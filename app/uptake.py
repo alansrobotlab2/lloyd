@@ -124,25 +124,25 @@ SKILL_PRESENCE_NOTE = (
     "blocks. Treat sub-90% coverage as unresolved, not as a miss."
 )
 
-#: Which prefetched *note* was in force for a turn has no persisted source.
-#: `prefetch.py:938` builds the `<vault-context>` block that carries note titles
-#: into the turn, and the only thing written about it is the boolean
-#: `has_prefetched_context` on the `brain1.user_prompt_received` event — measured
-#: over `event_logs/*.events.jsonl`, no event names a prefetched document, and
-#: no session JSON stores the injected block (`<vault-context>` appears in
-#: `sessions/*.json` only inside quoted code). So a note row is emitted when a
-#: title *does* reach us, and the half that cannot be computed says so out loud.
-#: A silent `notes_seen: 0` would read as "no knowledge note was ever disputed",
-#: which is the fifth instance of the class this repo keeps having to relearn:
-#: a check that reads its own missing input reports a verdict it cannot justify.
-NOTE_PRESENCE_SOURCE = "unavailable:no_per_document_prefetch_log"
+#: Which prefetched *note* was in force for a turn IS persisted: the writer
+#: (`app/routers/_messages_subliminal.py:86`) stores the whole injected block as a
+#: `role="subliminal"` message right after the user turn it was built for, and that
+#: block carries the `<vault-context>` note list `prefetch.py:938` assembled. So a
+#: note row is evidence-bound like a skill row, not a guess.
+#: The limit is reach, not existence: only a turn whose writer emitted a block can
+#: attribute notes, and a note prefetch chose not to inject is absent from the
+#: block for the same reason it was absent from the prompt. `coverage.prefetch_notes.
+#: turns_with_block` says how far this reaches; a zero there means "this window
+#: persisted no injected block", NOT "no note was disputed".
+NOTE_PRESENCE_UNREACHABLE = "unavailable:no_injected_block_in_window"
 
 NOTE_PRESENCE_NOTE = (
-    "Prefetched-note presence cannot be derived from what this tree persists: "
-    "prefetch.py:938 emits the <vault-context> block and the event log records "
-    "only the boolean has_prefetched_context, never which documents landed; "
-    "sessions/*.json never store the injected block. A zero here means "
-    "'unmeasurable', NOT 'no note was disputed'."
+    "Presence from the persisted injected block: the writer stores each turn's "
+    "<vault-context> as a role=\"subliminal\" message "
+    "(app/routers/_messages_subliminal.py:86) and these rows are built from it. "
+    "Reach is bounded by `turns_with_block` — a turn with no persisted block "
+    "contributes no note evidence, and a note prefetch did not inject was not in "
+    "that prompt either."
 )
 
 SECONDARY_MODEL = "secondary"
@@ -240,6 +240,10 @@ class Turn:
     prev_assistant: str | None = None
     injected_skills: list[str] = field(default_factory=list)
     vault_context: list[str] = field(default_factory=list)
+    #: How many persisted injected-context blocks landed on this turn. This is the
+    #: measurement's REACH for note/skill presence: a turn with 0 blocks has no
+    #: evidence either way, and its silence must not read as "nothing was prefetched".
+    injections_seen: int = 0
 
     @property
     def turn_id(self) -> str:
@@ -316,12 +320,32 @@ def human_turns(root: Path | str | None = None, days: int = 30) -> list[Turn]:
             continue
         prev: str | None = None
         ordinal = 0
+        turn: Turn | None = None          # human turn the next block belongs to
         for msg in doc.get("messages") or []:
             if not isinstance(msg, dict):
                 continue
             role = msg.get("role")
             text = _text_of(msg.get("content"))
-            if role == "assistant":
+            if role == "subliminal":
+                # The writer persists the injected block as its OWN message
+                # (`app/routers/_messages_subliminal.py:86`, role="subliminal",
+                # written immediately after the user turn it was built for), not
+                # as a field on the user message. Reading only the field is what
+                # made the skill/note lookups below dead code: they parsed a
+                # dict that the live store never puts there and so saw zero
+                # injected context in every transcript on this box. Measured on
+                # the 120 most recent session files: 59 such blocks, 48 carrying
+                # a <vault-context> note list, 4 carrying an injected skill body.
+                # Merge into the turn that precedes the block; never create one.
+                if turn is not None:
+                    for name in _injected_skills(text):
+                        if name not in turn.injected_skills:
+                            turn.injected_skills.append(name)
+                    for title in _vault_context_titles(text):
+                        if title not in turn.vault_context:
+                            turn.vault_context.append(title)
+                    turn.injections_seen += 1
+            elif role == "assistant":
                 # Assign unconditionally. A tool-only assistant turn carries no
                 # prose, and leaving *older* prose in `prev` would make a
                 # re-prompt look like it reacted to an answer delivered three
@@ -336,12 +360,13 @@ def human_turns(root: Path | str | None = None, days: int = 30) -> list[Turn]:
                 ctx = msg.get("subliminal") or {}
                 if isinstance(ctx, dict):
                     blob = f"{blob} {json.dumps(ctx)}"
-                turns.append(Turn(
+                turn = Turn(
                     session=session, ts=msg.get("timestamp"), user_text=text.strip(),
                     ordinal=ordinal, session_source=None, prev_assistant=prev,
                     injected_skills=_injected_skills(blob),
                     vault_context=_vault_context_titles(blob),
-                ))
+                )
+                turns.append(turn)
                 prev = None
     return turns
 
@@ -519,6 +544,112 @@ def _post_secondary(payload: dict[str, Any]) -> dict[str, Any]:
         return json.loads(resp.read().decode())
 
 
+#: The few-shot block, separated from the rules so it can be taken away.
+#: Its exemplars were written against this corpus's shapes — some quote a labeled
+#: turn's own words — so precision measured WITH them is an in-sample number no
+#: matter how the labels are split. `_CLASSIFY_RULES` alone is the zero-shot
+#: variant, and the probe reports both: the unexemplified figure is the only one
+#: that could not have been produced by the prompt having seen the answers, and
+#: the gap between the two is the honest size of the contamination.
+_EXAMPLE_MARKER = "Worked examples"
+_CLASSIFY_RULES, _, _CLASSIFY_EXAMPLES = _CLASSIFY_SYSTEM.partition(_EXAMPLE_MARKER)
+
+
+def prompt_leak(text: str, prompt: str = _CLASSIFY_SYSTEM, *,
+                min_words: int = 4) -> str | None:
+    """A verbatim ≥`min_words`-word span of `text` found in `prompt`, else None.
+
+    Four words is where a shared substring stops being an accident of English
+    (`please continue` is two) and starts being a quoted case. This decides which
+    labeled items may serve as a holdout at all.
+    """
+    words = (text or "").split()
+    hay = prompt.lower()
+    if not words:
+        return None
+    if len(words) < min_words:
+        # A two-word turn is exactly where an exemplar works hardest — the prompt
+        # encodes "`continue` is NOT" — and a ≥4-word window can never see it, so
+        # short turns are checked whole. Without this branch the shortest turns,
+        # the most contaminated ones, would be the ones declared held out.
+        whole = " ".join(words).lower()
+        return whole if whole in hay else None
+    for i in range(len(words) - min_words + 1):
+        frag = " ".join(words[i:i + min_words]).lower()
+        if frag in hay:
+            return frag
+    return None
+
+
+def pipeline_confusion(labels: Sequence[int], screened: Sequence[int],
+                       verdicts: Sequence[Any]) -> dict[str, Any]:
+    """Confusion matrix for the DEPLOYED path, not for the model alone.
+
+    Deployment is `candidate_disputes` (a cue screen) and THEN the classifier, so a
+    labeled dispute the screen never forwarded was never sent to the engine and
+    cannot become a true positive — the pipeline missed it, which is a false
+    negative. Grading the classifier by calling it directly on every labeled turn
+    is the mislabeling this function exists to prevent: it reported recall 0.57 for
+    a system whose measured end-to-end recall was 0.39, and that shortfall belongs
+    to the screen, not to the model.
+
+    `verdicts` entries may be `None` (the engine did not answer): counted in
+    `unanswered` and predicted negative, because deployment would have no verdict
+    either. Predicted positive requires BOTH gates.
+    """
+    if not (len(labels) == len(screened) == len(verdicts)):
+        raise ValueError("labels/screened/verdicts length mismatch")
+    labs: list[int] = []
+    preds: list[int] = []
+    unanswered = 0
+    for label, screen, verdict in zip(labels, screened, verdicts):
+        labs.append(int(label))
+        if screen != 1:
+            preds.append(0)
+            continue
+        if verdict is None:
+            unanswered += 1
+            preds.append(0)
+            continue
+        preds.append(1 if verdict else 0)
+    out = precision_recall(labs, preds)
+    out["unanswered"] = unanswered
+    out["screened"] = sum(1 for s in screened if s == 1)
+    return out
+
+
+def holdout_split(items: Sequence[Mapping[str, Any]], *,
+                  prompt: str = _CLASSIFY_SYSTEM,
+                  min_words: int = 4) -> dict[str, Any]:
+    """Partition a labeled corpus into eligible holdout and contaminated dev.
+
+    An item whose own text appears verbatim in the classifier's few-shot block was
+    not held out from anything: the prompt quotes the case being graded. Those items
+    become `dev` with the leaking span recorded, so the holdout is exactly the
+    subset that could not have been read off the prompt.
+    """
+    holdout: list[dict[str, Any]] = []
+    dev: list[dict[str, Any]] = []
+    for item in items:
+        leak = prompt_leak(str(item.get("user_text") or ""), prompt, min_words=min_words)
+        if leak is None:
+            holdout.append(dict(item))
+        else:
+            dev.append({**dict(item), "prompt_leak": leak})
+    return {
+        "holdout": holdout, "dev": dev,
+        "n_holdout": len(holdout), "n_dev": len(dev),
+        "n_holdout_positives": sum(1 for i in holdout if int(i.get("label", 0)) == 1),
+        "min_words": min_words,
+        "note": (
+            "holdout = labeled turns whose own text does not appear verbatim in the "
+            "classifier prompt (>=4-word span). Contaminated items are not dropped; "
+            "they are the dev set, and they are why the exemplified precision figure "
+            "is labelled in-sample."
+        ),
+    }
+
+
 def classifier_clears_floors(metrics: Mapping[str, Any] | None) -> bool:
     """The one place the classifier's stop condition lives.
 
@@ -537,16 +668,62 @@ def classifier_clears_floors(metrics: Mapping[str, Any] | None) -> bool:
     return precision >= PRECISION_FLOOR and recall >= RECALL_FLOOR
 
 
+def measurement_clears_floors(report: Mapping[str, Any] | None) -> bool:
+    """The stop condition for step 2, across every way precision was measured.
+
+    `classifier_clears_floors` alone graded one number: precision on the whole
+    labeled corpus, under a prompt whose exemplars were written against that same
+    corpus. That number can be 1.00 while the thing it claims to measure is not —
+    which is what the review found on the first version of this probe. Three
+    conditions now have to hold, and each one closes a way the single number lied:
+
+      * **deployed** (`classifier`) — the shipped configuration clears both floors;
+      * **holdout** — labeled turns the prompt does not quote also clear precision,
+        so the score is not the prompt reciting cases it was shown;
+      * **zero-shot** — the same turns clear precision with the few-shot block
+        removed, so the score is not the block having read out the answers;
+      * **labels** — every label re-resolves to the transcript it claims.
+
+    `zero_shot` and `holdout` are REQUIRED to be measured: absent metrics do not
+    pass, because "we did not measure it" and "it failed" must not both route to
+    "write the table". `pipeline` is deliberately NOT a gate — the cue screen drops
+    most labeled disputes (holdout recall 0.43 vs the classifier's 0.52), and the
+    item's stop condition is about the classifier. Its recall is what the table's
+    lower-bound note is computed from, and that is where it belongs.
+    """
+    if not report:
+        return False
+    if not report.get("labels_ok"):
+        return False
+    if not classifier_clears_floors(report.get("classifier")):
+        return False
+    for key in ("holdout", "zero_shot"):
+        m = report.get(key)
+        if not m or m.get("measured") is not True:
+            return False
+        if m.get("precision") is None or m["precision"] < PRECISION_FLOOR:
+            return False
+    return True
+
+
 def classify_dispute(prev_assistant: str | None, user_text: str, *,
-                     transport: Callable[[dict], dict] | None = None) -> bool | None:
-    return classify_dispute_raw(prev_assistant, user_text, transport=transport)[0]
+                     transport: Callable[[dict], dict] | None = None,
+                     examples: bool = True) -> bool | None:
+    return classify_dispute_raw(prev_assistant, user_text, transport=transport,
+                                examples=examples)[0]
 
 
 def classify_dispute_raw(
     prev_assistant: str | None, user_text: str, *,
     transport: Callable[[dict], dict] | None = None,
+    examples: bool = True,
 ) -> tuple[bool | None, str]:
     """One dispute verdict from the secondary engine, plus its raw reply.
+
+    `examples=False` sends the rules without the few-shot block, which is how the
+    probe measures a precision figure that the prompt cannot have read the answer
+    out of. Default True is the deployed prompt — a measurement of a variant nobody
+    runs would be the wrong default.
 
     Returns `(verdict, raw_content)`. The raw reply travels with the verdict so a
     measurement can be **replayed** later through `_parse_verdict` without the
@@ -568,7 +745,8 @@ def classify_dispute_raw(
     payload = {
         "model": SECONDARY_MODEL,
         "messages": [
-            {"role": "system", "content": _CLASSIFY_SYSTEM},
+            {"role": "system",
+             "content": _CLASSIFY_SYSTEM if examples else _CLASSIFY_RULES},
             {"role": "user", "content": _classify_user(prev_assistant, user_text)},
         ],
         "temperature": 0.0,
@@ -610,6 +788,66 @@ def load_labels(root: Path | str | None = None) -> list[dict[str, Any]]:
         return []
     items = doc.get("items") if isinstance(doc, dict) else doc
     return [i for i in (items or []) if isinstance(i, dict) and "turn_id" in i]
+
+
+def validate_labels(labels: Sequence[Mapping[str, Any]],
+                    index: Mapping[str, "Turn"], *,
+                    excerpt_chars: int = 40) -> dict[str, Any]:
+    """Re-anchor every label to the transcript byte-for-byte, without trusting the label.
+
+    A labels file attests itself: `labeled_by` is a string the same author wrote, so
+    "the corpus was hand-labeled" is unfalsifiable as an assertion. This function
+    makes it falsifiable. Each item carries the `user_text` and `prev_assistant` the
+    labeler was looking at, and the transcript store is an artifact nobody writing a
+    label controls — so re-resolving the `turn_id` against it and comparing the two
+    turns "I labeled this by hand" into "this text is what that turn actually said".
+
+    Excerpts are stored truncated, so a stored excerpt must be a **prefix** of the
+    real turn (after whitespace normalization), never merely similar. Anything
+    shorter than `excerpt_chars` must match in full: a two-word excerpt would be a
+    prefix of half the corpus.
+
+    Returns counts plus the offending ids. `ok` is the only field a caller should
+    branch on; a label that cannot be resolved is a failure, not a skip — a corpus
+    that silently shrinks as transcripts roll off the store would quietly re-weight
+    the precision figure the acceptance criterion is quoted on.
+    """
+    unresolved: list[str] = []
+    mismatch: list[str] = []
+
+    def norm(s: Any) -> str:
+        return re.sub(r"\s+", " ", str(s or "")).strip()
+
+    for item in labels:
+        tid = str(item.get("turn_id") or "")
+        turn = index.get(tid)
+        if turn is None:
+            unresolved.append(tid)
+            continue
+        stored_u, real_u = norm(item.get("user_text")), norm(turn.user_text)
+        stored_p, real_p = norm(item.get("prev_assistant")), norm(turn.prev_assistant)
+        bad = False
+        if stored_u != real_u and not (
+                len(stored_u) >= excerpt_chars and real_u.startswith(stored_u)):
+            bad = True
+        if stored_p != real_p and not (
+                len(stored_p) >= excerpt_chars and real_p.startswith(stored_p)):
+            bad = True
+        if bad:
+            mismatch.append(tid)
+
+    return {
+        "ok": not unresolved and not mismatch,
+        "n": len(labels),
+        "n_resolved": len(labels) - len(unresolved),
+        "unresolved_turn_ids": unresolved[:20],
+        "excerpt_mismatch_turn_ids": mismatch[:20],
+        "note": (
+            "each label's stored excerpt must be the beginning of what that turn "
+            "actually says in sessions/<id>.json; this is the only check here that "
+            "does not take the labels file's own word for being hand-labeled"
+        ),
+    }
 
 
 # ------------------------------------------------------------ attribution ---
@@ -995,13 +1233,18 @@ def build_uptake_table(
             "note": SKILL_PRESENCE_NOTE,
         },
         # An empty count here is the table's most misleading number: it is the
-        # one shape that reads as "knowledge notes are never disputed" while
-        # actually meaning "nothing persists which notes were prefetched". Emit
-        # the emptiness *with* its reason, always.
+        # one shape that reads as "knowledge notes are never disputed". It now
+        # travels with the reach that produced it — how many turns in this window
+        # actually persisted an injected block — so a zero says which of the two
+        # it is.
         "prefetch_notes": {
             "entries_identified": len(note_present),
+            "turns_with_block": sum(1 for t in turns if t.injections_seen),
+            "turns_total": len(turns),
+            "reach": (round(sum(1 for t in turns if t.injections_seen) / len(turns), 4)
+                      if turns else 0.0),
             "presence_source": (
-                NOTE_PRESENCE_EMITTED if note_present else NOTE_PRESENCE_SOURCE),
+                NOTE_PRESENCE_EMITTED if note_present else NOTE_PRESENCE_UNREACHABLE),
             "note": NOTE_PRESENCE_NOTE,
         },
     }

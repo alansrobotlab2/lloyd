@@ -1,5 +1,5 @@
 {
-  "probe_timestamp": "2026-09-11T09:49:58+00:00",
+  "probe_timestamp": "2026-09-11T10:35:38+00:00",
   "corpus": {
     "turns": 220,
     "disputes": 9,
@@ -44,21 +44,40 @@
       "denominator_note": "total = 172 bullets the entry grammar recognizes + 0 indented + 2 too-short that it does not. 'covered' means the join reached them, which for always-in-force entries is true by construction \u2014 it is NOT evidence an entry was honored; weighted_disputes on the row is the usable signal."
     },
     "active_skills": {
-      "covered": 13,
+      "covered": 77,
       "total": 191,
-      "ratio": 0.0681,
+      "ratio": 0.4031,
       "presence_source": "proxy:skills_read+injected_context (#435 pending)",
       "note": "Not per-injection telemetry: #435 (per-skill injection events) is still draft, so presence here is skills_read payloads + injected <skill name> blocks. Treat sub-90% coverage as unresolved, not as a miss."
     },
     "prefetch_notes": {
-      "entries_identified": 0,
-      "presence_source": "unavailable:no_per_document_prefetch_log",
-      "note": "Prefetched-note presence cannot be derived from what this tree persists: prefetch.py:938 emits the <vault-context> block and the event log records only the boolean has_prefetched_context, never which documents landed; sessions/*.json never store the injected block. A zero here means 'unmeasurable', NOT 'no note was disputed'."
+      "entries_identified": 142,
+      "turns_with_block": 213,
+      "turns_total": 220,
+      "reach": 0.9682,
+      "presence_source": "prefetch:vault_context",
+      "note": "Presence from the persisted injected block: the writer stores each turn's <vault-context> as a role=\"subliminal\" message (app/routers/_messages_subliminal.py:86) and these rows are built from it. Reach is bounded by `turns_with_block` \u2014 a turn with no persisted block contributes no note evidence, and a note prefetch did not inject was not in that prompt either."
     }
   },
   "entries": [
     {
-      "entry": "skill:arxiv",
+      "entry": "skill:ai-engineer-monitor",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "ai-engineer-monitor",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260907_020601_ivf74d#1",
+        "20260911_000522_iv201f#1"
+      ]
+    },
+    {
+      "entry": "skill:apple-notes",
       "presence_source": "proxy:skills_read+injected_context (#435 pending)",
       "present_in_turns": 1,
       "disputes": 0,
@@ -66,14 +85,94 @@
       "overlap_max": 0.0,
       "dispute_rate": 0.0,
       "kind": "skill",
-      "name": "arxiv",
-      "presence_bound": "causal_event_order",
+      "name": "apple-notes",
+      "presence_bound": "injected_this_turn",
       "present_turn_ids": [
+        "20260823_003655_iva360#1"
+      ]
+    },
+    {
+      "entry": "skill:arxiv",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "arxiv",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260903_171044_iv6b9c#1",
         "20260903_174327_iv8a76#1"
       ]
     },
     {
-      "entry": "skill:backlog-premise-triage",
+      "entry": "skill:ascii-video",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "ascii-video",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260903_040301_ivc097#4"
+      ]
+    },
+    {
+      "entry": "skill:automod-change-own-code",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 5,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "automod-change-own-code",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260909_185855_iv044e#1",
+        "20260910_235939_iv4a93#1",
+        "20260911_002852_iv1a23#2",
+        "20260911_012901_ivf346#1",
+        "20260911_012901_ivf346#2"
+      ]
+    },
+    {
+      "entry": "skill:autonomy-config-taskid-fix",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 1,
+      "weighted_disputes": 0.05,
+      "overlap_max": 0.0417,
+      "dispute_rate": 1.0,
+      "kind": "skill",
+      "name": "autonomy-config-taskid-fix",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260907_220430_iv15a0#2"
+      ]
+    },
+    {
+      "entry": "skill:autonomy-self-improvement",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "autonomy-self-improvement",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260909_185855_iv044e#2"
+      ]
+    },
+    {
+      "entry": "skill:autonomy-task-diagnosis",
       "presence_source": "proxy:skills_read+injected_context (#435 pending)",
       "present_in_turns": 3,
       "disputes": 0,
@@ -81,12 +180,150 @@
       "overlap_max": 0.0,
       "dispute_rate": 0.0,
       "kind": "skill",
+      "name": "autonomy-task-diagnosis",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_171700_iv4855#1",
+        "20260906_171700_iv4855#6",
+        "20260907_014811_iv166f#1"
+      ]
+    },
+    {
+      "entry": "skill:backlog-as-handoff",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "backlog-as-handoff",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_171700_iv4855#4",
+        "20260909_135557_iv2a95#1"
+      ]
+    },
+    {
+      "entry": "skill:backlog-premise-triage",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 7,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
       "name": "backlog-premise-triage",
-      "presence_bound": "causal_event_order",
+      "presence_bound": "injected_this_turn",
       "present_turn_ids": [
         "20260907_213337_iv502a#1",
+        "20260907_213649_iv9d36#1",
         "20260907_213816_iv0adc#1",
-        "20260907_213816_iv0adc#2"
+        "20260907_213816_iv0adc#2",
+        "20260908_144704_iv732e#1",
+        "20260908_175625_iv4b8e#3",
+        "20260909_135557_iv2a95#1"
+      ]
+    },
+    {
+      "entry": "skill:bash-background-tasks",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "bash-background-tasks",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260905_015651_iv5e6b#1",
+        "20260905_015736_iv04b8#1",
+        "main-test-1788551167#1"
+      ]
+    },
+    {
+      "entry": "skill:bash-path-export",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 5,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "bash-path-export",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260904_211505_obs02c#1",
+        "20260907_155201_iveaa1#1",
+        "dbg3-1788550684#1",
+        "dbg4-1788550796#1",
+        "main-test-1788551167#1"
+      ]
+    },
+    {
+      "entry": "skill:bash-timeout",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "bash-timeout",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260905_015651_iv5e6b#1"
+      ]
+    },
+    {
+      "entry": "skill:bash-transient-error-handling",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 4,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "bash-transient-error-handling",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260903_203401_ivcf60#1",
+        "20260904_211505_obs02c#1",
+        "dbg3-1788550684#1",
+        "dbg4-1788550796#1"
+      ]
+    },
+    {
+      "entry": "skill:batch-run-bash",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "batch-run-bash",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260903_203401_ivcf60#1",
+        "20260905_020747_ivfe5f#1"
+      ]
+    },
+    {
+      "entry": "skill:claude-code",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "claude-code",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260911_002852_iv1a23#2",
+        "20260911_012901_ivf346#1"
       ]
     },
     {
@@ -123,6 +360,166 @@
       ]
     },
     {
+      "entry": "skill:desktop-process-crash",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "desktop-process-crash",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260907_185707_iv57ab#3"
+      ]
+    },
+    {
+      "entry": "skill:email-calendar-monitoring",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "email-calendar-monitoring",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260826_031023_ivda08#2",
+        "20260907_213816_iv0adc#2"
+      ]
+    },
+    {
+      "entry": "skill:file-path-resolution",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 5,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "file-path-resolution",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260905_021658_iv21f2#1",
+        "20260906_113956_3c8d19#1",
+        "20260906_114009_819605#1",
+        "20260906_142955_bc5cc0#1",
+        "20260907_155201_iveaa1#1"
+      ]
+    },
+    {
+      "entry": "skill:file-read-error-handling",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 11,
+      "disputes": 1,
+      "weighted_disputes": 0.05,
+      "overlap_max": 0.0444,
+      "dispute_rate": 0.0909,
+      "kind": "skill",
+      "name": "file-read-error-handling",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260823_172345_ivb492#3",
+        "20260904_211536_obs40b#1",
+        "20260905_032900_iv3a74#1",
+        "20260906_114009_819605#1",
+        "20260906_142955_bc5cc0#1",
+        "20260906_143034_5390fe#1",
+        "20260907_142410_ivd971#1",
+        "20260907_142410_ivd971#3",
+        "20260908_selftest_thinktrace#1",
+        "20260908_selftest_thinktrace2#1",
+        "20260910_150524_ac4991#1"
+      ]
+    },
+    {
+      "entry": "skill:file-read-resilience",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 7,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "file-read-resilience",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260904_211536_obs40b#1",
+        "20260905_021658_iv21f2#1",
+        "20260905_032900_iv3a74#1",
+        "20260906_113956_3c8d19#1",
+        "20260907_142410_ivd971#1",
+        "20260907_142410_ivd971#3",
+        "20260908_selftest_thinktrace2#1"
+      ]
+    },
+    {
+      "entry": "skill:find-nearby",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "find-nearby",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260823_003655_iva360#1"
+      ]
+    },
+    {
+      "entry": "skill:git-filter-repo",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "git-filter-repo",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260905_015736_iv04b8#1",
+        "20260905_020747_ivfe5f#1",
+        "20260906_032832_ivbf4f#1"
+      ]
+    },
+    {
+      "entry": "skill:github-code-review",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "github-code-review",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260905_042357_iv6245#1",
+        "20260906_032832_ivbf4f#1"
+      ]
+    },
+    {
+      "entry": "skill:github-pr-workflow",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "github-pr-workflow",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_032832_ivbf4f#5",
+        "20260907_155201_iveaa1#3"
+      ]
+    },
+    {
       "entry": "skill:google-workspace",
       "presence_source": "proxy:skills_read+injected_context (#435 pending)",
       "present_in_turns": 2,
@@ -136,6 +533,221 @@
       "present_turn_ids": [
         "20260824_011606_iv7acd#1",
         "20260824_011606_iv7acd#2"
+      ]
+    },
+    {
+      "entry": "skill:gpu-device-mismatch",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "gpu-device-mismatch",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260907_220430_iv15a0#5"
+      ]
+    },
+    {
+      "entry": "skill:http-tool-error-handling",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "http-tool-error-handling",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260829_155111_iv13c0#1"
+      ]
+    },
+    {
+      "entry": "skill:https-migration-gotchas",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "https-migration-gotchas",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260829_155111_iv13c0#1"
+      ]
+    },
+    {
+      "entry": "skill:huggingface-model-download",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 4,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "huggingface-model-download",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_171700_iv4855#3",
+        "20260906_171700_iv4855#4",
+        "20260906_171700_iv4855#7",
+        "20260907_011347_iv668f#1"
+      ]
+    },
+    {
+      "entry": "skill:inner-voice",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 7,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "inner-voice",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260905_011748_iv84e4#1",
+        "20260905_024955_iv5f05#1",
+        "20260905_033029_iv3857#1",
+        "20260905_151355_iv5174#1",
+        "20260905_161842_iv2314#1",
+        "20260906_214751_iv1620#2",
+        "20260907_004855_iv6456#1"
+      ]
+    },
+    {
+      "entry": "skill:iv-tool-transparency",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "iv-tool-transparency",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260907_150214_ee1102#1"
+      ]
+    },
+    {
+      "entry": "skill:knowledge-health-report",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "knowledge-health-report",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_143051_60a8d1#1",
+        "20260906_143106_0dcfe4#1",
+        "20260907_211213_ivdcf7#1"
+      ]
+    },
+    {
+      "entry": "skill:knowledge-note-path-resolution",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "knowledge-note-path-resolution",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_214751_iv1620#2"
+      ]
+    },
+    {
+      "entry": "skill:local-llm-gotchas",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 4,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "local-llm-gotchas",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_171700_iv4855#5",
+        "20260906_171700_iv4855#6",
+        "20260906_171700_iv4855#8",
+        "20260907_033132_ivd756#1"
+      ]
+    },
+    {
+      "entry": "skill:mcp-lloyd-mcp-error-handling",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 2,
+      "disputes": 1,
+      "weighted_disputes": 0.05,
+      "overlap_max": 0.0435,
+      "dispute_rate": 0.5,
+      "kind": "skill",
+      "name": "mcp-lloyd-mcp-error-handling",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260823_172345_ivb492#1",
+        "20260823_172345_ivb492#3"
+      ]
+    },
+    {
+      "entry": "skill:memory-capture",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "memory-capture",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260908_045305_iv0938#1"
+      ]
+    },
+    {
+      "entry": "skill:memory-path-scoping",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "memory-path-scoping",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260908_045305_iv0938#1"
+      ]
+    },
+    {
+      "entry": "skill:ml-paper-writing",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 6,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "ml-paper-writing",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260827_212922_ivfe0c#2",
+        "20260830_163105_iv5b1c#2",
+        "20260902_170812_iv31ec#2",
+        "20260903_040301_ivc097#4",
+        "20260903_171044_iv6b9c#1",
+        "20260907_161840_iv4b74#3"
       ]
     },
     {
@@ -155,6 +767,132 @@
       ]
     },
     {
+      "entry": "skill:nightly-behavior-test",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 5,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "nightly-behavior-test",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_032832_ivbf4f#3",
+        "20260906_032832_ivbf4f#4",
+        "20260906_214751_iv1620#7",
+        "20260907_220430_iv15a0#4",
+        "20260910_231357_ive07d#2"
+      ]
+    },
+    {
+      "entry": "skill:nightly-morning-briefing",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "nightly-morning-briefing",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260909_185855_iv044e#2"
+      ]
+    },
+    {
+      "entry": "skill:nightly-reflection-config",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "nightly-reflection-config",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_143420_3f35d6#1"
+      ]
+    },
+    {
+      "entry": "skill:nightly-reflection-knowledge-write",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "nightly-reflection-knowledge-write",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_171700_iv4855#5"
+      ]
+    },
+    {
+      "entry": "skill:nightly-skills-management",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "nightly-skills-management",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260909_020810_iv6514#3"
+      ]
+    },
+    {
+      "entry": "skill:nightly-vault-maintenance",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "nightly-vault-maintenance",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260907_011347_iv668f#1"
+      ]
+    },
+    {
+      "entry": "skill:nightly-weekly-backlog-hygiene",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "nightly-weekly-backlog-hygiene",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260908_144704_iv732e#1"
+      ]
+    },
+    {
+      "entry": "skill:obsidian",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "obsidian",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260823_183038_ivc769#1",
+        "20260907_185707_iv57ab#2",
+        "20260907_185707_iv57ab#3"
+      ]
+    },
+    {
       "entry": "skill:opencode",
       "presence_source": "proxy:skills_read+injected_context (#435 pending)",
       "present_in_turns": 1,
@@ -167,6 +905,79 @@
       "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260907_023814_iv5079#1"
+      ]
+    },
+    {
+      "entry": "skill:orphaned-reference-cleanup",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "orphaned-reference-cleanup",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260903_040301_ivc097#2",
+        "20260907_185707_iv57ab#4"
+      ]
+    },
+    {
+      "entry": "skill:periodic-memory-capture-lloyd",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 5,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "periodic-memory-capture-lloyd",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260823_172345_ivb492#1",
+        "20260823_172345_ivb492#5",
+        "20260903_030630_iv0e36#2",
+        "20260908_175625_iv4b8e#3",
+        "20260910_234910_iva63a#2"
+      ]
+    },
+    {
+      "entry": "skill:poisoned-worker-troubleshoot",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 8,
+      "disputes": 1,
+      "weighted_disputes": 0.2308,
+      "overlap_max": 0.2308,
+      "dispute_rate": 0.125,
+      "kind": "skill",
+      "name": "poisoned-worker-troubleshoot",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260822_232106_ive8da#2",
+        "20260906_225900_ivf8d3#1",
+        "20260906_225900_ivf8d3#3",
+        "20260906_234316_iv0788#1",
+        "20260909_001815_ivf098#1",
+        "20260909_020810_iv6514#1",
+        "20260909_020810_iv6514#2",
+        "20260910_034059_iv75ea#1"
+      ]
+    },
+    {
+      "entry": "skill:powerpoint",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "powerpoint",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260826_031023_ivda08#2",
+        "20260910_014610_ivd127#2"
       ]
     },
     {
@@ -185,23 +996,25 @@
       ]
     },
     {
-      "entry": "skill:requesting-code-review",
+      "entry": "skill:queue-health-check",
       "presence_source": "proxy:skills_read+injected_context (#435 pending)",
-      "present_in_turns": 2,
+      "present_in_turns": 4,
       "disputes": 0,
       "weighted_disputes": 0,
       "overlap_max": 0.0,
       "dispute_rate": 0.0,
       "kind": "skill",
-      "name": "requesting-code-review",
-      "presence_bound": "causal_event_order",
+      "name": "queue-health-check",
+      "presence_bound": "injected_this_turn",
       "present_turn_ids": [
-        "20260905_151355_iv5174#1",
-        "20260905_151355_iv5174#2"
+        "20260907_211213_ivdcf7#1",
+        "20260907_220430_iv15a0#5",
+        "20260910_034059_iv75ea#1",
+        "20260910_231357_ive07d#1"
       ]
     },
     {
-      "entry": "skill:selfmod-change-own-code",
+      "entry": "skill:quick-research",
       "presence_source": "proxy:skills_read+injected_context (#435 pending)",
       "present_in_turns": 1,
       "disputes": 0,
@@ -209,14 +1022,35 @@
       "overlap_max": 0.0,
       "dispute_rate": 0.0,
       "kind": "skill",
-      "name": "selfmod-change-own-code",
-      "presence_bound": "causal_event_order",
+      "name": "quick-research",
+      "presence_bound": "injected_this_turn",
       "present_turn_ids": [
-        "20260907_213649_iv9d36#1"
+        "20260908_175258_iv232c#1"
       ]
     },
     {
-      "entry": "skill:system-health-check",
+      "entry": "skill:requesting-code-review",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 7,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "requesting-code-review",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260905_011748_iv84e4#1",
+        "20260905_024955_iv5f05#1",
+        "20260905_033029_iv3857#1",
+        "20260905_042357_iv6245#1",
+        "20260905_151355_iv5174#1",
+        "20260905_151355_iv5174#2",
+        "20260905_161842_iv2314#1"
+      ]
+    },
+    {
+      "entry": "skill:research-agent",
       "presence_source": "proxy:skills_read+injected_context (#435 pending)",
       "present_in_turns": 2,
       "disputes": 0,
@@ -224,11 +1058,236 @@
       "overlap_max": 0.0,
       "dispute_rate": 0.0,
       "kind": "skill",
-      "name": "system-health-check",
-      "presence_bound": "causal_event_order",
+      "name": "research-agent",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_171700_iv4855#7",
+        "20260906_171700_iv4855#8"
+      ]
+    },
+    {
+      "entry": "skill:research-paper-writing",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "research-paper-writing",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260827_212922_ivfe0c#2",
+        "20260902_170812_iv31ec#2",
+        "20260907_161840_iv4b74#3"
+      ]
+    },
+    {
+      "entry": "skill:restart-lloyd",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 4,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "restart-lloyd",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_214751_iv1620#7",
+        "20260907_033132_ivd756#1",
+        "20260910_150524_ac4991#1",
+        "20260910_234910_iva63a#2"
+      ]
+    },
+    {
+      "entry": "skill:selfmod-change-own-code",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 4,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "selfmod-change-own-code",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260907_004855_iv6456#2",
+        "20260907_155201_iveaa1#3",
+        "20260907_213649_iv9d36#1",
+        "20260907_213816_iv0adc#1"
+      ]
+    },
+    {
+      "entry": "skill:service-health-check",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 13,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "service-health-check",
+      "presence_bound": "injected_this_turn",
       "present_turn_ids": [
         "20260822_232106_ive8da#1",
-        "20260822_232106_ive8da#2"
+        "20260823_172345_ivb492#5",
+        "20260903_165747_ivc915#1",
+        "20260905_040122_iv95d2#1",
+        "20260906_032832_ivbf4f#2",
+        "20260907_045433_iv724c#1",
+        "20260907_184351_ivec8d#1",
+        "20260907_185707_iv57ab#1",
+        "20260907_220430_iv15a0#1",
+        "20260909_022107_iv0ffa#1",
+        "20260909_040405_ivb1b8#1",
+        "20260910_014610_ivd127#1",
+        "20260910_014618_iv6a62#1"
+      ]
+    },
+    {
+      "entry": "skill:skill-authoring-error-pattern-mining-batch",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "skill-authoring-error-pattern-mining-batch",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_143034_5390fe#1",
+        "20260909_020810_iv6514#1"
+      ]
+    },
+    {
+      "entry": "skill:skill-lint",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "skill-lint",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260909_020810_iv6514#3"
+      ]
+    },
+    {
+      "entry": "skill:songwriting-and-ai-music",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "songwriting-and-ai-music",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260907_020601_ivf74d#1"
+      ]
+    },
+    {
+      "entry": "skill:strict-task-mapping",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 4,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "strict-task-mapping",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260905_151355_iv5174#2",
+        "20260906_171700_iv4855#1",
+        "20260906_171700_iv4855#3",
+        "20260907_014811_iv166f#1"
+      ]
+    },
+    {
+      "entry": "skill:subagent-orchestrate",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "subagent-orchestrate",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_143051_60a8d1#1",
+        "20260906_143106_0dcfe4#1",
+        "20260906_143420_3f35d6#1"
+      ]
+    },
+    {
+      "entry": "skill:system-health-check",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 18,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "system-health-check",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260822_232106_ive8da#1",
+        "20260822_232106_ive8da#2",
+        "20260903_040301_ivc097#3",
+        "20260903_165747_ivc915#1",
+        "20260905_040122_iv95d2#1",
+        "20260906_032832_ivbf4f#2",
+        "20260906_214751_iv1620#1",
+        "20260907_045433_iv724c#1",
+        "20260907_184351_ivec8d#1",
+        "20260907_185707_iv57ab#1",
+        "20260907_220430_iv15a0#1",
+        "20260908_selftest_thinktrace#1",
+        "20260909_022107_iv0ffa#1",
+        "20260909_040405_ivb1b8#1",
+        "20260910_014610_ivd127#1",
+        "20260910_014618_iv6a62#1",
+        "20260910_231357_ive07d#1",
+        "20260910_231357_ive07d#2"
+      ]
+    },
+    {
+      "entry": "skill:task-notification-handling",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "task-notification-handling",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260905_151355_iv5174#2"
+      ]
+    },
+    {
+      "entry": "skill:test-driven-development",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "test-driven-development",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_032832_ivbf4f#3",
+        "20260906_032832_ivbf4f#4",
+        "20260907_220430_iv15a0#4"
       ]
     },
     {
@@ -248,16 +1307,100 @@
       ]
     },
     {
+      "entry": "skill:tool-parameter-validation",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "tool-parameter-validation",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260907_150214_ee1102#1"
+      ]
+    },
+    {
+      "entry": "skill:vault-search-automate",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 6,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "vault-search-automate",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260822_232110_iv0484#1",
+        "20260823_183038_ivc769#1",
+        "20260830_163105_iv5b1c#2",
+        "20260903_030630_iv0e36#2",
+        "20260907_142410_ivd971#2",
+        "20260908_175258_iv232c#1"
+      ]
+    },
+    {
+      "entry": "skill:vault-search-logic-handling",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "vault-search-logic-handling",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260822_232110_iv0484#1"
+      ]
+    },
+    {
+      "entry": "skill:verifying-time-window-code",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "verifying-time-window-code",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260910_235939_iv4a93#1"
+      ]
+    },
+    {
+      "entry": "skill:vite-hmr-cache-clear",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 5,
+      "disputes": 1,
+      "weighted_disputes": 0.0588,
+      "overlap_max": 0.0588,
+      "dispute_rate": 0.2,
+      "kind": "skill",
+      "name": "vite-hmr-cache-clear",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260822_232106_ive8da#2",
+        "20260906_225900_ivf8d3#1",
+        "20260906_225900_ivf8d3#3",
+        "20260909_020810_iv6514#2",
+        "20260910_231357_ive07d#3"
+      ]
+    },
+    {
       "entry": "skill:voice-clone-sample",
       "presence_source": "proxy:skills_read+injected_context (#435 pending)",
-      "present_in_turns": 9,
+      "present_in_turns": 11,
       "disputes": 1,
       "weighted_disputes": 0.05,
       "overlap_max": 0.0,
-      "dispute_rate": 0.1111,
+      "dispute_rate": 0.0909,
       "kind": "skill",
       "name": "voice-clone-sample",
-      "presence_bound": "causal_event_order",
+      "presence_bound": "injected_this_turn",
       "present_turn_ids": [
         "20260906_214751_iv1620#1",
         "20260906_214751_iv1620#2",
@@ -267,36 +1410,109 @@
         "20260906_214751_iv1620#6",
         "20260906_214751_iv1620#7",
         "20260906_214751_iv1620#8",
-        "20260906_214751_iv1620#9"
+        "20260906_214751_iv1620#9",
+        "20260907_004855_iv6456#2",
+        "20260907_185707_iv57ab#4"
+      ]
+    },
+    {
+      "entry": "skill:voice-mode",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "voice-mode",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260906_214751_iv1620#1",
+        "20260906_214751_iv1620#9",
+        "20260907_004855_iv6456#1"
+      ]
+    },
+    {
+      "entry": "skill:web-search-and-fetch",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "web-search-and-fetch",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260907_142410_ivd971#2"
       ]
     },
     {
       "entry": "skill:youtube-transcript",
       "presence_source": "proxy:skills_read+injected_context (#435 pending)",
-      "present_in_turns": 15,
+      "present_in_turns": 49,
       "disputes": 0,
       "weighted_disputes": 0,
       "overlap_max": 0.0,
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "youtube-transcript",
-      "presence_bound": "causal_event_order",
+      "presence_bound": "injected_this_turn",
       "present_turn_ids": [
+        "20260823_171633_iv30d4#1",
+        "20260823_171922_ivfdf0#1",
+        "20260823_173240_iv3006#1",
+        "20260823_173726_iv6ee5#1",
         "20260823_180927_iva21b#1",
+        "20260823_181135_iv5b3e#1",
+        "20260823_183707_iv8c87#1",
         "20260823_195916_iv8c65#1",
         "20260824_011606_iv7acd#1",
         "20260824_011606_iv7acd#2",
+        "20260826_183336_ive8d5#1",
         "20260826_205611_iv8eca#1",
+        "20260826_230120_ivdd9f#1",
+        "20260827_162008_ivc8e3#1",
+        "20260827_212922_ivfe0c#1",
         "20260827_234021_iv106c#1",
+        "20260828_171313_ivc0c4#1",
+        "20260829_174317_iv3918#1",
+        "20260829_204603_iv68c3#1",
+        "20260830_163105_iv5b1c#1"
+      ]
+    },
+    {
+      "entry": "skill:youtube-transcript-error-handling",
+      "presence_source": "proxy:skills_read+injected_context (#435 pending)",
+      "present_in_turns": 39,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "skill",
+      "name": "youtube-transcript-error-handling",
+      "presence_bound": "injected_this_turn",
+      "present_turn_ids": [
+        "20260823_171633_iv30d4#1",
+        "20260823_171922_ivfdf0#1",
+        "20260823_173240_iv3006#1",
+        "20260823_173726_iv6ee5#1",
+        "20260823_181135_iv5b3e#1",
+        "20260823_183707_iv8c87#1",
+        "20260826_183336_ive8d5#1",
+        "20260826_230120_ivdd9f#1",
+        "20260827_162008_ivc8e3#1",
+        "20260827_212922_ivfe0c#1",
+        "20260828_171313_ivc0c4#1",
+        "20260829_174317_iv3918#1",
+        "20260829_204603_iv68c3#1",
+        "20260830_163105_iv5b1c#1",
         "20260830_182633_ive386#1",
-        "20260907_153954_iv539a#1",
-        "20260907_153954_iv539a#2",
-        "20260909_220717_iv88b2#1",
-        "20260910_004857_iv11e2#1",
-        "20260910_004857_iv11e2#2",
-        "20260910_234910_iva63a#1",
-        "20260910_234910_iva63a#2",
-        "20260911_000923_iv3c95#1"
+        "20260902_170812_iv31ec#1",
+        "20260902_211538_iv33b5#1",
+        "20260902_214854_iv649b#1",
+        "20260903_030630_iv0e36#1",
+        "20260903_033058_iv2f6d#1"
       ]
     },
     {
@@ -2534,6 +3750,1987 @@
       "source_doc": "lloyd/MEMORY.md",
       "text": "**The `summary` caption on every tool call is load-bearing, not politeness:** `arguments` is replayed to the model as history, so one missing caption becomes its own most-recent example and the whole session locks into the gap. Sessions whose first Bash call carried one stayed above 95%; those that ",
       "note": "present in every prompt: dispute_rate is an upper bound, weighted_disputes is the usable signal"
+    },
+    {
+      "entry": "note:\"The engineer of the future is the person who is able to choose what is worth doing.\" \u2014 Addy Osmani",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_185855_iv044e#1",
+        "20260909_185855_iv044e#2"
+      ]
+    },
+    {
+      "entry": "note:(139) Are We Alone in the Universe? - Hank Green - YouTube",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_185855_iv044e#2"
+      ]
+    },
+    {
+      "entry": "note:2026-02-25 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_022107_iv0ffa#2"
+      ]
+    },
+    {
+      "entry": "note:2026-02-26 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_142410_ivd971#3"
+      ]
+    },
+    {
+      "entry": "note:2026-02-27 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_220430_iv15a0#5"
+      ]
+    },
+    {
+      "entry": "note:2026-03-03 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_214751_iv1620#8"
+      ]
+    },
+    {
+      "entry": "note:2026-03-07",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_004855_iv6456#2",
+        "20260907_220430_iv15a0#4",
+        "20260910_234910_iva63a#2"
+      ]
+    },
+    {
+      "entry": "note:2026-03-11 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_144704_iv732e#1"
+      ]
+    },
+    {
+      "entry": "note:2026-03-16",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_214751_iv1620#5"
+      ]
+    },
+    {
+      "entry": "note:2026-03-28 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_214751_iv1620#5",
+        "20260908_163153_ivba74#2",
+        "20260910_004857_iv11e2#2"
+      ]
+    },
+    {
+      "entry": "note:2026-03-29 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_150214_ee1102#1"
+      ]
+    },
+    {
+      "entry": "note:2026-04-03 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 4,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_213337_iv502a#1",
+        "20260907_213649_iv9d36#1",
+        "20260907_213816_iv0adc#1",
+        "20260907_213816_iv0adc#2"
+      ]
+    },
+    {
+      "entry": "note:2026-04-11 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_171700_iv4855#4"
+      ]
+    },
+    {
+      "entry": "note:2026-04-12 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_045305_iv0938#2",
+        "20260910_043648_ivacb5#1"
+      ]
+    },
+    {
+      "entry": "note:2026-04-14 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_selftest_thinktrace2#1"
+      ]
+    },
+    {
+      "entry": "note:2026-04-15 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_021204_iv4acf#3"
+      ]
+    },
+    {
+      "entry": "note:2026-04-16 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260905_161842_iv2314#1"
+      ]
+    },
+    {
+      "entry": "note:2026-04-19 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 4,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_225900_ivf8d3#2",
+        "20260909_020810_iv6514#1",
+        "20260909_020810_iv6514#2",
+        "20260909_135557_iv2a95#1"
+      ]
+    },
+    {
+      "entry": "note:2026-04-20 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_214751_iv1620#9"
+      ]
+    },
+    {
+      "entry": "note:2026-04-21 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 6,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.1667,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_171700_iv4855#4",
+        "20260906_225900_ivf8d3#3",
+        "20260907_213816_iv0adc#2",
+        "20260909_185855_iv044e#1",
+        "20260909_185855_iv044e#2",
+        "20260910_231357_ive07d#3"
+      ]
+    },
+    {
+      "entry": "note:2026-04-22 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.5,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_160431_ivcbad#3",
+        "20260906_225900_ivf8d3#3"
+      ]
+    },
+    {
+      "entry": "note:2026-04-23 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 5,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.2,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_185707_iv57ab#5",
+        "20260907_220430_iv15a0#2",
+        "20260907_220430_iv15a0#4",
+        "20260907_220430_iv15a0#5",
+        "20260910_231357_ive07d#3"
+      ]
+    },
+    {
+      "entry": "note:2026-04-29 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 6,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.1667,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_171700_iv4855#2",
+        "20260906_171700_iv4855#3",
+        "20260906_225900_ivf8d3#2",
+        "20260906_225900_ivf8d3#3",
+        "20260907_211213_ivdcf7#1",
+        "20260909_185855_iv044e#2"
+      ]
+    },
+    {
+      "entry": "note:2026-05-01 Data Pipeline Run",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_selftest_thinktrace#1",
+        "20260910_150524_ac4991#1"
+      ]
+    },
+    {
+      "entry": "note:2026-05-02 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260905_161842_iv2314#1"
+      ]
+    },
+    {
+      "entry": "note:2026-05-06 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.5,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_160431_ivcbad#5",
+        "20260910_235939_iv4a93#1"
+      ]
+    },
+    {
+      "entry": "note:2026-05-10 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_213816_iv0adc#2"
+      ]
+    },
+    {
+      "entry": "note:2026-05-11 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_225900_ivf8d3#2"
+      ]
+    },
+    {
+      "entry": "note:2026-05-12 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_175625_iv4b8e#3"
+      ]
+    },
+    {
+      "entry": "note:2026-05-18 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 8,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.125,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_225900_ivf8d3#3",
+        "20260907_184351_ivec8d#1",
+        "20260907_185707_iv57ab#1",
+        "20260907_185707_iv57ab#2",
+        "20260907_220430_iv15a0#1",
+        "20260909_040405_ivb1b8#1",
+        "20260910_014610_ivd127#1",
+        "20260910_014618_iv6a62#1"
+      ]
+    },
+    {
+      "entry": "note:2026-05-22 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_185707_iv57ab#5"
+      ]
+    },
+    {
+      "entry": "note:2026-05-23 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_171700_iv4855#2",
+        "20260906_171700_iv4855#3",
+        "20260906_171700_iv4855#4"
+      ]
+    },
+    {
+      "entry": "note:2026-05-26 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 5,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.2,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_160431_ivcbad#2",
+        "20260906_182433_ivc5c8#2",
+        "20260907_161840_iv4b74#2",
+        "20260907_161840_iv4b74#3",
+        "20260909_162609_iv6937#1"
+      ]
+    },
+    {
+      "entry": "note:2026-06-30 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_161840_iv4b74#3"
+      ]
+    },
+    {
+      "entry": "note:2026-07-06 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260905_161842_iv2314#1"
+      ]
+    },
+    {
+      "entry": "note:2026-07-09",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_032832_ivbf4f#3"
+      ]
+    },
+    {
+      "entry": "note:2026-07-21 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_225900_ivf8d3#2"
+      ]
+    },
+    {
+      "entry": "note:2026-07-22 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 3,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.3333,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_160431_ivcbad#2",
+        "20260906_182433_ivc5c8#2",
+        "20260907_161840_iv4b74#2"
+      ]
+    },
+    {
+      "entry": "note:2026-07-29 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 14,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0714,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_160431_ivcbad#2",
+        "20260906_160431_ivcbad#3",
+        "20260906_182433_ivc5c8#2",
+        "20260907_161840_iv4b74#2",
+        "20260907_161840_iv4b74#3",
+        "20260908_163153_ivba74#1",
+        "20260908_163153_ivba74#2",
+        "20260908_175625_iv4b8e#1",
+        "20260908_175625_iv4b8e#2",
+        "20260909_011539_iv4b00#1",
+        "20260910_004857_iv11e2#2",
+        "20260910_230103_iv0eea#1",
+        "20260910_234910_iva63a#2",
+        "20260911_000923_iv3c95#1"
+      ]
+    },
+    {
+      "entry": "note:2026-08-17 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 4,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.25,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_160431_ivcbad#2",
+        "20260906_182433_ivc5c8#2",
+        "20260907_161840_iv4b74#2",
+        "20260908_175625_iv4b8e#3"
+      ]
+    },
+    {
+      "entry": "note:2026-09-04 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_155201_iveaa1#2"
+      ]
+    },
+    {
+      "entry": "note:2026-09-05 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260905_161842_iv2314#1"
+      ]
+    },
+    {
+      "entry": "note:2026-09-06 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_142410_ivd971#2",
+        "20260907_142410_ivd971#3"
+      ]
+    },
+    {
+      "entry": "note:2026-09-08 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_014610_ivd127#2"
+      ]
+    },
+    {
+      "entry": "note:2026-09-09 Daily Notes",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_014610_ivd127#2"
+      ]
+    },
+    {
+      "entry": "note:20260822_232106_ive8da",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_011742_iv1350#1",
+        "20260910_011742_iv1350#2"
+      ]
+    },
+    {
+      "entry": "note:20260907_045433_iv724c",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260911_002852_iv1a23#2",
+        "20260911_012901_ivf346#2"
+      ]
+    },
+    {
+      "entry": "note:20260907_230414_backlogi_53e9",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_011742_iv1350#2",
+        "20260910_011742_iv1350#3"
+      ]
+    },
+    {
+      "entry": "note:20260909_014756_ivcbb7",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_014756_ivcbb7#2"
+      ]
+    },
+    {
+      "entry": "note:20260910_011742_iv1350",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_011742_iv1350#2"
+      ]
+    },
+    {
+      "entry": "note:20260910_014610_ivd127",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_014610_ivd127#2"
+      ]
+    },
+    {
+      "entry": "note:20260911_012901_ivf346",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260911_012901_ivf346#2"
+      ]
+    },
+    {
+      "entry": "note:AI Engineer \u2014 what it offered Lloyd",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_011742_iv1350#3",
+        "20260910_230103_iv0eea#1"
+      ]
+    },
+    {
+      "entry": "note:ASDA: Automated Skill Distillation and Adaptation",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_014756_ivcbb7#2"
+      ]
+    },
+    {
+      "entry": "note:ASDA: Automated Skill Distillation and Adaptation for Financial Reasoning",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_014756_ivcbb7#2"
+      ]
+    },
+    {
+      "entry": "note:Activity Log",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_171700_iv4855#2",
+        "20260907_185707_iv57ab#2"
+      ]
+    },
+    {
+      "entry": "note:Adaption Labs: Gradient-Free Continual Learning \u2014 Sara Hooker, Adaption",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_222438_iv9b3c#2"
+      ]
+    },
+    {
+      "entry": "note:Agent Loop Engineering \u2014 Video Insights",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 5,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_163153_ivba74#1",
+        "20260908_175625_iv4b8e#1",
+        "20260908_175625_iv4b8e#2",
+        "20260908_175625_iv4b8e#3",
+        "20260909_011539_iv4b00#1"
+      ]
+    },
+    {
+      "entry": "note:Alan's Interaction Patterns",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 7,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_225900_ivf8d3#2",
+        "20260907_045433_iv724c#1",
+        "20260907_184351_ivec8d#1",
+        "20260907_185707_iv57ab#1",
+        "20260907_220430_iv15a0#1",
+        "20260909_040405_ivb1b8#1",
+        "20260910_014618_iv6a62#1"
+      ]
+    },
+    {
+      "entry": "note:Autonomy Board System - Complete Implementation",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_171700_iv4855#2"
+      ]
+    },
+    {
+      "entry": "note:Autoresearch promotion floor \u2014 why no variants get promoted",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_022107_iv0ffa#2"
+      ]
+    },
+    {
+      "entry": "note:Autoresearch: Inter-Round Baseline Score Correlation",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_032832_ivbf4f#3"
+      ]
+    },
+    {
+      "entry": "note:CORAL: Autonomous Infrastructure for Self-Evolving Multi-Agent Agents",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_220430_iv15a0#5"
+      ]
+    },
+    {
+      "entry": "note:Claude Code OTEL Span Attributes: `claude_code.interaction` & `claude_code.tool`",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260911_002852_iv1a23#2"
+      ]
+    },
+    {
+      "entry": "note:Claude Code v2.1.126",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_185707_iv57ab#5"
+      ]
+    },
+    {
+      "entry": "note:Collaborative AI Engineering: One Dev,Two Dozen Agents,Zero Alignment \u2014 Maggie Appleton,GitHub",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 7,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_163153_ivba74#1",
+        "20260908_175625_iv4b8e#1",
+        "20260908_175625_iv4b8e#2",
+        "20260909_011539_iv4b00#1",
+        "20260910_230103_iv0eea#1",
+        "20260910_234910_iva63a#2",
+        "20260911_000923_iv3c95#1"
+      ]
+    },
+    {
+      "entry": "note:Context Forking in Multi-Agent Reasoning \u2014 Branching Conversation State for Parallel Hypothesis Exploration",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_213337_iv502a#1",
+        "20260907_213649_iv9d36#1",
+        "20260907_213816_iv0adc#1"
+      ]
+    },
+    {
+      "entry": "note:Data Pipeline Run 7 \u2014 2026-08-29",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260911_012901_ivf346#2"
+      ]
+    },
+    {
+      "entry": "note:DeepSeek V4.1 Flash \u2014 two-day API beta (2026-09-08 \u2192 09-10)",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_162609_iv6937#1"
+      ]
+    },
+    {
+      "entry": "note:ForkKV \u2014 Copy-on-Write Disaggregated KV Cache for Multi-LoRA Agent Serving",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_231357_ive07d#3"
+      ]
+    },
+    {
+      "entry": "note:Full Walkthrough: Workflow for AI Coding \u2014 Matt Pocock",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 7,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_184351_ivec8d#1",
+        "20260907_185707_iv57ab#1",
+        "20260907_185707_iv57ab#2",
+        "20260907_220430_iv15a0#1",
+        "20260909_040405_ivb1b8#1",
+        "20260910_014610_ivd127#1",
+        "20260910_014618_iv6a62#1"
+      ]
+    },
+    {
+      "entry": "note:Full Workshop: Setting Yourself Up for Success \u2014Jason Liu, OpenAI Codex",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_235939_iv4a93#1"
+      ]
+    },
+    {
+      "entry": "note:General Updates",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 15,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0667,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_225900_ivf8d3#3",
+        "20260907_150214_ee1102#1",
+        "20260907_213816_iv0adc#2",
+        "20260907_220430_iv15a0#5",
+        "20260908_163153_ivba74#1",
+        "20260908_175625_iv4b8e#1",
+        "20260909_011539_iv4b00#1",
+        "20260909_014756_ivcbb7#1",
+        "20260909_014756_ivcbb7#2",
+        "20260909_020810_iv6514#2",
+        "20260909_020810_iv6514#3",
+        "20260910_011742_iv1350#3",
+        "20260910_034059_iv75ea#1",
+        "20260910_230103_iv0eea#1",
+        "20260911_000522_iv201f#1"
+      ]
+    },
+    {
+      "entry": "note:Idler Termination Pattern \u2014 Root Cause Analysis",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_171700_iv4855#3"
+      ]
+    },
+    {
+      "entry": "note:Implement TGS-RAG \"Visited Memory\" + \"Orphan Entity Bridging\" for Multi-Hop Reasoning",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_213337_iv502a#1",
+        "20260907_213649_iv9d36#1",
+        "20260907_213816_iv0adc#1"
+      ]
+    },
+    {
+      "entry": "note:Inner Voice Drift Recovery \u2014 Resume Protocol",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_144704_iv732e#1"
+      ]
+    },
+    {
+      "entry": "note:Inner Voice \u2014 parallel cognitive process for Lloyd",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 4,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_171700_iv4855#2",
+        "20260906_171700_iv4855#3",
+        "20260909_020810_iv6514#2",
+        "20260909_020810_iv6514#3"
+      ]
+    },
+    {
+      "entry": "note:Karpathy Autoresearch \u2014 Self-Improving Agent Loop",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_175625_iv4b8e#2"
+      ]
+    },
+    {
+      "entry": "note:Knowledge Graph Densification \u2014 promote latent relationship facts into traversable edges",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_011742_iv1350#3"
+      ]
+    },
+    {
+      "entry": "note:Learnings Log \u2014 2026-03-31",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_220430_iv15a0#5"
+      ]
+    },
+    {
+      "entry": "note:MemGPT Automated Evals & Benchmark Infrastructure Analysis",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_032832_ivbf4f#4"
+      ]
+    },
+    {
+      "entry": "note:Memory Graph \u2014 Benchmark Results",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_045305_iv0938#2",
+        "20260908_selftest_thinktrace2#1"
+      ]
+    },
+    {
+      "entry": "note:Migrate query() \u2192 ClaudeSDKClient for persistent per-session connections",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260911_002852_iv1a23#2"
+      ]
+    },
+    {
+      "entry": "note:Model Resolution Fallback Chain",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_selftest_thinktrace#1"
+      ]
+    },
+    {
+      "entry": "note:Morning Brief \u2014 2026-05-09",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_selftest_thinktrace#1"
+      ]
+    },
+    {
+      "entry": "note:Multi-Agent Workflow Patterns",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_selftest_thinktrace2#1"
+      ]
+    },
+    {
+      "entry": "note:Nightly Reflection Architecture",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_175625_iv4b8e#3"
+      ]
+    },
+    {
+      "entry": "note:Nightly Reflection Changelog \u2014 2026-04-24",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_020810_iv6514#2"
+      ]
+    },
+    {
+      "entry": "note:Nightly Reflection \u2014 Config Application Summary (2026-05-08)",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_214751_iv1620#8"
+      ]
+    },
+    {
+      "entry": "note:Nightly Reflection \u2014 Config Changelog \u2014 2026-05-01",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_selftest_thinktrace#1"
+      ]
+    },
+    {
+      "entry": "note:OKF Gap Analysis \u2014 Current Vault State vs. OKF Ideal",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_185707_iv57ab#5"
+      ]
+    },
+    {
+      "entry": "note:Obsidian Headless sync dies silently on `Vault limit exceeded`",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_selftest_thinktrace2#1"
+      ]
+    },
+    {
+      "entry": "note:Obsidian Sync Alternatives: Multi-Host Workspace Conflict Resolution",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_185707_iv57ab#2"
+      ]
+    },
+    {
+      "entry": "note:Online Fine-Tuning for VLA Models \u2014 Continual Learning Without Catastrophic Forgetting",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_163153_ivba74#2",
+        "20260910_004857_iv11e2#2"
+      ]
+    },
+    {
+      "entry": "note:Open Knowledge Format (OKF) \u2014 Deep Dive",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_175625_iv4b8e#3"
+      ]
+    },
+    {
+      "entry": "note:OpenClaw Power User Workflows",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_185855_iv044e#2"
+      ]
+    },
+    {
+      "entry": "note:OpenCode headless HTTP API (verified on the Lloyd box, 2026-09-06)",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_142410_ivd971#2"
+      ]
+    },
+    {
+      "entry": "note:Orphaned Reference Cleanup \u2014 2026-05-23",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_032832_ivbf4f#2"
+      ]
+    },
+    {
+      "entry": "note:Overview",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_selftest_thinktrace2#1"
+      ]
+    },
+    {
+      "entry": "note:Production Zero-Downtime LLM Serving: vLLM,TGI,TensorRT-LLM Rolling Updates & Canary Deployments",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_150524_ac4991#1"
+      ]
+    },
+    {
+      "entry": "note:Qwen 3.8 27B vs Flash-Next for agentic work (Digital Spaceport, ~16.6 min)",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_161840_iv4b74#3"
+      ]
+    },
+    {
+      "entry": "note:Qwen3-TTS CUDA Graph Optimization for Sub-200ms TTFA",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 1,
+      "weighted_disputes": 0.0294,
+      "overlap_max": 0.0294,
+      "dispute_rate": 1.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_220430_iv15a0#2"
+      ]
+    },
+    {
+      "entry": "note:Release Invitees",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 5,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_184351_ivec8d#1",
+        "20260907_185707_iv57ab#1",
+        "20260907_220430_iv15a0#1",
+        "20260909_040405_ivb1b8#1",
+        "20260910_014618_iv6a62#1"
+      ]
+    },
+    {
+      "entry": "note:Research-to-Architecture Delta Analysis",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_231357_ive07d#3"
+      ]
+    },
+    {
+      "entry": "note:ReviewDebt: a practical framework for scoring every pull request \u2014 Sachin Gupta, Ebay",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260905_161842_iv2314#1"
+      ]
+    },
+    {
+      "entry": "note:RoboCasa Kitchen Manipulation Benchmark \u2014 Composite vs Atomic Task Transfer Gap",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_231357_ive07d#3"
+      ]
+    },
+    {
+      "entry": "note:Schema Compression & Tool Naming Audit",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_142410_ivd971#3"
+      ]
+    },
+    {
+      "entry": "note:Seed identification: 8/20 eval queries miss expected entities that already exist",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_213337_iv502a#1",
+        "20260907_213649_iv9d36#1",
+        "20260907_213816_iv0adc#1"
+      ]
+    },
+    {
+      "entry": "note:Self-Modification Baseline \u2014 2026-09-05",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_214751_iv1620#8"
+      ]
+    },
+    {
+      "entry": "note:Skills Index",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_032832_ivbf4f#5",
+        "20260907_004855_iv6456#2"
+      ]
+    },
+    {
+      "entry": "note:Staged Pipeline Architecture",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_155201_iveaa1#2",
+        "20260907_155201_iveaa1#3"
+      ]
+    },
+    {
+      "entry": "note:Stop Making Models Bigger,Make Them Behave \u2014 Kobie Crawdord,Snorkel",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_171700_iv4855#4"
+      ]
+    },
+    {
+      "entry": "note:Summary",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_160431_ivcbad#3",
+        "20260907_222438_iv9b3c#2"
+      ]
+    },
+    {
+      "entry": "note:System Monitoring \u2014 Disk Space",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_014610_ivd127#2"
+      ]
+    },
+    {
+      "entry": "note:System Prompt & Tool Surface Optimization Plan",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_213337_iv502a#1",
+        "20260907_213816_iv0adc#2"
+      ]
+    },
+    {
+      "entry": "note:TencentDB-Agent-Memory \u2014 Semantic Pyramid + Symbolic Memory for Long-Horizon Agents",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_045305_iv0938#2"
+      ]
+    },
+    {
+      "entry": "note:Test-Time Compute Scaling \u2014 2026-04-28 Research",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_214751_iv1620#8"
+      ]
+    },
+    {
+      "entry": "note:The Art & Science of Benchmarking Agents \u2014 Vincent Chen,Snorkel AI",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_211213_ivdcf7#1"
+      ]
+    },
+    {
+      "entry": "note:The End of Human-Defined Skills: AI Eigenvectors",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_001815_ivf098#1"
+      ]
+    },
+    {
+      "entry": "note:The Ratchet and the Graph Are the Same Gate: Baseline Integrity Before Any State-Transition Claim",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_032832_ivbf4f#3"
+      ]
+    },
+    {
+      "entry": "note:The Same \"Same-Hardware, Better-Logic\" Pattern Governs Both the Bernie Drive Decision and the Local LLM Harness Decision",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_032832_ivbf4f#2",
+        "20260906_032832_ivbf4f#3",
+        "20260906_032832_ivbf4f#4"
+      ]
+    },
+    {
+      "entry": "note:Thunderbird MCP Testing Procedures",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_214751_iv1620#8"
+      ]
+    },
+    {
+      "entry": "note:Tool List and Purpose",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_014610_ivd127#2"
+      ]
+    },
+    {
+      "entry": "note:Trace2Skill \u2014 Evaluation for Automatic Skill Extraction from LLM Execution Traces",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_020810_iv6514#1",
+        "20260909_020810_iv6514#2"
+      ]
+    },
+    {
+      "entry": "note:Track vLLM #40350 (NVFP4 engine wedge on Blackwell)",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 3,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.3333,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_160431_ivcbad#5",
+        "20260909_014756_ivcbb7#1",
+        "20260909_014756_ivcbb7#2"
+      ]
+    },
+    {
+      "entry": "note:User (Alan) \u2014 Memory & Context",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 6,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_004855_iv6456#2",
+        "20260908_163153_ivba74#2",
+        "20260908_175625_iv4b8e#2",
+        "20260910_004857_iv11e2#2",
+        "20260910_034059_iv75ea#1",
+        "20260910_234910_iva63a#2"
+      ]
+    },
+    {
+      "entry": "note:Vault Maintenance Report \u2014 2026-06-06",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_185707_iv57ab#2"
+      ]
+    },
+    {
+      "entry": "note:Vault Maintenance \u2014 2026-07-02",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_171700_iv4855#3"
+      ]
+    },
+    {
+      "entry": "note:Vault Maintenance \u2014 2026-07-27",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_171700_iv4855#4"
+      ]
+    },
+    {
+      "entry": "note:What Data from 20m Pull Requests Reveal About AI Transformation \u2014 Nick Arcolano,Jellyfish",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_163153_ivba74#2",
+        "20260910_004857_iv11e2#2"
+      ]
+    },
+    {
+      "entry": "note:When Will The Benchmaxxing Plague End? \u2014 Nick Heiner, Surge AI",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260908_045305_iv0938#2"
+      ]
+    },
+    {
+      "entry": "note:WikiSkill (arXiv:2608.27454) \u2014 Compiling Agent Experience into Persistent Knowledge",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260909_135557_iv2a95#1"
+      ]
+    },
+    {
+      "entry": "note:YouTube Transcript API \u2014 Reliability",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_160431_ivcbad#2"
+      ]
+    },
+    {
+      "entry": "note:YouTube Transcript Extraction \u2014 VTT Parsing and youtube-transcript-api Fallback",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 2,
+      "disputes": 1,
+      "weighted_disputes": 0.0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.5,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_182433_ivc5c8#2",
+        "20260907_161840_iv4b74#2"
+      ]
+    },
+    {
+      "entry": "note:Your AI Product Will Fail Unless You Can Explain It - Veronica Hylak,Hey AI",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_043648_ivacb5#1"
+      ]
+    },
+    {
+      "entry": "note:e2e_selfmod_1788756141",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_011742_iv1350#3"
+      ]
+    },
+    {
+      "entry": "note:gap-006: Inter-round baseline score correlation",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_032832_ivbf4f#3"
+      ]
+    },
+    {
+      "entry": "note:nightly-reflection: signal report 2026-04-21",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 3,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260907_045433_iv724c#1",
+        "20260911_002852_iv1a23#2",
+        "20260911_012901_ivf346#2"
+      ]
+    },
+    {
+      "entry": "note:selfmod_start's declared argument name is not the one its handler reads \u2014 a selfmod round costs 2 rejected calls to open",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_011742_iv1350#2"
+      ]
+    },
+    {
+      "entry": "note:vLLM NVFP4 Setup on RTX 5090",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260906_160431_ivcbad#3"
+      ]
+    },
+    {
+      "entry": "note:vLLM v0.29.0",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260911_012901_ivf346#2"
+      ]
+    },
+    {
+      "entry": "note:vLLM: Multiple Instances on Single GPU",
+      "presence_source": "prefetch:vault_context",
+      "present_in_turns": 1,
+      "disputes": 0,
+      "weighted_disputes": 0,
+      "overlap_max": 0.0,
+      "dispute_rate": 0.0,
+      "kind": "note",
+      "presence_turn_ids": [
+        "20260910_234910_iva63a#2"
+      ]
     }
   ],
   "item": "552",
@@ -2556,6 +5753,57 @@
       "recall": 0.5
     },
     "prompt_tuned_on_labels": true,
+    "holdout": {
+      "tp": 5,
+      "fp": 0,
+      "fn": 8,
+      "tn": 18,
+      "n": 31,
+      "n_positives": 13,
+      "n_predicted_positive": 5,
+      "precision": 1.0,
+      "recall": 0.38461538461538464,
+      "measured": true,
+      "n_holdout": 31,
+      "n_dev_contaminated": 15,
+      "n_positives_holdout": 13
+    },
+    "zero_shot": {
+      "tp": 5,
+      "fp": 0,
+      "fn": 8,
+      "tn": 18,
+      "n": 31,
+      "n_positives": 13,
+      "n_predicted_positive": 5,
+      "precision": 1.0,
+      "recall": 0.38461538461538464,
+      "measured": true,
+      "unanswered": 0
+    },
+    "deployed_pipeline": {
+      "tp": 9,
+      "fp": 0,
+      "fn": 14,
+      "tn": 23,
+      "n": 46,
+      "n_positives": 23,
+      "n_predicted_positive": 9,
+      "precision": 1.0,
+      "recall": 0.391304347826087,
+      "measured": true,
+      "unanswered": 0,
+      "screened": 24
+    },
+    "labels_check": {
+      "ok": true,
+      "n": 46,
+      "n_resolved": 46,
+      "unresolved_turn_ids": [],
+      "excerpt_mismatch_turn_ids": [],
+      "note": "each label's stored excerpt must be the beginning of what that turn actually says in sessions/<id>.json; this is the only check here that does not take the labels file's own word for being hand-labeled"
+    },
+    "split_note": "holdout = labeled turns whose own text does not appear verbatim in the classifier prompt (>=4-word span). Contaminated items are not dropped; they are the dev set, and they are why the exemplified precision figure is labelled in-sample.",
     "disagreements": {
       "false_positive": [],
       "false_negative": [
@@ -2571,7 +5819,7 @@
         "20260910_235939_iv4a93#1"
       ]
     },
-    "note": "recall 0.57 means dispute counts in this table are a LOWER BOUND, not a census",
+    "note": "deployed pipeline recall 0.39 (classifier alone 0.57) means dispute counts in this table are a LOWER BOUND, not a census",
     "retrieval_gate": {
       "nights": 6,
       "latest": {
@@ -2602,7 +5850,7 @@
   },
   "stores": {
     "facts_idx": {
-      "probed_at": "2026-09-11T09:49:58+00:00",
+      "probed_at": "2026-09-11T10:35:38+00:00",
       "store": "/home/alansrobotlab/lloyd/_pipeline/vault-derived/kg.sqlite",
       "fact_rows": 272337,
       "duplicate_text_hash_groups": 9200,

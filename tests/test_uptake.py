@@ -10,12 +10,16 @@ One test here needs the secondary LLM to be answering and two read the live
 `~/obsidian` vault; neither is under a round's control. The vault readers carry
 the tree's existing `live_vault` mark, which the automod gate excludes. The
 engine reader carries no mark — it is the acceptance measurement for #552, so it
-should run on the gate — and it asserts **both** states instead of skipping: with
-the engine awake the floors must clear, with it silent the pipeline must refuse to
-score anything. Nothing in this file skips, xfails, or asserts `True`; the
-loopback HTTP seam is crossed by a test that runs whether or not a model is
-loaded, and the precision claim is replayable from replies recorded in the corpus
-fixture, so no measurement here depends on a service being up to be checked.
+should run on the gate. With the engine awake the floors must clear; with it down
+the test **fails**, naming the engine, unless `UPTAKE_ALLOW_SILENT_ENGINE=1` records
+that the box is offline on purpose (then it skips, visibly, instead of passing). It
+used to assert whichever branch it landed in and record nothing about which, so an
+asleep model and a passing grader were indistinguishable in the report. The
+fail-closed behaviour of a silent engine is pinned hermetically by the
+stand-in-transport tests, so refusing to grade the live measurement against an
+absent model costs no coverage. Nothing else in this file skips, xfails, or asserts
+`True`; the loopback HTTP seam is crossed by a test that runs whether or not a model
+is loaded, and the precision claim is replayable from recorded replies.
 """
 
 from __future__ import annotations
@@ -243,10 +247,15 @@ def test_classifier_fails_closed_when_the_engine_is_unreachable():
 # ------------------------------------------------------------ attribution ----
 
 def _mk_turn(idx, text, prev, *, skills=(), ctx_titles=(), session="s1"):
+    # Whatever presence a fixture claims, it claims from a persisted injected
+    # block — the reader can produce `injected_skills`/`vault_context` no other way
+    # now, so a fixture with evidence and no block would describe a state the
+    # parser cannot emit, and `reach` would be lying about it.
     return uptake.Turn(
         session=session, session_source=None, ts=f"2026-09-10T0{idx % 10}:00:00+00:00",
         user_text=text, prev_assistant=prev, ordinal=idx,
         injected_skills=list(skills), vault_context=list(ctx_titles),
+        injections_seen=1 if (skills or ctx_titles) else 0,
     )
 
 
@@ -826,18 +835,47 @@ def test_probe_writes_a_dated_table_when_the_floor_clears(tmp_path, monkeypatch)
     assert corpus["disputes"] <= corpus["classified_turns"], corpus
 
 
-def test_coverage_declares_the_halves_it_cannot_evaluate():
-    """`notes_seen: 0` was the most misleading number in the table: it read as
-    "no knowledge note was ever disputed" and meant "nothing persists which notes
-    were prefetched". An unevaluable half must say it is unevaluable — this is
-    the class this repo has been burned by four times over."""
+def test_coverage_states_the_reach_of_the_note_half(tmp_path):
+    """`notes_seen: 0` was the most misleading number in the table, and the fix is
+    not a disclaimer — it is a measured reach.
+
+    Presence IS persisted (`role="subliminal"` messages), so the honest statement
+    is not "unmeasurable" but "here is how many turns in this window actually
+    persisted an injected block". A zero with `turns_with_block: 12/12` in front of
+    it means notes were prefetched and never disputed; a zero with `0/12` means this
+    window says nothing about notes at all. Those two readings are the difference
+    between an entry being pruned and an entry being left alone, and before the
+    reach went out neither could be told from the other.
+    """
     table = uptake.build_uptake_table(
-        turns=[_mk_turn(1, "wrong", "ok", skills=["voice-mode"])],
+        turns=[_mk_turn(1, "wrong", "ok")],          # no injected block at all
         dispute_flags={"s1#1": True}, memory_entries=[], skills_read={})
     notes = table["coverage"]["prefetch_notes"]
     assert notes["entries_identified"] == 0
-    assert notes["presence_source"] == uptake.NOTE_PRESENCE_SOURCE
-    assert "unmeasurable" in notes["note"] and "NOT 'no note was disputed'" in notes["note"]
+    assert notes["turns_total"] == 1
+    # A turn built without any injected block: no note evidence, and the table says
+    # so as *reach*, not as a verdict about the notes.
+    assert notes["turns_with_block"] == 0
+    assert notes["reach"] == 0.0
+    assert notes["presence_source"] == uptake.NOTE_PRESENCE_UNREACHABLE
+    assert "no_injected_block" in notes["presence_source"]
+    assert "contributes no note evidence" in notes["note"]
+
+
+def test_turns_that_persisted_no_injected_block_are_counted_as_no_reach(tmp_path):
+    """The reach denominator must be turns, not blocks.
+
+    Two blocks landing on one turn is one turn's worth of evidence. Counting blocks
+    would report reach of 2/1 and let a table claim more coverage than it has.
+    """
+    a = _mk_turn(1, "wrong", "ok", ctx_titles=["knowledge/a.md"])
+    a.injections_seen = 2                      # two blocks, one turn
+    b = _mk_turn(2, "next thing", "ok", session="s2")
+    table = uptake.build_uptake_table(
+        turns=[a, b], dispute_flags={"s1#1": True}, memory_entries=[], skills_read={})
+    notes = table["coverage"]["prefetch_notes"]
+    assert notes["turns_with_block"] == 1 and notes["turns_total"] == 2
+    assert notes["reach"] == pytest.approx(0.5)
 
 
 def test_a_prefetched_note_is_attributed_when_evidence_does_exist():
@@ -1077,43 +1115,168 @@ def test_hand_labeled_corpus_covers_the_item_s_minimum():
     positives = [l for l in labels if l["label"] == 1]
     assert len(labels) >= 40, len(labels)
     assert len(positives) >= 20, len(positives)
-    assert {l["labeled_by"] for l in labels} == {"hand:alan-turns-2026-09-11"}
     # Every label must point at a turn id of the documented shape, so a later
     # run can re-open the transcript behind it.
     for l in labels:
         assert re.match(r"^.+#\d+$", l["turn_id"]), l
+    # `labeled_by` used to be asserted equal to a string here. That assertion
+    # could not fail for a fabricated corpus: the string is part of the file it is
+    # checking. The claim "this was hand-labeled from real turns" is falsifiable
+    # only against the transcript store, which is what the test below does.
 
 
-def test_live_engine_scores_the_corpus_in_sample_or_fails_closed_when_down():
+def test_every_committed_label_re_resolves_to_its_transcript(tmp_path, monkeypatch):
+    """The labels file cannot attest itself, and this is the check that does.
+
+    The store is an artifact the labeler does not write, so re-resolving each
+    `turn_id` there and comparing the stored excerpt turns "I labeled this by hand"
+    into "this is what that turn actually said" — the check a reviewer had to
+    perform by hand over all 46 turns on the previous head, now in the suite.
+    """
+    labels = uptake.load_labels()
+    index = {t.turn_id: t for t in uptake.human_turns(days=900)}
+    check = uptake.validate_labels(labels, index)
+    assert check["unresolved_turn_ids"] == [], check
+    assert check["excerpt_mismatch_turn_ids"] == [], check
+    assert check["ok"] is True and check["n"] == len(labels), check
+    assert check["n_resolved"] == len(labels), (
+        "the corpus silently shrank as transcripts rolled off the store; the "
+        "precision figure is quoted against this denominator")
+
+
+def test_validate_labels_fails_on_a_fabricated_or_stale_label(tmp_path, monkeypatch):
+    """The check must be able to fail, in both directions."""
+    real = uptake.Turn(session="s9", ts="2026-09-01T00:00:00+00:00",
+                       user_text="the retry budget is not what you said it is",
+                       prev_assistant="I raised the retry budget to 5 and rebuilt the "
+                                      "client so the timeout no longer compounds.",
+                       ordinal=1, session_source=None)
+    index = {"s9#1": real}
+    good = {"turn_id": "s9#1", "label": 1,
+            "user_text": real.user_text, "prev_assistant": real.prev_assistant}
+    assert uptake.validate_labels([good], index)["ok"] is True
+
+    invented = {**good, "user_text": "a sentence no transcript contains " + "x" * 40}
+    out = uptake.validate_labels([invented], index)
+    assert out["ok"] is False and out["excerpt_mismatch_turn_ids"] == ["s9#1"], out
+
+    rolled_off = {"turn_id": "s9#2", "label": 0, "user_text": "anything",
+                  "prev_assistant": "anything"}
+    out = uptake.validate_labels([rolled_off], index)
+    # An unresolvable label is a FAILURE, not a skip: a corpus that shrinks as
+    # transcripts age out would quietly re-weight the precision figure.
+    assert out["ok"] is False and out["unresolved_turn_ids"] == ["s9#2"], out
+
+    # A truncated excerpt is legitimate — it is the beginning of the real turn.
+    long_prefix = real.prev_assistant[:45]
+    assert len(long_prefix) >= 40
+    assert uptake.validate_labels([{**good, "prev_assistant": long_prefix}],
+                                  index)["ok"] is True
+
+
+#: Set this only when the secondary engine is deliberately down (an offline bench,
+#: a machine being moved). Until it is set again, a silent engine FAILS this test
+#: rather than passing it. The previous version asserted whichever branch it
+#: happened to land in and recorded nothing about which one that was, so a gate run
+#: that caught :8091 asleep reported a pass on a measurement that had not happened.
+#: The fail-closed semantics of a silent engine are still pinned — hermetically, by
+#: `_oracle_classifier` driving the same pipeline with a stand-in transport.
+ALLOW_SILENT_ENGINE = "UPTAKE_ALLOW_SILENT_ENGINE"
+
+
+def test_live_engine_scores_the_corpus_and_reports_every_way_precision_was_measured():
     """Step 2's stop condition against the real secondary engine.
 
-    Named for what it is: `prompt_tuned_on_labels: true` — the exemplars were
-    written against these turn shapes, so this is an in-sample measurement and no
-    longer claims to be a holdout.
+    Three numbers must clear the floor before this passes, because the artifact
+    quotes all three and the first one alone flatters the prompt:
 
-    And it no longer `pytest.skip`s when the engine is silent. A conditional skip
-    on a measurement test means a gate run that happens to catch the engine down
-    passes without ever crossing the seam, which is how the previous version read
-    as covered. Both states are asserted instead: awake, the floors must clear;
-    silent, the pipeline must refuse to score anything at all — no precision, no
-    pass, every label unanswered. The second branch is the one a silent engine
-    used to hide.
+      * `metrics`    — the deployed prompt over the whole labeled corpus (in-sample:
+                       `prompt_tuned_on_labels: true`, the exemplars were written
+                       against these turn shapes);
+      * `holdout`    — the labeled turns the prompt does not quote;
+      * `zero_shot`  — those same turns with the few-shot block removed, which is
+                       the only figure the prompt cannot have read out of itself;
+      * `pipeline`   — screen + classifier together, reported but not gated: the
+                       cue screen drops most labeled disputes, and the item's stop
+                       condition is about the classifier. Its recall is what the
+                       table's lower-bound note is computed from.
     """
     import scripts.uptake_probe as probe
 
     awake = uptake.classify_dispute("Built it, works now.", "it 404s on me") is not None
+    if not awake:
+        # The previous version asserted whichever branch it happened to land in and
+        # recorded nothing about which, so a gate run that caught :8091 asleep
+        # reported a pass on a measurement that had not happened. Down is now loud
+        # by default; the opt-out exists for a box that is genuinely offline and
+        # makes the omission visible as a skip rather than a pass.
+        if os.environ.get(ALLOW_SILENT_ENGINE) == "1":
+            pytest.skip(f"{ALLOW_SILENT_ENGINE}=1: {uptake.SECONDARY_URL} is "
+                        "deliberately down, so the uptake measurement did not run")
+        pytest.fail(f"secondary engine at {uptake.SECONDARY_URL} is not answering. "
+                    "Step 2's acceptance measurement cannot be claimed without it. "
+                    f"Start it, or set {ALLOW_SILENT_ENGINE}=1 if this box is offline "
+                    "on purpose — the fail-closed behaviour of a silent engine is "
+                    "pinned hermetically by the stand-in-transport tests above.")
+
     result = probe.run_classifier_eval()
     m = result["metrics"]
-    if not awake:
-        assert m["n_labels_unresolvable"] == 0, m
-        assert m["n_unanswered"] == m["n_labeled"], m
-        assert m["measured"] is False and m["precision"] is None, m
-        assert result["passed"] is False, m
-        return
-    assert m["n_positives"] >= 20, m
-    assert m["precision"] is not None and m["precision"] >= 0.70, m
-    assert m["recall"] is not None and m["recall"] >= uptake.RECALL_FLOOR, m
+    assert m["n_labels_unresolvable"] == 0, m
     assert m["n_unanswered"] == 0, m
+    assert m["n_positives"] >= 20, m
+    assert m["precision"] is not None and m["precision"] >= uptake.PRECISION_FLOOR, m
+    assert m["recall"] is not None and m["recall"] >= uptake.RECALL_FLOOR, m
+
+    ho, zs = result["holdout"], result["zero_shot"]
+    assert ho["measured"] is True and zs["measured"] is True, (ho, zs)
+    assert ho["n"] >= 20, f"holdout below the item's 20-item minimum: {ho}"
+    assert ho["n_positives"] >= 10, ho
+    assert ho["precision"] >= uptake.PRECISION_FLOOR, ho
+    assert zs["precision"] >= uptake.PRECISION_FLOOR, zs
+    assert zs["n"] == ho["n"], (zs, ho)     # same turns, block removed
+    assert result["split_note"], "contamination must be described, not assumed away"
+
+    pl = result["pipeline"]
+    assert pl["measured"] is True and pl["screened"] > 0, pl
+    # The screen can only lose recall: every pipeline true positive is also a
+    # classifier true positive, so the deployed number is bounded by the model's.
+    assert pl["tp"] <= m["tp"], (pl, m)
+    assert pl["recall"] <= m["recall"], (pl, m)
+
+    assert result["labels_ok"] is True, result["labels_check"]
+    assert result["passed"] is True, {k: result[k] for k in
+                                      ("metrics", "holdout", "zero_shot", "pipeline")}
+
+
+def test_recorded_engine_replies_still_reproduce_on_the_live_engine():
+    """Closes the loop the recorded matrix could not: the fixture reproduces itself,
+    which proves nothing about whether the engine still says that.
+
+    Re-asks a sample of labeled turns with the deployed prompt and requires the
+    answer to match the committed `engine_raw`. The engine is temperature 0 on a
+    pinned slot, so a mismatch is the model or the prompt having moved — which is
+    exactly when a committed precision figure stops being re-quotable.
+    """
+    awake = uptake.classify_dispute("Built it, works now.", "it 404s on me") is not None
+    if not awake:
+        pytest.skip(f"secondary engine down; {ALLOW_SILENT_ENGINE} governs the "
+                    "measurement test, which fails rather than silently skipping")
+    labels = uptake.load_labels()
+    index = {t.turn_id: t for t in uptake.human_turns(days=900)}
+    checked = 0
+    for item in labels:
+        raw = item.get("engine_raw")
+        turn = index.get(item["turn_id"])
+        if raw is None or turn is None:
+            continue
+        verdict, fresh = uptake.classify_dispute_raw(turn.prev_assistant,
+                                                     turn.user_text)
+        assert verdict == uptake._parse_verdict(raw), (
+            f"{item['turn_id']}: recorded {raw!r}, engine now answers {fresh!r}")
+        checked += 1
+        if checked >= 6:
+            break
+    assert checked >= 6, f"only {checked} labeled turns resolvable to re-ask"
 
 
 @pytest.mark.live_vault
@@ -1165,7 +1328,7 @@ def test_the_skill_s_descriptions_of_the_table_match_what_the_code_emits():
         declared_unevaluable = (
             src.startswith("prefetch:")
             and j["coverage"]["prefetch_notes"]["presence_source"]
-            == uptake.NOTE_PRESENCE_SOURCE)
+            == uptake.NOTE_PRESENCE_UNREACHABLE)
         assert emitted or declared_unevaluable, (
             f"skill cites {src}; table emits {sorted(sources)} and does not "
             "declare that half unevaluable")
@@ -1174,3 +1337,279 @@ def test_the_skill_s_descriptions_of_the_table_match_what_the_code_emits():
     if "app.uptake" in text and "retrieval_gate" in text:
         from app.uptake import retrieval_gate  # noqa: F401
         assert callable(retrieval_gate)
+
+
+# ------------------------------------------- presence: the persisted block --
+
+#: What `app/routers/_messages_subliminal.py:86` + the writer actually put in a
+#: transcript: one message per injected block, role "subliminal", content a list of
+#: text blocks. Verified against the live store before this was written — 59 such
+#: blocks in the 120 most recent session files, 48 carrying a note list.
+def _subliminal_block(skills=(), titles=()):
+    parts = []
+    parts.extend(f'<skill name="{s}" score="9.0">\nbody of {s}\n</skill>' for s in skills)
+    if titles:
+        parts.append("<vault-context>\n"
+                     + "\n".join(f"- **{t}** (score: 1.00): excerpt" for t in titles)
+                     + "\n</vault-context>")
+    return {"role": "subliminal",
+            "content": [{"type": "text", "text": "\n".join(parts)}],
+            "timestamp": "2026-09-10T01:00:05+00:00"}
+
+
+def test_the_persisted_subliminal_message_is_what_binds_presence(tmp_path):
+    """Presence evidence lives in its OWN message, not in a field on the user turn.
+
+    The reader used to look for `msg["subliminal"]` on the user message, which the
+    writer never emits — so every skill/note lookup in the module parsed nothing,
+    `skill_injections` and `vault_context` were empty on every real transcript, and
+    the table's note half concluded the data did not exist. This fixture is the
+    shape on disk; the old reader returns empty lists against it, which is what
+    makes the assertion able to fail.
+    """
+    _write_session(tmp_path, "s5", [
+        _user("do the thing"),
+        _subliminal_block(skills=["voice-mode"], titles=["knowledge/software/x.md"]),
+        _asst("on it"),
+    ])
+    turn = uptake.human_turns(root=tmp_path)[0]
+    assert turn.injected_skills == ["voice-mode"], turn.injected_skills
+    assert turn.vault_context == ["knowledge/software/x.md"], turn.vault_context
+    assert turn.injections_seen == 1
+
+
+def test_a_subliminal_block_never_creates_a_turn_of_its_own(tmp_path):
+    """The block is evidence attached to a turn, not a user turn.
+
+    Counting it as one would let a session with three injected blocks report three
+    human turns of presence for one request — and a block with no preceding user
+    turn has nothing to be evidence about.
+    """
+    _write_session(tmp_path, "s6", [
+        _subliminal_block(titles=["knowledge/orphan.md"]),      # no turn to bind to
+        _user("first"),
+        _subliminal_block(titles=["knowledge/a.md"]),
+        _subliminal_block(titles=["knowledge/b.md"]),           # two blocks, one turn
+        _asst("ok"),
+        _user("second"),
+    ])
+    turns = uptake.human_turns(root=tmp_path)
+    assert [t.user_text for t in turns] == ["first", "second"], turns
+    assert turns[0].injections_seen == 2
+    assert turns[0].vault_context == ["knowledge/a.md", "knowledge/b.md"]
+    assert turns[1].vault_context == [] and turns[1].injections_seen == 0
+
+
+@pytest.mark.asyncio
+async def test_the_production_writer_and_the_reader_agree_on_one_block(tmp_path,
+                                                                       monkeypatch):
+    """The seam, crossed by the thing that writes and the thing that reads.
+
+    Every other presence test builds a transcript by hand, so all it proves is that
+    this module parses its own fixture. This one writes through
+    `app.sessions_io._append_messages` — the function that actually produces
+    `sessions/*.json`, with its schema repair, its dedupe against an in-memory
+    transcript, and its per-file lock — and reads the file back through
+    `uptake.human_turns`. If the writer ever nests the block, renames the role, or
+    drops the content list, this fails here instead of quietly emptying the
+    skill/note halves of the table.
+    """
+    import app.sessions_io as sio
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(sio, "SESSIONS_DIR", sessions)
+    await sio._save_session_meta("s7", "test-model", "do the thing")
+    await sio._append_messages("s7", [
+        {"role": "user", "content": "do the thing",
+         "timestamp": "2026-09-10T01:00:00+00:00"},
+        _subliminal_block(skills=["voice-mode"], titles=["knowledge/a.md"]),
+        {"role": "assistant", "content": "on it",
+         "timestamp": "2026-09-10T01:00:10+00:00"},
+    ])
+    on_disk = json.loads((sessions / "s7.json").read_text())
+    roles = [m.get("role") for m in on_disk["messages"]]
+    assert "subliminal" in roles, f"the writer did not persist the block: {roles}"
+
+    turns = uptake.human_turns(root=tmp_path)
+    assert len(turns) == 1, turns
+    assert turns[0].injected_skills == ["voice-mode"], turns[0].injected_skills
+    assert turns[0].vault_context == ["knowledge/a.md"], turns[0].vault_context
+    # And the note half of a real table built from that file is no longer "0 notes,
+    # unevaluable": it is one note, present, with reach to say so.
+    table = uptake.build_uptake_table(
+        turns=turns, dispute_flags={}, memory_entries=[], skills_read={})
+    assert table["coverage"]["prefetch_notes"]["entries_identified"] == 1
+    assert table["coverage"]["prefetch_notes"]["presence_source"] == "prefetch:vault_context"
+
+
+# --------------------------------------- holdout, zero-shot and the gate ----
+
+def test_prompt_leak_finds_quoted_cases_including_the_short_ones():
+    """`continue` is two words, and a ≥4-word window cannot see it.
+
+    The exemplars encode exactly that case, so if short turns were exempt from the
+    leak check the most contaminated items in the corpus would be the ones declared
+    held out — which would make the holdout number flattering in the one direction
+    the item's own risk section warns about.
+    """
+    prompt = "Rules here.\nWorked examples\nUSER: please continue\nLLM: NOT\n"
+    assert uptake.prompt_leak("please continue", prompt) == "please continue"
+    assert uptake.prompt_leak("continue", prompt) == "continue"
+    assert uptake.prompt_leak("please carry on", prompt) is None
+    assert uptake.prompt_leak(
+        "the deploy finished but the pods are crash-looping", prompt) is None
+
+
+def test_holdout_split_moves_quoted_turns_to_dev_and_keeps_them_visible():
+    quoted = {"turn_id": "a#1", "label": 1, "user_text": "please continue"}
+    clean = {"turn_id": "a#2", "label": 1,
+             "user_text": "the retry budget is not what you told me it was"}
+    prompt = uptake._CLASSIFY_RULES + "\nWorked examples\nUSER: please continue\n"
+    split = uptake.holdout_split([quoted, clean], prompt=prompt)
+    assert [i["turn_id"] for i in split["holdout"]] == ["a#2"], split
+    assert split["dev"][0]["prompt_leak"] == "please continue"
+    assert split["n_holdout_positives"] == 1
+    assert "verbatim" in split["note"]
+
+
+def test_pipeline_confusion_counts_a_screened_away_dispute_as_a_miss():
+    """The screen's misses are the pipeline's misses.
+
+    Grading the classifier by calling it directly on every labeled turn reported
+    recall 0.57 for a system measured end to end at 0.39, and the table's
+    lower-bound note was computed from the flattering one.
+    """
+    # 4 labeled positives; the screen forwards 2; the classifier gets both right.
+    m = uptake.pipeline_confusion([1, 1, 1, 1], [1, 1, 0, 0], [True, True, None, None])
+    assert (m["tp"], m["fp"], m["fn"]) == (2, 0, 2), m
+    assert m["precision"] == 1.0 and m["recall"] == 0.5, m
+    assert m["screened"] == 2 and m["unanswered"] == 0, m
+    # An engine that will not answer is not a correct negative.
+    m2 = uptake.pipeline_confusion([1, 1], [1, 1], [None, True])
+    assert m2["unanswered"] == 1 and m2["tp"] == 1 and m2["fn"] == 1, m2
+    with pytest.raises(ValueError):
+        uptake.pipeline_confusion([1], [1], [])
+
+
+def test_examples_false_is_what_strips_the_few_shot_block():
+    """`zero_shot` means "block removed" only if the call really removes it.
+
+    Captures the payload instead of calling the model: if the flag ever stops being
+    threaded, the unexemplified number silently becomes a second copy of the
+    in-sample one and the gate that exists to catch in-sample precision is grading
+    a tautology.
+    """
+    seen: list[dict] = []
+
+    def fake(payload):
+        seen.append(payload)
+        return {"choices": [{"text": "NOT"}]}
+
+    uptake.classify_dispute("prev", "next", transport=fake, examples=False)
+    assert "Worked examples" not in seen[-1]["messages"][0]["content"], seen[-1]
+    uptake.classify_dispute("prev", "next", transport=fake)
+    assert "Worked examples" in seen[-1]["messages"][0]["content"]
+    assert uptake._CLASSIFY_RULES and uptake._CLASSIFY_EXAMPLES
+    assert uptake._CLASSIFY_SYSTEM.startswith(uptake._CLASSIFY_RULES)
+    assert uptake._CLASSIFY_EXAMPLES in uptake._CLASSIFY_SYSTEM
+    assert uptake._EXAMPLE_MARKER not in uptake._CLASSIFY_RULES
+
+
+def test_measurement_gate_refuses_any_measurement_that_is_missing_or_weak():
+    """Step 2's stop condition, one clause per way the single number used to lie."""
+    strong = {"precision": 1.0, "recall": 0.55, "measured": True, "n_positives": 23}
+    full = {"labels_ok": True, "classifier": strong,
+            "holdout": {"precision": 1.0, "measured": True},
+            "zero_shot": {"precision": 0.9, "measured": True}}
+    assert uptake.measurement_clears_floors(full) is True
+    assert uptake.measurement_clears_floors(None) is False
+
+    assert uptake.measurement_clears_floors({**full, "labels_ok": False}) is False
+    assert uptake.measurement_clears_floors(
+        {**full, "classifier": {**strong, "precision": 0.6}}) is False
+    assert uptake.measurement_clears_floors(
+        {**full, "classifier": {**strong, "recall": 0.2, "precision": 1.0}}) is False
+    # Not measured is not passed: an absent holdout used to be indistinguishable
+    # from a holdout that cleared.
+    for key in ("holdout", "zero_shot"):
+        assert uptake.measurement_clears_floors({**full, key: None}) is False, key
+        assert uptake.measurement_clears_floors(
+            {**full, key: {"measured": False, "precision": None}}) is False, key
+        assert uptake.measurement_clears_floors(
+            {**full, key: {"measured": True, "precision": 0.5}}) is False, key
+
+
+@pytest.mark.asyncio
+async def test_zero_shot_pass_reports_unmeasured_when_the_engine_is_silent(tmp_path):
+    """An absent grader must not become a precision of 0.0 or of 1.0.
+
+    0.0 would fail the floor for an environmental reason and send the next run
+    hunting for a model bug; 1.0 would pass the floor for no reason at all. This is
+    the hermetic half of what the live test refuses to assert by inference.
+    """
+    import scripts.uptake_probe as probe
+
+    turn = uptake.Turn(session="s1", ts="2026-09-01T00:00:00+00:00",
+                       user_text="that is not what it does", prev_assistant="done",
+                       ordinal=1, session_source=None)
+    silent = lambda payload: (_ for _ in ()).throw(OSError("connection refused"))
+    out = probe._zero_shot_pass({"s1#1"}, {"s1#1": turn}, {"s1#1": 1}, transport=silent)
+    assert out["measured"] is False and out["precision"] is None, out
+    assert uptake.measurement_clears_floors(
+        {"labels_ok": True, "classifier": {"precision": 1.0, "recall": 1.0,
+                                           "measured": True, "n_positives": 20},
+         "holdout": {"precision": 1.0, "measured": True},
+         "zero_shot": out}) is False
+
+
+def test_store_sizes_counts_real_duplicate_rows_from_a_populated_store(tmp_path,
+                                                                       monkeypatch):
+    """The duplicate-row figure was pinned only on its absent branch.
+
+    The other branch runs a `GROUP BY text_hash` query that no fixture ever
+    exercised, so a broken query, a wrong column, or a store that reports one row
+    per group would all have passed. `facts_idx` duplication is the number the item
+    quotes (8,102 dup rows) and the number a consolidation is judged against, so it
+    gets a store with duplicates in it — populated through `app.kg_store`, because
+    nothing in this tree is allowed to open `kg.sqlite` any other way.
+    """
+    import app.paths
+    from app.kg_store import KGStore
+
+    facts = tmp_path / "facts"
+    db = tmp_path / "kg.sqlite"
+
+    def write(entity, category, facts_list):
+        import yaml
+        d = facts / entity
+        d.mkdir(parents=True, exist_ok=True)
+        fm = {"type": "facts", "entity": entity, "category": category,
+              "facts": facts_list}
+        p = d / f"{entity}-{category}.md"
+        p.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {entity} - {category}\n")
+        return p
+
+    # The same fact TEXT in two files: that is what `text_hash` duplication means
+    # here (the per-file `fact_id` counter is not an identity — see MEMORY.md).
+    write("Lloyd", "state", [
+        {"id": "stat-001", "fact": "shared claim", "created_at": "2026-01-01"},
+        {"id": "stat-002", "fact": "distinct claim", "created_at": "2026-01-01"}])
+    write("Lloyd", "goal", [
+        {"id": "goal-001", "fact": "shared claim", "created_at": "2026-01-01"}])
+    st = KGStore(db)
+    try:
+        st.facts_idx.reindex(root=facts)
+        assert st.facts_idx.count() == 3, st.facts_idx.count()
+    finally:
+        st.close()
+
+    monkeypatch.setattr(app.paths, "VAULT_KG_DB", db)
+    out = uptake.store_sizes()
+    f = out["facts_idx"]
+    assert f.get("error") is None, f
+    assert f["fact_rows"] == 3, f
+    assert f["duplicate_text_hash_groups"] == 1, f
+    assert f["duplicate_rows"] == 1, f
+    assert f["probed_at"], "a count without its timestamp is the defect, not the number"
+    assert "ages" in f["note"]
