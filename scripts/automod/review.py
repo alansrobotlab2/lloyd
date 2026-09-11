@@ -533,6 +533,31 @@ def run_grader(*, prompt: str, item_id: int, round_id: str, backend: str | None 
 
 # ── judging the judge ────────────────────────────────────────────────────
 
+def normalize_evidence_path(raw: str, worktree: Path) -> str:
+    """The grader's `evidence_path` as a path that exists, or "".
+
+    The schema asks for a bare worktree-relative file and the grader writes
+    `app/x.py:164`, `scripts/a.py:224,253,201-214`, `~/obsidian/lloyd/SOUL.md
+    + ~/obsidian/…/audit.md (…)` — every one of the first four backfill rows
+    had a `met` downgraded for a path that was real. The first token is the
+    path; a `:lines` suffix is dropped; `~` and absolute paths are accepted
+    when they exist (a code round's evidence can legitimately be a vault
+    file it read); a relative path is resolved against the worktree.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    first = re.split(r"[\s+]", text, 1)[0].strip().strip("`'\"()")
+    first = re.sub(r":[\d,\-]+$", "", first)
+    if not first:
+        return ""
+    if first.startswith("~") or first.startswith("/"):
+        p = Path(first).expanduser()
+        return str(p) if p.exists() else ""
+    rel = first.lstrip("./")
+    return rel if rel and (Path(worktree) / rel).exists() else ""
+
+
 def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                  n_clauses: int, require_tests: bool = True) -> dict | None:
     """The grader's object, validated, with `met` downgraded where the
@@ -561,13 +586,13 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
         verdict = str(raw.get("verdict") or "").strip().lower()
         if verdict not in CLAUSE_VERDICTS:
             verdict = "partial"
-        path = str(raw.get("evidence_path") or "").strip().lstrip("./")
+        path = normalize_evidence_path(str(raw.get("evidence_path") or ""), worktree)
         node = str(raw.get("test_node_id") or "").strip()
         how = str(raw.get("how_verified") or "").strip().lower()
         why: list[str] = []
         if verdict == "met":
-            if not path or not (worktree / path).exists():
-                why.append("evidence_path missing or not in the worktree")
+            if not path:
+                why.append("evidence_path missing or not on disk")
             node_file = node.split("::", 1)[0]
             if require_tests and (not node or node_file not in changed):
                 why.append("test_node_id not in a test file this diff changed")

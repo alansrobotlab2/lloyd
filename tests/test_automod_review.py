@@ -718,3 +718,22 @@ def test_the_vault_grader_only_judges_a_vault_items_clauses(isolated, monkeypatc
                      "evidence_line": 1, "test_node_id": "", "how_verified": "read", "note": ""}]}})
     (isolated / "skills" / "x").mkdir(parents=True); (isolated / "skills" / "x" / "SKILL.md").write_text("x")
     assert RV.grade_vault(item_id=570, paths=["skills/x/SKILL.md"], diff="+x", vault=isolated)[0] == "pass"
+
+
+def test_evidence_paths_are_normalized_before_they_are_judged(wt, tmp_path):
+    """The schema asks for a bare worktree-relative file; the grader writes
+    `app/x.py:164`, `a.py:224,253,201-214`, `~/vault/SOUL.md + ~/vault/b.md (…)`.
+    Every one of the first four backfill rows had a real `met` downgraded for
+    it. A path that exists, in any of those spellings, stands."""
+    n = RV.normalize_evidence_path
+    assert n("app/x.py", wt) == "app/x.py"
+    assert n("app/x.py:12", wt) == "app/x.py"
+    assert n("app/x.py:12,40-52", wt) == "app/x.py"
+    assert n("./app/x.py:3", wt) == "app/x.py"
+    assert n("`app/x.py:3`", wt) == "app/x.py"
+    outside = tmp_path / "vault" / "SOUL.md"; outside.parent.mkdir(); outside.write_text("s")
+    assert n(f"{outside} + {outside.parent}/other.md (trim is vault-side)", wt) == str(outside)
+    assert n("app/nope.py:1", wt) == "" and n("", wt) == "" and n("/nope/x.md", wt) == ""
+    parsed = RV.parse_review(_obj(evidence_path="app/x.py:3,7"), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1)
+    assert parsed["clauses"][0]["verdict"] == "met" and parsed["clauses"][0]["evidence_path"] == "app/x.py"
