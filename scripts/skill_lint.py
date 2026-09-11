@@ -523,7 +523,19 @@ def render_report(result: dict) -> str:
             lines.append(f"| `{item['name']}` | {item['age_days']} | {item['status']} |")
         lines.append("")
 
-    if not (n_dead or n_missing or n_drift or n_dup or n_stale):
+    # `n_phantom` belongs in this condition and was missing from it until
+    # 2026-09-11. It is computed above, printed in the table, and rendered as
+    # its own section — so a night whose ONLY defect was skills naming tools
+    # that do not exist produced a report reading `| PHANTOM_TOOL … | **1** |`
+    # in the table and `## ✅ Clean — All skills pass lint` in the body, which
+    # is the one category a reader most needs to not miss: a skill naming a
+    # tool that does not exist is actively harmful, because the model calls it,
+    # gets an unknown-tool error, and takes whatever fallback the skill listed.
+    # That is how `web_search`/`WebSearch` taught it to shell out to `curl` for
+    # every web lookup on 2026-09-04. Found by task #70's own calibration pass
+    # (2026-09-10, finding A1), which proved it by calling `render_report()`
+    # with a phantom-only result.
+    if not (n_dead or n_missing or n_drift or n_dup or n_stale or n_phantom):
         lines.append("## ✅ Clean")
         lines.append("")
         lines.append("All skills pass lint. No advisories.")

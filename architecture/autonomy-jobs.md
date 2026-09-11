@@ -629,11 +629,25 @@ construction — a task that timed out on every single run was indistinguishable
 from a healthy one. It clears poisoned queue items after recording why, and
 pauses any task with 3+ consecutive failures and a >50% fail rate.
 
-**#85 is the fleet's only `draft` task and it cannot run**: it pins `model: eco`,
-and `models:` in config.yaml defines only `primary` and `secondary`. What it is
-for is turning a routing choice made on throughput into one checked nightly
+**#85 is the fleet's only `draft` task, and it is blocked twice over.** What it
+is for is turning a routing choice made on throughput into one checked nightly
 against a stated margin: it runs the paired eval over the five generation jobs
-routed to the secondary engine and records the per-job routing decision.
+routed to the secondary engine and records the per-job routing decision. The
+first blocker is that `eval/secondary_routing_eval.py` exists only on an aborted
+round's branch — the vault half of a mixed-surface change landed immediately by
+design while the code half waited behind a gate that refused it, and whoever
+noticed set #85 back to `draft` so the nightly failure was not queued (backlog
+**#827**). The second bites after that branch lands: it pins `model: eco`, and
+`models:` in config.yaml defines only `primary` and `secondary`. Nothing rejects
+an unknown alias — `resolve_model_alias` rewrites only `secondary` → `primary`,
+`_get_model_env` returns `{}`, and the run then goes to the *primary's* endpoint
+(the hardcoded `base_url` fallback) under a name it does not serve, where the
+engine answers `404 The model 'eco' does not exist.` A 404 is shaped like an
+engine being down, which is the class `_record_failure(kind="infra")`
+deliberately keeps off the retry budget — so a permanently misconfigured task can
+look like a transient outage indefinitely. `validate_tasks.py` checks `status`,
+skill *presence* and `depends_on` resolution, and neither `model:` nor whether
+`skill_name` resolves to a directory (backlog **#811**).
 
 ### #36 and the groundskeeper queue
 
