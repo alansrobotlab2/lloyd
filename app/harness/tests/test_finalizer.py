@@ -318,19 +318,22 @@ async def test_a_cut_off_object_is_reported_as_truncated_not_as_not_json():
     assert parsed is None and "not JSON" in error and "truncated" not in error
 
 
-def test_the_default_budget_is_4096_and_config_agrees():
+def test_the_default_budget_is_8192_and_config_agrees():
     """The budget is the whole completion, thinking included, and the grammar
-    only applies after </think>. 1024 truncated 41% of verdicts; the config
-    value is what production runs, so the two must not drift."""
+    only applies after </think>. 1024 truncated 41% of triage verdicts; 4096
+    truncated the review grader's object on its second calibration case; the
+    config value is what production runs, so the two must not drift — this
+    test blocked round SM_20260911_031441 at the `tests` rung when config
+    moved to 8192 and the code default did not."""
     import re
     from pathlib import Path
     from app.harness.options import RunOptions
 
-    assert RunOptions(model="primary").finalizer_max_tokens == 4096
+    assert RunOptions(model="primary").finalizer_max_tokens == 8192
     cfg = Path(F.__file__).parents[2].joinpath("config.yaml").read_text()
     block = re.search(r"\n  finalizer:\n((?:    .*\n)+)", cfg)
     assert block, "harness.finalizer block missing from config.yaml"
-    assert re.search(r"^\s+max_tokens:\s+4096\s*$", block.group(1), re.M)
+    assert re.search(r"^\s+max_tokens:\s+8192\s*$", block.group(1), re.M)
 
 
 async def test_the_finalizers_own_output_tokens_get_their_own_key():

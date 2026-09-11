@@ -235,5 +235,9 @@ class RunOptions:
     # back as well-formed JSON cut mid-string inside `check`/`evidence` — 13
     # of them `confirmed`, the verbose verdicts that matter — and fell back
     # to the regex parser. `finalizer.py` names a truncation as such now.
-    finalizer_max_tokens: int = 4096
+    # 8192 since the review grader's object (five clauses with notes, a
+    # test-honesty list, a seams list) cut off at exactly 4096 on its second
+    # calibration case. A cap, not a spend. config.yaml carries the same
+    # number and a test pins the two together.
+    finalizer_max_tokens: int = 8192
     finalizer_timeout_s: float = 180.0
