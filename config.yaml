@@ -836,6 +836,26 @@ workers:
       # items only accumulate, visible in the triage skip summary and the
       # scorecard's over-bound gauge, never lost.
       expire_spawns: true
+    # Nightly clustering of the open backlog (scripts/automod/cluster.py):
+    # qmd's stored vectors + shared file paths + parent links, an optional
+    # pair-judge on the secondary for the ambiguous edges, written to
+    # ~/.local/state/lloyd-automod/clusters.json for autotriage's group mode.
+    # "Nightly" is the age of the last output: polled hourly, runs when the
+    # file is older than min_age_seconds, so a restart never doubles it up.
+    backlog-cluster:
+      enabled: true
+      interval_seconds: 3600
+      min_age_seconds: 72000
+      max_inflight: 1
+      max_duration_seconds: 900
+      # No session: a numpy pass plus a few JSON calls to the secondary.
+      inner_voice: false
+      threshold: 0.75
+      # Kill switch for the LLM pair-judge; off = cosine, paths and parents only.
+      judge: true
+      max_pairs_judged: 200
+      # Write `parent:` frontmatter from the prose first line, once.
+      persist_parents: true
     bench-mine:
       enabled: true
       interval_seconds: 7200

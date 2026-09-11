@@ -524,6 +524,35 @@ Spawn accounting is mechanical: `max_item_id()` is taken before the turn and
 spawn — #370's finished row had listed itself and a pre-existing #221 as
 spawns. The ledger carries `merged` and `id_floor` on both event types.
 
+### Clustering: the split items put back together
+
+Triage splits (one item per surviving claim), implement rounds file what they
+notice, and a re-offered round re-derives and re-files; by 2026-09-11, 84
+parent items had produced 282 children and nothing could reassemble them.
+`scripts/automod/cluster.py` groups the open drafts by three signals already
+on disk, deterministically and offline: **cosine** over the chunk-0 vectors
+qmd keeps for the `backlog` collection it already embeds (read through qmd's
+own bundled `vec0.so` at `qmd/node_modules/sqlite-vec-linux-x64/`, falling
+back to the live tree's copy — `node_modules` is not checked in — 0.12 s for
+the board; chunk 0 only, because mean-pooling pulls long items toward the
+corpus centroid); **shared file paths** named in backticks, by basename;
+and **a common `parent`**, parsed from the prose first line and persisted to
+frontmatter once. A shared parent is an edge on its own: #549's twelve
+children are one consolidation job whatever their pairwise cosine, and the
+first cut, which demanded a near-threshold cosine to confirm it, dropped that
+family entirely. A giant component is **peeled** into hub-centred groups of
+at most 12, never trimmed — trimming dropped most of the board from the
+night's output. A pair is a cluster: one group-triage turn closes one
+duplicate with certainty. The optional pair-judge (secondary, priority 2,
+cached in `cluster_judgments.jsonl` by body hash) adjudicates only ambiguous
+edges; an error keeps the edge. Quarantine is deliberately not applied —
+its question is staleness, this one is sameness. Output is `clusters.json`
+in the automod state dir, written nightly by the `backlog-cluster` worker
+source ("nightly" = the file is older than `min_age_seconds`, so a restart
+never doubles it up); `round cluster --no-judge` prints without writing.
+Every path default resolves at call time: a default bound at import made
+the first test run write to the real state dir.
+
 The verdict's `SURFACE:` picks the implementer's route. `code` and `frontend`
 run a worktree round through the gate — `web/src/**` is in scope since the
 `frontend` rung (tsc delta + `vite build`) exists. `vault` runs

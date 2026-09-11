@@ -360,6 +360,13 @@ class Item:
     body: str
     board: str = ""
     tags: list[str] = field(default_factory=list)
+    # Relations. `parent` is the item this one was split from or found while
+    # implementing (persisted from the prose first line by the clustering
+    # pass); `group` is the umbrella a member was folded into; `members` are
+    # the items an umbrella consolidates. None of these is a status.
+    parent: int | None = None
+    group: int | None = None
+    members: list[int] = field(default_factory=list)
 
     @property
     def age_days(self) -> int:
@@ -404,7 +411,60 @@ def load_item(path: Path) -> Item | None:
         created=str(fm.get("created", "")), body=body,
         board=str(fm.get("board", "") or ""),
         tags=normalize_tags(fm.get("tags")),
+        parent=_int_or_none(fm.get("parent")),
+        group=_int_or_none(fm.get("group")),
+        members=_ints(fm.get("members")),
     )
+
+
+def _int_or_none(v) -> int | None:
+    try:
+        return int(v) if v is not None and str(v).strip() != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def update_frontmatter(path: Path, updates: dict, *, activity: str = "",
+                       add_tags: tuple[str, ...] = (), remove_tags: tuple[str, ...] = ()) -> bool:
+    """Set frontmatter keys on an item without moving its status.
+
+    The one writer for the relation keys (`parent`, `group`, `members`,
+    `duplicate_of`). Refuses a file whose YAML did not parse: the other
+    writers here rewrite the file from the parsed dict, and a dict that came
+    back empty because the YAML was broken would be written back as a file
+    with its frontmatter destroyed — the MCP writer guards the same case
+    with `_yaml_broken`. A key set to None is removed.
+    """
+    text = path.read_text(encoding="utf-8")
+    fm, body = _split_frontmatter(text)
+    if text.startswith("---") and not fm:
+        return False
+    changed = False
+    for k, v in (updates or {}).items():
+        if v is None:
+            if k in fm:
+                del fm[k]
+                changed = True
+        elif fm.get(k) != v:
+            fm[k] = v
+            changed = True
+    tags = [str(t) for t in (fm.get("tags") or [])]
+    new_tags = [t for t in tags if t not in remove_tags] + [t for t in add_tags if t not in tags]
+    if new_tags != tags:
+        fm["tags"] = new_tags
+        changed = True
+    if not changed and not activity:
+        return False
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    if activity:
+        log = list(fm.get("activity_log") or [])
+        log.append(f"**{stamp}** — {activity}")
+        fm["activity_log"] = log
+    fm["updated"] = stamp
+    path.write_text(
+        f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
+        f"---\n{body}", encoding="utf-8")
+    return True
 
 
 def all_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> list[Item]:

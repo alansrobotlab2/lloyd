@@ -314,6 +314,8 @@ def main(argv=None) -> int:
     sc.add_argument("--since", default="7d")
     sc.add_argument("--json", action="store_true")
     sc.add_argument("--record", action="store_true", help="append the row to scorecard.jsonl")
+    cl = sub.add_parser("cluster", help="group the open backlog by what it is about (scripts/automod/cluster.py)")
+    cl.add_argument("rest", nargs=argparse.REMAINDER, help="passed through: --write --threshold --no-judge --json …")
     args = ap.parse_args(argv)
 
     if args.cmd == "start":
@@ -344,6 +346,9 @@ def main(argv=None) -> int:
         print(json.dumps(row, indent=2) if args.json else SC.render(row))
         if args.record:
             print(f"\nrecorded → {SC.record(row)}")
+    elif args.cmd == "cluster":
+        from scripts.automod import cluster as CL
+        return CL.main(args.rest)
     return 0
 
 
