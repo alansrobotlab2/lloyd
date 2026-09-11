@@ -1,5 +1,5 @@
 {
-  "probe_timestamp": "2026-09-11T08:58:25+00:00",
+  "probe_timestamp": "2026-09-11T09:19:36+00:00",
   "corpus": {
     "turns": 220,
     "disputes": 20,
@@ -11,9 +11,14 @@
   "coverage": {
     "user_md_entries": {
       "covered": 172,
-      "total": 172,
-      "ratio": 1.0,
-      "presence_source": "always_in_force:system_prompt"
+      "total": 174,
+      "ratio": 0.9885,
+      "presence_source": "always_in_force:system_prompt",
+      "skipped": {
+        "indented_bullets": 0,
+        "short_bullets": 2
+      },
+      "denominator_note": "total = 172 bullets the entry grammar recognizes + 0 indented + 2 too-short that it does not. 'covered' means the join reached them, which for always-in-force entries is true by construction \u2014 it is NOT evidence an entry was honored; weighted_disputes on the row is the usable signal."
     },
     "active_skills": {
       "covered": 13,
@@ -39,6 +44,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "arxiv",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260903_174327_iv8a76#1"
       ]
@@ -53,6 +59,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "backlog-premise-triage",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260907_213337_iv502a#1",
         "20260907_213816_iv0adc#1",
@@ -69,6 +76,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "code-review",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260905_024955_iv5f05#1",
         "20260905_024955_iv5f05#2",
@@ -85,6 +93,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "codebase-inspection",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260905_151355_iv5174#1",
         "20260905_151355_iv5174#2"
@@ -100,6 +109,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "google-workspace",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260824_011606_iv7acd#1",
         "20260824_011606_iv7acd#2"
@@ -115,6 +125,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "morning-brief-and-triage",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260824_011606_iv7acd#1",
         "20260824_011606_iv7acd#2"
@@ -130,6 +141,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "opencode",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260907_023814_iv5079#1"
       ]
@@ -144,6 +156,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "qmd-collection-management",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260823_183038_ivc769#1"
       ]
@@ -158,6 +171,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "requesting-code-review",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260905_151355_iv5174#1",
         "20260905_151355_iv5174#2"
@@ -173,6 +187,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "selfmod-change-own-code",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260907_213649_iv9d36#1"
       ]
@@ -187,6 +202,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "system-health-check",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260822_232106_ive8da#1",
         "20260822_232106_ive8da#2"
@@ -202,6 +218,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "thunderbird-mcp-implementation",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260824_011606_iv7acd#1",
         "20260824_011606_iv7acd#2"
@@ -217,6 +234,7 @@
       "dispute_rate": 0.4444,
       "kind": "skill",
       "name": "voice-clone-sample",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260906_214751_iv1620#1",
         "20260906_214751_iv1620#2",
@@ -239,6 +257,7 @@
       "dispute_rate": 0.0,
       "kind": "skill",
       "name": "youtube-transcript",
+      "presence_bound": "causal_event_order",
       "present_turn_ids": [
         "20260823_180927_iva21b#1",
         "20260823_195916_iv8c65#1",
@@ -2514,6 +2533,21 @@
       "recall": 0.5
     },
     "prompt_tuned_on_labels": true,
+    "disagreements": {
+      "false_positive": [],
+      "false_negative": [
+        "20260824_011606_iv7acd#2",
+        "20260826_031023_ivda08#2",
+        "20260905_151355_iv5174#2",
+        "20260906_171700_iv4855#10",
+        "20260906_214751_iv1620#8",
+        "20260906_225900_ivf8d3#2",
+        "20260907_142410_ivd971#2",
+        "20260907_185707_iv57ab#4",
+        "20260907_220430_iv15a0#5",
+        "20260910_235939_iv4a93#1"
+      ]
+    },
     "note": "recall 0.57 means dispute counts in this table are a LOWER BOUND, not a census",
     "retrieval_gate": {
       "nights": 6,
@@ -2545,7 +2579,7 @@
   },
   "stores": {
     "facts_idx": {
-      "probed_at": "2026-09-11T08:58:25+00:00",
+      "probed_at": "2026-09-11T09:19:36+00:00",
       "store": "/home/alansrobotlab/lloyd/_pipeline/vault-derived/kg.sqlite",
       "fact_rows": 272337,
       "duplicate_text_hash_groups": 9200,

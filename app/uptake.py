@@ -78,6 +78,25 @@ PRECISION_FLOOR = 0.70
 #: measurement, it is an absent one, so both ends of the matrix are gated.
 RECALL_FLOOR = 0.50
 
+#: Required keys of every emitted row. Rows also carry kind-specific extras
+#: (`kind`, `name`, `present_turn_ids`) and, on the rows that need one, a `note`
+#: caveat — the contract is this set being a SUBSET, which is what a reader may
+#: index on unconditionally. The vault skill that consumes this table names
+#: these fields in prose, and prose is not a schema: rename one in code and the
+#: consolidator reads a missing key and still writes a completion note that
+#: looks like it cited a figure. `tests/test_uptake.py` pins both directions —
+#: rows match this set hermetically, so the gate catches a rename on any box, and
+#: the skill's cited names are checked against the emitted artifact on a live
+#: vault.
+ROW_KEYS = frozenset({
+    "entry", "present_in_turns", "disputes", "dispute_rate", "weighted_disputes",
+    "overlap_max", "presence_source",
+})
+#: How tightly a skill row's presence is bounded, tightest last. A row must name
+#: one: "this skill was injected into that very turn" and "some turn of that
+#: session opened this skill at some point" are not the same claim, and a
+#: consolidator has to be able to tell them apart.
+PRESENCE_BOUNDS = frozenset({"session_wide", "causal_event_order", "injected_this_turn"})
 #: Presence source for `USER.md` / `MEMORY.md` bullets: loaded into every turn,
 #: so "present" carries no information on its own and must be weighted.
 ALWAYS_IN_FORCE = "always_in_force:system_prompt"
@@ -86,6 +105,17 @@ ALWAYS_IN_FORCE = "always_in_force:system_prompt"
 #: `skills_read` tool-call payloads in `event_logs/*.events.jsonl` plus the
 #: `<skill name=…>` blocks visible in the turn's own context.
 SKILL_PRESENCE_PROXY = "proxy:skills_read+injected_context (#435 pending)"
+
+#: Every value `presence_source` may take. A new one is a decision: it means the
+#: table now claims to see a prompt surface it previously could not, and the
+#: consumer's prose has to move with it.
+#: Presence source for a knowledge note that arrived in this turn's
+#: `<vault_context>`: evidence-bound, unlike the memory rows, where "present"
+#: only ever meant "it is in the system prompt".
+NOTE_PRESENCE_EMITTED = "prefetch:vault_context"
+PRESENCE_SOURCES = frozenset({
+    ALWAYS_IN_FORCE, SKILL_PRESENCE_PROXY, NOTE_PRESENCE_EMITTED,
+})
 
 #: The #435 dependency, in the words a consolidator reads.
 SKILL_PRESENCE_NOTE = (
@@ -566,20 +596,33 @@ class Entry:
 
 
 _MEMORY_DOC_RE = re.compile(r"^[-*] ?(.{12,})$")
+#: Anything bullet-shaped but indented, or a top-level bullet too short to be a
+#: claim. These are the lines the entry grammar does NOT reach, and they have to
+#: be counted, not quietly dropped: `user_md_entries.ratio` is the acceptance
+#: denominator, so a self-defined denominator is the whole clause going unmeasured.
+_NEAR_MISS_RE = re.compile(r"^\s+[-*] ?(.{12,})$|^\s*[-*] ?(.{1,11})$")
 
 
 def memory_entries(root: Path | str | None = None,
-                   docs: Sequence[str] = ("lloyd/USER.md", "lloyd/MEMORY.md")) -> list[Entry]:
+                   docs: Sequence[str] = ("lloyd/USER.md", "lloyd/MEMORY.md"),
+                   tally: dict[str, int] | None = None) -> list[Entry]:
     """Durable memory bullets, one `Entry` each.
 
     Read from the live vault when present, else the checkout — a top-level
     bullet is what actually gets loaded into the system prompt, which is the
     surface the item is about.
+
+    `tally`, if given, is filled with what the grammar *missed*
+    (`indented_bullets`, `short_bullets`) so the caller can publish a denominator
+    that is a measurement rather than a description of its own regex.
     """
     root = Path(root) if root else lloyd_root()
     vault = Path.home() / "obsidian"
     out: list[Entry] = []
     seen: set[str] = set()
+    if tally is not None:
+        tally.setdefault("indented_bullets", 0)
+        tally.setdefault("short_bullets", 0)
     for doc in docs:
         for base in (vault, root):
             path = base / doc
@@ -588,6 +631,12 @@ def memory_entries(root: Path | str | None = None,
             for line in path.read_text(errors="replace").splitlines():
                 m = _MEMORY_DOC_RE.match(line.rstrip())
                 if not m:
+                    if tally is not None:
+                        near = _NEAR_MISS_RE.match(line.rstrip())
+                        if near:
+                            key = ("indented_bullets" if line[:1].isspace()
+                                   else "short_bullets")
+                            tally[key] += 1
                     continue
                 e = Entry(doc, m.group(1).strip())
                 if e.key in seen:
@@ -620,27 +669,62 @@ def overlap(a: str, b: str) -> float:
     return len(ga & gb) / len(ga | gb)
 
 
-def skills_read_by_session(root: Path | str | None = None) -> dict[str, set[str]]:
-    """Skill names each session explicitly read, from the turn event log.
+#: A skill read mid-turn is logged *during* the turn whose ordinal we count, so
+#: presence starts at that turn. One turn late at worst — see the measured bound.
+TURN_EVENT = "brain1.user_prompt_received"
+
+
+def skills_read_by_session(root: Path | str | None = None):
+    """When each session first read each skill, as `{session: {name: turn}}`.
+
+    The value is the **ordinal of the earliest human turn during which the skill
+    was read**, not a set of names: a session-wide set was the defect the review
+    rung found here. The old shape marked a skill present for *every* turn of a
+    session that read it on any of them, so a dispute on turn 2 was attributed to
+    a skill first opened on turn 9 — inflating `present_in_turns` (the divisor)
+    and `disputes` (the numerator) of the same row at once, in both directions.
+
+    Turn index comes from counting `brain1.user_prompt_received` events with
+    `data.source == "user"` in the same per-session file, before the read line.
+    Deliberately not timestamps: session JSONs store naive ISO
+    (`2026-09-04T12:13:16.901843`) and the event log stores UTC with a `Z`
+    (`2026-09-08T18:15:26.540Z`), and deciding which side is local is an 8-hour
+    guess that would mis-order every read inside a session measured in minutes.
+    Measured bound on the proxy (114 sessions with a session JSON and a read):
+    the event count equals the human-turn count in 104 and **never falls below
+    it** — 10 sessions log extra events — so presence can start at most one turn
+    late and never one turn early. Late is the safe direction: it under-credits
+    rather than blaming a turn for a skill it had not asked for yet.
 
     The events are written by the agent loop, a different process, and the
-    payload is only half-structured: `data.args` is a JSON *string*, so the
-    skill name has to be parsed back out of it. A log line that does not
-    parse is skipped rather than fatal — these files have unparseable lines in
-    them today. Note this is a proxy for #435's per-injection telemetry, not
-    that telemetry: it says the model asked for a skill, not that one was
-    force-injected.
+    payload is only half-structured: `data.args` is a JSON *string*, so the skill
+    name has to be parsed back out of it. A log line that does not parse is
+    skipped rather than fatal — these files have unparseable lines in them today.
+    Note this is a proxy for #435's per-injection telemetry, not that telemetry:
+    it says the model asked for a skill, not that one was force-injected.
     """
     root = Path(root) if root else lloyd_root()
-    out: dict[str, set[str]] = {}
+    out: dict[str, dict[str, int]] = {}
     for path in root.glob(_EVENT_GLOB):
         try:
             handle = path.open(errors="replace")
         except OSError:
             continue
         with handle:
+            turn = 0  # human prompts seen so far in THIS file, same file order
             for line in handle:
                 if "skills_read" not in line:
+                    # Count the turn boundary even on lines we otherwise skip;
+                    # the ordinal is only meaningful if it advances in file
+                    # order alongside the reads.
+                    if f'"{TURN_EVENT}"' in line:
+                        try:
+                            rec = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        data = rec.get("data")
+                        if isinstance(data, dict) and str(data.get("source")) == "user":
+                            turn += 1
                     continue
                 try:
                     rec = json.loads(line)
@@ -656,8 +740,19 @@ def skills_read_by_session(root: Path | str | None = None) -> dict[str, set[str]
                     continue
                 name = args.get("name") if isinstance(args, dict) else None
                 session = rec.get("session_id")
-                if name and session:
-                    out.setdefault(str(session), set()).add(str(name))
+                if not name or not session:
+                    continue
+                # The read happens *during* the turn in flight, so it is in
+                # force from that turn on. A read logged before any human prompt
+                # (a resumed or autonomous session, or a log that rotated) starts
+                # at turn 1 rather than being dropped: dropping it would make the
+                # skill look never-present, the same silent-zero failure the
+                # prefetch half of this table is guarded against.
+                bucket = out.setdefault(str(session), {})
+                first = max(turn, 1)
+                prev = bucket.get(str(name))
+                if prev is None or first < prev:
+                    bucket[str(name)] = first
     return out
 
 
@@ -682,12 +777,45 @@ def _row(entry: str, presence_source: str, present: int, disputes: int,
     return row
 
 
+def _memory_coverage(entries: Sequence[Entry], tally: dict[str, int] | None) -> dict[str, Any]:
+    """Coverage of the durable-memory half, with a denominator that is measured.
+
+    `covered == total` was the shape here before: `total` was `len(entries)`, so
+    the ratio was 1.0 by construction and the acceptance clause's "≥ 80 % of
+    USER.md entries" graded a regex against itself. Indented bullets and
+    too-short bullets are bullet-shaped lines the grammar does not reach — they
+    belong in the denominator, counted by `memory_entries(tally=…)`.
+
+    And `covered` still does not mean *honored*: for always-in-force entries the
+    join reaches everything by definition, which is what the note says out loud.
+    """
+    recognized = len(entries)
+    indented = int((tally or {}).get("indented_bullets", 0))
+    short = int((tally or {}).get("short_bullets", 0))
+    total = recognized + indented + short
+    return {
+        "covered": recognized,
+        "total": total,
+        "ratio": round(recognized / total, 4) if total else 0.0,
+        "presence_source": ALWAYS_IN_FORCE,
+        "skipped": {"indented_bullets": indented, "short_bullets": short},
+        "denominator_note": (
+            f"total = {recognized} bullets the entry grammar recognizes + "
+            f"{indented} indented + {short} too-short that it does not. "
+            "'covered' means the join reached them, which for always-in-force "
+            "entries is true by construction — it is NOT evidence an entry was "
+            "honored; weighted_disputes on the row is the usable signal."
+        ),
+    }
+
+
 def build_uptake_table(
     turns: Sequence[Turn],
     dispute_flags: dict[int, Any],
     memory_entries: Sequence[Entry] = (),
-    skills_read: dict[str, set[str]] | None = None,
+    skills_read: dict[str, Any] | None = None,
     active_skills: Sequence[str] = (),
+    memory_tally: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Per-entry uptake table. Measurement only — nothing here prunes.
 
@@ -702,18 +830,35 @@ def build_uptake_table(
     unresolved = sum(1 for t in turns if dispute_flags.get(t.ordinal) is None)
 
     # --- skills: evidence-bound presence, never "all skills everywhere" ------
+    # Each row also records HOW tightly presence is bounded, because the three
+    # routes are not equally trustworthy and a consolidator must be able to tell
+    # "this skill was injected into that very turn" from "some turn of that
+    # session opened this skill at some point".
     skill_present: dict[str, list[Turn]] = {}
+    skill_bound: dict[str, str] = {}
+    _TIGHTNESS = {"session_wide": 1, "causal_event_order": 2, "injected_this_turn": 3}
+    assert PRESENCE_BOUNDS == frozenset(_TIGHTNESS), "bound vocabulary drifted"
 
-    def note_skill(name: str, turn: Turn) -> None:
+    def note_skill(name: str, turn: Turn, bound: str) -> None:
         bucket = skill_present.setdefault(name, [])
         if turn not in bucket:
             bucket.append(turn)
+        if _TIGHTNESS[bound] > _TIGHTNESS.get(skill_bound.get(name, ""), 0):
+            skill_bound[name] = bound
 
     for t in turns:
         for name in t.injected_skills:
-            note_skill(name, t)
-        for name in skills_read.get(t.session, ()):
-            note_skill(name, t)
+            note_skill(name, t, "injected_this_turn")
+        reads = skills_read.get(t.session) or {}
+        # A dict is `skills_read_by_session`'s real shape ({name: first_turn});
+        # a set is the test/legacy shape, meaning "present all session" and
+        # labelled as the loosest bound rather than pretending to be causal.
+        pairs = (reads.items() if isinstance(reads, dict)
+                 else ((n, 1) for n in reads))
+        causal = isinstance(reads, dict)
+        for name, first in pairs:
+            if t.ordinal >= int(first):
+                note_skill(name, t, "causal_event_order" if causal else "session_wide")
 
     entries: list[dict[str, Any]] = []
     for name in sorted(skill_present):
@@ -724,6 +869,7 @@ def build_uptake_table(
             f"skill:{name}", SKILL_PRESENCE_PROXY, len(present), len(hits), weight,
             max((overlap(name, t.user_text) for t in hits), default=0.0),
             {"kind": "skill", "name": name,
+             "presence_bound": skill_bound.get(name, "session_wide"),
              "present_turn_ids": [t.turn_id for t in present][:20]},
         ))
 
@@ -752,7 +898,7 @@ def build_uptake_table(
         hits = [t for t in present if t in disputed]
         title = key.split(":", 1)[1]
         entries.append(_row(
-            key, "prefetch:vault_context", len(present), len(hits),
+            key, NOTE_PRESENCE_EMITTED, len(present), len(hits),
             sum(overlap(title, t.user_text) for t in hits),
             max((overlap(title, t.user_text) for t in hits), default=0.0),
             {"kind": "note", "presence_turn_ids": [t.turn_id for t in present][:20]},
@@ -760,12 +906,7 @@ def build_uptake_table(
 
     cov_skills = sorted(set(skill_present) & set(active_skills or ()))
     coverage = {
-        "user_md_entries": {
-            "covered": len(memory_entries),
-            "total": len(memory_entries),
-            "ratio": 1.0 if memory_entries else 0.0,
-            "presence_source": ALWAYS_IN_FORCE,
-        },
+        "user_md_entries": _memory_coverage(memory_entries, memory_tally),
         "active_skills": {
             "covered": len(cov_skills),
             "total": len(active_skills or ()),
@@ -780,7 +921,7 @@ def build_uptake_table(
         "prefetch_notes": {
             "entries_identified": len(note_present),
             "presence_source": (
-                "prefetch:vault_context" if note_present else NOTE_PRESENCE_SOURCE),
+                NOTE_PRESENCE_EMITTED if note_present else NOTE_PRESENCE_SOURCE),
             "note": NOTE_PRESENCE_NOTE,
         },
     }

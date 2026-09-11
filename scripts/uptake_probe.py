@@ -139,6 +139,18 @@ def run_classifier_eval(cache: dict[str, Any] | None = None) -> dict[str, Any]:
         "prompt_tuned_on_labels": True,
         "labels_file": _repo_relative(uptake.labels_path() or ""),
         "unresolvable_turn_ids": missing[:20],
+        # The disagreements, by turn id. Counts alone let a report say
+        # "precision 1.00, fp 0" and be unverifiable by anything shipped with it;
+        # with the ids listed, a reader (or a test) can recompute the matrix from
+        # the labels and open every disagreement in the transcript. The full
+        # per-item detail stays out of the committed table on purpose: it would
+        # quote ~46 labeled user turns, including Alan's corrections, into git.
+        "disagreements": {
+            "false_positive": [p["turn_id"] for p in scored
+                               if int(p["label"]) == 0 and int(p["predicted"]) == 1],
+            "false_negative": [p["turn_id"] for p in scored
+                               if int(p["label"]) == 1 and int(p["predicted"]) == 0],
+        },
         "per_item": per_item,
     }
 
@@ -148,12 +160,14 @@ def run(days: int, cache: dict[str, Any]) -> tuple[dict[str, Any], list[uptake.T
     turns = build_corpus(days=days)
     candidates = uptake.candidate_disputes(turns)
     flags = {t.ordinal: _classify_cached(t, cache) for t in candidates}
+    tally: dict[str, int] = {}
     table = uptake.build_uptake_table(
         turns=turns,
         dispute_flags=flags,
-        memory_entries=uptake.memory_entries(),
+        memory_entries=uptake.memory_entries(tally=tally),
         skills_read=uptake.skills_read_by_session(),
         active_skills=uptake.active_skill_names(),
+        memory_tally=tally,
     )
     table["corpus"]["candidates_screened"] = len(candidates)
     table["corpus"]["note"] = (
@@ -191,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
         "n_labeled": m["n_labeled"], "n_unanswered": m["n_unanswered"],
         "passed": report["passed"], "floors": report["floors"],
         "prompt_tuned_on_labels": report["prompt_tuned_on_labels"],
+        "disagreements": report.get("disagreements", {}),
         # Derived, never typed: a hard-coded "recall ~0.5" in a template is a
         # number that gets re-quoted forever and was wrong the first time the
         # model moved. This clause is the reason a dispute count must be read as

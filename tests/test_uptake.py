@@ -248,7 +248,13 @@ def test_dispute_is_attributed_only_to_entries_present_in_that_turn():
         turns=[t1, t2],
         dispute_flags={1: True, 2: False},
         memory_entries=[uptake.Entry("lloyd/MEMORY.md", "restart lloyd-agent-worker")],
-        skills_read={},
+        # The real reader's shape: session → {skill: earliest human turn it was
+        # read during}. Passing {} here — as this test used to — left the entire
+        # per-session join unexercised while its name promised exactly that, so
+        # the session-boundary bug could have shipped under a green test.
+        # Same skill names, read only in ANOTHER session: they must contribute no
+        # presence to these two turns.
+        skills_read={"elsewhere": {"voice-mode": 1, "youtube-transcript": 1}},
     )
     rows = {r["entry"]: r for r in table["entries"]}
 
@@ -257,7 +263,12 @@ def test_dispute_is_attributed_only_to_entries_present_in_that_turn():
     assert vm["dispute_rate"] == pytest.approx(1.0)
 
     yt = rows["skill:youtube-transcript"]
+    # Present via the injected-context route on t2 only.
     assert yt["present_in_turns"] == 1 and yt["disputes"] == 0
+    for row in (vm, yt):
+        assert row["presence_bound"] == "injected_this_turn", row
+    assert uptake.PRESENCE_BOUNDS >= {r["presence_bound"] for r in table["entries"]
+                                     if r["kind"] == "skill"}
 
     assert "skill:voice-mode" not in json.dumps(yt)
 
@@ -290,10 +301,21 @@ def test_skill_presence_is_derived_from_skills_read_event_payloads(tmp_path):
     ev = tmp_path / "event_logs" / "s1.events.jsonl"
     ev.parent.mkdir(parents=True, exist_ok=True)
     lines = [
+        # The turn boundary the ordinal is counted from — same file, same order,
+        # so no clock assumption is involved. Only source=="user" counts.
+        {"ts": "x", "session_id": "s1", "event": uptake.TURN_EVENT, "turn_id": "t1",
+         "data": {"text": "do the thing", "source": "user"}},
+        {"ts": "x", "session_id": "s1", "event": uptake.TURN_EVENT, "turn_id": "t1b",
+         "data": {"text": "inner-voice follow-up", "source": "inner_voice"}},
         {"ts": "x", "session_id": "s1", "event": "brain1.tool_call_proposed",
          "turn_id": "t1", "data": {"tool_call_id": "a", "name": "skills_read",
                                    "args": json.dumps({"name": "voice-mode",
                                                        "summary": "reading"})}},
+        {"ts": "x", "session_id": "s1", "event": uptake.TURN_EVENT, "turn_id": "t2",
+         "data": {"text": "and now this", "source": "user"}},
+        {"ts": "x", "session_id": "s1", "event": "brain1.tool_call_proposed",
+         "turn_id": "t2", "data": {"tool_call_id": "c", "name": "skills_read",
+                                   "args": json.dumps({"name": "youtube-transcript"})}},
         {"ts": "x", "session_id": "s1", "event": "brain1.tool_call_proposed",
          "turn_id": "t2", "data": {"tool_call_id": "b", "name": "Bash",
                                    "args": json.dumps({"command": "grep skills_read app/"})}},
@@ -302,7 +324,41 @@ def test_skill_presence_is_derived_from_skills_read_event_payloads(tmp_path):
     ev.write_text("\n".join(json.dumps(l) if isinstance(l, dict) else l for l in lines))
 
     got = uptake.skills_read_by_session(tmp_path)
-    assert got == {"s1": {"voice-mode"}}
+    # value = earliest human turn during which the skill was read: voice-mode
+    # during turn 1, youtube-transcript not until turn 2. A set here would be the
+    # old shape, which is what let a turn-2 dispute be charged to a turn-9 read.
+    assert got == {"s1": {"voice-mode": 1, "youtube-transcript": 2}}, got
+
+
+def test_a_skill_read_late_in_a_session_is_not_charged_to_earlier_disputes():
+    """The defect this replaces: presence was a per-session set, so a skill first
+    opened on turn 3 was credited into turns 1 and 2 — inflating the divisor and
+    the numerator of the same row at once. A dispute before the read must land on
+    nothing."""
+    t1 = _mk_turn(1, "wrong, that is not what I asked", "Here you are.", session="s1")
+    t2 = _mk_turn(2, "thanks", None, session="s1")
+    table = uptake.build_uptake_table(
+        turns=[t1, t2], dispute_flags={1: True, 2: False}, memory_entries=[],
+        skills_read={"s1": {"voice-mode": 2}},   # first read during turn 2
+    )
+    rows = [r for r in table["entries"] if r["kind"] == "skill"]
+    assert len(rows) == 1, rows
+    # Present from turn 2 only — and crucially NOT charged with the turn-1 dispute.
+    assert rows[0]["present_in_turns"] == 1 and rows[0]["disputes"] == 0, rows[0]
+
+
+def test_a_turn_reading_a_skill_takes_the_blame_for_that_turn_only():
+    t1 = _mk_turn(1, "first", None, session="s1")
+    t2 = _mk_turn(2, "wrong again", "ok", session="s1")
+    t3 = _mk_turn(3, "fine", None, session="s1")
+    table = uptake.build_uptake_table(
+        turns=[t1, t2, t3], dispute_flags={1: False, 2: True, 3: False},
+        memory_entries=[], skills_read={"s1": {"voice-mode": 2}})
+    row = [r for r in table["entries"] if r["entry"] == "skill:voice-mode"][0]
+    assert row["present_in_turns"] == 2, "turn 1, before the read, was counted"
+    assert row["disputes"] == 1
+    assert row["dispute_rate"] == pytest.approx(0.5)
+    assert row["presence_bound"] == "causal_event_order"
 
 
 def test_coverage_block_reports_what_the_table_actually_covers():
@@ -310,7 +366,7 @@ def test_coverage_block_reports_what_the_table_actually_covers():
         turns=[_mk_turn(1, "wrong", "ok", skills=["voice-mode"])],
         dispute_flags={1: True},
         memory_entries=[uptake.Entry("lloyd/MEMORY.md", "a"), uptake.Entry("lloyd/MEMORY.md", "b")],
-        skills_read={"s1": {"voice-mode", "voice-clone-sample"}},
+        skills_read={"s1": {"voice-mode": 1, "voice-clone-sample": 1}},
         active_skills=["voice-mode", "voice-clone-sample", "restart-lloyd", "obsidian"],
     )
     cov = table["coverage"]
@@ -319,6 +375,92 @@ def test_coverage_block_reports_what_the_table_actually_covers():
     # The half the item cannot ask for yet must be labelled, not hidden.
     assert cov["active_skills"]["presence_source"] == uptake.SKILL_PRESENCE_PROXY
     assert "435" in cov["active_skills"]["note"]
+
+
+def test_the_memory_denominator_counts_what_the_grammar_misses(tmp_path):
+    """`user_md_entries.total` used to be `len(entries)`, so the "≥ 80 % of
+    USER.md entries" clause was this regex grading itself. The tally of
+    bullet-shaped lines the grammar does NOT reach now has to be in the
+    denominator, and the ratio has to move when it does."""
+    doc = tmp_path / "probe" / "MEMORY.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(
+        "# T\n\n"
+        "- a top-level bullet that is long enough\n"
+        "  - an indented sub bullet that is also long\n"
+        "- too short\n"
+    )
+    tally: dict[str, int] = {}
+    entries = uptake.memory_entries(root=tmp_path, docs=("probe/MEMORY.md",), tally=tally)
+    assert len(entries) == 1, entries
+    assert tally == {"indented_bullets": 1, "short_bullets": 1}, tally
+
+    cov = uptake._memory_coverage(entries, tally)
+    assert cov["covered"] == 1 and cov["total"] == 3
+    assert cov["ratio"] == pytest.approx(1 / 3, abs=5e-5)  # published at 4 dp
+    assert cov["skipped"] == {"indented_bullets": 1, "short_bullets": 1}
+    # `covered` is presence, not uptake — the block has to say so, or a reader
+    # files 100 % under "the entries are being honored".
+    assert "NOT evidence an entry was honored" in cov["denominator_note"]
+
+
+def test_the_committed_classifier_numbers_recompute_from_their_own_lists():
+    """The committed table is the acceptance evidence, so it has to be
+    self-checking: precision/recall must agree with the confusion counts they are
+    derived from, and the disagreement turn ids must be present in the label file
+    with the labels the counts claim. A block that only carries `precision: 1.0`
+    can be re-typed by hand; this one cannot."""
+    files = sorted((REPO / "eval" / "uptake").glob("uptake-*.json"))
+    j = json.loads(files[-1].read_text())
+    cls = j["classifier"]
+    tp, fp, fn = cls["tp"], cls["fp"], cls["fn"]
+    assert cls["precision"] == pytest.approx(tp / (tp + fp))
+    assert cls["recall"] == pytest.approx(tp / (tp + fn))
+
+    dis = cls["disagreements"]
+    assert len(dis["false_positive"]) == fp, "the fp count has no matching ids"
+    assert len(dis["false_negative"]) == fn, "the fn count has no matching ids"
+    labels = {i["turn_id"]: int(i["label"])
+              for i in json.loads((REPO / cls["labels_file"]).read_text())["items"]}
+    for tid in dis["false_positive"]:
+        assert labels[tid] == 0, f"{tid} listed as a false positive but labeled dispute"
+    for tid in dis["false_negative"]:
+        assert labels[tid] == 1, f"{tid} listed as a miss but labeled a non-dispute"
+    assert set(dis["false_negative"]) & set(dis["false_positive"]) == set()
+
+
+def test_every_row_matches_the_declared_contract_hermetically():
+    """The gate-running half of the skill↔table seam. The consumer's prose is
+    checked against the artifact only by a `live_vault` test, which the gate
+    deselects — so on the gate's own run nothing protected the schema at all.
+    This needs no vault, no engine and no transcripts: rows built from fixtures
+    must match `ROW_KEYS` exactly and take a `presence_source` from the declared
+    set, so renaming a field fails the suite on any box, and the committed
+    artifact is held to the same contract."""
+    turns = [_mk_turn(1, "wrong, that restart target is wrong", "Restarted.",
+                      skills=["voice-mode"],
+                      ctx_titles=["knowledge/software/livekit.md"], session="s1"),
+             _mk_turn(2, "thanks", None, session="s1")]
+    table = uptake.build_uptake_table(
+        turns=turns, dispute_flags={1: True, 2: False},
+        memory_entries=[uptake.Entry("lloyd/MEMORY.md", "restart lloyd-agent-worker")],
+        skills_read={"s1": {"voice-mode": 1}},
+        active_skills=["voice-mode"])
+    kinds = {r["kind"] for r in table["entries"]}
+    assert {"memory_entry", "skill", "note"} <= kinds, f"one row shape untested: {kinds}"
+
+    for row in table["entries"]:
+        assert uptake.ROW_KEYS <= set(row), (
+            f"{row['entry']} is missing {uptake.ROW_KEYS - set(row)}")
+        assert row["presence_source"] in uptake.PRESENCE_SOURCES, row["presence_source"]
+        if row["kind"] == "skill":
+            assert row["presence_bound"] in uptake.PRESENCE_BOUNDS, row
+
+    files = sorted((REPO / "eval" / "uptake").glob("uptake-*.json"))
+    for row in json.loads(files[-1].read_text())["entries"]:
+        assert uptake.ROW_KEYS <= set(row), (
+            f"{row['entry']} is missing {uptake.ROW_KEYS - set(row)} in the artifact")
+        assert row["presence_source"] in uptake.PRESENCE_SOURCES, row["presence_source"]
 
 
 # ---------------------------------------------------------------- gate ------
@@ -565,10 +707,20 @@ def test_store_size_figures_in_the_table_are_always_paired_with_a_timestamp():
     carry one without it."""
     files = sorted((REPO / "eval" / "uptake").glob("uptake-*.json"))
     j = json.loads(files[-1].read_text())
-    for name, block in (j.get("stores") or {}).items():
-        for metric, value in block.items():
-            if isinstance(value, int):
-                assert block.get("probed_at"), f"{name}.{metric} has no probe timestamp"
+    stores = j.get("stores")
+    # `for name, block in (j.get("stores") or {}).items()` iterated zero times on
+    # a table with no stores block and still reported green — the loop was a
+    # no-op that looked like a check. Require the block, and require the store
+    # the item quotes duplicate counts from.
+    assert isinstance(stores, dict) and stores, "committed table carries no stores block"
+    assert "facts_idx" in stores, sorted(stores)
+    quoted = 0
+    for name, block in stores.items():
+        numbers = {k: v for k, v in block.items() if isinstance(v, int)}
+        if numbers:
+            quoted += len(numbers)
+            assert block.get("probed_at"), f"{name}{sorted(numbers)} has no probe timestamp"
+    assert quoted, "no store figure at all — nothing here pins the timestamp rule"
 
 
 # ------------------------------------------------- labeled corpus integrity -
