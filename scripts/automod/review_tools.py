@@ -250,7 +250,11 @@ def backfill(*, repo: Path | None = None, ledger: Path | None = None, limit: int
     if out.exists():
         for line in out.read_text(encoding="utf-8").splitlines():
             try:
-                done.add(json.loads(line).get("round_id"))
+                row = json.loads(line)
+                # A row the grader never answered (truncated, 503, timeout)
+                # is not graded; a relaunch tries it again.
+                if not row.get("error"):
+                    done.add(row.get("round_id"))
             except ValueError:
                 continue
     rows = [r for r in rows if r["round_id"] not in done]
