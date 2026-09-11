@@ -64,6 +64,24 @@ def _classify_cached(turn: uptake.Turn, cache: dict[str, Any]) -> Any:
     return cache[tid]
 
 
+def _repo_relative(path: str | Path) -> str:
+    """Paths inside the checkout are emitted relative to it.
+
+    The classifier report is committed as evidence, and an absolute path baked
+    at run time outlives the tree it points into: the first artifact recorded
+    `labels_file` inside `~/lloyd-work/SM_20260911_031441/…`, a worktree that
+    `automod_abort` deletes. An evidence pointer that resolves to nothing is
+    worse than no pointer — it looks auditable and is not. Paths outside the
+    checkout (an override dir) stay absolute, because relative-to-what would be
+    a guess.
+    """
+    p = Path(path)
+    try:
+        return str(p.relative_to(REPO))
+    except ValueError:
+        return str(p)
+
+
 def run_classifier_eval(cache: dict[str, Any] | None = None) -> dict[str, Any]:
     """Score the classifier against the hand-labeled corpus.
 
@@ -119,7 +137,7 @@ def run_classifier_eval(cache: dict[str, Any] | None = None) -> dict[str, Any]:
         # (none of its turns are quoted in it), so this is an in-sample estimate
         # and must travel with that label rather than read as a clean holdout.
         "prompt_tuned_on_labels": True,
-        "labels_file": str(uptake.labels_path() or ""),
+        "labels_file": _repo_relative(uptake.labels_path() or ""),
         "unresolvable_turn_ids": missing[:20],
         "per_item": per_item,
     }
@@ -173,8 +191,17 @@ def main(argv: list[str] | None = None) -> int:
         "n_labeled": m["n_labeled"], "n_unanswered": m["n_unanswered"],
         "passed": report["passed"], "floors": report["floors"],
         "prompt_tuned_on_labels": report["prompt_tuned_on_labels"],
-        "note": "recall ~0.5 means dispute counts in this table are a LOWER BOUND, "
-                "not a census",
+        # Derived, never typed: a hard-coded "recall ~0.5" in a template is a
+        # number that gets re-quoted forever and was wrong the first time the
+        # model moved. This clause is the reason a dispute count must be read as
+        # a lower bound, so it has to describe *this* run.
+        "note": (
+            f"recall {m['recall']:.2f} means dispute counts in this table are a "
+            "LOWER BOUND, not a census"
+            if m["recall"] is not None else
+            "recall unmeasurable (no labeled positives answered), so dispute "
+            "counts here mean nothing"
+        ),
     }
 
     if report["passed"]:

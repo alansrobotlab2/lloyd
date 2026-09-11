@@ -394,7 +394,13 @@ def test_emitted_table_lands_under_eval_uptake_with_a_probe_timestamp(tmp_path):
 
 def test_live_uptake_table_exists_and_carries_per_entry_keys():
     """The reproduction the triage named: `ls ~/lloyd/eval/uptake/` shows a
-    dated JSON, and each row carries present_in_turns / disputes / dispute_rate."""
+    dated JSON, and each row carries present_in_turns / disputes / dispute_rate.
+
+    This asserts the *measured step-1/step-2 outcomes* off committed evidence, so
+    the acceptance clauses are pinned by a test that can fail on any machine and
+    does not need the secondary engine awake — the live-engine test next to it is
+    the cross-check, not the pin.
+    """
     files = sorted((REPO / "eval" / "uptake").glob("uptake-*.json"))
     assert files, "no dated uptake table under eval/uptake/"
     j = json.loads(files[-1].read_text())
@@ -403,8 +409,131 @@ def test_live_uptake_table_exists_and_carries_per_entry_keys():
     for key in ("entry", "present_in_turns", "disputes", "dispute_rate", "presence_source"):
         assert key in rows[0], rows[0]
     assert re.match(r"\d{4}-\d{2}-\d{2}", j["probe_timestamp"])
-    assert j["classifier"]["precision"] is not None
-    assert j["classifier"]["threshold"] == 0.70
+
+    cls = j["classifier"]
+    assert cls["threshold"] == 0.70
+    # Step 2's stop condition, as actually measured and recorded.
+    assert cls["precision"] is not None and cls["precision"] >= uptake.PRECISION_FLOOR, cls
+    assert cls["n_positives"] >= 20, "acceptance needs >= 20 hand-labeled disputes"
+    assert cls["recall"] is not None and cls["recall"] >= uptake.RECALL_FLOOR, cls
+    assert cls["passed"] is True, cls
+    # The exemplars were written against this corpus's shapes, so the number is
+    # in-sample; the flag is what stops a reader quoting it as a clean holdout.
+    assert cls["prompt_tuned_on_labels"] is True, cls
+    # Coverage halves, each with the source that produced it.
+    cov = j["coverage"]
+    assert cov["user_md_entries"]["ratio"] >= 0.8, cov
+    assert "435" in cov["active_skills"]["note"], cov
+
+
+def test_the_committed_artifact_points_at_evidence_that_still_exists(tmp_path):
+    """Every path in the committed report must resolve after the round that
+    produced it is gone. The first artifact recorded `labels_file` inside
+    `~/lloyd-work/SM_2026…`, which the abort deletes: an evidence pointer to a
+    deleted worktree reads as auditable and is not."""
+    import scripts.uptake_probe as probe
+
+    files = sorted((REPO / "eval" / "uptake").glob("uptake-*.json"))
+    labels_file = json.loads(files[-1].read_text())["classifier"]["labels_file"]
+    assert labels_file, "no labels file recorded"
+    assert not Path(labels_file).is_absolute(), (
+        f"labels_file must be repo-relative, got {labels_file}")
+    assert (REPO / labels_file).is_file(), f"{labels_file} does not resolve"
+    assert probe._repo_relative(REPO / "eval" / "x.json") == "eval/x.json"
+    assert Path(probe._repo_relative("/elsewhere/x.json")).is_absolute()
+
+
+# ------------------------------------------------------- probe exit codes --
+
+def _oracle_classifier(monkeypatch, *, want_positives: bool):
+    """Drive the pipeline with a stand-in engine, never the real one.
+
+    `want_positives=True` reproduces the hand labels (label==1 for the labeled
+    positive turns), which clears both floors; `False` answers NOT to everything,
+    the always-NOT shape the item's own stop condition exists to catch. Only the
+    engine is stubbed — `main()`'s own decide-and-write path runs for real.
+    """
+    import scripts.uptake_probe as probe
+
+    keyed = {(l["user_text"] or "")[:60]: int(l["label"])
+             for l in probe.uptake.load_labels()}
+
+    def fake(prev_assistant, user_text, *, transport=None):
+        if not want_positives:
+            return False
+        return bool(keyed.get((user_text or "")[:60], 0))
+
+    monkeypatch.setattr(uptake, "classify_dispute", fake)
+
+
+def test_probe_stops_below_the_precision_floor_and_writes_no_uptake_table(tmp_path, monkeypatch):
+    """Step 2 is 'stop here if precision < 0.70', and the stop must be behavior:
+    exit 3, a classifier report as the honest artifact, and — the part that
+    matters — *no uptake table*. A table emitted by a classifier that cannot
+    tell a correction from a new request is a machine for attributing blame at
+    random, and the always-NOT shape is exactly what the committed corpus scores
+    when the engine answers NOT to everything."""
+    import scripts.uptake_probe as probe
+
+    _oracle_classifier(monkeypatch, want_positives=False)
+    out = tmp_path / "uptake"
+
+    assert probe.main(["--eval-only", "--out-dir", str(out)]) == 3
+    assert not list(out.glob("uptake-*.json")), "an eval-only run writes nothing"
+
+    assert probe.main(["--out-dir", str(out), "--days", "30"]) == 3
+    assert not list(out.glob("uptake-*.json")), "table written despite the failed floor"
+    report = json.loads((out / "classifier-report.json").read_text())
+    assert report["classifier"]["precision"] is None, "no positive predicted => no precision"
+    assert report["classifier"]["passed"] is False
+
+
+def test_probe_writes_a_dated_table_when_the_floor_clears(tmp_path, monkeypatch):
+    """The other side of the same contract, run end to end through `main()`:
+    clear the floors and a dated, per-entry table appears under the output dir,
+    carrying the classifier block, the glossary, and the honest coverage block."""
+    import scripts.uptake_probe as probe
+
+    _oracle_classifier(monkeypatch, want_positives=True)
+    out = tmp_path / "uptake"
+    assert probe.main(["--out-dir", str(out), "--days", "30"]) == 0
+
+    files = sorted(out.glob("uptake-*.json"))
+    assert len(files) == 1, files
+    assert re.match(r"uptake-\d{4}-\d{2}-\d{2}\.json$", files[0].name)
+    j = json.loads(files[0].read_text())
+    assert j["item"] == "552"
+    assert j["classifier"]["precision"] >= uptake.PRECISION_FLOOR
+    assert j["classifier"]["recall"] >= uptake.RECALL_FLOOR
+    assert j["glossary"]["dispute_rate"], "the rate ships without its meaning"
+    assert any(r["kind"] == "memory_entry" for r in j["entries"]), j["entries"][:2]
+
+
+def test_coverage_declares_the_halves_it_cannot_evaluate():
+    """`notes_seen: 0` was the most misleading number in the table: it read as
+    "no knowledge note was ever disputed" and meant "nothing persists which notes
+    were prefetched". An unevaluable half must say it is unevaluable — this is
+    the class this repo has been burned by four times over."""
+    table = uptake.build_uptake_table(
+        turns=[_mk_turn(1, "wrong", "ok", skills=["voice-mode"])],
+        dispute_flags={1: True}, memory_entries=[], skills_read={})
+    notes = table["coverage"]["prefetch_notes"]
+    assert notes["entries_identified"] == 0
+    assert notes["presence_source"] == uptake.NOTE_PRESENCE_SOURCE
+    assert "unmeasurable" in notes["note"] and "NOT 'no note was disputed'" in notes["note"]
+
+
+def test_a_prefetched_note_is_attributed_when_evidence_does_exist():
+    """The other direction: if a title *does* reach us it must be credited, so
+    the honest-emptiness change cannot quietly disable the note half."""
+    t = _mk_turn(1, "wrong, that note is stale", "Here is the note.",
+                 ctx_titles=["knowledge/software/livekit.md"])
+    table = uptake.build_uptake_table(turns=[t], dispute_flags={1: True},
+                                      memory_entries=[], skills_read={})
+    row = [r for r in table["entries"] if r["kind"] == "note"][0]
+    assert row["presence_source"] == "prefetch:vault_context"
+    assert row["present_in_turns"] == 1 and row["disputes"] == 1
+    assert table["coverage"]["prefetch_notes"]["presence_source"] == "prefetch:vault_context"
 
 
 def test_an_absent_store_is_reported_absent_and_never_created(tmp_path, monkeypatch):
@@ -484,3 +613,49 @@ def test_knowledge_write_skill_cites_a_per_entry_uptake_figure():
     # The re-based gate has to be readable from the file too, or the skill keeps
     # quoting a threshold the noise band already broke.
     assert "retrieval_gate" in text or "noise band" in text
+
+
+@pytest.mark.live_vault
+def test_the_skill_s_descriptions_of_the_table_match_what_the_code_emits():
+    """Seam: the consumer lives in the vault, the producer lives here, and the
+    only thing between them is prose. `nightly-reflection-knowledge-write` names
+    the row fields and the `presence_source` values it expects to read; if the
+    code renames one, the consolidator reads `undefined`, decides on nothing, and
+    its completion note still looks like it cited a figure. So the skill's own
+    vocabulary is checked against the committed artifact, not against memory."""
+    skill = Path.home() / "obsidian/skills/nightly-reflection-knowledge-write/SKILL.md"
+    text = skill.read_text()
+    files = sorted((REPO / "eval" / "uptake").glob("uptake-*.json"))
+    j = json.loads(files[-1].read_text())
+    row_keys = set(j["entries"][0])
+    sources = {r["presence_source"] for r in j["entries"]}
+
+    # Every backticked field name the skill lists for a row must be a real key.
+    cited = set(re.findall(r"`([a-z_]{4,})`", text))
+    row_fields = cited & {"present_in_turns", "disputes", "dispute_rate",
+                          "weighted_disputes", "presence_source"}
+    assert len(row_fields) >= 4, f"skill cites no row contract: {sorted(cited)[:12]}"
+    missing = row_fields - row_keys
+    assert not missing, f"skill cites fields the table does not emit: {missing}"
+
+    # Every presence_source the skill quotes must be one the code really writes.
+    quoted = {s for s in ("always_in_force:system_prompt", "prefetch:vault_context")
+              if s in text}
+    assert quoted, "skill quotes no presence_source at all"
+    for src in quoted:
+        emitted = any(s.startswith(src) for s in sources)
+        # A source may legitimately have no rows, but only if the table says so
+        # in so many words. "The skill describes it and the data is silent" is
+        # how an unmeasurable half turns into a clean-looking zero.
+        declared_unevaluable = (
+            src.startswith("prefetch:")
+            and j["coverage"]["prefetch_notes"]["presence_source"]
+            == uptake.NOTE_PRESENCE_SOURCE)
+        assert emitted or declared_unevaluable, (
+            f"skill cites {src}; table emits {sorted(sources)} and does not "
+            "declare that half unevaluable")
+
+    # And the gate it is told to run must be callable under that name.
+    if "app.uptake" in text and "retrieval_gate" in text:
+        from app.uptake import retrieval_gate  # noqa: F401
+        assert callable(retrieval_gate)

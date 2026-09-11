@@ -94,6 +94,27 @@ SKILL_PRESENCE_NOTE = (
     "blocks. Treat sub-90% coverage as unresolved, not as a miss."
 )
 
+#: Which prefetched *note* was in force for a turn has no persisted source.
+#: `prefetch.py:938` builds the `<vault-context>` block that carries note titles
+#: into the turn, and the only thing written about it is the boolean
+#: `has_prefetched_context` on the `brain1.user_prompt_received` event — measured
+#: over `event_logs/*.events.jsonl`, no event names a prefetched document, and
+#: no session JSON stores the injected block (`<vault-context>` appears in
+#: `sessions/*.json` only inside quoted code). So a note row is emitted when a
+#: title *does* reach us, and the half that cannot be computed says so out loud.
+#: A silent `notes_seen: 0` would read as "no knowledge note was ever disputed",
+#: which is the fifth instance of the class this repo keeps having to relearn:
+#: a check that reads its own missing input reports a verdict it cannot justify.
+NOTE_PRESENCE_SOURCE = "unavailable:no_per_document_prefetch_log"
+
+NOTE_PRESENCE_NOTE = (
+    "Prefetched-note presence cannot be derived from what this tree persists: "
+    "prefetch.py:938 emits the <vault-context> block and the event log records "
+    "only the boolean has_prefetched_context, never which documents landed; "
+    "sessions/*.json never store the injected block. A zero here means "
+    "'unmeasurable', NOT 'no note was disputed'."
+)
+
 SECONDARY_MODEL = "secondary"
 _EVENT_GLOB = "event_logs/*.events.jsonl"
 
@@ -752,7 +773,16 @@ def build_uptake_table(
             "presence_source": SKILL_PRESENCE_PROXY,
             "note": SKILL_PRESENCE_NOTE,
         },
-        "notes_seen": len(note_present),
+        # An empty count here is the table's most misleading number: it is the
+        # one shape that reads as "knowledge notes are never disputed" while
+        # actually meaning "nothing persists which notes were prefetched". Emit
+        # the emptiness *with* its reason, always.
+        "prefetch_notes": {
+            "entries_identified": len(note_present),
+            "presence_source": (
+                "prefetch:vault_context" if note_present else NOTE_PRESENCE_SOURCE),
+            "note": NOTE_PRESENCE_NOTE,
+        },
     }
 
     return {
