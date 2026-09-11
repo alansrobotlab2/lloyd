@@ -739,17 +739,34 @@ class Gate:
                  if e.get("event") == "review" and e.get("round_id") == self.round_id]
         refused_by_head: dict[str, dict] = {}
         graded_refusals: list[dict] = []
+        graded_total = 0
         spent = 0
         for e in prior:
-            if not (e.get("ok") and e.get("blocking")):
+            if not e.get("ok"):
+                continue
+            graded_total += 1
+            if not e.get("blocking"):
                 continue
             graded_refusals.append(e)
             h = str(e.get("head") or "")
             if h and h in refused_by_head:
                 continue
-            spent += 1
             if h:
                 refused_by_head[h] = e
+            # A refusal of the CONTRACT spends nothing: the diff could not
+            # have passed a clause no diff can satisfy, and the author's next
+            # move — amend, gate again — must not be the one the cap refuses.
+            if any(c.get("verdict") == "unsatisfiable" for c in (e.get("clauses") or [])):
+                continue
+            spent += 1
+        if graded_total >= RV.REVIEW_HARD_CAP:
+            last = graded_refusals[-1] if graded_refusals else {}
+            return False, (f"review has graded this round {graded_total} times (ceiling "
+                           f"{RV.REVIEW_HARD_CAP}); abort and report — the item comes back "
+                           f"to the next round with the findings"), {
+                               "review_retry": True, "review_exhausted": True,
+                               "review_attempt": spent + 1,
+                               "review_findings": str(last.get("findings") or "")[:1500]}
         same = refused_by_head.get(head) if head else None
         if same is not None:
             findings = str(same.get("findings") or "")[:1500]
@@ -820,10 +837,18 @@ class Gate:
                 "review_premise_unsound": True, "review_summary": findings[:800],
                 "review_session": res.get("session_id")}
         if kind == "retry":
-            nxt = ("fix what it names, commit, and gate again"
-                   if attempt < RV.REVIEW_MAX_PER_ROUND else
-                   "abort and report — the item comes back with these findings and your branch")
-            return False, f"review sent it back ({attempt}/{RV.REVIEW_MAX_PER_ROUND}; {nxt}): {findings}", {
+            contract_refusal = any(c.get("verdict") == "unsatisfiable" for c in parsed["clauses"])
+            if contract_refusal:
+                nxt = ("this refusal spends no attempt — amend the unsatisfiable clause(s) "
+                       "with automod_amend_clause, fix anything else it names, commit if "
+                       "needed, and gate again")
+                shown = f"{attempt - 1}/{RV.REVIEW_MAX_PER_ROUND} spent"
+            else:
+                nxt = ("fix what it names, commit, and gate again"
+                       if attempt < RV.REVIEW_MAX_PER_ROUND else
+                       "abort and report — the item comes back with these findings and your branch")
+                shown = f"{attempt}/{RV.REVIEW_MAX_PER_ROUND}"
+            return False, f"review sent it back ({shown}; {nxt}): {findings}", {
                 "review_retry": True, "review_findings": findings[:1500],
                 "review_attempt": attempt, "review_session": res.get("session_id")}
         return True, (f"review: {RV.summarize_clauses(parsed)} of {len(contract['clauses'])} "

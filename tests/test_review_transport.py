@@ -557,3 +557,41 @@ def test_the_implement_prompt_renders_human_clauses_as_not_yours():
     assert "{human_clauses}" in I.PROMPT
     assert "automod_gate_wait" in I.PROMPT and "automod_amend_clause" in I.PROMPT
     assert "Do not edit, commit or run anything in the" in I.PROMPT
+
+
+UNSAT = {"premise": "sound", "summary": "", "clauses": [
+    {"clause": 1, "verdict": "unsatisfiable", "evidence_path": "", "evidence_line": 0,
+     "test_node_id": "", "how_verified": "read", "note": "a live-ledger measurement"}],
+    "test_honesty": [], "seams_unverified": [], "amendments_ok": True, "amendments_note": ""}
+
+
+def _unsat_refusal(head, attempt):
+    return {**_refusal(head, attempt, "clause 1 unsatisfiable"),
+            "clauses": [{"clause": 1, "verdict": "unsatisfiable"}]}
+
+
+def test_a_refusal_of_the_contract_spends_no_attempt(monkeypatch, tmp_path):
+    """#860: the second review was the first `unsatisfiable`, and the rung
+    said abort. Amend-and-regate has to be a move the cap allows."""
+    grade = _grader(UNSAT)
+    _arm(monkeypatch, tmp_path, grade=grade, head="c" * 40,
+         prior=[_refusal("a" * 40, 1, "clause 2 unmet"), _unsat_refusal("b" * 40, 2)])
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert data.get("review_exhausted") is None and len(grade.calls) == 1
+    assert data["review_attempt"] == 2, "one real refusal spent, the unsatisfiable one did not"
+    assert "spends no attempt" in detail and "automod_amend_clause" in detail
+    assert "1/2 spent" in detail
+
+
+def test_the_hard_ceiling_ends_a_round_that_keeps_getting_free_reviews(monkeypatch, tmp_path):
+    grade = _grader(UNSAT)
+    prior = [_unsat_refusal(f"{i:040d}", i + 1) for i in range(RV.REVIEW_HARD_CAP)]
+    _arm(monkeypatch, tmp_path, grade=grade, head="z" * 40, prior=prior)
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert data["review_exhausted"] and grade.calls == [] and "ceiling" in detail
+    # ...and passes count toward that ceiling too, refusals or not
+    passes = [{"event": "review", "round_id": "SM_REV", "ok": True, "blocking": False,
+               "head": f"{i:040d}"} for i in range(RV.REVIEW_HARD_CAP)]
+    _arm(monkeypatch, tmp_path, grade=_grader(UNSAT), head="y" * 40, prior=passes)
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert data["review_exhausted"]

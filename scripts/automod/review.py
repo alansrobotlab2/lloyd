@@ -68,6 +68,13 @@ LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 # without asking the model again. Two: the first refusal is the normal
 # fix-and-regate move; a second means author and grader disagree.
 REVIEW_MAX_PER_ROUND = 2
+# A refusal that names an `unsatisfiable` clause is a refusal of the contract,
+# not of the diff, and spends no attempt: the author's next move is to amend
+# and gate again, which the cap would otherwise refuse (#860's second review
+# was its first `unsatisfiable`, and the rung told it to abort). This is the
+# ceiling that keeps that free move from becoming a loop: graded reviews of
+# any kind per round, after which the rung refuses without asking.
+REVIEW_HARD_CAP = 5
 # The grader's wall clock, and the gate's: past this the rung is `external`
 # (the engine, not the diff) and the item keeps its attempt.
 REVIEW_TIMEOUT_S = 600.0
