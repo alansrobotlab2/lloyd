@@ -4,8 +4,6 @@ status: active
 created: 2026-05-02
 updated: 2026-09-05
 related:
-  - architecture/agents.md
-  - architecture/verification-system.md
   - architecture/subliminal.md
 ---
 

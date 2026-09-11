@@ -6,16 +6,13 @@ relations:
   - architecture/index.md
   - architecture/infrastructure.md
   - architecture/nightly-reflection.md
-  - architecture/nightly-vault-maintenance.md
   - architecture/skills.md
   - architecture/tools.md
   - architecture/voice.md
   - architecture/memory.md
   - architecture/autonomy-system.md
-  - architecture/evaluation-engine.md
   - projects/lloyd/plans/voice-async-protocol.md
   - projects/lloyd/plans/document-relations-retrieval.md
-  - architecture/agents.md
   - architecture/backlog.md
 tags: [architecture]
 summary: Markdown-based kanban task management integrated into the MCP Tools Server,

@@ -9,7 +9,6 @@ relations:
   - architecture/tools.md
   - architecture/memory.md
   - architecture/autonomy-system.md
-  - architecture/evaluation-engine.md
   - architecture/index.md
   - architecture/infrastructure.md
 tags: [architecture]
@@ -92,7 +91,7 @@ Target length: under 50 lines.
 ## Related Docs
 
 - [[nightly-reflection]] -- Nightly Reflection (self-improvement pipeline)
-- [[nightly-vault-maintenance]] -- Vault Maintenance
+- [[groundskeeper]] -- Vault Maintenance
 - [[nightly-skills-management]] -- Skills Management
 - [[memory]] -- Memory System Architecture
 

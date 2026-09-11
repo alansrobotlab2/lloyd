@@ -5,14 +5,12 @@ relations:
   - architecture/voice.md
   - architecture/memory.md
   - architecture/autonomy-system.md
-  - architecture/evaluation-engine.md
   - architecture/backlog.md
   - architecture/index.md
   - architecture/infrastructure.md
   - architecture/morning-briefing.md
   - autonomy/38-nightly-reflection-signals.md
   - architecture/nightly-skills-management.md
-  - architecture/nightly-vault-maintenance.md
   - architecture/skills.md
 tags: [architecture]
 summary: The lloyd-mcp aggregator — 124 tools across 21 modules, served to the

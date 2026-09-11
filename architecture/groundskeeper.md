@@ -7,7 +7,6 @@ relations:
   - architecture/index.md
   - architecture/autonomy-system.md
   - architecture/memory.md
-  - architecture/nightly-vault-maintenance.md
 
 ---
 

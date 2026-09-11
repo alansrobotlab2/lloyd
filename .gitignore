@@ -132,3 +132,9 @@ _scratch/
 # hides graph.json by accident; GRAPH_REPORT.md, graph.html, manifest.json,
 # .graphify_root and cache/ast/** were not covered by anything.
 graphify-out/
+
+# ─── Retired architecture docs ──────────────────
+# Docs that describe something never built or since replaced are moved here
+# by hand (and by the arch-review worker). Kept on disk for reference, out
+# of the tracked tree so nothing cites them by accident.
+/architecture/.archive/

@@ -2,12 +2,10 @@
 segment: architecture
 relations:
   related-to:
-  - architecture/nightly-vault-maintenance.md
   - tools.md
   - architecture/voice.md
   - memory.md
   - architecture/autonomy-system.md
-  - architecture/evaluation-engine.md
   - architecture/index.md
   - architecture/infrastructure.md
   - autonomy/6-morning-briefing.md
@@ -42,14 +40,14 @@ An automated pipeline that mines Lloyd's session transcripts for reusable proced
 - **Agent:** `memory` (isolated session)
 - **Model:** Claude Sonnet 4.6
 - **Budget:** <$15 per run
-- **Sequence:** Runs after [[nightly-vault-maintenance|reflection-vault]] (2am) and reflection-synthesis (1:30am),before [[nightly-reflection]] (4am)
+- **Sequence:** Runs after `reflection-vault` (retired; see [[groundskeeper]]) (2am) and reflection-synthesis (1:30am),before [[nightly-reflection]] (4am)
 - **Skill file:** [`nightly-skills-management/SKILL.md`](../../skills/nightly-skills-management/SKILL.md)
 
 ## Overview
 
 Every interaction between Alan and Lloyd generates session transcripts stored as JSONL files. These transcripts contain procedural knowledge -- troubleshooting steps,corrections,behavioral rules,gotchas -- that would otherwise be lost between sessions. The skills management pipeline automatically surfaces this knowledge,packages it as reusable skills,and maintains the library over time.
 
-This is a key component of Lloyd's self-improvement architecture,alongside [[nightly-reflection]] (mental models,MEMORY.md consolidation,config improvements) and [[nightly-vault-maintenance]] (structural hygiene).
+This is a key component of Lloyd's self-improvement architecture,alongside [[nightly-reflection]] (mental models,MEMORY.md consolidation,config improvements) and [[groundskeeper]] (structural hygiene).
 
 ## Four-Stage Pipeline
 
