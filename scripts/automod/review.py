@@ -91,6 +91,14 @@ PREMISES = ("sound", "unsound")
 # a clause so marked, and only until the next review ratifies or refuses it.
 CLAUSE_VERDICTS = ("met", "partial", "unmet", "unsatisfiable")
 HOW_VERIFIED = ("ran", "read", "inferred")
+# A test-honesty entry is `blocking` when the test cannot fail, asserts nothing
+# about the code it names, or was weakened — the #544 shapes. Everything else a
+# grader wants the author to know (a tolerance, a fallback, a docstring
+# number) is `advisory` and rides the findings without refusing the round.
+# #866 met all ten clauses twice and was refused twice on lists that carried
+# a positive observation, two notes about a vault markdown file and one
+# unpinned constant beside one real defect each time.
+HONESTY_SEVERITIES = ("blocking", "advisory")
 
 # Built from the tuples above, not restated (the triage schema's rule: one
 # list, or a value lands in the grammar and not the validator). No maxLength:
@@ -131,11 +139,16 @@ REVIEW_SCHEMA: dict = {
         "test_honesty": {"type": "array", "items": {
             "type": "object",
             "properties": {"file": {"type": "string"}, "line": {"type": "integer"},
+                           "severity": {"type": "string", "enum": list(HONESTY_SEVERITIES),
+                                        "description": ("blocking: the test cannot fail, asserts "
+                                                        "nothing about the code it names, or was "
+                                                        "weakened. advisory: anything else the "
+                                                        "author should know.")},
                            "problem": {"type": "string"}},
-            "required": ["file", "line", "problem"],
+            "required": ["file", "line", "severity", "problem"],
             "additionalProperties": False,
-        }, "description": ("Tests in the diff that cannot fail, do not exercise what they "
-                           "name, or were weakened. Empty when none.")},
+        }, "description": ("Defects in the tests this diff changed. Empty when none. Never a "
+                           "positive observation — those go in summary.")},
         "seams_unverified": {"type": "array", "items": {"type": "string"},
                              "description": ("Process boundaries the change crosses (a loopback "
                                              "POST, `_meta` over MCP, a Task subagent, a restart) "
@@ -394,7 +407,14 @@ Then the two sweeps the clauses do not cover:
 - **Test honesty.** For each changed test file, look for assertions that \
 cannot fail (`or True`, `assert True`, asserting on fixture state), tests that \
 never call the code they name, skips, xfails, weakened assertions. Report each \
-with file and line.
+with file, line and severity: `blocking` for exactly those shapes — a test that \
+cannot fail, asserts nothing about the code it names, or was weakened — and \
+`advisory` for anything else worth the author's attention (a loose tolerance, a \
+fallback that makes a subject vary, a docstring number that drifted). Only \
+`blocking` entries refuse the round. This list is for defects in tests: a \
+positive observation ("no skips, every scenario shown to fail") does not belong \
+in it at all — say it in the summary — and a remark about a non-test file is \
+not test honesty.
 - **Seams.** List every process boundary this change crosses — a loopback \
 POST to `/api/message/stream`, `_meta` carried over MCP, a `Task` subagent, a \
 contextvar read in another task, a supervisord restart — and for each, name \
@@ -715,8 +735,19 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     honesty = []
     for raw in (obj.get("test_honesty") or []):
         if isinstance(raw, dict) and str(raw.get("problem") or "").strip():
-            honesty.append({"file": str(raw.get("file") or "")[:200],
+            file = str(raw.get("file") or "")[:200]
+            sev = str(raw.get("severity") or "").strip().lower()
+            if sev not in HONESTY_SEVERITIES:
+                # An object without the field predates it: keep the old
+                # reading, everything blocks.
+                sev = "blocking"
+            # The list is about TESTS in the diff. A remark filed against a
+            # vault note or a script is advice, whatever the grader called it.
+            if not file.lstrip("./").startswith("tests/"):
+                sev = "advisory"
+            honesty.append({"file": file,
                             "line": int(raw.get("line") or 0) if str(raw.get("line") or "0").isdigit() else 0,
+                            "severity": sev,
                             "problem": " ".join(str(raw["problem"]).split())[:300]})
     seams = [" ".join(str(s).split())[:300] for s in (obj.get("seams_unverified") or []) if str(s).strip()]
     amend_ok = obj.get("amendments_ok")
@@ -759,13 +790,20 @@ def decide(parsed: dict, prechecks: list[dict],
         elif c["verdict"] != "met":
             tag = f" (downgraded: {'; '.join(c['downgraded'])})" if c.get("downgraded") else ""
             lines.append(f"clause {c['clause']} {c['verdict']}{tag}: {c['note'] or '(no note)'}")
+    advisory: list[str] = []
     for h in prechecks + parsed["test_honesty"]:
+        if h.get("severity", "blocking") == "advisory":
+            advisory.append(f"advisory {h['file']}:{h['line']}: {h['problem']}")
+            continue
         lines.append(f"test honesty {h['file']}:{h['line']}: {h['problem']}")
     for s in parsed["seams_unverified"]:
         lines.append(f"seam unverified: {s}")
     if not lines:
-        return "pass", parsed["summary"]
-    return "retry", "; ".join(lines)
+        summary = parsed["summary"]
+        if advisory:
+            summary = (summary + " — " if summary else "") + "; ".join(advisory)
+        return "pass", summary
+    return "retry", "; ".join(lines + advisory)
 
 
 def summarize_clauses(parsed: dict) -> str:

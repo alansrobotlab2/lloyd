@@ -614,3 +614,44 @@ def test_a_downgraded_partial_is_not_a_disagreement(isolated):
     review("c" * 40, [{"clause": 1, "verdict": "met"}, {"clause": 2, "verdict": "partial"}])
     review("d" * 40, [{"clause": 1, "verdict": "met"}, {"clause": 2, "verdict": "partial"}])
     assert B.review_disagreement(S.LEDGER_PATH, 860) == 2, "a judged partial twice still is"
+
+
+def test_only_a_blocking_honesty_finding_refuses_the_round(tmp_path):
+    """#866: ten clauses met twice, refused twice on lists carrying a positive
+    observation, two vault-note remarks and one unpinned constant beside one
+    real defect. Severity decides; a non-test file is advisory whatever the
+    grader called it; an object without the field keeps the old reading."""
+    met = {"clause": 1, "verdict": "met", "evidence_path": "app/x.py", "evidence_line": 1,
+           "test_node_id": "tests/test_x.py::test_it", "how_verified": "ran", "note": "ok"}
+    (tmp_path / "app").mkdir(); (tmp_path / "app" / "x.py").write_text("1\n")
+    def parsed(honesty):
+        return RV.parse_review({"premise": "sound", "summary": "fine", "clauses": [met],
+                                "test_honesty": honesty, "seams_unverified": [],
+                                "amendments_ok": True, "amendments_note": ""},
+                               worktree=tmp_path, changed_tests=["tests/test_x.py"], n_clauses=1)
+    advisory_only = parsed([
+        {"file": "tests/test_x.py", "line": 5, "severity": "advisory", "problem": "tolerance is loose"},
+        {"file": "knowledge/ai/note.md", "line": 107, "severity": "blocking", "problem": "claim is false"},
+    ])
+    assert [h["severity"] for h in advisory_only["test_honesty"]] == ["advisory", "advisory"]
+    kind, findings = RV.decide(advisory_only, [])
+    assert kind == "pass" and "advisory tests/test_x.py:5" in findings and "note.md:107" in findings
+    blocking = parsed([{"file": "tests/test_x.py", "line": 9, "severity": "blocking",
+                        "problem": "cannot fail"},
+                       {"file": "tests/test_x.py", "line": 5, "severity": "advisory",
+                        "problem": "tolerance"}])
+    kind, findings = RV.decide(blocking, [])
+    assert kind == "retry" and findings.startswith("test honesty tests/test_x.py:9")
+    assert "advisory tests/test_x.py:5" in findings
+    legacy = parsed([{"file": "tests/test_x.py", "line": 3, "problem": "or True"}])
+    assert legacy["test_honesty"][0]["severity"] == "blocking"
+    assert RV.decide(legacy, [])[0] == "retry"
+    # the deterministic prechecks stay blocking
+    kind, _ = RV.decide(parsed([]), [{"file": "tests/test_x.py", "line": 1, "problem": "`or True`"}])
+    assert kind == "retry"
+    assert "severity" in RV.REVIEW_SCHEMA["properties"]["test_honesty"]["items"]["required"]
+    text = RV.build_prompt(contract={"id": 1, "title": "t", "body": "b", "clauses": ["c"], "path": ""},
+                           diff="", diff_truncated=False, changed_tests=[], test_counts={},
+                           worktree=tmp_path, run_tests=tmp_path / "rt")
+    assert "Only \\\n`blocking` entries refuse the round" in text or "`blocking` entries refuse the round" in text
+    assert "does not belong" in text
