@@ -595,3 +595,22 @@ def test_the_hard_ceiling_ends_a_round_that_keeps_getting_free_reviews(monkeypat
     _arm(monkeypatch, tmp_path, grade=_grader(UNSAT), head="y" * 40, prior=passes)
     ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
     assert data["review_exhausted"]
+
+
+def test_a_downgraded_partial_is_not_a_disagreement(isolated):
+    """The grader said `met` twice and Python downgraded it twice for missing
+    evidence; that is agreement without receipts, not the author refusing."""
+    write_item(isolated, 860, clauses=["a", "b"])
+    S.append_event({"event": "backlog_implement", "item_id": 860, "phase": "finished",
+                    "round_id": "SM_d", "stop_reason": "stop", "num_turns": 5}, path=S.LEDGER_PATH)
+    def review(head, clauses):
+        S.append_event({"event": "review", "round_id": "SM_d", "item_id": 860, "ok": True,
+                        "blocking": True, "kind": "retry", "head": head, "clauses": clauses},
+                       path=S.LEDGER_PATH)
+    down = {"clause": 2, "verdict": "partial", "downgraded": ["evidence_path missing"]}
+    review("a" * 40, [{"clause": 1, "verdict": "unmet"}, down])
+    review("b" * 40, [{"clause": 1, "verdict": "met"}, down])
+    assert B.review_disagreement(S.LEDGER_PATH, 860) is None
+    review("c" * 40, [{"clause": 1, "verdict": "met"}, {"clause": 2, "verdict": "partial"}])
+    review("d" * 40, [{"clause": 1, "verdict": "met"}, {"clause": 2, "verdict": "partial"}])
+    assert B.review_disagreement(S.LEDGER_PATH, 860) == 2, "a judged partial twice still is"

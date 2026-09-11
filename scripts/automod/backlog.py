@@ -961,8 +961,15 @@ def review_disagreement(ledger: Path, item_id: int) -> int | None:
     if prev.get("head") and last.get("head") and prev["head"] == last["head"]:
         return None
     def flagged(ev: dict) -> set[int]:
+        # A `partial` the grader wrote as `met` and Python downgraded for
+        # missing evidence is not the grader disagreeing with the author —
+        # it is the grader agreeing without receipts. #860's clause 8 ("the
+        # suite exits 0") was downgraded on both reviews, once for the test
+        # node and once for the path, and would have parked the item as a
+        # disagreement nobody had.
         return {int(c.get("clause") or 0) for c in (ev.get("clauses") or [])
-                if c.get("verdict") in ("unmet", "partial", "unsatisfiable")}
+                if c.get("verdict") in ("unmet", "partial", "unsatisfiable")
+                and not c.get("downgraded")}
     both = flagged(last) & flagged(prev)
     both.discard(0)
     return min(both) if both else None
