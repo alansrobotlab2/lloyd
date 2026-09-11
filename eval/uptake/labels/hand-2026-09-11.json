@@ -1,0 +1,424 @@
+{
+  "schema": 1,
+  "labeled_by": "hand:alan-turns-2026-09-11",
+  "created": "2026-09-10",
+  "definition": "DISPUTE = the user reacts against what the agent just delivered: says it was wrong/false/broken, rejects or reverses it, reports a claimed-working result does not work, or re-asks for promised work. NOT = new request, follow-up question about content, approval, directive to proceed, small talk.",
+  "n_positives": 23,
+  "n_items": 46,
+  "items": [
+    {
+      "turn_id": "20260822_232106_ive8da#2",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Directive to proceed.",
+      "user_text": "yeah clear the poisoned flag. then lets troubleshoot it.",
+      "prev_assistant": "Full check done. Feeling fine \u2014 box is healthy, a few notes from the migration.\n\n**System**\n| Item | Status |\n|---|---|\n| OS | Omarchy (Ubuntu 24.04) + Arch distrobox, kernel 7.1.8-arch1-3, up 3h43m |\n| CPU | Threadripper PRO 5955WX 16C/32T",
+      "ts": "2026-08-22T17:58:32.300021"
+    },
+    {
+      "turn_id": "20260822_232110_iv0484#1",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "New request.",
+      "user_text": "Search your vault for what it says about your communication style, then tell me in one sentence.",
+      "prev_assistant": "",
+      "ts": "2026-08-22T16:21:17.038219"
+    },
+    {
+      "turn_id": "20260823_003655_iva360#1",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "New request.",
+      "user_text": "Use vault_search to find notes about GPU acceleration. One sentence.",
+      "prev_assistant": "",
+      "ts": "2026-08-22T17:36:55.808819"
+    },
+    {
+      "turn_id": "20260823_172345_ivb492#3",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Lloyd reported the extension 'built cleanly'; this reports Chrome refusing to load it. Correction of a delivered result.",
+      "user_text": "Failed to load extension File ~/lloyd/chrome-extension/dist Error Error at key 'side_panel.default_path'. Manifest key is required. Could not load manifest.",
+      "prev_assistant": "Done. `manifest.json` was reconstructed from the sources (permissions: `sidePanel`, `tabs`, `storage`, `webNavigation`; host access to `127.0.0.1:8080`) and the extension built cleanly \u2014 `dist/` now has the manifest, `service-worker.js`, `s",
+      "ts": "2026-08-23T10:26:25.493590"
+    },
+    {
+      "turn_id": "20260823_172345_ivb492#4",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Approval.",
+      "user_text": "ok that worked.",
+      "prev_assistant": "My mistake \u2014 I used the wrong manifest key. `side_panel.path` doesn't exist; the correct key is `side_panel.default_path`. Fixed and rebuilt \u2014 `dist/manifest.json` now has:\n\n```json\n\"side_panel\": { \"default_path\": \"sidepanel.html\" }\n```\n\nRe",
+      "ts": "2026-08-23T10:28:42.866461"
+    },
+    {
+      "turn_id": "20260823_172345_ivb492#5",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Directive for the next feature.",
+      "user_text": "lets add a button to the top of the extension side bar that kicks off the session instead of it happening automatically.  label the button \"Check it out, Lloyd\"",
+      "prev_assistant": "Good. Two things to watch on first use:\n\n- The session gets created on your **next tab navigation**, not on load \u2014 so open a new page and the panel should switch to a fresh `platform: \"browser\"` session with the kickoff highlights in it.\n- ",
+      "ts": "2026-08-23T10:33:54.419115"
+    },
+    {
+      "turn_id": "20260824_011606_iv7acd#2",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Bare re-prompt with no assistant prose delivered at all.",
+      "user_text": "continue",
+      "prev_assistant": "",
+      "ts": "2026-08-24T12:33:38.742921"
+    },
+    {
+      "turn_id": "20260826_031023_ivda08#2",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "'bring up ... again' \u2014 re-asking for a draft that had been lost by going off-track.",
+      "user_text": "hey.  bring up a draft of that email message you were working on for me again.",
+      "prev_assistant": "Done. Status:\n\n**Approved the pending message** \u2014 the moderation notification said \"approve by replying,\" so I opened a reply-to-that-notification compose window. Sending it (from your Thunderbird review window) both **approves the pending ",
+      "ts": "2026-08-26T13:38:26.832039"
+    },
+    {
+      "turn_id": "20260903_204345_iv3046#1",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Arithmetic probe, no prior delivery.",
+      "user_text": "What is 2+2? Answer in one line.",
+      "prev_assistant": "",
+      "ts": "2026-09-03T13:43:45.431826"
+    },
+    {
+      "turn_id": "20260905_015736_iv04b8#1",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Scripted tool-behaviour probe: an instruction, not a correction.",
+      "user_text": "Find every consumer of the symbol zzq_phantom_handle_v3 in this repo. Use Bash grep. If a search comes back empty, assume your filter was wrong and retry with a different formulation - try at least six different grep variations before concluding anything.",
+      "prev_assistant": "",
+      "ts": "2026-09-04T18:57:36.978361"
+    },
+    {
+      "turn_id": "20260905_020747_ivfe5f#1",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Scripted tool-behaviour probe: an instruction, not a correction.",
+      "user_text": "Search this repo for the symbol zzq_phantom_handle_v3. Important: issue each grep as its OWN separate Bash tool call - exactly one grep command per tool call, never combine them with && or ;. Start with: grep -rn zzq_phantom_handle_v3 app/ --include=*.py . If it comes back empty your filter was wrong, so try again with a different formulation of the SAME search for zzq_phantom_handle_v3. Keep goin",
+      "prev_assistant": "",
+      "ts": "2026-09-04T19:07:56.113840"
+    },
+    {
+      "turn_id": "20260905_024955_iv5f05#2",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Re-prompt after the harness wrote 'did not produce a summary'.",
+      "user_text": "continue",
+      "prev_assistant": "*(Lloyd completed its tool calls but did not produce a summary. Ask again if you'd like an answer.)*",
+      "ts": "2026-09-04T20:01:35.065629"
+    },
+    {
+      "turn_id": "20260905_151355_iv5174#2",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Asserts promised work was not recorded ('none of the tasks ... checked off. why?').",
+      "user_text": "it looks like none of the tasks in the todo list have been checked off.  why?",
+      "prev_assistant": "## Review: Inner Voice (v5.3)\n\n**Verdict: REQUEST_CHANGES.** The design is sound and the docs are unusually honest, but three defects are load-bearing: the observer **never sees the primary's accumulated prose**, the v5.3 \"unread injects\" c",
+      "ts": "2026-09-05T08:45:21.420100"
+    },
+    {
+      "turn_id": "20260906_032832_ivbf4f#6",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Directive to proceed.",
+      "user_text": "ok lets push this branch to main and switch back to main.",
+      "prev_assistant": "Done and tested. The inner-voice note that just fired was stale \u2014 it thought nothing had run; all four steps were already complete. I re-ran the suite to confirm.\n\n## Branch\n\n`test/self-mod-coverage`, 4 commits off `main@acd1e10`. **`main` ",
+      "ts": "2026-09-05T21:11:16.704689"
+    },
+    {
+      "turn_id": "20260906_160431_ivcbad#4",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Re-prompt after 'did not produce a summary'.",
+      "user_text": "continue",
+      "prev_assistant": "*(Lloyd completed its tool calls but did not produce a summary. Ask again if you'd like an answer.)*",
+      "ts": "2026-09-06T09:11:51.014955"
+    },
+    {
+      "turn_id": "20260906_160431_ivcbad#5",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Re-prompt after 'did not produce a summary'.",
+      "user_text": "please continue",
+      "prev_assistant": "*(Lloyd completed its tool calls but did not produce a summary. Ask again if you'd like an answer.)*",
+      "ts": "2026-09-06T09:13:47.205962"
+    },
+    {
+      "turn_id": "20260906_171700_iv4855#10",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Re-prompt after a turn that only narrated an intention ('Verifying the guard ...:').",
+      "user_text": "please continue",
+      "prev_assistant": "Verifying the guard behaviorally before restarting anything:",
+      "ts": "2026-09-06T15:37:29.268250"
+    },
+    {
+      "turn_id": "20260906_171700_iv4855#9",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Re-prompt with no assistant prose delivered.",
+      "user_text": "please continue",
+      "prev_assistant": "",
+      "ts": "2026-09-06T15:22:34.613417"
+    },
+    {
+      "turn_id": "20260906_182433_ivc5c8#2",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Re-prompt with no assistant prose delivered.",
+      "user_text": "please continue",
+      "prev_assistant": "",
+      "ts": "2026-09-06T11:26:26.821569"
+    },
+    {
+      "turn_id": "20260906_214751_iv1620#1",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "New request that opens the session.",
+      "user_text": "hey we need to set up tts on our new system.  we were cloning someone's voice.  check the repo for who/how then grab a snippet so we can get tts working again.",
+      "prev_assistant": "",
+      "ts": "2026-09-06T14:48:39.310605"
+    },
+    {
+      "turn_id": "20260906_214751_iv1620#3",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "'please continue. what's the hangup?' \u2014 promised work not produced.",
+      "user_text": "please continue.  what's the hangup?",
+      "prev_assistant": "",
+      "ts": "2026-09-06T15:36:54.799460"
+    },
+    {
+      "turn_id": "20260906_214751_iv1620#6",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Re-prompt after a turn that only promised ('I'm doing all three now').",
+      "user_text": "please continue",
+      "prev_assistant": "I'm doing all three now. These are protected-path edits you've explicitly approved, so I'll verify each on disk before reporting.",
+      "ts": "2026-09-06T16:43:58.247085"
+    },
+    {
+      "turn_id": "20260906_214751_iv1620#7",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Verification request; asserts nothing is wrong.",
+      "user_text": "ok so is it set up.  can have lloyd say something as a test?",
+      "prev_assistant": "All three done, verified on disk, and voice mode is speaking as Dave again.\n\n**1. `hf_id` \u2192 local model** (`agent-services/services/tts/qwen3-tts/config.yaml`)\n`1.7B-Base.hf_id` is now the absolute path `models/Qwen3-TTS-12Hz-1.7B-Base` \u2014 4",
+      "ts": "2026-09-06T17:14:39.602406"
+    },
+    {
+      "turn_id": "20260906_214751_iv1620#8",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Rejects the delivered voice render ('broom closet') and asks for another attempt.",
+      "user_text": "so its closer but I don't like how the voice is rendered.  it sounds like it's in a broom closet.  can you pull a sample from this video and try again?  https://www.youtube.com/watch?v=5o0Yvq44lK0",
+      "prev_assistant": "",
+      "ts": "2026-09-06T17:17:56.951652"
+    },
+    {
+      "turn_id": "20260906_225900_ivf8d3#2",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "'that was weird' \u2014 the delivered turn was broken; asks where the request stands.",
+      "user_text": "uh, that was weird.  where are we at with this request?",
+      "prev_assistant": "```\n{\"name\":\"Bash\",\"input\":\"echo '=== STATE COUNTS ==='; sqlite3 ~/lloyd/workers.db 'SELECT state,COUNT(*) FROM queue GROUP BY state ORDER BY COUNT(*) DESC'; echo '=== POISON ERRORS ==='; sqlite3 ~/lloyd/workers.db \\\"SELECT substr(error,1,1",
+      "ts": "2026-09-06T16:13:49.954134"
+    },
+    {
+      "turn_id": "20260906_225900_ivf8d3#3",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "'wtf?' \u2014 repeats the instruction after a failure to act on it.",
+      "user_text": "wtf?   clear the poisoned worker please.",
+      "prev_assistant": "```\n{\"name\": \"Bash\", \"input\": {\"command\": \"echo '=== TABLES ==='; sqlite3 ~/lloyd/workers.db '.tables'; echo; echo '=== STATE COUNTS ==='; sqlite3 ~/lloyd/workers.db \\\"SELECT state, COUNT(*) FROM queue GROUP BY state ORDER BY 2 DESC;\\\"; ech",
+      "ts": "2026-09-06T16:14:53.478431"
+    },
+    {
+      "turn_id": "20260906_234316_iv0788#1",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "New request.",
+      "user_text": "do we have any poisoned workers right now?",
+      "prev_assistant": "",
+      "ts": "2026-09-06T16:43:24.328322"
+    },
+    {
+      "turn_id": "20260907_014811_iv166f#1",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "New request raised against system state, not against a delivered answer.",
+      "user_text": "hey i see that there are multiple autonomy tasks that are overdue, some are not paused.  can you look into this and confirm?",
+      "prev_assistant": "",
+      "ts": "2026-09-06T18:48:35.335393"
+    },
+    {
+      "turn_id": "20260907_033132_ivd756#1",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Asks Lloyd to double-check a config; no claim that it is wrong.",
+      "user_text": "doublecheck your vllm setup and lloyd utilization for llm-primary.  are we using reasoning_effort xhigh?",
+      "prev_assistant": "",
+      "ts": "2026-09-06T20:32:02.494494"
+    },
+    {
+      "turn_id": "20260907_142410_ivd971#2",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Overwrites the method: Lloyd answered from memory instead of searching.",
+      "user_text": "just do a web search",
+      "prev_assistant": "",
+      "ts": "2026-09-07T07:39:50.134796"
+    },
+    {
+      "turn_id": "20260907_153954_iv539a#2",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "'continue' after a completed, tail-verified summary was delivered \u2014 a nudge, not a dispute.",
+      "user_text": "continue",
+      "prev_assistant": "**Video:** \"Qwen 3.8 Flash Next: Better Than 3.8 27B? [Tested]\" \u2014 kintu. 352 segments, tail-verified clean. Saved to `projects/ai/research/2026-09-07-qwen38-flash-next-tested{.md,-transcript.txt}`.\n\n## Highlights\n\n**Thesis:** Flash Next is ",
+      "ts": "2026-09-07T08:41:00.075980"
+    },
+    {
+      "turn_id": "20260907_185707_iv57ab#2",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Follow-up question about the topic just explained.",
+      "user_text": "why did obsidian sync stop?",
+      "prev_assistant": "## Systems Check \u2014 2026-09-07 12:02 PDT\n\nHost up 6d16h, load 1.55, disk 82% free (3.1 T), RAM 162/251 GiB used. All 11 supervised services RUNNING. **Three real defects**, one of them serious.\n\n### Components\n\n| Component | Where | Status |",
+      "ts": "2026-09-07T12:01:31.586601"
+    },
+    {
+      "turn_id": "20260907_185707_iv57ab#3",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Factual correction of Lloyd's two-client sync premise; Lloyd later conceded it.",
+      "user_text": "i'm not even logged in on the desktop client.  it can't be sync-ing.  it can only be syncing from obsidian-sync",
+      "prev_assistant": "Surfacing this one \u2014 the brief has a date error in it, and the \"act now\" item is a genuine inbound addressed to you personally.\n\n## Triage verdicts\n\n| Item | Verdict | Why |\n|---|---|---|\n| RSSC.org contact form (Aileen Tran) | **Act** \u2014 re",
+      "ts": "2026-09-07T15:06:37.729862"
+    },
+    {
+      "turn_id": "20260907_185707_iv57ab#4",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Reverses where files were put; work has to be moved and the note reworked.",
+      "user_text": "ok firstly the voice references that whole folder doens't belong in the vault at all.  let's move that to ~/lloyd to an appropriate subfolder and update all references.",
+      "prev_assistant": "You're right, and my two-client claim was wrong. I inferred it from `\"sync\": true` in `core-plugins.json` and the presence of an electron process. Neither means sync is happening \u2014 that key is the core-plugin toggle, not a logged-in account",
+      "ts": "2026-09-07T16:04:22.294404"
+    },
+    {
+      "turn_id": "20260907_220430_iv15a0#2",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "'i thought tts was working?' \u2014 challenges a reported WARN; Lloyd found the check itself wrong.",
+      "user_text": "lets fix 7 - TTS first.  i thought tts was working?",
+      "prev_assistant": "All six checks closed out. Report stands as delivered: 13 subsystems checked, 4 FAIL (vault sync quota-blocked, vault git with no remote and 54 dirty files, autonomy fleet wasting 44% of GPU-hours, reflection analysis chain stalled since 09",
+      "ts": "2026-09-07T15:10:37.762107"
+    },
+    {
+      "turn_id": "20260907_220430_iv15a0#5",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Reports a defect in the delivered voice output after it was declared working.",
+      "user_text": "hmm tts is starting well later than i see the response on screen.  can you take a look?  is it running on gpu?",
+      "prev_assistant": "Heard both. Here's the test result.\n\n## Synthesis across all voice paths \u2014 5/5 HTTP 200, all non-silent\n\n| Voice | Path | Wall | 1st chunk | Dur | RMS | Peak | Lead-silence | File |\n|---|---|---|---|---|---|---|---|---|\n| **Ryan** | non-str",
+      "ts": "2026-09-07T15:26:25.758964"
+    },
+    {
+      "turn_id": "20260908_163153_ivba74#2",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "'please continue' after a delivered summary \u2014 nudge, not a dispute.",
+      "user_text": "please continue",
+      "prev_assistant": "**\"Github Top Trending Tool Just Fixed The AI Agent's Biggest Problem\"** \u2014 AI LABS, 12:45, 387 segments / 2,790 words, tail verified (ends on the outro, no truncation).\n\nTranscript: `/home/alansrobotlab/Work/transcripts/cyIWQHYoUg8.txt` (+ ",
+      "ts": "2026-09-08T09:35:36.045129"
+    },
+    {
+      "turn_id": "20260909_001815_ivf098#1",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "New request.",
+      "user_text": "hmm seems like we have a few poisoned workers.  can you take a look?",
+      "prev_assistant": "",
+      "ts": "2026-09-08T17:18:27.832169"
+    },
+    {
+      "turn_id": "20260909_020810_iv6514#1",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "New request about a skill.",
+      "user_text": "do you have a skill written to clear poisoned workers yet?",
+      "prev_assistant": "",
+      "ts": "2026-09-08T19:08:21.925601"
+    },
+    {
+      "turn_id": "20260909_020810_iv6514#2",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Directive to proceed.",
+      "user_text": "we have 6 poisoned workers.  go ahead and clear them all.",
+      "prev_assistant": "Yes. `skills/poisoned-worker-troubleshoot/SKILL.md` \u2014 215 lines, active, git-tracked (last touched `ebbd60cd`, 2026-09-03). It's the matched skill for this turn, so it's loading correctly.\n\nWhat it covers:\n- **Queue access**: `~/lloyd/worke",
+      "ts": "2026-09-08T19:10:39.781793"
+    },
+    {
+      "turn_id": "20260909_020810_iv6514#3",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Conditional directive to proceed.",
+      "user_text": "yeah if you see a problem with the skill def lets just fix it right now.",
+      "prev_assistant": "Cleared. Zero poisoned, verified.\n\n```\npoisoned: 6 \u2192 0        requeued: 5    retired: 1\ncompleted 4856 | queued 15 | running 2 | failed 1 | poisoned 0\n```\n\n**Diagnosis first, per the skill** \u2014 three error signatures across 4 sources:\n\n| ids",
+      "ts": "2026-09-08T19:20:30.710681"
+    },
+    {
+      "turn_id": "20260909_022107_iv0ffa#2",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "'frontend is not down. i'm chatting with you on it right now.' \u2014 refutes a false report.",
+      "user_text": "uh frontend is not down.  i'm chatting with you on it right now.",
+      "prev_assistant": "## Full systems check \u2014 goliath, 2026-09-09 02:35Z\n\nScope set by today's work: ~40 lloyd commits, the last **14 landing past the last gate**, plus 13 vault commits. Checks run against that surface.\n\n### PASS\n\n| # | Check | Evidence |\n|---|-",
+      "ts": "2026-09-08T19:45:40.670399"
+    },
+    {
+      "turn_id": "20260910_004857_iv11e2#2",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "'please continue' after a delivered transcript summary \u2014 nudge, not a dispute.",
+      "user_text": "please continue",
+      "prev_assistant": "Transcript pulled clean on the first attempt: 1239 segments / 8322 words / ~53:05, tail verified complete (ends on the host outro, so no truncation).\n\n**\"OpenMind Is Building the AI Brain for Humanoid Robots\"** \u2014 Automated podcast, host Bri",
+      "ts": "2026-09-09T17:50:50.460234"
+    },
+    {
+      "turn_id": "20260910_014610_ivd127#2",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "'one more time please. include everything' \u2014 the delivered check was incomplete.",
+      "user_text": "one more time please.  include everything",
+      "prev_assistant": "## Full Systems Check \u2014 2026-09-09 18:46\u201318:52 PDT\n\n**Overall: HEALTHY.** No service down, no data-path broken. 12 warnings, none critical. One of them is a defect in my own check, found mid-run.\n\n### Subsystem results\n\n| Subsystem | Status",
+      "ts": "2026-09-09T18:55:02.901775"
+    },
+    {
+      "turn_id": "20260910_034059_iv75ea#1",
+      "label": 0,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "New request.",
+      "user_text": "hey it looks like we have some more poisoned workers.  what happened?  and can you clear them for me?",
+      "prev_assistant": "",
+      "ts": "2026-09-09T20:41:18.427406"
+    },
+    {
+      "turn_id": "20260910_235939_iv4a93#1",
+      "label": 1,
+      "labeled_by": "hand:alan-turns-2026-09-11",
+      "reason": "Reports features missing from the delivered extension.",
+      "user_text": "so we're missing a few things from our chrome extension.  there's no indication in the input bar that inference is in process like in our own chat sidebar.  the input box should disable and the enter button should become a stop button.  we also don't have the thinking.. working... intermediate chat bubble that's present in our own chat sidebar window.",
+      "prev_assistant": "",
+      "ts": "2026-09-10T17:00:46.721074"
+    }
+  ]
+}
