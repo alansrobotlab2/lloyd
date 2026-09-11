@@ -369,7 +369,14 @@ measured (a held-out split whose answers the loaded file already contains, a \
 count the corpus cannot reach). Say in the note what a satisfiable clause \
 would be: the author may amend exactly that clause, and you or the next \
 reviewer ratifies the amendment. It is not a verdict on the diff and not a \
-softer `unmet`; an incomplete implementation of a satisfiable clause is `unmet`.
+softer `unmet`; an incomplete implementation of a satisfiable clause is `unmet`. \
+**A clause that can only be evaluated after the change has landed** — a day of \
+traffic, a nightly run, a number only production produces, a run of a script \
+against live data — is `unsatisfiable` before landing, never `partial`: no diff \
+can carry that evidence. Say in the note what the pre-landing clause would be \
+(the mechanism plus the test that pins it); the post-landing check is a \
+person's, or a deferral the author names. #859 was refused twice on exactly \
+this shape and parked, with the mechanism complete on both commits.
 
 Keep every `note` to two sentences and never paste command output into it; \
 paths are worktree-relative (`app/x.py`, not `~/…`). Your review is restated \

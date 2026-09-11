@@ -467,6 +467,8 @@ def test_the_prompt_shows_amendments_and_human_clauses(tmp_path):
     assert "<human_clauses>" in text and "Alan audits ten items" in text
     assert "graded here" in text
     assert "`unsatisfiable` if NO diff" in text
+    assert "only be evaluated after the change has landed" in text
+    assert "never `partial`" in text
 
 
 def test_the_new_tools_are_denied_to_the_grader_and_to_workers_and_annotated():
@@ -506,6 +508,7 @@ def test_triage_parses_human_clauses_from_both_paths():
     assert structured["human_clauses"] == ["h"]
     assert "human_clauses" in B.TRIAGE_VERDICT_SCHEMA["required"]
     assert "HUMAN_CLAUSES:" in AT.PROMPT and "not an acceptance clause" in AT.PROMPT
+    assert "can only run after landing" in AT.PROMPT
 
 
 def test_record_verdict_writes_human_clauses_beside_the_contract(isolated):

@@ -219,7 +219,12 @@ items audited by Alan, a sign-off, a scope decision, a number that needs a week 
 of real traffic: put it under HUMAN_CLAUSES, never under ACCEPTANCE_CLAUSES. \
 The implementer is not asked to fake it, the reviewer does not grade it, and \
 the item stays open tagged `needs-human` after the code lands until a person \
-does it. #578 spent its round on a clause asking for ten human-audited items.
+does it. #578 spent its round on a clause asking for ten human-audited items. \
+The same rule for **a check that can only run after landing** — a day of \
+traffic, a nightly run, a script over live data: the pre-landing mechanism \
+and its test go in ACCEPTANCE_CLAUSES, the post-landing check goes in \
+HUMAN_CLAUSES. #859 was refused twice on "needs a day of post-change \
+traffic" with its mechanism complete.
 
 Finish with exactly this block and nothing after it:
 
