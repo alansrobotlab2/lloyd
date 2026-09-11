@@ -723,3 +723,39 @@ def test_the_review_event_records_seams_as_text_and_names_the_untestable_ones(mo
     ev = events[-1]
     assert ev["seams_unverified"] == ["live pool tick", "loopback POST"]
     assert ev["seams_untestable"] == ["live pool tick"]
+
+
+def test_a_re_offer_with_every_clause_met_runs_before_a_fresh_confirmation(isolated):
+    """Five re-offers at all-clauses-met sat behind fresh umbrellas on
+    2026-09-11, each of which took an hour and aborted at attempt two."""
+    def confirm(iid, created_days_ago):
+        created = (datetime.now(timezone.utc) - timedelta(days=created_days_ago)).isoformat()
+        path = isolated / f"{iid}-x.md"
+        path.write_text(f"---\nstatus: up_next\npriority: medium\ncreated: '{created}'\n"
+                        f"board: lloyd\ntags: []\nacceptance_clauses:\n- a\n---\n\n# x\n\nbody\n")
+        S.append_event({"event": "backlog_triage", "item_id": iid, "verdict": "confirmed",
+                        "acceptance": "the check passes", "acceptance_clauses": ["a"]},
+                       path=S.LEDGER_PATH)
+    confirm(901, 3)   # fresh, oldest
+    confirm(902, 1)   # re-offered, refused on a seam with every clause met
+    confirm(903, 2)   # re-offered, refused with a clause unmet
+    for iid, rid, verdict in ((902, "SM_902", "met"), (903, "SM_903", "unmet")):
+        S.append_event({"event": "backlog_implement", "item_id": iid, "phase": "finished",
+                        "round_id": rid, "stop_reason": "stop", "num_turns": 9}, path=S.LEDGER_PATH)
+        S.append_event({"event": "review", "round_id": rid, "item_id": iid, "ok": True,
+                        "blocking": True, "kind": "retry", "head": "h" * 40,
+                        "clauses": [{"clause": 1, "verdict": verdict}]}, path=S.LEDGER_PATH)
+        S.append_event({"event": "gate", "round_id": rid, "rung": "review", "ok": False,
+                        "detail": "sent back", "review_retry": True,
+                        "review_findings": "seam" if verdict == "met" else "clause 1 unmet"},
+                       path=S.LEDGER_PATH)
+    assert B.last_review_all_met(S.LEDGER_PATH) == {902}
+    order = []
+    remaining = {901, 902, 903}
+    while remaining:
+        pick = B.select_confirmed(S.LEDGER_PATH)
+        assert pick is not None
+        order.append(pick[0].id)
+        remaining.discard(pick[0].id)
+        (isolated / f"{pick[0].id}-x.md").unlink()
+    assert order == [902, 901, 903], "nearest to landing, then fresh, then other re-offers"

@@ -1875,11 +1875,33 @@ def select_confirmed(ledger: Path,
         ready.append((item, ev))
     if not ready:
         return None
-    # Fresh confirmations before re-offers. Oldest-first alone let a
+    # Nearest to landing first: a re-offer whose last graded review met
+    # every clause has one small task left (a test across a seam, a clause
+    # amendment to ratify) and lands in one gate; a fresh item costs an hour
+    # and two review attempts. On 2026-09-11 five such re-offers sat behind
+    # fresh umbrellas that each took the hour and aborted. Then fresh
+    # confirmations before other re-offers — oldest-first alone let a
     # sent-back item be re-picked on the very next round for as long as its
     # cap allowed, monopolising the loop while the rest of the pool waited.
-    return sorted(ready, key=lambda pair: (pair[0].id in outcomes,
+    near = last_review_all_met(ledger)
+    return sorted(ready, key=lambda pair: (pair[0].id not in near,
+                                           pair[0].id in outcomes,
                                            pair[0].created or "9999", pair[0].id))[0]
+
+
+def last_review_all_met(ledger: Path) -> set[int]:
+    """Items whose most recent graded review found every clause `met`.
+
+    The refusal, if any, was on a seam or a test-honesty finding — one
+    change away from a pass. Read off the review events by item, newest
+    graded row per item.
+    """
+    latest: dict[int, dict] = {}
+    for d in _ledger_events(ledger, "review"):
+        if d.get("ok") and d.get("clauses"):
+            latest[int(d["item_id"])] = d
+    return {iid for iid, d in latest.items()
+            if all(c.get("verdict") == "met" for c in d["clauses"])}
 
 
 def tag_item(item_id: int, *, add: tuple[str, ...] = (), remove: tuple[str, ...] = ()) -> bool:
