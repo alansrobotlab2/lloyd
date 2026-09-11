@@ -310,6 +310,10 @@ def main(argv=None) -> int:
     r.add_argument("--only", action="append", choices=["lloyd-mcp", "lloyd-backend"],
                    help="restart only this program (repeatable); default both, mcp first")
     r.add_argument("--force", action="store_true", help="even while a promotion is under observation")
+    sc = sub.add_parser("scorecard", help="how the unattended loop is doing, from the ledger")
+    sc.add_argument("--since", default="7d")
+    sc.add_argument("--json", action="store_true")
+    sc.add_argument("--record", action="store_true", help="append the row to scorecard.jsonl")
     args = ap.parse_args(argv)
 
     if args.cmd == "start":
@@ -334,6 +338,12 @@ def main(argv=None) -> int:
         programs = tuple(args.only) if args.only else ("lloyd-mcp", "lloyd-backend")
         print(json.dumps(P.restart_stack(programs, reason=args.reason, force=args.force),
                          indent=2, default=str))
+    elif args.cmd == "scorecard":
+        from scripts.automod import scorecard as SC
+        row = SC.compute(since_days=SC.parse_since(args.since))
+        print(json.dumps(row, indent=2) if args.json else SC.render(row))
+        if args.record:
+            print(f"\nrecorded → {SC.record(row)}")
     return 0
 
 

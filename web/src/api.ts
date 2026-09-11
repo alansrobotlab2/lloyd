@@ -2079,6 +2079,35 @@ export interface BacklogState {
   recent_open: Array<{ name: string; status: string; board: string; mtime: number }>
 }
 
+// scripts/automod/scorecard.py, last 7 days. Every rate is null when its
+// denominator is zero — "0%" for a loop that has not run is the reading the
+// panel exists to prevent.
+export interface AutomodState {
+  computed_at: string
+  since_days: number
+  events: number
+  enabled?: boolean | null
+  current?: { round_id?: string | null; state?: string | null }
+  halted?: boolean
+  broken?: boolean
+  acceptance: { landed: number; with_outcome: number; met: number; hit_rate: number | null }
+  audit: { rounds_compared: number; author_met: number; grader_met: number; delta: number | null }
+  review: { rounds_graded: number; refusals: number; rounds_refused: number; fixed_in_turn: number
+            premise_unsound: number; escalated: number; refusal_rate: number | null
+            grader_unavailable: number }
+  spawn: { triage_filed: number; triage_closed: number; triage_ratio: number | null
+           implement_filed: number; implement_closed: number; implement_ratio: number | null }
+  human_touch: { landed: number; touched_within_7d: number; rate: number | null; rounds: string[] }
+  test_honesty: { grader_findings: number; landed_with_or_true: number; per_gated_round: number | null }
+  bookkeeping: { nameless_deferrals: number; stranded_landings: number; bare_aborts: number }
+  verdict_plumbing: { verdicts_with_source: number; regex: number; regex_rate: number | null
+                      truncated: number; finalizer_tokens_median: number | null }
+  throughput: { items_closed: number; items_closed_per_day: number; rounds_finished: number
+                rounds_landed: number; median_turns_landed: number | null
+                median_gate_seconds: number | null }
+  rollbacks: { count: number; triggers: string[]; true_positives: number | null }
+}
+
 export interface DashboardSnapshot {
   host: HostMetrics | SectionError
   vllm: VllmEngine[] | SectionError
@@ -2089,6 +2118,8 @@ export interface DashboardSnapshot {
   workers: WorkersState | SectionError
   autonomy: AutonomyState | SectionError
   backlog: BacklogState | SectionError
+  // Absent on an older backend: read it through sectionOk, never `.error`.
+  automod?: AutomodState | SectionError
   usage: DashboardUsage | SectionError
   timestamp: number
 }

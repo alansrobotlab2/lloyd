@@ -645,6 +645,27 @@ def _backlog() -> dict[str, Any]:
 _BACKLOG_CLOSED = CLOSED_STATUSES
 
 
+# The scorecard reads the whole ledger, the backlog and a week of git log.
+# Its numbers move per round, not per poll: a minute is already generous.
+_SCORECARD_TTL_S = 60.0
+
+
+def _automod() -> dict[str, Any]:
+    """The unattended loop's scorecard for the last 7 days (scripts/automod/
+    scorecard.py) plus its live state. `compute` is read-only and stdlib; a
+    failure here is this section's error string and nothing else's."""
+    from scripts.automod import scorecard, state as S
+
+    def _scan() -> dict[str, Any]:
+        row = scorecard.compute(since_days=7.0)
+        current = S.read_current() or {}
+        return {**row, "enabled": bool(S.is_enabled()),
+                "current": {"round_id": current.get("round_id"), "state": current.get("state")},
+                "halted": bool(S.is_halted()), "broken": bool(S.is_broken())}
+
+    return _cached("automod", _SCORECARD_TTL_S, _scan)
+
+
 def _iso(value: Any) -> str:
     """Frontmatter dates arrive as str or datetime depending on the writer."""
     from datetime import date, datetime
@@ -710,6 +731,7 @@ async def get_dashboard():
         _gather("workers", _to_thread(_workers)),
         _gather("autonomy", _to_thread(_autonomy)),
         _gather("backlog", _to_thread(_backlog)),
+        _gather("automod", _to_thread(_automod)),
         _gather("usage", _to_thread(_usage)),
     )
     payload: dict[str, Any] = dict(sections)

@@ -1357,6 +1357,7 @@ python -m scripts.automod.round status              # state + ledger + guardian
 python -m scripts.automod.round bless               # record HEAD as last-known-good
 python -m scripts.automod.round recover             # clear BROKEN/halted, start the stack
 python -m scripts.automod.round restart --reason "…"  # pause, drain, restart mcp+backend under the lease
+python -m scripts.automod.round scorecard --since 7d  # is the loop earning its keep? (--record appends)
 python -m scripts.automod.rehearse --yes-i-mean-it  # prove rollback still works
 systemctl --user status lloyd-guardian
 /usr/bin/python3 agent-services/guardian/guardian.py --selftest
@@ -1378,6 +1379,20 @@ leaves the box down.
 `status` also reports `unit_drift`: systemd reads `~/.config/systemd/user`, so
 a unit edited in the repo and never installed is a change that looks landed
 and does nothing.
+
+`scorecard` (`scripts/automod/scorecard.py`) is the loop's report card, read
+off the ledger, the backlog's front matter and a week of `git log` — ten
+metrics, each null rather than 0% when it has no denominator: acceptance hit
+rate, the audit delta between the author's and the grader's `met` clauses,
+review refusals (and how many were fixed in turn, re-offered, escalated),
+spawn ratio per source, landed rounds a human commit touched within seven
+days, test-honesty findings, bookkeeping defects (nameless deferrals,
+stranded landings, bare aborts), the regex-fallback rate, throughput, and
+rollbacks. The dashboard's `automod` section shows the 7-day row; `--record`
+appends it to `scorecard.jsonl` in the state dir so the trend survives. Its
+baseline, from the loop's first 4.3 days: 32% acceptance met, 7 items closed
+against 148 filed (triage 4.1:1), 41% regex fallback, 3 rollbacks, all three
+false positives.
 
 Recovering from a rollback: the reverted commit is on the
 `guardian-broken-<ts>` tag and your uncommitted work is in the matching named

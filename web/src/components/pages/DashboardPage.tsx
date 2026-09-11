@@ -5,7 +5,7 @@ import {
 } from 'lucide-react'
 import {
   dashboardApi, sectionOk, sectionError,
-  type AutonomyState, type AutonomyTaskRow, type BacklogState,
+  type AutomodState, type AutonomyState, type AutonomyTaskRow, type BacklogState,
   type BackgroundTask, type DashboardSnapshot, type GpuInfo,
   type RecentSession, type SubagentRun, type UsageBucket, type VllmEngine,
   type WorkersState, type EnginePressure, type PrefixMissSummary,
@@ -879,6 +879,82 @@ function WorkersPanel({ workers }: { workers: WorkersState }) {
   )
 }
 
+// ── Automod scorecard ───────────────────────────────────────────────────
+// The unattended loop's own report card (scripts/automod/scorecard.py).
+// Every rate is null when it has no denominator and renders as "—": a loop
+// that has not run must not read as "0% failing" or "100% met".
+
+function pctOrDash(x: number | null | undefined): string {
+  return x == null ? '—' : `${Math.round(x * 100)}%`
+}
+
+function AutomodRow({ label, value, sub, tone = 'idle' }: {
+  label: string; value: string; sub?: string; tone?: Tone
+}) {
+  return (
+    <div className="flex items-baseline gap-2 text-[10px]">
+      <span className="w-28 flex-shrink-0 text-muted-foreground">{label}</span>
+      <span className={cn('font-mono tabular-nums', TONE_TEXT[tone])}>{value}</span>
+      {sub && <span className="ml-auto truncate text-muted-foreground" title={sub}>{sub}</span>}
+    </div>
+  )
+}
+
+function AutomodPanel({ automod }: { automod: AutomodState }) {
+  const a = automod.acceptance, r = automod.review, s = automod.spawn
+  const b = automod.bookkeeping, p = automod.verdict_plumbing, t = automod.throughput
+  const defects = b.nameless_deferrals + b.stranded_landings + b.bare_aborts
+  const state = automod.broken ? 'BROKEN' : automod.halted ? 'halted'
+    : automod.current?.state ? `${automod.current.state}` : automod.enabled === false ? 'off' : 'idle'
+  const stateTone: Tone = automod.broken ? 'crit' : automod.halted ? 'warn'
+    : automod.current?.state ? 'accent' : 'idle'
+  return (
+    <Panel>
+      <div className="mb-2 flex items-baseline justify-between gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          Automod · {automod.since_days}d
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className={cn('h-1.5 w-1.5 rounded-full', TONE_FILL[stateTone])} />
+          <span className={cn('text-[10px]', TONE_TEXT[stateTone])} title={automod.current?.round_id ?? undefined}>
+            {state}
+          </span>
+        </span>
+      </div>
+      <div className="space-y-1">
+        <AutomodRow label="Acceptance met" value={pctOrDash(a.hit_rate)}
+          sub={`${a.met}/${a.with_outcome} landed`}
+          tone={a.hit_rate == null ? 'idle' : a.hit_rate >= 0.7 ? 'good' : a.hit_rate >= 0.4 ? 'warn' : 'crit'} />
+        <AutomodRow label="Audit delta" value={pctOrDash(automod.audit.delta)}
+          sub={`grader ${automod.audit.grader_met} / author ${automod.audit.author_met}`} />
+        <AutomodRow label="Review refusals" value={pctOrDash(r.refusal_rate)}
+          sub={`${r.rounds_refused}/${r.rounds_graded} rounds · ${r.fixed_in_turn} fixed in turn · ${r.escalated} escalated`}
+          tone={r.escalated > 0 ? 'warn' : 'idle'} />
+        <AutomodRow label="Spawn ratio" value={`${s.triage_ratio ?? '—'} · ${s.implement_ratio ?? '—'}`}
+          sub={`triage ${s.triage_filed}/${s.triage_closed} · implement ${s.implement_filed}/${s.implement_closed}`}
+          tone={(s.implement_ratio ?? 0) > 1 ? 'warn' : 'idle'} />
+        <AutomodRow label="Human touch" value={pctOrDash(automod.human_touch.rate)}
+          sub={`${automod.human_touch.touched_within_7d}/${automod.human_touch.landed} landed rounds`} />
+        <AutomodRow label="Test honesty" value={String(automod.test_honesty.grader_findings)}
+          sub={`findings · ${automod.test_honesty.landed_with_or_true} landed with or True`}
+          tone={automod.test_honesty.landed_with_or_true > 0 ? 'crit' : 'idle'} />
+        <AutomodRow label="Bookkeeping" value={String(defects)}
+          sub={`${b.nameless_deferrals} nameless · ${b.stranded_landings} stranded · ${b.bare_aborts} bare aborts`}
+          tone={defects > 0 ? 'warn' : 'idle'} />
+        <AutomodRow label="Regex fallback" value={pctOrDash(p.regex_rate)}
+          sub={`${p.regex}/${p.verdicts_with_source} verdicts · ${p.truncated} truncated`}
+          tone={(p.regex_rate ?? 0) > 0.1 ? 'warn' : 'idle'} />
+        <AutomodRow label="Throughput" value={`${t.items_closed_per_day}/d`}
+          sub={`${t.items_closed} closed · ${t.rounds_landed}/${t.rounds_finished} rounds landed · gate ${t.median_gate_seconds ?? '—'}s`} />
+        <AutomodRow label="Rollbacks" value={String(automod.rollbacks.count)}
+          sub={automod.rollbacks.triggers.join(', ') || 'none'}
+          tone={automod.rollbacks.count > 0 ? 'warn' : 'idle'} />
+      </div>
+    </Panel>
+  )
+}
+
+
 function BacklogPanel({ backlog }: { backlog: BacklogState }) {
   // Same rule as AutonomyPanel: a list can be absent, and must read as empty.
   const byBoard = backlog.by_board ?? []
@@ -1005,7 +1081,7 @@ export default function DashboardPage() {
     )
   }
 
-  const { host, vllm, primary, recent, agents, services, workers, autonomy, backlog, usage } = snap
+  const { host, vllm, primary, recent, agents, services, workers, autonomy, backlog, automod, usage } = snap
 
   const engines = sectionOk<VllmEngine[]>(vllm) ? vllm : []
   const primaryEngine = engines.find(e => e.alias === 'primary') ?? engines[0]
@@ -1363,6 +1439,15 @@ export default function DashboardPage() {
             ? <BacklogPanel backlog={backlog} />
             : <ErrorPanel what="Backlog" error={backlog.error} />}
         </div>
+        {/* The loop's report card. `automod` is absent on an older backend;
+            a tab left open across a restart must not blank the page. */}
+        {automod !== undefined && (
+          <div className="mt-3">
+            {sectionOk(automod)
+              ? <AutomodPanel automod={automod} />
+              : <ErrorPanel what="Automod scorecard" error={sectionError(automod)} />}
+          </div>
+        )}
       </Section>
 
       {/* Local token accounting */}
