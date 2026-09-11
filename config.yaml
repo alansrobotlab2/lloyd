@@ -338,6 +338,21 @@ harness:
     enabled: true
     retention_days: 7
     max_total_mb: 256
+  # #544 effect ledger (agent_mcp/_tool_effects.py): a worker item that is
+  # cancelled at its budget and requeued re-runs its whole turn, so every
+  # side-effecting tool call the first attempt landed would land again. One
+  # row per (tool, arguments, queue item) refuses the duplicate and replays
+  # the recorded result. Off the read-only, idempotent and repeat-expected
+  # paths entirely (agent_mcp/annotations.py). Over-suppression is the
+  # failure that bites, so this is the switch to reach for if a legitimate
+  # second call is ever refused. `ok`/`error` rows are pruned after
+  # `retention_days`; `unknown` rows (a call that died mid-flight) are kept
+  # `unknown_retention_days`, because they are the only record that an
+  # effect may have landed.
+  effect_ledger:
+    enabled: true
+    retention_days: 14
+    unknown_retention_days: 30
   # Diagnostics appended to a successful Edit/Write result, so the model
   # learns about a broken edit at the edit rather than at the gate minutes
   # later. Delta only: the tree carries ~69 tolerated pyflakes findings and

@@ -635,10 +635,16 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     # what the scope buys is the *right* scope, which is the difference
     # between a grant made to `autonomy-task:39` and one made to whatever runs
     # on that source next.
-    from app.harness.policy import current_scope
+    from app.harness.policy import current_effect_scope, current_scope
     payload = {"session_id": session_id, "text": prompt, "model": "primary",
                "priority": int(priority), "max_turns": int(max_turns),
                "grant_scope": current_scope.get(),
+               # #544 — the same hop, the other contextvar. The effect ledger
+               # keys on the queue item the pool bound, and without this every
+               # session-backed source (autocode, autotriage, youtube-digest,
+               # deep-research) ran unledgered: 25 items, 0 rows, in the first
+               # sixteen hours the ledger was live.
+               "effect_scope": current_effect_scope.get(),
                # The same wall clock this function enforces below, announced to
                # the model. Iterations are not the budget a worker turn dies on:
                # automod round SM_20260909_054722 was killed here with 32 of its

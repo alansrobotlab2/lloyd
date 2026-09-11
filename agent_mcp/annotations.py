@@ -143,6 +143,13 @@ IDEMPOTENT: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 REPEAT_EXPECTED: frozenset[str] = frozenset({
     "Bash", "Task", "http_request",
+    # `Edit` carries its own idempotency check — `old_string` must be present
+    # — so the second identical call in a retry fails with "not found", which
+    # the model can see and act on. A REPLAY cannot be seen: probed A→B, B→A,
+    # A→B in one scope, the third call was answered "Edited (1 replacement)"
+    # and the file stayed at A — the silent revert the read-before-edit gate
+    # exists to prevent, delivered by the guard meant to stop duplicates.
+    "Edit",
     "automod_start", "automod_gate", "automod_land", "automod_abort",
     "automod_status", "automod_rollback",
     "automod_vault_land", "automod_vault_revert",
@@ -204,15 +211,24 @@ def side_effecting(name: str) -> bool:
     """Would a second call with these arguments be able to cause a second
     durable effect? (#544, consumed by `agent_mcp.tool_effects`.)
 
-    Two named exclusions, both owned by this file rather than by the caller:
-    `READ_ONLY` because observing twice observes, and `REPEAT_EXPECTED` because
-    a repeat of those tools is normal operation whose replay would be stale.
-    Everything else — senders, creators, appenders, deleters, task writers —
-    is a candidate for the effect ledger. An unlisted tool counts as
+    Three named exclusions, all owned by this file rather than by the caller:
+    `READ_ONLY` because observing twice observes; `IDEMPOTENT` because the
+    table's own definition is "repeating the call with identical arguments
+    adds no further change", so there is no second effect to prevent and a
+    replay could only ever be staler than the real call (`Write` of the same
+    bytes, `vault_write`, a delete, a setter); and `REPEAT_EXPECTED` because a
+    repeat of those tools is normal operation whose replay would be stale.
+    Everything else — senders, creators, appenders, task writers — is a
+    candidate for the effect ledger. An unlisted tool counts as
     side-effecting, which is the same safe default `annotations_for` gives
     plan mode: a tool nobody classified gets guarded, not waved through.
+
+    The first cut of #544 consulted only `READ_ONLY` and `REPEAT_EXPECTED`,
+    which left 20 idempotent tools ledgered for no protective value — and
+    `Write` among them, replaying "File written" over a file that may have
+    moved since.
     """
-    if name in READ_ONLY:
+    if name in READ_ONLY or name in IDEMPOTENT:
         return False
     return name not in REPEAT_EXPECTED
 
