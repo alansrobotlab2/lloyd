@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from mcp.types import TextContent, Tool
 
@@ -144,6 +145,8 @@ def _land_detached(round_id: str) -> dict:
     """
     from scripts.automod import state as S, worktree as W
 
+    if S.gate_in_progress(round_id):
+        return {"error": f"a gate is still running for {round_id} — automod_gate_wait first"}
     gate_path = S.ROUNDS_DIR / round_id / "gate.json"
     if not gate_path.exists():
         return {"error": f"{round_id} has no gate report — run automod_gate first"}
@@ -173,6 +176,146 @@ def _land_detached(round_id: str) -> dict:
             "observing, and the guardian settles it to last-known-good 15 minutes "
             f"after that. Progress is logged to {log}."),
     }
+
+
+def _background_tasks_for_session() -> list[dict]:
+    """Background Bash children the bound session started and has not seen
+    finish. A gate that runs while one is in flight kills it at abort or
+    restarts under it at landing — #578 lost its only baseline run that way."""
+    sid = get_bound_session()
+    if not sid:
+        return []
+    from agent_mcp import _task_registry
+    now = time.time()
+    return [{"task_id": r.task_id, "description": r.description,
+             "elapsed_s": round(now - r.started_at)}
+            for r in _task_registry.list_active() if r.session_id == sid]
+
+
+def _gate_detached(round_id: str, *, skip_smoke: bool = False) -> dict:
+    """Start the gate in its own session and return at once.
+
+    A gate with the review rung runs seven to twelve minutes, and the
+    2026-09-11 lesson is that one tool call cannot sit silent on the wire
+    that long: the transport's read timeout fired, the pool re-sent the
+    request, and the same round was gated twice at once — both review
+    attempts spent on one commit the model was never shown a finding for.
+    So the gate runs detached, `gate.running` says so, and
+    `automod_gate_wait` polls in bounded slices.
+    """
+    from scripts.automod import state as S, worktree as W
+
+    if not W.worktree_path(round_id).exists():
+        return {"error": f"no worktree for {round_id}"}
+    if S.gate_in_progress(round_id):
+        return _gate_wait(round_id, wait_seconds=0,
+                          note="a gate is already running for this round; not started again")
+    busy = _background_tasks_for_session()
+    if busy:
+        return {"error": ("refusing to gate while background task(s) of this session are "
+                          "still running — a gate that aborts kills them and a landing "
+                          "restarts the backend under them. Wait for them (they report on "
+                          "a later iteration) or kill them, then gate."),
+                "background_tasks": busy}
+    log = S.ROUNDS_DIR / round_id / "gate.log"
+    python = W.LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
+    argv = [python, "-m", "scripts.automod.round", "gate", round_id]
+    if skip_smoke:
+        argv.append("--skip-smoke")
+    pid = S.spawn_detached(argv, log, cwd=W.LIVE_ROOT)
+    S.write_gate_marker(round_id, pid=pid, head=W.head(W.worktree_path(round_id)) or "",
+                        by="automod_gate")
+    return {
+        "gate_started": round_id, "pid": pid, "log": str(log),
+        "next": ("Call automod_gate_wait(round_id). It blocks up to four minutes and "
+                 "returns the per-rung report when the ladder finishes, or a progress "
+                 "line if it has not — call it again then. Do NOT edit, commit or run "
+                 "anything in the worktree while the gate runs: the review grades a "
+                 "snapshot of the commit you gated, and every commit it refuses spends "
+                 "one of the round's two review attempts."),
+        "note": ("Detached: with the review rung a gate runs seven to twelve minutes, "
+                 "longer than one tool call may stay silent on the wire."),
+    }
+
+
+def _rungs_since(round_id: str, since_ts: float) -> list[str]:
+    from scripts.automod import state as S
+    rows = []
+    for e in S.read_events(limit=400):
+        if e.get("round_id") != round_id or float(e.get("ts") or 0) < since_ts - 1:
+            continue
+        if e.get("event") == "gate":
+            rows.append(f"{'PASS' if e.get('ok') else 'FAIL'} {e.get('rung')} "
+                        f"({e.get('seconds', 0)}s): {str(e.get('detail') or '')[:160]}")
+        elif e.get("event") == "review":
+            rows.append(f"review attempt {e.get('attempt')}: "
+                        f"{e.get('kind') or e.get('error') or 'ran'}")
+    return rows
+
+
+def _gate_wait(round_id: str, *, wait_seconds: int = 240, note: str = "") -> dict:
+    """Block until the detached gate finishes or `wait_seconds` pass.
+
+    Bounded well under the transport's read timeout, so the call itself can
+    never be the thing that times out. A marker whose process is gone with a
+    `gate.json` newer than it is a finished gate; gone with no newer report
+    is a gate that died, and says so.
+    """
+    from scripts.automod import state as S
+
+    # `0` is a real answer ("just look"), so no `or 240` here.
+    wait = max(0, min(int(240 if wait_seconds is None else wait_seconds), 540))
+    deadline = time.time() + wait
+    gate_path = S.ROUNDS_DIR / round_id / "gate.json"
+    log = S.ROUNDS_DIR / round_id / "gate.log"
+
+    def _report() -> dict:
+        rep = json.loads(gate_path.read_text(encoding="utf-8"))
+        rep["gate_finished"] = True
+        return rep
+
+    while True:
+        marker = S.read_gate_marker(round_id)
+        if marker is None:
+            if gate_path.exists():
+                return _report()
+            return {"error": f"no gate has been started for {round_id} — call automod_gate first"}
+        started = float(marker.get("started_at") or 0)
+        if not S.pid_alive(marker.get("pid") or 0):
+            S.clear_gate_marker(round_id)
+            if gate_path.exists() and gate_path.stat().st_mtime >= started - 1:
+                return _report()
+            return {"error": ("the gate process died before writing a report — read the "
+                              "log, then gate again"), "log": str(log), "marker": marker}
+        if time.time() >= deadline:
+            out = {"running": True, "round_id": round_id, "pid": marker.get("pid"),
+                   "elapsed_s": round(time.time() - started),
+                   "rungs_so_far": _rungs_since(round_id, started),
+                   "next": "call automod_gate_wait(round_id) again"}
+            if note:
+                out["note"] = note
+            return out
+        time.sleep(5)
+
+
+def _amend_clause(round_id: str, clause, text: str, reason: str) -> dict:
+    from scripts.automod import backlog as B, state as S
+    import yaml
+    spec_path = S.ROUNDS_DIR / round_id / "run_spec.yaml"
+    if not spec_path.exists():
+        return {"error": f"no run spec for {round_id}"}
+    run_spec = yaml.safe_load(spec_path.read_text(encoding="utf-8")) or {}
+    item_id = (run_spec.get("item") or {}).get("id")
+    if not item_id:
+        return {"error": f"{round_id} is not bound to a backlog item; there is no contract to amend"}
+    try:
+        rec = B.amend_clause(int(item_id), clause, text, reason, round_id=round_id)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return {"amended": rec, "item_id": int(item_id),
+            "next": ("Gate again. The next review sees the amendment as an <amendments> "
+                     "block and ratifies or refuses it — a refusal restores the old text. "
+                     "Nothing needs committing for the amendment itself.")}
 
 
 async def list_tools() -> list[Tool]:
@@ -206,10 +349,14 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="automod_gate",
             description=(
-                "Run the promotion gate on a round: static checks, the full test suite, a "
-                "candidate venv if requirements changed, a canary boot on alternate ports, "
-                "one real agent turn, and a guardian drill if the diff touches the rollback "
-                "path. Returns a per-rung report. Takes minutes."
+                "Start the promotion gate on a round: static checks, the full test suite, "
+                "the review rung (a second reader grading the diff against the item's "
+                "clauses), a candidate venv if requirements changed, a canary boot on "
+                "alternate ports, one real agent turn, and a guardian drill if the diff "
+                "touches the rollback path. RETURNS IMMEDIATELY — the gate runs detached "
+                "for seven to twelve minutes; call automod_gate_wait for the per-rung "
+                "report. Refuses while a gate is already running for the round or while "
+                "a background task of yours is in flight."
             ),
             inputSchema={
                 "type": "object",
@@ -226,6 +373,49 @@ async def list_tools() -> list[Tool]:
                                                   "from it."},
                 },
                 "required": ["round_id"],
+            },
+        ),
+        Tool(
+            name="automod_gate_wait",
+            description=(
+                "Wait for the detached gate started by automod_gate. Blocks up to "
+                "wait_seconds (default 240) and returns the per-rung report when the "
+                "ladder has finished, or {running: true, rungs_so_far: [...]} if it has "
+                "not — call again then. Read the failing rung's detail; it names the cause."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "round_id": {"type": "string",
+                                 "description": "Round id returned by automod_start."},
+                    "wait_seconds": {"type": "integer",
+                                     "description": "How long to block, 0–540. Default 240."},
+                },
+                "required": ["round_id"],
+            },
+        ),
+        Tool(
+            name="automod_amend_clause",
+            description=(
+                "Amend ONE acceptance clause the review rung just judged `unsatisfiable` "
+                "(no diff could satisfy it as written). Replaces the clause text on the "
+                "backlog item and records the amendment as pending; the next review "
+                "ratifies it or refuses it and restores the old text. Refused for any "
+                "clause the last review did not mark unsatisfiable. Amend to the nearest "
+                "clause that is satisfiable and still what the item asked for — never to "
+                "something weaker."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "round_id": {"type": "string",
+                                 "description": "Round id returned by automod_start."},
+                    "clause": {"type": "integer", "description": "1-based clause index."},
+                    "text": {"type": "string", "description": "The amended clause."},
+                    "reason": {"type": "string",
+                               "description": "Why the original could not be satisfied."},
+                },
+                "required": ["round_id", "clause", "text", "reason"],
             },
         ),
         Tool(
@@ -359,8 +549,21 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         if name == "automod_gate":
             rid = arguments.get("round_id") or ""
-            rep = R.run_gate(rid, skip_smoke=bool(arguments.get("skip_smoke")))
-            return text_result(json.dumps(rep, indent=2))
+            return text_result(json.dumps(
+                _gate_detached(rid, skip_smoke=bool(arguments.get("skip_smoke"))), indent=2))
+
+        if name == "automod_gate_wait":
+            rid = arguments.get("round_id") or ""
+            try:
+                wait = int(arguments.get("wait_seconds", 240))
+            except (TypeError, ValueError):
+                wait = 240
+            return text_result(json.dumps(_gate_wait(rid, wait_seconds=wait), indent=2))
+
+        if name == "automod_amend_clause":
+            return text_result(json.dumps(_amend_clause(
+                str(arguments.get("round_id") or ""), arguments.get("clause"),
+                str(arguments.get("text") or ""), str(arguments.get("reason") or "")), indent=2))
 
         if name == "automod_land":
             rid = arguments.get("round_id") or ""

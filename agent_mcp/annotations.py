@@ -34,6 +34,8 @@ READ_ONLY: frozenset[str] = frozenset({
     "Read", "Grep", "Glob",
     # Internal
     "_BackgroundTaskDrain",
+    # Polls a detached gate; observes, never starts one.
+    "automod_gate_wait",
     # Knowledge graph
     "fact_get", "fact_profile", "fact_check", "fact_resolve",
     "fact_relationships", "fact_path", "fact_neighbors",
@@ -151,7 +153,7 @@ REPEAT_EXPECTED: frozenset[str] = frozenset({
     # exists to prevent, delivered by the guard meant to stop duplicates.
     "Edit",
     "automod_start", "automod_gate", "automod_land", "automod_abort",
-    "automod_status", "automod_rollback",
+    "automod_amend_clause", "automod_status", "automod_rollback",
     "automod_vault_land", "automod_vault_revert",
     "EnterPlanMode", "ExitPlanMode", "SetGoal", "ClearGoal", "TodoWrite",
     "mc_navigate", "mc_close_modal",

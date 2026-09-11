@@ -101,7 +101,7 @@ As separately checkable clauses — the gate's review rung grades each one, and 
 your finalizer reports each one:
 
 {clauses}
-
+{human_clauses}
 The round is done when every clause has become true and a test pins each. If \
 you cannot make them true with one small, well-tested change, do not land a \
 larger one — abort the round, say why, and the item goes back to a human.
@@ -163,7 +163,16 @@ one-file change or a five-file one, and a grep for the symbol's spelling will \
 not tell you.
 4. Write the test that fails today. Then the smallest change that makes it \
 pass. One change per round.
-5. `automod_gate`. If it fails twice on the same rung for the same reason, \
+5. `automod_gate` **returns immediately** — the gate runs detached, seven to \
+twelve minutes with the review rung — then `automod_gate_wait(round_id)` until \
+it returns the per-rung report (each call blocks up to four minutes; call it \
+again on `running: true`). **Do not edit, commit or run anything in the \
+worktree while a gate runs**: the review grades a snapshot of the commit you \
+gated, and every distinct commit it refuses spends one of the round's two \
+review attempts — re-gating the same commit returns the same findings without \
+a review. Do not gate while a background task of yours is still running; the \
+tool refuses, because an abort kills it and a landing restarts the backend \
+under it. If the gate fails twice on the same rung for the same reason, \
 `automod_abort` and report — with one exception, below. A preflight that says \
 it **rebased** is a pass, not a warning: something landed on `main` under you \
 and the gate moved your branch onto it and retested. Your base has moved; do \
@@ -179,7 +188,13 @@ second refusal says "abort and report" — do that, with `automod_abort` and a \
 reason; the item comes back to the next round with the findings and your \
 branch. Do not argue with it in prose and do not weaken a test to satisfy it. \
 If it judges the **premise** unsound, stop: that is a verdict on the item, and \
-a human decides.
+a human decides. If it marks a clause **unsatisfiable** — no diff could meet it \
+as written — that is a defect in the contract, not in your diff: \
+`automod_amend_clause(round_id, clause, text, reason)` to the nearest clause \
+that is satisfiable and still what the item asked for, then gate again; the \
+next review ratifies the amendment or refuses it and restores the old text. \
+Never amend a clause the reviewer did not mark unsatisfiable, and never amend \
+one to something weaker.
 
 **An existing test that fails because it pins the behaviour you were asked to \
 change is work, not a blocker.** The gate reports whether a failure is new in \
@@ -293,6 +308,17 @@ def _reoffer_memory(prior, findings_appended: int) -> str:
         parts.append(f"Earlier rounds also appended {findings_appended} finding(s) under "
                      f"`## Findings` on this item; read them before you re-derive anything.")
     return " ".join(parts) + "\n\n"
+
+
+def _human_clauses_block(clauses) -> str:
+    """Conditions a person will satisfy after the code lands. Rendered so the
+    round knows they exist and knows they are not its to do — or to fake."""
+    clauses = [str(c) for c in (clauses or []) if str(c).strip()]
+    if not clauses:
+        return ""
+    rows = "\n".join(f"    - {c}" for c in clauses)
+    return (f"\nA person will do these after you land — they are not yours to do, "
+            f"and not yours to simulate; the item stays open for them:\n\n{rows}\n")
 
 
 def _reoffer_verdict(reason: str) -> str:
@@ -559,6 +585,8 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
         acceptance=triage.get("acceptance") or "",
         clauses="\n".join(f"    {i}. {c}" for i, c in enumerate(
             B.acceptance_clauses_of(triage), 1)) or "    (the contract above is one clause)",
+        human_clauses=_human_clauses_block(
+            B.human_clauses_for_item(getattr(candidate, "path", None), triage)),
         spawn_cap=SPAWN_CAP,
         members=_members_block(candidate),
         # A label the eval comparer can select on, unique per item and stable

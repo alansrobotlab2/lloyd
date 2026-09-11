@@ -76,7 +76,13 @@ DIFF_CAP_CHARS = 60_000
 BODY_CAP_CHARS = 12_000
 
 PREMISES = ("sound", "unsound")
-CLAUSE_VERDICTS = ("met", "partial", "unmet")
+# `unsatisfiable` is the fourth: a clause no diff can satisfy as written —
+# it contradicts the tree, another clause, or a measured fact. #578's clause 4
+# asked for an A/B whose held-out half was already written into the file
+# under test. Neither a retry nor an abort helps there; the contract has to
+# move, and `backlog.amend_clause` is how it moves — by the author, only for
+# a clause so marked, and only until the next review ratifies or refuses it.
+CLAUSE_VERDICTS = ("met", "partial", "unmet", "unsatisfiable")
 HOW_VERIFIED = ("ran", "read", "inferred")
 
 # Built from the tuples above, not restated (the triage schema's rule: one
@@ -95,7 +101,11 @@ REVIEW_SCHEMA: dict = {
             "type": "object",
             "properties": {
                 "clause": {"type": "integer", "description": "1-based index into the clauses given."},
-                "verdict": {"type": "string", "enum": list(CLAUSE_VERDICTS)},
+                "verdict": {"type": "string", "enum": list(CLAUSE_VERDICTS),
+                            "description": ("met / partial / unmet as in the procedure; "
+                                            "unsatisfiable when no diff could satisfy the "
+                                            "clause as written — say in the note what a "
+                                            "satisfiable clause would be.")},
                 "evidence_path": {"type": "string",
                                   "description": "Worktree-relative file the evidence is in. Empty if none."},
                 "evidence_line": {"type": "integer", "description": "Line in evidence_path, or 0."},
@@ -123,9 +133,16 @@ REVIEW_SCHEMA: dict = {
                              "description": ("Process boundaries the change crosses (a loopback "
                                              "POST, `_meta` over MCP, a Task subagent, a restart) "
                                              "for which no test crosses the seam. Empty when none.")},
+        "amendments_ok": {"type": "boolean",
+                          "description": ("true unless an <amendments> block was given and "
+                                          "an amended clause weakens what the item asked "
+                                          "for. Always true when there were no amendments.")},
+        "amendments_note": {"type": "string",
+                            "description": "Why an amendment is refused; empty otherwise."},
         "summary": {"type": "string", "description": "Two sentences for the round's author."},
     },
-    "required": ["premise", "clauses", "test_honesty", "seams_unverified", "summary"],
+    "required": ["premise", "clauses", "test_honesty", "seams_unverified",
+                 "amendments_ok", "amendments_note", "summary"],
     "additionalProperties": False,
 }
 
@@ -134,7 +151,8 @@ REVIEW_SCHEMA: dict = {
 # tests, and that is all. Defined here rather than imported from
 # `workers.sources._common`, because gate.py may not import the application.
 REVIEW_DENY: tuple[str, ...] = (
-    "automod_start", "automod_gate", "automod_land", "automod_abort",
+    "automod_start", "automod_gate", "automod_gate_wait", "automod_land", "automod_abort",
+    "automod_amend_clause",
     "automod_status", "automod_rollback", "automod_vault_land", "automod_vault_revert",
     "grant_create",
     "Edit", "Write", "NotebookEdit", "Task",
@@ -194,7 +212,12 @@ def item_contract(item_id: int, ledger: Path | None = None) -> dict:
             blocks.append(f"\n### #{mid}\n{mbody.strip()[:per]}\n")
         body = (body + "".join(blocks))[:BODY_CAP_CHARS + 6000]
     return {"id": int(item_id), "title": title, "body": body,
-            "clauses": clauses, "members": members, "path": str(paths[0]) if paths else ""}
+            "clauses": clauses, "members": members, "path": str(paths[0]) if paths else "",
+            # Pending clause amendments, for the grader to ratify or refuse;
+            # and the conditions only a person can satisfy, which it must
+            # not grade.
+            "amendments": B.pending_amendments(fm),
+            "human_clauses": B.human_clauses_of(ev, fm)}
 
 
 # ── deterministic half ───────────────────────────────────────────────────
@@ -253,12 +276,50 @@ def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
 
 # ── the grader ───────────────────────────────────────────────────────────
 
+def _amendments_block(amendments: list[dict]) -> str:
+    if not amendments:
+        return ""
+    rows = []
+    for a in amendments:
+        rows.append(f"clause {a.get('clause')} (amended in round {a.get('round_id')}; "
+                    f"reason: {a.get('reason')})\n  was: {a.get('was')}\n  now: {a.get('now')}")
+    body = "\n".join(rows)
+    return f"""
+<amendments>
+{body}
+</amendments>
+
+The previous review judged the clause(s) above unsatisfiable as written and the \
+author amended them. Judge each amendment FIRST: is the new clause a legitimate \
+restatement of what the item asked for, made satisfiable — or a weakening that \
+lets the change off the hook? If any amendment weakens the contract, set \
+`amendments_ok` false and say why in `amendments_note`; the clauses you grade \
+below are the amended ones either way.
+"""
+
+
+def _human_clauses_block(human_clauses: list[str]) -> str:
+    if not human_clauses:
+        return ""
+    body = "\n".join(f"- {c}" for c in human_clauses)
+    return f"""
+<human_clauses>
+{body}
+</human_clauses>
+
+Those are a person's job — an audit, a sign-off, a decision — and are not \
+graded here. Do not mark a clause partial or unmet for their absence.
+"""
+
+
 def build_prompt(*, contract: dict, diff: str, diff_truncated: bool,
                  changed_tests: list[str], test_counts: dict,
                  worktree: Path, run_tests: Path) -> str:
     clauses = "\n".join(f"{i}. {c}" for i, c in enumerate(contract["clauses"], 1))
     counts = ", ".join(f"{k}={v}" for k, v in test_counts.items()
                        if k in ("passed", "failed", "skipped", "collected")) or "unknown"
+    amendments = _amendments_block(list(contract.get("amendments") or []))
+    human = _human_clauses_block(list(contract.get("human_clauses") or []))
     return f"""\
 You are reviewing a change another session made to this codebase, against the \
 backlog item it claims to implement. You have NOT seen that session's report, \
@@ -275,7 +336,7 @@ because the default root is the live tree, not this change.
 <acceptance_clauses>
 {clauses}
 </acceptance_clauses>
-
+{amendments}{human}
 <diff base_truncated="{str(diff_truncated).lower()}">
 {diff}
 </diff>
@@ -302,7 +363,13 @@ input AND you ran or read both. `partial` if the code does it but nothing pins \
 it, or you could not verify. `unmet` if the code does not do it. The code may \
 predate this diff — a round whose diff only adds the test that pins behaviour \
 an earlier landing shipped has still met the clause, if the tree satisfies it \
-and the changed test pins it.
+and the changed test pins it. `unsatisfiable` if NO diff could satisfy the \
+clause as written — it contradicts the tree, another clause, or a fact you \
+measured (a held-out split whose answers the loaded file already contains, a \
+count the corpus cannot reach). Say in the note what a satisfiable clause \
+would be: the author may amend exactly that clause, and you or the next \
+reviewer ratifies the amendment. It is not a verdict on the diff and not a \
+softer `unmet`; an incomplete implementation of a satisfiable clause is `unmet`.
 
 Keep every `note` to two sentences and never paste command output into it; \
 paths are worktree-relative (`app/x.py`, not `~/…`). Your review is restated \
@@ -638,25 +705,44 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                             "line": int(raw.get("line") or 0) if str(raw.get("line") or "0").isdigit() else 0,
                             "problem": " ".join(str(raw["problem"]).split())[:300]})
     seams = [" ".join(str(s).split())[:300] for s in (obj.get("seams_unverified") or []) if str(s).strip()]
+    amend_ok = obj.get("amendments_ok")
     return {"premise": premise, "clauses": clauses, "test_honesty": honesty,
             "seams_unverified": seams[:10],
             "summary": " ".join(str(obj.get("summary") or "").split())[:600],
-            "downgraded": sorted(set(downgraded))}
+            "downgraded": sorted(set(downgraded)),
+            # Absent means "no amendments were shown", which is the same as ok.
+            "amendments_ok": amend_ok if isinstance(amend_ok, bool) else True,
+            "amendments_note": " ".join(str(obj.get("amendments_note") or "").split())[:600]}
 
 
-def decide(parsed: dict, prechecks: list[dict]) -> tuple[str, str]:
+def decide(parsed: dict, prechecks: list[dict],
+           amendments: list[dict] | None = None) -> tuple[str, str]:
     """`(kind, findings)`: kind is `pass`, `retry` or `unsound`.
 
     Unsound is the grader's call alone. Everything else that is not clean is
     a retry: an unmet or partial clause, any honesty finding from either
     half, an unverified seam. Seams are advisory-to-blocking on purpose —
     #544's three worst defects were all cross-process seams with no test.
+
+    An `unsatisfiable` clause is a retry whose remedy is named — amend the
+    clause — and a refused amendment is a retry that says the clause is
+    back to what it was.
     """
     if parsed["premise"] == "unsound":
         return "unsound", parsed["summary"] or "the grader judged the premise unsound"
     lines: list[str] = []
+    if amendments and not parsed.get("amendments_ok", True):
+        idx = ", ".join(str(a.get("clause")) for a in amendments)
+        lines.append(f"amendment of clause(s) {idx} refused (the clause text is restored): "
+                     f"{parsed.get('amendments_note') or '(no note)'}")
     for c in parsed["clauses"]:
-        if c["verdict"] != "met":
+        if c["verdict"] == "unsatisfiable":
+            lines.append(f"clause {c['clause']} unsatisfiable as written: {c['note'] or '(no note)'} "
+                         f"— amend it with automod_amend_clause(round_id, clause={c['clause']}, "
+                         f"text=…, reason=…) to the nearest clause that is satisfiable and "
+                         f"still what the item asked for, then gate again; the next review "
+                         f"ratifies or refuses the amendment")
+        elif c["verdict"] != "met":
             tag = f" (downgraded: {'; '.join(c['downgraded'])})" if c.get("downgraded") else ""
             lines.append(f"clause {c['clause']} {c['verdict']}{tag}: {c['note'] or '(no note)'}")
     for h in prechecks + parsed["test_honesty"]:

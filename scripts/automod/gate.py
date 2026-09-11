@@ -711,6 +711,21 @@ class Gate:
         without asking the model again; and a clause the grader marks `met`
         without evidence is downgraded in Python. Only a round with no item
         bound records a skip, because there is no contract to grade against.
+
+        Three rules from 2026-09-11, when every review-gated round aborted
+        and none of the refusals had reached the model (see `state.py`'s
+        gate marker for how one gate became two):
+
+        - **An attempt is a graded refusal of a distinct commit.** A grader
+          timeout is the engine's problem and spends nothing; the same head
+          refused twice is one refusal, delivered twice — the second gate of a
+          duplicated pair, or a model that re-gated without committing. That
+          case is answered from the ledger without a grading turn.
+        - **The grader reads a detached checkout of the commit, never the
+          working tree.** The second review of #578 caught a test file
+          mid-write and graded a head the author had already moved past.
+        - **The event carries `head`**, so `backlog.review_disagreement` can
+          tell two refusals of one commit from two refusals of two.
         """
         if not self.item_id:
             return True, "SKIPPED (no backlog item bound to this round — no contract to grade)", {
@@ -719,52 +734,87 @@ class Gate:
         contract = RV.item_contract(self.item_id)
         if not contract["clauses"]:
             return False, f"item #{self.item_id} has no acceptance clauses", {}
+        head = W.head(self.worktree) or self.report.head or ""
         prior = [e for e in S.read_events(limit=1000)
                  if e.get("event") == "review" and e.get("round_id") == self.round_id]
-        attempt = len(prior) + 1
+        refused_by_head: dict[str, dict] = {}
+        graded_refusals: list[dict] = []
+        spent = 0
+        for e in prior:
+            if not (e.get("ok") and e.get("blocking")):
+                continue
+            graded_refusals.append(e)
+            h = str(e.get("head") or "")
+            if h and h in refused_by_head:
+                continue
+            spent += 1
+            if h:
+                refused_by_head[h] = e
+        same = refused_by_head.get(head) if head else None
+        if same is not None:
+            findings = str(same.get("findings") or "")[:1500]
+            return False, (f"review already refused this exact commit {head[:8]} (attempt "
+                           f"{same.get('attempt')}) and nothing has been committed since — "
+                           f"no grading turn spent; fix what it names, commit, and gate "
+                           f"again: {findings}"), {
+                               "review_retry": True, "review_findings": findings,
+                               "review_attempt": int(same.get("attempt") or spent),
+                               "review_same_head": True}
+        attempt = spent + 1
         if attempt > RV.REVIEW_MAX_PER_ROUND:
+            last = graded_refusals[-1] if graded_refusals else {}
             return False, (f"review already sent this round back {RV.REVIEW_MAX_PER_ROUND} "
                            f"times; abort and report (automod_abort with the findings as "
                            f"the reason) — the item comes back to the next round with them"), {
                                "review_retry": True, "review_exhausted": True,
                                "review_attempt": attempt,
-                               "review_findings": str((prior[-1] or {}).get("findings") or "")[:1500]}
+                               "review_findings": str(last.get("findings") or "")[:1500]}
         changed = list(self.report.changed_paths)
         changed_tests = [p for p in changed if p.startswith("tests/") and p.endswith(".py")]
         pre = RV.honesty_prechecks(self.worktree, self.base, changed,
                                    n_clauses=len(contract["clauses"]))
         test_counts = next((r.data for r in self.report.rungs if r.name == "tests"), {}) or {}
         started = time.time()
-        res = RV.grade(round_id=self.round_id, worktree=self.worktree, base=self.base,
-                       contract=contract, changed_paths=changed, test_counts=test_counts,
-                       python=self.python, child_env=self._child_env(),
-                       scratch_dir=W.round_dir(self.round_id) / "gate-state")
+        snapshot, snap_note = self._review_snapshot(head)
+        grade_root = snapshot or self.worktree
         base_event = {"event": "review", "round_id": self.round_id, "item_id": self.item_id,
-                      "session_id": res.get("session_id"), "attempt": attempt,
-                      "seconds": round(time.time() - started, 1), "grader_model": "primary",
-                      "prechecks": pre}
-        if not res["ok"]:
-            S.append_event({**base_event, "ok": False, "blocking": False,
-                            "error": str(res.get("error") or "")[:400]})
-            return False, (f"review could not run: {res.get('error')} — the grader, not the "
-                           f"diff; the item keeps its attempt"), {
-                               "external_blocker": True, "external_failures": [],
-                               "review_session": res.get("session_id")}
-        parsed = RV.parse_review(res["structured"], worktree=self.worktree,
-                                 changed_tests=changed_tests, n_clauses=len(contract["clauses"]))
+                      "attempt": attempt, "head": head, "grader_model": "primary",
+                      "snapshot": bool(snapshot), "snapshot_note": snap_note, "prechecks": pre}
+        try:
+            res = RV.grade(round_id=self.round_id, worktree=grade_root, base=self.base,
+                           contract=contract, changed_paths=changed, test_counts=test_counts,
+                           python=self.python, child_env=self._child_env(grade_root),
+                           scratch_dir=W.round_dir(self.round_id) / "gate-state")
+            base_event.update({"session_id": res.get("session_id"),
+                               "seconds": round(time.time() - started, 1)})
+            if not res["ok"]:
+                S.append_event({**base_event, "ok": False, "blocking": False,
+                                "error": str(res.get("error") or "")[:400]})
+                return False, (f"review could not run: {res.get('error')} — the grader, not the "
+                               f"diff; neither the item's attempt nor a review attempt is spent"), {
+                                   "external_blocker": True, "external_failures": [],
+                                   "review_session": res.get("session_id")}
+            parsed = RV.parse_review(res["structured"], worktree=grade_root,
+                                     changed_tests=changed_tests, n_clauses=len(contract["clauses"]))
+        finally:
+            self._drop_snapshot(snapshot)
         if parsed is None:
             S.append_event({**base_event, "ok": False, "blocking": False,
                             "error": "structured review unusable"})
             return False, "review returned an unusable object; the item keeps its attempt", {
                 "external_blocker": True, "external_failures": [],
                 "review_session": res.get("session_id")}
-        kind, findings = RV.decide(parsed, pre)
+        amendments = contract.get("amendments") or []
+        kind, findings = RV.decide(parsed, pre, amendments=amendments)
         S.append_event({**base_event, "ok": True, "premise": parsed["premise"],
                         "clauses": parsed["clauses"], "test_honesty": parsed["test_honesty"],
                         "seams_unverified": parsed["seams_unverified"],
                         "downgraded": parsed["downgraded"], "summary": parsed["summary"],
+                        "amendments_ok": parsed.get("amendments_ok", True),
+                        "amendments_note": parsed.get("amendments_note", ""),
                         "blocking": kind != "pass", "kind": kind,
                         "findings": findings[:2000]})
+        self._settle_amendments(amendments, parsed, kind)
         if kind == "unsound":
             return False, f"review: premise unsound — {findings}", {
                 "review_premise_unsound": True, "review_summary": findings[:800],
@@ -779,7 +829,61 @@ class Gate:
         return True, (f"review: {RV.summarize_clauses(parsed)} of {len(contract['clauses'])} "
                       f"clause(s); {parsed['summary'][:160]}"), {
                           "review_session": res.get("session_id"),
-                          "clauses": parsed["clauses"], "review_attempt": attempt}
+                          "clauses": parsed["clauses"], "review_attempt": attempt,
+                          "amendments_ratified": [a.get("clause") for a in amendments]}
+
+    def _review_snapshot(self, head: str) -> tuple[Path | None, str]:
+        """A detached checkout of `head` for the grader to read and test.
+
+        The worktree is the author's, and on 2026-09-11 the author kept
+        editing while a review ran — the grader caught a test file mid-write.
+        A checkout of the commit cannot move. Lives under the round's scratch
+        dir, registered against the live repo like the tests rung's baseline
+        probe, and removed in `_drop_snapshot`. Falls back to the working
+        tree with a note when git will not cooperate; the note rides the
+        event so a graded working tree is visible, not silent.
+        """
+        if not head:
+            return None, "no head to snapshot; graded the working tree"
+        wt = W.round_dir(self.round_id) / "gate-state" / f"review-{head[:12]}"
+        shutil.rmtree(wt, ignore_errors=True)
+        r = W.git(self.live, "worktree", "add", "--detach", "-q", str(wt), head)
+        if r.returncode != 0 or not wt.exists():
+            return None, (f"snapshot failed ({(r.stderr or '').strip()[:160]}); "
+                          f"graded the working tree")
+        return wt, f"graded a detached checkout of {head[:8]}"
+
+    def _drop_snapshot(self, wt: Path | None) -> None:
+        if not wt:
+            return
+        try:
+            W.git(self.live, "worktree", "remove", "--force", str(wt))
+        except Exception:
+            pass
+        shutil.rmtree(wt, ignore_errors=True)
+        try:
+            W.git(self.live, "worktree", "prune")
+        except Exception:
+            pass
+
+    def _settle_amendments(self, amendments: list[dict], parsed: dict, kind: str) -> None:
+        """Ratify or refuse the clause amendments this review was shown.
+
+        The author may amend only a clause the previous review called
+        unsatisfiable, and the amendment holds only if the next review
+        accepts it — the second reader's judgment, not the author's. A
+        refusal restores the clause. Best effort: a backlog write that fails
+        costs the bookkeeping, never the verdict.
+        """
+        if not amendments or not self.item_id:
+            return
+        from scripts.automod import backlog as B
+        ok = bool(parsed.get("amendments_ok", True))
+        try:
+            B.settle_amendments(self.item_id, self.round_id, ratified=ok,
+                                note=str(parsed.get("amendments_note") or "")[:600])
+        except Exception as exc:  # pragma: no cover - bookkeeping only
+            print(f"[warn] settle_amendments failed: {exc}")
 
     def rung_venv(self):
         if not spec.touches_requirements(self.report.changed_paths):

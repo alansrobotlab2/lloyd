@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -133,14 +134,24 @@ def run_gate(round_id: str, *, skip_smoke: bool = False) -> dict:
     base = run_spec["code"]["base_commit"]
     item_id = (run_spec.get("item") or {}).get("id")
 
+    # One gate per round at a time. The second concurrent gate of 2026-09-11
+    # was the MCP pool's transport retry, but the CLI can do it too.
+    live = S.gate_in_progress(round_id)
+    if live and int(live.get("pid") or 0) != os.getpid():
+        raise RuntimeError(f"a gate is already running for {round_id} (pid {live['pid']}, "
+                           f"started {live.get('started_iso')}); wait for it")
     g = G.Gate(round_id, wt, base, skip_smoke=skip_smoke, item_id=item_id)
-    report = g.run()
-    S.write_gate_report(round_id, report.to_dict())
-    # Preflight may have rebased the round onto a moved `main`. The spec is
-    # where the NEXT gate call reads its base from, and a stale base there
-    # makes `changed_paths` sweep the human's commits into the round's diff.
-    if report.base != base:
-        S.update_run_spec_base(round_id, report.base)
+    S.write_gate_marker(round_id, pid=os.getpid(), head=W.head(wt) or "", by="run_gate")
+    try:
+        report = g.run()
+        S.write_gate_report(round_id, report.to_dict())
+        # Preflight may have rebased the round onto a moved `main`. The spec is
+        # where the NEXT gate call reads its base from, and a stale base there
+        # makes `changed_paths` sweep the human's commits into the round's diff.
+        if report.base != base:
+            S.update_run_spec_base(round_id, report.base)
+    finally:
+        S.clear_gate_marker(round_id)
     return report.to_dict()
 
 

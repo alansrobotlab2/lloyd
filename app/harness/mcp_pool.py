@@ -27,6 +27,13 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
+try:  # the SDK's own client factory; private path, so the fallback is the SDK default
+    import httpx2  # the httpx fork mcp 2.x is built on
+    from mcp.shared._httpx_utils import create_mcp_http_client
+except Exception:  # pragma: no cover - older SDK
+    httpx2 = None
+    create_mcp_http_client = None
+
 from app.config import service_url
 from app.harness.errors import ToolDiscoveryError, ToolDispatchError
 
@@ -109,6 +116,18 @@ META_EFFECT_SCOPE = "lloyd/effect_scope"
 # blocks the harness indefinitely — there is no default in the MCP client.
 CALL_TIMEOUT_SECONDS = 660.0
 
+# The HTTP client's READ timeout has to sit above that ceiling, and it did
+# not: `streamable_http_client(url)` with no client builds the SDK default,
+# `httpx.Timeout(30, read=300)`. A tool that stays silent for five minutes —
+# `automod_gate` with its review rung runs seven to twelve — died at the
+# transport, and the retry below re-sent the request, which started a SECOND
+# gate on the same round while the first was still grading. On 2026-09-11
+# every review-gated round hit it: 18 rounds, 17 aborts, 0 landings, and the
+# model's first sight of any review finding was the "abort and report" line.
+# `read` is the gap between bytes on the response stream; the connect and
+# write budgets stay short because those really are blips.
+HTTP_READ_TIMEOUT_SECONDS = CALL_TIMEOUT_SECONDS + 30.0
+
 # Transports that carry the 2026-07-28 stateless protocol. Nothing is pinned
 # to a connection for these, so the pool does not hold one open.
 HTTP_TRANSPORT_TYPES = ("http", "streamable-http", "streamable_http", "sse")
@@ -176,6 +195,10 @@ class MCPPool:
         self._sessions: dict[str, ClientSession] = {}
         self._tool_routes: dict[str, str] = {}  # bare_name → server_name
         self._schemas: dict[str, dict[str, Any]] = {}  # bare_name → inputSchema
+        # bare_name → the server's ToolAnnotations, as a plain dict. Read by
+        # `_retry_safe`: a transport failure mid-call is retried only for a
+        # tool the server itself calls read-only or idempotent.
+        self._annotations: dict[str, dict[str, Any]] = {}
         self._discovered: list[tuple[str, list[dict[str, Any]]]] = []
         self._opened = False
         self._open_lock = asyncio.Lock()
@@ -279,6 +302,24 @@ class MCPPool:
             schema = tool.get("inputSchema")
             if isinstance(schema, dict):
                 self._schemas[bare] = schema
+            ann = tool.get("annotations")
+            if isinstance(ann, dict):
+                self._annotations[bare] = ann
+
+    def _retry_safe(self, bare: str) -> bool:
+        """May a call to `bare` be re-sent after a transport failure?
+
+        Only when the server annotated it `readOnlyHint` or `idempotentHint`.
+        A transport error says nothing about whether the server ran the
+        call — for a long one it almost certainly did — and re-sending a
+        mutating call is how one `automod_gate` became two concurrent gates
+        of the same round. An unannotated tool is not retried: that is the
+        `annotations.py` contract (a server that sets no hints qualifies
+        nothing), and the cost of being wrong that way is one tool error
+        the model can read, not a duplicated side effect it cannot see.
+        """
+        ann = self._annotations.get(bare) or {}
+        return bool(ann.get("readOnlyHint") or ann.get("idempotentHint"))
 
     @asynccontextmanager
     async def _http_session(self, cfg: dict[str, Any]):
@@ -293,14 +334,21 @@ class MCPPool:
         single-digit milliseconds.
         """
         url = cfg["url"]
-        if cfg.get("type") == "sse":
-            ctx = sse_client(url)
-        else:
-            ctx = streamable_http_client(url)
-        async with ctx as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                yield session
+        async with AsyncExitStack() as stack:
+            if cfg.get("type") == "sse":
+                ctx = sse_client(url)
+            else:
+                # A client we hand in is a client we own: the SDK closes only
+                # the one it built itself.
+                client = _http_client()
+                if client is not None:
+                    await stack.enter_async_context(client)
+                ctx = streamable_http_client(url, http_client=client)
+            read_stream, write_stream = await stack.enter_async_context(ctx)
+            session = await stack.enter_async_context(
+                ClientSession(read_stream, write_stream))
+            await session.initialize()
+            yield session
 
     async def _owner_loop(self) -> None:
         """Hold every SSE/ClientSession context for the pool's lifetime.
@@ -350,6 +398,7 @@ class MCPPool:
         self._sessions.clear()
         self._tool_routes.clear()
         self._schemas.clear()
+        self._annotations.clear()
         self._discovered = []
         self._opened = False
 
@@ -457,6 +506,24 @@ class MCPPool:
             # behaviour — poison the pool, evict it from the cache, tear
             # down the session every concurrent turn was sharing — is no
             # longer a trade worth making.
+            #
+            # ...for a call that is safe to send twice. The server may well
+            # have RUN the first one — a read timeout fires while the tool is
+            # still working — and a second copy of a mutating call is a
+            # duplicated side effect the model never sees. Those are
+            # surfaced as a tool error that says so, and not retried.
+            if not self._retry_safe(bare):
+                logger.warning(
+                    "mcp_pool: %s on %s failed (%s); not retried — the tool is not "
+                    "annotated read-only or idempotent and may have run",
+                    bare, server_name, exc,
+                )
+                raise ToolDispatchError(
+                    name,
+                    f"transport error: {exc}. The call was NOT retried because {bare} "
+                    f"is not idempotent and the server may have run it — read its "
+                    f"state back (status, log, marker file) before calling it again.",
+                ) from exc
             logger.warning(
                 "mcp_pool: %s on %s failed (%s); reconnecting and retrying once",
                 bare, server_name, exc,
@@ -555,6 +622,7 @@ class MCPPool:
             self._sessions.clear()
             self._tool_routes.clear()
             self._schemas.clear()
+            self._annotations.clear()
             self._discovered = []
             self._opened = False
             self._poisoned = False
@@ -630,6 +698,19 @@ class MCPPool:
             }
             for t in result.tools
         ]
+
+
+def _http_client():
+    """An httpx client whose read timeout outlives `CALL_TIMEOUT_SECONDS`.
+
+    None when the SDK's factory is unavailable, which hands
+    `streamable_http_client` its own default (read=300) — the pre-2026-09-11
+    behaviour, kept only as the fallback for an SDK without the helper.
+    """
+    if create_mcp_http_client is None or httpx2 is None:
+        return None
+    return create_mcp_http_client(
+        timeout=httpx2.Timeout(60.0, read=HTTP_READ_TIMEOUT_SECONDS))
 
 
 def _annotations(tool: Any) -> dict[str, Any]:

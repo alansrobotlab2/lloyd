@@ -51,8 +51,8 @@ POOL_TIMEOUT_MARGIN_SECONDS = 60
 #: `tests/test_automod_hardening.py::test_worker_turns_cannot_drive_the_loop`
 #: greps this file for these names, so this is where they live.
 WORKER_AUTOMOD_BAN: tuple[str, ...] = (
-    "automod_start", "automod_gate", "automod_land",
-    "automod_abort", "automod_rollback",
+    "automod_start", "automod_gate", "automod_gate_wait", "automod_land",
+    "automod_abort", "automod_amend_clause", "automod_rollback",
     "automod_vault_land", "automod_vault_revert",
 )
 

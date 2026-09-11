@@ -747,6 +747,88 @@ must never read it as a verdict on the round. Items confirmed before clauses
 existed mostly wrote `(a) … (b) …` inline; `acceptance_clauses_of` splits
 those, so #544's prose reads as the five clauses its reviewer graded.
 
+### 4.5b The verdict has to reach the author: transport, attempts, snapshots
+
+The rung shipped on 2026-09-10 at 18:32 PT. In the eighteen hours after,
+eighteen rounds started, seventeen aborted and none landed — and every
+review-gated round ended the same way: two review rows on the ledger, then a
+0.02 s "already sent this round back 2 times; abort and report". It read as
+the grader being strict. It was the transport eating the verdict, four links
+long, and each link is now pinned by `tests/test_review_transport.py` and
+`tests/test_mcp_pool_retry_policy.py`.
+
+1. **A gate with the review rung runs seven to twelve minutes; the MCP
+   tool call could stay silent for five.** `mcp_pool._http_session` built
+   its HTTP client with the SDK default, `read=300`, so the stream died at
+   300 s while the gate was still grading. The pool's `CALL_TIMEOUT_SECONDS`
+   of 660 was never reached. The client now carries
+   `HTTP_READ_TIMEOUT_SECONDS`, above that ceiling.
+2. **The pool then "reconnected and retried once", which started a second
+   gate of the same round.** #578: gate one preflight 09:22:18, the retry
+   warning at 09:27:17, gate two preflight at 09:27:18, transport error to
+   the model at 09:32:17. A transport error says nothing about whether the
+   server ran the call — for a long one it almost certainly did — so a retry
+   is only safe for a call the server annotates read-only or idempotent.
+   `_retry_safe` reads the annotations `_list_tools` already carries;
+   anything else is surfaced as a tool error that says the call may have
+   run. `automod_gate` itself now returns immediately and runs detached
+   (`state.spawn_detached`, the landing's pattern), with `gate.running` as
+   the one-gate-per-round marker `run_gate` owns and clears; the model polls
+   `automod_gate_wait`, which blocks in slices well under any transport
+   budget and hands back the same per-rung report. It refuses to start while
+   a background task of the session is in flight — #578 launched its only
+   baseline run and gated over it, then killed the run at abort.
+3. **The review cap counted every row on the round id**, duplicates and
+   grader timeouts included, so both attempts were gone before the model
+   had read one finding. An attempt is now a *graded refusal of a distinct
+   commit*: the event carries `head`; a timeout (`ok: false`) spends
+   nothing; the same head refused before is answered from the ledger
+   without a grading turn ("nothing has been committed since"), which also
+   makes re-gating without committing free instead of fatal.
+4. **`review_disagreement` read the duplicate pair as the author refusing
+   to fix a clause** and parked #578 `needs-human` on its single attempt.
+   Two refusals of one head are one refusal, delivered twice; rows without
+   a head predate the field and keep the old reading.
+
+Two smaller things rode along. The grader reads a **detached checkout of
+the commit** (`Gate._review_snapshot`, removed after grading), never the
+author's working tree: the second review of #578 caught a test file
+mid-write and graded a head the author had already moved past. And the
+backlog's own filing of the incident, #838, had the symptom right and the
+mechanism wrong (it blamed lineage across resumed rounds); the ledger, not
+the prose, is what to read for a cause.
+
+### 4.5c Three things the loop can now settle for itself
+
+The day also showed three dead ends the loop could only escalate:
+
+- **A clause no diff can satisfy.** #578's clause 4 asked for an A/B whose
+  held-out half was already written into the file under test — a date split
+  cannot separate a corpus from memory files written from the same notes.
+  The reviewer's only verdicts were `unmet` (wrong: the diff was not at
+  fault) or `unsound` (wrong: the item was real). `unsatisfiable` is the
+  fourth clause verdict, and it names a remedy: the author calls
+  `automod_amend_clause(round_id, clause, text, reason)`, which
+  `backlog.amend_clause` refuses for any clause the last graded review did
+  not so mark, writes the new text onto the item with a `pending` record
+  under `clause_amendments`, and the **next** review sees it as an
+  `<amendments>` block and ratifies it (`amendments_ok`) or refuses it and
+  restores the old text. The second reader's judgment, not the author's:
+  a loop that rewrote its own acceptance unchecked could declare anything
+  met. An `unsatisfiable` clause on two distinct heads without an amendment
+  still escalates through `review_disagreement`.
+- **A clause only a person can satisfy.** Clause 5 asked for ten
+  human-audited items; the round could not produce them and the reviewer
+  correctly refused to accept an agent-authored audit as one. Triage now
+  separates `human_clauses` from `acceptance_clauses` (both parse paths, the
+  schema, `record_verdict`), the implement prompt shows them as "not yours
+  to do, and not yours to simulate", the review prompt shows them as not
+  graded, and `close_settled_items` leaves a `met` landing **open** and
+  tagged `needs-human` with the outstanding conditions in its note. The
+  loop's half lands; the item waits for the person.
+- **A gate over a running measurement.** Covered in 4.5b: the gate tool
+  reads `_task_registry.list_active()` for the bound session and refuses.
+
 ### 4.1 pyflakes is a diff, not a bar
 
 The tree carries 69 pre-existing findings. An absolute rule would be switched

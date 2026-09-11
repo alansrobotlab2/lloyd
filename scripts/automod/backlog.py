@@ -265,11 +265,19 @@ TRIAGE_VERDICT_SCHEMA: dict = {
                                                "test can pin, in order. The implementer reports "
                                                "per clause and the review rung grades per "
                                                "clause. Empty otherwise.")},
+        "human_clauses": {"type": "array", "items": {"type": "string"},
+                          "description": ("For `confirmed`: conditions only a person can "
+                                          "satisfy — an audit, a sign-off, a decision, a "
+                                          "measurement that needs real traffic. Never in "
+                                          "acceptance_clauses: the implementer is not asked "
+                                          "to fake them and the reviewer does not grade them; "
+                                          "the item waits on a human for them after the code "
+                                          "lands. Empty when none.")},
         "spawned": {"type": "array", "items": {"type": "integer"},
                     "description": "Backlog ids filed during this triage."},
     },
     "required": ["verdict", "surface", "check", "evidence", "acceptance",
-                 "acceptance_clauses", "spawned"],
+                 "acceptance_clauses", "human_clauses", "spawned"],
     "additionalProperties": False,
 }
 
@@ -371,6 +379,156 @@ def acceptance_clauses_of(event: dict | None, frontmatter: dict | None = None) -
     if is_human_only(prose):
         return [prose]
     return split_inline_lettered(prose) or [prose]
+
+
+def human_clauses_of(event: dict | None, frontmatter: dict | None = None) -> list[str]:
+    """Conditions only a person can satisfy, from the item's front matter or
+    the triage event. No prose fallback: absent means none."""
+    fm = frontmatter or {}
+    ev = event or {}
+    for source in (fm.get("human_clauses"), ev.get("human_clauses")):
+        if isinstance(source, list):
+            cleaned = clean_clauses(source)
+            if cleaned:
+                return cleaned
+    return []
+
+
+def human_clauses_for_item(path: Path | None, event: dict | None) -> list[str]:
+    """`human_clauses_of` read off the item file, for callers holding an
+    `Item` rather than its front matter."""
+    fm: dict = {}
+    if path is not None and Path(path).exists():
+        try:
+            fm, _ = _split_frontmatter(Path(path).read_text(encoding="utf-8"))
+        except OSError:
+            fm = {}
+    return human_clauses_of(event, fm)
+
+
+# ── Clause amendments ───────────────────────────────────────────────────────
+#
+# The review rung may judge a clause `unsatisfiable`: no diff can meet it as
+# written. The author's only moves used to be a retry that could not succeed
+# or an abort; now it may amend exactly that clause, and the amendment holds
+# only if the NEXT review ratifies it. The second reader's judgment, not the
+# author's — a loop that rewrote its own acceptance unchecked would be one
+# that could declare anything met. Records live on the item, so a human
+# reading the board sees what the contract was and what it became.
+AMENDMENTS_KEY = "clause_amendments"
+
+
+def _item_path(item_id: int) -> Path | None:
+    paths = sorted(BACKLOG_DIR.glob(f"{int(item_id)}-*.md"))
+    return paths[0] if paths else None
+
+
+def pending_amendments(frontmatter: dict | None) -> list[dict]:
+    return [dict(a) for a in ((frontmatter or {}).get(AMENDMENTS_KEY) or [])
+            if isinstance(a, dict) and a.get("state") == "pending"]
+
+
+def last_graded_review(ledger: Path, round_id: str) -> dict | None:
+    rows = [d for d in _ledger_events(ledger, "review", require_item=False)
+            if str(d.get("round_id") or "") == str(round_id) and d.get("ok")]
+    return rows[-1] if rows else None
+
+
+def _write_item(path: Path, fm: dict, body: str) -> None:
+    path.write_text(
+        f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
+        f"---\n{body}", encoding="utf-8")
+
+
+def amend_clause(item_id: int, clause: int, text: str, reason: str, *,
+                 round_id: str, ledger: Path | None = None) -> dict:
+    """Replace one acceptance clause the review rung judged unsatisfiable.
+
+    Refuses (ValueError) for a clause the last graded review of `round_id`
+    did not mark `unsatisfiable`, an index off the list, empty text or
+    reason, or a clause already amended and awaiting ratification. Returns
+    the amendment record, state `pending`.
+    """
+    from scripts.automod import state as S
+    ledger = ledger or S.LEDGER_PATH
+    path = _item_path(item_id)
+    if path is None:
+        raise ValueError(f"no backlog item #{item_id} on disk")
+    fm, body = _split_frontmatter(path.read_text(encoding="utf-8"))
+    clauses = clean_clauses(fm.get("acceptance_clauses") or [])
+    if not clauses:
+        raise ValueError(f"item #{item_id} has no acceptance_clauses on disk to amend")
+    try:
+        idx = int(clause)
+    except (TypeError, ValueError):
+        raise ValueError(f"clause must be an integer, got {clause!r}")
+    if not 1 <= idx <= len(clauses):
+        raise ValueError(f"clause {idx} is off the list (item #{item_id} has {len(clauses)})")
+    text = " ".join(str(text or "").split())[:CLAUSE_MAX_CHARS]
+    reason = " ".join(str(reason or "").split())[:CLAUSE_MAX_CHARS]
+    if not text or not reason:
+        raise ValueError("both the amended clause text and a reason are required")
+    review = last_graded_review(ledger, round_id)
+    verdicts = {int(c.get("clause") or 0): str(c.get("verdict") or "")
+                for c in ((review or {}).get("clauses") or []) if isinstance(c, dict)}
+    if verdicts.get(idx) != "unsatisfiable":
+        raise ValueError(f"the review rung has not judged clause {idx} unsatisfiable in round "
+                         f"{round_id}; only a clause the grader marked unsatisfiable may be amended")
+    if any(int(a.get("clause") or 0) == idx for a in pending_amendments(fm)):
+        raise ValueError(f"clause {idx} is already amended and awaiting the next review")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    old = clauses[idx - 1]
+    clauses[idx - 1] = text
+    fm["acceptance_clauses"] = clauses
+    rec = {"clause": idx, "was": old, "now": text, "reason": reason,
+           "round_id": str(round_id), "at": stamp, "state": "pending"}
+    fm[AMENDMENTS_KEY] = list(fm.get(AMENDMENTS_KEY) or []) + [rec]
+    log = list(fm.get("activity_log") or [])
+    log.append(f"**{stamp}** — automod round {round_id} amended clause {idx} (review judged it "
+               f"unsatisfiable; awaiting ratification by the next review). Was: {old} — Now: "
+               f"{text} — Reason: {reason}")
+    fm["activity_log"] = log
+    fm["updated"] = stamp
+    _write_item(path, fm, body)
+    return rec
+
+
+def settle_amendments(item_id: int, round_id: str, *, ratified: bool,
+                      note: str = "") -> list[int]:
+    """Mark this round's pending amendments ratified or refused. A refusal
+    restores the clause text. Returns the clause indices settled."""
+    path = _item_path(item_id)
+    if path is None:
+        return []
+    fm, body = _split_frontmatter(path.read_text(encoding="utf-8"))
+    clauses = list(fm.get("acceptance_clauses") or [])
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    settled: list[int] = []
+    for a in fm.get(AMENDMENTS_KEY) or []:
+        if not isinstance(a, dict) or a.get("state") != "pending":
+            continue
+        if str(a.get("round_id") or "") != str(round_id):
+            continue
+        a["state"] = "ratified" if ratified else "refused"
+        a["settled_at"] = stamp
+        if note:
+            a["note"] = note[:600]
+        i = int(a.get("clause") or 0) - 1
+        if not ratified and 0 <= i < len(clauses):
+            clauses[i] = a.get("was") or clauses[i]
+        settled.append(i + 1)
+    if not settled:
+        return []
+    fm["acceptance_clauses"] = clauses
+    log = list(fm.get("activity_log") or [])
+    verb = "ratified" if ratified else "refused (clause text restored)"
+    log.append(f"**{stamp}** — automod review {verb} the amendment of clause(s) "
+               f"{', '.join(map(str, settled))} from round {round_id}"
+               + (f": {note[:300]}" if note else ""))
+    fm["activity_log"] = log
+    fm["updated"] = stamp
+    _write_item(path, fm, body)
+    return settled
 
 
 _LETTERED = re.compile(r"\(([a-h]|\d{1,2})\)\s+")
@@ -795,10 +953,17 @@ def review_disagreement(ledger: Path, item_id: int) -> int | None:
     blocking = [d for d in review_events_for_item(ledger, item_id) if d.get("blocking")]
     if len(blocking) < 2:
         return None
+    prev, last = blocking[-2], blocking[-1]
+    # Two refusals of the SAME commit are one refusal delivered twice — the
+    # duplicated gate of 2026-09-11, which parked #578 as a "disagreement"
+    # the author had never been shown. Rows without a head predate the field
+    # and keep the old reading.
+    if prev.get("head") and last.get("head") and prev["head"] == last["head"]:
+        return None
     def flagged(ev: dict) -> set[int]:
         return {int(c.get("clause") or 0) for c in (ev.get("clauses") or [])
-                if c.get("verdict") in ("unmet", "partial")}
-    both = flagged(blocking[-1]) & flagged(blocking[-2])
+                if c.get("verdict") in ("unmet", "partial", "unsatisfiable")}
+    both = flagged(last) & flagged(prev)
     both.discard(0)
     return min(both) if both else None
 
@@ -1069,7 +1234,7 @@ def settled_landings(ledger: Path) -> list[dict]:
 
 
 def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
-                 close: bool, why: str) -> Path:
+                 close: bool, why: str, tags: tuple[str, ...] = ()) -> Path:
     """Record the landing on the item; close it when `close`.
 
     The marker is written either way, so a landing is processed once. A
@@ -1087,6 +1252,9 @@ def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
     fm["activity_log"] = log
     fm["updated"] = stamp
     fm[LANDED_MARKER] = commit
+    if tags:
+        have = [str(t) for t in (fm.get("tags") or [])]
+        fm["tags"] = have + [t for t in tags if t not in have]
     if close:
         fm["status"] = "done"
         fm["completed"] = stamp
@@ -1125,7 +1293,15 @@ def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
             continue
         outcome = landing.get("outcome") or {}
         acc = outcome.get("acceptance")
-        if acc == "met":
+        human = human_clauses_of(None, fm)
+        tags: tuple[str, ...] = ()
+        if acc == "met" and human:
+            # The loop's half is done; the item is not. Left open, tagged,
+            # and the note names what a person still owes it.
+            close, tags = False, (NEEDS_HUMAN_TAG,)
+            why = ("the round reported every acceptance clause met; still waiting on a person for: "
+                   + "; ".join(human))
+        elif acc == "met":
             close = True
             why = "the round reported the acceptance check met" + (
                 f" — {outcome['summary']}" if outcome.get("summary") else "")
@@ -1142,11 +1318,13 @@ def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
             close, why = False, ("the round recorded no structured outcome (it predates the "
                                  "finalizer); a human decides")
         close_landed(item, commit=landing["commit"], round_id=landing["round_id"],
-                     settled_at=str(landing.get("settled_at") or ""), close=close, why=why)
+                     settled_at=str(landing.get("settled_at") or ""), close=close, why=why,
+                     tags=tags)
         S.append_event({"event": "item_landed", "item_id": item.id,
                         "round_id": landing["round_id"], "commit": landing["commit"],
                         "vault": landing["vault"], "closed": close,
-                        "acceptance": acc, "reason": why[:300]}, path=ledger)
+                        "acceptance": acc, "reason": why[:300],
+                        "human_clauses": human}, path=ledger)
         done.append({"item_id": item.id, "closed": close, "acceptance": acc})
         # An umbrella that closed `met` closes the members it consolidated.
         # `not_met`, `deferred` and no-outcome leave them folded: the
@@ -1720,7 +1898,8 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
                    spawned: list[int] | tuple[int, ...] = (),
                    merged: list[int] | tuple[int, ...] = (),
                    acceptance: str = "",
-                   acceptance_clauses: list[str] | tuple[str, ...] = ()) -> Path:
+                   acceptance_clauses: list[str] | tuple[str, ...] = (),
+                   human_clauses: list[str] | tuple[str, ...] = ()) -> Path:
     """Append the verdict to the item's activity log, optionally closing it.
 
     Always writes the evidence, never just the conclusion. An item closed as
@@ -1759,6 +1938,11 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         # contract from disk, and a human editing the clauses here is editing
         # what the grader holds the next round to.
         fm["acceptance_clauses"] = clauses
+    human = clean_clauses(human_clauses)
+    if verdict == "confirmed" and human:
+        # What a person must do before this is done. Kept apart from the
+        # clauses so no round is asked to fake an audit (#578's clause 5).
+        fm["human_clauses"] = human
 
     section = (f"\n\n## Automod triage — {stamp[:10]}\n\n"
                f"**Verdict:** {verdict}\n\n{evidence.strip()}\n")
@@ -1772,6 +1956,9 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         # The item is the handoff. A contract that lives only in the ledger
         # and a transcript is one the next reader of the item never sees.
         section += f"\n**Acceptance — what must become true:**\n{acceptance.strip()}\n"
+    if verdict == "confirmed" and human:
+        section += ("\n**Needs a person before this closes:**\n"
+                    + "\n".join(f"- {c}" for c in human) + "\n")
     if verdict == "confirmed" and clauses:
         section += "\n**Acceptance clauses** (graded one by one at the gate):\n" + "\n".join(
             f"{i}. {c}" for i, c in enumerate(clauses, 1)) + "\n"

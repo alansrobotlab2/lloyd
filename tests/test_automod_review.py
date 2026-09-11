@@ -223,8 +223,10 @@ class _Gate(G.Gate):
 def _arm(monkeypatch, tmp_path, *, grade, contract=None, prior=0):
     events: list[dict] = []
     monkeypatch.setattr(G.S, "append_event", lambda e, **k: events.append(e))
+    # Graded refusals of DISTINCT commits: only those spend an attempt now.
     monkeypatch.setattr(G.S, "read_events", lambda limit=100: [
-        {"event": "review", "round_id": "SM_REV"} for _ in range(prior)])
+        {"event": "review", "round_id": "SM_REV", "ok": True, "blocking": True,
+         "attempt": i + 1, "head": f"{i:040d}", "findings": f"f{i}"} for i in range(prior)])
     monkeypatch.setattr(G.W, "round_dir", lambda rid: tmp_path / "round")
     monkeypatch.setattr(RV, "item_contract", lambda iid, ledger=None: contract or {
         "id": iid, "title": "t", "body": "b", "clauses": ["the thing happens once"], "path": ""})
@@ -542,7 +544,7 @@ def test_the_implement_prompt_names_the_clauses_the_seams_and_the_item_id():
     text = I.PROMPT.format(item_id=9, status="up_next", priority="high", name="n", body="b",
                            triaged_ago="today", surface="code", check="c", evidence="e",
                            acceptance="a", clauses="    1. a\n    2. b", spawn_cap=I.SPAWN_CAP,
-                           round_label="item9", reoffer="", members="")
+                           round_label="item9", reoffer="", members="", human_clauses="")
     assert "    1. a\n    2. b" in text
     assert "item_id=9" in text and "Seams." in text and "review" in text
     assert "A deferral that names no id is recorded as `not_met`" in text

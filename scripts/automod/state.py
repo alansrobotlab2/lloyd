@@ -391,6 +391,69 @@ def write_gate_report(round_id: str, report: dict) -> Path:
     return path
 
 
+# ---------------------------------------------------------------------------
+# The gate-in-progress marker
+# ---------------------------------------------------------------------------
+#
+# One gate per round at a time. On 2026-09-11 the MCP transport's 300 s read
+# timeout fired under a running gate, the pool re-sent the request, and the
+# same round was gated twice concurrently — each run spending one of the two
+# review attempts on the same commit while the model saw neither. The marker
+# is what `automod_gate` checks before spawning and what `automod_gate_wait`
+# polls; `run_gate` owns it for the life of the process and clears it in a
+# `finally`, so a marker whose pid is dead means the gate died mid-ladder.
+
+def gate_marker_path(round_id: str) -> Path:
+    return ROUNDS_DIR / round_id / "gate.running"
+
+
+def pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except (ProcessLookupError, ValueError, TypeError, OverflowError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def write_gate_marker(round_id: str, *, pid: int, head: str = "", by: str = "") -> dict:
+    path = gate_marker_path(round_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"pid": int(pid), "started_at": time.time(), "started_iso": now_iso(),
+           "head": head or "", "by": by or ""}
+    path.write_text(json.dumps(rec), encoding="utf-8")
+    return rec
+
+
+def read_gate_marker(round_id: str) -> dict | None:
+    path = gate_marker_path(round_id)
+    if not path.exists():
+        return None
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def clear_gate_marker(round_id: str) -> None:
+    try:
+        gate_marker_path(round_id).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def gate_in_progress(round_id: str) -> dict | None:
+    """The marker when its process is still alive, else None. A dead
+    marker is left in place: whether that gate finished or died is the
+    reader's call (`gate.json` newer than the marker says finished)."""
+    rec = read_gate_marker(round_id)
+    if rec is None or not pid_alive(rec.get("pid") or 0):
+        return None
+    return rec
+
+
 def update_run_spec_base(round_id: str, base: str) -> bool:
     """Move the round's recorded base after a rebase.
 

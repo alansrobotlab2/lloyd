@@ -200,6 +200,27 @@ error-shaped lines.
   from the implementer), and a deferral that names no id is `not_met`. Runs
   after `tests`, before `venv`; skipped (recorded) only when no item is
   bound to the round.
+- **The review verdict has to reach the author, and for the rung's first
+  eighteen hours it did not.** 18 rounds, 17 aborts, 0 landings on
+  2026-09-11, every one ending "already sent back 2 times" with the model
+  never shown a finding. A gate with review runs 7–12 min; the MCP pool
+  built its HTTP client on the SDK default `read=300`, the stream died,
+  the pool *retried* — a second gate of the same round — and the cap
+  counted both rows. Now: `HTTP_READ_TIMEOUT_SECONDS` sits above
+  `CALL_TIMEOUT_SECONDS`; the pool re-sends a failed call only when the
+  server annotates it read-only/idempotent (`_retry_safe`); `automod_gate`
+  returns at once and runs **detached** behind a `gate.running` marker
+  (one gate per round, `run_gate` owns and clears it) and the model polls
+  `automod_gate_wait`; a review attempt is a *graded refusal of a distinct
+  commit* (event carries `head`; timeouts spend nothing; the same head is
+  answered from the ledger); `review_disagreement` ignores two refusals of
+  one head; the grader reads a detached checkout of the commit, never the
+  working tree; and the gate refuses over a running background task of the
+  session. `architecture/automod.md` §4.5b. Three new moves for the loop
+  (§4.5c): a clause verdict `unsatisfiable` → `automod_amend_clause`,
+  ratified or refused by the next review; triage's `human_clauses` stay
+  out of the graded contract and hold a `met` landing open, tagged
+  `needs-human`; `tests/test_review_transport.py` pins all of it.
 - **A round that never reached a verdict has not spent the item.**
   `implemented_ids` counted any finished round as the one attempt "whatever it
   did", and six of the loop's first seventeen attempts were spent by something

@@ -211,6 +211,9 @@ async def test_transport_failure_reconnects_instead_of_poisoning(pool, monkeypat
     entered them (that is what the pool's owner-task exists to guarantee),
     so closing one from the test's task deadlocks rather than simulating
     a drop.
+
+    Since 2026-09-11 the retry is only for a call the server annotates
+    read-only or idempotent — see the next test for why `Bash` is not one.
     """
     real_invoke = pool._invoke
     calls = {"n": 0}
@@ -223,13 +226,39 @@ async def test_transport_failure_reconnects_instead_of_poisoning(pool, monkeypat
 
     monkeypatch.setattr(pool, "_invoke", flaky)
 
-    result = await pool.call_tool("Bash", {"command": "echo reconnected"})
+    result = await pool.call_tool("_BackgroundTaskDrain", {}, session_id="reconnect-probe")
 
     assert calls["n"] == 2, "should have retried exactly once after reconnecting"
     assert result["is_error"] is False, result["content"][:300]
-    assert result["content"].strip() == "reconnected"
     assert pool._poisoned is False
     assert "Bash" in pool._tool_routes      # routes survived the reconnect
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_a_mutating_call_is_surfaced_not_resent_after_a_transport_drop(pool, monkeypatch):
+    """A read timeout fires while the server is still working, so for a
+    mutating call "retry" means "run it twice". On 2026-09-11 that turned
+    one `automod_gate` into two concurrent gates of the same round. The
+    server's own annotations decide: `Bash` carries no readOnly/idempotent
+    hint, so the drop is a tool error that says the call may have run."""
+    from app.harness.errors import ToolDispatchError
+    real_invoke = pool._invoke
+    calls = {"n": 0}
+
+    async def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("simulated transport drop")
+        return await real_invoke(*args, **kwargs)
+
+    monkeypatch.setattr(pool, "_invoke", flaky)
+    with pytest.raises(ToolDispatchError) as exc:
+        await pool.call_tool("Bash", {"command": "echo twice?"})
+    assert calls["n"] == 1
+    assert "NOT retried" in str(exc.value) and "may have run" in str(exc.value)
+    assert pool._poisoned is False
+    monkeypatch.undo()
+    assert (await pool.call_tool("Bash", {"command": "echo fine"}))["content"].strip() == "fine"
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -243,7 +272,7 @@ async def test_persistent_transport_failure_still_gives_up(pool, monkeypatch):
     monkeypatch.setattr(pool, "_invoke", always_down)
 
     with pytest.raises(ToolDispatchError):
-        await pool.call_tool("Bash", {"command": "echo nope"})
+        await pool.call_tool("_BackgroundTaskDrain", {}, session_id="down-probe")
     assert pool._poisoned is True
 
     # The pool fixture is module-scoped, so leave it usable for anything

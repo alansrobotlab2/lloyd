@@ -214,6 +214,12 @@ the lockfile, `vite.config.*`, `tsconfig*.json`). If the fix needs one of \
 them the item is still `confirmed`, but a human has to land it: begin \
 ACCEPTANCE with `human-only:` and name the path. The implementer skips those \
 instead of spending a round finding out.
+- **A condition only a person can satisfy is not an acceptance clause.** Ten \
+items audited by Alan, a sign-off, a scope decision, a number that needs a week \
+of real traffic: put it under HUMAN_CLAUSES, never under ACCEPTANCE_CLAUSES. \
+The implementer is not asked to fake it, the reviewer does not grade it, and \
+the item stays open tagged `needs-human` after the code lands until a person \
+does it. #578 spent its round on a clause asking for ten human-audited items.
 
 Finish with exactly this block and nothing after it:
 
@@ -225,6 +231,8 @@ ACCEPTANCE: <if confirmed: what must become true for this to be done; otherwise 
 ACCEPTANCE_CLAUSES: <if confirmed: the same contract as separately checkable clauses, \
 one per line, each numbered "1." "2." … and each one thing a single test can pin; otherwise \
 the word none>
+HUMAN_CLAUSES: <if confirmed and any: the conditions only a person can satisfy, one per \
+line, numbered; otherwise the word none>
 SPAWNED: <ids of the items you filed or were merged into in step 6, e.g. #401 #402; otherwise the word none>
 
 The clauses are graded one by one at the gate by a reviewer who sees only the \
@@ -244,7 +252,8 @@ def _parse_spawned(value: str) -> list[int]:
 
 
 _FIELD = re.compile(
-    r"^(VERDICT|SURFACE|CHECK|EVIDENCE|ACCEPTANCE_CLAUSES|ACCEPTANCE|SPAWNED):\s*(.*)$", re.I)
+    r"^(VERDICT|SURFACE|CHECK|EVIDENCE|ACCEPTANCE_CLAUSES|HUMAN_CLAUSES|ACCEPTANCE|SPAWNED):\s*(.*)$",
+    re.I)
 
 
 def _clauses(value) -> list[str]:
@@ -317,6 +326,7 @@ def parse_verdict(text: str, structured: dict | None = None) -> dict | None:
         # the placeholder the text path already reads as "none", and a bullet
         # would collide with it.
         "acceptance_clauses": _clauses(joined("ACCEPTANCE_CLAUSES", 8000)),
+        "human_clauses": _clauses(joined("HUMAN_CLAUSES", 4000)),
         "spawned": _parse_spawned(joined("SPAWNED", 400)),
         "source": "regex",
     }
@@ -355,6 +365,7 @@ def _from_structured(obj: dict, verdicts, surfaces) -> dict | None:
         "evidence": str(obj.get("evidence") or "").strip()[:2000],
         "acceptance": _acceptance_text(str(obj.get("acceptance") or ""))[:3000],
         "acceptance_clauses": _clauses(obj.get("acceptance_clauses")),
+        "human_clauses": _clauses(obj.get("human_clauses")),
         "spawned": spawned,
         "source": "structured",
     }
@@ -635,7 +646,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
                      check=parsed["check"], close=close, spawned=spawned, merged=merged,
                      acceptance=parsed["acceptance"],
-                     acceptance_clauses=parsed.get("acceptance_clauses") or ())
+                     acceptance_clauses=parsed.get("acceptance_clauses") or (),
+                     human_clauses=parsed.get("human_clauses") or ())
 
     # The cap is a prompt instruction, and the items exist on disk by the time
     # we read SPAWNED — unfiling them would destroy real findings. So it is
@@ -654,6 +666,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "evidence": parsed["evidence"][:1000],
                     "acceptance": parsed["acceptance"],
                     "acceptance_clauses": parsed.get("acceptance_clauses") or [],
+                    "human_clauses": parsed.get("human_clauses") or [],
                     "closed": close,
                     "spawned": spawned, "merged": merged, "id_floor": id_floor,
                     "spawned_unverified": unverified,
