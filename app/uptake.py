@@ -530,6 +530,26 @@ def _parse_verdict(text: str) -> bool | None:
     return None
 
 
+def secondary_endpoint() -> str:
+    """The URL the classifier will actually POST to, resolved by the tree's owner.
+
+    Exposed for two reasons. A test that patches `secondary_models._endpoint` proves
+    the request plumbing but says nothing about WHICH slot the acceptance measurement
+    ran against, and that resolution is itself a seam #552's precision number sits on.
+    And an error path that can only name a model is not actionable — "start
+    `agent-llm-secondary`" only follows if you know the URL that was tried.
+
+    Never raises: an unconfigured slot must be describable in a report, not
+    exception-shaped, and the caller already fails closed on no verdict.
+    """
+    try:
+        from app.secondary_models import _endpoint
+        url, _ = _endpoint()
+        return url
+    except Exception as exc:            # noqa: BLE001 - describe, never propagate
+        return f"<unresolved: {type(exc).__name__}: {exc}>"
+
+
 def _post_secondary(payload: dict[str, Any]) -> dict[str, Any]:
     from app.secondary_models import _endpoint  # the tree's own resolver
 
@@ -1145,7 +1165,13 @@ def build_uptake_table(
     skill_seen: dict[str, set[str]] = {}
     skill_bound: dict[str, str] = {}
     _TIGHTNESS = {"session_wide": 1, "causal_event_order": 2, "injected_this_turn": 3}
-    assert PRESENCE_BOUNDS == frozenset(_TIGHTNESS), "bound vocabulary drifted"
+    # `raise`, not `assert`: this is an integrity check on the emitted table, and an
+    # assert is compiled out by `python -O`, which would leave the bound vocabulary
+    # free to drift on exactly the runs that optimise.
+    if PRESENCE_BOUNDS != frozenset(_TIGHTNESS):
+        raise RuntimeError(
+            f"presence bound vocabulary drifted: PRESENCE_BOUNDS={sorted(PRESENCE_BOUNDS)} "
+            f"vs tightenness ladder {sorted(_TIGHTNESS)}")
 
     def note_skill(name: str, turn: Turn, bound: str) -> None:
         bucket = skill_present.setdefault(name, [])

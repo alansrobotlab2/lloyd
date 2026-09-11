@@ -28,6 +28,7 @@ import json
 import os
 import re
 import sys
+from urllib.parse import urlparse
 from pathlib import Path
 
 import pytest
@@ -1211,9 +1212,9 @@ def test_live_engine_scores_the_corpus_and_reports_every_way_precision_was_measu
         # by default; the opt-out exists for a box that is genuinely offline and
         # makes the omission visible as a skip rather than a pass.
         if os.environ.get(ALLOW_SILENT_ENGINE) == "1":
-            pytest.skip(f"{ALLOW_SILENT_ENGINE}=1: {uptake.SECONDARY_URL} is "
+            pytest.skip(f"{ALLOW_SILENT_ENGINE}=1: {uptake.secondary_endpoint()} is "
                         "deliberately down, so the uptake measurement did not run")
-        pytest.fail(f"secondary engine at {uptake.SECONDARY_URL} is not answering. "
+        pytest.fail(f"secondary engine at {uptake.secondary_endpoint()} is not answering. "
                     "Step 2's acceptance measurement cannot be claimed without it. "
                     f"Start it, or set {ALLOW_SILENT_ENGINE}=1 if this box is offline "
                     "on purpose — the fail-closed behaviour of a silent engine is "
@@ -1257,10 +1258,13 @@ def test_recorded_engine_replies_still_reproduce_on_the_live_engine():
     pinned slot, so a mismatch is the model or the prompt having moved — which is
     exactly when a committed precision figure stops being re-quotable.
     """
-    awake = uptake.classify_dispute("Built it, works now.", "it 404s on me") is not None
-    if not awake:
-        pytest.skip(f"secondary engine down; {ALLOW_SILENT_ENGINE} governs the "
-                    "measurement test, which fails rather than silently skipping")
+    # No skip here either. A reproducibility check that skips when the engine is
+    # asleep is how "the committed matrix still holds" quietly stops being checked.
+    if uptake.classify_dispute("Built it, works now.", "it 404s on me") is None:
+        pytest.fail(f"secondary engine at {uptake.secondary_endpoint()} is not "
+                    "answering, so the committed engine_raw replies cannot be "
+                    "re-asked. The recorded matrix is unverified against the model "
+                    "until it does.")
     labels = uptake.load_labels()
     index = {t.turn_id: t for t in uptake.human_turns(days=900)}
     checked = 0
@@ -1613,3 +1617,62 @@ def test_store_sizes_counts_real_duplicate_rows_from_a_populated_store(tmp_path,
     assert f["duplicate_rows"] == 1, f
     assert f["probed_at"], "a count without its timestamp is the defect, not the number"
     assert "ages" in f["note"]
+
+
+def test_the_secondary_url_the_measurement_uses_is_the_one_the_tree_resolves():
+    """`_endpoint()` is patched out everywhere else, so nothing pinned which slot the
+    acceptance measurement actually runs against.
+
+    A classifier graded against the wrong engine is a precision figure about a model
+    nobody serves, and `uptake` does not own that URL — `app.secondary_models` does.
+    Called unpached, so resolution itself is what is asserted, plus that the URL
+    uptake would post to is the one the resolver returns.
+    """
+    from app.secondary_models import _endpoint
+
+    url, model = _endpoint()
+    assert url.startswith(("http://", "https://")), url
+    assert urlparse(url).port, f"no port in a localhost slot URL: {url}"
+    assert model, "an empty model name means the slot was never resolved"
+    assert uptake.secondary_endpoint() == url, (uptake.secondary_endpoint(), url)
+
+    # And the resolver's failure mode is describable, not exception-shaped: a
+    # misconfigured slot must be reportable, because a bare exception in a test
+    # message reads as "the test is broken" rather than "the engine is not there".
+    def boom():
+        raise RuntimeError("no slot configured")
+    import app.secondary_models as sm
+    saved = sm._endpoint
+    try:
+        sm._endpoint = boom
+        described = uptake.secondary_endpoint()
+    finally:
+        sm._endpoint = saved
+    assert described.startswith("<unresolved:") and "no slot configured" in described
+
+
+def test_a_worktree_with_no_sessions_falls_back_instead_of_reporting_a_clean_table(tmp_path):
+    """The fallback that keeps a round from measuring nothing and calling it health.
+
+    A gate runs in a worktree whose `sessions/` is empty or absent. Without the
+    live-checkout fallback the probe would read zero turns, find zero disputes, and
+    write a flawless uptake table over an empty corpus — the shape of every guard in
+    this tree that reads its own missing input and reports a verdict. This is the
+    root every `sessions/`, `event_logs/` and `eval/baselines/` read hangs off, and
+    no test crossed it.
+    """
+    import app.uptake as U
+
+    # A real stand-in for a round's worktree: the directory exists, `sessions/`
+    # exists inside it, and there is nothing in there to read.
+    empty = tmp_path / "worktree"
+    (empty / "sessions").mkdir(parents=True)
+    assert U._has_sessions(empty) is False, "fixture must have an EMPTY sessions dir"
+    resolved = U.lloyd_root()
+    assert resolved != empty, "fell back to nothing: the guard did not fire"
+    assert U._has_sessions(resolved) is True, (
+        f"lloyd_root() resolved to {resolved}, which has no sessions either — every "
+        "table read downstream of this would be silently empty")
+    # And the fallback is not decorative: reading turns through it yields a corpus,
+    # not the zero that the worktree path would have given.
+    assert len(U.human_turns(days=900)) > 0, resolved
