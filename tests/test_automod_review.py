@@ -694,3 +694,27 @@ def test_a_vault_land_passing_review_records_it(vault, monkeypatch):
     out = V.land(["skills/foo/SKILL.md"], "skill: foo v5", item_id=9)
     assert out["review"] == "pass"
     assert _vault_events("vault_review")[-1]["blocking"] is False
+
+
+def test_the_vault_grader_only_judges_a_vault_items_clauses(isolated, monkeypatch):
+    """#551 was a `code` item whose round landed a skill and a task file first.
+    The vault grader held that half to the whole contract and refused it for
+    the code it had not written yet — and would have every time. Only a
+    `vault` surface's clauses can be met by vault paths; the rest are the code
+    gate's. No network: the skip is decided before any grader runs."""
+    write_item(isolated, 570, clauses=["a"])
+    S.append_event({"event": "backlog_triage", "item_id": 570, "verdict": "confirmed",
+                    "surface": "code", "acceptance": "a", "acceptance_clauses": ["a"]},
+                   path=S.LEDGER_PATH)
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: pytest.fail("grader must not run"))
+    kind, why = RV.grade_vault(item_id=570, paths=["skills/x/SKILL.md"], diff="+x", vault=isolated)
+    assert kind == "skipped" and "surface is code" in why
+    S.append_event({"event": "backlog_triage", "item_id": 570, "verdict": "confirmed",
+                    "surface": "vault", "acceptance": "a", "acceptance_clauses": ["a"]},
+                   path=S.LEDGER_PATH)
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": True, "structured": {
+        "premise": "sound", "summary": "ok", "test_honesty": [], "seams_unverified": [],
+        "clauses": [{"clause": 1, "verdict": "met", "evidence_path": "skills/x/SKILL.md",
+                     "evidence_line": 1, "test_node_id": "", "how_verified": "read", "note": ""}]}})
+    (isolated / "skills" / "x").mkdir(parents=True); (isolated / "skills" / "x" / "SKILL.md").write_text("x")
+    assert RV.grade_vault(item_id=570, paths=["skills/x/SKILL.md"], diff="+x", vault=isolated)[0] == "pass"

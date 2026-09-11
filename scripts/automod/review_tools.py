@@ -32,7 +32,6 @@ import json
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -97,9 +96,15 @@ def checkout(repo: Path, commit: str, where: Path, *, strip_tests: list[str] | N
 
 
 def release(repo: Path, where: Path) -> None:
+    """Drop the detached worktree AND its `review_<label>/` dir (gate-state
+    included) — the first cut removed only `home/lloyd` and left an empty
+    shell per case under ~/lloyd-work."""
     _git(repo, "worktree", "remove", "--force", str(where))
     _git(repo, "worktree", "prune")
     shutil.rmtree(where, ignore_errors=True)
+    shell = where.parent.parent
+    if shell.name.startswith("review_"):
+        shutil.rmtree(shell, ignore_errors=True)
 
 
 def child_env(worktree: Path, scratch: Path) -> dict:

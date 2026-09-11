@@ -444,8 +444,17 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
                 model: str = "primary") -> tuple[str, str]:
     """`(kind, findings)` for a vault round's staged edit — the
     `vault_round.GRADER` contract. `skipped` when the grader cannot run."""
-    from scripts.automod import vault_round as VR
+    from scripts.automod import backlog as B, state as S, vault_round as VR
     vault = Path(vault or VR.VAULT)
+    # Only a `vault` item's clauses can be satisfied by vault paths. #551 was a
+    # `code` item whose round landed a skill and a task file first; grading the
+    # whole contract against that half refused it for the code it had not
+    # written yet — and would have every time. A `code` or `mixed` item's
+    # clauses are the code gate's to judge; the vault half is still validated
+    # through the real loaders.
+    surface = str((B.confirmed_verdicts(S.LEDGER_PATH).get(int(item_id)) or {}).get("surface") or "")
+    if surface and surface != "vault":
+        return "skipped", f"surface is {surface}: the clauses are graded at the code gate"
     contract = item_contract(int(item_id))
     if not contract["clauses"]:
         return "skipped", f"item #{item_id} has no acceptance clauses"
