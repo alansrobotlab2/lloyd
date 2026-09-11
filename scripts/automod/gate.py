@@ -1,4 +1,4 @@
-"""The promotion gate: eight rungs, cheapest first, every one fails closed.
+"""The promotion gate: nine rungs, cheapest first, every one fails closed.
 
 "Fails closed" is not a slogan here — it is the reason `_rung` catches every
 exception and records it as a FAILED rung. With no human review tier, a rung
@@ -10,17 +10,29 @@ candidate that weakens the gate is judged by the old gate, not by itself.
 Rung order is a cost ladder, and it short-circuits: an import error should
 cost 3 seconds, not a full canary boot.
 
-  0 preflight      ~1s    lock, clean tree, ancestry, diff scope
+  0 preflight      ~1s    lock, clean tree, ancestry, diff scope; with an item
+                          bound, that it has clauses and the diff has a test
   1 static         ~8s    compileall, import smoke, pyflakes delta
   2 tests         ~35s    full pytest + a collected-count floor; on
                           failure, re-probes the failing files at the
                           round's base to say whose breakage it is
-  3 venv        0-300s    only when requirements changed (reflink + uv)
-  4 canary boot   ~30s    both /health green, tool floor, config-follows-code
-  5 canary smoke  ~30s    one real turn, sentinel through a real Bash call
+  3 review      60-180s   a second reader: a fresh session on the LIVE
+                          backend grades the diff against the item's
+                          acceptance clauses (scripts/automod/review.py).
+                          Refuses with findings; the premise verdict decides
+                          whether the item is retried or handed to a human.
+                          Skipped (recorded) only when no item is bound.
+  4 venv        0-300s    only when requirements changed (reflink + uv)
+  5 canary boot   ~30s    both /health green, tool floor, config-follows-code
+  6 canary smoke  ~30s    one real turn, sentinel through a real Bash call
                           (recorded as SKIPPED when the engine is unreachable;
                            `skip_smoke` is refused while it answers)
-  6 drill         ~90s    only when the diff touches the rollback path
+  7 drill         ~90s    only when the diff touches the rollback path
+
+`review` sits after `tests` so the grader can trust a green tree and is
+handed the counts, and before `venv` so a refusal saves the venv build, the
+boot, the smoke and the drill — and because `canary_smoke` must immediately
+precede `drill` (the drill needs the canary's ports).
 """
 
 from __future__ import annotations
@@ -295,12 +307,17 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
 
 class Gate:
     def __init__(self, round_id: str, worktree: Path, base: str, *,
-                 live_root: Path | None = None, skip_smoke: bool = False):
+                 live_root: Path | None = None, skip_smoke: bool = False,
+                 item_id: int | None = None):
         self.round_id = round_id
         self.worktree = Path(worktree)
         self.base = base
         self.live = live_root or LIVE_ROOT
         self.skip_smoke = skip_smoke
+        # The backlog item this round implements, when the round said so
+        # (`automod_start(item_id=…)`, recorded in run_spec.yaml). It is what
+        # the review rung grades against; without it the rung records a skip.
+        self.item_id: int | None = int(item_id) if item_id else None
         self._smoke_skip_reason = "not requested"
         self._smoke_skip_refused = ""
         self.python = self.live / ".venvs" / "lloyd" / "bin" / "python"
@@ -354,6 +371,15 @@ class Gate:
         if (res.data or {}).get("external_blocker"):
             event["external_blocker"] = True
             event["external_failures"] = (res.data or {}).get("external_failures", [])
+        # The review rung's two verdicts ride the event for the same reason:
+        # `backlog.implement_outcomes` reads them long after the round dir is
+        # gone, and the findings are what the next round is told.
+        for key in ("review_retry", "review_premise_unsound"):
+            if (res.data or {}).get(key):
+                event[key] = True
+        for key in ("review_findings", "review_summary", "review_attempt"):
+            if (res.data or {}).get(key):
+                event[key] = (res.data or {})[key]
         S.append_event(event)
         print(f"[{'PASS' if ok else 'FAIL'}] {name} ({res.seconds:.1f}s) {res.detail[:160]}")
         return ok
@@ -365,7 +391,9 @@ class Gate:
         # to notice it was gone. A skip is now a recorded rung that says so.
         ladder = [("preflight", self.rung_preflight), ("static", self.rung_static),
                   ("frontend", self.rung_frontend),
-                  ("tests", self.rung_tests), ("venv", self.rung_venv),
+                  ("tests", self.rung_tests),
+                  ("review", self.rung_review),
+                  ("venv", self.rung_venv),
                   ("canary_boot", self.rung_canary_boot),
                   ("canary_smoke", self.rung_canary_smoke),
                   ("drill", self.rung_drill)]
@@ -475,6 +503,26 @@ class Gate:
         ok, reason, buckets = spec.check_scope(changed)
         if not ok:
             return False, reason, {**data, "buckets": buckets}
+
+        if self.item_id:
+            # Zero-cost fail-fasts for a round that has a contract. A round
+            # with no clauses has nothing the review rung can grade; a
+            # Python change with no test in the diff cannot have pinned any
+            # clause (the implement prompt demands a pinning test). Both are
+            # the round's own, and both are cheaper to learn here than after
+            # a 77 s test run.
+            from scripts.automod import review as RV
+            contract = RV.item_contract(self.item_id)
+            if not contract["clauses"]:
+                return False, (f"item #{self.item_id} has no acceptance clauses to judge "
+                               f"against — the review rung cannot grade it"), data
+            py_changed = any(p.endswith(".py") and not p.startswith("tests/") for p in changed)
+            if py_changed and not any(p.startswith("tests/") for p in changed):
+                return False, (f"item #{self.item_id} has {len(contract['clauses'])} acceptance "
+                               f"clause(s) and this diff changes code with no test under "
+                               f"tests/ — nothing pins a clause"), data
+            data["item_id"] = self.item_id
+            data["clauses"] = len(contract["clauses"])
 
         for port in (C.cc.BACKEND_PORT, C.cc.MCP_PORT):
             if not C.port_free(port):
@@ -653,6 +701,85 @@ class Gate:
             return False, f"test files removed: {removed}", counts
         return True, (f"{counts['passed']} passed, {counts['xfailed']} xfailed, "
                       f"{counts['skipped']} skipped"), counts
+
+    def rung_review(self):
+        """A second reader grades the diff against the item's clauses.
+
+        Fails closed in every direction that matters: an unreachable grader is
+        `external_blocker` (the engine, not the diff — the item keeps its
+        attempt), never a pass; a third refusal in one round is refused
+        without asking the model again; and a clause the grader marks `met`
+        without evidence is downgraded in Python. Only a round with no item
+        bound records a skip, because there is no contract to grade against.
+        """
+        if not self.item_id:
+            return True, "SKIPPED (no backlog item bound to this round — no contract to grade)", {
+                "skipped": True, "reason": "no item"}
+        from scripts.automod import review as RV
+        contract = RV.item_contract(self.item_id)
+        if not contract["clauses"]:
+            return False, f"item #{self.item_id} has no acceptance clauses", {}
+        prior = [e for e in S.read_events(limit=1000)
+                 if e.get("event") == "review" and e.get("round_id") == self.round_id]
+        attempt = len(prior) + 1
+        if attempt > RV.REVIEW_MAX_PER_ROUND:
+            return False, (f"review already sent this round back {RV.REVIEW_MAX_PER_ROUND} "
+                           f"times; abort and report (automod_abort with the findings as "
+                           f"the reason) — the item comes back to the next round with them"), {
+                               "review_retry": True, "review_exhausted": True,
+                               "review_attempt": attempt,
+                               "review_findings": str((prior[-1] or {}).get("findings") or "")[:1500]}
+        changed = list(self.report.changed_paths)
+        changed_tests = [p for p in changed if p.startswith("tests/") and p.endswith(".py")]
+        pre = RV.honesty_prechecks(self.worktree, self.base, changed,
+                                   n_clauses=len(contract["clauses"]))
+        test_counts = next((r.data for r in self.report.rungs if r.name == "tests"), {}) or {}
+        started = time.time()
+        res = RV.grade(round_id=self.round_id, worktree=self.worktree, base=self.base,
+                       contract=contract, changed_paths=changed, test_counts=test_counts,
+                       python=self.python, child_env=self._child_env(),
+                       scratch_dir=W.round_dir(self.round_id) / "gate-state")
+        base_event = {"event": "review", "round_id": self.round_id, "item_id": self.item_id,
+                      "session_id": res.get("session_id"), "attempt": attempt,
+                      "seconds": round(time.time() - started, 1), "grader_model": "primary",
+                      "prechecks": pre}
+        if not res["ok"]:
+            S.append_event({**base_event, "ok": False, "blocking": False,
+                            "error": str(res.get("error") or "")[:400]})
+            return False, (f"review could not run: {res.get('error')} — the grader, not the "
+                           f"diff; the item keeps its attempt"), {
+                               "external_blocker": True, "external_failures": [],
+                               "review_session": res.get("session_id")}
+        parsed = RV.parse_review(res["structured"], worktree=self.worktree,
+                                 changed_tests=changed_tests, n_clauses=len(contract["clauses"]))
+        if parsed is None:
+            S.append_event({**base_event, "ok": False, "blocking": False,
+                            "error": "structured review unusable"})
+            return False, "review returned an unusable object; the item keeps its attempt", {
+                "external_blocker": True, "external_failures": [],
+                "review_session": res.get("session_id")}
+        kind, findings = RV.decide(parsed, pre)
+        S.append_event({**base_event, "ok": True, "premise": parsed["premise"],
+                        "clauses": parsed["clauses"], "test_honesty": parsed["test_honesty"],
+                        "seams_unverified": parsed["seams_unverified"],
+                        "downgraded": parsed["downgraded"], "summary": parsed["summary"],
+                        "blocking": kind != "pass", "kind": kind,
+                        "findings": findings[:2000]})
+        if kind == "unsound":
+            return False, f"review: premise unsound — {findings}", {
+                "review_premise_unsound": True, "review_summary": findings[:800],
+                "review_session": res.get("session_id")}
+        if kind == "retry":
+            nxt = ("fix what it names, commit, and gate again"
+                   if attempt < RV.REVIEW_MAX_PER_ROUND else
+                   "abort and report — the item comes back with these findings and your branch")
+            return False, f"review sent it back ({attempt}/{RV.REVIEW_MAX_PER_ROUND}; {nxt}): {findings}", {
+                "review_retry": True, "review_findings": findings[:1500],
+                "review_attempt": attempt, "review_session": res.get("session_id")}
+        return True, (f"review: {RV.summarize_clauses(parsed)} of {len(contract['clauses'])} "
+                      f"clause(s); {parsed['summary'][:160]}"), {
+                          "review_session": res.get("session_id"),
+                          "clauses": parsed["clauses"], "review_attempt": attempt}
 
     def rung_venv(self):
         if not spec.touches_requirements(self.report.changed_paths):

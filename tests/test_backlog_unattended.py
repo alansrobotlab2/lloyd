@@ -553,7 +553,7 @@ def _reaper_env(monkeypatch, tmp_path, *, worktree=True, busy=(), current=None):
     from scripts.automod import round as R, worktree as W
     import app.sessions_io as sio
     aborted: list[str] = []
-    monkeypatch.setattr(R, "abort", lambda rid: aborted.append(rid) or {"aborted": rid})
+    monkeypatch.setattr(R, "abort", lambda rid, reason="": aborted.append(rid) or {"aborted": rid})
     import shutil
     wt = tmp_path / "wt"
     if worktree:
@@ -1078,11 +1078,12 @@ def test_the_kill_switch_and_an_already_closed_item(isolated):
 
 @pytest.mark.parametrize("obj,expect", [
     ({"acceptance": "met", "landed": True, "deferred_to": [], "summary": "x", "spawned": ["7", 8]},
-     {"landed": True, "acceptance": "met", "deferred_to": [], "summary": "x", "spawned": [7, 8]}),
+     {"landed": True, "acceptance": "met", "clause_outcomes": [], "deferred_to": [],
+      "summary": "x", "spawned": [7, 8]}),
     ({"acceptance": "maybe"}, None),
     ("not a dict", None),
     ({"acceptance": "deferred", "deferred_to": ["618", "bad"], "summary": "  a   b  " + "z" * 500},
-     {"landed": False, "acceptance": "deferred", "deferred_to": [618],
+     {"landed": False, "acceptance": "deferred", "clause_outcomes": [], "deferred_to": [618],
       "summary": ("a b " + "z" * 500)[:400], "spawned": []}),
 ])
 def test_parse_outcome_validates_and_clamps(obj, expect):
@@ -1297,7 +1298,7 @@ def test_an_abandoned_round_returns_the_item_to_the_pool(isolated, monkeypatch):
     S.append_event({"event": "round_start", "round_id": "SM_725"}, path=S.LEDGER_PATH)
     from scripts.automod import round as R, worktree as W
     monkeypatch.setattr(W, "worktree_path", lambda rid: isolated)   # "exists"
-    monkeypatch.setattr(R, "abort", lambda rid: None)
+    monkeypatch.setattr(R, "abort", lambda rid, reason="": None)
     monkeypatch.setattr(S, "read_current", lambda: {})
     out = I.reap_abandoned_rounds(now=9e12)
     assert out and out[0]["round_id"] == "SM_725"

@@ -39,7 +39,7 @@ booting.
 ## 2. Shape
 
 ```
- propose ──► WORKTREE ──► GATE (8 rungs) ──► PROMOTER ──► live tree
+ propose ──► WORKTREE ──► GATE (9 rungs) ──► PROMOTER ──► live tree
                               │                  │
                               └── fail ──────────┤
                                                  ▼
@@ -142,7 +142,7 @@ automod tools rather than trusted with a prompt that says not to.
 ```bash
 python -m scripts.automod.round start "make X faster"   # cuts a worktree
 #   ...edit that worktree, commit inside it...
-python -m scripts.automod.round gate  SM_<id>           # 8 rungs, ~2.5 min
+python -m scripts.automod.round gate  SM_<id>           # 9 rungs, ~4 min
 python -m scripts.automod.round land  SM_<id>           # idle-gated, verified
 ```
 
@@ -390,13 +390,26 @@ visible only as an open count that never went down.
 
 An implement turn now ends the way a triage turn does: one more completion
 under a grammar (`IMPLEMENT_OUTCOME_SCHEMA`) restating the result as
-`{landed, acceptance: met|not_met|deferred, deferred_to, summary, spawned}`,
+`{landed, acceptance: met|not_met|deferred|unnecessary, clause_outcomes:
+[{clause, outcome, evidence, deferred_to}], deferred_to, summary, spawned}`,
 recorded on the `finished` event as `outcome`, with `outcome_error` beside it
 so a finalizer that quietly stopped working does not look like one that is
 working. `close_settled_items` runs on every implement poll: for each
 settled promotion (or vault landing) whose item is still open and not yet
 marked, it writes `automod_landed: <sha>` and an activity line, and sets
-`status: done` **only when the round said `met`**.
+`status: done` **only when every clause said `met`**.
+
+The acceptance is **clauses** since the review rung (§4.5): triage writes
+`acceptance_clauses` (schema field, `ACCEPTANCE_CLAUSES:` numbered lines in
+the text block, and the item's front matter), the implementer reports per
+clause, and `parse_outcome` derives the overall word from them. **A deferral
+that names no id is `not_met`.** #544 declared `deferred` with
+`deferred_to: []`; the sweep wrote "deferred to an unnamed follow-up; close
+this when that closes" and `desired_statuses`' landed branch parked it
+`in_progress` with nothing ever re-reading the empty list. A landed round
+whose own outcome says a clause is `not_met` is offered **once more for
+exactly those clauses** (`implement_outcomes` → `partial`, cap 1); the branch
+is gone with the landing, so that round starts from live main.
 
 Only the round judged the acceptance, and it is asked in a grammar rather
 than read out of prose. Everything else is noted and left open: `deferred`
@@ -404,7 +417,9 @@ names the ids it waits on, `not_met` says so, and a round from before the
 finalizer says "a human decides". A closed item is never re-triaged, which is
 the whole reason not to guess — and the reason the prompt tells the model
 that `met` on an unverified acceptance is the one claim the loop cannot
-recover from.
+recover from. Items confirmed before clauses existed carry prose only; every
+reader (`acceptance_clauses_of`) treats that prose as one clause rather than
+refusing the whole current pool.
 
 ### 3.3 For humans (this repo's development)
 
@@ -468,7 +483,7 @@ build there would otherwise dirty the tree, and both `gate.py` and
 
 ## 4. The gate
 
-Eight rungs, cheapest first, short-circuiting. **Every rung fails closed** —
+Nine rungs, cheapest first, short-circuiting. **Every rung fails closed** —
 `_rung` catches exceptions and records them as failures, because with no human
 review tier a rung that errors and reads as "didn't fail" silently removes a
 check.
@@ -478,9 +493,11 @@ candidate that weakens the gate is judged by the old gate.
 
 | Rung | Typical | Catches |
 |---|---|---|
-| preflight | ~0s | dirty tree, moved base, merge commits, out-of-scope paths |
+| preflight | ~0s | dirty tree, moved base, merge commits, out-of-scope paths; an item with no clauses, a code diff with no test |
 | static | ~2s | syntax errors, **import failures**, new pyflakes findings |
+| frontend | ~5s | new tsc errors, a broken vite build (only when `web/` changed) |
 | tests | ~30-40s | the full suite, plus floors on collected AND passed |
+| review | 1–3m | a diff that does not do what the item asked — §4.5 |
 | venv | 3s–5m | only when `requirements*` changed |
 | canary_boot | ~2-30s | a build that will not start |
 | canary_smoke | ~5-15s | a build that starts but cannot dispatch a tool |
@@ -501,6 +518,82 @@ still pass.
 `pytest` substitutes for neither. It imports modules in its own process and
 never starts `server.py`, so it stays green through a broken startup event, a
 port collision, or an aggregator that registers no tools.
+
+### 4.5 The review rung: did it do what was asked?
+
+Eight rungs asked whether the change *broke* something. None asked whether
+it did what the acceptance check said, and the only verdict on that was the
+round's own self-report. Over the loop's first four days every landed round
+was green on every rung, seven items closed, and #544 — 3,271 tests, canary,
+smoke, a flat regression eval — had one of five acceptance clauses skipped,
+half the worker fleet uncovered by the ledger it added, an `Edit` replay that
+silently reverted files, and a test asserting `x == [] or True`. A human with
+the item and the diff found all four in forty minutes. That is the grader's
+whole input.
+
+`scripts/automod/review.py`. A **fresh session on the live backend** — the
+primary model, `platform: worker`, Inner Voice off, `priority: 1` — is handed
+the item, its clauses, `git diff base...HEAD` and the changed test files, and
+**not** the triage evidence or the round's report: the author's prose primes
+agreement. It reads the worktree at its absolute path and may run tests only
+through `<round>/gate-state/run_tests.sh`, which bakes in the gate's
+interpreter, cwd and scratch state so a grader-run suite cannot write live
+automod state. It answers under `REVIEW_SCHEMA`: a premise verdict, one entry
+per clause with `evidence_path`, `test_node_id` and `how_verified`, a
+`test_honesty` list and a `seams_unverified` list.
+
+Not the canary, deliberately. The canary is candidate code end to end
+(`canary_config.py` puts the worktree on `PYTHONPATH`): its harness,
+finalizer, prompt builder and tool policy are the round's own, so a round
+touching `app/harness/finalizer.py` would grade itself with itself — the
+gate's founding rule in reverse. The canary's sessions dir is also deleted
+with the worktree, and the grader transcript is what the scorecard reads.
+
+Three rails keep the verdict honest without trusting the model:
+
+- **`parse_review` downgrades `met` to `partial`** when `evidence_path` is not
+  in the worktree, `test_node_id` is not in a test file the diff changed, or
+  `how_verified` is `inferred`. A clause the grader did not mention is
+  `partial`. A lazy grader cannot pass a round.
+- **Deterministic honesty checks run first**, as a delta against the base
+  version of each changed test file: `or True`, `assert True`, a new skip or
+  xfail, and — when the item has clauses and code changed — no new `def
+  test_`. A hit is a finding whatever the grader says.
+- **Unverified seams block.** The three worst defects in #544 were all
+  cross-process (a contextvar lost over a loopback POST, a `Task` subagent,
+  `_meta` over MCP) and the code graph is blind across every one of them.
+
+The rung's four outcomes, and where each goes:
+
+| grader says | rung | then |
+|---|---|---|
+| every clause `met`, no findings | pass | ladder continues |
+| premise sound; a clause unmet/partial, an honesty finding, a seam | fail, `review_retry` + `review_findings` on the gate event | the round fixes and re-gates once in the same turn; the second refusal says *abort and report*; a third gate call is refused without asking the model. A turn that ends unlanded hands the item back as `implement_outcomes` → `review_retry` (cap 2), findings in `reoffer_reason`, branch kept — the next round passes it as `automod_start(from_branch=…)` and begins where this one stopped, rebased onto live main |
+| premise unsound | fail, `review_premise_unsound` | the existing `spent` path: `draft` + `needs-human`, tag `review-premise`, the grader's summary on the item |
+| grader unreachable, 503, timeout, unusable object | fail, `external_blocker` | the engine, not the diff; the item keeps its attempt. Never a SKIPPED pass — a waived review is the #544 shape |
+
+It sits **after `tests`**, so it can trust a green tree and is handed the
+counts, and **before `venv`**, so a refusal saves the build, the boot, the
+smoke and the drill (and because `canary_smoke` must immediately precede
+`drill`). It is skipped, and recorded as skipped, only for a round with no
+item bound — a human's round has no contract to grade against.
+
+**Termination.** Three bounds end the author/grader loop: two refusals per
+round, `REVIEW_RETRY_CAP = 2` across rounds, and an early exit — when the
+same clause comes back unmet on two consecutive reviews of an item
+(`review_disagreement`), the item is `spent` at once, tagged
+`review-disagreement`, and announced through the guardian's fan-out. A
+third round would re-run the same argument; a human resolves it.
+`select_confirmed` also orders fresh confirmations before re-offers, so a
+sent-back item cannot monopolise the loop for as long as its cap allows.
+
+Vault rounds have no worktree and no ladder — the edit is live the moment it
+is saved — so the same reader runs inside `vault_round.land`, between
+validation and `git add`, over the staged diff (`vault_round.GRADER`, wired
+by the aggregator; `None` in tests and from the CLI records `review:
+skipped`). The first refusal leaves the edit in place for the model to fix;
+the second, or an unsound premise, reverts it — so the nightly vault sweep
+cannot land unreviewed text under someone else's commit.
 
 ### 4.1 pyflakes is a diff, not a bar
 

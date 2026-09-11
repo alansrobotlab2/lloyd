@@ -186,8 +186,20 @@ async def list_tools() -> list[Tool]:
             ),
             inputSchema={
                 "type": "object",
-                "properties": {"goal": {"type": "string",
-                                        "description": "What this round is trying to change."}},
+                "properties": {
+                    "goal": {"type": "string",
+                             "description": "What this round is trying to change."},
+                    "item_id": {"type": "integer",
+                                "description": ("The backlog item this round implements. "
+                                                "Binds the round to its acceptance clauses, "
+                                                "which the gate's review rung grades the diff "
+                                                "against. Always pass it for an implement round.")},
+                    "from_branch": {"type": "string",
+                                    "description": ("Resume from this branch (e.g. automod/SM_…) "
+                                                    "when a previous round was sent back by review: "
+                                                    "the new worktree starts from it, rebased onto "
+                                                    "live main, and the old branch is deleted.")},
+                },
                 "required": ["goal"],
             },
         ),
@@ -253,7 +265,10 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {"round_id": {"type": "string",
-                                            "description": "Round id to abandon."}},
+                                            "description": "Round id to abandon."},
+                               "reason": {"type": "string",
+                                          "description": ("Why — one line. When the review rung "
+                                                          "sent the round back, its findings.")}},
                 "required": ["round_id"],
             },
         ),
@@ -333,7 +348,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             gate = _inner_voice_gate("open a round")
             if gate:
                 return text_result(json.dumps(gate, indent=2))
-            return text_result(json.dumps(R.start(goal), indent=2))
+            item_id = arguments.get("item_id")
+            try:
+                item_id = int(item_id) if item_id not in (None, "") else None
+            except (TypeError, ValueError):
+                return text_result(_err(f"item_id must be an integer, got {item_id!r}"))
+            from_branch = str(arguments.get("from_branch") or "").strip() or None
+            return text_result(json.dumps(
+                R.start(goal, item_id=item_id, from_branch=from_branch), indent=2))
 
         if name == "automod_gate":
             rid = arguments.get("round_id") or ""
@@ -347,10 +369,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return text_result(json.dumps(_land_detached(rid), indent=2))
 
         if name == "automod_abort":
-            return text_result(json.dumps(R.abort(arguments.get("round_id") or ""), indent=2))
+            return text_result(json.dumps(R.abort(arguments.get("round_id") or "",
+                                                  reason=str(arguments.get("reason") or "")),
+                                          indent=2))
 
         if name == "automod_vault_land":
-            from scripts.automod import vault_round as VR
+            from scripts.automod import review as RV, vault_round as VR
+            # The second reader for vault rounds, wired here and not at import
+            # in vault_round: tests and the CLI must not reach for the network.
+            if VR.GRADER is None:
+                VR.GRADER = RV.grade_vault
             gate = _inner_voice_gate("land a vault change")
             if gate:
                 return text_result(json.dumps(gate, indent=2))

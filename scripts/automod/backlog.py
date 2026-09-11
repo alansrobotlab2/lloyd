@@ -125,6 +125,8 @@ MAX_INCOMPLETE_ATTEMPTS = 2
 # triage schema is: one list, or a new value lands in the grammar and not in
 # the validator.
 ACCEPTANCE_OUTCOMES = ("met", "not_met", "deferred", "unnecessary")
+# Per clause. No `unnecessary`: that is a verdict on the item, not on a clause.
+CLAUSE_OUTCOMES = ("met", "not_met", "deferred")
 
 IMPLEMENT_OUTCOME_SCHEMA: dict = {
     "type": "object",
@@ -140,7 +142,22 @@ IMPLEMENT_OUTCOME_SCHEMA: dict = {
                                        "something else happens — name it in deferred_to. "
                                        "unnecessary: the work is not needed after all (the "
                                        "premise no longer holds, or it is already true) and "
-                                       "the item should close without a landing.")},
+                                       "the item should close without a landing. When "
+                                       "clause_outcomes is non-empty this is derived from it.")},
+        "clause_outcomes": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "clause": {"type": "integer", "description": "1-based index into the acceptance clauses."},
+                "outcome": {"type": "string", "enum": list(CLAUSE_OUTCOMES)},
+                "evidence": {"type": "string",
+                             "description": "The test node id or file:line that shows it, one line."},
+                "deferred_to": {"type": "array", "items": {"type": "integer"},
+                                "description": "Ids this clause waits on. Empty unless deferred."},
+            },
+            "required": ["clause", "outcome", "evidence", "deferred_to"],
+            "additionalProperties": False,
+        }, "description": ("One entry per acceptance clause, in order. Empty only when "
+                           "acceptance is unnecessary.")},
         "deferred_to": {"type": "array", "items": {"type": "integer"},
                         "description": ("Backlog ids that must close before the acceptance "
                                         "can be judged. Empty unless acceptance is deferred.")},
@@ -149,9 +166,19 @@ IMPLEMENT_OUTCOME_SCHEMA: dict = {
         "spawned": {"type": "array", "items": {"type": "integer"},
                     "description": "Backlog ids filed during this round."},
     },
-    "required": ["landed", "acceptance", "deferred_to", "summary", "spawned"],
+    "required": ["landed", "acceptance", "clause_outcomes", "deferred_to", "summary", "spawned"],
     "additionalProperties": False,
 }
+
+
+def _ints(v) -> list[int]:
+    out: list[int] = []
+    for x in (v or []):
+        try:
+            out.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def parse_outcome(structured) -> dict | None:
@@ -160,6 +187,14 @@ def parse_outcome(structured) -> dict | None:
     Clamped here rather than in the grammar for the reason the triage schema
     carries no `maxLength`: a guided decoder stops mid-sentence at a limit
     rather than writing something shorter.
+
+    The overall `acceptance` is DERIVED when clauses are present — all met →
+    `met`; any not_met → `not_met`; else `deferred` — and **a deferral that
+    names nothing is `not_met`**. #544 declared `deferred` with
+    `deferred_to: []`; `close_settled_items` wrote "deferred to an unnamed
+    follow-up; close this when that closes" and `desired_statuses` parked it
+    `in_progress` forever, because nothing ever re-read an empty list.
+    `unnecessary` is a verdict on the item and is kept as stated.
     """
     if not isinstance(structured, dict):
         return None
@@ -167,19 +202,46 @@ def parse_outcome(structured) -> dict | None:
     if acceptance not in ACCEPTANCE_OUTCOMES:
         return None
 
-    def ints(v) -> list[int]:
-        out: list[int] = []
-        for x in (v or []):
-            try:
-                out.append(int(x))
-            except (TypeError, ValueError):
-                continue
-        return out
+    clauses: list[dict] = []
+    for raw in (structured.get("clause_outcomes") or []):
+        if not isinstance(raw, dict):
+            continue
+        oc = str(raw.get("outcome") or "").strip().lower()
+        if oc not in CLAUSE_OUTCOMES:
+            continue
+        try:
+            idx = int(raw.get("clause") or (len(clauses) + 1))
+        except (TypeError, ValueError):
+            idx = len(clauses) + 1
+        clauses.append({"clause": idx, "outcome": oc,
+                        "evidence": " ".join(str(raw.get("evidence") or "").split())[:300],
+                        "deferred_to": _ints(raw.get("deferred_to"))})
+    deferred_to = _ints(structured.get("deferred_to"))
+    for c in clauses:
+        deferred_to += [i for i in c["deferred_to"] if i not in deferred_to]
+
+    if acceptance != "unnecessary" and clauses:
+        outcomes = {c["outcome"] for c in clauses}
+        if "not_met" in outcomes:
+            acceptance = "not_met"
+        elif outcomes == {"met"}:
+            acceptance = "met"
+        else:
+            acceptance = "deferred"
+    if acceptance == "deferred" and not deferred_to:
+        acceptance = "not_met"
 
     return {"landed": bool(structured.get("landed")), "acceptance": acceptance,
-            "deferred_to": ints(structured.get("deferred_to")),
+            "clause_outcomes": clauses,
+            "deferred_to": deferred_to,
             "summary": " ".join(str(structured.get("summary") or "").split())[:400],
-            "spawned": ints(structured.get("spawned"))}
+            "spawned": _ints(structured.get("spawned"))}
+
+
+def unmet_clauses(outcome: dict | None) -> list[int]:
+    """Clause indices an outcome reports as not met."""
+    return [int(c["clause"]) for c in ((outcome or {}).get("clause_outcomes") or [])
+            if c.get("outcome") == "not_met"]
 
 
 TRIAGE_VERDICT_SCHEMA: dict = {
@@ -197,12 +259,66 @@ TRIAGE_VERDICT_SCHEMA: dict = {
                                        "is held to. Prefix with 'human-only:' when the "
                                        "fix needs a path the loop may never touch. "
                                        "Empty otherwise.")},
+        "acceptance_clauses": {"type": "array", "items": {"type": "string"},
+                               "description": ("For `confirmed`: the same contract split into "
+                                               "separately checkable clauses, each one thing a "
+                                               "test can pin, in order. The implementer reports "
+                                               "per clause and the review rung grades per "
+                                               "clause. Empty otherwise.")},
         "spawned": {"type": "array", "items": {"type": "integer"},
                     "description": "Backlog ids filed during this triage."},
     },
-    "required": ["verdict", "surface", "check", "evidence", "acceptance", "spawned"],
+    "required": ["verdict", "surface", "check", "evidence", "acceptance",
+                 "acceptance_clauses", "spawned"],
     "additionalProperties": False,
 }
+
+MAX_CLAUSES = 12
+CLAUSE_MAX_CHARS = 600
+
+
+def clean_clauses(values) -> list[str]:
+    """Clauses as a bounded list of non-placeholder strings."""
+    out: list[str] = []
+    for v in (values or []):
+        s = acceptance_text(v)
+        if s and s not in out:
+            out.append(s[:CLAUSE_MAX_CHARS])
+        if len(out) >= MAX_CLAUSES:
+            break
+    return out
+
+
+_CLAUSE_LINE = re.compile(r"^\s*(\d{1,2})[.)]\s+(.*\S)\s*$")
+
+
+def split_clause_lines(text: str) -> list[str]:
+    """Numbered lines (`1. …`, `2) …`) into clauses; unnumbered prose is one
+    clause. A `-` or `none` placeholder is no clause at all."""
+    lines = [ln for ln in str(text or "").splitlines() if ln.strip()]
+    numbered = [m.group(2) for m in (_CLAUSE_LINE.match(ln) for ln in lines) if m]
+    if numbered:
+        return clean_clauses(numbered)
+    return clean_clauses([" ".join(str(text or "").split())])
+
+
+def acceptance_clauses_of(event: dict | None, frontmatter: dict | None = None) -> list[str]:
+    """The clauses an implementer is held to, from wherever they were recorded.
+
+    Front matter first (written by `record_verdict` since clauses existed),
+    then the triage event, then the prose acceptance as a single clause — an
+    item confirmed before clauses existed has prose only, and refusing it
+    would block the whole current pool.
+    """
+    fm = frontmatter or {}
+    ev = event or {}
+    for source in (fm.get("acceptance_clauses"), ev.get("acceptance_clauses")):
+        if isinstance(source, list):
+            cleaned = clean_clauses(source)
+            if cleaned:
+                return cleaned
+    prose = acceptance_text(ev.get("acceptance"))
+    return [prose] if prose and not is_human_only(prose) else ([prose] if prose else [])
 
 
 @dataclass
@@ -426,6 +542,13 @@ def human_only_ids(ledger: Path) -> dict[int, str]:
 EXTERNAL_RETRY_CAP = 3       # a red tree surviving four rounds is an incident
 INCOMPLETE_RETRY_CAP = 1     # triage's rule: it comes back once
 ROLLED_BACK_RETRY_CAP = 1    # the work is gone with the branch; one redo
+# The review rung found the premise sound and the implementation or tests
+# short. Two re-offers: the third round is the one where author and grader
+# have disagreed twice, and another run will not resolve that — a human will.
+REVIEW_RETRY_CAP = 2
+# A round LANDED and its own finalizer said a clause was not met. One more
+# go, told which clauses; the branch is gone with the landing.
+PARTIAL_RETRY_CAP = 1
 
 # Stop reasons that mean the turn ran out of room rather than reaching a
 # conclusion. #446 committed 757 lines and was killed by the wall clock
@@ -469,6 +592,53 @@ def externally_blocked_rounds(ledger: Path) -> set[str]:
             if not ev.get("ok") and ev.get("external_blocker")}
 
 
+def review_retry_rounds(ledger: Path) -> dict[str, dict]:
+    """`{round_id: gate event}` for rounds whose last gate attempt was refused
+    by the review rung with the premise judged sound — the implementation or
+    its tests fell short. The findings ride the event (`review_findings`)
+    because `gate.json` dies with the worktree."""
+    return {rid: ev for rid, ev in _last_gate_per_round(ledger).items()
+            if not ev.get("ok") and ev.get("review_retry")}
+
+
+def review_unsound_rounds(ledger: Path) -> dict[str, dict]:
+    """Rounds the review rung refused because the ITEM's premise is unsound.
+    No retry helps; the item goes to a human with the grader's summary."""
+    return {rid: ev for rid, ev in _last_gate_per_round(ledger).items()
+            if not ev.get("ok") and ev.get("review_premise_unsound")}
+
+
+def review_events_for_item(ledger: Path, item_id: int) -> list[dict]:
+    """Every `review` event for rounds this item's implement turns opened,
+    oldest first."""
+    rids = {str(d.get("round_id") or "") for d in _ledger_events(ledger, "backlog_implement")
+            if int(d["item_id"]) == int(item_id) and d.get("round_id")}
+    rids.discard("")
+    rows = [d for d in _ledger_events(ledger, "review", require_item=False)
+            if str(d.get("round_id") or "") in rids]
+    rows.sort(key=lambda d: float(d.get("ts") or 0))
+    return rows
+
+
+def review_disagreement(ledger: Path, item_id: int) -> int | None:
+    """The clause index two consecutive blocking reviews both flagged, or None.
+
+    The early exit from the author/grader loop: when the same clause comes
+    back unmet on two successive reviews, the author has twice believed it
+    satisfied and the grader has twice disagreed. A third round re-runs the
+    same disagreement; a human resolves it.
+    """
+    blocking = [d for d in review_events_for_item(ledger, item_id) if d.get("blocking")]
+    if len(blocking) < 2:
+        return None
+    def flagged(ev: dict) -> set[int]:
+        return {int(c.get("clause") or 0) for c in (ev.get("clauses") or [])
+                if c.get("verdict") in ("unmet", "partial")}
+    both = flagged(blocking[-1]) & flagged(blocking[-2])
+    both.discard(0)
+    return min(both) if both else None
+
+
 def rolled_back_rounds(ledger: Path) -> set[str]:
     """Rounds that promoted and were then reverted by the guardian.
 
@@ -510,10 +680,11 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
     """`{item_id: (verdict, detail)}` for every item an implement turn touched.
 
     `verdict` is one of `spent`, `reopened`, `external`, `incomplete`,
-    `infra`, `rolled_back` — where everything but `spent` means the item is
-    offered again. Exposed rather than folded into `implemented_ids` because
-    the reason is worth putting in front of the next round: a re-offer whose
-    branch still exists, or whose work was reverted, is not a fresh start.
+    `infra`, `rolled_back`, `review_retry`, `partial` — where everything but
+    `spent` means the item is offered again. Exposed rather than folded into
+    `implemented_ids` because the reason is worth putting in front of the
+    next round: a re-offer whose branch still exists, or whose work was
+    reverted, is not a fresh start.
     """
     latest: dict[int, dict] = {}
     attempts: dict[int, int] = {}
@@ -525,8 +696,10 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
 
     blocked = externally_blocked_rounds(ledger)
     reverted = rolled_back_rounds(ledger)
-    promoted = {str(d.get("round_id") or "") for d in
-                _ledger_events(ledger, "promoted", require_item=False)}
+    review_retry = review_retry_rounds(ledger)
+    promoted_ev = {str(d.get("round_id") or ""): d for d in
+                   _ledger_events(ledger, "promoted", require_item=False)}
+    promoted = set(promoted_ev)
     out: dict[int, tuple[str, str]] = {}
     for iid, ev in latest.items():
         phase = str(ev.get("phase") or "")
@@ -541,6 +714,18 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
         # change that is already in `main` and the next round would redo it.
         # Only a rollback reopens a landed item, and that is the next branch.
         if rid and rid in promoted and rid not in reverted:
+            # ...unless the round's own finalizer said a clause was not met.
+            # That is a landed change that did not finish the job, and the
+            # honest move is one more round told which clauses, not a closed
+            # item and not a park.
+            unmet = unmet_clauses(ev.get("outcome"))
+            if unmet and n <= 1 + PARTIAL_RETRY_CAP:
+                sha = str(promoted_ev[rid].get("commit") or "")[:8]
+                out[iid] = ("partial",
+                            f"round {rid} landed as {sha or '?'} but its own outcome reported "
+                            f"clause(s) {unmet} not met; the branch is gone with the landing, "
+                            f"so start from live main")
+                continue
             out[iid] = ("spent", "")
             continue
         if rid and rid in reverted and n <= ROLLED_BACK_RETRY_CAP:
@@ -560,6 +745,24 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
                         f"before reaching a verdict"
                         + (f"; its work is on branch `automod/{rid}`" if rid else ""))
             continue
+        # After `incomplete`, before `external`: a review-refused round whose
+        # turn then died at its budget is still incomplete, and both verdicts
+        # read the last gate event, so they are exclusive with `external`.
+        if rid and rid in review_retry:
+            clause = review_disagreement(ledger, iid)
+            if clause is not None:
+                out[iid] = ("spent",
+                            f"review disagreement: clause {clause} came back unmet on two "
+                            f"consecutive reviews of #{iid}; a human decides")
+                continue
+            if n <= 1 + REVIEW_RETRY_CAP:
+                findings = str(review_retry[rid].get("review_findings") or
+                               review_retry[rid].get("detail") or "")[:1200]
+                out[iid] = ("review_retry",
+                            f"the review rung found the premise sound but the implementation "
+                            f"or its tests short — {findings}; its work is on branch "
+                            f"`automod/{rid}` (pass it as from_branch)")
+                continue
         if rid and rid in blocked and n <= EXTERNAL_RETRY_CAP:
             g = _last_gate_per_round(ledger).get(rid) or {}
             out[iid] = ("external",
@@ -711,7 +914,10 @@ def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
             close, why = False, (f"the round deferred the acceptance check to {ids}; "
                                  f"close this when that closes")
         elif acc == "not_met":
-            close, why = False, "the round landed but reported the acceptance check not met"
+            unmet = unmet_clauses(outcome)
+            close, why = False, ("the round landed but reported the acceptance check not met"
+                                 + (f" (clause(s) {unmet}); offered again for those" if unmet
+                                    else ""))
         else:
             close, why = False, ("the round recorded no structured outcome (it predates the "
                                  "finalizer); a human decides")
@@ -866,11 +1072,16 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
         iid = item.id
         fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
         landed = fm.get(LANDED_MARKER) or any(fm.get(m) for m in _LEGACY_LANDED_MARKERS)
+        # A landing whose own outcome said a clause was not met is offered
+        # again once the sweep has marked it (the marker means settled) — it
+        # must not sit in the `landed` park below. Until the sweep runs it is
+        # still under observation and stays `in_progress`.
+        partial = outcomes.get(iid, ("", ""))[0] == "partial"
         if iid in in_flight:
             out[iid] = ("in_progress", "an automod round is in flight for it")
-        elif landed:
+        elif landed and not partial:
             out[iid] = ("in_progress", "landed, awaiting the acceptance check or a human close")
-        elif iid in observing:
+        elif iid in observing and not (landed and partial):
             # Promoted, not yet settled: the guardian is watching it and the
             # sweep has not run. Neither back in the pool nor done.
             out[iid] = ("in_progress", "landed; the promotion is under observation")
@@ -1087,7 +1298,8 @@ def select_confirmed(ledger: Path,
     unattended; it is skipped here rather than guessed at.
     """
     confirmed = confirmed_verdicts(ledger)
-    done = implemented_ids(ledger)
+    outcomes = implement_outcomes(ledger)
+    done = {iid for iid, (verdict, _) in outcomes.items() if verdict == "spent"}
     ready = []
     for item in open_items(boards):
         ev = confirmed.get(item.id)
@@ -1105,13 +1317,36 @@ def select_confirmed(ledger: Path,
         ready.append((item, ev))
     if not ready:
         return None
-    return sorted(ready, key=lambda pair: (pair[0].created or "9999", pair[0].id))[0]
+    # Fresh confirmations before re-offers. Oldest-first alone let a
+    # sent-back item be re-picked on the very next round for as long as its
+    # cap allowed, monopolising the loop while the rest of the pool waited.
+    return sorted(ready, key=lambda pair: (pair[0].id in outcomes,
+                                           pair[0].created or "9999", pair[0].id))[0]
+
+
+def tag_item(item_id: int, *, add: tuple[str, ...] = (), remove: tuple[str, ...] = ()) -> bool:
+    """Add or remove tags on an open item without moving its status."""
+    for item in open_items(None):
+        if item.id == int(item_id):
+            fm, body = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+            tags = [str(t) for t in (fm.get("tags") or [])]
+            new = [t for t in tags if t not in remove] + [t for t in add if t not in tags]
+            if new == tags:
+                return False
+            fm["tags"] = new
+            fm["updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+            item.path.write_text(
+                f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
+                f"---\n{body}", encoding="utf-8")
+            return True
+    return False
 
 
 def record_verdict(item: Item, verdict: str, evidence: str, *,
                    check: str = "", close: bool = False,
                    spawned: list[int] | tuple[int, ...] = (),
-                   acceptance: str = "") -> Path:
+                   acceptance: str = "",
+                   acceptance_clauses: list[str] | tuple[str, ...] = ()) -> Path:
     """Append the verdict to the item's activity log, optionally closing it.
 
     Always writes the evidence, never just the conclusion. An item closed as
@@ -1142,6 +1377,12 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         # Into the implement pool. Before 2026-09-09 a confirmed item stayed
         # wherever it was, and #353 landed while still `draft`.
         fm["status"] = IMPLEMENT_POOL_STATUS
+    clauses = clean_clauses(acceptance_clauses)
+    if verdict == "confirmed" and clauses:
+        # On the item, not only in the ledger: the review rung reads the
+        # contract from disk, and a human editing the clauses here is editing
+        # what the grader holds the next round to.
+        fm["acceptance_clauses"] = clauses
 
     section = (f"\n\n## Automod triage — {stamp[:10]}\n\n"
                f"**Verdict:** {verdict}\n\n{evidence.strip()}\n")
@@ -1153,6 +1394,9 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         # The item is the handoff. A contract that lives only in the ledger
         # and a transcript is one the next reader of the item never sees.
         section += f"\n**Acceptance — what must become true:**\n{acceptance.strip()}\n"
+    if verdict == "confirmed" and clauses:
+        section += "\n**Acceptance clauses** (graded one by one at the gate):\n" + "\n".join(
+            f"{i}. {c}" for i, c in enumerate(clauses, 1)) + "\n"
 
     item.path.write_text(
         f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"

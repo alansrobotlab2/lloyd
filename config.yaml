@@ -779,7 +779,11 @@ workers:
       interval_seconds: 900
       max_inflight: 1
       max_duration_seconds: 3600
-      max_turns: 100
+      # 150, not 100 — the code's own default and its reason
+      # (workers/sources/autocode.py DEFAULT_MAX_TURNS): a round called
+      # automod_land at 91/100, #278 died at 101 with a gated change
+      # unlanded, and the review rung now adds a fix-and-regate cycle.
+      max_turns: 150
       # On: this source rewrites production. See `autotriage.inner_voice`.
       inner_voice: true
     bench-mine:

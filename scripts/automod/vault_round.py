@@ -216,6 +216,45 @@ def _ensure_main() -> None:
                               f"{r.stderr.strip()[:200]}")
 
 
+# The review grader for vault rounds, or None. A vault round has no worktree
+# and no gate ladder — the edit is live the moment it is saved — so the
+# second reader runs here, between validation and `git add`. Set by the
+# aggregator (`agent_mcp/automod.py`) to `review.grade_vault`; None in tests
+# and from the CLI, where a missing grader records `review: skipped` rather
+# than reaching for the network.
+GRADER = None
+VAULT_REVIEW_MAX = 2
+
+
+def _vault_review(norm: list[str], item_id: int) -> tuple[str, str]:
+    """`(kind, findings)` from the grader over the staged diff. Never raises;
+    an unusable grader is `("skipped", why)` and the landing proceeds — a
+    vault edit is already validated through the real loaders, and a grader
+    outage must not hold every skill edit hostage."""
+    if GRADER is None:
+        return "skipped", "no grader configured"
+    try:
+        diff = _git("diff", "HEAD", "--", *norm).stdout
+        for p in norm:
+            if _git("cat-file", "-e", f"HEAD:{p}").returncode != 0 and (VAULT / p).exists():
+                diff += f"\n+++ new file {p}\n" + (VAULT / p).read_text(encoding="utf-8", errors="replace")
+        return GRADER(item_id=item_id, paths=norm, diff=diff)
+    except Exception as exc:  # noqa: BLE001 — the grader never fails a landing on its own
+        return "skipped", f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def _vault_review_attempts(item_id: int) -> int:
+    """Blocking vault reviews for this item since its implement turn started."""
+    events = S.read_events(limit=500)
+    started = 0.0
+    for e in events:
+        if (e.get("event") == "backlog_implement" and e.get("phase") == "started"
+                and e.get("item_id") == item_id):
+            started = float(e.get("ts") or 0)
+    return sum(1 for e in events if e.get("event") == "vault_review" and e.get("blocking")
+               and e.get("item_id") == item_id and float(e.get("ts") or 0) >= started)
+
+
 def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
     norm = []
     for p in paths:
@@ -236,6 +275,32 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
         raise VaultRoundError("validation failed; the change was reverted: "
                               + "; ".join(errors[:5]))
 
+    review = "skipped"
+    if item_id is not None:
+        kind, findings = _vault_review(norm, int(item_id))
+        review = kind
+        if kind in ("retry", "unsound"):
+            attempts = _vault_review_attempts(int(item_id)) + 1
+            final = kind == "unsound" or attempts >= VAULT_REVIEW_MAX
+            # First refusal: the edits stay in place so the model can fix them
+            # and land again. Second, or an unsound premise: revert, with the
+            # text in the event so the re-offer carries what was attempted —
+            # and so the nightly vault-commit sweep cannot land it under
+            # someone else's commit.
+            undone = revert_paths(norm) if final else []
+            S.append_event({"event": "vault_review", "item_id": item_id, "paths": norm,
+                            "kind": kind, "blocking": True, "attempt": attempts,
+                            "findings": findings[:2000], "reverted": undone,
+                            "review_premise_unsound": kind == "unsound",
+                            "review_retry": kind == "retry"})
+            raise VaultRoundError(
+                ("review: premise unsound — " if kind == "unsound" else
+                 f"review sent it back ({attempts}/{VAULT_REVIEW_MAX}): ") + findings[:800]
+                + ("; the edits were reverted" if undone else "; the edits are still in place — fix and land again"))
+        if kind != "skipped":
+            S.append_event({"event": "vault_review", "item_id": item_id, "paths": norm,
+                            "kind": kind, "blocking": False, "findings": findings[:600]})
+
     _ensure_main()
     add = _git("add", "-A", "--", *norm)
     if add.returncode != 0:
@@ -249,8 +314,9 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
     sha = _git("rev-parse", "HEAD").stdout.strip()
     S.append_event({"event": "vault_land", "ok": True, "item_id": item_id, "commit": sha,
                     "paths": norm, "validated": buckets["validated"],
-                    "message": message.strip()[:200]})
-    return {"ok": True, "commit": sha, "paths": norm, "validated": buckets["validated"]}
+                    "review": review, "message": message.strip()[:200]})
+    return {"ok": True, "commit": sha, "paths": norm, "validated": buckets["validated"],
+            "review": review}
 
 
 def revert_many(shas: list[str], reason: str = "rollback") -> dict:

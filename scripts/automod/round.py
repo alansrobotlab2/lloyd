@@ -24,8 +24,18 @@ def _round_id() -> str:
     return round_id().replace("R_", "SM_")
 
 
-def start(goal: str, *, base: str | None = None, force: bool = False) -> dict:
-    """Open a round: take the lock, cut a worktree, write the run spec."""
+def start(goal: str, *, base: str | None = None, force: bool = False,
+          item_id: int | None = None, from_branch: str | None = None) -> dict:
+    """Open a round: take the lock, cut a worktree, write the run spec.
+
+    `item_id` binds the round to the backlog item it implements; the gate's
+    review rung reads it from `run_spec.yaml` to find the clauses it grades
+    against. `from_branch` resumes a round the review rung sent back: the new
+    worktree starts from that branch, is rebased onto live HEAD at once so
+    the recorded base is the truth, and the old branch is deleted (otherwise
+    they accumulate forever). A rebase conflict falls back to a fresh
+    worktree and names the paths — the old branch stays for `git diff`.
+    """
     S.ensure_dirs()
     if not force:
         S.require_enabled("open a round", LIVE_ROOT)
@@ -49,7 +59,23 @@ def start(goal: str, *, base: str | None = None, force: bool = False) -> dict:
             capture_output=True, text=True).stdout.strip()
 
         W.prune_orphans(LIVE_ROOT)
-        wt = W.create(rid, base=base, repo=LIVE_ROOT)
+        resumed: dict = {}
+        if from_branch and from_branch != f"automod/{rid}" and W.branch_exists(LIVE_ROOT, from_branch):
+            wt = W.create_from_branch(rid, from_branch, repo=LIVE_ROOT)
+            ok, why, conflicts = W.rebase_onto(wt, base)
+            if ok:
+                W.delete_branch(LIVE_ROOT, from_branch)
+                resumed = {"from_branch": from_branch, "rebased_onto": base}
+            else:
+                # Fresh start, old branch kept for `git diff`; the caller is told.
+                W.remove(rid, keep_branch=False, repo=LIVE_ROOT)
+                wt = W.create(rid, base=base, repo=LIVE_ROOT)
+                resumed = {"from_branch": from_branch, "from_branch_conflict": conflicts or [why]}
+        elif from_branch:
+            resumed = {"from_branch": from_branch, "from_branch_missing": True}
+            wt = W.create(rid, base=base, repo=LIVE_ROOT)
+        else:
+            wt = W.create(rid, base=base, repo=LIVE_ROOT)
 
         run_spec = {
             "objective": goal,
@@ -59,6 +85,8 @@ def start(goal: str, *, base: str | None = None, force: bool = False) -> dict:
             "code": {"base_commit": base, "branch": f"automod/{rid}",
                      "worktree": str(wt)},
         }
+        if item_id:
+            run_spec["item"] = {"id": int(item_id)}
         err = spec.validate_code_run_spec(run_spec)
         if err:
             W.remove(rid)
@@ -72,10 +100,20 @@ def start(goal: str, *, base: str | None = None, force: bool = False) -> dict:
 
         S.append_event({"event": "round_start", "round_id": rid, "base": base,
                         "goal": goal[:500], "worktree": str(wt),
+                        **({"item_id": int(item_id)} if item_id else {}),
+                        **resumed,
                         **({"live_dirty_paths": dirty[:20]} if dirty else {})})
         out_d = {"round_id": rid, "worktree": str(wt), "base": base,
                  "branch": f"automod/{rid}",
-                 "run_spec": str(out / "run_spec.yaml")}
+                 "run_spec": str(out / "run_spec.yaml"), **resumed}
+        if item_id:
+            out_d["item_id"] = int(item_id)
+        if resumed.get("from_branch_conflict"):
+            out_d["note"] = (f"resuming {from_branch} conflicted with live main in "
+                             f"{resumed['from_branch_conflict']}; this worktree is fresh "
+                             f"and the old branch is kept for `git diff`")
+        elif resumed.get("from_branch_missing"):
+            out_d["note"] = f"{from_branch} does not exist; this worktree is fresh"
         if dirty:
             out_d["live_dirty_paths"] = dirty[:20]
             out_d["note"] = ("the live tree has uncommitted edits; the gate tolerates them "
@@ -91,9 +129,11 @@ def run_gate(round_id: str, *, skip_smoke: bool = False) -> dict:
         raise RuntimeError(f"no worktree for {round_id}")
     spec_path = S.ROUNDS_DIR / round_id / "run_spec.yaml"
     import yaml
-    base = yaml.safe_load(spec_path.read_text())["code"]["base_commit"]
+    run_spec = yaml.safe_load(spec_path.read_text()) or {}
+    base = run_spec["code"]["base_commit"]
+    item_id = (run_spec.get("item") or {}).get("id")
 
-    g = G.Gate(round_id, wt, base, skip_smoke=skip_smoke)
+    g = G.Gate(round_id, wt, base, skip_smoke=skip_smoke, item_id=item_id)
     report = g.run()
     S.write_gate_report(round_id, report.to_dict())
     # Preflight may have rebased the round onto a moved `main`. The spec is
@@ -128,9 +168,12 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
     return result
 
 
-def abort(round_id: str) -> dict:
+def abort(round_id: str, reason: str = "") -> dict:
+    """Close a round, branch kept. `reason` rides the event: seventeen of the
+    first seventeen `round_aborted` rows carried nothing but the id."""
     W.remove(round_id, keep_branch=True, repo=LIVE_ROOT)
-    S.append_event({"event": "round_aborted", "round_id": round_id})
+    S.append_event({"event": "round_aborted", "round_id": round_id,
+                    "reason": " ".join(str(reason or "").split())[:500]})
     return {"aborted": round_id, "branch_kept": f"automod/{round_id}"}
 
 
@@ -245,10 +288,15 @@ def main(argv=None) -> int:
     # the surface nobody used and false of the one they did.
     s = sub.add_parser("start"); s.add_argument("goal")
     s.add_argument("--force", action="store_true", help="ignore automod.enabled")
+    s.add_argument("--item-id", type=int, default=None,
+                   help="backlog item this round implements; the review rung grades against its clauses")
+    s.add_argument("--from-branch", default=None,
+                   help="resume a branch the review rung sent back (automod/SM_…), rebased onto live main")
     g = sub.add_parser("gate"); g.add_argument("round_id"); g.add_argument("--skip-smoke", action="store_true")
     l = sub.add_parser("land"); l.add_argument("round_id"); l.add_argument("--dry-run", action="store_true")
     l.add_argument("--force", action="store_true", help="ignore automod.enabled")
     a = sub.add_parser("abort"); a.add_argument("round_id")
+    a.add_argument("--reason", default="", help="recorded on the ledger")
     sub.add_parser("status")
     b = sub.add_parser("bless", help="record the running commit as last-known-good")
     b.add_argument("--note", default="")
@@ -265,7 +313,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     if args.cmd == "start":
-        print(json.dumps(start(args.goal, force=args.force), indent=2))
+        print(json.dumps(start(args.goal, force=args.force, item_id=args.item_id,
+                               from_branch=args.from_branch), indent=2))
     elif args.cmd == "gate":
         rep = run_gate(args.round_id, skip_smoke=args.skip_smoke)
         print(json.dumps(rep, indent=2))
@@ -274,7 +323,7 @@ def main(argv=None) -> int:
         print(json.dumps(land(args.round_id, dry_run=args.dry_run,
                               force=args.force), indent=2))
     elif args.cmd == "abort":
-        print(json.dumps(abort(args.round_id), indent=2))
+        print(json.dumps(abort(args.round_id, reason=args.reason), indent=2))
     elif args.cmd == "status":
         print(json.dumps(status(), indent=2, default=str))
     elif args.cmd == "bless":

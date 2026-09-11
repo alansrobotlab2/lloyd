@@ -153,7 +153,15 @@ SURFACE: <one of code|frontend|vault|mixed|external>
 CHECK: <the command or method you ran, one line>
 EVIDENCE: <2-4 sentences citing what you actually observed>
 ACCEPTANCE: <if confirmed: what must become true for this to be done; otherwise the word none>
+ACCEPTANCE_CLAUSES: <if confirmed: the same contract as separately checkable clauses, \
+one per line, each numbered "1." "2." … and each one thing a single test can pin; otherwise \
+the word none>
 SPAWNED: <ids of the new items you filed in step 6, e.g. #401 #402; otherwise the word none>
+
+The clauses are graded one by one at the gate by a reviewer who sees only the \
+item, the clauses and the diff — so a clause has to name the observable \
+behaviour, not the mechanism ("a retried worker item fires `email_send` once", \
+not "add a ledger"). Three to six clauses is the usual shape.
 """
 
 def _acceptance_text(value: str) -> str:
@@ -166,7 +174,15 @@ def _parse_spawned(value: str) -> list[int]:
     return parse_spawned(value)
 
 
-_FIELD = re.compile(r"^(VERDICT|SURFACE|CHECK|EVIDENCE|ACCEPTANCE|SPAWNED):\s*(.*)$", re.I)
+_FIELD = re.compile(
+    r"^(VERDICT|SURFACE|CHECK|EVIDENCE|ACCEPTANCE_CLAUSES|ACCEPTANCE|SPAWNED):\s*(.*)$", re.I)
+
+
+def _clauses(value) -> list[str]:
+    from scripts.automod.backlog import clean_clauses, split_clause_lines
+    if isinstance(value, list):
+        return clean_clauses(value)
+    return split_clause_lines(str(value or ""))
 
 
 def parse_verdict(text: str, structured: dict | None = None) -> dict | None:
@@ -228,6 +244,10 @@ def parse_verdict(text: str, structured: dict | None = None) -> dict | None:
         # The implementer's contract. 600 cut #278's mid-way through its
         # regression guards; a contract is not the field to save bytes on.
         "acceptance": _acceptance_text(joined("ACCEPTANCE", 4000))[:3000],
+        # Its own field, not `- ` bullets under ACCEPTANCE: `ACCEPTANCE: -` is
+        # the placeholder the text path already reads as "none", and a bullet
+        # would collide with it.
+        "acceptance_clauses": _clauses(joined("ACCEPTANCE_CLAUSES", 8000)),
         "spawned": _parse_spawned(joined("SPAWNED", 400)),
         "source": "regex",
     }
@@ -265,6 +285,7 @@ def _from_structured(obj: dict, verdicts, surfaces) -> dict | None:
         "check": " ".join(str(obj.get("check") or "").split())[:400],
         "evidence": str(obj.get("evidence") or "").strip()[:2000],
         "acceptance": _acceptance_text(str(obj.get("acceptance") or ""))[:3000],
+        "acceptance_clauses": _clauses(obj.get("acceptance_clauses")),
         "spawned": spawned,
         "source": "structured",
     }
@@ -417,7 +438,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                        candidate.id, unverified)
     B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
                      check=parsed["check"], close=close, spawned=spawned,
-                     acceptance=parsed["acceptance"])
+                     acceptance=parsed["acceptance"],
+                     acceptance_clauses=parsed.get("acceptance_clauses") or ())
 
     # The cap is a prompt instruction, and the items exist on disk by the time
     # we read SPAWNED — unfiling them would destroy real findings. So it is
@@ -434,7 +456,9 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "verdict": parsed["verdict"], "surface": parsed["surface"],
                     "check": parsed["check"],
                     "evidence": parsed["evidence"][:1000],
-                    "acceptance": parsed["acceptance"], "closed": close,
+                    "acceptance": parsed["acceptance"],
+                    "acceptance_clauses": parsed.get("acceptance_clauses") or [],
+                    "closed": close,
                     "spawned": spawned, "spawned_unverified": unverified,
                     # Which parser produced this verdict, and why the
                     # structured one did not when it did not. Without both,

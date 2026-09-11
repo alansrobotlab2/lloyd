@@ -323,6 +323,14 @@ def _announce_promoted(round_id: str, commit: str, changed: list, title: str = "
     announcement must never be able to fail a promotion that already
     succeeded and is being observed.
     """
+    head, body = promotion_announcement(title, len(changed))
+    announce(head, body)
+
+
+def announce(head: str, body: str) -> None:
+    """News through the guardian's one fan-out (journal, toast, voice), never
+    an `alert` — no ledger row, no backlog task. Guarded end to end: an
+    announcement must never fail the thing it announces."""
     try:
         import sys
         gdir = Path(__file__).resolve().parents[2] / "agent-services" / "guardian"
@@ -337,7 +345,6 @@ def _announce_promoted(round_id: str, commit: str, changed: list, title: str = "
             vault_root=policy.VAULT_ROOT,
             voice_window=policy.VOICE_REPEAT_SECONDS,
         )
-        head, body = promotion_announcement(title, len(changed))
         notifier.announce(head, body)
     except Exception:
         pass

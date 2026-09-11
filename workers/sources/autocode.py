@@ -32,6 +32,7 @@ did afterwards.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -53,12 +54,14 @@ LONG_LIVED = True
 DEFAULT_PRIORITY = 40
 DEDUP_KEY = "autocode:round"
 
-# Same cap and the same reason as autotriage.SPAWN_CAP. An implement
-# round ran hotter than triage did — 17 items over 6 runs, and the three
-# that aborted at the gate on 2026-09-08 filed 3, 6 and 5 while landing
-# nothing. A round that cannot make its own change true is the last one
-# that should be growing the board.
-SPAWN_CAP = 3
+# One, not triage's three. Triage's job is to split an item into claims, so
+# filing is its output; an implement round's output is a landing. Over the
+# loop's first four days implement rounds filed 102 items against 7 closed,
+# hit the cap of 3 in 21 of 43 rounds (it was binding, not a ceiling), and
+# the three that aborted at the gate on 2026-09-08 filed 3, 6 and 5 while
+# landing nothing. The overflow item still exists, so nothing is dropped —
+# it arrives as one handoff instead of three.
+SPAWN_CAP = 1
 # 150, not 100. Round SM_20260908_165950 called `automod_land` at iteration 91
 # of 100 — nine left for a landing that must be followed by an immediate turn
 # end, and #278 died at 101 with a gated, ready change it never landed. The
@@ -92,9 +95,21 @@ Evidence: {evidence}
 
     {acceptance}
 
-The round is done when that has become true and a test pins it. If you cannot \
-make it true with one small, well-tested change, do not land a larger one — \
-abort the round, say why, and the item goes back to a human.
+As separately checkable clauses — the gate's review rung grades each one, and \
+your finalizer reports each one:
+
+{clauses}
+
+The round is done when every clause has become true and a test pins each. If \
+you cannot make them true with one small, well-tested change, do not land a \
+larger one — abort the round, say why, and the item goes back to a human.
+
+**Seams.** Before you gate, write down every process boundary your change \
+crosses — a loopback POST to `/api/message/stream`, a value carried in `_meta` \
+over MCP, a `Task` subagent, a contextvar read in a different task, a \
+supervisord restart — and name the test that crosses each one. The code graph \
+is blind across these seams and a grep is not a test. The review rung asks the \
+same question of your diff cold, and an unverified seam sends the round back.
 
 **Scope you discover is not scope you take.** The work will show you things \
 the acceptance check does not cover — a second bug beside the first, a \
@@ -126,10 +141,11 @@ triage had already stated before it opened its round.
 Procedure when the surface is `code` or `frontend`:
 1. Re-read the item and the triage evidence. If anything has changed since the \
 triage and the premise no longer holds, say so and stop — that is a result.
-2. `automod_start` with a goal naming item #{item_id}. Work only in the \
-worktree it returns. The frontend is in scope: `web/src/**`, `web/index.html` \
-and `web/public/**` are writable and the gate type-checks and builds them; \
-`package.json`, the lockfile and the Vite/TS config are not.
+2. `automod_start` with a goal naming item #{item_id} **and `item_id={item_id}`** \
+— that is what lets the gate's review rung find the clauses it grades against. \
+Work only in the worktree it returns. The frontend is in scope: `web/src/**`, \
+`web/index.html` and `web/public/**` are writable and the gate type-checks and \
+builds them; `package.json`, the lockfile and the Vite/TS config are not.
 3. **Map the blast radius before you edit.** `graph_refresh(root=<worktree>)`, \
 then `graph_affected(symbol, root=<worktree>)` for each symbol you are about \
 to change and `graph_explain` for its callers. Pass `root=` every time — the \
@@ -145,6 +161,17 @@ it **rebased** is a pass, not a warning: something landed on `main` under you \
 and the gate moved your branch onto it and retested. Your base has moved; do \
 not re-cut. Only a rebase *conflict* stops you, and it names the files — \
 resolve in the worktree, commit, gate again.
+
+**The `review` rung is a second reader, not a test.** It hands your diff and \
+the clauses above to a fresh session that has not seen your report, and it \
+fails the gate when a clause is unmet or unpinned, a test cannot fail, or a \
+seam has no test across it. Its detail lists the findings. The first refusal \
+is the normal case: fix what it names, commit, `automod_gate` again. The \
+second refusal says "abort and report" — do that, with `automod_abort` and a \
+reason; the item comes back to the next round with the findings and your \
+branch. Do not argue with it in prose and do not weaken a test to satisfy it. \
+If it judges the **premise** unsound, stop: that is a verdict on the item, and \
+a human decides.
 
 **An existing test that fails because it pins the behaviour you were asked to \
 change is work, not a blocker.** The gate reports whether a failure is new in \
@@ -202,15 +229,18 @@ pass.
 
 **Your outcome closes the item — or leaves it open.** When this turn ends you \
 will be asked to restate the result as one JSON object: whether the change \
-landed, and whether the acceptance check above is now `met`, `not_met`, or \
-`deferred`. Once the promotion settles, an item whose round said `met` is \
-closed automatically. `deferred` leaves it open and names the ids it waits on \
-— that is the honest answer when the check needs traffic, a nightly run, or \
-another item to close first; file that item and name it. `not_met` leaves it \
-open. `unnecessary` means the work is not needed after all — the premise no \
+landed, and **per clause** whether it is now `met`, `not_met`, or `deferred`, \
+with the test node id or file:line that shows it. The overall acceptance is \
+derived from the clauses. Once the promotion settles, an item whose clauses all \
+said `met` is closed automatically. `deferred` leaves it open and names the ids \
+it waits on — that is the honest answer when the check needs traffic, a nightly \
+run, or another item to close first; file that item and name it. **A deferral \
+that names no id is recorded as `not_met`.** `not_met` leaves it open, and a \
+landed round with a `not_met` clause is offered once more for exactly those \
+clauses. `unnecessary` means the work is not needed after all — the premise no \
 longer holds, or the acceptance is already true — and closes the item without a \
 landing; say so in the summary. A closed item is never re-triaged, so `met` (or \
-`unnecessary`) on a check you did not actually verify is the one claim this loop \
+`unnecessary`) on a clause you did not actually verify is the one claim this loop \
 cannot recover from.
 
 Report what you did, quoting the gate line rather than saying "it passed", \
@@ -223,14 +253,48 @@ ABANDON_GRACE_SECONDS = 20 * 60
 
 
 def _reoffer_block(reason: str) -> str:
-    """The banner an item gets when it is being offered again."""
+    """The banner an item gets when it is being offered again.
+
+    Worded per verdict. "Never reached a verdict" was true of every re-offer
+    until the review rung existed; a review refusal IS a verdict on the
+    change, and the next round's first move is to read the findings and
+    resume the branch, not to start over.
+    """
     if not reason:
         return ""
+    verdict = reason.split(":", 1)[0].strip()
+    if verdict == "review_retry":
+        m = re.search(r"`automod/(SM_[0-9_]+)`", reason)
+        branch = f"automod/{m.group(1)}" if m else "the branch named below"
+        return (f"**This item is being offered again — the gate's review rung sent its "
+                f"previous round back with findings ({reason}).** The work is on "
+                f"`{branch}`. Pass `from_branch=\"{branch}\"` to `automod_start` so the new "
+                f"worktree starts from it, rebased onto live main; then address each "
+                f"finding by name before anything else, and say in your report which "
+                f"finding each commit answers. The same grader reads the result.\n\n")
+    if verdict == "partial":
+        return (f"**This item is being offered again — its previous round landed, but "
+                f"its own outcome reported clauses not met ({reason}).** The landed change "
+                f"is in live main; your round is about the named clauses only.\n\n")
     return (f"**This item is being offered again — its previous round never reached a "
             f"verdict on the change ({reason}).** Read what is there before you start: "
             f"if a branch is named, `git log`/`git diff` it against your new base and "
             f"reuse what still applies rather than rewriting it. Say in your report "
             f"what you reused and what you redid.\n\n")
+
+
+def _review_note(events: list[dict], round_id: str | None) -> dict | None:
+    """The review rung's refusal for this round, if that is how the gate
+    last ended — read off the gate event, which outlives the round dir."""
+    if not round_id:
+        return None
+    last = None
+    for ev in events:
+        if ev.get("event") == "gate" and ev.get("round_id") == round_id:
+            last = ev
+    if last and not last.get("ok") and last.get("rung") == "review":
+        return last
+    return None
 
 
 def reap_abandoned_rounds(now: float | None = None) -> list[dict]:
@@ -276,12 +340,16 @@ def reap_abandoned_rounds(now: float | None = None) -> list[dict]:
             continue
         if not W.worktree_path(rid).exists():
             continue
-        R.abort(rid)
+        review = _review_note(events, rid)
+        why = (f"implement turn ended ({e.get('stop_reason')}) and the round "
+               f"stayed open for {int(age // 60)} min with nothing running in "
+               f"its session")
+        if review is not None:
+            why = (f"the review rung sent the round back and the turn ended without "
+                   f"abort or re-gate; {why}")
+        R.abort(rid, reason=why)
         rec = {"event": "round_abandoned", "round_id": rid, "item_id": e.get("item_id"),
-               "branch": f"automod/{rid}",
-               "reason": (f"implement turn ended ({e.get('stop_reason')}) and the round "
-                          f"stayed open for {int(age // 60)} min with nothing running in "
-                          f"its session")}
+               "branch": f"automod/{rid}", "reason": why}
         S.append_event(rec)
         if e.get("item_id") is not None:
             B.note_item(int(e["item_id"]),
@@ -423,6 +491,8 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
         check=triage.get("check") or "(none recorded)",
         evidence=(triage.get("evidence") or "(none recorded)")[:2000],
         acceptance=triage.get("acceptance") or "",
+        clauses="\n".join(f"    {i}. {c}" for i, c in enumerate(
+            B.acceptance_clauses_of(triage), 1)) or "    (the contract above is one clause)",
         spawn_cap=SPAWN_CAP,
         # A label the eval comparer can select on, unique per item and stable
         # across the turn's retries. `--label item377` reads back as the run
@@ -442,11 +512,13 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
             final_schema=B.IMPLEMENT_OUTCOME_SCHEMA if want_outcome else None,
             final_schema_prompt=(
                 "Restate the result of this round as a single JSON object matching "
-                "the schema: whether the change landed, and whether the acceptance "
-                "check recorded at triage is now met, not_met, or deferred (with the "
-                "ids it waits on). Same filed ids as your SPAWNED line. This is a "
-                "transcription of what you already reported, not a re-decision — and "
-                "`met` closes the item once the promotion settles, so say what is true."
+                "the schema: whether the change landed, and for EACH acceptance clause "
+                "in order whether it is now met, not_met, or deferred (with the ids it "
+                "waits on) and the test node id or file:line that shows it. Same filed "
+                "ids as your SPAWNED line. This is a transcription of what you already "
+                "reported, not a re-decision — `met` on every clause closes the item "
+                "once the promotion settles, and a deferral that names no id is "
+                "recorded as not_met, so say what is true."
             ))
     except DrainActive as exc:
         S.append_event({"event": "backlog_implement", "item_id": candidate.id,
@@ -500,6 +572,35 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
                      "the round found the work unnecessary" + (f": {outcome['summary']}" if outcome.get("summary") else ""))
         S.append_event({"event": "item_closed", "item_id": candidate.id, "by": "autocode",
                         "acceptance": "unnecessary", "reason": outcome.get("summary", "")[:300]})
+    # The review rung's word, onto the item. A refusal is on the gate event,
+    # which outlives the round dir; what goes on the item is the part a
+    # human reads — the grader's findings, the branch, and when the grader
+    # judged the premise itself unsound, a tag that makes it findable in a
+    # 380-deep draft pile.
+    review = _review_note(events, round_id)
+    if review is not None:
+        if review.get("review_premise_unsound"):
+            B.note_item(candidate.id,
+                        f"automod review judged the premise unsound (round {round_id}): "
+                        f"{str(review.get('review_summary') or review.get('detail') or '')[:600]}")
+            B.tag_item(candidate.id, add=("review-premise",))
+        else:
+            B.note_item(candidate.id,
+                        f"automod review sent round {round_id} back: "
+                        f"{str(review.get('review_findings') or review.get('detail') or '')[:800]} "
+                        f"— work is on branch `automod/{round_id}`")
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH).get(candidate.id, ("", ""))
+    if detail.startswith("review disagreement"):
+        B.note_item(candidate.id, f"escalated: {detail}")
+        B.tag_item(candidate.id, add=("review-disagreement",))
+        S.append_event({"event": "review_escalated", "item_id": candidate.id,
+                        "round_id": round_id, "reason": detail[:400]})
+        try:
+            from scripts.automod.promote import announce
+            announce(f"#{candidate.id} needs you",
+                     f"review sent it back twice on the same clause: {detail[:160]}")
+        except Exception as exc:  # noqa: BLE001 — an announcement never fails a round
+            logger.warning("announce failed: %s", exc)
     claimed = B.parse_spawned_line(run.get("text") or "")
     spawned = B.existing_ids(claimed)
     # Recorded, not enforced — the items are on disk before this line runs.

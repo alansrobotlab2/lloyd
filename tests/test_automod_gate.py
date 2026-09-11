@@ -67,8 +67,7 @@ class _StubGate(G.Gate):
         return rung
 
     def run(self):
-        for name in ("preflight", "static", "frontend", "tests", "venv",
-                     "canary_boot", "canary_smoke", "drill"):
+        for name in RUNGS:
             if not self._rung(name, self._make(name)):
                 self.report.ok = False
                 return self.report
@@ -76,16 +75,28 @@ class _StubGate(G.Gate):
         return self.report
 
 
-ALL_PASS = {n: (True, "ok", {}) for n in
-            ("preflight", "static", "frontend", "tests", "venv", "canary_boot",
-             "canary_smoke", "drill")}
+# The ladder, in order. `review` sits after `tests` (it trusts a green tree)
+# and before `venv` (a refusal saves the build, the boot, the smoke).
+RUNGS = ("preflight", "static", "frontend", "tests", "review", "venv",
+         "canary_boot", "canary_smoke", "drill")
+ALL_PASS = {n: (True, "ok", {}) for n in RUNGS}
 
 
 def test_all_rungs_passing_is_a_pass(monkeypatch, tmp_path):
     monkeypatch.setattr(G.S, "append_event", lambda *a, **k: None)
     g = _StubGate(dict(ALL_PASS))
     assert g.run().ok
-    assert len(g.called) == 8
+    assert len(g.called) == 9
+
+
+def test_the_stub_ladder_is_the_real_ladder(monkeypatch):
+    """The stub above is only a test of the gate while it lists the rungs the
+    gate actually runs, in the order it runs them."""
+    names: list[str] = []
+    g = G.Gate("SM_TEST_LADDER", Path(__file__).resolve().parent.parent, "HEAD")
+    monkeypatch.setattr(g, "_rung", lambda name, fn: names.append(name) or True)
+    g.run()
+    assert tuple(names) == RUNGS
 
 
 def test_a_failing_rung_short_circuits_the_expensive_ones(monkeypatch):
@@ -118,8 +129,7 @@ def test_every_rung_result_is_recorded_even_on_success(monkeypatch):
     monkeypatch.setattr(G.S, "append_event", lambda *a, **k: None)
     g = _StubGate(dict(ALL_PASS))
     report = g.run()
-    assert [r.name for r in report.rungs] == [
-        "preflight", "static", "frontend", "tests", "venv", "canary_boot", "canary_smoke", "drill"]
+    assert [r.name for r in report.rungs] == list(RUNGS)
     assert all(r.seconds >= 0 for r in report.rungs)
 
 
@@ -127,7 +137,7 @@ def test_the_report_serializes_for_the_round_log(monkeypatch):
     monkeypatch.setattr(G.S, "append_event", lambda *a, **k: None)
     g = _StubGate(dict(ALL_PASS))
     d = g.run().to_dict()
-    assert d["ok"] is True and len(d["rungs"]) == 8
+    assert d["ok"] is True and len(d["rungs"]) == 9
     assert set(d) >= {"round_id", "base", "head", "ok", "rungs", "changed_paths"}
 
 

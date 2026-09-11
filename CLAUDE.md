@@ -90,7 +90,7 @@ the confirmed ones. (Named `selfmod`, then `autoimplement`, until 2026-09-09.)
 ```bash
 python -m scripts.automod.round status              # state + ledger + guardian
 python -m scripts.automod.round start "goal"        # cuts a worktree
-python -m scripts.automod.round gate  SM_<id>       # 8 rungs, ~2.5 min
+python -m scripts.automod.round gate  SM_<id>       # 9 rungs, ~4 min
 python -m scripts.automod.round land  SM_<id>       # idle-gated, verified
 python -m scripts.automod.round bless               # HEAD becomes last-known-good
 python -m scripts.automod.round recover             # clear BROKEN, restart the stack
@@ -177,6 +177,26 @@ error-shaped lines.
   Fails closed everywhere (a probe that cannot run blames the round), capped
   at `EXTERNAL_RETRY_CAP` re-offers so a permanently red tree cannot starve
   the board, and granted by the `tests` rung only.
+- **The gate has a second reader.** Eight rungs asked whether a change
+  *broke* something and none asked whether it did what the item said; #544
+  landed through all eight with one of five acceptance clauses skipped, half
+  a fleet uncovered, a silent `Edit` replay and an `or True` assertion, then
+  declared itself `deferred` to an empty list. The `review` rung
+  (`scripts/automod/review.py`, `architecture/automod.md` §4.5) hands a fresh
+  session on the **live** backend — never the canary, which is the
+  candidate's own harness grading itself — only the item, its clauses, the
+  diff and the changed tests, and blocks on an unmet clause, a test that
+  cannot fail, or a seam with no test across it. `parse_review` downgrades a
+  `met` with no evidence in Python. Premise sound → the round fixes and
+  re-gates once, then aborts and the item is re-offered with the findings
+  and the kept branch (`automod_start(from_branch=…)`, `review_retry`, cap
+  2; the same clause refused twice escalates to a human at once, tag
+  `review-disagreement`). Premise unsound → `spent`, tag `review-premise`.
+  Grader unreachable → `external`, never a pass. Acceptance is now
+  **clauses** end to end (`acceptance_clauses` at triage, `clause_outcomes`
+  from the implementer), and a deferral that names no id is `not_met`. Runs
+  after `tests`, before `venv`; skipped (recorded) only when no item is
+  bound to the round.
 - **A round that never reached a verdict has not spent the item.**
   `implemented_ids` counted any finished round as the one attempt "whatever it
   did", and six of the loop's first seventeen attempts were spent by something

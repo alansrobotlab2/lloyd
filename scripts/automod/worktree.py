@@ -49,6 +49,27 @@ def create(round_id: str, base: str = "HEAD", repo: Path | None = None) -> Path:
     return wt
 
 
+def branch_exists(repo: Path, branch: str) -> bool:
+    return git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}").returncode == 0
+
+
+def create_from_branch(round_id: str, branch: str, repo: Path | None = None) -> Path:
+    """Create the round's worktree on a NEW branch that starts where `branch`
+    left off — the resume path for a round the review rung sent back. The
+    caller rebases onto live HEAD immediately and deletes the old branch."""
+    repo = repo or LIVE_ROOT
+    wt = worktree_path(round_id)
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    r = git(repo, "worktree", "add", "-q", "-b", f"automod/{round_id}", str(wt), branch)
+    if r.returncode != 0:
+        raise RuntimeError(f"git worktree add from {branch} failed: {r.stderr.strip()[:400]}")
+    return wt
+
+
+def delete_branch(repo: Path, branch: str) -> bool:
+    return git(repo, "branch", "-D", branch).returncode == 0
+
+
 def changed_paths(worktree: Path, base: str) -> list[str]:
     """Repo-relative paths changed between `base` and the worktree's HEAD."""
     r = git(worktree, "diff", "--name-only", f"{base}...HEAD")
