@@ -146,10 +146,12 @@ python -m scripts.automod.round gate  SM_<id>           # 9 rungs, ~4 min
 python -m scripts.automod.round land  SM_<id>           # idle-gated, verified
 ```
 
-Or the same four steps as MCP tools: `automod_start`, `automod_gate`,
-`automod_land`, `automod_status` (plus `automod_abort` and
-`automod_rollback`). Every mutating tool refuses while `automod.enabled` is
-false, which is the default.
+Or the same steps as MCP tools: `automod_start`, `automod_gate` (returns
+at once; the gate runs detached), `automod_gate_wait` (blocks in slices and
+hands back the per-rung report), `automod_land`, `automod_status` (plus
+`automod_abort`, `automod_amend_clause` and `automod_rollback`). Every
+mutating tool refuses while `automod.enabled` is false, which is the
+default. §4.5b says why the gate is detached.
 
 ### 3.2 Unattended
 
@@ -351,7 +353,11 @@ that and a lost round, in order:
 inputs. A triage whose fix needs one records `confirmed` with an acceptance
 that begins `human-only:`, and `select_confirmed` skips it — the alternative
 was an implement round spent discovering it, which is what #278 cost before
-`web/src` was allowed.
+`web/src` was allowed. A *condition* only a person can satisfy — an audit,
+a sign-off, a measurement that needs real traffic — is the other shape, and
+it goes in `human_clauses`, never in `acceptance_clauses`: the item is still
+implemented, the reviewer does not grade those, and the landing leaves it
+open tagged `needs-human` (§4.5c).
 
 ### 3.2a Status is the state machine
 
@@ -701,7 +707,8 @@ The rung's four outcomes, and where each goes:
 | grader says | rung | then |
 |---|---|---|
 | every clause `met`, no findings | pass | ladder continues |
-| premise sound; a clause unmet/partial, an honesty finding, a seam | fail, `review_retry` + `review_findings` on the gate event | the round fixes and re-gates once in the same turn; the second refusal says *abort and report*; a third gate call is refused without asking the model. A turn that ends unlanded hands the item back as `implement_outcomes` → `review_retry` (cap 2), findings in `reoffer_reason`, branch kept — the next round passes it as `automod_start(from_branch=…)` and begins where this one stopped, rebased onto live main |
+| premise sound; a clause unmet/partial, an honesty finding, a seam | fail, `review_retry` + `review_findings` on the gate event | the round fixes what it names, commits, and gates again; the second graded refusal of a *distinct commit* says *abort and report*; a third is refused without asking the model. Re-gating the same commit is answered from the ledger with the same findings and spends nothing. A turn that ends unlanded hands the item back as `implement_outcomes` → `review_retry` (cap 2), findings in `reoffer_reason`, branch kept — the next round passes it as `automod_start(from_branch=…)` and begins where this one stopped, rebased onto live main |
+| premise sound; a clause `unsatisfiable` as written | fail, `review_retry`, the findings name `automod_amend_clause` | the author amends exactly that clause (refused for any other); the next review sees the amendment as an `<amendments>` block and ratifies it or refuses it and restores the old text (§4.5c) |
 | premise unsound | fail, `review_premise_unsound` | the existing `spent` path: `draft` + `needs-human`, tag `review-premise`, the grader's summary on the item |
 | grader unreachable, 503, timeout, unusable object | fail, `external_blocker` | the engine, not the diff; the item keeps its attempt. Never a SKIPPED pass — a waived review is the #544 shape |
 
@@ -711,9 +718,11 @@ smoke and the drill (and because `canary_smoke` must immediately precede
 `drill`). It is skipped, and recorded as skipped, only for a round with no
 item bound — a human's round has no contract to grade against.
 
-**Termination.** Three bounds end the author/grader loop: two refusals per
-round, `REVIEW_RETRY_CAP = 2` across rounds, and an early exit — when the
-same clause comes back unmet on two consecutive reviews of an item
+**Termination.** Three bounds end the author/grader loop: two graded
+refusals of distinct commits per round (a grader timeout and a duplicate
+review of one commit spend nothing — §4.5b), `REVIEW_RETRY_CAP = 2` across
+rounds, and an early exit — when the same clause comes back unmet on two
+consecutive reviews of an item *on two different commits*
 (`review_disagreement`), the item is `spent` at once, tagged
 `review-disagreement`, and announced through the guardian's fan-out. A
 third round would re-run the same argument; a human resolves it.
