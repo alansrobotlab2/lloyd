@@ -804,6 +804,12 @@ async def _maybe_finalize(
     for key in ("output_tokens", "total_tokens"):
         if usage.get(key):
             total_usage[key] = total_usage.get(key, 0) + usage[key]
+    # Its own key as well as the fold: the ledger records it per verdict so
+    # a budget that is too tight shows up as a number, not as a regex rate.
+    if usage.get("output_tokens"):
+        total_usage["finalizer_output_tokens"] = (
+            total_usage.get("finalizer_output_tokens", 0)
+            + int(usage["output_tokens"]))
     if usage.get("input_tokens"):
         total_usage["finalizer_input_tokens"] = (
             total_usage.get("finalizer_input_tokens", 0)

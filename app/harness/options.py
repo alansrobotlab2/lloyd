@@ -219,5 +219,11 @@ class RunOptions:
 
     final_schema: dict[str, Any] | None = None
     final_schema_prompt: str = ""
-    finalizer_max_tokens: int = 1024
+    # 4096, not 1024: this is the WHOLE completion budget and the grammar only
+    # applies after `</think>`, so reasoning tokens are spent before the
+    # object starts. At 1024, 14 of the first 34 triage verdicts (41%) came
+    # back as well-formed JSON cut mid-string inside `check`/`evidence` — 13
+    # of them `confirmed`, the verbose verdicts that matter — and fell back
+    # to the regex parser. `finalizer.py` names a truncation as such now.
+    finalizer_max_tokens: int = 4096
     finalizer_timeout_s: float = 180.0

@@ -1125,6 +1125,10 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 if options.final_schema:
                     stream_stats["structured"] = evt.get("structured")
                     stream_stats["structured_error"] = evt.get("structured_error", "")
+                    # What the restatement cost, so a too-tight budget shows
+                    # up in the ledger as a number beside the truncation.
+                    stream_stats["finalizer_output_tokens"] = (
+                        (evt.get("usage") or {}).get("finalizer_output_tokens"))
                 # What this turn wrote. On `stream_stats` for the same reason
                 # `structured` is: that dict object is both persisted on the
                 # final assistant message and sent in every `done` branch, so
@@ -1275,6 +1279,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 if options.final_schema:
                     done_payload['structured'] = stats_dict.get("structured")
                     done_payload['structured_error'] = stats_dict.get("structured_error", "")
+                    done_payload['finalizer_output_tokens'] = stats_dict.get("finalizer_output_tokens")
                 if accumulated_thinking:
                     done_payload['reasoning'] = accumulated_thinking
                     if accumulated_thinking_ms:

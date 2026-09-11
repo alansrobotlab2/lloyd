@@ -353,8 +353,14 @@ harness:
   # after the turn ends that restates the verdict as a JSON object. These
   # bound that request; the schema itself is a per-caller contract, never
   # config. Inert for every caller that sends no schema.
+  # max_tokens is the WHOLE completion, thinking included — the grammar
+  # only applies after </think>. At 1024, 41% of triage verdicts came back
+  # as JSON cut mid-string and fell back to the regex parser (the ledger's
+  # `structured_error` says "truncated" for those now). 4096 is the floor
+  # once verdicts carry per-clause acceptance; do not lower it without
+  # re-reading the `verdict_source` distribution.
   finalizer:
-    max_tokens: 1024
+    max_tokens: 4096
     timeout_seconds: 180
   # Concurrent tool dispatch, for READ-ONLY batches only. A batch runs
   # concurrently when EVERY call in it is annotated readOnlyHint (or is a

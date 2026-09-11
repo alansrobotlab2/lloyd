@@ -2015,6 +2015,16 @@ turn ends, restating its conclusion as a JSON object
   known and records `source`; the ledger carries `verdict_source` and
   `structured_error` so a finalizer that quietly stopped working does not look
   exactly like one that is working.
+- **The budget is the whole completion, thinking included.** The grammar
+  applies only after `</think>`, so reasoning tokens are spent before the
+  object starts. At `finalizer_max_tokens: 1024`, 14 of the first 34 triage
+  verdicts (41%) came back as well-formed JSON cut mid-string inside
+  `check`/`evidence` — 13 of them `confirmed`, the verbose verdicts that
+  matter — and every one was recorded `output is not JSON`, the same message
+  a model writing prose would get. The default is 4096 now, `finalizer.py`
+  names a truncation as one (`finish_reason: length`, or an unclosed `{`),
+  and the ledger carries `finalizer_tokens` per verdict so the budget is a
+  number beside the failure rather than a regex rate to be inferred.
 
 `TRIAGE_VERDICT_SCHEMA` is built from `VERDICTS`/`SURFACES` rather than
 restated — one list, or a new verdict lands in the grammar and not the

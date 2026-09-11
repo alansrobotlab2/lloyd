@@ -148,7 +148,9 @@ async def run_finalizer(
 
         try:
             body = resp.json()
-            content = body["choices"][0]["message"].get("content") or ""
+            choice = body["choices"][0]
+            content = choice["message"].get("content") or ""
+            finish_reason = str(choice.get("finish_reason") or "")
             usage = _usage(body.get("usage") or {})
         except Exception as exc:
             return None, f"finalizer failed: unreadable response: {exc}", {}
@@ -156,6 +158,17 @@ async def run_finalizer(
         try:
             parsed = json.loads(content)
         except (ValueError, TypeError):
+            # Two failures used to share one message, and they call for
+            # different fixes. A well-formed object cut mid-string is the
+            # budget (`finish_reason: length`, or an unclosed `{` when the
+            # engine does not say); anything else is the model not producing
+            # an object at all. 14 of the first 34 verdicts were the former
+            # and read as the latter.
+            if finish_reason == "length" or content.lstrip().startswith("{"):
+                return None, (f"finalizer failed: output truncated at "
+                              f"{usage.get('output_tokens', '?')} tokens — "
+                              f"raise harness.finalizer.max_tokens "
+                              f"({content[:200]!r})"), usage
             return None, (f"finalizer failed: output is not JSON "
                           f"({content[:200]!r})"), usage
         if not isinstance(parsed, dict):

@@ -397,6 +397,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                         "auto": True, "session_id": session_id,
                         "verdict_source": "none",
                         "structured_error": structured_error,
+                        "finalizer_tokens": run.get("finalizer_tokens"),
                         "stop_reason": stop_reason})
         logger.warning("backlog #%s: %s", candidate.id, evidence)
         return {"status": "success", "item_id": candidate.id, "verdict": "unverifiable",
@@ -441,6 +442,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     # like one that is working.
                     "verdict_source": parsed.get("source", "regex"),
                     "structured_error": structured_error,
+                    "finalizer_tokens": run.get("finalizer_tokens"),
                     "session_id": session_id, "stop_reason": stop_reason,
                     "num_turns": run.get("num_turns"), "budget": budget})
 

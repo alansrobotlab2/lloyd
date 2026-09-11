@@ -44,8 +44,9 @@ class _Resp:
         return self._body
 
 
-def _ok(content, usage=None):
-    return _Resp(200, {"choices": [{"message": {"content": content}}],
+def _ok(content, usage=None, finish_reason="stop"):
+    return _Resp(200, {"choices": [{"message": {"content": content},
+                                    "finish_reason": finish_reason}],
                        "usage": usage or {}})
 
 
@@ -253,7 +254,8 @@ async def test_the_loop_folds_finalizer_tokens_into_the_turns_usage(monkeypatch)
         options=opts, stop_reason="stop", chat_messages=[], tools=None,
         total_usage=total)
     assert parsed == {"verdict": "confirmed"} and error == ""
-    assert total == {"output_tokens": 1040, "total_tokens": 5090}
+    assert total == {"output_tokens": 1040, "total_tokens": 5090,
+                     "finalizer_output_tokens": 40}
 
 
 async def test_nothing_raises_out_of_the_loops_finalizer(monkeypatch):
@@ -288,3 +290,68 @@ def test_config_maps_the_finalizer_budgets(monkeypatch):
     kw = D._get_harness_kwargs()
     assert kw["finalizer_max_tokens"] == 256
     assert kw["finalizer_timeout_s"] == 30.0
+
+
+# ── the budget, and naming a truncation as one ──────────────────────────────
+
+async def test_a_cut_off_object_is_reported_as_truncated_not_as_not_json():
+    """14 of the first 34 triage verdicts came back as well-formed JSON cut
+    mid-string and were recorded "output is not JSON" — the same message a
+    model that wrote prose would get, which hid a budget problem behind a
+    model-behaviour one for two days. The engine says `finish_reason: length`;
+    when it does not, an unclosed `{` is the tell."""
+    _Client.responses = [_ok('{"verdict":"confirmed","check":"ls _pipe',
+                             usage={"completion_tokens": 1024},
+                             finish_reason="length")]
+    parsed, error, usage = await _run()
+    assert parsed is None
+    assert "truncated at 1024 tokens" in error and "max_tokens" in error
+    assert usage["output_tokens"] == 1024
+
+    _Client.responses = [_ok('{"verdict":"confirmed","evidence":"…',
+                             finish_reason="")]
+    parsed, error, _ = await _run()
+    assert parsed is None and "truncated" in error
+
+    _Client.responses = [_ok("I think the verdict is confirmed.")]
+    parsed, error, _ = await _run()
+    assert parsed is None and "not JSON" in error and "truncated" not in error
+
+
+def test_the_default_budget_is_4096_and_config_agrees():
+    """The budget is the whole completion, thinking included, and the grammar
+    only applies after </think>. 1024 truncated 41% of verdicts; the config
+    value is what production runs, so the two must not drift."""
+    import re
+    from pathlib import Path
+    from app.harness.options import RunOptions
+
+    assert RunOptions(model="primary").finalizer_max_tokens == 4096
+    cfg = Path(F.__file__).parents[2].joinpath("config.yaml").read_text()
+    block = re.search(r"\n  finalizer:\n((?:    .*\n)+)", cfg)
+    assert block, "harness.finalizer block missing from config.yaml"
+    assert re.search(r"^\s+max_tokens:\s+4096\s*$", block.group(1), re.M)
+
+
+async def test_the_finalizers_own_output_tokens_get_their_own_key():
+    """So the ledger can carry the cost per verdict beside the truncation."""
+    from app.harness import loop as L
+    from app.harness.options import RunOptions
+
+    async def fake(**kw):
+        return {"verdict": "confirmed"}, "", {"output_tokens": 300, "total_tokens": 900,
+                                              "input_tokens": 600}
+    import app.harness.finalizer as FF
+    orig = FF.run_finalizer
+    FF.run_finalizer = fake
+    try:
+        total: dict = {"output_tokens": 10}
+        parsed, error = await L._maybe_finalize(
+            options=RunOptions(model="primary", final_schema=SCHEMA),
+            stop_reason="stop", chat_messages=[], tools=None, total_usage=total)
+    finally:
+        FF.run_finalizer = orig
+    assert parsed == {"verdict": "confirmed"} and error == ""
+    assert total["output_tokens"] == 310
+    assert total["finalizer_output_tokens"] == 300
+    assert total["finalizer_input_tokens"] == 600

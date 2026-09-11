@@ -523,6 +523,7 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
                     # there is none when there is none — a finalizer that
                     # quietly stopped working must not look like one working.
                     "outcome": outcome, "outcome_error": outcome_error,
+                    "finalizer_tokens": run.get("finalizer_tokens"),
                     "response_tail": (run.get("text") or "")[-1500:]})
     outcome = (f"round {round_id}" if round_id else
                f"vault commit {vault_commits[-1][:8]}" if vault_commits else "no round opened")
