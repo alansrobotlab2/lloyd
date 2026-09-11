@@ -110,7 +110,7 @@ def test_the_supervisord_environment_pins_the_fix():
     assert env.get("KV_CACHE_DTYPE") == "fp8"
     assert env.get("VLLM_VENV", "").endswith("/.venvs/vllm-flash-next-main")
     # The chunk budget adopted from the Layer 3 arms (the conf's comment and
-    # architecture/vllm-throughput-mitigation.md §3.3).
+    # architecture/vllm.md §3.3).
     assert env.get("MAX_NUM_BATCHED_TOKENS") == "4096"
 
 

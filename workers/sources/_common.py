@@ -309,7 +309,7 @@ def _worker_run_options(max_turns: int, *, extra_disallowed: Sequence[str] = (),
         hooks=hooks,
         # The compaction wall, from the config the chat path reads. This
         # constructor takes no `_get_harness_kwargs()` at all — see
-        # architecture/vllm-throughput-mitigation.md, "Found on the way" — so
+        # architecture/vllm.md, "Found on the way" — so
         # the fractions are passed on their own, or the lowered cap would not
         # reach direct worker turns.
         **intra_turn_compaction_kwargs(),

@@ -45,7 +45,7 @@ RUN_STATUSES = ("success", "failed", "skipped")
 # turn's prefix sits only in the engine's free pool, where the next
 # allocation can take it. Three or four of those resident at once on a 398k
 # pool and one of them came back cold on almost every iteration
-# (architecture/vllm-throughput-mitigation.md). Short-lived jobs never came
+# (architecture/vllm.md). Short-lived jobs never came
 # back to miss, which is why seven youtube digests at 81.5% KV ran clean the
 # night before.
 #
