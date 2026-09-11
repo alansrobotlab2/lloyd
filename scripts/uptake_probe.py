@@ -82,7 +82,8 @@ def _repo_relative(path: str | Path) -> str:
         return str(p)
 
 
-def run_classifier_eval(cache: dict[str, Any] | None = None) -> dict[str, Any]:
+def run_classifier_eval(cache: dict[str, Any] | None = None, *,
+                        record_raw: bool = False) -> dict[str, Any]:
     """Score the classifier against the hand-labeled corpus.
 
     Returns the metrics plus the per-item detail, so a reader can open any
@@ -90,6 +91,13 @@ def run_classifier_eval(cache: dict[str, Any] | None = None) -> dict[str, Any]:
     how many items the secondary slot refused to answer — those are excluded
     from both classes, which is why `n` and `n_labeled` differ when the engine
     was flapping.
+
+    `record_raw=True` additionally stores the engine's literal reply per item
+    (bypassing the cache, which holds verdicts only). That is what lets the
+    measurement be replayed offline: the suite re-parses recorded replies
+    through `app.uptake._parse_verdict` and recomputes precision, so the
+    committed number has a check that does not depend on the engine being awake,
+    and does not trust the fixture's own `predicted` field.
     """
     cache = {} if cache is None else cache
     labels = uptake.load_labels()
@@ -103,15 +111,21 @@ def run_classifier_eval(cache: dict[str, Any] | None = None) -> dict[str, Any]:
         if turn is None:
             missing.append(item["turn_id"])
             continue
-        verdict = _classify_cached(turn, cache)
+        if record_raw:
+            verdict, raw = uptake.classify_dispute_raw(
+                turn.prev_assistant, turn.user_text)
+        else:
+            verdict, raw = _classify_cached(turn, cache), ""
         if verdict is None:
-            per_item.append({**item, "predicted": None, "scored": False})
+            per_item.append({**item, "predicted": None, "scored": False,
+                             **({"engine_raw": raw} if record_raw else {})})
             continue
         labels_used += 1
         per_item.append({
             **item, "predicted": 1 if verdict else 0,
             "scored": True,
             "correct": (1 if verdict else 0) == int(item["label"]),
+            **({"engine_raw": raw} if record_raw else {}),
         })
 
     scored = [p for p in per_item if p["scored"]]
@@ -122,12 +136,10 @@ def run_classifier_eval(cache: dict[str, Any] | None = None) -> dict[str, Any]:
     metrics["n_unanswered"] = len(per_item) - len(scored)
     metrics["n_labels_unresolvable"] = len(missing)
     # Both ends of the matrix are gated: an always-NOT grader scores precision
-    # 1.00 on this corpus and would attribute no disputes to anything.
-    passed = bool(
-        metrics["measured"]
-        and (metrics["precision"] or 0) >= uptake.PRECISION_FLOOR
-        and (metrics["recall"] or 0) >= uptake.RECALL_FLOOR
-    )
+    # 1.00 on this corpus and would attribute no disputes to anything. The stop
+    # condition is `app.uptake.classifier_clears_floors`, shared with the tests —
+    # an inline copy of the gate here would leave the gate itself untested.
+    passed = uptake.classifier_clears_floors(metrics)
     return {
         "metrics": metrics,
         "passed": passed,
@@ -159,8 +171,14 @@ def run(days: int, cache: dict[str, Any]) -> tuple[dict[str, Any], list[uptake.T
     """Classify the window's candidates and join them to the entries in force."""
     turns = build_corpus(days=days)
     candidates = uptake.candidate_disputes(turns)
-    flags = {t.ordinal: _classify_cached(t, cache) for t in candidates}
-    tally: dict[str, int] = {}
+    # Verdicts are keyed on `turn_id`, never on `ordinal`. `Turn.ordinal` restarts
+    # at 1 in every session — the live 30-day window is 220 turns over 132
+    # sessions occupying ordinals 1-10 — so an ordinal-keyed dict collapses 24
+    # verdicts into 9 keys, and the join then charges every session that has a
+    # turn at that position with someone else's dispute. `build_uptake_table`
+    # refuses keys that are not turn_ids of the turns it was handed.
+    flags = {t.turn_id: _classify_cached(t, cache) for t in candidates}
+    tally: dict[str, dict[str, int]] = {}
     table = uptake.build_uptake_table(
         turns=turns,
         dispute_flags=flags,

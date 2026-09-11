@@ -57,7 +57,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -519,9 +519,41 @@ def _post_secondary(payload: dict[str, Any]) -> dict[str, Any]:
         return json.loads(resp.read().decode())
 
 
+def classifier_clears_floors(metrics: Mapping[str, Any] | None) -> bool:
+    """The one place the classifier's stop condition lives.
+
+    Both floors must clear **and** at least one verdict must have come back: an
+    engine that answered nothing produced `precision is None`, and `None >= 0.70`
+    is a TypeError in some callings and a silent False in others, so it is
+    written out instead. The probe refuses to write a table on False, and the
+    tests assert against this function rather than re-typing the expression —
+    an inline copy of the gate is not the gate under test.
+    """
+    if not metrics or metrics.get("measured") is not True:
+        return False
+    precision, recall = metrics.get("precision"), metrics.get("recall")
+    if precision is None or recall is None:
+        return False
+    return precision >= PRECISION_FLOOR and recall >= RECALL_FLOOR
+
+
 def classify_dispute(prev_assistant: str | None, user_text: str, *,
                      transport: Callable[[dict], dict] | None = None) -> bool | None:
-    """One dispute verdict from the secondary engine, or `None`.
+    return classify_dispute_raw(prev_assistant, user_text, transport=transport)[0]
+
+
+def classify_dispute_raw(
+    prev_assistant: str | None, user_text: str, *,
+    transport: Callable[[dict], dict] | None = None,
+) -> tuple[bool | None, str]:
+    """One dispute verdict from the secondary engine, plus its raw reply.
+
+    Returns `(verdict, raw_content)`. The raw reply travels with the verdict so a
+    measurement can be **replayed** later through `_parse_verdict` without the
+    engine: a precision figure that can only be re-checked by asking the model
+    again is not auditable, and a grader whose replies were never recorded makes
+    "re-run the eval" mean "trust the fixture". Callers that only want the verdict
+    use `classify_dispute`.
 
     `None` on an unreachable engine or an unparseable reply is deliberate: an
     unavailable grader must not fall through to "no dispute", which would make
@@ -546,14 +578,14 @@ def classify_dispute(prev_assistant: str | None, user_text: str, *,
     try:
         resp = post(payload)
     except (OSError, urllib.error.URLError, TimeoutError):
-        return None
+        return None, ""
     except Exception:  # noqa: BLE001 - a transport that dies oddly is still "no answer"
-        return None
+        return None, ""
     try:
         content = resp["choices"][0]["message"].get("content") or ""
     except (KeyError, IndexError, AttributeError, TypeError):
-        return None
-    return _parse_verdict(content)
+        return None, ""
+    return _parse_verdict(content), content
 
 
 # ------------------------------------------------------------ label corpus --
@@ -605,25 +637,26 @@ _NEAR_MISS_RE = re.compile(r"^\s+[-*] ?(.{12,})$|^\s*[-*] ?(.{1,11})$")
 
 def memory_entries(root: Path | str | None = None,
                    docs: Sequence[str] = ("lloyd/USER.md", "lloyd/MEMORY.md"),
-                   tally: dict[str, int] | None = None) -> list[Entry]:
+                   tally: dict[str, dict[str, int]] | None = None) -> list[Entry]:
     """Durable memory bullets, one `Entry` each.
 
     Read from the live vault when present, else the checkout — a top-level
     bullet is what actually gets loaded into the system prompt, which is the
     surface the item is about.
 
-    `tally`, if given, is filled with what the grammar *missed*
-    (`indented_bullets`, `short_bullets`) so the caller can publish a denominator
-    that is a measurement rather than a description of its own regex.
+    `tally`, if given, is filled with what the grammar *missed*, **keyed by
+    document** (`{"lloyd/USER.md": {"indented_bullets": 3, "short_bullets": 2}}`)
+    so the caller can publish a denominator that is a measurement rather than a
+    description of its own regex. Per-document because the acceptance clause
+    names USER.md specifically: one flat tally lets a clean MEMORY.md carry a
+    USER.md the grammar barely reads.
     """
     root = Path(root) if root else lloyd_root()
     vault = Path.home() / "obsidian"
     out: list[Entry] = []
     seen: set[str] = set()
-    if tally is not None:
-        tally.setdefault("indented_bullets", 0)
-        tally.setdefault("short_bullets", 0)
     for doc in docs:
+        doc_misses = tally.setdefault(doc, {}) if tally is not None else None
         for base in (vault, root):
             path = base / doc
             if not path.is_file():
@@ -631,12 +664,12 @@ def memory_entries(root: Path | str | None = None,
             for line in path.read_text(errors="replace").splitlines():
                 m = _MEMORY_DOC_RE.match(line.rstrip())
                 if not m:
-                    if tally is not None:
+                    if doc_misses is not None:
                         near = _NEAR_MISS_RE.match(line.rstrip())
                         if near:
                             key = ("indented_bullets" if line[:1].isspace()
                                    else "short_bullets")
-                            tally[key] += 1
+                            doc_misses[key] = doc_misses.get(key, 0) + 1
                     continue
                 e = Entry(doc, m.group(1).strip())
                 if e.key in seen:
@@ -777,7 +810,7 @@ def _row(entry: str, presence_source: str, present: int, disputes: int,
     return row
 
 
-def _memory_coverage(entries: Sequence[Entry], tally: dict[str, int] | None) -> dict[str, Any]:
+def _memory_coverage(entries: Sequence[Entry], tally: dict[str, Any] | None) -> dict[str, Any]:
     """Coverage of the durable-memory half, with a denominator that is measured.
 
     `covered == total` was the shape here before: `total` was `len(entries)`, so
@@ -786,18 +819,35 @@ def _memory_coverage(entries: Sequence[Entry], tally: dict[str, int] | None) -> 
     too-short bullets are bullet-shaped lines the grammar does not reach — they
     belong in the denominator, counted by `memory_entries(tally=…)`.
 
+    Reported per document as well as overall, because the clause is about
+    **USER.md** specifically and a healthy MEMORY.md could otherwise carry a
+    USER.md that the grammar barely reads.
+
     And `covered` still does not mean *honored*: for always-in-force entries the
     join reaches everything by definition, which is what the note says out loud.
     """
+    tallies: dict[str, dict[str, int]] = tally or {}
+    per_doc: dict[str, Any] = {}
+    for doc in sorted({e.source for e in entries} | set(tallies)):
+        rec = sum(1 for e in entries if e.source == doc)
+        ind = int(tallies.get(doc, {}).get("indented_bullets", 0))
+        shrt = int(tallies.get(doc, {}).get("short_bullets", 0))
+        tot = rec + ind + shrt
+        per_doc[doc] = {
+            "covered": rec, "total": tot,
+            "ratio": round(rec / tot, 4) if tot else 0.0,
+            "skipped": {"indented_bullets": ind, "short_bullets": shrt},
+        }
     recognized = len(entries)
-    indented = int((tally or {}).get("indented_bullets", 0))
-    short = int((tally or {}).get("short_bullets", 0))
+    indented = sum(d["skipped"]["indented_bullets"] for d in per_doc.values())
+    short = sum(d["skipped"]["short_bullets"] for d in per_doc.values())
     total = recognized + indented + short
     return {
         "covered": recognized,
         "total": total,
         "ratio": round(recognized / total, 4) if total else 0.0,
         "presence_source": ALWAYS_IN_FORCE,
+        "by_doc": per_doc,
         "skipped": {"indented_bullets": indented, "short_bullets": short},
         "denominator_note": (
             f"total = {recognized} bullets the entry grammar recognizes + "
@@ -811,23 +861,42 @@ def _memory_coverage(entries: Sequence[Entry], tally: dict[str, int] | None) -> 
 
 def build_uptake_table(
     turns: Sequence[Turn],
-    dispute_flags: dict[int, Any],
+    dispute_flags: dict[str, Any],
     memory_entries: Sequence[Entry] = (),
     skills_read: dict[str, Any] | None = None,
     active_skills: Sequence[str] = (),
-    memory_tally: dict[str, int] | None = None,
+    memory_tally: dict[str, dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     """Per-entry uptake table. Measurement only — nothing here prunes.
 
-    `dispute_flags` maps `Turn.ordinal` -> verdict (`True` / `False` / `None`
-    for "the classifier did not answer"). `None` verdicts are counted in
-    `unresolved_turns` rather than folded into the negative class, so a stalled
-    engine shows up as missing evidence instead of a clean bill of health.
+    `dispute_flags` maps **`Turn.turn_id`** (`"<session>#<ordinal>"`) -> verdict
+    (`True` / `False` / `None` for "the classifier did not answer"). `None`
+    verdicts are counted in `engine_unanswered` rather than folded into the
+    negative class, so a stalled engine shows up as missing evidence instead of
+    a clean bill of health.
+
+    The key is the whole contract, and it was the defect this function shipped
+    with: verdicts used to be keyed on `Turn.ordinal`, which **restarts at 1 in
+    every session**. Measured on the live 30-day window, 220 human turns spread
+    over 132 sessions occupy only ordinals 1–10, so 24 candidate verdicts
+    collapsed into 9 ordinal keys, and the join then charged every session that
+    happened to have a turn at that position with another session's dispute. A
+    key that is not a `turn_id` of one of `turns` is therefore a caller defect
+    and raises, rather than silently matching nothing (or the wrong thing).
     """
     skills_read = skills_read or {}
-    flagged = {k: v for k, v in dispute_flags.items() if v is not None}
-    disputed = [t for t in turns if flagged.get(t.ordinal) is True]
-    unresolved = sum(1 for t in turns if dispute_flags.get(t.ordinal) is None)
+    by_id = {t.turn_id: t for t in turns}
+    if len(by_id) != len(turns):
+        raise ValueError(f"duplicate turn_id among {len(turns)} turns")
+    unknown = sorted(set(dispute_flags) - set(by_id))
+    if unknown:
+        raise ValueError(
+            f"{len(unknown)} dispute_flags key(s) are not turn_ids of these turns, "
+            f"first few: {unknown[:4]}. Verdicts must be keyed on Turn.turn_id "
+            "(session#ordinal); Turn.ordinal restarts per session and collides.")
+    disputed_ids = {k for k, v in dispute_flags.items() if v is True}
+    disputed = [t for t in turns if t.turn_id in disputed_ids]
+    unresolved = sum(1 for v in dispute_flags.values() if v is None)
 
     # --- skills: evidence-bound presence, never "all skills everywhere" ------
     # Each row also records HOW tightly presence is bounded, because the three
@@ -835,13 +904,16 @@ def build_uptake_table(
     # "this skill was injected into that very turn" from "some turn of that
     # session opened this skill at some point".
     skill_present: dict[str, list[Turn]] = {}
+    skill_seen: dict[str, set[str]] = {}
     skill_bound: dict[str, str] = {}
     _TIGHTNESS = {"session_wide": 1, "causal_event_order": 2, "injected_this_turn": 3}
     assert PRESENCE_BOUNDS == frozenset(_TIGHTNESS), "bound vocabulary drifted"
 
     def note_skill(name: str, turn: Turn, bound: str) -> None:
         bucket = skill_present.setdefault(name, [])
-        if turn not in bucket:
+        seen = skill_seen.setdefault(name, set())
+        if turn.turn_id not in seen:
+            seen.add(turn.turn_id)
             bucket.append(turn)
         if _TIGHTNESS[bound] > _TIGHTNESS.get(skill_bound.get(name, ""), 0):
             skill_bound[name] = bound
@@ -863,7 +935,7 @@ def build_uptake_table(
     entries: list[dict[str, Any]] = []
     for name in sorted(skill_present):
         present = skill_present[name]
-        hits = [t for t in present if t in disputed]
+        hits = [t for t in present if t.turn_id in disputed_ids]
         weight = sum(max(overlap(name, t.user_text), 0.05) for t in hits)
         entries.append(_row(
             f"skill:{name}", SKILL_PRESENCE_PROXY, len(present), len(hits), weight,
@@ -875,6 +947,10 @@ def build_uptake_table(
 
     # --- memory: always in force, so presence is uninformative by design ----
     for e in memory_entries:
+        # Every dispute in the window is "in the presence" of an always-in-force
+        # entry, by definition. That is why this row's `dispute_rate` is capped
+        # and labeled an upper bound, and why `weighted_disputes` (which is not
+        # the same number for two different entries) is the usable signal.
         hits = disputed
         weight = sum(overlap(e.text, t.user_text) for t in hits)
         entries.append(_row(
@@ -888,14 +964,18 @@ def build_uptake_table(
 
     # --- notes/facts that arrived through prefetch --------------------------
     note_present: dict[str, list[Turn]] = {}
+    note_seen: dict[str, set[str]] = {}
     for t in turns:
         for title in t.vault_context:
-            bucket = note_present.setdefault(f"note:{title}", [])
-            if t not in bucket:
-                bucket.append(t)
+            key = f"note:{title}"
+            seen = note_seen.setdefault(key, set())
+            if t.turn_id in seen:
+                continue
+            seen.add(t.turn_id)
+            note_present.setdefault(key, []).append(t)
     for key in sorted(note_present):
         present = note_present[key]
-        hits = [t for t in present if t in disputed]
+        hits = [t for t in present if t.turn_id in disputed_ids]
         title = key.split(":", 1)[1]
         entries.append(_row(
             key, NOTE_PRESENCE_EMITTED, len(present), len(hits),
@@ -930,7 +1010,10 @@ def build_uptake_table(
         "probe_timestamp": _now(),
         "corpus": {
             "turns": len(turns), "disputes": len(disputed),
-            "unresolved_turns": unresolved,
+            "verdict_keyed_on": "turn_id",
+            "classified_turns": len(dispute_flags) - unresolved,
+            "engine_unanswered": unresolved,
+            "unscreened_turns": len(turns) - len(dispute_flags),
             "dispute_rate_over_turns": round(len(disputed) / len(turns), 4) if turns else 0.0,
         },
         "coverage": coverage,
@@ -1102,10 +1185,27 @@ def store_sizes(root: Path | str | None = None) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ output --
 
+def _validate_stores(stores: dict) -> None:
+    """The timestamp rule, checked before anything is written.
+
+    A guard that fires after `mkdir` has already left the output directory
+    behind — so the refusal is real but the tree is half-changed by a call that
+    was rejected.
+    """
+    for name, block in stores.items():
+        if not isinstance(block, dict):
+            raise ValueError(f"stores.{name} must be a mapping")
+        if any(isinstance(v, int) and not isinstance(v, bool) for v in block.values()) \
+                and not block.get("probed_at"):
+            raise ValueError(f"stores.{name} carries a count with no probed_at")
+
+
 def write_table(table: dict[str, Any], out_dir: Path | str | None = None,
                 date: str | None = None, classifier: dict | None = None,
                 stores: dict | None = None, extra: dict | None = None) -> Path:
     """Emit `eval/uptake/uptake-<date>.json`. Enforces the timestamp rule."""
+    if stores:
+        _validate_stores(stores)
     out = Path(out_dir) if out_dir else (REPO / "eval" / "uptake")
     out.mkdir(parents=True, exist_ok=True)
     date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1115,12 +1215,6 @@ def write_table(table: dict[str, Any], out_dir: Path | str | None = None,
     if classifier is not None:
         doc["classifier"] = {**classifier, "threshold": PRECISION_FLOOR}
     if stores:
-        for name, block in stores.items():
-            if not isinstance(block, dict):
-                raise ValueError(f"stores.{name} must be a mapping")
-            if any(isinstance(v, int) and not isinstance(v, bool) for v in block.values()) \
-                    and not block.get("probed_at"):
-                raise ValueError(f"stores.{name} carries a count with no probed_at")
         doc["stores"] = stores
     if extra:
         doc.update(extra)
