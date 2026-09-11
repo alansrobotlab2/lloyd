@@ -553,6 +553,53 @@ never doubles it up); `round cluster --no-judge` prints without writing.
 Every path default resolves at call time: a default bound at import made
 the first test run write to the real state dir.
 
+### Group triage and umbrellas: a cluster judged per run, members closed per landing
+
+`autotriage` takes a cluster from `clusters.json` before it takes a single
+item (`backlog.select_cluster`: re-validated against disk, ids a group run
+already judged dropped, `duplicates` pairs kept together, largest surviving
+cluster, `group_min_items` 2 / `group_max_items` 8). Quarantine does not
+apply: the question is consolidation, and a one-day-old item can be a
+duplicate of last week's. One turn, `GROUP_PROMPT`, `GROUP_TRIAGE_SCHEMA`
+(built from `RETIRING`/`SURFACES`, no `maxLength`), per-item verdicts:
+
+- `duplicate_of #t` → `done`, `duplicate_of` in frontmatter, a `stale`
+  triage row. Chains resolve to the terminal survivor against the verdicts
+  *as given* (resolving against the rewrites in progress let 4→5→4 come out
+  as "duplicate of a keep"); a cycle or a target outside the cluster is
+  `keep`.
+- `stale` / `already_done` → as today.
+- `fold` → `group: <umbrella>`, tag `grouped`, stays `draft`; ledger verdict
+  `folded`, outside `VERDICTS` so `triaged_ids` does not count it as judged.
+  A member is out of both pools (`triage_pool`, `select_confirmed`) and the
+  reconciler parks it `draft` whatever else the ledger says.
+- `keep` → an activity note, no triage row, and the id is *released* from
+  quarantine so single triage reaches it.
+- the **umbrella** the turn filed (tags `umbrella`, `spawned-by-triage`, the
+  write-time dedupe never merges it) is confirmed through `record_verdict`
+  exactly like any confirmed item — `up_next`, `acceptance_clauses` on
+  disk, ≤12 clauses — plus `members`. Two folds minimum: one fold is a
+  keep, and an umbrella over one item is a copy. No umbrella on disk turns
+  every fold into a keep and records `umbrella_missing`.
+
+One `backlog_triage` row per member and one `backlog_group_triage` summary
+(`judged: {id: verdict}`), so the scorecard, the status pipeline and
+`triaged_ids` see ordinary verdicts. Unparsed → `keep`, never a close;
+budget exhaustion is `incomplete` once and `abandoned` the second time,
+writing nothing on the items. Kill switch
+`workers.sources.autotriage.group_triage`.
+
+Implement stays one item per round. An umbrella is an ordinary confirmed
+item whose prompt carries `<member>` blocks (`_members_block`) and whose
+review contract appends the members as context under its own clauses. When
+it settles `met`, `close_settled_items` closes every still-open member with
+"landed via umbrella #u" and an `item_closed {by: umbrella}` event
+(`close_members_on_settle`); `not_met`, `deferred` and no-outcome leave
+them folded, and `unnecessary` closes the umbrella but tags it
+`needs-human` with the members still folded — a wrong `unnecessary` on six
+findings is the one claim the loop should not make alone.
+`backlog.unfold_umbrella(id, reason)` is the human escape hatch.
+
 The verdict's `SURFACE:` picks the implementer's route. `code` and `frontend`
 run a worktree round through the gate — `web/src/**` is in scope since the
 `frontend` rung (tsc delta + `vite build`) exists. `vault` runs

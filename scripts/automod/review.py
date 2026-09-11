@@ -177,8 +177,24 @@ def item_contract(item_id: int, ledger: Path | None = None) -> dict:
         title = m.group(1).strip() if m else paths[0].stem
     ev = B.confirmed_verdicts(ledger).get(int(item_id)) or {}
     clauses = B.acceptance_clauses_of(ev, fm)
-    return {"id": int(item_id), "title": title, "body": body[:BODY_CAP_CHARS],
-            "clauses": clauses, "path": str(paths[0]) if paths else ""}
+    body = body[:BODY_CAP_CHARS]
+    members = [int(m) for m in (fm.get("members") or []) if str(m).strip().lstrip("-").isdigit()]
+    if members:
+        # An umbrella: the members are context so the grader can judge
+        # whether a clause covers the finding it came from. The clauses stay
+        # the umbrella's own.
+        blocks = ["\n\n## Members (consolidated by group triage)\n"]
+        room = max(0, BODY_CAP_CHARS - len(body) - len(blocks[0]))
+        per = max(400, room // max(1, len(members)))
+        for mid in members:
+            mp = sorted(B.BACKLOG_DIR.glob(f"{mid}-*.md"))
+            if not mp:
+                continue
+            _, mbody = B._split_frontmatter(mp[0].read_text(encoding="utf-8"))
+            blocks.append(f"\n### #{mid}\n{mbody.strip()[:per]}\n")
+        body = (body + "".join(blocks))[:BODY_CAP_CHARS + 6000]
+    return {"id": int(item_id), "title": title, "body": body,
+            "clauses": clauses, "members": members, "path": str(paths[0]) if paths else ""}
 
 
 # ── deterministic half ───────────────────────────────────────────────────

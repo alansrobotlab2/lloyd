@@ -1377,3 +1377,132 @@ def test_the_needs_human_tag_rides_the_status_move_both_ways(isolated):
     fm = B._split_frontmatter(next(isolated.glob("730-*.md")).read_text())[0]
     assert fm["status"] == "up_next" and B.NEEDS_HUMAN_TAG not in fm["tags"]
     assert "backlog" in fm["tags"], "other tags survive"
+
+
+# ===========================================================================
+# Umbrellas: a landed consolidation closes the members it consolidated
+# ===========================================================================
+
+def _umbrella(isolated, uid, members, *, status="up_next"):
+    p = write_item(isolated, uid, status=status)
+    B.update_frontmatter(p, {"members": list(members)}, add_tags=("umbrella",))
+    for m in members:
+        mp = write_item(isolated, m, name=f"Member {m}")
+        B.update_frontmatter(mp, {"group": uid}, add_tags=("grouped",))
+    return p
+
+
+MET = {"acceptance": "met", "landed": True, "deferred_to": [], "summary": "shipped", "spawned": []}
+
+
+def test_a_settled_umbrella_landing_closes_every_open_member_with_the_sha(isolated):
+    _umbrella(isolated, 50, [2, 5])
+    _landed(50, "SM_50", "feedfacefeed", outcome=MET)
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert {r["item_id"]: r["closed"] for r in out} == {50: True, 2: True, 5: True}
+    for m in (2, 5):
+        fm = _fm(next(isolated.glob(f"{m}-*.md")))
+        assert fm["status"] == "done" and fm["automod_landed"] == "feedfacefeed"
+        assert "landed via umbrella #50" in fm["activity_log"][-1]
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_closed"]
+    assert sorted(e["item_id"] for e in ev) == [2, 5] and all(e["by"] == "umbrella" for e in ev)
+
+
+@pytest.mark.parametrize("outcome", [
+    {"acceptance": "deferred", "landed": True, "deferred_to": [9], "summary": "", "spawned": []},
+    {"acceptance": "not_met", "landed": True, "deferred_to": [], "summary": "", "spawned": [],
+     "clause_outcomes": [{"clause": 1, "outcome": "not_met", "evidence": "", "deferred_to": []}]},
+])
+def test_not_met_and_deferred_on_an_umbrella_leave_members_folded(isolated, outcome):
+    _umbrella(isolated, 50, [2, 5])
+    _landed(50, "SM_50", "feedfacefeed", outcome=outcome)
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert [r["item_id"] for r in out] == [50] and out[0]["closed"] is False
+    for m in (2, 5):
+        fm = _fm(next(isolated.glob(f"{m}-*.md")))
+        assert fm["status"] == "draft" and fm["group"] == 50
+
+
+def test_member_closing_is_idempotent_and_respects_a_human_close(isolated):
+    _umbrella(isolated, 50, [2, 5])
+    B._apply_status(next(isolated.glob("5-*.md")), "done", "closed by hand first")
+    _landed(50, "SM_50", "feedfacefeed", outcome=MET)
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert {r["item_id"] for r in out} == {50, 2}, "the human-closed member is left alone"
+    assert B.close_settled_items(S.LEDGER_PATH) == [], "the sweep is idempotent"
+    text = next(isolated.glob("5-*.md")).read_text()
+    assert "landed via umbrella" not in text
+
+
+def test_the_close_members_kill_switch(isolated):
+    _umbrella(isolated, 50, [2, 5])
+    _landed(50, "SM_50", "feedfacefeed", outcome=MET)
+    out = B.close_settled_items(S.LEDGER_PATH, close_members=False)
+    assert [r["item_id"] for r in out] == [50]
+    assert _fm(next(isolated.glob("2-*.md")))["status"] == "draft"
+
+
+def test_the_reconciler_never_lifts_a_grouped_member_to_up_next(isolated):
+    _umbrella(isolated, 50, [2])
+    # Even a confirmed verdict on the member does not lift it: its umbrella
+    # carries the contract now.
+    S.append_event({"event": "backlog_triage", "item_id": 2, "verdict": "confirmed",
+                    "acceptance": "x"}, path=S.LEDGER_PATH)
+    B.set_status(2, "up_next", "test: a human or an old verdict moved it")
+    moved = B.reconcile_statuses(S.LEDGER_PATH)
+    assert {"item_id": 2, "from": "up_next", "to": "draft"} in moved
+    assert B.select_confirmed(S.LEDGER_PATH) is None or B.select_confirmed(S.LEDGER_PATH)[0].id != 2
+
+
+def test_a_spent_umbrella_parks_needs_human_and_members_stay_folded(isolated):
+    _umbrella(isolated, 50, [2, 5])
+    _confirm(50)
+    _blocked_round(50, "SM_50", external=False)
+    B.reconcile_statuses(S.LEDGER_PATH)
+    fm = _fm(next(isolated.glob("50-*.md")))
+    assert fm["status"] == "draft" and B.NEEDS_HUMAN_TAG in fm["tags"]
+    assert _fm(next(isolated.glob("2-*.md")))["group"] == 50
+
+
+def test_unnecessary_on_an_umbrella_does_not_release_members(isolated, monkeypatch):
+    import asyncio
+    from workers.sources import autocode as I
+    _umbrella(isolated, 50, [2, 5])
+    _confirm(50)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, ""))
+
+    async def turn(prompt, **kw):
+        return {"text": "nothing to do\n\nSPAWNED: none\n", "session_id": "s", "stop_reason": "stop",
+                "num_turns": 5, "errors": [],
+                "structured": {"landed": False, "acceptance": "unnecessary", "clause_outcomes": [],
+                               "deferred_to": [], "summary": "already true", "spawned": []}}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    asyncio.run(I.execute(_Item()))
+    fm = _fm(next(isolated.glob("50-*.md")))
+    assert fm["status"] == "done" and B.NEEDS_HUMAN_TAG in fm["tags"]
+    assert "unfold_umbrella" in fm["activity_log"][-2] or "unfold_umbrella" in fm["activity_log"][-1]
+    assert _fm(next(isolated.glob("2-*.md")))["group"] == 50, "members are not released automatically"
+
+
+def test_the_implement_prompt_renders_members_under_an_umbrella_within_the_cap(isolated):
+    from workers.sources import autocode as I
+    _umbrella(isolated, 50, [2, 5])
+    for m in (2, 5):
+        p = next(isolated.glob(f"{m}-*.md"))
+        p.write_text(p.read_text() + "y" * 30_000)
+    umbrella = next(i for i in B.all_items(None) if i.id == 50)
+    block = I._members_block(umbrella)
+    assert block.count("<member id=") == 2 and "umbrella" in block
+    assert len(block) < 2 * (24_000 // 2) + 2_000
+    plain = next(i for i in B.all_items(None) if i.id == 2)
+    assert I._members_block(plain) == ""
+
+
+def test_item_contract_appends_members_and_keeps_the_umbrella_clauses(isolated):
+    from scripts.automod import review as RV
+    p = _umbrella(isolated, 50, [2, 5])
+    B.update_frontmatter(p, {"acceptance_clauses": ["the floor gates again"]})
+    c = RV.item_contract(50, S.LEDGER_PATH)
+    assert c["clauses"] == ["the floor gates again"] and c["members"] == [2, 5]
+    assert "## Members (consolidated by group triage)" in c["body"]
+    assert "### #2" in c["body"] and "Member 5" in c["body"]

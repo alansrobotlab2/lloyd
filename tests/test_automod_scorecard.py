@@ -238,3 +238,32 @@ def test_merges_appends_expiries_and_the_open_self_spawned_gauge(tmp_path, repo)
     assert s["self_spawned_open"]["oldest_days"] == 40.0
     text = SC.render(row)
     assert "merged 1+2, appended 3, expired 1" in text and "over bound 1" in text
+
+
+def test_the_grouping_section_adds_up_a_realistic_week(tmp_path, repo):
+    ledger = _ledger(tmp_path, [
+        _ev("backlog_cluster", 6, clusters=12, items=71),
+        _ev("backlog_cluster", 1, clusters=15, items=63),
+        _ev("backlog_group_triage", 5, cluster_id="c-1", judged={"1": "duplicate_of", "2": "fold", "3": "fold"},
+            duplicates=1, retired=0, folded=2, kept=0, umbrella_id=50),
+        _ev("backlog_group_triage", 4, cluster_id="c-2", judged={"4": "keep", "5": "stale"},
+            duplicates=0, retired=1, folded=0, kept=1, umbrella_id=None),
+        _ev("backlog_group_triage", 3, cluster_id="c-3", verdict="incomplete", judged={}),
+        _ev("backlog_triage", 5, item_id=1, verdict="stale", closed=True, spawned=[]),
+        _ev("backlog_triage", 5, item_id=2, verdict="folded", closed=False, spawned=[]),
+        _ev("backlog_triage", 5, item_id=3, verdict="folded", closed=False, spawned=[]),
+        _ev("backlog_triage", 5, item_id=50, verdict="confirmed", umbrella=True, members=[2, 3], spawned=[]),
+        _ev("item_landed", 2, item_id=50, closed=True, acceptance="met"),
+        _ev("item_closed", 2, item_id=2, by="umbrella", umbrella_id=50),
+        _ev("item_closed", 2, item_id=3, by="umbrella", umbrella_id=50),
+    ])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "nope", repo=repo, now=NOW)
+    g = row["grouping"]
+    assert g["cluster_runs"] == 2 and g["clusters_formed"] == 15 and g["items_clustered"] == 63
+    assert g["group_triages"] == 2, "an incomplete run judged nothing"
+    assert g["duplicates_closed"] == 1 and g["retired_in_group"] == 1 and g["folded"] == 2 and g["kept"] == 1
+    assert g["umbrellas_formed"] == 1 and g["umbrellas_landed"] == 1 and g["members_closed"] == 2
+    assert g["members_per_landing"] == 2.0
+    # Folds and duplicates count as triage closures on row 4.
+    assert row["spawn"]["triage_closed"] == 3
+    assert "| 11 | grouping | 2 group triages" in SC.render(row)

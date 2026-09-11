@@ -44,6 +44,71 @@ DEDUP_KEY = "autotriage:triage"
 # lives only in EVIDENCE is still lost — see #229.
 SPAWN_CAP = 3
 
+# Group mode: one turn over a cluster of related items from clusters.json
+# (scripts/automod/cluster.py). The question is consolidation, not
+# staleness, so quarantine does not apply and the fan-out is one item.
+GROUP_SPAWN_CAP = 1
+DEFAULT_GROUP_MIN_ITEMS = 2
+DEFAULT_GROUP_MAX_ITEMS = 8
+DEFAULT_GROUP_MAX_TURNS = 120
+PER_ITEM_MIN_CHARS = 2500
+
+GROUP_PROMPT = """\
+You are triaging {n} items from Lloyd's own backlog TOGETHER. A nightly pass \
+found them related ({reason}); most were filed by earlier automod runs and \
+several are probably the same finding written more than once. Your job is to \
+consolidate them — not to fix anything, and not to re-ask whether each one is \
+stale on its own.
+
+<cluster id="{cluster_id}" anchor_paths="{anchor_paths}" parent="{parent}">
+{items}
+</cluster>
+
+Work in this order:
+
+1. **Read every item.** For each pair that says the same thing, decide which is \
+the better handoff (more specific paths, the check that reproduces); the others \
+are `duplicate_of` it. A duplicate's target must itself be `fold` or `keep`, \
+never another duplicate.
+2. **Check the shared premise ONCE** against the live tree (Read, Grep, Glob, \
+Bash — read-only on the code, no edits, no automod round). If the premise is \
+gone, those items are `stale`; if a commit fixed it, `already_done` — name the \
+commit.
+3. **Of what survives, decide what is ONE piece of work.** Items that would be \
+implemented together are `fold`; an item that is genuinely separate work is \
+`keep` (it goes back to the normal pool, unchanged).
+4. **If two or more items are `fold`, file ONE umbrella** with \
+`backlog_write_task` (board `lloyd`, no `task_id`, tags `umbrella` and \
+`spawned-by-triage`). Its description is the merged handoff: first line \
+"Umbrella for #a #b #c, formed by automod group triage of {cluster_id} on <date>"; \
+then the claim, the current state with file paths and line numbers, the check \
+that shows it, and the acceptance clauses — at most {max_clauses}, each one \
+thing a single test can pin. The tool returns the id; that is UMBRELLA. Do not \
+file an umbrella for a single item: one `fold` is a `keep`.
+5. **File at most {spawn_cap} further item**, only for a finding none of these \
+covers (tag `spawned-by-triage`). If the tool answers `merged_into: N`, list N.
+6. Finish with exactly this block and nothing after it:
+
+GROUP_VERDICTS:
+#<id>: <duplicate_of #<id> | stale | already_done | fold | keep> — <one line of evidence>
+(one line per item; every item listed)
+UMBRELLA: <#id or none>
+UMBRELLA_MEMBERS: <the ids marked fold, or none>
+SURFACE: <one of code|frontend|vault|mixed|external>
+CHECK: <the one check you ran, one line>
+EVIDENCE: <2-4 sentences>
+ACCEPTANCE: <the umbrella's contract, or none>
+ACCEPTANCE_CLAUSES: <numbered, one per line, or none>
+SPAWNED: <ids from step 5, or none>
+
+Rules: closing a duplicate is a success and folding is a success; `keep` for \
+all {n} is a legitimate answer. A wrong `duplicate_of` deletes a real finding, \
+so cite what makes two items the same. Quarantine does not apply here: an item \
+filed yesterday can be a duplicate of one filed last week. The umbrella's \
+clauses are graded one by one at the gate by a reviewer who sees only the \
+umbrella, its clauses and the diff, so name observable behaviour, not mechanism.
+"""
+
 PROMPT = """\
 You are triaging one item from Lloyd's own backlog. It was written {age} days \
 ago, and the system has changed since. Your job is to find out whether it is \
@@ -299,6 +364,110 @@ DEFAULT_MAX_TURNS = 90
 DEFAULT_BODY_CHARS = 30_000
 
 
+_GROUP_LINE = re.compile(
+    r"^\W*#?(\d+)\s*(?:->|=>|[:→—–-])+\s*(duplicate[ _]of|dup(?:licate)?|stale|already[ _]done|fold|keep)\b"
+    r"\s*(?:#?(\d+))?\s*(?:[—–-]+\s*(.*))?$", re.I)
+_GROUP_FIELD = re.compile(
+    r"^(UMBRELLA_MEMBERS|UMBRELLA|SURFACE|CHECK|EVIDENCE|ACCEPTANCE_CLAUSES|ACCEPTANCE|SPAWNED):\s*(.*)$",
+    re.I)
+
+
+def _norm_group_verdict(word: str) -> str:
+    w = word.strip().lower().replace(" ", "_")
+    if w in ("dup", "duplicate", "duplicate_of"):
+        return "duplicate_of"
+    return w
+
+
+def parse_group_verdict(text: str, structured: dict | None, member_ids: list[int]) -> dict | None:
+    """`{items: {id: {verdict, duplicate_of, evidence}}, umbrella: {...}, spawned}`
+    from the finalizer's object, else from the last GROUP_VERDICTS block.
+
+    Unknown ids are dropped; unjudged members become `keep` and are listed
+    under `unjudged`; anything unparsed degrades to `keep`, never to a close.
+    """
+    from scripts.automod.backlog import GROUP_VERDICTS, SURFACES
+    members = {int(i) for i in member_ids}
+    items: dict[int, dict] = {}
+    umbrella: dict = {}
+    spawned: list[int] = []
+    source = "none"
+    if isinstance(structured, dict) and isinstance(structured.get("items"), list):
+        for raw in structured["items"]:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                iid = int(raw.get("item_id"))
+            except (TypeError, ValueError):
+                continue
+            v = str(raw.get("verdict") or "").strip().lower()
+            if iid not in members or v not in GROUP_VERDICTS:
+                continue
+            items[iid] = {"verdict": v, "duplicate_of": int(raw.get("duplicate_of") or 0),
+                          "evidence": " ".join(str(raw.get("evidence") or "").split())[:600]}
+        u = structured.get("umbrella") or {}
+        if isinstance(u, dict):
+            umbrella = {"item_id": int(u.get("item_id") or 0),
+                        "members": _parse_spawned(u.get("members")) if isinstance(u.get("members"), (str, list)) else [],
+                        "surface": u.get("surface") if u.get("surface") in SURFACES else "code",
+                        "check": str(u.get("check") or ""),
+                        "evidence": str(u.get("evidence") or ""),
+                        "acceptance": _acceptance_text(u.get("acceptance")),
+                        "acceptance_clauses": _clauses(u.get("acceptance_clauses"))}
+        spawned = _parse_spawned(structured.get("spawned")) if isinstance(structured.get("spawned"), (str, list)) else []
+        if items:
+            source = "structured"
+    if not items:
+        tail = (text or "")[-12000:]
+        idx = tail.rfind("GROUP_VERDICTS:")
+        if idx < 0:
+            return None
+        block = tail[idx + len("GROUP_VERDICTS:"):]
+        fields: dict[str, str] = {}
+        current = ""
+        for line in block.splitlines():
+            fm = _GROUP_FIELD.match(line.strip())
+            if fm:
+                current = fm.group(1).upper()
+                fields[current] = fm.group(2).strip()
+                continue
+            lm = _GROUP_LINE.match(line)
+            if lm and not current:
+                iid = int(lm.group(1))
+                if iid in members:
+                    items[iid] = {"verdict": _norm_group_verdict(lm.group(2)),
+                                  "duplicate_of": int(lm.group(3) or 0),
+                                  "evidence": (lm.group(4) or "").strip()[:600]}
+                continue
+            if current and line.strip():
+                fields[current] = (fields[current] + "\n" + line.strip()).strip()
+        if not items:
+            return None
+        source = "regex"
+        umbrella = {"item_id": (_parse_spawned(fields.get("UMBRELLA")) or [0])[0],
+                    "members": _parse_spawned(fields.get("UMBRELLA_MEMBERS")),
+                    "surface": (fields.get("SURFACE") or "code").strip().lower(),
+                    "check": fields.get("CHECK", ""), "evidence": fields.get("EVIDENCE", ""),
+                    "acceptance": _acceptance_text(fields.get("ACCEPTANCE", "")),
+                    "acceptance_clauses": _clauses(fields.get("ACCEPTANCE_CLAUSES", ""))}
+        if umbrella["surface"] not in SURFACES:
+            umbrella["surface"] = "code"
+        spawned = _parse_spawned(fields.get("SPAWNED"))
+    unjudged = sorted(members - set(items))
+    for iid in unjudged:
+        items[iid] = {"verdict": "keep", "duplicate_of": 0, "evidence": "not judged by the turn"}
+    return {"items": items, "umbrella": umbrella, "spawned": spawned,
+            "unjudged": unjudged, "source": source}
+
+
+def _render_cluster(members, per_item_chars: int) -> str:
+    parts = []
+    for m in members:
+        parts.append(f'<item id="{m.id}" status="{m.status}" age="{m.age_days}" '
+                     f'tags="{",".join(m.tags)}">\n# {m.name}\n\n{m.body[:per_item_chars]}\n</item>')
+    return "\n\n".join(parts)
+
+
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     # Budgets ride in the payload so `execute` sees the config that was live
     # when the item was queued, not whatever it is by the time it runs.
@@ -306,7 +475,13 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         source=NAME, kind="triage",
         payload={"max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),
                  "body_chars": int(src_cfg.get("body_chars", DEFAULT_BODY_CHARS)),
-                 "structured_verdict": bool(src_cfg.get("structured_verdict", True))},
+                 "structured_verdict": bool(src_cfg.get("structured_verdict", True)),
+                 # Group mode, carried like the budgets. Off: this source runs
+                 # exactly as before and clusters.json is ignored.
+                 "group_triage": bool(src_cfg.get("group_triage", True)),
+                 "group_min_items": int(src_cfg.get("group_min_items", DEFAULT_GROUP_MIN_ITEMS)),
+                 "group_max_items": int(src_cfg.get("group_max_items", DEFAULT_GROUP_MAX_ITEMS)),
+                 "group_max_turns": int(src_cfg.get("group_max_turns", DEFAULT_GROUP_MAX_TURNS))},
         priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
         dedup_key=DEDUP_KEY,
     )
@@ -332,6 +507,17 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     """
     from scripts.automod import backlog as B, state as S
     from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
+
+    payload = item.payload or {}
+    if bool(payload.get("group_triage", True)):
+        from scripts.automod import cluster as CL
+        pick = B.select_cluster(S.LEDGER_PATH, CL.load_clusters(),
+                                min_size=int(payload.get("group_min_items") or DEFAULT_GROUP_MIN_ITEMS),
+                                max_size=int(payload.get("group_max_items") or DEFAULT_GROUP_MAX_ITEMS))
+        if pick is not None:
+            # A qualifying cluster wins over the single pool: consolidation
+            # is finite, the single pool is not.
+            return await _execute_group(item, pick[0], pick[1])
 
     candidates, held = B.triage_pool(S.LEDGER_PATH)
     candidate = B.select_candidate(S.LEDGER_PATH)
@@ -487,3 +673,86 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             "verdict": parsed["verdict"], "closed": close, "session_id": session_id,
             "summary": f"#{candidate.id} → {parsed['verdict']}"
                        f"{' (closed)' if close else ''}"}
+
+
+
+async def _execute_group(item: QueueItem, cluster: dict, members: list) -> dict[str, Any]:
+    """One turn over a cluster: per-item verdicts, one umbrella at most."""
+    from scripts.automod import backlog as B, state as S
+    from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
+
+    payload = item.payload or {}
+    budget = int(payload.get("group_max_turns") or DEFAULT_GROUP_MAX_TURNS)
+    body_chars = int(payload.get("body_chars") or DEFAULT_BODY_CHARS)
+    want_structured = bool(payload.get("structured_verdict", True))
+    cid = str(cluster.get("id") or "")
+    per_item = max(PER_ITEM_MIN_CHARS, body_chars // max(1, len(members)))
+    member_ids = [m.id for m in members]
+    logger.info("group triage %s: %d items %s (budget %d)", cid, len(members), member_ids, budget)
+
+    prompt = GROUP_PROMPT.format(
+        n=len(members), reason=str(cluster.get("reason") or "similar text and shared files"),
+        cluster_id=cid, anchor_paths=",".join(cluster.get("anchor_paths") or []) or "none",
+        parent=f"#{cluster['parent']}" if cluster.get("parent") else "none",
+        items=_render_cluster(members, per_item), max_clauses=B.MAX_CLAUSES,
+        spawn_cap=GROUP_SPAWN_CAP)
+    id_floor = B.max_item_id()
+    try:
+        run = await run_prompt_in_session(
+            prompt, title=f"backlog group triage {cid}: {len(members)} items",
+            source=NAME, max_turns=budget, priority=1,
+            final_schema=B.GROUP_TRIAGE_SCHEMA if want_structured else None,
+            final_schema_prompt=(
+                "Restate the GROUP_VERDICTS block above as a single JSON object matching "
+                "the schema: one entry per item with its verdict, the umbrella you filed "
+                "(item_id 0 if none) with its clauses, and the ids you filed or were merged "
+                "into. A transcription, not a re-decision."))
+    except DrainActive as exc:
+        return {"status": "skipped", "summary": f"landing in progress: {exc}"}
+    except TurnTimeout as exc:
+        S.append_event({"event": "backlog_group_triage", "cluster_id": cid, "item_ids": member_ids,
+                        "verdict": B.INCOMPLETE, "reason": "turn timeout", "budget": budget,
+                        "judged": {}}, path=S.LEDGER_PATH)
+        return {"status": "failed", "summary": f"group triage {cid}: {exc}"}
+
+    session_id = run["session_id"]
+    stop_reason = run.get("stop_reason")
+    structured = run.get("structured") if want_structured else None
+    parsed = parse_group_verdict(run.get("text") or "", structured, member_ids)
+    if not parsed:
+        attempts = sum(1 for d in B._ledger_events(S.LEDGER_PATH, "backlog_group_triage", require_item=False)
+                       if d.get("cluster_id") == cid and d.get("verdict") == B.INCOMPLETE) + 1
+        outcome = B.INCOMPLETE if attempts < B.MAX_INCOMPLETE_ATTEMPTS else "abandoned"
+        S.append_event({"event": "backlog_group_triage", "cluster_id": cid, "item_ids": member_ids,
+                        "verdict": outcome, "attempt": attempts, "judged": {},
+                        "session_id": session_id, "stop_reason": stop_reason,
+                        "num_turns": run.get("num_turns"), "budget": budget}, path=S.LEDGER_PATH)
+        logger.warning("group triage %s: no parseable verdict block (%s); %s", cid, stop_reason, outcome)
+        return {"status": "skipped" if outcome == B.INCOMPLETE else "success",
+                "summary": f"group triage {cid}: no verdict ({stop_reason}); {outcome}"}
+
+    spawned, merged = B.split_claimed(parsed["spawned"], id_floor=id_floor, self_id=0)
+    umbrella = None
+    uid = int(parsed["umbrella"].get("item_id") or 0)
+    if uid and uid > id_floor:
+        umbrella = next((i for i in B.open_items(None) if i.id == uid), None)
+    fold_ids = [i for i, v in parsed["items"].items() if v["verdict"] == "fold"]
+    if umbrella is not None and len(fold_ids) < 2:
+        # One fold is a keep, and an umbrella over one item is just a copy.
+        B.note_item(uid, f"filed by group triage {cid} over fewer than two folds; not confirmed")
+        umbrella = None
+    spawned = [i for i in spawned if i != uid]
+    result = B.record_group_verdict(cluster, members, parsed["items"], umbrella, parsed["umbrella"],
+                                    session_id=session_id, spawned=spawned, merged=merged,
+                                    extra={"verdict_source": parsed["source"],
+                                           "structured_error": str(run.get("structured_error") or ""),
+                                           "stop_reason": stop_reason,
+                                           "num_turns": run.get("num_turns"), "budget": budget,
+                                           "unjudged": parsed["unjudged"]})
+    summary = (f"group triage {cid}: {result['duplicates']} duplicate(s) closed, "
+               f"{result['retired']} retired, {result['folded']} folded"
+               + (f" into #{result['umbrella_id']}" if result.get("umbrella_id") else "")
+               + f", {result['kept']} kept")
+    logger.info(summary)
+    return {"status": "success", "cluster_id": cid, "session_id": session_id, "summary": summary,
+            **{k: result[k] for k in ("duplicates", "retired", "folded", "kept", "umbrella_id")}}

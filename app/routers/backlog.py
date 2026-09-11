@@ -187,6 +187,8 @@ async def backlog_tasks(board_id: str = "", status: str = ""):
                 # existing filter/tab contract.
                 "board": task_board,
                 "board_id": board_map.get(task_board, 0),
+                "group": fm.get("group"),
+                "member_count": len(fm.get("members") or []),
                 "url": "",
                 "created_at": str(created),
                 "updated_at": str(updated),

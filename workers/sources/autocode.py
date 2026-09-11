@@ -86,7 +86,7 @@ exactly.
 {body}
 </item>
 
-<triage>
+{members}<triage>
 Verdict: confirmed
 Surface: {surface}
 Check that was run: {check}
@@ -317,6 +317,27 @@ def _reoffer_verdict(reason: str) -> str:
             f"what you reused and what you redid.\n\n")
 
 
+def _members_block(candidate, all_items: dict | None = None) -> str:
+    """For an umbrella: the members it consolidates, so the round can read
+    the original findings. Empty for an ordinary item."""
+    if not getattr(candidate, "members", None):
+        return ""
+    from scripts.automod import backlog as B
+    all_items = all_items if all_items is not None else {i.id: i for i in B.all_items(None)}
+    n = len(candidate.members)
+    cap = max(2000, 24_000 // max(1, n))
+    blocks = []
+    for mid in candidate.members:
+        m = all_items.get(int(mid))
+        if m is None:
+            continue
+        blocks.append(f'<member id="{m.id}" status="{m.status}">\n# {m.name}\n\n{m.body[:cap]}\n</member>')
+    return ("This item is an **umbrella**: group triage consolidated the members below into "
+            "one piece of work, and they close automatically when every clause is met. Read "
+            "them for the original findings; do not file follow-ups that restate a member.\n\n"
+            + "\n\n".join(blocks) + "\n\n")
+
+
 def _review_note(events: list[dict], round_id: str | None) -> dict | None:
     """The review rung's refusal for this round, if that is how the gate
     last ended — read off the gate event, which outlives the round dir."""
@@ -437,7 +458,8 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         # `settled` and `finished` back to the item. Same rule as the reaper —
         # this must never take the scheduler down.
         for r in B.close_settled_items(S.LEDGER_PATH,
-                                       enabled=bool(src_cfg.get("close_on_settle", True))):
+                                       enabled=bool(src_cfg.get("close_on_settle", True)),
+                                       close_members=bool(src_cfg.get("close_members_on_settle", True))):
             logger.info("backlog #%s landed: %s (acceptance=%s)", r["item_id"],
                         "closed" if r["closed"] else "noted, left open", r["acceptance"])
     except Exception as exc:
@@ -538,6 +560,7 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
         clauses="\n".join(f"    {i}. {c}" for i, c in enumerate(
             B.acceptance_clauses_of(triage), 1)) or "    (the contract above is one clause)",
         spawn_cap=SPAWN_CAP,
+        members=_members_block(candidate),
         # A label the eval comparer can select on, unique per item and stable
         # across the turn's retries. `--label item377` reads back as the run
         # that judged item 377, months later, in a directory of bare
@@ -621,6 +644,14 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
         # "Determined not to be necessary" is a verdict with no landing to wait
         # for: the premise no longer holds, or the acceptance is already true.
         # Closed here rather than by the settle sweep, which only sees landings.
+        if getattr(candidate, "members", None):
+            # A wrong `unnecessary` on six findings is the one claim the loop
+            # should not make alone: the umbrella closes, the members stay
+            # folded and a human decides (unfold_umbrella releases them).
+            B.note_item(candidate.id,
+                        f"closed as unnecessary with members {candidate.members} still folded; "
+                        f"a human decides whether to release them (unfold_umbrella)")
+            B.tag_item(candidate.id, add=(B.NEEDS_HUMAN_TAG,))
         B.set_status(candidate.id, "done",
                      "the round found the work unnecessary" + (f": {outcome['summary']}" if outcome.get("summary") else ""))
         S.append_event({"event": "item_closed", "item_id": candidate.id, "by": "autocode",

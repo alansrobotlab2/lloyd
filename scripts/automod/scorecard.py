@@ -252,9 +252,12 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
 
     # ── 4 spawn ratio ───────────────────────────────────────────────────
     triage = [e for e in by("backlog_triage") if e.get("verdict") in
-              ("confirmed", "already_done", "stale", "unverifiable", "not_code")]
+              ("confirmed", "already_done", "stale", "unverifiable", "not_code", "folded")]
     t_filed = sum(len(e.get("spawned") or []) for e in triage)
-    t_closed = sum(1 for e in triage if e.get("closed") or e.get("verdict") in ("already_done", "stale"))
+    # A fold is a consolidation: the item leaves the pool. Duplicates are
+    # already `stale` + closed.
+    t_closed = sum(1 for e in triage if e.get("closed")
+                   or e.get("verdict") in ("already_done", "stale", "folded"))
     i_filed = sum(len(e.get("spawned") or []) for e in finished)
     i_closed = (sum(1 for e in by("item_landed") if e.get("closed"))
                 + sum(1 for e in by("item_closed")))
@@ -271,6 +274,27 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
              "triage_merged": t_merged, "implement_merged": i_merged,
              "findings_appended": appended, "expired": expired,
              "self_spawned_open": _self_spawned_gauge(_events(ledger), backlog_dir, now)}
+
+    # ── 4b grouping ─────────────────────────────────────────────────────
+    group_runs = [e for e in by("backlog_group_triage") if isinstance(e.get("judged"), dict) and e.get("judged")]
+    umbrella_confirmed = {int(e["item_id"]) for e in by("backlog_triage")
+                          if e.get("umbrella") and e.get("item_id") is not None}
+    members_closed = [e for e in by("item_closed") if e.get("by") == "umbrella"]
+    umbrellas_landed = {int(e["item_id"]) for e in by("item_landed")
+                        if e.get("closed") and int(e.get("item_id") or 0) in umbrella_confirmed}
+    last_cluster = (by("backlog_cluster") or [{}])[-1]
+    grouping = {"cluster_runs": len(by("backlog_cluster")),
+                "clusters_formed": int(last_cluster.get("clusters") or 0),
+                "items_clustered": int(last_cluster.get("items") or 0),
+                "group_triages": len(group_runs),
+                "duplicates_closed": sum(int(e.get("duplicates") or 0) for e in group_runs),
+                "retired_in_group": sum(int(e.get("retired") or 0) for e in group_runs),
+                "folded": sum(int(e.get("folded") or 0) for e in group_runs),
+                "kept": sum(int(e.get("kept") or 0) for e in group_runs),
+                "umbrellas_formed": sum(1 for e in group_runs if e.get("umbrella_id")),
+                "umbrellas_landed": len(umbrellas_landed),
+                "members_closed": len(members_closed),
+                "members_per_landing": _rate(len(members_closed), len(umbrellas_landed))}
 
     # ── 5 human touch ───────────────────────────────────────────────────
     commits = _git_log(repo, since - HUMAN_TOUCH_DAYS * 86400)
@@ -351,7 +375,7 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
                  "true_positives": None}
 
     return {"computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
-            "since_days": since_days, "events": len(ev),
+            "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
             "human_touch": human, "test_honesty": honesty, "bookkeeping": bookkeeping,
             "verdict_plumbing": plumbing, "throughput": throughput, "rollbacks": rollbacks}
@@ -381,6 +405,7 @@ def render(row: dict) -> str:
         f"| 8 | verdict plumbing | {_pct(p['regex_rate'])} regex | {p['regex']} of {p['verdicts_with_source']} verdicts fell back; {p['truncated']} truncated; median finalizer tokens {p['finalizer_tokens_median'] if p['finalizer_tokens_median'] is not None else '—'} |",
         f"| 9 | throughput | {th['items_closed_per_day']}/day | {th['items_closed']} closed; {th['rounds_landed']} of {th['rounds_finished']} rounds landed; median turns {th['median_turns_landed'] if th['median_turns_landed'] is not None else '—'}; median gate {th['median_gate_seconds'] if th['median_gate_seconds'] is not None else '—'} s |",
         f"| 10 | rollbacks | {rb['count']} | triggers {', '.join(rb['triggers']) or '—'}; true positives: human judgment, not computed |",
+        f"| 11 | grouping | {row.get('grouping', {}).get('group_triages', 0)} group triages | {row.get('grouping', {}).get('clusters_formed', 0)} clusters over {row.get('grouping', {}).get('items_clustered', 0)} items last night; {row.get('grouping', {}).get('duplicates_closed', 0)} duplicates closed, {row.get('grouping', {}).get('retired_in_group', 0)} retired, {row.get('grouping', {}).get('folded', 0)} folded, {row.get('grouping', {}).get('kept', 0)} kept; {row.get('grouping', {}).get('umbrellas_formed', 0)} umbrellas formed, {row.get('grouping', {}).get('umbrellas_landed', 0)} landed closing {row.get('grouping', {}).get('members_closed', 0)} members |",
     ]
     return "\n".join(lines)
 

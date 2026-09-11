@@ -273,6 +273,54 @@ TRIAGE_VERDICT_SCHEMA: dict = {
     "additionalProperties": False,
 }
 
+# Group triage: one turn over a cluster of related items. Per-item verdicts
+# are the retiring ones plus three that only make sense with siblings in
+# view — `duplicate_of` (closed, pointing at the survivor), `fold` (into the
+# umbrella this turn files) and `keep` (distinct work; back to the single
+# pool). Built from RETIRING, not restated, for the reason the single schema
+# is built from VERDICTS.
+GROUP_VERDICTS = ("fold", "duplicate_of", "keep") + tuple(sorted(RETIRING))
+# The ledger verdict a folded member gets. Outside VERDICTS on purpose, so
+# `triaged_ids` does not count it as judged — like INCOMPLETE, it is a state
+# of the item, not a conclusion about its premise.
+FOLDED = "folded"
+
+GROUP_TRIAGE_SCHEMA: dict = {
+    "type": "object",
+    "title": "backlog_group_triage_verdict",
+    "properties": {
+        "items": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "item_id": {"type": "integer"},
+                "verdict": {"type": "string", "enum": list(GROUP_VERDICTS)},
+                "duplicate_of": {"type": "integer",
+                                 "description": "The surviving item's id; 0 unless verdict is duplicate_of."},
+                "evidence": {"type": "string",
+                             "description": "One or two sentences with the path/line or commit that decides it."},
+            },
+            "required": ["item_id", "verdict", "duplicate_of", "evidence"],
+            "additionalProperties": False,
+        }, "description": "One entry per item in the cluster, every item listed."},
+        "umbrella": {"type": "object", "properties": {
+            "item_id": {"type": "integer",
+                        "description": "Id backlog_write_task returned for the umbrella; 0 when nothing was folded."},
+            "members": {"type": "array", "items": {"type": "integer"}},
+            "surface": {"type": "string", "enum": list(SURFACES)},
+            "check": {"type": "string"},
+            "evidence": {"type": "string"},
+            "acceptance": {"type": "string"},
+            "acceptance_clauses": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["item_id", "members", "surface", "check", "evidence",
+                        "acceptance", "acceptance_clauses"],
+            "additionalProperties": False},
+        "spawned": {"type": "array", "items": {"type": "integer"},
+                    "description": "Backlog ids filed or merged into during this triage, umbrella excluded."},
+    },
+    "required": ["items", "umbrella", "spawned"],
+    "additionalProperties": False,
+}
+
 MAX_CLAUSES = 12
 CLAUSE_MAX_CHARS = 600
 
@@ -1052,7 +1100,7 @@ def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
 
 
 def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
-                        enabled: bool = True) -> list[dict]:
+                        enabled: bool = True, close_members: bool = True) -> list[dict]:
     """The sweep: note every settled landing on its item, close the ones whose
     round said the acceptance check was met.
 
@@ -1100,6 +1148,26 @@ def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
                         "vault": landing["vault"], "closed": close,
                         "acceptance": acc, "reason": why[:300]}, path=ledger)
         done.append({"item_id": item.id, "closed": close, "acceptance": acc})
+        # An umbrella that closed `met` closes the members it consolidated.
+        # `not_met`, `deferred` and no-outcome leave them folded: the
+        # umbrella's own note says why, and a human can `unfold_umbrella`.
+        if close and close_members and item.members:
+            by_all = {i.id: i for i in open_items(None)}
+            for mid in item.members:
+                member = by_all.get(int(mid))
+                if member is None:
+                    continue
+                mfm, _ = _split_frontmatter(member.path.read_text(encoding="utf-8"))
+                if mfm.get(LANDED_MARKER):
+                    continue
+                close_landed(member, commit=landing["commit"], round_id=landing["round_id"],
+                             settled_at=str(landing.get("settled_at") or ""), close=True,
+                             why=f"landed via umbrella #{item.id} as {landing['commit'][:8]}")
+                S.append_event({"event": "item_closed", "item_id": member.id, "by": "umbrella",
+                                "umbrella_id": item.id, "round_id": landing["round_id"],
+                                "commit": landing["commit"]}, path=ledger)
+                done.append({"item_id": member.id, "closed": True, "acceptance": "met",
+                             "via": item.id})
     return done
 
 
@@ -1249,7 +1317,11 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
         # must not sit in the `landed` park below. Until the sweep runs it is
         # still under observation and stays `in_progress`.
         partial = outcomes.get(iid, ("", ""))[0] == "partial"
-        if iid in in_flight:
+        if is_grouped(item):
+            # Folded into an umbrella: it closes when that lands `met`, and
+            # nothing else may lift it into a pool.
+            out[iid] = ("draft", f"folded into umbrella #{item.group}; it closes when that lands")
+        elif iid in in_flight:
             out[iid] = ("in_progress", "an automod round is in flight for it")
         elif landed and not partial:
             out[iid] = ("in_progress", "landed, awaiting the acceptance check or a human close")
@@ -1388,6 +1460,28 @@ def LEDGER_DEFAULT() -> Path:
     return S.LEDGER_PATH
 
 
+def is_umbrella(item: Item) -> bool:
+    return "umbrella" in item.tags or bool(item.members)
+
+
+def is_grouped(item: Item) -> bool:
+    return item.group is not None
+
+
+def group_triaged_ids(ledger: Path) -> set[int]:
+    """Every id a group triage judged, whatever the verdict."""
+    out: set[int] = set()
+    for d in _ledger_events(ledger, "backlog_group_triage", require_item=False):
+        judged = d.get("judged") or {}
+        if isinstance(judged, dict):
+            for k in judged:
+                try:
+                    out.add(int(k))
+                except (TypeError, ValueError):
+                    continue
+    return out
+
+
 def is_self_spawned(item: Item) -> bool:
     """Did this loop write this item? `backlog_write_task` tags what it files."""
     return any(t in SPAWN_TAGS for t in item.tags)
@@ -1478,7 +1572,8 @@ def triage_pool(ledger: Path,
     # implement pool and `in_progress` is a round in flight; an untriaged item
     # in either is a dead state the reconciler moves back here.
     untriaged = [i for i in open_items(boards)
-                 if i.id not in seen and i.status == TRIAGE_POOL_STATUS]
+                 if i.id not in seen and i.status == TRIAGE_POOL_STATUS
+                 and not is_grouped(i)]
     fresh = [i for i in untriaged if not is_quarantined(i, released=released)]
     return fresh, len(untriaged) - len(fresh)
 
@@ -1584,6 +1679,10 @@ def select_confirmed(ledger: Path,
         # else to keep it out of the loop's hands.
         if item.status != IMPLEMENT_POOL_STATUS:
             continue
+        # A member is never implemented on its own: its umbrella carries the
+        # contract and closes it.
+        if is_grouped(item):
+            continue
         if not acceptance_text(ev.get("acceptance")):
             continue
         if is_human_only(ev.get("acceptance")):
@@ -1682,6 +1781,194 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         f"---\n{body.rstrip()}{section}",
         encoding="utf-8")
     return item.path
+
+
+def select_cluster(ledger: Path, clusters: dict, *, min_size: int = 3, max_size: int = 8,
+                   boards: tuple[str, ...] | None = DEFAULT_BOARDS
+                   ) -> tuple[dict, list[Item]] | None:
+    """The cluster a group triage should take: re-validated against disk.
+
+    `clusters.json` is a night old by the time it is read, so every member
+    is checked to still be an untriaged, ungrouped open draft; ids a group
+    triage already judged are dropped (a cluster of `keep`s is never
+    retaken); a cluster whose last group event was not `incomplete` is
+    skipped. The survivors are trimmed to `max_size` keeping the `duplicates`
+    pairs together, then oldest first. Largest surviving cluster wins.
+    """
+    seen = triaged_ids(ledger)
+    judged = group_triaged_ids(ledger)
+    by_id = {i.id: i for i in open_items(boards)
+             if i.status == TRIAGE_POOL_STATUS and i.id not in seen
+             and not is_grouped(i) and not is_umbrella(i)
+             and NEEDS_HUMAN_TAG not in i.tags and EXPIRED_TAG not in i.tags}
+    last_group: dict[str, str] = {}
+    for d in _ledger_events(ledger, "backlog_group_triage", require_item=False):
+        last_group[str(d.get("cluster_id") or "")] = str(d.get("verdict") or d.get("outcome") or "done")
+    best: tuple[dict, list[Item]] | None = None
+    for c in (clusters or {}).get("clusters") or []:
+        cid = str(c.get("id") or "")
+        if cid in last_group and last_group[cid] != INCOMPLETE:
+            continue
+        ids = [int(i) for i in (c.get("item_ids") or []) if int(i) in by_id and int(i) not in judged]
+        if len(ids) < int(min_size):
+            continue
+        dup_ids: list[int] = []
+        for pair in c.get("duplicates") or []:
+            for i in pair:
+                if int(i) in ids and int(i) not in dup_ids:
+                    dup_ids.append(int(i))
+        rest = sorted((i for i in ids if i not in dup_ids),
+                      key=lambda i: (by_id[i].created or "9999", i))
+        chosen = (dup_ids + rest)[:int(max_size)]
+        members = [by_id[i] for i in sorted(chosen)]
+        if best is None or len(members) > len(best[1]):
+            best = (c, members)
+    return best
+
+
+def _resolve_duplicates(verdicts: dict[int, dict], members: set[int]) -> dict[int, dict]:
+    """Chains resolve to the terminal survivor (a→b→c ⇒ a→c); a cycle or a
+    target outside the cluster becomes `keep`. A duplicate's target must
+    itself be `fold` or `keep`."""
+    # Resolved against the verdicts as given, never against the rewrites in
+    # progress: with 4→5→4, rewriting 4 to `keep` first would let 5 resolve
+    # to "duplicate of a keep" instead of to the cycle it is.
+    orig = {i: dict(v) for i, v in verdicts.items()}
+    out = {i: dict(v) for i, v in verdicts.items()}
+    for i, v in orig.items():
+        if v.get("verdict") != "duplicate_of":
+            continue
+        seen = {i}
+        t = int(v.get("duplicate_of") or 0)
+        while t in orig and orig[t].get("verdict") == "duplicate_of" and t not in seen:
+            seen.add(t)
+            t = int(orig[t].get("duplicate_of") or 0)
+        if t not in members or t in seen or t == i or orig.get(t, {}).get("verdict") == "duplicate_of":
+            out[i]["verdict"] = "keep"
+            out[i]["duplicate_of"] = 0
+            out[i]["evidence"] = (v.get("evidence") or "") + " (duplicate target unresolved; kept)"
+        else:
+            out[i]["duplicate_of"] = t
+    return out
+
+
+def record_group_verdict(cluster: dict, members: list[Item], verdicts: dict[int, dict],
+                         umbrella: Item | None, umbrella_fields: dict, *,
+                         session_id: str = "", spawned=(), merged=(),
+                         extra: dict | None = None) -> dict:
+    """Write a group triage's verdicts onto the items and the ledger.
+
+    One `backlog_triage` row per member so every existing reader — the
+    scorecard, `triaged_ids`, the status pipeline — sees ordinary verdicts,
+    plus one `backlog_group_triage` summary keyed on the cluster.
+    """
+    from scripts.automod import state as S
+    cid = str(cluster.get("id") or "")
+    member_ids = {m.id for m in members}
+    by_id = {m.id: m for m in members}
+    verdicts = _resolve_duplicates(verdicts, member_ids)
+    fold_ids = [i for i, v in verdicts.items() if v.get("verdict") == "fold"]
+    umbrella_missing = bool(fold_ids) and umbrella is None
+    if umbrella_missing:
+        for i in fold_ids:
+            verdicts[i]["verdict"] = "keep"
+            verdicts[i]["evidence"] = (verdicts[i].get("evidence") or "") + " (no umbrella on disk; kept)"
+        fold_ids = []
+    counts = {"duplicates": 0, "retired": 0, "folded": 0, "kept": 0}
+    judged: dict[str, str] = {}
+    for i, v in verdicts.items():
+        item = by_id.get(i)
+        if item is None:
+            continue
+        verdict = str(v.get("verdict") or "keep")
+        evidence = str(v.get("evidence") or "").strip()
+        judged[str(i)] = verdict
+        if verdict == "duplicate_of":
+            t = int(v["duplicate_of"])
+            record_verdict(item, "stale", f"duplicate of #{t}: {evidence}", close=True)
+            update_frontmatter(item.path, {"duplicate_of": t})
+            S.append_event({"event": "backlog_triage", "item_id": i, "verdict": "stale",
+                            "closed": True, "duplicate_of": t, "group_cluster": cid,
+                            "group_verdict": verdict, "evidence": evidence[:1000],
+                            "session_id": session_id, "spawned": [], "auto": True}, path=_ledger_or(extra))
+            counts["duplicates"] += 1
+        elif verdict in RETIRING:
+            record_verdict(item, verdict, evidence, close=True)
+            S.append_event({"event": "backlog_triage", "item_id": i, "verdict": verdict,
+                            "closed": True, "group_cluster": cid, "group_verdict": verdict,
+                            "evidence": evidence[:1000], "session_id": session_id,
+                            "spawned": [], "auto": True}, path=_ledger_or(extra))
+            counts["retired"] += 1
+        elif verdict == "fold":
+            update_frontmatter(item.path, {"group": umbrella.id},
+                               activity=f"folded into umbrella #{umbrella.id} by automod group "
+                                        f"triage ({cid}): {evidence}"[:600],
+                               add_tags=("grouped",))
+            S.append_event({"event": "backlog_triage", "item_id": i, "verdict": FOLDED,
+                            "closed": False, "group": umbrella.id, "group_cluster": cid,
+                            "group_verdict": verdict, "evidence": evidence[:1000],
+                            "session_id": session_id}, path=_ledger_or(extra))
+            counts["folded"] += 1
+        else:  # keep — still untriaged, on purpose; released from quarantine by the summary
+            note_item(i, f"group triage {cid}: distinct from the others; stays in the single-item pool"
+                         + (f" — {evidence}" if evidence else ""))
+            counts["kept"] += 1
+    if umbrella is not None and fold_ids:
+        clauses = clean_clauses(umbrella_fields.get("acceptance_clauses") or ())
+        record_verdict(umbrella, "confirmed", str(umbrella_fields.get("evidence") or ""),
+                       check=str(umbrella_fields.get("check") or ""),
+                       acceptance=str(umbrella_fields.get("acceptance") or ""),
+                       acceptance_clauses=clauses)
+        update_frontmatter(umbrella.path, {"members": sorted(fold_ids)}, add_tags=("umbrella",))
+        S.append_event({"event": "backlog_triage", "item_id": umbrella.id, "verdict": "confirmed",
+                        "surface": str(umbrella_fields.get("surface") or "code"),
+                        "check": str(umbrella_fields.get("check") or ""),
+                        "evidence": str(umbrella_fields.get("evidence") or "")[:1000],
+                        "acceptance": str(umbrella_fields.get("acceptance") or ""),
+                        "acceptance_clauses": clauses, "spawned": [], "closed": False,
+                        "umbrella": True, "members": sorted(fold_ids), "group_cluster": cid,
+                        "session_id": session_id, "verdict_source": (extra or {}).get("verdict_source", "structured")},
+                       path=_ledger_or(extra))
+    summary = {"event": "backlog_group_triage", "cluster_id": cid,
+               "item_ids": sorted(member_ids), "judged": judged, **counts,
+               "umbrella_id": umbrella.id if (umbrella is not None and fold_ids) else None,
+               "umbrella_missing": umbrella_missing,
+               "spawned": list(spawned), "merged": list(merged), "session_id": session_id,
+               **(extra or {})}
+    S.append_event(summary, path=_ledger_or(extra))
+    return {**counts, "umbrella_id": summary["umbrella_id"], "umbrella_missing": umbrella_missing,
+            "judged": judged}
+
+
+def _ledger_or(extra: dict | None) -> Path:
+    from scripts.automod import state as S
+    return S.LEDGER_PATH
+
+
+def unfold_umbrella(umbrella_id: int, reason: str, *, ledger: Path | None = None) -> dict:
+    """The human escape hatch: release an umbrella's members back to the
+    single pool and clear the umbrella's member list. Recorded, because a
+    fold was a judgement and undoing it is one too."""
+    from scripts.automod import state as S
+    reason = " ".join(str(reason or "").split()).strip()
+    if not reason:
+        raise ValueError("a reason is required")
+    ledger = ledger or LEDGER_DEFAULT()
+    umbrella = next((i for i in all_items(None) if i.id == int(umbrella_id)), None)
+    if umbrella is None:
+        raise ValueError(f"#{umbrella_id} not found")
+    released: list[int] = []
+    for item in all_items(None):
+        if item.group == int(umbrella_id):
+            update_frontmatter(item.path, {"group": None},
+                               activity=f"released from umbrella #{umbrella_id}: {reason}",
+                               remove_tags=("grouped",))
+            released.append(item.id)
+    update_frontmatter(umbrella.path, {"members": []},
+                       activity=f"unfolded ({len(released)} member(s) released): {reason}")
+    S.append_event({"event": "backlog_group_unfold", "item_id": int(umbrella_id),
+                    "released": released, "reason": reason}, path=ledger)
+    return {"umbrella_id": int(umbrella_id), "released": released, "reason": reason}
 
 
 def summarize(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> dict:

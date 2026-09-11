@@ -599,6 +599,7 @@ def _backlog() -> dict[str, Any]:
         # board -> {open, total}
         boards: dict[str, dict[str, int]] = {}
         total = 0
+        umbrellas = grouped = 0
         recent: list[dict[str, Any]] = []
         for path in paths:
             if not path.name[:1].isdigit():
@@ -614,6 +615,10 @@ def _backlog() -> dict[str, Any]:
             entry["total"] += 1
             if status not in _BACKLOG_CLOSED:
                 entry["open"] += 1
+                if fm.get("members") or "umbrella" in (fm.get("tags") or []):
+                    umbrellas += 1
+                if fm.get("group") is not None:
+                    grouped += 1
                 try:
                     mtime = path.stat().st_mtime
                 except OSError:
@@ -636,6 +641,8 @@ def _backlog() -> dict[str, Any]:
                 n for st, n in by_status.items() if st not in _BACKLOG_CLOSED
             ),
             "recent_open": recent[:5],
+            "umbrellas": umbrellas,
+            "grouped": grouped,
         }
 
     return _cached("backlog", _VAULT_SCAN_TTL_S, _scan)

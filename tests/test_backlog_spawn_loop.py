@@ -291,7 +291,7 @@ def _impl_prompt(**over):
     kw = dict(item_id=9, status="draft", priority="low", name="n", body="b",
               triaged_ago="an hour ago", surface="code", check="c", evidence="e",
               acceptance="a", clauses="    1. a", spawn_cap=I.SPAWN_CAP,
-              round_label="item9", reoffer="")
+              round_label="item9", reoffer="", members="")
     kw.update(over)
     return I.PROMPT.format(**kw)
 

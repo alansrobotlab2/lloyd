@@ -542,7 +542,7 @@ def test_the_implement_prompt_names_the_clauses_the_seams_and_the_item_id():
     text = I.PROMPT.format(item_id=9, status="up_next", priority="high", name="n", body="b",
                            triaged_ago="today", surface="code", check="c", evidence="e",
                            acceptance="a", clauses="    1. a\n    2. b", spawn_cap=I.SPAWN_CAP,
-                           round_label="item9", reoffer="")
+                           round_label="item9", reoffer="", members="")
     assert "    1. a\n    2. b" in text
     assert "item_id=9" in text and "Seams." in text and "review" in text
     assert "A deferral that names no id is recorded as `not_met`" in text
