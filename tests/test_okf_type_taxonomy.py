@@ -37,6 +37,7 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -246,7 +247,13 @@ def test_the_migrator_emits_canonical_types_for_knowledge_notes(tmp_path):
 
 # ── 3. the acceptance check itself, on the live vault ─────────────────────────
 
+@pytest.mark.live_vault
 def test_knowledge_frontmatter_uses_only_the_canonical_set():
+    # `live_vault`: this reads ~/obsidian/knowledge as it is right now, which
+    # no round under test controls. Unmarked, one note with `type: note`
+    # (written by a nightly job) failed the `tests` rung for #551's round on
+    # 2026-09-11 — and would have failed every round until someone fixed the
+    # vault. The gate runs `-m "not live_vault"`; the full suite still runs it.
     counts = _knowledge_type_values()
     # A guard that reads nothing reports "OK" — fail loudly on a missing tree
     # instead of passing a vacuous scan.
