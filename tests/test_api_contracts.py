@@ -207,6 +207,75 @@ async def test_autonomy_tasks_shape(client):
         assert set(task) >= {"id", "name", "status"}
 
 
+async def test_autonomy_blocked_agrees_with_dispatch_at_one_instant(
+        client, tmp_path, monkeypatch):
+    """#870 clause 6, measured AT the endpoint and not only at the function.
+
+    `blocked` is the board's answer to "why is this not running"; the queue is
+    the scheduler's. They were computed from two different `depends_on`
+    resolution sets, so the autonomy tab could show `waiting on #1` on a task the
+    ticker was dispatching in the same second. This crosses the real seam — an
+    ASGI request through the router, which reads the directory and imports
+    autonomy inside the handler — with the clock pinned to one instant on both
+    sides, and asserts the two answers cannot part company for ANY task listed.
+    """
+    import datetime as dt
+
+    import autonomy
+    from app.routers import autonomy as autonomy_router
+
+    when = dt.datetime(2026, 9, 11, 12, 0, 0, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(autonomy, "_utcnow", lambda: when, raising=False)
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tmp_path)
+    monkeypatch.setattr(autonomy_router, "_AUTONOMY_DIR", tmp_path)
+
+    def write(tid, **over):
+        fm = {"id": tid, "name": f"task{tid}", "status": "up_next",
+              "frequency": "daily", "priority": "medium", "skill_name": "some-skill",
+              "timeout_seconds": 600, "max_retries": 3, "failure_count": 0}
+        fm.update(over)
+        head = "\n".join(f"{k}: {v}" for k, v in fm.items())
+        (tmp_path / f"{tid}-task{tid}.md").write_text(f"---\n{head}\n---\n\nb\n")
+
+    # Every task here is PAST its own interval before the biconditional is
+    # asserted, on purpose: `hold_reason` answers "is anything holding this", not
+    # "is its interval up", so a task comfortably inside its own window has no
+    # hold reason and does not dispatch either. Asking one instant to settle both
+    # questions is fine; asking `blocked is None` to mean "dispatching now" is
+    # only sound once no task is sitting in its window.
+    stale = (when - dt.timedelta(days=3)).isoformat()
+    write(1, status="paused", last_run=(when - dt.timedelta(days=2)).isoformat())
+    write(2, depends_on=1, last_run=stale)          # held by #870's fix
+    # 3 runs every 6 h and last ran 8 h ago: due on its own clock, and fresh
+    # enough (under task 4's 12 h half-interval bound) to satisfy 4.
+    write(3, frequency="every_6_hours",
+          last_run=(when - dt.timedelta(hours=8)).isoformat())
+    write(4, depends_on=3, last_run=stale)          # upstream met → dispatches
+    write(5, depends_on=99, last_run=stale)         # id with no file → unresolved
+
+    r = await client.get("/api/autonomy/tasks")
+    assert r.status_code == 200
+    listed = {t["id"]: t for t in r.json()["tasks"]}
+    due = {t["id"] for t in autonomy.get_due_tasks()}
+    assert set(listed) == {1, 2, 3, 4, 5}
+    # The contradiction this item exists to kill, asserted unconditionally: no
+    # task is reported as held by the board and dispatched by the scheduler at
+    # the same instant.
+    for tid, task in listed.items():
+        assert not (task["blocked"] is not None and tid in due), (
+            f"task {tid}: board said {task['blocked']!r} while "
+            f"get_due_tasks() dispatched it")
+    # And with every task past its interval, the two answers coincide outright.
+    for tid, task in listed.items():
+        assert (task["blocked"] is None) == (tid in due), (
+            f"task {tid}: board said {task['blocked']!r}, "
+            f"get_due_tasks says dispatched={tid in due}")
+    # Both branches taken, so neither loop above is green by everything landing
+    # on one side: a dependency-held dependent AND a dispatched dependent.
+    assert listed[2]["blocked"] == "waiting on #1" and 2 not in due
+    assert listed[4]["blocked"] is None and 4 in due
+
+
 # ── Memory page: entities, entity detail, entity graph ───────────────────────
 
 @pytest.fixture

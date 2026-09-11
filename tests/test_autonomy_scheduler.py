@@ -5,6 +5,7 @@ week burned on failed runs. Each test names the failure mode it prevents.
 """
 import asyncio
 import datetime as dt
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -502,3 +503,198 @@ def test_secondary_routes_to_primary_when_disabled(monkeypatch):
     assert _model_health_url("secondary").endswith("8091/health")
     # primary is unaffected either way
     assert _model_health_url("primary").endswith("8096/health")
+
+
+# ── #870: one reproducible dependency gate, one resolution input ─────────────
+#
+# The gate read `datetime.datetime.now` twice inside its own body and its two
+# callers handed it two different task sets — dispatch the status-filtered
+# runnable set, the Mission Control board every parsed task. So the gate was not
+# a function of its inputs (nothing could ask "would this have been due at
+# instant T?") and the two surfaces could print opposite answers for one task in
+# one second. Every test below pins the instant through the ONE module-level
+# clock helper, `autonomy._utcnow`, and never touches a stdlib datetime
+# attribute — which is why `_pin` passes `raising=False`: the helper is new, and
+# the patch must not be the thing that fails.
+#
+# Red-for-the-right-reason, measured by checking out the base commit's source and
+# re-running this section: most of these tests exercise API that did not exist
+# (`now=`, `dependency_resolution_set`), so pre-fix they die on a TypeError or
+# AttributeError, which is the honest outcome for new-API coverage.
+# `test_paused_upstream_never_both_holds_and_dispatches` is the one written
+# against only the old surface — it builds the board the way the endpoint built
+# it before #870 — so pre-fix it fails on the disagreement assertion itself.
+
+PIN = dt.datetime(2026, 9, 11, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+
+def _pin(aut, monkeypatch, when=PIN):
+    """Replace the single module-level clock helper. Clause 2: one helper, and
+    no patching of a stdlib `datetime` attribute anywhere in this section."""
+    monkeypatch.setattr(aut, "_utcnow", lambda: when, raising=False)
+    return when
+
+
+def _stale_pair(aut, up_status="paused", up_age_days=2, dep_age_days=3):
+    """The reproduction from the item: upstream `paused` and 2 days stale,
+    dependent `up_next` and 3 days stale, both `daily`."""
+    write_task(aut, 1, status=up_status,
+               last_run=(PIN - dt.timedelta(days=up_age_days)).isoformat())
+    write_task(aut, 2, depends_on=1,
+               last_run=(PIN - dt.timedelta(days=dep_age_days)).isoformat())
+
+
+async def test_gate_is_a_function_of_its_inputs(aut, monkeypatch):
+    """Clause 1. Two calls, the same two task dicts, the same pinned instant →
+    the same value. Before #813 the gate built its own `now` twice, so this
+    question could not even be asked, let alone answered twice the same way."""
+    _pin(aut, monkeypatch)
+    _stale_pair(aut)
+    tasks = [read_task(aut, 1), read_task(aut, 2)]
+    first = aut._is_dependency_met(tasks[1], tasks, now=PIN)
+    second = aut._is_dependency_met(tasks[1], tasks, now=PIN)
+    assert first is False and second is False
+    # And with no explicit instant, the pinned helper is still the only clock,
+    # so the answer is the same one — reproducible across runs, not just calls.
+    assert aut._is_dependency_met(tasks[1], tasks) is first
+    # The two in-body wall-clock reads are gone; one indirection replaced them.
+    src = inspect.getsource(aut._is_dependency_met)
+    assert "datetime.datetime.now" not in src
+    assert "_utcnow()" in src
+
+
+async def test_freshness_bound_asserted_from_both_sides(aut, monkeypatch):
+    """Clause 3. A daily dependent's bound is `interval / 2` = 43200 s. One
+    second inside the bound the dependency is met; one second outside it is not.
+    A real-clock test cannot make that claim — the case sat exactly on a moving
+    line, which is the flake #813 names."""
+    _pin(aut, monkeypatch)
+    inside = PIN - dt.timedelta(seconds=43200 - 1)    # 43199 s: inside
+    outside = PIN - dt.timedelta(seconds=43200 + 1)   # 43201 s: outside
+    stale = (PIN - dt.timedelta(days=3)).isoformat()
+    write_task(aut, 1, last_run=inside.isoformat())
+    write_task(aut, 3, last_run=outside.isoformat())
+    write_task(aut, 2, depends_on=1, last_run=stale)
+    write_task(aut, 4, depends_on=3, last_run=stale)
+    board = [read_task(aut, i) for i in (1, 2, 3, 4)]
+    by = {int(t["id"]): t for t in board}
+    assert aut._is_dependency_met(by[2], board, now=PIN) is True
+    assert aut._is_dependency_met(by[4], board, now=PIN) is False
+
+
+@pytest.mark.parametrize("up_status", [
+    "up_next", "in_progress", "failed", "paused", "draft", None])
+async def test_board_and_scheduler_agree_for_every_upstream_status(
+        aut, monkeypatch, up_status):
+    """Clause 4. Every upstream status class, and the case where the
+    `depends_on` id has no file at all: the board's hold reason and the
+    scheduler's due decision must give one verdict, at one instant.
+
+    The expected column is NOT this item choosing an answer for the absent id:
+    the no-file row keeps today's fail-open answer, which is #558's to move.
+    What is pinned here is that both surfaces say the same thing."""
+    _pin(aut, monkeypatch)
+    if up_status is None:                       # depends_on points at nothing
+        write_task(aut, 2, depends_on=1,
+                   last_run=(PIN - dt.timedelta(days=3)).isoformat())
+        expect_held = False
+    else:
+        _stale_pair(aut, up_status=up_status)
+        # Upstream exists and ran 2 days ago; the dependent is daily, so the
+        # half-interval freshness bound is 12 h and it is 40x past. Met → held,
+        # and `stale_bypass_hours` is unset, so nothing forwards past it.
+        expect_held = True
+    board = list(aut.dependency_resolution_set())
+    due = [int(t["id"]) for t in aut.get_due_tasks(now=PIN)]
+    dep = next(t for t in board if int(t["id"]) == 2)
+    held = aut.hold_reason(dep, board, now=PIN)
+    assert (2 in due) is not (held is not None), (
+        f"upstream {up_status!r}: board said {held!r}, scheduler due={2 in due}")
+    if expect_held:
+        assert held == "waiting on #1" and 2 not in due
+    else:
+        assert held is None and 2 in due
+
+
+async def test_paused_upstream_never_both_holds_and_dispatches(aut, monkeypatch):
+    """Clause 5 — the check that opens the item, and the one test in this
+    section written against ONLY the pre-#870 surface so it can fail on the
+    behaviour rather than on a missing function: the board's set is assembled the
+    way the endpoint assembled it (`every parsed task file, whatever its status`)
+    and passed in positionally. Pre-fix, run against the base commit's
+    autonomy.py, the assertion below fires: the scheduler returned the dependent
+    — a `paused` upstream was invisible to the set dispatch resolved against, so
+    the lookup missed it and read as satisfied — while the same call stack
+    returned `waiting on #1` for it. Verified that way, not asserted."""
+    _pin(aut, monkeypatch)
+    _stale_pair(aut)                            # upstream paused, 2 days stale
+    board = [t for t in (aut._parse_task_file(p)
+                         for p in sorted(aut.AUTONOMY_DIR.glob("*.md"))) if t]
+    due = [int(t["id"]) for t in aut.get_due_tasks()]
+    dep = next(t for t in board if int(t["id"]) == 2)
+    held = aut.hold_reason(dep, board)
+    assert not (held == "waiting on #1" and 2 in due), (
+        f"board and scheduler disagreed at one instant: board={held!r}, "
+        f"get_due_tasks={due}")
+
+
+async def test_the_stall_alarm_shares_the_one_verdict(aut, monkeypatch, tmp_path):
+    """Clause 4/5 across the worker seam. `_grossly_overdue` is the gate's third
+    caller and the only one that runs in the worker pool process rather than the
+    backend; it handed `_is_task_due` the runnable set to resolve `depends_on`
+    with, so a `paused` upstream was invisible to the alarm exactly as it was to
+    dispatch, and an unheld-dependent-forever read as a broken dispatch path.
+    This calls the worker-side function itself, not a copy of its logic."""
+    from workers.queue import WorkQueue
+    from workers.sources.scheduled_task import _grossly_overdue
+
+    _pin(aut, monkeypatch)
+    _stale_pair(aut)                              # upstream paused, 2 days stale
+    # A genuinely stalled task, so the alarm returning nothing cannot pass this
+    # test by being broken: hourly, last ran 10 days ago, nothing holding it.
+    write_task(aut, 3, frequency="hourly",
+               last_run=(PIN - dt.timedelta(days=10)).isoformat())
+    q = WorkQueue(tmp_path / "w.db")
+
+    alarm = _grossly_overdue(q)
+    due = [int(t["id"]) for t in aut.get_due_tasks()]
+    assert 3 in alarm, "the alarm stopped reporting a genuinely stalled task"
+    assert 2 not in due and 2 not in alarm, (
+        f"dispatch says due={2 in due} while the stall alarm says "
+        f"{2 in alarm} — one gate, two answers")
+
+
+async def test_both_gate_branches_under_one_pinned_instant(aut, monkeypatch):
+    """Clause 7. The never-ran branch and the ran-but-stale branch, each with
+    and without the `stale_bypass_hours` fail-forward, evaluated at ONE instant.
+
+    The bypass pairs matter most: they differ only in how far `now` is from the
+    upstream's `last_run`, and `now` used to be recomputed inside
+    `_is_dependency_met` before being handed to `_dependency_bypassed` — which
+    already took it as a parameter. If the instant were not the pinned one, the
+    30-hour case would read ~40 hours against the real clock and both halves of
+    each pair would come out True."""
+    _pin(aut, monkeypatch)
+    stale = (PIN - dt.timedelta(days=3)).isoformat()
+    write_task(aut, 1, last_run="")                                     # never ran
+    write_task(aut, 3, last_run=(PIN - dt.timedelta(hours=40)).isoformat())  # stale
+    write_task(aut, 5, last_run=(PIN - dt.timedelta(hours=30)).isoformat())  # stale
+    write_task(aut, 2, depends_on=1, last_run=stale)                    # no bypass
+    write_task(aut=aut, task_id=6, depends_on=1, last_run=stale, stale_bypass_hours=36)
+    write_task(aut, 4, depends_on=3, last_run=stale)                    # no bypass
+    write_task(aut=aut, task_id=7, depends_on=3, last_run=stale, stale_bypass_hours=36)
+    write_task(aut=aut, task_id=8, depends_on=5, last_run=stale, stale_bypass_hours=36)
+    board = list(aut.dependency_resolution_set())
+    by = {int(t["id"]): t for t in board}
+    met = {d: aut._is_dependency_met(by[d], board, now=PIN) for d in (2, 4, 6, 7, 8)}
+    # Never ran, no bypass window: not met, and the dependent waits.
+    assert met[2] is False
+    # Never ran, bypass set: the documented fail-forward answer is met.
+    assert met[6] is True
+    # Ran but stale past the half-interval bound, no bypass: not met.
+    assert met[4] is False
+    # Ran 40 h ago against a 36 h window: stale enough to forward. Met.
+    assert met[7] is True
+    # Ran 30 h ago against the same 36 h window: inside it. Not met. This is the
+    # half that only holds if the evaluation used the pinned instant.
+    assert met[8] is False

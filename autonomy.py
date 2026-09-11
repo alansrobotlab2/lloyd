@@ -255,21 +255,62 @@ def _write_run_record(task_id: int, run_id: str, status: str,
 
 # ── Scheduling logic (used by scheduled-task source) ──────────────────────────
 
-def _all_runnable_tasks() -> list[dict]:
+def _all_board_tasks() -> list[dict]:
+    """Every parseable task file, whatever its status or grants block.
+
+    This is the BOARD — the set `depends_on` gets resolved against (#870). An
+    upstream that exists on disk is a fact about the schedule whether it is
+    `paused`, `draft` or mid-flight; whether it may itself dispatch is a
+    separate question that `_all_runnable_tasks` answers for the dispatch
+    candidate only.
+    """
     if not AUTONOMY_DIR.exists():
         return []
     tasks = []
-    for path in AUTONOMY_DIR.glob("*.md"):
+    for path in sorted(AUTONOMY_DIR.glob("*.md")):
         if not re.match(r"\d+-", path.name):
             continue  # only NN-name.md task files; skip _config.md, reports, notes
         task = _parse_task_file(path)
         if not task:
             continue
+        tasks.append(task)
+    return tasks
+
+
+def dependency_resolution_set() -> list[dict]:
+    """THE input `depends_on` is resolved against — scheduler and board alike.
+
+    Both surfaces used to hand `_is_dependency_met` their own list: dispatch
+    passed `_all_runnable_tasks()` (status-filtered), the Mission Control board
+    passed every parsed task. With an upstream in `paused` the scheduler could
+    not see it, `if not dep_task: return True` fired, and the dependent
+    dispatched while the board printed `waiting on #N` for the same task in the
+    same second. One resolution set, one answer, so the two surfaces cannot
+    disagree — and no test can be written against one and pass while the other
+    is broken.
+
+    Deliberately NOT a decision about what an *absent* upstream means: an id
+    with no file still resolves to nothing and is still treated as met. That
+    boundary is #558's to move, not this function's.
+    """
+    return _all_board_tasks()
+
+
+def _all_runnable_tasks(board: Optional[list[dict]] = None) -> list[dict]:
+    """Dispatch CANDIDATES: board tasks a status filter and #534's gate let run.
+
+    Not the dependency resolution set — see `dependency_resolution_set`. The
+    two roles were one list until #870, which is exactly how the scheduler came
+    to be blind to a paused upstream. Pass `board` to filter a snapshot already
+    in hand, so one caller does not read the directory twice and get two
+    different boards out of it.
+    """
+    tasks = []
+    for task in (board if board is not None else _all_board_tasks()):
         status = str(task.get("status", "")).strip()
         # `failed` is included so a disabled upstream stays FINDABLE by
-        # _is_dependency_met — otherwise the dependency lookup misses it and
-        # returns True, letting dependents run off a broken upstream. It is
-        # excluded from dispatch by the status gate in _is_task_due.
+        # _is_task_due's own status gate — it is excluded from dispatch there,
+        # not dropped here, so a broken upstream still reads as an upstream.
         if status not in ("up_next", "in_progress", "failed"):
             continue
         # #534: a `grants:` block the loader cannot read is not the same thing
@@ -279,7 +320,7 @@ def _all_runnable_tasks() -> list[dict]:
         # nobody actually wrote. Drop it from the runnable set: it is not due,
         # it is not enqueued, it does not drain. The fix is legible in the
         # error and the file is one edit away.
-        _errors = _grant_block_errors(task, path)
+        _errors = _grant_block_errors(task, Path(str(task.get("_path") or "")))
         if _errors:
             continue
         tasks.append(task)
@@ -333,6 +374,18 @@ def _frequency_interval_seconds(task: dict) -> Optional[float]:
 _no_skill_warned: set[str] = set()
 
 
+def _utcnow() -> datetime.datetime:
+    """Current UTC instant. Indirection exists so tests can pin it.
+
+    Same reason `_local_hour` below is a one-line function. The dependency gate
+    read `datetime.datetime.now` twice inside its own body, so nothing could ask
+    "would this task have been due at instant T?" and a case near the
+    `interval / 2` freshness bound flipped depending on when the probe ran
+    (#813). Pin this, and the whole due-decision path is reproducible.
+    """
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 def _dependency_bypassed(task: dict, dep_task: dict,
                          dep_last_run: Optional[datetime.datetime],
                          now: datetime.datetime) -> bool:
@@ -356,7 +409,19 @@ def _dependency_bypassed(task: dict, dep_task: dict,
     return (now - dep_last_run).total_seconds() > bypass_hours * 3600
 
 
-def _is_dependency_met(task: dict, all_tasks: list[dict]) -> bool:
+def _is_dependency_met(task: dict, all_tasks: list[dict], *,
+                       now: Optional[datetime.datetime] = None) -> bool:
+    """Is `task`'s `depends_on` satisfied right now?
+
+    `all_tasks` is the resolution set — pass `dependency_resolution_set()` in
+    production; a test passes the tasks it means to exist. `now` is the instant
+    the answer is about: the gate read the wall clock inside its own body until
+    #813, which made it not a function of its inputs — two probes of a case near
+    the freshness bound could legitimately disagree, so neither the gate nor a
+    differential over it could be replayed. One evaluation reads one instant.
+    """
+    if now is None:
+        now = _utcnow()
     dep_id = task.get("depends_on")
     if not dep_id or str(dep_id).strip().lower() in ("null", "none", ""):
         return True
@@ -367,12 +432,14 @@ def _is_dependency_met(task: dict, all_tasks: list[dict]) -> bool:
             dep_task = t
             break
     if not dep_task:
+        # Absent from the resolution set. Whether this should read as NOT met is
+        # #558's open decision; this round deliberately keeps the existing
+        # answer so the gate's agreement is not smuggled in as a verdict.
         return True
     dep_last_run = _parse_iso(dep_task.get("last_run"))
     if not dep_last_run:
         # Never succeeded — still eligible for a stale bypass.
-        return _dependency_bypassed(task, dep_task, None,
-                                    datetime.datetime.now(datetime.timezone.utc))
+        return _dependency_bypassed(task, dep_task, None, now)
     # Freshness gate: the dependency must have completed within the current
     # scheduling cycle (half this task's interval), not just "since my last
     # run". Without this, yesterday's upstream run satisfies the gate and the
@@ -380,7 +447,6 @@ def _is_dependency_met(task: dict, all_tasks: list[dict]) -> bool:
     # tasks always consume day-old upstream artifacts (observed June 2026:
     # reflection ran 39→38/40→42, trajectory ran 57 before 56).
     interval = _frequency_interval_seconds(task) or 86400.0
-    now = datetime.datetime.now(datetime.timezone.utc)
     if (now - dep_last_run).total_seconds() > interval / 2:
         return _dependency_bypassed(task, dep_task, dep_last_run, now)
     my_last_run = _parse_iso(task.get("last_run"))
@@ -424,7 +490,14 @@ def _is_preferred_hour(task: dict) -> bool:
     return _local_hour() in hours
 
 
-def _is_task_due(task: dict, all_tasks: list[dict]) -> bool:
+def _is_task_due(task: dict, all_tasks: list[dict], *,
+                 now: Optional[datetime.datetime] = None) -> bool:
+    # `all_tasks` is the dependency resolution set, not the dispatch candidates
+    # — pass `dependency_resolution_set()`. `now` is one instant for this whole
+    # evaluation, so `hold_reason` can be asked the same question at the same
+    # instant and get the same answer (#870).
+    if now is None:
+        now = _utcnow()
     # A task is runnable if it has a skill_name (slug) or a full skill_path.
     # If both are empty, skip it.
     skill_name = str(task.get("skill_name", "") or "").strip()
@@ -448,7 +521,6 @@ def _is_task_due(task: dict, all_tasks: list[dict]) -> bool:
     if interval is None:
         return False
     last_run = _parse_iso(task.get("last_run"))
-    now = datetime.datetime.now(datetime.timezone.utc)
     if last_run:
         elapsed = (now - last_run).total_seconds()
         # last_run is a COMPLETION time, so due-time drifts later by the run's
@@ -462,7 +534,7 @@ def _is_task_due(task: dict, all_tasks: list[dict]) -> bool:
     # due again on the next tick — the retry storm.
     if _in_failure_cooldown(task, now):
         return False
-    if not _is_dependency_met(task, all_tasks):
+    if not _is_dependency_met(task, all_tasks, now=now):
         return False
     if not _is_preferred_hour(task):
         return False
@@ -488,7 +560,8 @@ def _hour_windows(hours) -> str:
     return ",".join(out)
 
 
-def hold_reason(task: dict, all_tasks: list[dict]) -> Optional[str]:
+def hold_reason(task: dict, all_tasks: list[dict], *,
+                now: Optional[datetime.datetime] = None) -> Optional[str]:
     """Why this task will not dispatch right now, or None if nothing holds it.
 
     Mirrors `autonomy._is_task_due`'s gates in its order and calls the very
@@ -514,10 +587,11 @@ def hold_reason(task: dict, all_tasks: list[dict]) -> Optional[str]:
         return status or "no status"
     if _frequency_interval_seconds(task) is None:
         return "no frequency"
-    now = datetime.datetime.now(datetime.timezone.utc)
+    if now is None:
+        now = _utcnow()
     if _in_failure_cooldown(task, now):
         return "failure cooldown"
-    if not _is_dependency_met(task, all_tasks):
+    if not _is_dependency_met(task, all_tasks, now=now):
         return f"waiting on #{task.get('depends_on')}"
     if not _is_preferred_hour(task):
         window = _hour_windows(_effective_preferred_hours(task) or [])
@@ -533,9 +607,23 @@ def _priority_key(task: dict) -> tuple:
     return (-prio, -overdue)
 
 
-def get_due_tasks() -> list[dict]:
-    all_tasks = _all_runnable_tasks()
-    due = [t for t in all_tasks if _is_task_due(t, all_tasks)]
+def get_due_tasks(*, now: Optional[datetime.datetime] = None) -> list[dict]:
+    """Dispatch candidates, gated against the one dependency resolution set.
+
+    Two inputs were one variable until #870: `_all_runnable_tasks()` was both
+    the list to dispatch and the list `depends_on` was resolved against, while
+    the board resolved against every task file. Same gate, different inputs,
+    opposite answers for one task in one second. Candidates keep the status and
+    grants filters (#534 fails a bad `grants:` block closed); resolution takes
+    the whole board, so a `paused` upstream stays FINDABLE — the intent the
+    `failed` status was let into the old runnable set to serve (see
+    `dependency_resolution_set`).
+    """
+    if now is None:
+        now = _utcnow()
+    resolution = dependency_resolution_set()
+    due = [t for t in _all_runnable_tasks(resolution)
+           if _is_task_due(t, resolution, now=now)]
     due.sort(key=_priority_key)
     return due
 

@@ -185,19 +185,13 @@ async def autonomy_tasks(status: str = "", tag: str = ""):
     """List autonomy tasks from ~/obsidian/autonomy/."""
     if not _AUTONOMY_DIR.exists():
         return JSONResponse({"tasks": []})
-    tasks, everything = [], []
+    tasks = []
     for path in _AUTONOMY_DIR.glob("*.md"):
         if not re.match(r"\d+-", path.name):
             continue  # only NN-name.md task files; skip _config.md, reports, notes
         task = _autonomy_parse(path)
         if task is None:
             continue
-        # The dependency gate resolves `depends_on` by id, and an unresolved
-        # id counts as met — so it has to search the WHOLE board, not the
-        # filtered view. Filtering to status=up_next would otherwise report
-        # every dependency satisfied, since the upstream task is usually the
-        # one that just moved out of that status.
-        everything.append(task)
         if status and task.get("status") != status:
             continue
         if tag and tag not in (task.get("tags") or []):
@@ -209,9 +203,19 @@ async def autonomy_tasks(status: str = "", tag: str = ""):
     try:
         import autonomy as _a
 
+        # One resolution input, shared with dispatch (#870). This endpoint used to
+        # assemble its own `everything` — every parsed task regardless of status,
+        # deliberately, because an unresolvable `depends_on` id counts as met and
+        # a filtered view would report every dependency satisfied — while dispatch
+        # resolved the same `depends_on` against the status-filtered runnable set.
+        # Same gate, two inputs: for a `paused` upstream the board printed
+        # `waiting on #N` in the same second the scheduler dispatched the
+        # dependent. The whole-board reasoning now lives in
+        # `autonomy.dependency_resolution_set()`, which the dispatcher reads too.
+        resolution = _a.dependency_resolution_set()
         for task in tasks:
             try:
-                task["blocked"] = _a.hold_reason(task, everything)
+                task["blocked"] = _a.hold_reason(task, resolution)
             except Exception:
                 task["blocked"] = None
     except Exception as e:
