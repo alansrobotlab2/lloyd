@@ -335,7 +335,15 @@ def test_no_active_skill_prescribes_a_non_canonical_knowledge_type():
 # inline `type: <value>` — including a value in back-adjacent prose — and requires
 # it to normalise onto a canonical value. `source_type`/`subagent_type` are
 # excluded by the lookbehind: they are different fields with different vocabularies.
-_INLINE_TYPE_ASSIGNMENT = re.compile(r"(?<![\w_])type:\s*([A-Za-z0-9_ -]+)")
+# The value may sit inside a quote or a backtick, because that is how a template
+# line quotes a literal (`type: "deep-research"`, ``type: `deep-research` ``). The
+# value class cannot itself contain a quote, so without this optional one the
+# whole match dies on the opening character and a quoted retired literal is
+# invisible to the scan — the test passed for the wrong reason on a shape it had
+# not met. Every template line on disk today is unquoted, which is exactly why
+# only the discriminator case below can prove the widening. Verified widening is
+# free: the same scan over every active skill yields no new offenders.
+_INLINE_TYPE_ASSIGNMENT = re.compile(r"(?<![\w_])type:\s*[\"'`]?([A-Za-z0-9_ -]+)[\"'`]?")
 _WRITING_SKILLS = ("deep-research", "medium-research", "quick-research", "ingest")
 
 
@@ -367,6 +375,34 @@ def test_the_inline_type_instruction_check_acts_on_a_retired_literal():
     found = [m.group(1).strip().strip("`\"'")
              for m in _INLINE_TYPE_ASSIGNMENT.finditer(line)]
     assert found == ["deep-research"], found  # the lookbehind drops source_type
+    # A quoted or back-ticked literal must be extracted BY NAME, and this is the
+    # discriminator for the optional quote in the pattern. The failure mode is
+    # subtler than "no match": the value class contains a space, so against
+    # `type: "x"` the narrow pattern's `\s*` backtracks and matches that one space
+    # — the match is not absent, it is `''` after stripping, which the scan then
+    # skips with its own `if value` guard. A retired literal behind a quote is
+    # invisible either way, and `assert len(seen) == 1` would PASS on it. Only
+    # comparing against the literal itself fails on the narrow pattern. Measured,
+    # narrow vs wide: `''` vs `'deep-research'` on `type: "deep-research"`. Not a
+    # hypothetical shape — a template that quotes its literal is one edit away, and
+    # clause 4 covers every line that names the value to write.
+    for quoted, expected in (
+        ('  type: "deep-research"', "deep-research"),
+        ("  type: `medium-research`", "medium-research"),
+        ("  frontmatter says type: 'quick-research' now", "quick-research"),
+    ):
+        seen = [m.group(1).strip().strip("`\"'")
+                for m in _INLINE_TYPE_ASSIGNMENT.finditer(quoted)]
+        assert seen == [expected], (
+            f"quoted literal was not extracted from {quoted!r}: got {seen}, wanted "
+            f"[{expected!r}] — an empty value means the scan skips it unseen")
+        assert expected not in okf_taxonomy.CANONICAL_TYPES
+    # …and a quoted CANONICAL value stays clean, so the widening did not just
+    # turn the scan into something that flags any quoted line.
+    clean = [m.group(1).strip().strip("`\"'")
+             for m in _INLINE_TYPE_ASSIGNMENT.finditer('  type: "research-deep"')]
+    assert clean == ["research-deep"], clean
+    assert clean[0] in okf_taxonomy.CANONICAL_TYPES
     assert "deep-research" not in okf_taxonomy.CANONICAL_TYPES, "the retired literal is retired"
     # …and normalising it WOULD look clean, which is why the line above is the
     # assertion that matters and not a normalize_type() comparison.
@@ -684,8 +720,12 @@ def test_a_lander_cannot_land_a_type_that_is_not_already_canonical(tmp_path):
     invented = note("knowledge/ai/bad.md", "---\ntype: note\ndomain: ai\n---\n# x\n")
     err = vault_round.knowledge_type_error(invented)
     assert err and "note" in err, err
-    assert note("knowledge/ai/good.md", "---\ntype: notes\ndomain: ai\n---\n# x\n") and \
-        vault_round.knowledge_type_error(tmp_path / "knowledge/ai/good.md") is None
+    # Two statements, not `assert create(...) and check(...) is None`: a
+    # file-creating call is a truthy operand, so the substantive check rode on a
+    # term that can never be false. The write is setup; only the check is a claim.
+    note("knowledge/ai/good.md", "---\ntype: notes\ndomain: ai\n---\n# x\n")
+    assert vault_round.knowledge_type_error(tmp_path / "knowledge/ai/good.md") is None, (
+        "a canonical type must land")
 
     alias = note("knowledge/ai/alias.md", "---\ntype: deep-research\n---\n# x\n")
     alias_err = vault_round.knowledge_type_error(alias)
@@ -698,6 +738,50 @@ def test_a_lander_cannot_land_a_type_that_is_not_already_canonical(tmp_path):
     assert vault_round.knowledge_type_error(orphan) is None, (
         "#478's orphan-frontmatter files must stay landable — this item does not "
         "hold a round hostage to a sweep it does not own")
+
+
+def test_the_landers_validate_gate_refuses_a_bad_knowledge_type_end_to_end(tmp_path, monkeypatch):
+    """The wiring, not the helper: `validate()` must reach the vocabulary branch.
+
+    The test above calls `knowledge_type_error` directly, which pins the rule but
+    not the call site. Inside `scripts/automod/vault_round.py::validate` the check
+    hangs off an ``elif p.startswith("knowledge/")`` — a branch no existing test
+    crossed, because every case in `tests/test_automod_vault_round.py` mocks
+    `loader_errors` and none names a `knowledge/` path. So the lander could have
+    shipped a correct helper that nothing called, and the suite would have been
+    green: the exact shape of "a guard whose input nothing wired up", which this
+    item exists to close. This drives `validate` itself, the function
+    `land()`/`automod_vault_land` actually calls, with `VAULT` redirected at a
+    scratch tree.
+
+    `knowledge/` is neither denied nor validated, so the loader subprocess is
+    never reached here — the assertion is about the front-matter/vocabulary
+    branch and nothing else.
+    """
+    from scripts.automod import vault_round
+
+    monkeypatch.setattr(vault_round, "VAULT", tmp_path)
+
+    def write(rel: str, body: str) -> str:
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+        return rel
+
+    bad = write("knowledge/ai/bad.md", "---\ntype: note\ndomain: ai\n---\n# x\n")
+    errors, _buckets = vault_round.validate([bad])
+    assert len(errors) == 1, f"the lander let an invented type through: {errors}"
+    assert "note" in errors[0], f"the refusal must name the value: {errors[0]}"
+    assert errors[0].startswith(f"{bad}: "), f"the error must name the file: {errors[0]}"
+
+    good = write("knowledge/ai/good.md", "---\ntype: notes\ndomain: ai\n---\n# x\n")
+    assert vault_round.validate([good])[0] == [], (
+        f"a canonical type must be landable: {vault_round.validate([good])[0]}")
+
+    aliased = write("knowledge/ai/alias.md", "---\ntype: deep-research\n---\n# x\n")
+    alias_errors = vault_round.validate([aliased])[0]
+    assert len(alias_errors) == 1 and "research-deep" in alias_errors[0], (
+        f"the lander refuses an alias and must name the fix: {alias_errors}")
 
 
 def _make_taxonomy_unimportable(monkeypatch) -> None:
@@ -755,8 +839,18 @@ def test_the_landed_skill_bodies_still_load_through_the_lander_itself():
     (`scripts/automod/vault_round.py`), and every existing test that mentions
     `loader_errors` mocks it — so the suite never proved that seam still ran,
     which is how "it loads" could be claimed without anything pinning it. This
-    calls it for real: a ~20 s subprocess against the vault as landed, and the
-    only thing standing between a skill body that will not load and a commit.
+    calls it for real, against the vault as landed, and it is the only thing
+    standing between a skill body that will not load and a commit.
+
+    Say the weaker thing about what it proves, because the wording of clause 11
+    invites the stronger: `_load_skill` returns a dict for a SKILL.md whose
+    front matter is malformed YAML (verified, not assumed), so "still loads
+    through `_load_skill`" is a **loadability** check — the file resolves and the
+    prompt builds — and NOT a schema check. The malformed-YAML net at land time
+    is `frontmatter_error`, a different function, pinned by this module's
+    lander test above and by `tests/test_automod_vault_round.py`. Cost of the
+    subprocess measured here: 0.6 s for these five paths, not the tens of
+    seconds an earlier version of this docstring claimed.
     """
     from scripts.automod import vault_round
     paths = [f"skills/{slug}/SKILL.md" for slug in _WRITING_SKILLS]
