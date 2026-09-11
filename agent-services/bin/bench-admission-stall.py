@@ -2,7 +2,7 @@
 """Reproduce the 09-09 admission stall on the primary, and count it the way
 production does.
 
-Two shapes, both from 2026-09-10 (architecture/vllm-throughput-mitigation.md):
+Two shapes, both from 2026-09-10 (architecture/vllm.md):
 
   verify  A = a ~120k-token context decoding continuously. B = an agent loop
           re-admitting its own growing prompt: 12 warm iterations (lloyd-be's

@@ -149,27 +149,35 @@ python -m scripts.automod.round land  SM_<id>           # idle-gated, verified
 Or the same steps as MCP tools: `automod_start`, `automod_gate` (returns
 at once; the gate runs detached), `automod_gate_wait` (blocks in slices and
 hands back the per-rung report), `automod_land`, `automod_status` (plus
-`automod_abort`, `automod_amend_clause` and `automod_rollback`). Every
-mutating tool refuses while `automod.enabled` is false, which is the
-default. §4.5b says why the gate is detached.
+`automod_abort`, `automod_amend_clause` and `automod_rollback`; the vault
+route adds `automod_vault_land` and `automod_vault_revert`). Every mutating
+tool refuses while `automod.enabled` is false, which is the default — with
+one deliberate exception, `automod_abort`, because abandoning a round has to
+stay possible after the switch has gone off. §4.5b says why the gate is
+detached.
 
 ### 3.2 Unattended
 
 Two worker sources, off by default, chained so that implementation can never
 start from an unverified premise:
 
-- **`autotriage`** triages one open item per run, oldest first, and
-  records a verdict with evidence. `stale` and `already_done` close the item;
+- **`autotriage`** records a verdict with evidence. It takes a *cluster* from
+  `clusters.json` before it takes a single item (§3.2c); failing that, one
+  open item per run, oldest first. `stale` and `already_done` close the item;
   `confirmed` records an acceptance check and stops. It never opens a round.
-  Items this loop filed itself are held out of its candidate pool while they
-  are fresh — see "The pass may not eat what it files" below.
-- **`autocode`** takes the oldest still-open `confirmed` item that
-  has an acceptance check, and runs one round on it through the normal gate.
-  It refuses while the loop is anything but free — disabled, halted, BROKEN,
-  a promotion under observation, a rollback pending, a round open — and checks
-  that twice, once before queueing and again before spending the turn. **One
-  attempt per item.** The attempt is recorded before the turn starts, so a
-  crash cannot put the item back on the pile; a second try is a human's call.
+  Items this loop filed itself are held out of the single-item candidate pool
+  — see "The pass may not eat what it files" below.
+- **`autocode`** takes a still-open `confirmed` item that has an acceptance
+  check and runs one round on it through the normal gate. Not simply the
+  oldest: `select_confirmed` orders nearest-to-landing first, then fresh
+  confirmations, then other re-offers (§4.5). It refuses while the loop is
+  anything but free — disabled, halted, BROKEN, a promotion under observation,
+  a rollback pending, a round open — and checks that twice, once before
+  queueing and again before spending the turn. **One attempt per item**, where
+  an attempt means a round that reached a verdict on the change; §4.2c is what
+  a round has to do to spend one. The attempt is recorded before the turn
+  starts, so a crash cannot put the item back on the pile; a second try is a
+  human's call.
 
 Both run **in a real session through `POST /api/message/stream`**, not through
 `run_query` directly. That is the only turn path that attaches the Inner Voice
@@ -193,6 +201,13 @@ alone, each now pinned by a test:
 | iteration budget | 30 | 45, 65, 76 on the three hand-driven triages | 90, per-request via `max_turns`, ceiling 120 |
 | item body | 6,000 chars | next item 12,279; largest 21,300 | 30,000, cut from the end |
 | observer | none | — | attached, transcript kept |
+
+The ceiling is enforced at the endpoint, not by the source, and it binds:
+`messages._clamp_max_turns` clamps whatever a worker asks for to
+`agent.max_turns_ceiling` (120). Triage asks for 90 and gets it; `autocode`
+asks for 150 — the value `workers.sources.autocode.max_turns` carries, and
+the one its own `DEFAULT_MAX_TURNS` argues for — and is served 120. Raising
+one without the other moves nothing.
 
 **Running out of budget is not a conclusion.** The loop stops cleanly at
 `max_turns` with whatever text it has, which for a triage means no verdict
@@ -390,6 +405,23 @@ and the loop rewrites only statuses it has a ledger opinion about. The one
 exception is an untriaged item parked in `up_next` — nothing can pull it from
 there, so it goes back to `draft`, where triage looks.
 
+**A status outside that vocabulary is invisible to the loop and open on the
+board**, and the pass above is structurally unable to fix it: `set_status` and
+`reconcile_statuses` both reach items through `open_items`, which filters *on
+status*. So the one defect this state machine cannot see is a status that is
+wrong in exactly this way — the dashboard counts it as open work while
+`OPEN_STATUSES` cannot see it at all. #287 (`review`) and #304 (`closed`) sat
+there from April 2026 until 2026-09-09, stranded when the vocabulary was
+narrowed to four words and nothing migrated what was already on disk.
+`app/backlog_status.py` is the one definition, and `rescue_off_vocabulary`
+runs at the *top* of every reconcile — walking by **board** rather than by
+status, and before the main pass, so a rescued item gets a real verdict in
+that same pass instead of waiting for the next one. The mapping is
+deliberately lopsided: only words already known to be terminal (`closed`,
+`cancelled`, `wontfix`) reach `done`, everything else becomes `draft`. Calling
+a word terminal when it is not buries a live item where nothing will look
+again; calling it live when it is not costs one triage run that closes it.
+
 ### 3.2b The item is closed when the round says so, once the landing settles
 
 The loop wrote three records about a landing — the promotion, the guardian's
@@ -440,7 +472,9 @@ one; 84 parent items had 282 children linked only in prose, and a
 re-offered round re-derived and re-filed the same findings (#549 ran four
 times in 110 minutes and filed ten children, three of them one finding).
 Both closers were one item wide and both producers were unbounded. Six
-mechanisms, landed 2026-09-11 (eb224d5), and none of them deletes anything.
+mechanisms, landed 2026-09-11 across three commits — `03e98d8` the inflow
+cuts, `30be051` the nightly clustering pass, `eb224d5` group triage and
+umbrellas — and none of them deletes anything.
 
 **Inflow is cut at the source.**
 
@@ -693,14 +727,32 @@ Three rails keep the verdict honest without trusting the model:
 - **`parse_review` downgrades `met` to `partial`** when `evidence_path` is not
   in the worktree, `test_node_id` is not in a test file the diff changed, or
   `how_verified` is `inferred`. A clause the grader did not mention is
-  `partial`. A lazy grader cannot pass a round.
+  `partial`. A lazy grader cannot pass a round. The path is *normalised*
+  before it is judged (`normalize_evidence_path`): the schema asks for a bare
+  worktree-relative file and graders write `app/x.py:164`,
+  `scripts/a.py:224,253`, `autonomy.py::_pin`, `~/obsidian/…`, or an absolute
+  path into the review snapshot that has since been removed — every one of the
+  first four backfill rows had a `met` downgraded for a path that was real. A
+  line suffix, a trailing symbol or anchor, and a dead absolute prefix whose
+  tail resolves in the worktree are all accepted; anything left is a genuine
+  miss, and the downgrade reason records what the grader actually wrote, so a
+  rail that fires wrongly is visible rather than silent.
 - **Deterministic honesty checks run first**, as a delta against the base
   version of each changed test file: `or True`, `assert True`, a new skip or
   xfail, and — when the item has clauses and code changed — no new `def
   test_`. A hit is a finding whatever the grader says.
-- **Unverified seams block.** The three worst defects in #544 were all
-  cross-process (a contextvar lost over a loopback POST, a `Task` subagent,
-  `_meta` over MCP) and the code graph is blind across every one of them.
+- **An unverified seam blocks — if a test could have crossed it.** The three
+  worst defects in #544 were all cross-process (a contextvar lost over a
+  loopback POST, a `Task` subagent, `_meta` over MCP) and the code graph is
+  blind across every one of them. Since 2026-09-11 each seam carries
+  `testable_before_landing`, and only a testable one refuses: #870 met all
+  eight clauses on its second attempt and was refused on two seams the grader
+  raised fresh on the last pass, one of which the grader itself called a
+  post-landing check — a real pool tick in the worker process, which no test
+  in this repo can drive. An untestable seam is recorded on the event
+  (`seams_untestable`) and rides the findings. #544's lesson is about seams a
+  test *could* have crossed. A bare-string seam keeps the old reading, so the
+  calibration cases and the backfill are unchanged.
 
 The rung's four outcomes, and where each goes:
 
@@ -708,7 +760,7 @@ The rung's four outcomes, and where each goes:
 |---|---|---|
 | every clause `met`, no findings | pass | ladder continues |
 | premise sound; a clause unmet/partial, a `blocking` honesty finding, a seam a test could cross before landing (advisory honesty entries and post-landing seams ride the findings without refusing — #866 and #870, the evening the rung first ran) | fail, `review_retry` + `review_findings` on the gate event | the round fixes what it names, commits, and gates again; the second graded refusal of a *distinct commit* says *abort and report*; a third is refused without asking the model. Re-gating the same commit is answered from the ledger with the same findings and spends nothing. A turn that ends unlanded hands the item back as `implement_outcomes` → `review_retry` (cap 2), findings in `reoffer_reason`, branch kept — the next round passes it as `automod_start(from_branch=…)` and begins where this one stopped, rebased onto live main |
-| premise sound; a clause `unsatisfiable` as written | fail, `review_retry`, the findings name `automod_amend_clause`; **spends no attempt** | a refusal of the contract, not the diff: the author amends exactly that clause (refused for any other), gates again, and the next review sees the amendment as an `<amendments>` block and ratifies it or refuses it and restores the old text (§4.5c). `REVIEW_HARD_CAP` graded reviews per round is the ceiling that keeps the free move from looping |
+| premise sound; a clause `unsatisfiable` as written | fail, `review_retry`, the findings name `automod_amend_clause`; **spends no attempt** | a refusal of the contract, not the diff: the author amends exactly that clause (refused for any other), gates again, and the next review sees the amendment as an `<amendments>` block and ratifies it or refuses it and restores the old text (§4.5c). `REVIEW_HARD_CAP` — 5 graded reviews per round, passes included — is the ceiling that keeps the free move from looping |
 | premise unsound | fail, `review_premise_unsound` | the existing `spent` path: `draft` + `needs-human`, tag `review-premise`, the grader's summary on the item |
 | grader unreachable, 503, timeout, unusable object | fail, `external_blocker` | the engine, not the diff; the item keeps its attempt. Never a SKIPPED pass — a waived review is the #544 shape |
 
@@ -726,8 +778,23 @@ consecutive reviews of an item *on two different commits*
 (`review_disagreement`), the item is `spent` at once, tagged
 `review-disagreement`, and announced through the guardian's fan-out. A
 third round would re-run the same argument; a human resolves it.
-`select_confirmed` also orders fresh confirmations before re-offers, so a
-sent-back item cannot monopolise the loop for as long as its cap allows.
+
+A clause Python **downgraded** does not count toward that disagreement. A
+`met` the grader wrote and the evidence rails demoted is not the grader
+disagreeing with the author, it is the grader agreeing without receipts:
+#860's clause 8 ("the suite exits 0") was downgraded on both reviews, once
+for the test node and once for the path, and would have parked the item as a
+disagreement nobody had.
+
+`select_confirmed` orders the pool so this cannot monopolise it, in three
+keys. **Nearest to landing first**: a re-offer whose last graded review met
+every clause has one small task left — a test across a seam, an amendment to
+ratify — and lands in one gate, while a fresh item costs an hour and two
+review attempts. On 2026-09-11 five such re-offers sat behind fresh umbrellas
+that each took the hour and aborted. Then fresh confirmations, then other
+re-offers, then oldest first: oldest-first alone let a sent-back item be
+re-picked on the very next round for as long as its cap allowed, while the
+rest of the pool waited.
 
 Vault rounds have no worktree and no ladder — the edit is live the moment it
 is saved — so the same reader runs inside `vault_round.land`, between
@@ -736,6 +803,13 @@ by the aggregator; `None` in tests and from the CLI records `review:
 skipped`). The first refusal leaves the edit in place for the model to fix;
 the second, or an unsound premise, reverts it — so the nightly vault sweep
 cannot land unreviewed text under someone else's commit.
+
+It grades only a **`vault`-surface** item's clauses, and skips with a note
+otherwise. #551 was a `code` item whose round landed a skill and a task file
+first; grading the whole contract against that half refused it for the code it
+had not written yet — and would have, every time. A `code` or `mixed` item's
+clauses belong to the code gate; the vault half is still validated through the
+real loaders either way.
 
 **Calibrating the grader.** A rung that blocks from day one has to be
 checked against diffs whose verdict is already known.
@@ -826,6 +900,16 @@ The day also showed three dead ends the loop could only escalate:
   a loop that rewrote its own acceptance unchecked could declare anything
   met. An `unsatisfiable` clause on two distinct heads without an amendment
   still escalates through `review_disagreement`.
+
+  **A check that can only run after the change lands is `unsatisfiable`
+  before it, never `partial`** — a day of traffic, a nightly run, a number
+  only production produces, a script over live data. No diff can carry that
+  evidence, so grading it `partial` refuses a round for the one thing it
+  could not have done: #859 was refused twice on exactly this shape and
+  parked, with the mechanism complete on both commits. The reviewer names
+  what the pre-landing clause would be — the mechanism plus the test that
+  pins it — and the post-landing check becomes a person's (`human_clauses`)
+  or a deferral the author names.
 - **A clause only a person can satisfy.** Clause 5 asked for ten
   human-audited items; the round could not produce them and the reviewer
   correctly refused to accept an agent-authored audit as one. Triage now
@@ -1105,14 +1189,23 @@ that reconcile is a no-op by construction.
    `snapshot_current_prompts` mkdirs unconditionally, never verifies the copy,
    and promotes anyway — which is why 26 of 83 historical promotions have no
    rollback point.
-2. Idle-gate on `/health.turns` — three consecutive quiet polls, resetting on
-   any activity — then set a **TTL'd drain flag** so a turn arriving between
-   the last poll and the restart gets a 503 instead of being cancelled
-   mid-flight. The TTL is mandatory: a promoter that dies here cannot wedge
-   the endpoint, and the flag is in-memory so the restart clears it anyway.
-   "Idle" counts `harness_runs` as well as the session queues — worker jobs
-   call `run_query` directly and never enter a queue, so a ten-minute research
-   job was invisible to the gate that exists to avoid killing it.
+2. **Pause the worker pool, arm the drain, then** idle-gate on `/health.turns`
+   — three consecutive quiet polls, resetting on any activity. The order is
+   the fix described in §3.2: the **TTL'd drain flag** goes up *before* the
+   first poll, not after the last, so a turn arriving between the last poll
+   and the restart gets a 503 instead of being cancelled mid-flight and
+   nothing new starts while the count is being taken. It is re-armed every 60s
+   because its 180s TTL is shorter than the wait, and released on give-up. The
+   TTL is mandatory: a promoter that dies here cannot wedge the endpoint, and
+   the flag is in-memory so the restart clears it anyway. The pool is *paused*
+   rather than merely drained, because the drain makes a dispatched worker job
+   **fail** — each refusal counts an attempt, and three attempts poison the
+   job — whereas a paused pool starts nothing and lets what is in flight
+   finish. Only a pause this promoter set is released; a pause a human set is
+   never touched. "Idle" counts `harness_runs` as well as the session queues —
+   worker jobs call `run_query` directly and never enter a queue, so a
+   ten-minute research job was invisible to the gate that exists to avoid
+   killing it.
 3. `git merge --ff-only`, swap the venv if one was built.
 4. **Apply changed service definitions**, then restart MCP then backend, and
    **verify `/health.commit` and `boot_id` both changed** — the only proof the
@@ -1229,7 +1322,7 @@ purpose — the watchdog then alerted about the outage it had itself created,
 every 15 minutes for as long as the quarantine lasted. `STOPPED` while
 promotions are halted is excused; `EXITED` never is.
 
-### 7.3 Three invariants
+### 7.3 Four invariants
 
 1. **`HEAD == last-known-good` ⇒ never roll back.** Everything on fire with
    nothing promoted is infrastructure, not a bad change.
@@ -1552,7 +1645,9 @@ than the one this prevents.
   under `web/` the build inputs — `package.json`, the lockfile,
   `node_modules`, `dist`, `vite.config.*`, `tsconfig*.json` — because the
   frontend rung builds the candidate against the live tree's install, which
-  is only the candidate's dependency set if a round cannot change it.
+  is only the candidate's dependency set if a round cannot change it. Also
+  `.git/**` and `.venvs/**`: the object store and the interpreter a rollback
+  has to still work with afterwards.
 - **protected** — the gate itself, the guardian, the supervisor confs, and the
   health/restart path the rollback depends on. Allowed, but only with a
   passing drill.
@@ -1583,6 +1678,13 @@ not do: gitignored but still inside the tree.
 | `denied.json` | guardian | anti-ping-pong |
 | `broken/<ts>/` | guardian | preserved evidence |
 | `BROKEN` | guardian | terminal state; services left stopped |
+| `rounds/<id>/` | round, gate | `run_spec.yaml`, `gate.json`, the `gate.running` marker (§4.5b), and the detached `gate.log` / `land.log` |
+| `clusters.json` | `backlog-cluster` | last night's clustering (§3.2c); `autotriage`'s group mode reads it, and its mtime is what "nightly" means |
+| `cluster_judgments.jsonl` | cluster pass | the pair-judge's verdicts, cached by body hash so a re-run costs no LLM calls |
+| `dedupe.jsonl` | `backlog_write_task` | every write-time merge decision, for tuning the threshold from data rather than from the three points measured when it landed |
+| `review_backfill.jsonl` | `review_tools backfill` | the grader's verdict beside the author's. **Its own file on purpose**: a backfilled verdict measures the grader, and `implement_outcomes` must never read it as a verdict on the round |
+| `scorecard.jsonl` | `round scorecard --record` | the trend, so a row survives the terminal it was printed in |
+| `eval-noise.json` | regression worker | the measured noise floor (§8.1) |
 
 The ledger deliberately does **not** reuse
 `scripts.autoresearch.common.ledger_append`, whose contract is "best-effort,
@@ -1601,6 +1703,8 @@ python -m scripts.automod.round bless               # record HEAD as last-known-
 python -m scripts.automod.round recover             # clear BROKEN/halted, start the stack
 python -m scripts.automod.round restart --reason "…"  # pause, drain, restart mcp+backend under the lease
 python -m scripts.automod.round scorecard --since 7d  # is the loop earning its keep? (--record appends)
+python -m scripts.automod.round cluster --write      # regroup the open board by hand (§3.2c; flags pass through)
+python -m scripts.automod.review_tools calibrate    # the review grader against known verdicts (§4.5)
 python -m scripts.automod.rehearse --yes-i-mean-it  # prove rollback still works
 systemctl --user status lloyd-guardian
 /usr/bin/python3 agent-services/guardian/guardian.py --selftest
@@ -1624,14 +1728,16 @@ a unit edited in the repo and never installed is a change that looks landed
 and does nothing.
 
 `scorecard` (`scripts/automod/scorecard.py`) is the loop's report card, read
-off the ledger, the backlog's front matter and a week of `git log` — ten
-metrics, each null rather than 0% when it has no denominator: acceptance hit
+off the ledger, the backlog's front matter and a week of `git log` — eleven
+rows, each null rather than 0% when it has no denominator: acceptance hit
 rate, the audit delta between the author's and the grader's `met` clauses,
 review refusals (and how many were fixed in turn, re-offered, escalated),
-spawn ratio per source, landed rounds a human commit touched within seven
-days, test-honesty findings, bookkeeping defects (nameless deferrals,
-stranded landings, bare aborts), the regex-fallback rate, throughput, and
-rollbacks. The dashboard's `automod` section shows the 7-day row; `--record`
+spawn ratio per source (with merges, appended findings, expiries and the
+open self-spawned count against its bound), landed rounds a human commit
+touched within seven days, test-honesty findings, bookkeeping defects
+(nameless deferrals, stranded landings, bare aborts), the regex-fallback
+rate, throughput, rollbacks, and grouping — clusters formed, duplicates
+closed, folds, umbrellas landed and the members each one closed (§3.2c). The dashboard's `automod` section shows the 7-day row; `--record`
 appends it to `scorecard.jsonl` in the state dir so the trend survives. Its
 baseline, from the loop's first 4.3 days: 32% acceptance met, 7 items closed
 against 148 filed (triage 4.1:1), 41% regex fallback, 3 rollbacks, all three

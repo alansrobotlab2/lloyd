@@ -2,18 +2,19 @@
 relations:
   related-to:
   - architecture/memory.md
-  - architecture/autonomy-system.md
+  - architecture/autonomy.md
 segment: architecture
 summary: 'Knowledge graph: markdown fact files as the fact layer, one SQLite store
   (app.kg_store) for edges, aliases, the entity registry and the fact index, the
-  extraction chain that writes them, and the rules that came out of the 2026-08-22
-  wipe and the 2026-09-03 merge incident.'
+  extraction chain that writes them, the declared-identity gate in front of it,
+  and the rules that came out of the 2026-08-22 wipe and the 2026-09-03 merge
+  incident.'
 tags:
 - architecture
 - knowledge
 - memory
 type: reference
-updated: 2026-09-04
+updated: 2026-09-11
 ---
 
 # Knowledge Graph
@@ -36,15 +37,21 @@ in Obsidian. Everything structural lives in one SQLite file.
 
 ```
 _pipeline/vault-derived/
-├── facts/<Entity>/<Entity>-<category>.md   # THE FACT LAYER (61,394 files)
+├── facts/<Entity>/<Entity>-<category>.md   # THE FACT LAYER (68,834 files)
 │                                            # YAML frontmatter + generated body
-└── kg.sqlite                                # THE STORE (76 MB, WAL)
+└── kg.sqlite                                # THE STORE (157 MB, WAL)
     ├── entities   name, kind, definition, source_hash, timestamps
     ├── aliases    surface -> canonical, with kind and origin
     ├── edges      typed, with provenance, evidence, supersede chain
-    ├── facts_idx  derived from the markdown; `kg reindex` rebuilds it
-    └── meta       schema_version, last_reindex
+    ├── facts_idx  derived from the markdown; `facts_idx.reindex()` rebuilds it
+    └── meta       schema_version, last_reindex, migrated_at
 ```
+
+There is no `kg` command. The index is rebuilt by calling
+`store().facts_idx.reindex(root=…)` — what `kg_rebuild.py`, `repair_fact_ids.py`,
+`entity-resolution-sweep.py` and `kg_migrate_to_sqlite.py` each do at the end of
+a pass. Two comments in `agent_mcp/facts.py` still tell a reader to run
+`kg reindex`; they mean that call.
 
 Derived and rebuildable at any time: `facts_idx`, `_pipeline/relations-index.json`
 (document co-occurrence), `_pipeline/content-hashes.json`, entity overview files,
@@ -54,33 +61,40 @@ Not derivable, and therefore backed up: the edge graph, the alias table, merge
 history and hand-review state. Fact *content* can be re-extracted from the vault;
 the fact that two entities are related, and who decided so, cannot.
 
-### Scale (2026-09-08)
+### Scale (2026-09-11)
 
-| Metric | Count | 2026-09-04 |
-|---|---|---|
-| Entity directories | 23,812 | 23,571 |
-| Fact files | 62,410 | 61,394 |
-| Indexed facts | 222,532 across 23,816 registered entities | 205,573 / 23,567 |
-| Edges | 18,753 total, 14,049 active | 6,703 / 4,029 |
-| Nodes with ≥1 edge | 6,564 — 28% coverage | 3,304 — 14% |
-| Aliases | 3,874 (2,541 case, 1,271 punct, 61 suffix, 1 semantic) | unchanged |
-| Entity kinds | 16,678 system, 4,171 entity, 951 concept, 703 skill, 631 doc, 425 task, 256 unclassified, 1 person | |
-| Fact files with duplicate IDs | 0 | 15,825 |
-| Provenance coverage | 7.9% (17,687) | 0.37% (755) |
+| Metric | Count | 2026-09-08 | 2026-09-04 |
+|---|---|---|---|
+| Entity directories | 25,155 | 23,812 | 23,571 |
+| Fact files | 68,834 | 62,410 | 61,394 |
+| Indexed facts | 284,146 across 25,159 registered entities | 222,532 / 23,816 | 205,573 / 23,567 |
+| Edges | 59,061 total, 46,114 active | 18,753 / 14,049 | 6,703 / 4,029 |
+| Nodes with ≥1 edge | 12,825 — 51% coverage | 6,564 — 28% | 3,304 — 14% |
+| Aliases | 3,919 (2,541 case, 1,268 punct, 61 suffix, 49 semantic) | 3,874 (… 1 semantic) | unchanged |
+| Entity kinds | 16,732 system, 4,204 entity, 1,245 unclassified, 1,057 concept, 709 skill, 659 doc, 448 task, 59 person, 18 project, 17 subsystem, 14 pipeline, 1 model | 16,678 / 4,171 / 951 / 703 / 631 / 425 / 256 / 1 | |
+| Fact files with duplicate IDs | 0 | 0 | 15,825 |
+| Provenance coverage | 27.9% (79,293) | 7.9% (17,687) | 0.37% (755) |
 
-The 09-04 column is not history for its own sake: everything between the two
-was **one day of the pipeline running again**. #24 had been paused since
+Read the columns as a rate, not a snapshot: the pipeline runs 6x/day and these
+numbers move between two queries in the same session.
+
+The 09-04 column is not history for its own sake: everything between it and
+09-08 was **one day of the pipeline running again**. #24 had been paused since
 2026-09-04 by a `kg_rebuild.py freeze` whose rebuild never passed its gate, and
 nothing un-paused it, so the graph simply stopped growing and the only record
 of that was a `status:` line in a vault file. Edges nearly tripled and node
 coverage doubled on the first day back. Treat a flat edge count as an outage
-signal, not a quiet week.
+signal, not a quiet week. The three days to 09-11 are what that looks like
+sustained: edges tripled again and node coverage passed half the registry.
 
 Provenance is still the outstanding one, and it only improves going forward —
 the 0.37% floor was every fact written before the extractor started recording
-`created_at` and `source_doc`, and those cannot be dated now. Duplicate fact
-IDs used to sit beside it here; they were repaired in place on 2026-09-08, see
-*The rebuild*.
+`created_at` and `source_doc`, and those cannot be dated now. What the column
+measures is therefore dilution, not repair: 27.9% is the old undated majority
+being outgrown by facts written since. Duplicate fact IDs used to sit beside it
+here; they were repaired in place on 2026-09-08 and the tree has held at zero
+since, see *The rebuild*. The semantic-alias jump from 1 to 49 is the one row
+that is not growth — see *The declared-identity gate*.
 
 ---
 
@@ -108,7 +122,7 @@ What the store changes:
 | Two processes cannot lose a write | WAL + `busy_timeout=30000`; tested with two concurrent writer processes and a `kill -9` mid-write |
 | An unreadable store is not an empty one | `StoreUnavailable` is raised, never the empty schema. Writers abort; ranking-only readers degrade |
 | Nothing is silently overwritten | A merge *expires* each edge and re-adds it, returning `(old_id, new_id)` so a revert is exact. `retype` sets `superseded_edge_id` |
-| Every row says where it came from | `edges.origin` ∈ extractor, sweep, classifier, conversation, fact_relate, seed, migration; `aliases.origin` and `aliases.kind` likewise |
+| Every row says where it came from | `kg_store.ORIGINS` — extractor, sweep, semantic, fact_add, fact_relate, seed, classifier, conversation, revert, migration, manual, legacy — are the *known* writers, not a constraint: the column is free-form, and `schema` (the identity gate) is a real origin that predates nothing in that tuple. `aliases.origin` and `aliases.kind` likewise |
 | Caches cannot go stale | Adjacency, degree and the alias map memoise on `PRAGMA data_version`, which moves when *any* process commits |
 | A backup is a valid database | `sqlite3.Connection.backup()`, not `cp` — a plain copy of a WAL file taken mid-commit is not restorable |
 
@@ -148,6 +162,9 @@ vault documents                    pipeline_config.yaml sources.paths
 nightly_extraction.py  (#24, 6x/day)
         │  content-hash gate; a FAILED extraction is not hashed, so it retries
         ▼
+entity_naming.gate_entity_name          THE DECLARED-IDENTITY GATE (#537)
+        │  schema / alias / typed_new / candidate / junk — see below
+        ▼
 fact_extractor.write_fact_file
         │  atomic_write_text inside locked_file(<file>.lock)
         ├──▶ <Entity>/<Entity>-<category>.md      the fact layer
@@ -166,29 +183,85 @@ entity-resolution-sweep.py  (#48, daily, DRY RUN ONLY)
    a human reads the plan and runs --apply
 ```
 
-Two other writers:
+Three other writers:
 
 - **`fact_relate` / `fact_add`** (MCP tools) — a fact or edge stated in a chat
-  turn. `provenance: STATED`, `origin: fact_relate`.
+  turn. `provenance: STATED`, `origin: fact_relate`. Since 2026-09-09 the
+  `remember` and `forget` verbs land here too: they are routers onto `fact_add`
+  and `fact_invalidate`, not new write paths, so nothing in this chain changed
+  shape. See `architecture/memory.md`.
 - **`conversation_relations.py`** (#51) — co-access pairs from session
   trajectories become `co_accessed` edges, `provenance: INFERRED`, with the
-  trajectory as `source_doc`.
+  trajectory as `source_doc`. It has produced **2 edges**, both on 2026-09-10.
+  That is the honest number for a path that was writing nothing at all until
+  2026-09-04, and it is worth re-reading before anyone budgets work against it.
+- **`entity_naming.register_schema_keys`** — writes the declared aliases, and
+  is the only producer of `origin: schema` rows.
+
+Measured by origin on 2026-09-11, active edges: extractor 35,188, classifier
+8,221, migration 3,096, `fact_relate` 7, conversation 2. The extractor is the
+graph, and the classifier is what makes it typed; everything else is rounding.
 
 `seed_relationship_edges.py` still exists but is a **backfill tool for trees
 extracted before the extractor emitted edges**, not part of the nightly chain.
 
-**The index is not optional.** The markdown is what a person reads; `facts_idx`
-is what the router, `fact_profile`, the Memory page and the health report
-actually read. Every writer of a fact file updates it in the same breath —
+### The declared-identity gate
+
+Added 2026-09-09 (#537). Every name the extractor wants to file under now
+passes `app/entity_naming.py::gate_entity_name` first, which returns
+`(entity, verdict)` and answers in a fixed order:
+
+| verdict | what happens |
+|---|---|
+| `schema` | the name is a declared key or declared alias → the canonical |
+| `alias` | the store already routes it → the canonical |
+| `typed_new` | unclaimed, but the model declared a type → a new typed entity |
+| `candidate` | unclaimed and untyped → the sidecar, **nothing created** |
+| `register` | unclaimed and untyped, `enforce=False` → the pre-#537 behaviour |
+| `junk` | the existing junk predicate rejects it |
+
+**The order is the design.** The declaration is asked *before* the store, so a
+human saying two names are one thing outranks whatever a previous extraction
+inferred. Nothing in the chain resembles a string metric — the gate exists
+because minting on every alias miss produced sibling families (`Knowledge
+Graph` plus five variants with one edge among them; `Autonomy Data Pipeline`
+plus three), and a similarity rule is what would fuse the pairs that are
+genuinely distinct. `tests/test_entity_identity_schema.py` pins that it never
+consults one.
+
+`scripts/memory/entity_identity_schema.json` is the declaration: human-edited,
+extractor-read-only, and validated on load — a type outside
+`app.entity_kind.KINDS` (plus `pipeline`/`subsystem`, the two spellings
+`entities.kind` already carries) is refused, as is one surface declared an
+alias of two canonicals, because the answer would then depend on file order.
+Declared aliases are written `kind='semantic'`, `origin='schema'`, which is the
+whole of the scale table's 1 → 49 semantic-alias jump; `register_schema_keys`
+is idempotent, so the nightly run installs them without churning `created_at`.
+
+**A refusal is recorded, not swallowed.** `candidate` appends to
+`_pipeline/vault-derived/entity-candidates.jsonl` — 15 names so far — for
+weekly human review. Refusing to mint is easy and quietly stops remembering
+things; the sidecar is the pressure valve that keeps the gate honest.
+
+**Reads opt out, writes cannot.** `enforce=False` is passed only where a name
+is being resolved to pull an entity's existing facts into the prompt
+(`get_existing_facts`); refusing there would withhold context and degrade
+extraction rather than protect the graph. Writes leave it at the default,
+because a gate you have to remember to enable is a gate that gets forgotten.
+
+### The index is not optional
+
+The markdown is what a person reads; `facts_idx` is what the router,
+`fact_profile`, the Memory page and the health report actually read. Every
+writer of a fact file updates it in the same breath —
 `fact_add` through `facts_idx.update_file`, `fact_resolve` and
 `fact_invalidate` through `facts.py:_reindex_files()`, in the same call, as
 soon as the markdown write returns. `fact_invalidate` did neither until
 2026-09-04 — it wrote `expired_at` to the file and stopped, and it was missing
 the `locked_file` the other two had — so the file said expired while the Memory
 page went on serving the fact as current, and the two disagreed until the next
-full reindex. A `StoreUnavailable` here is not
-fatal — the markdown is written and `kg reindex` rebuilds the index — but a
-silent skip is.
+full reindex. A `StoreUnavailable` here is not fatal — the markdown is written
+and `facts_idx.reindex()` rebuilds the index — but a silent skip is.
 
 ---
 
@@ -212,6 +285,12 @@ silent skip is.
 things. `fact_invalidate` expires; `fact_resolve --auto_resolve` invalidates.
 Retrieval filters both by default; `as_of` reconstructs a past state.
 
+`valid_at` is filled from the model's `event_date` when the fact dates itself,
+and `created_at` stays the extraction time either way — the two answer "when
+was this true" and "when did we learn it", and a fact about last April written
+this morning needs both. The file's own frontmatter carries `entity`,
+`category`, `last_extracted` and `last_updated` around the `facts:` list.
+
 ---
 
 ## Retrieval
@@ -234,9 +313,10 @@ not have detected a regression in the real one.
 **God-node handling.** An entity above `FACT_GODNODE_THRESHOLD` (50) facts
 needs a query-token match before any of its facts are returned; graph expansion
 divides each neighbour's weight by `log(degree + e)`; `fact_profile` caps each
-category at 10. `Lloyd` has 5,489 facts — without these it answers every
-question. The same threshold refuses the pairwise contradiction scan behind
-`fact_check` and `fact_resolve`; see *Tools*.
+category at 10. `Lloyd` had 5,489 facts when this was written and has 6,642 on
+2026-09-11 — without these it answers every question. The same threshold
+refuses the pairwise contradiction scan behind `fact_check` and `fact_resolve`;
+see *Tools*.
 
 ---
 
@@ -258,6 +338,14 @@ question. The same threshold refuses the pairwise contradiction scan behind
 6. **The corpus is an allow-list.** A deny-list means every new directory is
    ingested by default, which is how half the fact tree became re-extracted
    pipeline exhaust.
+7. **A gate with no input fails loudly.** `IdentitySchemaUnavailable` is raised
+   when the declared-identity schema is missing or unparseable, rather than
+   read as "nothing is declared" — a gate whose input is absent reports success
+   on every name that passes through it, which is rule 1 one level up. Its own
+   docstring names the three times this repo has been bitten by that shape:
+   `graph-baseline.json` rewriting itself, `_is_dependency_met` returning True
+   for an unfindable upstream, and dream-consolidation gated on a lock file
+   that never existed.
 
 ---
 
@@ -425,7 +513,10 @@ Also outstanding, and unrelated to the rebuild: 977 junk-named entity
 directories (`_pipeline/memory-graph/junk-entities-review.json`) holding 6,898
 facts in the live tree. The extractor rejects these names before registration
 now, so the set cannot grow; removing the existing ones moves fact files and
-drops edges, which is a merge-class operation and goes through review.
+drops edges, which is a merge-class operation and goes through review. Still
+exactly 977 when re-measured on 2026-09-11 against the same predicate the gate
+uses (`looks_like_junk_entity`), across 25,155 directories — the containment
+holds, and the count is a stock, not a leak.
 
 ---
 
@@ -435,6 +526,14 @@ drops edges, which is a merge-class operation and goes through review.
 `fact_invalidate`, `fact_relate`, `fact_relationships`, `fact_path`,
 `fact_neighbors` (`agent_mcp/facts.py`), and `vault_recall`
 (`agent_mcp/vault.py`).
+
+Since 2026-09-09 four verbs sit over them — `remember`, `recall`, `forget`,
+`improve` (`agent_mcp/memory_ops.py`). They are routers, not replacements:
+each adds the one guard its underlying tool lacks, all ten tools above stay
+callable with their own parameters, and nothing about the store or the write
+chain changed. `architecture/memory.md` is that surface's doc, including the
+`improve` loop (#84, nightly, plan mode) and why its detector is evidence
+rather than a verdict.
 
 Three of those address a fact by `<file, id>` -- `fact_resolve`,
 `fact_invalidate` and every revert report -- so the ID has to name exactly one

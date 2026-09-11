@@ -120,6 +120,18 @@ chat path uses (`user_prompt_received`, `query_started`,
 `thinking_block_emitted`, `tool_call_proposed`, `tool_result_received`,
 `result_message`), so the Inner Voice reader's raw event view works on either.
 
+The recorder also writes the **usage row** these two paths never had, and
+folds their prefix-cache misses on the way past. `_RunRecorder` holds a
+`prefix_miss.TurnMissTracker` for the turn, feeds it each
+`assistant_message`, and on `result` calls `usage_store.record_usage` with
+the totals — the same accounting the chat path does, through the same
+module, rather than a second private copy. Before this, `usage.db` and the
+dashboard's token panel had never seen an autonomy task or a
+`run_prompt_on_primary` job at all, so a per-turn miss count would have had
+nowhere to live for two of the three paths that run an agent loop. Like
+every other append here it is wrapped: a failed usage row costs the
+accounting, not the run.
+
 ## 5. One transcript shape
 
 `app/transcript_entries.py` owns the shape of every row a turn writes:
@@ -138,10 +150,17 @@ reconstruct-from-the-log paths never did, and writing `false` there would turn
 empty; the role is what keeps reasoning out of every transcript producer (see
 `architecture/inner-voice.md` and `tests/test_thinking_trace_transcripts.py`).
 
+A tool result is truncated at `TOOL_RESULT_MAX_CHARS` (2000) before it is
+written, with `...(truncated)` appended. The full text went to the model; the
+transcript is the human-facing record, and a 300 kB `Read` result sitting in
+it helps nobody. Worth knowing when reading a run back: the transcript is
+faithful about *which* calls were made and lossy about the long results, so
+an audit that needs the whole of one goes to the tool's own output, not here.
+
 ## 6. One session writer
 
 `sessions_io.create_session(session_id, *, platform, model, title, source,
-inner_voice)` creates every non-chat session. `workers.sources._common.
+inner_voice, preview)` creates every non-chat session. `workers.sources._common.
 new_worker_session` goes through it too; it had its own copy of the shape,
 which already disagreed with the chat path's — `id` where the chat path writes
 `session_id`, and no `last_active`, so a worker session sorted by file mtime
@@ -154,7 +173,9 @@ while every chat sorted by its conversation. Both keys are written now.
 | session-backed worker | `YYYYMMDD_HHMMSS_<source>_<4hex>` | `worker` | the source's `NAME` | set by the caller |
 
 Ids are minted by `new_background_session_id(slug)` in local time, like chat
-ids. The `source` slug is the source name with non-alphanumerics dropped.
+ids. The `source` slug is the source name with every non-alphanumeric
+character dropped — which is what stops a slug smuggling an underscore in and
+making a four-part id parse as five — and then cut to 12 characters.
 
 **Titles are set at creation**, for two reasons that apply to different
 sessions. A direct-path run never goes near the LLM titler — it is fired from
@@ -305,13 +326,30 @@ override with a literal reads as broken the one time somebody uses it.
 | `youtube-digest` | true | evaluates untrusted transcripts and files backlog items from them |
 | `deep-research` | false | a human reads the note before anything acts on it |
 
-The key is set only on those four, because only a turn that runs through the
-chat endpoint can be observed at all. `/api/workers/health` reports it
-tri-state for that reason — `null` means "not set", which for a direct-path
-source means "not observable", and a flat `false` would invite a knob that
-reads as broken. It is UI-mutable through `data/tool_overrides.yaml` like
-`workers.enabled`; the override merge honours that one key per source and
-nothing else.
+Those four are the whole observable set — they are exactly the sources that
+call `run_prompt_in_session`, and only a turn that runs through the chat
+endpoint can be observed at all. A session-backed source that sets no key is
+observed: `source_inner_voice`'s fallback is `True`, because that is what
+these four do today, so opting *out* is the thing config.yaml has to say.
+
+`/api/workers/health` reports the key tri-state for the same reason — `null`
+means "not set", which for a direct-path source means "not observable", and a
+flat `false` would invite a knob that reads as broken. **Until 2026-09-11 the
+key was set only on those four**, which is what made the tri-state honest.
+Then `backlog-cluster` arrived (`30be051`, the nightly clustering source)
+carrying `inner_voice: false` — and that source has no agent turn at all: its
+`execute` is a `build_clusters` call in a thread, a numpy pass plus a few
+JSON calls to the secondary, as its own config comment says. So health now
+renders it `false` where `null` is the honest answer, i.e. as a source
+someone could switch observation on for, which is precisely the misreading
+the tri-state exists to prevent. The value is otherwise inert: nothing on
+that path reads `source_inner_voice`. Nothing caught it because
+`test_the_shipped_config_matches_the_intended_defaults` names the four
+individually and says nothing about a fifth.
+
+It is UI-mutable through `data/tool_overrides.yaml` like `workers.enabled`;
+the override merge honours that one key per source, refuses to introduce a
+source that config.yaml does not already name, and touches nothing else.
 
 ### Autonomy tasks
 
@@ -452,6 +490,9 @@ built.
 ## 13. Known limits
 
 - The eight mis-labelled sandbox sessions (§8) appear in neither listing.
+- `backlog-cluster` carries an `inner_voice` key it cannot use, so
+  `/api/workers/health` reports it `false` rather than `null` — observable-
+  but-off, for a source with no agent turn (§9).
 - The Background tab shows the newest 150 runs out of at most 600 scanned (§11).
 - `workers.db` has no retention; session files do (§8).
 - Session ids are local time; an autonomy `run_id` is UTC. Both are labels,

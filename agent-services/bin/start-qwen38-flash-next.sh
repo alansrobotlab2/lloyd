@@ -498,7 +498,7 @@ FLASHINFER_AUTOTUNE="${FLASHINFER_AUTOTUNE:-0}"
 #   8192  608 ms / 20.2 s    and the prefill references ~2.5x its KV
 #   4096  333 ms / 21.6 s    no overshoot
 #   2048  195 ms / 25.7 s
-# architecture/vllm-throughput-mitigation.md §3.3 has the rest.
+# architecture/vllm.md §3.3 has the rest.
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
 
 # Escape hatch for one-off arms. Word-split deliberately.

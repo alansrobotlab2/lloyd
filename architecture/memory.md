@@ -1,3 +1,11 @@
+---
+segment: architecture
+tags: [architecture, lloyd, memory]
+type: reference
+status: implemented
+date: 2026-09-11
+---
+
 # Memory: the `improve` loop and the four-verb surface
 
 Backlog #376. Written while implementing it, so the numbers below are measured,
@@ -7,8 +15,9 @@ store, that is recorded rather than smoothed over.
 ## 1. What the surface looked like, and what it is now
 
 Before: 19 memory-family tools at three abstraction levels — 10 `fact_*`
-(`agent_mcp/facts.py`), 5 `vault_*`, 4 `memory_*`. Two prior consolidation
-efforts (#174 "17→7", #340 the module split) moved the count **up**.
+(`agent_mcp/facts.py`), 5 `vault_*` (`agent_mcp/vault.py`), 4 `memory_*`
+(`agent_mcp/session.py`). Two prior consolidation efforts (#174 "17→7", #340
+the module split) moved the count **up**.
 
 Now: four verbs in `agent_mcp/memory_ops.py`, and the 19 unchanged underneath.
 
@@ -53,6 +62,29 @@ what ate useful facts. So `REQUIRE_OPPOSING_TERMS = True`: only polarity flips
 pairs are counted in the record as `near_duplicates` and left alone. On a wide
 pass this changed 749 candidate actions into 17.
 
+The `Lloyd` measurement above is now itself history, and worth keeping as the
+reason for the bound rather than deleting as out of date: that 113-second,
+15-million-comparison scan is why `_detect_contradictions_sync` refuses any
+entity holding more than `FACT_GODNODE_THRESHOLD` (50, `agent_mcp/retrieval.py:112`)
+facts at all. So the entity that produced the 32,857 false positives can no
+longer be scanned, and `plan_entity` propagates that as `refused` rather than
+as "nothing found" — the two must never read alike. It bites harder than it
+sounds: in the 09-09 pass restricted to the eval's own expected entities,
+**18 of 30 were refused as god-nodes**, so most of the entities the metric
+depends on are ones this loop is structurally unable to examine. The nightly
+shape is milder (1–5 refused of 40) because drift selects on recent writes,
+not on size.
+
+Two bounds sit under the evidence rules, and they are what the CLI's exit 3
+is checking: `MAX_ACTIONS_PER_ENTITY = 5` and `MAX_ACTIONS_PER_RUN = 25`.
+Expiring twenty facts because a heuristic shrugged is not an improvement, and
+a god-node's contradiction list is long enough to do exactly that. Both
+counters are also deliberately un-fakeable in the other direction:
+`_active_count` returns **-1** when the store cannot answer and
+`_fact_entity_recall` returns **None** when it could not run, so "did not
+measure" can never be recorded as "measured zero" — the same rule
+`knowledge-health-report.py` runs on.
+
 Signal sources, both real, neither invented:
 - **corrections** — entities named in `~/obsidian/memory/corrections.md`, the
   user's own log of things gotten wrong. Consumed before this only by the
@@ -65,7 +97,10 @@ Signal sources, both real, neither invented:
 
 Writers are the existing tools called as functions. Three writers of
 `expired_at` would be the drift bug `fact_profile` and the router already had
-(`agent_mcp/facts.py:71-82`). Every run writes a JSON record under
+— `_reindex_files` (`agent_mcp/facts.py:80-92`), whose docstring is the rule:
+the markdown is the fact layer, `facts_idx` is what the router, `fact_profile`
+and the health report actually read, and a write that skips the reindex leaves
+the two disagreeing. Every run writes a JSON record under
 `_pipeline/improvement/` with before/after active-fact counts and one reason
 string per action.
 
@@ -93,9 +128,12 @@ fact tree and `kg.sqlite` via `LLOYD_FACTS_ROOT`/`LLOYD_KG_DB`; the live store
 was never opened. Production knobs passed explicitly — `run_eval()`'s
 *signature* defaults are the pre-#322 configuration (`graph_rerank=False`,
 `alpha=0.5`) while only the *argparse* defaults come from `agent_mcp.vault`, so
-calling `run_eval(queries)` measures a configuration nothing serves. That trap
-is in `eval/run_eval.py:306-309` and `fact_improvement._fact_entity_recall`
-fell into it on the first version.
+calling `run_eval(queries)` measures a configuration nothing serves. The trap
+is the gap between the signature (`eval/run_eval.py:184-188`) and the argparse
+block (`:428-442`, which imports `RECALL_GRAPH_RERANK` / `RECALL_RERANK_ALPHA`
+from `agent_mcp.vault` and carries the comment recording the 2026-09-03 review
+that found it); `fact_improvement._fact_entity_recall` fell into it on the
+first version.
 
 | pass | facts expired | active facts | `fact_entity_recall` |
 |---|---|---|---|
@@ -115,18 +153,22 @@ fresh copies, and the flat result reproduced.** Baseline `fact_entity_recall`
 policy over 40 correction/drift entities found **0 admissible actions** (136
 detector pairs, 0 of them opposing-terms — every one was the near-duplicate
 class the loop refuses to delete); an unguarded pass expired 24 facts
-(255,812 → 255,788) → **0.375**; a further pass restricted to the 43
-`expect_entities` of the 20 eval queries expired 8 more, including **5 of
-`Task #363`'s 34 facts** → **0.375**. Probe records:
-`_pipeline/improvement/2026090917*-apply.json`.
+(255,812 → 255,788) → **0.375**; a further pass restricted to the **30
+distinct entities** named by the 20 eval queries' 43 `expect_entities` slots
+expired 8 more — 18 of those 30 refused outright as god-nodes — including
+**5 of `Task #363`'s 34 facts** (34 → 29) → **0.375**. Probe records:
+`_pipeline/improvement/20260909-175*-apply.json`.
 
 **The honest result: the loop runs correctly and does not move the metric.**
 #376's acceptance says "a change that cannot move that metric is not this
 feature". Two findings say the criterion is mis-aimed rather than the code dead:
 
-1. **The metric is pool-composition-bound.** `_rank` in `agent_mcp/vault.py`
-   caps the returned fact list at `FACT_RANK_CAP_SEED=10` across *all* seed
-   entities — the per-entity cap applies only to god-nodes. So
+1. **The metric is pool-composition-bound.** `_rank` (`agent_mcp/vault.py:1023`)
+   caps the returned fact list at `FACT_RANK_CAP_SEED=10`
+   (`agent_mcp/retrieval.py:116`; graph-expanded neighbours get their own
+   `FACT_RANK_CAP_GRAPH=5`) across *all* seed entities — the only per-entity
+   guardrail is a query-token filter, and it applies only above
+   `FACT_GODNODE_THRESHOLD=50`. So
    `fact_entity_recall` records which entities won 10 slots, and expiring
    individual facts only changes that when it shifts the score ordering.
    Removing the *lowest-scoring* facts of an entity changes nothing; removing
@@ -136,12 +178,26 @@ feature". Two findings say the criterion is mis-aimed rather than the code dead:
    and it is mostly downward.
 2. **The headroom is capped.** Of 30 unmet expected-entity slots, **8 name
    entities with no fact directory at all** — no fact-side change can reach
-   them; only ingestion can, which #376 explicitly puts out of scope.
+   them; only ingestion can, which #376 explicitly puts out of scope. Re-counted
+   2026-09-11: 9 of the 43 slots, 7 distinct entities (`1X Neo`,
+   `Backlog Item #363`, `Isaac GR00T N1.7`, `Semantic Entity Resolution`,
+   `TGS-RAG Implementation`, `lloyd`, `qmd`). The number moves with ingestion,
+   not with anything this loop does, which is the point.
 
 So the nightly consumer is shipped in **plan mode**: it reads the signals,
 pairs, explains, logs counts, and writes nothing. Applying is an explicit act.
 The apply-mode policy decision, with the numbers above, is filed as its own
 item rather than being taken quietly at 3am by a scheduler.
+
+It is running, and the record says so rather than the schedule saying so: the
+pass of 2026-09-11 21:01 UTC (task #84's 14:00 local window) read 40 signal
+entities, found 133 detector pairs, classed **every one** of them a
+near-duplicate, planned nothing and wrote nothing — the same shape as 09-09's
+136-of-136. The number underneath it moved anyway: 255,812 active facts on
+09-09, **274,167** on 09-11. Ingestion added ~18,000 facts in two days while
+this loop expired none, which is the honest proportion to keep in view — the
+quality of the corpus is set by what writes into it, and an expiry loop
+bounded at 25 actions a run is not the lever that moves it.
 
 Filed out of this round, so the next reader does not re-derive them: **#659**
 (the metric is insensitive to the mechanism — what to measure instead), **#660**

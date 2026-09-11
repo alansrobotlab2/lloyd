@@ -1783,7 +1783,7 @@ and has no other way to know. Pin an alias there to override. Empty
 
 ## Primary throughput: prefix misses, KV pressure, the KV gate
 
-`architecture/vllm-throughput-mitigation.md` is the long version, with the
+`architecture/vllm.md` is the long version, with the
 measurements.
 
 The 09-09 "5 tok/s" chat was cold re-prefills. An agent loop re-submits its

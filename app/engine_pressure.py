@@ -24,7 +24,7 @@ between iterations sits in the free pool, evictable, and does not count. So
 the gauge is resident pressure — how much of the pool is spoken for right
 now — and the free remainder is exactly where a paused turn's prefix has to
 survive until its next iteration. That is the quantity the 09-09 stall
-turned on (`architecture/vllm-throughput-mitigation.md`).
+turned on (`architecture/vllm.md`).
 
 Reads fail open. A stale or missing sample means "unknown", and each reader
 treats unknown as "no pressure": the gate claims, the alert stays quiet, the

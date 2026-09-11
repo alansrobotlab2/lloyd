@@ -40,7 +40,7 @@ What it captures, and why each matters:
 | `~/obsidian/` (whole vault, incl. `.git` and `.obsidian`) | 89 MB | The vault has **no git remote** — local history dies with the disk. Obsidian Sync restores notes but not git history or plugin state. |
 | `~/lloyd/.env` | tiny | Gitignored. LiveKit key/secret. |
 | `~/lloyd/data/tool_overrides.yaml` | tiny | Gitignored UI tool toggles, merged over config.yaml at boot. |
-| `~/lloyd/agent-services/services/tts/qwen3-tts/voice_library/profiles/cullen/` | 2.7 MB | The **`clone:cullen` voice** referenced by `config.yaml` → `livekit.tts.voice`. Untracked and not reproducible. |
+| `~/lloyd/agent-services/services/tts/qwen3-tts/voice_library/profiles/dave_cullen/` | 1.5 MB | The **`clone:dave_cullen` voice** referenced by `config.yaml` → `livekit.tts.voice`. Untracked and not reproducible. |
 | `~/lloyd/agent-services/cert/` | 84 KB | mTLS CA + server cert + minted client bundles. Regenerating the CA invalidates every enrolled device. |
 | `~/lloyd/_pipeline/vault-derived/kg.sqlite` | 76 MB | **The knowledge graph.** Edges, aliases, the entity registry and the fact index. Fact *content* can be re-extracted from the vault over a few GPU-nights; the edges, the merge history and the hand-review state cannot be reproduced at all. Copy it with `sqlite3 kg.sqlite ".backup out.sqlite"` or the daily tarball — a plain `cp` of a WAL database taken mid-write is not restorable. |
 | `~/lloyd/_pipeline/vault-derived/facts/` | 282 MB | The fact layer, 61,392 markdown files. Re-extractable, but that is ~5 GPU-hours. |
@@ -686,6 +686,10 @@ node ABI. Rebuild it with **node-gyp** — `npm rebuild` silently no-ops on npm 
 
 ## Part 8 — Qwen3-TTS
 
+> How the voice pipeline actually uses this engine — the `clone:` protocol,
+> why `1.7B-Base` is the default model, and the two client-side corrections
+> applied to its output — is in `architecture/voice.md`.
+
 `agent-services/services/tts/qwen3-tts/` is a checkout of
 [groxaxo/Qwen3-TTS-Openai-Fastapi](https://github.com/groxaxo/Qwen3-TTS-Openai-Fastapi)
 with **local modifications that are not committed anywhere**. Only three
@@ -706,15 +710,15 @@ git apply ../qwen3-tts-local.patch
 hf download Qwen/Qwen3-TTS-12Hz-1.7B-Base --local-dir models/Qwen3-TTS-12Hz-1.7B-Base
 ```
 
-Then restore `voice_library/profiles/cullen/` from backup — that one is not
+Then restore `voice_library/profiles/dave_cullen/` from backup — that one is not
 reproducible. Re-sync the patch if you change the vendored code:
 
 ```bash
 git -C qwen3-tts diff > qwen3-tts-local.patch
 ```
 
-`config.yaml` sets `livekit.tts.voice: clone:cullen`, which resolves against
-`voice_library/profiles/cullen/`. Without it, TTS starts but every synthesis
+`config.yaml` sets `livekit.tts.voice: clone:dave_cullen`, which resolves against
+`voice_library/profiles/dave_cullen/`. Without it, TTS starts but every synthesis
 request for that voice fails.
 
 **Falling back to a built-in voice — check `/v1/voices`, not the source.**
@@ -811,6 +815,10 @@ family, Gemma 4) are optional — download only what you'll run. They share the
 ---
 
 ## Part 10 — LiveKit
+
+> `architecture/voice.md` is the authority on the voice pipeline as a whole:
+> rooms as sessions, the two URLs, why `node_ip` is resolved at boot, wake
+> word, ASR and speaker enrollment.
 
 `start-livekit-server.sh` downloads the binary itself on first run:
 
