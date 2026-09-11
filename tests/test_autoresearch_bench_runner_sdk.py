@@ -329,11 +329,16 @@ def test_trials_do_not_write_session_files(monkeypatch):
                    _FakePool("lloyd-mcp", [_mcp_tool("Read")]),
                    _StreamScript([("all clear", [])]))
     before = {p.name for p in SESSIONS_DIR.glob("*.json")}
+    # A delta, not an empty-set assertion: on the live tree this directory is
+    # production, and a `bench_*.tool-results` spill left by an earlier run
+    # (2026-09-09) failed this test for every full-suite run on 2026-09-11
+    # without any trial having written a thing.
+    before_bench = {p.name for p in SESSIONS_DIR.glob("bench_*")}
     tr = asyncio.run(run_bench_sdk(None, [("V", Path("/no"))], [_task()], model="primary",
                                   hooks_factory=lambda: HookRegistry()))[0]
     assert tr["session_id"].startswith("bench_")
     assert {p.name for p in SESSIONS_DIR.glob("*.json")} == before
-    assert list(SESSIONS_DIR.glob("bench_*")) == []
+    assert {p.name for p in SESSIONS_DIR.glob("bench_*")} == before_bench
 
 
 # ---------------------------------------------------------------------------

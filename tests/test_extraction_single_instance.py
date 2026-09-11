@@ -60,12 +60,29 @@ def test_the_lock_is_taken_when_free(ne):
     held.close()
 
 
-def test_a_second_holder_is_refused_and_a_release_frees_it():
-    """One process at a time — and `None` specifically, since the caller
-    branches on it to print `status=locked` and exit 0 rather than fail."""
+@pytest.fixture
+def own_lock(tmp_path, monkeypatch):
+    """A lock path of the test's own, in the parent AND in every child.
+
+    The live path is `~/lloyd/_pipeline/nightly_extraction.lock`, and on
+    2026-09-11 a real extractor (task #24) held it while the automod gate ran
+    this file: two tests red for every round that gated in that window, none
+    of them about the round. `LLOYD_EXTRACTION_LOCK` reaches the children
+    through the environment; the already-imported module is patched directly.
+    """
+    lock = tmp_path / "extraction.lock"
+    monkeypatch.setenv("LLOYD_EXTRACTION_LOCK", str(lock))
     sys.path.insert(0, _NGM)
     sys.path.insert(0, "/home/alansrobotlab/lloyd")
     import nightly_extraction as mod
+    monkeypatch.setattr(mod, "_LOCK_PATH", lock)
+    return mod
+
+
+def test_a_second_holder_is_refused_and_a_release_frees_it(own_lock):
+    """One process at a time — and `None` specifically, since the caller
+    branches on it to print `status=locked` and exit 0 rather than fail."""
+    mod = own_lock
 
     held = mod.acquire_single_instance_lock()
     assert held
@@ -80,7 +97,7 @@ def test_a_second_holder_is_refused_and_a_release_frees_it():
         "else 'ACQUIRED')") == "ACQUIRED"
 
 
-def test_a_dead_holder_does_not_strand_the_lock():
+def test_a_dead_holder_does_not_strand_the_lock(own_lock):
     """The whole reason for flock over a pidfile: a killed extractor must not
     wedge every future run. The child exits without releasing anything."""
     assert _in_child("ne.acquire_single_instance_lock(); print('ok')") == "ok"

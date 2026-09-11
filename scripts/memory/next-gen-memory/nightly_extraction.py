@@ -515,7 +515,14 @@ class NightlyExtraction:
 #
 # flock, not a pidfile: the kernel releases it when the process dies, so a
 # `kill -9` or an OOM cannot leave a stale lock that wedges the pipeline.
-_LOCK_PATH = Path.home() / "lloyd" / "_pipeline" / "nightly_extraction.lock"
+#
+# `LLOYD_EXTRACTION_LOCK` overrides the path so a test can take a lock of its
+# own instead of the live one: `tests/test_extraction_single_instance.py`
+# used the live path, and on 2026-09-11 a real extractor (task #24, ~20 min
+# a night) held it while the automod gate ran the suite — two tests red for
+# every round that gated during that window, none of them about the round.
+_LOCK_PATH = Path(os.environ.get("LLOYD_EXTRACTION_LOCK")
+                  or (Path.home() / "lloyd" / "_pipeline" / "nightly_extraction.lock"))
 
 
 def acquire_single_instance_lock():
