@@ -371,11 +371,14 @@ harness:
   # max_tokens is the WHOLE completion, thinking included — the grammar
   # only applies after </think>. At 1024, 41% of triage verdicts came back
   # as JSON cut mid-string and fell back to the regex parser (the ledger's
-  # `structured_error` says "truncated" for those now). 4096 is the floor
-  # once verdicts carry per-clause acceptance; do not lower it without
-  # re-reading the `verdict_source` distribution.
+  # `structured_error` says "truncated" for those now). 4096 was the floor
+  # once verdicts carried per-clause acceptance — and the review grader's
+  # object (five clauses with notes, a test-honesty list, a seams list) cut
+  # off at exactly 4096 on its second calibration case. 8192 is a cap, not
+  # a spend; do not lower it without re-reading the `verdict_source`
+  # distribution and the review ledger's `structured_error`s.
   finalizer:
-    max_tokens: 4096
+    max_tokens: 8192
     timeout_seconds: 180
   # Concurrent tool dispatch, for READ-ONLY batches only. A batch runs
   # concurrently when EVERY call in it is annotated readOnlyHint (or is a

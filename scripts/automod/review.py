@@ -283,7 +283,15 @@ its node id. If no changed test exercises it, the clause is at most `partial`.
 it, or the gap.
 4. Decide: `met` only if the code does it AND a changed test pins the breaking \
 input AND you ran or read both. `partial` if the code does it but nothing pins \
-it, or you could not verify. `unmet` if the code does not do it.
+it, or you could not verify. `unmet` if the code does not do it. The code may \
+predate this diff — a round whose diff only adds the test that pins behaviour \
+an earlier landing shipped has still met the clause, if the tree satisfies it \
+and the changed test pins it.
+
+Keep every `note` to two sentences and never paste command output into it; \
+paths are worktree-relative (`app/x.py`, not `~/…`). Your review is restated \
+as one JSON object at the end under a fixed token budget, and a long note in \
+clause 1 is how clause 4 gets cut off.
 
 Then the two sweeps the clauses do not cover:
 - **Test honesty.** For each changed test file, look for assertions that \
