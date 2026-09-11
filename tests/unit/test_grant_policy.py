@@ -38,6 +38,13 @@ from app.harness.policy import (  # noqa: E402
     tool_tier,
 )
 
+# Frozen for the pure-policy tests, which pass `now=NOW` to `check_grants`.
+# A fixture expiry derived from it must NOT be read by a code path that uses
+# the real clock: `install_policy_hook` does, so from 2026-09-11T12:00Z every
+# grant minted from `_iso` was already expired on the hook path and
+# `test_hook_allows_granted_call` went red for good — blocking every automod
+# round at the `tests` rung (#848/#853). Hook-path tests mint with `expires_at`
+# against the real clock.
 NOW = dt.datetime(2026, 9, 10, 12, 0, tzinfo=dt.timezone.utc)
 
 
@@ -53,11 +60,18 @@ def store(tmp_path) -> GrantStore:
 
 
 def _mint(store, *, scope="autonomy-task:39", tool="email_send",
-          predicate="", quota=None, expires=+24.0, issued_by="alan"):
+          predicate="", quota=None, expires=+24.0, issued_by="alan",
+          expires_at=None):
     return store.mint(
         scope=scope, tool_pattern=tool, arg_predicate=predicate,
-        quota=quota, issued_by=issued_by, expires_at=_iso(expires),
+        quota=quota, issued_by=issued_by,
+        expires_at=expires_at or _iso(expires),
     )
+
+
+def _real_clock_expiry(hours: float = 24.0) -> str:
+    """For the hook path, which checks against the real clock."""
+    return (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=hours)).isoformat()
 
 
 def _check(store, *, scope="autonomy-task:39", tool="email_send",
@@ -316,7 +330,7 @@ def test_hook_denies_ungranted_tier2_from_worker_scope(store, monkeypatch):
 
 def test_hook_allows_granted_call(store, monkeypatch):
     monkeypatch.setenv("LLOYD_GRANT_DB", str(store.db_path))
-    _mint(store, scope="worker:scheduled-task")
+    _mint(store, scope="worker:scheduled-task", expires_at=_real_clock_expiry())
     hooks = HookRegistry()
     install_policy_hook(hooks, store=store, scope="worker:scheduled-task")
     assert not _denied(_fire(hooks, "email_send", {"to": "x@y.z"}))
