@@ -190,35 +190,6 @@ def test_a_task_waiting_on_a_dependency_is_held(vault):
     assert out["held"][0]["blocked"] == "waiting on #1"
 
 
-def test_a_dependency_hidden_by_broken_front_matter_is_still_a_hold(vault):
-    """#870, the third caller: the landing strip resolves `depends_on` with the
-    scheduler's parser, not its own.
-
-    `_autonomy` used to hand `hold_reason` an `all_fm` list it built with the
-    dashboard's own `_frontmatter`, which returns `{}` when YAML cannot parse the
-    block. The scheduler's `_parse_task_file` repairs that same file and
-    regex-extracts `id` / `status` / `last_run` out of it — the graduated recovery
-    that stopped 34 of 40 tasks going dormant on 2026-05-28. So one broken line in
-    an upstream's front matter removed the upstream from the list the strip
-    resolved against, an unresolvable `depends_on` counts as met, and the landing
-    strip showed the dependent as ready in the same second the scheduler held it.
-    The rows are still built from the dashboard's own parse — only the resolution
-    input is shared — which is why the unreadable upstream is not a row here.
-    """
-    up = _task(vault, "upstream", status="up_next", last_run=_iso(days=-2),
-               description="a note that: broke the yaml")
-    up.write_text(up.read_text().replace("name: upstream", "name: upstream\nid: 1"))
-    _task(vault, "downstream", status="up_next", next_run=_iso(hours=-2),
-          depends_on=1, last_run=_iso(days=-1))
-
-    held = {t["name"]: t["blocked"] for t in dash._autonomy()["held"]}
-    assert held.get("downstream") == "waiting on #1", (
-        f"the strip resolved #2 against a list that had lost its upstream: {held}")
-    assert "upstream" not in held, (
-        "the dashboard's own parse cannot read this file, so it must not appear "
-        "as a row — the verdict has to come from the shared resolution set")
-
-
 def test_a_task_with_no_skill_can_never_run_and_says_so(vault):
     """`_is_task_due` warns once and skips forever; the board is where
     that silence should end."""
@@ -700,3 +671,37 @@ def test_only_two_chats_are_shown(sessions):
     for i in range(5):
         _session(sessions, f"s{i}", _local(minutes=-i - 1))
     assert len(dash._recent_sessions()["sessions"]) == 2
+
+
+def test_a_dependency_hidden_by_broken_front_matter_is_still_a_hold(vault):
+    """#870, the third caller: the landing strip resolves `depends_on` with the
+    scheduler's parser, not its own.
+
+    `_autonomy` used to hand `hold_reason` an `all_fm` list it built with the
+    dashboard's own `_frontmatter`, which returns `{}` when YAML cannot parse the
+    block. The scheduler's `_parse_task_file` repairs that same file and
+    regex-extracts `id` / `status` / `last_run` out of it — the graduated recovery
+    that stopped 34 of 40 tasks going dormant on 2026-05-28. So one broken line in
+    an upstream's front matter removed the upstream from the list the strip
+    resolved against, an unresolvable `depends_on` counts as met, and the landing
+    strip showed the dependent as ready in the same second the scheduler held it.
+    The rows are still built from the dashboard's own parse — only the resolution
+    input is shared — which is why the unreadable upstream is not a row here.
+
+    Placed at the end of the file deliberately: inserted mid-file it shifted the
+    pre-existing duplicated chats section below it, and the gate's pyflakes delta
+    matches findings by text including the line number, so eight untouched
+    `redefinition of unused ... from line NNN` messages counted as new.
+    """
+    up = _task(vault, "upstream", status="up_next", last_run=_iso(days=-2),
+               description="a note that: broke the yaml")
+    up.write_text(up.read_text().replace("name: upstream", "name: upstream\nid: 1"))
+    _task(vault, "downstream", status="up_next", next_run=_iso(hours=-2),
+          depends_on=1, last_run=_iso(days=-1))
+
+    held = {t["name"]: t["blocked"] for t in dash._autonomy()["held"]}
+    assert held.get("downstream") == "waiting on #1", (
+        f"the strip resolved #2 against a list that had lost its upstream: {held}")
+    assert "upstream" not in held, (
+        "the dashboard's own parse cannot read this file, so it must not appear "
+        "as a row — the verdict has to come from the shared resolution set")
