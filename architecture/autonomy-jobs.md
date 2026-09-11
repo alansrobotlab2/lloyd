@@ -10,8 +10,8 @@ date: 2026-09-11
 
 What each scheduled task is *for*. [[autonomy]] is the mechanism — the five
 due-gates, the failure ladder, the deadline anchor, the run records; this
-document is the fleet it dispatches, one entry per job, grouped by the chain it
-belongs to.
+document is the fleet it dispatches, one entry per job, grouped by what the job
+is trying to accomplish.
 
 **The skill is the job.** A task file is frontmatter: a schedule, a set of
 gates, and a `skill_name`. The procedure — the phases, the output contract, the
@@ -37,26 +37,188 @@ gone wrong with it.
 Jobs are numbered by their task id and that numbering is historical, not
 ordered: the fleet runs 24 through 85 with gaps where tasks were retired.
 
-## The families
+## The functions
 
-| Family | Jobs | What it produces |
+| Function | Jobs | What it is for |
 |---|---|---|
-| [Nightly reflection](#nightly-reflection-38--42--39--40-47) | #38 #42 #39 #40 #47 | durable changes to memory and config from the day's signals |
-| [trace2skill](#trace2skill-56--57--58--83-70) | #56 #57 #58 #83 #70 | the skills library, mined from Lloyd's own session record |
-| [Knowledge graph](#the-knowledge-graph-chain-24-48-67-74-51-60-84-82) | #24 #48 #67 #74 #51 #60 #84 #82 | facts, edges, and the measurements that say whether they got better |
-| [Vault hygiene](#vault-hygiene-36-78-79-80-81) | #36 #78 #79 #80 #81 | structural health of the vault and its indexes |
-| [Backlog](#backlog-35-77) | #35 #77 | the kanban at `~/obsidian/backlog/`, kept drained and tidy |
-| [Inbound signal](#inbound-signal-68-30-53-54-65) | #68 #30 #53 #54 #65 | what the outside world did while nobody was looking |
-| [Fleet self-watch](#fleet-self-watch-76-85) | #76 #85 | whether the fleet and the routing it depends on are working |
+| [Ingest](#ingest-68-30-53) | #68 #30 #53 | turn outside signal into internal state |
+| [Distil](#distil-38-42-39-40-47--56-57-58-83--54) | #38 #42 #39 #40 #47 · #56 #57 #58 #83 · #54 | read what we already have, write something more useful than the sum of it |
+| [Build the graph](#build-the-graph-24-51-74) | #24 #51 #74 | turn documents and trajectories into facts and typed edges |
+| [Canonicalize](#canonicalize-48-67-84) | #48 #67 #84 | make what is already stored agree with itself |
+| [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
+| [Bound entropy](#bound-entropy-79-81-78-80) | #79 #81 #78 #80 | stop the stores rotting or growing without limit |
+| [Measure](#measure-60-82-70-36-76-85) | #60 #82 #70 #36 #76 #85 | say whether any of it is working |
 
-**Exactly one `depends_on` edge crosses a family boundary**: #51 (knowledge
-graph) waits on #56 (trace2skill), because the trajectories #56 writes are the
-same artifact #51 mines for co-access pairs. Every other edge is inside its own
-chain, and 22 of the 32 tasks declare no dependency at all.
+### Write authority is the fault line
+
+Function is what a job means to do; **write authority is what it is permitted to
+do when nobody is watching**, and it is the axis worth checking first before
+changing any of these. Four tiers, and they do not follow the function groups:
+
+| Tier | Jobs | |
+|---|---|---|
+| Writes durable state unattended | #68 #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 | 21 |
+| Proposes; an operator applies | #48 #67 #84 | 3 |
+| Reports only | #60 #82 #70 #78 #80 #36 #85 | 7 |
+| Acts on the fleet itself | #76 | 1 |
+
+Two consequences the function grouping makes visible and the chain grouping did
+not:
+
+- **The group with the most write authority has the least verification, and the
+  group with the most verification is forbidden from writing.** Canonicalize
+  carries the semantic gates, the unanimous-verdict rule and the guard rails
+  that downgrade a questionable merge to alias-only — and all three of its jobs
+  run in plan mode, because the 2026-08-22 wipe (12,131 edges) and the
+  2026-09-03 151-merge incident were both unattended applies. Distil writes
+  `lloyd/USER.md`, `config.yaml` and the skills library with none of that
+  apparatus. `workers/evidence.py` is the correction, and its pilot set
+  (`EVIDENCE_PILOT_TASK_IDS = {38, 42, 39, 40}`) covers 4 of the 21.
+- **Nothing watches the deciders.** #65, #35 and #77 all direct future effort —
+  what gets researched, what reaches `up_next`, what gets archived — and no job
+  in Measure covers decision quality. #76 watches task *health*, which is a
+  different question.
+
+### The wiring, which this layout no longer carries
+
+Grouping by chain had one advantage this grouping gives up: the layout was the
+dependency graph. Ten `depends_on` edges exist and **three of them now cross a
+function boundary**, so they are written down here instead:
+
+```
+#38 ─► #42 ─► #39 ─► #40 ─► #47     distil, wholly inside
+#56 ─► #57 ─► #58 ─► #83            distil, wholly inside
+#56 ─► #51                          distil ──► build
+#24 ─► #48 ─► #74                   build ──► canonicalize ──► build
+```
+
+The last line is the interesting one, and it is a genuine finding rather than an
+artifact of the regrouping: **the graph pipeline alternates writing with
+canonicalizing**, which is exactly why #74 declares `depends_on: 48` — it must
+re-type edges only after the names under them have settled. Under the chain
+grouping those three jobs sat in one list and the alternation was invisible.
+
+22 of the 32 tasks declare no dependency at all.
+
+### Two holes in the wiring
+
+Both were measured against the reflection chain, both are properties of the
+mechanism and apply to every edge above:
+
+- **An upstream that resolves to nothing satisfies `depends_on` vacuously.**
+  `_is_dependency_met` returns True when the id finds no task. Until item #870
+  landed (2026-09-11) that swallowed far more than a typo: dispatch resolved
+  against `_all_runnable_tasks()`, which keeps only `up_next`, `in_progress` and
+  `failed`, so a `paused` or `draft` upstream was *invisible* and unblocked
+  everything below it — while the Mission Control board, resolving against every
+  parsed task, printed `waiting on #N` for that same task in the same second.
+  `dependency_resolution_set()` is the one set both surfaces read now, and an
+  upstream that exists on disk blocks whatever its status. What is still open as
+  backlog **#558** is the narrow case #870 deliberately left alone: an id with no
+  file behind it is still read as met.
+- **An empty-but-successful run is indistinguishable from a dead one.** A run's
+  status is decided by its terminal text, and the chains gate on status. Measured
+  2026-09-11: `run_38_20260911_050055` wrote a complete signal report, was
+  recorded `empty: true, status: failed` after 248 s with `stop_reason: stop` and
+  19 turns, `last_run` did not advance, and only the 05:15 retry unblocked #42.
+  Open as backlog **#832**.
 
 ---
 
-## Nightly reflection: #38 → #42 → #39 → #40 (+#47)
+## Ingest: #68, #30, #53
+
+What the outside world did while nobody was looking. All three write into
+`knowledge/`; #68 is the only job in the fleet whose output is a *conversation*
+rather than a file, and the only one that runs on the **secondary** engine.
+
+| ID | Freq | Role |
+|----|------|---|
+| #68 | every 15 min | Calendar + unread mail, filtered and classified, injected as ambient context |
+| #30 | 3×/day | GitHub releases/issues and YouTube RSS → keyword pre-filter → scorer → high-scoring items to the vault |
+| #53 | daily | Changelogs and release notes for the stack; compare each source's latest version against last-checked; only process actual changes, then write `knowledge/stack-updates/YYYY-MM-DD-<source>.md` |
+
+### #68 — the name outlived the job
+
+`morning-briefing` names two things. One is #68, which runs every fifteen minutes
+around the clock on the **secondary** engine and triages mail and calendar into
+whatever chat session Alan is actually sitting in. The other — the 6 am "read the
+overnight reports and announce a synthesis" job — no longer runs at all and no
+autonomy task binds it. Its skill is archived; an unbound copy survives as
+`~/obsidian/skills/nightly-morning-briefing/` still carrying "Runs at 6:00 AM PST
+daily" and "Use announce mode", and **there is no announce delivery mode for
+autonomy tasks anywhere in the code** — the only `announce()` in the tree is the
+guardian's alert fan-out, a different mechanism for a different purpose. Its
+documented output, `memory/reflection/morning-briefing-latest.md`, exists nowhere
+on disk. Today's run writes no report file at all: its output is the injected
+signal plus its own `scripts/state.json`, and the durable record is the run record
+and the session transcript.
+
+**How it decides what to surface.** `references/prefs.yaml` holds `watch_senders`,
+`watch_domains`, `mailing_lists`, `block_senders`, `block_domains`,
+`priority_keywords`, `ignore_subjects`, `watch_calendars`; `scripts/state.json`
+holds already-surfaced ids, pruned to 24 h each cycle. Calendar comes from
+`calendar_events` and mail from `email_recent`, both Thunderbird bridge tools
+advertised only while Thunderbird and its bridge are up. Filters run blocklist
+first, then `ignore_subjects`, then the allowlist and `priority_keywords`, then
+per-item dedup, then a soft reject of anything newsletter-shaped; at most 3
+calendar items and 5 emails survive. Each is classed `act-now` (an event inside
+~3 hours, a deadline inside 48 hours, a personally addressed ask) or `fyi`, and
+**a single `act-now` changes the routing of the whole signal**:
+
+- **`ambient`** (nothing is act-now) → `POST /api/sessions/{id}/inject-prefetch`.
+  No turn, no tokens, no transcript noise: the entry waits in a queue and is
+  drained into the `<context>` block of the user's *next* turn.
+- **`notable`** (anything is act-now) → `POST /api/sessions/{id}/inject`, a real
+  ambient turn. The skill is told never to escalate to `urgent` — that is
+  reserved for safety and security.
+
+**Which session counts as "the user's" is the whole problem.** The producer passes
+no session id, so resolution asks for the last session to receive a user turn,
+else the most recent user session by mtime inside 24 hours. On **2026-09-07** that
+answered with a machine: the brief — a meeting that night — was injected into a
+backlog-triage **worker** session that had finished 77 seconds earlier, and was
+answered there, to nobody. Worker turns go through the chat path so they can have
+Inner Voice, which means they set `_last_user_session_id` exactly as a human
+typing does. The fix is one definition of "a human reads this":
+`NON_USER_PLATFORMS = frozenset({"autonomy", "worker"})`, applied through
+`is_user_session` to **both** resolution rules. It is a **deny-list on purpose** —
+a platform this code has never heard of stays eligible, because silently losing a
+brief is worse than delivering one to an unexpected session. Two details that are
+easy to get backwards: `/inject` answers **409, not a 200 "skipped"**, so no
+producer records a lost brief as delivered; and `/inject-prefetch` carries no such
+gate, so the ambient path is protected at *resolution* rather than at the
+endpoint, which is sufficient only because the producer lets the server resolve
+the session.
+
+**`[SILENT]` is what keeps a 15-minute job from being a 15-minute notification.**
+Every task is told to answer with exactly `[SILENT]` and nothing else when there
+is nothing new. Three checks, two semantics: the run record and
+`discord_notify.py` both test for an **exact** `[SILENT]`, while the call site
+above the latter skips the notification when `[SILENT]` appears **anywhere** in
+the preview. So a response that merely mentions the token is still recorded as a
+real run while its Discord post is dropped. The skill's own last line is written
+against the equality reading, because the loose one cost a delivery: a paragraph
+ending in `[SILENT]` was delivered to Alan in full, as noise (2026-09-03).
+
+**Known defect — backlog #481.** Step 2 tells the agent to skip a missing calendar
+source **silently** ("do not retry, do not treat it as an error"), which
+contradicts the degraded-run attribution guardrail at the bottom of the same file
+— a run whose source died must name it. Both instructions are live in one document
+about 150 lines apart, and Step 3 has no missing-tool branch at all. The
+2026-08-29 "succeeding but blind" run (0 emails against a normal 15–21, after a
+~24 h IMAP/Thunderbird bridge gap) is the shape of failure that then reproduces by
+instruction rather than by accident.
+
+---
+
+## Distil: #38 #42 #39 #40 #47 · #56 #57 #58 #83 · #54
+
+Ten of the fleet's thirty-two jobs, and the largest concentration of unattended
+write authority in it. Two chains and one straggler: reflection turns the day's
+*signals* into memory and config, trace2skill turns the *tool-call record* into
+skills, and #54 turns the vault's existing notes into new ones.
+
+### The reflection chain: #38 → #42 → #39 → #40 (+#47)
 
 The chain turns the day's signals into durable changes: what Alan corrected,
 what the system learned, and what should therefore change in memory and config.
@@ -141,21 +303,7 @@ across the files reflection wrote, resolves contradictions, prunes stale entries
 and keeps the MEMORY.md index tight. Gate-checked on ≥24 h since its last run and
 ≥3 new sessions, and lock-file protected.
 
-### Two known holes
-
-- **A paused upstream vacuously satisfies `depends_on`.** `_all_runnable_tasks`
-  keeps `up_next`, `in_progress` and `failed`, and `_is_dependency_met` returns
-  True when the dependency is not found — `failed` is in that set deliberately so
-  a disabled upstream still blocks, but `paused` and `draft` are not, so either
-  unblocks everything below it. Open as backlog **#558**.
-- **An empty-but-successful run is indistinguishable from a dead one.** A run's
-  status is decided by its terminal text, and the chain gates on status. Measured
-  2026-09-11: `run_38_20260911_050055` wrote a complete signal report, was
-  recorded `empty: true, status: failed` after 248 s with `stop_reason: stop` and
-  19 turns, `last_run` did not advance, and only the 05:15 retry unblocked #42.
-  Open as backlog **#832**.
-
-### Jobs 3 and 4 do not exist
+#### Jobs 3 and 4 do not exist
 
 Earlier documentation, and #40's own data-load, referenced a prompt audit and a
 behavior test writing `prompt-audit-issues.md`, `prompt-audit-latest.md`,
@@ -175,9 +323,7 @@ The numbering inside the skills never converged and is not worth trusting: the
 four self-label "Job 1 of 3", "Job 2a of 4", "Job 2b of 4" and "Job 5 of 5".
 There are four jobs.
 
----
-
-## trace2skill: #56 → #57 → #58 → #83 (+#70)
+### trace2skill: #56 → #57 → #58 → #83
 
 Every interaction leaves a record, and that record contains procedural knowledge
 — troubleshooting steps, corrections, behavioral rules, gotchas — that would
@@ -190,7 +336,10 @@ skills, and maintains the library.
 | #57 | `trajectory-skill-mining` | 7-day window over those trajectories for error and success patterns, grouped into skill candidates with metadata. Installs **new** skill dirs only; defers existing ones to #83 |
 | #58 | `nightly-skill-consolidation` | groups dated candidate snapshots, proposes patches to existing skills, flags new candidates; auto-applies at confidence ≥ 0.85 and sessions ≥ 5 |
 | #83 | `nightly-skills-management` | the lifecycle pass: evaluate, create/update, review drafts, dedup the library, regenerate `memory/skills-index.md` |
-| #70 | `skill-lint` | weekly advisory lint — `DEAD`, `MISSING_DESC`, `DRIFT`, `DUPLICATE`, `STALE`. Read-only, writes `skill-lint-report.{md,json}` for a human |
+
+#56 is also the input to #51 — the one edge that leaves this function group. The
+trajectories it writes are the same artifact the graph chain mines for co-access
+pairs.
 
 **#83's pre-flight is a git snapshot, because there is no other undo.** The pass
 opens by running `scripts/util/vault-commit.sh "skills-mgmt: pre-run snapshot"`.
@@ -205,7 +354,7 @@ background sessions a day this machine runs for itself are not in the daily note
 the pass falls back to. The trajectory JSONL is the wider corpus and does carry
 them.
 
-### Evidence integrity: three signals weaker than they look
+#### Evidence integrity: three signals weaker than they look
 
 Added to the skill 2026-09-06 after measurement, and the most load-bearing thing
 in it. A mining pass that trusts its inputs manufactures skills from incidents
@@ -235,7 +384,7 @@ obeyed, and wrong.
   not counted. A useful failure is one the tool itself framed as an error, or a
   deliberate block or cancellation; never merely "the shell returned non-zero".
 
-### Authoring rules: why the generator was off for 68 days
+#### Authoring rules: why the generator was off for 68 days
 
 The predecessor task #37 was paused 2026-06-27 for one recorded reason: the
 generator "authored/grew dense bash-runbook skills that the primary model echoed
@@ -276,7 +425,7 @@ names down, because their job is to say those names are not real. The test's
 name have been rewritten or archived — and a new entry there is a regression, not
 a grandfathering.
 
-### Two traps in the review stage
+#### Two traps in the review stage
 
 - **Draft skills are selected on parsed frontmatter, never a body grep.** The
   `nightly-skills-management` skill's own body contains the literal string
@@ -292,11 +441,12 @@ a grandfathering.
   keeps appearing in `<available_skills>` and keeps being retrievable until
   somebody acts on it.
 
-**#70 owns the other half of "wrong skill".** When the body is fine and the
-*description* is not, retrieval fires the skill on the wrong request or fails to
-fire it on the right one; that is #70's `MISSING_DESC` and `DRIFT`, advisory only.
-When the procedure itself has rotted, that is #83's Stage 3, which appends a
-correction rather than rewriting.
+**The other half of "wrong skill" is measured, not written.** When the body is
+fine and the *description* is not, retrieval fires the skill on the wrong request
+or fails to fire it on the right one; that is #70's `MISSING_DESC` and `DRIFT`,
+advisory only, and it lives in [Measure](#measure-60-82-70-36-76-85). When the
+procedure itself has rotted, that is #83's Stage 3, which appends a correction
+rather than rewriting.
 
 **#83 runs unobserved, and that has a cost.** It sets no `inner_voice:` and the
 fleet default is `false`. On 2026-09-11 the pass tried to land a vault change
@@ -304,48 +454,37 @@ through `automod_vault_land` and was refused, because that tool gates on Inner
 Voice being attached and the observer attaches at turn start — switching it on
 mid-turn cannot cover the turn.
 
+### #54 — the straggler
+
+| ID | Freq | Role |
+|----|------|---|
+| #54 | weekly | Take 2–3 knowledge areas and find non-obvious connections grounded in actual vault content — not brainstorming; read existing notes, identify gaps or bridges, write to `knowledge/synthesis/` |
+
+#54 sat under inbound signal while this document was grouped by chain, and that
+was the wrong shelf: nothing about it is inbound. Its inputs are notes already on
+disk and its output is a new note derived from them, which is the same shape as
+the two chains above — read what we already have, write something more useful
+than the sum of it. It differs only in the corpus: reflection reads the day's
+signals, trace2skill reads the tool-call record, and #54 reads the vault itself.
+
 ---
 
-## The knowledge graph chain: #24, #48, #67, #74, #51, #60, #84, #82
+## Build the graph: #24, #51, #74
 
-Ordered because each step's input is the previous step's output. #24 produces
-entities and `mentions` edges; #48 and #67 settle canonical names; #74 types the
-edges; #60, #84 and #82 measure the result.
+The only three jobs that write to the edge store. #24 produces entities and
+`mentions` edges; #51 adds co-access edges from the trajectory record; #74
+re-types what #24 left untyped, after [Canonicalize](#canonicalize-48-67-84) has
+settled the names underneath.
 
-| ID | Freq | Depends | Applies? | Role |
-|----|------|---------|----------|------|
-| #24 | 6×/day | — | yes | Content-hash-gated fact extraction over the `pipeline_config.yaml` corpus, then index rebuild and a `kg_health` snapshot. Emits graph edges as it writes facts; no-ops when no source document changed |
-| #51 | daily | #56 | yes | Session co-access pairs from trajectories → `co_accessed` edges, provenance `INFERRED`, the trajectory as `source_doc` |
-| #48 | daily | #24 | **no** | Name-shape clustering; `CASE`/`PUNCT` merge on shape, suffix pairs only on a unanimous definition-based verdict from the semantic gate. Reports a plan |
-| #67 | weekly | — | **no** | LLM-judges the pairs string rules cannot — differently-spelled names, abbreviations, path variants. ~40 min/run. Writes `semantic-proposals-latest.jsonl` for #48's review list; strict guard rails downgrade questionable merges to alias-only |
-| #74 | daily | #48 | yes | Re-types active `mentions` edges with the v4 classifier and applies confident upgrades through `app.kg_store`. Runs after #48 so canonical names are settled first |
-| #60 | daily | — | no | Knowledge Health Report: god entities (>20 facts), thin (<2), orphans, stale facts, contamination, near-duplicates, provenance coverage |
-| #84 | daily | — | **no** | Fact-quality pass: reads the corrections log and recent-write drift, pairs contradictions, reports which claims an independent reason condemns |
-| #82 | daily | — | no | 20-query retrieval eval against production's recall defaults; records the trend |
+| ID | Freq | Depends | Role |
+|----|------|---------|---|
+| #24 | 6×/day | — | Content-hash-gated fact extraction over the `pipeline_config.yaml` corpus, then index rebuild and a `kg_health` snapshot. Emits graph edges as it writes facts; no-ops when no source document changed |
+| #51 | daily | #56 | Session co-access pairs from trajectories → `co_accessed` edges, provenance `INFERRED`, the trajectory as `source_doc` |
+| #74 | daily | #48 | Re-types active `mentions` edges with the v4 classifier and applies confident upgrades through `app.kg_store`. Runs after #48 so canonical names are settled first |
 
-**Nothing in this chain moves fact files unattended.** #48 is the one that could
-— it is the sweep that merges — but it never passes `--apply`, so its scheduled
-form reports a plan and stops. #67 proposes into a JSONL and stops too; its own
-`--apply` was retired 2026-09-04. #84 runs in plan mode and writes nothing;
-applying is an operator act. Only #51 and #74 write to the edge store outside
-extraction. That split is deliberate: the 2026-08-22 wipe (12,131 edges) and the
-2026-09-03 151-merge incident were both unattended applies.
-
-**Two of these monitors exit 2 rather than report zero.** #60 exits 2 and alerts
-when the store cannot be read, when active edges fall below half the baseline,
-when any directory holds facts about another entity, or when any fact file
-carries duplicate fact IDs. #84 exits 2 when the graph could not be read. The
-rule both encode: *a monitor that reports success when it cannot see the thing it
-monitors is worse than none* — the same failure `_is_dependency_met`'s
-`if not dep_task: return True` and the evidence verifier's `insufficient` verdict
-are each written against.
-
-**#82 must pass no flags.** Until 2026-09-04 it ran `graph_rerank=False/alpha=0.5`
-against a production serving `True/0.3` and scored a configuration nobody used.
-Every record now carries `matches_production_defaults`, and a `false` there means
-the run is not comparable to the others. It is ordered after #81's index
-maintenance by window only — it declares no `depends_on`, so a late #81 does not
-hold it. If a night's writes hurt recall, this is where it shows up.
+**#24 is the single most expensive job in the fleet** — 8.5 GPU-h over the seven
+days to 2026-09-11, against 28 runs. It and #68 carry 40% of the fleet's load
+between them.
 
 **#51 produced no graph at all until 2026-09-04**, when approval only flipped a
 status field in a JSON file nothing downstream read. It also ran every 15 minutes
@@ -358,15 +497,69 @@ it. See [[knowledge-graph]].
 
 ---
 
-## Vault hygiene: #36, #78, #79, #80, #81
+## Canonicalize: #48, #67, #84
+
+Make what is already stored agree with itself — one name per entity, no
+contradictory claims. **All three run in plan mode and write nothing to the fact
+tree.** That is the group's defining property, not an accident of scheduling.
+
+| ID | Freq | Depends | Role |
+|----|------|---------|---|
+| #48 | daily | #24 | Name-shape clustering; `CASE`/`PUNCT` merge on shape, suffix pairs only on a unanimous definition-based verdict from the semantic gate. Reports a plan |
+| #67 | weekly | — | LLM-judges the pairs string rules cannot — differently-spelled names, abbreviations, path variants. ~40 min/run. Writes `semantic-proposals-latest.jsonl` for #48's review list; strict guard rails downgrade questionable merges to alias-only |
+| #84 | daily | — | Fact-quality pass: reads the corrections log and recent-write drift, pairs contradictions, reports which claims an independent reason condemns |
+
+**Nothing here moves fact files unattended.** #48 is the one that could — it is
+the sweep that merges — but it never passes `--apply`, so its scheduled form
+reports a plan and stops. #67 proposes into a JSONL and stops too; its own
+`--apply` was retired 2026-09-04. #84 runs in plan mode and writes nothing;
+applying is an operator act. The only unattended writes to the edge store come
+from [Build the graph](#build-the-graph-24-51-74). That split is deliberate: the
+2026-08-22 wipe (12,131 edges) and the 2026-09-03 151-merge incident were both
+unattended applies.
+
+**#84 exits 2 rather than report zero** when the graph cannot be read — the
+monitor rule it shares with #60, stated under
+[Measure](#measure-60-82-70-36-76-85).
+
+---
+
+## Queue the work: #65, #35, #77
+
+Three jobs that decide what future effort goes to — what gets researched, what
+reaches `up_next` on the kanban at `~/obsidian/backlog/`, what gets archived.
+Nothing in the fleet measures how well they decide.
 
 | ID | Freq | Role |
 |----|------|---|
-| #36 | daily | Read the groundskeeper queue and report counts, health score, and whether the timer ran |
-| #78 | weekly | Broken backlinks, unreferenced notes, stale skill references, broken cross-links → a cleanup report |
-| #79 | weekly | Retention: delete `_pipeline/tasks` background-bash logs over 30 days, gzip session transcripts inactive 90+ days |
-| #80 | weekly | OKF v0.1 conformance — `validate_okf.py` catches pages with no non-empty `type` or unparseable frontmatter |
-| #81 | daily | Prune orphaned qmd embedding chunks, backfill pending embeddings |
+| #65 | daily | Propose 5–8 research topics into `research.db` via `research_propose`, from the knowledge health report, session-distill gaps, open backlog and the last two daily notes |
+| #35 | daily | Promote 2–4 high-priority inbox items into `up_next`; target queue size 8–12; skip when `up_next` is at capacity unless critical/high blockers exist |
+| #77 | weekly | Archive stale and done tasks, clear draft clutter, reprioritize what remains |
+
+**#65 feeds the `deep-research` worker and no longer reads or writes any queue
+file** — [[research-pipeline]] is the registry it proposes into and the source
+that drains it. The checklist it replaced held 2,839 items of which 314 were
+unique and cost 1.02M tokens a night to read.
+
+**#35 and #77 are the *human* backlog's maintenance.** The self-modification
+loop's own triage and implement passes are worker sources, not autonomy tasks,
+and run under [[automod]]'s gates — see [[backlog]] for the board itself and the
+quarantine rule that keeps the loop from eating what it files.
+
+---
+
+## Bound entropy: #79, #81, #78, #80
+
+Stop the stores rotting or growing without limit. The group splits on write
+authority: #79 and #81 delete and rebuild, #78 and #80 only report what they
+find.
+
+| ID | Freq | Writes? | Role |
+|----|------|---------|---|
+| #81 | daily | yes | Prune orphaned qmd embedding chunks, backfill pending embeddings |
+| #79 | weekly | yes | Retention: delete `_pipeline/tasks` background-bash logs over 30 days, gzip session transcripts inactive 90+ days |
+| #78 | weekly | no | Broken backlinks, unreferenced notes, stale skill references, broken cross-links → a cleanup report |
+| #80 | weekly | no | OKF v0.1 conformance — `validate_okf.py` catches pages with no non-empty `type` or unparseable frontmatter |
 
 **#81 is the one with a measured payoff**: orphaned chunks had grown the index to
 24 GB and vec queries to 700 ms, and orphans displace real results, so it buys
@@ -374,6 +567,73 @@ both speed and accuracy. **#79** bounds the two unbounded-growth stores
 identified in the 2026-06-11 architecture review; its gzipped archives stay
 recoverable, but live consumers glob `*.json`, so archived sessions drop out of
 listings and recall by design.
+`scripts/groundskeeper/retention-sweep.py` is #79, pinned by
+`tests/test_retention_sweep.py`; it shares a directory with the groundskeeper
+survey and nothing else.
+
+**#78 and #80 look like the fleet's worst jobs and are not** — see
+[What the fleet actually costs](#what-the-fleet-actually-costs). Both are
+report-only by design: neither has ever been asked to fix what it names, and the
+reports have no scheduled consumer, which puts them in the same position as three
+of the six jobs in Measure.
+
+---
+
+## Measure: #60, #82, #70, #36, #76, #85
+
+Say whether any of it is working. Five of the six change nothing; #76 is the only
+monitor in the fleet with authority to act on what it finds.
+
+| ID | Freq | Watches | Role |
+|----|------|---------|---|
+| #60 | daily | the graph | Knowledge Health Report: god entities (>20 facts), thin (<2), orphans, stale facts, contamination, near-duplicates, provenance coverage |
+| #82 | daily | retrieval | 20-query retrieval eval against production's recall defaults; records the trend |
+| #70 | weekly | the skills library | `skill-lint`, advisory — `DEAD`, `MISSING_DESC`, `DRIFT`, `DUPLICATE`, `STALE`. Read-only, writes `skill-lint-report.{md,json}` for a human |
+| #36 | daily | the vault | Read the groundskeeper queue and report counts, health score, and whether the timer ran |
+| #76 | daily | the fleet | Queue health: per-task failure rate, timeouts, empty runs, `[SILENT]` rate, GPU-hours; clears poisoned items and pauses failing tasks |
+| #85 | daily | routing | Paired primary-vs-secondary eval over the jobs routed to the secondary engine. **Cannot run** |
+
+**Half of this group has no consumer.** #36's queue holds 31,291 items and
+nothing reads it back (below). #85 cannot run at all. #70's findings are
+advisory and reach #83 only if #83 happens to look — there is no `depends_on`
+between them. Under the chain grouping those were three unrelated facts in three
+different sections; grouped by function they are three of six, which is a pattern
+rather than three incidents.
+
+**A monitor that reports success when it cannot see the thing it monitors is
+worse than none.** #60 exits 2 and alerts when the store cannot be read, when
+active edges fall below half the baseline, when any directory holds facts about
+another entity, or when any fact file carries duplicate fact IDs; #84 exits 2
+when the graph could not be read. It is the same rule
+`_is_dependency_met`'s `if not dep_task: return True` gets wrong and the evidence
+verifier's `insufficient` verdict is written against.
+
+**#82 must pass no flags.** Until 2026-09-04 it ran `graph_rerank=False/alpha=0.5`
+against a production serving `True/0.3` and scored a configuration nobody used.
+Every record now carries `matches_production_defaults`, and a `false` there means
+the run is not comparable to the others. It is ordered after #81's index
+maintenance by window only — it declares no `depends_on`, so a late #81 does not
+hold it. If a night's writes hurt recall, this is where it shows up.
+
+**#70 owns half of "wrong skill".** Its `MISSING_DESC` and `DRIFT` cover the case
+where a skill's body is fine and its *description* is not, so retrieval fires it
+on the wrong request or fails to fire it on the right one. The other half — a
+procedure that has rotted — belongs to #83 Stage 3 in
+[Distil](#distil-38-42-39-40-47--56-57-58-83--54), which appends a correction
+rather than rewriting.
+
+**#76 reads `/api/autonomy/health`, which reads `workers.db` and not the
+per-task run records.** 237 pool-timeout rows
+carried a NULL `task_id` and were unreachable from any per-task view by
+construction — a task that timed out on every single run was indistinguishable
+from a healthy one. It clears poisoned queue items after recording why, and
+pauses any task with 3+ consecutive failures and a >50% fail rate.
+
+**#85 is the fleet's only `draft` task and it cannot run**: it pins `model: eco`,
+and `models:` in config.yaml defines only `primary` and `secondary`. What it is
+for is turning a routing choice made on throughput into one checked nightly
+against a stated margin: it runs the paired eval over the five generation jobs
+routed to the secondary engine and records the per-job routing decision.
 
 ### #36 and the groundskeeper queue
 
@@ -479,133 +739,6 @@ also instructs the agent to append to `groundskeeper-research-log.jsonl`, which
 has never existed on disk. An orphaned skill is not inert: it is retrievable by
 name.
 
-`scripts/groundskeeper/retention-sweep.py` shares that directory and nothing
-else — it is #79, a separate live job pinned by `tests/test_retention_sweep.py`.
-
----
-
-## Backlog: #35, #77
-
-| ID | Freq | Role |
-|----|------|---|
-| #35 | daily | Promote 2–4 high-priority inbox items into `up_next`; target queue size 8–12; skip when `up_next` is at capacity unless critical/high blockers exist |
-| #77 | weekly | Archive stale and done tasks, clear draft clutter, reprioritize what remains |
-
-These are the *human* backlog's maintenance. The self-modification loop's own
-triage and implement passes are worker sources, not autonomy tasks, and run under
-[[automod]]'s gates — see [[backlog]] for the board itself and the quarantine rule
-that keeps the loop from eating what it files.
-
----
-
-## Inbound signal: #68, #30, #53, #54, #65
-
-What the outside world did while nobody was looking.
-
-| ID | Freq | Role |
-|----|------|---|
-| #68 | every 15 min | Calendar + unread mail, filtered and classified, injected as ambient context |
-| #30 | 3×/day | GitHub releases/issues and YouTube RSS → keyword pre-filter → scorer → high-scoring items to the vault |
-| #53 | daily | Changelogs and release notes for the stack; compare each source's latest version against last-checked; only process actual changes |
-| #54 | weekly | Take 2–3 knowledge areas and find non-obvious connections grounded in actual vault content — not brainstorming; read existing notes, identify gaps or bridges, write to `knowledge/synthesis/` |
-| #65 | daily | Propose 5–8 research topics into `research.db` via `research_propose`, from the knowledge health report, session-distill gaps, open backlog and the last two daily notes |
-
-**#65 feeds the `deep-research` worker and no longer reads or writes any queue
-file** — [[research-pipeline]] is the registry it proposes into and the source
-that drains it. The checklist it replaced held 2,839 items of which 314 were
-unique and cost 1.02M tokens a night to read.
-
-### #68 — the name outlived the job
-
-`morning-briefing` names two things. One is #68, which runs every fifteen minutes
-around the clock on the **secondary** engine and triages mail and calendar into
-whatever chat session Alan is actually sitting in. The other — the 6 am "read the
-overnight reports and announce a synthesis" job — no longer runs at all and no
-autonomy task binds it. Its skill is archived; an unbound copy survives as
-`~/obsidian/skills/nightly-morning-briefing/` still carrying "Runs at 6:00 AM PST
-daily" and "Use announce mode", and **there is no announce delivery mode for
-autonomy tasks anywhere in the code** — the only `announce()` in the tree is the
-guardian's alert fan-out, a different mechanism for a different purpose. Its
-documented output, `memory/reflection/morning-briefing-latest.md`, exists nowhere
-on disk. Today's run writes no report file at all: its output is the injected
-signal plus its own `scripts/state.json`, and the durable record is the run record
-and the session transcript.
-
-**How it decides what to surface.** `references/prefs.yaml` holds `watch_senders`,
-`watch_domains`, `mailing_lists`, `block_senders`, `block_domains`,
-`priority_keywords`, `ignore_subjects`, `watch_calendars`; `scripts/state.json`
-holds already-surfaced ids, pruned to 24 h each cycle. Calendar comes from
-`calendar_events` and mail from `email_recent`, both Thunderbird bridge tools
-advertised only while Thunderbird and its bridge are up. Filters run blocklist
-first, then `ignore_subjects`, then the allowlist and `priority_keywords`, then
-per-item dedup, then a soft reject of anything newsletter-shaped; at most 3
-calendar items and 5 emails survive. Each is classed `act-now` (an event inside
-~3 hours, a deadline inside 48 hours, a personally addressed ask) or `fyi`, and
-**a single `act-now` changes the routing of the whole signal**:
-
-- **`ambient`** (nothing is act-now) → `POST /api/sessions/{id}/inject-prefetch`.
-  No turn, no tokens, no transcript noise: the entry waits in a queue and is
-  drained into the `<context>` block of the user's *next* turn.
-- **`notable`** (anything is act-now) → `POST /api/sessions/{id}/inject`, a real
-  ambient turn. The skill is told never to escalate to `urgent` — that is
-  reserved for safety and security.
-
-**Which session counts as "the user's" is the whole problem.** The producer passes
-no session id, so resolution asks for the last session to receive a user turn,
-else the most recent user session by mtime inside 24 hours. On **2026-09-07** that
-answered with a machine: the brief — a meeting that night — was injected into a
-backlog-triage **worker** session that had finished 77 seconds earlier, and was
-answered there, to nobody. Worker turns go through the chat path so they can have
-Inner Voice, which means they set `_last_user_session_id` exactly as a human
-typing does. The fix is one definition of "a human reads this":
-`NON_USER_PLATFORMS = frozenset({"autonomy", "worker"})`, applied through
-`is_user_session` to **both** resolution rules. It is a **deny-list on purpose** —
-a platform this code has never heard of stays eligible, because silently losing a
-brief is worse than delivering one to an unexpected session. Two details that are
-easy to get backwards: `/inject` answers **409, not a 200 "skipped"**, so no
-producer records a lost brief as delivered; and `/inject-prefetch` carries no such
-gate, so the ambient path is protected at *resolution* rather than at the
-endpoint, which is sufficient only because the producer lets the server resolve
-the session.
-
-**`[SILENT]` is what keeps a 15-minute job from being a 15-minute notification.**
-Every task is told to answer with exactly `[SILENT]` and nothing else when there
-is nothing new. Three checks, two semantics: the run record and
-`discord_notify.py` both test for an **exact** `[SILENT]`, while the call site
-above the latter skips the notification when `[SILENT]` appears **anywhere** in
-the preview. So a response that merely mentions the token is still recorded as a
-real run while its Discord post is dropped. The skill's own last line is written
-against the equality reading, because the loose one cost a delivery: a paragraph
-ending in `[SILENT]` was delivered to Alan in full, as noise (2026-09-03).
-
-**Known defect — backlog #481.** Step 2 tells the agent to skip a missing calendar
-source **silently** ("do not retry, do not treat it as an error"), which
-contradicts the degraded-run attribution guardrail at the bottom of the same file
-— a run whose source died must name it. Both instructions are live in one document
-about 150 lines apart, and Step 3 has no missing-tool branch at all. The
-2026-08-29 "succeeding but blind" run (0 emails against a normal 15–21, after a
-~24 h IMAP/Thunderbird bridge gap) is the shape of failure that then reproduces by
-instruction rather than by accident.
-
----
-
-## Fleet self-watch: #76, #85
-
-**#76 Queue Health Check** is the fleet's watchdog. It reads
-`/api/autonomy/health` for per-task failure rate, timeouts, empty runs, `[SILENT]`
-rate and GPU-hours; clears poisoned queue items after recording why; and pauses
-any task with 3+ consecutive failures and a >50% fail rate. That endpoint reads
-**`workers.db`**, not the per-task run records, because 237 pool-timeout rows with
-a NULL `task_id` were unreachable from any per-task view by construction — a task
-that timed out on every single run was indistinguishable from a healthy one.
-
-**#85 Nightly Secondary Routing Eval** runs the paired primary-vs-secondary eval
-over the five generation jobs routed to the secondary engine and records the
-per-job routing decision, turning a routing choice made on throughput into one
-checked nightly against a stated margin. It is the fleet's only `draft` task and
-**it cannot run**: it pins `model: eco`, and `models:` in config.yaml defines only
-`primary` and `secondary`.
-
 ---
 
 ## What the fleet actually costs
@@ -615,18 +748,19 @@ A snapshot, not a fact — the seven days to 2026-09-11, from `workers.db` where
 are here for the *shape* of the load, which is lopsided in a way no per-task view
 reveals.
 
-| Job | Runs | GPU-h | Note |
-|---|---|---|---|
-| #68 triage | 407 | 7.3 | the quarter-hourly job — the only run count in the hundreds |
-| #24 data pipeline | 28 | 8.5 | the single most expensive job in the fleet |
-| #74 mention classifier | 9 | 2.2 | cold-start backlog amortizes over days |
-| #39, #42 | 7 each | 2.0 each | the reflection chain's two heavy halves |
-| everything else | 1–20 each | ≤1.8 | the weeklies land at 0.0–0.6 |
+| Job | Function | Runs | GPU-h | Note |
+|---|---|---|---|---|
+| #68 triage | ingest | 407 | 7.3 | the quarter-hourly job — the only run count in the hundreds |
+| #24 data pipeline | build | 28 | 8.5 | the single most expensive job in the fleet |
+| #74 mention classifier | build | 9 | 2.2 | cold-start backlog amortizes over days |
+| #39, #42 | distil | 7 each | 2.0 each | the reflection chain's two heavy halves |
+| everything else | — | 1–20 each | ≤1.8 | the weeklies land at 0.0–0.6 |
 
-**Two jobs carry 40% of the fleet's ~40 GPU-hours.** Three families — reflection,
-trace2skill and the graph chain — account for most of the rest, and the weekly
-hygiene jobs are nearly free. If a change has to make the fleet cheaper, #24 and
-#68 are the only two places where it can matter.
+**Two jobs carry 40% of the fleet's ~40 GPU-hours**, and they sit in the two
+functions that touch the outside world and the graph — ingest and build. Distil
+is the next, through #39 and #42. Canonicalize, Queue the work, Bound entropy and
+Measure are nearly free between them. If a change has to make the fleet cheaper,
+#24 and #68 are the only two places where it can matter.
 
 **Aggregate a week of this fleet and you describe a fleet that no longer exists.**
 Failures over the same window, by day: **35, 7, 15, 9, 15, 10, 2, 1**. The rate
@@ -657,6 +791,7 @@ window with no task file behind them.
 - [[skills]] — the skill loader and the quarantine set the trace2skill chain writes against
 - [[knowledge-graph]] — the store the graph chain writes to
 - [[research-pipeline]] — the registry #65 proposes into
+
 `nightly-reflection`, `nightly-skills-management`, `morning-briefing` and
 `groundskeeper` were four separate docs until 2026-09-11. They covered 8 of the
 fleet's 32 jobs between them and left 24 undescribed, so they were folded in here
@@ -664,3 +799,12 @@ and retired to `architecture/.archive/`. Their incident history is carried above
 what was dropped was the retired two-loop groundskeeper architecture, the
 per-line source citations, and every restatement of a schedule that lives in the
 task file.
+
+This document was grouped by chain — which pipeline a job's output feeds — until
+later the same day, and is now grouped by what each job is for. The chains are
+real and still gate execution, so they are drawn in
+[The wiring](#the-wiring-which-this-layout-no-longer-carries) rather than being
+the layout. Three jobs moved shelf and the move is the point: #54 was under
+inbound signal and reads nothing inbound; #36 was under vault hygiene and repairs
+nothing; #65 was under inbound signal and belongs with the other two jobs that
+decide what gets worked on next.
