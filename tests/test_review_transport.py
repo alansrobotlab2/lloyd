@@ -655,3 +655,25 @@ def test_only_a_blocking_honesty_finding_refuses_the_round(tmp_path):
                            worktree=tmp_path, run_tests=tmp_path / "rt")
     assert "Only \\\n`blocking` entries refuse the round" in text or "`blocking` entries refuse the round" in text
     assert "does not belong" in text
+
+
+def test_evidence_paths_with_symbols_anchors_or_a_dead_absolute_prefix_still_resolve(tmp_path):
+    (tmp_path / "app").mkdir(); (tmp_path / "app" / "x.py").write_text("1\n")
+    n = RV.normalize_evidence_path
+    assert n("app/x.py::helper", tmp_path) == "app/x.py"
+    assert n("app/x.py:helper", tmp_path) == "app/x.py"
+    assert n("app/x.py#L12", tmp_path) == "app/x.py"
+    assert n("app/x.py:12-14,", tmp_path) == "app/x.py"
+    assert n("[app/x.py]", tmp_path) == "app/x.py"
+    # #870's clause 2, verbatim: two locations in one field, downgraded for the semicolon
+    assert n("app/x.py:377; tests/test_y.py:534", tmp_path) == "app/x.py"
+    assert n("/gone/checkout/review-abc/app/x.py", tmp_path) == "app/x.py"
+    assert n("app/missing.py", tmp_path) == ""
+    # ...and a met that still cannot resolve records what the grader wrote
+    parsed = RV.parse_review({"premise": "sound", "summary": "", "clauses": [
+        {"clause": 1, "verdict": "met", "evidence_path": "nowhere/y.py", "evidence_line": 3,
+         "test_node_id": "tests/test_x.py::t", "how_verified": "ran", "note": "n"}],
+        "test_honesty": [], "seams_unverified": []},
+        worktree=tmp_path, changed_tests=["tests/test_x.py"], n_clauses=1)
+    assert parsed["clauses"][0]["verdict"] == "partial"
+    assert "grader wrote 'nowhere/y.py'" in parsed["clauses"][0]["downgraded"][0]
