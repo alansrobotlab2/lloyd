@@ -184,6 +184,9 @@ class KnowledgeTypeError(ValueError):
         if value in OUTSIDE_KNOWLEDGE_TYPES:
             why = (f"`{value}` is a vault-wide value that is legal only *outside* "
                    f"knowledge/" + (f"; inside knowledge/ it means `{target}`" if target else ""))
+        elif target:
+            why = (f"`{value}` was retired in the #370 consolidation; "
+                   f"write `{target}`")
         else:
             why = "no such type exists"
         super().__init__(
@@ -259,5 +262,35 @@ def normalize_document_type(text: str) -> tuple[str, str | None]:
     line_end = block.find("\n", found.start())
     if line_end == -1:
         line_end = len(block)
-    new_block = block[:found.start()] + f"type: {canonical}" + block[line_end:]
+    # Keep any trailing comment: the value was wrong, the reason written next to
+    # it usually was not, and dropping it silently loses a line of the author's.
+    comment = block[found.end():line_end].strip()
+    new_block = (block[:found.start()] + f"type: {canonical}"
+                 + (f"  {comment}" if comment else "") + block[line_end:])
     return text[:fm.start(1)] + new_block + text[fm.end(1):], raw
+
+
+def rejected_document_type(text: str) -> str | None:
+    """The ``type`` this note carries that may NOT land as-is, or ``None``.
+
+    The read-only half of ``normalize_document_type``, for a caller that must
+    check a file without rewriting it — the vault lander, which commits whatever
+    is on disk. That difference makes this rule STRICTER than the write rule, not
+    looser: ``vault_write`` may rewrite ``deep-research`` to ``research-deep``
+    because it controls the bytes, while a lander that accepted the alias would
+    put a non-canonical value straight back into the tree #370 emptied and fail
+    ``test_knowledge_frontmatter_uses_only_the_canonical_set`` on the next round.
+    So: only a value that is *already* canonical lands, and the refusal names the
+    value to write instead. An absent or empty ``type`` is not an answer either
+    way — #478's orphan-frontmatter files must stay landable.
+    """
+    fm = _FRONTMATTER_RE.match(text)
+    if fm is None:
+        return None
+    found = _TOP_LEVEL_TYPE_RE.search(fm.group(1))
+    if found is None:
+        return None
+    raw = found.group(1).strip().strip("\"'")
+    if not raw:
+        return None
+    return None if raw in CANONICAL_TYPES else raw

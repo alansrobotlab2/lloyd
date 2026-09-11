@@ -109,12 +109,43 @@ def _load_script(rel: str, name: str):
     return mod
 
 
+def _non_canonical_type_literals(body: str) -> set[str]:
+    """Non-canonical ``type`` literals in a skill's body text.
+
+    Compared RAW, deliberately. Normalizing first (as this did until #872) makes
+    the scan blind to exactly the bug it exists to catch: every retired literal
+    the skills were carrying — ``deep-research``, ``medium-research``,
+    ``quick-research``, ``source-summary`` — maps onto a canonical value, so at
+    base the aliases read as clean and this returned the empty set while four
+    templates still said them out loud. An instruction must NAME a canonical
+    value, not one that resolves to one.
+    """
+    return {value.strip() for value in _TYPE_LINE.findall(body)
+            if value.strip() and value.strip() not in okf_taxonomy.CANONICAL_TYPES}
+
+
+def test_the_skill_scan_acts_on_a_literal_that_would_normalize_clean():
+    """The raw comparison is this round's headline defect; it must be testable.
+
+    A synthetic body shaped like the four templates #872 renamed. Under the old
+    normalize-then-compare rule the assertion below could not fail, which is the
+    whole reason clause 2 read as already-met at base.
+    """
+    body = ("writes `knowledge/{domain}/{slug}.md`:\n\n"
+            "```markdown\n---\ntype: deep-research\ntags: [x]\n---\n```\n")
+    assert _non_canonical_type_literals(body) == {"deep-research"}
+    # …and the same value read through normalize_type WOULD have looked clean:
+    assert okf_taxonomy.normalize_type("deep-research") in okf_taxonomy.CANONICAL_TYPES
+
+
 def _skill_prescribed_legacy_types() -> set[str]:
     """Legacy ``type`` literals an active skill still hands a knowledge note.
 
     Scope is a skill's *body* (its own frontmatter says ``type: skill``, which is
-    unrelated) of a skill that writes into ``knowledge/`` at all. Measured
-    2026-09-09: exactly the five in ``TRACKED_RE_FRAGMENTERS``, one per file.
+    a different vocabulary on a different surface) of a skill that writes into
+    ``knowledge/`` at all. Empty since #872 renamed the four templates — measured
+    across every active skill body, the strict scan finds nothing, so tightening
+    it cost nothing on the rest of the tree.
     """
     out: set[str] = set()
     if not SKILLS.is_dir():
@@ -126,19 +157,7 @@ def _skill_prescribed_legacy_types() -> set[str]:
         body = text.split("---", 2)[2] if text.startswith("---") else text
         if "knowledge/" not in body:
             continue
-        for raw in _TYPE_LINE.findall(body):
-            # Compared RAW, deliberately. Normalizing first (as this did until
-            # #872) makes the scan blind to exactly the bug it exists to catch:
-            # every retired literal the skills were carrying — deep-research,
-            # medium-research, quick-research, source-summary — maps onto a
-            # canonical value, so an alias at base read as clean and this
-            # returned the empty set while the templates still said them. An
-            # instruction must name a canonical value, not one that resolves to
-            # one. Verified #872: the strict scan is empty across every active
-            # skill body that mentions `knowledge/`, so this costs nothing.
-            value = raw.strip()
-            if value and value not in okf_taxonomy.CANONICAL_TYPES:
-                out.add(value)
+        out |= _non_canonical_type_literals(body)
     return out
 
 
@@ -497,8 +516,7 @@ def _strict_warnings() -> int:
 # promotion on this box was blocked until the word was found by hand. These tests
 # drive the real handler, so a writer that invents a value is stopped where it
 # would otherwise have been caught by a gate seven hours later.
-@pytest.fixture
-def scratch_vault(tmp_path, monkeypatch):
+def _scratch(tmp_path, monkeypatch):
     """``vault_write`` aimed at a scratch tree instead of the live vault.
 
     ``VAULT`` is imported into ``agent_mcp.vault``'s own namespace, so that is
@@ -512,6 +530,11 @@ def scratch_vault(tmp_path, monkeypatch):
     monkeypatch.setattr(vault_mod, "AUDIT_LOG_DIR", tmp_path / "audit")
     monkeypatch.setattr(vault_mod, "AUDIT_LOG_FILE", tmp_path / "audit" / "writes.jsonl")
     return types.SimpleNamespace(root=tmp_path, mod=vault_mod)
+
+
+@pytest.fixture
+def scratch_vault(tmp_path, monkeypatch):
+    return _scratch(tmp_path, monkeypatch)
 
 
 def _write_note(scratch, rel: str, type_value: str | None = "research") -> dict:
@@ -631,3 +654,113 @@ def test_the_document_type_rewriter_acts_on_a_retired_literal():
     assert okf_taxonomy.normalize_document_type(rewritten) == (rewritten, None)
     assert okf_taxonomy.normalize_document_type("# no frontmatter\n") == ("# no frontmatter\n", None)
     assert okf_taxonomy.normalize_document_type("---\ndomain: ai\n---\nbody\n") == ("---\ndomain: ai\n---\nbody\n", None)
+
+
+def test_the_rewriter_keeps_a_trailing_comment():
+    """#872 review advisory: the value was wrong, the reason beside it was not."""
+    text = "---\ntype: quick-research   # REQUIRED — the page type\n---\nbody\n"
+    rewritten, replaced = okf_taxonomy.normalize_document_type(text)
+    assert replaced == "quick-research"
+    assert rewritten.splitlines()[1] == "type: research-quick  # REQUIRED — the page type"
+
+
+def test_a_lander_cannot_land_a_type_that_is_not_already_canonical(tmp_path):
+    """#872's other writer: a note written with generic file tools lands HERE.
+
+    `automod_vault_land` is a writer of `knowledge/` too, and its validator only
+    ever asked whether the front matter *parses*. Stricter than `vault_write` on
+    purpose: a lander commits bytes, so it may not accept a value it would have
+    to rewrite to be honest about — that value would sit in the tree and fail the
+    canonical-set test on the next round.
+    """
+    from scripts.automod import vault_round
+
+    def note(rel: str, body: str) -> Path:
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+        return target
+
+    invented = note("knowledge/ai/bad.md", "---\ntype: note\ndomain: ai\n---\n# x\n")
+    err = vault_round.knowledge_type_error(invented)
+    assert err and "note" in err, err
+    assert note("knowledge/ai/good.md", "---\ntype: notes\ndomain: ai\n---\n# x\n") and \
+        vault_round.knowledge_type_error(tmp_path / "knowledge/ai/good.md") is None
+
+    alias = note("knowledge/ai/alias.md", "---\ntype: deep-research\n---\n# x\n")
+    alias_err = vault_round.knowledge_type_error(alias)
+    assert alias_err and "research-deep" in alias_err, (
+        f"the refusal must name the value to write instead: {alias_err}")
+    assert alias.read_text(encoding="utf-8").startswith("---\ntype: deep-research"), \
+        "the lander refuses; it does not rewrite an author's file"
+
+    orphan = note("knowledge/ai/orphan.md", "# no front matter at all\n")
+    assert vault_round.knowledge_type_error(orphan) is None, (
+        "#478's orphan-frontmatter files must stay landable — this item does not "
+        "hold a round hostage to a sweep it does not own")
+
+
+def _make_taxonomy_unimportable(monkeypatch) -> None:
+    """Make `from scripts.vault import okf_taxonomy` raise ImportError.
+
+    Both removals are needed, which is not obvious: `from package import name`
+    finds the submodule as an ATTRIBUTE of an already-imported package, so
+    clearing only the `sys.modules` entry — the first thing one reaches for —
+    leaves the guard reading a perfectly good vocabulary and reporting a clean
+    verdict about a check it did not perform. That is the failure mode the branch
+    under test exists to prevent, reproduced by the test for it.
+    """
+    import scripts.vault as vault_pkg
+    monkeypatch.delattr(vault_pkg, "okf_taxonomy", raising=False)
+    monkeypatch.delitem(sys.modules, "scripts.vault.okf_taxonomy", raising=False)
+    monkeypatch.setitem(sys.modules, "scripts.vault.okf_taxonomy", None)
+
+
+def test_the_lander_reports_an_unusable_vocabulary_instead_of_clean(tmp_path, monkeypatch):
+    """A check that cannot read its vocabulary must not report 'clean'."""
+    from scripts.automod import vault_round
+    target = tmp_path / "knowledge/ai/x.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("---\ntype: whatever\n---\n# x\n", encoding="utf-8")
+    _make_taxonomy_unimportable(monkeypatch)
+    err = vault_round.knowledge_type_error(target)
+    assert err and "unimportable" in err, err
+
+
+def test_the_write_guard_fails_closed_when_the_taxonomy_is_unusable(tmp_path, monkeypatch):
+    """Same rule on the MCP side: no taxonomy, no write — never a silent pass."""
+    scratch = _scratch(tmp_path, monkeypatch)
+    _make_taxonomy_unimportable(monkeypatch)
+    result = _write_note(scratch, "knowledge/ai/x.md", "research")
+    assert "error" in result, f"the guard reported a verdict it could not justify: {result}"
+    assert "unimportable" in result["error"], result["error"]
+    assert not (scratch.root / "knowledge/ai/x.md").exists()
+
+
+def test_the_write_guard_reports_an_unexpected_rewrite_failure(tmp_path, monkeypatch):
+    scratch = _scratch(tmp_path, monkeypatch)
+    def _boom(_text):
+        raise RuntimeError("rewriter exploded")
+    monkeypatch.setattr(okf_taxonomy, "normalize_document_type", _boom)
+    result = _write_note(scratch, "knowledge/ai/x.md", "research")
+    assert "error" in result and "rewriter exploded" in result["error"], result
+    assert not (scratch.root / "knowledge/ai/x.md").exists()
+
+
+def test_the_landed_skill_bodies_still_load_through_the_lander_itself():
+    """#872 clause 11, across the seam the lander actually uses.
+
+    `automod_vault_land` decides whether a skill or prompt edit may land by
+    running `_load_skill` and `build_system_prompt()` in a FRESH interpreter
+    (`scripts/automod/vault_round.py`), and every existing test that mentions
+    `loader_errors` mocks it — so the suite never proved that seam still ran,
+    which is how "it loads" could be claimed without anything pinning it. This
+    calls it for real: a ~20 s subprocess against the vault as landed, and the
+    only thing standing between a skill body that will not load and a commit.
+    """
+    from scripts.automod import vault_round
+    paths = [f"skills/{slug}/SKILL.md" for slug in _WRITING_SKILLS]
+    paths.append("knowledge/KNOWLEDGE_SCHEMA.md")
+    assert vault_round.loader_errors(paths) == [], (
+        "the lander's own loader check rejects a path #872 renamed — the skill "
+        "bodies or the prompt surface no longer load")

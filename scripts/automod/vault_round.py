@@ -105,6 +105,37 @@ def frontmatter_error(path: Path) -> str | None:
     return None
 
 
+def knowledge_type_error(path: Path) -> str | None:
+    """A `knowledge/` file whose front-matter `type` may not land, else None.
+
+    The other writer-side half of #872. `vault_write` normalises a retired
+    spelling and refuses an invented one, but a note written with the generic
+    file tools reaches the tree through HERE, not through that tool — and #780
+    was exactly a knowledge file whose invented `type` was noticed only when a
+    promotion gate went red seven hours later. Front matter that merely *parses*
+    (``frontmatter_error`` above) was never a check on the vocabulary.
+
+    Unlike `vault_write` this refuses a retired alias rather than rewriting it:
+    the lander commits files byte-for-byte, and quietly editing an author's front
+    matter to make a change land is worse than one line naming the value to
+    write. An absent or empty `type` is left alone — that is #478's sweep, not a
+    vocabulary error.
+    """
+    try:
+        from scripts.vault import okf_taxonomy
+    except Exception as exc:  # noqa: BLE001
+        # A check that cannot read its vocabulary must not report "clean" — the
+        # reason vault_write fails closed too (lloyd/MEMORY.md: four instances).
+        return f"cannot check the `type` vocabulary: okf_taxonomy is unimportable ({exc})"
+    try:
+        rejected = okf_taxonomy.rejected_document_type(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return f"unreadable: {exc}"
+    if rejected is None:
+        return None
+    return f"{okf_taxonomy.KnowledgeTypeError(rejected)}"
+
+
 _LOADER_SCRIPT = r"""
 import json, sys
 from pathlib import Path
@@ -182,6 +213,11 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
             err = frontmatter_error(f)
             if err:
                 errors.append(f"{p}: {err}")
+            elif p.startswith("knowledge/"):
+                # Parsing front matter was never a check on its vocabulary (#872).
+                terr = knowledge_type_error(f)
+                if terr:
+                    errors.append(f"{p}: {terr}")
     if not errors:
         errors.extend(contract_errors(paths))
     if not errors and buckets["validated"]:
