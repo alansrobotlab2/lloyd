@@ -254,25 +254,29 @@ Two more were found by the first unattended run itself (#229, 2026-09-07:
   the pass works the real backlog first and reads as healthy right up to the
   moment there is nothing else left; on 2026-09-08 that moment was three hours
   and 6 items away. `backlog.is_quarantined` holds an item tagged
-  `spawned-by-triage` or `spawned-by-autocode` out of the pool until it is
-  `SPAWN_TRIAGE_MIN_AGE_DAYS` (30) old. Quarantine rather than exclusion: an
-  item nobody implements really can go stale, and then the question triage
-  asks is real again. The gate keys on those tags and **not** on `draft`,
-  which is the status of most of a stale backlog — a rule that skipped drafts
-  would switch the pass off rather than bound it.
+  `spawned-by-triage` or `spawned-by-autocode` out of the single-item pool.
+  The first cut released it at `SPAWN_TRIAGE_MIN_AGE_DAYS` (30) on the theory
+  that an unimplemented item can go stale; by 2026-09-11 that was 291 items
+  due back in triage in October, each spawning ~2 more, so **age no longer
+  releases**. The exits are the ones that do not re-enter the queue: the
+  clustering pass and a group triage `keep` (§3.2c), expiry, and a human
+  reopen. The gate keys on those tags and **not** on `draft`, which is the
+  status of most of a stale backlog — a rule that skipped drafts would switch
+  the pass off rather than bound it.
 
   An exhausted queue therefore has two meanings. `backlog.triage_pool` returns
   the held count beside the candidates so the skip summary can say which one:
   "every open backlog item has been triaged" was true, and misleading, on a
-  board of 122 where 106 were this loop's own drafts. `SPAWN_CAP` (3, both
-  sources) bounds fan-out per run, with the remainder folded into a single
-  "Further findings from…" item rather than dropped — #229's lesson still
-  holds, and the answer to too many findings is one more item, not fewer
-  findings. It is **recorded, not enforced**: the items are on disk before
+  board of 122 where 106 were this loop's own drafts. `SPAWN_CAP` bounds
+  fan-out per run — 3 for triage, whose remainder folds into a single
+  "Further findings from…" item rather than being dropped (#229's lesson
+  still holds), and 1 for autocode, where the one thing that may become an
+  item is a **blocker** and every other finding goes onto the item itself
+  (§3.2c). It is **recorded, not enforced**: the items are on disk before
   `SPAWNED:` is parsed, so unfiling them would destroy real work. Both event
   types carry `spawn_cap` and `spawned_over_cap`.
   `tests/test_backlog_spawn_loop.py` pins it, including the counterfactual —
-  with the window set to zero the same run grows the queue.
+  with the spawn tags unrecognised the same run grows the queue.
   The proving run on #278 (`confirmed`, 16 iterations) filed #402 and #403
   before its verdict, after checking `backlog_tasks` for duplicates — and
   exposed that the acceptance check, the implementer's contract, was cut at
@@ -420,6 +424,135 @@ that `met` on an unverified acceptance is the one claim the loop cannot
 recover from. Items confirmed before clauses existed carry prose only; every
 reader (`acceptance_clauses_of`) treats that prose as one clause rather than
 refusing the whole current pool.
+
+### 3.2c Bounding the board: the loop must close more than it opens
+
+Quarantine bounded one edge. Over 2026-09-07 → 09-11 the board still took
+**453 new items against 49 closed**: triage filed 1.9 per run and closed
+0.46; implement rounds filed 2.1 per turn and closed 0.12, seventeen for
+one; 84 parent items had 282 children linked only in prose, and a
+re-offered round re-derived and re-filed the same findings (#549 ran four
+times in 110 minutes and filed ten children, three of them one finding).
+Both closers were one item wide and both producers were unbounded. Six
+mechanisms, landed 2026-09-11 (eb224d5), and none of them deletes anything.
+
+**Inflow is cut at the source.**
+
+- **`backlog_write_task` checks the board before it writes**
+  (`agent_mcp/backlog_similar.py`). The triage prompt used to say "run
+  `backlog_tasks` to be sure no item already covers it" — a tool with no
+  text search that returns ~800 titles. Now every create runs the qmd
+  daemon's reranked vector search over the `backlog` collection it already
+  embeds, plus a lexical Jaccard over the item heads on disk. A create
+  tagged `spawned-by-*` whose finding an open item already covers is
+  **appended** to that item under a "Merged finding" heading (the activity
+  log names the session) and the result carries `merged_into`; a human's
+  write is only ever advised (`similar`). The reranker score alone never
+  merges — an unrelated query still scored 0.75 on its top hit — so rule A
+  needs the lexical leg to agree, and rule B (a strong lexical match on an
+  item created in the last ten minutes) covers the qmd watcher's debounce.
+  `umbrella` and `blocker` writes are never merged; `force: true` bypasses;
+  every decision is logged to `dedupe.jsonl`; it fails open. Config
+  `backlog.dedupe`, `merge: false` is observation mode.
+- **A finding an implement round turns up goes onto the item it came from**
+  (`## Findings (round …)`, appended with `backlog_write_task`), counted off
+  the file into `findings_appended`. Only a blocker — a finding that stops a
+  clause of the round's contract from becoming true — becomes an item, one
+  per round. The first round under the new prompt (#578) appended ten
+  findings and filed none.
+- **A re-offered round is told what earlier rounds filed** (`prior_spawned`
+  in `_reoffer_block`) and told to append rather than re-file.
+- **Spawn accounting is mechanical**: `max_item_id()` before the turn, and
+  `split_claimed` reads an id at or below it as a merge, above it as a
+  spawn — #370's finished row had listed itself and a pre-existing #221 as
+  spawns. Both event types carry `merged` and `id_floor`.
+
+**Expiry is the hard bound.** `backlog.expire_stale_spawns` runs in
+autocode's housekeeping and closes a self-filed `draft` that nothing
+triaged, implemented, clustered or tagged in `SPAWN_TRIAGE_MIN_AGE_DAYS` —
+`done`, tagged `expired`, text kept. A human setting its status back to
+`draft` reopens it: the reconciler strips the tag and `expired_ids` keeps it
+released, so it is never expired twice. Never `grouped`, `umbrella` or
+`needs-human` items, never a human's draft. Scorecard row 4 carries the open
+self-spawned count and `over_bound`, which should read 0. Kill switch
+`workers.sources.autocode.expire_spawns`.
+
+**Clustering puts the split items back together.**
+`scripts/automod/cluster.py` groups the open drafts by three signals already
+on disk, deterministically and offline: cosine over the chunk-0 vectors qmd
+keeps for the `backlog` collection (read through qmd's own bundled
+`vec0.so`, 0.12 s for the board; chunk 0 only, because mean-pooling pulls
+long items toward the corpus centroid); shared file paths named in
+backticks, by basename; and a common `parent`, parsed from the prose first
+line and persisted to frontmatter once. A shared parent is an edge on its
+own — #549's twelve children are one consolidation job whatever their
+pairwise cosine, and a cut that demanded a cosine to confirm it dropped that
+family entirely. A giant component is **peeled** into hub-centred groups of
+at most 12, never trimmed (trimming dropped most of the board from the
+output); a pair is a cluster. The optional pair-judge (the secondary,
+priority 2, cached by body hash in `cluster_judgments.jsonl`) adjudicates
+only ambiguous edges and an error keeps the edge. Quarantine is deliberately
+not applied — its question is staleness, this one is sameness. The
+`backlog-cluster` worker source runs it nightly ("nightly" = the output is
+older than `min_age_seconds`, so a restart never doubles it up) and writes
+`clusters.json` in the state dir; `round cluster --write` runs it by hand.
+First live run: 53 clusters over 322 of 407 drafts, 200 pairs judged, 291
+parents persisted.
+
+**Group triage judges a cluster per run.** `autotriage` takes a cluster
+before it takes a single item (`backlog.select_cluster`: re-validated
+against disk, ids a group run already judged dropped, duplicate pairs kept
+together, largest surviving cluster, `group_min_items` 2 /
+`group_max_items` 8). One turn, `GROUP_PROMPT`, `GROUP_TRIAGE_SCHEMA` built
+from `RETIRING`/`SURFACES`, per-item verdicts:
+
+- `duplicate_of #t` → `done`, `duplicate_of` in frontmatter, a `stale`
+  triage row. Chains resolve to the terminal survivor against the verdicts
+  *as given* (resolving against the rewrites in progress let 4→5→4 come out
+  as "duplicate of a keep"); a cycle or a target outside the cluster is
+  `keep`.
+- `stale` / `already_done` → as today.
+- `fold` → `group: <umbrella>`, tag `grouped`, stays `draft`; ledger verdict
+  `folded`, outside `VERDICTS` so `triaged_ids` does not count it as judged.
+  A member is out of both pools and the reconciler parks it `draft` whatever
+  else the ledger says.
+- `keep` → an activity note, no triage row, and the id is released from
+  quarantine so single triage reaches it.
+- The **umbrella** the turn filed (tags `umbrella`, `spawned-by-triage`) is
+  confirmed through `record_verdict` exactly like any confirmed item —
+  `up_next`, `acceptance_clauses` on disk, ≤12 clauses — plus `members`. Two
+  folds minimum: one fold is a keep. No umbrella on disk turns every fold
+  into a keep and records `umbrella_missing`.
+
+One `backlog_triage` row per member and one `backlog_group_triage` summary
+(`judged: {id: verdict}`), so the scorecard, the status pipeline and
+`triaged_ids` see ordinary verdicts. Unparsed degrades to `keep`, never to a
+close; budget exhaustion is `incomplete` once and `abandoned` the second
+time, writing nothing on the items. The first live run (c-6047a94c, eight
+items, twelve turns, structured): three `already_done`, two folded into
+umbrella #858, three kept. Kill switch
+`workers.sources.autotriage.group_triage`.
+
+**Implement stays one item per round**, so the gate, the review rung and
+the rollback unit are untouched. An umbrella is an ordinary confirmed item
+whose prompt carries `<member>` blocks and whose review contract appends the
+members as context under its own clauses. When it settles `met`,
+`close_settled_items` closes every still-open member with "landed via
+umbrella #u" and an `item_closed {by: umbrella}` event
+(`close_members_on_settle`); `not_met`, `deferred` and no-outcome leave them
+folded; `unnecessary` closes the umbrella but tags it `needs-human` with the
+members still folded — a wrong `unnecessary` on six findings is the one
+claim the loop should not make alone. `backlog.unfold_umbrella(id, reason)`
+is the human escape hatch. Scorecard row 11 counts all of it; folds and
+duplicates count as closures on row 4.
+
+Triage polls every 15 minutes again (it was raised to an hour on 09-08 as
+the second half of the quarantine fix, for a pass that filed two items per
+item it read). It never opens a round, so it may overlap an autocode round
+or its observation window; two pool slots and the KV gate arbitrate for the
+primary. Autocode's own gate (`_loop_is_free`) is what keeps two rounds
+apart: no worktree open, no promotion under observation, no rollback
+pending, checked at enqueue and again at run.
 
 ### 3.3 For humans (this repo's development)
 
