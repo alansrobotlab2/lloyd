@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 KNOWLEDGE_DIR = Path(os.path.expanduser("~/obsidian/knowledge"))
-LOG_FILE = KNOWLEDGE_DIR / "_log.md"
 
 # Skip these files
 SKIP_FILES = {"KNOWLEDGE_SCHEMA.md", "_log.md", "idle-worker-tasks.md", "knowledge.md"}
@@ -272,13 +271,16 @@ def main():
         for st, count in sorted(type_counts.items()):
             print(f"    {st}: {count}")
 
-    # Append to log if not dry run
+    # This used to append its own line to knowledge/_log.md — a bracketed heading tacked onto
+    # the bottom of the file, which is two of the three defects #873 spent the repair removing,
+    # and the mechanism that re-broke it after the last clean-up. That file has one owner now
+    # (nightly-reflection-knowledge-write, appending through scripts/vault/knowledge_log.py);
+    # a maintenance run that wants a line there calls the helper itself rather than writing the
+    # file directly. This script's own history is git.
     if not DRY_RUN and modified > 0:
-        today = datetime.now().strftime("%Y-%m-%d")
-        log_entry = f"## [{today}] lint | Frontmatter backfill — {modified} pages updated (source_type, domain, segment, last_synthesized)\n"
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(log_entry)
-        print(f"\n  Appended log entry to {LOG_FILE}")
+        print(f"\n  {modified} pages updated — logged in git; for a knowledge/_log.md entry run "
+              f"scripts/vault/knowledge_log.py append --kind lint --text \"Frontmatter backfill — "
+              f"{modified} pages updated\"")
 
 
 if __name__ == "__main__":
