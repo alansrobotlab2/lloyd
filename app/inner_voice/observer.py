@@ -999,6 +999,23 @@ class ObserverState:
     # Harness `max_turns` for this run, so the observer can see the
     # iteration wall coming instead of only learning about it afterwards.
     max_turns: int = 0
+    # The SAME `ContextMeter` the loop relieves against and the `<context>`
+    # anchor reports from. Read-only here. None for a caller that does not
+    # supply one, which is every path but the chat router — and then every
+    # context judgment below reads "unmeasured" and changes nothing.
+    context_meter: Any | None = None
+    # Who this turn is for. `unattended` is `platform in NON_USER_PLATFORMS`,
+    # resolved once at install rather than re-derived per event, and it is
+    # what makes the difference between "deliver the final report" (right for
+    # a chat, wrong for a round — the harness asks for the report itself) and
+    # "commit and gate".
+    platform: str = ""
+    source: str = ""
+    unattended: bool = False
+    # True between a successful `automod_start` and the `automod_land` or
+    # `automod_abort` that closes it. The one terminal stall that matters on
+    # an unattended turn is a turn stopping with a round still open.
+    round_open: bool = False
     turn_started_at: float = field(default_factory=time.perf_counter)
     last_iteration: int = 0
     # Count of benign (non-error, small) tool results seen this turn —
@@ -1324,6 +1341,43 @@ def _iteration_pressure_note(state: ObserverState) -> str:
     )
 
 
+def _context_pressure_note(state: ObserverState) -> str:
+    """Render the context warning when the turn is running out of window."""
+    if not state.cfg.get("context_pressure_enabled", True):
+        return ""
+    cp = _guards.context_pressure(
+        state.context_meter,
+        threshold=float(state.cfg.get("context_pressure_threshold", 0.8)),
+        floor_tokens=_context_floor_tokens(),
+    )
+    if not cp.critical:
+        return ""
+    return _prompt.build_context_pressure_note(
+        cp.used, cp.window, cp.fraction, round_open=state.round_open,
+    )
+
+
+def _platform_note(state: ObserverState) -> str:
+    """One line saying who, if anyone, is reading this turn.
+
+    Round 874's observer told a worker round to "deliver the final report
+    now". Nobody was going to read it: `run_prompt_in_session` takes the
+    harness finalizer's structured outcome, not the turn's prose. The
+    deterministic content replacement in `_apply_decision_guards` is the
+    backstop; this is the half that stops the observer forming the
+    intention in the first place.
+    """
+    if not state.unattended:
+        return ""
+    src = f" (source={state.source})" if state.source else ""
+    return (
+        f"PLATFORM: {state.platform}{src} — no human reads this session; the "
+        f"harness asks for the report itself. Never inject 'deliver the final "
+        f"report'. Assert nothing about the working tree or the repo unless a "
+        f"tool result shown to you says so, and name that result in `reason`."
+    )
+
+
 def _build_event_user_prompt(
     state: ObserverState, event_summary: str,
 ) -> str:
@@ -1346,6 +1400,8 @@ def _build_event_user_prompt(
         persistent_goal=state.persistent_goal,
         prior_turn_interventions=state.prior_turn_interventions,
         iteration_pressure_note=_iteration_pressure_note(state),
+        context_pressure_note=_context_pressure_note(state),
+        platform_note=_platform_note(state),
     )
 
 
@@ -1639,6 +1695,17 @@ _IGNORED_INJECT_REASON_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# The one cancel that is legitimate with no injects behind it, and therefore
+# the one exempt from the unattended gate: the primary is doing damage and
+# stopping it is the point. Everything else on an unattended turn is a
+# judgment about disobedience, which needs something to have been disobeyed.
+_DESTRUCTIVE_CANCEL_REASON_PATTERN = re.compile(
+    r"\b(?:destructive|destroy\w*|rm\s+-rf|data\s+loss|wipe\w*|"
+    r"delet\w+\s+(?:the\s+)?(?:vault|repo|repository|database)|"
+    r"irreversible|unrecoverable|force[- ]?push)\b",
+    re.IGNORECASE,
+)
+
 
 def _apply_decision_guards(
     state: ObserverState,
@@ -1672,6 +1739,34 @@ def _apply_decision_guards(
         ).strip()
         decision.action = "inject"
         decision.bypass_budget = True
+
+    # On an unattended turn the LLM still decides WHETHER to speak; Python
+    # decides what it says.
+    #
+    # Round 874: the observer injected "deliver the final report now" on the
+    # invented premise "working tree clean", and a healthy round was
+    # abandoned at iteration 38 with 44 minutes left. Two things were wrong
+    # and only one of them is fixable by prompting. Nobody reads a worker
+    # turn's prose — `run_prompt_in_session` takes the harness finalizer's
+    # structured outcome — so "deliver the report" is never the right nudge
+    # there, whatever the model believes about the tree. The model's own
+    # words are kept in `reason`, where they are a record of its judgment
+    # rather than an instruction to the primary.
+    if (
+        is_terminal
+        and decision.action == "inject"
+        and state.unattended
+        and bool(state.cfg.get("unattended_terminal_content_deterministic", True))
+    ):
+        original = (decision.content or "").strip()
+        decision.content = (
+            UNATTENDED_ROUND_OPEN_CONTENT if state.round_open
+            else UNATTENDED_TERMINAL_RESCUE_CONTENT
+        )
+        decision.reason = (
+            (decision.reason or "")
+            + f" [unattended: content replaced; observer said {original[:200]!r}]"
+        ).strip()
 
     # Consecutive-inject suppression, across all mid-work triggers.
     if _guards.suppress_consecutive_inject(
@@ -1749,6 +1844,35 @@ def _apply_decision_guards(
     # force-stops the turn for disobedience the primary never had a chance to
     # commit. `injects_primary_has_seen` counts only injects followed by a
     # completed primary iteration.
+    # Cancelling an unattended turn throws away work nobody is watching, so
+    # it needs evidence the primary was actually told something first. The
+    # destructive-loop case is exempt — that one is about stopping damage,
+    # not about disobedience.
+    if (
+        decision.action == "cancel"
+        and state.unattended
+        and not _DESTRUCTIVE_CANCEL_REASON_PATTERN.search(decision.reason or "")
+        and _guards.injects_primary_has_seen(state.decisions_this_turn) == 0
+    ):
+        logger.info(
+            "[iv.observer] downgraded unattended cancel session=%s turn=%s "
+            "trigger=%s reason=%r",
+            state.session_id, state.turn_id, trigger, decision.reason,
+        )
+        _event_log.log_event(
+            state.session_id,
+            "inner_voice.unattended_cancel_downgraded",
+            {"trigger": trigger, "reason": decision.reason},
+            turn_id=state.turn_id,
+        )
+        decision.action = "noop_unattended_cancel_unseen"
+        decision.reason = (
+            (decision.reason or "")
+            + " [downgraded: unattended turn, and the primary has not yet seen "
+            "an inject to disobey]"
+        ).strip()
+        return
+
     if decision.action == "cancel" and _IGNORED_INJECT_REASON_PATTERN.search(
         decision.reason or ""
     ):
@@ -1823,6 +1947,64 @@ def _apply_decision_guards(
 # ---------------------------------------------------------------------------
 
 
+def _context_floor_tokens() -> int:
+    """`harness.context_relief.terminal_floor_tokens` — the loop's own floor.
+
+    Read from the same key the loop reads rather than restated here. The
+    whole point of the shared meter is that the two halves cannot disagree
+    about when a turn is out of room, and a second private default is how
+    that disagreement would come back.
+    """
+    try:
+        from app.config import CONFIG
+
+        return int(((CONFIG.get("harness") or {}).get("context_relief") or {})
+                   .get("terminal_floor_tokens", 12_000))
+    except Exception:  # noqa: BLE001
+        return 12_000
+
+
+def _is_unattended(platform: str) -> bool:
+    """True when nobody is reading this turn's reply.
+
+    `sessions_io.NON_USER_PLATFORMS` is the one definition, imported lazily
+    so the inner_voice package stays importable without an app bootstrap.
+    Fails to False, which keeps the user-facing behaviour on an import error
+    — the observer has always behaved this way and an unattended round is
+    the new case, so the unknown case should be the old one.
+    """
+    if not platform:
+        return False
+    try:
+        from app.sessions_io import NON_USER_PLATFORMS
+    except Exception:  # noqa: BLE001
+        return False
+    return platform in NON_USER_PLATFORMS
+
+
+# What the observer injects on an unattended turn that stops with nothing
+# left to say. The LLM still decides WHETHER to speak; Python decides what
+# the words are.
+#
+# Round 874 is why. The observer injected "deliver the final report now" on
+# the invented premise "working tree clean", the model abandoned a healthy
+# round at iteration 38 with 44 minutes left, and nobody was ever going to
+# read the report it was asked for — `run_prompt_in_session` takes the
+# harness finalizer's structured outcome, not the turn's prose.
+UNATTENDED_TERMINAL_RESCUE_CONTENT = (
+    "You are stopping, and this session has no human reader — the harness "
+    "asks for the report itself, so there is nothing to deliver here. If "
+    "there is work left that you can still finish, do it. If there is not, "
+    "end the turn."
+)
+
+UNATTENDED_ROUND_OPEN_CONTENT = (
+    "A round is open. Do not write a report — the harness asks for one. "
+    "Commit what is in the worktree and call automod_gate, then "
+    "automod_land or automod_abort."
+)
+
+
 def install_observer(
     *,
     hooks: Any,  # HookRegistry
@@ -1843,6 +2025,9 @@ def install_observer(
     prior_turn_interventions: list[dict[str, Any]] | None = None,
     max_turns: int = 0,
     priority: int | None = None,
+    context_meter: Any | None = None,
+    platform: str = "",
+    source: str = "",
 ) -> ObserverState:
     """Install observer hooks onto a HookRegistry for one primary turn.
 
@@ -1901,18 +2086,42 @@ def install_observer(
         prior_turn_interventions=list(prior_turn_interventions or []),
         priority=priority,
         max_turns=int(max_turns or 0),
+        context_meter=context_meter,
+        platform=platform or "",
+        source=source or "",
+        unattended=_is_unattended(platform),
     )
     fast_path_enabled = bool(cfg.get("fast_path_enabled", True))
     pretool_llm_enabled = bool(cfg.get("pretool_llm_enabled", False))
     async_nonterminal = bool(cfg.get("async_nonterminal", True))
     sample_every = int(cfg.get("tool_result_sample_every", 5))
     escalate_bytes = int(cfg.get("tool_result_escalate_bytes", 20000))
+    # An unattended turn is sampled less and escalates later. The observer
+    # runs on the PRIMARY at the watched turn's priority, in front of
+    # whatever a human is typing, and a worker round produces long benign
+    # results all day: a pytest tail clears the 20k escalate threshold and
+    # buys an LLM call that says nothing. Applied at install, so a chat turn
+    # is byte-for-byte unchanged.
+    if _is_unattended(platform):
+        sample_every = int(cfg.get("unattended_tool_result_sample_every", 10))
+        escalate_bytes = int(
+            cfg.get("unattended_tool_result_escalate_bytes", 60000))
     repetition_enabled = bool(cfg.get("repetition_guard_enabled", True))
     repetition_window = int(cfg.get("repetition_window", _guards.REPETITION_WINDOW))
     repetition_threshold = int(
         cfg.get("repetition_threshold", _guards.REPETITION_THRESHOLD)
     )
+    # Merged over the built-in set rather than replacing it: config adds a
+    # polling tool, it does not un-exempt `automod_gate_wait`.
+    repetition_exempt = _guards.REPETITION_EXEMPT_TOOLS | frozenset(
+        str(x) for x in (cfg.get("repetition_exempt_tools") or [])
+    )
     silent_limit = int(cfg.get("silent_iterations_before_review", 10))
+    context_pressure_enabled = bool(cfg.get("context_pressure_enabled", True))
+    context_pressure_threshold = float(cfg.get("context_pressure_threshold", 0.8))
+    # ONE floor for the loop and the observer. Two would mean the observer
+    # speaking into a turn the loop has already decided to end.
+    context_floor_tokens = _context_floor_tokens()
     async_timeout = float(cfg.get("async_timeout_seconds", 12.0))
     # One more than the widest comparison window so the window is always
     # fully populated even when `repetition_window` is raised past the floor.
@@ -2024,6 +2233,7 @@ def install_observer(
                 # them, and after a fire `comparable` is too short to tell —
                 # which is how an automod round's worktree id kept matching.
                 ambient=_guards.ubiquitous_identifiers(state.recent_tool_calls),
+                exempt_tools=repetition_exempt,
             )
             if rep is not None:
                 state.repetition_baseline = state.tool_calls_seen
@@ -2138,6 +2348,32 @@ def install_observer(
                 # its decision is visible to the guards below.
                 await _drain_pending()
 
+                # Nothing the observer says here can be acted on: the loop
+                # would have to send another request and there is no room to
+                # answer in. Round 875 reached exactly this point at 241k of
+                # 262,144 tokens, was injected into, and spent its last
+                # iteration on a completion the window truncated. The loop
+                # drops such an inject on the same floor; skipping the LLM
+                # call as well saves a primary request in front of whatever
+                # a human is typing.
+                if context_pressure_enabled:
+                    cp = _guards.context_pressure(
+                        state.context_meter,
+                        threshold=context_pressure_threshold,
+                        floor_tokens=context_floor_tokens,
+                    )
+                    if cp.exhausted:
+                        await _persist(state, ObserverDecision(
+                            action="noop_context_exhausted",
+                            reason=(
+                                f"context exhausted: {cp.used} of {cp.window} "
+                                f"tokens used, under the "
+                                f"{context_floor_tokens}-token floor — an "
+                                f"inject here cannot be answered"
+                            ),
+                        ), trigger="assistant_message")
+                        return
+
             # Track the run of iterations with no user-visible text. Reset
             # the moment the primary says anything.
             if tool_calls and not text.strip():
@@ -2229,6 +2465,17 @@ def install_observer(
                 state.tool_calls_this_turn.append(tool_name)
                 if len(state.tool_calls_this_turn) > 32:
                     state.tool_calls_this_turn = state.tool_calls_this_turn[-32:]
+
+            # Is a round open? The one terminal stall worth rescuing on an
+            # unattended turn is a turn stopping with uncommitted work in a
+            # worktree, and that is the only signal that says so. Keyed on a
+            # non-error result, because a refused `automod_start` opens
+            # nothing.
+            bare_tool = tool_name.rsplit("__", 1)[-1]
+            if bare_tool == "automod_start" and not is_error:
+                state.round_open = True
+            elif bare_tool in ("automod_land", "automod_abort") and not is_error:
+                state.round_open = False
 
             # Plan A.5 — mid-turn TodoWrite refresh + flip detection. The
             # static reference TODOS block in IV's prompt is sourced from

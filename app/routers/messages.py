@@ -924,6 +924,11 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         except Exception as e:
             logger.warning(f"_iv_persist_intervention_cb({kind}) failed: {e}")
 
+    # Resolved here rather than threaded in: `_run_turn` is reached from the
+    # stream endpoint and from the ambient producer, and both already have
+    # the session id. One read of the session file, same answer either way.
+    run_platform, run_source = _session_identity(session_id)
+
     iv_observer_state = await attach_observer_for_turn(
         session_id=session_id,
         turn_id=turn.turn_id,
@@ -940,6 +945,11 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         todos=_load_session_todos(session_id),
         plan_artifact=_load_session_plan(session_id),
         persistent_goal=_load_session_goal(session_id),
+        # The session's own identity, already resolved above for the grant
+        # gate. What makes the observer's unattended profile possible at all:
+        # "deliver the final report" is right for a chat and wrong for a
+        # round, and only the platform tells the two apart.
+        platform=run_platform, source=run_source,
     )
 
     # Background-task completion drain. Calls the internal MCP tool
