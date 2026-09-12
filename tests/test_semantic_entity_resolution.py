@@ -32,8 +32,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parent.parent
 MEMORY = ROOT / "scripts" / "memory"
 sys.path.insert(0, str(ROOT))
@@ -115,8 +113,15 @@ def test_generation_yields_no_date_shaped_pair():
 
 
 def test_filter_does_not_drop_real_duplicates():
-    """The filter removes shapes, not candidates: a genuine variant survives."""
+    """Generation keeps a genuine variant, and only about generation.
+
+    This pair scores below the default floor, so surviving the FILTER does not
+    mean it gets judged — selection is a separate rule, pinned by
+    test_no_candidate_below_the_floor_is_selected and by the main() tests below.
+    """
     assert KEEP_PAIR in _pairs(_candidates())
+    selected, _above = ser.select_candidates(_candidates())
+    assert KEEP_PAIR not in {(c["a"], c["b"]) for c in selected}
 
 
 # ---------------------------------------------------------------------------
@@ -412,13 +417,141 @@ def test_sweep_tolerates_a_missing_ledger_and_missing_proposals(tmp_path, capsys
 
 
 # ---------------------------------------------------------------------------
+# the whole run, driven through main()
+#
+# Everything above tests functions; the acceptance clauses are about FILES a run
+# writes and the LINE a run prints, and the only code that produces those is
+# main(). These three drive main() with every production path and every external
+# call redirected into tmp_path — argv in, candidate file, proposals and the
+# summary line out.
+# ---------------------------------------------------------------------------
+
+# Synthetic pool, sized so each pair's fate is decided by the two rules under
+# test rather than by bucketing: all three groups share a 5-char normalized
+# prefix, and the neighbor sets give the first group exactly the 3 shared
+# neighbors that lift it over the floor (0.75 jaccard + 1.0 stem + 3.0 = 4.75).
+# score = jaccard*3 + (1.0 if shares_stem) + min(shared_neighbors,10)*0.3, and
+# `pipeline`/`agent` are name stopwords, so the first pair tokenizes identically
+# (jaccard 1.0) and shares 4 neighbors → 3.0 + 1.0 + 1.2 = 5.2. The qwen pair
+# keeps its 4th token ("cloning"), so jaccard 0.75 → 3.25: a real pair the floor
+# leaves out until --min-score says otherwise.
+RUN_ENTITIES = [
+    "intel-pipeline-config",          # real entity
+    "intel-agent-pipeline-config",    # its real variant — clears the floor (5.2)
+    "intel-pipeline-config.md",       # the twin — also 5.2, must never be judged
+    "qwen3-tts-voice",                # real entity
+    "qwen3-tts-voice cloning",        # real variant, 3.25: under the floor
+]
+
+RUN_NEIGHBORS = {
+    "intel-pipeline-config": {"n1", "n2", "n3", "n4", "n5"},
+    "intel-agent-pipeline-config": {"n1", "n2", "n3", "n4", "n6"},
+    "intel-pipeline-config.md": {"n1", "n2", "n3", "n4", "n7"},
+}
+
+INTEL_PAIR = {"intel-pipeline-config", "intel-agent-pipeline-config"}
+QWEN_PAIR = {"qwen3-tts-voice", "qwen3-tts-voice cloning"}
+
+
+def _drive_main(tmp_path, monkeypatch, argv, confidence=0.93):
+    """Run the real main() against tmp_path. Returns the pairs it judged."""
+    monkeypatch.setattr(ser, "PIPELINE_ROOT", tmp_path)
+    monkeypatch.setattr(ser, "CANDIDATE_LOG", tmp_path / "semantic-entity-candidates-2099-01-01.jsonl")
+    monkeypatch.setattr(ser, "JUDGMENT_LOG", tmp_path / "judgments.jsonl")
+    monkeypatch.setattr(ser, "PROPOSAL_LOG", tmp_path / "semantic-proposals-2099-01-01.jsonl")
+    monkeypatch.setattr(ser, "PROPOSAL_CUMULATIVE", tmp_path / "semantic-proposals-cumulative.jsonl")
+    monkeypatch.setattr(ser, "PROPOSAL_LATEST", tmp_path / "semantic-proposals-latest.jsonl")
+    # Store, facts and verdicts are the outside world; the run under test must
+    # not read or write any of them.
+    monkeypatch.setattr(ser, "list_entities", lambda: list(RUN_ENTITIES))
+    monkeypatch.setattr(ser, "load_aliases", lambda: {})
+    monkeypatch.setattr(ser, "load_graph", lambda: {"edges": []})
+    monkeypatch.setattr(ser, "build_neighbors", lambda graph: dict(RUN_NEIGHBORS))
+    # `already_aliased` is nested inside generate_candidates and reaches for the
+    # KG store through this global; with no store it falls back to name equality,
+    # which keeps the run off the live database entirely.
+    monkeypatch.setattr(ser, "get_store", lambda: None, raising=False)
+    monkeypatch.setattr(ser, "count_facts", lambda entity: 0)
+    monkeypatch.setattr(ser, "load_verdict_cache", lambda *a, **k: {})
+    monkeypatch.setattr(ser, "append_verdict", lambda rec, *a, **k: None)
+    monkeypatch.setattr(ser, "_definition", lambda entity: "a definition")
+    judged = []
+
+    def fake_judge(pair, endpoint, model, timeout):
+        judged.append({pair["a"], pair["b"]})
+        return {"verdict": "same", "confidence": confidence, "reason": "test"}
+
+    monkeypatch.setattr(ser, "judge_pair", fake_judge)
+    monkeypatch.setattr(sys, "argv", ["semantic-entity-resolution.py", *argv])
+    assert ser.main() == 0
+    return judged
+
+
+def test_run_writes_a_clean_pool_judges_only_above_the_floor_and_reports_it(
+        tmp_path, monkeypatch, capsys):
+    """clauses 3, 4, 5 and 7, through the code a run actually executes."""
+    judged = _drive_main(tmp_path, monkeypatch, [])
+    out = capsys.readouterr().out
+
+    # clause 3 — the file main wrote, measured by the cited check.
+    pool = tmp_path / "semantic-entity-candidates-2099-01-01.jsonl"
+    tot, md, dt = _run_cited_check(pool)
+    assert tot == 2, [json.loads(l) for l in pool.read_text().splitlines()]
+    assert (md, dt) == (0, 0)
+
+    # clause 5 — the 4.75 artifact twin is absent AND the 1.75 real pair is
+    # unjudged: the floor, not the filter, is what left the pair out.
+    assert judged == [INTEL_PAIR]
+    assert QWEN_PAIR not in judged
+
+    # clause 7 — one line, three numbers, printed by main.
+    summary = [l for l in out.splitlines() if l.startswith("[summary]")]
+    assert len(summary) == 1, out
+    assert "newly_judged=1" in summary[0]
+    assert "from_cache=0" in summary[0]
+    assert "above_floor_remaining=0" in summary[0]
+
+    # clause 4 — what the sweep will be handed.
+    seen = sweep.load_semantic_proposals(tmp_path)
+    assert [p["canonical"] for p in seen] == ["intel-pipeline-config"]
+    for p in seen:
+        assert not p["canonical"].endswith(".md") and not p["variant"].endswith(".md")
+
+
+def test_min_score_zero_from_the_command_line_judges_the_low_scoring_pair(
+        tmp_path, monkeypatch, capsys):
+    """clause 6 at the seam that matters: argv, not a call into a helper."""
+    judged = _drive_main(tmp_path, monkeypatch, ["--min-score", "0"])
+    out = capsys.readouterr().out
+    assert QWEN_PAIR in judged, "the floor is not a knob if 0 does not open the tail"
+    assert len(judged) == 2, judged
+    assert "newly_judged=2" in out
+
+
+def test_limit_cuts_the_eligible_head_and_reports_what_is_left(
+        tmp_path, monkeypatch, capsys):
+    """`--limit` after the floor, so the remaining number means backlog."""
+    judged = _drive_main(tmp_path, monkeypatch, ["--min-score", "0", "--limit", "1"])
+    out = capsys.readouterr().out
+    assert judged == [INTEL_PAIR], "the slice must take the highest-scoring eligible pair"
+    assert "above_floor_remaining=1" in out, "the 1.75 pair is eligible and left over"
+
+
+# ---------------------------------------------------------------------------
 # clause 11 + 12: the docs match the box
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not VAULT_SKILL.exists(), reason="vault not present on this box")
 def test_skill_states_the_measured_pool_limit_and_timeout():
-    """clause 11."""
+    """clause 11.
+
+    No skip marker on the two doc tests: they are the only thing standing between
+    a reader and clauses 11/12, so a missing vault has to be a failure. A skip
+    would let the contract pass by not being checked.
+    """
+    assert VAULT_SKILL.exists(), (
+        f"{VAULT_SKILL} is absent, and clause 11 of #879 is a claim about that "
+        "file — refusing to treat an unchecked claim as a pass")
     text = VAULT_SKILL.read_text(encoding="utf-8")
     assert "566,170" in text
     assert "--limit 2000" in text
@@ -427,9 +560,9 @@ def test_skill_states_the_measured_pool_limit_and_timeout():
         assert stale not in text, f"skill still carries {stale!r}"
 
 
-@pytest.mark.skipif(not VAULT_SKILL.exists(), reason="vault not present on this box")
 def test_skill_says_propose_only_and_drops_the_shrinking_pool_claim():
-    """clause 12 — the skill."""
+    """clause 12 — the skill. See the note on the test above about the skip."""
+    assert VAULT_SKILL.exists(), "vault skill absent; clause 12 cannot be checked"
     text = VAULT_SKILL.read_text(encoding="utf-8")
     assert "propose-only" in text
     assert "cannot shrink" in text
