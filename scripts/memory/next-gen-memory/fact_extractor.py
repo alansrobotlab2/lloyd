@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import Any
 
 # Shared entity normalization (case-insensitive alias resolution + self-register).
-# The facts tree uses <VAULT_FACTS_ROOT>/entity-aliases.json as the source of truth;
-# without normalization, writers accumulate duplicate dirs (gr00t/ + GR00T/).
+# Names resolve against the `aliases` table in app.kg_store, never against the
+# legacy <VAULT_FACTS_ROOT>/entity-aliases.json export — a frozen migration
+# snapshot that reads as ~5x the live table (#474). Without normalization,
+# writers accumulate duplicate dirs (gr00t/ + GR00T/).
 _LLOYD_ROOT = Path(__file__).resolve().parents[3]
 if str(_LLOYD_ROOT) not in sys.path:
     sys.path.insert(0, str(_LLOYD_ROOT))

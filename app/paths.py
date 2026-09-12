@@ -43,8 +43,16 @@ VAULT_KG_DB = Path(os.environ["LLOYD_KG_DB"]) if os.environ.get("LLOYD_KG_DB") \
 RESEARCH_DB = Path(os.environ["LLOYD_RESEARCH_DB"]) if os.environ.get("LLOYD_RESEARCH_DB") \
     else LLOYD_HOME / "research.db"
 
-# Legacy alias map. Since the 2026-09 store migration this is only an export
-# target (backups, diffs) — readers and writers go through app.kg_store.
+# The legacy alias map, and a warning about its shape. The live alias table is
+# `aliases` in app.kg_store (SQLite); this path is NOT an export target any
+# more (#474). Store.export_json() is called only by the one-shot migration and
+# by the pre-rebuild freeze, and both write timestamped dirs under
+# _pipeline/backups/ — because a snapshot that sits inside the tree it claims to
+# describe gets read as that tree. The copy that used to live here was written
+# once on 2026-09-03 and never refreshed, and every alias "defect" since was
+# measured off it at ~5x the live table. The constant stays so
+# kg_migrate_to_sqlite's `--aliases` default can still name a pre-migration file;
+# nothing in the running system writes or reads this path.
 VAULT_FACTS_ALIASES = VAULT_FACTS_ROOT / "entity-aliases.json"
 VAULT_SESSIONS_DIR = VAULT_DERIVED_ROOT / "sessions"
 # Background sessions export here instead, and the split is about the qmd
