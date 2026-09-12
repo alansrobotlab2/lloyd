@@ -139,7 +139,9 @@ def test_the_prompt_names_the_vocabulary_and_forbids_done():
                                    "verdict": "confirmed"}],
                           items=[_item(1, "up_next")], n_open=5, since_ts=0)
     for phrase in ("`draft`", "`up_next`", "`in_progress`", "`done` is NOT yours",
-                   "next_pick", "#1 [up_next]", "backlog_triage"):
+                   "next_pick", "#1 [up_next]", "backlog_triage",
+                   # the rule the first dry-run missed, and the umbrella/member split
+                   "A triage verdict moves the item", "An `umbrella` is an ordinary confirmed item"):
         assert phrase in text, phrase
     assert len(text) < 20_000
 

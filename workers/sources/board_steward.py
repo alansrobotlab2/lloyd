@@ -111,6 +111,15 @@ said `met`; you never propose it. An item that looks finished but has no such \
 landing stays where it is with a note.
 
 The rules the state machine applied, which you now apply with judgment:
+- **A triage verdict moves the item.** `backlog_triage` with `confirmed` \
+puts it in `up_next` — whatever it is now, unless a round is in flight or a \
+human moved it since. `already_done` and `stale` close it, which is not \
+yours to do. Any other verdict leaves it `draft`. An item that is `draft` \
+with a `confirmed` verdict and no later event is the commonest move on this \
+board, and the first dry-run missed exactly that (#898).
+- An `umbrella` is an ordinary confirmed item: it goes to `up_next` and the \
+loop implements it. Its `members` (tagged `grouped`) are the ones that stay \
+`draft` — the umbrella carries them. Do not confuse the two.
 - A `backlog_implement` `started` with nothing after it is a round in flight: \
 `in_progress`. A round that ended with a promotion that `settled` and an \
 outcome of `met` closes by itself; `not_met` / `deferred` leave it `up_next` \
