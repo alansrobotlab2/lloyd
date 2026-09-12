@@ -61,18 +61,41 @@ def test_parse_clamps_and_tolerates_junk():
 # agreement with the state machine
 # ---------------------------------------------------------------------------
 
-def test_agreement_separates_agree_extra_and_missed():
+def test_agreement_separates_agree_disagree_abstain_and_missed():
+    """The first dry-run counted the machine's deliberate abstentions (the
+    stranded landings it parks for a human) as the steward being wrong. They
+    are different things and are scored apart."""
     expected = {1: ("up_next", "why"), 2: ("draft", "why", True), 3: ("in_progress", "why")}
     current = {1: "draft", 2: "up_next", 3: "up_next", 4: "draft"}
     moves = [{"item_id": 1, "status": "up_next"},    # agrees
-             {"item_id": 2, "status": "up_next"},    # machine says draft: extra
-             {"item_id": 4, "status": "up_next"}]    # machine has no opinion: extra
+             {"item_id": 2, "status": "up_next"},    # machine says draft: disagree
+             {"item_id": 4, "status": "up_next"}]    # machine has no opinion
     a = W.agreement(moves, expected, current)
     assert a["agree"] == [1]
-    assert a["extra"] == [2, 4]
+    assert a["disagree"] == [2]
+    assert a["no_opinion"] == [4]
     assert a["missed"] == [2, 3]
     assert a["machine_moves"] == 3
-    assert 0 < a["rate"] < 1
+    # rate is over decisions both sides made: {1,2,3} judged, 1 agrees
+    assert a["rate"] == pytest.approx(1 / 3)
+
+
+def test_the_steward_is_shown_every_pending_machine_move():
+    """#898: confirmed, parked in draft, wanted in up_next by the machine —
+    and invisible to the steward because nothing recent had touched it."""
+    items = [_item(898, "draft"), _item(2, "up_next"), _item(5, "draft")]
+    shown = W.board_view(items, touched=set(), pending={898}, max_items=10)
+    assert [i.id for i in shown] == [2, 898]
+
+
+def test_events_include_each_shown_items_own_history(tmp_path):
+    ledger = tmp_path / "l.jsonl"
+    rows = [{"event": "backlog_triage", "ts": 1, "item_id": 898, "verdict": "confirmed"},
+            {"event": "backlog_triage", "ts": 2, "item_id": 7, "verdict": "stale"},
+            {"event": "backlog_implement", "ts": 100, "item_id": 3, "phase": "started"}]
+    ledger.write_text("\n".join(json.dumps(r) for r in rows))
+    out = W.events_since(ledger, since_ts=50, for_items={898})
+    assert [e["item_id"] for e in out] == [898, 3], "898's old triage rides along; 7's does not"
 
 
 def test_agreement_is_perfect_when_nothing_should_move():

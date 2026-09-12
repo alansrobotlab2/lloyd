@@ -120,6 +120,16 @@ that was down, a pre-existing red test, a rebase conflict) has NOT spent the \
 item: `up_next`. A round that spent its one attempt on a judgment of the \
 change — a review refusal twice, `spent` — goes back to `draft` with the tag \
 `needs-human`; the tag comes off with any move back into the pool.
+- **A landed item that is waiting on a person stays where it is.** An \
+`item_landed` with `closed=false` and a reason naming what a person still \
+owes it (a post-landing check, a human clause, a `human_paths` entry) is \
+held deliberately — the code is live and the item is open for someone to \
+confirm. It is not "stuck in_progress"; propose no move and say so in your \
+summary if you think the vocabulary is wrong for it.
+- `spent` is spent. An item whose one attempt was consumed by a verdict on \
+the change (`spent` in an outcome, "a human decides" in its status reason) \
+goes to `draft` with `needs-human` and stays there until a human reopens it. \
+Do not send it back to `up_next` because the outcome looks recoverable.
 - A `rollback_succeeded` naming a landing's commit reopens its item: `up_next`.
 - An item tagged `grouped` (folded into an umbrella) stays `draft` whatever \
 its own history; the umbrella carries it.
@@ -173,13 +183,18 @@ def _write_state(d: dict) -> None:
 
 # ── input ────────────────────────────────────────────────────────────────
 
-def events_since(ledger: Path, since_ts: float, *, limit: int = DEFAULT_MAX_EVENTS) -> list[dict]:
-    """Shown events newer than `since_ts`, oldest first, bounded from the end."""
-    out: list[dict] = []
+def events_since(ledger: Path, since_ts: float, *, limit: int = DEFAULT_MAX_EVENTS,
+                 for_items: set[int] = frozenset(), per_item: int = 6) -> list[dict]:
+    """Shown events newer than `since_ts`, oldest first, bounded from the end
+    — plus, for each id in `for_items`, its last `per_item` events whatever
+    their age. An item the steward is shown with none of its history is one it
+    can only guess about."""
+    recent: list[dict] = []
+    history: dict[int, list[dict]] = {i: [] for i in for_items}
     try:
         lines = ledger.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return out
+        return recent
     for line in lines:
         try:
             d = json.loads(line)
@@ -187,10 +202,20 @@ def events_since(ledger: Path, since_ts: float, *, limit: int = DEFAULT_MAX_EVEN
             continue
         if d.get("event") not in _SHOWN_EVENTS:
             continue
-        if float(d.get("ts") or 0) <= since_ts:
-            continue
-        out.append(d)
-    return out[-limit:]
+        iid = d.get("item_id")
+        if isinstance(iid, int) and iid in history:
+            history[iid].append(d)
+        if float(d.get("ts") or 0) > since_ts:
+            recent.append(d)
+    out = recent[-limit:]
+    have = {id(d) for d in out}
+    for rows in history.values():
+        for d in rows[-per_item:]:
+            if id(d) not in have:
+                out.append(d)
+                have.add(id(d))
+    out.sort(key=lambda d: float(d.get("ts") or 0))
+    return out
 
 
 def _event_line(d: dict) -> str:
@@ -207,13 +232,27 @@ def _event_line(d: dict) -> str:
     return f"{ts} " + " ".join(parts)
 
 
-def board_view(items: list[Any], touched: set[int], *, max_items: int = DEFAULT_MAX_ITEMS) -> list[Any]:
-    """Which open items the steward sees: everything in the pool, plus drafts
-    an event touched or a human flagged. Bounded, pool first."""
+def board_view(items: list[Any], touched: set[int], *, max_items: int = DEFAULT_MAX_ITEMS,
+               pending: set[int] = frozenset()) -> list[Any]:
+    """Which open items the steward sees: everything in the pool, every item
+    the state machine has a pending move for, then drafts an event touched or
+    a human flagged. Bounded, in that order.
+
+    `pending` is the fix for the first dry-run's one miss: #898 was a
+    confirmed item parked in `draft` that the machine wanted in `up_next`,
+    and the steward never proposed it because its triage event was older
+    than the event window and nothing else had touched it. The steward
+    cannot move what it is not shown, and a comparison against a machine
+    that sees the whole board has to show it at least what the machine is
+    about to act on.
+    """
     pool = [i for i in items if i.status in ("up_next", "in_progress")]
-    rest = [i for i in items if i.status not in ("up_next", "in_progress")
+    seen = {i.id for i in pool}
+    due = [i for i in items if i.id in pending and i.id not in seen]
+    seen |= {i.id for i in due}
+    rest = [i for i in items if i.id not in seen
             and (i.id in touched or "needs-human" in (i.tags or []))]
-    return (pool + rest)[:max_items]
+    return (pool + due + rest)[:max_items]
 
 
 def _item_line(i: Any) -> str:
@@ -283,15 +322,23 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
     """
     proposed = {m["item_id"]: m["status"] for m in moves}
     agree = [i for i, s in proposed.items() if i in expected and expected[i][0] == s]
-    extra = [i for i, s in proposed.items()
-             if i not in expected or expected[i][0] != s]
+    # Two different things the first dry-run counted as one. `disagree` is
+    # the machine saying A and the steward B — a real conflict. `no_opinion`
+    # is the machine deliberately leaving an item where it is (the stranded
+    # landings it parks `in_progress` for a human) and the steward having a
+    # view; that is not the steward being wrong, it is the machine abstaining.
+    disagree = [i for i, s in proposed.items() if i in expected and expected[i][0] != s]
+    no_opinion = [i for i, s in proposed.items() if i not in expected]
     missed = [i for i, want in expected.items()
               if current.get(i) != want[0] and proposed.get(i) != want[0]]
     machine_moves = [i for i, want in expected.items() if current.get(i) != want[0]]
-    denom = len(set(proposed) | set(machine_moves))
-    return {"agree": sorted(agree), "extra": sorted(extra), "missed": sorted(missed),
+    # Rate over the decisions BOTH sides made: the machine's pending moves and
+    # the steward's moves on items the machine has an opinion about.
+    judged = set(machine_moves) | {i for i in proposed if i in expected}
+    return {"agree": sorted(agree), "disagree": sorted(disagree),
+            "no_opinion": sorted(no_opinion), "missed": sorted(missed),
             "machine_moves": len(machine_moves), "proposed": len(proposed),
-            "rate": (len(agree) / denom) if denom else 1.0}
+            "rate": (len(agree) / len(judged)) if judged else 1.0}
 
 
 def apply_moves(moves: list[dict], *, round_id: str = "") -> list[dict]:
@@ -338,10 +385,18 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     since_ts = float(state.get("last_ts") or 0.0)
     ledger = S.LEDGER_PATH
 
-    events = await asyncio.to_thread(events_since, ledger, since_ts, limit=int(p.get("max_events", DEFAULT_MAX_EVENTS)))
     open_items = await asyncio.to_thread(B.open_items, None)
-    touched = {int(d["item_id"]) for d in events if str(d.get("item_id") or "").isdigit()}
-    shown = board_view(open_items, touched, max_items=int(p.get("max_items", DEFAULT_MAX_ITEMS)))
+    expected = await asyncio.to_thread(B.desired_statuses, ledger)
+    current = {i.id: i.status for i in open_items}
+    pending = {i for i, want in expected.items() if current.get(i) != want[0]}
+    recent = await asyncio.to_thread(events_since, ledger, since_ts,
+                                     limit=int(p.get("max_events", DEFAULT_MAX_EVENTS)))
+    touched = {int(d["item_id"]) for d in recent if str(d.get("item_id") or "").isdigit()}
+    shown = board_view(open_items, touched, max_items=int(p.get("max_items", DEFAULT_MAX_ITEMS)),
+                       pending=pending)
+    events = await asyncio.to_thread(events_since, ledger, since_ts,
+                                     limit=int(p.get("max_events", DEFAULT_MAX_EVENTS)),
+                                     for_items={i.id for i in shown})
     if not events and not any(i.status in ("up_next", "in_progress") for i in shown):
         return {"status": "skipped", "summary": "nothing happened since the last pass"}
 
@@ -370,8 +425,6 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         return {"status": "failed", "summary": f"no structured answer: {run.get('structured_error')}",
                 "meta": {"session_id": run.get("session_id")}}
 
-    expected = await asyncio.to_thread(B.desired_statuses, ledger)
-    current = {i.id: i.status for i in open_items}
     agree = agreement(parsed["moves"], expected, current)
 
     applied: list[dict] = []
@@ -397,7 +450,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     return {"status": "success",
             "summary": (f"{len(parsed['moves'])} move(s) {verb}, agreement "
                         f"{agree['rate']:.0%} ({len(agree['agree'])} agree, "
-                        f"{len(agree['extra'])} own, {len(agree['missed'])} missed); "
+                        f"{len(agree['disagree'])} disagree, {len(agree['no_opinion'])} "
+                        f"where the machine abstains, {len(agree['missed'])} missed); "
                         f"next pick #{parsed['next_pick'] or '—'}: {parsed['summary']}"),
             "meta": {"session_id": run.get("session_id"), "agreement": agree}}
 
