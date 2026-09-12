@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "scripts" / "memory"))
 from app.kg_store import KGStore  # noqa: E402
@@ -132,12 +134,47 @@ def test_an_absent_store_is_refused_not_audited_as_empty(tmp_path):
     assert not dest.exists()
 
 
-def test_the_default_out_dir_is_anchored_to_the_store_not_to_home():
-    """--db follows app.paths (and LLOYD_KG_DB); a home-anchored --out-dir let a
-    worktree or canary run join the live reverted artifact to a different store and
-    write its verdict into production _pipeline/memory-graph."""
-    from app.paths import VAULT_KG_DB
-    assert emd.OUT_DIR == VAULT_KG_DB.parents[1] / "memory-graph"
+SWEEP = ROOT / "scripts" / "memory" / "entity-resolution-sweep.py"
+
+
+def test_the_two_tools_default_to_the_same_report_directory():
+    """The audit discovers which runs dispositioned a pair by globbing the sweep's
+    own report directory and reading each report's `plan_file`. Two anchors — the
+    sweep home-anchored, the audit checkout-anchored — and every applied pair reads
+    as unaccounted from a worktree or canary run."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ers_out_dir", str(SWEEP))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert emd.OUT_DIR == mod.OUT_DIR == mod.BASELINE_PATH.parent
+
+
+def test_a_real_sweep_apply_is_the_disposition_the_audit_reports(tmp_path):
+    """The seam between the two processes: one run writes the alias row and the
+    report it names, a separate later process reads the store and the report
+    directory to answer "who applied this pair". Neither half can fake that join,
+    and it is the only test that the stamped report_path is findable by whoever has
+    to answer the question in production."""
+    root = tmp_path / "facts"; root.mkdir()
+    for name in ("vLLM", "vllm"):
+        d = root / name; d.mkdir()
+        fm = {"type": "facts", "entity": name, "category": "state",
+              "facts": [{"entity": name, "fact": f"{name} exists.", "confidence": 0.9,
+                         "category": "state"}]}
+        (d / f"{name}-state.md").write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {name}\n")
+    db, out = tmp_path / "kg.sqlite", tmp_path / "mg"; out.mkdir()
+    (out / "entity-merges-reverted-20260903T174108Z.json").write_text(
+        json.dumps({"plan": [{"variant": "vllm", "canonical": "vLLM"}]}))
+    r = subprocess.run([sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
+                        "--out-dir", str(out), "--no-gate", "--apply"],
+                       capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, r.stdout + r.stderr
+    a = _audit(db, out, out / "disposition.json")
+    assert a.returncode == 0, a.stdout + a.stderr
+    d = json.loads((out / "disposition.json").read_text())
+    assert d["counts"] == {"applied": 1, "declined": 0, "unaccounted": 0}, d["counts"]
+    assert d["entries"][0]["detail"]["origin"] == "sweep"
+    assert Path(d["entries"][0]["detail"]["report_path"]).is_file()
 
 
 def test_a_run_that_never_applied_proves_nothing_about_the_reverted_pairs(tmp_path):

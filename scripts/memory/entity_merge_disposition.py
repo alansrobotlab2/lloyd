@@ -36,11 +36,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.kg_store import KGStore, StoreUnavailable  # noqa: E402
 from app.paths import VAULT_KG_DB  # noqa: E402
 
-# Anchored to the store it reads, not to $HOME: `--db` honours LLOYD_KG_DB and
-# `app.paths` is checkout-anchored, so a home-anchored default would let a
-# canary or worktree run join the live reverted artifact to some other (or empty)
-# store and write its verdict into production `_pipeline/memory-graph`.
-OUT_DIR = VAULT_KG_DB.parents[1] / "memory-graph"
+# MUST be the same directory `entity-resolution-sweep.py` writes its apply
+# reports to: the audit discovers the runs that dispositioned a pair by globbing
+# `entity-merges-applied-*.json` here and reading each report's `plan_file`, so
+# any other anchor makes the two tools disagree about where the evidence lives and
+# the audit silently reports applied pairs as unaccounted. Pinned against the
+# sweep's own constant in tests/test_entity_merge_disposition.py. The store is not
+# assumed: an absent --db is refused rather than opened as an empty one.
+OUT_DIR = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
 
 # Origins that arrive from somewhere other than a gated apply: the 2026-09-03
 # SQLite migration, the schema-declared naming layer, test fixtures. `revert` is

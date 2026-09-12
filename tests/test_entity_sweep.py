@@ -338,6 +338,24 @@ def test_a_clean_apply_does_not_report_itself_as_bypassed(tmp_path):
     assert safety["degraded_graph"] == "not degraded"
 
 
+def test_an_apply_with_the_gate_on_reports_itself_as_not_bypassed(tmp_path):
+    """`_run` hardcodes --no-gate, so every other end-to-end test here can only
+    ever produce `no_gate: true`. The state the 09-03 apply needed to be caught in
+    — a real run, gate up, saying so — has to be produced by the CLI too, or the
+    report's most important field is only ever exercised in its bypassed form.
+    --tiers excludes the suffix tier, so the gate is constructed and consulted
+    nowhere: no judge is asked, no HTTP."""
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    r = subprocess.run([sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
+                        "--out-dir", str(out), "--apply", "--tiers", "PUNCT,CASE"],
+                       capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, r.stdout + r.stderr
+    safety = _applied_report(out)["safety"]
+    assert safety["no_gate"] is False, safety
+    assert safety["gate_verdict"].startswith("ran"), safety
+    assert safety["allow_degraded"] is False
+
+
 def test_safety_record_names_the_gate_verdict_whichever_way_the_gate_ran():
     """`gate_verdict` is the one line a reviewer reads to know whether the suffix
     tier was judged at all, so each way the gate can go has to read differently."""
