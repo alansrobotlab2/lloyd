@@ -48,12 +48,16 @@ EXPORTER_HOME = "app/kg_store.py"
 # never appear.
 SCHEDULED_PIPELINE_DIR = "scripts/memory/next-gen-memory"
 
-# The claim that must not exist in code: naming the JSON as authoritative.
-# Mirrors the acceptance grep, including the words that mark a mention as
-# knowingly-historical (a line may name the file as a stray/backup/legacy/
-# snapshot; it may not call it the source of truth).
-STALE_HOOD_WORDS = re.compile(r"stray|backup|legacy|snapshot", re.I)
-SOURCE_CLAIM = re.compile(r"source of truth|authoritative|live alias|current alias|alias table\b", re.I)
+# The claim that must not exist in code: naming the JSON authoritative. Judged
+# over a comment window rather than one line — and an adjective is no excuse.
+# "The legacy file is the source of truth" is exactly the shape that fooled
+# readers for nine days, so a window may keep a claim only by *both* negating it
+# and naming where the truth actually lives.
+SOURCE_CLAIM = re.compile(
+    r"source of truth|authoritative|canonical alias (?:file|map|table)"
+    r"|(?:live|current|real) alias(?:es)? (?:file|map|table|export|source)", re.I)
+RETIRES_CLAIM = re.compile(r"\bnot\b|never|no longer|retired|frozen|deprecated|stray", re.I)
+LIVES_HERE = re.compile(r"app\.kg_store|kg\.sqlite|`aliases`|aliases? table", re.I)
 
 _SKIP_DIRS = {".venvs", ".git", "node_modules", "__pycache__", ".pytest_cache",
               "_pipeline", "logs", "sessions", "event_logs", "graphify-out",
@@ -130,19 +134,49 @@ def test_export_json_takes_no_default_destination():
     assert param.default is inspect.Parameter.empty
 
 
-def test_no_recurring_autonomy_task_names_the_export_call():
-    """Clause 2's other half: no caller is wired to a recurring job. The rebuild
-    and the migration are run by hand; if a task ever automates the exporter the
-    frozen-file failure is back with a schedule attached.
+ACTIVITY_HEADING = re.compile(r"^##\s+Activity", re.I)
+DATED_BULLET = re.compile(r"^-\s+\d{4}-\d{2}-\d{2}T")
 
-    Reads the live task dir read-only (precedent: test_automod_hardening,
-    test_backlog_tags_shape). These are the files that register work, so a tmp
-    fixture cannot pin them.
+
+def _task_instructions(text: str) -> str:
+    """The part of an autonomy task file that *registers work*.
+
+    Everything after `## Activity Log` is history the scheduler never executes,
+    and dated bullets under it are run reports — #24 and #74 both legitimately
+    record "kg_rebuild.py freeze paused this task". Matching those would make
+    the pin false-positive on prose, and a pin that fires on an honest log line
+    gets deleted the first time it annoys someone.
+    """
+    kept = []
+    for line in text.splitlines():
+        if ACTIVITY_HEADING.match(line):
+            break
+        if DATED_BULLET.match(line):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def test_no_recurring_autonomy_task_is_told_to_run_an_exporter():
+    """Clause 2's other half: neither caller is wired to a recurring job. The
+    migration and the rebuild are run by hand; a task that automates either one
+    puts the frozen-file failure back on a schedule.
+
+    Matches the script names a task body would actually contain (`python3
+    scripts/memory/kg_rebuild.py freeze`), not the Python method name — no task
+    file has ever spelled `export_json`. Reads the live task dir, which is what
+    the scheduler reads (precedent: test_automod_hardening, test_backlog_tags_shape).
     """
     assert AUTONOMY_DIR.is_dir(), f"{AUTONOMY_DIR} missing — the pin would pass vacuously"
-    offenders = sorted(p.name for p in AUTONOMY_DIR.glob("*.md")
-                       if "export_json" in p.read_text(encoding="utf-8", errors="replace"))
-    assert not offenders, f"autonomy tasks calling the exporter: {offenders}"
+    needles = ["export_json", "kg_rebuild.py", "kg_migrate_to_sqlite.py",
+               "kg-migrate-to-sqlite"]
+    offenders = []
+    for path in sorted(AUTONOMY_DIR.glob("*.md")):
+        text = _task_instructions(path.read_text(encoding="utf-8", errors="replace"))
+        hits = [n for n in needles if n in text]
+        if hits:
+            offenders.append(f"{path.name}: {hits}")
+    assert not offenders, f"recurring tasks told to run an exporter: {offenders}"
 
 
 # ── clause 1: the file reflects a store, and only where it was told ─────────
@@ -208,13 +242,16 @@ def test_no_code_calls_the_legacy_alias_json_the_source_of_truth():
     for path in _py_files(needle="entity-aliases.json"):
         if path.relative_to(REPO).parts[0] == "tests":
             continue
-        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
             if "entity-aliases.json" not in line:
                 continue
-            if STALE_HOOD_WORDS.search(line):
+            window = "\n".join(lines[max(0, i - 2):i + 3])
+            if not SOURCE_CLAIM.search(window):
                 continue
-            if SOURCE_CLAIM.search(line):
-                offenders.append(f"{path.relative_to(REPO).as_posix()}:{line_no}: {line.strip()}")
+            if RETIRES_CLAIM.search(window) and LIVES_HERE.search(window):
+                continue
+            offenders.append(f"{path.relative_to(REPO).as_posix()}:{i + 1}: {line.strip()}")
     assert not offenders, "code still asserts the legacy JSON is authoritative:\n" + "\n".join(offenders)
 
 
@@ -236,11 +273,65 @@ def test_paths_comment_states_the_fate_chosen():
     path" has to be answerable without opening the backlog."""
     lines = (REPO / "app" / "paths.py").read_text(encoding="utf-8").splitlines()
     at = next(i for i, ln in enumerate(lines) if ln.startswith("VAULT_FACTS_ALIASES"))
-    block = "\n".join(lines[max(0, at - 12):at])
-    assert "app.kg_store" in block, "the comment does not say what the live alias table is"
-    assert "NOT an export target" in block, "the comment does not say the export stopped here"
-    assert "_pipeline/backups" in block, "the comment does not say where snapshots go"
-    assert "#474" in block, "the comment does not name the item that chose the fate"
+    block = "\n".join(lines[max(0, at - 14):at])
+    # Checked for meaning, not wording: a reworded comment that still says the
+    # same four things must not re-fail.
+    assert LIVES_HERE.search(block), "the comment does not say what the live alias table is"
+    assert re.search(r"not an export target|no longer (?:an |written here)|stopped (?:being|writing)",
+                     block, re.I), "the comment does not say the export stopped at this path"
+    assert re.search(r"_pipeline/backups|backups/|snapshot dir", block, re.I), \
+        "the comment does not say where a snapshot goes instead"
+    assert re.search(r"#474|item 474", block), "the comment does not name the item that chose the fate"
+
+
+# ── clause 4: loaded memory, and the disk state it asserts ──────────────────
+#
+# USER.md is loaded into every system prompt, so its claim about this file is
+# read as fact by every run. The half that can be pinned is the *coupling*: the
+# sentence must be dated history, and the state it describes must be true. The
+# first version of this round shipped the sentence while the 939 KB copy was
+# still on disk — the review rung caught what reading my own diff could not,
+# because a memory file and a data file never appear in the same `git status`.
+#
+# These read the live checkout and the live vault, not the worktree: a claim
+# about production state is only falsifiable against production (precedent:
+# test_automod_hardening reads the live skills tree).
+
+LOADED_MEMORY = Path.home() / "obsidian" / "lloyd" / "USER.md"
+LIVE_FACT_TREE = Path.home() / "lloyd" / "_pipeline" / "vault-derived" / "facts"
+# A line counts as history if it is marked closed/retired or carries a date in
+# either form this vault uses: `2026-09-03`, or the `08-22` bullet prefix the
+# incident notes use. Loose by design — it asks "is this line standing on a
+# date", not "is the date well-formed".
+HISTORY_MARK = re.compile(r"CLOSED|history|retired|\d{4}-\d{2}-\d{2}|\b\d{1,2}-\d{1,2}\b")
+
+
+def test_loaded_memory_cites_the_export_only_as_dated_history():
+    """The 19,914 / 16,041 figures sat in loaded memory as a standing defect for
+    nine days, and the SQLite row count on the same line had already drifted."""
+    assert LOADED_MEMORY.is_file(), f"{LOADED_MEMORY} missing — the pin would pass vacuously"
+    lines = LOADED_MEMORY.read_text(encoding="utf-8").splitlines()
+    assert not [ln for ln in lines if "19,914" in ln], \
+        "loaded memory still carries the frozen export's entry count"
+    undated = [ln[:110] for ln in lines
+               if "entity-aliases.json" in ln and not HISTORY_MARK.search(ln)]
+    assert not undated, f"undated live-sounding claims in loaded memory: {undated}"
+
+
+def test_the_state_loaded_memory_describes_is_true_on_disk():
+    """USER.md now says the export no longer lives in the fact tree. That
+    sentence is only honest while the file is actually absent — and this is the
+    only thing in the repo that checks the two against each other."""
+    assert LOADED_MEMORY.is_file(), f"{LOADED_MEMORY} missing — the pin would pass vacuously"
+    text = LOADED_MEMORY.read_text(encoding="utf-8")
+    claims_gone = re.search(r"no longer lives under|not in the live tree", text)
+    live_copy = LIVE_FACT_TREE / "entity-aliases.json"
+    if claims_gone:
+        assert not live_copy.exists(), (
+            f"loaded memory says {live_copy} is gone but it is on disk "
+            f"({live_copy.stat().st_size} bytes, mtime {live_copy.stat().st_mtime_ns}); "
+            "either move the file back into the tree or stop claiming it is gone")
+    assert live_copy.name == "entity-aliases.json"
 
 
 def test_constant_still_names_the_legacy_path_for_the_migration():
