@@ -36,6 +36,11 @@ Usage:
     # Limit LLM calls (dev / sampling)
     .venvs/lloyd/bin/python scripts/memory/semantic-entity-resolution.py --limit 50
 
+    # Selection floor: candidates scoring below this are never judged.
+    # Default 4.0 is where the weekly `--limit 2000` slice already lands;
+    # 0 reopens the tail (which is 98.8 % of the pool — budget accordingly).
+    .venvs/lloyd/bin/python scripts/memory/semantic-entity-resolution.py --min-score 0
+
     # Custom confidence thresholds
     .venvs/lloyd/bin/python scripts/memory/semantic-entity-resolution.py \\
         --merge-threshold 0.85 --alias-threshold 0.65
@@ -63,11 +68,17 @@ PIPELINE_ROOT = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
 CANDIDATE_LOG = PIPELINE_ROOT / f"semantic-entity-candidates-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
 JUDGMENT_LOG = PIPELINE_ROOT / f"semantic-entity-judgments-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
 PROPOSAL_LOG = PIPELINE_ROOT / f"semantic-proposals-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+# The accumulated record, deduped by (canonical, variant). `semantic-proposals-
+# latest.jsonl` — the ONLY path the sweep reads — points at THIS file, not at one
+# run's dated file. This pass is propose-only, so a proposal the sweep had not
+# reached vanished whenever the next run overwrote its dated file (#744).
+PROPOSAL_CUMULATIVE = PIPELINE_ROOT / "semantic-proposals-cumulative.jsonl"
 PROPOSAL_LATEST = PIPELINE_ROOT / "semantic-proposals-latest.jsonl"
 # Verdicts keyed on the pair plus a hash of both definitions, the same shape
-# `entity_semantic_gate.SemanticGate._key` uses. A weekly run over a 65k-pair
-# pool re-judged pairs it had already settled; with this it only pays for
-# pairs whose definitions actually changed.
+# `entity_semantic_gate.SemanticGate._key` uses. This pass writes no aliases, so
+# a pair stays in the pool after it is judged and every weekly run would
+# re-judge what it had already settled; with this it only pays for pairs whose
+# definitions actually changed.
 VERDICT_CACHE = PIPELINE_ROOT / "semantic-verdicts-pairs.jsonl"
 
 CLASSIFIER_V2 = Path.home() / "lloyd" / "scripts" / "memory" / "classify-relationships.py"
@@ -83,6 +94,27 @@ JACCARD_THRESHOLD = 0.4
 STEM_MIN_CHARS = 5
 SHARED_NEIGHBOR_THRESHOLD = 3
 MAX_CANDIDATES_PER_ENTITY = 20  # cap fanout
+
+# Selection floor (#879). Measured on the live store the same way a run measures
+# it: 567,123 candidate pairs, of which 5,235 score ≥ 4.0 — so 98.8 % of the pool
+# is tail the run must not be charged for. `--limit 2000` cut at exactly 4.0
+# before the floor existed, which means the line was already being drawn, just
+# not stated, and a run whose head drained would have walked into the tail. The
+# floor makes it a knob and makes the remaining work countable; `--min-score 0`
+# reopens the tail on purpose.
+DEFAULT_MIN_SCORE = 4.0
+
+# Name shapes that are a note filename or a date-prefixed note rather than an
+# entity (#729). Measured 2026-09-11 over the pre-filter pool: 48,771 pairs
+# (8.61 %) had a `.md`-suffixed side, 19,421 (3.43 %) a date-shaped one, and
+# 2,348 of the 6,863 pairs above the floor (34.2 %) were one of the two —
+# `out.sort` put them at the very top, so they dominated every `--limit` slice
+# and 40 of the 221 proposals the sweep was handed. A fresh generation with this
+# filter drops 50,547 such pairs and yields 0. #537 attacks the same shapes on
+# the write side; this is the read-side triage that stops paying for them
+# meanwhile.
+MD_SUFFIX = ".md"
+DATE_NAME_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}")
 
 # Merge guards — if violated, downgrade proposed merge to alias-only.
 # Rationale: LLM at conf ≥ 0.85 tends to conflate specific task instances with
@@ -138,6 +170,29 @@ def shares_stem(a: str, b: str, min_chars: int = STEM_MIN_CHARS) -> bool:
         return False
     # Either one contains the other's first min_chars
     return na.startswith(nb[:min_chars]) or nb.startswith(na[:min_chars])
+
+
+def is_artifact_name(name: str) -> bool:
+    """Is this 'entity' actually a note filename or a date-prefixed note?
+
+    Extraction writes an entity for the note it came from, so the store holds
+    both `knowledge-library` and `knowledge-library.md`, and both
+    `2026-09-08-daily-note` and its sibling. A pair of those is not a duplicate
+    claim about the world — it is one thing and a rendering of it — so judging
+    it is a wasted LLM call and merging it is a wrong alias.
+    """
+    n = (name or "").strip()
+    return n.endswith(MD_SUFFIX) or bool(DATE_NAME_PATTERN.match(n))
+
+
+def is_artifact_pair(a: str, b: str) -> bool:
+    """Either side artifact-shaped → drop at generation, before any LLM call.
+
+    Dropping on EITHER side (not only the exact `X` vs `X.md` shape) is what the
+    acceptance check measures, and it is the honest rule: an entity whose name is
+    a filename should not be in a resolution pool at all.
+    """
+    return is_artifact_name(a) or is_artifact_name(b)
 
 
 # ---------------------------------------------------------------------------
@@ -268,10 +323,17 @@ def generate_candidates(
 
     # Score each pair
     out = []
+    dropped_artifacts = 0
     for (a, b) in pair_keys:
         if already_aliased(a, b):
             continue
         if a == b:
+            continue
+        # #729: artifact name shapes are dropped HERE, not judged. They also used
+        # to sort to the very top (a `.md` twin is a near-perfect Jaccard match),
+        # which is how they came to dominate every `--limit` slice.
+        if is_artifact_pair(a, b):
+            dropped_artifacts += 1
             continue
         jacc = token_jaccard(a, b)
         stem = shares_stem(a, b)
@@ -299,7 +361,49 @@ def generate_candidates(
         })
 
     out.sort(key=lambda x: -x["score"])
+    if dropped_artifacts:
+        print(f"[info] dropped {dropped_artifacts} artifact-shaped pair(s) "
+              f"({MD_SUFFIX}-suffixed or date-named) before the judge")
     return out
+
+
+def select_candidates(
+    candidates: list[dict],
+    min_score: float = DEFAULT_MIN_SCORE,
+    limit: int | None = None,
+) -> tuple[list[dict], int]:
+    """What this run may judge, and how much eligible work is left.
+
+    Two rules, both before the limit, so `--limit N` cuts the eligible head and a
+    run can never spend budget below the floor:
+
+    - the score floor — `--min-score`, default 4.0;
+    - the artifact-name filter, re-applied here. Generation already drops those
+      pairs, but `--from-candidates` loads a file written by an older run, and
+      re-judging a stale pool is exactly how the budget goes back to being spent
+      on `.md` twins.
+
+    Returns `(selected, above_floor_total)`; `above_floor_total - len(selected)`
+    is the eligible backlog left for later runs.
+    """
+    eligible = [c for c in candidates
+                if float(c.get("score", 0.0)) >= min_score
+                and not is_artifact_pair(str(c.get("a") or ""), str(c.get("b") or ""))]
+    return (eligible[:limit] if limit else eligible), len(eligible)
+
+
+def run_summary(newly_judged: int, from_cache: int, above_floor_total: int | None,
+                selected: int, min_score: float) -> str:
+    """One line: judged newly, judged free from cache, and eligible pairs left.
+
+    Without the third number a run read as an unbounded backlog over a
+    566,170-pair pool when what is actually left is a countable set just above
+    the floor (#730). `None` means the run had no pool to measure — `--replay`.
+    """
+    remaining = ("unknown" if above_floor_total is None
+                 else max(above_floor_total - selected, 0))
+    return (f"[summary] newly_judged={newly_judged} from_cache={from_cache} "
+            f"above_floor_remaining={remaining} (min_score={min_score})")
 
 
 # ---------------------------------------------------------------------------
@@ -493,11 +597,116 @@ def pick_canonical(a: str, b: str, neighbors: dict[str, set[str]]) -> tuple[str,
 
 
 # ---------------------------------------------------------------------------
+# Proposal emission — the durable record the sweep reads
+# ---------------------------------------------------------------------------
+
+
+def _proposal_key(rec: dict) -> tuple[str, str]:
+    return (str(rec.get("canonical") or ""), str(rec.get("variant") or ""))
+
+
+def filter_artifact_proposals(proposals: list[dict]) -> list[dict]:
+    """#729 on the output side: never hand the sweep an artifact-named row.
+
+    Generation already drops these, so a nonzero count here means proposals came
+    in through `--from-candidates` or `--replay`, which bypass candidate
+    generation — and the sweep would have acted on them.
+    """
+    kept: list[dict] = []
+    dropped = 0
+    for p in proposals:
+        if is_artifact_pair(*_proposal_key(p)):
+            dropped += 1
+            continue
+        kept.append(p)
+    if dropped:
+        print(f"[info] withheld {dropped} artifact-shaped proposal(s) from the record")
+    return kept
+
+
+def load_cumulative_proposals(path: Path) -> dict[tuple[str, str], dict]:
+    """The accumulated record as (canonical, variant) → most recent proposal."""
+    out: dict[tuple[str, str], dict] = {}
+    path = Path(path)
+    if not path.exists():
+        return out
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        key = _proposal_key(rec)
+        if all(key):
+            out[key] = rec
+    return out
+
+
+def merge_proposals(existing: dict[tuple[str, str], dict],
+                    new: list[dict], now_iso: str) -> list[dict]:
+    """Union by (canonical, variant) — a re-stated proposal refreshes, never duplicates.
+
+    `first_seen_at` is the run that surfaced it and `last_seen_at` the most
+    recent: that gap is what tells a reader the same proposal has been shown to
+    the sweep for six weeks without being acted on.
+    """
+    merged = dict(existing)
+    for rec in new:
+        key = _proposal_key(rec)
+        if not all(key):
+            continue
+        rec = dict(rec)
+        prior = merged.get(key) or {}
+        rec["first_seen_at"] = (prior.get("first_seen_at") or prior.get("proposed_at")
+                               or rec.get("proposed_at") or now_iso)
+        rec["last_seen_at"] = rec.get("proposed_at") or now_iso
+        merged[key] = rec
+    return sorted(merged.values(),
+                  key=lambda r: (-float(r.get("confidence") or 0), _proposal_key(r)))
+
+
+def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
+                   latest: Path, now_iso: str | None = None) -> dict:
+    """Write this run's file, refresh the cumulative record, point `latest` at it.
+
+    `latest` used to be re-pointed at the run's dated file, which is how an
+    unconsumed proposal disappeared without a trace (#744). It now names the
+    cumulative record, so the sweep's single loader path sees every proposal that
+    is still open. Returns counts for the run report.
+    """
+    now_iso = now_iso or datetime.now(timezone.utc).isoformat()
+    run_log, cumulative, latest = Path(run_log), Path(cumulative), Path(latest)
+    run_log.parent.mkdir(parents=True, exist_ok=True)
+    with run_log.open("w") as f:
+        for rec in proposals:
+            f.write(json.dumps(rec) + "\n")
+    merged = merge_proposals(load_cumulative_proposals(cumulative), proposals, now_iso)
+    tmp = cumulative.with_name(cumulative.name + ".tmp")
+    with tmp.open("w") as f:
+        for rec in merged:
+            f.write(json.dumps(rec) + "\n")
+    tmp.replace(cumulative)
+    try:
+        if latest.is_symlink() or latest.exists():
+            latest.unlink()
+        latest.symlink_to(cumulative.name)
+    except OSError:
+        pass
+    return {"run": len(proposals), "cumulative": len(merged)}
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 
-def main() -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
     p.add_argument("--limit", type=int, default=None,
                    help="Cap number of candidate pairs judged (dev).")
@@ -514,7 +723,14 @@ def main() -> int:
                    help="Skip candidate generation; load candidates from existing JSONL file")
     p.add_argument("--replay", type=Path, default=None,
                    help="Skip candidate gen + judging; replay apply plan from existing judgments JSONL")
-    args = p.parse_args()
+    p.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE,
+                   help=f"candidate score floor for selection "
+                        f"(default {DEFAULT_MIN_SCORE}; 0 reopens the tail)")
+    return p
+
+
+def main() -> int:
+    args = build_arg_parser().parse_args()
 
     # --replay short-circuit handled below by setting judgments from file
     # and skipping candidate gen + LLM calls.
@@ -531,6 +747,11 @@ def main() -> int:
 
     PIPELINE_ROOT.mkdir(parents=True, exist_ok=True)
 
+    cache_hits = 0
+    newly_judged = 0
+    above_floor_total: int | None = 0
+    candidates: list[dict] = []
+
     if args.replay:
         judgments = []
         with args.replay.open() as f:
@@ -541,20 +762,21 @@ def main() -> int:
         verdict_counts = Counter(r["verdict"] for r in judgments)
         print(f"[info] verdicts: {dict(verdict_counts)}")
         candidates = []  # not used in replay
+        above_floor_total = None  # a replay has no pool to measure
     elif args.from_candidates:
-        candidates = []
+        pool = []
         with args.from_candidates.open() as f:
             for line in f:
                 if line.strip():
-                    candidates.append(json.loads(line))
-        print(f"[info] loaded {len(candidates)} candidates from {args.from_candidates}")
+                    pool.append(json.loads(line))
+        print(f"[info] loaded {len(pool)} candidates from {args.from_candidates}")
 
         if args.skip_judge:
             return 0
 
-        if args.limit:
-            candidates = candidates[: args.limit]
-            print(f"[info] limited to first {len(candidates)} candidates")
+        candidates, above_floor_total = select_candidates(pool, args.min_score, args.limit)
+        print(f"[info] {above_floor_total} of them at or above min_score="
+              f"{args.min_score}; judging {len(candidates)} of those")
     else:
         print("[info] generating candidates…")
         candidates = generate_candidates(entities, aliases, neighbors)
@@ -568,9 +790,9 @@ def main() -> int:
         if args.skip_judge:
             return 0
 
-        if args.limit:
-            candidates = candidates[: args.limit]
-            print(f"[info] limited to first {len(candidates)} candidates")
+        candidates, above_floor_total = select_candidates(candidates, args.min_score, args.limit)
+        print(f"[info] {above_floor_total} of them at or above min_score="
+              f"{args.min_score}; judging {len(candidates)} of those")
 
     # Judgment loop (skipped in replay mode)
     t_start = time.perf_counter()
@@ -578,7 +800,6 @@ def main() -> int:
         judgments = []
         verdict_counts = Counter()
         cache = load_verdict_cache()
-        cache_hits = 0
         for i, pair in enumerate(candidates, 1):
             t0 = time.perf_counter()
             da, db = _definition(pair["a"]), _definition(pair["b"])
@@ -613,6 +834,7 @@ def main() -> int:
             )
             record = {**pair, **j}
             judgments.append(record)
+            newly_judged += 1
 
         with JUDGMENT_LOG.open("w") as f:
             for r in judgments:
@@ -667,20 +889,20 @@ def main() -> int:
             "cached": r.get("cached", False),
             "proposed_at": datetime.now(timezone.utc).isoformat(),
         })
+    # No artifact-named row may reach the sweep from any path, including
+    # `--from-candidates` / `--replay`, which skip candidate generation (#729).
+    proposals = filter_artifact_proposals(proposals)
     proposals.sort(key=lambda p: -p["confidence"])
-    PROPOSAL_LOG.parent.mkdir(parents=True, exist_ok=True)
-    with PROPOSAL_LOG.open("w") as f:
-        for rec in proposals:
-            f.write(json.dumps(rec) + "\n")
-    try:
-        if PROPOSAL_LATEST.is_symlink() or PROPOSAL_LATEST.exists():
-            PROPOSAL_LATEST.unlink()
-        PROPOSAL_LATEST.symlink_to(PROPOSAL_LOG.name)
-    except OSError:
-        pass
-    print(f"[info] {len(proposals)} proposals → {PROPOSAL_LOG}")
+    counts = emit_proposals(proposals, run_log=PROPOSAL_LOG,
+                            cumulative=PROPOSAL_CUMULATIVE, latest=PROPOSAL_LATEST)
+    print(f"[info] {counts['run']} proposals → {PROPOSAL_LOG}")
+    print(f"[info] {counts['cumulative']} total in the accumulated record; "
+          f"{PROPOSAL_LATEST.name} → {PROPOSAL_CUMULATIVE.name}, so a proposal the "
+          f"sweep has not reached cannot be lost by the next run")
     print("[info] no changes made. The sweep reads these as review input; "
           "run `entity-resolution-sweep.py` to see them in its plan.")
+    print(run_summary(newly_judged, cache_hits, above_floor_total,
+                      len(candidates), args.min_score))
     return 0
 
 

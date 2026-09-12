@@ -682,6 +682,84 @@ def load_semantic_proposals(out_dir: Path) -> list[dict]:
     return out
 
 
+SEEN_PROPOSALS_NAME = "semantic-proposals-seen.jsonl"
+
+
+def load_seen_proposals(path: Path) -> set[tuple[str, str]]:
+    """The (canonical, variant) keys this sweep has already surfaced in a plan.
+
+    Its own state, appended by `surface_semantic_proposals` below. #67 now
+    accumulates proposals across runs instead of rewriting one run's file, so
+    without this ledger the sweep could not tell a proposal it has been shown
+    every 15 minutes for a week from one that just arrived.
+    """
+    seen: set[tuple[str, str]] = set()
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return seen
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        key = (str(rec.get("canonical") or ""), str(rec.get("variant") or ""))
+        if all(key):
+            seen.add(key)
+    return seen
+
+
+def _append_seen_proposals(path: Path, fresh: list[dict], now: str | None = None) -> int:
+    """Append newly-surfaced keys. Append-only: a ledger that is rewritten can be
+    lost, and this one is the only answer to 'what have I never looked at'."""
+    if not fresh:
+        return 0
+    try:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = now or dt.datetime.now().isoformat()
+        with path.open("a", encoding="utf-8") as f:
+            for rec in fresh:
+                f.write(json.dumps({
+                    "canonical": rec.get("canonical"),
+                    "variant": rec.get("variant"),
+                    "confidence": rec.get("confidence"),
+                    "evaluated_at": stamp,
+                }) + "\n")
+    except OSError as exc:
+        print(f"  [proposals] seen-ledger unwritable ({exc}); counts will repeat")
+        return 0
+    return len(fresh)
+
+
+def surface_semantic_proposals(out_dir: Path, seen_path: Path | None = None,
+                               now: str | None = None) -> tuple[list[dict], int]:
+    """Load #67's proposals for this plan, report how many are new here, ledger them.
+
+    Surfaced-in-a-plan counts as evaluated: the plan file is the review artifact,
+    and dispositions (applied / rejected) are the apply ledger's business, not
+    this one's. Returns `(proposals, never_evaluated)` and prints the plan line.
+    """
+    proposals = load_semantic_proposals(out_dir)
+    if not proposals:
+        return [], 0
+    seen_path = Path(seen_path) if seen_path else Path(out_dir) / SEEN_PROPOSALS_NAME
+    seen = load_seen_proposals(seen_path)
+    keyed = [(r, (str(r.get("canonical") or ""), str(r.get("variant") or "")))
+             for r in proposals]
+    # A row missing either half of the key cannot be tracked, so it is not
+    # counted as new either — otherwise the count would never reach 0.
+    trackable = [(r, k) for r, k in keyed if all(k)]
+    never = [r for r, k in trackable if k not in seen]
+    _append_seen_proposals(seen_path, never, now)
+    print(f"  #67 proposals:   {len(proposals)} pairs awaiting review, "
+          f"{len(never)} never evaluated")
+    return proposals, len(never)
+
+
 def prune_old_backups(path: Path, keep: int = 3, pattern: str | None = None) -> int:
     """Keep the newest `keep` backups beside `path`; delete older ones.
 
@@ -1030,11 +1108,14 @@ def main() -> int:
         print(f"  Semantic gate:   {gs['asked']} suffix pairs judged — {gs['same']} clusters SAME, {gs['review']} to review")
 
     # Proposals from #67's weekly judge, if it has run. They are review input,
-    # never an auto-merge: #67 lost its apply path on 2026-09-04.
-    proposals = load_semantic_proposals(out_dir)
+    # never an auto-merge: #67 lost its apply path on 2026-09-04. The
+    # never-evaluated count comes from this sweep's own ledger — #67 accumulates
+    # proposals across runs now, so a proposal shown here every 15 minutes for a
+    # week and one that just arrived would otherwise look identical (#744).
+    proposals, never_evaluated = surface_semantic_proposals(out_dir)
     if proposals:
         plan["semantic_proposals"] = proposals[:200]
-        print(f"  #67 proposals:   {len(proposals)} pairs awaiting review")
+        plan["semantic_proposals_never_evaluated"] = never_evaluated
 
     # Emit plan. Timestamped: the old `entity-merges-<date>.jsonl` was opened in
     # write mode by every dry-run, so a second run on the same day overwrote the
