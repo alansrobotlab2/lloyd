@@ -146,9 +146,19 @@ def test_prohibition_line_ratio_is_under_the_ceiling(soul_text):
 @vault_only
 @live_vault
 def test_memory_md_is_not_a_copy_of_the_contract(memory_text, soul_text):
-    """#464 — MEMORY.md was overwritten with SOUL.md; the contract arrived twice."""
-    assert (memory_text.split("\n", 1)[0].strip()
-            != soul_text.split("\n", 1)[0].strip()), (
+    """#464 — MEMORY.md was overwritten with SOUL.md; the contract arrived twice.
+
+    The H1, not the first *line*: both files gained `---` front matter, and
+    comparing line 1 compared `---` to `---`, so this half could never pass
+    again — a guard that always fires guards nothing. The property is
+    unchanged; only where it reads the title is.
+    """
+    def _h1(text: str) -> str:
+        for line in text.splitlines():
+            if line.startswith("# "):
+                return line.strip()
+        return ""
+    assert _h1(memory_text) and _h1(memory_text) != _h1(soul_text), (
         "MEMORY.md opens with SOUL.md's H1 — the operating-contract paste is back"
     )
     dup = _shared_line_share(memory_text, soul_text)
