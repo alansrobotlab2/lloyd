@@ -60,7 +60,6 @@ import math
 
 AUDIT_LOG_DIR = VAULT / "memory" / "audit"
 AUDIT_LOG_FILE = AUDIT_LOG_DIR / "writes.jsonl"
-QMD_BIN = Path.home() / ".bun" / "bin" / "qmd"
 QMD_DAEMON_URL = service_url("qmd", "http://localhost:8181/query")
 
 # The qmd collections vault_search fans out over and vault_recall filters on.
@@ -315,6 +314,24 @@ def _qmd_log(msg: str) -> None:
     print(f"[qmd] {msg}", file=sys.stderr, flush=True)
 
 
+class QmdUnavailable(RuntimeError):
+    """The qmd daemon did not answer. Retrieval **failed**; it did not find nothing.
+
+    Before #407 every non-HTTP-500 problem ended in `return None`, and every
+    caller defaulted that to an empty list — so a hung or dead daemon read as an
+    empty corpus everywhere except `logs/mcp.err`, 23 `search failed:
+    TimeoutError('timed out')` lines behind which the agent was told there were
+    no documents. The message is what the MCP handler shows the model
+    (`_err(str(exc), ...)`), which is why it names the daemon and says in so
+    many words that zero hits is not the finding.
+
+    A `RuntimeError` because this is an operational condition, not a bad
+    argument. A caller that would rather degrade than fail — there is exactly
+    one, the opt-in enrichment in `_lookup_one` — catches it by name, which is
+    the thing the old blanket `except Exception` could not express.
+    """
+
+
 def _qmd_post(payload: dict) -> list:
     req = urllib.request.Request(
         QMD_DAEMON_URL,
@@ -369,8 +386,14 @@ def _qmd_normalize_global(rows: list, allowed: set) -> list:
 def _qmd_daemon_search(query: str, limit: int, collections: list,
                       skip_rerank: bool = not RECALL_QMD_RERANK,
                       legs: tuple[str, ...] = ("lex", "vec"),
-                      lex_query: Optional[str] = None) -> Optional[list]:
+                      lex_query: Optional[str] = None) -> list:
     """Send a lex and/or vec query to the qmd daemon.
+
+    **Returns a list, or raises `QmdUnavailable`.** An empty list means the
+    daemon answered and nothing matched; a daemon that timed out, refused the
+    connection, or answered with a status is an exception, because "zero
+    documents" and "no answer" are different findings and the caller is the only
+    one who can say which one it got (#407).
 
     DEFAULT: rerank on (see RECALL_QMD_RERANK for the measurement). The
     request carries an explicit `rerank` boolean — that is the key every
@@ -481,29 +504,39 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
                 return _finish(_qmd_post(payload))
             except Exception as e2:
                 _qmd_log(f"rerank-off retry also failed: {e2!r}")
-                return None
+                raise QmdUnavailable(
+                    "qmd retrieval failed: the daemon 500'd with rerank on and "
+                    f"the rerank-off retry also failed ({e2!r}) — these are "
+                    "not zero matches"
+                ) from e2
         _qmd_log(f"HTTPError {e.code}: {e.reason}")
-        return None
-    except Exception as e:
+        raise QmdUnavailable(
+            f"qmd retrieval failed: the daemon returned HTTP {e.code} "
+            f"({e.reason}) — these are not zero matches"
+        ) from e
+    except (OSError, urllib.error.URLError) as e:
+        # The two daemon shapes, both of which used to buy one stderr line and a
+        # `None` that each caller then defaulted to an empty list. TimeoutError:
+        # up and not answering — the 23 `search failed: TimeoutError('timed
+        # out')` lines in logs/mcp.err. URLError/ConnectionRefusedError: not
+        # running at all.
+        # `URLError` is itself an `OSError`, so this is one family; the name is
+        # spelled twice to say that. The log line stays because it is the only
+        # per-failure record the daemon path has, and the raise is what makes it
+        # reach anyone.
         _qmd_log(f"search failed: {e!r}")
-        return None
-
-
-def _qmd_subprocess_search(query: str, limit: int, collections: list) -> list:
-    if not QMD_BIN.exists():
-        return []
-    try:
-        coll_args = []
-        for c in collections:
-            coll_args.extend(["-c", c])
-        env = {**os.environ, "CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": "0"}
-        proc = subprocess.run([str(QMD_BIN), "query", query, *coll_args, "-n", str(limit), "--json"],
-                              capture_output=True, text=True, timeout=30, env=env)
-        if proc.returncode != 0:
-            return []
-        return json.loads(proc.stdout)
+        raise QmdUnavailable(
+            f"qmd retrieval failed: the daemon did not answer ({e!r}) — these "
+            "are not zero matches"
+        ) from e
     except Exception:
-        return []
+        # Anything else is this client's own bug (a bad fold in `_finish`, a
+        # malformed reply, a typo), not an outage. It propagates as itself: the
+        # tool handler still turns it into an error reply, so it is no longer
+        # silent, but it must not be filed under "the daemon did not answer" —
+        # that report would send the next reader to the daemon.
+        _qmd_log("unexpected error in the qmd search path (not a daemon outage)")
+        raise
 
 
 def _consolidate_results(query: str, results: list) -> Optional[dict]:
@@ -649,7 +682,13 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
         # answer: 9571ms fanned out against 3971ms as one call. The threads
         # bought nothing and paid twelve times for the per-collection scan that
         # `_qmd_daemon_search` now avoids entirely.
-        return _qmd_daemon_search(query, max_results, coll_list) or []
+        #
+        # No empty-list default here: a daemon that did not answer raises
+        # `QmdUnavailable`; it is not a search that found nothing. The raise
+        # crosses the pool on `qmd_fut.result()` below and comes back as an
+        # error reply in `_vault_search`. The grep leg's hits are deliberately
+        # not handed back as if they were vault results during an outage.
+        return _qmd_daemon_search(query, max_results, coll_list)
 
     def _do_grep():
         # Skip grep when caller restricted scope — they want vault-only results.
@@ -941,11 +980,18 @@ def _vault_recall(params: dict) -> dict:
         )
 
     def _do_search():
-        # Daemon is the only search path. Subprocess fallback was removed
-        # 2026-04-20: on daemon failure the CLI subprocess hits the same
-        # broken state, then eats 30s before returning empty.
-        result = _qmd_daemon_search(query, limit, VAULT_SEGMENTS)
-        return result or []
+        # Daemon is the only search path. A CLI subprocess fallback was removed
+        # 2026-04-20: on daemon failure it hits the same broken state, then eats
+        # 30s before returning empty. The orphaned function that comment
+        # outlived — still defined, still zero call sites, still making this
+        # read as a two-tier system — was deleted by #407 rather than rewired,
+        # because the 2026-04-20 reasoning still holds.
+        #
+        # No empty-list default here: an outage propagates to `_vault_recall`
+        # and comes back as an error, which is the whole point. A genuine
+        # zero-hit answer is an empty list and still merges with the grep and
+        # graph legs as usual.
+        return _qmd_daemon_search(query, limit, VAULT_SEGMENTS)
 
     def _do_code_grep():
         if not params.get("grep_code", True):
@@ -981,9 +1027,21 @@ def _vault_recall(params: dict) -> dict:
             return []
 
         def _lookup_one(ent):
+            # The one caller still allowed to degrade instead of fail, and the
+            # reason is narrow: `graph_lookup` is opt-in enrichment (default off,
+            # -12% MRR when on per the 2026-05-12 eval), so a transient failure
+            # on one entity must not throw away a recall whose main search
+            # already succeeded. What changed with #407 is the shape of the
+            # swallow: `except Exception` also ate real bugs, and defaulting the
+            # None made a daemon failure identical to "this entity has no file".
+            # Now only `QmdUnavailable` degrades, and it is logged — and on a
+            # real outage `_do_search` raises for the same daemon a few
+            # milliseconds later, so the caller still gets an error, not a
+            # quietly-shortened answer.
             try:
-                hits = _qmd_daemon_search(ent, 2, VAULT_SEGMENTS) or []
-            except Exception:
+                hits = _qmd_daemon_search(ent, 2, VAULT_SEGMENTS)
+            except QmdUnavailable as e:
+                _qmd_log(f"graph_lookup: skipping entity {ent!r}: {e}")
                 hits = []
             return [(ent, h) for h in hits[:2]]
 
