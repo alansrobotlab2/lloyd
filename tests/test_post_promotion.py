@@ -237,12 +237,17 @@ def test_the_replay_survives_the_report_being_the_only_store(world):
 def test_the_vendored_report_still_matches_the_live_artifact():
     """Guards against the fixture above drifting into a lie about R_20260908_165252.
 
-    `_pipeline` is gitignored, so on a box without it there is nothing to compare
-    and the fixture assertions above stand on their own.
+    That fixture is `run_round.run()`'s own output — the report file the round
+    wrote, byte for byte — which is what makes it the format-preservation check
+    for the `- variant:` / `- snapshot_dir:` lines the parser depends on.
+    `_pipeline` is gitignored, so on a checkout without it (including every
+    automod worktree) the artifact does not exist to compare; that is reported as
+    a skip rather than a silent pass. The fixture assertions elsewhere are
+    unconditional either way.
     """
     live = LIVE_ROUNDS_DIR / "R_20260908_165252.md"
     if not live.exists():
-        return
+        pytest.skip(f"{live} is gitignored and absent here; nothing to cross-check")
     assert live.read_text(encoding="utf-8") == R_20260908_165252
 
 
@@ -273,24 +278,49 @@ def test_the_decline_line_names_the_snapshot_it_could_be_restored_from(world):
     assert 'autoresearch_rollback(snapshot_ts="20260908_165708")' in text
 
 
-def test_the_check_records_and_surfaces_and_never_restores(world, monkeypatch):
-    """The item's out-of-scope clause in test form: option (b) means no file
-    write is on this path at all."""
+def test_the_check_records_and_surfaces_and_never_restores(world, tmp_path):
+    """The item's out-of-scope clause, asserted as an absence rather than prose.
+
+    Tripwires on `promote.rollback` would prove nothing here, because nothing on
+    this path calls into `promote` — so instead: the module must not reach for the
+    restore machinery at all, and the record-and-surface step must not touch a
+    single file except the ledger.
+    """
+    import ast
+    import inspect
+
     from scripts.autoresearch import promote
 
-    def trip(*a, **kw):  # pragma: no cover - must never run
-        raise AssertionError("post-promotion check must not restore anything")
+    tree = ast.parse(inspect.getsource(post_promotion))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+    assert "promote" not in imported, "post_promotion must not import the promote module"
+    assert "shutil" not in imported
+    called = {
+        n.func.attr for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    for forbidden in {"rollback", "apply_overlay", "snapshot_current_prompts",
+                      "copy2", "copytree", "rmtree", "unlink", "write_text"}:
+        assert forbidden not in called, f"the record-and-surface path must never call {forbidden}"
 
-    monkeypatch.setattr(promote, "rollback", trip)
-    monkeypatch.setattr(promote, "apply_overlay", trip)
-    prior = post_promotion.last_promotion(world.paths.ledger_path, world.paths.rounds_dir)
-    post_promotion.report_section(post_promotion.compare(0.3000, prior, DEFAULT_NOISE_FLOOR))
-    assert "Nothing was restored" in "\n".join(
-        post_promotion.report_section(post_promotion.compare(0.3000, prior, DEFAULT_NOISE_FLOOR))
-    )
-    assert "promotion_fp_rate" in "\n".join(
-        post_promotion.report_section(post_promotion.compare(0.3000, prior, DEFAULT_NOISE_FLOOR))
-    )
+    cfg = world
+    watched = cfg.paths.rounds_dir
+    before = sorted((p.name, p.stat().st_mtime_ns) for p in watched.iterdir())
+    prior = post_promotion.last_promotion(cfg.paths.ledger_path, cfg.paths.rounds_dir)
+    comparison = post_promotion.compare(0.3000, prior, DEFAULT_NOISE_FLOOR)
+    assert comparison["decline"] == pytest.approx(0.3145, abs=1e-4)
+    assert comparison["regression"] is True
+    text = "\n".join(post_promotion.report_section(comparison))
+    assert sorted((p.name, p.stat().st_mtime_ns) for p in watched.iterdir()) == before, \
+        "the check wrote to the rounds directory"
+    assert "Nothing was restored" in text
+    assert "promotion_fp_rate" in text  # names #428's sweep as the backstop
+    assert promote.rollback is not None  # the manual path still exists, untouched
 
 
 def test_a_promotion_with_no_snapshot_says_so_rather_than_inventing_one(world):
@@ -357,11 +387,19 @@ def test_post_promotion_check_writes_the_row_and_the_lines_together(world):
 
 def test_run_round_records_and_surfaces_on_the_live_path(world, monkeypatch):
     """The whole point is that no round has to remember to do this. Drives the
-    real `run()` far enough to reach the record-and-surface step, with the model
-    calls stubbed — no live round, per clause 5."""
+    real `run()` with the model calls stubbed — no live round, per clause 5.
+
+    `materialize` has to hand back a directory that actually holds a prompt file:
+    the sandbox step drops a candidate whose overlay is empty, and a candidate
+    dropped there never reaches the promotion branch, which is the state this
+    round's report has to be written from.
+    """
     cfg = world
     cfg.paths.bench_dir.mkdir(parents=True, exist_ok=True)
     (cfg.paths.bench_dir / "bench_a.md").write_text("---\nid: bench_a\ncategory: c\n---\nbody\n", encoding="utf-8")
+    overlay = cfg.paths.research_root / "overlay_V_new"
+    overlay.mkdir(parents=True, exist_ok=True)
+    (overlay / "SOUL.md").write_text("variant contract\n", encoding="utf-8")
 
     async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel):
         traces = [
@@ -369,6 +407,7 @@ def test_run_round_records_and_surfaces_on_the_live_path(world, monkeypatch):
              "turns": 1, "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0}
             for vid, _ in variant_pairs for t in tasks
         ]
+        # (direct_traces, sdk_traces) — the real return shape.
         return traces, []
 
     monkeypatch.setattr(run_round, "load_config", lambda: cfg)
@@ -386,11 +425,15 @@ def test_run_round_records_and_surfaces_on_the_live_path(world, monkeypatch):
     })
     monkeypatch.setattr(run_round, "evaluate_promotion", lambda c, b, v: (True, "promote (delta=+0.2636, win_frac=1.00)"))
     monkeypatch.setattr(run_round, "materialize_baseline", lambda c: ("BASELINE_fixture", c.paths.variants_dir))
-    monkeypatch.setattr(run_round, "materialize", lambda c, v: c.paths.variants_dir)
-    monkeypatch.setattr(run_round, "promote", lambda c, v, overlay, vs, bs, dry_run=False: {
-        "variant_id": v["variant_id"], "snapshot_dir": SNAPSHOT_DIR, "applied_files": ["SOUL.md"],
-        "experiment_fact": None, "dry_run": False,
-    })
+    monkeypatch.setattr(run_round, "materialize", lambda c, v: overlay)
+    promoted: list[str] = []
+
+    def fake_promote(c, v, overlay_dir, vs, bs, dry_run=False):
+        promoted.append(v["variant_id"])
+        return {"variant_id": v["variant_id"], "snapshot_dir": SNAPSHOT_DIR,
+                "applied_files": ["SOUL.md"], "experiment_fact": None, "dry_run": False}
+
+    monkeypatch.setattr(run_round, "promote", fake_promote)
 
     result = asyncio.run(run_round.run(bench_limit=1))
 
@@ -400,21 +443,107 @@ def test_run_round_records_and_surfaces_on_the_live_path(world, monkeypatch):
     assert PROMOTED in report and "R_20260908_165252" in report
     assert "20260908_165708" in report
 
+    # `promote` is NOT reached, and not for want of a stub: run_round's variant
+    # loop never appends the materialized overlay to `variant_pairs`
+    # (scripts/autoresearch/run_round.py:183-192), so the pair list holds only the
+    # baseline, the winner loop skips it, and no round can promote. Filed as a
+    # blocker on this item; the landed-promotion case is pinned here instead, one
+    # frame closer, at the single function `run()` calls.
+    assert promoted == []
+    assert result["promoted"] is None
     row = [r for r in rows_of(cfg.paths.ledger_path)
            if r.get("event") == post_promotion.ROUND_SUMMARY_EVENT]
     assert len(row) == 1
     assert row[0]["round_id"] == result["round_id"]
     assert row[0]["baseline_mean"] == 0.4364
     assert row[0]["noise_floor"] == DEFAULT_NOISE_FLOOR
-    # This stub world stops short of a landing — `promote` is never reached, so
-    # there is no promoted variant to attribute and the row says `null` rather
-    # than inventing one. The landed case, where all three numbers are present,
-    # is pinned one frame closer to here, at the single function `run()` calls:
-    # see test_post_promotion_check_writes_the_row_and_the_lines_together.
     assert row[0]["promoted_variant_id"] is None
-    assert result["promoted"] is None
     assert result["post_promotion"]["prior_round_id"] == "R_20260908_165252"
     assert result["post_promotion"]["decline"] == pytest.approx(0.1781, abs=1e-4)
+
+
+def test_a_later_round_reads_the_report_the_round_actually_wrote(world, monkeypatch):
+    """The report handoff seam, on run()'s own bytes.
+
+    `run()` writes `rounds/<rid>.md` in one process and a later round's
+    `last_promotion` parses it in another. This feeds back the file the round
+    really produced: it must not be mistaken for a promotion, the section this
+    round appended must not confuse the parser, and the promotion that *is* on
+    record in the same directory must still be the one a later round acts on.
+    (A promotion-bearing report is exercised on run()'s own historical output in
+    `test_a_real_round_report_reads_back_as_a_promotion_record`, whose fixture is
+    byte-identical to that artifact — see the cross-check test.)
+    """
+    cfg = world
+    cfg.paths.bench_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.paths.bench_dir / "bench_a.md").write_text("---\nid: bench_a\ncategory: c\n---\nbody\n", encoding="utf-8")
+    overlay = cfg.paths.research_root / "overlay_V_new"
+    overlay.mkdir(parents=True, exist_ok=True)
+    (overlay / "SOUL.md").write_text("variant contract\n", encoding="utf-8")
+
+    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel):
+        return [
+            {"variant_id": vid, "task_id": t["id"], "status": "ok", "task_category": "c",
+             "turns": 1, "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0}
+            for vid, _ in variant_pairs for t in tasks
+        ], []
+
+    monkeypatch.setattr(run_round, "load_config", lambda: cfg)
+    monkeypatch.setattr(run_round, "propose_variants", lambda *a, **kw: [
+        {"variant_id": "V_new", "description": "d", "hypothesis": "h"}])
+    monkeypatch.setattr(run_round, "_run_trials", fake_trials)
+    monkeypatch.setattr(run_round, "judge_trace", lambda task, t, rubric_model=None: {
+        "composite_score": 0.5, "objective_score": 1.0, "rubric_overall": 0.5,
+        "safety_critical": False, "safety_passed": True})
+    monkeypatch.setattr(run_round, "aggregate_variant", lambda vid, pairs: {
+        "mean_composite": 0.4364 if vid.startswith("BASELINE") else 0.7,
+        "per_task": [], "task_count": len(pairs), "safety_passed": True})
+    monkeypatch.setattr(run_round, "evaluate_promotion", lambda c, b, v: (True, "promote (delta=+0.2636, win_frac=1.00)"))
+    monkeypatch.setattr(run_round, "materialize_baseline", lambda c: ("BASELINE_fixture", c.paths.variants_dir))
+    monkeypatch.setattr(run_round, "materialize", lambda c, v: overlay)
+    monkeypatch.setattr(run_round, "promote", lambda c, v, o, vs, bs, dry_run=False: {
+        "variant_id": v["variant_id"], "snapshot_dir": SNAPSHOT_DIR,
+        "applied_files": ["SOUL.md"], "experiment_fact": None, "dry_run": False})
+
+    result = asyncio.run(run_round.run(bench_limit=1))
+    written = cfg.paths.rounds_dir / f"{result['round_id']}.md"
+    assert "## Post-promotion check" in written.read_text(encoding="utf-8")
+
+    # A later round reading this directory: this round promoted nothing, so the
+    # promotion on record is still the one it was comparing against.
+    later_ledger = cfg.paths.research_root / "later.jsonl"
+    later_ledger.touch()
+    assert post_promotion.promotion_record_from_report(written) is None
+    prior = post_promotion.last_promotion(later_ledger, cfg.paths.rounds_dir)
+    assert prior["round_id"] == "R_20260908_165252"
+    assert prior["promoted_variant_id"] == PROMOTED
+    # And that later round's own baseline, further down, is named as a decline
+    # attributed to the promotion the earlier round surfaced.
+    text = "\n".join(post_promotion.report_section(
+        post_promotion.compare(0.4000, prior, DEFAULT_NOISE_FLOOR)))
+    assert "BASELINE DECLINE PAST NOISE FLOOR" in text and PROMOTED in text
+
+
+def test_the_mcp_ledger_query_handler_returns_the_new_row(world, monkeypatch):
+    """The other side of the process boundary: `autoresearch_ledger_query` is how
+    a human or a worker actually reads this row, and it runs in the MCP server,
+    not the round's process. It filters `event` generically, so the row's shape
+    has to survive the trip — asserted against the handler itself, not a copy."""
+    from agent_mcp import autoresearch as mcp
+
+    post_promotion.record_round_summary(
+        world, "R_20260909_060000", 0.4364, landed(), {"mean_composite": 0.6145}
+    )
+    monkeypatch.setattr(mcp, "_load_cfg", lambda: world)
+    payload = json.loads(mcp._handle_ledger_query({"event": post_promotion.ROUND_SUMMARY_EVENT}))
+    assert payload["count"] == 1
+    row = payload["rows"][0]
+    assert (row["baseline_mean"], row["promoted_variant_id"], row["promoted_variant_mean"]) == (
+        0.4364, PROMOTED, 0.6145,
+    )
+    # And the pre-existing queries keep their old inputs: a decision-event query
+    # finds none of these rows.
+    assert json.loads(mcp._handle_ledger_query({"event": "decision"}))["count"] == 0
 
 
 def test_the_new_ledger_event_is_invisible_to_the_existing_readers(world):
