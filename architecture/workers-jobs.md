@@ -212,7 +212,7 @@ section's stated invariants and its members have come apart.
 **Writes** exactly one file: that doc. Findings become `arch-review` drafts
 tagged `spawned-by-review`, and a fix that belongs in a skill, an autonomy task
 file or anywhere else is filed rather than made. Everything else the turn wrote
-— in this repo and in the vault's `skills/` and `autonomy/` — is reverted from a
+— anywhere in this repo, and anywhere in the vault bar `backlog/` — is reverted from a
 `git status` baseline taken before the turn, and the doc's own diff is thrown
 away if it exceeds 400 changed lines, deletes more than 30% of the doc, breaks
 the front matter, or (for a group) touches a hunk outside its own section. What

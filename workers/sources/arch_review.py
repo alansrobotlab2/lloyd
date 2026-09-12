@@ -27,9 +27,14 @@ Three properties decide whether this is safe, and they are the whole module:
 
 * **Every review edits production.** `~/lloyd` is the running tree, so a saved
   file is a deploy. `Write` is denied — the doc already exists and `Edit` is
-  the only verb needed. Every other path the turn touched, in this repo or in
-  the vault's `skills/` and `autonomy/`, is reverted after the turn from a
-  `git status` baseline taken before it. The doc's own diff is bounded
+  the only verb needed. Every other path the turn touched — anywhere in this
+  repo, and anywhere in the vault except `backlog/`, where its filings belong —
+  is reverted after the turn from a `git status` baseline taken before it, and
+  a path that was *already* dirty is reported by content hash rather than
+  reverted, because somebody else is mid-edit on it. What a `git status` sweep
+  can never see is an **ignored** path, so the tools that write one
+  (`fact_*` under `_pipeline/`, `memory_*`) are denied outright rather than
+  swept. The doc's own diff is bounded
   (`max_delta_lines`, `max_shrink_pct`, front matter intact) and a group's diff
   must land inside its own section. Whatever survives all of that, the
   **source** commits — the model never runs `git`.
@@ -57,6 +62,7 @@ commit, and single triage is exactly the pass that should judge it.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -116,6 +122,19 @@ DISALLOWED: tuple[str, ...] = (
     *WORKER_AUTOMOD_BAN,
     "Task", "Write",
     "vault_write",
+    # The memory surface writes `~/obsidian/lloyd/MEMORY.md` and `USER.md`, and
+    # the fact surface writes `_pipeline/vault-derived/facts/**` plus
+    # `kg.sqlite`. Both were reachable because `DISALLOWED` subtracts from the
+    # whole chat toolbox rather than granting from nothing (#709), and neither
+    # is any part of reviewing a document.
+    #
+    # The fact half is why this list is load-bearing rather than belt-and-
+    # braces: `_pipeline/` is gitignored (`.gitignore:25`), and `git status`
+    # does not report ignored paths at all. The sweep in `revert_strays` is
+    # structurally incapable of seeing a fact write, so denying the tool is
+    # not a second line of defence there — it is the only one.
+    "memory_add", "memory_remove", "memory_replace",
+    "fact_add", "fact_relate", "fact_invalidate", "fact_resolve",
     "http_request",
     "browser_evaluate", "browser_fill", "browser_type", "browser_click",
     "browser_press", "browser_cookies", "browser_drag", "browser_select",
@@ -125,10 +144,16 @@ DISALLOWED: tuple[str, ...] = (
     "graph_refresh",
 )
 
-#: Vault paths a review may not rewrite. The prompt says a skill or task-file
-#: fix is FILED, never made, and this is the half that does not rely on the
-#: model having read that. `backlog/` is deliberately absent: filing is the job.
-VAULT_GUARDED_PATHS = ("skills", "autonomy")
+#: The one vault prefix the sweep ignores, because writing there is the job.
+#: Everything else in the vault is swept.
+#:
+#: This was `("skills", "autonomy")` — an allowlist of the two directories the
+#: prompt talks about — which left `lloyd/MEMORY.md`, `knowledge/`, `projects/`
+#: and the rest of the vault unwatched (#709). Naming what is *exempt* rather
+#: than what is *guarded* is the difference between a sweep that covers what
+#: somebody thought of and one that covers what exists: a directory added to
+#: the vault next month is swept by default instead of silently not being.
+VAULT_UNSWEPT_PREFIXES = ("backlog/",)
 
 #: Defaults for every knob, so a source config that predates a key still runs.
 DEFAULT_REVIEW_INTERVAL_DAYS = 30
@@ -405,6 +430,63 @@ def _porcelain(repo: Path, *pathspec: str) -> set[str]:
             if part:
                 paths.add(part)
     return paths
+
+
+def vault_dirty(root: Path | None = None) -> set[str]:
+    """Dirty paths in the vault that this job is answerable for.
+
+    The whole repo minus `backlog/`. Measured at 15 ms over a vault carrying
+    254 dirty paths, 227 of them backlog items, so scoping by pathspec bought
+    nothing and cost the coverage.
+    """
+    return {p for p in _porcelain(root or VAULT_ROOT)
+            if not p.startswith(VAULT_UNSWEPT_PREFIXES)}
+
+
+def fingerprints(repo: Path, paths: Iterable[str]) -> dict[str, str]:
+    """`{path: sha1-of-bytes}` for paths that exist; absent ones are omitted.
+
+    The answer to the sweep's blind spot (#915). `revert_strays` compares the
+    *set* of dirty paths, so a path that was already dirty before the turn
+    cannot appear in `after - before` however much the turn rewrote it — and
+    the vault's `autonomy/*.md` task files are dirty on nearly every run,
+    because the scheduler rewrites one each time it runs a task. Content is
+    what tells those apart.
+    """
+    out: dict[str, str] = {}
+    for rel in paths:
+        p = _under(repo, rel)
+        if p is None:
+            continue
+        try:
+            out[rel] = hashlib.sha1(p.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return out
+
+
+def modified_preexisting(repo: Path, before: dict[str, str],
+                         keep: Iterable[str] = ()) -> list[dict]:
+    """Already-dirty paths whose CONTENT the turn changed.
+
+    Reported, never reverted, and that asymmetry is the whole point: a path
+    that was already dirty is one somebody else — a human with an editor open,
+    the autonomy scheduler mid-run — is in the middle of. Restoring it would
+    destroy their uncommitted work to undo ours, which is worse than the write
+    being undone. Saying so is the honest half of what the sweep can do here.
+    """
+    kept = set(keep)
+    now = fingerprints(repo, [p for p in before if p not in kept])
+    out = []
+    for rel, sha in sorted(before.items()):
+        if rel in kept:
+            continue
+        after = now.get(rel)
+        if after is not None and after != sha:
+            out.append({"repo": repo.name, "path": rel, "action": "reported (was already dirty)"})
+        elif after is None:
+            out.append({"repo": repo.name, "path": rel, "action": "reported (deleted; was already dirty)"})
+    return out
 
 
 def _is_tracked(repo: Path, rel: str) -> bool:
@@ -792,8 +874,12 @@ Your diff is bounded and the bound is enforced after the turn: more than \
 deleted, a broken front matter block, or {section_bound_hint} — and the whole \
 doc edit is thrown away, while your filed items survive. Stay well inside it.
 
-Every file you write other than that one doc is reverted after the turn, in \
-this repo and in the vault's `skills/` and `autonomy/`.
+Every file you write other than that one doc is reverted after the turn — \
+anywhere in this repository, and anywhere in the vault except `backlog/`, \
+where your filings belong. A file that was already modified before your turn \
+is not reverted (somebody else is mid-edit) but any change you make to it is \
+reported. You cannot write memory or facts: those tools are not available to \
+you, because a document review has no business changing what Lloyd believes.
 
 **5. End your final message with exactly this block and nothing after it:**
 
@@ -1253,7 +1339,11 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # 2. Baselines, in both trees. `-uall` so an untracked directory is never
     #    one entry that would be deleted wholesale on the way out.
     before_lloyd = await asyncio.to_thread(_porcelain, root)
-    before_vault = await asyncio.to_thread(_porcelain, VAULT_ROOT, *VAULT_GUARDED_PATHS)
+    before_vault = await asyncio.to_thread(vault_dirty, VAULT_ROOT)
+    # Content, not just presence: a path already dirty can never show up in
+    # `after - before`, so without this the turn could rewrite one freely (#915).
+    fp_lloyd = await asyncio.to_thread(fingerprints, root, before_lloyd)
+    fp_vault = await asyncio.to_thread(fingerprints, VAULT_ROOT, before_vault)
     if rel in before_lloyd:
         # A human is editing this doc right now. Not the unit's fault and not
         # an attempt: parking a unit because somebody had the file open would
@@ -1301,9 +1391,14 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     # 5. Stray writes — everything but the one doc, in both trees.
     after_lloyd = await asyncio.to_thread(_porcelain, root)
-    after_vault = await asyncio.to_thread(_porcelain, VAULT_ROOT, *VAULT_GUARDED_PATHS)
+    after_vault = await asyncio.to_thread(vault_dirty, VAULT_ROOT)
     strays = await asyncio.to_thread(revert_strays, root, before_lloyd, after_lloyd, {rel})
     strays += await asyncio.to_thread(revert_strays, VAULT_ROOT, before_vault, after_vault)
+    # Reported, never reverted — see `modified_preexisting`. The doc is exempt
+    # in this repo: a human editing it sends the unit down the `doc_dirty`
+    # path before the turn ever starts, so any change here is the turn's own.
+    strays += await asyncio.to_thread(modified_preexisting, root, fp_lloyd, {rel})
+    strays += await asyncio.to_thread(modified_preexisting, VAULT_ROOT, fp_vault)
 
     # 6. The doc's own diff, against the bounds. Parsed first, because whether
     #    a large deletion is allowed depends on the status the turn assigned.

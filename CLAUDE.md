@@ -649,9 +649,13 @@ The turn checks the unit's claims against the tree and the health routes,
 reviews the code it names, **edits that one doc**, and files everything else
 as `arch-review` drafts. Four rails decide what survives, and they are the
 whole design: every path the turn touched other than the doc — in this repo
-and in the vault's `skills/` and `autonomy/` — is reverted against a
+and anywhere in the vault bar `backlog/` — is reverted against a
 `git status` baseline taken *before* the turn (a diff, never a snapshot, or a
-human's open editor buffer goes with it); the doc's own diff is thrown away
+human's open editor buffer goes with it), while a path *already* dirty is
+reported by content hash rather than reverted, since somebody else is mid-edit
+on it; a **gitignored** path is invisible to any such sweep, so the tools that
+write one (`fact_*` under `_pipeline/`, `memory_*`) are denied rather than
+swept, which makes that deny list the only defence there and not a second one; the doc's own diff is thrown away
 over 400 changed lines, over 30% deleted (waived for a `superseded` banner),
 or with the front matter gone; a **group** edit must land inside its own
 `## ` section, by old-side `git diff -U0` hunks, so the seven groups sharing

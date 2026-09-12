@@ -18,6 +18,7 @@ those rails is `git` behaviour and a mock of it would pin the mock.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import subprocess
@@ -134,6 +135,11 @@ def tree(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "BACKLOG_DIR", vault / "backlog")
     return {"repo": repo, "vault": vault, "state": state, "arch": arch,
             "backlog": vault / "backlog", "ledger": state / "promotions.jsonl"}
+
+
+def await_sync(coro):
+    """Drive one coroutine from a sync test."""
+    return asyncio.run(coro)
 
 
 def _item(payload: dict, item_id: int = 1) -> QueueItem:
@@ -1016,3 +1022,118 @@ def test_provenance_matches_a_whole_line_only(tree):
     assert not A._filed_item_exists(902, "memory")
     _write_item(tree["backlog"], 903, slug="memory")
     assert A._filed_item_exists(903, "memory")
+
+
+# ── #709 / #915: what the sweep can and cannot see ──────────────────────────
+
+
+def test_the_toolbox_denies_the_memory_and_fact_writers(tree):
+    """#709. `DISALLOWED` subtracts from the whole chat toolbox rather than
+    granting from nothing, so everything not named here is live — and the
+    memory and fact surfaces were."""
+    for name in ("memory_add", "memory_remove", "memory_replace",
+                 "fact_add", "fact_relate", "fact_invalidate", "fact_resolve"):
+        assert name in A.DISALLOWED, f"{name} can write outside the one doc"
+    for name in ("memory_read", "fact_get", "fact_profile", "vault_read",
+                 "vault_search", "session_recall"):
+        assert name not in A.DISALLOWED, f"{name} is a reader; a review legitimately reads"
+
+
+def test_denying_the_fact_writers_is_the_only_defence_not_a_second_one(tree):
+    """The fact tree lives under `_pipeline/`, which is gitignored — and
+    `git status` does not report ignored paths at all, with or without
+    `-uall`. So `revert_strays` is structurally incapable of seeing a fact
+    write: the deny list is not belt-and-braces there, it is the belt.
+
+    Pinned as behaviour rather than stated in a comment, because the day
+    someone narrows the deny list on the theory that the sweep will catch it
+    is the day this matters.
+    """
+    repo = tree["repo"]
+    (repo / ".gitignore").write_text("/_pipeline/\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "ignore the pipeline")
+    before = A._porcelain(repo)
+
+    facts = repo / "_pipeline" / "vault-derived" / "facts" / "Lloyd"
+    facts.mkdir(parents=True)
+    (facts / "Lloyd-state.md").write_text("- Lloyd believes something new.\n")
+
+    after = A._porcelain(repo)
+    assert after == before, "an ignored path is invisible to the sweep, by design"
+    assert A.revert_strays(repo, before, after) == []
+    assert (facts / "Lloyd-state.md").exists(), "so nothing reverts it"
+
+
+def test_the_sweep_covers_the_whole_vault_not_two_directories(tree, monkeypatch):
+    """#709. It was an allowlist of the two directories the prompt mentions,
+    which left `lloyd/MEMORY.md`, `knowledge/` and the rest unwatched."""
+    vault = tree["vault"]
+    (vault / "lloyd").mkdir()
+    (vault / "knowledge").mkdir()
+
+    def edits():
+        (vault / "lloyd" / "MEMORY.md").write_text("- a belief the review invented\n")
+        (vault / "knowledge" / "note.md").write_text("# invented\n")
+        (tree["backlog"] / "900-a-real-finding.md").write_text("---\nid: 900\n---\n# filed\n")
+    monkeypatch.setattr(A, "run_prompt_in_session", _turn(_block(), edits=edits))
+    out = await_sync(A.execute(_item(_payload("doc:memory", "doc", "memory"))))
+
+    assert not (vault / "lloyd" / "MEMORY.md").exists()
+    assert not (vault / "knowledge" / "note.md").exists()
+    assert (tree["backlog"] / "900-a-real-finding.md").exists(), "backlog/ is the job"
+    swept = {s["path"] for s in out["meta"]["stray_writes"]}
+    assert swept == {"lloyd/MEMORY.md", "knowledge/note.md"}
+
+
+def test_the_exempt_prefix_names_what_is_skipped_not_what_is_guarded(tree):
+    """A directory added to the vault next month is swept by default rather
+    than silently not being."""
+    assert A.VAULT_UNSWEPT_PREFIXES == ("backlog/",)
+    vault = tree["vault"]
+    (vault / "brand-new-area").mkdir()
+    (vault / "brand-new-area" / "x.md").write_text("new\n")
+    assert "brand-new-area/x.md" in A.vault_dirty(vault)
+    (tree["backlog"] / "1-x.md").write_text("filed\n")
+    assert not any(p.startswith("backlog/") for p in A.vault_dirty(vault))
+
+
+async def test_a_rewrite_of_an_already_dirty_path_is_reported_not_reverted(tree, monkeypatch):
+    """#915. A path already dirty cannot appear in `after - before` however
+    much the turn rewrote it, and the vault's `autonomy/*.md` files are dirty
+    on nearly every run because the scheduler rewrites one each time.
+
+    Reported, never reverted: somebody else is mid-edit on that path, and
+    restoring it would destroy their uncommitted work to undo ours.
+    """
+    task = tree["vault"] / "autonomy" / "39-nightly.md"
+    task.write_text("---\nstatus: up_next\n---\n# scheduled\n")   # dirty BEFORE the turn
+    human = tree["repo"] / "README.md"
+    human.write_text("a human is mid-edit\n")
+
+    def edits():
+        task.write_text("---\nstatus: paused\n---\n# the review edited this\n")
+    monkeypatch.setattr(A, "run_prompt_in_session", _turn(_block(updated="no"), edits=edits))
+    out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+
+    reported = {s["path"]: s["action"] for s in out["meta"]["stray_writes"]}
+    assert "autonomy/39-nightly.md" in reported
+    assert "already dirty" in reported["autonomy/39-nightly.md"]
+    assert "the review edited this" in task.read_text(), "not reverted"
+    assert human.read_text() == "a human is mid-edit\n", "and untouched paths are silent"
+    assert "README.md" not in reported
+
+
+async def test_an_untouched_dirty_path_is_not_reported(tree, monkeypatch):
+    """The vault is never clean. Reporting every pre-existing dirty path would
+    make the field noise and nobody would read it."""
+    (tree["vault"] / "autonomy" / "39-nightly.md").write_text("---\nstatus: up_next\n---\n")
+    (tree["repo"] / "README.md").write_text("mid-edit\n")
+    monkeypatch.setattr(A, "run_prompt_in_session", _turn(_block(updated="no")))
+    out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+    assert out["meta"]["stray_writes"] == []
+
+
+def test_fingerprints_skips_what_it_cannot_read(tree):
+    fp = A.fingerprints(tree["repo"], ["README.md", "does-not-exist.md", "../escape.md"])
+    assert set(fp) == {"README.md"}

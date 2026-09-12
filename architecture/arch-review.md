@@ -92,7 +92,7 @@ live**, `memory_add` and the `fact_*` writers among them, and those write vault
 paths §2.1's sweep never looks at (#709).
 
 1. **A `git status` diff, not a snapshot.** Baselines are taken in `~/lloyd`
-   and in the vault's `skills/` and `autonomy/` *before* the turn, with
+   and across the vault except `backlog/` *before* the turn, with
    `--untracked-files=all` so an untracked directory is never one entry to
    delete wholesale. Afterwards, every path that appeared and is not the doc is
    reverted: tracked back to HEAD, untracked unlinked. A snapshot would revert
@@ -212,10 +212,11 @@ review.
 - **It does not fix what it finds** outside the one doc. A phantom tool name in
   a SKILL.md, an unbounded autonomy step, a dead consumer: all filed. This is
   the rule most likely to look like waste and is the reason the sweep in §2.1
-  exists — the model is told it, *and* the tree enforces it, for the paths the
-  sweep actually looks at: `~/lloyd` whole-tree and the vault's `skills/` and
-  `autonomy/`. The memory and fact writers it is never denied write elsewhere
-  in the vault and are not swept (#709).
+  exists — the model is told it, *and* the tree enforces it. The sweep covers
+  `~/lloyd` whole-tree and the whole vault bar `backlog/`; what it cannot cover
+  is a **gitignored** path, since `git status` does not report one, so the
+  tools that write under `_pipeline/` (`fact_*`) or to `lloyd/MEMORY.md`
+  (`memory_*`) are denied instead (#709).
 - **It does not stage an artifact.** Nothing under `pending-research/`, so no
   `_DEFAULT_DEST` entry and no row in the Review tab. Its output is a commit
   and a set of drafts, both already durable.
