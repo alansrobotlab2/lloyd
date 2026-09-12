@@ -85,7 +85,16 @@ def test_the_steward_is_shown_every_pending_machine_move():
     and invisible to the steward because nothing recent had touched it."""
     items = [_item(898, "draft"), _item(2, "up_next"), _item(5, "draft")]
     shown = W.board_view(items, touched=set(), pending={898}, max_items=10)
-    assert [i.id for i in shown] == [2, 898]
+    assert [i.id for i in shown] == [898, 2]
+
+
+def test_a_pending_move_survives_a_pool_bigger_than_the_cap():
+    """The third dry-run's miss: 91 pool items, cap 80, the one pending item
+    listed after them and cut off. Pending goes first, whatever the cap."""
+    items = [_item(i, "up_next") for i in range(1, 92)] + [_item(898, "draft")]
+    shown = W.board_view(items, touched=set(), pending={898}, max_items=80)
+    assert shown[0].id == 898
+    assert len(shown) == 80
 
 
 def test_events_include_each_shown_items_own_history(tmp_path):

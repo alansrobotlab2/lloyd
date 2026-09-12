@@ -255,13 +255,18 @@ def board_view(items: list[Any], touched: set[int], *, max_items: int = DEFAULT_
     that sees the whole board has to show it at least what the machine is
     about to act on.
     """
-    pool = [i for i in items if i.status in ("up_next", "in_progress")]
-    seen = {i.id for i in pool}
-    due = [i for i in items if i.id in pending and i.id not in seen]
-    seen |= {i.id for i in due}
+    # Pending FIRST. The pool alone is bigger than `max_items` on this board
+    # (91 items in up_next/in_progress on 2026-09-12), so with the pool ahead
+    # of it the one item the machine was about to move was truncated off the
+    # end three dry-runs running — the steward saw its event and no board
+    # line, and correctly refused to move an item it had not been shown.
+    due = [i for i in items if i.id in pending]
+    seen = {i.id for i in due}
+    pool = [i for i in items if i.status in ("up_next", "in_progress") and i.id not in seen]
+    seen |= {i.id for i in pool}
     rest = [i for i in items if i.id not in seen
             and (i.id in touched or "needs-human" in (i.tags or []))]
-    return (pool + due + rest)[:max_items]
+    return (due + pool + rest)[:max_items]
 
 
 def _item_line(i: Any) -> str:
