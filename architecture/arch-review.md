@@ -3,15 +3,18 @@ segment: architecture
 tags: [architecture, lloyd, workers, automod]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-09-12
 ---
 
 # arch-review — the pass that keeps these docs honest
 
-`architecture/` was hand-curated on 2026-09-11: 22 top-level docs, 17 retired
-into the gitignored `.archive/`, an [[index]] that lists what is left. Nothing
+`architecture/` was hand-curated on 2026-09-11: 22 top-level docs then, **23
+now** — this doc joined the picklist the day it landed, so the pass reviews
+itself — and 17 docs retired, of which **12 are still in the gitignored
+`.archive/`**: five were deleted outright in `f80c9d0` rather than kept. An
+[[index]] lists what is left. Nothing
 kept it honest from there. Three `tests/test_*_doc_claims.py` pin numbers in
-three of the 22; `agent_mcp/memory_ops.py:12` cited a doc that no longer
+three of them; `agent_mcp/memory_ops.py:12` cited a doc that no longer
 existed; the measured tables in [[autonomy-jobs]] and [[workers-jobs]] are
 snapshots of one afternoon. A doc that has drifted is worse than no doc,
 because it is read as current.
@@ -62,7 +65,8 @@ to it; only a level-2 heading ends it.
 `last_reviewed_at`, docs before groups on a tie. A unit rests
 `review_interval_days` (30) after a review; `max_attempts` (3) consecutive
 failures park it for `retry_spacing_seconds` (6 h). There is no churn trigger
-and no backoff — 33 units at `daily_max: 4` is a first pass in about eight
+and no backoff — 34 units (23 docs + 11 groups) at `daily_max: 4` is a first
+pass in about eight
 days, and a review a month per unit after that. `daily_max` is counted from
 `arch_review` ledger events rather than from the state file, because the ledger
 is what survives the state file being deleted.
@@ -73,24 +77,36 @@ State is `~/.local/state/lloyd-automod/arch_review.json`, one row per unit:
 
 ## 2. Every review edits production, and four rails decide what survives
 
-`~/lloyd` is the running tree: a saved file is a deploy. The turn is given
-`Edit`, `Bash`, `Read`/`Grep`/`Glob`, the `graph_*` readers and
-`backlog_write_task`, and denied `Write` (the doc exists — a new file is either
+`~/lloyd` is the running tree: a saved file is a deploy. What the turn may not
+use is a **deny-list over the whole chat toolbox**, not a grant list:
+`workers/sources/_common.py:592-600` says outright that a worker
+session "is handed exactly the toolbox a chat gets", and `DISALLOWED`
+subtracts from that. It names `Write` (the doc exists — a new file is either
 a finding to file or a stray write), `Task` (a subagent's writes land on the
-parent's turn, after the diff was measured), `vault_write`, the automod tools
-and every queue writer.
+parent's turn, after the diff was measured), `vault_write`, the automod tools,
+the autonomy writers, `http_request`, `graph_refresh` and the mutating half of
+the browser. The job needs `Edit`, `Bash`, `Read`/`Grep`/`Glob`, the `graph_*`
+readers and `backlog_write_task`; **what is left of the chat toolbox is still
+live**, `memory_add` and the `fact_*` writers among them, and those write vault
+paths §2.1's sweep never looks at (#709).
 
 1. **A `git status` diff, not a snapshot.** Baselines are taken in `~/lloyd`
    and in the vault's `skills/` and `autonomy/` *before* the turn, with
    `--untracked-files=all` so an untracked directory is never one entry to
    delete wholesale. Afterwards, every path that appeared and is not the doc is
    reverted: tracked back to HEAD, untracked unlinked. A snapshot would revert
-   a human's open editor buffer; a diff cannot. `backlog/` is deliberately
-   outside the sweep, because filing is the job.
+   a human's open editor buffer; a diff cannot — and the limit of that trade is
+   that a path already dirty *before* the turn cannot appear, so a stray edit to
+   one (a vault `autonomy/*.md` task file, which the scheduler dirties on nearly
+   every run) is neither reverted nor reported (#915). `backlog/` is
+   deliberately outside the sweep, because filing is the job.
 2. **The doc's own diff is bounded.** More than `max_delta_lines` (400)
    changed lines is a rewrite, not a correction. More than `max_shrink_pct`
    (30%) deleted is the doc gutted — waived for `superseded` and
    `aspirational`, where a banner over a body nobody should trust is the point.
+   The percentage is measured against the whole file for both unit kinds, so
+   for a group it is ~20× looser than it reads: every section but `Distil` is
+   smaller than 30% of its own doc, and one turn could delete it entire (#913).
    A front matter block that no longer opens the file is refused outright: the
    vault indexes on it.
 3. **A group edits only its own section.** `git diff -U0` gives old-side hunks;
@@ -142,9 +158,13 @@ an autocode round's.
 Every `filed` id is verified on disk before the ledger records it: the file
 must exist, carry the `arch-review` tag, and open with this unit's provenance
 line (`Found reviewing architecture/<slug>.md`, plus ` §<heading>` for a
-group). An id at or below the pre-turn `max_item_id()` is a **merge**, not a
-spawn — `backlog_write_task` answers `merged_into: #n` when an open item
-already covers the finding. An id with no file at all is `filed_unverified`.
+group). Both halves are matched as substrings of the file's first 20k
+characters rather than as a tag and a leading line, and the doc-level line is a
+prefix of every group-level one for the same slug, so neither check is as strict
+as this sentence (#914). An id at or below the pre-turn `max_item_id()` is a
+**merge**, not a spawn — `backlog_write_task` answers `merged_into: #n` when an
+open item already covers the finding. An id with no file at all is
+`filed_unverified`.
 
 ## 4. The tag asymmetry
 
@@ -163,11 +183,14 @@ commit up to a month old, and deciding whether it still holds is precisely what
 single triage is for. Expiry asks the other question — did anything ever act on
 this? — and the answer is no for both, so the bound applies to both.
 
-Inflow is bounded three ways regardless: `spawn_cap` (5) per run,
-`max_open_items` (25) open `arch-review` drafts across both kinds before a tick
-skips entirely, and the 30-day expiry. The middle one is the R > 1 lesson
+Inflow is bounded at three points, but only two of them bind. `max_open_items`
+(25) open `arch-review` drafts across both kinds stops the whole tick, and the
+30-day expiry closes anything untouched; `spawn_cap` (5) per run is a prompt
+instruction plus the `spawned_over_cap` field on the ledger event — nothing
+truncates a turn that files a sixth finding. The middle one is the R > 1 lesson
 applied before it can happen — a pass that files faster than the board closes
-does not need better verdicts, it needs an edge cut.
+does not need better verdicts, it needs an edge cut, and the only edge cut here
+is the one that stops the tick.
 
 ## 5. Where it shows up
 
@@ -188,7 +211,10 @@ review.
 - **It does not fix what it finds** outside the one doc. A phantom tool name in
   a SKILL.md, an unbounded autonomy step, a dead consumer: all filed. This is
   the rule most likely to look like waste and is the reason the sweep in §2.1
-  exists — the model is told it, *and* the tree enforces it.
+  exists — the model is told it, *and* the tree enforces it, for the paths the
+  sweep actually looks at: `~/lloyd` whole-tree and the vault's `skills/` and
+  `autonomy/`. The memory and fact writers it is never denied write elsewhere
+  in the vault and are not swept (#709).
 - **It does not stage an artifact.** Nothing under `pending-research/`, so no
   `_DEFAULT_DEST` entry and no row in the Review tab. Its output is a commit
   and a set of drafts, both already durable.
@@ -201,3 +227,15 @@ review.
 ## Related
 
 [[workers]], [[workers-jobs]], [[automod]], [[backlog]], [[index]]
+
+## Review log
+
+- 2026-09-12 — **stale**. The mechanism is all live and verified against
+  `workers/sources/arch_review.py` at `2de2150`, but four counts and two
+  claims about enforcement were wrong: the picklist is 23 docs / 34 units and
+  `.archive/` holds 12 (not 22 / 33 / 17); tool policy is a deny-list over the
+  chat toolbox rather than the grant list §2 described, so the memory and fact
+  writers are live and outside the sweep (#709); `spawn_cap` is a prompt plus a
+  gauge, not a bound; and two rails are looser than their own sentences — the
+  shrink percentage is whole-file for groups (#913) and the filing check matches
+  provenance as a substring (#914). Filed #709, #913, #914, #915, #916.
