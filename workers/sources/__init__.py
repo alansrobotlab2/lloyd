@@ -57,6 +57,7 @@ from workers.sources import deep_research as _deep_research  # noqa: E402,F401
 from workers.sources import youtube_digest as _youtube_digest  # noqa: E402,F401
 from workers.sources import backlog_cluster as _backlog_cluster  # noqa: E402,F401
 from workers.sources import arch_review as _arch_review  # noqa: E402,F401
+from workers.sources import board_steward as _board_steward  # noqa: E402,F401
 
 register(_scheduled_task)
 register(_autoresearch)
@@ -70,3 +71,4 @@ register(_deep_research)
 register(_youtube_digest)
 register(_backlog_cluster)
 register(_arch_review)
+register(_board_steward)

@@ -560,7 +560,8 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                                 timeout_seconds: float | None = None,
                                 extra_disallowed: list[str] | None = None,
                                 final_schema: dict | None = None,
-                                final_schema_prompt: str = "") -> dict:
+                                final_schema_prompt: str = "",
+                                model: str = "primary") -> dict:
     """Run one turn through the backend's own chat path, in a real session.
 
     This is the counterpart to `run_prompt_on_primary`, and the difference is
@@ -628,7 +629,8 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     # a switch that reads as broken the one time somebody uses it.
     if inner_voice is None:
         inner_voice = source_inner_voice(source)
-    session_id = new_worker_session(title=title, source=source, inner_voice=inner_voice)
+    session_id = new_worker_session(title=title, source=source, inner_voice=inner_voice,
+                                    model=model)
     # #534 — whose authority this turn borrows, carried across the loopback
     # POST. `policy.current_scope` is a contextvar the pool binds around the
     # claimed job, and it is correct HERE, in the pool's own task; the backend
@@ -639,7 +641,7 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     # between a grant made to `autonomy-task:39` and one made to whatever runs
     # on that source next.
     from app.harness.policy import current_effect_scope, current_scope
-    payload = {"session_id": session_id, "text": prompt, "model": "primary",
+    payload = {"session_id": session_id, "text": prompt, "model": model,
                "priority": int(priority), "max_turns": int(max_turns),
                "grant_scope": current_scope.get(),
                # #544 — the same hop, the other contextvar. The effect ledger

@@ -29,6 +29,7 @@ request for a human to sharpen the item, not a failure.
 from __future__ import annotations
 
 import json
+import time
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -2108,6 +2109,16 @@ def select_confirmed(ledger: Path,
     # confirmations before other re-offers — oldest-first alone let a
     # sent-back item be re-picked on the very next round for as long as its
     # cap allowed, monopolising the loop while the rest of the pool waited.
+    # Cut 3 of senses-not-supervision: when the board steward is APPLYING,
+    # its pick is the order. It read the same ledger and the same board and
+    # was asked the same question, and one judgment with reasons beats three
+    # sort keys. Only a pick that is in `ready` counts — the pick is advice,
+    # the readiness rules above are facts.
+    picked = steward_pick()
+    if picked is not None:
+        for item, ev in ready:
+            if item.id == picked:
+                return item, ev
     near = set(last_review_all_met(ledger))
     # A FIRST re-offer whose branch still holds the work belongs in the same
     # tier, for the same reason: it is a fix cycle, not an hour.
@@ -2115,6 +2126,37 @@ def select_confirmed(ledger: Path,
     return sorted(ready, key=lambda pair: (pair[0].id not in near,
                                            pair[0].id in outcomes,
                                            pair[0].created or "9999", pair[0].id))[0]
+
+
+STEWARD_PICK_MAX_AGE_S = 2 * 3600
+
+
+def steward_pick(path: Path | None = None, *, now: float | None = None) -> int | None:
+    """The board steward's `next_pick`, when it is applying and fresh.
+
+    None unless `workers.sources.board-steward.apply` is on: in dry-run the
+    steward records what it WOULD pick and the ordering below stays the
+    order. Stale (older than two of its intervals) means the steward has
+    stopped running, and a pick from a board that has since moved is worse
+    than the sort.
+    """
+    try:
+        from app.config import CONFIG
+        cfg = ((CONFIG.get("workers") or {}).get("sources") or {}).get("board-steward") or {}
+        if not cfg.get("apply", False):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        from scripts.automod import state as S
+        p = path or (S.STATE_DIR / "steward_pick.json")
+        d = json.loads(Path(p).read_text(encoding="utf-8"))
+        if (now or time.time()) - float(d.get("ts") or 0) > STEWARD_PICK_MAX_AGE_S:
+            return None
+        iid = int(d.get("item_id") or 0)
+        return iid or None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def rounds_for_item(ledger: Path) -> dict[int, list[str]]:
