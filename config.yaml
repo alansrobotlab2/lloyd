@@ -786,6 +786,23 @@ workers:
     enabled: true
     max_kv_usage: 0.60
     window_seconds: 60
+  # Round hold (workers/pool.py). While an `autocode` round is in flight,
+  # nothing else claims a slot except the sources named here. A round is the
+  # rarest and most expensive job in the pool — one worktree, nine gate rungs,
+  # a landing that restarts the backend — and the one most damaged by sharing
+  # the primary: it re-submits a 100-200k context every iteration, so anything
+  # else claiming a slot evicts its prefix. On 2026-09-11 every autocode
+  # session showed cold re-prefills (0.14-0.85M tokens per session), with 14
+  # scheduled-task and 15 autotriage runs on the same engine in one window.
+  #
+  # The KV gate above asks "is the engine full now"; this asks "is the one job
+  # worth protecting running at all". Different questions, both cheap.
+  #
+  # `scheduled-task` is exempt: those are short and time-sensitive, and a
+  # user-visible schedule slipping by an hour is its own failure.
+  round_hold:
+    enabled: true
+    exempt: [scheduled-task]
   sources:
     # OFF since 2026-09-08. This source promoted generated prompt variants
     # straight over the live `lloyd/SOUL.md` / `MEMORY.md` every hour with no

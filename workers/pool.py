@@ -78,6 +78,24 @@ def kv_gate_config() -> dict[str, Any]:
         return {}
 
 
+# Round hold — see `WorkerPool._round_hold_held`.
+#
+# The source whose in-flight job holds the rest of the pool back, and the
+# sources exempt from it. `scheduled-task` is exempt because those jobs are
+# time-sensitive and short, and a user-visible schedule slipping by an hour
+# is its own failure.
+ROUND_SOURCE = "autocode"
+DEFAULT_ROUND_HOLD_EXEMPT: tuple[str, ...] = ("scheduled-task",)
+
+
+def round_hold_config() -> dict[str, Any]:
+    try:
+        from app.config import CONFIG
+        return dict((CONFIG.get("workers") or {}).get("round_hold") or {})
+    except Exception:
+        return {}
+
+
 def long_lived_sources(registry: dict[str, Any]) -> list[str]:
     """Sources that declare themselves long-lived re-admitters.
 
@@ -216,6 +234,13 @@ class WorkerPool:
             "kv_usage": None,
             "held_sources": [],
         }
+        # Round hold. See `_round_hold_held`.
+        self._round_hold: dict[str, Any] = {
+            "engaged": False,
+            "engaged_since": None,
+            "engagements": 0,
+            "held_sources": [],
+        }
 
     @property
     def worker_ids(self) -> list[str]:
@@ -285,6 +310,7 @@ class WorkerPool:
             },
             "in_flight_count": len(self._in_flight),
             "kv_gate": self.kv_gate_status(),
+            "round_hold": self.round_hold_status(),
         }
 
     def kv_gate_status(self) -> dict[str, Any]:
@@ -311,6 +337,84 @@ class WorkerPool:
         if engine_pressure.latest() is None:
             return None
         return engine_pressure.kv_percentile(0.5, window=window)
+
+    def round_hold_status(self) -> dict[str, Any]:
+        cfg = round_hold_config()
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            "exempt": list(cfg.get("exempt", DEFAULT_ROUND_HOLD_EXEMPT)),
+            **self._round_hold,
+            "held_sources": list(self._round_hold["held_sources"]),
+        }
+
+    def _round_hold_held(self, registry: dict[str, Any]) -> list[str]:
+        """Sources this claim must skip because an autocode round is running.
+
+        A round is the rarest and most expensive thing this pool does: one
+        worktree, a nine-rung gate, a landing that restarts the backend. It
+        is also the job most damaged by sharing the primary, because it runs
+        a 100k-200k-token context for an hour and re-submits all of it every
+        iteration — so anything else claiming a slot evicts its prefix. On
+        2026-09-11 every autocode session showed cold re-prefills (0.14-0.85M
+        tokens per session), and in one 21-hour window 14 scheduled-task and
+        15 autotriage runs shared the engine with the rounds.
+
+        The KV gate beside this asks "is the engine full *now*"; this asks
+        "is the one job worth protecting running at all". They are different
+        questions and both are cheap.
+
+        **No lease and no TTL**, deliberately. `_in_flight` is exact — it is
+        written when a slot claims and popped on every exit path, including
+        the timeout and exception branches — and it is bounded by the pool's
+        own `wait_for`. A lease would add a second source of truth about the
+        same fact, which is how a hold outlives the thing it was holding for.
+        `autocode._loop_is_free` already guarantees at most one round.
+
+        `scheduled-task` is exempt by default: those are time-sensitive, short,
+        and a user-visible schedule slipping by an hour is its own failure.
+        """
+        cfg = round_hold_config()
+        if not bool(cfg.get("enabled", True)):
+            self._release_round_hold()
+            return []
+        running = {
+            str(v.get("source") or "") for v in self._in_flight.values()
+        }
+        if ROUND_SOURCE not in running:
+            self._release_round_hold()
+            return []
+        exempt = set(cfg.get("exempt", DEFAULT_ROUND_HOLD_EXEMPT)) | {ROUND_SOURCE}
+        held = sorted(name for name in registry if name not in exempt)
+        hold = self._round_hold
+        if not hold["engaged"]:
+            hold.update(
+                engaged=True, engagements=hold["engagements"] + 1,
+                engaged_since=datetime.now(timezone.utc).isoformat(),
+                held_sources=held,
+            )
+            logger.info(
+                "Round hold engaged: an %s round is in flight — holding %s",
+                ROUND_SOURCE, ", ".join(held) or "nothing",
+            )
+        else:
+            hold["held_sources"] = held
+        return held
+
+    def _release_round_hold(self) -> None:
+        hold = self._round_hold
+        if hold["engaged"]:
+            logger.info("Round hold released")
+            hold.update(engaged=False, engaged_since=None, held_sources=[])
+
+    def _claim_holds(self, registry: dict[str, Any]) -> list[str]:
+        """Every reason this claim must skip a source, unioned.
+
+        Two independent gates, and the union is what the claim query takes.
+        Kept as one call site so a third gate has an obvious home.
+        """
+        held = set(self._kv_gate_held(registry))
+        held |= set(self._round_hold_held(registry))
+        return sorted(held)
 
     def _kv_gate_held(self, registry: dict[str, Any]) -> list[str]:
         """Sources this claim must skip because the primary's KV is over budget.
@@ -415,7 +519,7 @@ class WorkerPool:
                 if src.get("max_inflight") is not None
             }
 
-            held = self._kv_gate_held(SOURCE_REGISTRY)
+            held = self._claim_holds(SOURCE_REGISTRY)
             item = await asyncio.to_thread(
                 self.queue.claim_next, worker_id, max_inflight, held)
             if not item:

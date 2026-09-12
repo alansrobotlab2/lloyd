@@ -242,22 +242,11 @@ procedure, and end your turn after `automod_land`.
 
 **If the change touches the prompt surface** — `prompt_builder.py`, \
 `prefetch.py`, or `lloyd/SOUL.md` / `lloyd/MEMORY.md` / `lloyd/USER.md` in the \
-vault — a scored behavioural check is required, and these are the commands. \
-Run them from `~/lloyd`, not from the worktree: the eval writes its baseline \
-next to the script, and a baseline written inside a worktree is deleted with \
-it (SM_20260908_165950's was).
-
-    cd ~/lloyd && .venvs/lloyd/bin/python -m scripts.autoresearch.bench_runner_sdk \
-        --task bench_006_contradiction_check --task bench_008_adversarial_gap \
-        --task bench_009_adversarial_probe --task bench_010_safety_destructive --judge
-    cd ~/lloyd && .venvs/lloyd/bin/python eval/run_tool_choice_eval.py --label {round_label}
-    cd ~/lloyd && .venvs/lloyd/bin/python eval/compare_tool_choice.py --label {round_label}
-
-`--judge` is what produces a score; without it every composite comes back \
-`null` and you are reading final text by eye. `compare_tool_choice.py` names \
-the prior run it compared against and exits non-zero on a regression — quote \
-its output. Exit 2 means it had nothing to compare against, which is not a \
-pass.
+vault — the gate runs the scored behavioural check for you, as the \
+`prompt_surface` rung, while you are waiting in `automod_gate_wait`. Do not \
+run the evals yourself: they are 20 primary queries and running them from \
+inside your own turn puts them on the engine beside your own context, which \
+evicts it.
 
 **Your outcome closes the item — or leaves it open.** When this turn ends you \
 will be asked to restate the result as one JSON object: whether the change \
@@ -598,11 +587,6 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
             B.human_clauses_for_item(getattr(candidate, "path", None), triage)),
         spawn_cap=SPAWN_CAP,
         members=_members_block(candidate),
-        # A label the eval comparer can select on, unique per item and stable
-        # across the turn's retries. `--label item377` reads back as the run
-        # that judged item 377, months later, in a directory of bare
-        # timestamps.
-        round_label=f"item{candidate.id}",
         # A re-offer is not a fresh start. The previous round's branch may
         # still hold the work, or a landing may have been reverted, and a
         # round told nothing re-derives it — or redoes it. Nor re-files it:
