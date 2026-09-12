@@ -65,8 +65,9 @@ to it; only a level-2 heading ends it.
 `last_reviewed_at`, docs before groups on a tie. A unit rests
 `review_interval_days` (30) after a review; `max_attempts` (3) consecutive
 failures park it for `retry_spacing_seconds` (6 h). There is no churn trigger
-and no backoff — 34 units (23 docs + 11 groups) at `daily_max: 4` is a first
-pass in about eight
+and no backoff — the picklist is read from disk at call time, and at
+`daily_max: 4` a board this size is a first
+pass in about a week
 days, and a review a month per unit after that. `daily_max` is counted from
 `arch_review` ledger events rather than from the state file, because the ledger
 is what survives the state file being deleted.
@@ -233,7 +234,10 @@ review.
 - 2026-09-12 — **stale**. The mechanism is all live and verified against
   `workers/sources/arch_review.py` at `2de2150`, but four counts and two
   claims about enforcement were wrong: the picklist is 23 docs / 34 units and
-  `.archive/` holds 12 (not 22 / 33 / 17); tool policy is a deny-list over the
+  `.archive/` held 12 at the time (not 22 / 33 / 17) — those five were lost to
+  a `git rm --cached` whose deletion a merge then applied to the working tree,
+  and they were restored the same evening, so it holds 17 again; tool policy is
+  a deny-list over the
   chat toolbox rather than the grant list §2 described, so the memory and fact
   writers are live and outside the sweep (#709); `spawn_cap` is a prompt plus a
   gauge, not a bound; and two rails are looser than their own sentences — the

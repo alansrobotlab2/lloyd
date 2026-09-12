@@ -958,3 +958,61 @@ async def test_only_open_review_items_for_this_unit_reach_the_prompt(tree, monke
     await A.execute(_item(_payload("doc:memory", "doc", "memory")))
     assert "#900 Mine" in run.prompt
     assert "Someone elses" not in run.prompt and "Closed one" not in run.prompt
+
+
+# ── the two rails the pass found wrong in its own first self-review ──────────
+
+
+async def test_a_group_may_not_delete_its_own_section_wholesale(tree, monkeypatch):
+    """#913. The shrink denominator is the UNIT, not the file.
+
+    A group's section is a small fraction of a jobs doc — 43 lines of 824 — so
+    measuring its deletions against the whole file let it delete itself
+    entirely and score 5%. The section rail does not catch it either: a hunk
+    that removes the whole section is, by construction, inside the section.
+    """
+    doc = tree["arch"] / "workers-jobs.md"
+    start, end = _section(tree)
+    lines = doc.read_text().splitlines(keepends=True)
+    gutted = "".join(lines[:start] + lines[end:])   # heading kept, body removed
+    out = await _run_group(tree, monkeypatch, lambda: doc.write_text(gutted))
+    assert "its section" in out["meta"]["doc_update_rejected"]
+    assert "cap 30%" in out["meta"]["doc_update_rejected"]
+    assert "Dispatch body line one." in doc.read_text(), "the section is back"
+
+
+async def test_a_small_edit_inside_a_section_still_passes_the_shrink_rail(tree, monkeypatch):
+    """The other side of #913: narrowing the denominator must not make an
+    ordinary one-line correction unlandable."""
+    doc = tree["arch"] / "workers-jobs.md"
+    out = await _run_group(tree, monkeypatch,
+                           _edit(doc, "Dispatch body line two.\n", ""))
+    assert out["meta"]["doc_update_rejected"] == ""
+
+
+def test_a_doc_units_provenance_does_not_match_its_groups_findings(tree):
+    """#914. `provenance_line(slug, "")` is a strict PREFIX of every group's
+    line for the same doc, and both readers matched it as a substring — so the
+    doc unit saw every one of its groups' findings as its own."""
+    _write_item(tree["backlog"], 900, slug="workers-jobs", name="Dispatch", title="Group find")
+    _write_item(tree["backlog"], 901, slug="workers-jobs", title="Doc find")
+
+    doc_items = [i["id"] for i in A.open_review_items("workers-jobs", "")]
+    grp_items = [i["id"] for i in A.open_review_items("workers-jobs", "Dispatch")]
+    assert doc_items == [901], "the doc unit sees only its own"
+    assert grp_items == [900], "and the group only its own"
+
+    assert A._filed_item_exists(900, "workers-jobs", "Dispatch")
+    assert not A._filed_item_exists(900, "workers-jobs", ""), (
+        "a group's item is not proof of a doc unit's claim")
+    assert A._filed_item_exists(901, "workers-jobs", "")
+    assert not A._filed_item_exists(901, "workers-jobs", "Dispatch")
+
+
+def test_provenance_matches_a_whole_line_only(tree):
+    """Prose that merely quotes the line is not a filing."""
+    _write_item(tree["backlog"], 902, slug="memory",
+                provenance="See also: Found reviewing architecture/memory.md in the log")
+    assert not A._filed_item_exists(902, "memory")
+    _write_item(tree["backlog"], 903, slug="memory")
+    assert A._filed_item_exists(903, "memory")

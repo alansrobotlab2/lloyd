@@ -231,6 +231,37 @@ def status() -> dict:
     }
 
 
+def _served_code_is_head(running: str, head: str) -> tuple[bool, list[str]]:
+    """`(the served code equals HEAD, the paths that differ)`.
+
+    `bless` verifies against the RUNNING process because only `/health.commit`
+    proves the service — but what that check is *for* is narrower than
+    "the shas match". `app/gitinfo.py` and `app/routers/health.py` both state
+    it as: only `/health.commit == last_known_good` proves **the service**
+    changed. A commit that moves no file the backend imports leaves the served
+    code identical, so pinning HEAD there pins exactly what is running.
+
+    That case is now routine rather than exotic. `arch-review` commits one
+    `architecture/*.md` per run, up to `daily_max` times a day, so HEAD sits
+    documentation-ahead of the served commit most of the time and a
+    sha-equality guard makes `bless` unreachable without a restart — a restart
+    whose only purpose is to load a markdown file nothing reads at runtime.
+
+    An **allowlist of inert paths**, never a denylist of code: anything this
+    does not recognise is code, so a new `.py` can never pass as documentation.
+    Fails closed — an unreadable diff (the served commit garbage-collected, git
+    unavailable) reports "not equal" and `bless` refuses, which is the safe
+    direction for a guard on a rollback target.
+    """
+    r = subprocess.run(["git", "-C", str(LIVE_ROOT), "diff", "--name-only", running, head],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return False, []
+    paths = [p for p in r.stdout.splitlines() if p.strip()]
+    code = [p for p in paths if not p.endswith(".md")]
+    return not code, (code or paths)
+
+
 def bless(note: str = "") -> dict:
     """Record the RUNNING commit as last-known-good.
 
@@ -251,18 +282,34 @@ def bless(note: str = "") -> dict:
         raise RuntimeError("cannot read HEAD")
     _, body = _get(f"{BACKEND}/health")
     running = (body or {}).get("commit")
+    docs_only = False
     if running and running != head:
-        raise RuntimeError(
-            f"the running backend reports {running[:8]} but HEAD is {head[:8]} — "
-            "restart the backend before blessing, or you will pin a commit that "
-            "is not the code being served")
+        same_code, differing = _served_code_is_head(running, head)
+        if not same_code:
+            raise RuntimeError(
+                f"the running backend reports {running[:8]} but HEAD is {head[:8]}, and "
+                f"{len(differing)} non-documentation path(s) differ "
+                f"({', '.join(differing[:4])}{' …' if len(differing) > 4 else ''}) — "
+                "restart the backend before blessing, or you will pin a commit that "
+                "is not the code being served")
+        # Documentation-only. The served code IS this commit's code, so HEAD is
+        # the right target: rolling back to it restores what is running and
+        # keeps the doc, where pinning the older sha would throw the doc away.
+        docs_only = True
     if S.read_current():
         raise RuntimeError("a promotion is under observation — let it settle or "
                            "abort it rather than blessing over it")
     lkg = S.write_lkg(head)
-    S.append_event({"event": "settled", "commit": head,
-                    "note": f"blessed by hand: {note}" if note else "blessed by hand"})
-    return {"last_known_good": lkg, "verified_running": running}
+    detail = f"blessed by hand: {note}" if note else "blessed by hand"
+    if docs_only:
+        # Recorded, not silent: the gap between the served sha and the blessed
+        # one is exactly what a reader of this row would otherwise have to
+        # reconstruct, and "it was only docs" is the whole justification.
+        detail += f" (documentation-only ahead of served {running[:8]})"
+    S.append_event({"event": "settled", "commit": head, "note": detail,
+                    "served_commit": running, "docs_only_ahead": docs_only})
+    return {"last_known_good": lkg, "verified_running": running,
+            "docs_only_ahead": docs_only}
 
 
 def recover(clear_broken: bool = True, clear_halt: bool = True) -> dict:

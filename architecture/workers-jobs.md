@@ -195,11 +195,11 @@ Long version: [[automod]], [[backlog]].
 ### `arch-review` — one doc, checked against the tree it describes
 
 **Wakes** every 30 min and takes the unit that has rested longest from a
-picklist of 33: every top-level `architecture/*.md` (22), plus one unit per
-functional *group* of [[autonomy-jobs]] and this doc (11, hand-kept in
+picklist: every top-level `architecture/*.md` is a unit, plus one per
+functional *group* of [[autonomy-jobs]] and this doc (hand-kept in
 `workers.sources.arch-review.groups`). A unit rests 30 days after a review, so
-the first pass takes about eight days at `daily_max: 4` and steady state is a
-review a week per doc.
+the first pass takes about a week at `daily_max: 4` and steady state is a
+review a month per unit.
 
 **Executes** as one session (Inner Voice on) that checks every backticked path,
 count, tool name and config key against the tree — `Read`, `Grep`,

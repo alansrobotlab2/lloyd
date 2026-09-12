@@ -638,10 +638,11 @@ acceptance with `human-only:` and is skipped, not attempted.
 after that — three tests pin numbers in three of the 22 docs, one module
 cited a doc that no longer existed, and the measured tables in the two jobs
 docs are snapshots. `workers/sources/arch_review.py` reviews **one unit per
-session** off a picklist of 33: every top-level `architecture/*.md`, plus one
-unit per functional *group* of `autonomy-jobs.md` / `workers-jobs.md` (the
-hand-kept `groups` list in config). Oldest-rested first, 30-day rest,
-`daily_max: 4` — a first pass in about eight days. `architecture/arch-review.md`
+session**: every top-level `architecture/*.md` is a unit, plus one per
+functional *group* of `autonomy-jobs.md` / `workers-jobs.md` (the hand-kept
+`groups` list in config). Oldest-rested first, 30-day rest, `daily_max: 4` —
+a first pass in about a week. The picklist is read from disk, so no count is
+restated in prose; the first one that was went stale the same day. `architecture/arch-review.md`
 is the long version.
 
 The turn checks the unit's claims against the tree and the health routes,

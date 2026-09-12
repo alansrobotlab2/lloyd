@@ -40,8 +40,11 @@ Three properties decide whether this is safe, and they are the whole module:
 * **The picklist is the scheduler.** Never-reviewed first, then oldest
   `last_reviewed_at`, docs before groups on a tie. A unit rests
   `review_interval_days` after a review; three failed attempts park it. There
-  is no churn trigger and no backoff — 33 units at `daily_max` 4 is a first
-  pass in about eight days, and a month's rest after that.
+  is no churn trigger and no backoff — the picklist is read from disk at call
+  time, and at `daily_max` 4 a board this size is a first pass in about a
+  week, then a month's rest per unit. No count is written down anywhere: the
+  first one went stale the moment this module's own doc joined the picklist
+  it describes, which is exactly the drift the pass exists to find.
 
 The tag asymmetry in step 3 of the plan is the one thing to hold in mind when
 reading `scripts/automod/backlog.py` beside this: `spawned-by-review` is merged
@@ -591,6 +594,19 @@ def parse_result(text: str, structured: Any, kind: str) -> Optional[dict]:
 # ── Already-filed items ──────────────────────────────────────────────────────
 
 
+def _provenance_re(slug: str, name: str = "") -> "re.Pattern[str]":
+    """A whole-line match for this unit's provenance, never a substring.
+
+    `provenance_line(slug, "")` is a strict **prefix** of every group's line
+    for the same doc — `…/workers-jobs.md` against
+    `…/workers-jobs.md §Dispatch` — so a substring test made the doc unit
+    match every one of its groups' findings: `<already_filed>` would show a
+    group's items to the doc review, and `_filed_item_exists` would accept a
+    group's item as proof of a doc unit's claim.
+    """
+    return re.compile(rf"^{re.escape(provenance_line(slug, name))}\s*$", re.M)
+
+
 def _read_head(path: Path, nbytes: int = 8000) -> str:
     try:
         with path.open("r", errors="ignore") as f:
@@ -648,7 +664,7 @@ def open_review_items(slug: str, name: str = "", backlog_dir: Path | None = None
     d = backlog_dir or _backlog_dir()
     if not d.is_dir():
         return []
-    want = provenance_line(slug, name)
+    want = _provenance_re(slug, name)
     out: list[dict] = []
     for f in sorted(d.glob("*.md")):
         m = re.match(r"^(\d+)[-_]", f.name)
@@ -659,7 +675,7 @@ def open_review_items(slug: str, name: str = "", backlog_dir: Path | None = None
             continue
         if _item_status(fm) not in OPEN_STATUSES:
             continue
-        if want not in body:
+        if not want.search(body):
             continue
         t = re.search(r"^#\s+(.+)$", body, re.M)
         out.append({"id": int(m.group(1)), "title": (t.group(1).strip() if t else f.stem)[:120]})
@@ -669,7 +685,7 @@ def open_review_items(slug: str, name: str = "", backlog_dir: Path | None = None
 
 def open_review_item_count(backlog_dir: Path | None = None) -> int:
     """Every open `arch-review` draft, across both kinds — the backpressure
-    gauge. Counted across units on purpose: 33 units each holding a handful of
+    gauge. Counted across units on purpose: every unit holding a handful of
     open findings is the board this pass could bury."""
     from app.backlog_status import OPEN_STATUSES
     d = backlog_dir or _backlog_dir()
@@ -692,10 +708,10 @@ def _filed_item_exists(item_id: int, slug: str, name: str = "",
     """A `FILED: #n` claim holds only if that item is on disk, carries the
     review tag, and opens with this unit's provenance line."""
     d = backlog_dir or _backlog_dir()
-    want = provenance_line(slug, name)
+    want = _provenance_re(slug, name)
     for f in d.glob(f"{int(item_id)}-*.md"):
         text = _read_head(f, 20000)
-        return REVIEW_TAG in text and want in text
+        return REVIEW_TAG in text and bool(want.search(text))
     return False
 
 
@@ -970,11 +986,17 @@ def check_doc_bound(root: Path, rel: str, *, max_delta_lines: int, max_shrink_pc
     total = added + deleted
     if total > int(max_delta_lines):
         return True, f"diff is {total} changed lines, cap {max_delta_lines}"
-    base = _head_line_count(root, rel)
+    # The denominator is the UNIT, not the file. A group's section is a small
+    # fraction of a jobs doc — 43 lines of 824 — so measuring its deletions
+    # against the whole file lets it delete itself entirely and score 5%. The
+    # section rail does not catch that either: a hunk that removes the whole
+    # section is, by construction, inside the section.
+    base = (section[1] - section[0] + 1) if section else _head_line_count(root, rel)
     if base and not allow_shrink:
         pct = deleted * 100.0 / base
         if pct > float(max_shrink_pct):
-            return True, (f"deleted {deleted} of {base} lines ({pct:.0f}%), "
+            what = "its section" if section else "the doc"
+            return True, (f"deleted {deleted} of {base} lines of {what} ({pct:.0f}%), "
                           f"cap {max_shrink_pct}%")
     was_fm = _git(root, "show", f"HEAD:{rel}").startswith("---")
     if was_fm:
