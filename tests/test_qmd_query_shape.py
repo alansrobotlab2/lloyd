@@ -354,41 +354,66 @@ def test_vault_recall_reports_an_outage_too(monkeypatch):
 
 # ── The one caller still allowed to degrade, and only out loud ──────────────
 
+ENRICH_ENTITY = "Rollback Ledger"
+MAIN_QUERY = "Guardian Policy"
+
+
 def _main_answers_and_entities_fail(monkeypatch, exc):
     """Answer the main query, fail every entity-enrichment query.
 
-    Told apart by query text, not by call order: the main search and the
-    enrichment lookups run on separate threads of the same pool, so arrival
-    order is not a fact to assert on.
+    The two legs run on separate threads of the same pool, so order is not a
+    fact to assert on and the fake has to classify each call. It classifies by
+    equality with the entity's *post-sanitizer* text, computed with the very
+    functions the client uses — not by a substring of the main leg. Substring
+    matching would mean a change to `_qmd_sanitize`/`_qmd_strip_stopwords` could
+    silently reclassify the main leg as enrichment and fail these tests for a
+    reason that has nothing to do with qmd; here a sanitizer change moves both
+    sides together, and `legs_seen` below is what proves the split happened the
+    way the test believes it did.
     """
+    entity_text = vault._qmd_strip_stopwords(vault._qmd_sanitize(ENRICH_ENTITY))
+    legs_seen: list[str] = []
+
     def fake_post(payload):
-        text = " ".join(s["query"] for s in payload["searches"])
-        if "guardian" in text:
-            return [{"file": "qmd://knowledge/guardian.md", "title": "g",
-                     "snippet": "", "score": 0.9}]
-        raise exc
+        queries = [s["query"] for s in payload["searches"]]
+        if queries and all(q == entity_text for q in queries):
+            legs_seen.append("enrichment")
+            raise exc
+        legs_seen.append("main")
+        return [{"file": "qmd://knowledge/guardian.md", "title": "g",
+                 "snippet": "", "score": 0.9}]
+
+    assert entity_text != vault._qmd_strip_stopwords(vault._qmd_sanitize(MAIN_QUERY)), \
+        "the two legs would be indistinguishable; pick an entity that survives sanitizing apart"
 
     monkeypatch.setattr(vault, "_qmd_post", fake_post)
     monkeypatch.setattr(vault, "extract_entities_from_query",
-                        lambda q: [("Rollback Ledger", 1.0)])
+                        lambda q: [(ENRICH_ENTITY, 1.0)])
+    return legs_seen
 
 
 def test_entity_enrichment_degrades_loudly_and_keeps_its_reply(monkeypatch, capsys):
     """`graph_lookup` is opt-in enrichment (default off; -12% MRR when on), so
     one entity's failed lookup must not lose a recall that already worked. That
-    is the only reason a swallow survives here — and it has to be on the
-    record, which the bare `or []` inside a blanket `except Exception` was not.
+    is the only reason a swallow survives here — and it has to be on the record,
+    which the empty default inside a blanket `except Exception` was not.
+
+    The failure injected on the enrichment leg is a `TimeoutError`, the class a
+    hung daemon really produces: it has to travel through
+    `_qmd_daemon_search`'s own conversion before `_lookup_one` sees it, or this
+    would only pin the handler against an exception nothing raises.
     """
-    _main_answers_and_entities_fail(
-        monkeypatch,
-        vault.QmdUnavailable("qmd retrieval failed: timed out — not zero matches"))
-    out = vault._vault_recall({"query": "guardian policy", "include_facts": False,
+    legs = _main_answers_and_entities_fail(monkeypatch, TimeoutError("timed out"))
+    out = vault._vault_recall({"query": MAIN_QUERY, "include_facts": False,
                                "grep_code": False, "graph_rerank": False,
                                "expand_graph": False, "graph_lookup": True})
+    assert "main" in legs and "enrichment" in legs, f"legs: {legs}"
     assert not out.get("error"), out
     assert [d["path"] for d in out["documents"]] == ["knowledge/guardian.md"]
-    assert "graph_lookup" in capsys.readouterr().err, \
+    err = capsys.readouterr().err
+    assert "graph_lookup" in err, \
         "skipped enrichment must be logged, not silently emptied"
+    assert "TimeoutError" in err, "the log line must carry the real cause"
 
 
 def test_a_real_bug_in_enrichment_is_not_swallowed_along_with_the_outage(monkeypatch):
@@ -399,10 +424,11 @@ def test_a_real_bug_in_enrichment_is_not_swallowed_along_with_the_outage(monkeyp
     caller still gets an error instead of a short answer, and the message does
     not send the next reader to the daemon to fix a bug in the client.
     """
-    _main_answers_and_entities_fail(monkeypatch, ValueError("boom"))
-    out = vault._vault_recall({"query": "guardian policy", "include_facts": False,
+    legs = _main_answers_and_entities_fail(monkeypatch, ValueError("boom"))
+    out = vault._vault_recall({"query": MAIN_QUERY, "include_facts": False,
                                "grep_code": False, "graph_rerank": False,
                                "expand_graph": False, "graph_lookup": True})
+    assert "main" in legs and "enrichment" in legs, f"legs: {legs}"
     assert out.get("error") and "boom" in out["error"], out
     assert "not zero matches" not in out["error"], \
         "a client bug must not be labelled a daemon outage"
@@ -438,10 +464,103 @@ def test_no_caller_wraps_a_daemon_search_in_or_empty_list():
     assert bad == [], f"a daemon failure is collapsed into [] again: {bad}"
 
 
-# The deleted CLI fallback has no guard test here, deliberately. Clause 1 is a
-# tree-wide grep over *.py expecting zero hits for the name of that function and
-# of the binary path only it read, so a Python test could not pin it without
-# becoming the line the clause fails on. The history the deletion closes: the
-# helper had no call site from the moment the #340 split orphaned it (82ef902),
-# and re-wiring it had already been evaluated and rejected that same day, for
-# eating 30 seconds against a daemon that was already broken.
+def test_the_retrieval_layer_exposes_exactly_one_search_path():
+    """Clause 1, pinned by structure instead of by spelling.
+
+    The clause is a tree-wide grep for two names expecting zero hits, so no test
+    can name them — the guard would be the line the clause fails on. What it can
+    say, and what actually matters, is the shape the deletion leaves behind: this
+    module exposes exactly one qmd search function, and no constant points at a
+    qmd binary. Reinstate the orphaned CLI helper under any name ending in
+    `_search`, or re-add the binary path it existed to read, and this fails.
+
+    The history that made the dead helper worse than nothing: it had no call
+    site from the moment the #340 split orphaned it (82ef902), and re-wiring it
+    had already been evaluated and rejected that same day — against a broken
+    daemon the CLI hits the same broken state, then eats 30 seconds doing it.
+    What kept it reading as load-bearing was the comment that called it a
+    fallback.
+    """
+    search_paths = [n for n in vars(vault)
+                    if n.startswith("_qmd_") and n.endswith("_search")]
+    assert search_paths == ["_qmd_daemon_search"], \
+        f"a second qmd search path is back: {sorted(search_paths)}"
+    binary_paths = [n for n in vars(vault) if "_BIN" in n]
+    assert binary_paths == [], \
+        f"a qmd binary path is reachable from the retrieval layer again: {binary_paths}"
+
+
+# ── The transport seam, with urllib in it ───────────────────────────────────
+
+def _no_proxy(monkeypatch):
+    """A stray `http_proxy` in the environment would send a 127.0.0.1 request
+    somewhere else entirely, and the test would pin the proxy's behavior."""
+    for var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_a_refused_connection_is_refused_by_real_urllib_not_by_a_stub(monkeypatch, capsys):
+    """Everything above this line swaps `_qmd_post` out, which pins the
+    classification against exceptions hand-built in this file. This one lets
+    `urlopen` do the connect itself, to a port with nothing listening.
+
+    It is as close as a test can get to the item's own check — stopping the live
+    daemon with supervisorctl is the operator's action, listed as such on #407,
+    and a suite must not stop the service answering queries on this box.
+    """
+    import socket
+
+    _no_proxy(monkeypatch)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead_port = probe.getsockname()[1]
+    monkeypatch.setattr(vault, "QMD_DAEMON_URL", f"http://127.0.0.1:{dead_port}/query")
+
+    with pytest.raises(vault.QmdUnavailable) as ei:
+        vault._qmd_daemon_search("guardian rollback", 5, ["knowledge"])
+    assert "not zero matches" in str(ei.value)
+    assert "search failed" in capsys.readouterr().err, "logged as well as raised"
+
+
+def test_a_daemon_that_hangs_up_mid_response_never_answers_with_nothing(monkeypatch, capsys):
+    """A peer that closes before the status line is the ambiguous case, and the
+    reason the outage arm takes the `OSError` family and not `URLError` alone.
+
+    Measured against real `urllib` on this box, the failure arrives as
+    `http.client.RemoteDisconnected`, based `ConnectionResetError →
+    ConnectionError → OSError` — and it is **not** a `URLError`. A
+    `URLError`-only clause would have sent a daemon dying mid-response down the
+    "this is not an outage" path, which is one step away from the silence this
+    item exists to close.
+    """
+    import socket
+    import threading
+
+    _no_proxy(monkeypatch)
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def hang_up_after_reading():
+        try:
+            conn, _ = server.accept()
+            conn.recv(65536)
+            conn.close()                    # no status line, ever
+        except OSError:
+            pass
+
+    hook = threading.Thread(target=hang_up_after_reading, daemon=True)
+    hook.start()
+    monkeypatch.setattr(vault, "QMD_DAEMON_URL",
+                        f"http://127.0.0.1:{server.getsockname()[1]}/query")
+    try:
+        with pytest.raises(vault.QmdUnavailable) as ei:
+            vault._qmd_daemon_search("guardian rollback", 5, ["knowledge"])
+    finally:
+        hook.join(timeout=5)
+        server.close()
+
+    assert "RemoteDisconnected" in str(ei.value), \
+        "the message must carry the class urllib actually raised"
+    assert "search failed" in capsys.readouterr().err, "logged as well as raised"
