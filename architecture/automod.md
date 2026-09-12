@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, automod]
 type: reference
 status: implemented
-date: 2026-09-06
+date: 2026-09-12
 ---
 
 # Automod: self-modification with automatic rollback
@@ -203,7 +203,8 @@ alone, each now pinned by a test:
 | observer | none | — | attached, transcript kept |
 
 The ceiling is enforced at the endpoint, not by the source, and it binds:
-`messages._clamp_max_turns` clamps whatever a worker asks for to
+`messages._turn_budget` (`app/routers/messages.py:132`) clamps whatever a worker
+asks for to
 `agent.max_turns_ceiling` (120). Triage asks for 90 and gets it; `autocode`
 asks for 150 — the value `workers.sources.autocode.max_turns` carries, and
 the one its own `DEFAULT_MAX_TURNS` argues for — and is served 120. Raising
@@ -669,12 +670,18 @@ candidate that weakens the gate is judged by the old gate.
 | preflight | ~0s | dirty tree, moved base, merge commits, out-of-scope paths; an item with no clauses, a code diff with no test |
 | static | ~2s | syntax errors, **import failures**, new pyflakes findings |
 | frontend | ~5s | new tsc errors, a broken vite build (only when `web/` changed) |
-| tests | ~30-40s | the full suite, plus floors on collected AND passed |
-| review | 1–3m | a diff that does not do what the item asked — §4.5 |
+| tests | 2-2.5m | the full suite, plus floors on collected AND passed |
+| review | 3.5-6.5m | a diff that does not do what the item asked — §4.5 |
 | venv | 3s–5m | only when `requirements*` changed |
 | canary_boot | ~2-30s | a build that will not start |
 | canary_smoke | ~5-15s | a build that starts but cannot dispatch a tool |
-| drill | ~18s | only when the diff touches the rollback path |
+| drill | ~35s | only when the diff touches the rollback path |
+
+Timings above are the measured runtimes of the last full ladder
+(`gate.json` per round, 2026-09-11/12): static 2s, tests 127-152s, review
+215-394s, canary_boot 2.3s, canary_smoke 6-7s, drill 33s. `gate.py`'s own module
+docstring still says `tests ~35s` and lists eight rungs — it has not been
+re-measured since `frontend` and `review` joined the ladder.
 
 Two rungs carry most of the weight.
 
@@ -924,7 +931,9 @@ The day also showed three dead ends the loop could only escalate:
 
 ### 4.1 pyflakes is a diff, not a bar
 
-The tree carries 69 pre-existing findings. An absolute rule would be switched
+The tree carries hundreds of pre-existing findings — 215 unique ones measured
+over every tracked `.py` on 2026-09-12, up ~3× from the 69 this section cited,
+because the count is over all files and nothing re-measures it. An absolute rule would be switched
 off within a day, so the rung compares changed files against the same files at
 the merge base and fails only on *new* findings.
 
@@ -1185,10 +1194,12 @@ that reconcile is a no-op by construction.
    promoter/guardian split exists to provide.
 1. **Write the rollback point and read it back.** Nothing is mutated until
    `current.json` round-trips. This is the strict analogue of the xfail at
-   `tests/test_autoresearch_promotion.py:362`, where
-   `snapshot_current_prompts` mkdirs unconditionally, never verifies the copy,
-   and promotes anyway — which is why 26 of 83 historical promotions have no
-   rollback point.
+   `tests/test_autoresearch_promotion.py:372`, which used to be an
+   xfail: `snapshot_current_prompts` mkdirs unconditionally, never verified the
+   copy, and promoted anyway — which is why 26 of 83 historical promotions have
+   no rollback point. **That half is fixed** (2026-09-08): the function now
+   raises when the copy yields no file, and the test is a real one. What the
+   promoter here must not copy is the older shape, not the fixed one.
 2. **Pause the worker pool, arm the drain, then** idle-gate on `/health.turns`
    — three consecutive quiet polls, resetting on any activity. The order is
    the fix described in §3.2: the **TTL'd drain flag** goes up *before* the
@@ -1277,7 +1288,7 @@ guardian degrades to a *stale* watchdog, never to *no* watchdog. The unit
 invokes staging with a leading `-`, so even a crash there cannot prevent a
 start. Verified by breaking it on purpose.
 
-Lloyd may edit the guardian. A diff touching it triggers gate rung 6: the
+Lloyd may edit the guardian. A diff touching it triggers the `drill` rung: the
 drill boots a deliberately unbootable build under a canary, runs the
 **candidate** guardian against it, and requires that the tree came back and
 the service returned. A bound on *how* it changes, not a ban on changing it.
@@ -1653,7 +1664,7 @@ than the one this prevents.
   passing drill.
 - **allowed** — ordinary code.
 
-`requirements*` is allowed *only because* rung 3 exists: a btrfs reflink clone
+`requirements*` is allowed *only because* the `venv` rung exists: a btrfs reflink clone
 of the venv plus a `uv pip install` of the delta, booted by the canary.
 `--reflink=always`, not `auto` — auto degrades to a real 6GB copy silently.
 
@@ -1685,6 +1696,7 @@ not do: gitignored but still inside the tree.
 | `review_backfill.jsonl` | `review_tools backfill` | the grader's verdict beside the author's. **Its own file on purpose**: a backfilled verdict measures the grader, and `implement_outcomes` must never read it as a verdict on the round |
 | `scorecard.jsonl` | `round scorecard --record` | the trend, so a row survives the terminal it was printed in |
 | `eval-noise.json` | regression worker | the measured noise floor (§8.1) |
+| `arch_review.json` | `arch-review` worker | per-unit review cursor: verdict, `reviewed_commit`, attempts, the ids each unit filed (`workers/sources/arch_review.py:147`) |
 
 The ledger deliberately does **not** reuse
 `scripts.autoresearch.common.ledger_append`, whose contract is "best-effort,
@@ -1728,8 +1740,9 @@ a unit edited in the repo and never installed is a change that looks landed
 and does nothing.
 
 `scorecard` (`scripts/automod/scorecard.py`) is the loop's report card, read
-off the ledger, the backlog's front matter and a week of `git log` — eleven
-rows, each null rather than 0% when it has no denominator: acceptance hit
+off the ledger, the backlog's front matter and a week of `git log` — twelve
+rows (row 12, `arch review`, landed 2026-09-11), each null rather than 0% when
+it has no denominator: acceptance hit
 rate, the audit delta between the author's and the grader's `met` clauses,
 review refusals (and how many were fixed in turn, re-offered, escalated),
 spawn ratio per source (with merges, appended findings, expiries and the
@@ -1811,3 +1824,22 @@ from `denied.json` first).
   when no client fingerprint is forwarded. The guardian files rollback tasks
   through it over loopback; `/api/automod/drain` was restricted because it can
   silence every user turn for ten minutes, this one can only create a note.
+
+---
+
+## Review log
+
+- **2026-09-12 — `current`.** Checked every backticked path, symbol, config key,
+  rung list, constant and cadence in this file against the tree at `e534e1c`,
+  plus the live `/health`, `/api/workers/health` and `/api/autonomy/health`
+  routes and six recent `gate.json` reports. The mechanism described is what
+  runs. Corrected in place: the whole-tree pyflakes baseline (69 → 215
+  measured, ~3× drift), the rung timings table, `messages._clamp_max_turns`
+  (no such function — the clamp is `messages._turn_budget`), two stale rung
+  *ordinals* (`drill` and `venv`, both mis-numbered since `frontend` and
+  `review` joined the ladder), the §6 xfail claim (autoresearch's snapshot copy
+  was fixed 2026-09-08), the scorecard row count (eleven → twelve; row 12 is
+  `arch review`), and the §11 state table, which never listed
+  `arch_review.json`. Filed: #919 (`gate.py`'s own module docstring still
+  lists eight rungs and pre-`frontend` timings), #823 (autocode's
+  `max_turns: 150` is unreachable under `agent.max_turns_ceiling: 120`).
