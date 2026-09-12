@@ -130,9 +130,9 @@ def _turn_deadline(data: dict) -> float:
     return max(0.0, min(secs, 86_400.0))
 
 
-def _turn_budget(data: dict) -> int:
+def _turn_budget(data: dict, platform: str = "") -> int:
     """Iteration budget for one turn: `agent.max_turns`, or a per-request
-    `max_turns` clamped to `agent.max_turns_ceiling`.
+    `max_turns` clamped to a ceiling that depends on who is asking.
 
     Exists for worker-driven turns that need more room than a chat turn. The
     unattended backlog triage was written with a 30-iteration budget; the three
@@ -141,16 +141,39 @@ def _turn_budget(data: dict) -> int:
     so a budget that is too small does not fail loudly, it produces a verdict
     with no evidence block, which the caller records as "unverifiable". The
     ceiling keeps a tailnet client from asking for an unbounded turn.
+
+    **Two ceilings, because the clamp was silent and cost a round.** Round
+    858 asked for 150 iterations, was clamped to `max_turns_ceiling` = 120
+    with nothing said anywhere, and died at the cap before it could re-gate
+    a change it had already fixed. That ceiling exists to stop a tailnet
+    client asking for an unbounded turn — a worker source is not a tailnet
+    client, it is this process asking itself, and it is the caller whose
+    budget is genuinely larger. `NON_USER_PLATFORMS` gets
+    `agent.max_turns_ceiling_worker`; everyone else keeps the old number.
+    Either way a clamp now warns, because a budget silently smaller than the
+    one that was asked for reads as the model giving up early.
     """
     agent = CONFIG.get("agent", {}) or {}
     default = int(agent.get("max_turns", 60))
     ceiling = int(agent.get("max_turns_ceiling", 120))
+    if platform:
+        try:
+            from app.sessions_io import NON_USER_PLATFORMS
+        except Exception:  # noqa: BLE001
+            NON_USER_PLATFORMS = frozenset()
+        if platform in NON_USER_PLATFORMS:
+            ceiling = int(agent.get("max_turns_ceiling_worker", 200))
     try:
         requested = int(data.get("max_turns") or 0)
     except (TypeError, ValueError):
         requested = 0
     if requested <= 0:
         return default
+    if requested > ceiling:
+        logger.warning(
+            "turn budget: request asked for %d iterations, clamped to %d "
+            "(platform=%s)", requested, ceiling, platform or "user",
+        )
     return max(1, min(requested, ceiling))
 
 
@@ -1804,9 +1827,14 @@ async def post_message_stream(request: Request):
             data.get("extra_disallowed") or []
         )
 
+    # The session's own platform decides the prompt surface: a worker turn
+    # does not carry USER.md. The session file exists before the loopback
+    # POST that runs a worker turn, so this resolves correctly for them; a
+    # brand-new chat reads as `mission-control` and keeps everything.
+    turn_platform, _turn_source = _session_identity(session_id)
     system_prompt = build_system_prompt(
         todos=session_todos, plan=session_plan, goal=session_goal,
-        session_id=session_id,
+        session_id=session_id, platform=turn_platform,
     )
     t_prompt = time.perf_counter()
 
@@ -1884,7 +1912,7 @@ async def post_message_stream(request: Request):
         model=model,
         base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
         system_prompt=system_prompt,
-        max_turns=_turn_budget(data),
+        max_turns=_turn_budget(data, platform=turn_platform),
         permission_mode=permission_mode,
         mcp_servers=_get_mcp_servers(),
         disallowed_tools=_get_disallowed_tools(plan_mode=plan_mode_active) + extra_disallowed,
@@ -1985,7 +2013,7 @@ async def build_ambient_turn(
     plan_mode_active = bool(plan.get("plan_mode"))
     system_prompt = build_system_prompt(
         todos=existing.get("todos") or [], plan=plan, goal=goal,
-        session_id=session_id,
+        session_id=session_id, platform=_session_identity(session_id)[0],
     )
 
     # An ambient injection carries no request body, so the gate can only be
@@ -2109,7 +2137,7 @@ async def post_message(request: Request):
     sync_plan_mode_active = bool(sync_session_plan.get("plan_mode"))
     system_prompt = build_system_prompt(
         todos=_load_session_todos(session_id), plan=sync_session_plan,
-        session_id=session_id,
+        session_id=session_id, platform=_session_identity(session_id)[0],
     )
     prefetched_text = await prefetch_context_async(
         text, session_id=session_id, plan_mode=sync_plan_mode_active,

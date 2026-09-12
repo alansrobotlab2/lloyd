@@ -265,7 +265,7 @@ def _stub_autonomy(monkeypatch, tmp_path, task, stream):
     monkeypatch.setattr(harness, "run_query", _run_query)
     monkeypatch.setattr(harness, "RunOptions", Opts)
     monkeypatch.setattr(mcp_pool, "DEFAULT_LLOYD_MCP_SERVERS", {}, raising=False)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda: "SYS")
+    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
     return captured
 
 

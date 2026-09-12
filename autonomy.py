@@ -1037,7 +1037,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
         from prompt_builder import build_system_prompt
 
-        system_prompt = build_system_prompt()
+        system_prompt = build_system_prompt(platform="autonomy")
 
         config = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
         # Resolve the tool surface through the same helpers the chat and voice

@@ -70,16 +70,24 @@ def measure_prompt(components: dict[str, str]) -> dict:
     }
 
 
-def log_prompt_size(components: dict[str, str], *, session_id: str = "") -> dict:
-    """One INFO line per build: the component breakdown #466 never had."""
+def log_prompt_size(
+    components: dict[str, str], *, session_id: str = "", platform: str = "",
+) -> dict:
+    """One INFO line per build: the component breakdown #466 never had.
+
+    `platform=` is on the line because the prompt is no longer the same for
+    every turn — a worker turn drops USER.md — and a `memories=` figure with
+    no platform beside it cannot be read as either right or wrong.
+    """
     report = measure_prompt(components)
     breakdown = "  ".join(
         f"{name}={size['chars']}c/{size['est_tokens']}t"
         for name, size in report["components"].items()
     )
     logger.info(
-        "PROMPT_BUDGET session=%s %s  total=%dc/%dt  budget=%dc  over_budget=%s",
-        session_id or "-", breakdown, report["total_chars"],
+        "PROMPT_BUDGET session=%s platform=%s %s  total=%dc/%dt  budget=%dc  "
+        "over_budget=%s",
+        session_id or "-", platform or "user", breakdown, report["total_chars"],
         report["total_est_tokens"], PROMPT_BUDGET_CHARS, report["over_budget"],
     )
     return report
@@ -270,6 +278,7 @@ def build_system_prompt(
     plan: dict | None = None,
     goal: dict | None = None,
     session_id: str = "",
+    platform: str = "",
 ) -> str:
     """Build the full system prompt for a Lloyd session.
 
@@ -295,6 +304,16 @@ def build_system_prompt(
     the per-component char/token breakdown for this build (#466). Pass the live
     session id from the chat/ambient/sync handler so there is one line per turn.
     Logging never changes the returned string.
+
+    `platform` — the session's own platform. For a non-user platform
+    (`autonomy`, `worker`) the memory files named in
+    `harness.worker_prompt.drop_memory_files` are not loaded. USER.md is
+    ~20k tokens describing the person Lloyd works for; an unattended round
+    is judged against an acceptance contract and nobody reads its reply, so
+    that is 20k tokens of a 262k window spent on something structurally
+    irrelevant to the work. `sessions_io.NON_USER_PLATFORMS` is the one
+    definition of "nobody is reading this", imported lazily so eval and
+    bench scripts that call this function stay importable.
     """
     overlay = _resolve_overlay(overlay_dir)
     components: dict[str, str] = {}
@@ -307,7 +326,7 @@ def build_system_prompt(
     if soul:
         components["SOUL.md"] = soul
 
-    memories = _load_memories(overlay, soul=soul)
+    memories = _load_memories(overlay, soul=soul, files=_memory_files_for(platform))
     if memories:
         components["memories"] = f"<memory>\n{memories}\n</memory>"
 
@@ -413,7 +432,7 @@ def build_system_prompt(
     # vault files it reads. Grouping them cannot change the joined string.
     components["harness_hints"] = "\n\n".join(parts[len(components):])
     if session_id:
-        log_prompt_size(components, session_id=session_id)
+        log_prompt_size(components, session_id=session_id, platform=platform)
     return "\n\n".join(parts)
 
 
@@ -479,8 +498,52 @@ def _drop_longest_duplicate_run(text: str, soul: str) -> str:
     return "\n".join(lines[:start] + lines[end:]).strip()
 
 
-def _load_memories(overlay: Path | None = None, *, soul: str | None = None) -> str | None:
-    """Load MEMORY.md and USER.md — overlay dir takes priority, canonical as fallback.
+def _memory_files_for(platform: str) -> tuple[str, ...]:
+    """Which memory files a turn on this platform should carry.
+
+    Fails open in both directions that matter: an unreadable config keeps
+    the full set, and an ImportError on `sessions_io` (a bench script with
+    no app bootstrap) treats every platform as a user platform. Dropping
+    USER.md from a chat turn would be a visible regression; carrying it on
+    a worker turn is only a cost.
+    """
+    default = ("MEMORY.md", "USER.md")
+    if not platform:
+        return default
+    try:
+        from app.sessions_io import NON_USER_PLATFORMS
+    except Exception:  # noqa: BLE001
+        return default
+    if platform not in NON_USER_PLATFORMS:
+        return default
+    try:
+        from app.config import CONFIG
+
+        drop = ((CONFIG.get("harness") or {}).get("worker_prompt") or {}).get(
+            "drop_memory_files", ["USER.md"])
+    except Exception:  # noqa: BLE001
+        # The config is the kill switch. Unreadable means we cannot confirm
+        # the drop was asked for, so keep everything: a worker turn carrying
+        # USER.md costs tokens, and a `drop_memory_files: []` that stopped
+        # holding because a yaml read failed would be a switch that does not
+        # switch.
+        return default
+    dropped = {str(d) for d in (drop or [])}
+    return tuple(f for f in default if f not in dropped)
+
+
+def _load_memories(
+    overlay: Path | None = None, *, soul: str | None = None,
+    files: tuple[str, ...] = ("MEMORY.md", "USER.md"),
+) -> str | None:
+    """Load the memory files — overlay dir takes priority, canonical as fallback.
+
+    `files` is the list to load, and it is a parameter because an unattended
+    turn does not want all of them. USER.md is ~20k tokens of who Alan is,
+    which is the single largest component of the system prompt and exactly
+    the wrong thing to spend a worker round's window on: the round is judged
+    against an acceptance contract, not against the user's preferences, and
+    on 2026-09-11 three rounds died at the wall carrying it.
 
     When `soul` is supplied, a memory file that is a paste of the operating
     contract has the pasted run dropped rather than injected a second time.
@@ -492,7 +555,7 @@ def _load_memories(overlay: Path | None = None, *, soul: str | None = None) -> s
     memory surface is the same class of failure as the clobber itself.
     """
     parts = []
-    for filename in ("MEMORY.md", "USER.md"):
+    for filename in files:
         content = None
         if overlay and (overlay / filename).exists():
             content = (overlay / filename).read_text(encoding="utf-8").strip()
