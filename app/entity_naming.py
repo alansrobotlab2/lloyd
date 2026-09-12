@@ -591,7 +591,18 @@ def normalize_declared_type(raw) -> str | None:
 
 
 def _ensure_alias(surface: str, canonical: str, *, kind: str, origin: str) -> bool:
-    """Route `surface` to `canonical` unless it already does. True if written."""
+    """Route `surface` to `canonical` unless it already does. True if written.
+
+    A row a gated apply wrote is left alone. `Aliases.set` upserts on `surface`
+    and overwrites `origin` and `report_path` with whatever the caller passes, so
+    a declaration differing only in `kind`/`origin` used to retarget an apply's
+    row and NULL the run that authorized it — the naming layer ran nightly, so an
+    apply could run and the store could read, days later, as if it never had.
+    #475's verification is precisely "apply-origin rows that name their report",
+    so extraction may not be able to erase that as a side effect. A declaration
+    that disagrees with a gated apply is a conflict for a person, not a silent
+    upsert; nothing is lost by leaving the applied row standing.
+    """
     if not surface or not canonical or surface == canonical:
         return False
     try:
@@ -601,7 +612,15 @@ def _ensure_alias(surface: str, canonical: str, *, kind: str, origin: str) -> bo
     # `for_canonical` is the indexed lookup; scanning every alias per call
     # would make the gate cost O(3.8k) rows per extracted name. A surface that
     # exists but routes elsewhere is not found here, so the write proceeds —
-    # the declaration is authoritative over what an extraction inferred.
+    # the declaration is authoritative over what an extraction inferred, except
+    # against a row that carries a run's provenance.
+    routed = st.aliases.resolve(surface)
+    if routed:
+        for row in st.aliases.for_canonical(routed):
+            if row["surface"] == surface:
+                if row.get("report_path"):
+                    return False
+                break
     for row in st.aliases.for_canonical(canonical):
         if row["surface"] == surface and row["kind"] == kind and row["origin"] == origin:
             return False

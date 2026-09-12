@@ -36,7 +36,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.kg_store import KGStore, StoreUnavailable  # noqa: E402
 from app.paths import VAULT_KG_DB  # noqa: E402
 
-OUT_DIR = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
+# Anchored to the store it reads, not to $HOME: `--db` honours LLOYD_KG_DB and
+# `app.paths` is checkout-anchored, so a home-anchored default would let a
+# canary or worktree run join the live reverted artifact to some other (or empty)
+# store and write its verdict into production `_pipeline/memory-graph`.
+OUT_DIR = VAULT_KG_DB.parents[1] / "memory-graph"
 
 # Origins that arrive from somewhere other than a gated apply: the 2026-09-03
 # SQLite migration, the schema-declared naming layer, test fixtures. `revert` is
@@ -189,6 +193,13 @@ def main() -> int:
         print(f"{artifact_path} lists no variant→canonical pairs", file=sys.stderr)
         return 2
 
+    # sqlite creates on open, so an audit pointed at a typo'd or not-yet-built
+    # path would otherwise "succeed" against an empty store and print a verdict
+    # that means nothing. A store that is not there is an error, never a 0.
+    if not Path(args.db).is_file():
+        print(f"no KG store at {args.db} — refusing to audit against an empty one",
+              file=sys.stderr)
+        return 2
     try:
         st = KGStore(Path(args.db))
     except StoreUnavailable as e:

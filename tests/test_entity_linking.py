@@ -81,3 +81,29 @@ def test_alias_kind_shapes():
     assert alias_kind("swe-bench", "SWE Bench") == "punct"
     assert alias_kind("Intel Pipeline System", "Intel Pipeline") == "suffix"
     assert alias_kind("Groundskeeper", "Intel") == "semantic"
+
+
+def test_a_declaration_cannot_erase_an_apply_runs_provenance(tmp_path):
+    """#475: an authorized apply's evidence was one nightly extraction away from
+    vanishing. `Aliases.set` upserts on `surface` and takes `origin`/`report_path`
+    with it, so the schema-declaration path rewrote an applied row to
+    origin='schema' with a NULL report — the mapping survived and the record of who
+    authorized it did not, which is how a store that had been backfilled could go
+    on reading as if it never had been."""
+    st = kg_store.configure(tmp_path / "kg.sqlite")
+    report = tmp_path / "entity-merges-applied-2026-09-13-010000Z.json"
+    report.write_text("{}")
+    try:
+        st.entities.register("vLLM")
+        st.aliases.set("vllm", "vLLM", kind="punct", origin="sweep", report_path=str(report))
+        assert en._ensure_alias("vllm", "vLLM", kind="semantic", origin="schema") is False
+        row = next(r for r in st.aliases.rows() if r["surface"] == "vllm")
+        assert (row["origin"], row["report_path"]) == ("sweep", str(report))
+        # Only rows carrying a run's provenance are protected. An inherited row is
+        # still the declaration's to route — that is what this function is for.
+        st.aliases.set("vllm-engine", "vLLM", kind="punct", origin="migration")
+        assert en._ensure_alias("vllm-engine", "vLLM", kind="semantic", origin="schema") is True
+        assert next(r for r in st.aliases.rows()
+                    if r["surface"] == "vllm-engine")["origin"] == "schema"
+    finally:
+        kg_store.reset()

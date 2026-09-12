@@ -117,6 +117,29 @@ def test_the_audit_is_green_only_when_every_pair_is_dispositioned(tmp_path):
     assert "UNACCOUNTED: 0" in r.stdout
 
 
+def test_an_absent_store_is_refused_not_audited_as_empty(tmp_path):
+    """sqlite creates a file on open, so an audit pointed at a typo'd or
+    not-yet-built path printed `applied: 0 / UNACCOUNTED: 151` about a store with
+    nothing in it — a verdict indistinguishable from the true one, from an
+    instrument whose entire purpose is attribution."""
+    out, _db, _art = _graph(tmp_path, PAIRS)
+    missing = tmp_path / "typo" / "kg.sqlite"
+    dest = out / "should-not-exist.json"
+    r = _audit(missing, out, dest)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "refusing to audit against an empty one" in r.stderr, r.stderr
+    assert not missing.exists() and not missing.parent.exists()
+    assert not dest.exists()
+
+
+def test_the_default_out_dir_is_anchored_to_the_store_not_to_home():
+    """--db follows app.paths (and LLOYD_KG_DB); a home-anchored --out-dir let a
+    worktree or canary run join the live reverted artifact to a different store and
+    write its verdict into production _pipeline/memory-graph."""
+    from app.paths import VAULT_KG_DB
+    assert emd.OUT_DIR == VAULT_KG_DB.parents[1] / "memory-graph"
+
+
 def test_a_run_that_never_applied_proves_nothing_about_the_reverted_pairs(tmp_path):
     """Declination evidence comes from plans a run actually wrote, so the same
     plan text sitting in the directory unnamed by any apply report must not
