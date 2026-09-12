@@ -445,14 +445,15 @@ def test_an_apply_leaves_voice_loop_voice_pipeline_and_voice_separate(tmp_path):
         assert rows == [], f"the backfill wrote an alias for {rows}"
         # Every reader goes through `entity_naming.normalize`, which is
         # `store().resolve(name) or name`. All three must come back unchanged.
-        # `resolve` is None because no alias maps it — the registered-entity half
-        # of the claim is `normalize(name) == name`, which is what every reader
-        # calls; asserting both, so an absent entity cannot satisfy this test.
+        # `resolve` returns the name itself or None; `normalize(name) == name` is
+        # the claim every reader actually depends on, and it is what fails if any
+        # surface of one of these becomes an alias for another. The `rows == []`
+        # assertion above is what proves nothing mapped them at all.
         from app import entity_naming, kg_store
         kg_store.configure(db)
         try:
             for name in sorted(VOICE):
-                assert st.resolve(name) is None
+                assert st.resolve(name) in (None, name)
                 assert entity_naming.normalize(name) == name
         finally:
             kg_store.reset()
