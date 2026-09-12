@@ -25,7 +25,7 @@ refused at the writer that would land the change.
 
 Where the rule lives, and where it runs
 --------------------------------------
-The rule itself is :mod:`reflection_archive` — one definition, two consumers.
+The rule itself is ``scripts/reflection_archive.py`` — one definition, two consumers.
 ``scripts/automod/vault_round.py`` calls it on every ``skills/**/SKILL.md`` a
 vault round touches, so dropping an archive step is refused at
 ``automod_vault_land`` before the commit and the round's paths are reverted.
@@ -113,8 +113,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import reflection_archive as ra
-from reflection_archive import archive_problems, classify, classify_all
+from scripts import reflection_archive as ra
+from scripts.reflection_archive import archive_problems, classify, classify_all
 
 SKILLS_DIRS = [Path.home() / "obsidian" / "skills", ROOT / "skills"]
 

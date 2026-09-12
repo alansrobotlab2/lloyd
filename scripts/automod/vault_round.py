@@ -224,7 +224,7 @@ def reflection_archive_errors(paths: list[str]) -> list[str]:
     if not skills:
         return []
     try:
-        import reflection_archive
+        from scripts import reflection_archive
     except ImportError as exc:  # pragma: no cover - repo is always importable
         return [f"reflection_archive unavailable, cannot check report retention: {exc}"]
     errs: list[str] = []
