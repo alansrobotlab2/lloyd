@@ -121,57 +121,6 @@ def test_a_legacy_origin_row_is_not_an_apply_either(tmp_path):
     assert d["entries"][0]["detail"]["inherited_alias"]["origin"] == "legacy"
 
 
-def test_an_apply_report_written_by_the_sweep_is_the_evidence_the_audit_reads(tmp_path):
-    """The seam between the two programs, with no fixture in the middle.
-
-    The sweep commits alias rows naming a report it is about to write, and the
-    audit, in a separate process, resolves that path. Either side can change the
-    name, the directory, or the tmp-file convention and the other will not see it:
-    the audit's whole applied verdict is `Path(report).is_file()`. So run the real
-    `--apply`, then the real audit over the same out-dir, and require the audit to
-    accept the report the sweep left. Everything upstream of this test is a fixture
-    someone wrote by hand; this is the only one where one program consumes the
-    other's artifact.
-    """
-    facts = tmp_path / "facts"
-    for name in ("vLLM", "vllm", "Intel", "Intel Pipeline"):
-        d = facts / name; d.mkdir(parents=True)
-        fm = {"type": "facts", "entity": name, "category": "state",
-              "facts": [{"entity": name, "fact": f"{name} exists.", "confidence": 0.9,
-                         "category": "state"}]}
-        (d / f"{name}-state.md").write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {name} - state\n")
-    out = tmp_path / "mg"; out.mkdir()
-    db = tmp_path / "kg.sqlite"
-    out.joinpath("entity-merges-reverted-20260903T174108Z.json").write_text(json.dumps(
-        {"tiers": ["CASE"], "plan": [{"variant": "vllm", "canonical": "vLLM"}]}))
-    st = KGStore(db)
-    for n in ("vLLM", "vllm", "Intel", "Intel Pipeline"):
-        st.entities.register(n)
-    st.edges.add({"source": "vLLM", "target": "Ray", "type": "mentions"}, origin="test")
-    st.edges.add({"source": "vllm", "target": "Ray", "type": "mentions"}, origin="test")
-    st.close()
-
-    applied = subprocess.run(
-        [sys.executable, str(SWEEP), "--facts-dir", str(facts), "--db", str(db),
-         "--out-dir", str(out), "--no-gate", "--apply"],
-        capture_output=True, text=True, timeout=180)
-    assert applied.returncode == 0, applied.stdout + applied.stderr
-
-    dest = out / "disposition.json"
-    audit = _audit(db, out, dest)
-    assert audit.returncode == 0, audit.stdout + audit.stderr   # the pair is accounted for
-    d = json.loads(dest.read_text())
-    assert d["counts"] == {"applied": 1, "declined": 0, "unaccounted": 0}, d["counts"]
-    detail = d["entries"][0]["detail"]
-    assert "provenance_missing" not in detail and "report_missing" not in detail, detail
-    assert Path(detail["report_path"]).is_file()                # resolves across processes
-    report = json.loads(Path(detail["report_path"]).read_text())
-    assert report["report_status"] == "complete"
-    assert report["applied_clusters"] >= 1
-    # the tmp name the sweep writes through must never read as a second report
-    assert len(list(out.glob("entity-merges-applied-*.json"))) == 1
-
-
 def test_the_audit_is_green_only_when_every_pair_is_dispositioned(tmp_path):
     out, db, _ = _graph(
         tmp_path, PAIRS,
@@ -242,7 +191,20 @@ def test_a_real_sweep_apply_is_the_disposition_the_audit_reports(tmp_path):
     d = json.loads((out / "disposition.json").read_text())
     assert d["counts"] == {"applied": 1, "declined": 0, "unaccounted": 0}, d["counts"]
     assert d["entries"][0]["detail"]["origin"] == "sweep"
-    assert Path(d["entries"][0]["detail"]["report_path"]).is_file()
+    detail = d["entries"][0]["detail"]
+    assert Path(detail["report_path"]).is_file()
+    # The join has to carry a report that means something. `report_missing` or
+    # `provenance_missing` would say the row points nowhere usable, and a report
+    # left at `started` (a run killed before its final write) carries no `safety`
+    # block at all — so accepting it silently is how clause 6's "gate verdict"
+    # becomes unprovable for the one run that matters.
+    assert "report_missing" not in detail and "provenance_missing" not in detail, detail
+    report = json.loads(Path(detail["report_path"]).read_text())
+    assert report["report_status"] == "complete", "a killed apply is not gated evidence"
+    assert report["applied_clusters"] >= 1
+    # exactly one report: the tmp the atomic write goes through must never be
+    # globbed as a second apply report by this program's own pattern
+    assert len(list(out.glob("entity-merges-applied-*.json"))) == 1
 
 
 def test_a_run_that_never_applied_proves_nothing_about_the_reverted_pairs(tmp_path):
