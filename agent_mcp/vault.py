@@ -278,13 +278,6 @@ CONSOLIDATION_SYSTEM_PROMPT = (
     "3. Return a JSON object with a 'summary' key.\n4. Be concise — under 400 words."
 )
 
-_INTENT_FACTUAL_RE = re.compile(
-    r"(?:what\s+port|where\s+is|how\s+to|which\s+file|what\s+is\s+the|config\s+for|path\s+to|url\s+for|command\s+to)", re.I)
-_INTENT_TEMPORAL_RE = re.compile(
-    r"(?:last\s+week|yesterday|today|when\s+did|recent(?:ly)?|latest|last\s+month|last\s+time|\d{4}-\d{2}-\d{2})", re.I)
-_INTENT_CONCEPTUAL_RE = re.compile(
-    r"(?:approaches?\s+to|how\s+does\s+\w+\s+compare|explain\s|overview\s+of|strategy\s+for|principles?\s+of)", re.I)
-
 
 # ── QMD helpers ──────────────────────────────────────────────────────────────
 
@@ -545,24 +538,6 @@ def _consolidate_results(query: str, results: list) -> Optional[dict]:
         return json.loads(content)
     except Exception:
         return None
-
-
-def _rrf_fuse(ranked_lists: list, k: int = 60) -> list:
-    scores, items = {}, {}
-    for ranked in ranked_lists:
-        for rank, item in enumerate(ranked):
-            path = item.get("path") or item.get("file", "")
-            rrf_score = 1.0 / (k + rank + 1)
-            scores[path] = scores.get(path, 0.0) + rrf_score
-            existing = items.get(path)
-            if not existing or float(item.get("score", 0)) > float(existing.get("score", 0)):
-                items[path] = item
-    fused = []
-    for path, rrf_score in sorted(scores.items(), key=lambda x: -x[1]):
-        result = dict(items[path])
-        result["rrf_score"] = round(rrf_score, 6)
-        fused.append(result)
-    return fused
 
 
 def _graph_rerank(

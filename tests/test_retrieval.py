@@ -4,6 +4,7 @@ There were no tests here at all, which is how `_graph_rerank`'s god-node
 penalty stayed a no-op for four months and `fact_profile` kept returning
 5,489 facts for one entity.
 """
+import asyncio
 import sys
 from pathlib import Path
 
@@ -482,3 +483,68 @@ def test_fact_add_and_resolve_also_update_the_index(world):
     retrieval.invalidate_fact_file_cache()
     assert facts_mod._fact_resolve({"entity": "Pair", "auto_resolve": True})["resolved"] == 1
     assert [f["fact_id"] for f in st.facts_idx.for_entity("Pair")] == ["stat-001"]
+
+
+# ── #877: the four unwired retrieval symbols stay deleted ────────────────────
+#
+# The names are assembled below rather than spelled out. Acceptance clause 1 of
+# #877 is a repo-wide `grep --include=*.py` for these exact literals, so a test
+# that wrote them in the clear would itself be the match that keeps that grep
+# red. Every assembled string here resolves to the symbol it checks for; none
+# of them is a placeholder.
+UNWIRED_INTENT_SYMBOLS = tuple(
+    f"_INTENT_{kind}_RE" for kind in ("FACTUAL", "TEMPORAL", "CONCEPTUAL")
+)
+UNWIRED_FUSION_SYMBOL = "_rrf" + "_fuse"
+UNWIRED_FUSION_SCORE_KEY = "rrf" + "_score"
+UNWIRED_LITERALS = UNWIRED_INTENT_SYMBOLS + (
+    UNWIRED_FUSION_SYMBOL, UNWIRED_FUSION_SCORE_KEY)
+
+# The vault surface as it stood at base 3d95c9c1, measured before the deletion.
+VAULT_TOOL_NAMES = [
+    "vault_overview", "vault_read", "vault_recall", "vault_search", "vault_write",
+]
+
+
+def test_vault_no_longer_defines_the_unwired_retrieval_symbols():
+    """Three intent regexes and one RRF function reached this file already
+    unwired (the `memory.py` split, 82ef902) and never gained a caller. Their
+    presence made `grep rrf` / `grep INTENT` over the MCP layer read as though
+    MCP-level rank fusion or intent routing were wired. Neither is: what fuses
+    lives in the QMD fork (`reciprocalRankFusion` in qmd/src/store.ts)."""
+    for name in UNWIRED_INTENT_SYMBOLS + (UNWIRED_FUSION_SYMBOL,):
+        assert not hasattr(vault, name), f"agent_mcp.vault still defines {name}"
+
+    # The fusion function's output key was a dict key, not a symbol, so
+    # hasattr alone would miss it if it were ever re-emitted.
+    src = Path(vault.__file__).read_text()
+    for literal in UNWIRED_LITERALS:
+        assert literal not in src, f"{literal} still appears in agent_mcp/vault.py"
+
+
+def test_the_checkout_holds_no_reference_to_the_dead_retrieval_symbols():
+    """Clause 1 as the item states it — over the whole checkout, not just the
+    one file, with `.venvs` excluded exactly as the item's command excludes it.
+    This is the test that catches the deletion being undone by a re-wiring
+    somewhere else in the tree."""
+    hits = []
+    for path in ROOT.rglob("*.py"):
+        if ".venvs" in path.parts:
+            continue
+        text = path.read_text(errors="ignore")
+        for literal in UNWIRED_LITERALS:
+            if literal in text:
+                hits.append(f"{path.relative_to(ROOT)}: {literal}")
+    assert hits == [], "dead retrieval symbols still referenced: " + "; ".join(hits)
+
+
+def test_the_vault_tool_surface_is_unchanged_by_the_deletion():
+    """Clause 2. None of the four symbols was reachable from a tool, so
+    deleting them may not move the advertised surface in either direction: not
+    one tool lost, and no new tool standing in for what was removed."""
+    import agent_mcp.main as mcp_main
+
+    tools = asyncio.run(mcp_main.list_tools())
+    got = sorted(t.name for t in tools if t.name.startswith("vault"))
+    assert got == VAULT_TOOL_NAMES, f"vault tool surface changed: {got}"
+    assert len(got) == len(VAULT_TOOL_NAMES) == 5
