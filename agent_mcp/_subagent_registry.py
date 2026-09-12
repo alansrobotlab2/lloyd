@@ -13,6 +13,12 @@ progresses — turns taken, tools dispatched, how long it has been going —
 so a stuck subagent is visible while it is stuck rather than after it
 returns.
 
+The registry is also the *control* surface, not only a view (#411). A row
+publishes the live conversation list its loop is reading and the event that
+stops it, so `steer()` and `cancel_run()` can reach a child that is running
+rather than only reporting on one. Both refuse a caller that is not the
+orchestrating session, and a refusal adds nothing.
+
 Lifetime is process-scoped, matching `_task_registry` (background bash
 tasks) next door. Completed runs stay in a bounded ring so the dashboard
 can show what *just* happened, not only what is happening; the ring is
@@ -22,10 +28,14 @@ the durable record.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger("lloyd-subagent-registry")
 
 # How many finished runs to keep for the "recent" panel. Small on
 # purpose: the dashboard shows a handful and the event log holds history.
@@ -36,6 +46,50 @@ _recent: deque["SubagentRecord"] = deque(maxlen=_RECENT_LIMIT)
 
 _counter = 0
 _task_counter = 0
+
+# ---------------------------------------------------------------------------
+# Steering framing — fixed here, in one place, on purpose (#411 clause 5)
+# ---------------------------------------------------------------------------
+#
+# An injected message is stored in the child's own conversation and is
+# replayed to it on every later iteration *and* on a resume, so its shape is
+# load-bearing in two directions:
+#
+#   * the role cannot be `assistant`, or a rebuilt history reads the
+#     orchestrator's instruction as the child's own turn — it would be
+#     agreeing with itself, and the harness's own assistant-only repair pass
+#     would treat it as authored content;
+#   * it cannot be `system`, because vLLM rejects a system turn arriving
+#     mid-stream — which is exactly why the Inner Voice observer uses `user`
+#     for its own injections (`app/inner_voice/observer.py`).
+#
+# The prefix is what makes the injected line self-identifying to the model
+# and greppable in a spilled transcript. Both are asserted in
+# `tests/test_task_steering.py`; nothing else may build an injected message.
+STEER_ROLE = "user"
+STEER_PREFIX = "[ORCHESTRATOR] "
+
+
+class SteeringRefused(Exception):
+    """A steer/cancel that will not happen, with the reason for the caller."""
+
+
+@dataclass(frozen=True)
+class CallerScope:
+    """Who is acting. `session_id` is the identity authority is checked on.
+
+    Built from the contextvars `agent_mcp.main.call_tool` binds from the
+    request `_meta` — see `builtin_task.current_caller_scope()`. An empty
+    session id means "nobody in particular" and is never authorised.
+    """
+
+    session_id: str
+    turn_id: str = ""
+
+
+def steering_message(text: str) -> dict[str, str]:
+    """The exact message an orchestrator append puts into the child's list."""
+    return {"role": STEER_ROLE, "content": STEER_PREFIX + text.strip()}
 
 
 @dataclass
@@ -66,6 +120,18 @@ class SubagentRecord:
     tool_calls: list[str] = field(default_factory=list)
     # The run_id this one continues, when it is a resume.
     continuation_of: str = ""
+    # The LIVE conversation list the child's loop is reading — the same
+    # object `RunOptions.chat_messages_handle` holds, not a copy — and the
+    # event that stops it. Published so a control surface can reach a running
+    # child at all: before #411 the only reference to that list left the
+    # process through `store_history()` inside `_close`, i.e. after the run
+    # was already over, which is observability, not control.
+    #
+    # Never serialised. See `to_dict`.
+    chat_messages: list[dict[str, Any]] | None = None
+    cancel_event: asyncio.Event | None = None
+    # How many orchestrator appends landed. Observable on the dashboard row.
+    injected: int = 0
 
     @property
     def elapsed_s(self) -> float:
@@ -107,6 +173,14 @@ class SubagentRecord:
             "tool_call_count": len(self.tool_calls),
             "tool_counts": counts,
             "last_tool": self.tool_calls[-1] if self.tool_calls else "",
+            # Capabilities, not handles. `snapshot()` is a JSON surface
+            # (`main.py` → Mission Control): an `asyncio.Event` is not
+            # serialisable and a conversation is unbounded, so the row says
+            # whether this run can be steered or killed, and how many times
+            # it has been — the objects themselves stay in the process.
+            "steerable": self.chat_messages is not None,
+            "cancellable": self.cancel_event is not None,
+            "injected": self.injected,
         }
 
 
@@ -134,12 +208,19 @@ def register(
     parent_turn_id: str = "",
     task_id: str = "",
     continuation_of: str = "",
+    chat_messages: list[dict[str, Any]] | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> SubagentRecord:
     """Open a row for a Task run that is about to start.
 
     `task_id` is carried in on a resume so the continuation keeps the same
     identity; a fresh Task mints one. `run_id` stays per-run either way —
     the dashboard shows runs, and a resume is a new run of the same task.
+
+    `chat_messages` / `cancel_event` are the child's live handles. They must
+    be the objects handed to `RunOptions`, and register must happen BEFORE
+    the run starts — a row published after `run_query` returns is a
+    post-mortem, which is the state #411 is about.
     """
     record = SubagentRecord(
         run_id=_new_run_id(),
@@ -154,6 +235,8 @@ def register(
         model=model,
         max_turns=max_turns,
         started_at=time.time(),
+        chat_messages=chat_messages,
+        cancel_event=cancel_event,
     )
     _active[record.run_id] = record
     return record
@@ -203,6 +286,119 @@ def snapshot() -> dict[str, Any]:
         "active_count": len(active),
         "recent": list_recent(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Control surface: steer a running child, or stop it (#411)
+# ---------------------------------------------------------------------------
+#
+# `Task` blocks its caller until the subagent returns, so the caller of a
+# steering control surface is never the blocked tool call itself — it is
+# something else acting in this process for the same session. That is why
+# authority is a *session* and not a turn: a turn that is blocked on a wedged
+# child cannot also be the one killing it, and the useful case after that is
+# the parent session's next turn cleaning up the child it left behind.
+#
+# Session-scoped, fail-closed, and the narrowest of the shapes the item
+# named. Widening it — the Inner Voice observer, a Mission Control button —
+# is a decision this module deliberately does not make for whoever asks
+# first; see `backlog/411-*` ("Needs a person").
+
+
+def active_run(task_id: str) -> SubagentRecord | None:
+    """The live row for a task_id, or None. One active run per task_id: a
+    second resume of the same id is refused by `claim_history`."""
+    for record in _active.values():
+        if record.task_id == task_id:
+            return record
+    return None
+
+
+def _require_authority(record: SubagentRecord, caller: CallerScope, verb: str) -> None:
+    """Refuse, and say so in the log, unless `caller` IS the orchestrator.
+
+    The refusal is a raise *and* a log line because both audiences matter:
+    the caller needs the reason, and whoever is watching a subagent that got
+    steered without anyone admitting it needs the record.
+    """
+    if not caller.session_id or caller.session_id != record.parent_session_id:
+        detail = (
+            f"steering refused: {verb} on subagent {record.task_id} "
+            f"(run {record.run_id}) by caller session "
+            f"{caller.session_id or '<unbound>'!r}, which is not the "
+            f"orchestrating session "
+            f"{record.parent_session_id or '<unbound>'!r}"
+        )
+        logger.warning(detail)
+        raise SteeringRefused(detail)
+
+
+def steer(task_id: str, text: str, *, caller: CallerScope,
+          reason: str = "") -> dict[str, str]:
+    """Append one orchestrator message to a running child's live conversation.
+
+    Returns the message that was appended — the same dict now in the child's
+    list, so a caller can assert what the child will actually see. Raises
+    `SteeringRefused` and appends nothing if the run is gone, has no
+    published handle, carries no text, or the caller is not the orchestrating
+    session.
+
+    Ordering caveat, stated rather than hidden: an out-of-band append lands
+    wherever the list is at that instant, which may be before the assistant
+    turn it answers. The Inner Voice path avoids that by injecting after the
+    turn is appended; an external caller has no such moment to wait for.
+    """
+    record = active_run(task_id)
+    if record is None:
+        raise SteeringRefused(
+            f"steering refused: no active subagent run for task_id {task_id!r} "
+            "(finished, evicted, or never spawned)"
+        )
+    _require_authority(record, caller, "append")
+    if record.chat_messages is None:
+        raise SteeringRefused(
+            f"steering refused: run {record.run_id} published no conversation "
+            "handle, so there is nothing to append to"
+        )
+    if not text or not text.strip():
+        raise SteeringRefused("steering refused: nothing to say")
+
+    message = steering_message(text)
+    record.chat_messages.append(message)
+    record.injected += 1
+    logger.info(
+        "subagent %s steered by session %r (%d injected%s)%s",
+        record.task_id, caller.session_id, record.injected,
+        f" — {reason}" if reason else "",
+    )
+    return message
+
+
+def cancel_run(task_id: str, *, caller: CallerScope, reason: str = "") -> bool:
+    """Ask a running child to stop, via the event its loop already checks.
+
+    Not a kill: `app/harness/loop.py` checks this event between iterations,
+    between SSE chunks and before each tool dispatch, and races an in-flight
+    MCP tool call — so the child stops at its next safe point with
+    `stop_reason == "cancelled"`, which is also what lets `_close` store its
+    history and keep the task_id resumable.
+    """
+    record = active_run(task_id)
+    if record is None:
+        raise SteeringRefused(
+            f"cancelling refused: no active subagent run for task_id {task_id!r}"
+        )
+    _require_authority(record, caller, "cancel")
+    if record.cancel_event is None:
+        raise SteeringRefused(
+            f"cancelling refused: run {record.run_id} published no cancel event"
+        )
+    record.cancel_event.set()
+    logger.info(
+        "subagent %s cancelled by session %r%s",
+        record.task_id, caller.session_id, f" — {reason}" if reason else "",
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------

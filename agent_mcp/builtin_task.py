@@ -27,6 +27,7 @@ from mcp.types import Tool
 from agent_mcp import _subagent_registry
 from agent_mcp import _task_registry
 from agent_mcp._shared import get_bound_session, text_result
+from agent_mcp._subagent_registry import CallerScope
 
 logger = logging.getLogger("lloyd-builtin-task")
 
@@ -47,6 +48,24 @@ current_parent_model: contextvars.ContextVar[str] = contextvars.ContextVar(
 current_parent_base_url: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_parent_base_url", default=""
 )
+
+
+def current_caller_scope() -> CallerScope:
+    """The identity whoever is acting inside this call, for the registry's
+    authority check (#411).
+
+    Reads the same two contextvars `_task` records as a row's parent scope,
+    and they are non-empty only when a dispatch bound them from the request's
+    `_meta` (`agent_mcp.main.call_tool`). So a control surface that names
+    itself through this function can only claim the session its own dispatch
+    arrived on — which is the whole policy, and why it is not a parameter a
+    caller gets to pass.
+    """
+    return CallerScope(
+        session_id=get_bound_session(),
+        turn_id=_task_registry.current_turn_id.get(),
+    )
+
 
 def _load_subagent_profile(subagent_type: str) -> dict[str, Any]:
     """Read one `subagents:` profile from the live config.
@@ -220,6 +239,14 @@ async def _task(args: dict[str, Any]) -> str:
     sub_session_id = (history.session_id if history is not None
                       else f"task:{subagent_type}:{uuid.uuid4().hex[:8]}")
 
+    # The child's stop request (#411). ONE object, shared three ways: the
+    # loop checks it between iterations, between SSE chunks and before every
+    # tool dispatch (`app/harness/loop.py`), the registry row publishes it so
+    # a control surface can set it, and the loop reads it off these options.
+    # Built before `RunOptions` because the row has to carry the same event
+    # the child does — a second Event nobody sets is not a stop button.
+    cancel_evt = asyncio.Event()
+
     options = RunOptions(
         model=model,
         base_url=base_url,
@@ -229,6 +256,7 @@ async def _task(args: dict[str, Any]) -> str:
         hooks=task_hooks,
         mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
         session_id=sub_session_id,
+        cancel_event=cancel_evt,
         # A subagent is an agent loop like any other and has the same
         # redundant-reasoning problem the main loop does — more so, since
         # it runs its whole investigation inside one turn.
@@ -259,6 +287,10 @@ async def _task(args: dict[str, Any]) -> str:
     # handed back as `chat_messages_handle` — `run_query` ignores `messages`
     # entirely when the handle is non-empty (loop.py), so passing the
     # follow-up as `messages` would silently drop it.
+    #
+    # This same list object is what the registry row publishes below, so it is
+    # both the resume mechanism and, since #411, the thing a steering append
+    # goes into while the child is running. The loop reads it by reference.
     if history is not None:
         chat_messages = history.chat_messages
         chat_messages.append({"role": "user", "content": prompt})
@@ -303,6 +335,13 @@ async def _task(args: dict[str, Any]) -> str:
         max_turns=profile["max_turns"],
         task_id=history.task_id if history is not None else "",
         continuation_of=history.last_run_id if history is not None else "",
+        # #411: the two handles that turn this row from a view into a control
+        # surface. Published here, before `run_query` is entered, because a
+        # row that only learns of its conversation at `_close` describes a
+        # run nobody could still influence. `_close`/`finish` drops the row
+        # out of `_active`, so a published handle can never outlive the run.
+        chat_messages=chat_messages,
+        cancel_event=cancel_evt,
     )
     runs_so_far = (history.runs if history is not None else 0) + 1
 
@@ -355,6 +394,32 @@ async def _task(args: dict[str, Any]) -> str:
                            "task_id": record.task_id})
     finally:
         _task_depth.reset(token)
+
+    # Stopped through its own `cancel_event` (#411). Neither of the branches
+    # below describes this: it is not a failure to produce an answer, and no
+    # exception fired — `app/harness/loop.py` breaks cleanly and reports
+    # `stop_reason == "cancelled"`. It has to be answered explicitly, because
+    # the default fall-through would report an uncancelled "stop" with an
+    # empty response, and the caller would read a killed child as one that
+    # finished with nothing to say.
+    #
+    # `_close` still runs: the row records the real status and the history is
+    # stored, so the task_id stays resumable. Stopping a wedged child to
+    # restart it with better instructions is the point; losing the work it had
+    # already done would make the button worthless.
+    if stop_reason == "cancelled":
+        _close("cancelled", stop_reason="cancelled")
+        cancelled: dict[str, Any] = {
+            "error": ("Subagent was cancelled before it finished. Its "
+                      "conversation is stored — resume it with `task_id`."),
+            "stop_reason": "cancelled",
+            "turns_used": num_turns,
+            "tools_used": tool_calls_summary,
+            "task_id": record.task_id,
+        }
+        if last_iter_text.strip():
+            cancelled["partial_text"] = last_iter_text[:500]
+        return json.dumps(cancelled)
 
     # A subagent that dispatched tools but never produced a closing
     # message did NOT do the job. Return an error rather than a
