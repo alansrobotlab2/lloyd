@@ -87,9 +87,15 @@ def test_the_ledger_event_carries_the_skip(monkeypatch):
     g = _StubGate()
     g._rung("canary_smoke", lambda: (True, "SKIPPED (engine unreachable: x)",
                                      {"skipped": True}))
-    g._rung("tests", lambda: (True, "2132 passed", {"passed": 2132}))
+    # The pytest counts, verbatim, as `rung_tests` returns them. A `skipped`
+    # count of 3 here used to record the whole rung as skipped.
+    g._rung("tests", lambda: (True, "2132 passed, 3 skipped",
+                              {"passed": 2132, "tests_skipped": 3,
+                               "collected": 2135}))
+    g._rung("venv", lambda: (True, "requirements unchanged", {"skipped": True}))
     assert events[0]["skipped"] is True
-    assert events[1]["skipped"] is False
+    assert events[1]["skipped"] is False, "a skipped TEST is not a skipped rung"
+    assert events[2]["skipped"] is True
 
 
 def test_engine_reachable_reads_the_configured_endpoint(tmp_path):

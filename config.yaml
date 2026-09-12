@@ -718,6 +718,16 @@ automod:
   gate:
     pytest_min_collected: 1000
     mcp_min_tools_excl_thunderbird: 80
+    # Rung reuse. A gate with review runs 7-12 minutes and every re-gate
+    # replays the whole ladder, so a 60-minute round gets about one fix
+    # cycle. A rung is answered from the round's own cache only when the
+    # base has not moved, the cached head is an ancestor of this one, the
+    # entry is fresher than `reuse_max_age_s`, and the delta since could not
+    # have changed that rung's answer. `preflight`, `static` and `review`
+    # always run; `tests` is never reused bare, but a delta that is only
+    # test files (and no conftest or helper) re-runs just those files.
+    reuse_rungs: true
+    reuse_max_age_s: 3600
   # The review rung's policy knobs. The rung refused 86% of the rounds it
   # graded over 2026-09-11 and the two largest contributors were both
   # findings that are real and usually unfixable INSIDE the round.

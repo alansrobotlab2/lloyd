@@ -411,7 +411,20 @@ def test_the_test_rung_requires_tests_to_have_RUN():
 
 def test_skips_are_parsed_at_all():
     from scripts.automod import gate as G
-    assert G._parse_pytest_summary("1600 passed, 12 skipped in 30s")["skipped"] == 12
+    assert G._parse_pytest_summary("1600 passed, 12 skipped in 30s")["tests_skipped"] == 12
+
+
+def test_the_skipped_test_count_does_not_masquerade_as_a_skipped_rung():
+    """`_rung` records a rung as skipped from `data["skipped"]`, and
+    `rung_tests` returns the pytest counts as its data — so a suite with three
+    skipped tests recorded the whole `tests` rung as skipped on the ledger,
+    where `scorecard.py` reads it. A round that ran its entire suite was
+    indistinguishable from one that never ran it.
+    """
+    from scripts.automod import gate as G
+    counts = G._parse_pytest_summary("1600 passed, 12 skipped in 30s")
+    assert "skipped" not in counts, "the count must not collide with the flag"
+    assert counts["tests_skipped"] == 12
 
 
 def test_gate_rungs_run_candidate_code_against_scratch_state():

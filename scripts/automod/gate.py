@@ -164,21 +164,30 @@ def engine_reachable(root: Path, timeout: float = 4.0) -> tuple[bool, str]:
 
 
 def _parse_pytest_summary(text: str) -> dict:
-    """Pull counts out of pytest's summary line."""
+    """Pull counts out of pytest's summary line.
+
+    The skipped COUNT is `tests_skipped`, not `skipped`, and the rename is the
+    whole of a real bug. `_rung` records a rung as skipped from
+    `data["skipped"]`, and `rung_tests` returns these counts as its data — so
+    a suite with three skipped tests recorded the entire `tests` rung as
+    "skipped" on the ledger. The scorecard reads that field, which made a
+    round that ran its whole suite indistinguishable from one that never ran
+    it.
+    """
     out: dict = {"passed": 0, "failed": 0, "errors": 0, "xfailed": 0,
-                 "skipped": 0, "collected": 0}
+                 "tests_skipped": 0, "collected": 0}
     m = re.search(r"collected (\d+) item", text)
     if m:
         out["collected"] = int(m.group(1))
     for key, pattern in (("passed", r"(\d+) passed"), ("failed", r"(\d+) failed"),
                          ("errors", r"(\d+) error"), ("xfailed", r"(\d+) xfailed"),
-                         ("skipped", r"(\d+) skipped")):
+                         ("tests_skipped", r"(\d+) skipped")):
         m = re.search(pattern, text)
         if m:
             out[key] = int(m.group(1))
     if not out["collected"]:
         out["collected"] = (out["passed"] + out["failed"] + out["xfailed"]
-                            + out["errors"] + out["skipped"])
+                            + out["errors"] + out["tests_skipped"])
     return out
 
 
@@ -305,6 +314,15 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
         shutil.rmtree(wt, ignore_errors=True)
 
 
+def _gate_cfg(key: str, default):
+    """`automod.gate.<key>` from config, or the default. Never raises."""
+    try:
+        from app.config import CONFIG
+        return ((CONFIG.get("automod") or {}).get("gate") or {}).get(key, default)
+    except Exception:
+        return default
+
+
 def _review_policy(key: str, default: str = "first") -> str:
     """`automod.review.<key>` from config, or the default. Never raises."""
     try:
@@ -359,9 +377,139 @@ class Gate:
             "LLOYD_VOICE_ALERTS": "0",
         }
 
+    # ── rung reuse ─────────────────────────────────────────────────────
+    #
+    # A gate with review runs 7-12 minutes and every re-gate replays the whole
+    # ladder, so a 60-minute round gets about one fix cycle. But the ladder
+    # short-circuits at the first failure, so after a review refusal only the
+    # rungs BEFORE review have a cached pass — `frontend` and `tests`, about
+    # 146 s. The larger win is the promoter's rebase chase, which re-runs the
+    # ladder twice more against a moved base for a diff that has not changed.
+    #
+    # Four conditions, all of them about "is this still the same question":
+    # the config allows it, the base has not moved (a rebase changes what the
+    # diff MEANS), the entry is fresh, and the cached head is an ancestor of
+    # this one. Per-rung rules then ask whether the delta since that head
+    # could have changed the answer.
+    REUSE_MAX_AGE_S = 3600
+
+    def _reuse_path(self) -> Path:
+        return W.round_dir(self.round_id) / "gate-state" / "rung_cache.json"
+
+    def _reuse_load(self) -> dict:
+        try:
+            return json.loads(self._reuse_path().read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _reuse_save(self, name: str, data: dict) -> None:
+        """Record a genuine pass. Wholly guarded: a cache is not the gate.
+
+        Every attribute this touches is one a caller could have left off —
+        the test stubs build a Gate without a worktree — and a rung that
+        passed must never be reported as failed because its bookkeeping did.
+        """
+        if not _gate_cfg("reuse_rungs", True):
+            return
+        try:
+            head = W.head(self.worktree) or self.report.head or ""
+            if not head:
+                return
+            cache = self._reuse_load()
+            cache[name] = {"base": self.base, "head": head, "ts": time.time(),
+                           "data": data or {}}
+            path = self._reuse_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001 — a cache is not the gate
+            print(f"[warn] could not write the rung cache: {exc}")
+
+    def _reuse(self, name: str) -> tuple[dict, str] | None:
+        """The cached pass for `name`, if it still answers the question.
+
+        Guarded end to end for the same reason `_reuse_save` is: a failure to
+        READ the cache must run the rung, never skip it.
+        """
+        try:
+            return self._reuse_inner(name)
+        except Exception as exc:  # noqa: BLE001 — fail toward running it
+            print(f"[warn] rung cache unreadable for {name}: {exc}")
+            return None
+
+    def _reuse_inner(self, name: str) -> tuple[dict, str] | None:
+        if not _gate_cfg("reuse_rungs", True):
+            return None
+        if name in ("preflight", "static", "review"):
+            # `preflight` rebases and must always run; `static` is
+            # milliseconds; `review` has its own patch-id reuse, which is a
+            # stronger test than "no relevant file changed".
+            return None
+        entry = self._reuse_load().get(name)
+        if not isinstance(entry, dict):
+            return None
+        head = W.head(self.worktree) or self.report.head or ""
+        old_head = str(entry.get("head") or "")
+        if not head or not old_head:
+            return None
+        if str(entry.get("base") or "") != self.base:
+            return None      # a rebase changed what the diff means
+        max_age = float(_gate_cfg("reuse_max_age_s", self.REUSE_MAX_AGE_S))
+        if time.time() - float(entry.get("ts") or 0) > max_age:
+            return None
+        if old_head != head:
+            anc = _run(["git", "merge-base", "--is-ancestor", old_head, head],
+                       cwd=self.worktree, timeout=30)
+            if anc.returncode != 0:
+                return None
+        delta = [p for p in _run(
+            ["git", "diff", "--name-only", f"{old_head}..{head}"],
+            cwd=self.worktree, timeout=60).stdout.splitlines() if p.strip()]
+        why = self._reuse_rule(name, delta)
+        if why is None:
+            return None
+        return entry.get("data") or {}, why
+
+    @staticmethod
+    def _reuse_rule(name: str, delta: list[str]) -> str | None:
+        """Why this rung's answer cannot have changed, or None."""
+        if not delta:
+            return "nothing committed since"
+        if name == "frontend":
+            if any(p.startswith("web/") for p in delta):
+                return None
+            return "no web/ path in the delta"
+        if name == "venv":
+            if any(p in ("requirements.txt", "requirements.lock") for p in delta):
+                return None
+            return "no requirements path in the delta"
+        if name in ("canary_boot", "canary_smoke", "drill"):
+            # A canary boots the candidate: any code change invalidates it.
+            if all(p.startswith("tests/") or p.endswith(".md") for p in delta):
+                return "only tests/ and docs in the delta"
+            return None
+        if name == "prompt_surface":
+            if any(p in ("prompt_builder.py", "prefetch.py")
+                   or p.rsplit("/", 1)[-1] in ("SOUL.md", "MEMORY.md", "USER.md")
+                   for p in delta):
+                return None
+            return "no prompt-surface path in the delta"
+        # `tests` is never reused bare — see `rung_tests`.
+        return None
+
     # ── driver ─────────────────────────────────────────────────────────
     def _rung(self, name: str, fn) -> bool:
         started = time.time()
+        reused = self._reuse(name)
+        if reused is not None:
+            data, why = reused
+            data = {**data, "reused": True}
+            res = RungResult(name, True, f"REUSED ({why})", 0.0, data)
+            self.report.rungs.append(res)
+            S.append_event({"event": "gate", "round_id": self.round_id, "rung": name,
+                            "ok": True, "detail": res.detail, "reused": True,
+                            "skipped": data.get("skipped") is True, "seconds": 0.0})
+            print(f"[PASS] {name} (0.0s) {res.detail}")
+            return True
         try:
             ok, detail, data = fn()
         except Exception as exc:
@@ -376,7 +524,10 @@ class Gate:
         # failure its own fault?" long after the round is gone.
         event = {"event": "gate", "round_id": self.round_id, "rung": name,
                  "ok": ok, "detail": res.detail[:500],
-                 "skipped": bool((res.data or {}).get("skipped")),
+                 # `is True`, not truthy: a rung's data is its own shape and
+                 # an integer count in a key of this name is how the `tests`
+                 # rung came to record itself skipped.
+                 "skipped": (res.data or {}).get("skipped") is True,
                  "seconds": round(res.seconds, 2)}
         if (res.data or {}).get("external_blocker"):
             event["external_blocker"] = True
@@ -391,6 +542,8 @@ class Gate:
             if (res.data or {}).get(key):
                 event[key] = (res.data or {})[key]
         S.append_event(event)
+        if ok:
+            self._reuse_save(name, res.data)
         print(f"[{'PASS' if ok else 'FAIL'}] {name} ({res.seconds:.1f}s) {res.detail[:160]}")
         return ok
 
@@ -614,7 +767,8 @@ class Gate:
         """
         changed_web = [p for p in self.report.changed_paths if p.startswith("web/")]
         if not changed_web:
-            return True, "no frontend changed", {}
+            return True, "no frontend changed", {"skipped": True,
+                                                "reason": "no web/ path"}
         web = self.worktree / "web"
         live_web = self.live / "web"
         nm = web / "node_modules"
@@ -704,7 +858,51 @@ class Gate:
                            f"against, which is not a pass): {tail}"), data
         return True, f"tool-choice eval: no regression. {tail[-300:]}", data
 
-    def rung_tests(self):
+    def _tests_delta_only(self) -> list[str] | None:
+        """Test files to re-run instead of the whole suite, or None.
+
+        `tests` is never reused bare: a cached pass says the suite was green
+        at an earlier commit, and any code change since could have broken
+        anything. But a delta that is ONLY test files — and no `conftest.py`
+        and no `tests/_*.py` helper, either of which changes how every other
+        test runs — can be answered by running those files.
+
+        The floors (`PYTEST_MIN_COLLECTED`, `PYTEST_MIN_PASSED`) do not apply
+        to a partial run and are skipped; the removed-files check still runs,
+        because deleting the test that was failing is the failure mode those
+        floors exist for.
+        """
+        entry = self._reuse_load().get("tests")
+        if not isinstance(entry, dict) or not _gate_cfg("reuse_rungs", True):
+            return None
+        if str(entry.get("base") or "") != self.base:
+            return None
+        max_age = float(_gate_cfg("reuse_max_age_s", self.REUSE_MAX_AGE_S))
+        if time.time() - float(entry.get("ts") or 0) > max_age:
+            return None
+        old_head = str(entry.get("head") or "")
+        head = W.head(self.worktree) or self.report.head or ""
+        if not old_head or not head or old_head == head:
+            return None
+        if _run(["git", "merge-base", "--is-ancestor", old_head, head],
+                cwd=self.worktree, timeout=30).returncode != 0:
+            return None
+        delta = [p for p in _run(
+            ["git", "diff", "--name-only", f"{old_head}..{head}"],
+            cwd=self.worktree, timeout=60).stdout.splitlines() if p.strip()]
+        if not delta:
+            return None
+        files = []
+        for rel in delta:
+            if not (rel.startswith("tests/") and rel.endswith(".py")):
+                return None                       # any code path: full run
+            base = rel.rsplit("/", 1)[-1]
+            if base == "conftest.py" or base.startswith("_"):
+                return None                       # changes how everything runs
+            files.append(rel)
+        return files or None
+
+    def rung_tests(self, only: list[str] | None = None):
         # `-m "not live_vault"`: this rung judges the CANDIDATE, and a test that
         # reads the live `~/obsidian` vault judges whatever last wrote to it.
         # An hourly autoresearch promotion or a nightly reflection job can move
@@ -716,8 +914,11 @@ class Gate:
         # Those invariants are enforced where the writes happen instead:
         # `vault_round.validate` and `autoresearch.promote` both call
         # `prompt_surface.check_contract` before committing.
-        r = _run([str(self.python), "-m", "pytest", "-q", "-m", "not live_vault"],
-                 cwd=self.worktree, env=self._child_env(), timeout=1800)
+        only = only if only is not None else self._tests_delta_only()
+        cmd = [str(self.python), "-m", "pytest", "-q", "-m", "not live_vault"]
+        if only:
+            cmd += list(only)
+        r = _run(cmd, cwd=self.worktree, env=self._child_env(), timeout=1800)
         text = r.stdout + r.stderr
         counts = _parse_pytest_summary(text)
         if r.returncode != 0:
@@ -754,6 +955,19 @@ class Gate:
             data["new_failures"] = new
             return False, f"pytest failed ({counts}): {tail[-900:]}\n{probe_note}", data
 
+        if only:
+            # A partial run answers a narrower question, so the whole-suite
+            # floors below do not apply — they would fail every partial run
+            # by construction. The removed-files check still runs.
+            removed = [p for p in self.report.changed_paths
+                       if p.startswith("tests/") and not (self.worktree / p).exists()]
+            if removed:
+                return False, (f"test files removed by this round: {removed}"), counts
+            return True, (f"pytest (partial, {len(only)} changed test file(s) since the "
+                          f"last full run): {counts['passed']} passed, "
+                          f"{counts['tests_skipped']} skipped"), {
+                              **counts, "partial": True, "only": list(only)}
+
         # Non-negotiable under auto-landing: `pytest -q` exits 0 if the round
         # simply deleted the test that was failing.
         if counts["collected"] < PYTEST_MIN_COLLECTED:
@@ -765,10 +979,10 @@ class Gate:
         if counts["passed"] < PYTEST_MIN_PASSED:
             return False, (f"only {counts['passed']} tests passed "
                            f"(floor {PYTEST_MIN_PASSED}) of {counts['collected']} "
-                           f"collected, {counts['skipped']} skipped — the suite "
+                           f"collected, {counts['tests_skipped']} skipped — the suite "
                            "was collected but not run"), counts
-        if counts["skipped"] > PYTEST_MAX_SKIPPED:
-            return False, (f"{counts['skipped']} tests skipped "
+        if counts["tests_skipped"] > PYTEST_MAX_SKIPPED:
+            return False, (f"{counts['tests_skipped']} tests skipped "
                            f"(limit {PYTEST_MAX_SKIPPED}) — a round that skips its way "
                            "to green is not a round that passed"), counts
         removed = [p for p in self.report.changed_paths
@@ -776,7 +990,7 @@ class Gate:
         if removed:
             return False, f"test files removed: {removed}", counts
         return True, (f"{counts['passed']} passed, {counts['xfailed']} xfailed, "
-                      f"{counts['skipped']} skipped"), counts
+                      f"{counts['tests_skipped']} skipped"), counts
 
     def rung_review(self):
         """A second reader grades the diff against the item's clauses.
@@ -849,6 +1063,25 @@ class Gate:
         # — the amendment was never looked at, and the round aborted on a
         # refusal of the text it had just replaced.
         pending_amendments = list(contract.get("amendments") or [])
+        # A clean rebase produces a new commit with an identical diff. The
+        # promoter chases a moved base by re-gating, and `_regate_after_move`
+        # used to record `review: skipped` for exactly this case — so a
+        # landing could be judged on a review of a commit that no longer
+        # existed. `git patch-id --stable` is the identity of the CHANGE
+        # rather than of the commit, so a prior PASS of the same patch is the
+        # same answer to the same question.
+        patch_id = self._patch_id()
+        if patch_id and not pending_amendments:
+            for e in reversed(prior):
+                if (e.get("ok") and not e.get("blocking")
+                        and str(e.get("patch_id") or "") == patch_id):
+                    return True, (f"review: identical diff already passed at "
+                                  f"{str(e.get('head') or '')[:8]} (patch-id "
+                                  f"{patch_id[:8]}); rebased, not re-graded"), {
+                                      "review_reused": True, "patch_id": patch_id,
+                                      "review_attempt": attempt,
+                                      "clauses": e.get("clauses") or []}
+
         same = refused_by_head.get(head) if (head and not pending_amendments) else None
         if same is not None:
             findings = str(same.get("findings") or "")[:1500]
@@ -886,6 +1119,7 @@ class Gate:
                       # A refusal shown an amendment is a judgment of a new
                       # contract; `backlog.review_disagreement` reads this so
                       # it does not count the amended pass as a repeat.
+                      "patch_id": patch_id,
                       "amendments_shown": [a.get("clause") for a in pending_amendments]}
         try:
             res = RV.grade(round_id=self.round_id, worktree=grade_root, base=self.base,
@@ -893,7 +1127,13 @@ class Gate:
                            python=self.python, child_env=self._child_env(grade_root),
                            scratch_dir=W.round_dir(self.round_id) / "gate-state")
             base_event.update({"session_id": res.get("session_id"),
-                               "seconds": round(time.time() - started, 1)})
+                               "seconds": round(time.time() - started, 1),
+                               # Waits the grader sat out because another
+                               # round was landing. On the scorecard, so a
+                               # grader that is chronically unavailable is a
+                               # number rather than a story.
+                               "retries": int(res.get("retries") or 0),
+                               "waited_s": float(res.get("waited_s") or 0.0)})
             if not res["ok"]:
                 S.append_event({**base_event, "ok": False, "blocking": False,
                                 "error": str(res.get("error") or "")[:400]})
@@ -966,12 +1206,37 @@ class Gate:
                     marked.append(int(c["clause"]))
             except Exception as exc:  # noqa: BLE001 — a mark is not the gate
                 print(f"[warn] could not mark clause {c['clause']} post_landing: {exc}")
+        if marked:
+            S.append_event({"event": "gate", "round_id": self.round_id,
+                            "rung": "review", "ok": True, "skipped": False,
+                            "post_landing_clauses": marked, "item_id": self.item_id,
+                            "detail": "clauses marked observable only after landing"})
         return True, (f"review: {RV.summarize_clauses(parsed)} of {len(contract['clauses'])} "
                       f"clause(s); {parsed['summary'][:160]}"), {
                           "review_session": res.get("session_id"),
                           "clauses": parsed["clauses"], "review_attempt": attempt,
                           "post_landing_clauses": marked,
                           "amendments_ratified": [a.get("clause") for a in amendments]}
+
+    def _patch_id(self) -> str:
+        """`git patch-id --stable` of this round's whole diff, or "".
+
+        The identity of the CHANGE rather than of the commit: a clean rebase
+        moves the head and leaves this alone. Never raises — an unavailable
+        patch-id costs the reuse, not the rung.
+        """
+        try:
+            diff = _run(["git", "diff", f"{self.base}...HEAD"],
+                        cwd=self.worktree, timeout=120).stdout
+            if not diff.strip():
+                return ""
+            proc = subprocess.run(["git", "patch-id", "--stable"],
+                                  input=diff, capture_output=True, text=True,
+                                  timeout=60, check=False)
+            return (proc.stdout.split() or [""])[0]
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] could not compute a patch-id: {exc}")
+            return ""
 
     def _review_snapshot(self, head: str) -> tuple[Path | None, str]:
         """A detached checkout of `head` for the grader to read and test.
@@ -1028,7 +1293,8 @@ class Gate:
 
     def rung_venv(self):
         if not spec.touches_requirements(self.report.changed_paths):
-            return True, "requirements unchanged — using the live venv", {}
+            return True, "requirements unchanged — using the live venv", {
+                "skipped": True, "reason": "requirements unchanged"}
         if not UV_BIN.exists():
             return False, f"uv not found at {UV_BIN}", {}
 
@@ -1100,7 +1366,8 @@ class Gate:
 
     def rung_drill(self):
         if not spec.requires_drill(self.report.changed_paths):
-            return True, "no protected paths touched — drill not required", {}
+            return True, "no protected paths touched — drill not required", {
+                "skipped": True, "reason": "no protected paths"}
         from scripts.automod import rehearse
         # Stop the gate's canary first: the drill needs the ports.
         if self._canary:
