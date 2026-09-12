@@ -77,8 +77,11 @@ class _StubGate(G.Gate):
 
 # The ladder, in order. `review` sits after `tests` (it trusts a green tree)
 # and before `venv` (a refusal saves the build, the boot, the smoke).
-RUNGS = ("preflight", "static", "frontend", "tests", "review", "venv",
-         "canary_boot", "canary_smoke", "drill")
+# `prompt_surface` sits after `tests` and before `review`: after, so a broken
+# tree fails first and cheaply; before, because a behavioural regression in
+# what the model is TOLD is a fact the reviewer should be able to see.
+RUNGS = ("preflight", "static", "frontend", "tests", "prompt_surface",
+         "review", "venv", "canary_boot", "canary_smoke", "drill")
 ALL_PASS = {n: (True, "ok", {}) for n in RUNGS}
 
 
@@ -86,7 +89,7 @@ def test_all_rungs_passing_is_a_pass(monkeypatch, tmp_path):
     monkeypatch.setattr(G.S, "append_event", lambda *a, **k: None)
     g = _StubGate(dict(ALL_PASS))
     assert g.run().ok
-    assert len(g.called) == 9
+    assert len(g.called) == len(RUNGS)
 
 
 def test_the_stub_ladder_is_the_real_ladder(monkeypatch):
@@ -137,7 +140,7 @@ def test_the_report_serializes_for_the_round_log(monkeypatch):
     monkeypatch.setattr(G.S, "append_event", lambda *a, **k: None)
     g = _StubGate(dict(ALL_PASS))
     d = g.run().to_dict()
-    assert d["ok"] is True and len(d["rungs"]) == 9
+    assert d["ok"] is True and len(d["rungs"]) == len(RUNGS)
     assert set(d) >= {"round_id", "base", "head", "ok", "rungs", "changed_paths"}
 
 

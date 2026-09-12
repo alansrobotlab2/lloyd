@@ -125,22 +125,22 @@ async def gauges(client) -> dict:
     return {k: vllm_metrics._sum_all(parsed, k) for k in METRIC_KEYS}
 
 
-async def wait_idle(client, quiet_s: float = 5.0, limit_s: float = 600.0) -> None:
+async def wait_idle(client, quiet_s: float = 5.0, limit_s: float = 600.0,
+                    allow_running: int = 0) -> None:
     """Nothing else may be on the engine: a momentary zero is not idle
-    (memory bench-primary-pause-pool-first), so require `quiet_s` of it."""
-    t0 = time.monotonic()
-    quiet_since = None
-    while time.monotonic() - t0 < limit_s:
-        g = await gauges(client)
-        if (g["vllm:num_requests_running"] or 0) == 0:
-            quiet_since = quiet_since or time.monotonic()
-            if time.monotonic() - quiet_since >= quiet_s:
-                return
-        else:
-            quiet_since = None
-        await asyncio.sleep(0.5)
-    raise SystemExit(f"engine never went idle for {quiet_s}s in {limit_s}s — "
-                     "is the worker pool paused and drained?")
+    (memory bench-primary-pause-pool-first), so require `quiet_s` of it.
+
+    The implementation moved to `app.vllm_metrics.wait_idle` so the evals and
+    the bench runner share one definition of idle; this keeps the script's
+    `SystemExit` wording, which is what a human running it reads.
+    """
+    try:
+        await vllm_metrics.wait_idle(
+            BASE, quiet_s=quiet_s, limit_s=limit_s,
+            allow_running=allow_running, client=client,
+        )
+    except TimeoutError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 async def metrics_loop(client, rows: list, stop: asyncio.Event) -> None:

@@ -507,6 +507,66 @@ def gauges_from_text(text: str) -> dict[str, Any]:
     }
 
 
+async def wait_idle(
+    base_url: str,
+    *,
+    quiet_s: float = 5.0,
+    limit_s: float = 600.0,
+    allow_running: int = 0,
+    poll_s: float = 0.5,
+    client: Any | None = None,
+) -> None:
+    """Block until the engine has been quiet for `quiet_s`. Raises on timeout.
+
+    **A momentary zero is not idle.** The gauge is sampled, requests arrive
+    between samples, and a bench that starts on the first zero it sees is
+    measuring a shared engine while believing it has one to itself. Requiring
+    a continuous quiet run is the whole point, and it is why this is not two
+    lines at each call site.
+
+    It lives here rather than in the bench script that first needed it
+    because the callers are *scripts*: they run outside the backend process
+    and so cannot read `app.engine_pressure`, which is the in-process sampler.
+    `parse_prometheus` was already here, and a second private copy of "is the
+    engine busy" is how the bench and the pool would come to disagree about
+    what idle means.
+
+    `allow_running` is for a caller that is itself one of the requests — an
+    eval measuring its own turn should wait for everyone *else* to leave, not
+    for a number it is contributing to.
+    """
+    import httpx
+
+    own_client = client is None
+    c = client or httpx.AsyncClient()
+    t0 = time.monotonic()
+    quiet_since: float | None = None
+    try:
+        while time.monotonic() - t0 < limit_s:
+            try:
+                text = (await c.get(f"{base_url.rstrip('/')}/metrics",
+                                    timeout=5)).text
+                running = gauges_from_text(text).get("requests_running")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("wait_idle: scrape failed: %s", exc)
+                running = None
+            if running is not None and running <= allow_running:
+                quiet_since = quiet_since or time.monotonic()
+                if time.monotonic() - quiet_since >= quiet_s:
+                    return
+            else:
+                quiet_since = None
+            await asyncio.sleep(poll_s)
+    finally:
+        if own_client:
+            await c.aclose()
+    raise TimeoutError(
+        f"engine at {base_url} never went idle (<= {allow_running} running) "
+        f"for {quiet_s}s within {limit_s}s — is the worker pool paused and "
+        f"drained?"
+    )
+
+
 def cache_config_from_text(text: str) -> dict[str, Any] | None:
     """What the engine says its KV cache *is*: dtype, pool size, page size.
 

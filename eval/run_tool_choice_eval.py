@@ -139,6 +139,21 @@ async def run_eval(queries: list[dict], *, timeout: float, model: str | None) ->
 
     system_prompt = build_system_prompt()
     print(f"[info] system prompt: {len(system_prompt)} chars; model={default_alias} @ {base_url}")
+
+    # Do not measure tool choice on a shared engine. Every query here is a
+    # cold ~34k-token prefill, and an autocode round re-submitting a 150k
+    # context beside them evicts its own prefix on every iteration — the
+    # 2026-09-11 rounds that showed 0.14-0.85M tokens of re-prefill per
+    # session were sharing with exactly this. `allow_running=1` because the
+    # backend this eval imports may itself be serving.
+    from app import vllm_metrics
+
+    try:
+        await vllm_metrics.wait_idle(base_url, quiet_s=3.0, limit_s=300.0,
+                                     allow_running=1)
+    except TimeoutError as exc:
+        print(f"[warn] {exc}")
+        print("[warn] running anyway; latency numbers will be noisy")
     baseline = tool_search_kwargs.get("tool_search_baseline") or []
     print(f"[info] tool_search: enabled={tool_search_kwargs.get('tool_search_enabled')} "
           f"baseline={len(baseline)} tools; "
@@ -175,7 +190,10 @@ async def run_eval(queries: list[dict], *, timeout: float, model: str | None) ->
             mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
             disallowed_tools=disallowed,
             env=model_env,
-            priority=1,
+            # 3, not 1. Priority ASC: an eval yields to the round, never the
+            # other way round. A measurement is repeatable and an implement
+            # round is not.
+            priority=3,
             **tool_search_kwargs,
         )
 

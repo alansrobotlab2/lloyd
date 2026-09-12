@@ -392,6 +392,7 @@ class Gate:
         ladder = [("preflight", self.rung_preflight), ("static", self.rung_static),
                   ("frontend", self.rung_frontend),
                   ("tests", self.rung_tests),
+                  ("prompt_surface", self.rung_prompt_surface),
                   ("review", self.rung_review),
                   ("venv", self.rung_venv),
                   ("canary_boot", self.rung_canary_boot),
@@ -627,6 +628,71 @@ class Gate:
         return True, (f"tsc: no new errors ({sum(head.values())} pre-existing); "
                       f"vite build ok; {len(changed_web)} frontend file(s)"), {
                           "changed_web": changed_web}
+
+    # Files whose edit changes what the model is *told*, rather than what the
+    # code does. A behavioural regression here passes every other rung: the
+    # tests are green, tsc is clean, the canary boots, and the model has
+    # quietly stopped reaching for `http_search`.
+    PROMPT_SURFACE_PATHS = (
+        "prompt_builder.py", "prefetch.py",
+    )
+    PROMPT_SURFACE_VAULT = ("SOUL.md", "MEMORY.md", "USER.md")
+
+    def _touches_prompt_surface(self) -> bool:
+        for path in self.report.changed_paths:
+            base = path.rsplit("/", 1)[-1]
+            if path in self.PROMPT_SURFACE_PATHS or base in self.PROMPT_SURFACE_PATHS:
+                return True
+            if base in self.PROMPT_SURFACE_VAULT:
+                return True
+        return False
+
+    def rung_prompt_surface(self):
+        """Scored behavioural check, but only when the prompt surface moved.
+
+        This used to be four commands in the autocode prompt, and that placed
+        it exactly wrong. The model ran it from inside its own turn, against
+        the live engine, while its own 150k-token round was the other tenant —
+        20 primary queries beside the round's own iterations, twice, evicting
+        the round's prefix both times. The 2026-09-11 sessions show 0.14-0.85M
+        tokens of re-prefill each and this is part of why.
+
+        As a rung it runs while the model is idle in `automod_gate_wait`,
+        which is the one window in a round when nothing else of its own is on
+        the engine.
+
+        Exit codes come from the live script, not from a copy of its contract
+        here: `compare_tool_choice.py` exits 0 pass / 1 regression / 2 nothing
+        to compare against, and #875's kept branch adds a 3. Anything non-zero
+        fails the rung and the message quotes what it said.
+        """
+        if not self._touches_prompt_surface():
+            return True, "no prompt-surface path in the diff", {"skipped": True,
+                                                                "reason": "not touched"}
+        # Labelled by item where the round has one. `--label item377` reads
+        # back as the run that judged item 377, months later, in a directory
+        # of bare timestamps; the round id is the fallback.
+        label = f"item{self.item_id}" if self.item_id else f"gate-{self.round_id}"
+        # From the LIVE tree, not the worktree: the eval writes its baseline
+        # next to the script, and a baseline written inside a worktree is
+        # deleted with it (SM_20260908_165950's was).
+        run = _run([str(self.python), "eval/run_tool_choice_eval.py",
+                    "--label", label],
+                   cwd=self.live, env=self._child_env(), timeout=1800)
+        if run.returncode != 0:
+            tail = "\n".join((run.stdout + run.stderr).strip().splitlines()[-15:])
+            return False, f"tool-choice eval failed to run: {tail}", {"label": label}
+        cmp_ = _run([str(self.python), "eval/compare_tool_choice.py",
+                     "--label", label],
+                    cwd=self.live, env=self._child_env(), timeout=600)
+        text = (cmp_.stdout + cmp_.stderr).strip()
+        tail = "\n".join(text.splitlines()[-15:])
+        data = {"label": label, "compare_exit": cmp_.returncode}
+        if cmp_.returncode != 0:
+            return False, (f"tool-choice comparison exit {cmp_.returncode} "
+                           f"(0=pass, 1=regression, 2=nothing to compare "
+                           f"against, which is not a pass): {tail}"), data
+        return True, f"tool-choice eval: no regression. {tail[-300:]}", data
 
     def rung_tests(self):
         # `-m "not live_vault"`: this rung judges the CANDIDATE, and a test that
