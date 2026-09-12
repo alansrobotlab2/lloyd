@@ -258,6 +258,46 @@ def intra_turn_compaction_kwargs() -> dict:
         out["intra_turn_microcompact_trigger_fraction"] = float(mc["trigger_fraction"])
     if "target_fraction" in mc:
         out["intra_turn_microcompact_target_fraction"] = float(mc["target_fraction"])
+    out.update(context_relief_kwargs())
+    return out
+
+
+def context_relief_kwargs() -> dict:
+    """`harness.context_relief.*`, for the relief ladder.
+
+    Rides in `intra_turn_compaction_kwargs` rather than only in
+    `_get_harness_kwargs` for the reason that function's docstring gives:
+    `workers/sources/_common._worker_run_options` builds its options from
+    the narrower seam, and a worker round is exactly the turn that fills its
+    window. Plumbing a context knob through one of the two seams would have
+    it apply to chats and not to the rounds it was written for.
+    """
+    cr = ((CONFIG.get("harness") or {}).get("context_relief") or {})
+    out: dict = {}
+    if "enabled" in cr:
+        out["context_relief_enabled"] = bool(cr["enabled"])
+    if "terminal_floor_tokens" in cr:
+        out["context_relief_terminal_floor_tokens"] = int(cr["terminal_floor_tokens"])
+    if "min_completion_tokens" in cr:
+        out["context_relief_min_completion_tokens"] = int(cr["min_completion_tokens"])
+    if "reasoning_keep_under_pressure" in cr:
+        out["context_relief_reasoning_keep_under_pressure"] = int(
+            cr["reasoning_keep_under_pressure"]
+        )
+    if "shrink_arguments" in cr:
+        out["context_relief_shrink_arguments"] = bool(cr["shrink_arguments"])
+    if "shrink_arguments_min_chars" in cr:
+        out["context_relief_shrink_arguments_min_chars"] = int(
+            cr["shrink_arguments_min_chars"]
+        )
+    if cr.get("shrink_arguments_tools"):
+        out["context_relief_shrink_arguments_tools"] = tuple(
+            str(x) for x in cr["shrink_arguments_tools"]
+        )
+    if "send_max_tokens_reservation" in cr:
+        out["context_relief_send_max_tokens_reservation"] = bool(
+            cr["send_max_tokens_reservation"]
+        )
     return out
 
 

@@ -200,6 +200,44 @@ class RunOptions:
     intra_turn_microcompact_target_fraction: float = 0.6
     intra_turn_microcompact_min_chars: int = 2_000
 
+    # ---- context pressure -------------------------------------------------
+    # Live view of how much of the window this turn has spent. Caller-owned
+    # and mutable, the same pattern as `chat_messages_handle`: the router
+    # builds one, hands it to the loop AND to the Inner Voice observer, and
+    # both read the one figure. The loop builds a private meter when this is
+    # None, so a bare `run_query` caller still gets relief — it just has no
+    # `<context>` anchor, because nothing outside the loop can see the meter.
+    context_meter: Any | None = None
+
+    # Relief ladder. Microcompaction clears tool results and nothing else,
+    # so a turn whose residue is reasoning and `Write` bodies has no valve:
+    # on 2026-09-11 a pass freed 1.0 tool result (254k -> 252k against a 109k
+    # target) and the round died at the wall with finished work uncommitted.
+    context_relief_enabled: bool = True
+    # An observer inject on a terminal iteration continues the loop. Below
+    # this much headroom the next request has no room to answer in, so the
+    # turn ends as `context_exhausted` instead of spending an iteration
+    # producing a truncated completion.
+    context_relief_terminal_floor_tokens: int = 12_000
+    # Pre-request floor: relieve before `stream_chat` when the completion
+    # would have less than this to write into.
+    context_relief_min_completion_tokens: int = 6_000
+    # Second reasoning window, applied ONLY under pressure. The turn-entry
+    # window (`preserve_thinking_iterations`) stays what it is: pruning
+    # mid-turn invalidates the cached prefix (#520), which is a real cost
+    # and worth paying only when the alternative is losing the turn.
+    context_relief_reasoning_keep_under_pressure: int = 2
+    # Spill `Write`/`Edit` bodies out of assistant tool_call arguments once
+    # their result has landed. A 16k-char file body rides in the prompt for
+    # the rest of the turn otherwise, and no existing rung can reach it.
+    context_relief_shrink_arguments: bool = True
+    context_relief_shrink_arguments_min_chars: int = 2_000
+    context_relief_shrink_arguments_tools: tuple[str, ...] = ("Write", "Edit")
+    # Opt-in A/B only: reserve completion room with an explicit max_tokens.
+    # Off because a cap truncates a long think on a short answer, and
+    # llama.cpp truncates silently rather than erroring.
+    context_relief_send_max_tokens_reservation: bool = False
+
     # Structured final answer. When `final_schema` is set and the turn ends
     # of its own accord, the loop runs ONE extra completion that restates the
     # answer as a JSON object matching this schema, and reports it on the

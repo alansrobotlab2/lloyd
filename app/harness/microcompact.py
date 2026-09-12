@@ -420,8 +420,173 @@ def microcompact(
     return out, cleared
 
 
+SHRUNK_ARG_MARKER = "[argument cleared from context]"
+
+# Which argument of which tool carries a body big enough to be worth
+# spilling. `agent_mcp/builtin_fs.py` is the authority on the names.
+SHRINKABLE_ARGS: dict[str, tuple[str, ...]] = {
+    "Write": ("content",),
+    "Edit": ("old_string", "new_string"),
+}
+
+
+def _shrinkable_fields(tool_name: str, allow: set[str]) -> tuple[str, ...]:
+    """Field names to spill for a tool, bare or namespaced."""
+    if not tool_name:
+        return ()
+    bare = tool_name.rsplit("__", 1)[-1]
+    if bare not in allow:
+        return ()
+    return SHRINKABLE_ARGS.get(bare, ())
+
+
+def shrink_assistant_arguments(
+    messages: list[dict],
+    *,
+    keep_recent_tools: int = 5,
+    min_chars: int = 2_000,
+    session_id: str = "",
+    tools: Iterable[str] = ("Write", "Edit"),
+) -> tuple[list[dict], int, int]:
+    """Spill big `Write`/`Edit` bodies out of *assistant* tool_call arguments.
+
+    The third relief rung, and the only one that can reach this residue.
+    Microcompaction clears tool *results*; the file body the model wrote
+    lives in the assistant message's `tool_calls[].function.arguments` and
+    rides in the prompt for the rest of the turn. Measured on the rounds
+    that died at the wall on 2026-09-11: a single 16k-char `Write` costs
+    ~4k tokens every iteration after it, and a round that writes eight
+    files has spent 32k tokens on text already on disk.
+
+    Two rules keep it safe:
+
+    - **Only once the result has landed.** An argument spilled before its
+      tool ran would change what the model is shown it asked for while the
+      call is still in flight. `keep_recent_tools` additionally holds the
+      most recent N calls intact, because the model is usually still
+      working with those.
+    - **Refuse when the spill fails**, exactly as `microcompact` does at
+      the equivalent point: staying over budget is recoverable, destroying
+      the only copy of what was written is not. A `Write` body is not
+      re-derivable from the marker.
+
+    The rewritten arguments must stay valid JSON — `loop._commit_tool_calls`
+    replaces unparseable arguments with `{}` on the way in precisely because
+    vLLM re-parses this field as history and 400s on malformed input.
+
+    Returns `(messages, shrunk_count, freed_chars)`. `messages` is a new
+    list; callers holding a shared handle must slice-assign.
+    """
+    allow = {str(t) for t in tools if t}
+    if not allow or not messages:
+        return messages, 0, 0
+
+    # Which tool_call ids already have a result in this list. An id with no
+    # result is still in flight.
+    landed: set[str] = set()
+    for msg in messages:
+        if msg.get("role") == "tool":
+            cid = msg.get("tool_call_id") or msg.get("call_id") or ""
+            if cid:
+                landed.add(str(cid))
+
+    # Hold the most recent `keep_recent_tools` landed calls intact, in the
+    # order they appear.
+    ordered: list[str] = []
+    for msg in messages:
+        for tc in (msg.get("tool_calls") or []) if msg.get("role") == "assistant" else []:
+            cid = str(tc.get("id") or "")
+            if cid and cid in landed:
+                ordered.append(cid)
+    recent = set(ordered[-keep_recent_tools:]) if keep_recent_tools > 0 else set()
+
+    out: list[dict] = []
+    shrunk = 0
+    freed = 0
+    for msg in messages:
+        tool_calls = msg.get("tool_calls") if msg.get("role") == "assistant" else None
+        if not tool_calls:
+            out.append(msg)
+            continue
+
+        new_calls: list[dict] = []
+        touched = False
+        for tc in tool_calls:
+            cid = str(tc.get("id") or "")
+            fn = tc.get("function") or {}
+            fields = _shrinkable_fields(str(fn.get("name") or ""), allow)
+            if not fields or not cid or cid not in landed or cid in recent:
+                new_calls.append(tc)
+                continue
+            raw = fn.get("arguments")
+            if not isinstance(raw, str) or len(raw) < min_chars:
+                new_calls.append(tc)
+                continue
+            try:
+                args = json.loads(raw)
+            except (ValueError, TypeError):
+                new_calls.append(tc)
+                continue
+            if not isinstance(args, dict):
+                new_calls.append(tc)
+                continue
+
+            changed = False
+            for field_name in fields:
+                body = args.get(field_name)
+                if not isinstance(body, str) or len(body) < min_chars:
+                    continue
+                path = None
+                if session_id:
+                    path = persist_for_compaction(
+                        body,
+                        tool_use_id=f"{cid}.args.{field_name}",
+                        session_id=session_id,
+                    )
+                if path is None:
+                    # Could not save it — leave it alone.
+                    continue
+                target = args.get("file_path") or args.get("path") or ""
+                args[field_name] = (
+                    f"{SHRUNK_ARG_MARKER} {len(body):,} chars"
+                    + (f" written to {target}" if target else "")
+                    + f"; the text is at {path}. Read that path if you need it again."
+                )
+                freed += len(body) - len(args[field_name])
+                changed = True
+
+            if not changed:
+                new_calls.append(tc)
+                continue
+
+            new_fn = dict(fn)
+            new_fn["arguments"] = json.dumps(args)
+            new_tc = dict(tc)
+            new_tc["function"] = new_fn
+            new_calls.append(new_tc)
+            shrunk += 1
+            touched = True
+
+        if touched:
+            new_msg = dict(msg)
+            new_msg["tool_calls"] = new_calls
+            out.append(new_msg)
+        else:
+            out.append(msg)
+
+    if shrunk:
+        logger.info(
+            "microcompact: shrank %d assistant tool-call argument(s), freed ~%d chars "
+            "(keep_recent=%d, min_chars=%d)",
+            shrunk, freed, keep_recent_tools, min_chars,
+        )
+    return out, shrunk, freed
+
+
 __all__ = [
     "DEFAULT_COMPACTABLE_TOOLS",
     "CLEARED_MARKER",
+    "SHRUNK_ARG_MARKER",
     "microcompact",
+    "shrink_assistant_arguments",
 ]
