@@ -37,8 +37,8 @@ the order the pool considers them.
 
 ## 1. The roster
 
-Eleven sources are registered. Priority is `DEFAULT_PRIORITY` unless config
-overrides it (only `youtube-digest` does), and **lower runs sooner**.
+Twelve sources are registered. Priority is `DEFAULT_PRIORITY` unless config
+overrides it (`youtube-digest` and `arch-review` do), and **lower runs sooner**.
 
 | source | family | prio | cadence | inflight | turn path | KV-gated | IV | on |
 |---|---|---|---|---|---|---|---|---|
@@ -48,6 +48,7 @@ overrides it (only `youtube-digest` does), and **lower runs sooner**.
 | `gap-fill` | mining | 50 | 300 s | 2 | direct (primary) | no | — | yes |
 | `autotriage` | self-mod | 55 | 900 s | 1 | session | **yes** | on | yes |
 | `autoresearch` | self-mod | 60 | 3600 s | 1 | own script | no | — | **no** |
+| `arch-review` | self-mod | **62** | 1800 s | 1 | session | **yes** | on | yes |
 | `backlog-cluster` | self-mod | 65 | 3600 s poll | 1 | none (numpy) | no | — | yes |
 | `deep-research` | intake | 70 | 3600 s | 1 | session | **yes** | off | yes |
 | `session-distill` | mining | 70 | 1800 s | 1 | direct (primary) | no | — | yes |
@@ -56,7 +57,7 @@ overrides it (only `youtube-digest` does), and **lower runs sooner**.
 
 **KV-gated** is `LONG_LIVED = True`: tens of iterations each re-submitting a
 100–200k context, so the pool will not *claim* one while the primary's
-one-minute median KV usage is over `workers.kv_gate.max_kv_usage` (0.60). Three
+one-minute median KV usage is over `workers.kv_gate.max_kv_usage` (0.60). Four
 sources declare it; `backlog-cluster` declares it `False` explicitly.
 
 **IV** is `workers.sources.<name>.inner_voice`, and `—` is not "off": it is
@@ -158,20 +159,28 @@ hygiene, inbound signal.
 
 ## 4. Self-modification — the loop that changes Lloyd's own code
 
-Four sources are one closed loop over the backlog, and they read best in
-pipeline order rather than priority order:
+Five sources are one loop over the backlog, and they read best in pipeline
+order rather than priority order:
 
 ```
-backlog-cluster  →  autotriage  →  autocode  →  automod-regression
-group the drafts    judge one       implement one   measure whether the
-                    item or one     confirmed item  landing made anything
-                    cluster         behind the gate worse
+arch-review  →  backlog-cluster  →  autotriage  →  autocode  →  automod-regression
+read one doc    group the drafts    judge one       implement one   measure whether the
+against the                         item or one     confirmed item  landing made anything
+tree, file                          cluster         behind the gate worse
+what is wrong
 ```
 
-What the four share is that **no member acts on its own conclusion**.
+`arch-review` is the loop's one *supplier* rather than a stage of it: nothing
+downstream waits on it, and what it files enters the board as ordinary drafts.
+It is here because its findings are about this tree and it writes to this tree —
+one `architecture/*.md` doc per run, and nothing else.
+
+What the five share is that **no member acts on its own conclusion**.
 `backlog-cluster` writes a file that triage is free to ignore; `autotriage`
 reaches a verdict and implements nothing; `autocode` lands only through nine
-rungs and a second reader; `automod-regression` measures and never reverts.
+rungs and a second reader; `automod-regression` measures and never reverts; and
+`arch-review` may correct the doc it read and must *file* every other finding,
+including the one-line skill fix it could obviously make itself.
 Each one's output is the next one's input, and every handoff is a file on disk
 rather than a call — so a member that is down stalls the loop rather than
 corrupting it.
@@ -182,6 +191,38 @@ last entry in this section — it is here as the counterexample the other four
 are shaped against.
 
 Long version: [[automod]], [[backlog]].
+
+### `arch-review` — one doc, checked against the tree it describes
+
+**Wakes** every 30 min and takes the unit that has rested longest from a
+picklist of 33: every top-level `architecture/*.md` (22), plus one unit per
+functional *group* of [[autonomy-jobs]] and this doc (11, hand-kept in
+`workers.sources.arch-review.groups`). A unit rests 30 days after a review, so
+the first pass takes about eight days at `daily_max: 4` and steady state is a
+review a week per doc.
+
+**Executes** as one session (Inner Voice on) that checks every backticked path,
+count, tool name and config key against the tree — `Read`, `Grep`,
+`graph_affected`, `git log`, and `curl` on `/api/workers/health` and
+`/api/autonomy/health` for anything the doc states as measured — then reviews
+the code the unit names. A group gets three lenses instead: does the grouping
+still hold, what the members' own code and SKILL.md bodies do, and where the
+section's stated invariants and its members have come apart.
+
+**Writes** exactly one file: that doc. Findings become `arch-review` drafts
+tagged `spawned-by-review`, and a fix that belongs in a skill, an autonomy task
+file or anywhere else is filed rather than made. Everything else the turn wrote
+— in this repo and in the vault's `skills/` and `autonomy/` — is reverted from a
+`git status` baseline taken before the turn, and the doc's own diff is thrown
+away if it exceeds 400 changed lines, deletes more than 30% of the doc, breaks
+the front matter, or (for a group) touches a hunk outside its own section. What
+survives, the **source** commits: the model never runs `git`.
+
+It stages nothing under `pending-research/`, so it has no `_DEFAULT_DEST` entry
+and does not appear in the Review tab — its output is a commit and a set of
+backlog drafts, both already durable.
+
+Long version: [[arch-review]].
 
 ### `backlog-cluster` — the deterministic half of group triage
 
@@ -613,6 +654,7 @@ Deleting the entry would make them unpromotable from the Review tab.
 |---|---|---|
 | dispatch | `scheduled-task`, and the fleet it runs | [[autonomy]], [[autonomy-jobs]] |
 | self-mod | `backlog-cluster`, `autotriage`, `autocode`, `automod-regression` | [[automod]], [[backlog]] |
+| self-mod | `arch-review`, and the picklist it walks | [[arch-review]] |
 | intake | the registry `deep-research` drains | [[research-pipeline]] |
 | all | every job's transcript and recording | [[background-runs]] |
 | all | the queue, gates and contracts they share | [[workers]] |

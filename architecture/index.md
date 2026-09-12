@@ -58,6 +58,7 @@ turns out to describe something gone or never built is moved to
 | [[autonomy-jobs]] | what each of the 32 scheduled jobs is *for* — the reflection chain, trace2skill, the graph chain, vault hygiene, inbound signal |
 | [[automod]] | self-modification: worktree, nine-rung gate, review rung, promoter, guardian rollback, triage/implement, clustering, group triage |
 | [[backlog]] | the markdown kanban at `~/obsidian/backlog/` and its tools |
+| [[arch-review]] | the pass that keeps these docs honest: a picklist of 33 units, one session each, the doc edits itself |
 
 ## Front end
 

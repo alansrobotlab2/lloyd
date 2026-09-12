@@ -632,6 +632,42 @@ matter; the real prompt/skill/task loaders for `skills/**`, `lloyd/**`,
 acceptance with `human-only:` and is skipped, not attempted.
 `architecture/automod.md` §3.2.
 
+### arch-review: the docs are reviewed the way the code is
+
+`architecture/` was hand-curated on 2026-09-11 and nothing kept it honest
+after that — three tests pin numbers in three of the 22 docs, one module
+cited a doc that no longer existed, and the measured tables in the two jobs
+docs are snapshots. `workers/sources/arch_review.py` reviews **one unit per
+session** off a picklist of 33: every top-level `architecture/*.md`, plus one
+unit per functional *group* of `autonomy-jobs.md` / `workers-jobs.md` (the
+hand-kept `groups` list in config). Oldest-rested first, 30-day rest,
+`daily_max: 4` — a first pass in about eight days. `architecture/arch-review.md`
+is the long version.
+
+The turn checks the unit's claims against the tree and the health routes,
+reviews the code it names, **edits that one doc**, and files everything else
+as `arch-review` drafts. Four rails decide what survives, and they are the
+whole design: every path the turn touched other than the doc — in this repo
+and in the vault's `skills/` and `autonomy/` — is reverted against a
+`git status` baseline taken *before* the turn (a diff, never a snapshot, or a
+human's open editor buffer goes with it); the doc's own diff is thrown away
+over 400 changed lines, over 30% deleted (waived for a `superseded` banner),
+or with the front matter gone; a **group** edit must land inside its own
+`## ` section, by old-side `git diff -U0` hunks, so the seven groups sharing
+`autonomy-jobs.md` cannot re-open each other's text; and the **source**
+commits, under the automod lock and never during a landing drain — the model
+is denied `Write` and told never to run `git`. A rejected doc edit does not
+unfile the findings.
+
+`spawned-by-review` is read three ways and they disagree on purpose: merged at
+write time (on the `spawned-by-` prefix), expired at 30 days and counted on the
+scorecard gauge (`LOOP_SPAWN_TAGS`), and **not** quarantined (`SPAWN_TAGS`
+stays the fixed four). Quarantine asks whether an item can answer the staleness
+question — a triage finding cannot, having been written from a check that just
+ran, and a review finding can, describing the tree as of a commit a month old.
+Scorecard row 12; ledger event `arch_review`. Kill switch:
+`workers.sources.arch-review.enabled`.
+
 ### Development happens in ~/lloyd-sandbox
 
 `/home/alansrobotlab/lloyd` is production: a saved file is a deploy. Non-trivial

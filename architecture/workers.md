@@ -358,6 +358,7 @@ what it reads, what it writes, and the measured state of it.
 | `autotriage` | 55 | triages one backlog item, or consolidates one cluster | session, IV on |
 | `autocode` | 40 | one gated automod round per confirmed item | session, IV on |
 | `backlog-cluster` | 65 | nightly clustering of the open board for the above | none (numpy, off-loop) |
+| `arch-review` | 62 | one `architecture/` doc or one functional group: check it against the tree, edit it, file the rest | session, IV on |
 | `automod-regression` | 70 | paired A/B eval after a promotion | none (subprocess on a thread) |
 | `autoresearch` | 60 | one prompt-optimisation round | its own |
 | `deep-research` | 70 | one registry topic, through the deep-dive-research skill | session, IV off |
@@ -367,8 +368,11 @@ what it reads, what it writes, and the measured state of it.
 | `bench-mine` | 80 | new bench tasks from failed autonomy runs, and from baseline losses when the ledger has any it can read | direct |
 
 Priorities are each module's `DEFAULT_PRIORITY` unless config overrides it, and
-only `youtube-digest` does (45, so a digest beats low/background autonomy work
-for a slot while an autocode round still goes first). `scheduled-task` is a
+two do: `youtube-digest` (45, so a digest beats low/background autonomy work
+for a slot while an autocode round still goes first) and `arch-review` (62,
+which is also its module default — set explicitly because doc maintenance must
+sit below the digest and above the night's clustering, and reading that from
+one file rather than two is worth the duplication). `scheduled-task` is a
 range because it maps each task's own frontmatter through `_PRIORITY_MAP` —
 critical/high/medium/low/background to 10/20/30/50/70 — which is why it can
 both preempt everything and sit behind everything in the same tick.
