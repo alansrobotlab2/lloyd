@@ -538,6 +538,40 @@ def test_the_checkout_holds_no_reference_to_the_dead_retrieval_symbols():
     assert hits == [], "dead retrieval symbols still referenced: " + "; ".join(hits)
 
 
+def _code_names(fn) -> set:
+    """Every name reachable from a function's code object, including its nested
+    functions — `_vault_recall` builds its retrieval legs as closures, so the
+    outer `co_names` alone would not see a call made from inside one."""
+    names: set = set()
+    stack, seen = [fn.__code__], set()
+    while stack:
+        code = stack.pop()
+        if id(code) in seen:
+            continue
+        seen.add(id(code))
+        names.update(code.co_names)
+        stack.extend(c for c in code.co_consts if type(c).__name__ == "code")
+    return names
+
+
+def test_the_recall_leg_the_eval_scores_does_no_rank_fusion():
+    """#877 is a pure deletion, so the claim acceptance rests on is that the
+    thing deleted never ran. This states that about the one leg
+    `eval/run_eval.py` scores: `_vault_recall` merges QMD, code-grep and graph
+    legs by dedupe-append, first-wins, and the only MCP-side rescoring is
+    `_graph_rerank`, which is default-off (`RECALL_GRAPH_RERANK`). Nothing on
+    that path fused ranks before this round and nothing does after — wiring the
+    deleted function into it is exactly what would move a metric, and that is
+    what this catches."""
+    referenced = _code_names(vault._vault_recall)
+    for literal in UNWIRED_LITERALS:
+        assert literal not in referenced, (
+            f"{literal} is referenced on the recall path the eval scores")
+    assert vault.RECALL_GRAPH_RERANK is False, (
+        "graph rerank flipped default-on; the eval numbers this round measured "
+        "were taken with it off, so the base-vs-changed comparison no longer holds")
+
+
 def test_the_vault_tool_surface_is_unchanged_by_the_deletion():
     """Clause 2. None of the four symbols was reachable from a tool, so
     deleting them may not move the advertised surface in either direction: not

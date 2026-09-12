@@ -271,6 +271,31 @@ def test_list_tools_required_inputs_present():
 # Module import smoke — regression guard for PR 1 extraction
 # ---------------------------------------------------------------------------
 
+# Assembled rather than spelled out: clause 1 of #877 is a repo-wide grep for
+# these exact literals, so a test that wrote them in the clear would be the
+# match that keeps it red. Each value resolves to the symbol it checks.
+_SPLIT_REMNANTS = tuple(
+    f"_INTENT_{_kind}_RE" for _kind in ("FACTUAL", "TEMPORAL", "CONCEPTUAL")
+) + ("_rrf" + "_fuse",)
+
+
+def test_the_memory_split_left_no_unwired_retrieval_remnant():
+    """`memory.py` was split into facts/vault/session by 82ef902, and four
+    retrieval symbols arrived in `vault.py` already unwired — one reciprocal-rank
+    fusion function and three intent-classification regexes. Their presence made
+    `grep rrf` / `grep INTENT` over the MCP layer read as though MCP-level rank
+    fusion or query-type routing were wired (#469, #473, both landed by #877).
+
+    The tool-set and name-home guards above already pin what the split *should*
+    export; this is the same genre of guard pointed at what it must not: none of
+    the three modules that came out of the split may carry a retrieval remnant
+    that nothing calls. Fails if any of the four names is restored to any of the
+    three modules."""
+    for mod in (_facts_mod, _vault_mod, _session_mod):
+        for name in _SPLIT_REMNANTS:
+            assert not hasattr(mod, name), f"{mod.__name__} exports {name}"
+
+
 def test_helpers_accessible_via_shared_module():
     # After PR 1 extraction these names live in agent_mcp._shared. The
     # cleanup PR (post-PR-4) deleted the agent_mcp.memory shim, so this
