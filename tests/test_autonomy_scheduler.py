@@ -822,3 +822,242 @@ async def test_one_pool_tick_enqueues_exactly_what_the_board_calls_unheld(
     # nor an always-enqueueing one can pass this.
     assert held["2"] == "waiting on #1" and "2" not in enqueued
     assert held["4"] is None and "4" in enqueued
+
+
+# ── #421: a next_run-keyed stall assertion beside the due-ness alarm ─────────
+#
+# `_grossly_overdue` is the fleet's only stall detector and it is keyed on
+# DUE-ness and on `last_run`, so its own three filters exclude the three shapes
+# that actually went silent for 41 h (#51) and 60 h (#40) on 2026-09-07/08: a
+# task blocked by an upstream whose run was never recorded is never DUE, a task
+# that has never run has no `last_run`, and a task whose queue row is
+# re-created every cycle reads as "starved for capacity, not stalled". The
+# assertion added beside it is keyed on the task's own `next_run` and consults
+# none of those three inputs, so it sees all of them. Every test in this section
+# drives a SYNTHESIZED fleet: the live board currently has zero tasks past
+# `next_run`, so a production-shaped test could not fail on the defect.
+
+def _next_run_fleet(aut, *, control: bool = True):
+    """Six tasks, one per shape, all `daily`, all read at the pinned `PIN`.
+
+    `control=False` leaves out task 902, the one shape the OLD alarm does
+    return. Tick-level tests need that: they assert an exact alert count, and
+    the noisy alarm would otherwise add its own message on the same tick and
+    make the count about two alarms instead of one.
+
+    Ids are in the 900s so nothing here can collide with a real task id.
+    `next_run` is the only field the new assertion reads; `last_run`, `status`
+    and `depends_on` are set to the values that make each shape invisible to
+    `_grossly_overdue`, and the same fleet is asserted against that alarm in the
+    same test — so clause 6 ('the exclusions remain') cannot pass by being
+    unexercised.
+    """
+    day = dt.timedelta(days=1)
+    # Shape 1 (clause 1): `depends_on` an upstream 5 days stale against a 12 h
+    # half-interval bound, so `_is_task_due` says False and the noisy alarm's
+    # due-ness filter drops it before it can ever be counted.
+    write_task(aut, 950, status="paused",
+               last_run=(PIN - 5 * day).isoformat(),
+               next_run=(PIN + 2 * day).isoformat())
+    write_task(aut, 900, depends_on=950,
+               last_run=(PIN - 6 * day).isoformat(),
+               next_run=(PIN - 2 * day).isoformat())
+    # Shape 2 (clause 2): never ran, so `last_run` is null and the noisy
+    # alarm's `if not last: continue` skips it outright.
+    write_task(aut, 901, last_run=None,
+               next_run=(PIN - 2 * day).isoformat())
+    # Shape 3 (clause 3): a live queue row, added by the caller — the noisy
+    # alarm's `if str(id) in active: continue` skips it.
+    write_task(aut, 903, last_run=(PIN - 3 * day).isoformat(),
+               next_run=(PIN - 2 * day).isoformat())
+    # Control (clause 6): due, 5 days grossly overdue, dependency-free, no
+    # queue row — the one shape the noisy alarm does return, and still must.
+    if control:
+        write_task(aut, 902, last_run=(PIN - 5 * day).isoformat(),
+                   next_run=(PIN - 4 * day).isoformat())
+    # Clause 4: the one-interval bound, one second either side, each with an
+    # ordinary `last_run` one period before its `next_run`. Only a pinned clock
+    # can put a case 1 s from a one-day line, so these two pin the instant too.
+    write_task(aut, 904,
+               last_run=(PIN - dt.timedelta(seconds=2 * 86400 - 1)).isoformat(),
+               next_run=(PIN - dt.timedelta(seconds=86400 - 1)).isoformat())
+    write_task(aut, 905,
+               last_run=(PIN - dt.timedelta(seconds=2 * 86400 + 1)).isoformat(),
+               next_run=(PIN - dt.timedelta(seconds=86400 + 1)).isoformat())
+
+
+def test_the_next_run_assertion_sees_the_three_shapes_the_stall_alarm_excludes(
+        aut, monkeypatch, tmp_path):
+    """Clauses 1, 2, 3, 4 and 6 on one synthesized board.
+
+    Clause 6 is asserted here rather than in its own test on purpose: the old
+    alarm is graded on the SAME fleet as the new one, so the three exclusions
+    and the control are all exercised in the same breath as the new keys."""
+    from workers.queue import WorkQueue
+    from workers.sources.scheduled_task import _grossly_overdue, _next_run_stalled
+
+    _pin(aut, monkeypatch)
+    _next_run_fleet(aut)
+    q = WorkQueue(tmp_path / "nextrun.db")
+    q.enqueue(source="scheduled-task", kind="run",
+              payload={"task_id": 903, "name": "task903"},
+              priority=30, dedup_key="scheduled-task:903")
+
+    # Clause 6, first and unqualified: the noisy alarm is unchanged, down to
+    # the three exclusions this item says to leave alone.
+    assert _grossly_overdue(q) == [902], (
+        "the existing alarm changed: it must still return the due, grossly "
+        "overdue, dependency-free, queue-row-free control and nothing else")
+
+    flagged = {e["id"]: e for e in _next_run_stalled(q)}
+    for missing in (900, 901, 903):
+        assert missing in flagged, f"shape {missing} is still invisible to the alarm"
+    assert 902 in flagged, "the noisy alarm's own case disappeared from the new one"
+    # Clause 4, and with it the pinned instant: 86399 s past `next_run` is
+    # inside one period, 86401 s is past it.
+    assert 904 not in flagged, "flagged a task less than one period past next_run"
+    assert 905 in flagged, (
+        "did not flag a task one second past one period — the bound is not "
+        "answering at the pinned instant")
+    # Clause 1's second half, stated as the clause states it: the task is
+    # flagged EVEN THOUGH the scheduler's own due gate rejects it. If the
+    # fixture ever stops being that case, this assertion says so instead of
+    # letting the clause above pass vacuously.
+    board = list(aut.dependency_resolution_set())
+    t900 = next(t for t in board if int(t["id"]) == 900)
+    assert aut._is_task_due(t900, board, now=PIN) is False, (
+        "the fixture is no longer a dependency-blocked case, so the clause "
+        "about _is_task_due returning False is not being tested")
+    # Clause 3's second half: the queue-row shape is flagged with its queue
+    # state carried, not silently merged with the un-queued ones.
+    assert flagged[903]["queued"] is True and flagged[900]["queued"] is False
+
+
+async def test_the_next_run_alert_carries_the_hold_reason_and_fires_low_frequency(
+        aut, monkeypatch, tmp_path):
+    """Clauses 1, 2 and 5 across the executor seam, plus the low-frequency half.
+
+    Drives the real `enqueue_if_due` coroutine tick after tick the way the pool
+    calls it, stubbing only what leaves the process: the vLLM health socket and
+    the Discord alert. "Low-frequency" is part of the acceptance contract — the
+    alarm this one must not disturb needs 5 ticks and a 6 h cooldown, so the
+    quieter one is asserted to confirm across ticks and to respect its own
+    cooldown, not assumed to."""
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    _pin(aut, monkeypatch)
+    # No control task: task 902 is the one shape the noisy alarm returns, and
+    # this test counts alerts, so leaving it in would make the expected count a
+    # sum of two alarms. Its own alarm is pinned unchanged by
+    # test_the_stall_alarm_shares_the_one_verdict and again in the test above.
+    _next_run_fleet(aut, control=False)
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(st, "_state", {**st._state, "startup_checked": True,
+                                       "stall_streak": 0, "stall_alerted_at": None,
+                                       "nextrun_streak": 0,
+                                       "nextrun_alerted_at": None})
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture)
+    q = WorkQueue(tmp_path / "nextrun-tick.db")
+    ticks = st._STALL_NEXTRUN_TICKS
+
+    for _ in range(ticks - 1):
+        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert not alerts, (
+        f"alerted on tick {len(alerts)} of {ticks} — the new assertion does not "
+        f"confirm across ticks the way the alarm beside it does")
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, f"expected exactly one alert on tick {ticks}, got {len(alerts)}"
+    for _ in range(ticks):
+        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, (
+        "re-alerted inside its own cooldown — that is the noisy alarm's failure")
+
+    msg = alerts[0]
+    # The count above is only about the NEW alarm if the old one stayed silent
+    # on this fleet — assert that rather than trusting `control=False`.
+    assert all("Autonomy scheduler may be stalled" not in m for m in alerts), alerts
+    # Clause 5: the message carries the string `autonomy.hold_reason` returns,
+    # not a paraphrase, so a change to that function surfaces here.
+    board = list(aut.dependency_resolution_set())
+    t900 = next(t for t in board if int(t["id"]) == 900)
+    reason = aut.hold_reason(t900, board, now=PIN)
+    assert reason == "waiting on #950", f"fixture drifted: hold reason is {reason!r}"
+    assert "900" in msg and reason in msg, f"task 900 flagged without its reason: {msg}"
+    # The never-ran task is held by nothing, so it must say so instead of
+    # printing an empty reason: a stall message nobody can act on is the defect
+    # this item is about.
+    assert "901" in msg and "nothing holds it" in msg, (
+        f"never-run task flagged without an actionable reason: {msg}")
+
+
+async def test_the_pool_reaches_the_next_run_assertion_through_the_registry(
+        aut, monkeypatch, tmp_path):
+    """The seam the code graph cannot see, crossed for real.
+
+    `graph_affected(enqueue_if_due)` returns ZERO dependents: the pool never
+    names this function, it dispatches `source.enqueue_if_due(...)` by attribute
+    off `SOURCE_REGISTRY` (workers/pool.py:391). Every assertion made by calling
+    the coroutine directly is therefore an assertion about a caller production
+    does not have. This registers the real module and lets the real scheduler
+    loop find it.
+
+    The streak is seeded one tick short because the pool's loop is 60 s a tick
+    and a test may not wait five minutes — carrying state across ticks is
+    exactly what the module-global `_state` does between real ticks. Nothing in
+    this fleet is due, so the pool's worker loop has nothing to claim and
+    `run_task` is never reached; the assertion that the queue stayed empty is
+    what proves that, and it is also what makes driving a real pool safe here."""
+    from workers.queue import WorkQueue
+    import workers.sources as sources
+    import workers.sources.scheduled_task as st
+    from workers.pool import WorkerPool
+
+    _pin(aut, monkeypatch)
+    day = dt.timedelta(days=1)
+    write_task(aut, 950, status="paused",
+               last_run=(PIN - 5 * day).isoformat(),
+               next_run=(PIN + 2 * day).isoformat())
+    write_task(aut, 900, depends_on=950,
+               last_run=(PIN - 6 * day).isoformat(),
+               next_run=(PIN - 2 * day).isoformat())
+
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(st, "_state", {**st._state, "startup_checked": True,
+                                       "stall_streak": 0, "stall_alerted_at": None,
+                                       "nextrun_streak": st._STALL_NEXTRUN_TICKS - 1,
+                                       "nextrun_alerted_at": None})
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture)
+    monkeypatch.setattr(sources, "SOURCE_REGISTRY", {"scheduled-task": st},
+                        raising=False)
+    monkeypatch.setattr(sources, "get_sources_config", lambda: {
+        "scheduled-task": {"enabled": True, "interval_seconds": 0,
+                           "max_duration_seconds": 60}}, raising=False)
+
+    q = WorkQueue(tmp_path / "pool.db")
+    pool = WorkerPool(q, slots=1, poll_idle_seconds=0.01)
+    await pool.start()
+    try:
+        for _ in range(300):
+            if alerts:
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        await pool.stop()
+
+    assert alerts, ("the pool's own scheduler loop never reached the next_run "
+                    "assertion — it would be dead code in production")
+    assert "900" in alerts[0] and "waiting on #950" in alerts[0], alerts[0]
+    assert not q.list_items(source="scheduled-task", limit=50), (
+        "a dependency-blocked task reached the queue; this test would then "
+        "have executed it")

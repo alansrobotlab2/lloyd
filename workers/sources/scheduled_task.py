@@ -66,8 +66,18 @@ _STALL_ALARM_TICKS = 5
 # when demand exceeds the 2 shared slots. Re-alerting at most this often keeps
 # a genuine stall visible instead of drowned.
 _STALL_ALERT_INTERVAL_SECONDS = 6 * 3600
+# The second, quieter stall assertion (#421). The alarm above is keyed on
+# due-ness and `last_run` and its three exclusions are load-bearing for noise —
+# they are also exactly the shapes that sat silent for 41 h and 60 h on
+# 2026-09-07/08, so this one is keyed on each task's own `next_run` and reads
+# none of those three inputs. Quieter by construction: the key is a whole
+# period (not 2.5x a partial one) and the cooldown is a day, not 6 hours. Its
+# streak is a separate counter so neither alarm can reset the other's.
+_STALL_NEXTRUN_TICKS = 5
+_STALL_NEXTRUN_ALERT_INTERVAL_SECONDS = 24 * 3600
 _state = {"vllm_down_logged": False, "startup_checked": False,
-          "stall_streak": 0, "stall_alerted_at": None}
+          "stall_streak": 0, "stall_alerted_at": None,
+          "nextrun_streak": 0, "nextrun_alerted_at": None}
 
 
 def _vllm_healthy(timeout: float = 4.0, url: str | None = None) -> bool:
@@ -134,6 +144,59 @@ def _grossly_overdue(queue: WorkQueue) -> list:
         if (now - last).total_seconds() > _STALL_INTERVAL_MULT * interval:
             overdue.append(t.get("id"))
     return overdue
+
+
+def _next_run_stalled(queue: WorkQueue) -> list[dict]:
+    """up_next tasks sitting more than one period past their OWN `next_run`.
+
+    The companion to `_grossly_overdue`, and deliberately not a variant of it:
+    the only task state it reads is `next_run` (plus `status` and `frequency` to
+    know what a period is), so the three filters that make the noisy alarm
+    survivable — skip not-due, skip queue-waiting, skip never-run — cannot hide
+    a stall here. Those three are the shapes #421 was filed for: #51 41 h and
+    #40 60 h overdue, `failure_count: 0`, no run record, because an upstream's
+    run was never recorded and that makes the dependent not-due forever.
+
+    Each entry carries the reason dispatch itself would give — `hold_reason`,
+    the same function the dispatch loop's "Holding #" line uses — so the alert
+    says WHY it has not run rather than only THAT it has not. A task with no
+    hold reason was skipped below this loop: a per-task model-server health
+    check, or the vLLM gate that #938 tracks separately.
+
+    The instant is `autonomy._utcnow()`, like the alarm beside it, so one clock
+    pin moves both."""
+    import autonomy
+    now = autonomy._utcnow()
+    resolution = autonomy.dependency_resolution_set()
+    active = _active_task_ids(queue)
+    stalled = []
+    for t in resolution:
+        if str(t.get("status", "")).strip() != "up_next":
+            continue
+        interval = autonomy._frequency_interval_seconds(t)
+        nxt = autonomy._parse_iso(t.get("next_run"))
+        if not interval or not nxt:
+            continue
+        overdue = (now - nxt).total_seconds()
+        if overdue <= interval:
+            continue
+        stalled.append({
+            "id": t.get("id"),
+            "name": t.get("name"),
+            "hours": overdue / 3600.0,
+            "hold": autonomy.hold_reason(t, resolution, now=now),
+            "queued": str(t.get("id")) in active,
+        })
+    return stalled
+
+
+def _hold_note(entry: dict) -> str:
+    """Why a flagged task has not dispatched, in dispatch's own words."""
+    if entry["hold"]:
+        return f"held: {entry['hold']}"
+    if entry["queued"]:
+        return "nothing holds it; a queue row is already waiting for capacity"
+    return "nothing holds it; dispatch did not enqueue it"
 
 
 def _queue_starving(queue: WorkQueue, max_duration: int) -> float:
@@ -231,6 +294,30 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
             await _alert(msg)
     else:
         _state["stall_streak"] = 0
+
+    # Second stall assertion (#421), keyed on each task's own `next_run` so it
+    # sees the three shapes the alarm above is built to exclude. Separate
+    # streak, separate cooldown, separate message: nothing about the noisy
+    # alarm's exclusions or text moved.
+    stalled = await loop.run_in_executor(None, _next_run_stalled, queue)
+    _state["nextrun_streak"] = (
+        (_state.get("nextrun_streak", 0) + 1) if stalled else 0)
+    if stalled and _state["nextrun_streak"] >= _STALL_NEXTRUN_TICKS:
+        last_nextrun = _state.get("nextrun_alerted_at")
+        nr_now = _dt.datetime.now(_dt.timezone.utc)
+        if (last_nextrun is None
+                or (nr_now - last_nextrun).total_seconds()
+                >= _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS):
+            _state["nextrun_alerted_at"] = nr_now
+            lines = "; ".join(
+                f"#{e['id']} ({e['name']}) is {e['hours']:.1f}h past its next_run"
+                f" — {_hold_note(e)}"
+                for e in stalled[:15])
+            msg = (f"{len(stalled)} up_next task(s) more than one period past "
+                   f"their own next_run, which the due-ness stall alarm cannot "
+                   f"see: {lines}")
+            logger.error("%s", msg)
+            await _alert(msg)
 
     due = await loop.run_in_executor(None, get_due_tasks)
 
