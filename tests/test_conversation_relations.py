@@ -199,22 +199,24 @@ def test_search_result_branch_is_inert_and_stays_so(cr, vault):
 def test_extractor_scales_on_a_synthetic_corpus(cr, vault, tmp_path):
     """The clause-3 floor, pinned hermetically so it always runs.
 
-    4 files x 15 SDK-named accesses: a vocabulary that missed `Read`/`Edit`
-    yields 0 pairs here, and the thresholds are the ones #420 was graded on.
+    6 files x 18 SDK-named accesses: a vocabulary that missed `Read`/`Edit`
+    yields 0 pairs here. The assertions stay at the floors #420 was graded on
+    (200 / 100) while the corpus yields 918 / 198, so losing one whole day's
+    worth of pairs is a red for a reason and not a red because the twin was
+    built 8 aggregates above its own bar (round SM_20260912_092119 advisory).
     """
     traj = tmp_path / "trajectories"
-    for day in range(1, 5):
-        entries = []
-        for col in range(15):
+    for day in range(1, 7):
+        for col in range(18):
             rel = f"knowledge/d{day}_{col}.md"
             doc = vault / rel
             doc.parent.mkdir(parents=True, exist_ok=True)
             doc.write_text("# doc\n")
         tools = [_tool("Read", seq,
                        {"file_path": f"~/obsidian/knowledge/d{day}_{seq}.md"})
-                 for seq in range(15)]
-        entries.append(_entry(tools, session_key=f"2026090{day}_111111_x"))
-        _write_traj(traj, f"2026-09-0{day}", entries)
+                 for seq in range(18)]
+        _write_traj(traj, f"2026-09-0{day}",
+                    [_entry(tools, session_key=f"2026090{day}_111111_x")])
 
     pairs = cr.extract_co_access_pairs(traj, since_date=None)
     assert len(pairs) >= 200, f"only {len(pairs)} raw pairs"
@@ -222,13 +224,20 @@ def test_extractor_scales_on_a_synthetic_corpus(cr, vault, tmp_path):
 
 
 @pytest.mark.live_vault
-@pytest.mark.skipif(not TRAJECTORY_DIR.is_dir(), reason="trajectory corpus not present")
 def test_live_trajectories_yield_material_co_access_signal(cr):
     """The acceptance measurement on the real corpus: 7 pairs / 1 aggregate
     before #420, 1144 / 256 after. Reads the live trajectories and the live
     vault (path existence is part of normalize_vault_path), so it is marked
     `live_vault` like the other tests that assert over files no round controls.
+
+    Not `skipif`-guarded: a corpus that is absent or moved must be a failure,
+    never a silent pass — the same reason #551's vault scan fails loudly on an
+    empty tree. The gate deselects this by marker, not by absence.
     """
+    files = sorted(TRAJECTORY_DIR.glob("*.jsonl")) if TRAJECTORY_DIR.is_dir() else []
+    assert len(files) >= 5, (
+        f"expected >=5 trajectory files under {TRAJECTORY_DIR}, found {len(files)} "
+        "— an empty or moved corpus is not a pass")
     pairs = cr.extract_co_access_pairs(TRAJECTORY_DIR, since_date=None)
     assert len(pairs) >= 200, f"only {len(pairs)} raw pairs from {TRAJECTORY_DIR}"
     assert len(cr.aggregate_pairs(pairs)) >= 100
@@ -343,12 +352,22 @@ def _task_file(dir_path: Path, model: str) -> Path:
 
 
 def _config_endpoint(alias: str) -> str:
-    """The endpoint config.yaml says for an alias — the contract under test,
-    so the assertions below track the file rather than a port someone may move."""
+    """The endpoint config.yaml declares for an alias, read straight from the
+    parsed config — the contract under test, so these assertions track the file
+    rather than a port someone may move.
+
+    Deliberately *no* fallback chain here. `resolve_llm_target()` derives its URL
+    from `base_url` with an `env.ANTHROPIC_BASE_URL` fallback; repeating that
+    precedence in the test means the two can drift together and stay green while
+    both are wrong (round SM_20260912_092119 advisory). `base_url` is the key
+    both model slots actually populate; if one stops being, this assert names it
+    instead of quietly resolving through a different key.
+    """
     from app.config import MODEL_CONFIGS
-    cfg = MODEL_CONFIGS.get(alias) or {}
-    base = (cfg.get("base_url")
-            or (cfg.get("env") or {}).get("ANTHROPIC_BASE_URL") or "")
+    base = MODEL_CONFIGS[alias]["base_url"]
+    assert base, (
+        f"MODEL_CONFIGS[{alias!r}].base_url is empty; the endpoint assertions "
+        "below would be vacuous")
     return base.rstrip("/") + "/v1/chat/completions"
 
 
