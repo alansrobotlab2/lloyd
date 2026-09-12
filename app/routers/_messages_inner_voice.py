@@ -249,6 +249,27 @@ _inner_voice_hooks_dict = build_iv_hook_registry
 # Observer attach (per-turn)
 # ---------------------------------------------------------------------------
 
+def _observer_priority(options: Any, platform: str) -> int | None:
+    """The vLLM priority the observer's own calls run at.
+
+    Normally the watched turn's, so an observer never preempts the primary
+    it is watching. One step lower (numerically higher — priority ASC) on an
+    unattended turn: a worker round's observer calling the primary at the
+    round's own priority puts a second-opinion request in front of a human's
+    first token, and there is no human waiting on the round.
+    """
+    base = getattr(options, "priority", None)
+    if base is None:
+        return None
+    try:
+        from app.sessions_io import NON_USER_PLATFORMS
+    except Exception:  # noqa: BLE001
+        return base
+    if platform and platform in NON_USER_PLATFORMS:
+        return int(base) + 1
+    return base
+
+
 async def attach_observer_for_turn(
     *,
     session_id: str,
@@ -266,6 +287,8 @@ async def attach_observer_for_turn(
     todos: list[dict[str, Any]] | None = None,
     plan_artifact: dict[str, Any] | None = None,
     persistent_goal: dict[str, Any] | None = None,
+    platform: str = "",
+    source: str = "",
 ) -> ObserverState | None:
     """Install the observer onto `options.hooks` for one turn.
 
@@ -359,8 +382,18 @@ async def attach_observer_for_turn(
         persistent_goal=persistent_goal,
         prior_turn_interventions=prior_interventions,
         max_turns=int(getattr(options, "max_turns", 0) or 0),
-        # Observer calls are scheduled like the turn they watch.
-        priority=getattr(options, "priority", None),
+        # The SAME meter the loop relieves against. Without this the
+        # observer judges a turn at 241k tokens exactly as it judges one at
+        # 40k, which is how round 875 was injected into with no room left to
+        # answer in.
+        context_meter=getattr(options, "context_meter", None),
+        platform=platform,
+        source=source,
+        # Observer calls are scheduled like the turn they watch — except on
+        # an unattended one, which yields to anything a human is waiting on.
+        # A round's own observer at the round's priority sits in front of a
+        # chat turn's first token.
+        priority=_observer_priority(options, platform),
     )
     logger.info(
         "[iv.observer] attached session=%s turn=%s source=%s budget=%d "

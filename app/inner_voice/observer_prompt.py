@@ -585,6 +585,40 @@ def build_iteration_pressure_note(
     )
 
 
+def build_context_pressure_note(
+    used: int, window: int, fraction: float, *, round_open: bool = False,
+) -> str:
+    """Warn the observer that the turn is running out of CONTEXT, not turns.
+
+    The other way a turn dies, and on 2026-09-11 the one that actually
+    killed rounds — 875 died at iteration 50-odd of 150 with 44 minutes
+    left, purely out of window.
+
+    The advice has to be different from the iteration note's, and that is
+    the whole point of a second block. Under iteration pressure "stop
+    gathering and deliver the answer" is right. Under context pressure it is
+    wrong twice over: writing a long answer is itself the expensive act, and
+    the primary has already been told this by the `<context>` anchor the
+    harness fired. So the only nudge worth making here is "commit and gate",
+    and the default is silence.
+    """
+    pct = int(fraction * 100)
+    tail = (
+        " A round is open: the useful nudge is commit, then automod_gate, "
+        "then land or abort — never 'write the report'."
+        if round_open else
+        " If there is nothing to commit, let the turn end."
+    )
+    return (
+        f"CONTEXT PRESSURE: this turn has used {used:,} of {window:,} tokens "
+        f"({pct}% of the compaction threshold). The harness has ALREADY told "
+        f"the primary this through a <context> anchor, so repeating it is "
+        f"noise. Anything you inject costs context the primary needs to act "
+        f"with, and a long final answer is itself the expensive act — so "
+        f"prefer noop unless the primary is plainly ignoring the anchor.{tail}"
+    )
+
+
 def build_goal_card_block_for_primary(goal_card: dict[str, Any] | None) -> str:
     """Render the goal card as a block for the PRIMARY's user message.
 
@@ -640,6 +674,8 @@ def build_user_prompt_for_event(
     persistent_goal: dict[str, Any] | None = None,
     prior_turn_interventions: list[dict[str, Any]] | None = None,
     iteration_pressure_note: str = "",
+    context_pressure_note: str = "",
+    platform_note: str = "",
 ) -> str:
     """Assemble the per-event user prompt the observer evaluates."""
     budget_line = (
@@ -658,6 +694,10 @@ def build_user_prompt_for_event(
     pressure_section = (
         f"\n{iteration_pressure_note}\n" if iteration_pressure_note else ""
     )
+    context_section = (
+        f"\n{context_pressure_note}\n" if context_pressure_note else ""
+    )
+    platform_section = f"{platform_note}\n\n" if platform_note else ""
     subliminal_block = _format_subliminal_context(subliminal_context)
     subliminal_section = f"\n{subliminal_block}" if subliminal_block else ""
     plan_block = _format_plan_artifact(plan_artifact)
@@ -667,6 +707,7 @@ def build_user_prompt_for_event(
     persistent_goal_block = _format_persistent_goal(persistent_goal)
     persistent_goal_section = f"{persistent_goal_block}\n\n" if persistent_goal_block else ""
     return (
+        f"{platform_section}"
         f"USER REQUEST:\n{user_request}\n\n"
         f"{persistent_goal_section}"
         f"{_format_goal_card(goal_card)}\n"
@@ -677,7 +718,8 @@ def build_user_prompt_for_event(
         f"PRIMARY'S RESPONSE SO FAR (visible text):\n"
         f"{primary_text_so_far or '(none yet)'}\n"
         f"{prior_section}"
-        f"{pressure_section}\n"
+        f"{pressure_section}"
+        f"{context_section}\n"
         f"EVENT UNDER REVIEW:\n{event_summary}\n\n"
         f"{budget_line}\n\n"
         f"Call exactly one lever tool: noop, inject, cancel, ambient, or clarify."

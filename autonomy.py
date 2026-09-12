@@ -1145,6 +1145,9 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                     turn_source="ambient", producer_source="autonomy",
                     user_request=prompt, options=options,
                     chat_messages_handle=messages, cancel_event=iv_cancel,
+                    # Nobody reads a scheduled task's reply either, so the
+                    # unattended profile applies here for the same reason.
+                    platform="autonomy", source=str(task.get("name") or ""),
                 )
                 # The observer's `cancel` lever has to reach the loop or it is
                 # a knob nothing reads. On the chat path `_run_turn` wires the

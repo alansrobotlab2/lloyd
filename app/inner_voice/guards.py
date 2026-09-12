@@ -330,6 +330,61 @@ class IterationPressure:
     critical: bool
 
 
+@dataclass(frozen=True)
+class ContextPressure:
+    """How close the turn is to the CONTEXT wall, the other way to die.
+
+    `iteration_pressure` watches `max_turns`; this watches tokens. They are
+    independent, and on 2026-09-11 it was this one that killed rounds — 875
+    died at iteration 50-odd of 150 with 44 minutes left, purely out of
+    window.
+    """
+
+    used: int
+    window: int
+    fraction: float          # against the compaction wall, not the window
+    critical: bool           # nudging is still worth it, but only to converge
+    exhausted: bool          # nothing the observer says can be acted on
+
+
+def context_pressure(
+    meter: Any, *, threshold: float = 0.8, floor_tokens: int = 12_000,
+) -> ContextPressure:
+    """Read the shared `ContextMeter`. Unmeasured is never critical.
+
+    Fails open in the direction that preserves the observer: a turn whose
+    context position is unknown is judged exactly as it always was. The
+    failure being closed is the opposite one — spending the last iteration a
+    turn has on a nudge it has no room to answer, which is what happened to
+    875 when the observer injected "deliver the final report now" onto a
+    silent terminal iteration at 241k of 262,144 tokens.
+
+    `floor_tokens` is the SAME number the loop drops a terminal inject at
+    (`harness.context_relief.terminal_floor_tokens`). Two different floors
+    would mean the observer speaking into a turn the loop has already
+    decided to end, which is the disagreement this shared object exists to
+    prevent.
+    """
+    if meter is None:
+        return ContextPressure(0, 0, 0.0, False, False)
+    try:
+        if not meter.measured:
+            return ContextPressure(0, int(meter.window), 0.0, False, False)
+        used = int(meter.used)
+        window = int(meter.window)
+        frac = float(meter.threshold_fraction)
+        headroom = int(meter.headroom)
+    except Exception:  # noqa: BLE001
+        return ContextPressure(0, 0, 0.0, False, False)
+    return ContextPressure(
+        used=used,
+        window=window,
+        fraction=frac,
+        critical=frac >= threshold,
+        exhausted=headroom < floor_tokens,
+    )
+
+
 def iteration_pressure(
     iteration: int, max_turns: int, *, threshold: float = 0.8,
 ) -> IterationPressure:
@@ -424,9 +479,42 @@ def _ambient_path_prefixes() -> tuple[str, ...]:
 _AMBIENT_PATH_PREFIXES = _ambient_path_prefixes()
 
 
+# Fragments that are ambient for a whole *kind* of turn rather than for the
+# machine. The prefix list above can only remove what it can name literally;
+# these are shapes.
+#
+# The round id is the one that keeps costing rounds. `SM_20260908_165950`
+# survives `_strip_ambient` (it has underscores), reaches 18 characters, and
+# so `_is_distinctive` lets it carry a near match on its own — and every call
+# in an implement round mentions it. `_strip_cd_prefix` removes it from Bash
+# commands only, which left it live in every other idiom: on 2026-09-11 the
+# repetition guard fired 16 times on autocode turns in one day, 7 of them on
+# the round id alone, through `graph_affected(root=…SM_…)` and
+# `automod_gate_wait(round_id=…)`. One turn hit the deterministic cap of 5 at
+# the moment its gate started.
+#
+# The worktree path is the second: `/lloyd-work/<round>/home/lloyd` is the
+# prefix of every path a round touches, and it is not under `Path.home()` in
+# the shape the prefix list matches.
+# Order matters: the worktree path CONTAINS the round id, so the broader
+# pattern has to run first or the narrower one eats its middle and leaves
+# `/lloyd-work/ /home/lloyd` behind.
+_AMBIENT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"/lloyd-work/[^\s'\"]*?/home/lloyd\b"),
+    re.compile(r"\bSM_\d{8}_\d{6}\b"),
+)
+
+
 def _strip_ambient(text: str) -> str:
-    """Drop the session-wide path fragments before extracting identifiers."""
+    """Drop the session-wide fragments before extracting identifiers.
+
+    Patterns run BEFORE the literal prefixes: the worktree pattern contains a
+    path the prefix pass would otherwise punch a hole in, leaving a fragment
+    that still carries the round id.
+    """
     out = text
+    for rx in _AMBIENT_PATTERNS:
+        out = rx.sub(" ", out)
     for frag in _AMBIENT_PATH_PREFIXES:
         out = out.replace(frag, " ")
     return out
@@ -593,8 +681,16 @@ def ubiquitous_identifiers(sigs: list[ToolCallSignature]) -> frozenset[str]:
     """
     if len(sigs) < _AMBIENT_MIN_HISTORY:
         return frozenset()
-    common = set(sigs[0].all_idents)
-    for s in sigs[1:]:
+    # A signature with NO identifiers at all empties the intersection and so
+    # declares nothing ambient — which is backwards: one bare `git status` in
+    # the ring restored the round id to distinctive and let it carry a match
+    # again. A call that mentions nothing is evidence about nothing, so it
+    # abstains rather than voting.
+    contributing = [s for s in sigs if s.all_idents]
+    if len(contributing) < _AMBIENT_MIN_HISTORY:
+        return frozenset()
+    common = set(contributing[0].all_idents)
+    for s in contributing[1:]:
         common &= s.all_idents
         if not common:
             break
@@ -618,6 +714,27 @@ def _is_distinctive(term: str) -> bool:
     return term.count("_") >= 2 or len(term) >= 16
 
 
+# Tools whose repetition IS the protocol. Polling one of these four times is
+# not a stuck model, it is the documented way to use them: `automod_gate_wait`
+# is the poll a detached gate is designed around, and a `browser_wait` or an
+# `autoresearch_status` says nothing until the thing it watches has moved.
+# Round 874's observer read four silent `automod_gate_wait` calls as a loop.
+#
+# Configurable so a new polling tool does not need a code change, but the
+# default is the four that exist.
+REPETITION_EXEMPT_TOOLS: frozenset[str] = frozenset({
+    "automod_gate_wait", "automod_status", "browser_wait", "graph_status",
+    "autoresearch_status",
+})
+
+
+def _is_exempt(tool: str, exempt: frozenset[str]) -> bool:
+    """Bare or namespaced (`mcp__lloyd-mcp__automod_gate_wait`)."""
+    if not tool:
+        return False
+    return tool.rsplit("__", 1)[-1] in exempt
+
+
 def repetition_verdict(
     recent: list[ToolCallSignature],
     *,
@@ -626,6 +743,7 @@ def repetition_verdict(
     containment: float = REPETITION_CONTAINMENT,
     threshold: int = REPETITION_THRESHOLD,
     ambient: frozenset[str] | None = None,
+    exempt_tools: frozenset[str] | None = None,
 ) -> RepetitionVerdict | None:
     """Judge whether the LAST entry in `recent` re-runs earlier work.
 
@@ -643,6 +761,12 @@ def repetition_verdict(
     if len(recent) < 2:
         return None
     current = recent[-1]
+    # Polling is the protocol for a handful of tools — see
+    # REPETITION_EXEMPT_TOOLS. Checked before anything else, so neither the
+    # exact nor the near signal can fire on them.
+    if _is_exempt(current.tool, REPETITION_EXEMPT_TOOLS if exempt_tools is None
+                  else exempt_tools):
+        return None
     prior = recent[-(window + 1):-1]
     matches: list[ToolCallSignature] = []
     exact = False

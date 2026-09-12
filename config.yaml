@@ -57,6 +57,34 @@ inner_voice:
     # flips and the stalled-progress gate always escalate.
     tool_result_sample_every: 5
     tool_result_escalate_bytes: 20000
+    # The same two, for a turn nobody is reading. The observer runs on the
+    # PRIMARY at the watched turn's priority, so every escalation it makes
+    # sits in front of whatever a human is typing — and a worker round
+    # produces long benign results all day: a pytest tail clears the 20k
+    # threshold and buys an LLM call that says nothing.
+    unattended_tool_result_sample_every: 10
+    unattended_tool_result_escalate_bytes: 60000
+    # Tools whose repetition IS the protocol, merged over the built-in set
+    # (automod_gate_wait, automod_status, browser_wait, graph_status,
+    # autoresearch_status). On 2026-09-11 the repetition guard fired 16
+    # times on autocode turns in one day, 7 of them on the round id alone,
+    # and one turn hit the deterministic cap of 5 the moment its gate
+    # started. Config adds to this list; it never un-exempts the built-ins.
+    repetition_exempt_tools: []
+    # The context wall is the other way a turn dies, and in September 2026
+    # it was the one that actually killed rounds. Past this fraction of the
+    # compaction threshold the observer is told to prefer noop — the
+    # <context> anchor has already told the primary, and an inject costs
+    # the context the primary needs to act with. Below the loop's own
+    # `harness.context_relief.terminal_floor_tokens` the terminal judgment
+    # is skipped entirely: nothing said there can be answered.
+    context_pressure_enabled: true
+    context_pressure_threshold: 0.8
+    # On an unattended turn the LLM still decides WHETHER to speak; Python
+    # decides what it says. Round 874's observer injected "deliver the final
+    # report now" on the invented premise "working tree clean" and a healthy
+    # round was abandoned at iteration 38 with 44 minutes left.
+    unattended_terminal_content_deterministic: true
     # Run non-terminal judgments off the harness's critical path.
     async_nonterminal: true
     async_drain_timeout_seconds: 6.0
