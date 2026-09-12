@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import post_promotion
 from .bench_runner import run_bench
 from .bench_runner_sdk import DEFAULT_PER_TASK_TIMEOUT as SDK_PER_TASK_TIMEOUT
 from .bench_runner_sdk import run_bench_sdk
@@ -47,6 +48,31 @@ def _group_traces_by_variant(traces: list[dict[str, Any]]) -> dict[str, list[dic
     for t in traces:
         grouped.setdefault(t["variant_id"], []).append(t)
     return grouped
+
+
+def post_promotion_check(
+    cfg: AutoresearchConfig,
+    round_id: str,
+    baseline_mean: float,
+    promotion_result: dict[str, Any] | None,
+    variant_summary: dict[str, Any] | None = None,
+) -> tuple[list[str], dict[str, Any], dict[str, Any] | None]:
+    """Compare this round's fresh baseline against the last promotion (#429).
+
+    Returns `(report_lines, ledger_row, comparison)`. Recording and surfacing
+    happen in this one call so the per-round comparison row is a property of
+    every round rather than a step a round has to remember to take. The lookup
+    runs *before* the write: a round must never be compared against itself.
+    """
+    prior = post_promotion.last_promotion(
+        cfg.paths.ledger_path, cfg.paths.rounds_dir, exclude_round=round_id,
+    )
+    comparison = post_promotion.compare(baseline_mean, prior, cfg.promotion_noise_floor)
+    lines = post_promotion.report_section(comparison)
+    row = post_promotion.record_round_summary(
+        cfg, round_id, baseline_mean, promotion_result, variant_summary,
+    )
+    return lines, row, comparison
 
 
 async def _run_trials(
@@ -243,6 +269,18 @@ async def run(
     if best_variant and best_summary and best_overlay:
         promotion_result = promote(cfg, best_variant, best_overlay, best_summary, baseline_summary, dry_run=dry_run)
 
+    # #429: a promotion used to be the last time anything looked at it. Compare
+    # this round's fresh baseline to the mean the previous promoted variant
+    # recorded in its own round, record the row, and carry the verdict into the
+    # report below. Record and surface only — nothing here restores a file.
+    report_lines, summary_row, comparison = post_promotion_check(
+        cfg,
+        rid,
+        float(baseline_summary.get("mean_composite", 0.0)),
+        promotion_result,
+        best_summary,
+    )
+
     # Write round summary markdown
     summary_file = cfg.paths.rounds_dir / f"{rid}.md"
     sdk_task_ids = sorted({t["task_id"] for t in sdk_traces})
@@ -274,6 +312,7 @@ async def run(
         lines.append(f"- snapshot_dir: `{promotion_result.get('snapshot_dir')}`")
         lines.append(f"- applied_files: {promotion_result.get('applied_files')}")
         lines.append(f"- experiment_fact: `{promotion_result.get('experiment_fact')}`")
+    lines.extend(report_lines)
     summary_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     # Patch ledger with final promotion decisions (cheap second pass — append another entry)
@@ -298,6 +337,8 @@ async def run(
         "baseline_mean": baseline_summary.get("mean_composite", 0.0),
         "decisions": decisions,
         "promoted": promotion_result,
+        "post_promotion": comparison,
+        "round_summary_row": summary_row,
         "parent_variant_id": parent_variant["variant_id"] if parent_variant else None,
         "dry_run": dry_run,
         "harness": harness,

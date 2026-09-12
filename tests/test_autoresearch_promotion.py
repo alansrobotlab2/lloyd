@@ -398,6 +398,68 @@ def test_promote_refuses_when_the_snapshot_cannot_be_written(isolated_prompts, t
     assert isolated_prompts["SOUL.md"].read_text() == "canonical SOUL.md\n"
 
 
+def test_snapshot_current_prompts_raises_when_it_holds_no_prompt(isolated_prompts, tmp_path):
+    """The `RuntimeError` half of the no-rollback-point guard (#429 clause 4).
+
+    The test above forces `OSError` out of `copy2`; this is the other half — the
+    one that costs *nothing* to trigger. A copy that silently no-ops, or a source
+    that has gone missing, still leaves a directory behind, so only the content
+    check can see it. It is the half that matters most: the ledger's 65
+    `"promoted": true` rows carry no snapshot field at all, so a snapshot that
+    exists only as a directory nobody recorded is invisible exactly like this one.
+    """
+    cfg = make_cfg(tmp_path)
+    for path in isolated_prompts.values():
+        path.unlink()
+    with pytest.raises(RuntimeError, match="no rollback point"):
+        promote.snapshot_current_prompts(cfg)
+
+
+def test_promote_still_refuses_on_a_runtime_snapshot_error_and_applies_nothing(
+    isolated_prompts, tmp_path, monkeypatch, caplog
+):
+    """#429 clause 4: the refusal must outlive any change to the promote path.
+
+    `snapshot_current_prompts` raising `RuntimeError` is caught by the same
+    handler as `OSError` and must produce the `REFUSED promotion … no rollback
+    point` log and leave the live contract untouched. The overlay here is one the
+    contract gate *accepts*, so the snapshot is the only thing standing between it
+    and SOUL.md.
+    """
+    import shutil
+
+    from tests.test_prompt_surface_guard import GOOD_CONTRACT
+
+    cfg = make_cfg(tmp_path)
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    (overlay / "SOUL.md").write_text(GOOD_CONTRACT, encoding="utf-8")
+
+    real_copy2 = shutil.copy2
+
+    def silently_failing_copy2(src, dst, *a, **kw):
+        # No exception, no write: the snapshot directory exists and is empty,
+        # exactly the state the content check in snapshot_current_prompts is for.
+        if "snapshots" in str(dst):
+            return Path(dst)
+        return real_copy2(src, dst, *a, **kw)
+
+    monkeypatch.setattr(promote.shutil, "copy2", silently_failing_copy2)
+    caplog.set_level("ERROR", logger="autoresearch.promote")
+
+    result = promote.promote(cfg, VARIANT, overlay, summary(0.9), summary(0.1))
+
+    logged = [r.getMessage() for r in caplog.records]
+    assert any("REFUSED promotion" in m and "no rollback point" in m for m in logged), (
+        f"expected the no-rollback-point refusal in {logged}"
+    )
+    assert result["refused"] and "snapshot failed" in result["refused"][0]
+    assert result["applied_files"] == []
+    assert result["snapshot_dir"] is None
+    # The overlay never got its turn on the contract.
+    assert isolated_prompts["SOUL.md"].read_text() == "canonical SOUL.md\n"
+
+
 # ── the live default, asserted as a fact rather than assumed ─────────────────
 
 def test_unpatched_canonical_targets_point_at_the_live_vault():

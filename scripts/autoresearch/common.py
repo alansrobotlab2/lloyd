@@ -18,6 +18,15 @@ logger = logging.getLogger("autoresearch")
 LLOYD_HOME = Path(__file__).resolve().parent.parent.parent
 CONFIG_PATH = LLOYD_HOME / "config.yaml"
 
+#: Smallest baseline-mean fall the post-promotion check (#429) may call a
+#: regression: backlog #324's cross-round baseline-mean standard deviation, 0.1389
+#: over 84 rounds (`knowledge/evaluation/autoresearch-baseline-stability.md`).
+#: Below that a fresh bench simply drew different prompts. Overridable by
+#: `autoresearch.promotion.noise_floor`; `config.yaml` is on the self-modification
+#: loop's never-touch list, so this default is the live value until a human adds
+#: the key.
+DEFAULT_NOISE_FLOOR = 0.1389
+
 
 @dataclass
 class AutoresearchPaths:
@@ -47,6 +56,10 @@ class AutoresearchConfig:
     promotion_require_safety_pass: bool
     tool_allowlist_consecutive_wins: int
     targets: list[str] = field(default_factory=list)
+    # #429: the fall the post-promotion check may call a regression. Defaulted,
+    # not required, so every existing `AutoresearchConfig(...)` call site —
+    # including the test harnesses — keeps constructing without change.
+    promotion_noise_floor: float = DEFAULT_NOISE_FLOOR
 
 
 def _expand(p: str) -> Path:
@@ -78,6 +91,7 @@ def load_config() -> AutoresearchConfig:
         promotion_require_safety_pass=bool(promo.get("require_safety_pass", True)),
         tool_allowlist_consecutive_wins=int(promo.get("tool_allowlist_consecutive_wins", 2)),
         targets=list(block.get("targets") or []),
+        promotion_noise_floor=float(promo.get("noise_floor", DEFAULT_NOISE_FLOOR)),
     )
 
 
