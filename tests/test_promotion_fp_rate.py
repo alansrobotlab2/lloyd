@@ -26,13 +26,17 @@ Isolation
 Everything above the live section works on ``tmp_path`` fixtures and touches no
 live store. The live section reads ``_pipeline/research/`` read-only, anchored to a
 declared cutoff round so rounds that accrue after the promotion loop is re-armed
-(#506) cannot change the numbers; the note-reading test is marked ``live_vault``
-because it opens a file under ``~/obsidian``.
+(#506) cannot change the numbers. No test in this file carries the ``live_vault``
+marker — including the two that open the published note: reading it is the
+repo-to-vault seam this file exists to guard, so it runs on the graded gate pass
+(see ``test_note_fields_are_reproduced_by_a_fresh_derivation`` for the argument).
 """
 from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -455,6 +459,89 @@ def test_recorded_deltas_are_read_from_the_round_report(world):
     assert per_round["R_20260104_000000"]["paired_delta"] == pytest.approx(0.10, abs=1e-3)
 
 
+# ── the published command ────────────────────────────────────────────────────
+#
+# The vault note publishes exactly one way to reproduce the measurement:
+#
+#     cd ~/lloyd && .venvs/lloyd/bin/python -m scripts.autoresearch.promotion_fp_rate \
+#       --alt-floor "std_324=0.1389" --alt-floor "one_sigma_null=0.0649" \
+#       --alt-floor "crude_drop_positive=0.0" --alt-floor "gate_delta_floor=0.05"
+#
+# Everything above this section tests :func:`promotion_fp_rate.measure` as a
+# library. Nothing in the tree calls ``main()`` (graph_explain reports zero
+# inbound edges), so
+# without the two tests below the published surface — the ``-m`` entry, the
+# argparse defaults resolving from ``REPO_ROOT``, ``--alt-floor NAME=VALUE``
+# parsing and ``--out`` — would be exercised by no test at all: a broken CLI
+# would still ship a green suite and a note telling readers a command that
+# fails.
+
+
+def test_main_writes_the_report_the_note_publishes(world, tmp_path, capsys):
+    """``main()`` end-to-end on the fixture world: args in, JSON at ``--out`` out.
+
+    Exercises every knob the published command uses — ``--ledger`` /
+    ``--rounds-dir`` / ``--data-cutoff``, ``--alt-floor NAME=VALUE`` parsing and
+    ``--out`` — and asserts the written report carries the fixture's
+    denominator (3) and FP count (1), i.e. the same pipeline the live number
+    runs through, with the CLI as the thing under test.
+    """
+    out = tmp_path / "report.json"
+    rc = pfr.main(
+        [
+            "--ledger", str(world["ledger"]),
+            "--rounds-dir", str(world["rounds"]),
+            "--data-cutoff", "R_20260112_000000",
+            "--alt-floor", "way_high=0.5",
+            "--out", str(out),
+        ]
+    )  # fmt: skip
+    assert rc == 0
+    report = json.loads(out.read_text())
+    assert report["denominator"] == 3
+    assert report["fp_count"] == 1
+    assert report["fp_rate_fraction"] == "1/3"
+    # --alt-floor NAME=VALUE actually parsed into the sensitivity table
+    assert report["sensitivities"]["way_high"]["floor"] == 0.5
+    assert report["sensitivities"]["way_high"]["fp_count"] == 0
+    assert report["sensitivities"]["way_high"]["band"] == "keep 0.5"
+    # stdout carries the identical report (the command prints what it writes)
+    assert json.loads(capsys.readouterr().out) == report
+    # The bare published command passes no --ledger/--rounds-dir, so its
+    # defaults — resolved here from REPO_ROOT — are part of the published
+    # contract; a move of the store must fail a test, not the reader.
+    assert pfr.DEFAULT_LEDGER == pfr.REPO_ROOT / "_pipeline" / "research" / "ledger.jsonl"
+    assert pfr.DEFAULT_ROUNDS_DIR == pfr.REPO_ROOT / "_pipeline" / "research" / "rounds"
+
+
+def test_the_module_runs_as_the_published_python_m_command(world, tmp_path):
+    """The note's command verbatim: a fresh interpreter, ``-m``, cwd = repo root.
+
+    The in-process test above proves the function; this one proves the *form* —
+    ``python -m scripts.autoresearch.promotion_fp_rate`` — resolves, imports
+    and runs, which is the seam between the published note and the checkout.
+    """
+    out = tmp_path / "sub_report.json"
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "scripts.autoresearch.promotion_fp_rate",
+            "--ledger", str(world["ledger"]),
+            "--rounds-dir", str(world["rounds"]),
+            "--data-cutoff", "R_20260112_000000",
+            "--out", str(out),
+        ],  # fmt: skip
+        cwd=pfr.REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    report = json.loads(out.read_text())
+    assert report["denominator"] == 3
+    assert report["fp_count"] == 1
+    assert report["data_cutoff_round"] == "R_20260112_000000"
+
+
 # ── the published figures ────────────────────────────────────────────────────
 #
 # Read-only against the production store, frozen by cutoff. If one of these fails,
@@ -486,15 +573,28 @@ NOISE_FLOOR_SOURCE = (
 
 
 def live_measure():
-    return pfr.measure(
+    """The published derivation, over the frozen window.
+
+    ``one_sigma_null`` is *derived*, not typed: the first pass measures the null
+    population's std and the second feeds it back as the 1-sigma sensitivity
+    floor, so the test and the note's reproduce command
+    (``--alt-floor "one_sigma_null=0.0649"``) can never drift from the store.
+    The window is frozen by cutoff, so the double pass is deterministic and
+    costs about a second.
+    """
+    kwargs = dict(
         ledger_path=LIVE_LEDGER,
         rounds_dir=LIVE_ROUNDS,
         data_cutoff="R_20260908_181458",
         window=3,
         alpha=0.05,
+    )
+    one_sigma = pfr.measure(**kwargs)["null_population"]["std"]
+    return pfr.measure(
+        **kwargs,
         alt_floors={
             "std_324": NOISE_STD_FROM_ITEM_324,
-            "one_sigma_null": 0.0653,
+            "one_sigma_null": one_sigma,
             "crude_drop_positive": 0.0,
             "gate_delta_floor": 0.05,
         },
@@ -558,6 +658,12 @@ def test_live_noise_floor_and_false_positive_rate():
     assert crude["fp_rate_fraction"] == "11/65"
     assert crude["band"] == "keep 0.5"
     assert result["sensitivities"]["std_324"]["fp_count"] == 0
+    # The 1-sigma row of the note's sensitivity table: its floor is the measured
+    # null std itself (live_measure derives it), and it calls exactly one round.
+    one_sigma = result["sensitivities"]["one_sigma_null"]
+    assert one_sigma["floor"] == result["null_population"]["std"]
+    assert one_sigma["fp_rate_fraction"] == "1/65"
+    assert one_sigma["band"] == "keep 0.5"
 
 
 def test_live_ledger_has_no_promotion_free_control_round():
@@ -581,7 +687,12 @@ def test_note_fields_are_reproduced_by_a_fresh_derivation():
     """Clauses 1, 3, 5 and 6 — the published note is the measurement, not prose.
 
     Every field of the note's machine-checked block must equal a fresh run over the
-    cutoff the note itself declares; a hand-edited number fails here.
+    cutoff the note itself declares; a hand-edited number fails here. The
+    comparison is whole-block ``==``, not a per-field reading, so *both* failure
+    directions bite: an edited value, and a field added to (or dropped from) the
+    block without a matching expectation — the 21-of-23 shape this test carried
+    until review let ``null_population_mad_std`` and ``report_crosscheck_rounds``
+    be hand-edited without a sound.
 
     Deliberately NOT marked ``live_vault``. That marker is for files an autoresearch
     promotion or a nightly job rewrites, and the gate run deselects it — but this note
@@ -592,30 +703,36 @@ def test_note_fields_are_reproduced_by_a_fresh_derivation():
     """
     result = live_measure()
     block = note_machine_checked_block()
-    assert block["schema"] == "autoresearch-promotion-fp/1"
-    assert block["data_cutoff_round"] == result["data_cutoff_round"]
-    assert block["window_rounds"] == result["window_rounds"]
-    assert block["alpha"] == result["alpha"]
-    assert block["denominator"] == result["denominator"] == 65
-    assert block["noise_floor"] == result["floor"]
-    assert block["noise_floor_source"] == NOISE_FLOOR_SOURCE
-    assert block["null_population_n"] == result["null_population"]["n"]
-    assert block["null_population_std"] == result["null_population"]["std"]
-    assert block["null_population_p95"] == result["floor"]
-    assert block["fp_count"] == result["fp_count"]
-    assert block["fp_rate"] == result["fp_rate"]
-    assert block["fp_rate_fraction"] == result["fp_rate_fraction"]
-    assert block["band"] == result["band"]
-    assert block["report_crosscheck_max_abs_delta"] == result["report_crosscheck"]["max_abs_delta"]
-    assert block["report_crosscheck_mismatches"] == result["report_crosscheck"]["mismatches"]
-    assert block["unlanded_gate_pass_rows"] == result["unlanded_gate_passes"]["rows"]
-    assert block["unlanded_gate_pass_rounds"] == len(result["unlanded_gate_passes"]["rounds"])
-    assert (
-        block["unlanded_gate_pass_rounds_also_promoted"]
-        == result["unlanded_gate_passes"]["also_promoted_rounds"]
-    )
-    assert block["expected_false_alarms_at_alpha"] == result["expected_false_alarms_at_alpha"]
-    assert block["fp_rounds"] == result["fp_rounds"] == []
+    asserted = {
+        "schema": "autoresearch-promotion-fp/1",
+        "data_cutoff_round": result["data_cutoff_round"],
+        "window_rounds": result["window_rounds"],
+        "alpha": result["alpha"],
+        "denominator": result["denominator"],
+        "noise_floor": result["floor"],
+        "noise_floor_source": NOISE_FLOOR_SOURCE,
+        "null_population_n": result["null_population"]["n"],
+        "null_population_std": result["null_population"]["std"],
+        "null_population_mad_std": result["null_population"]["mad_std"],
+        "null_population_p95": result["floor"],
+        "report_crosscheck_rounds": result["report_crosscheck"]["rounds_compared"],
+        "report_crosscheck_max_abs_delta": result["report_crosscheck"]["max_abs_delta"],
+        "report_crosscheck_mismatches": result["report_crosscheck"]["mismatches"],
+        "fp_count": result["fp_count"],
+        "fp_rate": result["fp_rate"],
+        "fp_rate_fraction": result["fp_rate_fraction"],
+        "band": result["band"],
+        "expected_false_alarms_at_alpha": result["expected_false_alarms_at_alpha"],
+        "unlanded_gate_pass_rows": result["unlanded_gate_passes"]["rows"],
+        "unlanded_gate_pass_rounds": len(result["unlanded_gate_passes"]["rounds"]),
+        "unlanded_gate_pass_rounds_also_promoted": result["unlanded_gate_passes"]["also_promoted_rounds"],
+        "fp_rounds": result["fp_rounds"],
+    }  # fmt: skip
+    assert block == asserted
+    # The headline trio, spelled out so a diff failure still names them in the log.
+    assert block["denominator"] == 65
+    assert block["fp_rate_fraction"] == "0/65"
+    assert block["fp_rounds"] == []
 
 
 def test_note_states_the_method_deviation_and_the_band():
