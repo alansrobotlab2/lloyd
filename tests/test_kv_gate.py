@@ -106,7 +106,7 @@ def test_long_lived_is_a_declared_attribute():
 def test_the_real_sources_declare_what_the_plan_names():
     import workers.sources as sources
     assert set(long_lived_sources(sources.SOURCE_REGISTRY)) == {
-        "autocode", "autotriage", "deep-research"}
+        "autocode", "autotriage", "deep-research", "arch-review"}
 
 
 # ── the pool ──────────────────────────────────────────────────────────

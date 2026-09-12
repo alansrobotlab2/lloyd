@@ -876,6 +876,57 @@ workers:
       max_pairs_judged: 200
       # Write `parent:` frontmatter from the prose first line, once.
       persist_parents: true
+    # One architecture review unit per real session: either a whole
+    # architecture/*.md doc, or one functional group of autonomy-jobs.md /
+    # workers-jobs.md (the `groups` list below, kept by hand). Oldest
+    # last-reviewed first. The session checks the unit's claims and paths
+    # against the tree and the health routes, reviews the code it names,
+    # files findings as `arch-review` drafts (tag `spawned-by-review`:
+    # merged at write time, expired at 30 d, NOT quarantined — a review
+    # finding is exactly the kind of claim single triage should judge) and
+    # edits the one doc in place; a group only inside its own section. The
+    # source reverts every other write in this repo and in the vault's
+    # skills/ and autonomy/, throws away a diff that breaks its bounds, and
+    # commits the doc to main itself — the model never runs git.
+    # State: ~/.local/state/lloyd-automod/arch_review.json.
+    arch-review:
+      enabled: true
+      interval_seconds: 1800
+      max_inflight: 1
+      max_duration_seconds: 3600
+      max_turns: 90
+      # On: it edits a production doc and files from its own judgement.
+      inner_voice: true
+      # Below youtube-digest (45) and autocode (40), above backlog-cluster
+      # (65): routine maintenance that must not delay a round or a digest.
+      priority: 62
+      batch: 2
+      review_interval_days: 30      # a unit rests this long after a review
+      retry_spacing_seconds: 21600  # between failed attempts
+      max_attempts: 3               # then the unit is parked for that spacing
+      daily_max: 4                  # a first pass over 33 units in ~8 days
+      max_open_items: 25            # open arch-review items before a tick skips
+      spawn_cap: 5
+      max_delta_lines: 400          # a group section is <= 162 lines; 400 is a doc refresh
+      max_shrink_pct: 30            # waived for a `superseded`/`aspirational` banner
+      # The functional groups of the two jobs docs, one unit each. Each entry
+      # is `<doc slug>:<section name>`; the name is matched against the `## `
+      # heading with a leading `N. ` and anything from `:` or ` — ` stripped,
+      # case-insensitively. A name with no matching heading is skipped and
+      # recorded as `section_missing` — and the doc's own review is shown this
+      # list and told to file a finding when it no longer matches its tables.
+      groups:
+        - autonomy-jobs:Ingest
+        - autonomy-jobs:Distil
+        - autonomy-jobs:Build the graph
+        - autonomy-jobs:Canonicalize
+        - autonomy-jobs:Queue the work
+        - autonomy-jobs:Bound entropy
+        - autonomy-jobs:Measure
+        - workers-jobs:Dispatch
+        - workers-jobs:Self-modification
+        - workers-jobs:Intake
+        - workers-jobs:Mining
     bench-mine:
       enabled: true
       interval_seconds: 7200
