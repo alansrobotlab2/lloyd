@@ -188,6 +188,23 @@ Unresolved questions the video raises.
    Write from the transcript, not from what you already know about the topic. \
 No preamble in the file and no code fence around it.
 
+   **Prose Rules** — the shared ban-list from \
+`~/obsidian/knowledge/KNOWLEDGE_SCHEMA.md`. This note is prose a person reads, and \
+the run is graded on the note, so slop in it is a defect in the deliverable:
+   - No filler opening. Never start the note or a section with `In this video`, \
+`In today's video`, `This video provides a comprehensive overview of`, `It's worth \
+noting`, `Let's dive in`, `In conclusion`, or `Overall,`.
+   - Banned words: `delve`, `the evolving landscape`, `a testament to`, `seamless`, \
+`leverage` as a verb, `cutting-edge`, `game-changer`, `revolutionize`.
+   - No hedge stacks: `may potentially`, `could possibly`, `might perhaps`. One hedge, \
+where the speaker himself hedges, is honest and stays.
+   - Bad → good. Bad: "In this video, the speaker dives into the evolving landscape of \
+KV-cache offloading, and it's worth noting the potential benefits." Good: "KV-cache \
+offload to CPU RAM cuts prefill cost 3.1x at 32k context — measured on one RTX 4090, so \
+unreplicated."
+   - Lead with the finding, not with the act of reporting it; keep the speaker's \
+numbers with their units; write `None` in an empty section instead of padding it.
+
 3. **Evaluate it for Lloyd.** Read {profile_path} — it describes Lloyd's \
 stack, what already exists, and the standing problems. Decide whether this \
 video contains a specific technique, tool, framework, model or finding that \
