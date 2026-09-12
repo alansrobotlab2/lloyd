@@ -546,5 +546,5 @@ def test_the_vault_tool_surface_is_unchanged_by_the_deletion():
 
     tools = asyncio.run(mcp_main.list_tools())
     got = sorted(t.name for t in tools if t.name.startswith("vault"))
+    assert len(VAULT_TOOL_NAMES) == 5, "the pinned list itself is no longer five"
     assert got == VAULT_TOOL_NAMES, f"vault tool surface changed: {got}"
-    assert len(got) == len(VAULT_TOOL_NAMES) == 5
