@@ -48,7 +48,15 @@ OUT_DIR = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
 # Origins that arrive from somewhere other than a gated apply: the 2026-09-03
 # SQLite migration, the schema-declared naming layer, test fixtures. `revert` is
 # the revert tool writing an old mapping back, which is the opposite of applied.
-INHERITED_ORIGINS = {"migration", "schema", "test", "revert"}
+#
+# `legacy` is the origin `agent_mcp/_shared.py` writes, and it belongs here for the
+# same reason `schema` does: that call site passes no `report_path`, so a
+# `legacy` row names no run and no gate. Left out of this set it would have
+# counted as APPLIED — "a human authorized this" — purely because the string was
+# not in a list, with nothing but a `provenance_missing` note to say otherwise.
+# The rule this encodes: an origin is evidence of an apply only if the code that
+# writes it also writes a report. Today that is `sweep` and nothing else.
+INHERITED_ORIGINS = {"migration", "schema", "test", "revert", "legacy"}
 DECLINED_STATUSES = {"AMBIGUOUS", "SKIPPED"}
 
 

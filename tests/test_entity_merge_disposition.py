@@ -21,6 +21,7 @@ from app.kg_store import KGStore  # noqa: E402
 import entity_merge_disposition as emd  # noqa: E402
 
 AUDIT = ROOT / "scripts" / "memory" / "entity_merge_disposition.py"
+SWEEP = ROOT / "scripts" / "memory" / "entity-resolution-sweep.py"
 
 
 def _graph(tmp_path, pairs, aliases=(), plan_clusters=(), report_plan_file=True):
@@ -102,6 +103,73 @@ def test_a_revert_row_is_not_an_apply_either(tmp_path):
     dest = out / "disposition.json"
     assert _audit(db, out, dest).returncode == 1
     assert json.loads(dest.read_text())["counts"]["applied"] == 0
+
+
+def test_a_legacy_origin_row_is_not_an_apply_either(tmp_path):
+    """`agent_mcp/_shared.py:640` writes aliases with origin="legacy" and no
+    `report_path`, so a row it wrote names neither a run nor a gate. While
+    INHERITED_ORIGINS omitted "legacy", such a row fell to the applied branch on
+    the strength of a string being absent from a set — the audit would have
+    reported #475's clause 5 green off an MCP-side write nobody authorized, with
+    only a `provenance_missing` note against it. The rule: an origin counts as an
+    apply only if the code that writes it also writes a report."""
+    out, db, _ = _graph(tmp_path, [("vllm", "vLLM")], aliases=[("vllm", "vLLM", "legacy")])
+    dest = out / "disposition.json"
+    assert _audit(db, out, dest).returncode == 1
+    d = json.loads(dest.read_text())
+    assert d["counts"] == {"applied": 0, "declined": 0, "unaccounted": 1}, d["counts"]
+    assert d["entries"][0]["detail"]["inherited_alias"]["origin"] == "legacy"
+
+
+def test_an_apply_report_written_by_the_sweep_is_the_evidence_the_audit_reads(tmp_path):
+    """The seam between the two programs, with no fixture in the middle.
+
+    The sweep commits alias rows naming a report it is about to write, and the
+    audit, in a separate process, resolves that path. Either side can change the
+    name, the directory, or the tmp-file convention and the other will not see it:
+    the audit's whole applied verdict is `Path(report).is_file()`. So run the real
+    `--apply`, then the real audit over the same out-dir, and require the audit to
+    accept the report the sweep left. Everything upstream of this test is a fixture
+    someone wrote by hand; this is the only one where one program consumes the
+    other's artifact.
+    """
+    facts = tmp_path / "facts"
+    for name in ("vLLM", "vllm", "Intel", "Intel Pipeline"):
+        d = facts / name; d.mkdir(parents=True)
+        fm = {"type": "facts", "entity": name, "category": "state",
+              "facts": [{"entity": name, "fact": f"{name} exists.", "confidence": 0.9,
+                         "category": "state"}]}
+        (d / f"{name}-state.md").write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {name} - state\n")
+    out = tmp_path / "mg"; out.mkdir()
+    db = tmp_path / "kg.sqlite"
+    out.joinpath("entity-merges-reverted-20260903T174108Z.json").write_text(json.dumps(
+        {"tiers": ["CASE"], "plan": [{"variant": "vllm", "canonical": "vLLM"}]}))
+    st = KGStore(db)
+    for n in ("vLLM", "vllm", "Intel", "Intel Pipeline"):
+        st.entities.register(n)
+    st.edges.add({"source": "vLLM", "target": "Ray", "type": "mentions"}, origin="test")
+    st.edges.add({"source": "vllm", "target": "Ray", "type": "mentions"}, origin="test")
+    st.close()
+
+    applied = subprocess.run(
+        [sys.executable, str(SWEEP), "--facts-dir", str(facts), "--db", str(db),
+         "--out-dir", str(out), "--no-gate", "--apply"],
+        capture_output=True, text=True, timeout=180)
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+
+    dest = out / "disposition.json"
+    audit = _audit(db, out, dest)
+    assert audit.returncode == 0, audit.stdout + audit.stderr   # the pair is accounted for
+    d = json.loads(dest.read_text())
+    assert d["counts"] == {"applied": 1, "declined": 0, "unaccounted": 0}, d["counts"]
+    detail = d["entries"][0]["detail"]
+    assert "provenance_missing" not in detail and "report_missing" not in detail, detail
+    assert Path(detail["report_path"]).is_file()                # resolves across processes
+    report = json.loads(Path(detail["report_path"]).read_text())
+    assert report["report_status"] == "complete"
+    assert report["applied_clusters"] >= 1
+    # the tmp name the sweep writes through must never read as a second report
+    assert len(list(out.glob("entity-merges-applied-*.json"))) == 1
 
 
 def test_the_audit_is_green_only_when_every_pair_is_dispositioned(tmp_path):

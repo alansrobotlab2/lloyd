@@ -4,6 +4,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -330,20 +331,47 @@ def test_apply_report_records_the_switches_and_what_it_applied(tmp_path):
 
 
 def test_the_backfilled_aliases_exclude_the_permanent_noise_shapes(tmp_path):
-    """The alias set a backfill writes has to be entity-shaped: a surface the
-    extractor is forbidden to treat as an entity (a filename, a bare code
-    identifier) regrows the variants a merge just removed, which is the 08-26 shape
-    rule (`e235e5a`) and the reason the 09-03 merge undid itself. Run through the
-    real apply, because it is the apply that writes these rows."""
+    """`--rebuild-aliases` removes the exhaust the 09-03 migration carried in, and
+    leaves every routing row that actually works. Both halves are asserted because
+    the first version of the prune failed only the second one: filtering alias
+    surfaces by `looks_like_junk_entity` measured 263 deletions on the live store,
+    including `.openclaw → OpenClaw` and `Autonomy task #24 → Autonomy Task #24` —
+    real rows, whose removal would have lowered the very coverage ratio #475 exists
+    to raise. The boundary that survived is `_is_exhaust_surface`: a code filename
+    or a call fragment, and nothing that merely looks unusual.
+
+    Seeded, not merely observed. The first version of this test inspected only the
+    rows the apply had just written, and could not fail: `_tree` holds
+    `vLLM/vllm/Intel/Intel Pipeline` (none exhaust-shaped) and `build_plan` filters
+    junk out upstream at :332, so the apply set was clean by construction. The rows
+    that matter are the ones already in the store when a run starts — 3,919 of them
+    came from the JSON table, and `--rebuild-aliases` is the only path that touches
+    them.
+    """
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
-    assert _run(root, db, out, "--apply", "--rebuild-aliases").returncode == 0
+    exhaust = ("server.py", "kg_store.py", "query()")     # this pipeline's own debris
+    working = (".openclaw",                               # dotted, but a real name
+               "Neo et al. (Interpreting Vision Grounding in VLMs)")
     st = KGStore(db)
     try:
-        applied = [r["surface"] for r in st.aliases.rows() if r["origin"] == "sweep"]
+        for s in exhaust + working:          # inherited migration rows
+            st.aliases.set(s, "vLLM", kind="semantic", origin="migration")
+        assert all(st.aliases.resolve(s) == "vLLM" for s in exhaust + working), "seed did not land"
     finally:
         st.close()
-    assert applied, "the apply wrote no alias rows to check"
-    assert not [s for s in applied if ers.looks_like_junk_entity(s)], applied
+
+    assert _run(root, db, out, "--apply", "--rebuild-aliases").returncode == 0
+
+    st = KGStore(db)
+    try:
+        rows = list(st.aliases.rows())
+    finally:
+        st.close()
+    surfaces = {r["surface"] for r in rows}
+    assert [r["surface"] for r in rows if r["origin"] == "sweep"], "the apply wrote no rows to check"
+    assert not (surfaces & set(exhaust)), f"--rebuild-aliases kept {sorted(surfaces & set(exhaust))}"
+    assert set(working) <= surfaces, f"the prune ate working routing rows: {set(working) - surfaces}"
+    assert not [s for s in surfaces if ers._is_exhaust_surface(s)], sorted(surfaces)
 
 
 def test_a_clean_apply_does_not_report_itself_as_bypassed(tmp_path):
@@ -355,16 +383,109 @@ def test_a_clean_apply_does_not_report_itself_as_bypassed(tmp_path):
     assert safety["degraded_graph"] == "not degraded"
 
 
+def test_a_kill_between_the_transaction_and_the_report_leaves_no_dangling_pointer(tmp_path, monkeypatch):
+    """A run can die anywhere. If it dies after the store transaction but before
+    the report is written, every alias row it committed names a report that was
+    never created — and the disposition audit's only word for that is
+    `report_missing`, on a merge that genuinely happened. `claim_report` puts the
+    file down first; this simulates the kill at that exact seam.
+
+    In-process on purpose: the point is the ORDER inside main(), which a
+    subprocess run cannot interrupt mid-way. `report_path` is still what the rows
+    carry, so the assertion reads the store, not the log.
+    """
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    real_dump = json.dump
+
+    def dying_dump(obj, fh, *a, **kw):        # dies writing the FINAL report, nothing earlier
+        if "entity-merges-applied" in getattr(fh, "name", ""):
+            raise OSError("simulated kill after the store transaction")
+        return real_dump(obj, fh, *a, **kw)
+
+    monkeypatch.setattr(sys, "argv", [str(SWEEP), "--facts-dir", str(root), "--db", str(db),
+                                     "--out-dir", str(out), "--no-gate", "--apply"])
+    monkeypatch.setattr(json, "dump", dying_dump)
+    with pytest.raises(OSError):
+        ers.main()
+    monkeypatch.setattr(json, "dump", real_dump)
+
+    st = KGStore(db)
+    try:
+        rows = [r for r in st.aliases.rows() if r["origin"] == "sweep"]
+    finally:
+        st.close()
+    assert rows, "the apply wrote no rows, so the seam was never exercised"
+    for r in rows:
+        assert r["report_path"], f"{r['surface']!r} committed with no provenance at all"
+        p = Path(r["report_path"])
+        assert p.is_file(), f"alias provenance points at nothing: {p}"
+        claimed = json.loads(p.read_text())
+        assert claimed["report_status"] == "started", "a killed run must not claim completion"
+        assert claimed["applied_clusters"] is None, "a killed run must not claim a count"
+
+
+def test_the_gate_cache_path_is_plumbed_to_the_gate(tmp_path, monkeypatch):
+    """The gate reads a cache under `_pipeline/memory-graph` by default. A test, or
+    a dry-run on someone's laptop, that consults it is reading verdicts the real
+    pipeline earned — and a verdict cache written by a run nobody authorized is
+    worse: it feeds future applies. `--gate-cache` exists so a run can be hermetic;
+    this pins the flag actually reaching the constructor."""
+    seen = {}
+
+    class GateSpy:
+        def __init__(self, root, cache_path=None):
+            seen["root"], seen["cache_path"] = root, cache_path
+
+        def verdict(self, a, b):
+            return {"decision": "REVIEW", "judges": {}}
+
+    fake = types.ModuleType("entity_semantic_gate")
+    fake.SemanticGate = GateSpy
+    monkeypatch.setitem(sys.modules, "entity_semantic_gate", fake)
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    cache = tmp_path / "hermetic-verdicts.jsonl"
+    monkeypatch.setattr(sys, "argv", [str(SWEEP), "--facts-dir", str(root), "--db", str(db),
+                                     "--out-dir", str(out), "--apply",
+                                     "--gate-cache", str(cache)])
+    assert ers.main() == 0
+    assert seen["cache_path"] == cache, "the flag did not reach the gate"
+
+
+def test_the_default_gate_cache_is_left_alone_when_a_run_names_its_own(tmp_path, monkeypatch):
+    """The other direction: unset must stay the pipeline's own cache, or the flag
+    silently breaks the nightly run it was added to protect."""
+    seen = {}
+
+    class GateSpy:
+        def __init__(self, root, cache_path=None):
+            seen["cache_path"] = cache_path
+
+        def verdict(self, a, b):
+            return {"decision": "REVIEW", "judges": {}}
+
+    fake = types.ModuleType("entity_semantic_gate")
+    fake.SemanticGate = GateSpy
+    monkeypatch.setitem(sys.modules, "entity_semantic_gate", fake)
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    monkeypatch.setattr(sys, "argv", [str(SWEEP), "--facts-dir", str(root), "--db", str(db),
+                                     "--out-dir", str(out), "--apply"])
+    assert ers.main() == 0
+    assert seen["cache_path"] is None        # the gate's own default, untouched
+
+
 def test_an_apply_with_the_gate_on_reports_itself_as_not_bypassed(tmp_path):
     """`_run` hardcodes --no-gate, so every other end-to-end test here can only
     ever produce `no_gate: true`. The state the 09-03 apply needed to be caught in
     — a real run, gate up, saying so — has to be produced by the CLI too, or the
     report's most important field is only ever exercised in its bypassed form.
     --tiers excludes the suffix tier, so the gate is constructed and consulted
-    nowhere: no judge is asked, no HTTP."""
+    nowhere: no judge is asked, no HTTP. `--gate-cache` keeps even the read off the
+    production verdict cache — a run that reads verdicts the live pipeline earned
+    is not measuring the gate, it is replaying it."""
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
     r = subprocess.run([sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
-                        "--out-dir", str(out), "--apply", "--tiers", "PUNCT,CASE"],
+                        "--out-dir", str(out), "--apply", "--tiers", "PUNCT,CASE",
+                        "--gate-cache", str(tmp_path / "hermetic-verdicts.jsonl")],
                        capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, r.stdout + r.stderr
     safety = _applied_report(out)["safety"]

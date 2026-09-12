@@ -38,6 +38,7 @@ import argparse
 import collections
 import datetime as dt
 import json
+import os
 import re
 import shutil
 import sys
@@ -53,6 +54,11 @@ import yaml
 
 from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT, VAULT_KG_DB
 from app.entity_naming import looks_like_junk_entity
+# The two sub-rules behind `looks_like_junk_entity` that mean "this string is a
+# code artifact", imported bare rather than via the composite predicate: an alias
+# SURFACE may be dotted, parenthesised or task-shaped and still be a real routing
+# row. See `_is_exhaust_surface`.
+from app.entity_naming import _CODE_FILE_RE, _CODE_CALL_RE, _CODE_CALL_CONTENT_RE
 from app.fact_ids import dedupe_ids
 from app.kg_store import KGStore
 from app.atomic_io import atomic_write_text
@@ -953,10 +959,20 @@ def apply_merges(
 def _prune_noise_aliases(st, existing_dirs: set[str] | None) -> int:
     """Drop inherited alias rows that are pipeline noise (--rebuild-aliases).
 
-    Noise is an entry whose surface and canonical collapse to the same
-    `normalize_full` by suffix stripping alone. Case-only and punct-only
-    variants are legitimate and stay. Entries whose canonical has no fact
-    directory are dropped too, unless the canonical is still an edge endpoint.
+    Three kinds of noise, and only the second one is new here:
+      * an entry whose surface and canonical collapse to the same
+        `normalize_full` by suffix stripping alone. Case-only and punct-only
+        variants are legitimate and stay.
+      * a surface `looks_like_junk_entity` refuses — a filename, a code-call
+        fragment, a bookkeeping file. `build_plan` already refuses to put such a
+        a code filename or a call fragment. `build_plan` already refuses to put
+        such a name inside a cluster (:332), and the 2026-09-03 migration carried
+        rows in from a JSON table that predates that filter — a row the plan never
+        looks at is a row nothing else ever prunes. See `_is_exhaust_surface` for
+        why this is narrower than `looks_like_junk_entity`, and why being broader
+        here would have cost coverage instead of gaining it.
+      * an entry whose canonical has no fact directory and is not an edge
+        endpoint.
     """
     if existing_dirs is None:
         existing_dirs = set()
@@ -964,10 +980,35 @@ def _prune_noise_aliases(st, existing_dirs: set[str] | None) -> int:
     removed = 0
     for row in st.aliases.rows():
         k, v = row["surface"], row["canonical"]
-        if _is_alias_noise(k, v) or (live and v not in live):
+        if _is_exhaust_surface(k) or _is_alias_noise(k, v) or (live and v not in live):
             st.aliases.remove(k)
             removed += 1
     return removed
+
+
+def _is_exhaust_surface(surface: str) -> bool:
+    """True only for a surface that is unambiguously this pipeline's own exhaust: a
+    code filename (`server.py`, `kg_store.py`) or a call fragment (`query()`,
+    `models.load_lora_adapter()`).
+
+    Deliberately NOT `looks_like_junk_entity`, which this module already imports
+    for the cluster path. That predicate answers "may this become an ENTITY?" and
+    is tuned high-precision for creation; an alias surface is a different object —
+    a spelling that routes to a canonical. Measured against the live store on
+    2026-09-12, filtering surfaces by the whole predicate would have deleted 263 of
+    3,919 rows in a run whose stated purpose is to raise coverage, and the sample
+    shows they are not exhaust: `.openclaw → OpenClaw`, `.openclaw config →
+    OpenClaw Config`, `Autonomy task #24 → Autonomy Task #24`, `Neo et al.
+    (Interpreting Vision Grounding in VLMs) → …`. Those are working routing rows,
+    so removing them LOWERS alias coverage — the one way clause 2 could be failed by
+    the fix itself. These two shapes remove 0 of today's 3,919 rows and still catch
+    the exhaust the migration can carry.
+    """
+    s = (surface or "").strip()
+    if _CODE_FILE_RE.match(s):
+        return True
+    m = _CODE_CALL_RE.search(s)
+    return bool(m) and (not m.group(1) or bool(_CODE_CALL_CONTENT_RE.search(m.group(1))))
 
 
 def _is_alias_noise(k: str, v: str) -> bool:
@@ -979,6 +1020,32 @@ def _is_alias_noise(k: str, v: str) -> bool:
     if len(tk) != len(tv):
         return True
     return not all(a.lower() == b.lower() for a, b in zip(tk, tv))
+
+
+def claim_report(path: Path, plan_out: Path, date: str, ts: str) -> None:
+    """Put the apply report's NAME on disk before the store transaction runs.
+
+    Every alias row the apply writes carries this path as its provenance. Until
+    now the path was only *computed* before the apply and the file written after
+    it — so a run killed between the commit and the write left alias rows pointing
+    at a report that never existed, and the disposition audit could say nothing
+    about a merge that genuinely happened except `report_missing`. Claiming the
+    name first means a row's pointer always resolves.
+
+    The stub deliberately claims no decision: `applied_clusters` is None, not 0.
+    Zero would read as "the plan was evaluated and nothing was safe to merge",
+    which is a verdict, and a run that did not finish does not have one.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "report_status": "started",
+        "date": date,
+        "timestamp": ts,
+        "plan_file": str(plan_out),
+        "applied_clusters": None,
+        "applied_merges": None,
+        "ledger": invocation_ledger(),
+    }, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 # ── Output formatters ────────────────────────────────────────────────────────
@@ -1091,6 +1158,13 @@ def safety_record(no_gate: bool, allow_degraded: bool, gate, plan: dict,
     if degraded and allow_degraded:
         degraded_note = "bypassed: --allow-degraded"
     elif degraded:
+        # Defensive, and unreachable from `main` today: main returns 3 before it
+        # applies when the graph is degraded and --allow-degraded is absent, so no
+        # shipped caller reaches this with a degradation it went on to ignore. It
+        # stays because the alternative is falling through to "not degraded", which
+        # would have the report deny a degradation the caller could see. Anyone
+        # looking for the caller: there is none, by design — this is the branch
+        # that keeps a future caller from lying.
         degraded_note = "degraded (would have refused)"
     else:
         degraded_note = "not degraded"
@@ -1112,6 +1186,11 @@ def main() -> int:
         action="store_true",
         help="Also drop inherited alias rows that are pipeline noise. Requires --apply.",
     )
+    ap.add_argument("--gate-cache", default=None,
+                    help="semantic-gate verdict cache to read/write. Default: the pipeline's "
+                         "own cache. Pass a private path (a tmp dir) for a hermetic run — "
+                         "without this, a test that runs the CLI with the gate on silently "
+                         "reads production verdicts it never earned.")
     ap.add_argument("--db", default=str(VAULT_KG_DB), help="knowledge-graph store")
     ap.add_argument("--facts-dir", default=str(FACTS_ROOT))
     ap.add_argument("--out-dir", default=str(OUT_DIR))
@@ -1133,7 +1212,10 @@ def main() -> int:
     if not args.no_gate:
         try:
             from entity_semantic_gate import SemanticGate
-            gate = SemanticGate(facts_root)
+            # Unset means the gate's own default (the pipeline cache); set means
+            # this run reads and writes only that file.
+            gate = (SemanticGate(facts_root) if not args.gate_cache
+                    else SemanticGate(facts_root, cache_path=Path(args.gate_cache)))
         except Exception as e:  # no judge reachable → suffix clusters go to review
             print(f"  [gate] unavailable ({type(e).__name__}: {e}); SUFFIX_SAFE → review")
     plan = build_plan(active_edges, existing_dirs, gate=gate, allowed_tiers=allowed_tiers)
@@ -1186,10 +1268,12 @@ def main() -> int:
 
     # Apply
     ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
-    # Named before the apply, not after: the alias rows this run writes carry
-    # this path as their provenance, so the file they point at has to exist as
-    # a name before they can point at it (#475).
+    # Claimed before the apply, not just named: the alias rows this run writes
+    # carry this path as their provenance, so the FILE has to exist before they
+    # can point at it, or a kill mid-run leaves provenance that resolves to
+    # nothing (#475, `claim_report`).
     apply_out = out_dir / f"entity-merges-applied-{args.date}-{ts}.json"
+    claim_report(apply_out, plan_out, args.date, ts)
     print()
     print(f"== Applying merges (timestamp: {ts}) ==")
 
@@ -1223,6 +1307,10 @@ def main() -> int:
     # Save an apply report
     apply_out.parent.mkdir(parents=True, exist_ok=True)
     report_to_save = {k: v for k, v in report.items() if k != "aliases"}
+    # Replaces the `started` stub `claim_report` wrote before the transaction:
+    # a reader who finds `started` on disk knows the run was killed, and knows no
+    # counts were ever claimed by it.
+    report_to_save["report_status"] = "complete"
     report_to_save["plan_file"] = str(plan_out)
     report_to_save["tiers_allowed"] = sorted(allowed_tiers)
     report_to_save["gate_stats"] = plan.get("gate_stats")
@@ -1236,8 +1324,21 @@ def main() -> int:
     report_to_save["store_backup"] = str(store_bak)
     report_to_save["store_before"], report_to_save["store_after"] = before, after
     report_to_save["ledger"] = invocation_ledger()   # who ran this — see _invocation.py
-    with apply_out.open("w") as f:
+    # Atomic replace, not `open("w")`: opening the claimed path in write mode
+    # truncates the `started` stub first, so a run that dies part-way through the
+    # dump leaves alias rows pointing at a half-written file that no longer parses.
+    # That is the same defect `claim_report` was written to close, one window later.
+    # Via tmp + os.replace the pointer resolves to the stub or to the complete
+    # report, and never to something in between.
+    # Dot-prefixed so neither this tool's nor the disposition audit's
+    # `entity-merges-applied-*.json` glob can ever mistake a leftover tmp — the
+    # shape a mid-write death leaves behind — for an apply report.
+    tmp_report = apply_out.with_name(f".{apply_out.name}.tmp")
+    with tmp_report.open("w") as f:
         json.dump(report_to_save, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_report, apply_out)
     print(f"  Report: {apply_out}")
 
     st.close()
