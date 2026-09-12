@@ -305,6 +305,33 @@ def snapshot() -> dict[str, Any]:
 # first; see `backlog/411-*` ("Needs a person").
 
 
+STEERING_POLICY = "orchestrator-session"
+
+
+def policy_allows(record: SubagentRecord, caller: CallerScope) -> bool:
+    """THE authority rule for steering and cancelling a running child.
+
+    Named, in one place, and named in every refusal, because the choice of
+    policy is NOT this module's to make: `backlog/411-*` reserves it to a
+    person ("who may append to a running subagent — orchestrator parent only,
+    Inner Voice observer, Mission Control UI"). What is implemented is the
+    narrowest of those three and fail-closed:
+
+      * `orchestrator-session` — the child's caller must be acting for the
+        session that spawned it. Session, not turn: a turn blocked inside a
+        wedged `Task` cannot also be the turn killing it, and the parent
+        session's *next* turn is the common cleanup case.
+      * An unbound caller (empty session id — a worker, a stray script, a
+        dispatch that arrived without `lloyd/session_id`) is never authorised,
+        because there is nothing to compare against.
+
+    Widening it is a one-function edit plus a test, and whatever it becomes,
+    clause 2 of #411 stays true only for whichever policy is actually chosen.
+    A person must ratify or replace this one.
+    """
+    return bool(caller.session_id) and caller.session_id == record.parent_session_id
+
+
 def active_run(task_id: str) -> SubagentRecord | None:
     """The live row for a task_id, or None. One active run per task_id: a
     second resume of the same id is refused by `claim_history`."""
@@ -315,18 +342,20 @@ def active_run(task_id: str) -> SubagentRecord | None:
 
 
 def _require_authority(record: SubagentRecord, caller: CallerScope, verb: str) -> None:
-    """Refuse, and say so in the log, unless `caller` IS the orchestrator.
+    """Refuse, and say so in the log, unless `caller` is authorised.
 
     The refusal is a raise *and* a log line because both audiences matter:
     the caller needs the reason, and whoever is watching a subagent that got
-    steered without anyone admitting it needs the record.
+    steered without anyone admitting it needs the record. The log names the
+    policy that said no — a refusal that does not say which rule fired cannot
+    be audited against a policy a person later changes.
     """
-    if not caller.session_id or caller.session_id != record.parent_session_id:
+    if not policy_allows(record, caller):
         detail = (
             f"steering refused: {verb} on subagent {record.task_id} "
             f"(run {record.run_id}) by caller session "
-            f"{caller.session_id or '<unbound>'!r}, which is not the "
-            f"orchestrating session "
+            f"{caller.session_id or '<unbound>'!r} is not authorised under "
+            f"policy {STEERING_POLICY!r}; the orchestrating session is "
             f"{record.parent_session_id or '<unbound>'!r}"
         )
         logger.warning(detail)

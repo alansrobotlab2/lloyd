@@ -1,35 +1,31 @@
 """Steering and killing a RUNNING `Task` child (#411).
 
-A subagent used to be write-only once started: nothing could push new
-information into it and nothing could stop it. The harness seam already
-exists — `RunOptions.chat_messages_handle` is read by the loop *by reference*
-(the loop uses the caller's list instead of copying it), and
-`RunOptions.cancel_event` is checked between iterations, between SSE chunks
-and before every tool dispatch. What `Task` never did was hand either one to
-anyone: the list is a local in `_task` whose only escaping reference is
-`store_history()` inside `_close` — i.e. AFTER the run — and
-`options.cancel_event` was never set at all.
+A subagent used to be write-once: nothing could push new information into it
+and nothing could stop it. The harness seam already exists —
+`RunOptions.chat_messages_handle` is read by the loop *by reference*, and
+`RunOptions.cancel_event` is checked by the loop at `loop.py:226` (iteration
+boundary), `:405` (before tool dispatch) and `:1591-1650` (racing an
+in-flight MCP call). What `Task` never did was hand either one to anyone: the
+list is a local in `_task` whose only escaping reference is `store_history()`
+inside `_close` — after the run — and `options.cancel_event` was never set.
 
-So these tests pin the four things that make the seam usable rather than
-merely present:
+Everything here that claims something about a *running* child runs the real
+`app.harness.loop.run_query`:
 
-1. the running row publishes the live list, and an append through the
-   registry reaches the child's NEXT vLLM request body — asserted on the
-   message list the model is actually sent, the way
-   `app/harness/tests/test_loop_inject_ordering.py` asserts an Inner Voice
-   inject (real `run_query`, scripted stream, nothing under test mocked);
-2. an append from a caller outside the authorised set adds nothing and is
-   logged;
-3. `options.cancel_event` is set on the child, and setting it mid-run stops
-   the child with `stop_reason == "cancelled"` while `_close` still closes
-   the row and stores the history;
-4. a cancelled child stays resumable, and the injected message survives into
-   the resumed conversation.
+  * the child's tool surface is faked (`_build_pool`), so a stop request is
+    issued from outside the child's own code, mid tool dispatch, which is
+    where killing a wedged subagent matters;
+  * the vLLM engine is faked (`stream_chat`) and captures every request body,
+    so "the child saw it" is asserted on the messages the model is actually
+    sent — the way `app/harness/tests/test_loop_inject_ordering.py` asserts an
+    Inner Voice inject;
+  * nothing asserts a `stop_reason` a fake invented. The loop's own checks
+    produce it, or the test fails.
 
-The framing of an injected message is fixed in code (`STEER_ROLE`,
-`STEER_PREFIX`) and asserted here, because a resumed history is rebuilt from
-this same list: an append that read as an assistant turn would be the child
-agreeing with itself.
+The five clauses: the published handle reaching the next request body; the
+refusal path; `options.cancel_event` stopping a real run while `_close` still
+closes and stores; resume-after-cancel; and the framing that keeps an
+injection from reading as the child's own turn.
 """
 
 from __future__ import annotations
@@ -41,16 +37,24 @@ import logging
 
 import pytest
 
+import app.harness.loop as loop_mod
 from agent_mcp import _subagent_registry as SR
 from agent_mcp import _task_registry
 from agent_mcp import builtin_task as T
-from agent_mcp._subagent_registry import CallerScope, SteeringRefused
+from agent_mcp._subagent_registry import (
+    STEERING_POLICY,
+    CallerScope,
+    SteeringRefused,
+)
 
 PARENT = "sess-parent-1"
 OTHER = "sess-someone-else"
 
 INJECT_TEXT = "the file is at /x, not /y"
 INJECT_BODY = "[ORCHESTRATOR] the file is at /x, not /y"
+
+_PROFILE = {"system_prompt": "sys", "max_turns": 20, "disallowed_tools": [],
+            "model": "primary", "base_url": ""}
 
 
 @pytest.fixture(autouse=True)
@@ -60,13 +64,22 @@ def _clean():
     SR.reset()
 
 
+@pytest.fixture(autouse=True)
+def _reset_cache():
+    from app.harness import tool_search_cache
+    asyncio.run(tool_search_cache.clear())
+    yield
+    asyncio.run(tool_search_cache.clear())
+
+
 @contextlib.contextmanager
 def bound_session(session_id: str = PARENT, turn_id: str = "turn-1"):
     """Act as the turn that spawned the child.
 
     These two contextvars are what `main.call_tool` binds from the request
-    `_meta`; setting them is what a real dispatch does, and
-    `current_caller_scope()` reads them back.
+    `_meta`; setting them is what a real dispatch does. (The two-dispatch test
+    at the bottom goes through `main.call_tool` itself, so nothing is
+    simulated there.)
     """
     stok = _task_registry.current_session_id.set(session_id)
     ttok = _task_registry.current_turn_id.set(turn_id)
@@ -105,6 +118,11 @@ def _contents(messages: list[dict]) -> list[str]:
     return [str(m.get("content") or "") for m in messages]
 
 
+def _injected(messages: list[dict]) -> list[dict]:
+    return [m for m in messages
+            if str(m.get("content", "")).startswith("[ORCHESTRATOR]")]
+
+
 # ── 1. the running row publishes the live handles ───────────────────────────
 
 def test_a_running_row_publishes_the_live_handle_and_the_cancel_event():
@@ -120,8 +138,8 @@ def test_a_running_row_publishes_the_live_handle_and_the_cancel_event():
 def test_the_dashboard_row_says_a_run_is_steerable_without_serialising_it():
     """`snapshot()` is a JSON surface (`main.py` → Mission Control).
 
-    An `asyncio.Event` is not serialisable and the conversation is unbounded,
-    so the row carries the capability, never the handle.
+    An `asyncio.Event` is not serialisable and a conversation is unbounded, so
+    the row carries the capability, never the handle.
     """
     _row()
     row = SR.list_active()[0]
@@ -168,7 +186,9 @@ def test_an_append_from_another_session_adds_nothing_and_is_logged(caplog):
     assert rec.injected == 0
     assert "refused" in caplog.text
     assert OTHER in caplog.text and PARENT in caplog.text
-    assert "refused" in str(exc.value)
+    # The refusal names the rule that fired, so it stays auditable against a
+    # policy a person later changes.
+    assert STEERING_POLICY in caplog.text and STEERING_POLICY in str(exc.value)
 
 
 def test_an_unbound_caller_cannot_steer_fail_closed(caplog):
@@ -194,9 +214,9 @@ def test_a_task_with_no_live_run_cannot_be_steered():
 
 def test_an_empty_injection_is_refused_rather_than_appended():
     chat = [{"role": "user", "content": "go"}]
-    rec = _row(chat_messages=chat)
+    _row(chat_messages=chat)
     with pytest.raises(SteeringRefused):
-        SR.steer(rec.task_id, "   ", caller=_caller())
+        SR.steer(SR.list_active()[0]["task_id"], "   ", caller=_caller())
     assert len(chat) == 1
 
 
@@ -229,24 +249,33 @@ def test_a_finished_run_is_not_steerable_or_cancellable():
         SR.cancel_run(rec.task_id, caller=_caller())
 
 
-# ── the real loop: request bodies and cancellation ─────────────────────────
-# Everything below drives the real `app.harness.loop.run_query` with a
-# scripted vLLM stream, so "the child saw it" is asserted on the message list
-# the model is actually sent, not on a mock of the loop.
+# ── the real loop ──────────────────────────────────────────────────────────
 
 class _FakePool:
-    def __init__(self) -> None:
+    """The child's tool surface.
+
+    `during_call` runs *inside* a tool dispatch — the one moment outside the
+    child's own code where a stop request is worth anything, because it is
+    what a wedged subagent looks like from the outside. The loop checks
+    `options.cancel_event` at the top of the next iteration, so a stop issued
+    here is enforced by the loop, not by this pool.
+    """
+
+    def __init__(self, during_call=None) -> None:
         self._discovered = [("lloyd-mcp", [{
             "name": "Read",
             "description": "read a file",
             "inputSchema": {"type": "object", "properties": {}},
         }])]
+        self._during = during_call
 
     @property
     def discovered(self):
         return self._discovered
 
     async def call_tool(self, name: str, args: dict, *, session_id: str = "", **_kw):
+        if self._during is not None:
+            await self._during(session_id)
         return {"content": f"FAKE_RESULT[{name}]", "is_error": False}
 
 
@@ -286,223 +315,163 @@ class _StreamScript:
         yield {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
 
 
-@pytest.fixture(autouse=True)
-def _reset_cache():
-    from app.harness import tool_search_cache
-    asyncio.run(tool_search_cache.clear())
-    yield
-    asyncio.run(tool_search_cache.clear())
+class _Harness:
+    def __init__(self) -> None:
+        # `RunOptions` of every child the loop was asked to run, captured at
+        # `_build_pool` — the last place the options are seen before the loop
+        # consumes them.
+        self.options: list = []
+        # async callable(sub_session_id), run inside a child's tool dispatch
+        self.during_call = None
 
 
 @pytest.fixture
-def real_loop(monkeypatch):
-    """Real `run_query`, fake pool, fake engine, deterministic profile."""
-    from app.harness import loop as L
+def harness(monkeypatch):
+    """Real `run_query`; fake pool and engine; deterministic profile.
 
-    async def _build_pool(_options):
-        return _FakePool()
-
-    monkeypatch.setattr(L, "_build_pool", _build_pool)
-    monkeypatch.setattr(
-        T, "_load_subagent_profile",
-        lambda t: {"system_prompt": "sys", "max_turns": 20,
-                   "disallowed_tools": [], "model": "primary", "base_url": ""},
-    )
-    return L
-
-
-async def test_an_append_through_the_registry_reaches_the_childs_next_request(real_loop, monkeypatch):
-    """Clause 1 — mirrors test_loop_inject_ordering.py for a Task child.
-
-    The append happens while the child is mid-run and is asserted on the
-    following iteration's request body.
+    The child's handle and cancel event are read off the captured options, so
+    the identity assertions are about what `Task` itself built, not a handle
+    the test pre-populated.
     """
+    h = _Harness()
+
+    async def _build_pool(options):
+        h.options.append(options)
+        return _FakePool(during_call=h.during_call)
+
+    monkeypatch.setattr(loop_mod, "_build_pool", _build_pool)
+    monkeypatch.setattr(T, "_load_subagent_profile", lambda t: dict(_PROFILE))
+    return h
+
+
+async def test_an_append_through_the_registry_reaches_the_childs_next_request(harness, monkeypatch):
+    """Clause 1 — mirrors test_loop_inject_ordering.py:135 for a Task child.
+
+    Started by `Task` itself: the handle the append goes into is the one
+    `_task` built and handed to the loop, and the claim is checked on the
+    following iteration's real request body.
+    """
+    seen: dict = {}
+
     def on_request(n: int):
-        if n == 1:
-            SR.steer(SR.list_active()[0]["task_id"], INJECT_TEXT, caller=_caller())
+        if n != 1:
+            return
+        rec = SR.active_run(SR.list_active()[0]["task_id"])
+        opts = harness.options[0]
+        # The row publishes THE objects the child's options hold.
+        seen["handle_is_childs"] = rec.chat_messages is opts.chat_messages_handle
+        seen["cancel_is_childs"] = rec.cancel_event is opts.cancel_event
+        SR.steer(rec.task_id, INJECT_TEXT, caller=_caller())
 
     script = _StreamScript(
         [("Reading it:", [{"id": "c1", "name": "Read", "arguments": {}}]),
          ("Done.", [])],
         on_request=on_request,
     )
-    monkeypatch.setattr(real_loop, "stream_chat", script)
+    monkeypatch.setattr(loop_mod, "stream_chat", script)
 
     with bound_session():
         out = json.loads(await T._task({"prompt": "read /y"}))
 
+    assert seen == {"handle_is_childs": True, "cancel_is_childs": True}
     assert len(script.captured) == 2, script.captured
     first, second = script.captured
     # Not in the prompt: the child saw it because it was appended mid-run.
     assert INJECT_BODY not in _contents(first), first
     assert INJECT_BODY in _contents(second), second
-    injected = [m for m in second
-                if str(m.get("content", "")).startswith("[ORCHESTRATOR]")]
-    assert [m["role"] for m in injected] == ["user"]
+    assert [m["role"] for m in _injected(second)] == ["user"]
     # And the child kept working afterwards.
     assert out["response"] == "Done."
 
 
-class _Wedge:
-    """A child that reads its own published `cancel_event` and stops on it.
+async def test_cancelling_mid_run_stops_the_real_loop_and_still_closes_and_stores(
+    harness, monkeypatch,
+):
+    """Clause 3 — the stop comes from the loop's own check, not from a fake.
 
-    Not a mock of the loop's cancellation — the loop's own checks stand. What
-    is under test here is that `_task` puts a real event on
-    `options.cancel_event`, so this fake stops by doing exactly what the loop
-    does with that field, and raises `AttributeError` if it is still unset.
+    The stop request is issued inside a tool dispatch, outside the child's
+    code. `loop.py:226` is then the only thing that can end the run, so
+    `stop_reason == "cancelled"` here is the loop's, and the child asking for
+    no second completion is the proof it enforced it.
     """
+    async def stop_mid_tool(sub_session_id: str):
+        tid = next(r["task_id"] for r in SR.list_active())
+        SR.steer(tid, INJECT_TEXT, caller=_caller())
+        SR.cancel_run(tid, caller=_caller(), reason="wedged")
 
-    instances: list = []
-
-    def __init__(self, messages, options):
-        self.options = options
-        self.reached = asyncio.Event()
-        self.stopped_via_event = False
-        _Wedge.instances.append(self)
-
-    def __aiter__(self):
-        return self._gen()
-
-    async def _gen(self):
-        handle = self.options.chat_messages_handle
-        handle.append({"role": "assistant", "content": "half-way there"})
-        yield {"type": "assistant_message", "text": "half-way there",
-               "thinking": "", "tool_calls": []}
-        self.reached.set()
-        while not self.options.cancel_event.is_set():
-            await asyncio.sleep(0.005)
-        self.stopped_via_event = True
-        yield {"type": "result", "stop_reason": "cancelled", "num_turns": 2}
-
-
-@pytest.fixture
-def wedged(monkeypatch):
-    _Wedge.instances = []
-
-    import app.harness.loop as L
-    monkeypatch.setattr(L, "run_query", lambda m, o: _Wedge(m, o))
-    monkeypatch.setattr(
-        T, "_load_subagent_profile",
-        lambda t: {"system_prompt": "sys", "max_turns": 20,
-                   "disallowed_tools": [], "model": "primary", "base_url": ""},
+    harness.during_call = stop_mid_tool
+    script = _StreamScript(
+        [("Looking:", [{"id": "c1", "name": "Read", "arguments": {}}]),
+         ("MUST NOT BE REACHED", [])],
     )
-    return _Wedge
+    monkeypatch.setattr(loop_mod, "stream_chat", script)
 
+    with bound_session():
+        out = json.loads(await asyncio.wait_for(T._task({"prompt": "go"}), 20))
 
-async def test_task_puts_a_cancel_event_and_the_live_handle_on_the_childs_options(wedged):
-    """Clause 3's literal half: `_task` sets `options.cancel_event`."""
-    async def drive(caller):
-        run = asyncio.create_task(T._task({"prompt": "go"}))
-        while not wedged.instances:
-            await asyncio.sleep(0.005)
-        child = wedged.instances[0]
-        assert child.options.cancel_event is not None
-        assert SR.active_run(SR.list_active()[0]["task_id"]).cancel_event is \
-            child.options.cancel_event
-        SR.cancel_run(SR.list_active()[0]["task_id"], caller=caller)
-        return await run
-
-    with bound_session() as caller:
-        out = json.loads(await asyncio.wait_for(drive(caller), 10))
-    assert out["stop_reason"] == "cancelled"
-
-
-async def test_cancelling_mid_run_stops_the_child_and_still_closes_and_stores(wedged):
-    """Clause 3 — `stop_reason` cancelled, row closed, history stored."""
-    async def drive(caller):
-        run = asyncio.create_task(T._task({"prompt": "go"}))
-        while not SR.list_active():
-            await asyncio.sleep(0.005)
-        tid = SR.list_active()[0]["task_id"]
-        SR.steer(tid, INJECT_TEXT, caller=caller)
-        while not wedged.instances[0].reached.is_set():
-            await asyncio.sleep(0.005)
-        SR.cancel_run(tid, caller=caller, reason="wedged")
-        return tid, await run
-
-    with bound_session() as caller:
-        tid, raw = await asyncio.wait_for(drive(caller), 10)
-    out = json.loads(raw)
-
+    assert len(script.captured) == 1, \
+        "the loop asked for a second completion, so cancellation did not stop it"
     assert out["stop_reason"] == "cancelled"
     assert "cancelled" in out["error"]
-    assert out["task_id"] == tid
-    assert wedged.instances[0].stopped_via_event is True
+    assert out["task_id"]
 
     row = SR.list_recent()[0]
     assert row["status"] == "cancelled" and row["stop_reason"] == "cancelled"
     assert row["injected"] == 1, "the row records that it was steered"
     # `_close` closes the row AND stores history on every exit path — a
     # cancelled child has to be resumable, not lost.
-    assert tid in SR._history
-    stored = SR._history[tid].chat_messages
+    assert out["task_id"] in SR._history
+    stored = SR._history[out["task_id"]].chat_messages
     assert INJECT_BODY in _contents(stored)
-    assert "half-way there" in _contents(stored)
+    # Clause 5, on a real run's stored conversation: the injection is framed
+    # as an outside message, never as the child's own assistant turn.
+    assert [m["role"] for m in _injected(stored)] == ["user"]
 
 
-async def test_a_cancelled_child_resumes_with_the_injection_still_in_it(wedged, monkeypatch):
-    """Clause 4 — the pre-cancel append survives into the resumed run."""
-    async def first(caller):
-        run = asyncio.create_task(T._task({"prompt": "go"}))
-        while not SR.list_active():
-            await asyncio.sleep(0.005)
-        tid = SR.list_active()[0]["task_id"]
-        SR.steer(tid, INJECT_TEXT, caller=caller)
-        while not wedged.instances[0].reached.is_set():
-            await asyncio.sleep(0.005)
-        SR.cancel_run(tid, caller=caller)
-        return tid, json.loads(await run)
+async def test_a_cancelled_child_resumes_with_the_injection_in_its_next_request(
+    harness, monkeypatch,
+):
+    """Clause 4 — resume after cancel, checked on the resumed request body."""
+    async def stop_mid_tool(sub_session_id: str):
+        tid = next(r["task_id"] for r in SR.list_active())
+        SR.steer(tid, INJECT_TEXT, caller=_caller())
+        SR.cancel_run(tid, caller=_caller())
 
-    with bound_session() as caller:
-        tid, out = await asyncio.wait_for(first(caller), 10)
-    assert out["stop_reason"] == "cancelled"
-
-    seen: list = []
-
-    class _Resume:
-        def __init__(self, messages, options):
-            seen.append({"messages": list(messages),
-                         "handle": options.chat_messages_handle})
-            self._options = options
-
-        def __aiter__(self):
-            return self._gen()
-
-        async def _gen(self):
-            self._options.chat_messages_handle.append(
-                {"role": "assistant", "content": "finished at last"})
-            yield {"type": "assistant_message", "text": "finished at last",
-                   "thinking": "", "tool_calls": []}
-            yield {"type": "result", "stop_reason": "stop", "num_turns": 1}
-
-    import app.harness.loop as L
-    monkeypatch.setattr(L, "run_query", lambda m, o: _Resume(m, o))
+    harness.during_call = stop_mid_tool
+    first = _StreamScript([("Looking:", [{"id": "c1", "name": "Read",
+                                          "arguments": {}}])])
+    monkeypatch.setattr(loop_mod, "stream_chat", first)
 
     with bound_session():
-        resumed = json.loads(await T._task({"prompt": "finish it", "task_id": tid}))
+        cancelled = json.loads(await asyncio.wait_for(T._task({"prompt": "go"}), 20))
+        assert cancelled["stop_reason"] == "cancelled"
 
-    assert resumed["response"] == "finished at last"
-    assert resumed["task_id"] == tid
-    handle = seen[0]["handle"]
-    assert INJECT_BODY in _contents(handle)
-    assert "finish it" in _contents(handle)
-    assert seen[0]["messages"] == [], \
-        "a resume must not pass `messages` — the loop would ignore them"
-    # Still framed as an outside message after one rebuild of history, never
-    # as an assistant turn of the child's own.
-    injected = [m for m in handle
-                if str(m.get("content", "")).startswith("[ORCHESTRATOR]")]
-    assert [m["role"] for m in injected] == ["user"]
+        # Second run: same task_id, the loop's real resume path.
+        harness.during_call = None
+        resumed = _StreamScript([("finished at last", [])])
+        monkeypatch.setattr(loop_mod, "stream_chat", resumed)
+        out = json.loads(await asyncio.wait_for(
+            T._task({"prompt": "finish it", "task_id": cancelled["task_id"]}), 20))
 
+    assert out["response"] == "finished at last"
+    assert out["task_id"] == cancelled["task_id"]
 
-# ── the `_meta` seam: caller identity arrives over the MCP boundary ─────────
+    body = resumed.captured[0]
+    assert INJECT_BODY in _contents(body), \
+        "the pre-cancel append did not survive into the resumed conversation"
+    assert "finish it" in _contents(body)
+    assert [m["role"] for m in _injected(body)] == ["user"], \
+        "after one rebuild of history the injection is still not an " \
+        "assistant turn of the child's own"
+    assert harness.options[1].chat_messages_handle is not None
+
 
 def test_the_caller_scope_helper_reads_the_meta_bound_identity():
     """`current_caller_scope()` is how a control surface names itself.
 
     The two contextvars it reads are bound by `agent_mcp.main.call_tool` from
-    the request `_meta` (`lloyd/session_id`, `lloyd/turn_id`), which is the
-    only channel a caller inside the aggregator process has.
+    the request `_meta` (`lloyd/session_id`, `lloyd/turn_id`) — the only
+    channel a caller inside the aggregator process has.
     """
     stok = _task_registry.current_session_id.set(PARENT)
     ttok = _task_registry.current_turn_id.set("turn-9")
@@ -514,39 +483,81 @@ def test_the_caller_scope_helper_reads_the_meta_bound_identity():
     assert scope == CallerScope(session_id=PARENT, turn_id="turn-9")
 
 
-async def test_authority_is_the_meta_bound_session_across_the_dispatch_seam(real_loop, monkeypatch):
-    """One Task dispatched with `_meta`; the row's authority is what arrived.
+async def test_authority_across_the_meta_boundary_one_session_cannot_steer(
+    harness, monkeypatch, caplog,
+):
+    """Two real MCP dispatches, each with its own `_meta` session.
 
-    The child's body here acts as a *concurrent* caller inside the aggregator
-    — the shape every real steering caller has, since `Task` blocks its own
-    tool call. It steers with the identity the dispatch bound, and is refused
-    when it claims someone else's.
+    A's child is steered from a caller inside A's own dispatch and accepts it;
+    B's child — another session, both running concurrently, both real `Task`
+    dispatches through `agent_mcp.main.call_tool` — tries to steer A's child
+    and is refused. Authority is never a constructed `CallerScope` here: each
+    side names itself with `current_caller_scope()`, which can only report the
+    session its own request arrived on.
     """
     from agent_mcp import main as agg_main
 
     seen: dict = {}
+    a_steer_attempted = asyncio.Event()
+    b_finished = asyncio.Event()
 
-    async def _concurrent(messages, options):
-        row = SR.list_active()[0]
-        seen["row_parent"] = row["parent_session_id"]
-        chat = SR.active_run(row["task_id"]).chat_messages
-        seen["len_before"] = len(chat)
-        msg = SR.steer(row["task_id"], INJECT_TEXT, caller=T.current_caller_scope())
-        seen["injected"] = msg
-        with pytest.raises(SteeringRefused):
-            SR.steer(row["task_id"], "not mine", caller=CallerScope(session_id=OTHER))
-        seen["len_after_refusal"] = len(chat)
-        yield {"type": "assistant_message", "text": "ok",
-               "thinking": "", "tool_calls": []}
-        yield {"type": "result", "stop_reason": "stop", "num_turns": 1}
+    async def during(sub_session_id: str):
+        rows = {r["session_id"]: r for r in SR.list_active()}
+        mine = rows[sub_session_id]
+        scope = T.current_caller_scope()
+        if mine["parent_session_id"] == PARENT:
+            SR.steer(mine["task_id"], INJECT_TEXT, caller=scope)
+            seen["a_session"] = scope.session_id
+            a_steer_attempted.set()
+            await asyncio.wait_for(b_finished.wait(), 20)
+        else:
+            await asyncio.wait_for(a_steer_attempted.wait(), 20)
+            target = next(r["task_id"] for r in SR.list_active()
+                          if r["parent_session_id"] == PARENT)
+            try:
+                SR.steer(target, "is this mine to steer?", caller=scope)
+                seen["b_attempt"] = "allowed"
+            except SteeringRefused:
+                seen["b_attempt"] = "refused"
+            b_finished.set()
 
-    monkeypatch.setattr("app.harness.loop.run_query",
-                        lambda m, o: _concurrent(m, o))
+    harness.during_call = during
 
-    res = await agg_main.call_tool("Task", {"prompt": "go"},
-                                   meta={agg_main.META_SESSION_ID: PARENT})
-    assert json.loads(res.content[0].text)["response"] == "ok"
-    assert seen["row_parent"] == PARENT, "the row's authority comes from _meta"
-    assert seen["injected"] == {"role": "user", "content": INJECT_BODY}
-    assert seen["len_after_refusal"] == seen["len_before"] + 1, \
-        "the refused append added nothing to the live list"
+    scripts: dict = {}
+
+    def router(**kwargs):
+        msgs = kwargs.get("messages") or []
+        which = "b" if any("do B" in str(m.get("content")) for m in msgs) else "a"
+        script = scripts.get(which)
+        if script is None:
+            script = _StreamScript(
+                [("probing:", [{"id": "c1", "name": "Read", "arguments": {}}]),
+                 ("B done.", [])] if which == "b" else
+                [("working:", [{"id": "c1", "name": "Read", "arguments": {}}]),
+                 ("A done.", [])])
+            scripts[which] = script
+        return script(**kwargs)
+
+    monkeypatch.setattr(loop_mod, "stream_chat", router)
+
+    with caplog.at_level(logging.WARNING, logger="lloyd-subagent-registry"):
+        res_a, res_b = await asyncio.wait_for(asyncio.gather(
+            agg_main.call_tool("Task", {"prompt": "do A work"},
+                               meta={agg_main.META_SESSION_ID: PARENT}),
+            agg_main.call_tool("Task", {"prompt": "do B work"},
+                               meta={agg_main.META_SESSION_ID: OTHER}),
+        ), 30)
+
+    a = json.loads(res_a.content[0].text)
+    b = json.loads(res_b.content[0].text)
+    assert a["response"] == "A done." and b["response"] == "B done."
+    assert seen["a_session"] == PARENT, "A named itself from its own _meta"
+    assert seen["b_attempt"] == "refused", \
+        "a caller bound to another session must not be able to steer"
+    assert "refused" in caplog.text
+    assert OTHER in caplog.text and PARENT in caplog.text
+    # The authorised append landed in A's child and is in the history that run
+    # stored; exactly one — B's refused attempt added nothing.
+    stored_a = SR._history[a["task_id"]].chat_messages
+    assert [m["content"] for m in _injected(stored_a)] == [INJECT_BODY]
+    assert [m["role"] for m in _injected(stored_a)] == ["user"]
