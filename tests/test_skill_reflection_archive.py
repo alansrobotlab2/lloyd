@@ -20,43 +20,57 @@ one skill and only for ``signals-latest.md``. Prose one model reads once per run
 is what the remaining cycles were still relying on, and #436's own merged finding
 says so in the skill's own words: "A Read-before-Write discipline that preserves
 a file only while the reader remembers to copy it is not a retention policy."
-This file is the instrument: the archive step is now pinned, and deleting it
-turns the suite red instead of losing a cycle.
+This file is the instrument: the archive step is now pinned, and deleting it is
+refused at the writer that would land the change.
+
+Where the rule lives, and where it runs
+--------------------------------------
+The rule itself is :mod:`reflection_archive` — one definition, two consumers.
+``scripts/automod/vault_round.py`` calls it on every ``skills/**/SKILL.md`` a
+vault round touches, so dropping an archive step is refused at
+``automod_vault_land`` before the commit and the round's paths are reverted.
+**That is the automated rung this rule is enforced at**, and
+``test_the_vault_writer_refuses_a_skill_that_dropped_its_archive_step`` below
+drives ``validate`` end to end to prove the wiring, not just the helper.
+
+The assertions in this file that read ``~/obsidian/skills`` carry
+``live_vault`` (``pytest.ini:6-12``): skill prose is state no round under test
+controls, and the gate's hard ``tests`` rung runs ``-m "not live_vault"`` so an
+autoresearch promotion or a nightly rewrite of some unrelated skill cannot fail
+the next author's round for the previous writer's wording. Being honest about the
+rest: the full suite *command* runs the marked group, and no job in the fleet runs
+the full suite command — they name individual files — so those assertions are
+executed by hand and by the gate's review rung, and backlog #979 owns giving
+``live_vault`` a rung of its own. That is why the enforcement is at the writer and
+not here; it is the architecture ``pytest.ini`` already states for the identity
+surface ("Enforcement lives at the writers … this mark is the reporting copy"),
+and ``reflection_archive`` exists so this rule can follow it. The unmarked tests
+here — every mutation that proves the rule can fail, the writer wiring, and the
+git-ignore pin — run on every rung.
 
 What each clause is pinned by
 -----------------------------
 1. *Every live report gets a dated copy before its overwrite, on every cycle* →
    ``test_every_skill_that_writes_a_reflection_report_archives_it_first``, over
-   the writer set discovered by ``_classify_writers``. Clause 1's specific
+   the writer set discovered by ``classify_all``. Clause 1's specific
    requirement — §2e of ``nightly-reflection-knowledge-write`` for both pattern
    files — is asserted separately in
    ``test_knowledge_write_section_2e_archives_both_pattern_files``.
 2. *A test in the ``tests/test_skill_*.py`` family, failing when such a line is
    removed* → the same test, plus ``test_the_archive_check_can_actually_fail``,
    which mutates synthetic skill bodies and asserts the check reports each
-   removal class. A pin that cannot fail is not a pin.
+   removal class, and the two writer-wiring tests that show a removal is
+   *refused* and not merely reported. A pin that cannot fail is not a pin.
 3. *The stamp must be UTC-derived, never a `generated:` field read out of the
    previous report* → ``test_archive_stamp_is_derived_from_a_utc_command`` (the
    destination is ``$STAMP``/``$(date …)`` and that variable is assigned from
    ``date -u … +%Y-%m-%d-%H%M`` on the same logical line) and
    ``test_no_skill_builds_an_archive_name_from_a_generated_field``.
-4. *No gitignored file under ``~/lloyd`` is touched* → the diff is this one file
-   under ``tests/``, and
+4. *No gitignored file under ``~/lloyd`` is touched* → the diff is this file, one
+   module and one validator hunk, all tracked paths, and
    ``test_pipeline_stays_gitignored_so_retention_is_copies_not_tracking`` fails if
    ``_pipeline/`` ever stops being ignored — which is the other route #436 names
    and deliberately does not take (it is Alan's decision, not a side effect).
-
-Where these run, and why that is not a weakening
-------------------------------------------------
-The tests that read ``~/obsidian/skills`` carry ``live_vault`` (pytest.ini:6-12):
-skill prose is state no round under test controls, and an hourly autoresearch
-promotion that rewords some unrelated skill must not fail the next author's hard
-gate. The pure-logic tests — the mutations that prove every assertion here can
-fail, and the git-ignore pin — carry no mark and run on every rung. So the pin
-binds through the full suite (where the nightly run executes it) and through the
-archive assertions' own non-vacuity tests; the vault-reading assertions are the
-reporting copy that pytest.ini describes, not a gate the previous writer's wording
-should trip.
 
 How writers are recognised, and why the carve-outs are honest
 -------------------------------------------------------------
@@ -72,7 +86,7 @@ path. Tier 2 is a write prescription that cannot land or cannot be machine-bound
 either routed through ``vault_write``/``mem_write`` — which reject any ``~/lloyd/``
 target with ``PATH_ESCAPE`` (recorded in ``nightly-reflection-signals`` Phase 0,
 ``nightly-reflection-knowledge-analysis`` step 1, and MEMORY.md) — or stated as
-prose ("Merge all ``signals-*.md`` into …"). Tier 2 entries carry a reason and are
+prose ("Merge all ``signals-*.md`` into …"). Tier-2 entries carry a reason and are
 re-verified every run: if one ever gains a real ``Write`` call it moves to tier 1
 and must have an archive step. Both tier-2 families are recorded as findings on
 #436 rather than widened into this diff.
@@ -81,7 +95,7 @@ The attribution boundary, stated plainly: a mention counts when it names the pat
 (``reflection/<name>-latest.md``). A skill that refers to ``test-results-latest.md``
 by bare filename somewhere else is not attributed, because a bare filename cannot
 be told apart from one in a different directory. That is the reason
-``_PROSE_WRITE`` carries verbs of instruction and not nouns like "output" — the
+``PROSE_WRITE`` carries verbs of instruction and not nouns like "output" — the
 nouns are what descriptive annotations use, and three of the read-list items in
 ``autonomy-reflection-pipeline`` Step 6.1 are annotated that way.
 """
@@ -89,6 +103,7 @@ nouns are what descriptive annotations use, and three of the read-list items in
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -98,87 +113,21 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import reflection_archive as ra
+from reflection_archive import archive_problems, classify, classify_all
+
 SKILLS_DIRS = [Path.home() / "obsidian" / "skills", ROOT / "skills"]
-
-#: A live report path under the reflection directory. `-latest` is the in-place
-#: convention this test exists to police; the per-day artifacts in the same
-#: directory (`knowledge-handoff-2026-09-12.md`, `knowledge-write-*`) already
-#: carry their date in the name and need no check.
-_LATEST_PATH = re.compile(r"_pipeline/reflection/([A-Za-z0-9_-]+-latest)\.md")
-
-#: A write that can actually land the file: a `Write`/`Edit` call whose target is
-#: a literal path. `Write to` alone is not enough — the older skills say
-#: "Write to `vault_write(path=…)`", which is this next pattern's business.
-_TOOL_WRITE = re.compile(
-    r"(?<![A-Za-z_])\bWrite\s*\(\s*(?:file_path\s*=|[\"'`])"
-    r"|(?<![A-Za-z_])\bEdit\s*\("
-)
-
-#: Tools scoped to the vault. On a `~/lloyd/` target they return PATH_ESCAPE, so a
-#: skill naming them is a broken prescription, not a writer that loses data.
-#: Checked before _TOOL_WRITE's "Write to" prose form for exactly that reason.
-_VAULT_WRITE = re.compile(r"\bvault_write\s*\(|\bmem_write\s*\(")
-
-#: Prose instruction to produce the file, naming no tool that could do it.
-_WRITE_TO = re.compile(r"\bWrite\s+(?:this|to|the|pattern|both)\b|^\s*[-*]?\s*\*\*Write\b")
-
-_READ = re.compile(
-    r"(?<![A-Za-z_])\bRead\s*\(|\bvault_read\s*\(|\bmem_get\s*\(|\bRead (?:this|these)\b"
-    r"|\bInput:|\bprevious (?:audit|report)\b",
-    re.IGNORECASE,
-)
-
-#: Prose that prescribes producing the file, with no tool call to bind. Deliberately
-#: verbs of *instruction* only: "Output: …" and "— prompt audit output (Subagent B)"
-#: annotate a file, they do not write it, and the second is the annotation on an
-#: item of a **read** list (`autonomy-reflection-pipeline` Step 6.1), so a noun here
-#: would read a reader as a writer.
-_PROSE_WRITE = re.compile(
-    r"\b(?:merge|merges|consolidate|consolidates|regenerate|regenerates"
-    r"|write|writes|written)\b",
-    re.IGNORECASE,
-)
-
-#: An archive destination: `<stem>-<stamp>.md` where the stamp is produced by the
-#: shell. A `$STAMP` variable is accepted (its assignment is checked separately by
-#: _utc_stamp), a `$(date …)` substitution must carry `-u` inline, and a
-#: `<cycle>`/`<YYYY-MM-DD>` placeholder or a hand-typed date is not: those are
-#: exactly the "name comes from prose or from someone's typing" case clause 3
-#: forbids. A bare `<stem>.md` overwrite does not match either.
-def _archive_dest(stem: str) -> re.Pattern[str]:
-    stamp = r"(?:\$STAMP|\$\{STAMP\}|\$\(date\s+-u[^)]*\))"
-    return re.compile(re.escape(stem) + "-" + stamp + r"\.md")
-
-
-_COPY = re.compile(r"(?<![A-Za-z0-9_])cp\b|shutil\.copy")
-
-
-def _utc_stamp(line: str) -> bool:
-    """True when the line derives a stamp from the UTC clock.
-
-    Order-independent so `STAMP=$(date -u +%Y-%m-%d-%H%M)` and the mtime form
-    `date -u -r "$src" +%Y-%m-%d-%H%M` (clause 3 allows both) both count. A local
-    `date +%Y-%m-%d-%H%M` does not: it is the defect that made
-    `signals-latest-2026-09-10-2230.md`, a file written at 2026-09-12 05:03 UTC
-    whose name sorts 8 hours behind that.
-    """
-    return "date" in line and "-u" in line and "%Y-%m-%d-%H%M" in line
-
-
-def _logical_lines(body: str) -> list[str]:
-    """Body with backslash-newline continuations spliced into single lines.
-
-    Skill code blocks wrap long `Bash("cp …` invocations; the archive step is one
-    instruction, and matching per raw line would miss every wrapped copy.
-    """
-    return re.sub(r"\\\s*\n\s*", " ", body).splitlines()
 
 
 def _active_skills() -> dict[str, str]:
     """Every SKILL.md the prompt actually advertises → its body.
 
     Mirrors prompt_builder._load_skills_index: dot-prefixed directories are the
-    archive, quarantined skills are out of circulation.
+    archive, quarantined skills are out of circulation. The quarantine filter
+    lives here and not in ``reflection_archive`` because the vault writer is
+    handed the one path a round touched and must judge that file whether or not
+    the index advertises it — a skill being un-listed is not a licence to lose a
+    report.
     """
     from prompt_builder import _is_quarantined_skill
 
@@ -206,144 +155,6 @@ def skills() -> dict[str, str]:
         "reads, so a run that found none proves nothing and must not pass"
     )
     return bodies
-
-
-def _mention_lines(body: str, stem: str) -> list[tuple[int, str]]:
-    """(line index, text) for every logical line naming this live report."""
-    needle = f"_pipeline/reflection/{stem}.md"
-    return [(i, ln) for i, ln in enumerate(_logical_lines(body)) if needle in ln]
-
-
-def _heading_verb(body_lines: list[str], idx: int) -> str | None:
-    """Verb from the section a bare path bullet sits in.
-
-    `Write pattern files from the artifact:` followed by two backticked paths is a
-    write prescription; `Read these files:` followed by seven is not — and in
-    `autonomy-reflection-pipeline` Step 6.1 the read list is seven items long, while
-    in `historical-knowledge-refresh` the write list nests two levels
-    (`**Consolidate patterns:** Merge all pattern analysis into:` then two sub-bullets).
-    So this walks back through the list, taking the first verb it meets, and gives
-    up at a blank line, a heading, or six non-blank lines — far enough for a nested
-    bullet, not far enough to borrow a verb from the previous section.
-    """
-    walked = 0
-    for j in range(idx - 1, -1, -1):
-        prev = body_lines[j]
-        if not prev.strip():
-            return None
-        if prev.lstrip().startswith("#"):
-            return None
-        if _TOOL_WRITE.search(prev) or _VAULT_WRITE.search(prev) or _WRITE_TO.search(prev) or _PROSE_WRITE.search(prev):
-            return "prose-write"
-        if _READ.search(prev):
-            return "read"
-        walked += 1
-        if walked >= 6:
-            return None
-    return None
-
-
-def _prose_write_before_path(line: str, needle: str) -> bool:
-    """A prose instruction governing *this* path: the verb must precede the path.
-
-    Position is what separates an instruction from an annotation. "Read the previous
-    report and merge everything into `<path>`" is a write that also reads, and must
-    not be talked out of being one by the word `Read` at its head; while
-    "`Read(file_path="<path>")` — Same rule for the handoff write below" mentions a
-    write that belongs to a different file, and reading a report does not make a
-    reader a writer. An instruction puts its verb in front of its object.
-    """
-    at = line.find(needle)
-    if at < 0:
-        return False
-    head = line[:at]
-    return bool(_WRITE_TO.search(head) or _PROSE_WRITE.search(head))
-
-
-def _line_tier(body_lines: list[str], idx: int, line: str, needle: str) -> str:
-    """One mention line's tier.
-
-    `vault_write` is asked before the "Write to" prose form because the skills that
-    use that form are writing *to vault_write* — an instruction that cannot reach
-    the path. The direct-call test comes first of all so a skill that names both
-    (`Write(file_path=…)` — "`Write` not `vault_write`") still reads as a writer.
-    Write tiers are then asked **before** `read`: a line that both reads and writes
-    the path destroys the report, which is the thing being guarded.
-    """
-    if _TOOL_WRITE.search(line):
-        return "tool-write"
-    if _VAULT_WRITE.search(line):
-        return "vault-write"
-    if _prose_write_before_path(line, needle):
-        return "prose-write"
-    if _READ.search(line):
-        return "read"
-    return _heading_verb(body_lines, idx) or "unclassified"
-
-
-def _classify(body: str, stem: str) -> str:
-    """The strongest tier any mention of `stem` carries.
-
-    A skill with one real write and three reads is a writer: the reads cannot undo
-    the write, and the archive step is required by the write.
-    """
-    lines = _logical_lines(body)
-    needle = f"_pipeline/reflection/{stem}.md"
-    mentions = _mention_lines(body, stem)
-    if not mentions:
-        return "absent"
-    tiers = {_line_tier(lines, idx, line, needle) for idx, line in mentions}
-    for tier in ("tool-write", "vault-write", "prose-write", "read", "unclassified"):
-        if tier in tiers:
-            return tier
-    return "unclassified"
-
-
-def _classify_all(skills: dict[str, str]) -> dict[tuple[str, str], str]:
-    out: dict[tuple[str, str], str] = {}
-    for name, body in skills.items():
-        for stem in sorted(set(_LATEST_PATH.findall(body))):
-            out[(name, stem)] = _classify(body, stem)
-    return out
-
-
-def _archive_problems(body: str, stem: str) -> list[str]:
-    """Why this skill does not archive `stem` before overwriting it, or []."""
-    problems: list[str] = []
-    lines = _logical_lines(body)
-    needle = f"_pipeline/reflection/{stem}.md"
-    copy_at = [
-        i for i, ln in enumerate(lines) if _COPY.search(ln) and _archive_dest(stem).search(ln)
-    ]
-    if not copy_at:
-        problems.append(
-            f"no dated-copy archive step for {stem}: no cp to `{stem}-<stamp>.md`"
-        )
-        return problems
-    copied = [lines[i] for i in copy_at]
-    if not any(f"{stem}.md" in ln for ln in copied):
-        problems.append(
-            f"archive step for {stem} never names the live path it is copying from"
-        )
-    if not any(_utc_stamp(ln) for ln in copied):
-        problems.append(
-            f"archive stamp for {stem} is not derived from a UTC command "
-            f"(`date -u … +%Y-%m-%d-%H%M`, or the source's mtime)"
-        )
-    # "Before it is overwritten" is the clause, so order is part of what is pinned:
-    # an archive step written *below* the write instruction copies the new report and
-    # loses the old one exactly as completely as no copy at all.
-    write_at = [
-        i for i, ln in enumerate(lines) if needle in ln and _TOOL_WRITE.search(ln)
-    ]
-    if write_at and min(copy_at) > min(write_at):
-        problems.append(
-            f"archive step for {stem} appears after the instruction that overwrites it"
-        )
-    read_at = [i for i, ln in enumerate(lines) if needle in ln and re.search(r"(?<![A-Za-z_])\bRead\s*\(", ln)]
-    if read_at and write_at and min(read_at) > min(write_at):
-        problems.append(f"{stem} is written before it is read, so Write was refused on every run")
-    return problems
 
 
 # --- Tier 1: writers that the archive rule binds. -------------------------------
@@ -402,13 +213,12 @@ def test_every_skill_that_writes_a_reflection_report_archives_it_first(skills):
     """The acceptance clause: every live nightly reflection report gets a dated
     copy before it is overwritten, on every cycle, pinned here rather than by the
     skill prose alone."""
-    classified = _classify_all(skills)
     offenders = {
-        f"{name}:{stem}": _archive_problems(skills[name], stem)
-        for (name, stem), tier in classified.items()
-        if tier == "tool-write"
-        for bad in [_archive_problems(skills[name], stem)]
-        if bad
+        f"{name}:{stem}": problems
+        for (name, stem), tier in classify_all(skills).items()
+        if tier in ra.BOUND_TIERS
+        for problems in [archive_problems(skills[name], stem)]
+        if problems
     }
     assert offenders == {}, (
         "skills write a nightly reflection report in place without an archive "
@@ -421,10 +231,9 @@ def test_every_skill_that_writes_a_reflection_report_archives_it_first(skills):
 def test_discovered_tool_writers_are_exactly_the_expected_set(skills):
     """Anti-drift for the classifier itself: a new tool-writer, or one that
     disappears, is a decision someone has to record here."""
-    classified = _classify_all(skills)
     found: dict[str, set[str]] = {}
-    for (name, stem), tier in classified.items():
-        if tier == "tool-write":
+    for (name, stem), tier in classify_all(skills).items():
+        if tier in ra.BOUND_TIERS:
             found.setdefault(name, set()).add(stem)
     assert found == EXPECTED_TOOL_WRITERS, (
         f"reflection-report writers changed: found {found}, expected "
@@ -446,9 +255,9 @@ def test_knowledge_write_section_2e_archives_both_pattern_files(skills):
         assert f"_pipeline/reflection/{stem}.md" in section, (
             f"§2e no longer writes {stem}.md"
         )
-        assert not _archive_problems(section, stem), (
+        assert not archive_problems(section, stem), (
             f"§2e must Read and dated-copy {stem}.md before overwriting it: "
-            f"{_archive_problems(section, stem)}"
+            f"{archive_problems(section, stem)}"
         )
         # Per file, not per section: clause 1 says "for each of", and one Read
         # anywhere in §2e would satisfy a section-wide search while leaving the
@@ -467,10 +276,10 @@ def test_archive_stamp_is_derived_from_a_utc_command(skills):
     """The archive name must come from `date -u … +%Y-%m-%d-%H%M` (or the source's
     mtime) — never a hand-typed date."""
     problems: dict[str, list[str]] = {}
-    for (name, stem), tier in _classify_all(skills).items():
-        if tier != "tool-write":
+    for (name, stem), tier in classify_all(skills).items():
+        if tier not in ra.BOUND_TIERS:
             continue
-        bad = [p for p in _archive_problems(skills[name], stem) if "UTC" in p]
+        bad = [p for p in archive_problems(skills[name], stem) if "UTC" in p]
         if bad:
             problems[f"{name}:{stem}"] = bad
     assert problems == {}, f"archive stamps are not UTC-derived: {problems}"
@@ -488,6 +297,19 @@ def _sentences_mentioning(text: str, token: str) -> list[str]:
     return [s for s in re.split(r"(?<=[.!?:])\s+", flat) if token in s]
 
 
+def _generated_field_offenders(text: str) -> list[str]:
+    """Sentences that instruct naming a file from a `generated:` header.
+
+    A negation is the difference between a rule and a prohibition on the rule: the
+    skills now spend several lines explaining why the old wording was wrong, and
+    those sentences name both the field and a filename.
+    """
+    return [
+        s for s in _sentences_mentioning(text, "generated:")
+        if ".md" in s and not re.search(r"\b(?:never|not|no longer|isn't|cannot)\b", s, re.I)
+    ]
+
+
 @pytest.mark.live_vault
 def test_no_skill_builds_an_archive_name_from_a_generated_field(skills):
     """Clause 3's negative half. The report's own `generated:` header is a local
@@ -496,13 +318,10 @@ def test_no_skill_builds_an_archive_name_from_a_generated_field(skills):
     field is missing. A skill may *say* this — with a negation — but must not
     instruct it."""
     offenders: dict[str, list[str]] = {}
-    for (name, stem), tier in _classify_all(skills).items():
-        if tier != "tool-write":
+    for (name, stem), tier in classify_all(skills).items():
+        if tier not in ra.BOUND_TIERS:
             continue
-        bad = [
-            s for s in _sentences_mentioning(skills[name], "generated:")
-            if ".md" in s and not re.search(r"\b(?:never|not|no longer|isn't|cannot)\b", s, re.I)
-        ]
+        bad = _generated_field_offenders(skills[name])
         if bad:
             offenders[name] = bad
     assert offenders == {}, (
@@ -518,8 +337,6 @@ def test_pipeline_stays_gitignored_so_retention_is_copies_not_tracking():
     generated reports into the repo. If someone un-ignores it, the choice has
     changed and this pin — plus #436's open question for Alan — has to be
     re-decided, not silently implemented from a test."""
-    import subprocess
-
     probe = "_pipeline/reflection/signals-latest.md"
     # No skip here: this asserts repo state the round does control, and a run that
     # cannot ask git is a failure worth seeing, not a green line.
@@ -535,11 +352,12 @@ def test_pipeline_stays_gitignored_so_retention_is_copies_not_tracking():
     )
 
 
-# --- Non-vacuity: the pin must be able to fail ---------------------------------
+# --- The enforcement point: the vault writer, not a test rung -------------------
+_SKILL_FRONT = "---\nname: test-skill\ndescription: A skill that overwrites a report\n---\n\n"
 _STEM = "tool-patterns-latest"
 _LIVE = f"/home/alansrobotlab/lloyd/_pipeline/reflection/{_STEM}.md"
 # Written the way the skills write it: one instruction wrapped over three lines
-# with backslash continuations, so this fixture also exercises _logical_lines.
+# with backslash continuations, so this fixture also exercises logical_lines.
 _READ_LINE = f'Read("{_LIVE}")'
 _COPY_LINE = (
     'Bash("STAMP=$(date -u +%Y-%m-%d-%H%M) && \\\n'
@@ -547,36 +365,155 @@ _COPY_LINE = (
     f"         {_LIVE[:-3]}-$STAMP.md\")"
 )
 _WRITE_LINE = f'- `Write(file_path="{_LIVE}", content=…)` — new content'
-_GOOD = "\n".join(["### 2e. Pattern Output Files\n", _READ_LINE, _COPY_LINE, "", _WRITE_LINE, ""])
+_GOOD_BODY = _SKILL_FRONT + "\n".join(
+    ["### 2e. Pattern Output Files\n", _READ_LINE, _COPY_LINE, "", _WRITE_LINE, ""]
+)
+_BAD_BODY = _SKILL_FRONT + "\n".join(
+    ["### 2e. Pattern Output Files\n", _READ_LINE, "", _WRITE_LINE, ""]
+)
 
 
-def _mutate(old: str, new: str) -> str:
-    assert old in _GOOD, "mutation target absent — the fixture drifted, fix the fixture"
-    return _GOOD.replace(old, new)
+@pytest.fixture
+def scratch_vault(tmp_path, monkeypatch):
+    """A vault tree the test owns, plus the loader subprocess stubbed out.
+
+    `skills/**` is a *validated* vault path, so `validate` would otherwise shell
+    out to `agent_mcp.skills._load_skill` against this scratch tree — which is a
+    real check of a different question (does the skill load) and belongs to
+    tests/test_automod_vault_round.py. Stubbing it keeps this assertion about the
+    retention branch and nothing else, the same way every case in that file
+    stubs it.
+    """
+    from scripts.automod import vault_round
+
+    monkeypatch.setattr(vault_round, "VAULT", tmp_path)
+    monkeypatch.setattr(vault_round, "loader_errors", lambda paths: [])
+    return tmp_path
+
+
+def _write_skill(vault: Path, name: str, body: str) -> str:
+    rel = f"skills/{name}/SKILL.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+    return rel
+
+
+def test_the_vault_writer_refuses_a_skill_that_dropped_its_archive_step(scratch_vault):
+    """The wiring, not the helper: `validate()` — the function `land()` and
+    therefore `automod_vault_land` actually call — must reach the retention branch.
+
+    Calling `reflection_archive.skill_rule_violations` directly pins the rule; it
+    does not pin the call site, and a correct helper that nothing calls is the
+    exact shape of "a guard whose input nothing wired up" that this item exists to
+    close. So this drives the lander: a skill edit that loses the archive `cp`
+    comes back refused, naming the report and the missing step, while the same
+    skill with its `cp` intact lands.
+    """
+    from scripts.automod import vault_round
+
+    bad = _write_skill(scratch_vault, "nightly-reflection-knowledge-write", _BAD_BODY)
+    errors, _buckets = vault_round.validate([bad])
+    assert len(errors) == 1, f"the lander let an unarchived overwrite through: {errors}"
+    assert _STEM in errors[0], f"the refusal must name the report: {errors[0]}"
+    assert "dated-copy archive step" in errors[0], (
+        f"the refusal must name what is missing: {errors[0]}"
+    )
+    assert errors[0].startswith(f"{bad}: "), f"the error must name the file: {errors[0]}"
+
+    good = _write_skill(scratch_vault, "nightly-reflection-knowledge-write", _GOOD_BODY)
+    assert vault_round.validate([good])[0] == [], (
+        "a skill that archives before overwriting must be landable: "
+        f"{vault_round.validate([good])[0]}"
+    )
+
+
+def test_the_vault_writer_only_judges_the_skills_a_round_touched(scratch_vault):
+    """Scoping, which is what keeps this off an unrelated round's critical path.
+
+    A governed skill sitting unarchived in the vault must not block a round that
+    lands a different file — the same reason `contract_errors` reads only the two
+    identity files it is named for. Without this, adding the check to `validate`
+    would make every skill edit in the tree hostage to the worst skill in it.
+    """
+    from scripts.automod import vault_round
+
+    _write_skill(scratch_vault, "nightly-reflection-knowledge-write", _BAD_BODY)
+    unrelated = _write_skill(
+        scratch_vault, "some-other-skill",
+        _SKILL_FRONT + "Nothing about reflection reports here.\n",
+    )
+    assert vault_round.validate([unrelated])[0] == [], (
+        "an untouched skill was judged for a condition it did not change"
+    )
+    # And a touched skill that never mentions a report is judged and clean.
+    assert vault_round.reflection_archive_errors([unrelated]) == []
+
+
+def test_the_writer_and_the_test_share_one_definition():
+    """Static pin: the lander must call the same rule this file asserts.
+
+    Mirrors `tests/test_prompt_surface_guard.py::test_both_writers_call_the_shared_invariants`
+    for the same reason — a mark and a helper can both exist while the call site
+    quietly disappears, and then the rule is documentation again.
+    """
+    src = (ROOT / "scripts" / "automod" / "vault_round.py").read_text(encoding="utf-8")
+    assert "import reflection_archive" in src, (
+        "vault_round no longer imports the retention rule: the writer stopped "
+        "enforcing it and only the live_vault reporting copy remains"
+    )
+    assert "reflection_archive.skill_rule_violations" in src, (
+        "vault_round no longer calls the retention rule"
+    )
+    validate_src = src.split("def validate(", 1)[1].split("\ndef ", 1)[0]
+    assert "reflection_archive_errors(paths)" in validate_src, (
+        "reflection_archive_errors is defined but validate() no longer calls it — "
+        "the lander would compute nothing and land everything"
+    )
+
+
+# --- Non-vacuity: the pin must be able to fail ---------------------------------
+def _mutate(body: str, old: str, new: str) -> str:
+    assert old in body, "mutation target absent — the fixture drifted, fix the fixture"
+    return body.replace(old, new)
 
 
 def test_the_archive_check_can_actually_fail():
     """Every way this guard was asked to fail, on synthetic bodies. Without this
     the suite could be green on a check that matches nothing."""
-    assert _classify(_GOOD, _STEM) == "tool-write", (
+    assert classify(_GOOD_BODY, _STEM) == "tool-write", (
         "the well-formed skill body must classify as a writer — otherwise every "
         "archive assertion below is vacuous"
     )
-    assert _archive_problems(_GOOD, _STEM) == [], "the well-formed case must be clean"
+    assert archive_problems(_GOOD_BODY, _STEM) == [], "the well-formed case must be clean"
+    assert ra.skill_rule_violations("s", _GOOD_BODY) == [], (
+        "the writer's entry point reported a problem on a skill that archives"
+    )
 
+    bad = _BAD_BODY
+    assert ra.skill_rule_violations("s", bad), (
+        "the writer's entry point passed a skill with no archive step"
+    )
+    assert classify(bad, _STEM) == "tool-write", (
+        "removing the cp must not have removed the writer — the skill still "
+        "overwrites the report, which is the whole problem"
+    )
+
+    good = _GOOD_BODY
     cases = {
-        "the cp instruction deleted": _GOOD.replace(_COPY_LINE, ""),
-        "the cp replaced by a no-op": _mutate("      cp ", "      echo "),
+        "the cp instruction deleted": good.replace(_COPY_LINE, ""),
+        "the cp replaced by a no-op": _mutate(good, "      cp ", "      echo "),
         "the stamp taken from the local clock": _mutate(
-            "STAMP=$(date -u +%Y-%m-%d-%H%M)", "STAMP=$(date +%Y-%m-%d-%H%M)"
+            good, "STAMP=$(date -u +%Y-%m-%d-%H%M)", "STAMP=$(date +%Y-%m-%d-%H%M)"
         ),
         "the stamp a `<cycle>` placeholder": _mutate(
-            f"{_LIVE[:-3]}-$STAMP.md", f"{_LIVE[:-3]}-<cycle>.md"
+            good, f"{_LIVE[:-3]}-$STAMP.md", f"{_LIVE[:-3]}-<cycle>.md"
         ),
         "the stamp a hand-typed date": _mutate(
-            f"{_LIVE[:-3]}-$STAMP.md", f"{_LIVE[:-3]}-2026-09-10-2230.md"
+            good, f"{_LIVE[:-3]}-$STAMP.md", f"{_LIVE[:-3]}-2026-09-10-2230.md"
         ),
         "the copy pointed at a different file": _mutate(
+            good,
             f"{_LIVE[:-3]}-$STAMP.md",
             "/home/alansrobotlab/lloyd/_pipeline/reflection/other-latest-$STAMP.md",
         ),
@@ -591,18 +528,18 @@ def test_the_archive_check_can_actually_fail():
         ),
     }
     for label, body in cases.items():
-        problems = _archive_problems(body, _STEM)
+        problems = archive_problems(body, _STEM)
         assert problems, f"the check passed a body whose archive step is broken ({label})"
+        assert ra.skill_rule_violations("s", body), (
+            f"the writer would have landed a body with a broken archive step ({label})"
+        )
 
     # A body that reads the file but never writes it is not a writer, so it must
     # not be demanded an archive step.
-    reader = f'{_READ_LINE}\n'
-    assert _classify(reader, _STEM) == "read"
+    assert classify(_READ_LINE + "\n", _STEM) == "read"
     # A write prescribed through vault_write is a broken instruction, not a writer.
-    vault = (
-        f'Write to `vault_write(path="~/lloyd/_pipeline/reflection/{_STEM}.md")`:\n'
-    )
-    assert _classify(vault, _STEM) == "vault-write"
+    vault = f'Write to `vault_write(path="~/lloyd/_pipeline/reflection/{_STEM}.md")`:\n'
+    assert classify(vault, _STEM) == "vault-write"
 
     # A line that reads *and* destroys the file is a write. If `read` won here, a
     # skill could say "Read the previous report and merge everything into <path>",
@@ -612,7 +549,7 @@ def test_the_archive_check_can_actually_fail():
         f'Read the previous report and merge everything into '
         f'`~/lloyd/_pipeline/reflection/{_STEM}.md`\n'
     )
-    assert _classify(read_merge, _STEM) == "prose-write", (
+    assert classify(read_merge, _STEM) == "prose-write", (
         "a read-and-merge instruction was classified as a harmless read"
     )
     # Its inverse: a genuine read annotated with a write that belongs to another
@@ -623,7 +560,7 @@ def test_the_archive_check_can_actually_fail():
         f'reflection/{_STEM}.md")` — absolute path, not `vault_read`. Same rule for '
         f"the handoff write below and for reading it back.\n"
     )
-    assert _classify(annotated_read, _STEM) == "read", (
+    assert classify(annotated_read, _STEM) == "read", (
         "a reader was recruited as a writer by a noun belonging to another file"
     )
 
@@ -635,33 +572,50 @@ def test_the_generated_field_check_can_actually_fail():
         "previous report's own `generated:` stamp, so "
         "`signals-latest-2026-09-10-2230.md`.\n"
     )
-    hits = [
-        s
-        for s in _sentences_mentioning(old_wording, "generated:")
-        if ".md" in s and not re.search(r"\b(?:never|not|no longer|isn't|cannot)\b", s, re.I)
-    ]
-    assert hits, "the check accepted an instruction to build the name from generated:"
+    assert _generated_field_offenders(old_wording), (
+        "the check accepted an instruction to build the name from generated:"
+    )
 
     allowed = (
         "> `STAMP` is never read out of the previous report's `generated:` field. "
         "The `generated:` stamp is not usable here: the copy named "
         "`signals-latest-2026-09-10-2230.md` sorts 8 hours out.\n"
     )
-    flagged = [
-        s
-        for s in _sentences_mentioning(allowed, "generated:")
-        if ".md" in s and not re.search(r"\b(?:never|not|no longer|isn't|cannot)\b", s, re.I)
-    ]
+    flagged = _generated_field_offenders(allowed)
     assert flagged == [], f"a permitted, negated mention was flagged: {flagged}"
 
 
+def test_the_rule_survives_a_wrapped_shell_instruction():
+    """The seam between a wrapped shell instruction and a line-matching rule.
+
+    The archive step is one `Bash("cp …` written over three markdown lines with
+    backslash continuations. If `logical_lines` stopped splicing them, the `cp`
+    and the dated destination would be on different lines and every real archive
+    step in the vault would read as missing — so the splice is asserted, in both
+    directions, on a body that is wrapped exactly as §2e's is.
+    """
+    wrapped = ra.logical_lines(_COPY_LINE)
+    assert len(wrapped) == 1, f"the continuation was not spliced: {wrapped}"
+    assert ra.COPY.search(wrapped[0]) and ra.archive_dest(_STEM).search(wrapped[0]), (
+        "the spliced line no longer matches as a copy to a dated destination"
+    )
+    assert ra.utc_stamp(wrapped[0]), "the spliced line no longer carries the UTC stamp"
+    # The negative control: the same instruction un-spliced matches nothing, which
+    # is what the splice is for.
+    assert not any(
+        ra.COPY.search(ln) and ra.archive_dest(_STEM).search(ln)
+        for ln in _COPY_LINE.splitlines()
+    ), "an un-spliced body matched, so the splice is not what makes the check work"
+
+
+# --- Live-vault reporting copy: drift guards on the classifier itself -----------
 @pytest.mark.live_vault
 def test_classification_survives_an_unclassifiable_mention(skills):
     """Every mention must be attributed. A path that is neither written nor read
     nor prose-written lands in `unclassified`, which is how an under-inclusive
     rule would leak a writer — so it is a failure, not a shrug."""
     unclassified = {
-        f"{name}:{stem}" for (name, stem), tier in _classify_all(skills).items()
+        f"{name}:{stem}" for (name, stem), tier in classify_all(skills).items()
         if tier == "unclassified"
     }
     assert unclassified == set(), (
@@ -676,7 +630,7 @@ def test_declared_write_prescriptions_are_still_accurate(skills):
     """The tier-2 carve-outs must still describe reality, and no new one may
     appear unlisted. A carve-out that outlives its reason would quietly exempt a
     live writer from the archive rule."""
-    classified = _classify_all(skills)
+    classified = classify_all(skills)
     found: dict[str, set[str]] = {}
     for (name, stem), tier in classified.items():
         if tier in ("vault-write", "prose-write"):
@@ -701,15 +655,15 @@ def test_the_prose_writer_carve_out_is_debt_recorded_on_436(skills):
     """The honest limit of this guard, stated as an assertion rather than a comment.
 
     This file binds three write prescriptions and leaves four instructions alone:
-    `historical-knowledge-refresh/SKILL.md:93-97` instructs merging into all three
-    live reports, and nothing in the repo executes a `cp` for it, because the check
+    `historical-knowledge-refresh/SKILL.md` instructs merging into all three live
+    reports, and nothing in the repo executes a `cp` for it, because the check
     binds instructions a run *executes* and that skill's write is a sentence. It is
     carved out as a finding on #436 (round SM_20260912_155333), not silently covered
     by a rule that reads "every writer". Asserted family by family so the debt can
     only shrink: a new prose writer has to be added here, which is a decision with a
     name on it, and a prose writer that is fixed disappears from it.
     """
-    classified = _classify_all(skills)
+    classified = classify_all(skills)
     prose: dict[str, set[str]] = {}
     vault: dict[str, set[str]] = {}
     for (name, stem), tier in classified.items():
@@ -728,11 +682,18 @@ def test_the_prose_writer_carve_out_is_debt_recorded_on_436(skills):
     )
     # The debt is on the item, not just in this file: if #436 closes while a prose
     # writer still has no archive step, whoever closed it read this and disagreed.
-    item = sorted((Path.home() / "obsidian" / "backlog").glob("436-*.md"))
-    if item:
-        body = item[0].read_text(encoding="utf-8", errors="replace")
-        for skill in prose:
-            assert skill in body, (
-                f"{skill} is unarchived prose-write debt on #436 but is not named in "
-                "the item — the carve-out has become invisible to whoever closes it"
-            )
+    # Asserted, not guarded — a renamed or pruned item file must stop this test
+    # dead rather than leave its final assertion silently unrun (review finding,
+    # round SM_20260912_155333).
+    items = sorted((Path.home() / "obsidian" / "backlog").glob("436-*.md"))
+    assert items, (
+        "backlog/436-*.md is gone, so the prose-writer carve-out has nowhere to "
+        "live: re-record it on the item that owns #436's remaining scope, then "
+        "point this assertion at it"
+    )
+    body = items[0].read_text(encoding="utf-8", errors="replace")
+    for skill in prose:
+        assert skill in body, (
+            f"{skill} is unarchived prose-write debt on #436 but is not named in "
+            "the item — the carve-out has become invisible to whoever closes it"
+        )

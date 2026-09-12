@@ -201,6 +201,40 @@ def contract_errors(paths: list[str]) -> list[str]:
     return [f"prompt surface: {e}" for e in errs]
 
 
+def reflection_archive_errors(paths: list[str]) -> list[str]:
+    """#436: a touched skill must still archive a reflection report before it
+    overwrites it.
+
+    `skills/**` is the only tree this reads, and only the ones the round names —
+    the same scoping `contract_errors` argues for. The loaders answer "does the
+    skill still load"; a skill that instructs an in-place overwrite of
+    `_pipeline/reflection/<name>-latest.md` with no prior dated copy loads
+    perfectly and destroys a report nobody can recover, because `_pipeline/` is
+    gitignored. That question has to be answered by the writer, which is this
+    function: `tests/test_skill_reflection_archive.py` marks its live-vault
+    assertions `live_vault` precisely because the gate's hard `tests` rung is the
+    wrong place for an invariant about a tree no round under test controls, and
+    an unmarked version of them would fail the next author for the previous
+    writer's wording. Here the invariant runs on the path that actually lands.
+    """
+    skills = sorted({
+        p for p in paths
+        if p.startswith("skills/") and p.endswith("/SKILL.md") and (VAULT / p).exists()
+    })
+    if not skills:
+        return []
+    try:
+        import reflection_archive
+    except ImportError as exc:  # pragma: no cover - repo is always importable
+        return [f"reflection_archive unavailable, cannot check report retention: {exc}"]
+    errs: list[str] = []
+    for p in skills:
+        body = (VAULT / p).read_text(encoding="utf-8", errors="replace")
+        for e in reflection_archive.skill_rule_violations(p.split("/")[1], body):
+            errs.append(f"{p}: reflection report retention: {e}")
+    return errs
+
+
 def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     """(errors, buckets). Empty errors means the change may land."""
     ok, why, buckets = check_scope(paths)
@@ -219,7 +253,7 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
                 if terr:
                     errors.append(f"{p}: {terr}")
     if not errors:
-        errors.extend(contract_errors(paths))
+        errors.extend(contract_errors(paths) + reflection_archive_errors(paths))
     if not errors and buckets["validated"]:
         errors.extend(loader_errors(buckets["validated"]))
     return errors, buckets
