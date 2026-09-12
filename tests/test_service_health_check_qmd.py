@@ -256,25 +256,54 @@ def test_qmd_reachable_keeps_the_entry_healthy(monkeypatch):
     assert result["healthy"] is True, result
 
 
-def test_a_closed_port_flips_the_entry_unhealthy_with_nothing_mocked():
-    """Acceptance clause 2's unhealthy half, through entirely real machinery.
+def test_a_held_closed_port_flips_the_entry_unhealthy_with_real_sockets(monkeypatch):
+    """Acceptance clause 2's unhealthy half, through the real prober and real TCP.
 
-    Only the port number is changed: supervisor is really asked about
-    `agent-qmd-daemon` and the connect is really attempted, against a port that
-    is not listening. So the unhealthy verdict is demonstrated without taking
-    the resident daemon down, on the same code path qmd would take if its
-    listener genuinely went away while supervisor still believed it was up.
+    The connect is really attempted, over both families, at a port that is
+    provably refusing connections — so the unhealthy verdict is demonstrated
+    without taking the resident daemon down, on the code path qmd would take if
+    its listener really went away while supervisor still believed it was up.
+
+    The port is *held* rather than allocated-then-released: a socket bound to
+    `::1:p` (v6only) and `127.0.0.1:p` with no `listen()` behind it answers
+    ECONNREFUSED on both families, and the bind keeps another process from
+    taking that number mid-test. The obvious version — bind, read the ephemeral
+    port, `close()`, then probe it — passed standalone and then failed in the
+    full-suite gate run of round SM_20260912_064601, because a released
+    ephemeral port belongs to the suite again (this suite starts uvicorn
+    servers) and because this very assertion also sat on a real `supervisorctl`
+    call that the script caps at 5 s. Both of those are environment, not
+    behaviour. What is left as external is supervisor's answer, which is a fact
+    about the box rather than about this code, so it is the one thing stubbed.
     """
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.bind(("127.0.0.1", 0))
-    closed_port = listener.getsockname()[1]
-    listener.close()
+    v6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    v6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    v6.bind(("::1", 0))
+    closed_port = v6.getsockname()[1]
+    v4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        v4.bind(("127.0.0.1", closed_port))
+    except OSError as exc:  # pragma: no cover - number already used on ::1 side
+        v6.close()
+        raise AssertionError(
+            f"cannot hold both loopback families on port {closed_port}: {exc}"
+        )
+    monkeypatch.setattr(
+        shc,
+        "subprocess",
+        _StubSubprocessModule(f"{QMD}  RUNNING   pid 3129856, uptime 18:46:25"),
+    )
+    try:
+        entry = dict(shc.SERVICES[QMD])
+        entry["port"] = closed_port
+        result = shc.check_service(QMD, entry)
+    finally:
+        v4.close()
+        v6.close()
 
-    entry = dict(shc.SERVICES[QMD])
-    entry["port"] = closed_port
-    result = shc.check_service(QMD, entry)
     assert result["healthy"] is False, (
-        f"port {closed_port} is closed yet the entry reported healthy: {result}"
+        f"port {closed_port} refuses connections yet the entry reported healthy: "
+        f"{result}"
     )
     assert f"port {closed_port} FAIL" in result["status"], result
 
