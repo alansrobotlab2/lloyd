@@ -196,8 +196,8 @@ def test_denominator_is_promoted_decision_rounds(world):
         "R_20260109_000000",
     }
     # the dry-run round is the control group, not part of the measured set
-    assert result["control"]["measurable_rounds"] == 1
-    assert world["control_round"] in result["control"]["drops"]  # it has a scored drop
+    assert world["control_round"] not in [r["round_id"] for r in result["rounds"]]
+    assert result["unlanded_gate_passes"]["rows"] == 1
 
 
 def test_a_promoted_flag_on_a_non_decision_row_is_not_counted(world):
@@ -309,7 +309,12 @@ def test_beyond_noise_drop_is_attributed_to_the_round_that_promoted(tmp_path):
     plan[3] = ("R_04", 0.60)  # the promoted round
     for rid, mean in plan:
         write_round(rounds_dir, rid, mean)
-    evals = {rid: {"BASELINE_V": score(rid, mean)} for rid, mean in plan}
+    # The post-R_04 collapse has to exist in the ledger, not just the report: the
+    # baseline means are read from per-task rows, so a report-only collapse would be
+    # a fixture lying about the source of record.
+    collapsed_after = {rid: mean - 0.30 for rid, mean in plan[4:]}
+    means = {rid: collapsed_after.get(rid, mean) for rid, mean in plan}
+    evals = {rid: {"BASELINE_V": score(rid, means[rid])} for rid, _ in plan}
     evals["R_04"]["V_w"] = score("R_04", 0.70)
     decisions = [
         {"round_id": "R_04", "event": "decision", "variant_id": "V_w", "should_promote": True, "promoted": True}
@@ -319,14 +324,8 @@ def test_beyond_noise_drop_is_attributed_to_the_round_that_promoted(tmp_path):
         if rid != "R_04"
     ]
     write_ledger(ledger, evals, decisions)
-    # R_04's own round report, with the PROMOTE line the gate printed.
-    write_round(rounds_dir, "R_04", 0.60, {"V_w": (0.70, 0.10)})
     for rid, mean in plan:
-        if rid == "R_04":
-            continue
-        write_round(rounds_dir, rid, mean)
-    for rid, mean in plan[4:]:  # post-R_04 collapse
-        write_round(rounds_dir, rid, mean - 0.30)
+        write_round(rounds_dir, rid, means[rid], {"V_w": (0.70, 0.10)} if rid == "R_04" else None)
     result = pfr.measure(ledger_path=ledger, rounds_dir=rounds_dir, data_cutoff="R_07")
     assert result["fp_rounds"] == ["R_04"]
     assert result["rounds"][0]["drop"] == pytest.approx(0.30, abs=1e-3)
@@ -348,7 +347,12 @@ def test_collapsed_rounds_never_serve_as_the_control_window(tmp_path):
             means[rid],
             {"V_w": (means[rid] + 0.10, 0.10)} if rid == "R_01" else None,
         )
-    evals = {rid: {"BASELINE_V": score(rid, means[rid])} for rid in rids}
+    # A collapsed round has to collapse in the ledger rows, which is where the
+    # baseline mean is read from; score() would give it a 0.01 second task.
+    evals = {
+        rid: {"BASELINE_V": {f"task_{i}": 0.0 for i in range(2)} if means[rid] == 0.0 else score(rid, means[rid])}
+        for rid in rids
+    }
     evals["R_01"]["V_w"] = score("R_01", 0.70)
     decisions = [{"round_id": "R_01", "event": "decision", "variant_id": "V_w", "should_promote": True, "promoted": True}] + [
         {"round_id": rid, "event": "decision", "variant_id": "V_x", "should_promote": False, "promoted": False}
@@ -364,11 +368,19 @@ def test_collapsed_rounds_never_serve_as_the_control_window(tmp_path):
     assert result["fp_count"] == 0
 
 
-def test_control_group_is_gate_passed_but_unlanded_rounds(world):
-    assert world  # fixture smoke
+def test_an_unlanded_gate_pass_is_a_control_only_if_that_round_promoted_nothing(world):
+    """Control-ness is computed from the data, and the data can say no.
+
+    In this fixture the gate-passing round landed nothing, so it *is* a clean
+    no-landing control — which is exactly why the live-data test below is worth
+    writing: on the live ledger the same query returns rounds that all promoted
+    something else, and the flag flips to false.
+    """
     result = measure_world(world)
-    assert result["control"]["fp_count"] == 0
-    assert "should_promote" in result["control"]["definition"]
+    passes = result["unlanded_gate_passes"]
+    assert passes["rows"] == 1 and passes["rounds"] == [world["control_round"]]
+    assert passes["also_promoted_rounds"] == 0
+    assert passes["is_a_no_landing_control"] is True
 
 
 # ── the frozen window ────────────────────────────────────────────────────────
@@ -377,7 +389,22 @@ def test_control_group_is_gate_passed_but_unlanded_rounds(world):
 def test_rounds_after_the_cutoff_cannot_rewrite_the_measurement(world):
     """Re-arming the loop appends rounds; the published window must not move."""
     before = measure_world(world)
+    # A later round with both a report and per-task rows: re-arming the loop appends
+    # real data, not just a file.
     write_round(world["rounds"], "R_20260201_000000", 0.05)
+    rows = [line for line in world["ledger"].read_text().splitlines() if line.strip()]
+    rows += [
+        json.dumps(
+            {
+                "round_id": "R_20260201_000000",
+                "variant_id": "BASELINE_V",
+                "task_id": task_id,
+                "composite_score": value,
+            }
+        )
+        for task_id, value in score("R_20260201_000000", 0.05).items()
+    ]
+    world["ledger"].write_text("\n".join(rows) + "\n")
     after_same_cutoff = measure_world(world)
     assert after_same_cutoff["floor"] == before["floor"]
     assert after_same_cutoff["fp_count"] == before["fp_count"]
@@ -449,6 +476,14 @@ NOTE_PATH = (
 #: Backlog #324's independent figure, knowledge/evaluation/autoresearch-baseline-stability.md
 NOISE_STD_FROM_ITEM_324 = 0.1389
 
+#: Exact text of the note's ``noise_floor_source`` field. Compared for equality, not
+#: by substring: the claim is about which store the floor is computed from, and a
+#: substring check would pass on prose that named the wrong one.
+NOISE_FLOOR_SOURCE = (
+    "ledger.jsonl BASELINE_* per-task composite_score rows, averaged per round; "
+    "cross-checked against rounds/R_*.md"
+)
+
 
 def live_measure():
     return pfr.measure(
@@ -485,12 +520,29 @@ def test_live_ledger_denominator_is_sixty_five_promoted_rounds():
     assert result["data_cutoff_round"] == "R_20260908_181458"
 
 
+def test_the_floor_input_is_the_ledger_and_the_round_reports_agree():
+    """The floor is computed from the ledger's own per-task rows; the reports are the
+    cross-check, and the switch is only auditable if that check is pinned.
+
+    The reports round to 4 decimals, so agreement is to 1e-3, not to 0. Three rounds
+    have a ledger baseline and no report at all — reading the reports as the source
+    would drop them from the window without saying so.
+    """
+    check = live_measure()["report_crosscheck"]
+    assert check["source_of_record"].startswith("ledger.jsonl")
+    assert check["rounds_compared"] == 351
+    assert check["rounds_with_ledger_baseline_but_no_report"] == 3
+    assert check["mismatches"] == 0
+    assert check["max_abs_delta"] <= 1e-4
+
+
 def test_live_noise_floor_and_false_positive_rate():
     """Clauses 3, 4 and 6 — floor from on-disk data, FP only past it, band named."""
     result = live_measure()
-    assert result["floor"] == pytest.approx(0.1239, abs=1e-4)
-    assert result["null_population"]["n"] == 278
-    assert result["null_population"]["std"] == pytest.approx(0.0653, abs=1e-3)
+    assert result["floor"] == pytest.approx(0.1289, abs=1e-4)
+    assert "BASELINE_* per-task composite_score rows" in result["floor_definition"]
+    assert result["null_population"]["n"] == 281
+    assert result["null_population"]["std"] == pytest.approx(0.0649, abs=1e-3)
     assert result["fp_count"] == 0
     assert result["fp_rounds"] == []
     assert result["fp_rate_fraction"] == "0/65"
@@ -498,7 +550,7 @@ def test_live_noise_floor_and_false_positive_rate():
     # Every promoted round was still evaluated against the rule, and the largest
     # observed drop stayed under the floor — this is why the count is zero.
     assert len([r for r in result["rounds"] if r["drop"] is not None]) == 65
-    assert result["promoted_drops"]["max"] == pytest.approx(0.0866, abs=1e-3)
+    assert result["promoted_drops"]["max"] == pytest.approx(0.0867, abs=1e-3)
     assert result["promoted_drops"]["max"] < result["floor"]
     # The crude "any drop" rule, which is what the item body's 23.3% proxy was,
     # would have called 11 rounds false positives and still landed in keep-0.5.
@@ -506,16 +558,37 @@ def test_live_noise_floor_and_false_positive_rate():
     assert crude["fp_rate_fraction"] == "11/65"
     assert crude["band"] == "keep 0.5"
     assert result["sensitivities"]["std_324"]["fp_count"] == 0
-    assert result["control"]["fp_count"] == 0
-    assert result["control"]["measurable_rounds"] == 16
 
 
-@pytest.mark.live_vault
+def test_live_ledger_has_no_promotion_free_control_round():
+    """The rows that look like a control group are runner-ups, not a control.
+
+    ``should_promote: true`` with ``promoted`` false reads like "passed the gate,
+    nothing landed" — 30 such rows over 16 rounds — but every one of those 16 rounds
+    promoted a *different* variant. Scoring them as a no-landing control would have
+    been scoring the promoted group against itself, so this measures the overlap
+    rather than asserting it away. If a future round ever passes the gate and lands
+    nothing, this flips and a real control becomes available.
+    """
+    passes = live_measure()["unlanded_gate_passes"]
+    assert passes["rows"] == 30
+    assert len(passes["rounds"]) == 16
+    assert passes["also_promoted_rounds"] == 16
+    assert passes["is_a_no_landing_control"] is False
+
+
 def test_note_fields_are_reproduced_by_a_fresh_derivation():
     """Clauses 1, 3, 5 and 6 — the published note is the measurement, not prose.
 
     Every field of the note's machine-checked block must equal a fresh run over the
     cutoff the note itself declares; a hand-edited number fails here.
+
+    Deliberately NOT marked ``live_vault``. That marker is for files an autoresearch
+    promotion or a nightly job rewrites, and the gate run deselects it — but this note
+    is the artefact this repo exists to keep honest, and the boundary between the code
+    and the published number is the seam that has to be crossed on the graded run. The
+    note is not rewritten by anything except a re-measurement, and the window it
+    reports is frozen by cutoff, so the assertion is stable.
     """
     result = live_measure()
     block = note_machine_checked_block()
@@ -525,8 +598,7 @@ def test_note_fields_are_reproduced_by_a_fresh_derivation():
     assert block["alpha"] == result["alpha"]
     assert block["denominator"] == result["denominator"] == 65
     assert block["noise_floor"] == result["floor"]
-    assert "ledger.jsonl" in block["noise_floor_source"]
-    assert "rounds/R_*.md" in block["noise_floor_source"]
+    assert block["noise_floor_source"] == NOISE_FLOOR_SOURCE
     assert block["null_population_n"] == result["null_population"]["n"]
     assert block["null_population_std"] == result["null_population"]["std"]
     assert block["null_population_p95"] == result["floor"]
@@ -534,18 +606,30 @@ def test_note_fields_are_reproduced_by_a_fresh_derivation():
     assert block["fp_rate"] == result["fp_rate"]
     assert block["fp_rate_fraction"] == result["fp_rate_fraction"]
     assert block["band"] == result["band"]
-    assert block["control_rounds"] == result["control"]["measurable_rounds"]
-    assert block["control_fp_count"] == result["control"]["fp_count"]
+    assert block["report_crosscheck_max_abs_delta"] == result["report_crosscheck"]["max_abs_delta"]
+    assert block["report_crosscheck_mismatches"] == result["report_crosscheck"]["mismatches"]
+    assert block["unlanded_gate_pass_rows"] == result["unlanded_gate_passes"]["rows"]
+    assert block["unlanded_gate_pass_rounds"] == len(result["unlanded_gate_passes"]["rounds"])
+    assert (
+        block["unlanded_gate_pass_rounds_also_promoted"]
+        == result["unlanded_gate_passes"]["also_promoted_rounds"]
+    )
+    assert block["expected_false_alarms_at_alpha"] == result["expected_false_alarms_at_alpha"]
     assert block["fp_rounds"] == result["fp_rounds"] == []
 
 
-@pytest.mark.live_vault
 def test_note_states_the_method_deviation_and_the_band():
+    """Prose-level presence checks for the same note; see the test above for why
+    this one also runs on the graded gate pass.
+    """
     text = NOTE_PATH.read_text(encoding="utf-8")
     lowered = text.lower()
     # clause 5: both unavailable controls, each with its evidence
     for needle in ("same-trace re-scoring", "same-day control round", "run_spec.yaml", "enabled: false"):
         assert needle in lowered, f"missing method-deviation evidence: {needle!r}"
+    # and no phantom matched control: the note must say what the runner-ups actually are
+    assert "not promotion-free rounds" in lowered
+    assert "is_a_no_landing_control" in lowered
     # clause 6: the bands, and which one the number lands in
     for needle in ("keep 0.5", "0.575", "revert to 0.6"):
         assert needle in text, f"missing #352 band text: {needle!r}"

@@ -22,7 +22,7 @@ Why not the clean controls
       closes), so no new round of any kind can be produced.
 
 What is used instead
-    Two controls that are already on disk.
+    One control is available on disk, and it is the one that matters.
 
     1. **The null distribution of the drop statistic itself.** For a round ``r``
        let ``bm(r)`` be the ``baseline mean composite`` recorded in
@@ -39,11 +39,13 @@ What is used instead
        round nor a collapse (``bm == 0``, an infrastructure failure rather than a
        measurement).
 
-    2. **A matched control group of gate-passing rounds that were not landed.**
-       The ledger records rounds whose variant passed the gate but was not
-       applied (``should_promote: true`` with ``promoted`` false — dry-run
-       rounds). They got the same decision and no prompt change, so their drop
-       rate is what "beyond-noise drop with no promotion anywhere" looks like.
+    There is deliberately no second, matched control group. The rows that look
+    like one — ``should_promote: true`` with ``promoted`` false — turn out to be
+    *runner-up variants inside rounds that did promote something*: all 16 distinct
+    rounds carrying them are promoted rounds. They therefore cannot show what a
+    beyond-noise drop looks like "with no promotion anywhere", and any control of
+    that shape would be a restatement of the null. :func:`unlanded_pass_rounds`
+    returns them with that caveat attached rather than dressed up as a control.
 
     A promoted round counts as a false positive **only** when ``D(r) > floor``.
 
@@ -148,7 +150,14 @@ def promoted_rounds(ledger_path: Path) -> dict[str, list[str]]:
     return rounds_by_predicate(decision_rows(ledger_path), lambda r: bool(r.get("promoted")))
 
 
-def control_rounds(ledger_path: Path) -> dict[str, list[str]]:
+def unlanded_pass_rounds(ledger_path: Path) -> dict[str, list[str]]:
+    """Rounds carrying a variant that passed the gate but was not the one applied.
+
+    Whether they *are* a control is data, not assertion: it holds only if none of
+    these rounds also promoted something. On the live ledger all 16 do, so the
+    answer there is no — see ``unlanded_gate_passes`` in the report, and the
+    fixture/live pair in ``tests/test_promotion_fp_rate.py`` that pins both sides.
+    """
     return rounds_by_predicate(
         decision_rows(ledger_path),
         lambda r: bool(r.get("should_promote")) and not r.get("promoted"),
@@ -163,6 +172,22 @@ def baseline_means(rounds_dir: Path) -> dict[str, float]:
         match = BASELINE_RE.search(text)
         if match:
             out[path.stem] = float(match.group(1))
+    return out
+
+
+def baseline_means_from_ledger(table: dict[tuple[str, str], dict[str, float]]) -> dict[str, float]:
+    """``{round_id: mean composite of that round's BASELINE_* variant}``.
+
+    Built from the per-task ``composite_score`` rows, so the noise floor and the
+    denominator come from one store. A round whose baseline row-set is missing is
+    simply absent from the result, which is what makes a missing round visible in the
+    counts rather than silently absorbed.
+    """
+    out: dict[str, float] = {}
+    for (rid, vid), scores in table.items():
+        if not vid.startswith("BASELINE") or not scores:
+            continue
+        out[rid] = statistics.fmean(scores.values())
     return out
 
 
@@ -264,10 +289,19 @@ def measure(
     """Recompute the whole measurement. Every number in the #428 note is one of these."""
     decisions = decision_rows(ledger_path)
     promoted = rounds_by_predicate(decisions, lambda r: bool(r.get("promoted")))
-    control = rounds_by_predicate(
+    unlanded_passes = rounds_by_predicate(
         decisions, lambda r: bool(r.get("should_promote")) and not r.get("promoted")
     )
-    bm_all = baseline_means(rounds_dir)
+    rows = per_task_rows(ledger_path)
+    table = score_table(rows)
+    # The floor's input is the ledger's own per-task composite_score rows: a round's
+    # baseline mean composite is the mean of its BASELINE_* variant's task scores. The
+    # round reports are the cross-check, not the source — they exist for 351 of the 354
+    # rounds, so reading them instead would silently drop three rounds from the window.
+    bm_all = baseline_means_from_ledger(table)
+    reported = baseline_means(rounds_dir)
+    compared = sorted(set(bm_all) & set(reported))
+    report_deltas = [abs(bm_all[rid] - reported[rid]) for rid in compared]
     cutoff = data_cutoff or max(bm_all)
 
     rounds = [rid for rid in sorted(bm_all) if rid <= cutoff]
@@ -290,9 +324,9 @@ def measure(
     if not null_values:
         raise ValueError(
             f"no null population in the window ending {cutoff}: every round with a baseline "
-            f"mean was promoted, or the window has no rounds after its rounds. The floor is "
-            f"measured against non-promoted rounds, so it cannot be estimated here — widen "
-            f"--data-cutoff or --window rather than assuming a floor."
+            f"mean was promoted, or the window has no rounds after its rounds. "
+            f"The floor is measured against rounds nothing was landed in, so it cannot be "
+            f"estimated here — widen --data-cutoff or --window rather than assuming a floor."
         )
     floor = percentile(null_values, 1 - alpha)
 
@@ -317,14 +351,13 @@ def measure(
         return records
 
     promoted_records = score_group(promoted)
-    control_records = score_group(control)
     scored = [r for r in promoted_records if r["drop"] is not None]
-    control_scored = [r for r in control_records if r["drop"] is not None]
 
-    def summarise(records: list[dict], denominator: int) -> dict:
+    def summarise(records: list[dict], denominator: int, all_records: list[dict] | None = None) -> dict:  # noqa: E501
         hits = [r["round_id"] for r in records if r["is_fp"]]
         rate = len(hits) / denominator if denominator else 0.0
         return {
+            "rounds_total": len(all_records if all_records is not None else records),
             "measurable_rounds": len(records),
             "fp_count": len(hits),
             "fp_rate": round(rate, 4),
@@ -335,8 +368,7 @@ def measure(
         }
 
     denominator = len(promoted_records)
-    primary = summarise(scored, denominator)
-    control_summary = summarise(control_scored, len(control_records))
+    primary = summarise(scored, denominator, promoted_records)
     drops = [r["drop"] for r in scored]
 
     sensitivities = {}
@@ -352,8 +384,6 @@ def measure(
             "rounds": hits,
         }
 
-    rows = per_task_rows(ledger_path)
-    table = score_table(rows)
     paired, best_null = paired_deltas(table, set(rounds), promoted)
     deltas = recorded_deltas(rounds_dir)
     gain = []
@@ -392,12 +422,22 @@ def measure(
         "per_task_score_rows": len(rows),
         "distinct_task_ids": len({r["task_id"] for r in rows}),
         "rounds_with_baseline_mean_in_window": len(rounds),
+        "report_crosscheck": {
+            "source_of_record": "ledger.jsonl BASELINE_* per-task composite_score rows",
+            "compared_against": "rounds/R_*.md '- baseline mean composite:' lines",
+            "rounds_compared": len(compared),
+            "rounds_with_ledger_baseline_but_no_report": len(set(bm_all) - set(reported)),
+            "max_abs_delta": round(max(report_deltas), 6) if report_deltas else None,
+            "tolerance": 1e-3,
+            "mismatches": sum(1 for d in report_deltas if d > 1e-3),
+        },
         "rounds_excluded_zero_baseline": len(collapsed),
         "denominator": denominator,
         "floor": round(floor, 4),
         "floor_definition": (
             f"{round((1 - alpha) * 100)}th percentile of the drop statistic over the "
-            f"null (non-promoted, non-collapsed) rounds in the window"
+            f"null (non-promoted, non-collapsed) rounds in the window; each round's "
+            f"baseline mean is the mean of its BASELINE_* per-task composite_score rows"
         ),
         "null_population": {
             "n": len(null_values),
@@ -424,12 +464,16 @@ def measure(
         "fp_rounds": primary["fp_rounds"],
         "band": primary["band"],
         "expected_false_alarms_at_alpha": round(alpha * denominator, 2),
-        "control": {
-            "definition": (
-                "rounds whose variant passed the gate (should_promote: true) but was "
-                "not applied (promoted falsy) — the same decision, no prompt change"
+        "unlanded_gate_passes": {
+            "rounds": sorted(unlanded_passes),
+            "rows": sum(1 for d in decisions if d.get("should_promote") and not d.get("promoted")),
+            "also_promoted_rounds": len(set(unlanded_passes) & set(promoted)),
+            "is_a_no_landing_control": not (set(unlanded_passes) & set(promoted)),
+            "why": (
+                "every distinct round carrying an unlanded gate-pass is itself a "
+                "promoted round, so these are runner-up variants, not promotion-free "
+                "rounds — they cannot calibrate a no-promotion drop rate"
             ),
-            **control_summary,
         },
         "sensitivities": sensitivities,
         "gain_side": {
