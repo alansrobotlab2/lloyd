@@ -40,10 +40,23 @@ What each clause is pinned by
    destination is ``$STAMP``/``$(date …)`` and that variable is assigned from
    ``date -u … +%Y-%m-%d-%H%M`` on the same logical line) and
    ``test_no_skill_builds_an_archive_name_from_a_generated_field``.
-4. *No gitignored file under ``~/lloyd`` is touched* → this test reads skill
-   markdown only; it never opens ``_pipeline/`` (see
-   ``test_the_check_needs_no_pipeline_directory``), so retention can never be
-   "achieved" by tracking the gitignored tree.
+4. *No gitignored file under ``~/lloyd`` is touched* → the diff is this one file
+   under ``tests/``, and
+   ``test_pipeline_stays_gitignored_so_retention_is_copies_not_tracking`` fails if
+   ``_pipeline/`` ever stops being ignored — which is the other route #436 names
+   and deliberately does not take (it is Alan's decision, not a side effect).
+
+Where these run, and why that is not a weakening
+------------------------------------------------
+The tests that read ``~/obsidian/skills`` carry ``live_vault`` (pytest.ini:6-12):
+skill prose is state no round under test controls, and an hourly autoresearch
+promotion that rewords some unrelated skill must not fail the next author's hard
+gate. The pure-logic tests — the mutations that prove every assertion here can
+fail, and the git-ignore pin — carry no mark and run on every rung. So the pin
+binds through the full suite (where the nightly run executes it) and through the
+archive assertions' own non-vacuity tests; the vault-reading assertions are the
+reporting copy that pytest.ini describes, not a gate the previous writer's wording
+should trip.
 
 How writers are recognised, and why the carve-outs are honest
 -------------------------------------------------------------
@@ -184,9 +197,14 @@ def _active_skills() -> dict[str, str]:
 
 @pytest.fixture(scope="module")
 def skills() -> dict[str, str]:
+    """Active skill bodies. Every test using this reads state no round controls, so
+    those tests carry `live_vault`; an unreadable skill tree is a failure, not a skip
+    — a green run that read nothing is exactly the vacuity this file argues against."""
     bodies = _active_skills()
-    if not bodies:
-        pytest.skip("no skills directory on this machine")
+    assert bodies, (
+        f"no SKILL.md found under {SKILLS_DIRS} — the skills tree is what this check "
+        "reads, so a run that found none proves nothing and must not pass"
+    )
     return bodies
 
 
@@ -225,22 +243,41 @@ def _heading_verb(body_lines: list[str], idx: int) -> str | None:
     return None
 
 
-def _line_tier(body_lines: list[str], idx: int, line: str) -> str:
+def _prose_write_before_path(line: str, needle: str) -> bool:
+    """A prose instruction governing *this* path: the verb must precede the path.
+
+    Position is what separates an instruction from an annotation. "Read the previous
+    report and merge everything into `<path>`" is a write that also reads, and must
+    not be talked out of being one by the word `Read` at its head; while
+    "`Read(file_path="<path>")` — Same rule for the handoff write below" mentions a
+    write that belongs to a different file, and reading a report does not make a
+    reader a writer. An instruction puts its verb in front of its object.
+    """
+    at = line.find(needle)
+    if at < 0:
+        return False
+    head = line[:at]
+    return bool(_WRITE_TO.search(head) or _PROSE_WRITE.search(head))
+
+
+def _line_tier(body_lines: list[str], idx: int, line: str, needle: str) -> str:
     """One mention line's tier.
 
     `vault_write` is asked before the "Write to" prose form because the skills that
     use that form are writing *to vault_write* — an instruction that cannot reach
     the path. The direct-call test comes first of all so a skill that names both
     (`Write(file_path=…)` — "`Write` not `vault_write`") still reads as a writer.
+    Write tiers are then asked **before** `read`: a line that both reads and writes
+    the path destroys the report, which is the thing being guarded.
     """
     if _TOOL_WRITE.search(line):
         return "tool-write"
     if _VAULT_WRITE.search(line):
         return "vault-write"
+    if _prose_write_before_path(line, needle):
+        return "prose-write"
     if _READ.search(line):
         return "read"
-    if _WRITE_TO.search(line) or _PROSE_WRITE.search(line):
-        return "prose-write"
     return _heading_verb(body_lines, idx) or "unclassified"
 
 
@@ -251,10 +288,11 @@ def _classify(body: str, stem: str) -> str:
     the write, and the archive step is required by the write.
     """
     lines = _logical_lines(body)
+    needle = f"_pipeline/reflection/{stem}.md"
     mentions = _mention_lines(body, stem)
     if not mentions:
         return "absent"
-    tiers = {_line_tier(lines, idx, line) for idx, line in mentions}
+    tiers = {_line_tier(lines, idx, line, needle) for idx, line in mentions}
     for tier in ("tool-write", "vault-write", "prose-write", "read", "unclassified"):
         if tier in tiers:
             return tier
@@ -272,12 +310,17 @@ def _classify_all(skills: dict[str, str]) -> dict[tuple[str, str], str]:
 def _archive_problems(body: str, stem: str) -> list[str]:
     """Why this skill does not archive `stem` before overwriting it, or []."""
     problems: list[str] = []
-    copied = [ln for ln in _logical_lines(body) if _COPY.search(ln) and _archive_dest(stem).search(ln)]
-    if not copied:
+    lines = _logical_lines(body)
+    needle = f"_pipeline/reflection/{stem}.md"
+    copy_at = [
+        i for i, ln in enumerate(lines) if _COPY.search(ln) and _archive_dest(stem).search(ln)
+    ]
+    if not copy_at:
         problems.append(
             f"no dated-copy archive step for {stem}: no cp to `{stem}-<stamp>.md`"
         )
         return problems
+    copied = [lines[i] for i in copy_at]
     if not any(f"{stem}.md" in ln for ln in copied):
         problems.append(
             f"archive step for {stem} never names the live path it is copying from"
@@ -287,6 +330,19 @@ def _archive_problems(body: str, stem: str) -> list[str]:
             f"archive stamp for {stem} is not derived from a UTC command "
             f"(`date -u … +%Y-%m-%d-%H%M`, or the source's mtime)"
         )
+    # "Before it is overwritten" is the clause, so order is part of what is pinned:
+    # an archive step written *below* the write instruction copies the new report and
+    # loses the old one exactly as completely as no copy at all.
+    write_at = [
+        i for i, ln in enumerate(lines) if needle in ln and _TOOL_WRITE.search(ln)
+    ]
+    if write_at and min(copy_at) > min(write_at):
+        problems.append(
+            f"archive step for {stem} appears after the instruction that overwrites it"
+        )
+    read_at = [i for i, ln in enumerate(lines) if needle in ln and re.search(r"(?<![A-Za-z_])\bRead\s*\(", ln)]
+    if read_at and write_at and min(read_at) > min(write_at):
+        problems.append(f"{stem} is written before it is read, so Write was refused on every run")
     return problems
 
 
@@ -306,20 +362,26 @@ EXPECTED_TOOL_WRITERS: dict[str, set[str]] = {
 # test_declared_write_prescriptions_are_still_accurate, and the discovered tier-2
 # set must equal this set. If a skill here gains a real Write call it moves to
 # tier 1 and owes an archive step; both families are recorded as findings on #436.
-EXPECTED_UNARCHIVED_WRITERS: dict[str, set[str]] = {
-    # Prescribes the write through vault_write / mem_write, which reject any
-    # ~/lloyd/ target with PATH_ESCAPE — the instruction cannot destroy a report.
-    # (`autonomy-reflection-pipeline` names prompt-audit-latest and
-    # test-results-latest only inside Step 6.1's *read* list, so they classify as
-    # reads; it prescribes producing them by bare filename, which no path-shaped
-    # check can attribute.)
+#: Write prescriptions routed through vault_write / mem_write, which reject any
+#: ~/lloyd/ target with PATH_ESCAPE — the instruction cannot destroy a report, so
+#: the absence of an archive step costs nothing today.
+#: (`autonomy-reflection-pipeline` names prompt-audit-latest and test-results-latest
+#: only inside Step 6.1's *read* list, so they classify as reads; it prescribes
+#: producing them by bare filename, which no path-shaped check can attribute.)
+EXPECTED_VAULT_WRITE_WRITERS: dict[str, set[str]] = {
     "autonomy-reflection-pipeline": {"signals-latest", "day-end-synthesis-latest"},
     "nightly-prompt-audit": {"prompt-audit-latest"},
     "nightly-behavior-test": {"test-results-latest"},
     "nightly-day-end-synthesis": {"day-end-synthesis-latest"},
-    # Prose writes ("**Consolidate signals:** Merge all `signals-YYYY-MM-DD.md`
-    # into …", lines 94-98) — a real loss vector when the refresh is run, with no
-    # dated copy and no tool call for this check to bind. Finding on #436.
+}
+
+#: The disclosed debt, checked family by family by
+#: test_the_prose_writer_carve_out_is_debt_recorded_on_436. These skills really do
+#: instruct overwriting the live reports and really do have no archive step; this
+#: check cannot bind them because it binds instructions a run executes, and prose is
+#: not one. Recorded on #436 (round SM_20260912_155333 findings) as the item's scope,
+#: not this test's exemption: the set is asserted equal, so it can only shrink.
+EXPECTED_PROSE_WRITERS: dict[str, set[str]] = {
     "historical-knowledge-refresh": {
         "signals-latest",
         "tool-patterns-latest",
@@ -327,8 +389,15 @@ EXPECTED_UNARCHIVED_WRITERS: dict[str, set[str]] = {
     },
 }
 
+EXPECTED_UNARCHIVED_WRITERS: dict[str, set[str]] = {
+    name: set(stems) for name, stems in EXPECTED_VAULT_WRITE_WRITERS.items()
+}
+for _name, _stems in EXPECTED_PROSE_WRITERS.items():
+    EXPECTED_UNARCHIVED_WRITERS.setdefault(_name, set()).update(_stems)
+
 
 # --- Clause 1 + 2 ---------------------------------------------------------------
+@pytest.mark.live_vault
 def test_every_skill_that_writes_a_reflection_report_archives_it_first(skills):
     """The acceptance clause: every live nightly reflection report gets a dated
     copy before it is overwritten, on every cycle, pinned here rather than by the
@@ -348,6 +417,7 @@ def test_every_skill_that_writes_a_reflection_report_archives_it_first(skills):
     )
 
 
+@pytest.mark.live_vault
 def test_discovered_tool_writers_are_exactly_the_expected_set(skills):
     """Anti-drift for the classifier itself: a new tool-writer, or one that
     disappears, is a decision someone has to record here."""
@@ -362,6 +432,7 @@ def test_discovered_tool_writers_are_exactly_the_expected_set(skills):
     )
 
 
+@pytest.mark.live_vault
 def test_knowledge_write_section_2e_archives_both_pattern_files(skills):
     """Clause 1 by name: §2e of nightly-reflection-knowledge-write, for each of
     the two pattern files — Read the existing file, copy it to a dated path, then
@@ -379,13 +450,19 @@ def test_knowledge_write_section_2e_archives_both_pattern_files(skills):
             f"§2e must Read and dated-copy {stem}.md before overwriting it: "
             f"{_archive_problems(section, stem)}"
         )
-        assert re.search(r"(?<![A-Za-z_])\bRead\s*\(", section), (
-            "§2e must Read the existing pattern file: Write refuses an unread "
-            "file, so an instruction that omits it was refused on every run"
+        # Per file, not per section: clause 1 says "for each of", and one Read
+        # anywhere in §2e would satisfy a section-wide search while leaving the
+        # other pattern file's overwrite unread.
+        assert re.search(
+            r"(?<![A-Za-z_])\bRead\s*\(\s*[\"'`][^\"'`]*" + re.escape(stem) + r"\.md", section
+        ), (
+            f"§2e must Read {stem}.md itself: Write refuses a file it has not read "
+            "in the session, so the instruction has to name this file"
         )
 
 
 # --- Clause 3 ------------------------------------------------------------------
+@pytest.mark.live_vault
 def test_archive_stamp_is_derived_from_a_utc_command(skills):
     """The archive name must come from `date -u … +%Y-%m-%d-%H%M` (or the source's
     mtime) — never a hand-typed date."""
@@ -411,6 +488,7 @@ def _sentences_mentioning(text: str, token: str) -> list[str]:
     return [s for s in re.split(r"(?<=[.!?:])\s+", flat) if token in s]
 
 
+@pytest.mark.live_vault
 def test_no_skill_builds_an_archive_name_from_a_generated_field(skills):
     """Clause 3's negative half. The report's own `generated:` header is a local
     (PST) clock reading, so a copy named from it sorts 8 hours out from the
@@ -443,14 +521,13 @@ def test_pipeline_stays_gitignored_so_retention_is_copies_not_tracking():
     import subprocess
 
     probe = "_pipeline/reflection/signals-latest.md"
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(ROOT), "check-ignore", "-q", probe],
-            capture_output=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pytest.skip("git unavailable; cannot check the ignore rule")
+    # No skip here: this asserts repo state the round does control, and a run that
+    # cannot ask git is a failure worth seeing, not a green line.
+    proc = subprocess.run(
+        ["git", "-C", str(ROOT), "check-ignore", "-q", probe],
+        capture_output=True,
+        timeout=30,
+    )
     assert proc.returncode == 0, (
         f"`{probe}` is no longer gitignored. #436 keeps the nightly reports out of "
         "the repo and archives them as dated copies; committing generated reports "
@@ -503,6 +580,15 @@ def test_the_archive_check_can_actually_fail():
             f"{_LIVE[:-3]}-$STAMP.md",
             "/home/alansrobotlab/lloyd/_pipeline/reflection/other-latest-$STAMP.md",
         ),
+        # "before it is overwritten" is part of the clause, not a suggestion: the
+        # same two instructions in the other order copy the new report and lose the
+        # old one, so a check blind to order would pass a body that saves nothing.
+        "the archive step written below the overwrite": "\n".join(
+            ["### 2e. Pattern Output Files\n", _READ_LINE, "", _WRITE_LINE, _COPY_LINE, ""]
+        ),
+        "the read written below the overwrite": "\n".join(
+            ["### 2e. Pattern Output Files\n", _COPY_LINE, "", _WRITE_LINE, _READ_LINE, ""]
+        ),
     }
     for label, body in cases.items():
         problems = _archive_problems(body, _STEM)
@@ -517,6 +603,29 @@ def test_the_archive_check_can_actually_fail():
         f'Write to `vault_write(path="~/lloyd/_pipeline/reflection/{_STEM}.md")`:\n'
     )
     assert _classify(vault, _STEM) == "vault-write"
+
+    # A line that reads *and* destroys the file is a write. If `read` won here, a
+    # skill could say "Read the previous report and merge everything into <path>",
+    # classify as a reader, and escape the archive rule, the tier-2 set equality and
+    # the unclassified alarm all at once — so this case is the leak, pinned.
+    read_merge = (
+        f'Read the previous report and merge everything into '
+        f'`~/lloyd/_pipeline/reflection/{_STEM}.md`\n'
+    )
+    assert _classify(read_merge, _STEM) == "prose-write", (
+        "a read-and-merge instruction was classified as a harmless read"
+    )
+    # Its inverse: a genuine read annotated with a write that belongs to another
+    # file further down the line stays a reader. Without this pair the rule would
+    # simply be "any line mentioning a write verb is a writer", which is wrong.
+    annotated_read = (
+        f'1. Signal report: `Read(file_path="/home/alansrobotlab/lloyd/_pipeline/'
+        f'reflection/{_STEM}.md")` — absolute path, not `vault_read`. Same rule for '
+        f"the handoff write below and for reading it back.\n"
+    )
+    assert _classify(annotated_read, _STEM) == "read", (
+        "a reader was recruited as a writer by a noun belonging to another file"
+    )
 
 
 def test_the_generated_field_check_can_actually_fail():
@@ -546,6 +655,7 @@ def test_the_generated_field_check_can_actually_fail():
     assert flagged == [], f"a permitted, negated mention was flagged: {flagged}"
 
 
+@pytest.mark.live_vault
 def test_classification_survives_an_unclassifiable_mention(skills):
     """Every mention must be attributed. A path that is neither written nor read
     nor prose-written lands in `unclassified`, which is how an under-inclusive
@@ -561,6 +671,7 @@ def test_classification_survives_an_unclassifiable_mention(skills):
     )
 
 
+@pytest.mark.live_vault
 def test_declared_write_prescriptions_are_still_accurate(skills):
     """The tier-2 carve-outs must still describe reality, and no new one may
     appear unlisted. A carve-out that outlives its reason would quietly exempt a
@@ -582,4 +693,46 @@ def test_declared_write_prescriptions_are_still_accurate(skills):
                 f"{name}:{stem} changed classification to "
                 f"{classified.get((name, stem))}; if it now writes with Write/Edit "
                 "it must archive before overwriting"
+            )
+
+
+@pytest.mark.live_vault
+def test_the_prose_writer_carve_out_is_debt_recorded_on_436(skills):
+    """The honest limit of this guard, stated as an assertion rather than a comment.
+
+    This file binds three write prescriptions and leaves four instructions alone:
+    `historical-knowledge-refresh/SKILL.md:93-97` instructs merging into all three
+    live reports, and nothing in the repo executes a `cp` for it, because the check
+    binds instructions a run *executes* and that skill's write is a sentence. It is
+    carved out as a finding on #436 (round SM_20260912_155333), not silently covered
+    by a rule that reads "every writer". Asserted family by family so the debt can
+    only shrink: a new prose writer has to be added here, which is a decision with a
+    name on it, and a prose writer that is fixed disappears from it.
+    """
+    classified = _classify_all(skills)
+    prose: dict[str, set[str]] = {}
+    vault: dict[str, set[str]] = {}
+    for (name, stem), tier in classified.items():
+        if tier == "prose-write":
+            prose.setdefault(name, set()).add(stem)
+        elif tier == "vault-write":
+            vault.setdefault(name, set()).add(stem)
+    assert prose == EXPECTED_PROSE_WRITERS, (
+        f"prose writers changed: found {prose}, expected {EXPECTED_PROSE_WRITERS}. "
+        "Either one was fixed (delete its entry) or a new skill writes reports in "
+        "prose — which is a finding on #436, not an entry added to keep green."
+    )
+    assert vault == EXPECTED_VAULT_WRITE_WRITERS, (
+        f"vault_write-shaped prescriptions changed: found {vault}, expected "
+        f"{EXPECTED_VAULT_WRITE_WRITERS}"
+    )
+    # The debt is on the item, not just in this file: if #436 closes while a prose
+    # writer still has no archive step, whoever closed it read this and disagreed.
+    item = sorted((Path.home() / "obsidian" / "backlog").glob("436-*.md"))
+    if item:
+        body = item[0].read_text(encoding="utf-8", errors="replace")
+        for skill in prose:
+            assert skill in body, (
+                f"{skill} is unarchived prose-write debt on #436 but is not named in "
+                "the item — the carve-out has become invisible to whoever closes it"
             )
