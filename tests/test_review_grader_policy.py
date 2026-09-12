@@ -178,9 +178,11 @@ def test_decide_dispatches_on_the_configured_policy(monkeypatch):
     assert RV.decide(parsed, [], attempt=1)[0] == "retry"
 
 
-def test_the_default_policy_is_table():
+def test_the_shipped_policy_is_grader():
+    """Flipped 2026-09-12 after the calibration suite scored the two policies
+    equal on identical grader output. The `table` code stays for a revert."""
     from app.config import CONFIG
-    assert ((CONFIG.get("automod") or {}).get("review") or {}).get("policy") == "table"
+    assert ((CONFIG.get("automod") or {}).get("review") or {}).get("policy") == "grader"
 
 
 # ---------------------------------------------------------------------------

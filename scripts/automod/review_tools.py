@@ -230,7 +230,15 @@ def calibrate(*, repo: Path | None = None, fixture_dir: Path | None = None, grad
         rows.append({"name": case["name"], "ok": ok, "why": why, "kind": result.get("kind"),
                      "findings": (result.get("findings") or result.get("error") or "")[:400],
                      "session_id": result.get("session_id"), "provisional": case.get("provisional", False),
-                     "seconds": round(time.time() - started, 1)})
+                     "seconds": round(time.time() - started, 1),
+                     # The parsed review and the prechecks, so a policy change
+                     # can be judged on THIS grader output rather than on a
+                     # second nondeterministic run: `RV.decide(row["result"],
+                     # row["result"]["prechecks"], mode=...)`.
+                     "result": {k: result.get(k) for k in (
+                         "premise", "clauses", "test_honesty", "seams_unverified",
+                         "downgraded", "summary", "amendments_ok", "amendments_note",
+                         "prechecks", "policy")}})
     return rows
 
 

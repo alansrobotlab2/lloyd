@@ -420,6 +420,23 @@ from scripts.automod import backlog as B  # noqa: E402
 from scripts.automod import spec as SP    # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _table_policy(monkeypatch):
+    """This file tests the TABLE review policy's mechanics — seams by attempt,
+    precheck severities, amendment handling. The shipped policy is `grader`
+    since 2026-09-12 (`tests/test_review_grader_policy.py` covers it), and the
+    table code stays for a one-key revert, so its tests keep pinning it. Set
+    through the config both readers consult (`review.review_policy` and
+    `gate._review_policy`), not by patching one of them."""
+    from app.config import CONFIG
+    automod = dict(CONFIG.get("automod") or {})
+    review = dict(automod.get("review") or {})
+    review["policy"] = "table"
+    automod["review"] = review
+    monkeypatch.setitem(CONFIG, "automod", automod)
+
+
+
 def test_a_scope_refusal_names_the_move():
     """A round told only that it may not have a path reached for `git add -f`,
     which defeats the check rather than reporting past it.

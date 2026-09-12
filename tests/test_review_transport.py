@@ -30,6 +30,23 @@ from workers.sources import autocode as I
 from workers.sources import autotriage as AT
 
 
+@pytest.fixture(autouse=True)
+def _table_policy(monkeypatch):
+    """This file tests the TABLE review policy's mechanics — seams by attempt,
+    precheck severities, amendment handling. The shipped policy is `grader`
+    since 2026-09-12 (`tests/test_review_grader_policy.py` covers it), and the
+    table code stays for a one-key revert, so its tests keep pinning it. Set
+    through the config both readers consult (`review.review_policy` and
+    `gate._review_policy`), not by patching one of them."""
+    from app.config import CONFIG
+    automod = dict(CONFIG.get("automod") or {})
+    review = dict(automod.get("review") or {})
+    review["policy"] = "table"
+    automod["review"] = review
+    monkeypatch.setitem(CONFIG, "automod", automod)
+
+
+
 def git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=False)
 

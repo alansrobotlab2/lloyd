@@ -759,8 +759,14 @@ automod:
     # judgments the grader makes per finding — `actionable_in_round` and
     # `same_as_prior` — and an eight-line decide. The grader holds the diff,
     # the clauses, its own prior reviews and the tree; the table held none of
-    # them. Flipped only once the calibration suite scored it equal or better.
-    policy: table
+    # them.
+    # `grader` since 2026-09-12: graded once and decided under both, the two
+    # policies scored equal on the calibration suite (2/4; both #544 cases
+    # agree). On a first attempt the grader policy's blocking set is a strict
+    # subset of the table's, so every refusal it makes the table would have
+    # made; the only new behaviour is passing a round the table would refuse
+    # on a finding nobody can act on inside the round — the #859 shape.
+    policy: grader
   landing:
     idle_max_wait_s: 900
     idle_quiet_polls: 3
