@@ -428,6 +428,45 @@ def clean_clauses(values) -> list[str]:
     return out
 
 
+# A clause that can only be OBSERVED once the change is live. The prompt tells
+# triage to put these under HUMAN_CLAUSES, and this is the backstop for when it
+# does not: #859 was refused twice on "needs a day of post-change traffic" with
+# its mechanism complete on both commits, and parked.
+#
+# Deliberately narrow. A clause mentioning "traffic" in passing is not one of
+# these; the shapes here all say the evidence arrives with TIME, which is
+# exactly what a pre-landing gate cannot wait for. A false positive moves a
+# gradeable clause out of the graded contract, which is worse than a false
+# negative — the review rung's own `post_landing` verdict catches what this
+# misses.
+POST_LANDING_RX = re.compile(
+    r"(?:"
+    r"after (?:it|the change|this) (?:has )?land(?:s|ed|ing)"
+    r"|post[- ]landing"
+    r"|once (?:it|the change|this) is live"
+    r"|(?:a |one )?(?:day|week|24 hours|48 hours) of (?:real )?traffic"
+    r"|over (?:a|the) (?:next )?(?:day|week|month)"
+    r"|(?:the )?next nightly run"
+    r"|in production over"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def split_post_landing_clauses(clauses) -> tuple[list[str], list[str]]:
+    """`(graded, post_landing)` — clauses a gate can judge, and the rest.
+
+    Applied at `record_verdict`, so a triage verdict that put a
+    can-only-be-seen-later clause in ACCEPTANCE_CLAUSES has it moved to
+    `human_clauses` before any round is held to it.
+    """
+    graded: list[str] = []
+    later: list[str] = []
+    for c in (clauses or []):
+        (later if POST_LANDING_RX.search(str(c or "")) else graded).append(c)
+    return graded, later
+
+
 _CLAUSE_LINE = re.compile(r"^\s*(\d{1,2})[.)]\s+(.*\S)\s*$")
 
 
@@ -2069,10 +2108,62 @@ def select_confirmed(ledger: Path,
     # confirmations before other re-offers — oldest-first alone let a
     # sent-back item be re-picked on the very next round for as long as its
     # cap allowed, monopolising the loop while the rest of the pool waited.
-    near = last_review_all_met(ledger)
+    near = set(last_review_all_met(ledger))
+    # A FIRST re-offer whose branch still holds the work belongs in the same
+    # tier, for the same reason: it is a fix cycle, not an hour.
+    near |= first_reoffer_with_a_branch(ledger, outcomes)
     return sorted(ready, key=lambda pair: (pair[0].id not in near,
                                            pair[0].id in outcomes,
                                            pair[0].created or "9999", pair[0].id))[0]
+
+
+def rounds_for_item(ledger: Path) -> dict[int, list[str]]:
+    """Round ids each item has had, oldest first.
+
+    Off `backlog_implement` `started` rows, which carry both ids. Used for
+    ordering only — a missing row costs a place in the queue, never a
+    correctness property.
+    """
+    out: dict[int, list[str]] = {}
+    for d in _ledger_events(ledger, "backlog_implement"):
+        rid = str(d.get("round_id") or "")
+        if d.get("phase") != "started" or not rid:
+            continue
+        try:
+            iid = int(d["item_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if rid not in out.setdefault(iid, []):
+            out[iid].append(rid)
+    return out
+
+
+def first_reoffer_with_a_branch(ledger: Path, outcomes: dict,
+                                repo: Path | None = None) -> set[int]:
+    """Items on their FIRST re-offer whose round branch still holds the work.
+
+    `automod_start(from_branch=…)` resumes it, so the next round is a fix
+    cycle rather than a fresh hour. Only the first: a second re-offer has
+    already had its fix cycle, and letting it keep jumping the queue is the
+    monopoly the oldest-first ordering exists to prevent.
+    """
+    from scripts.automod import worktree as W
+
+    root = repo or W.LIVE_ROOT
+    rounds = rounds_for_item(ledger)
+    out: set[int] = set()
+    for iid, (verdict, _detail) in (outcomes or {}).items():
+        if verdict not in ("review_retry", "external", "incomplete", "infra"):
+            continue
+        ids = rounds.get(int(iid)) or []
+        if len(ids) != 1:
+            continue
+        try:
+            if W.branch_exists(root, f"automod/{ids[-1]}"):
+                out.add(int(iid))
+        except Exception:  # noqa: BLE001 — ordering is not correctness
+            continue
+    return out
 
 
 def last_review_all_met(ledger: Path) -> set[int]:
@@ -2148,12 +2239,17 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         # wherever it was, and #353 landed while still `draft`.
         fm["status"] = IMPLEMENT_POOL_STATUS
     clauses = clean_clauses(acceptance_clauses)
+    # Backstop for the rule the prompt states: a clause whose evidence only
+    # arrives with time cannot be graded before landing, and holding a round
+    # to one can only refuse it. #859 was refused twice on "needs a day of
+    # post-change traffic" with its mechanism complete on both commits.
+    clauses, moved_later = split_post_landing_clauses(clauses)
+    human = clean_clauses(list(human_clauses) + moved_later)
     if verdict == "confirmed" and clauses:
         # On the item, not only in the ledger: the review rung reads the
         # contract from disk, and a human editing the clauses here is editing
         # what the grader holds the next round to.
         fm["acceptance_clauses"] = clauses
-    human = clean_clauses(human_clauses)
     if verdict == "confirmed" and human:
         # What a person must do before this is done. Kept apart from the
         # clauses so no round is asked to fake an audit (#578's clause 5).
@@ -2161,6 +2257,10 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
 
     section = (f"\n\n## Automod triage — {stamp[:10]}\n\n"
                f"**Verdict:** {verdict}\n\n{evidence.strip()}\n")
+    if moved_later:
+        section += ("\n**Moved to human clauses** (observable only after "
+                    "landing, so no gate can judge them): "
+                    + "; ".join(moved_later) + "\n")
     if check:
         section += f"\n**Premise check:**\n```\n{check.strip()}\n```\n"
     if spawned:

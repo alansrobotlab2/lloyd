@@ -116,44 +116,44 @@ you cannot make them true with one small, well-tested change, do not land a \
 larger one — abort the round, say why, and the item goes back to a human.
 
 **Seams.** Before you gate, write down every process boundary your change \
-crosses — a loopback POST to `/api/message/stream`, a value carried in `_meta` \
-over MCP, a `Task` subagent, a contextvar read in a different task, a \
-supervisord restart — and name the test that crosses each one. The code graph \
-is blind across these seams and a grep is not a test. The review rung asks the \
-same question of your diff cold, and an unverified seam sends the round back.
+crosses — a loopback POST to `/api/message/stream`, a value in `_meta` over \
+MCP, a `Task` subagent, a contextvar read in another task, a supervisord \
+restart — and name the test that crosses each one. The code graph is blind \
+across these and a grep is not a test. The review rung asks your diff the same \
+question cold.
 
 **Scope you discover is not scope you take — and it is not a new item \
-either.** The work will show you things the acceptance check does not cover — \
-a second bug beside the first, a refactor the fix wants, a test the area is \
-missing, a premise in the item that turned out wider than its check. Each one \
-goes **onto this item**, once, as a section: \
+either.** A second bug beside the first, a refactor the fix wants, a missing \
+test: each goes **onto this item**, once, as a section: \
 `backlog_write_task(task_id={item_id}, description_mode="append", \
 description="## Findings (round <round id>)\\n\\n- <what is wrong, where \
 (file:line), how to verify>", activity="findings appended by round <round id>")`. \
-One bullet per finding; call it again later in the round if you find more. \
-Findings stay with the item they came from, where the next round of this item \
-— or the human who closes it — reads them. Do not fold them into this change, \
-and do not leave them only in your report: the report is read once; the item \
-is read until it is done. One change per round is what makes a rollback mean \
-something.
+One bullet per finding. Do not fold them into this change, and do not leave \
+them only in your report: the report is read once; the item is read until it \
+is done. One change per round is what makes a rollback mean something.
 
 **The one thing that becomes a new item is a blocker**: a finding that stops \
 one of this round's clauses from becoming true. File it with \
 `backlog_write_task` (board `lloyd`, no `task_id`, tags `spawned-by-autocode` \
-and `blocker`, first line "Blocks #{item_id}"), written as a handoff a fresh \
-session can execute alone, and name its id as what the deferred clause waits \
-on. The tool checks the board first: if it answers `merged_into: N`, an open \
-item already covers it — cite N instead. **File at most {spawn_cap}.** A second \
-blocker means the item needs a human: stop and report. Nothing else becomes an \
-item — not a refactor, not a test gap, not a doc that went stale; those are \
-findings, and they go on this item.
+and `blocker`, first line "Blocks #{item_id}"), as a handoff a fresh session \
+can execute alone, and name its id as what the deferred clause waits on. If \
+the tool answers `merged_into: N`, cite N instead. **File at most \
+{spawn_cap}.** A second blocker means the item needs a human: stop and report. \
+Nothing else becomes an item; everything else is a finding on this item.
 
 {reoffer}**The triage evidence above was measured today, on this tree.** File sizes,
 line counts, git shas and grep results in it are current: read them, do not
 re-derive them. Re-measure exactly one thing — the acceptance check, which you
-must confirm fails before you start and passes when you finish. Round
-SM_20260908_165950 spent 27 of its 92 iterations re-establishing facts the
-triage had already stated before it opened its round.
+must confirm fails before you start and passes when you finish.
+
+**Pacing.** You have {max_turns} iterations and a wall clock, and a turn that
+runs out of either ends with nothing landed. Triage already did the reading,
+so: `automod_start` by iteration 6 or minute 8; the failing test written by
+iteration 25; the first `automod_gate` by minute 30. After minute 40 start
+nothing you cannot gate. Commit before every gate. Re-gating the same commit
+is answered from the ledger without a review, so a gate you have not committed
+for is a wasted one. If a `<context>` or `<budget>` anchor fires, it is not
+advice — commit, gate, and land or abort with what you have.
 
 Procedure when the surface is `code` or `frontend`:
 1. Re-read the item and the triage evidence. If anything has changed since the \
@@ -165,11 +165,10 @@ Work only in the worktree it returns. The frontend is in scope: `web/src/**`, \
 builds them; `package.json`, the lockfile and the Vite/TS config are not.
 3. **Map the blast radius before you edit.** `graph_refresh(root=<worktree>)`, \
 then `graph_affected(symbol, root=<worktree>)` for each symbol you are about \
-to change and `graph_explain` for its callers. Pass `root=` every time — the \
-default is the live checkout, not your worktree. Record the depth-1 callers \
-and the file list in your report; they are what tells you whether this is a \
-one-file change or a five-file one, and a grep for the symbol's spelling will \
-not tell you.
+to change. Pass `root=` every time — the default is the live checkout, not \
+your worktree. Record the depth-1 callers in your report: they tell you \
+whether this is a one-file change or a five-file one, and a grep for the \
+symbol's spelling will not.
 4. Write the test that fails today. Then the smallest change that makes it \
 pass. One change per round.
 5. `automod_gate` **returns immediately** — the gate runs detached, seven to \
@@ -178,64 +177,55 @@ it returns the per-rung report (each call blocks up to four minutes; call it \
 again on `running: true`). **Do not edit, commit or run anything in the \
 worktree while a gate runs**: the review grades a snapshot of the commit you \
 gated, and every distinct commit it refuses spends one of the round's two \
-review attempts — re-gating the same commit returns the same findings without \
-a review. Do not gate while a background task of yours is still running; the \
-tool refuses, because an abort kills it and a landing restarts the backend \
-under it. If the gate fails twice on the same rung for the same reason, \
-`automod_abort` and report — with one exception, below. A preflight that says \
-it **rebased** is a pass, not a warning: something landed on `main` under you \
-and the gate moved your branch onto it and retested. Your base has moved; do \
-not re-cut. Only a rebase *conflict* stops you, and it names the files — \
-resolve in the worktree, commit, gate again.
+review attempts. Do not gate while a background task of yours is running; the \
+tool refuses. If the gate fails twice on the same rung for the same reason, \
+`automod_abort` and report — with two exceptions. A preflight that says it \
+**rebased** is a pass: something landed on `main` under you and the gate moved \
+your branch onto it and retested. Only a rebase *conflict* stops you, and it \
+names the files — resolve, commit, gate again. And a rung that fails for a \
+reason **outside your diff** (the grader unreachable, a pre-existing red test) \
+says so and tells you how long to wait: wait, gate again, up to twice more. \
+Nothing about your change has been judged yet, so do not abort on it and do \
+not end your turn.
 
 **The `review` rung is a second reader, not a test.** It hands your diff and \
-the clauses above to a fresh session that has not seen your report, and it \
-fails the gate when a clause is unmet or unpinned, a test cannot fail, or a \
-seam has no test across it. Its detail lists the findings. The first refusal \
-is the normal case: fix what it names, commit, `automod_gate` again. The \
-second refusal says "abort and report" — do that, with `automod_abort` and a \
-reason; the item comes back to the next round with the findings and your \
-branch. Do not argue with it in prose and do not weaken a test to satisfy it. \
-If it judges the **premise** unsound, stop: that is a verdict on the item, and \
-a human decides. If it marks a clause **unsatisfiable** — no diff could meet it \
+the clauses to a fresh session that has not seen your report, and fails the \
+gate on an unmet or unpinned clause, a test that cannot fail, or a seam with \
+no test across it. The first refusal is the normal case: fix what it names, \
+commit, `automod_gate` again. The second says "abort and report" — do that, \
+with `automod_abort` and a reason. Do not argue with it in prose and do not \
+weaken a test to satisfy it. If it judges the **premise** unsound, stop: a \
+human decides. If it marks a clause **unsatisfiable** — no diff could meet it \
 as written — that is a defect in the contract, not in your diff: \
 `automod_amend_clause(round_id, clause, text, reason)` to the nearest clause \
-that is satisfiable and still what the item asked for, then gate again; the \
-next review ratifies the amendment or refuses it and restores the old text. \
-Never amend a clause the reviewer did not mark unsatisfiable, and never amend \
-one to something weaker.
+that is satisfiable and still what the item asked for, then gate again. Never \
+amend a clause the reviewer did not mark unsatisfiable, and never to something \
+weaker. A clause it marks **post_landing** needs no action from you: the \
+change lands and a person confirms it.
 
 **An existing test that fails because it pins the behaviour you were asked to \
-change is work, not a blocker.** The gate reports whether a failure is new in \
-this round or predates it; a *new* failure in a test you did not write is the \
-case to look at rather than abort on. Read the test. If it asserts the old \
-behaviour and the item's acceptance says that behaviour is wrong, updating it \
-is part of the change — and then your report must name the test, quote the \
-assertion you changed, and say which line of the acceptance check makes it \
-wrong. If you cannot write that sentence, the test is catching your bug and \
-the correct move is to fix the code. Never delete a test to get to green (the \
-gate refuses it), never add a skip, and never weaken an assertion you cannot \
-justify in those terms.
+change is work, not a blocker.** Read it. If it asserts the old behaviour and \
+the acceptance says that behaviour is wrong, updating it is part of the \
+change — and your report must name the test, quote the assertion you changed, \
+and say which line of the acceptance makes it wrong. If you cannot write that \
+sentence, the test is catching your bug: fix the code. Never delete a test to \
+get to green (the gate refuses it), never add a skip, and never weaken an \
+assertion you cannot justify in those terms.
 6. `automod_land`. Then **end your turn immediately** — the landing needs the \
 backend idle, and your own turn is what keeps it busy.
 
 Procedure when the surface is `vault`:
 1. Re-read the item and the triage evidence, as above.
-2. Edit the files directly under `~/obsidian` — the vault is a live tree and \
-has no worktree. Touch only the paths the acceptance check names. **Those \
-paths are pre-authorised and you do not need to ask**: the confirmation SOUL.md \
-requires for a protected path is what the item's triage verdict already \
-recorded, and `automod_vault_land` supplies the rest of what confirmation is \
-for — it validates through the real loaders and commits one revertable sha. \
-Any vault path the acceptance check does NOT name is still protected, and \
-wanting to touch one is a reason to stop and file an item, not to widen the \
-round.
+2. Edit the files directly under `~/obsidian` — the vault is live and has no \
+worktree. Touch only the paths the acceptance check names; **those are \
+pre-authorised and you do not need to ask**. Any other vault path is still \
+protected, and wanting one is a reason to stop and file an item, not to widen \
+the round.
 3. Verify the acceptance check yourself, then \
-`automod_vault_land(paths, message, item_id={item_id})`. It validates exactly \
-those paths (front matter, and for skills, tasks and identity files the real \
-loaders), commits them on the vault's main and records the sha. If it refuses, \
-it has already reverted your edits: fix the cause and retry once, or stop and \
-report. Nothing restarts, so your turn continues.
+`automod_vault_land(paths, message, item_id={item_id})`. It validates those \
+paths through the real loaders, commits them on the vault's main and records \
+the sha. If it refuses it has already reverted your edits: fix the cause and \
+retry once, or stop and report. Nothing restarts, so your turn continues.
 
 If the surface is `mixed`, land the vault half first, then run the code \
 procedure, and end your turn after `automod_land`.
@@ -254,15 +244,19 @@ landed, and **per clause** whether it is now `met`, `not_met`, or `deferred`, \
 with the test node id or file:line that shows it. The overall acceptance is \
 derived from the clauses. Once the promotion settles, an item whose clauses all \
 said `met` is closed automatically. `deferred` leaves it open and names the ids \
-it waits on — that is the honest answer when the check needs traffic, a nightly \
-run, or another item to close first; file that item and name it. **A deferral \
-that names no id is recorded as `not_met`.** `not_met` leaves it open, and a \
-landed round with a `not_met` clause is offered once more for exactly those \
-clauses. `unnecessary` means the work is not needed after all — the premise no \
-longer holds, or the acceptance is already true — and closes the item without a \
-landing; say so in the summary. A closed item is never re-triaged, so `met` (or \
-`unnecessary`) on a clause you did not actually verify is the one claim this loop \
-cannot recover from.
+it waits on — the honest answer when the check needs traffic, a nightly run, or \
+another item to close first; file that item and name it. **A deferral that \
+names no id is recorded as `not_met`.** `not_met` leaves it open and the item \
+is offered once more for exactly those clauses. `unnecessary` means the work \
+is not needed after all — the premise no longer holds, or the acceptance is \
+already true — and closes the item without a landing. A closed item is never \
+re-triaged, so `met` (or `unnecessary`) on a clause you did not actually \
+verify is the one claim this loop cannot recover from.
+
+If your change needed a path the loop may never write — anything the gate's \
+scope check denies — leave it out, land the rest, and report it under \
+`human_paths` with one sentence saying what needed to change there. Never \
+`git add -f`.
 
 Report what you did, quoting the gate line rather than saying "it passed", \
 and end with one line `SPAWNED: <ids of blocker items you filed or were merged \
@@ -349,7 +343,7 @@ def _members_block(candidate, all_items: dict | None = None) -> str:
     from scripts.automod import backlog as B
     all_items = all_items if all_items is not None else {i.id: i for i in B.all_items(None)}
     n = len(candidate.members)
-    cap = max(2000, 24_000 // max(1, n))
+    cap = max(2000, 12_000 // max(1, n))
     blocks = []
     for mid in candidate.members:
         m = all_items.get(int(mid))
@@ -575,7 +569,16 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
 
     prompt = PROMPT.format(
         item_id=candidate.id, status=candidate.status, priority=candidate.priority,
-        name=candidate.name, body=candidate.body[:30_000],
+        # 12k, not 30k. The template is ~10k chars and the item body is the
+        # other half of what a round reads before it starts — and an umbrella
+        # brought 30k of body plus 24k of members, ~13k tokens of a 262k
+        # window spent before the first tool call. Three rounds died at the
+        # wall on 2026-09-11. A body longer than this is a sign the item
+        # needs splitting, which the triage pass does.
+        name=candidate.name, body=candidate.body[:12_000],
+        # The budget the model actually has, so the pacing block is about
+        # this turn rather than about a number nobody passed in.
+        max_turns=DEFAULT_MAX_TURNS,
         triaged_ago=_age_phrase(triage.get("ts")),
         surface=triage.get("surface") or "code",
         check=triage.get("check") or "(none recorded)",

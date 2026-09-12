@@ -225,6 +225,16 @@ traffic, a nightly run, a script over live data: the pre-landing mechanism \
 and its test go in ACCEPTANCE_CLAUSES, the post-landing check goes in \
 HUMAN_CLAUSES. #859 was refused twice on "needs a day of post-change \
 traffic" with its mechanism complete.
+- **Clauses must be jointly satisfiable.** Never write one clause forbidding \
+a change beside another requiring its effect. #875 carried a clause fixing `n` \
+and a clause requiring a floor that only a different `n` reaches, so no diff \
+could satisfy both and the round could only be refused. A trade-off is ONE \
+clause with the number in it ("the floor is 12,000 tokens"), not two clauses \
+pulling opposite ways.
+- **When an item weakens a gate, a threshold or a check, add a purpose \
+clause.** Name what that gate exists to catch and the test that shows it still \
+catches it. Relaxing a check is the change most likely to pass every rung and \
+be wrong, because the thing it stops catching leaves no trace.
 
 Finish with exactly this block and nothing after it:
 
