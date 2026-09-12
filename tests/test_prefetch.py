@@ -336,6 +336,25 @@ def test_daemon_row_reaches_the_block_unchanged_in_its_fields(monkeypatch):
     assert "[... truncated]" in out
 
 
+def test_wire_spelling_with_the_vault_root_is_stripped_too(monkeypatch):
+    # The other spelling the daemon uses: a collection rooted at the vault, so
+    # the row arrives `qmd://obsidian/<path>`. Without both prefixes off, the
+    # path handed to `Read` would not resolve. Named collections, not a global
+    # scan, is the shape prefetch actually sends (global_scan is False for
+    # VAULT_COLLECTIONS), and that is the path that keeps the raw spelling.
+    def fake_post(payload):
+        return [{"file": f"qmd://obsidian/{_MARCH}", "title": "March 5 Transcript",
+                 "score": 0.9, "snippet": "w" * 700}]
+
+    monkeypatch.setattr(vault_mod, "_qmd_post", fake_post)
+    hits = prefetch._search_vault(_PROBE_QUERY)
+    assert len(hits) == 1
+    out = _render_vault(*hits)
+    assert f"file: {_MARCH}" in out
+    assert "obsidian/" not in out and "qmd://" not in out
+    assert "[... truncated]" in out
+
+
 def test_carried_hit_crosses_the_thread_hand_off_still_marked(quiet_workers, monkeypatch):
     # The hybrid (vec) leg runs on a worker thread and stashes its result on the
     # SessionFocus; the NEXT turn drains that stash, merges it, and renders it.
