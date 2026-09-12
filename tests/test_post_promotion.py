@@ -15,24 +15,27 @@ only far enough to reach the record-and-surface step.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import json
 from pathlib import Path
+from types import CodeType
 
 import pytest
 
 from scripts.autoresearch import post_promotion, run_round
 from scripts.autoresearch.common import DEFAULT_NOISE_FLOOR, AutoresearchConfig, AutoresearchPaths
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-LIVE_ROUNDS_DIR = REPO_ROOT / "_pipeline" / "research" / "rounds"
-
 #: Round R_20260908_165252 is the last promotion in the live ledger and the one
 #: the item names as the replay subject. Copied verbatim from
 #: `_pipeline/research/rounds/R_20260908_165252.md`; the numbers below (baseline
 #: 0.4364, winner `V_20260908_165359_f45720` at 0.6145, snapshot 20260908_165708)
-#: are that round's, not invented. `test_the_vendored_report_still_matches_the_live_artifact`
-#: cross-checks this copy whenever the gitignored tree is present.
+#: are that round's, not invented. That it is real output rather than a guess is
+#: pinned two ways, both of which run on every machine: it parses to exactly the
+#: record `test_a_real_round_report_reads_back_as_a_promotion_record` asserts, and
+#: `test_the_fixture_and_the_writer_agree_about_one_round` requires it to agree
+#: field-for-field with a report rendered from `run_round`'s own report templates.
 R_20260908_165252 = """# Autoresearch round R_20260908_165252
 - started_at: 2026-09-08T16:57:08Z
 - model: primary
@@ -234,24 +237,195 @@ def test_the_replay_survives_the_report_being_the_only_store(world):
     )["promoted_variant_id"] == PROMOTED
 
 
-def test_the_vendored_report_still_matches_the_live_artifact():
-    """Guards against the fixture above drifting into a lie about R_20260908_165252.
+# ── the format contract between the writer and the parser ────────────────────
+#
+# `post_promotion` parses prose that `run_round` writes. Nothing pinned that
+# coupling: the previous guard here compared the fixture above against the live
+# `_pipeline/research/rounds/R_20260908_165252.md`, `_pipeline` is gitignored, and
+# so it skipped on every machine where the suite actually runs. These checks
+# enforce the same thing with no gitignored artifact — they compile the
+# f-strings out of `run_round`'s own syntax tree, render them, and read the
+# result back through the parsers. Rename a field on either side and they fail.
 
-    That fixture is `run_round.run()`'s own output — the report file the round
-    wrote, byte for byte — which is what makes it the format-preservation check
-    for the `- variant:` / `- snapshot_dir:` lines the parser depends on.
-    `_pipeline` is gitignored, so on a checkout without it (including every
-    automod worktree) the artifact does not exist to compare; that is reported as
-    a skip rather than a silent pass. The fixture assertions elsewhere are
-    unconditional either way.
+#: The report lines `post_promotion` and `promotion_fp_rate` parse, keyed by what
+#: they carry, each identified by the literal text that opens it inside
+#: `run_round.run()`'s f-strings.
+_REPORT_TEMPLATES = {
+    # (prefix of the f-string's literal text, a token that may sit inside its
+    # {…} interpolations instead) — `lit` is the literal chunks only, `src` the
+    # whole f-string reparsed, so a word written inside a conditional still counts.
+    "baseline_mean": lambda lit, src: lit.startswith("- baseline mean composite: "),
+    # `- `V_x` (baseline): mean=…` — the per-variant mean line, baseline and candidate alike.
+    "variant_mean": lambda lit, src: lit.startswith("- `") and "mean=" in src,
+    "promote_decision": lambda lit, src: lit.startswith("- `") and "PROMOTE" in src,
+    "promoted_variant": lambda lit, src: lit.startswith("- variant: "),
+    "snapshot_dir": lambda lit, src: lit.startswith("- snapshot_dir: "),
+}
+
+#: The names those f-strings interpolate, at the values R_20260908_165252 had.
+_TEMPLATE_NS = {
+    "baseline_summary": {"mean_composite": 0.4364},
+    "summ": {"mean_composite": 0.6145, "safety_passed": True, "task_count": 11},
+    "vid": PROMOTED,
+    "marker": "",
+    "d": {"variant_id": PROMOTED, "should_promote": True,
+          "reason": "promote (delta=+0.1781, win_frac=0.64)"},
+    "promotion_result": {
+        "variant_id": PROMOTED, "snapshot_dir": SNAPSHOT_DIR,
+        "applied_files": ["SOUL.md"], "experiment_fact": None,
+    },
+}
+
+
+def _report_template(key: str) -> CodeType:
+    """Compile the one f-string in `run_round` that writes report line `key`."""
+    hits = []
+    for node in ast.walk(ast.parse(inspect.getsource(run_round))):
+        if not isinstance(node, ast.JoinedStr):
+            continue
+        literal = "".join(p.value for p in node.values if isinstance(p, ast.Constant))
+        if _REPORT_TEMPLATES[key](literal, ast.unparse(node)):
+            hits.append(node)
+    assert len(hits) == 1, (
+        f"expected exactly one run_round report line matching {key!r}, found {len(hits)}: "
+        f"{[ast.unparse(h) for h in hits]!r} — the report format moved and "
+        "post_promotion's parser was not told about it"
+    )
+    expr = ast.Expression(body=hits[0])
+    ast.fix_missing_locations(expr)
+    return compile(expr, f"<run_round report line: {key}>", "eval")
+
+
+def _render(key: str, **over) -> str:
+    """Evaluate `run_round`'s own report template — the writer's bytes, not a copy."""
+    ns = dict(_TEMPLATE_NS)
+    ns.update(over)
+    return eval(_report_template(key), {"__builtins__": {}}, ns)  # noqa: S307
+
+
+def _rendered_round_report(rid: str = "R_20260909_060000") -> str:
+    """A whole round report, assembled from the lines `run_round` really writes."""
+    return "\n".join([
+        f"# Autoresearch round {rid}",
+        "- started_at: 2026-09-09T06:00:00Z",
+        _render("baseline_mean"),
+        "",
+        "## Variant summaries",
+        _render("variant_mean", vid="BASELINE_fixture", marker=" (baseline)",
+                summ={"mean_composite": 0.4364, "safety_passed": True, "task_count": 11}),
+        _render("variant_mean"),
+        "",
+        "## Promotion decisions",
+        _render("promote_decision"),
+        "",
+        "## Promoted",
+        _render("promoted_variant"),
+        _render("snapshot_dir"),
+        "- applied_files: ['SOUL.md']",
+        "",
+    ]) + "\n"
+
+
+def test_the_report_the_writer_writes_reads_back_as_a_promotion(tmp_path):
+    """Round-trip: `run_round`'s templates in, `post_promotion`'s parser out.
+
+    This is the check that replaces the byte comparison against a gitignored
+    artifact: it needs no round, no model, and no `_pipeline`.
     """
-    live = LIVE_ROUNDS_DIR / "R_20260908_165252.md"
-    if not live.exists():
-        pytest.skip(f"{live} is gitignored and absent here; nothing to cross-check")
-    assert live.read_text(encoding="utf-8") == R_20260908_165252
+    rounds = tmp_path / "rounds"
+    rounds.mkdir()
+    path = rounds / "R_20260909_060000.md"
+    path.write_text(_rendered_round_report(), encoding="utf-8")
+
+    record = post_promotion.promotion_record_from_report(path)
+    assert record == {
+        "source": "report",
+        "round_id": "R_20260909_060000",
+        "baseline_mean": 0.4364,
+        "promoted_variant_id": PROMOTED,
+        "promoted_variant_mean": 0.6145,
+        "snapshot_dir": SNAPSHOT_DIR,
+    }
 
 
-# ── clauses 2 and 3: the decline is named and attributed ─────────────────────
+def test_the_fixture_and_the_writer_agree_about_one_round(tmp_path):
+    """The vendored R_20260908_165252 and a freshly rendered report must not drift.
+
+    One says what a promotion looked like, the other what one looks like now; if
+    they parse to different records, the format has moved under the replay test.
+    """
+    rounds = tmp_path / "rounds"
+    rounds.mkdir()
+    fixture = rounds / "R_20260908_165252.md"
+    fixture.write_text(R_20260908_165252, encoding="utf-8")
+    rendered = rounds / "R_20260909_060000.md"
+    rendered.write_text(_rendered_round_report(), encoding="utf-8")
+
+    a = post_promotion.promotion_record_from_report(fixture)
+    b = post_promotion.promotion_record_from_report(rendered)
+    assert {k: v for k, v in a.items() if k not in {"round_id", "source"}} == \
+           {k: v for k, v in b.items() if k not in {"round_id", "source"}}
+
+
+def test_a_renamed_report_field_breaks_the_parser_loudly(tmp_path):
+    """Proves the round-trip above can fail: a writer that renames the landing
+    record's field is not read as a promotion, and this test sees that."""
+    rounds = tmp_path / "rounds"
+    rounds.mkdir()
+    drifted = _rendered_round_report().replace("- variant: `", "- promoted: `")
+    assert drifted != _rendered_round_report()  # the template really did say `variant:`
+    path = rounds / "R_20260909_070000.md"
+    path.write_text(drifted, encoding="utf-8")
+    assert post_promotion.promotion_record_from_report(path) is None
+
+
+# ── the seam into #428's sweep: it re-reads the bytes this round appends ─────
+
+def test_the_new_section_does_not_move_the_fp_sweep_s_readers(tmp_path):
+    """`promotion_fp_rate` parses every `rounds/R_*.md`, and #429 started
+    appending a section full of competing means to those same bytes.
+
+    `baseline_means` takes the first `- baseline mean composite:` in the file and
+    `recorded_deltas` takes every "- `V_x`: PROMOTE … delta=" line; the decline
+    line carries a baseline mean, a promoted mean, a delta and a noise floor, all
+    as prose. Crossed here on real bytes, in both its shapes, so the sweep's
+    denominator cannot silently move when a report gains this section.
+    """
+    from scripts.autoresearch import promotion_fp_rate as fp
+
+    rounds = tmp_path / "rounds"
+    rounds.mkdir()
+    path = rounds / "R_20260909_060000.md"
+    path.write_text(_rendered_round_report(), encoding="utf-8")
+
+    before_means = fp.baseline_means(rounds_dir=rounds)
+    before_deltas = fp.recorded_deltas(rounds_dir=rounds)
+    assert before_means == {"R_20260909_060000": 0.4364}
+    assert before_deltas == {("R_20260909_060000", PROMOTED): 0.1781}
+
+    record = post_promotion.last_promotion(tmp_path / "none.jsonl", rounds)
+    for baseline in (0.3000, 0.5200):  # one decline past the floor, one inside it
+        path.write_text(
+            _rendered_round_report()
+            + "\n".join(post_promotion.report_section(
+                post_promotion.compare(baseline, record, DEFAULT_NOISE_FLOOR))) + "\n",
+            encoding="utf-8",
+        )
+        assert fp.baseline_means(rounds_dir=rounds) == before_means
+        assert fp.recorded_deltas(rounds_dir=rounds) == before_deltas
+        # And the numbers the section introduces are not what the sweep reads:
+        # 0.3000 is the only figure in the file a looser baseline regex could take.
+        assert 0.3000 not in fp.baseline_means(rounds_dir=rounds).values()
+        # The promotion is still the promotion, and still attributed.
+        assert post_promotion.promotion_record_from_report(path)["promoted_variant_id"] == PROMOTED
+
+    # A report whose section says there is nothing to check is equally inert.
+    path.write_text(
+        _rendered_round_report()
+        + "\n".join(post_promotion.report_section(None)) + "\n", encoding="utf-8")
+    assert fp.baseline_means(rounds_dir=rounds) == before_means
+    assert fp.recorded_deltas(rounds_dir=rounds) == before_deltas
+
 
 def test_a_decline_inside_the_floor_is_recorded_but_not_called_a_regression(world):
     """0.6145 → 0.5200 is 0.0945: fresh bench prompts drawn differently, not a
@@ -278,7 +452,7 @@ def test_the_decline_line_names_the_snapshot_it_could_be_restored_from(world):
     assert 'autoresearch_rollback(snapshot_ts="20260908_165708")' in text
 
 
-def test_the_check_records_and_surfaces_and_never_restores(world, tmp_path):
+def test_the_check_records_and_surfaces_and_never_restores(world, tmp_path, monkeypatch):
     """The item's out-of-scope clause, asserted as an absence rather than prose.
 
     Tripwires on `promote.rollback` would prove nothing here, because nothing on
@@ -288,8 +462,6 @@ def test_the_check_records_and_surfaces_and_never_restores(world, tmp_path):
     """
     import ast
     import inspect
-
-    from scripts.autoresearch import promote
 
     tree = ast.parse(inspect.getsource(post_promotion))
     imported: set[str] = set()
@@ -320,7 +492,16 @@ def test_the_check_records_and_surfaces_and_never_restores(world, tmp_path):
         "the check wrote to the rounds directory"
     assert "Nothing was restored" in text
     assert "promotion_fp_rate" in text  # names #428's sweep as the backstop
-    assert promote.rollback is not None  # the manual path still exists, untouched
+    # The manual path this check deliberately declines to use is still wired, and
+    # still refuses rather than restores — asserted where the route actually lives
+    # (`promote.rollback is not None` could never fail, so it proved nothing).
+    from agent_mcp import autoresearch as mcp
+
+    monkeypatch.setattr(mcp, "_load_cfg", lambda: cfg)
+    answer = json.loads(mcp._handle_rollback({"snapshot_ts": "no-such-snapshot"}))
+    assert "error" in answer and "snapshot" in answer["error"].lower()
+    assert not any((cfg.paths.snapshots_dir).glob("*")), \
+        "probing the manual route must not create a snapshot"
 
 
 def test_a_promotion_with_no_snapshot_says_so_rather_than_inventing_one(world):
@@ -443,6 +624,19 @@ def test_run_round_records_and_surfaces_on_the_live_path(world, monkeypatch):
     assert PROMOTED in report and "R_20260908_165252" in report
     assert "20260908_165708" in report
 
+    # Seam into #428, on the bytes this call actually wrote (not a fixture):
+    # `promotion_fp_rate.baseline_means` re-reads every round report, and this one
+    # now ends in a section naming three other means. The sweep must still read
+    # this round's own baseline, and no delta from prose.
+    from scripts.autoresearch import promotion_fp_rate as fp
+
+    assert fp.baseline_means(cfg.paths.rounds_dir)[result["round_id"]] == pytest.approx(
+        0.4364, abs=1e-4)
+    # The only delta on record is the real round's PROMOTE line; this report has no
+    # PROMOTE line (see below) and must not have invented one out of the section.
+    assert fp.recorded_deltas(cfg.paths.rounds_dir) == {
+        ("R_20260908_165252", PROMOTED): 0.1781}
+
     # `promote` is NOT reached, and not for want of a stub: run_round's variant
     # loop never appends the materialized overlay to `variant_pairs`
     # (scripts/autoresearch/run_round.py:183-192), so the pair list holds only the
@@ -471,8 +665,9 @@ def test_a_later_round_reads_the_report_the_round_actually_wrote(world, monkeypa
     round appended must not confuse the parser, and the promotion that *is* on
     record in the same directory must still be the one a later round acts on.
     (A promotion-bearing report is exercised on run()'s own historical output in
-    `test_a_real_round_report_reads_back_as_a_promotion_record`, whose fixture is
-    byte-identical to that artifact — see the cross-check test.)
+    `test_a_real_round_report_reads_back_as_a_promotion_record`, and that fixture
+    is held to the writer's current format by
+    `test_the_fixture_and_the_writer_agree_about_one_round`.)
     """
     cfg = world
     cfg.paths.bench_dir.mkdir(parents=True, exist_ok=True)
