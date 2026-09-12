@@ -279,6 +279,21 @@ def test_snippet_under_the_cap_renders_no_marker(monkeypatch):
     assert "[... truncated]" not in out
 
 
+def test_injected_block_carries_path_and_marker_end_to_end(quiet_workers, monkeypatch):
+    # Whole path: qmd row -> `_search_vault` (where the cap lives) -> merge ->
+    # renderer -> the string handed to the model. Patching the *daemon*, not
+    # `_search_vault`, is what makes this cross the real seam: the hit dict, the
+    # capped snippet and the `truncated` flag are all produced by the code.
+    monkeypatch.setattr(prefetch, "_qmd_daemon_search",
+                        _fake_daemon(prefetch.VAULT_SNIPPET_MAX + 300))
+    out = prefetch.prefetch_context(_PROBE_QUERY, session_id="test-471-path", plan_mode=False)
+    assert "<vault-context>" in out
+    assert "file: knowledge/meetings/march-5-transcript.md" in out
+    assert "[... truncated]" in out
+    # the injected text still ends with the user's own message
+    assert out.endswith("\n\n" + _PROBE_QUERY)
+
+
 # ── Budget + carry-over end to end (workers patched) ──────────────────────────
 
 @pytest.fixture
