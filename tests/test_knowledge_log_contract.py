@@ -22,7 +22,10 @@ trusting the prose around it.
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -212,8 +215,14 @@ def test_the_owner_logs_the_runs_it_records():
         f"heading is {max(logged)} — the owner is appending, or it is not"
     )
     day, run_id = named[0]
+    # The activity log inside the tracked task file is the durable evidence. autonomy-runs/ is
+    # gitignored, so where it does exist it must agree — an assertion that silently passes when
+    # the directory is absent would never run at the gate.
+    assert re.search(rf"Run {run_id} — success", body), f"{task.name} does not record {run_id} as successful"
     run_log = ROOT / "autonomy-runs" / task.stem.split("-")[0] / f"{run_id}.md"
-    assert run_log.exists() or not run_log.parent.exists(), f"{run_id} is claimed but its run log is missing"
+    if run_log.parent.exists():
+        assert run_log.exists(), f"{run_id} is recorded as run but its run log {run_log} is missing"
+        assert "status: success" in run_log.read_text(encoding="utf-8"), f"{run_log} does not record success"
 
 
 # --- clause 9: an append cannot re-create the collision -----------------------------------
@@ -243,23 +252,90 @@ def test_one_append_cannot_recreate_the_collision(log_copy):
     assert check(log_copy) == []
 
 
-def test_the_command_the_skill_runs_keeps_the_counts_equal(log_copy):
-    """The seam: a Bash line in a SKILL.md reaches this repo across a process boundary."""
-    result = subprocess.run(
-        [sys.executable, str(HELPER), "append",
-         "--kind", "nightly-reflection-knowledge-write",
-         "--text", "run run_39_20260912_070000 — knowledge write: 2 notes (knowledge/software/a.md, knowledge/software/b.md)",
-         "--date", "2026-09-12", "--log", str(log_copy)],
-        capture_output=True, text=True, timeout=60,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    raw = log_copy.read_text(encoding="utf-8")
-    assert counts(raw)[0] == counts(raw)[1], f"the CLI wrote a colliding entry: {result.stdout}"
-    assert raw.endswith("\n") and "## 2026-09-12" in raw
+def prescribed_command(skill_text: str, verb: str) -> str:
+    """Pull a ```bash block's command out of a SKILL.md, verbatim, continuations joined."""
+    for block in re.findall(r"```bash\n(.*?)```", skill_text, re.S):
+        if f"knowledge_log.py {verb}" in block:
+            return " ".join(line.rstrip("\\").strip() for line in block.strip().splitlines() if line.strip())
+    raise AssertionError(f"no ```bash block prescribing 'knowledge_log.py {verb}' in the skill")
 
-    verify = subprocess.run([sys.executable, str(HELPER), "check", "--log", str(log_copy)],
-                            capture_output=True, text=True, timeout=60)
-    assert verify.returncode == 0, verify.stdout + verify.stderr
+
+def shell_form(tokens: list[str], path_index: int = 1) -> str:
+    """Quote every token but the script path, so the shell expands its ``~`` the way it will at runtime.
+
+    ``shlex.join`` gets this wrong for exactly the token that matters: it quotes
+    ``'~/lloyd/scripts/…'`` and a quoted tilde is not expanded, which is how the first version of
+    this test failed — the interpreter looked for a directory literally named ``~``.
+    """
+    return " ".join(token if index == path_index else shlex.quote(token) for index, token in enumerate(tokens))
+
+
+def test_the_path_the_skill_and_schema_name_is_the_module_under_test():
+    """Drift guard: both documents must name one identical literal path, and it is this file."""
+    skill_text = owners_of_the_log()[0].read_text(encoding="utf-8")
+    in_skill = re.findall(r"[\w./~$-]*knowledge_log\.py", prescribed_command(skill_text, "append"))
+    in_schema = re.findall(r"[\w./~$-]*knowledge_log\.py", operations_log_section())
+    assert in_skill == in_schema != [], (
+        f"the skill runs {in_skill} while the schema names {in_schema}; whoever follows one "
+        "instructions would not reach the other's tool"
+    )
+    assert set(in_skill) == {"~/lloyd/scripts/vault/knowledge_log.py"}, (
+        f"the contract names {in_skill}; the module lives at scripts/vault/knowledge_log.py"
+    )
+    assert str(HELPER).endswith("/scripts/vault/knowledge_log.py")
+
+
+def test_running_the_command_the_skill_prints_keeps_the_counts_equal(tmp_path):
+    """The seam, crossed as written: the skill's own argv, shell-expanded, against a vault copy.
+
+    The command is taken from ``SKILL.md`` character for character — path, flags and all — and
+    run through a shell with ``$HOME`` pointed at a fake home holding ``obsidian/knowledge/
+    _log.md`` (a copy of the live file) and ``lloyd`` symlinked at this checkout. So the path is
+    expanded by the shell exactly as it will be in the nightly run, the child resolves its own
+    default target from that home, and a wrong path or a renamed flag fails here instead of
+    reading green. Only two things are substituted: the interpreter, which is environment, and
+    the ``<run_id>``/``<N>``/``<paths>`` holes the template itself declares.
+    """
+    owner_skill = owners_of_the_log()[0]
+    command = prescribed_command(owner_skill.read_text(encoding="utf-8"), "append")
+    for placeholder, value in (("<run_id>", "run_39_20260912_070000"), ("<N>", "2"),
+                               ("<paths>", "knowledge/software/a.md, knowledge/software/b.md")):
+        assert placeholder in command or "<" not in command, f"undeclared placeholder {placeholder}"
+        command = command.replace(placeholder, value)
+
+    home = tmp_path / "home"
+    (home / "obsidian" / "knowledge").mkdir(parents=True)
+    shutil.copy(LOG, home / "obsidian" / "knowledge" / "_log.md")
+    (home / "lloyd").symlink_to(ROOT)
+
+    tokens = shlex.split(command)
+    assert tokens[1] == "~/lloyd/scripts/vault/knowledge_log.py", (
+        f"the skill invokes {tokens[1]!r}; the shell cannot expand that to the module under test"
+    )
+    assert "--kind" in tokens and "--text" in tokens, f"the skill's flags drifted: {tokens}"
+    tokens[0] = sys.executable
+    before = counts((home / "obsidian" / "knowledge" / "_log.md").read_text(encoding="utf-8"))
+
+    run = subprocess.run(shell_form(tokens), shell=True, env={**os.environ, "HOME": str(home)},
+                         capture_output=True, text=True, timeout=120)
+    assert run.returncode == 0, f"the skill's own command failed: {run.stdout}{run.stderr}"
+    assert "WROTE ##" in run.stdout, f"the append did not report writing a heading: {run.stdout}"
+
+    after = (home / "obsidian" / "knowledge" / "_log.md").read_text(encoding="utf-8")
+    occurrences, line_initial = counts(after)
+    assert occurrences == line_initial == before[0] + 1, (
+        f"the documented command changed one count but not the other ({before} → "
+        f"{(occurrences, line_initial)}): it wrote a colliding entry"
+    )
+    assert after.endswith("\n") and not after.endswith("\n\n")
+
+    check_command = prescribed_command(owner_skill.read_text(encoding="utf-8"), "check")
+    check_tokens = shlex.split(check_command)
+    assert check_tokens[1] == tokens[1], "the skill's verify step names a different tool than its append step"
+    check_tokens[0] = sys.executable
+    verify = subprocess.run(shell_form(check_tokens), shell=True, env={**os.environ, "HOME": str(home)},
+                            capture_output=True, text=True, timeout=120)
+    assert verify.returncode == 0, f"the skill's own shape check rejects what its append step wrote: {verify.stdout}"
 
 
 def test_a_value_that_would_open_a_second_heading_is_refused_not_written(log_copy):
@@ -284,16 +360,50 @@ def test_re_appending_a_recorded_entry_does_not_double_it(log_copy):
 # --- clause 9's other half: no second writer is left --------------------------------------
 
 
-def test_the_lint_migrator_no_longer_writes_the_log():
-    """``knowledge-frontmatter-backfill.py`` was the other hand on this file."""
-    src = (ROOT / "scripts" / "knowledge-frontmatter-backfill.py").read_text(encoding="utf-8")
-    assert "LOG_FILE" not in src, "the migrator still holds its own handle on the log"
-    # Quoted occurrences are code; a comment may name the file. Exactly one code reference is
-    # allowed, and it is the SKIP_FILES entry that stops the migrator rewriting the log itself.
-    assert src.count('"_log.md"') == 1, (
-        "the only code reference to _log.md must be the SKIP_FILES entry that keeps it unmigrated"
+def _load_migrator():
+    """Load the dash-named script the way ``test_okf_type_taxonomy`` does — by file path.
+
+    ``sys.argv`` is cleared first because the script reads ``DRY_RUN`` from it at import time;
+    a test that imported it under pytest's own argv would silently exercise the dry-run path.
+    """
+    import importlib.util
+
+    script = ROOT / "scripts" / "knowledge-frontmatter-backfill.py"
+    spec = importlib.util.spec_from_file_location("knowledge_frontmatter_backfill_under_test", script)
+    module = importlib.util.module_from_spec(spec)
+    saved = sys.argv
+    sys.argv = [str(script)]
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.argv = saved
+    return module
+
+
+def test_the_lint_migrator_migrates_pages_and_leaves_the_log_alone(tmp_path, capsys):
+    """#452's item 4: this script was the other hand on the file, appending the bad form.
+
+    Run for real, against a temporary ``knowledge/`` — an assertion about the script's source
+    text would still pass if someone put the append back behind a name this test never grepped.
+    """
+    module = _load_migrator()
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    page = knowledge / "page.md"
+    page.write_text("---\ntype: research-quick\ntags:\n  - robotics\n---\n\n# Page\n\nBody prose about the page.\n",
+                    encoding="utf-8")
+    log = knowledge / "_log.md"
+    untouched = "# Knowledge Log\n\n## 2026-09-11\nlint | pre-existing entry\n"
+    log.write_text(untouched, encoding="utf-8")
+
+    module.KNOWLEDGE_DIR = knowledge
+    module.main()
+    capsys.readouterr()
+
+    assert "last_synthesized" in page.read_text(encoding="utf-8"), (
+        "the migrator changed nothing in the fixture, so 'it did not write the log' proves nothing"
     )
-    assert "SKIP_FILES" in src
+    assert log.read_text(encoding="utf-8") == untouched, "the migrator wrote knowledge/_log.md; it has no business there"
 
 
 def test_the_default_target_is_the_live_vault_log():
@@ -336,11 +446,4 @@ def test_a_missing_trailing_newline_is_reported(tmp_path):
     assert any("does not end with a newline" in problem for problem in check(target))
 
 
-def check_path_text(text: str) -> list[str]:
-    """Run the checker over a string by way of a temp file, same code path as the live log."""
-    import tempfile
 
-    with tempfile.TemporaryDirectory() as work:
-        target = Path(work) / "_log.md"
-        target.write_text(text, encoding="utf-8")
-        return check(target)
