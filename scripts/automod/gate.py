@@ -1125,7 +1125,11 @@ class Gate:
             res = RV.grade(round_id=self.round_id, worktree=grade_root, base=self.base,
                            contract=contract, changed_paths=changed, test_counts=test_counts,
                            python=self.python, child_env=self._child_env(grade_root),
-                           scratch_dir=W.round_dir(self.round_id) / "gate-state")
+                           scratch_dir=W.round_dir(self.round_id) / "gate-state",
+                           # The round's own earlier reviews, so the grader
+                           # judges repeats itself (`same_as_prior`) rather
+                           # than the ledger inferring them by head.
+                           prior_reviews=prior)
             base_event.update({"session_id": res.get("session_id"),
                                "seconds": round(time.time() - started, 1),
                                # Waits the grader sat out because another
@@ -1157,7 +1161,8 @@ class Gate:
                 "review_session": res.get("session_id")}
         amendments = contract.get("amendments") or []
         kind, findings = RV.decide(parsed, pre, amendments=amendments,
-                                   attempt=attempt, policy=_review_policy("seams_block"))
+                                   attempt=attempt, policy=_review_policy("seams_block"),
+                                   mode=_review_policy("policy", "table"))
         S.append_event({**base_event, "ok": True, "premise": parsed["premise"],
                         "clauses": parsed["clauses"], "test_honesty": parsed["test_honesty"],
                         "seams_unverified": [s["seam"] if isinstance(s, dict) else s

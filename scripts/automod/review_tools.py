@@ -119,7 +119,7 @@ def child_env(worktree: Path, scratch: Path) -> dict:
 
 def grade_commit(*, repo: Path, item_id: int, parent: str, commit: str, changed_paths: list[str],
                  label: str, strip_tests: bool = False, python: Path | None = None,
-                 grader=None, keep: bool = False) -> dict:
+                 grader=None, keep: bool = False, policy: str | None = None) -> dict:
     """Run the rung's grader over `parent..commit` as if it were a round.
 
     `grader` defaults to `review.grade`; tests pass a stub. Returns the
@@ -147,8 +147,9 @@ def grade_commit(*, repo: Path, item_id: int, parent: str, commit: str, changed_
                                  n_clauses=len(contract["clauses"]))
         if parsed is None:
             return {"error": "unusable review object", "session_id": res.get("session_id")}
-        kind, findings = RV.decide(parsed, pre)
+        kind, findings = RV.decide(parsed, pre, mode=policy)
         return {**parsed, "kind": kind, "findings": findings, "prechecks": pre,
+                "policy": policy or RV.review_policy(),
                 "session_id": res.get("session_id"), "clauses_total": len(contract["clauses"])}
     finally:
         if not keep:
@@ -214,14 +215,14 @@ def compare(case: dict, result: dict) -> tuple[bool, str]:
 
 
 def calibrate(*, repo: Path | None = None, fixture_dir: Path | None = None, grader=None,
-              only: str | None = None) -> list[dict]:
+              only: str | None = None, policy: str | None = None) -> list[dict]:
     repo = repo or LIVE_ROOT
     rows = []
     for case in load_fixtures(fixture_dir):
         if only and case["name"] != only:
             continue
         started = time.time()
-        result = grade_commit(repo=repo, item_id=case["item_id"], parent=case["parent"],
+        result = grade_commit(repo=repo, item_id=case["item_id"], parent=case["parent"], policy=policy,
                               commit=case["commit"], changed_paths=case["changed_paths"],
                               label=f"cal_{case['name']}", strip_tests=case.get("strip_tests", False),
                               grader=grader)
@@ -301,6 +302,8 @@ def main(argv=None) -> int:
     f.add_argument("--note", default="")
     c = sub.add_parser("calibrate", help="run every case and compare")
     c.add_argument("--only", default=None)
+    c.add_argument("--policy", default=None, choices=["table", "grader"],
+                   help="decide under this policy instead of automod.review.policy")
     b = sub.add_parser("backfill", help="grade every settled landing with an item")
     b.add_argument("--limit", type=int, default=None)
     b.add_argument("--item", type=int, action="append", default=[])
@@ -313,7 +316,7 @@ def main(argv=None) -> int:
         print(p)
         return 0
     if args.cmd == "calibrate":
-        rows = calibrate(only=args.only)
+        rows = calibrate(only=args.only, policy=args.policy)
         for r in rows:
             mark = "PASS" if r["ok"] else "FAIL"
             print(f"[{mark}] {r['name']}{' (provisional)' if r['provisional'] else ''}: {r['why']}"

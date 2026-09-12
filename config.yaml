@@ -753,6 +753,14 @@ automod:
     # drain's 180s TTL plus a supervisord restart, with margin. Round 866-a's
     # grader hit a 503 because ANOTHER round was landing at that moment.
     unavailable_wait_s: 420
+    # Cut 2 of senses-not-supervision. `table` is the incident-by-incident
+    # policy above (seams_block, precheck severities, amendment exemptions,
+    # attempts by head then patch-id). `grader` replaces all of it with two
+    # judgments the grader makes per finding — `actionable_in_round` and
+    # `same_as_prior` — and an eight-line decide. The grader holds the diff,
+    # the clauses, its own prior reviews and the tree; the table held none of
+    # them. Flipped only once the calibration suite scored it equal or better.
+    policy: table
   landing:
     idle_max_wait_s: 900
     idle_quiet_polls: 3
@@ -839,6 +847,31 @@ workers:
     enabled: true
     exempt: [scheduled-task]
   sources:
+    # Cut 3 of senses-not-supervision: one steward turn instead of the
+    # backlog state machine (`desired_statuses`, `reconcile_statuses`,
+    # `implement_outcomes` and its caps, quarantine, expiry, the three-tier
+    # `select_confirmed`). Every 15 minutes it reads the ledger since its
+    # last pass and the open board and answers with the moves and the next
+    # pick. `apply: false` is the shipped state: it records how far its
+    # answer agrees with the machine's and writes nothing — the
+    # `board_steward` ledger events are what decide whether `apply` flips.
+    # With `apply: true` it writes through the one status writer and
+    # `select_confirmed` takes its pick; then `autocode.status_pipeline`
+    # and `close_on_settle` come off. It may never set `done`: closing is
+    # gated on a settled promotion that said `met`, and stays mechanical.
+    # Secondary model — a judgment over frontmatter needs no primary, and
+    # the primary is what a round is using.
+    board-steward:
+      enabled: true
+      apply: false
+      interval_seconds: 900
+      max_inflight: 1
+      max_duration_seconds: 600
+      model: secondary
+      max_turns: 8
+      max_events: 300
+      max_items: 80
+      priority: 68
     # OFF since 2026-09-08. This source promoted generated prompt variants
     # straight over the live `lloyd/SOUL.md` / `MEMORY.md` every hour with no
     # gate, no test, no review and no revert. It is what produced the #464

@@ -112,6 +112,26 @@ HOW_VERIFIED = ("ran", "read", "inferred")
 # unpinned constant beside one real defect each time.
 HONESTY_SEVERITIES = ("blocking", "advisory")
 
+# Two judgments the grader makes about each finding, and the whole of what
+# replaces `decide()`'s policy table under `automod.review.policy: grader`.
+# The table grew a row per incident — seams first/always/never, precheck
+# severities, amendment exemptions, attempts by head then patch-id — and each
+# row answered one of these two questions on the grader's behalf, from
+# outside the evidence. The grader is holding the diff, the clauses, the
+# prior reviews and the tree; it is the one placed to answer them.
+ACTIONABLE_DESC = (
+    "true if the author can fix this INSIDE the round — with a test in this "
+    "repo, a code change, or an amendment — before landing. false if only "
+    "production can answer it (live traffic, a real pool tick, a deployment "
+    "shape) or if it is advice rather than a defect. Only true findings refuse "
+    "the round; false ones ride into the landing report."
+)
+SAME_AS_PRIOR_DESC = (
+    "true if a PRIOR REVIEW of this round (shown to you) already made this "
+    "finding and the diff has not addressed it. false for a new finding or one "
+    "the author acted on. Two refusals of the same finding escalate to a human."
+)
+
 # Built from the tuples above, not restated (the triage schema's rule: one
 # list, or a value lands in the grammar and not the validator). No maxLength:
 # the decoder would stop mid-sentence at it.
@@ -162,8 +182,13 @@ REVIEW_SCHEMA: dict = {
                                                         "nothing about the code it names, or was "
                                                         "weakened. advisory: anything else the "
                                                         "author should know.")},
-                           "problem": {"type": "string"}},
-            "required": ["file", "line", "severity", "problem"],
+                           "problem": {"type": "string"},
+                           "actionable_in_round": {"type": "boolean",
+                                                   "description": ACTIONABLE_DESC},
+                           "same_as_prior": {"type": "boolean",
+                                             "description": SAME_AS_PRIOR_DESC}},
+            "required": ["file", "line", "severity", "problem",
+                         "actionable_in_round", "same_as_prior"],
             "additionalProperties": False,
         }, "description": ("Defects in the tests this diff changed. Empty when none. Never a "
                            "positive observation — those go in summary.")},
@@ -180,8 +205,11 @@ REVIEW_SCHEMA: dict = {
                                                             "only production can — a live pool "
                                                             "tick, real traffic, a deployment "
                                                             "shape.")},
+                "actionable_in_round": {"type": "boolean", "description": ACTIONABLE_DESC},
+                "same_as_prior": {"type": "boolean", "description": SAME_AS_PRIOR_DESC},
             },
-            "required": ["seam", "testable_before_landing"],
+            "required": ["seam", "testable_before_landing", "actionable_in_round",
+                         "same_as_prior"],
             "additionalProperties": False,
         }, "description": ("Process boundaries the change crosses (a loopback POST, `_meta` "
                            "over MCP, a Task subagent, a restart) for which no test crosses the "
@@ -378,13 +406,15 @@ graded here. Do not mark a clause partial or unmet for their absence.
 
 def build_prompt(*, contract: dict, diff: str, diff_truncated: bool,
                  changed_tests: list[str], test_counts: dict,
-                 worktree: Path, run_tests: Path) -> str:
+                 worktree: Path, run_tests: Path,
+                 prior_reviews: list[dict] | None = None) -> str:
     clauses = "\n".join(f"{i}. {c}" for i, c in enumerate(contract["clauses"], 1))
     counts = ", ".join(f"{k}={v}" for k, v in test_counts.items()
                        if k in ("passed", "failed", "skipped", "collected")) or "unknown"
     amendments = _amendments_block(list(contract.get("amendments") or []))
     human = _human_clauses_block(list(contract.get("human_clauses") or []))
-    return f"""\
+    prior = _prior_reviews_block(prior_reviews or [])
+    return prior + f"""\
 You are reviewing a change another session made to this codebase, against the \
 backlog item it claims to implement. You have NOT seen that session's report, \
 and you must not look for it: your value is that you read the diff cold. Work \
@@ -464,7 +494,10 @@ fallback that makes a subject vary, a docstring number that drifted). Only \
 `blocking` entries refuse the round. This list is for defects in tests: a \
 positive observation ("no skips, every scenario shown to fail") does not belong \
 in it at all — say it in the summary — and a remark about a non-test file is \
-not test honesty.
+not test honesty. For each entry also say `actionable_in_round` — can the \
+author fix it before landing with a test or a change in this repo — and \
+`same_as_prior` — did an earlier review of this round (shown above, if any) \
+already make it and the diff not address it.
 - **Seams.** List every process boundary this change crosses — a loopback \
 POST to `/api/message/stream`, `_meta` carried over MCP, a `Task` subagent, a \
 contextvar read in another task, a supervisord restart — and for each, name \
@@ -474,7 +507,8 @@ repo could cross it now (a test server on loopback, the in-process aggregator, \
 a subprocess), false when only production can — a real pool tick, live \
 traffic, a deployment shape. Only a testable seam refuses the round; an \
 untestable one is recorded for the item as a post-landing check. The code \
-graph is blind across these; a grep is not a test.
+graph is blind across these; a grep is not a test. Each seam also carries \
+`actionable_in_round` and `same_as_prior`, as for test honesty.
 
 Finally judge the PREMISE: is the item describing a real problem, and is this \
 the kind of change that can fix it? `unsound` is for a false premise or a fix \
@@ -566,7 +600,8 @@ def grade(*, round_id: str, worktree: Path, base: str, contract: dict,
           changed_paths: list[str], test_counts: dict, python: Path, child_env: dict,
           scratch_dir: Path, backend: str | None = None, sessions_dir: Path | None = None,
           timeout: float = REVIEW_TIMEOUT_S, model: str = "primary",
-          max_turns: int = REVIEW_MAX_TURNS) -> dict:
+          max_turns: int = REVIEW_MAX_TURNS,
+          prior_reviews: list[dict] | None = None) -> dict:
     """One grading turn on the live backend, for a code round. Never raises.
 
     Returns `{ok, error, session_id, structured, structured_error, text,
@@ -578,6 +613,7 @@ def grade(*, round_id: str, worktree: Path, base: str, contract: dict,
     diff, truncated = diff_text(worktree, base)
     run_tests = write_run_tests(scratch_dir, worktree=worktree, python=python, env=child_env)
     prompt = build_prompt(contract=contract, diff=diff, diff_truncated=truncated,
+                          prior_reviews=prior_reviews,
                           changed_tests=changed_tests, test_counts=test_counts,
                           worktree=worktree, run_tests=run_tests)
     return run_grader(prompt=prompt, item_id=contract["id"], round_id=round_id,
@@ -929,7 +965,8 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             honesty.append({"file": file,
                             "line": int(raw.get("line") or 0) if str(raw.get("line") or "0").isdigit() else 0,
                             "severity": sev,
-                            "problem": " ".join(str(raw["problem"]).split())[:300]})
+                            "problem": " ".join(str(raw["problem"]).split())[:300],
+                            **_judgments(raw)})
     seams: list[dict] = []
     for raw_seam in (obj.get("seams_unverified") or []):
         # Both shapes: the object the schema asks for, and the bare string
@@ -939,11 +976,13 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             text = " ".join(str(raw_seam.get("seam") or "").split())[:300]
             testable = raw_seam.get("testable_before_landing")
             testable = True if not isinstance(testable, bool) else testable
+            judged = _judgments(raw_seam)
         else:
             text = " ".join(str(raw_seam).split())[:300]
             testable = True
+            judged = _judgments({})
         if text:
-            seams.append({"seam": text, "testable_before_landing": testable})
+            seams.append({"seam": text, "testable_before_landing": testable, **judged})
     amend_ok = obj.get("amendments_ok")
     return {"premise": premise, "clauses": clauses, "test_honesty": honesty,
             "seams_unverified": seams[:10],
@@ -952,6 +991,96 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             # Absent means "no amendments were shown", which is the same as ok.
             "amendments_ok": amend_ok if isinstance(amend_ok, bool) else True,
             "amendments_note": " ".join(str(obj.get("amendments_note") or "").split())[:600]}
+
+
+def _judgments(raw: dict) -> dict:
+    """The two per-finding judgments, absent-tolerant.
+
+    A review written before the fields existed (every calibration case and
+    the backfill) carries neither. `actionable_in_round` defaults to True —
+    the old reading, where every finding blocked — so an old object decides
+    exactly as it used to under either policy. `same_as_prior` defaults to
+    False for the same reason: a repeat the grader did not flag is not a
+    repeat this code invents.
+    """
+    a = raw.get("actionable_in_round")
+    s = raw.get("same_as_prior")
+    return {"actionable_in_round": a if isinstance(a, bool) else True,
+            "same_as_prior": s if isinstance(s, bool) else False}
+
+
+def _prior_reviews_block(prior: list[dict]) -> str:
+    """The round's earlier graded reviews, for the grader to judge repeats.
+
+    Compact on purpose: verdict per clause and the findings, not the notes.
+    The grader is asked whether each finding it makes is one of these; what
+    it is not asked to do is re-litigate them.
+    """
+    rows = [e for e in (prior or []) if e.get("ok")]
+    if not rows:
+        return ""
+    out = ["<prior_reviews>",
+           "Earlier reviews of THIS round, oldest first. For every finding you make, "
+           "set same_as_prior=true if one of these already made it and the diff has "
+           "not addressed it."]
+    for e in rows[-3:]:
+        verdicts = ", ".join(f"c{c.get('clause')}={c.get('verdict')}"
+                             for c in (e.get("clauses") or []))
+        out.append(f"- attempt {e.get('attempt')} on {str(e.get('head') or '')[:8]}: "
+                   f"{'refused' if e.get('blocking') else 'passed'}; {verdicts}")
+        findings = str(e.get("findings") or "").strip()
+        if findings:
+            out.append(f"  findings: {findings[:700]}")
+    out.append("</prior_reviews>")
+    return "\n".join(out) + "\n\n"
+
+
+def decide_by_grader(parsed: dict, prechecks: list[dict]) -> tuple[str, str]:
+    """`(kind, findings)` with the grader's own judgments deciding, not a table.
+
+    Eight lines where `decide` is eighty: an unmet/partial clause refuses; a
+    finding refuses iff the grader said it is actionable inside the round;
+    everything else is advisory and rides into the report. The mechanical
+    prechecks are handed in as findings the grader could not have missed —
+    they are facts, so they keep their old blocking reading.
+    """
+    if parsed["premise"] == "unsound":
+        return "unsound", parsed["summary"] or "the grader judged the premise unsound"
+    blocking: list[str] = []
+    advisory: list[str] = []
+    for c in parsed["clauses"]:
+        if c["verdict"] == "unsatisfiable":
+            blocking.append(f"clause {c['clause']} unsatisfiable as written: {c['note'] or '(no note)'} "
+                            f"— amend it with automod_amend_clause and gate again")
+        elif c["verdict"] == "post_landing":
+            advisory.append(f"clause {c['clause']} observable only after landing: "
+                            f"{c['note'] or '(no note)'}")
+        elif c["verdict"] != "met":
+            tag = f" (downgraded: {'; '.join(c['downgraded'])})" if c.get("downgraded") else ""
+            blocking.append(f"clause {c['clause']} {c['verdict']}{tag}: {c['note'] or '(no note)'}")
+    for h in prechecks:
+        # A precheck is a fact the pattern found; severity is its only policy.
+        (advisory if h.get("severity") == "advisory" else blocking).append(
+            f"test honesty {h['file']}:{h['line']}: {h['problem']}")
+    for h in parsed["test_honesty"]:
+        rep = " [repeat]" if h.get("same_as_prior") else ""
+        line = f"test honesty {h['file']}:{h['line']}: {h['problem']}{rep}"
+        (blocking if h.get("actionable_in_round", True) else advisory).append(line)
+    for s in parsed["seams_unverified"]:
+        rep = " [repeat]" if s.get("same_as_prior") else ""
+        line = f"seam unverified: {s['seam']}{rep}"
+        # A seam only production can cross is not actionable inside a round
+        # whatever the grader wrote in the other field: `testable_before_landing`
+        # is a fact about the seam, and the table read it the same way.
+        actionable = (s.get("actionable_in_round", True)
+                      and s.get("testable_before_landing", True))
+        (blocking if actionable else advisory).append(line)
+    if not blocking:
+        summary = parsed["summary"]
+        if advisory:
+            summary = (summary + " — " if summary else "") + "; ".join(advisory)
+        return "pass", summary
+    return "retry", "; ".join(blocking + [f"advisory {a}" for a in advisory])
 
 
 def seams_block(policy: str, attempt: int) -> bool:
@@ -979,9 +1108,21 @@ def seams_block(policy: str, attempt: int) -> bool:
     return int(attempt or 1) <= 1
 
 
+def review_policy() -> str:
+    """`automod.review.policy`: `table` (the incident-by-incident rules) or
+    `grader` (the grader's own actionable/repeat judgments). Default `table`
+    until the calibration suite says otherwise."""
+    try:
+        from app.config import CONFIG
+        return str(((CONFIG.get("automod") or {}).get("review") or {}).get("policy", "table"))
+    except Exception:
+        return "table"
+
+
 def decide(parsed: dict, prechecks: list[dict],
            amendments: list[dict] | None = None,
-           *, attempt: int = 1, policy: str = "first") -> tuple[str, str]:
+           *, attempt: int = 1, policy: str = "first",
+           mode: str | None = None) -> tuple[str, str]:
     """`(kind, findings)`: kind is `pass`, `retry` or `unsound`.
 
     Unsound is the grader's call alone. Everything else that is not clean is
@@ -993,6 +1134,10 @@ def decide(parsed: dict, prechecks: list[dict],
     clause — and a refused amendment is a retry that says the clause is
     back to what it was.
     """
+    if (mode or review_policy()) == "grader":
+        # Amendments still ride: a refused amendment restores the clause and
+        # the grader's verdict on the restored text is what it graded.
+        return decide_by_grader(parsed, prechecks)
     if parsed["premise"] == "unsound":
         return "unsound", parsed["summary"] or "the grader judged the premise unsound"
     lines: list[str] = []

@@ -562,8 +562,10 @@ def test_the_implement_prompt_renders_human_clauses_as_not_yours():
     assert "not yours to do" in block and "Alan audits ten items" in block
     assert I._human_clauses_block([]) == ""
     assert "{human_clauses}" in I.PROMPT
-    assert "automod_gate_wait" in I.PROMPT and "automod_amend_clause" in I.PROMPT
-    assert "Do not edit, commit or run anything in the" in I.PROMPT
+    # `automod_gate_wait`, `automod_amend_clause` and the do-not-edit-while-
+    # gating rule are procedure and live in the skill the prompt names
+    # (cut 4); `test_prompt_pacing_and_ordering` pins them there.
+    assert "automod-change-own-code" in I.PROMPT
 
 
 UNSAT = {"premise": "sound", "summary": "", "clauses": [
@@ -709,7 +711,10 @@ def test_only_a_seam_a_test_could_cross_before_landing_refuses(tmp_path):
     kind, findings = RV.decide(p, [])
     assert kind == "pass" and "post-landing seam" in findings
     legacy = parsed(["_meta over MCP"])
-    assert legacy["seams_unverified"] == [{"seam": "_meta over MCP", "testable_before_landing": True}]
+    # A bare-string seam still reads as testable — and, since the grader
+    # started judging its own findings, as actionable and not a repeat.
+    assert legacy["seams_unverified"] == [{"seam": "_meta over MCP", "testable_before_landing": True,
+                                           "actionable_in_round": True, "same_as_prior": False}]
     assert RV.decide(legacy, [])[0] == "retry"
     items = RV.REVIEW_SCHEMA["properties"]["seams_unverified"]["items"]
     assert "testable_before_landing" in items["required"]
