@@ -135,6 +135,24 @@ def test_the_prompt_budget_line_names_the_platform(caplog):
     assert "platform=worker" in line
 
 
+def test_the_budget_line_reports_the_platform_not_a_prompt_component(caplog):
+    """A local named `platform` — the "Platform: Lloyd (Claude Agent SDK)…"
+    hints block — shadowed the parameter and printed itself into the log line
+    as though it were the session's platform.
+
+    The drop itself was unaffected, because `_memory_files_for` is called
+    above the reassignment. That is what makes this worth a test rather than
+    a fix: the behaviour depended on statement order that nothing named.
+    """
+    with caplog.at_level(logging.INFO, logger="lloyd.prompt"):
+        prompt_builder.build_system_prompt(include_skills_index=False,
+                                           session_id="s1", platform="worker")
+    line = next(r.getMessage() for r in caplog.records
+                if "PROMPT_BUDGET" in r.getMessage())
+    assert "platform=worker" in line
+    assert "Claude Agent SDK" not in line
+
+
 def test_the_prompt_budget_line_says_user_when_no_platform(caplog):
     with caplog.at_level(logging.INFO, logger="lloyd.prompt"):
         prompt_builder.log_prompt_size({"soul": "x" * 100}, session_id="s1")

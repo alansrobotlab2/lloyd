@@ -356,14 +356,20 @@ def build_system_prompt(
     # Platform hints — NOTE: no timestamp here; a per-minute timestamp busts
     # vLLM's prefix cache, forcing full re-prefill of the system prompt every turn.
     # The model gets the current time via tool calls or conversation context instead.
-    platform = (
+    # `platform_hints`, not `platform`: the parameter of that name is the
+    # session's platform, and a local shadowing it here printed this whole
+    # block into the PROMPT_BUDGET line as though it were the platform. The
+    # memory-file decision above happens before this point, so the drop
+    # itself was unaffected — which is exactly why this needs a name of its
+    # own rather than an ordering rule nobody can see.
+    platform_hints = (
         "Platform: Lloyd (Claude Agent SDK). "
         f"Home: {LLOYD_HOME}. "
         "Vault: ~/obsidian/. Knowledge notes go in ~/obsidian/knowledge/. "
         "All persistent notes, research output, and files created by the agent "
         "go in the vault (~/obsidian/), NOT in the lloyd project directory."
     )
-    parts.append(platform)
+    parts.append(platform_hints)
 
     bg_tasks = (
         "Background bash tasks: pass run_in_background=true to Bash for any "
