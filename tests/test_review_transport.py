@@ -467,8 +467,15 @@ def test_the_prompt_shows_amendments_and_human_clauses(tmp_path):
     assert "<human_clauses>" in text and "Alan audits ten items" in text
     assert "graded here" in text
     assert "`unsatisfiable` if NO diff" in text
-    assert "only be evaluated after the change has landed" in text
-    assert "never `partial`" in text
+    # A clause that needs live traffic is `post_landing` — it lands and waits
+    # for a person — while `unsatisfiable` stays for a clause no diff could
+    # ever satisfy, whose remedy is an amendment. Telling the grader to use
+    # the second for the first is what parked #859 with the mechanism
+    # complete on both commits.
+    assert "only be OBSERVED after the change has landed" in text
+    assert "is `post_landing`" in text
+    assert "does not refuse the round" in text
+    assert "not `partial` and not `unsatisfiable`" in text
 
 
 def test_the_new_tools_are_denied_to_the_grader_and_to_workers_and_annotated():

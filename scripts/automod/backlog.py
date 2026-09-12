@@ -186,6 +186,19 @@ IMPLEMENT_OUTCOME_SCHEMA: dict = {
                     "description": "One sentence: what landed, or why nothing did."},
         "spawned": {"type": "array", "items": {"type": "integer"},
                     "description": "Backlog ids filed during this round."},
+        "human_paths": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Repo-relative path you could not change."},
+                "reason": {"type": "string", "description": "One sentence: what needed to change there, and why."},
+            },
+            "required": ["path", "reason"],
+            "additionalProperties": False,
+        }, "description": ("Paths this change needed but the loop may never write "
+                           "(denied or outside the writable set). Leaving one out and "
+                           "landing the rest is correct; hiding it is not. The item "
+                           "stays open and tagged needs-human until a person applies "
+                           "them. Empty when there are none.")},
     },
     "required": ["landed", "acceptance", "clause_outcomes", "deferred_to", "summary", "spawned"],
     "additionalProperties": False,
@@ -252,11 +265,60 @@ def parse_outcome(structured) -> dict | None:
     if acceptance == "deferred" and not deferred_to:
         acceptance = "not_met"
 
+    human_paths = []
+    for raw in (structured.get("human_paths") or []):
+        if not isinstance(raw, dict):
+            continue
+        path = " ".join(str(raw.get("path") or "").split())[:300]
+        if not path:
+            continue
+        human_paths.append({
+            "path": path,
+            "reason": " ".join(str(raw.get("reason") or "").split())[:300],
+        })
+
     return {"landed": bool(structured.get("landed")), "acceptance": acceptance,
             "clause_outcomes": clauses,
             "deferred_to": deferred_to,
             "summary": " ".join(str(structured.get("summary") or "").split())[:400],
-            "spawned": _ints(structured.get("spawned"))}
+            "spawned": _ints(structured.get("spawned")),
+            "human_paths": human_paths}
+
+
+def apply_post_landing(outcome: dict | None, post_landing: list[int]) -> dict | None:
+    """Re-read an outcome with the review's `post_landing` clauses honoured.
+
+    The review rung, not the implementer, decides that a clause is observable
+    only after landing — the implementer is inside the round and cannot know.
+    So the implementer honestly reports `deferred` or `not_met` for such a
+    clause and this re-reads those indices as met, tagging the outcome so
+    `close_settled_items` knows to hold the item open for a human rather than
+    closing it.
+
+    Deliberately NOT applied to a clause the implementer called `met`: that
+    claim stands on its own and needs no rescue.
+    """
+    if not outcome or not post_landing:
+        return outcome
+    idx = {int(i) for i in post_landing}
+    changed = []
+    clauses = []
+    for c in (outcome.get("clause_outcomes") or []):
+        if int(c.get("clause") or 0) in idx and c.get("outcome") in ("deferred", "not_met"):
+            c = {**c, "outcome": "met", "post_landing": True}
+            changed.append(int(c["clause"]))
+        clauses.append(c)
+    if not changed:
+        return outcome
+    out = {**outcome, "clause_outcomes": clauses, "post_landing_clauses": changed}
+    outcomes = {c["outcome"] for c in clauses}
+    if "not_met" in outcomes:
+        out["acceptance"] = "not_met"
+    elif outcomes == {"met"}:
+        out["acceptance"] = "met"
+    else:
+        out["acceptance"] = "deferred"
+    return out
 
 
 def unmet_clauses(outcome: dict | None) -> list[int]:
@@ -1320,8 +1382,21 @@ def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
         if fm.get(LANDED_MARKER) or any(fm.get(m) for m in _LEGACY_LANDED_MARKERS):
             continue
         outcome = landing.get("outcome") or {}
+        # The review rung's own `post_landing` verdicts, honoured here rather
+        # than by the implementer — which is inside the round and cannot know
+        # that a clause needs live traffic. A clause so marked reads as met
+        # for the purpose of "did the round do its job" and holds the item
+        # open for the purpose of "has anyone confirmed it".
+        outcome = apply_post_landing(outcome, post_landing_clause_ids(item.path)) or outcome
         acc = outcome.get("acceptance")
-        human = human_clauses_of(None, fm)
+        human = list(human_clauses_of(None, fm))
+        # A path the loop may never write is the same shape of debt as a
+        # human clause: the round did what it could, and a person owes the
+        # rest. Reported rather than hidden, which is what `git add -f` was.
+        for hp in (outcome.get("human_paths") or []):
+            human.append(f"apply `{hp.get('path')}` by hand: {hp.get('reason')}")
+        for idx in (outcome.get("post_landing_clauses") or []):
+            human.append(f"confirm clause {idx} now that the change is live")
         tags: tuple[str, ...] = ()
         if acc == "met" and human:
             # The loop's half is done; the item is not. Left open, tagged,
@@ -1375,6 +1450,83 @@ def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
                 done.append({"item_id": member.id, "closed": True, "acceptance": "met",
                              "via": item.id})
     return done
+
+
+def post_landing_clause_ids(path: Path | None) -> list[int]:
+    """Clause indices the review rung marked `post_landing` on this item."""
+    if path is None or not Path(path).exists():
+        return []
+    fm, _ = _split_frontmatter(Path(path).read_text(encoding="utf-8"))
+    out: list[int] = []
+    for raw in (fm.get("post_landing_clauses") or []):
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if n > 0 and n not in out:
+            out.append(n)
+    return sorted(out)
+
+
+def mark_clause_post_landing(item_id: int, clause: int, note: str = "",
+                             round_id: str = "") -> bool:
+    """Record that clause N of item `item_id` can only be observed live.
+
+    Written by `gate.rung_review` on a PASS, so the mark is a fact the
+    grader established about a change that is about to land — not a claim
+    the implementer made about its own work. Idempotent: a clause marked
+    twice by two rounds is marked once.
+    """
+    paths = sorted(BACKLOG_DIR.glob(f"{int(item_id)}-*.md"))
+    if not paths:
+        return False
+    path = paths[0]
+    fm, _ = _split_frontmatter(path.read_text(encoding="utf-8"))
+    existing = [int(x) for x in (fm.get("post_landing_clauses") or [])
+                if str(x).lstrip("-").isdigit()]
+    if int(clause) in existing:
+        return False
+    return update_frontmatter(
+        path, {"post_landing_clauses": sorted(existing + [int(clause)])},
+        activity=(f"review marked acceptance clause {int(clause)} as observable "
+                  f"only after landing"
+                  + (f" ({round_id})" if round_id else "")
+                  + (f": {note}" if note else "")))
+
+
+def record_human_paths(item_id: int, human_paths: list[dict],
+                       round_id: str = "") -> list[str]:
+    """Record paths a round needed and the loop may never write.
+
+    The item stays open and tagged `needs-human` — `close_settled_items`
+    treats these exactly like a human clause. Returns the paths recorded.
+    """
+    if not human_paths:
+        return []
+    paths = sorted(BACKLOG_DIR.glob(f"{int(item_id)}-*.md"))
+    if not paths:
+        return []
+    path = paths[0]
+    fm, _ = _split_frontmatter(path.read_text(encoding="utf-8"))
+    existing = list(fm.get("human_paths") or [])
+    seen = {str(e.get("path") if isinstance(e, dict) else e) for e in existing}
+    added: list[str] = []
+    for hp in human_paths:
+        if not isinstance(hp, dict):
+            continue
+        rel = str(hp.get("path") or "").strip()
+        if not rel or rel in seen:
+            continue
+        existing.append({"path": rel, "reason": str(hp.get("reason") or "")[:300]})
+        seen.add(rel)
+        added.append(rel)
+    if not added:
+        return []
+    update_frontmatter(
+        path, {"human_paths": existing}, add_tags=(NEEDS_HUMAN_TAG,),
+        activity=(f"round {round_id or '?'} needed paths the loop may not write, "
+                  f"left for a person: " + ", ".join(f"`{x}`" for x in added)))
+    return added
 
 
 def work_title_for_round(ledger: Path, round_id: str) -> str:

@@ -157,10 +157,23 @@ def check_scope(paths: list[str]) -> tuple[bool, str, dict[str, list[str]]]:
     rollback drill in rung 6, handled by the caller.
     """
     buckets = classify_all(paths)
+    # Both refusals name what to do instead. A round that needs a path the
+    # loop may never touch used to be told only that it could not have it,
+    # and the move it then reached for was `git add -f` — which defeats the
+    # scope check rather than reporting past it. `data/**` and `.gitignore`
+    # are both denied, so a JSON data record has no home in the repo at all:
+    # the automod state dir is where one goes.
+    _MOVE = ("Leave it out of the diff, land the rest, and report it under "
+             "`human_paths` in your outcome so a person can apply it. NEVER "
+             "`git add -f`. If you need to record structured data, write it "
+             "to the automod state dir (~/.local/state/lloyd-automod/), not "
+             "into the repo.")
     if buckets["denied"]:
-        return False, f"denied paths in diff: {sorted(buckets['denied'])}", buckets
+        return False, (f"denied paths in diff: {sorted(buckets['denied'])}. "
+                       f"{_MOVE}"), buckets
     if buckets["unlisted"]:
-        return False, f"paths outside the writable set: {sorted(buckets['unlisted'])}", buckets
+        return False, (f"paths outside the writable set: "
+                       f"{sorted(buckets['unlisted'])}. {_MOVE}"), buckets
     return True, "in scope", buckets
 
 
