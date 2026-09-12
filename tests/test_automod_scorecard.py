@@ -267,3 +267,63 @@ def test_the_grouping_section_adds_up_a_realistic_week(tmp_path, repo):
     # Folds and duplicates count as triage closures on row 4.
     assert row["spawn"]["triage_closed"] == 3
     assert "| 11 | grouping | 2 group triages" in SC.render(row)
+
+
+def test_row_12_adds_up_a_week_of_architecture_reviews(tmp_path, repo):
+    """`rejected` is the number worth watching: it counts turns whose doc edit
+    was thrown away for breaking a bound, which is the only way this job can
+    spend a whole session and produce nothing. A rate that stops being near
+    zero means a bound is wrong, not that the model is."""
+    ledger = _ledger(tmp_path, [
+        _ev("arch_review", 6, unit="doc:memory", kind="doc", verdict="current",
+            doc_updated=True, commit="a" * 40, filed=[900, 901], merged=[], appended_to=[],
+            stray_writes=[]),
+        _ev("arch_review", 5, unit="doc:voice", kind="doc", verdict="stale",
+            doc_updated=False, commit="", doc_update_rejected="diff is 900 changed lines, cap 400",
+            filed=[902], merged=[500], appended_to=[41],
+            stray_writes=[{"repo": "lloyd", "path": "README.md", "action": "checkout"}]),
+        _ev("arch_review", 3, unit="group:workers-jobs:Mining", kind="group", verdict="current",
+            grouping="split", doc_updated=True, commit="b" * 40, filed=[], merged=[],
+            appended_to=[], stray_writes=[]),
+        # Outside the window: it must not be counted.
+        _ev("arch_review", 30, unit="doc:tools", kind="doc", verdict="current",
+            doc_updated=True, commit="c" * 40, filed=[1], merged=[], appended_to=[]),
+    ])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "nope",
+                     repo=repo, now=NOW)
+    ar = row["arch_review"]
+    assert ar["reviewed"] == 3
+    assert ar["by_kind"] == {"doc": 2, "group": 1}
+    assert ar["updated"] == 2 and ar["committed"] == 2 and ar["rejected"] == 1
+    assert ar["filed"] == 3 and ar["merged"] == 1 and ar["appended_to"] == 1
+    assert ar["stray_writes"] == 1
+    assert ar["by_status"] == {"current": 2, "stale": 1}
+    text = SC.render(row)
+    assert "| 12 | arch review | 3 units |" in text
+    assert "2 docs, 1 groups" in text and "2 doc edits committed, 1 rejected" in text
+
+
+def test_row_12_renders_for_a_row_recorded_before_it_existed():
+    """`scorecard.jsonl` is append-only and the trend is the point, so every
+    field on this row is read with a default."""
+    old = {"since_days": 7, "events": 0, "computed_at": "2026-09-01T00:00:00+00:00",
+           "acceptance": {"landed": 0, "with_outcome": 0, "met": 0, "hit_rate": None},
+           "audit": {"delta": None, "grader_met": 0, "author_met": 0, "rounds_compared": 0},
+           "review": {"refusal_rate": None, "rounds_refused": 0, "rounds_graded": 0,
+                      "fixed_in_turn": 0, "premise_unsound": 0, "escalated": 0,
+                      "grader_unavailable": 0},
+           "spawn": {"triage_ratio": None, "implement_ratio": None, "triage_filed": 0,
+                     "triage_closed": 0, "implement_filed": 0, "implement_closed": 0},
+           "human_touch": {"rate": None, "touched_within_7d": 0, "landed": 0},
+           "test_honesty": {"grader_findings": 0, "per_gated_round": None,
+                            "landed_with_or_true": 0},
+           "bookkeeping": {"nameless_deferrals": 0, "stranded_landings": 0, "bare_aborts": 0},
+           "verdict_plumbing": {"regex_rate": None, "regex": 0, "verdicts_with_source": 0,
+                                "truncated": 0, "finalizer_tokens_median": None},
+           "throughput": {"items_closed": 0, "items_closed_per_day": 0.0, "rounds_finished": 0,
+                          "rounds_landed": 0, "median_turns_landed": None,
+                          "median_gate_seconds": None},
+           "rollbacks": {"count": 0, "triggers": [], "true_positives": None}}
+    text = SC.render(old)
+    assert "| 12 | arch review | 0 units |" in text
+    assert "no verdicts" in text

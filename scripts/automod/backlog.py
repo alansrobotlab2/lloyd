@@ -61,6 +61,27 @@ BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 SPAWN_TAGS = frozenset({"spawned-by-triage", "spawned-by-autocode",
                         "spawned-by-autoimplement", "spawned-by-selfmod"})
 
+# The architecture reviewer (`workers/sources/arch_review.py`) files findings
+# the same way, and they are loop output by every measure that matters for the
+# board's size — so expiry bounds them and the scorecard gauge counts them.
+# They are NOT quarantined, and that asymmetry is the point of keeping two
+# names rather than widening one.
+REVIEW_SPAWN_TAGS = frozenset({"spawned-by-review"})
+
+# Three readers, three different sets, and they disagree on purpose:
+#
+#   merge at write time   `spawned-by-` prefix   (agent_mcp/backlog.py)
+#   quarantine            SPAWN_TAGS             (is_quarantined, below)
+#   expiry and the gauge  LOOP_SPAWN_TAGS        (this union)
+#
+# Quarantine asks "can this item answer the staleness question?" — an item
+# triage filed from a check it just ran cannot, by construction. A review
+# finding can: it describes the tree as of one commit a month ago, and single
+# triage is exactly the pass that should decide whether it still holds. Expiry
+# asks the other question — "did anything ever pick this up?" — and the answer
+# is no for both, so the bound applies to both.
+LOOP_SPAWN_TAGS = SPAWN_TAGS | REVIEW_SPAWN_TAGS
+
 # How old a self-filed item must be before triage may judge it. Long enough
 # that 'is this still true?' is a real question about a claim nobody acted
 # on, rather than a re-run of the check that produced it.
@@ -1668,8 +1689,21 @@ def group_triaged_ids(ledger: Path) -> set[int]:
 
 
 def is_self_spawned(item: Item) -> bool:
-    """Did this loop write this item? `backlog_write_task` tags what it files."""
+    """Did the triage/implement loop write this item? The quarantine test.
+
+    Deliberately narrower than `is_loop_spawned`: see `LOOP_SPAWN_TAGS`.
+    """
     return any(t in SPAWN_TAGS for t in item.tags)
+
+
+def is_loop_spawned(item: Item) -> bool:
+    """Did any unattended pass write this item — triage, implement or review?
+
+    The bound-the-board test. Everything under it is subject to expiry and
+    shows on the scorecard's open self-spawned gauge, whether or not it is
+    held out of the triage pool.
+    """
+    return any(t in LOOP_SPAWN_TAGS for t in item.tags)
 
 
 # A self-filed item that nothing picked up. Closed, not deleted: the file
@@ -1782,7 +1816,7 @@ def expire_stale_spawns(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
     judged |= {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}
     out: list[dict] = []
     for item in open_items(boards):
-        if not is_self_spawned(item) or item.status != TRIAGE_POOL_STATUS:
+        if not is_loop_spawned(item) or item.status != TRIAGE_POOL_STATUS:
             continue
         if item.id in judged or (set(item.tags) & EXPIRY_EXEMPT_TAGS):
             continue
@@ -1795,7 +1829,7 @@ def expire_stale_spawns(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
                f"or picked up; reopen by setting status back to draft")
         if not _apply_status(item.path, "done", why, add_tags=(EXPIRED_TAG,)):
             continue
-        spawned_by = next((t for t in item.tags if t in SPAWN_TAGS), "")
+        spawned_by = next((t for t in item.tags if t in LOOP_SPAWN_TAGS), "")
         S.append_event({"event": "backlog_expired", "item_id": item.id,
                         "age_days": item.age_days, "name": item.name[:200],
                         "spawned_by": spawned_by}, path=ledger)

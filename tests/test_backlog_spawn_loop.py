@@ -33,6 +33,7 @@ reopen. See `backlog.is_quarantined` and `backlog.expire_stale_spawns`.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -426,3 +427,98 @@ def test_findings_are_counted_off_the_file_not_the_report():
     assert B.count_findings(before, after) == 2
     assert B.count_findings(after, before) == 0, "never negative"
     assert B.count_findings("", "") == 0
+
+
+# ===========================================================================
+# The architecture reviewer files under its own tag, and the three readers
+# of "the loop wrote this" deliberately disagree about it
+# ===========================================================================
+
+REVIEW_TAG = "spawned-by-review"
+
+
+def test_a_review_finding_IS_a_triage_candidate(isolated):
+    """The one asymmetry in the whole tag scheme, and the reason there are two
+    frozensets rather than one.
+
+    Quarantine asks: can this item answer the staleness question? An item
+    triage filed cannot — it was written from a check that had just been run,
+    so "is this still true?" is a re-run of that check. A review finding can:
+    it describes the tree as of a commit up to a month old, and deciding
+    whether it still holds is exactly what single triage is for.
+    """
+    spawned_item(isolated, 500, days_old=0, tag=REVIEW_TAG)
+    assert B.select_candidate(S.LEDGER_PATH).id == 500
+    fresh, held = B.triage_pool(S.LEDGER_PATH)
+    assert [i.id for i in fresh] == [500] and held == 0
+
+
+def test_quarantine_still_keys_on_exactly_the_four_loop_tags():
+    """Widening `SPAWN_TAGS` instead of adding a second set would silently put
+    every review finding out of reach of the pass that should judge it."""
+    assert B.SPAWN_TAGS == {"spawned-by-triage", "spawned-by-autocode",
+                            "spawned-by-autoimplement", "spawned-by-selfmod"}
+    assert B.REVIEW_SPAWN_TAGS == {REVIEW_TAG}
+    assert B.LOOP_SPAWN_TAGS == B.SPAWN_TAGS | B.REVIEW_SPAWN_TAGS
+
+
+def test_the_two_predicates_answer_differently_for_a_review_finding(isolated):
+    path = spawned_item(isolated, 500, days_old=0, tag=REVIEW_TAG)
+    item = next(i for i in B.open_items(None) if i.id == 500)
+    assert not B.is_self_spawned(item), "not held out of the triage pool"
+    assert B.is_loop_spawned(item), "but still bounded by expiry and the gauge"
+    assert path.exists()
+
+
+def test_a_review_finding_nothing_picked_up_expires_on_the_same_bound(isolated):
+    """Expiry asks the other question — did anything ever act on this? — and
+    the answer is no for both producers, so the 30-day bound applies to both."""
+    spawned_item(isolated, 500, days_old=B.SPAWN_TRIAGE_MIN_AGE_DAYS + 1, tag=REVIEW_TAG)
+    out = B.expire_stale_spawns(S.LEDGER_PATH)
+    assert [d["item_id"] for d in out] == [500]
+    ev = [json.loads(l) for l in S.LEDGER_PATH.read_text().splitlines() if l.strip()]
+    assert ev[-1]["event"] == "backlog_expired" and ev[-1]["spawned_by"] == REVIEW_TAG
+    assert not B.open_items(None), "closed, with the text kept on disk"
+
+
+def test_a_fresh_review_finding_is_not_expired(isolated):
+    spawned_item(isolated, 500, days_old=1, tag=REVIEW_TAG)
+    assert B.expire_stale_spawns(S.LEDGER_PATH) == []
+
+
+def test_the_open_gauge_counts_review_findings(isolated, tmp_path):
+    """Row 4's bound is about the size of the board, and a review draft sits on
+    it exactly like a triage draft does."""
+    from scripts.automod import scorecard as SC
+    spawned_item(isolated, 500, days_old=1, tag=REVIEW_TAG)
+    spawned_item(isolated, 501, days_old=1, tag="spawned-by-triage")
+    gauge = SC._self_spawned_gauge([], isolated, now=datetime.now(timezone.utc).timestamp())
+    assert gauge["count"] == 2
+
+
+def test_a_review_write_is_merged_into_an_item_that_already_covers_it(isolated, tmp_path, monkeypatch):
+    """The write-time dedupe keys on the `spawned-by-` PREFIX, so it caught
+    this tag before the tag existed — pinned because the prefix is the only
+    thing that makes that true, and someone will one day list the tags."""
+    from agent_mcp import backlog as BL, backlog_similar as SIM
+    d = isolated
+    monkeypatch.setattr(BL, "BACKLOG_DIR", d)
+    monkeypatch.setattr(SIM, "DEDUPE_LOG", tmp_path / "dedupe.jsonl")
+    monkeypatch.setattr(SIM, "dedupe_config", lambda: dict(SIM.DEFAULTS))
+    name = "graph_refresh is advertised but never called by any tool"
+    body = ("`agent_mcp/code_graph.py:210` defines it and nothing dispatches it; "
+            "the staleness rule rebuilds on its own.")
+    created = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    (d / "10-existing.md").write_text(
+        "---\n" + yaml.dump({"status": "draft", "priority": "medium", "created": created,
+                             "board": "lloyd", "tags": ["backlog"]}) +
+        f"---\n\n# {name}\n\n{body}\n", encoding="utf-8")
+    monkeypatch.setattr(SIM, "semantic_candidates", lambda text, **kw: [{"id": 10, "score": 0.9}])
+
+    args = {"name": name, "description": body, "board": "lloyd", "tags": [REVIEW_TAG]}
+    out = json.loads(BL._handle_write(dict(args)))
+    assert out.get("merged_into") == 10, "a review re-run does not re-file its finding"
+    assert "Merged finding" in (d / "10-existing.md").read_text()
+
+    forced = json.loads(BL._handle_write({**args, "force": True}))
+    assert forced.get("merged_into") is None and forced.get("task_id") != 10

@@ -28,6 +28,8 @@ The metrics, each defined where it is computed:
   8  verdict_plumbing        regex-fallback rate, truncations
   9  throughput              items closed/day, median turns, median gate seconds
  10  rollbacks               count (precision is a human judgment; recorded null)
+ 11  grouping                clusters formed, group triages and what they judged
+ 12  arch review             units reviewed, docs edited vs rejected, what was filed
 """
 
 from __future__ import annotations
@@ -73,7 +75,7 @@ def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -
     """
     # Stdlib-only modules, imported lazily so the CLI stays light: the tag
     # set and the bound live in one place and are not restated here.
-    from scripts.automod.backlog import (EXPIRY_EXEMPT_TAGS, SPAWN_TAGS,
+    from scripts.automod.backlog import (EXPIRY_EXEMPT_TAGS, LOOP_SPAWN_TAGS,
                                          SPAWN_TRIAGE_MIN_AGE_DAYS)
     judged: set[int] = set()
     for e in all_events:
@@ -96,7 +98,7 @@ def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -
             if isinstance(tags, str):
                 tags = [tags]
             tags = {str(t) for t in tags}
-            if not (tags & SPAWN_TAGS):
+            if not (tags & LOOP_SPAWN_TAGS):
                 continue
             if fm.get("status") not in ("draft", "up_next", "in_progress"):
                 continue
@@ -374,11 +376,32 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
                  # unknown rather than as 0/N, which would be a claim.
                  "true_positives": None}
 
+    # ── 12 architecture review ──────────────────────────────────────────
+    # The doc-maintenance pass. `rejected` is the number that matters: it
+    # counts turns whose doc edit was thrown away for breaking a bound, which
+    # is the only way this job can waste a whole session, and a rate that
+    # stops being near zero means a bound is wrong or a prompt is unclear.
+    arch = by("arch_review")
+    arch_review = {
+        "reviewed": len(arch),
+        "by_kind": {k: sum(1 for e in arch if e.get("kind") == k) for k in ("doc", "group")},
+        "updated": sum(1 for e in arch if e.get("doc_updated")),
+        "committed": sum(1 for e in arch if e.get("commit")),
+        "rejected": sum(1 for e in arch if e.get("doc_update_rejected")),
+        "filed": sum(len(e.get("filed") or []) for e in arch),
+        "merged": sum(len(e.get("merged") or []) for e in arch),
+        "appended_to": sum(len(e.get("appended_to") or []) for e in arch),
+        "stray_writes": sum(len(e.get("stray_writes") or []) for e in arch),
+        "by_status": {v: sum(1 for e in arch if e.get("verdict") == v)
+                      for v in sorted({str(e.get("verdict")) for e in arch if e.get("verdict")})},
+    }
+
     return {"computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
             "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
             "human_touch": human, "test_honesty": honesty, "bookkeeping": bookkeeping,
-            "verdict_plumbing": plumbing, "throughput": throughput, "rollbacks": rollbacks}
+            "verdict_plumbing": plumbing, "throughput": throughput, "rollbacks": rollbacks,
+            "arch_review": arch_review}
 
 
 # ── output ───────────────────────────────────────────────────────────────
@@ -407,6 +430,17 @@ def render(row: dict) -> str:
         f"| 10 | rollbacks | {rb['count']} | triggers {', '.join(rb['triggers']) or '—'}; true positives: human judgment, not computed |",
         f"| 11 | grouping | {row.get('grouping', {}).get('group_triages', 0)} group triages | {row.get('grouping', {}).get('clusters_formed', 0)} clusters over {row.get('grouping', {}).get('items_clustered', 0)} items last night; {row.get('grouping', {}).get('duplicates_closed', 0)} duplicates closed, {row.get('grouping', {}).get('retired_in_group', 0)} retired, {row.get('grouping', {}).get('folded', 0)} folded, {row.get('grouping', {}).get('kept', 0)} kept; {row.get('grouping', {}).get('umbrellas_formed', 0)} umbrellas formed, {row.get('grouping', {}).get('umbrellas_landed', 0)} landed closing {row.get('grouping', {}).get('members_closed', 0)} members |",
     ]
+    ar = row.get("arch_review") or {}
+    kinds = ar.get("by_kind") or {}
+    statuses = ar.get("by_status") or {}
+    lines.append(
+        f"| 12 | arch review | {ar.get('reviewed', 0)} units | "
+        f"{kinds.get('doc', 0)} docs, {kinds.get('group', 0)} groups; "
+        f"{ar.get('committed', 0)} doc edits committed, {ar.get('rejected', 0)} rejected; "
+        f"filed {ar.get('filed', 0)}, merged {ar.get('merged', 0)}, "
+        f"appended {ar.get('appended_to', 0)}; "
+        f"{ar.get('stray_writes', 0)} stray writes reverted; "
+        f"{', '.join(f'{k} {v}' for k, v in statuses.items()) or 'no verdicts'} |")
     return "\n".join(lines)
 
 
