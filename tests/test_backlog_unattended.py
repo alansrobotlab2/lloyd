@@ -334,7 +334,9 @@ def test_the_implementer_hands_the_acceptance_check_over_as_the_contract(isolate
     prompt = fake.calls[0]["prompt"]
     assert "grep finds zero hits for the old name" in prompt
     assert "automod-change-own-code" in prompt
-    assert "end your turn immediately" in prompt
+    # The procedure ("end your turn immediately" after landing) lives in
+    # that skill since cut 4; the prompt says so rather than restating it.
+    assert "this message is the contract, not the procedure" in " ".join(prompt.split())
     assert fake.calls[0]["max_turns"] == 100
     events = [e for e in S.read_events(path=S.LEDGER_PATH) if e["event"] == "backlog_implement"]
     assert [e["phase"] for e in events] == ["started", "finished"]
@@ -537,8 +539,11 @@ def test_the_implementer_prompt_has_a_vault_route_and_renders_the_surface(isolat
                 "stop_reason": "stop", "num_turns": 4, "errors": []}
     monkeypatch.setattr(C, "run_prompt_in_session", fake)
     out = asyncio.run(I.execute(_Item()))
-    assert "Surface: vault" in fake.prompt and "automod_vault_land" in fake.prompt
-    assert "web/src/**" in fake.prompt
+    assert "Surface: vault" in fake.prompt
+    # `automod_vault_land` and the frontend scope moved to the skill the
+    # prompt names (cut 4); `test_prompt_pacing_and_ordering` pins them
+    # there under `live_vault`.
+    assert "automod-change-own-code" in fake.prompt
     ev = [e for e in S.read_events(path=S.LEDGER_PATH)
           if e.get("event") == "backlog_implement" and e.get("phase") == "finished"][-1]
     assert ev["vault_commits"] == ["abc1234def"] and ev["surface"] == "vault"
@@ -940,29 +945,27 @@ def test_the_re_offer_block_lists_what_earlier_rounds_filed(isolated):
     assert B.prior_spawned(S.LEDGER_PATH, 398) == [601, 602, 77]
 
 
-def test_the_prompt_and_the_skill_both_cover_a_test_that_pins_old_behaviour(isolated):
-    """A model told only "if it fails twice on the same rung, abort" will abort
-    on a test that fails *because* it asserts the behaviour the item asked to
-    change. That is work, not a blocker — but licensing a round to edit tests
-    needs the audit clause beside it, or the escape hatch becomes a way to
-    delete the test that was catching the bug."""
+def test_the_skill_covers_a_test_that_pins_old_behaviour_and_the_prompt_points_there(isolated):
+    """The rule for a test that fails *because* it asserts the behaviour the
+    item asked to change: read it, name it, quote the assertion, say which
+    line of the acceptance makes it wrong; never delete, never skip. It used
+    to be in the prompt AND the skill; since cut 4 it is in the skill only,
+    and the prompt's job is to send the model there.
+    """
     from pathlib import Path
+
     from workers.sources.autocode import PROMPT
     skill = Path.home() / "obsidian/skills/automod-change-own-code/SKILL.md"
-
-    for name, text in (("prompt", PROMPT), ("skill", skill.read_text())):
-        # Normalised: the skill is wrapped markdown and the prompt is a
-        # backslash-continued string, so a phrase is split across lines in
-        # both. The claim is about the content, not the line breaks.
-        low = " ".join(text.lower().split())
-        assert "pins the behaviour you were asked to change" in low, name
-        assert "name the test" in low or "must name the test" in low, name
-        assert "quote the assertion" in low, name
-        assert "acceptance" in low, name
-        # The guard rails that keep it from becoming an open door.
-        assert "never delete a test" in low, name
-        assert "skip" in low, name
-
+    assert "automod-change-own-code" in PROMPT
+    if not skill.exists():
+        pytest.skip("live vault skill not on disk here")
+    low = " ".join(skill.read_text().split()).lower()
+    assert "pins the behaviour you were asked to change" in low
+    assert "name the test" in low or "must name the test" in low
+    assert "quote the assertion" in low
+    assert "acceptance" in low
+    assert "never delete a test" in low
+    assert "skip" in low
 
 def test_a_turn_that_never_completed_is_written_as_infra_failed(isolated, monkeypatch):
     """The write side of #392: `execute` must not record a `finished` event for

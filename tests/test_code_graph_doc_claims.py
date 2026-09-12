@@ -98,21 +98,36 @@ def test_system_prompt_paragraph_carries_no_per_turn_value():
     assert "SM_20" not in para
 
 
-def test_implement_prompt_asks_for_the_blast_radius_with_a_worktree_root():
+def test_implement_prompt_sends_the_round_to_the_skill_that_maps_the_radius():
+    """Since cut 4 of senses-not-supervision the prompt is the contract and
+    the procedure — the blast-radius step included — lives in the vault skill
+    it names. The two tests below pin the step there."""
     p = _implement_prompt()
-    assert "graph_affected" in p
-    assert "root=<worktree>" in p, \
+    assert "automod-change-own-code" in p
+    assert "graph_affected" not in p, "procedure crept back into the prompt"
+
+
+@pytest.mark.live_vault
+@pytest.mark.skipif(not VAULT_SKILL.exists(), reason="vault not present")
+def test_the_skill_asks_for_the_blast_radius_with_a_worktree_root():
+    s = VAULT_SKILL.read_text()
+    assert "graph_affected" in s
+    assert "root=<worktree>" in s, \
         "without root= the implementer maps the live checkout, not its own"
 
 
-def test_implement_prompt_steps_stay_numbered_in_order():
-    """The blast-radius step was inserted; the ones after it had to move."""
-    p = _implement_prompt()
-    start = p.find("Procedure when the surface is `code`")
-    end = p.find("Procedure when the surface is `vault`")
+@pytest.mark.live_vault
+@pytest.mark.skipif(not VAULT_SKILL.exists(), reason="vault not present")
+def test_the_skill_procedure_stays_numbered_in_order():
+    """The blast-radius step was inserted as step 2; the ones after it had to
+    move, and a later edit must not leave a gap."""
+    s = VAULT_SKILL.read_text()
+    start = s.find("## Procedure")
+    end = s.find("## The round contract")
     assert -1 not in (start, end)
-    nums = [int(m) for m in re.findall(r"^(\d+)\. ", p[start:end], re.M)]
-    assert nums == [1, 2, 3, 4, 5, 6], nums
+    nums = [int(m) for m in re.findall(r"^(\d+)\. ", s[start:end], re.M)]
+    assert nums == list(range(1, len(nums) + 1)) and len(nums) >= 6, nums
+    assert "graph_affected" in s[start:end]
 
 
 PATCH = "scripts/maintenance/vault-automod-skill-blast-radius.patch"

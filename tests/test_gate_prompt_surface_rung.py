@@ -180,6 +180,8 @@ def test_the_autocode_prompt_no_longer_asks_the_model_to_run_it():
 
     assert "run_tool_choice_eval.py" not in PROMPT
     assert "compare_tool_choice.py" not in PROMPT
-    # ...and it says who does run it, so the model does not simply assume
-    # the check stopped existing.
-    assert "prompt_surface" in PROMPT
+    # ...and the procedure the prompt points at says who does run it, so the
+    # model does not assume the check stopped existing. That text lives in
+    # the vault skill now (cut 4); `tests/test_prompt_pacing_and_ordering.py`
+    # pins it there under the `live_vault` marker.
+    assert "automod-change-own-code" in PROMPT

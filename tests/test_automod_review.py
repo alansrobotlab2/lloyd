@@ -547,7 +547,9 @@ def test_the_implement_prompt_names_the_clauses_the_seams_and_the_item_id():
                            max_turns=I.DEFAULT_MAX_TURNS,
                            round_label="item9", reoffer="", members="", human_clauses="")
     assert "    1. a\n    2. b" in text
-    assert "item_id=9" in text and "Seams." in text and "review" in text
+    # "Seams." and the review-rung procedure moved to the vault skill
+    # `automod-change-own-code` (cut 4); the prompt names the skill instead.
+    assert "item_id=9" in text and "automod-change-own-code" in text and "review rung" in text
     assert "A deferral that names no id is recorded as `not_met`" in text
     assert "per clause" in text
 

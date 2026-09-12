@@ -16,6 +16,7 @@ Three things, all measured on the 2026-09-11 rounds:
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 from scripts.automod import backlog as B
 from workers.sources import autocode as I
@@ -40,12 +41,51 @@ def test_the_template_stays_bounded():
     """Not a style rule: the template is half of what a round reads before
     its first tool call, and the other half is the item.
 
-    10.5k chars is ~2.6k tokens. It is deliberately not lower — the pacing
-    block, the `human_paths` rule and the external-failure guidance all
-    earned their place by a round dying without them — but it must not drift
-    upward unnoticed, which is how it reached 11.8k.
+    Under 5.5k chars since cut 4 of senses-not-supervision moved the
+    procedure into the vault skill `automod-change-own-code`. What is left is
+    the contract: the item, the clauses, the findings and blocker rules,
+    pacing, and the finalizer's outcome vocabulary. Procedure the model can
+    read once belongs in a file it reads; procedure in a prompt is re-sent
+    every iteration and re-derived by every re-offer. 11.8k -> 10.3k -> 4.9k.
     """
-    assert len(I.PROMPT) < 10_500, f"{len(I.PROMPT)} chars"
+    assert len(I.PROMPT) < 5_500, f"{len(I.PROMPT)} chars"
+
+
+SKILL_PATH = Path.home() / "obsidian" / "skills" / "automod-change-own-code" / "SKILL.md"
+
+
+def _skill_text() -> str:
+    return " ".join(SKILL_PATH.read_text(encoding="utf-8").split())
+
+
+def test_the_prompt_points_at_the_skill():
+    text = _prompt()
+    assert "automod-change-own-code" in text
+    assert "this message is the contract, not the procedure" in " ".join(text.split())
+
+
+@pytest.mark.live_vault
+def test_the_procedure_lives_in_the_skill():
+    """Every rule the prompt stopped restating is in the file it points at.
+    Reads the live vault, so it runs where the vault is and is excluded from
+    the automod gate like the other `live_vault` tests.
+    """
+    text = _skill_text()
+    for phrase in (
+        "Seams.",
+        "Do not edit, commit or run anything in the worktree while a gate runs",
+        "outside your diff",
+        "do not abort on it",
+        "prompt_surface",
+        "automod_amend_clause",
+        "post_landing",
+        "is work, not a blocker",
+        "automod_vault_land",
+        "web/src/**",
+        "human_paths",
+        "git add -f",
+    ):
+        assert phrase in text, phrase
 
 
 def test_the_item_body_is_capped_well_under_the_old_thirty_thousand():
@@ -101,16 +141,6 @@ def test_the_eval_commands_are_gone_from_the_prompt():
     text = _prompt()
     assert "run_tool_choice_eval.py" not in text
     assert "compare_tool_choice.py" not in text
-    assert "prompt_surface" in text, "the model must know the check still runs"
-
-
-def test_the_external_failure_guidance_is_stated():
-    """Round 866-a ended its turn on a grader 503 caused by a SIBLING round's
-    landing, and was reaped 30 minutes later with the work intact.
-    """
-    text = " ".join(_prompt().split())
-    assert "outside your diff" in text
-    assert "do not abort on it" in text.lower()
 
 
 def test_human_paths_is_stated_with_its_prohibition():
@@ -125,8 +155,7 @@ def test_every_phrase_the_other_tests_pin_survived_the_trim():
     """
     text = " ".join(_prompt().split())
     for phrase in (
-        "backlog_write_task", "SPAWNED", "Seams.", "automod_gate_wait",
-        "automod_amend_clause", "Do not edit, commit or run anything in the",
+        "backlog_write_task", "SPAWNED", "item_id=9",
         "A deferral that names no id is recorded as `not_met`", "per clause",
         "closed automatically", "never re-triaged",
         "do not leave them only in your report",

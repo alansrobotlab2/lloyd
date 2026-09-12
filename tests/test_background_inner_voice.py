@@ -248,15 +248,22 @@ def test_a_source_reads_its_switch_from_config(monkeypatch):
 
 
 def test_the_shipped_config_matches_the_intended_defaults():
-    """Named individually, because these are the four sources that can be
-    observed at all and each answer is a judgement, not a default."""
+    """Named individually, because these are the sources that can be observed
+    at all and each answer is a judgement, not a default.
+
+    All off since cut 1 of senses-not-supervision (2026-09-12). The observer's
+    measured effect on unattended turns was negative — #874 abandoned at
+    iteration 38 on an invented premise, sixteen false repetition fires in a
+    day — and what it provided there is done by the anchors and the gate now.
+    Recording is untouched: every one of these is still a real session in the
+    Background tab. `tests/test_automod_hardening.py` pins the same four on
+    the automod gate's side.
+    """
     from app.config import CONFIG
 
     sources = (CONFIG.get("workers") or {}).get("sources") or {}
-    assert sources["autocode"]["inner_voice"] is True
-    assert sources["autotriage"]["inner_voice"] is True
-    assert sources["youtube-digest"]["inner_voice"] is True
-    assert sources["deep-research"]["inner_voice"] is False
+    for name in ("autocode", "autotriage", "youtube-digest", "arch-review", "deep-research"):
+        assert sources[name]["inner_voice"] is False, name
 
 
 def test_no_call_site_bakes_its_own_answer_in():

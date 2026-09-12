@@ -86,8 +86,11 @@ LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 PROMPT = """\
 Backlog item #{item_id} on your own board was triaged {triaged_ago} and \
 **confirmed**: the premise still holds and there is real work here. Implement \
-it through the self-modification loop, following `automod-change-own-code` \
-exactly.
+it through the self-modification loop, following the skill \
+`automod-change-own-code` exactly — it holds the procedure for a `code`, \
+`frontend`, `vault` or `mixed` surface, what each gate rung means, how the \
+`review` rung behaves, and what to do when an existing test fails. Read it \
+before you start; this message is the contract, not the procedure.
 
 <item id="{item_id}" status="{status}" priority="{priority}">
 # {name}
@@ -113,14 +116,9 @@ your finalizer reports each one:
 {human_clauses}
 The round is done when every clause has become true and a test pins each. If \
 you cannot make them true with one small, well-tested change, do not land a \
-larger one — abort the round, say why, and the item goes back to a human.
-
-**Seams.** Before you gate, write down every process boundary your change \
-crosses — a loopback POST to `/api/message/stream`, a value in `_meta` over \
-MCP, a `Task` subagent, a contextvar read in another task, a supervisord \
-restart — and name the test that crosses each one. The code graph is blind \
-across these and a grep is not a test. The review rung asks your diff the same \
-question cold.
+larger one — abort the round, say why, and the item goes back to a human. \
+Open the round with `automod_start(goal, item_id={item_id})` — the `item_id` \
+is what lets the review rung find these clauses.
 
 **Scope you discover is not scope you take — and it is not a new item \
 either.** A second bug beside the first, a refactor the fix wants, a missing \
@@ -154,89 +152,6 @@ nothing you cannot gate. Commit before every gate. Re-gating the same commit
 is answered from the ledger without a review, so a gate you have not committed
 for is a wasted one. If a `<context>` or `<budget>` anchor fires, it is not
 advice — commit, gate, and land or abort with what you have.
-
-Procedure when the surface is `code` or `frontend`:
-1. Re-read the item and the triage evidence. If anything has changed since the \
-triage and the premise no longer holds, say so and stop — that is a result.
-2. `automod_start` with a goal naming item #{item_id} **and `item_id={item_id}`** \
-— that is what lets the gate's review rung find the clauses it grades against. \
-Work only in the worktree it returns. The frontend is in scope: `web/src/**`, \
-`web/index.html` and `web/public/**` are writable and the gate type-checks and \
-builds them; `package.json`, the lockfile and the Vite/TS config are not.
-3. **Map the blast radius before you edit.** `graph_refresh(root=<worktree>)`, \
-then `graph_affected(symbol, root=<worktree>)` for each symbol you are about \
-to change. Pass `root=` every time — the default is the live checkout, not \
-your worktree. Record the depth-1 callers in your report: they tell you \
-whether this is a one-file change or a five-file one, and a grep for the \
-symbol's spelling will not.
-4. Write the test that fails today. Then the smallest change that makes it \
-pass. One change per round.
-5. `automod_gate` **returns immediately** — the gate runs detached, seven to \
-twelve minutes with the review rung — then `automod_gate_wait(round_id)` until \
-it returns the per-rung report (each call blocks up to four minutes; call it \
-again on `running: true`). **Do not edit, commit or run anything in the \
-worktree while a gate runs**: the review grades a snapshot of the commit you \
-gated, and every distinct commit it refuses spends one of the round's two \
-review attempts. Do not gate while a background task of yours is running; the \
-tool refuses. If the gate fails twice on the same rung for the same reason, \
-`automod_abort` and report — with two exceptions. A preflight that says it \
-**rebased** is a pass: something landed on `main` under you and the gate moved \
-your branch onto it and retested. Only a rebase *conflict* stops you, and it \
-names the files — resolve, commit, gate again. And a rung that fails for a \
-reason **outside your diff** (the grader unreachable, a pre-existing red test) \
-says so and tells you how long to wait: wait, gate again, up to twice more. \
-Nothing about your change has been judged yet, so do not abort on it and do \
-not end your turn.
-
-**The `review` rung is a second reader, not a test.** It hands your diff and \
-the clauses to a fresh session that has not seen your report, and fails the \
-gate on an unmet or unpinned clause, a test that cannot fail, or a seam with \
-no test across it. The first refusal is the normal case: fix what it names, \
-commit, `automod_gate` again. The second says "abort and report" — do that, \
-with `automod_abort` and a reason. Do not argue with it in prose and do not \
-weaken a test to satisfy it. If it judges the **premise** unsound, stop: a \
-human decides. If it marks a clause **unsatisfiable** — no diff could meet it \
-as written — that is a defect in the contract, not in your diff: \
-`automod_amend_clause(round_id, clause, text, reason)` to the nearest clause \
-that is satisfiable and still what the item asked for, then gate again. Never \
-amend a clause the reviewer did not mark unsatisfiable, and never to something \
-weaker. A clause it marks **post_landing** needs no action from you: the \
-change lands and a person confirms it.
-
-**An existing test that fails because it pins the behaviour you were asked to \
-change is work, not a blocker.** Read it. If it asserts the old behaviour and \
-the acceptance says that behaviour is wrong, updating it is part of the \
-change — and your report must name the test, quote the assertion you changed, \
-and say which line of the acceptance makes it wrong. If you cannot write that \
-sentence, the test is catching your bug: fix the code. Never delete a test to \
-get to green (the gate refuses it), never add a skip, and never weaken an \
-assertion you cannot justify in those terms.
-6. `automod_land`. Then **end your turn immediately** — the landing needs the \
-backend idle, and your own turn is what keeps it busy.
-
-Procedure when the surface is `vault`:
-1. Re-read the item and the triage evidence, as above.
-2. Edit the files directly under `~/obsidian` — the vault is live and has no \
-worktree. Touch only the paths the acceptance check names; **those are \
-pre-authorised and you do not need to ask**. Any other vault path is still \
-protected, and wanting one is a reason to stop and file an item, not to widen \
-the round.
-3. Verify the acceptance check yourself, then \
-`automod_vault_land(paths, message, item_id={item_id})`. It validates those \
-paths through the real loaders, commits them on the vault's main and records \
-the sha. If it refuses it has already reverted your edits: fix the cause and \
-retry once, or stop and report. Nothing restarts, so your turn continues.
-
-If the surface is `mixed`, land the vault half first, then run the code \
-procedure, and end your turn after `automod_land`.
-
-**If the change touches the prompt surface** — `prompt_builder.py`, \
-`prefetch.py`, or `lloyd/SOUL.md` / `lloyd/MEMORY.md` / `lloyd/USER.md` in the \
-vault — the gate runs the scored behavioural check for you, as the \
-`prompt_surface` rung, while you are waiting in `automod_gate_wait`. Do not \
-run the evals yourself: they are 20 primary queries and running them from \
-inside your own turn puts them on the engine beside your own context, which \
-evicts it.
 
 **Your outcome closes the item — or leaves it open.** When this turn ends you \
 will be asked to restate the result as one JSON object: whether the change \

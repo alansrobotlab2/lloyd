@@ -220,7 +220,11 @@ async def test_a_good_turn_is_recorded_with_a_verified_filing(tmp_path, backlog,
     # by the source — one reader for the switch, or the config is decoration.
     assert "inner_voice" not in turn.kwargs
     from workers.sources._common import source_inner_voice
-    assert source_inner_voice(Y.NAME) is True, "the whole point: Inner Voice watches it"
+    # Off since cut 1 of senses-not-supervision: the turn is still a real,
+    # recorded session — that was the point, and it holds — but the observer
+    # no longer watches unattended turns. The source passes no override, so
+    # config is the whole of it.
+    assert source_inner_voice(Y.NAME) is False
     assert turn.kwargs["max_turns"] == 33 and turn.kwargs["source"] == Y.NAME
     assert set(Y.DISALLOWED) <= set(turn.kwargs["extra_disallowed"])
     assert turn.kwargs["title"].startswith("Discover AI: Claude Code")
