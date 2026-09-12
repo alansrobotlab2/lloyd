@@ -70,6 +70,15 @@ SPAWN_CAP = 1
 # budget anchor fires at 75% and 90%, so a cap that is too tight spends its
 # warnings during normal work and has nothing left for the real deadline. The
 # cost of a larger cap is bounded by `max_duration_seconds` either way.
+#
+# This number only survives the whole chain: the source asks for it, the
+# queue payload carries it, `/api/message/stream` reads it, and
+# `messages._turn_budget` clamps it to a ceiling. Until 2026-09-12 that
+# ceiling was `agent.max_turns_ceiling` = 120 for every caller and the
+# clamp was silent, so this constant read 150 and the turn got 120 —
+# which is what killed round 858, at the cap, before it could re-gate.
+# The worker ceiling is `agent.max_turns_ceiling_worker` (200) and a clamp
+# now logs. Raising this past that ceiling puts it back to being a wish.
 DEFAULT_MAX_TURNS = 150
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent

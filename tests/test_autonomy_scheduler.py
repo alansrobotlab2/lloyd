@@ -31,7 +31,7 @@ def aut(tmp_path, monkeypatch):
     skill = tmp_path / "SKILL.md"
     skill.write_text("# test skill\nDo the thing.\n")
     monkeypatch.setattr(autonomy, "_SKILL_FOR_TESTS", str(skill), raising=False)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda: "sys", raising=False)
+    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "sys", raising=False)
     return autonomy
 
 

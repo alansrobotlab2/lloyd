@@ -5,6 +5,13 @@ agent:
   # backlog triage needs ~90; three hand-driven ones used 45, 65 and 76). The
   # ceiling is what stops a tailnet client asking for an unbounded turn.
   max_turns_ceiling: 120
+  # The same bound for a turn this process is running for itself. A worker
+  # source is not a tailnet client — it is the backend asking itself — and
+  # it is the caller whose budget is genuinely larger. Round 858 asked for
+  # 150, was clamped to 120 with nothing logged anywhere, and died at the
+  # cap before it could re-gate a change it had already fixed. Applies to
+  # `sessions_io.NON_USER_PLATFORMS` (autonomy, worker) only.
+  max_turns_ceiling_worker: 200
   permission_mode: bypassPermissions
 # Authoritative switch for the secondary LLM slot (:8091, Qwen3.6-35B-A3B
 # UD-Q3_K_XL on GPU 2's RTX 3090). server.py reconciles the supervisord process
@@ -280,6 +287,13 @@ harness:
   # uncommitted in a worktree, still Reading whole files at 241k of
   # 262,144 tokens. Silent before the first usage report — an unmeasured
   # turn is not a turn in trouble.
+  # What an unattended turn does NOT carry. USER.md is ~20k tokens
+  # describing the person Lloyd works for; a worker round is judged against
+  # an acceptance contract, nobody reads its reply, and on 2026-09-11 three
+  # rounds died at the context wall carrying it. MEMORY.md stays — it is
+  # how Lloyd knows what he has already learned about this machine.
+  worker_prompt:
+    drop_memory_files: [USER.md]
   context_anchor:
     enabled: true
     warn_fraction: 0.76
