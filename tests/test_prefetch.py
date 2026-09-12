@@ -191,6 +191,94 @@ def test_merge_reserves_slots_for_carried_hits():
     assert files[:3] == ["f0.md", "f1.md", "f2.md"]  # still score-ordered
 
 
+# ── #471: an injected vault hit names its file and says when it was cut ───────
+#
+# Every vault snippet reaching the agent is a fragment (`VAULT_SNIPPET_MAX`),
+# and until now the rendered line named neither the file it came from nor that
+# it had been cut — so a fragment was a dead end instead of a pointer to
+# `Read`. These pin the two attributes, and pin that the marker is conditional.
+
+def _render_vault(*hits):
+    return prefetch._format_context([], [], vault_results=list(hits))
+
+
+def test_vault_context_names_the_file_of_the_hit():
+    out = _render_vault(
+        {"file": "knowledge/meetings/march-5-transcript.md",
+         "title": "March 5 Transcript", "score": 0.92,
+         "snippet": "action items from the March 5 review"}
+    )
+    assert "<vault-context>" in out
+    assert "knowledge/meetings/march-5-transcript.md" in out
+
+
+def test_vault_context_renders_a_qmd_uri_vault_relative():
+    # The qmd daemon spells hits `qmd://obsidian/<path>`. The whole use of the
+    # path is that it goes straight into `Read`, so the URI scheme and the vault
+    # root have to come off before it is rendered.
+    out = _render_vault(
+        {"file": "qmd://obsidian/projects/lloyd/march-5-transcript.md",
+         "title": "March 5 Transcript", "score": 0.91,
+         "snippet": "action items from the March 5 review"}
+    )
+    assert "projects/lloyd/march-5-transcript.md" in out
+    assert "qmd://" not in out and "obsidian/" not in out
+
+
+def test_vault_context_names_the_file_on_a_carried_hit():
+    out = _render_vault(
+        {"file": "knowledge/meetings/march-5-transcript.md",
+         "title": "March 5 Transcript", "score": 0.7, "snippet": "hit",
+         "carried": True}
+    )
+    assert "semantic hit from the previous turn's query" in out
+    assert "knowledge/meetings/march-5-transcript.md" in out
+
+
+def test_vault_context_hit_without_a_file_still_renders():
+    # An unavailable path must cost the path attribute, never the hit.
+    out = _render_vault(
+        {"file": "", "title": "No Path Hit", "score": 0.8,
+         "snippet": "text from a hit whose path is unavailable"}
+    )
+    assert "No Path Hit" in out
+    assert "text from a hit whose path is unavailable" in out
+    assert "file:" not in out  # never an empty path attribute
+
+
+def _fake_daemon(snippet_len: int):
+    def _search(query, limit, collections, **kw):
+        return [{"file": "knowledge/meetings/march-5-transcript.md",
+                 "title": "March 5 Transcript", "score": 0.9,
+                 "snippet": "x" * snippet_len}]
+    return _search
+
+
+# >= VAULT_MIN_QUERY_LEN, and the phrasing an item-#471 acceptance probe uses.
+_PROBE_QUERY = "give me the full march 5 transcript from the vault"
+
+
+def test_snippet_cut_by_the_cap_is_flagged_and_marked(monkeypatch):
+    monkeypatch.setattr(prefetch, "_qmd_daemon_search",
+                        _fake_daemon(prefetch.VAULT_SNIPPET_MAX + 400))
+    hits = prefetch._search_vault(_PROBE_QUERY)
+    assert len(hits) == 1
+    assert len(hits[0]["snippet"]) == prefetch.VAULT_SNIPPET_MAX
+    assert hits[0]["truncated"] is True
+    out = _render_vault(*hits)
+    assert "[... truncated]" in out
+    assert "knowledge/meetings/march-5-transcript.md" in out
+
+
+def test_snippet_under_the_cap_renders_no_marker(monkeypatch):
+    monkeypatch.setattr(prefetch, "_qmd_daemon_search", _fake_daemon(40))
+    hits = prefetch._search_vault(_PROBE_QUERY)
+    assert len(hits) == 1
+    assert hits[0]["truncated"] is False
+    out = _render_vault(*hits)
+    assert "[... truncated]" not in out
+
+
 # ── Budget + carry-over end to end (workers patched) ──────────────────────────
 
 @pytest.fixture

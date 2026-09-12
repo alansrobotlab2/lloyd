@@ -672,6 +672,11 @@ def _search_vault(query: str, focus: SessionFocus | None = None,
                 "snippet": r.get("snippet", "")[:VAULT_SNIPPET_MAX],
                 "score": r.get("score", 0),
                 "file": r.get("file", ""),
+                # Recorded here, at the cut (#471): only this line can tell a
+                # snippet the cap actually shortened from one that merely
+                # happens to be VAULT_SNIPPET_MAX long, and the renderer needs
+                # that difference to say "this is a fragment" without lying.
+                "truncated": len(r.get("snippet", "")) > VAULT_SNIPPET_MAX,
             }
             for r in results
             if r.get("score", 0) >= VAULT_MIN_SCORE
@@ -863,6 +868,19 @@ def _search_recent_sessions(query: str) -> list[dict]:
 
 # ── Context block formatting ──────────────────────────────────────────────────
 
+def _vault_rel_path(file_val: str) -> str:
+    """Vault-relative path for a qmd hit, or "" when the hit has none (#471).
+
+    The daemon spells hits `qmd://obsidian/<path>`; the rendered path is meant
+    to be handed straight to `Read`/`vault_read`, so the scheme and the vault
+    root come off — the same two prefixes the explicit tool strips at
+    `agent_mcp/vault.py:730-731`. Empty in, empty out: a missing path costs the
+    attribute, never the hit.
+    """
+    path = (file_val or "").removeprefix("qmd://").removeprefix("obsidian/")
+    return path.strip()
+
+
 def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
                     vault_results: list[dict] = None,
                     session_results: list[dict] = None,
@@ -928,12 +946,21 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
             score = vr.get("score", 0)
             if not snippet:
                 continue
+            # A fragment is a pointer, not an answer (#471). Name the file it
+            # came from and say when the cap cut it, so the escalation is
+            # `Read <path>` rather than another search. Same marker the skill
+            # branch above uses. No keyword/intent detector: the path was
+            # already in the dict, it simply was never rendered.
+            if vr.get("truncated"):
+                snippet += " [... truncated]"
+            path = _vault_rel_path(vr.get("file", ""))
+            meta = f"score: {score:.2f}" + (f", file: {path}" if path else "")
             if vr.get("carried"):
                 vault_lines.append(
-                    f"- **{title}** (score: {score:.2f}, semantic hit from the previous turn's query): {snippet}"
+                    f"- **{title}** ({meta}, semantic hit from the previous turn's query): {snippet}"
                 )
             else:
-                vault_lines.append(f"- **{title}** (score: {score:.2f}): {snippet}")
+                vault_lines.append(f"- **{title}** ({meta}): {snippet}")
         if vault_lines:
             parts.append("<vault-context>\n" + "\n".join(vault_lines) + "\n</vault-context>")
 
