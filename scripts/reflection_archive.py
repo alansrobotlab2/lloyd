@@ -95,18 +95,29 @@ PROSE_WRITE = re.compile(
 
 COPY = re.compile(r"(?<![A-Za-z0-9_])cp\b|shutil\.copy")
 
-#: Tiers, strongest first. `tool-write` is the tier the archive rule binds: a
-#: call a run actually executes. `vault-write` and `prose-write` are write
-#: prescriptions this rule cannot bind — the first cannot reach the path at all,
-#: the second is a sentence rather than an instruction a run executes — so they
-#: are reported for the record rather than refused. `unclassified` is a failure
-#: of *this* rule, not a verdict about the skill, which is why the test alarms
-#: on it instead of letting an under-inclusive rule hide a writer.
+#: Tiers, strongest first. `tool-write` and `prose-write` are the tiers the
+#: archive rule binds (see `BOUND_TIERS`). `vault-write` is exempt for a reason
+#: that is not a loophole: those calls reject a `~/lloyd/` target with
+#: `PATH_ESCAPE`, so nothing they prescribe can overwrite anything.
+#: `unclassified` is a failure of *this* rule, not a verdict about the skill,
+#: which is why the test alarms on it instead of letting an under-inclusive rule
+#: hide a writer.
 TIER_ORDER = ("tool-write", "vault-write", "prose-write", "read", "unclassified")
 
 #: The tiers that destroy the report when no dated copy precedes them, and that
 #: the vault writer therefore refuses to land without one.
-BOUND_TIERS = ("tool-write",)
+#:
+#: Both of them, deliberately. A prose instruction ("Merge all `signals-*.md`
+#: into …") is a sentence rather than a call a run executes, so this rule cannot
+#: make the run copy the file first — but #436's acceptance quantifier is about
+#: *skills that write a report*, not about calls, and a rule binding only
+#: `tool-write` would let a skill destroy all three reports in prose and still
+#: read as covered. So a prose writer is bound the only way a prose writer can be
+#: bound: the archive step must be named in the same skill text, in the shape the
+#: nightly writers use, and the vault writer refuses to land the skill without
+#: it. Narrowing this tuple is narrowing the clause, which is why
+#: `tests/test_skill_reflection_archive.py` asserts it by value.
+BOUND_TIERS = ("tool-write", "prose-write")
 
 
 def archive_dest(stem: str) -> re.Pattern[str]:
@@ -271,8 +282,14 @@ def archive_problems(body: str, stem: str) -> list[str]:
         )
     # "Before it is overwritten" is the clause, so order is part of what is pinned:
     # an archive step written *below* the write instruction copies the new report and
-    # loses the old one exactly as completely as no copy at all.
-    write_at = [i for i, ln in enumerate(lines) if needle in ln and TOOL_WRITE.search(ln)]
+    # loses the old one exactly as completely as no copy at all. Asked over every
+    # bound tier, not just `Write(` calls — a skill whose overwrite is a prose
+    # instruction has the same ordering hazard, and it is the tier #436's quantifier
+    # is mainly about.
+    write_at = [
+        i for i, ln in enumerate(lines)
+        if needle in ln and line_tier(lines, i, ln, needle) in BOUND_TIERS
+    ]
     if write_at and min(copy_at) > min(write_at):
         problems.append(
             f"archive step for {stem} appears after the instruction that overwrites it"
@@ -289,7 +306,12 @@ def archive_problems(body: str, stem: str) -> list[str]:
 
 
 def stems_written(body: str) -> list[str]:
-    """Reports this skill body overwrites with a call a run can execute."""
+    """Reports this skill body overwrites, in any tier the rule binds.
+
+    Both a `Write(file_path=…)` and a prose "Merge … into <path>" are here: which
+    of the two it is decides how the archive step has to be written, not whether
+    one is owed.
+    """
     return sorted(
         stem for stem in set(LATEST_PATH.findall(body))
         if classify(body, stem) in BOUND_TIERS

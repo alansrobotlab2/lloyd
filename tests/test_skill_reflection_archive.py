@@ -81,15 +81,26 @@ silently uncovered, and any mention that is neither a write nor a read lands in
 ``unclassified``, which must be empty, so an under-inclusive rule cannot hide a
 writer.
 
-Tier 1 is the tier the archive rule binds: a real ``Write``/``Edit`` call on the
-path. Tier 2 is a write prescription that cannot land or cannot be machine-bound:
-either routed through ``vault_write``/``mem_write`` — which reject any ``~/lloyd/``
-target with ``PATH_ESCAPE`` (recorded in ``nightly-reflection-signals`` Phase 0,
-``nightly-reflection-knowledge-analysis`` step 1, and MEMORY.md) — or stated as
-prose ("Merge all ``signals-*.md`` into …"). Tier-2 entries carry a reason and are
-re-verified every run: if one ever gains a real ``Write`` call it moves to tier 1
-and must have an archive step. Both tier-2 families are recorded as findings on
-#436 rather than widened into this diff.
+The archive rule binds **two** tiers: a real ``Write``/``Edit`` call on the path,
+and a prose instruction to overwrite it ("Merge all ``signals-*.md`` into …").
+The distinction between them is only how the archive step has to be written, not
+whether one is owed — #436's quantifier is about *skills that write a report*,
+not about calls a run executes, so a rule binding only ``tool-write`` would let a
+skill destroy all three reports in prose and still read as covered. The prose tier
+is bound in the one way a prose writer can be bound: the step must be named in the
+same skill text, and the vault writer refuses to land the skill without it.
+``test_the_bound_tiers_are_the_two_that_can_lose_a_report`` pins ``BOUND_TIERS`` by
+value, because narrowing that tuple narrows the clause.
+
+``vault-write`` is the single exemption, and its reason is not a loophole: those
+calls reject any ``~/lloyd/`` target with ``PATH_ESCAPE`` (recorded in
+``nightly-reflection-signals`` Phase 0, ``nightly-reflection-knowledge-analysis``
+step 1, and MEMORY.md), so nothing they prescribe can overwrite anything. Those
+five (skill, report) pairs are re-verified every run and the discovered set must
+equal the recorded one; if a skill there ever gains a real ``Write`` call it moves
+into a bound tier and owes an archive step. The dead instructions themselves —
+prescriptions that read as pipeline steps and cannot execute — are recorded on
+#436 as findings, not widened into this diff.
 
 The attribution boundary, stated plainly: a mention counts when it names the path
 (``reflection/<name>-latest.md``). A skill that refers to ``test-results-latest.md``
@@ -157,15 +168,22 @@ def skills() -> dict[str, str]:
     return bodies
 
 
-# --- Tier 1: writers that the archive rule binds. -------------------------------
-# Discovered and asserted as a set, so a new tool-writer of any reflection report
-# has to be looked at rather than quietly inheriting "no archive step".
-EXPECTED_TOOL_WRITERS: dict[str, set[str]] = {
-    "nightly-reflection-signals": {"signals-latest"},
-    "nightly-reflection-knowledge-write": {
-        "tool-patterns-latest",
-        "conversation-patterns-latest",
-    },
+# --- The writers the archive rule binds, with the tier that binds them. ---------
+# Discovered and asserted as a set, so a new writer of any reflection report has to
+# be looked at rather than quietly inheriting "no archive step". Two of these
+# overwrite with a `Write` call a run executes; `historical-knowledge-refresh`
+# instructs the overwrite in prose and is bound anyway, because #436's quantifier is
+# about skills that write reports rather than calls a run executes.
+EXPECTED_BOUND_WRITERS: dict[str, tuple[str, set[str]]] = {
+    "nightly-reflection-signals": ("tool-write", {"signals-latest"}),
+    "nightly-reflection-knowledge-write": (
+        "tool-write",
+        {"tool-patterns-latest", "conversation-patterns-latest"},
+    ),
+    "historical-knowledge-refresh": (
+        "prose-write",
+        {"signals-latest", "tool-patterns-latest", "conversation-patterns-latest"},
+    ),
 }
 
 # --- Tier 2: write prescriptions that are not machine-bindable, and why. --------
@@ -186,25 +204,19 @@ EXPECTED_VAULT_WRITE_WRITERS: dict[str, set[str]] = {
     "nightly-day-end-synthesis": {"day-end-synthesis-latest"},
 }
 
-#: The disclosed debt, checked family by family by
-#: test_the_prose_writer_carve_out_is_debt_recorded_on_436. These skills really do
-#: instruct overwriting the live reports and really do have no archive step; this
-#: check cannot bind them because it binds instructions a run executes, and prose is
-#: not one. Recorded on #436 (round SM_20260912_155333 findings) as the item's scope,
-#: not this test's exemption: the set is asserted equal, so it can only shrink.
-EXPECTED_PROSE_WRITERS: dict[str, set[str]] = {
-    "historical-knowledge-refresh": {
-        "signals-latest",
-        "tool-patterns-latest",
-        "conversation-patterns-latest",
-    },
-}
-
-EXPECTED_UNARCHIVED_WRITERS: dict[str, set[str]] = {
-    name: set(stems) for name, stems in EXPECTED_VAULT_WRITE_WRITERS.items()
-}
-for _name, _stems in EXPECTED_PROSE_WRITERS.items():
-    EXPECTED_UNARCHIVED_WRITERS.setdefault(_name, set()).update(_stems)
+#: The recorded debt, **measured by archive presence rather than by tier**: bound
+#: writers that still lack a named archive step. Computed from `archive_problems`
+#: by test_the_recorded_debt_is_measured_by_archive_presence, which asserts it
+#: equals this. Empty as of round SM_20260912_163822: `historical-knowledge-refresh`
+#: was the last entry, and it now reads and dated-copies all three reports before
+#: merging into them, in the same shape the nightly writers use.
+#:
+#: Measuring rather than listing is the point (review finding, round
+#: SM_20260912_163822): keyed on classification tier, an expectation would keep
+#: demanding a paid-off skill's name on #436 forever, so the debt could never
+#: shrink by being paid. Keyed on presence, paying it removes the entry from the
+#: measurement, and the only way to grow the set is to break an archive step.
+EXPECTED_UNARCHIVED_DEBT: dict[str, set[str]] = {}
 
 
 # --- Clause 1 + 2 ---------------------------------------------------------------
@@ -229,15 +241,25 @@ def test_every_skill_that_writes_a_reflection_report_archives_it_first(skills):
 
 @pytest.mark.live_vault
 def test_discovered_tool_writers_are_exactly_the_expected_set(skills):
-    """Anti-drift for the classifier itself: a new tool-writer, or one that
-    disappears, is a decision someone has to record here."""
-    found: dict[str, set[str]] = {}
+    """Anti-drift for the classifier itself: a new bound writer, or one whose tier
+    changed, is a decision someone has to record here.
+
+    Carrying the tier in the expectation is what makes this a drift guard for the
+    *rule* and not just for the file list: had the set been names-and-stems only,
+    narrowing `BOUND_TIERS` back to `tool-write` would have dropped three entries
+    and been answered by editing the expectation down to match, which is the
+    regression `test_the_bound_tiers_are_the_two_that_can_lose_a_report` exists to
+    prevent."""
+    found: dict[str, tuple[str, set[str]]] = {}
     for (name, stem), tier in classify_all(skills).items():
         if tier in ra.BOUND_TIERS:
-            found.setdefault(name, set()).add(stem)
-    assert found == EXPECTED_TOOL_WRITERS, (
+            prev_tier, stems = found.get(name, (tier, set()))
+            assert prev_tier == tier, f"{name} carries two tiers: {prev_tier}, {tier}"
+            stems.add(stem)
+            found[name] = (tier, stems)
+    assert found == EXPECTED_BOUND_WRITERS, (
         f"reflection-report writers changed: found {found}, expected "
-        f"{EXPECTED_TOOL_WRITERS}. Every entry must archive before overwriting."
+        f"{EXPECTED_BOUND_WRITERS}. Every entry must archive before overwriting."
     )
 
 
@@ -565,6 +587,96 @@ def test_the_archive_check_can_actually_fail():
     )
 
 
+def test_the_bound_tiers_are_the_two_that_can_lose_a_report():
+    """The quantifier of clause 2, pinned by value.
+
+    `BOUND_TIERS` is what decides whether a skill's overwrite is checked at all, so
+    a edit that quietly narrowed it to `tool-write` would leave every prose merge —
+    including the one `historical-knowledge-refresh` used to perform on all three
+    reports — looking covered. The exemption is asserted too: `vault-write` is out
+    because `PATH_ESCAPE` makes the write impossible, not because it is prose.
+    """
+    assert ra.BOUND_TIERS == ("tool-write", "prose-write"), (
+        f"BOUND_TIERS is {ra.BOUND_TIERS}; the clause covers every skill that "
+        "writes a report, which is both the call and the instruction"
+    )
+    assert "vault-write" not in ra.BOUND_TIERS, (
+        "vault-write writes are refused by PATH_ESCAPE, so refusing to land a "
+        "skill over them would block on an instruction that cannot execute"
+    )
+    # And the tier the clause is really about stays bound end to end: a prose
+    # merge with no archive step is a problem, is refused by the writer, and is
+    # not excused by its tier.
+    prose_only = (
+        "1. **Consolidate signals:** Merge everything into "
+        "`~/lloyd/_pipeline/reflection/signals-latest.md`\n"
+    )
+    assert classify(prose_only, "signals-latest") == "prose-write"
+    assert archive_problems(prose_only, "signals-latest"), (
+        "a prose merge with no archive step passed, which is the exact shape "
+        "historical-knowledge-refresh had before round SM_20260912_163822"
+    )
+    assert ra.skill_rule_violations("s", prose_only), (
+        "the vault writer would land a skill that destroys a report in prose"
+    )
+    # "Before it is overwritten" binds the prose tier with the same force: an
+    # archive step written *below* the merge instruction copies the merged report
+    # and loses the old one, so a sequence-blind rule passes a body that saves
+    # nothing. This is the shape `historical-knowledge-refresh` now avoids by
+    # putting its archive block first in Phase 3.
+    prose_after = (
+        "1. **Consolidate signals:** Merge everything into "
+        "`~/lloyd/_pipeline/reflection/signals-latest.md`\n"
+        "   STAMP=$(date -u +%Y-%m-%d-%H%M) && "
+        "cp signals-latest.md signals-latest-$STAMP.md\n"
+    )
+    assert archive_problems(prose_after, "signals-latest"), (
+        "a prose merge followed by its archive step passed the order check"
+    )
+    assert not archive_problems(
+        prose_after.splitlines()[1] + "\n" + prose_after.splitlines()[0] + "\n",
+        "signals-latest",
+    ), "an archive step written before the prose merge was still flagged"
+
+
+_BARE_REPORT = r"(?<![A-Za-z0-9_./-])"  # a filename not preceded by `reflection/`
+
+
+@pytest.mark.live_vault
+def test_a_bound_writer_names_every_report_it_owes_by_full_path(skills):
+    """Attribution is textual, so the shape of the mention is part of the pin.
+
+    `LATEST_PATH` needs the `_pipeline/reflection/` prefix to see a report at all —
+    that is what tells a report in that directory apart from a file that merely
+    shares its name, and the price is that a *write instruction* naming only a bare
+    filename is invisible to the classifier: no tier, no archive rule, no writer-set
+    entry. So every bound writer's mentions must be path-shaped. A copy step is
+    allowed to name its source relatively (the skills `cd` into the directory for
+    the archive block), and a sentence *about* the file is allowed too — what must
+    not happen is an instruction with a write verb in front of a bare name, because
+    that is a writer this check would never find.
+    """
+    offenders: dict[str, list[str]] = {}
+    for (name, stem), tier in classify_all(skills).items():
+        if tier not in ra.BOUND_TIERS:
+            continue
+        bare = re.compile(_BARE_REPORT + re.escape(stem) + r"\.md")
+        for ln in ra.logical_lines(skills[name]):
+            at = ln.find(f"{stem}.md")
+            if at < 0 or not bare.search(ln):
+                continue
+            if ra.COPY.search(ln) and ra.archive_dest(stem).search(ln):
+                continue  # an archive copy may name its source relatively
+            head = ln[:at]
+            if ra.WRITE_TO.search(head) or ra.PROSE_WRITE.search(head) or ra.TOOL_WRITE.search(head):
+                offenders.setdefault(f"{name}:{stem}", []).append(ln.strip()[:100])
+    assert offenders == {}, (
+        f"bound writers name a report by bare filename in a write instruction, "
+        f"where this check cannot see them: {offenders}. Spell the path as "
+        "`_pipeline/reflection/<name>-latest.md`."
+    )
+
+
 def test_the_generated_field_check_can_actually_fail():
     """The pre-#436 wording, verbatim from vault commit 3514dac1, must be caught."""
     old_wording = (
@@ -626,74 +738,91 @@ def test_classification_survives_an_unclassifiable_mention(skills):
 
 
 @pytest.mark.live_vault
-def test_declared_write_prescriptions_are_still_accurate(skills):
-    """The tier-2 carve-outs must still describe reality, and no new one may
-    appear unlisted. A carve-out that outlives its reason would quietly exempt a
-    live writer from the archive rule."""
+def test_the_only_exemption_is_a_call_that_cannot_reach_the_path(skills):
+    """One exemption is allowed, and it is the one that cannot destroy a report.
+
+    Anything routed through `vault_write`/`mem_write` returns `PATH_ESCAPE` on a
+    `~/lloyd/` target, so no archive step can be owed by it — but that reason has
+    an expiry date: the moment such a skill gains a real `Write`/`Edit` call it is
+    a writer and owes the step. So the exempt set is asserted equal to the
+    recorded one (it cannot grow unlisted) and each entry is re-checked to still
+    classify as `vault-write` (an entry whose reason lapsed fails rather than
+    grandfathering in)."""
     classified = classify_all(skills)
-    found: dict[str, set[str]] = {}
+    exempt: dict[str, set[str]] = {}
     for (name, stem), tier in classified.items():
-        if tier in ("vault-write", "prose-write"):
-            found.setdefault(name, set()).add(stem)
-    assert found == EXPECTED_UNARCHIVED_WRITERS, (
-        f"unarchived write prescriptions changed: found {found}, expected "
-        f"{EXPECTED_UNARCHIVED_WRITERS}. A tool-call writer must archive; a "
-        "prose/vault_write one is a finding on #436, not an exemption."
+        if tier == "vault-write":
+            exempt.setdefault(name, set()).add(stem)
+    assert exempt == EXPECTED_VAULT_WRITE_WRITERS, (
+        f"PATH_ESCAPE-shaped prescriptions changed: found {exempt}, expected "
+        f"{EXPECTED_VAULT_WRITE_WRITERS}. A bound writer must archive; the only "
+        "acceptable exemption is a call that cannot reach the path."
     )
-    for name, stems in EXPECTED_UNARCHIVED_WRITERS.items():
+    for name, stems in EXPECTED_VAULT_WRITE_WRITERS.items():
         assert name in skills, f"{name} is no longer an active skill — prune its entry"
         for stem in stems:
-            assert classified.get((name, stem)) in ("vault-write", "prose-write"), (
+            assert classified.get((name, stem)) == "vault-write", (
                 f"{name}:{stem} changed classification to "
-                f"{classified.get((name, stem))}; if it now writes with Write/Edit "
-                "it must archive before overwriting"
+                f"{classified.get((name, stem))}; if it now writes with Write/Edit, "
+                "or merges in prose, it must archive before overwriting"
             )
 
 
 @pytest.mark.live_vault
-def test_the_prose_writer_carve_out_is_debt_recorded_on_436(skills):
-    """The honest limit of this guard, stated as an assertion rather than a comment.
+def test_the_recorded_debt_is_measured_by_archive_presence(skills):
+    """The last skill that overwrote a report without naming a copy is now gone
+    from the debt, and the debt itself is a measurement, not a list.
 
-    This file binds three write prescriptions and leaves four instructions alone:
-    `historical-knowledge-refresh/SKILL.md` instructs merging into all three live
-    reports, and nothing in the repo executes a `cp` for it, because the check
-    binds instructions a run *executes* and that skill's write is a sentence. It is
-    carved out as a finding on #436 (round SM_20260912_155333), not silently covered
-    by a rule that reads "every writer". Asserted family by family so the debt can
-    only shrink: a new prose writer has to be added here, which is a decision with a
-    name on it, and a prose writer that is fixed disappears from it.
+    Round SM_20260912_155333 recorded `historical-knowledge-refresh` as the
+    outstanding case: it merges into all three live reports in prose, and prose is
+    not a call a run executes. Round SM_20260912_163822 bound the prose tier and
+    gave that skill its own Read + `date -u` `cp` step, so the expectation is empty
+    — and it is checked as `archive_problems` output, so the only way to add an
+    entry is to break an archive step, while paying one removes it. Two half-states
+    are pinned against that: a bound writer with no archive step appears in the
+    measurement (mutation below), and a skill cannot sit in the debt by virtue of
+    its tier alone.
     """
     classified = classify_all(skills)
-    prose: dict[str, set[str]] = {}
-    vault: dict[str, set[str]] = {}
+    debt: dict[str, set[str]] = {}
     for (name, stem), tier in classified.items():
-        if tier == "prose-write":
-            prose.setdefault(name, set()).add(stem)
-        elif tier == "vault-write":
-            vault.setdefault(name, set()).add(stem)
-    assert prose == EXPECTED_PROSE_WRITERS, (
-        f"prose writers changed: found {prose}, expected {EXPECTED_PROSE_WRITERS}. "
-        "Either one was fixed (delete its entry) or a new skill writes reports in "
-        "prose — which is a finding on #436, not an entry added to keep green."
+        if tier in ra.BOUND_TIERS:
+            problems = archive_problems(skills[name], stem)
+            if problems:
+                debt.setdefault(name, set()).add(stem)
+    assert debt == EXPECTED_UNARCHIVED_DEBT, (
+        f"skills overwrite a nightly report with no named archive step: {debt}. "
+        "`_pipeline/` is gitignored, so those reports are unrecoverable (#436)."
     )
-    assert vault == EXPECTED_VAULT_WRITE_WRITERS, (
-        f"vault_write-shaped prescriptions changed: found {vault}, expected "
-        f"{EXPECTED_VAULT_WRITE_WRITERS}"
-    )
-    # The debt is on the item, not just in this file: if #436 closes while a prose
-    # writer still has no archive step, whoever closed it read this and disagreed.
-    # Asserted, not guarded — a renamed or pruned item file must stop this test
-    # dead rather than leave its final assertion silently unrun (review finding,
-    # round SM_20260912_155333).
-    items = sorted((Path.home() / "obsidian" / "backlog").glob("436-*.md"))
-    assert items, (
-        "backlog/436-*.md is gone, so the prose-writer carve-out has nowhere to "
-        "live: re-record it on the item that owns #436's remaining scope, then "
-        "point this assertion at it"
-    )
-    body = items[0].read_text(encoding="utf-8", errors="replace")
-    for skill in prose:
-        assert skill in body, (
-            f"{skill} is unarchived prose-write debt on #436 but is not named in "
-            "the item — the carve-out has become invisible to whoever closes it"
+    # The payment, pinned: same skill, prose tier, no problems, absent from debt.
+    paid = "historical-knowledge-refresh"
+    for stem in ("signals-latest", "tool-patterns-latest", "conversation-patterns-latest"):
+        assert classified.get((paid, stem)) == "prose-write", (
+            f"{paid} no longer merges {stem} in prose, so the pinned payment above "
+            "is checking a condition that no longer exists — update the expectation"
+        )
+        assert archive_problems(skills[paid], stem) == [], (
+            f"{paid} lost the archive step round SM_20260912_163822 gave it for "
+            f"{stem}: {archive_problems(skills[paid], stem)}"
+        )
+    assert paid not in debt, f"{paid} is back in the debt the round cleared"
+    # Anything still owed has to be named on the item, where the next reader of
+    # #436 will see it. Asserted, not guarded: a renamed or pruned item file stops
+    # this test dead rather than leave its last assertion silently unrun (review
+    # finding, round SM_20260912_155333).
+    if debt:
+        items = sorted((Path.home() / "obsidian" / "backlog").glob("436-*.md"))
+        assert items, (
+            "backlog/436-*.md is gone, so unarchived writers have nowhere to be "
+            "recorded: re-record them on the item that owns #436's remaining scope"
+        )
+        body = items[0].read_text(encoding="utf-8", errors="replace")
+        for skill in debt:
+            assert skill in body, (
+                f"{skill} is unarchived debt on #436 but is not named in the item — "
+                "invisible to whoever closes it"
+            )
+    else:
+        assert any((Path.home() / "obsidian" / "backlog").glob("436-*.md")), (
+            "the backlog item this file's scope is written against is gone"
         )
