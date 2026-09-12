@@ -35,8 +35,13 @@ def _load(name: str):
 @pytest.fixture
 def cr(request):
     """A fresh module instance per test — these tests monkeypatch module
-    globals (VAULT, TRAJECTORY_DIR, PROPOSALS_FILE) and must not leak them."""
-    return _load(f"cr_{request.node.name.replace('[', '_').replace(']', '_')}")
+    globals (VAULT, TRAJECTORY_DIR, PROPOSALS_FILE) and must not leak them —
+    unloaded again on teardown so sys.modules does not accumulate one copy per
+    test."""
+    name = f"cr_{request.node.name.replace('[', '_').replace(']', '_')}"
+    mod = _load(name)
+    yield mod
+    sys.modules.pop(name, None)
 
 
 @pytest.fixture
@@ -110,7 +115,9 @@ def test_sdk_read_and_edit_by_file_path_yield_one_pair(cr, vault, tmp_path):
 
 
 def test_write_tool_path_key_and_no_self_pair(cr, vault, tmp_path):
-    """`Write` counts too, and the same doc read twice is one doc, not a pair."""
+    """`Write` counts too. Every access is a document entry — two accesses to
+    one doc contribute two pair-rows with it (co_access_count then records 2),
+    but a doc is never paired with itself."""
     entry = _entry([
         _tool("Write", 1, {"file_path": "~/obsidian/knowledge/a.md"}),
         _tool("Read", 2, {"file_path": "~/obsidian/knowledge/a.md"}),
@@ -122,8 +129,11 @@ def test_write_tool_path_key_and_no_self_pair(cr, vault, tmp_path):
     traj = tmp_path / "trajectories"
     _write_traj(traj, "2026-09-12", [entry])
     pairs = cr.extract_co_access_pairs(traj, since_date=None)
-    assert len(pairs) == 2  # a<->c from each of the two a accesses
+    assert len(pairs) == 2  # a<->c once per a access
     assert all(p["doc_a"] != p["doc_b"] for p in pairs)
+    # The count is aggregated, not per-pair: both a<->c rows land in one group.
+    groups = list(cr.aggregate_pairs(pairs).values())
+    assert len(groups) == 1 and groups[0]["co_access_count"] == 2
 
 
 # ── clause 2: the legacy vocabulary and the `path` key still work ────────────
@@ -186,9 +196,39 @@ def test_search_result_branch_is_inert_and_stays_so(cr, vault):
 
 # ── clause 3: the live corpus now yields a material signal ───────────────────
 
+def test_extractor_scales_on_a_synthetic_corpus(cr, vault, tmp_path):
+    """The clause-3 floor, pinned hermetically so it always runs.
+
+    4 files x 15 SDK-named accesses: a vocabulary that missed `Read`/`Edit`
+    yields 0 pairs here, and the thresholds are the ones #420 was graded on.
+    """
+    traj = tmp_path / "trajectories"
+    for day in range(1, 5):
+        entries = []
+        for col in range(15):
+            rel = f"knowledge/d{day}_{col}.md"
+            doc = vault / rel
+            doc.parent.mkdir(parents=True, exist_ok=True)
+            doc.write_text("# doc\n")
+        tools = [_tool("Read", seq,
+                       {"file_path": f"~/obsidian/knowledge/d{day}_{seq}.md"})
+                 for seq in range(15)]
+        entries.append(_entry(tools, session_key=f"2026090{day}_111111_x"))
+        _write_traj(traj, f"2026-09-0{day}", entries)
+
+    pairs = cr.extract_co_access_pairs(traj, since_date=None)
+    assert len(pairs) >= 200, f"only {len(pairs)} raw pairs"
+    assert len(cr.aggregate_pairs(pairs)) >= 100
+
+
+@pytest.mark.live_vault
 @pytest.mark.skipif(not TRAJECTORY_DIR.is_dir(), reason="trajectory corpus not present")
 def test_live_trajectories_yield_material_co_access_signal(cr):
-    """The acceptance measurement: 7 pairs / 1 aggregate before #420."""
+    """The acceptance measurement on the real corpus: 7 pairs / 1 aggregate
+    before #420, 1144 / 256 after. Reads the live trajectories and the live
+    vault (path existence is part of normalize_vault_path), so it is marked
+    `live_vault` like the other tests that assert over files no round controls.
+    """
     pairs = cr.extract_co_access_pairs(TRAJECTORY_DIR, since_date=None)
     assert len(pairs) >= 200, f"only {len(pairs)} raw pairs from {TRAJECTORY_DIR}"
     assert len(cr.aggregate_pairs(pairs)) >= 100
@@ -302,6 +342,16 @@ def _task_file(dir_path: Path, model: str) -> Path:
     return f
 
 
+def _config_endpoint(alias: str) -> str:
+    """The endpoint config.yaml says for an alias — the contract under test,
+    so the assertions below track the file rather than a port someone may move."""
+    from app.config import MODEL_CONFIGS
+    cfg = MODEL_CONFIGS.get(alias) or {}
+    base = (cfg.get("base_url")
+            or (cfg.get("env") or {}).get("ANTHROPIC_BASE_URL") or "")
+    return base.rstrip("/") + "/v1/chat/completions"
+
+
 def test_endpoint_follows_the_task_model_declaration(cr, tmp_path, monkeypatch):
     """#51's frontmatter is the decision; the constant at :41 ignored it."""
     adir = tmp_path / "autonomy"
@@ -309,11 +359,26 @@ def test_endpoint_follows_the_task_model_declaration(cr, tmp_path, monkeypatch):
     monkeypatch.setattr(cr, "AUTONOMY_DIR", adir)
     endpoint, model = cr.resolve_llm_target()
     assert model == "secondary"
-    assert endpoint == "http://127.0.0.1:8091/v1/chat/completions"
-    assert endpoint != cr.LLM_ENDPOINT  # not the hardcoded constant
+    assert endpoint == _config_endpoint("secondary")
+    assert endpoint != cr.LLM_ENDPOINT          # not the hardcoded constant
+    assert _config_endpoint("secondary") != _config_endpoint("primary")
 
     _task_file(adir, "primary")
-    assert cr.resolve_llm_target()[0] == "http://127.0.0.1:8096/v1/chat/completions"
+    assert cr.resolve_llm_target()[0] == _config_endpoint("primary")
+
+
+def test_disabled_secondary_alias_moves_with_the_switch(cr, tmp_path, monkeypatch):
+    """`secondary_enabled: false` rewrites the alias to primary in app.config;
+    Stage 2 must follow the rewrite rather than post to a slot that is off.
+    The constant could not have honoured either state."""
+    from app import config as app_config
+    adir = tmp_path / "autonomy"
+    _task_file(adir, "secondary")
+    monkeypatch.setattr(cr, "AUTONOMY_DIR", adir)
+    monkeypatch.setitem(app_config.CONFIG, "secondary_enabled", False)
+    monkeypatch.setattr(app_config, "_ALIAS_REWRITES_LOGGED", set(), raising=True)
+    endpoint, model = cr.resolve_llm_target()
+    assert (endpoint, model) == (_config_endpoint("primary"), "primary")
 
 
 def test_endpoint_falls_back_to_the_constant_without_a_task_file(cr, tmp_path, monkeypatch):
@@ -345,9 +410,13 @@ def test_stage2_posts_to_the_resolved_endpoint(cr, tmp_path, monkeypatch):
     adir = tmp_path / "autonomy"
     _task_file(adir, "secondary")
     monkeypatch.setattr(cr, "AUTONOMY_DIR", adir)
-    monkeypatch.setattr(cr.urllib.request, "urlopen", fake_urlopen)
+    # urllib.request is process-global, so the fake is installed only around the
+    # call itself and the assertions run after the context has restored it.
+    with monkeypatch.context() as ctx:
+        ctx.setattr(cr.urllib.request, "urlopen", fake_urlopen)
+        out = cr.classify_relationship("knowledge/a.md", "knowledge/b.md", "ctx")
 
-    out = cr.classify_relationship("knowledge/a.md", "knowledge/b.md", "ctx")
-    assert captured["url"] == "http://127.0.0.1:8091/v1/chat/completions"
+    assert captured["url"] == _config_endpoint("secondary")
+    assert captured["url"] != cr.LLM_ENDPOINT
     assert captured["body"]["model"] == "secondary"
     assert out["type"] == "supersedes"
