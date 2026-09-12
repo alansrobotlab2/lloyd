@@ -22,6 +22,7 @@ from typing import Any, AsyncIterator
 
 from app.harness import events
 from app.harness.client import stream_chat
+from app.harness.context_meter import ContextMeter, context_window_for
 from app.harness.errors import (
     ContextOverflowError,
     ParseError,
@@ -126,6 +127,14 @@ async def run_query(
         chat_messages = list(messages)
     if options.system_prompt and not _has_system(chat_messages):
         chat_messages.insert(0, {"role": "system", "content": options.system_prompt})
+
+    # Live context-window position. Caller-owned when supplied — the router
+    # hands the SAME object to the Inner Voice observer so both read one
+    # figure — and private otherwise, which still gets a bare `run_query`
+    # caller the relief ladder without an anchor it has no way to render.
+    meter = options.context_meter
+    if meter is None:
+        meter = ContextMeter(context_window_for(options.model))
 
     pool = await _build_pool(options)
     # Pool is process-shared (see mcp_pool.get_or_open_pool); do NOT
@@ -240,6 +249,7 @@ async def run_query(
                     drained = []
                 if drained:
                     chat_messages.extend(drained)
+                    meter.observe_append(chat_messages)
                     logger.info(
                         "loop: drained %d background-task notification(s)", len(drained),
                     )
@@ -256,6 +266,7 @@ async def run_query(
                     anchors = []
                 if anchors:
                     chat_messages.extend(anchors)
+                    meter.observe_append(chat_messages)
                     logger.info(
                         "loop: state anchor re-injected %d message(s) (iter=%d)",
                         len(anchors), num_turns,
@@ -306,6 +317,32 @@ async def run_query(
             if options.visible_tools_capture is not None:
                 options.visible_tools_capture[:] = last_visible_tools
 
+            # Pre-request floor. A request sent with less room than the
+            # completion needs comes back truncated mid-tool-call, and the
+            # model's own next move is to re-send it — which is how 875's
+            # completions shrank 3147 -> 1760 -> 1175 tokens against the
+            # same heredoc. Relieve first, so the request has somewhere to
+            # write.
+            min_completion = int(
+                getattr(options, "context_relief_min_completion_tokens", 6_000)
+            )
+            if (
+                getattr(options, "context_relief_enabled", True)
+                and meter.measured
+                and meter.headroom < min_completion
+            ):
+                _relieve_context(
+                    chat_messages,
+                    options=options,
+                    meter=meter,
+                    reason="pre_request",
+                    total_usage=total_usage,
+                    keep_recent=int(getattr(
+                        options, "intra_turn_microcompact_keep_recent", 15)),
+                    iteration=num_turns,
+                )
+
+            request_msgs_len = len(chat_messages)
             try:
                 async for chunk in stream_chat(
                     base_url=options.base_url,
@@ -380,22 +417,41 @@ async def run_query(
                     )
                     raise
                 context_overflow_recoveries += 1
-                truncated_count, freed_chars = _truncate_largest_tool_results(
-                    chat_messages, target_chars=80_000,
+                # The engine told us the real size of the prompt it just
+                # rejected, which is a better anchor than anything the
+                # meter has: adopt it, then aim below the compaction wall.
+                requested = int(getattr(exc, "requested_input_tokens", 0) or 0)
+                if requested > 0:
+                    meter.observe_usage(
+                        {"input_tokens": requested}, request_msgs_len,
+                    )
+                    meter.observe_append(chat_messages)
+                overflow_target = _relief_target(options, meter)
+                report = _relieve_context(
+                    chat_messages,
+                    options=options,
+                    meter=meter,
+                    reason="overflow",
+                    target=overflow_target,
+                    total_usage=total_usage,
+                    keep_recent=int(getattr(
+                        options, "intra_turn_microcompact_keep_recent", 15)),
+                    iteration=num_turns,
                 )
                 logger.warning(
                     "loop: context overflow (requested=%s tokens), recovery #%d: "
-                    "truncated %d tool result(s), freed ~%d chars",
+                    "freed ~%d tokens via %s",
                     exc.requested_input_tokens,
                     context_overflow_recoveries,
-                    truncated_count,
-                    freed_chars,
+                    report.get("freed_tokens", 0),
+                    ", ".join(report.get("rungs") or []) or "nothing",
                 )
                 yield events.stream_raw(
                     "",
                     error=(
                         f"context_overflow_recovery: attempt={context_overflow_recoveries}, "
-                        f"truncated={truncated_count}, freed_chars={freed_chars}, "
+                        f"rungs={','.join(report.get('rungs') or []) or 'none'}, "
+                        f"freed_tokens={report.get('freed_tokens', 0)}, "
                         f"requested_input_tokens={exc.requested_input_tokens}"
                     ),
                 )
@@ -417,11 +473,18 @@ async def run_query(
 
             tool_calls_committed = _commit_tool_calls(
                 tool_calls_acc, summary_tools=summary_tools,
+                finish_reason=finish_reason or "",
             )
 
             iteration_duration_ms = int((time.perf_counter() - iteration_started_at) * 1000)
             last_iteration_usage = iteration_usage
             total_usage = _accumulate_iteration_usage(total_usage, iteration_usage)
+            # The engine just reported the real size of the prompt it
+            # processed. `request_msgs_len` is the list length as that
+            # request went out, so everything appended from here is
+            # attributed to the meter's estimate rather than double-counted.
+            meter.observe_usage(iteration_usage, request_msgs_len)
+            meter.observe_append(chat_messages)
             asst_evt = events.assistant_message(
                 text=assistant_text,
                 tool_calls=tool_calls_committed,
@@ -430,6 +493,7 @@ async def run_query(
                 duration_ms=iteration_duration_ms,
                 iteration=num_turns,
                 finish_reason=finish_reason or "stop",
+                context=meter.snapshot() if meter.measured else None,
             )
             yield asst_evt
             accumulated_text += assistant_text
@@ -472,7 +536,49 @@ async def run_query(
             if not tool_calls_committed:
                 if observer_injected:
                     # Observer injected a system message. Continue the loop
-                    # so the model gets to read it and respond.
+                    # so the model gets to read it and respond — but only if
+                    # there is room to respond IN.
+                    #
+                    # On 2026-09-11 round 875 reached this branch with the
+                    # window already full: the loop continued, the next
+                    # completion was capped at `window - prompt`, the model
+                    # re-sent the same cut-off heredoc, and vLLM eventually
+                    # 400'd. An inject the model cannot answer is worse than
+                    # no inject — it spends the last iteration the turn had.
+                    meter.observe_append(chat_messages)
+                    floor = int(getattr(
+                        options, "context_relief_terminal_floor_tokens", 12_000))
+                    if meter.measured and meter.headroom < floor:
+                        _relieve_context(
+                            chat_messages,
+                            options=options,
+                            meter=meter,
+                            reason="terminal_inject",
+                            total_usage=total_usage,
+                            keep_recent=int(getattr(
+                                options, "intra_turn_microcompact_keep_recent", 15)),
+                            iteration=num_turns,
+                        )
+                    if meter.measured and meter.headroom < floor:
+                        logger.warning(
+                            "loop: dropping terminal inject — headroom %d < floor %d "
+                            "(iter=%d); ending turn as context_exhausted",
+                            meter.headroom, floor, num_turns,
+                        )
+                        _log_harness_event(
+                            session_id,
+                            "harness.terminal_inject_dropped_for_context",
+                            {
+                                "headroom": meter.headroom,
+                                "floor": floor,
+                                "iteration": num_turns,
+                                "used": meter.used,
+                                "context_window": meter.window,
+                            },
+                        )
+                        stop_reason = "context_exhausted"
+                        accumulated_text += ""
+                        break
                     logger.info(
                         "loop: observer injected on terminal iteration — continuing loop",
                     )
@@ -540,6 +646,7 @@ async def run_query(
                         tc=tc, options=options, session_id=session_id,
                         loaded_set=loaded_set,
                         runtime_disallowed=current_disallowed,
+                        meter=meter,
                     )
                     if pre is not None:
                         early[tc["id"]] = pre
@@ -645,6 +752,7 @@ async def run_query(
                     session_id=session_id,
                     loaded_set=loaded_set,
                     runtime_disallowed=current_disallowed,
+                    meter=meter,
                 )
 
                 # The caption ratchet. Only tools whose schema actually asked
@@ -693,6 +801,7 @@ async def run_query(
             # 2026-09-05 it was the entire trigger, so a turn that ran 70
             # tool calls at 40% of its context window was held to 5 inline
             # results the whole way, and everything it had read was gone.
+            meter.observe_append(chat_messages)
             if (
                 tool_calls_committed
                 and getattr(options, "intra_turn_microcompact_enabled", True)
@@ -701,9 +810,13 @@ async def run_query(
                 keep = getattr(options, "intra_turn_microcompact_keep_recent", 15)
                 tool_count = sum(1 for m in chat_messages if m.get("role") == "tool")
                 if tool_count >= threshold:
-                    _intra_turn_microcompact(
+                    # The tool-count threshold stays a cheap pre-check; the
+                    # ladder's own rungs each decide whether they are needed.
+                    _relieve_context(
                         chat_messages,
                         options=options,
+                        meter=meter,
+                        reason="intra_turn",
                         total_usage=total_usage,
                         keep_recent=keep,
                         tool_count=tool_count,
@@ -914,6 +1027,187 @@ def _merge_usage(acc: dict[str, int], chunk: dict[str, Any]) -> dict[str, int]:
     return out
 
 
+def _log_harness_event(
+    session_id: str, event: str, data: dict[str, Any],
+) -> None:
+    """Append one event to the session's event log, or give up quietly.
+
+    Lazy and guarded: `app.harness` is importable without a full app
+    bootstrap (bench scripts and `app/harness/tests` rely on that), and a
+    turn must never die because its diagnostics could not be written.
+    """
+    if not session_id:
+        return
+    try:
+        from app import event_log
+
+        event_log.log_event(session_id, event, data)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("loop: could not log %s: %s", event, exc)
+
+
+def _relief_target(options: Any, meter: Any) -> int:
+    """Tokens the relief ladder is trying to get back under.
+
+    The same target the intra-turn pass already budgets against, so the two
+    cannot disagree about where "relieved" is.
+    """
+    try:
+        threshold = int(meter.threshold)
+    except Exception:  # noqa: BLE001
+        return 0
+    frac = float(getattr(options, "intra_turn_microcompact_target_fraction", 0.6))
+    return int(threshold * frac)
+
+
+def _relieve_context(
+    chat_messages: list[dict[str, Any]],
+    *,
+    options: Any,
+    meter: Any,
+    reason: str,
+    target: int = 0,
+    total_usage: dict[str, int] | None = None,
+    keep_recent: int = 15,
+    tool_count: int = 0,
+    iteration: int = 0,
+) -> dict[str, Any]:
+    """Free context, cheapest rung first, stopping as soon as it is enough.
+
+    Four rungs, in cost order, each running only while the meter still says
+    the turn is over `target`:
+
+    1. **Clear stale tool results** (`_intra_turn_microcompact`). Spills to
+       disk, so nothing is lost. Self-gating on its own arithmetic, and the
+       only rung that runs when the meter is unmeasured.
+    2. **Prune preserved reasoning**, first to the configured window and
+       then to `reasoning_keep_under_pressure`. This rewrites messages the
+       engine has already cached and costs a re-prefill (#520) — which is
+       why it is here and not in the per-iteration path. Under pressure the
+       alternative is losing the turn, and that is the trade #520 did not
+       have to make.
+    3. **Spill `Write`/`Edit` bodies** out of assistant tool-call arguments
+       once their results have landed. The residue nothing else can reach.
+    4. **Truncate the largest tool results** — destructive-ish (it spills
+       first now), and last for that reason.
+
+    Returns a report dict for the log and the event; never raises, because a
+    turn that dies inside its own relief path is strictly worse than one
+    that runs a little over budget.
+    """
+    report: dict[str, Any] = {"reason": reason, "rungs": [], "freed_tokens": 0}
+    if not getattr(options, "context_relief_enabled", True):
+        return report
+
+    before = int(getattr(meter, "used", 0) or 0)
+    target = target or _relief_target(options, meter)
+
+    def _over() -> bool:
+        # Unmeasured never counts as over: an iteration-1 turn with no
+        # usage report has not been shown to need anything.
+        return bool(getattr(meter, "measured", False)) and meter.used > target
+
+    # -- rung 1: stale tool results -------------------------------------
+    try:
+        _intra_turn_microcompact(
+            chat_messages,
+            options=options,
+            total_usage=total_usage or {},
+            keep_recent=keep_recent,
+            tool_count=tool_count or sum(
+                1 for m in chat_messages if m.get("role") == "tool"
+            ),
+            iteration=iteration,
+        )
+        meter.resync(chat_messages)
+        report["rungs"].append("tool_results")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("loop: relief rung 'tool_results' failed: %s", exc)
+
+    # -- rung 2: preserved reasoning ------------------------------------
+    if _over():
+        keep_now = int(getattr(options, "preserve_thinking_iterations", 0) or 0)
+        under_pressure = int(
+            getattr(options, "context_relief_reasoning_keep_under_pressure", 2)
+        )
+        for keep in (keep_now, under_pressure):
+            if not _over():
+                break
+            if keep <= 0:
+                continue
+            try:
+                _prune_reasoning(chat_messages, keep=keep)
+                meter.resync(chat_messages)
+                report["rungs"].append(f"reasoning:{keep}")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("loop: relief rung 'reasoning' failed: %s", exc)
+                break
+
+    # -- rung 3: assistant tool-call argument bodies --------------------
+    if _over() and getattr(options, "context_relief_shrink_arguments", True):
+        try:
+            from app.harness.microcompact import shrink_assistant_arguments
+
+            shrunk_msgs, shrunk, freed_chars = shrink_assistant_arguments(
+                chat_messages,
+                keep_recent_tools=keep_recent,
+                min_chars=int(
+                    getattr(options, "context_relief_shrink_arguments_min_chars", 2_000)
+                ),
+                session_id=getattr(options, "session_id", "") or "",
+                tools=getattr(
+                    options, "context_relief_shrink_arguments_tools", ("Write", "Edit")
+                ),
+            )
+            if shrunk:
+                # Slice-assign: `chat_messages` may be the observer's own
+                # handle and rebinding would leave it holding the old list.
+                chat_messages[:] = shrunk_msgs
+                meter.resync(chat_messages)
+                report["rungs"].append(f"arguments:{shrunk}")
+                report["argument_chars_freed"] = freed_chars
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("loop: relief rung 'arguments' failed: %s", exc)
+
+    # -- rung 4: truncate the largest tool results ----------------------
+    if _over():
+        try:
+            over_tokens = max(0, meter.used - target)
+            truncated, freed_chars = _truncate_largest_tool_results(
+                chat_messages,
+                target_chars=max(20_000, over_tokens * 4),
+                session_id=getattr(options, "session_id", "") or "",
+                min_chars=int(
+                    getattr(options, "intra_turn_microcompact_min_chars", 2_000)
+                ),
+            )
+            if truncated:
+                meter.resync(chat_messages)
+                report["rungs"].append(f"truncate:{truncated}")
+                report["truncated_chars_freed"] = freed_chars
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("loop: relief rung 'truncate' failed: %s", exc)
+
+    after = int(getattr(meter, "used", 0) or 0)
+    report["freed_tokens"] = max(0, before - after)
+    report["used_before"] = before
+    report["used_after"] = after
+    report["target"] = target
+    if report["rungs"] and report["freed_tokens"]:
+        logger.info(
+            "loop: context relief (%s) freed ~%d tokens: %d -> %d (target %d) via %s",
+            reason, report["freed_tokens"], before, after, target,
+            ", ".join(report["rungs"]),
+        )
+    elif _over():
+        logger.warning(
+            "loop: context relief (%s) could not get under target: %d > %d "
+            "(rungs tried: %s)",
+            reason, after, target, ", ".join(report["rungs"]) or "none",
+        )
+    return report
+
+
 def _intra_turn_microcompact(
     chat_messages: list[dict],
     *,
@@ -1115,6 +1409,7 @@ def _commit_tool_calls(
     acc: dict[int, dict[str, Any]],
     *,
     summary_tools: set[str] | None = None,
+    finish_reason: str = "",
 ) -> list[dict[str, Any]]:
     """Finalize accumulated tool calls.
 
@@ -1151,7 +1446,17 @@ def _commit_tool_calls(
                 "loop: tool_call args parse failed for %s: %s (raw=%r)",
                 tc["function"]["name"], err, raw_args,
             )
-            args_dict = {"__parse_error__": True, "raw": raw_args, "error": err}
+            # `finish_reason` and the raw length are what tell a malformed
+            # call apart from one the context window cut in half. They are
+            # the same shape on the wire and the right next move is the
+            # opposite in each case — see `_pre_dispatch`.
+            args_dict = {
+                "__parse_error__": True,
+                "raw": raw_args,
+                "error": err,
+                "finish_reason": finish_reason,
+                "raw_len": len(raw_args),
+            }
             # vLLM ingests assistant tool_calls back as conversation
             # history on the next turn and re-parses `arguments`. If we
             # leave the malformed string, the next request 400s and the
@@ -1245,7 +1550,7 @@ def _assistant_message_for_history(
 
 
 def _cap_history_reasoning(chat_messages: list[dict[str, Any]], *, keep: int) -> None:
-    """Apply the preserved-thinking window ONCE, at turn entry.
+    """Apply the preserved-thinking window at turn entry, and under pressure.
 
     The bound itself is unchanged (`_prune_reasoning`, same `keep`). What
     changed is *where* it is applied, and that is the whole of backlog
@@ -1278,6 +1583,14 @@ def _cap_history_reasoning(chat_messages: list[dict[str, Any]], *, keep: int) ->
     intra-turn overshoot is the thinking from iterations 1..n-6 that used
     to be dropped. `eval/run_preserve_thinking_eval.py` prices the
     keep-window trade-off if that ever needs re-tuning.
+
+    Since 2026-09-12 there is a second caller: `_relieve_context` rung 2,
+    which prunes to `context_relief.reasoning_keep_under_pressure` when the
+    turn is about to hit the wall. That does pay the re-prefill #520 was
+    filed against, deliberately — at that point the alternative is not a
+    cheaper turn, it is no turn. The per-iteration call this docstring was
+    written against is still gone; relief runs only when the meter says the
+    prompt is over target.
     """
     if keep <= 0:
         return
@@ -1287,10 +1600,13 @@ def _cap_history_reasoning(chat_messages: list[dict[str, Any]], *, keep: int) ->
 def _prune_reasoning(chat_messages: list[dict[str, Any]], *, keep: int) -> None:
     """Keep `reasoning` on the most recent `keep` assistant messages only.
 
-    Callers: `_cap_history_reasoning` at turn entry ONLY. Calling this from
-    inside the iteration loop is the defect backlog #520 was filed against
-    — it rewrites history the engine has already cached and collapses the
-    prefix-cache hit rate from iteration `keep`+2 onward.
+    Callers: `_cap_history_reasoning` at turn entry, and `_relieve_context`
+    rung 2 under measured context pressure. Calling this *per iteration* is
+    the defect backlog #520 was filed against — it rewrites history the
+    engine has already cached and collapses the prefix-cache hit rate from
+    iteration `keep`+2 onward. The relief caller is not that: it fires only
+    when the meter says the prompt is over target, which on a healthy turn
+    is never.
 
     Preserved thinking is not free: the review turn on
     20260905_151355_iv5174 generated 66.6k reasoning tokens, so carrying
@@ -1428,6 +1744,7 @@ async def _dispatch_one_tool_call(
     session_id: str,
     loaded_set: LoadedToolSet,
     runtime_disallowed: set[str] | None = None,
+    meter: Any | None = None,
 ) -> NormalizedEvent:
     """Run hooks → MCP dispatch → hooks for a single tool call.
 
@@ -1446,12 +1763,77 @@ async def _dispatch_one_tool_call(
     early = await _pre_dispatch(
         tc=tc, options=options, session_id=session_id,
         loaded_set=loaded_set, runtime_disallowed=runtime_disallowed,
+        meter=meter,
     )
     if early is not None:
         return early
     return await _execute_tool_call(
         tc=tc, pool=pool, options=options, session_id=session_id,
     )
+
+
+def _parse_failure_text(args_dict: dict[str, Any], *, meter: Any | None = None) -> str:
+    """What to tell the model about a tool call whose arguments did not parse.
+
+    Two failures arrive in the same shape and want opposite answers:
+
+    - **The completion was cut off by the context window.** The tool did not
+      run, the arguments are a prefix of what the model meant to send, and
+      re-sending is the worst available move — the retry is generated with
+      *less* room than the attempt that was just cut, so each one is shorter
+      than the last. That is measured: round 875 re-sent the same heredoc
+      three times at 3147, then 1760, then 1175 tokens. Both the old tool
+      result and the vault skill told it to "retry verbatim".
+    - **The model emitted malformed JSON.** Re-sending is exactly right.
+
+    `finish_reason == "length"` is the direct signal. The fallback — low
+    headroom against a large raw argument string — catches the case where
+    the stream ended without one. With no meter (a bare `run_query` caller)
+    the text is byte-identical to what it has always been, which is what
+    keeps `tests/test_tool_dispatch.py` honest.
+    """
+    err = args_dict.get("error", "unknown")
+    base = f"Tool call arguments could not be parsed as JSON: {err}"
+
+    raw_len = int(args_dict.get("raw_len", 0) or 0)
+    cut_by_wall = str(args_dict.get("finish_reason", "")) == "length"
+    headroom = None
+    if meter is not None and getattr(meter, "measured", False):
+        headroom = int(meter.headroom)
+        # A big argument string plus little room left is the same event
+        # without the flag: the completion ran out of window mid-write.
+        if headroom < int(getattr(meter, "window", 0)) * 0.10 and raw_len > 2_000:
+            cut_by_wall = True
+
+    if cut_by_wall:
+        used_k = f"~{headroom // 1000}k" if headroom is not None else "very little"
+        win_k = (
+            f"{int(getattr(meter, 'window', 0)) // 1000}k"
+            if meter is not None else "the window"
+        )
+        call_k = max(1, raw_len // 4000)
+        return (
+            f"{base}\n\n"
+            f"The completion was cut off by the context window: {used_k} of "
+            f"{win_k} remain, and this call was ~{call_k}k tokens. The tool "
+            f"did NOT run.\n\n"
+            f"Do not re-send this call. The retry is generated with less room "
+            f"than this attempt had, so each one comes back shorter. Instead: "
+            f"commit what is already on disk, gate, and land or abort. If "
+            f"content still has to be written, write it in pieces well under "
+            f"{max(1, call_k // 2)}k tokens each — prefer small Edits over "
+            f"whole-file Writes, and do not Read whole files."
+        )
+
+    if headroom is not None and headroom < int(
+        getattr(meter, "window", 0)
+    ) * 0.15:
+        return (
+            f"{base}\n\nRe-send the call with valid JSON. Note the context "
+            f"window is nearly full (~{headroom // 1000}k tokens of headroom "
+            f"remain), so keep the arguments small."
+        )
+    return base
 
 
 async def _pre_dispatch(
@@ -1461,6 +1843,7 @@ async def _pre_dispatch(
     session_id: str,
     loaded_set: LoadedToolSet,
     runtime_disallowed: set[str] | None = None,
+    meter: Any | None = None,
 ) -> NormalizedEvent | None:
     """Everything before the MCP call. Returns an early result, or None.
 
@@ -1473,7 +1856,7 @@ async def _pre_dispatch(
     call_id = tc["id"]
 
     if args_dict.get("__parse_error__"):
-        msg = f"Tool call arguments could not be parsed as JSON: {args_dict.get('error', 'unknown')}"
+        msg = _parse_failure_text(args_dict, meter=meter)
         return events.tool_result(call_id=call_id, name=name, content=msg, is_error=True)
 
     effective_disallowed = (
@@ -1823,6 +2206,8 @@ def _truncate_largest_tool_results(
     chat_messages: list[dict[str, Any]],
     *,
     target_chars: int,
+    session_id: str = "",
+    min_chars: int = 4096,
 ) -> tuple[int, int]:
     """Replace the largest tool-result message contents with a truncation
     notice until at least ``target_chars`` of content has been freed.
@@ -1834,8 +2219,21 @@ def _truncate_largest_tool_results(
     the largest down, replacing each with a short error string that
     surfaces what happened to the model. Stop as soon as we've freed
     ``target_chars`` chars cumulatively, OR after we've replaced every
-    tool message that's > 4KB (smaller results aren't worth touching).
+    tool message bigger than ``min_chars`` (smaller results aren't worth
+    touching).
+
+    **Spills before it overwrites.** This is the last relief rung and the
+    only destructive one: until 2026-09-11 it replaced the content with a
+    notice telling the model to "re-run the call with a narrower query",
+    which at the wall is advice the turn has no room to take. When a
+    ``session_id`` is available the content goes to the same per-session
+    spill directory microcompaction uses and the notice names the path, so
+    the evidence survives as a file the model can Read. A failed spill
+    still truncates — this rung runs when the alternative is the request
+    being rejected outright — but says so.
     """
+    from app.harness.tool_result_spill import persist_for_compaction
+
     candidates: list[tuple[int, int]] = []   # (size, message_index)
     for i, msg in enumerate(chat_messages):
         if msg.get("role") != "tool":
@@ -1850,7 +2248,7 @@ def _truncate_largest_tool_results(
             )
         else:
             size = 0
-        if size > 4096:
+        if size > min_chars:
             candidates.append((size, i))
     candidates.sort(reverse=True)
 
@@ -1858,14 +2256,39 @@ def _truncate_largest_tool_results(
     truncated = 0
     for size, idx in candidates:
         original_size = size
-        notice = (
-            f"[harness: tool result truncated by context-overflow recovery — "
-            f"original was {original_size} chars. The combined tool history "
-            f"exceeded the model's context window. Re-run the call with a "
-            f"narrower query (smaller hops, higher min_confidence, fewer "
-            f"max_results) or use a more targeted tool.]"
-        )
         msg = chat_messages[idx]
+        path = None
+        if session_id:
+            cid = msg.get("tool_call_id") or msg.get("call_id") or ""
+            content = msg.get("content")
+            if isinstance(content, list):
+                text = "".join(
+                    b.get("text", "") for b in content if isinstance(b, dict)
+                )
+            else:
+                text = content if isinstance(content, str) else ""
+            if cid and text:
+                try:
+                    path = persist_for_compaction(
+                        text, tool_use_id=f"{cid}.truncated", session_id=session_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("loop: truncation spill failed: %s", exc)
+                    path = None
+        if path is not None:
+            notice = (
+                f"[harness: tool result cleared under context pressure — "
+                f"{original_size:,} chars, full content at {path}. "
+                f"Read that path if you need it again.]"
+            )
+        else:
+            notice = (
+                f"[harness: tool result truncated by context-overflow recovery — "
+                f"original was {original_size} chars. The combined tool history "
+                f"exceeded the model's context window. Re-run the call with a "
+                f"narrower query (smaller hops, higher min_confidence, fewer "
+                f"max_results) or use a more targeted tool.]"
+            )
         if isinstance(msg.get("content"), list):
             msg["content"] = [{"type": "text", "text": notice}]
         else:

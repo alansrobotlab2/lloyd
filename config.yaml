@@ -272,6 +272,46 @@ harness:
   # review turn would push peak context past the microcompaction trigger,
   # and microcompaction can only clear tool results. 0 disables.
   preserve_thinking_iterations: 6
+  # Context anchor. Tell the model where it is against its own context
+  # window, once at `warn_fraction` and once at `critical_fraction`. The
+  # model has no other view of this: the engine reports the prompt size,
+  # the harness knows it, and until 2026-09-12 nothing passed it on. Three
+  # autocode rounds died at the wall on 2026-09-11 with finished work
+  # uncommitted in a worktree, still Reading whole files at 241k of
+  # 262,144 tokens. Silent before the first usage report — an unmeasured
+  # turn is not a turn in trouble.
+  context_anchor:
+    enabled: true
+    warn_fraction: 0.76
+    critical_fraction: 0.90
+    # Roughly the argument size that starts getting cut off at critical.
+    critical_call_tokens: 1500
+  # Context relief. The ladder the loop runs when the prompt presses on the
+  # window: clear stale tool results, then prune preserved reasoning, then
+  # spill Write/Edit bodies out of assistant tool-call arguments, then
+  # truncate the largest tool results. Only the first rung existed before,
+  # and on 2026-09-11 it freed 1.0 tool result against a 145k-token
+  # shortfall — the compactable residue was already gone and the rest of
+  # the prompt was reasoning and file bodies nothing could reach.
+  context_relief:
+    enabled: true
+    # Below this much headroom an observer inject on a terminal iteration
+    # is dropped and the turn ends `context_exhausted`, rather than
+    # spending its last iteration on a completion with no room to write.
+    terminal_floor_tokens: 12000
+    # Relieve before a request when the completion would have less than
+    # this to write into.
+    min_completion_tokens: 6000
+    # Second reasoning window, applied ONLY under pressure — pruning
+    # mid-turn invalidates the cached prefix (#520) and is worth it only
+    # when the alternative is losing the turn.
+    reasoning_keep_under_pressure: 2
+    shrink_arguments: true
+    shrink_arguments_min_chars: 2000
+    shrink_arguments_tools: [Write, Edit]
+    # A/B only. A max_tokens reservation truncates a long think on a short
+    # answer, and llama.cpp truncates silently rather than erroring.
+    send_max_tokens_reservation: false
   # Thinking trace. Persist each agent-loop iteration's reasoning phase as
   # its own `role="thinking"` session entry, so the chat timeline can show
   # a "Thought for 11.8s" row where the thinking actually happened. Before

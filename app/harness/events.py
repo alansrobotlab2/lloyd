@@ -161,6 +161,7 @@ def assistant_message(
     duration_ms: int = 0,
     iteration: int = 0,
     finish_reason: str = "stop",
+    context: dict[str, Any] | None = None,
 ) -> NormalizedEvent:
     """Emitted at end of each agent-loop iteration.
 
@@ -172,6 +173,12 @@ def assistant_message(
     ``duration_ms`` is the wall-clock duration of just this iteration's
     chat completion. ``iteration`` is the 1-based index inside the
     agent loop.
+
+    ``context`` is the turn's live context-window position as of this
+    iteration — ``{input_tokens, context_window, headroom, fraction}`` — or
+    None before an engine has reported a prompt size. The Inner Voice
+    observer reads it to stop nudging a turn with no room to act on a
+    nudge; nothing else may assume it is present.
 
     ``finish_reason`` is vLLM's stop reason for the assistant turn:
     ``"stop"`` (model emitted EOS — harness will terminate iff there
@@ -189,6 +196,7 @@ def assistant_message(
         "duration_ms": duration_ms,
         "iteration": iteration,
         "finish_reason": finish_reason,
+        "context": context,
     }
 
 

@@ -37,6 +37,7 @@ from app.harness import (
     install_default_safety_hook,
     install_skill_dispatch_hook,
 )
+from app.harness.context_meter import ContextMeter, context_window_for
 from app.harness.skill_dispatch import injected_skill_names
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
@@ -187,7 +188,8 @@ def _load_session_todos(session_id: str) -> list[dict]:
 
 
 def _build_state_anchor(session_id: str, max_turns: int = 0,
-                        deadline_seconds: float = 0.0):
+                        deadline_seconds: float = 0.0,
+                        context_meter: Any = None):
     """Build the closure handed to ``RunOptions.state_anchor``.
 
     Three anchors ride this closure. The **budget** anchor fires once at 75%
@@ -207,6 +209,17 @@ def _build_state_anchor(session_id: str, max_turns: int = 0,
     the verdict that would have landed them, with 32 of its 100 iterations
     still unspent. The iteration anchor cannot see that clock and never fired.
     `app.deadline_anchor` is the single definition, shared with autonomy.
+
+    The **context** anchor is the third clock, and the one that was missing
+    entirely. A turn can die with iterations and minutes to spare simply by
+    filling the window: on 2026-09-11 three autocode rounds ended that way
+    with finished work sitting uncommitted in a worktree. The model has no
+    view of its own prompt size — the engine reports it, the harness knows
+    it, and nothing told the model — so it kept Reading whole files and
+    re-sending a cut-off `Write` at 241k of 262,144 tokens. Fires once at
+    `warn_fraction` and once at `critical_fraction`, and stays silent when
+    no meter was supplied or none has been measured yet: an unmeasured
+    turn is not a turn in trouble.
 
     Re-anchors `session.todos` inside a long turn. The `<active_todos>`
     block in the system prompt is rendered once, from the list as it
@@ -255,10 +268,67 @@ def _build_state_anchor(session_id: str, max_turns: int = 0,
     from app.deadline_anchor import build_deadline_anchor
     deadline = build_deadline_anchor(deadline_seconds, what="turn")
 
+    ctx_cfg = (CONFIG.get("harness") or {}).get("context_anchor") or {}
+    ctx_enabled = bool(ctx_cfg.get("enabled", True))
+    ctx_warn = float(ctx_cfg.get("warn_fraction", 0.76))
+    ctx_critical = float(ctx_cfg.get("critical_fraction", 0.90))
+    ctx_call_tokens = int(ctx_cfg.get("critical_call_tokens", 1500))
+    ctx_fired: set[str] = set()
+
+    def context(iteration: int) -> list[dict[str, Any]]:
+        """Tell the model where it is against its own context window.
+
+        Silent until an engine has reported a prompt size — `measured` is
+        False on iteration 1 of every turn, and an anchor that fired there
+        would be guessing. Each level fires once, for the same reason the
+        budget anchor's do: a warning re-sent every iteration is one the
+        model learns to skip.
+        """
+        if not ctx_enabled or context_meter is None:
+            return []
+        try:
+            if not context_meter.measured:
+                return []
+            frac = context_meter.fraction
+            headroom = context_meter.headroom
+            window = context_meter.window
+        except Exception:  # noqa: BLE001
+            return []
+
+        out: list[dict[str, Any]] = []
+        if frac >= ctx_critical and "critical" not in ctx_fired:
+            ctx_fired.add("critical")
+            ctx_fired.add("warn")   # never warn after critical
+            out.append({"role": "user", "content": (
+                f"<context>You have used {int(frac * 100)}% of your "
+                f"{window // 1000}k-token context window — about "
+                f"{headroom // 1000}k tokens remain.\n"
+                f"Any tool call whose arguments exceed roughly "
+                f"{ctx_call_tokens} tokens will be CUT OFF mid-write and will "
+                f"not run. If that happens, do not re-send it: the retry is "
+                f"generated with even less room.\n"
+                f"Stop reading. Commit what is on disk now. If an automod "
+                f"round is open, call automod_gate and then automod_land or "
+                f"automod_abort. Then finish with a short report — two or "
+                f"three sentences.</context>")})
+        elif frac >= ctx_warn and "warn" not in ctx_fired:
+            ctx_fired.add("warn")
+            out.append({"role": "user", "content": (
+                f"<context>You have used {int(frac * 100)}% of your "
+                f"{window // 1000}k-token context window — about "
+                f"{headroom // 1000}k tokens remain, and everything you read "
+                f"from here stays in it for the rest of the turn.\n"
+                f"Stop reading whole files: use Grep, or Read with an offset "
+                f"and a limit. Prefer small Edits over whole-file Writes.\n"
+                f"If your change is written and tested, commit and gate it "
+                f"now rather than after one more check.</context>")})
+        return out
+
     async def anchor(iteration: int) -> list[dict[str, Any]]:
         out = budget(iteration)
         if deadline is not None:
             out += await deadline(iteration)
+        out += context(iteration)
         return out + await todo_anchor(iteration)
 
     async def todo_anchor(iteration: int) -> list[dict[str, Any]]:
@@ -863,7 +933,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # without invalidating the cached prefix, so this appends instead.
     options.state_anchor = _build_state_anchor(
         session_id, max_turns=int(options.max_turns or 0),
-        deadline_seconds=float(payload.get("deadline_seconds") or 0.0))
+        deadline_seconds=float(payload.get("deadline_seconds") or 0.0),
+        context_meter=options.context_meter)
 
     _event_log.log_event(session_id, "brain1.query_started", {
         "model": model,
@@ -1824,6 +1895,13 @@ async def post_message_stream(request: Request):
         # cancel_event and session_id wired in _run_turn at run time
         **_get_harness_kwargs(),
     )
+    # One meter, three readers: the loop relieves against it, the
+    # `<context>` anchor reports it to the model, and the Inner Voice
+    # observer stops nudging a turn that has no room to act on a nudge.
+    # Built here because only this level can hand the same object to all
+    # three — the loop builds a private one when this is None, which still
+    # gets relief but no anchor.
+    options.context_meter = ContextMeter(context_window_for(model))
     final_schema = _final_schema_for(session_id, data)
     if final_schema is not None:
         options.final_schema = final_schema
@@ -2073,12 +2151,14 @@ async def post_message(request: Request):
         hooks=iv_hooks,
         session_id=session_id,
         priority=sync_llm_priority,
-        # This path calls run_query directly rather than going through
-        # _run_turn, so it wires its own anchor.
-        state_anchor=_build_state_anchor(session_id),
         effect_scope=_effect_scope_for(session_id, data),
         **_get_harness_kwargs(),
     )
+    # This path calls run_query directly rather than going through
+    # _run_turn, so it wires its own meter and anchor.
+    options.context_meter = ContextMeter(context_window_for(model))
+    options.state_anchor = _build_state_anchor(
+        session_id, context_meter=options.context_meter)
 
     comp = await load_and_compact_session(meta_path, model=model)
     if comp["truncated"] or comp.get("summarized") or comp.get("microcompacted"):
