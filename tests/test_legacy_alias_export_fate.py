@@ -299,6 +299,7 @@ def test_paths_comment_states_the_fate_chosen():
 
 LOADED_MEMORY = Path.home() / "obsidian" / "lloyd" / "USER.md"
 LIVE_FACT_TREE = Path.home() / "lloyd" / "_pipeline" / "vault-derived" / "facts"
+LIVE_BACKUPS = Path.home() / "lloyd" / "_pipeline" / "backups"
 # A line counts as history if it is marked closed/retired or carries a date in
 # either form this vault uses: `2026-09-03`, or the `08-22` bullet prefix the
 # incident notes use. Loose by design — it asks "is this line standing on a
@@ -331,7 +332,13 @@ def test_the_state_loaded_memory_describes_is_true_on_disk():
             f"loaded memory says {live_copy} is gone but it is on disk "
             f"({live_copy.stat().st_size} bytes, mtime {live_copy.stat().st_mtime_ns}); "
             "either move the file back into the tree or stop claiming it is gone")
-    assert live_copy.name == "entity-aliases.json"
+    # "Stop emitting into the live tree" is a move, not a deletion: the migration
+    # source of record still has to exist somewhere, or the next rebuild has no
+    # pre-migration state to diff against.
+    snapshots = list(LIVE_BACKUPS.rglob("entity-aliases.json")) if LIVE_BACKUPS.is_dir() else []
+    assert snapshots, (
+        f"{live_copy} is gone from the fact tree but no snapshot exists under "
+        f"{LIVE_BACKUPS} — the fate was 'move to backups', not 'delete'")
 
 
 def test_constant_still_names_the_legacy_path_for_the_migration():
