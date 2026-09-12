@@ -272,3 +272,151 @@ def test_two_dry_runs_on_one_day_keep_both_plans(tmp_path):
     assert _run(root, db, out).returncode == 0
     plans = [q for q in out.glob("entity-merges-*.jsonl") if not q.is_symlink()]
     assert len(plans) == 2, "a second dry-run must not overwrite the first plan"
+
+
+# ── #475: an apply has to be attributable, and the guard has to survive it ───
+#
+# #475's acceptance is checked with SQL against the alias table, and two of its
+# clauses asked for things the apply path could not produce however many clean
+# applies ran: rows carried no `report_path`, and the report carried counts but
+# not the state of the two switches built to stop a 2026-09-03 repeat.
+
+VOICE = {"Voice-Loop", "Voice Pipeline", "voice"}
+
+
+def _applied_report(out: Path) -> dict:
+    reports = sorted(out.glob("entity-merges-applied-*.json"))
+    assert reports, "the apply wrote no report"
+    return json.loads(reports[-1].read_text())
+
+
+def test_apply_stamps_the_apply_report_into_every_alias_row(tmp_path):
+    """"Which run said this surface means that entity" must be answerable from
+    the store itself. `Aliases.set` has always taken a `report_path`; the sweep's
+    apply call site never passed one, so
+    `SELECT COUNT(*) FROM aliases WHERE report_path IS NOT NULL` stayed 0 even
+    after a perfect apply — #475 clause 1 could never go green."""
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    r = _run(root, db, out, "--apply")
+    assert r.returncode == 0, r.stdout + r.stderr
+    st = KGStore(db)
+    try:
+        row = next((a for a in st.aliases.for_canonical("vLLM") if a["surface"] == "vllm"), None)
+    finally:
+        st.close()
+    assert row is not None and row["origin"] == "sweep"
+    assert row["report_path"], "an apply-origin alias row with no report behind it"
+    rep = Path(row["report_path"])
+    assert rep.is_file(), f"alias provenance points at a report that does not exist: {rep}"
+    assert json.loads(rep.read_text())["alias_provenance"]["report_path"] == str(rep)
+
+
+def test_apply_report_records_the_switches_and_what_it_applied(tmp_path):
+    """The 2026-09-03 apply fused 151 entities and left no record that it ran
+    with the protections off. The report now has to say so itself, because a
+    reader who cannot tell a guarded apply from a bypassed one cannot audit it."""
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    (out / "graph-baseline.json").write_text(json.dumps({"active_edges": 10_000}))
+    r = _run(root, db, out, "--apply", "--allow-degraded")
+    assert r.returncode == 0, r.stdout + r.stderr
+    rep = _applied_report(out)
+    assert rep["safety"]["allow_degraded"] is True
+    assert rep["safety"]["degraded_graph"] == "bypassed: --allow-degraded"
+    assert rep["safety"]["no_gate"] is True          # _run always passes --no-gate
+    assert rep["safety"]["gate_verdict"].startswith("skipped: --no-gate")
+    assert rep["applied_clusters"] >= 1, rep["applied_clusters"]
+    assert rep["applied_merges"] == len(rep["variant_to_canonical"]) >= 1
+    assert rep["alias_provenance"]["origin"] == "sweep"
+
+
+def test_a_clean_apply_does_not_report_itself_as_bypassed(tmp_path):
+    """The other half: `safety` must not read as bypassed when nothing was."""
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    assert _run(root, db, out, "--apply").returncode == 0
+    safety = _applied_report(out)["safety"]
+    assert safety["allow_degraded"] is False
+    assert safety["degraded_graph"] == "not degraded"
+
+
+def test_safety_record_names_the_gate_verdict_whichever_way_the_gate_ran():
+    """`gate_verdict` is the one line a reviewer reads to know whether the suffix
+    tier was judged at all, so each way the gate can go has to read differently."""
+    g = ers.safety_record(True, False, None, {}, None)
+    assert g["no_gate"] is True and g["gate_verdict"].startswith("skipped: --no-gate")
+    g = ers.safety_record(False, False, None, {}, None)
+    assert g["gate_verdict"].startswith("unavailable")
+    assert g["degraded_graph"] == "not degraded" and g["allow_degraded"] is False
+    g = ers.safety_record(False, False, object(),
+                          {"gate_stats": {"asked": 4, "same": 2, "review": 2}}, None)
+    assert g["gate_verdict"] == "ran: 4 suffix pairs judged, 2 SAME, 2 to review"
+    g = ers.safety_record(False, True, object(), {}, "graph is degraded")
+    assert g["allow_degraded"] is True
+    assert g["degraded_graph"] == "bypassed: --allow-degraded"
+
+
+# ── the 06f0e41 guard, pinned against the apply path itself ──────────────────
+
+def test_the_name_shape_guard_still_refuses_the_09_03_shape():
+    """06f0e41 removed the 0-degree shortcut: `X`, `X Loop` and `X Pipeline`
+    share a normalization, but only the gate may say they are one system. This is
+    the exact condition that fused 151 entities — every variant at degree 0."""
+    assert ers.cluster_tier(["Voice-Loop", "Voice Pipeline", "voice"]) == "AMBIGUOUS"
+    assert (ers.normalize_full("Voice-Loop") == ers.normalize_full("Voice Pipeline")
+            == ers.normalize_full("voice") == "voice")
+    # `X Loop` is not even shape-safe: the ambiguous suffix keeps it out of SAFE.
+    assert ers.cluster_tier(["Voice-Loop", "voice"]) == "AMBIGUOUS"
+    # `X` inside `X Pipeline` IS shape-safe, and still refuses without a gate —
+    # this is the shortcut that fused 151 entities, at their exact 0-degree shape.
+    ok, why = ers.decide_merge("SUFFIX_SAFE", "Voice Pipeline", ["Voice Pipeline", "voice"],
+                              {"Voice Pipeline": 0, "voice": 0})
+    assert ok is False and "gate" in why, why
+
+
+def test_an_apply_leaves_voice_loop_voice_pipeline_and_voice_separate(tmp_path):
+    """#475 clause 4: the backfill must not fuse them. Run through the real
+    apply, not just the classifier, because the guard's whole point is what ends
+    up in the alias table."""
+    root = tmp_path / "facts"; root.mkdir()
+    for name in sorted(VOICE):
+        d = root / name; d.mkdir()
+        fm = {"type": "facts", "entity": name, "category": "state",
+              "facts": [{"entity": name, "fact": f"{name} exists.", "confidence": 0.9,
+                         "category": "state"}]}
+        (d / f"{name}-state.md").write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {name} - state\n")
+    db, out = tmp_path / "kg.sqlite", tmp_path / "out"; out.mkdir()
+    existing = {d.name for d in root.iterdir() if d.is_dir()}
+    st = KGStore(db)
+    try:
+        for name in sorted(VOICE):
+            st.entities.register(name)
+        # No edges: on 2026-09-03 every entity looked disconnected, which is the
+        # condition the old 0-degree shortcut merged under. And a gate that says
+        # SAME to everything: without it `gate=None` alone would keep every
+        # suffix cluster out of the plan and the test would pass no matter how
+        # badly the name-shape guard were broken.
+        class Permissive:
+            def verdict(self, a, b):
+                return {"decision": "SAME", "judges": {}}
+
+        assert ers.build_plan([], {"Voice Pipeline", "voice"}, gate=Permissive())["safe_clusters"] == 1, \
+            "a permissive gate must be able to fuse `X` with `X Pipeline`, or this test proves nothing"
+        plan = ers.build_plan([], existing, gate=Permissive())
+        merged = {mm["variant"] for c in plan["safe_merges"] for mm in c.get("merges", [])}
+        assert not (merged & VOICE), f"the plan would fuse {merged & VOICE}"
+        ers.apply_merges(plan, st, root, rebuild_aliases=True, existing_dirs=existing,
+                         entities=plan.get("all_entities", []),
+                         report_path=str(out / "applied.json"))
+        rows = [r for r in st.aliases.rows() if r["surface"] in VOICE]
+        assert rows == [], f"the backfill wrote an alias for {rows}"
+        # Every reader goes through `entity_naming.normalize`, which is
+        # `store().resolve(name) or name`. All three must come back unchanged.
+        from app import entity_naming, kg_store
+        kg_store.configure(db)
+        try:
+            for name in sorted(VOICE):
+                assert st.resolve(name) in (None, name)
+                assert entity_naming.normalize(name) == name
+        finally:
+            kg_store.configure(st.path)
+    finally:
+        st.close()

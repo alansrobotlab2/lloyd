@@ -789,8 +789,16 @@ def apply_merges(
     rebuild_aliases: bool,
     existing_dirs: set[str] | None = None,
     entities: list[str] | None = None,
+    report_path: str | None = None,
 ) -> dict:
     """Execute all SAFE merges in the plan against the store and the fact tree.
+
+    `report_path` is the apply report this run is about to write. Every alias
+    row the apply creates carries it, so a later reader can answer "which run
+    said this surface means that entity, and under what gate" without re-deriving
+    it from mtimes. Before #475 the apply passed no `report_path` at all, so
+    `SELECT COUNT(*) FROM aliases WHERE report_path IS NOT NULL` stayed 0 even
+    after a clean apply and the backfill could never be attributed.
 
     The alias writes and every edge rewrite happen in ONE store transaction:
     a crash or a kill in the middle leaves the graph exactly as it was, not
@@ -818,7 +826,8 @@ def apply_merges(
         #    consults them, and they must never survive a rolled-back merge.
         for variant, canonical in variant_to_canonical.items():
             kind = TIER_ALIAS_KIND.get(variant_tier.get(variant, ""), "semantic")
-            st.aliases.set(variant, canonical, kind=kind, origin="sweep")
+            st.aliases.set(variant, canonical, kind=kind, origin="sweep",
+                           report_path=report_path)
             st.entities.register(canonical)
             alias_writes += 1
         if rebuild_aliases:
@@ -1058,6 +1067,37 @@ def degraded_reason(active: int, baseline: int, fraction: float = DEGRADED_FRACT
     return None
 
 
+def safety_record(no_gate: bool, allow_degraded: bool, gate, plan: dict,
+                  degraded: str | None) -> dict:
+    """What the apply report must say about the checks that actually ran.
+
+    The 2026-09-03 apply that fused 151 distinct entities is hard to audit
+    precisely because nothing on disk recorded that it ran against a 2-edge
+    graph: the report carried counts but not the state of the two switches that
+    were built to stop it. This is that answer, written from the flags as
+    parsed, so a later reader never has to reconstruct it from a shell history
+    line — and `--no-gate` / `--allow-degraded` are visible as `true` when they
+    were used instead of merely absent.
+    """
+    gs = plan.get("gate_stats") or {}
+    if no_gate:
+        verdict = "skipped: --no-gate — every SUFFIX_SAFE cluster went to review"
+    elif gate is None:
+        verdict = ("unavailable: the semantic gate could not be constructed — "
+                   "every SUFFIX_SAFE cluster went to review")
+    else:
+        verdict = (f"ran: {gs.get('asked', 0)} suffix pairs judged, "
+                   f"{gs.get('same', 0)} SAME, {gs.get('review', 0)} to review")
+    if degraded and allow_degraded:
+        degraded_note = "bypassed: --allow-degraded"
+    elif degraded:
+        degraded_note = "degraded (would have refused)"
+    else:
+        degraded_note = "not degraded"
+    return {"no_gate": bool(no_gate), "allow_degraded": bool(allow_degraded),
+            "gate_verdict": verdict, "degraded_graph": degraded_note}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="Apply SAFE merges")
@@ -1146,6 +1186,10 @@ def main() -> int:
 
     # Apply
     ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    # Named before the apply, not after: the alias rows this run writes carry
+    # this path as their provenance, so the file they point at has to exist as
+    # a name before they can point at it (#475).
+    apply_out = out_dir / f"entity-merges-applied-{args.date}-{ts}.json"
     print()
     print(f"== Applying merges (timestamp: {ts}) ==")
 
@@ -1157,7 +1201,8 @@ def main() -> int:
 
     before = st.stats()
     report = apply_merges(plan, st, facts_root, args.rebuild_aliases,
-                          existing_dirs=existing_dirs, entities=plan.get("all_entities", []))
+                          existing_dirs=existing_dirs, entities=plan.get("all_entities", []),
+                          report_path=str(apply_out))
     after = st.stats()
 
     # Report
@@ -1176,12 +1221,17 @@ def main() -> int:
     print()
 
     # Save an apply report
-    apply_out = out_dir / f"entity-merges-applied-{args.date}-{ts}.json"
     apply_out.parent.mkdir(parents=True, exist_ok=True)
     report_to_save = {k: v for k, v in report.items() if k != "aliases"}
     report_to_save["plan_file"] = str(plan_out)
     report_to_save["tiers_allowed"] = sorted(allowed_tiers)
     report_to_save["gate_stats"] = plan.get("gate_stats")
+    # What this run actually did and under what checks: a reader must be able
+    # to tell a guarded apply from a bypassed one from the report alone.
+    report_to_save["applied_clusters"] = plan.get("safe_clusters", len(plan["safe_merges"]))
+    report_to_save["applied_merges"] = len(report["variant_to_canonical"])
+    report_to_save["safety"] = safety_record(args.no_gate, args.allow_degraded, gate, plan, reason)
+    report_to_save["alias_provenance"] = {"origin": "sweep", "report_path": str(apply_out)}
     report_to_save["baseline_active_edges"] = baseline
     report_to_save["store_backup"] = str(store_bak)
     report_to_save["store_before"], report_to_save["store_after"] = before, after
