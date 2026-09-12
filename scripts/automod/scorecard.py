@@ -250,7 +250,20 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
               "premise_unsound": len(unsound), "escalated": len(by("review_escalated")),
               "refusal_rate": _rate(len(refused_rounds), len(graded_rounds)),
               "grader_unavailable": sum(1 for e in review_gates
-                                        if not e.get("ok") and e.get("external_blocker"))}
+                                        if not e.get("ok") and e.get("external_blocker")),
+              # How often a grading turn was NOT spent: an identical diff
+              # after a rebase, answered from the ledger.
+              "review_reused": sum(1 for e in review_gates if e.get("review_reused")),
+              # Clauses the grader said can only be observed live. These land
+              # and leave the item open for a person, so a rising number is
+              # not a failure — it is the rung declining to refuse work it
+              # cannot judge yet.
+              "post_landing_clauses": sum(
+                  len(e.get("post_landing_clauses") or []) for e in review_gates),
+              # Waits the grader sat out because another round was landing.
+              "grader_retries": sum(int(e.get("retries") or 0) for e in review_gates),
+              # Rungs answered from the round's own cache rather than re-run.
+              "reused_rungs": sum(1 for e in by("gate") if e.get("reused"))}
 
     # ── 4 spawn ratio ───────────────────────────────────────────────────
     triage = [e for e in by("backlog_triage") if e.get("verdict") in

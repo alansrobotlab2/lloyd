@@ -318,8 +318,13 @@ class _StubGate:
     verdict = True
     seen: list = []
 
-    def __init__(self, round_id, worktree, base, *, live_root=None, skip_smoke=False):
+    def __init__(self, round_id, worktree, base, *, live_root=None,
+                 skip_smoke=False, item_id=None):
         self.round_id, self.worktree, self.base, self.live = round_id, _Path(worktree), base, live_root
+        # The chase passes the item so its gate can run the review rung. It
+        # used to record `review: skipped`, which meant a landing could be
+        # judged on a review of a commit the rebase had already replaced.
+        self.item_id = item_id
         type(self).seen.append((round_id, base))
 
     def run(self):

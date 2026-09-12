@@ -424,7 +424,21 @@ def _regate_after_move(round_id: str, worktree: Path, live: Path, base: str,
     spec's base, which the next `run_gate` reads its diff from.
     """
     from scripts.automod import gate as G   # lazy: gate → canary → ports; not needed elsewhere here
-    report = G.Gate(round_id, Path(worktree), base, live_root=live).run()
+    # The item, so the chase's gate can run its review rung. Without it the
+    # rung records `review: skipped` and a landing can be judged on a review
+    # of a commit that no longer exists — the rebase moved the head. The
+    # review's patch-id reuse then answers the common case (a clean rebase of
+    # an identical diff) from the ledger without a second grading turn.
+    item_id = None
+    try:
+        import yaml
+        spec = yaml.safe_load(
+            (S.ROUNDS_DIR / round_id / "run_spec.yaml").read_text()) or {}
+        item_id = (spec.get("item") or {}).get("id")
+    except Exception as exc:  # noqa: BLE001 — a missing spec is not fatal here
+        print(f"[warn] could not read the run spec for {round_id}: {exc}")
+    report = G.Gate(round_id, Path(worktree), base, live_root=live,
+                    item_id=item_id).run()
     rep = report.to_dict()
     S.write_gate_report(round_id, rep)
     if report.base != base:
