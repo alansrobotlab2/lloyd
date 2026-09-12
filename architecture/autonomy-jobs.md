@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, autonomy]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-09-12
 ---
 
 # The autonomy jobs
@@ -72,8 +72,10 @@ not:
   run in plan mode, because the 2026-08-22 wipe (12,131 edges) and the
   2026-09-03 151-merge incident were both unattended applies. Distil writes
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
-  apparatus. `workers/evidence.py` is the correction, and its pilot set
-  (`EVIDENCE_PILOT_TASK_IDS = {38, 42, 39, 40}`) covers 4 of the 21.
+  apparatus. `workers/evidence.py` is the correction and `autonomy.py` is where
+  its pilot set lives (`EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40})`,
+  `autonomy.py:710`) — 4 of the 21, and not one claim has yet been verified by it
+  (#902).
 - **Nothing watches the deciders.** #65, #35 and #77 all direct future effort —
   what gets researched, what reaches `up_next`, what gets archived — and no job
   in Measure covers decision quality. #76 watches task *health*, which is a
@@ -271,11 +273,15 @@ Phase 2 dies at 1809–1826 s against a 1800 s cap while healthy runs take
 181–639 s. Raising the ceiling is the wrong lever — the 600→1800 s raise on
 2026-09-01 enlarged the burn rather than making overruns rarer.
 
-**The windows are staggered, not shared, since 2026-09-09.** All four sat on
-22–04 against `workers.slots: 2`, so #39 could be claimed in the hours #42 was
-still writing the handoff it was about to read. The chain is now a queue in wall
-clock as well as in `depends_on`, which is why it spans about four hours end to
-end while the jobs themselves are minutes.
+**The windows are offset pairwise, not disjoint, since 2026-09-09.** All four sat
+on 22–04 against `workers.slots: 2`, so #39 could be claimed in the hours #42 was
+still writing the handoff it was about to read. Now #38 and #42 take 22–01, #39
+takes 01–04 and #40 02–04: no job shares a window with the one whose *output* it
+consumes, but hour 01 is still offered to both #42 and #39 and 02–04 to both #39
+and #40. What orders those pairs is the freshness half of `depends_on`, not the
+clock — which is the correct division of labour, and the reason the two holes
+above matter more than any window edit. The offset is also why the chain spans
+about four hours end to end while the jobs themselves are minutes.
 
 Two tool-shaped rules, both learned expensively. `Write` refuses to overwrite a
 file it has not read this session, so a Phase 0 skeleton write is *refused on
@@ -289,13 +295,23 @@ defect was never a crash, it was a confident number: a handoff reporting the
 graph "restored to 12,131 relationships" against a same-night health report
 reading zero; counts of 96/21 where disk held 121/64; a 13,503-byte file called
 "307KB". `workers/evidence.py` is the structural fix and its pilot set is exactly
-this chain — `EVIDENCE_PILOT_TASK_IDS = {38, 42, 39, 40}`, a literal frozenset so
+this chain — `EVIDENCE_PILOT_TASK_IDS = {38, 42, 39, 40}` (`autonomy.py:710`, not
+inside the verifier's own file), a literal frozenset so
 widening it is a change someone reads. The verifier is **stdlib-only and never
 LLM-judged**, because a model grading its own claims is the narration this
 replaces one layer up; and **a claim that cannot be evaluated is `insufficient`,
 never `verified`**. Whatever failed to verify is carried into the next run of
 that task through the queue's watermarks, not written back into the
 human-edited task file.
+
+**No scheduled run has ever gone through it.** `run_task` attaches the parsed
+claims block to its result for a piloted task, and `workers/sources/scheduled_task.py`
+rebuilds the dict it hands the pool without a `claims` key, so `workers/pool.py`
+reads an out-of-scope source every time: 0 bundles across the 22 piloted runs in
+the window to 2026-09-12, and `claims_checked: 0` over 713 fleet runs. Read the
+paragraph above as the design and backlog **#902** as the reason it is inert —
+which also means #714's prediction of a first window full of `insufficient` gaps
+cannot come true either, because the runs never reach the verifier.
 
 **#47 Dream Consolidation** is the weekly synthesizer on the tail. It does not
 re-read raw sessions — that is the chain's job — it merges near-duplicate topics
@@ -568,8 +584,8 @@ identified in the 2026-06-11 architecture review; its gzipped archives stay
 recoverable, but live consumers glob `*.json`, so archived sessions drop out of
 listings and recall by design.
 `scripts/groundskeeper/retention-sweep.py` is #79, pinned by
-`tests/test_retention_sweep.py`; it shares a directory with the groundskeeper
-survey and nothing else.
+`tests/test_retention_sweep.py`; its directory holds three scripts, not two —
+this, `groundskeeper-survey.py`, and `groundskeeper-weekly-summary.py`.
 
 **#78 and #80 look like the fleet's worst jobs and are not** — see
 [What the fleet actually costs](#what-the-fleet-actually-costs). Both are
@@ -721,11 +737,15 @@ Four properties worth knowing before touching any of it:
 
 Two defects that are live and unowned:
 
-- **The orphan skipper is an unattributed daily write.** Every `ORPHAN_FILE` item
-  in the queue — all 3,892 — reads `status: skipped`, reason
+- **The orphan skipper is an unattributed daily write.** 3,867 of the queue's
+  3,892 `ORPHAN_FILE` items read `status: skipped`, reason
   `hub-page-linked-survey-bug`, stamped 2026-09-11T10:37:04Z, eighteen minutes
-  after that night's survey finished. `_pipeline/groundskeeper-log.jsonl` has
-  grown to 18,176 rows, every one an `ORPHAN_FILE` skip. That is
+  after that night's survey finished; the other 25 carry a different reason
+  (`legitimate organized project file in folder hierarchy`) stamped one second
+  earlier, so either a second writer touched the file inside that minute or the
+  script ran twice with different text. `_pipeline/groundskeeper-log.jsonl` has
+  grown to 18,176 rows, every one an `ORPHAN_FILE` skip, and its last batch is
+  2026-09-11. That is
   `scripts/memory/process-groundskeeper-queue.py`, a one-off written when the
   survey had no hub-page awareness and every organised project file read as an
   orphan. The survey has had hub-page detection since; the premise is gone and
@@ -822,3 +842,24 @@ the layout. Three jobs moved shelf and the move is the point: #54 was under
 inbound signal and reads nothing inbound; #36 was under vault hygiene and repairs
 nothing; #65 was under inbound signal and belongs with the other two jobs that
 decide what gets worked on next.
+
+## Review log
+
+- **2026-09-12 — `current`.** Every path, symbol, config key, task id, cadence and
+  measured count re-verified against the tree and the live routes at
+  `28abecf073ee`: the 32 live tasks and their `depends_on` set (ten edges, three
+  crossing a function boundary), the 74-row function grouping, the quarantine and
+  `NON_USER_PLATFORMS` literals, the inject 409 versus the unguarded prefetch, the
+  three `[SILENT]` call sites, the script thresholds (30/90-day retention, god >20
+  / thin <2, #36's 180 s), `validate_tasks.py`'s coverage and its
+  `model:` blind spot, `workers/evidence.py`'s three-state contract, the
+  groundskeeper queue (31,291 / 27,399 / 58.4 / 18,176 log rows), and the empty
+  `autonomy-runs/33` and `/34`. Five statements were wrong and are corrected: the
+  pilot frozenset is in `autonomy.py:710` and not `workers/evidence.py`; the
+  evidence pilot has verified **nothing** (0 bundles across 22 piloted runs,
+  `claims_checked: 0` over 713) because `scheduled_task.py` drops the `claims` key
+  before `pool.py` reads it (#902); the reflection windows are offset pairwise, not
+  disjoint — hour 01 is still offered to both #42 and #39; `scripts/groundskeeper/`
+  holds a third script; and the orphan skip is 3,867 + 25 with two reason strings,
+  not 3,892 with one. Also appended to #899 and #900 — the unbound-skill hazard is
+  five skills, all five advertised in the index today.
