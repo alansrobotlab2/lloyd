@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import prefetch  # noqa: E402
 from agent_mcp import session as session_mod  # noqa: E402
+from agent_mcp import vault as vault_mod  # noqa: E402
 from agent_mcp.skills import _score_skill, _skill_token_sets, _tokenize  # noqa: E402
 from app.routers._messages_subliminal import (  # noqa: E402
     _classify_subliminal,
@@ -243,13 +244,24 @@ def test_vault_context_hit_without_a_file_still_renders():
     )
     assert "No Path Hit" in out
     assert "text from a hit whose path is unavailable" in out
-    assert "file:" not in out  # never an empty path attribute
+    # Assert on the attribute window of the rendered entry, not on the whole
+    # block: "no empty path attribute" is a property of the entry, and a
+    # whole-block substring would also be satisfied by a snippet that happens
+    # not to contain the word.
+    entry = next(ln for ln in out.splitlines() if ln.startswith("- **"))
+    assert entry.startswith("- **No Path Hit** (score: 0.80): ")
+    assert "file:" not in entry.split("): ", 1)[0]
 
 
-def _fake_daemon(snippet_len: int):
+_MARCH = "knowledge/meetings/march-5-transcript.md"
+
+
+def _fake_daemon(snippet_len: int, file: str = f"qmd://{_MARCH}"):
+    """A stand-in for the qmd daemon's reply list, in the daemon's own shape:
+    `file` spelled as a `qmd://obsidian/...` URI, snippet already hunk-marked.
+    """
     def _search(query, limit, collections, **kw):
-        return [{"file": "knowledge/meetings/march-5-transcript.md",
-                 "title": "March 5 Transcript", "score": 0.9,
+        return [{"file": file, "title": "March 5 Transcript", "score": 0.9,
                  "snippet": "x" * snippet_len}]
     return _search
 
@@ -286,12 +298,67 @@ def test_injected_block_carries_path_and_marker_end_to_end(quiet_workers, monkey
     # capped snippet and the `truncated` flag are all produced by the code.
     monkeypatch.setattr(prefetch, "_qmd_daemon_search",
                         _fake_daemon(prefetch.VAULT_SNIPPET_MAX + 300))
+    # `quiet_workers` drops the budget to 120 ms; this change lengthens the
+    # injected payload, so pin it under the budget that actually ships.
+    monkeypatch.setattr(prefetch, "PREFETCH_BUDGET_MS", 300)
+    monkeypatch.setattr(prefetch, "_qmd_daemon_search",
+                        _fake_daemon(prefetch.VAULT_SNIPPET_MAX + 300))
+    t0 = time.monotonic()
     out = prefetch.prefetch_context(_PROBE_QUERY, session_id="test-471-path", plan_mode=False)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.30, f"injection with path+marker took {elapsed:.3f}s past the 300ms budget"
     assert "<vault-context>" in out
-    assert "file: knowledge/meetings/march-5-transcript.md" in out
+    assert f"file: {_MARCH}" in out
     assert "[... truncated]" in out
     # the injected text still ends with the user's own message
     assert out.endswith("\n\n" + _PROBE_QUERY)
+
+
+def test_daemon_row_reaches_the_block_unchanged_in_its_fields(monkeypatch):
+    # The process boundary itself: `_qmd_post` is the loopback HTTP call to the
+    # qmd daemon, and `file`/`snippet` are whatever it puts on the wire. Every
+    # other test here stubs one level above, which would pass with the wire
+    # spellings (`qmd://…` URIs, hunk-marked snippet, daemon-side line numbers)
+    # unhandled. This one runs the real `_qmd_daemon_search` over a canned reply.
+    def fake_post(payload):
+        return [{"file": f"qmd://{_MARCH}", "title": "March 5 Transcript",
+                 "score": 0.92,
+                 "snippet": "@@ -117,4 @@ (116 before, 365 after)\n" + "z" * 900}]
+
+    monkeypatch.setattr(vault_mod, "_qmd_post", fake_post)
+    hits = prefetch._search_vault(_PROBE_QUERY)
+    assert len(hits) == 1
+    assert hits[0]["file"] == f"qmd://{_MARCH}"  # URI form survives to render
+    assert hits[0]["truncated"] is True
+    out = _render_vault(*hits)
+    assert f"file: {_MARCH}" in out                       # stripped at render
+    assert "qmd://" not in out
+    assert "[... truncated]" in out
+
+
+def test_carried_hit_crosses_the_thread_hand_off_still_marked(quiet_workers, monkeypatch):
+    # The hybrid (vec) leg runs on a worker thread and stashes its result on the
+    # SessionFocus; the NEXT turn drains that stash, merges it, and renders it.
+    # So `truncated` has to survive a dict written by another thread, an age
+    # check and `_merge_vault_results`. Firing the legs by payload shape (the
+    # lex leg sends one search, the hybrid two) keeps `_search_vault`, the stash
+    # and the merge all real.
+    def fake_post(payload):
+        if len(payload["searches"]) > 1:      # the lex+vec hybrid leg
+            time.sleep(0.4)
+            return [{"file": f"qmd://{_MARCH}", "title": "March 5 Transcript",
+                     "score": 0.7, "snippet": "y" * (prefetch.VAULT_SNIPPET_MAX + 200)}]
+        return []                              # lex leg finds nothing in budget
+
+    monkeypatch.setattr(vault_mod, "_qmd_post", fake_post)
+    sid = "test-471-carried"
+    out1 = prefetch.prefetch_context(_PROBE_QUERY, session_id=sid, plan_mode=False)
+    assert "March 5 Transcript" not in out1    # straggler not back yet
+    time.sleep(0.6)
+    out2 = prefetch.prefetch_context(_PROBE_QUERY, session_id=sid, plan_mode=False)
+    assert "semantic hit from the previous turn's query" in out2
+    assert f"file: {_MARCH}" in out2
+    assert "[... truncated]" in out2
 
 
 # ── Budget + carry-over end to end (workers patched) ──────────────────────────
