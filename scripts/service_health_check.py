@@ -23,25 +23,73 @@ SERVICES = {
     # LLM inference servers — status via supervisorctl, no HTTP check
     "agent-llm-primary": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-llm-primary"], "category": "supervisor"},
     "agent-llm-secondary": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-llm-secondary"], "category": "supervisor"},
+
+    # QMD retrieval daemon — the path every vault_search/vault_recall needs,
+    # and until #406 this check could not see it at all. Port is the one
+    # `agent-services/supervisor/conf.d/agent-qmd-daemon.conf` launches it on
+    # (`qmd mcp --http --port 8181`); it serves a real /health route, so a
+    # supervisor RUNNING line that no longer has a listener behind it — the
+    # failure this entry exists to catch — now shows up here instead of in the
+    # first failed vault_search of the day. This is also the first SERVICES
+    # entry to declare a `port`, i.e. the first thing to ever exercise
+    # http_check().
+    "agent-qmd-daemon": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-qmd-daemon"], "category": "retrieval", "port": 8181},
 }
 
 CATEGORIES = {
     "llm": ["agent-llm-primary", "agent-llm-secondary"],
     "lloyd": ["lloyd-backend", "lloyd-frontend", "lloyd-mcp"],
+    "retrieval": ["agent-qmd-daemon"],
     "all": list(SERVICES.keys()),
 }
 
 
-def http_check(port: int) -> tuple:
-    """Quick TCP connect check against a port. Returns (connected, error)."""
+def _probe_targets(host: str, port: int) -> list:
+    """Addresses worth trying for `host:port`, in the order curl would try them.
+
+    `getaddrinfo` on this box returns `::1` *first* for "localhost", which is why
+    `curl localhost:8181/health` succeeds against qmd while an IPv4-literal
+    probe of the same port is refused. Loopback literals are appended for any
+    family resolution did not yield, so a resolver hiccup cannot by itself
+    produce an "unhealthy" verdict about a service.
+    """
+    targets = []
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
-        result = s.connect_ex(("127.0.0.1", port))
-        s.close()
-        return (result == 0, result)
-    except Exception as e:
-        return (False, str(e))
+        for info in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+            targets.append((info[0], info[4]))
+    except Exception:
+        pass
+    resolved = {t[1][0] for t in targets}
+    for family, literal in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        if literal not in resolved:
+            addr = (literal, port, 0, 0) if family == socket.AF_INET6 else (literal, port)
+            targets.append((family, addr))
+    return targets
+
+
+def http_check(port: int, host: str = "localhost") -> tuple:
+    """Quick TCP connect check against a port. Returns (connected, error).
+
+    Tries every address `host` resolves to rather than assuming the port is on
+    IPv4 loopback. qmd is the reason: it binds `[::1]:8181` and nothing else, so
+    a `127.0.0.1` probe answers ECONNREFUSED (111) from a daemon that is up and
+    serving `/health` — a healthy service reported dead, which is a worse
+    failure than not probing at all.
+    """
+    last_err = "no addresses to try"
+    for family, addr in _probe_targets(host, port):
+        try:
+            s = socket.socket(family, socket.SOCK_STREAM)
+            s.settimeout(2)
+            result = s.connect_ex(addr)
+            s.close()
+        except Exception as e:
+            last_err = str(e)
+            continue
+        if result == 0:
+            return (True, 0)
+        last_err = result
+    return (False, last_err)
 
 
 def check_service(name: str, service_def: dict) -> dict:
