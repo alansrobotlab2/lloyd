@@ -916,7 +916,14 @@ workers:
       # where the judgement is worth a second opinion. Meaningful only
       # for a source that runs through `run_prompt_in_session` — the
       # observer is wired in the chat endpoint and nowhere else.
-      inner_voice: true
+      # OFF for unattended turns since 2026-09-12 (plan: senses-not-supervision,
+      # cut 1). Measured effect on rounds was negative: #874 abandoned at
+      # iteration 38 with 44 min left on an invented premise, 16 false
+      # repetition fires in one day, an inject into #875 with no room to
+      # answer. Stall rescue, budget and context pressure are deterministic
+      # anchors now; the gate is the real check. Stays on for chat, where a
+      # human reads it and its value was measured there.
+      inner_voice: false
       # Runs as a real session through /api/message/stream, so it has Inner
       # Voice and a transcript. Budgets are measured, not guessed: the three
       # hand-driven triages took 45, 65 and 76 iterations and 8-30 minutes.
@@ -978,7 +985,14 @@ workers:
       # unlanded, and the review rung now adds a fix-and-regate cycle.
       max_turns: 150
       # On: this source rewrites production. See `autotriage.inner_voice`.
-      inner_voice: true
+      # OFF for unattended turns since 2026-09-12 (plan: senses-not-supervision,
+      # cut 1). Measured effect on rounds was negative: #874 abandoned at
+      # iteration 38 with 44 min left on an invented premise, 16 false
+      # repetition fires in one day, an inject into #875 with no room to
+      # answer. Stall rescue, budget and context pressure are deterministic
+      # anchors now; the gate is the real check. Stays on for chat, where a
+      # human reads it and its value was measured there.
+      inner_voice: false
       # The hard bound on the board. A self-filed draft that nothing —
       # clustering, group triage, a human — picked up in 30 days is closed,
       # tagged `expired`, and reopens by setting its status back to draft.
@@ -1030,7 +1044,14 @@ workers:
       max_duration_seconds: 3600
       max_turns: 90
       # On: it edits a production doc and files from its own judgement.
-      inner_voice: true
+      # OFF for unattended turns since 2026-09-12 (plan: senses-not-supervision,
+      # cut 1). Measured effect on rounds was negative: #874 abandoned at
+      # iteration 38 with 44 min left on an invented premise, 16 false
+      # repetition fires in one day, an inject into #875 with no room to
+      # answer. Stall rescue, budget and context pressure are deterministic
+      # anchors now; the gate is the real check. Stays on for chat, where a
+      # human reads it and its value was measured there.
+      inner_voice: false
       # Below youtube-digest (45) and autocode (40), above backlog-cluster
       # (65): routine maintenance that must not delay a round or a digest.
       priority: 62
@@ -1084,7 +1105,14 @@ workers:
       max_inflight: 1
       # On: it evaluates untrusted transcripts against Lloyd's own profile
       # and files backlog items from the answer. See `autotriage.inner_voice`.
-      inner_voice: true
+      # OFF for unattended turns since 2026-09-12 (plan: senses-not-supervision,
+      # cut 1). Measured effect on rounds was negative: #874 abandoned at
+      # iteration 38 with 44 min left on an invented premise, 16 false
+      # repetition fires in one day, an inject into #875 with no room to
+      # answer. Stall rescue, budget and context pressure are deterministic
+      # anchors now; the gate is the real check. Stays on for chat, where a
+      # human reads it and its value was measured there.
+      inner_voice: false
       # 45, not the source default of 60: scheduled-task maps autonomy
       # priorities critical/high/medium/low/background to 10/20/30/50/70
       # and may hold both slots, so at 60 a digest only ran in the gaps
@@ -1097,7 +1125,14 @@ workers:
       max_duration_seconds: 1800
       max_turns: 40
       batch: 3
-      inner_voice: true
+      # OFF for unattended turns since 2026-09-12 (plan: senses-not-supervision,
+      # cut 1). Measured effect on rounds was negative: #874 abandoned at
+      # iteration 38 with 44 min left on an invented premise, 16 false
+      # repetition fires in one day, an inject into #875 with no room to
+      # answer. Stall rescue, budget and context pressure are deterministic
+      # anchors now; the gate is the real check. Stays on for chat, where a
+      # human reads it and its value was measured there.
+      inner_voice: false
       channels: [ai-engineer, discover-ai]
     deep-research:
       enabled: true

@@ -947,6 +947,37 @@ def _iv_gate(monkeypatch, tmp_path, session_id, session_data=None, require=True)
     return M._inner_voice_gate("open a round")
 
 
+def test_a_worker_session_opens_a_round_without_the_observer(monkeypatch, tmp_path):
+    """Cut 1 of senses-not-supervision: `inner_voice: false` on the autocode
+    source. The gate's two reasons were written for a chat turn and neither
+    holds unattended — the observer's measured effect on rounds was negative,
+    and every background run is recorded and listed in the Background tab.
+    Without this exemption the config switch would have stopped every round
+    from opening, which is the opposite of a switch.
+    """
+    for platform in ("worker", "autonomy"):
+        gate = _iv_gate(monkeypatch, tmp_path, f"s-{platform}",
+                        {"id": f"s-{platform}", "inner_voice": False,
+                         "platform": platform})
+        assert gate is None, platform
+
+
+def test_a_chat_session_is_still_refused_without_the_observer(monkeypatch, tmp_path):
+    """The exemption is by platform, not a loosening of the chat rule."""
+    gate = _iv_gate(monkeypatch, tmp_path, "s-chat",
+                    {"id": "s-chat", "inner_voice": False, "platform": "mission-control"})
+    assert gate is not None
+
+
+def test_the_unattended_sources_ship_with_the_observer_off():
+    """The switch itself, pinned: cut 1 is a config change and a config
+    change can be reverted by a UI toggle without anyone noticing."""
+    from app.config import CONFIG
+    src = CONFIG["workers"]["sources"]
+    for name in ("autocode", "autotriage", "arch-review", "youtube-digest"):
+        assert src[name].get("inner_voice") is False, name
+
+
 def test_a_round_is_refused_from_an_unobserved_turn(monkeypatch, tmp_path):
     """The observer attaches at turn START, so enabling the flag mid-call
     cannot cover the turn that enabled it.

@@ -73,12 +73,21 @@ def _inner_voice_gate(action: str) -> dict | None:
     nothing but a ledger row and a diff, which tells you what changed and
     nothing about how the agent got there.
 
-    `app/routers/messages.py` is the ONLY turn path that wires the observer —
-    worker turns and Task subagents have none at all, which is why neither is
-    allowed to drive the loop.
-
     No bound session means this is not a chat turn: the CLI, or the detached
     promoter. A human at a terminal is their own observer, so that path passes.
+
+    **A worker or autonomy session passes too, since 2026-09-12.** Both
+    reasons above were written for a *chat* turn, and neither holds for an
+    unattended one. *Live:* the observer's measured effect on rounds was
+    negative — #874 abandoned at iteration 38 with 44 minutes left on an
+    invented premise, sixteen false repetition fires in a day — and the
+    drift it was meant to catch is caught deterministically now by the
+    anchors and the gate. *Afterwards:* every background run has been
+    recorded since 2026-09-10 (`app/run_recorder.py`) and the Background tab
+    lists it, so a round driven from a worker session is exactly as
+    reviewable as one driven from an IV session. Refusing here would have
+    made `inner_voice: false` on the autocode source a switch that stops
+    every round from opening, which is the opposite of a switch.
     """
     if not _require_inner_voice():
         return None
@@ -95,6 +104,12 @@ def _inner_voice_gate(action: str) -> dict | None:
         # file should not be able to block self-modification entirely.
         return None
     if data.get("inner_voice"):
+        return None
+    try:
+        from app.sessions_io import NON_USER_PLATFORMS
+    except Exception:  # noqa: BLE001
+        NON_USER_PLATFORMS = frozenset()
+    if str(data.get("platform") or "") in NON_USER_PLATFORMS:
         return None
 
     data["inner_voice"] = True
