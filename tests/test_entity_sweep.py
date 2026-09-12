@@ -329,6 +329,23 @@ def test_apply_report_records_the_switches_and_what_it_applied(tmp_path):
     assert rep["alias_provenance"]["origin"] == "sweep"
 
 
+def test_the_backfilled_aliases_exclude_the_permanent_noise_shapes(tmp_path):
+    """The alias set a backfill writes has to be entity-shaped: a surface the
+    extractor is forbidden to treat as an entity (a filename, a bare code
+    identifier) regrows the variants a merge just removed, which is the 08-26 shape
+    rule (`e235e5a`) and the reason the 09-03 merge undid itself. Run through the
+    real apply, because it is the apply that writes these rows."""
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    assert _run(root, db, out, "--apply", "--rebuild-aliases").returncode == 0
+    st = KGStore(db)
+    try:
+        applied = [r["surface"] for r in st.aliases.rows() if r["origin"] == "sweep"]
+    finally:
+        st.close()
+    assert applied, "the apply wrote no alias rows to check"
+    assert not [s for s in applied if ers.looks_like_junk_entity(s)], applied
+
+
 def test_a_clean_apply_does_not_report_itself_as_bypassed(tmp_path):
     """The other half: `safety` must not read as bypassed when nothing was."""
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
@@ -428,13 +445,16 @@ def test_an_apply_leaves_voice_loop_voice_pipeline_and_voice_separate(tmp_path):
         assert rows == [], f"the backfill wrote an alias for {rows}"
         # Every reader goes through `entity_naming.normalize`, which is
         # `store().resolve(name) or name`. All three must come back unchanged.
+        # `resolve` is None because no alias maps it — the registered-entity half
+        # of the claim is `normalize(name) == name`, which is what every reader
+        # calls; asserting both, so an absent entity cannot satisfy this test.
         from app import entity_naming, kg_store
         kg_store.configure(db)
         try:
             for name in sorted(VOICE):
-                assert st.resolve(name) in (None, name)
+                assert st.resolve(name) is None
                 assert entity_naming.normalize(name) == name
         finally:
-            kg_store.configure(st.path)
+            kg_store.reset()
     finally:
         st.close()
