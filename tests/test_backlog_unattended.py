@@ -1127,12 +1127,22 @@ def test_the_kill_switch_and_an_already_closed_item(isolated):
 @pytest.mark.parametrize("obj,expect", [
     ({"acceptance": "met", "landed": True, "deferred_to": [], "summary": "x", "spawned": ["7", 8]},
      {"landed": True, "acceptance": "met", "clause_outcomes": [], "deferred_to": [],
-      "summary": "x", "spawned": [7, 8]}),
+      "summary": "x", "spawned": [7, 8], "human_paths": []}),
     ({"acceptance": "maybe"}, None),
     ("not a dict", None),
     ({"acceptance": "deferred", "deferred_to": ["618", "bad"], "summary": "  a   b  " + "z" * 500},
      {"landed": False, "acceptance": "deferred", "clause_outcomes": [], "deferred_to": [618],
-      "summary": ("a b " + "z" * 500)[:400], "spawned": []}),
+      "summary": ("a b " + "z" * 500)[:400], "spawned": [], "human_paths": []}),
+    # A path the loop may never write, reported rather than hidden. Leaving
+    # it out of the diff and saying so is correct; `git add -f` was the move
+    # this replaces.
+    ({"acceptance": "met", "landed": True, "deferred_to": [], "summary": "s", "spawned": [],
+      "human_paths": [{"path": "  .gitignore ", "reason": "  needs   a rule  "},
+                      {"path": "", "reason": "dropped: no path"},
+                      "not a dict"]},
+     {"landed": True, "acceptance": "met", "clause_outcomes": [], "deferred_to": [],
+      "summary": "s", "spawned": [],
+      "human_paths": [{"path": ".gitignore", "reason": "needs a rule"}]}),
 ])
 def test_parse_outcome_validates_and_clamps(obj, expect):
     assert B.parse_outcome(obj) == expect

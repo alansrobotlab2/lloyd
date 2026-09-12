@@ -661,6 +661,19 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
                      and float(e.get("ts") or 0) >= started]
     outcome = B.parse_outcome(run.get("structured")) if want_outcome else None
     outcome_error = str(run.get("structured_error") or "")
+    # A path the round needed and the loop may never write. Recorded on the
+    # item, which tags it `needs-human` and holds it open — reported rather
+    # than hidden, which is what `git add -f` was.
+    if outcome and outcome.get("human_paths"):
+        try:
+            recorded = B.record_human_paths(candidate.id, outcome["human_paths"],
+                                            round_id=round_id)
+            if recorded:
+                S.append_event({"event": "human_paths", "item_id": candidate.id,
+                                "round_id": round_id, "paths": recorded})
+        except Exception as exc:  # noqa: BLE001 — a note is not the round
+            logger.warning("#%s: could not record human_paths: %s",
+                           candidate.id, exc)
     if outcome and outcome["acceptance"] == "unnecessary":
         # "Determined not to be necessary" is a verdict with no landing to wait
         # for: the premise no longer holds, or the acceptance is already true.

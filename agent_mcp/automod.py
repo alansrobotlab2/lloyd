@@ -272,6 +272,24 @@ def _gate_wait(round_id: str, *, wait_seconds: int = 240, note: str = "") -> dic
     def _report() -> dict:
         rep = json.loads(gate_path.read_text(encoding="utf-8"))
         rep["gate_finished"] = True
+        # An external blocker is not a verdict on the diff, and the round's
+        # right next move is to wait and gate again — but nothing said so, so
+        # round 866-a ended its turn on a grader 503 caused by a SIBLING
+        # round's landing and was reaped 30 minutes later with the work
+        # intact in its worktree.
+        failed = next((r for r in (rep.get("rungs") or [])
+                       if not r.get("ok")), None) or {}
+        data = failed.get("data") or {}
+        if data.get("external_blocker"):
+            after = int(data.get("retry_after_s") or 120)
+            why = str(data.get("external_reason") or "outside your diff")
+            rep["next"] = (
+                f"This failure is {why} — outside your diff. Wait {after}s and "
+                f"call automod_gate again, up to two more times. Do NOT abort "
+                f"and do NOT end the turn on this: nothing about your change "
+                f"has been judged yet."
+            )
+            rep["retry_after_s"] = after
         return rep
 
     while True:

@@ -305,6 +305,16 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
         shutil.rmtree(wt, ignore_errors=True)
 
 
+def _review_policy(key: str, default: str = "first") -> str:
+    """`automod.review.<key>` from config, or the default. Never raises."""
+    try:
+        from app.config import CONFIG
+        return str(((CONFIG.get("automod") or {}).get("review") or {})
+                   .get(key, default))
+    except Exception:
+        return default
+
+
 class Gate:
     def __init__(self, round_id: str, worktree: Path, base: str, *,
                  live_root: Path | None = None, skip_smoke: bool = False,
@@ -833,7 +843,13 @@ class Gate:
                                "review_retry": True, "review_exhausted": True,
                                "review_attempt": spent + 1,
                                "review_findings": str(last.get("findings") or "")[:1500]}
-        same = refused_by_head.get(head) if head else None
+        # A pending amendment changes the contract, so the SAME head is a
+        # different question and has to be graded again. 866-c amended a
+        # clause, re-gated the same commit, and was answered from the ledger
+        # — the amendment was never looked at, and the round aborted on a
+        # refusal of the text it had just replaced.
+        pending_amendments = list(contract.get("amendments") or [])
+        same = refused_by_head.get(head) if (head and not pending_amendments) else None
         if same is not None:
             findings = str(same.get("findings") or "")[:1500]
             return False, (f"review already refused this exact commit {head[:8]} (attempt "
@@ -844,7 +860,11 @@ class Gate:
                                "review_attempt": int(same.get("attempt") or spent),
                                "review_same_head": True}
         attempt = spent + 1
-        if attempt > RV.REVIEW_MAX_PER_ROUND:
+        # Same reason: a round holding an unratified amendment has not had
+        # its new contract judged even once. The HARD_CAP above still bounds
+        # it — that one counts grading turns, not refusals, so amendments
+        # cannot buy unlimited passes.
+        if attempt > RV.REVIEW_MAX_PER_ROUND and not pending_amendments:
             last = graded_refusals[-1] if graded_refusals else {}
             return False, (f"review already sent this round back {RV.REVIEW_MAX_PER_ROUND} "
                            f"times; abort and report (automod_abort with the findings as "
@@ -862,7 +882,11 @@ class Gate:
         grade_root = snapshot or self.worktree
         base_event = {"event": "review", "round_id": self.round_id, "item_id": self.item_id,
                       "attempt": attempt, "head": head, "grader_model": "primary",
-                      "snapshot": bool(snapshot), "snapshot_note": snap_note, "prechecks": pre}
+                      "snapshot": bool(snapshot), "snapshot_note": snap_note, "prechecks": pre,
+                      # A refusal shown an amendment is a judgment of a new
+                      # contract; `backlog.review_disagreement` reads this so
+                      # it does not count the amended pass as a repeat.
+                      "amendments_shown": [a.get("clause") for a in pending_amendments]}
         try:
             res = RV.grade(round_id=self.round_id, worktree=grade_root, base=self.base,
                            contract=contract, changed_paths=changed, test_counts=test_counts,
@@ -876,6 +900,8 @@ class Gate:
                 return False, (f"review could not run: {res.get('error')} — the grader, not the "
                                f"diff; neither the item's attempt nor a review attempt is spent"), {
                                    "external_blocker": True, "external_failures": [],
+                                   "external_reason": "grader unreachable",
+                                   "retry_after_s": 120,
                                    "review_session": res.get("session_id")}
             parsed = RV.parse_review(res["structured"], worktree=grade_root,
                                      changed_tests=changed_tests, n_clauses=len(contract["clauses"]))
@@ -886,9 +912,12 @@ class Gate:
                             "error": "structured review unusable"})
             return False, "review returned an unusable object; the item keeps its attempt", {
                 "external_blocker": True, "external_failures": [],
+                "external_reason": "grader returned an unusable object",
+                "retry_after_s": 120,
                 "review_session": res.get("session_id")}
         amendments = contract.get("amendments") or []
-        kind, findings = RV.decide(parsed, pre, amendments=amendments)
+        kind, findings = RV.decide(parsed, pre, amendments=amendments,
+                                   attempt=attempt, policy=_review_policy("seams_block"))
         S.append_event({**base_event, "ok": True, "premise": parsed["premise"],
                         "clauses": parsed["clauses"], "test_honesty": parsed["test_honesty"],
                         "seams_unverified": [s["seam"] if isinstance(s, dict) else s
@@ -921,10 +950,27 @@ class Gate:
             return False, f"review sent it back ({shown}; {nxt}): {findings}", {
                 "review_retry": True, "review_findings": findings[:1500],
                 "review_attempt": attempt, "review_session": res.get("session_id")}
+        # On a PASS, record the grader's `post_landing` clauses onto the item.
+        # Written here rather than by the implementer because it is a fact the
+        # grader established about a change that is about to land, not a claim
+        # the author made about its own work.
+        from scripts.automod import backlog as _B
+        marked: list[int] = []
+        for c in parsed["clauses"]:
+            if c["verdict"] != "post_landing":
+                continue
+            try:
+                if _B.mark_clause_post_landing(self.item_id, int(c["clause"]),
+                                               note=c.get("note") or "",
+                                               round_id=self.round_id):
+                    marked.append(int(c["clause"]))
+            except Exception as exc:  # noqa: BLE001 — a mark is not the gate
+                print(f"[warn] could not mark clause {c['clause']} post_landing: {exc}")
         return True, (f"review: {RV.summarize_clauses(parsed)} of {len(contract['clauses'])} "
                       f"clause(s); {parsed['summary'][:160]}"), {
                           "review_session": res.get("session_id"),
                           "clauses": parsed["clauses"], "review_attempt": attempt,
+                          "post_landing_clauses": marked,
                           "amendments_ratified": [a.get("clause") for a in amendments]}
 
     def _review_snapshot(self, head: str) -> tuple[Path | None, str]:

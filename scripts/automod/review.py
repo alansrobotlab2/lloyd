@@ -89,7 +89,19 @@ PREMISES = ("sound", "unsound")
 # under test. Neither a retry nor an abort helps there; the contract has to
 # move, and `backlog.amend_clause` is how it moves — by the author, only for
 # a clause so marked, and only until the next review ratifies or refuses it.
-CLAUSE_VERDICTS = ("met", "partial", "unmet", "unsatisfiable")
+# `post_landing` is the fifth, and it is the most common honest answer this
+# rung had no word for. A clause like "the dashboard shows round_hold engaged
+# while a round runs" is satisfiable only by traffic that does not exist until
+# the change is live; the grader could say `met` (dishonest — it verified
+# nothing) or `partial` (a refusal, for a round that did the work). On the
+# 2026-09-11 scorecard that ambiguity is a large part of an 86% refusal rate.
+#
+# It is advisory at the gate and load-bearing afterwards: the clause is marked
+# on the item, `backlog.parse_outcome` accepts a `deferred`/`not_met` for that
+# index as met, and `close_settled_items` holds the item open with
+# `needs-human` exactly as a human clause does. The round lands; the claim
+# stays unmade until a person makes it.
+CLAUSE_VERDICTS = ("met", "partial", "unmet", "unsatisfiable", "post_landing")
 HOW_VERIFIED = ("ran", "read", "inferred")
 # A test-honesty entry is `blocking` when the test cannot fail, asserts nothing
 # about the code it names, or was weakened — the #544 shapes. Everything else a
@@ -120,7 +132,13 @@ REVIEW_SCHEMA: dict = {
                             "description": ("met / partial / unmet as in the procedure; "
                                             "unsatisfiable when no diff could satisfy the "
                                             "clause as written — say in the note what a "
-                                            "satisfiable clause would be.")},
+                                            "satisfiable clause would be; post_landing when "
+                                            "the mechanism is in the diff and correct but "
+                                            "the clause can only be OBSERVED once the change "
+                                            "is live (it needs real traffic, a nightly run, "
+                                            "or a restart). post_landing REQUIRES "
+                                            "evidence_path pointing at the mechanism; "
+                                            "without one it is recorded as partial.")},
                 "evidence_path": {"type": "string",
                                   "description": "Worktree-relative file the evidence is in. Empty if none."},
                 "evidence_line": {"type": "integer", "description": "Line in evidence_path, or 0."},
@@ -199,13 +217,21 @@ REVIEW_DENY: tuple[str, ...] = (
 # Patterns that make a test unable to fail, or weaker than it was. Applied
 # to the changed test files as a delta against the base version, so a tree
 # that already carried one is not blamed on this round.
-_HONESTY_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"\bor\s+True\b", "`or True` makes the assertion unable to fail"),
-    (r"^\s*assert\s+True\b", "`assert True` asserts nothing"),
-    (r"pytest\.skip\(", "a new pytest.skip"),
-    (r"pytest\.mark\.skip", "a new skip marker"),
-    (r"pytest\.mark\.xfail", "a new xfail marker"),
+_HONESTY_PATTERNS: tuple[tuple[str, str, str], ...] = (
+    (r"\bor\s+True\b", "`or True` makes the assertion unable to fail", "blocking"),
+    (r"^\s*assert\s+True\b", "`assert True` asserts nothing", "blocking"),
+    (r"pytest\.skip\(", "a new pytest.skip", "blocking"),
+    (r"pytest\.mark\.skip", "a new skip marker", "blocking"),
+    (r"pytest\.mark\.xfail", "a new xfail marker", "blocking"),
 )
+
+# "test files changed but no test function was added" is a real observation
+# and a bad refusal. A round that tightens an existing test's assertions,
+# renames a fixture, or extends a parametrize list has pinned exactly what it
+# should and added no `def test_`; the LLM half of the review is the part
+# equipped to tell that from a round that pinned nothing. Advisory, so it
+# rides into the findings and the landing report without spending an attempt.
+_NO_NEW_TEST_SEVERITY = "advisory"
 
 
 # ── the contract ──────────────────────────────────────────────────────────
@@ -289,7 +315,7 @@ def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
         post_path = worktree / rel
         post = post_path.read_text(encoding="utf-8", errors="replace") if post_path.exists() else ""
         pre = _git(worktree, "show", f"{base}:{rel}")
-        for pat, why in _HONESTY_PATTERNS:
+        for pat, why, severity in _HONESTY_PATTERNS:
             rx = re.compile(pat, re.M)
             n_post, n_pre = len(rx.findall(post)), len(rx.findall(pre))
             if n_post > n_pre:
@@ -299,14 +325,16 @@ def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
                     if rx.search(ln):
                         line = i
                         break
-                out.append({"file": rel, "line": line, "problem": why})
+                out.append({"file": rel, "line": line, "problem": why,
+                            "severity": severity})
         added_tests += max(0, len(re.findall(r"^\s*(?:async\s+)?def test_", post, re.M))
                            - len(re.findall(r"^\s*(?:async\s+)?def test_", pre, re.M)))
     code_changed = any(p.endswith(".py") and not p.startswith("tests/") for p in changed_paths)
     if n_clauses and code_changed and tests and added_tests == 0:
         out.append({"file": tests[0], "line": 0,
                     "problem": ("test files changed but no test function was added while "
-                                "the item has acceptance clauses to pin")})
+                                "the item has acceptance clauses to pin"),
+                    "severity": _NO_NEW_TEST_SEVERITY})
     return out
 
 
@@ -406,16 +434,22 @@ count the corpus cannot reach). Say in the note what a satisfiable clause \
 would be: the author may amend exactly that clause, and you or the next \
 reviewer ratifies the amendment. It is not a verdict on the diff and not a \
 softer `unmet`; an incomplete implementation of a satisfiable clause is `unmet`. \
-**A clause that can only be evaluated after the change has landed** — a day of \
+**A clause that can only be OBSERVED after the change has landed** — a day of \
 traffic, a nightly run, a number only production produces, a run of a script \
-against live data — is `unsatisfiable` before landing, never `partial`: no diff \
-can carry that evidence. Say in the note what the pre-landing clause would be \
-(the mechanism plus the test that pins it); the post-landing check is a \
-person's, or a deferral the author names. #859 was refused twice on exactly \
-this shape and parked, with the mechanism complete on both commits.
+against live data — is `post_landing`, not `partial` and not `unsatisfiable`. \
+Use it when the mechanism IS in the diff and looks right, and point \
+evidence_path at that mechanism; a `post_landing` with nothing to point at is \
+recorded as `partial`. It does not refuse the round: the change lands, the \
+clause is marked on the item, and the item stays open and tagged for a person \
+to confirm. Reserve `unsatisfiable` for a clause no diff could EVER satisfy \
+because it contradicts something — that is a defect in the contract, and its \
+remedy is an amendment, not a landing. #859 was refused twice on exactly the \
+post-landing shape and parked, with the mechanism complete on both commits.
 
-Keep every `note` to two sentences and never paste command output into it; \
-paths are worktree-relative (`app/x.py`, not `~/…`). Your review is restated \
+Keep every `note` to two sentences and never paste command output into it. \
+Paths are worktree-relative (`app/x.py`); a vault path you actually read is \
+also accepted, as `lloyd/SOUL.md` or `~/obsidian/lloyd/SOUL.md`. Your review \
+is restated \
 as one JSON object at the end under a fixed token budget, and a long note in \
 clause 1 is how clause 4 gets cut off.
 
@@ -617,15 +651,91 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     return kind, findings
 
 
+# How long `run_grader` will wait out a backend that is not answering yet.
+# 420s = the landing drain's 180s TTL plus a supervisord restart with margin.
+# The case this exists for: round 866-a's grader hit a 503 because ANOTHER
+# round was landing at that moment, the rung recorded `external`, and the
+# turn ended without ever re-gating — reaped 30 minutes later, one attempt
+# spent on a collision with a sibling.
+DEFAULT_UNAVAILABLE_WAIT_S = 420.0
+_RETRY_BACKOFF_S = (15.0, 30.0, 60.0)
+_RETRY_AFTER_CAP_S = 60.0
+
+
+def _retry_delay(error: str, attempt: int) -> float:
+    """How long to wait before re-POSTing, from the server's own hint."""
+    m = re.search(r"retry in (\d+)\s*s", error or "", re.I)
+    if m:
+        try:
+            return min(float(m.group(1)), _RETRY_AFTER_CAP_S)
+        except ValueError:
+            pass
+    return _RETRY_BACKOFF_S[min(attempt, len(_RETRY_BACKOFF_S) - 1)]
+
+
+def _is_unavailable(error: str) -> bool:
+    """A backend that is not up YET, as opposed to one that refused this."""
+    e = (error or "").lower()
+    return ("http 503" in e or "connection refused" in e
+            or "connectionrefused" in e or "remotedisconnected" in e
+            or "is landing a code update" in e)
+
+
 def run_grader(*, prompt: str, item_id: int, round_id: str, backend: str | None = None,
                sessions_dir: Path | None = None, timeout: float = REVIEW_TIMEOUT_S,
-               model: str = "primary", max_turns: int = REVIEW_MAX_TURNS) -> dict:
-    """POST one grading turn to the live backend and collect its `done`."""
+               model: str = "primary", max_turns: int = REVIEW_MAX_TURNS,
+               unavailable_wait_s: float = DEFAULT_UNAVAILABLE_WAIT_S) -> dict:
+    """POST one grading turn to the live backend and collect its `done`.
+
+    **Retries an unavailable backend, and only before the stream opens.** A
+    503 or a refused connection *before any event was yielded* means the
+    grader never started — another round's landing is restarting the backend,
+    and waiting is exactly right. Once events have arrived, a failure is a
+    failure: re-POSTing would run a second grading turn whose cost the round
+    pays and whose verdict duplicates a judgment already partly made.
+
+    The session id is reused across attempts so the retries read as one
+    grading of one commit rather than as three.
+    """
     backend = (backend or backend_url()).rstrip("/")
     sessions_dir = Path(sessions_dir or (LIVE_ROOT / "sessions"))
     session_id = write_session(sessions_dir, item_id=item_id, round_id=round_id, model=model)
     report: dict = {"ok": False, "error": "", "session_id": session_id, "structured": None,
-                    "structured_error": "", "text": "", "stop_reason": None, "duration_s": 0.0}
+                    "structured_error": "", "text": "", "stop_reason": None, "duration_s": 0.0,
+                    "retries": 0, "waited_s": 0.0}
+    overall_started = time.time()
+    attempt = 0
+    while True:
+        _grade_once(report, backend=backend, payload_prompt=prompt,
+                    session_id=session_id, timeout=timeout, model=model,
+                    max_turns=max_turns)
+        if report["ok"] or not _is_unavailable(report["error"]):
+            break
+        if report.get("saw_event"):
+            # Mid-stream. Never retry: the turn ran and cost the round.
+            break
+        waited = report["waited_s"]
+        delay = _retry_delay(report["error"], attempt)
+        if waited + delay > unavailable_wait_s:
+            report["error"] = (
+                f"{report['error']} (backend still unavailable after "
+                f"{waited:.0f}s of {unavailable_wait_s:.0f}s)")
+            break
+        time.sleep(delay)
+        report["waited_s"] = round(waited + delay, 1)
+        report["retries"] += 1
+        attempt += 1
+        report["error"] = ""
+    report["duration_s"] = round(time.time() - overall_started, 1)
+    return report
+
+
+def _grade_once(report: dict, *, backend: str, payload_prompt: str, session_id: str,
+                timeout: float, model: str, max_turns: int) -> None:
+    """One POST. Fills `report` in place; never raises."""
+    prompt = payload_prompt
+    report["error"] = ""
+    report["saw_event"] = False
     started = time.time()
     payload = {
         "session_id": session_id, "text": prompt, "model": model,
@@ -642,6 +752,7 @@ def run_grader(*, prompt: str, item_id: int, round_id: str, backend: str | None 
     }
     try:
         for name, data in _post_stream(f"{backend}/api/message/stream", payload, timeout):
+            report["saw_event"] = True
             if name == "error":
                 report["error"] = (report["error"] + " " + str(data)[:300]).strip()
             elif name == "done":
@@ -662,16 +773,22 @@ def run_grader(*, prompt: str, item_id: int, round_id: str, backend: str | None 
         report["error"] = f"HTTP {e.code}: {body}"
     except Exception as e:
         report["error"] = f"{type(e).__name__}: {str(e)[:300]}"
-    report["duration_s"] = round(time.time() - started, 1)
     if report["structured"] is None and not report["error"]:
         report["error"] = report["structured_error"] or "turn ended without a structured review"
     report["ok"] = isinstance(report["structured"], dict)
-    return report
 
 
 # ── judging the judge ────────────────────────────────────────────────────
 
-def normalize_evidence_path(raw: str, worktree: Path) -> str:
+# Roots tried after the worktree misses. A code round's evidence can
+# legitimately be a vault file it read — the prompt forbade `~` while the
+# parser already accepted it, and five `met`s were downgraded on 2026-09-11
+# for paths that were real.
+REVIEW_EVIDENCE_ROOTS: tuple[Path, ...] = (Path("~/obsidian").expanduser(),)
+
+
+def normalize_evidence_path(raw: str, worktree: Path,
+                            roots: tuple[Path, ...] | None = None) -> str:
     """The grader's `evidence_path` as a path that exists, or "".
 
     The schema asks for a bare worktree-relative file and the grader writes
@@ -715,6 +832,13 @@ def normalize_evidence_path(raw: str, worktree: Path) -> str:
         rel = cand.lstrip("./")
         if rel and (Path(worktree) / rel).exists():
             return rel
+    # Not in the worktree. A vault-relative path (`lloyd/SOUL.md`,
+    # `backlog/544-x.md`) is a real place the grader can have read from.
+    for root in (REVIEW_EVIDENCE_ROOTS if roots is None else roots):
+        for cand in candidates:
+            rel = cand.strip("`\'\"()[],;").lstrip("./")
+            if rel and (Path(root) / rel).exists():
+                return str(Path(root) / rel)
     return ""
 
 
@@ -751,6 +875,16 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
         node = str(raw.get("test_node_id") or "").strip()
         how = str(raw.get("how_verified") or "").strip().lower()
         why: list[str] = []
+        if verdict == "post_landing" and not path:
+            # A `post_landing` with nothing to point at is a claim about a
+            # mechanism nobody has seen. The evidence rail is the whole
+            # difference between "in the diff, observable later" and "not
+            # done".
+            verdict = "partial"
+            downgraded.append(idx)
+            why.append("post_landing without a pinned mechanism "
+                       "(evidence_path missing or not on disk)"
+                       + (f" (grader wrote {raw_path[:120]!r})" if raw_path else ""))
         if verdict == "met":
             if not path:
                 # Keep what the grader wrote: three rounds on 2026-09-11 were
@@ -820,8 +954,34 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             "amendments_note": " ".join(str(obj.get("amendments_note") or "").split())[:600]}
 
 
+def seams_block(policy: str, attempt: int) -> bool:
+    """Whether an unverified seam refuses this attempt.
+
+    `first` (the default) blocks on attempt 1 and advises afterwards. The
+    reasoning is that a seam finding is real and worth making — #544's three
+    worst defects were all cross-process seams with no test — but it is also
+    the finding most likely to be *unfixable within the round*: a seam across
+    an HTTP boundary often cannot be crossed by a test until the change is
+    live. Blocking it forever means the round is refused twice and aborts,
+    and the item comes back to make the same unfixable finding again. On
+    2026-09-11 `seam unverified` was one of the two largest contributors to
+    an 86% refusal rate.
+
+    Blocking on the FIRST attempt is what keeps it honest: the author is told
+    once, with a chance to add the test, and only a second pass lets it
+    through as a finding that rides into the landing report.
+    """
+    policy = (policy or "first").strip().lower()
+    if policy == "never":
+        return False
+    if policy == "always":
+        return True
+    return int(attempt or 1) <= 1
+
+
 def decide(parsed: dict, prechecks: list[dict],
-           amendments: list[dict] | None = None) -> tuple[str, str]:
+           amendments: list[dict] | None = None,
+           *, attempt: int = 1, policy: str = "first") -> tuple[str, str]:
     """`(kind, findings)`: kind is `pass`, `retry` or `unsound`.
 
     Unsound is the grader's call alone. Everything else that is not clean is
@@ -840,6 +1000,7 @@ def decide(parsed: dict, prechecks: list[dict],
         idx = ", ".join(str(a.get("clause")) for a in amendments)
         lines.append(f"amendment of clause(s) {idx} refused (the clause text is restored): "
                      f"{parsed.get('amendments_note') or '(no note)'}")
+    advisory: list[str] = []
     for c in parsed["clauses"]:
         if c["verdict"] == "unsatisfiable":
             lines.append(f"clause {c['clause']} unsatisfiable as written: {c['note'] or '(no note)'} "
@@ -847,19 +1008,30 @@ def decide(parsed: dict, prechecks: list[dict],
                          f"text=…, reason=…) to the nearest clause that is satisfiable and "
                          f"still what the item asked for, then gate again; the next review "
                          f"ratifies or refuses the amendment")
+        elif c["verdict"] == "post_landing":
+            # Advisory at the gate: the mechanism is in the diff and pinned,
+            # and the claim itself waits for a human after the landing.
+            advisory.append(
+                f"clause {c['clause']} observable only after landing: "
+                f"{c['note'] or '(no note)'} — the item stays open and tagged "
+                f"needs-human until someone confirms it")
         elif c["verdict"] != "met":
             tag = f" (downgraded: {'; '.join(c['downgraded'])})" if c.get("downgraded") else ""
             lines.append(f"clause {c['clause']} {c['verdict']}{tag}: {c['note'] or '(no note)'}")
-    advisory: list[str] = []
     for h in prechecks + parsed["test_honesty"]:
         if h.get("severity", "blocking") == "advisory":
             advisory.append(f"advisory {h['file']}:{h['line']}: {h['problem']}")
             continue
         lines.append(f"test honesty {h['file']}:{h['line']}: {h['problem']}")
+    blocking_seams = seams_block(policy, attempt)
     for s in parsed["seams_unverified"]:
         text = s["seam"] if isinstance(s, dict) else str(s)
         if isinstance(s, dict) and not s.get("testable_before_landing", True):
             advisory.append(f"post-landing seam (not refusing): {text}")
+            continue
+        if not blocking_seams:
+            advisory.append(
+                f"seam unverified (attempt {attempt}, not refusing again): {text}")
             continue
         lines.append(f"seam unverified: {text}")
     if not lines:

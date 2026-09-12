@@ -718,6 +718,31 @@ automod:
   gate:
     pytest_min_collected: 1000
     mcp_min_tools_excl_thunderbird: 80
+  # The review rung's policy knobs. The rung refused 86% of the rounds it
+  # graded over 2026-09-11 and the two largest contributors were both
+  # findings that are real and usually unfixable INSIDE the round.
+  review:
+    # `first` blocks an unverified seam on the round's first review attempt
+    # and advises afterwards. A seam finding is worth making — #544's three
+    # worst defects were all cross-process seams with no test — but a seam
+    # across an HTTP boundary often cannot be crossed by a test until the
+    # change is live, so blocking it forever refuses the round twice and
+    # aborts, and the item comes back to make the same finding again.
+    # `always` restores the old behaviour; `never` makes it purely advisory.
+    seams_block: first
+    # Test-honesty prechecks. The pattern findings (`or True`, `assert True`,
+    # a new skip or xfail) block; "no new test function" is advisory, because
+    # a round that tightens an existing test has pinned exactly what it
+    # should and added no `def test_`.
+    prechecks_block: true
+    # Where an `evidence_path` may point besides the worktree. A code round's
+    # evidence can legitimately be a vault file it read, and five `met`s were
+    # downgraded on 2026-09-11 for paths that were real.
+    evidence_roots: ["~/obsidian"]
+    # How long to wait out a backend that is not answering yet — the landing
+    # drain's 180s TTL plus a supervisord restart, with margin. Round 866-a's
+    # grader hit a 503 because ANOTHER round was landing at that moment.
+    unavailable_wait_s: 420
   landing:
     idle_max_wait_s: 900
     idle_quiet_polls: 3
