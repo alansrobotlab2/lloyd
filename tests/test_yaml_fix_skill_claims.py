@@ -172,6 +172,48 @@ def test_the_scripts_section_names_the_real_carriers_only():
     assert "Apply the same patch to all three scripts" not in _text(YAML_SKILL)
 
 
+def _bullets(section: str) -> list[str]:
+    """The section's `- ` items, with their continuation lines joined, so a
+    bullet whose path and line-range sit on different wrapped lines is still
+    one unit."""
+    out: list[str] = []
+    for line in section.splitlines():
+        if line.lstrip().startswith("- "):
+            out.append(line.lstrip()[2:].strip())
+        elif out and line.strip():
+            out[-1] += " " + line.strip()
+    return out
+
+
+def test_the_line_ranges_the_skill_cites_are_where_the_block_actually_is():
+    """The two bullets cite the block by line number — `at lines 17-21` and
+    `at lines 18-22`. The names being right is clause 2; a stale *range* is the
+    same defect one step down, so each cited range is checked against the file
+    rather than left accurate-by-luck: the first number is the `try:` line that
+    opens the block, the last is the `class yaml:` line that closes its header.
+    A round that shifts either script by one line fails here and is the round
+    that has to move the number."""
+    checked = 0
+    for bullet in _bullets(_section(_text(YAML_SKILL), "## Scripts Requiring This Fix")):
+        cited = re.search(r"\blines? (\d+)-(\d+)\b", bullet)
+        if not cited:
+            continue
+        paths = NAMED_PATH.findall(bullet)
+        assert paths, f"bullet cites a line range but names no script: {bullet!r}"
+        rel = paths[0].removeprefix("~/lloyd/")
+        body = (ROOT / rel).read_text(encoding="utf-8", errors="replace")
+        block = _FALLBACK_BLOCK.search(body)
+        assert block, f"{rel} no longer carries the block the skill cites"
+        opener = body.count("\n", 0, block.start()) + 1
+        closer = body.count("\n", 0, body.index("class yaml", block.start())) + 1
+        assert (opener, closer) == (int(cited.group(1)), int(cited.group(2))), (
+            f"{rel}: the skill cites lines {cited.group(1)}-{cited.group(2)}, "
+            f"the block is at {opener}-{closer}"
+        )
+        checked += 1
+    assert checked == 2, f"expected both carriers' bullets to cite a range, got {checked}"
+
+
 # ── clause 3: every path it names resolves ──────────────────────────────────
 
 
