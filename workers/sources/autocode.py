@@ -574,6 +574,14 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     candidate, triage = pair
     budget = int((item.payload or {}).get("max_turns") or DEFAULT_MAX_TURNS)
 
+    # Read BEFORE the `started` row below, and this ordering is the whole
+    # fix. `implement_outcomes` judges an item by its LATEST implement row,
+    # and a `started` row with no round reads as `spent` — so a banner
+    # computed after it was always empty. 0 of the 92 autocode sessions on
+    # record to 2026-09-13 had ever been told they were a re-offer: no
+    # `from_branch`, no findings, no clause verdicts, every one a fresh start.
+    reoffer = _reoffer_for(candidate.id)
+
     # Recorded BEFORE the turn. `implemented_ids` counts any event for the
     # item, so this is what makes it one attempt per item: a turn that crashes
     # or times out must not put the item back on the pile to be retried
@@ -584,7 +592,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "budget": budget})
     B.set_status(candidate.id, "in_progress", "automod round starting")
     try:
-        return await _run_and_record(item, candidate, triage, budget, started)
+        return await _run_and_record(item, candidate, triage, budget, started, reoffer)
     finally:
         # Every exit — landed, aborted, timed out, never ran, skipped for a
         # drain — hands the item back to the ledger's verdict. Without this the
@@ -596,7 +604,22 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             logger.warning("reconcile_statuses after #%s failed: %s", candidate.id, exc)
 
 
-async def _run_and_record(item, candidate, triage, budget, started) -> dict[str, Any]:
+def _reoffer_for(item_id: int) -> str:
+    """The re-offer banner for an item, from the ledger as it stands NOW.
+
+    Call it before this attempt's `started` row is written (see `execute`).
+    """
+    from scripts.automod import backlog as B, state as S
+    return _reoffer_block(
+        B.reoffer_reason(S.LEDGER_PATH, item_id),
+        prior=B.prior_spawned(S.LEDGER_PATH, item_id),
+        findings_appended=sum(r["findings_appended"]
+                              for r in B.prior_rounds(S.LEDGER_PATH, item_id)),
+        clause_verdicts=_last_review_clauses(item_id))
+
+
+async def _run_and_record(item, candidate, triage, budget, started,
+                          reoffer: str = "") -> dict[str, Any]:
     from scripts.automod import backlog as B, state as S
     from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
     logger.info("implementing backlog #%s (budget %d): %s",
@@ -628,13 +651,9 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
         # A re-offer is not a fresh start. The previous round's branch may
         # still hold the work, or a landing may have been reverted, and a
         # round told nothing re-derives it — or redoes it. Nor re-files it:
-        # the ids earlier rounds filed ride along.
-        reoffer=_reoffer_block(
-            B.reoffer_reason(S.LEDGER_PATH, candidate.id),
-            prior=B.prior_spawned(S.LEDGER_PATH, candidate.id),
-            findings_appended=sum(r["findings_appended"]
-                                  for r in B.prior_rounds(S.LEDGER_PATH, candidate.id)),
-            clause_verdicts=_last_review_clauses(candidate.id)),
+        # the ids earlier rounds filed ride along. Built by `execute` before
+        # this attempt's `started` row, which would otherwise erase it.
+        reoffer=reoffer,
     )
     want_outcome = bool((item.payload or {}).get("structured_outcome", True))
     # Taken BEFORE the turn: an id the turn claims that is at or below this

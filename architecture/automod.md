@@ -1044,6 +1044,13 @@ refusals on their own grader output named the causes, heaviest first:
    a `review_retry` re-offer carries the last review's per-clause verdicts;
    the grader is shown the item's last three graded reviews across rounds,
    each naming its round, while attempts are still counted on the round.
+   Checking the first re-offer after landing found that **no re-offer banner
+   had ever been delivered**: `execute` wrote the attempt's `started` row
+   before building the prompt, `implement_outcomes` reads an item by its
+   latest row, and a `started` row with no round reads as `spent` — so the
+   banner was empty in all 92 autocode sessions on record. It is built before
+   that row now, and `tests/test_backlog_unattended.py` pins it through
+   `execute` rather than by calling the block builder.
 
 Both policies now share the severity, seam-attempt and refused-amendment
 rules, and a review object without the two judgment fields decides the same

@@ -1029,6 +1029,41 @@ def test_a_review_re_offer_carries_the_last_reviews_clause_verdicts(isolated):
     assert "per-clause verdicts" not in _reoffer_block(reason)
 
 
+def test_a_re_offered_round_is_actually_told_so_through_execute(isolated, monkeypatch):
+    """The banner was right and never delivered: `execute` wrote this
+    attempt's `started` row first, `implement_outcomes` read the item's latest
+    row — `started`, no round — as `spent`, and the banner came out empty. 0
+    of 92 autocode sessions on record had received one. The test above builds
+    the block by hand; this one goes through the path a round actually takes.
+    """
+    write_item(isolated, 875)
+    _confirm(875)
+    rid = "SM_20260913_205239"
+    S.append_event({"event": "backlog_implement", "item_id": 875, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": 875, "phase": "finished",
+                    "round_id": rid, "stop_reason": "stop", "num_turns": 90},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "review", "round_id": rid, "item_id": 875, "ok": True,
+                    "blocking": True, "kind": "retry", "attempt": 1, "head": "a" * 40,
+                    "clauses": [{"clause": 1, "verdict": "met"},
+                                {"clause": 8, "verdict": "unmet", "note": "no test"}]},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "gate", "round_id": rid, "rung": "review", "ok": False,
+                    "review_retry": True, "detail": "sent back",
+                    "review_findings": "clause 8 unmet: no test"}, path=S.LEDGER_PATH)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
+    fake = _fake_turn("Aborted.")
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+
+    asyncio.run(I.execute(_Item()))
+
+    prompt = " ".join(fake.calls[0]["prompt"].split())
+    assert "being offered again" in prompt
+    assert f'from_branch="automod/{rid}"' in prompt
+    assert "Its last per-clause verdicts: clause 1 met; clause 8 unmet: no test" in prompt
+
+
 def test_the_skill_covers_a_test_that_pins_old_behaviour_and_the_prompt_points_there(isolated):
     """The rule for a test that fails *because* it asserts the behaviour the
     item asked to change: read it, name it, quote the assertion, say which
