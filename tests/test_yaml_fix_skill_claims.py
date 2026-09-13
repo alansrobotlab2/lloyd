@@ -18,6 +18,19 @@ can follow it verbatim. Written on 2026-04-03, it had drifted three ways (backlo
 Whether the fallback classes go outright is backlog #484's call, not this
 file's; the skill now defers to it, and one test below pins that it defers.
 
+The prose is not the artifact an agent reads. `agent_mcp/skills.py` parses the
+front matter (`_parse_frontmatter`, `_load_skill`) and `skills_search` serves
+that parsed description, while the prefetch injects `skill["body"]` — so a page
+whose front matter degrades is not the page this file's text assertions read.
+The seam section therefore asserts against what the loader returns and against
+the `skills_search` result for the query an agent makes when a pipeline step
+dies on yaml. That section found a live defect on landing: an unquoted ` #`
+inside a plain YAML scalar opens a comment, so the description the loader served
+stopped at "… deleting the classes is backlog" and the #484 deferral was
+invisible in search results. Fixed in the page's front matter ("backlog item
+484"), and pinned tree-wide by
+`test_no_skill_description_loses_its_tail_to_a_yaml_comment`.
+
 Scope of the scans: the acceptance greps are `grep -rn` over every file under
 `~/obsidian/skills/`, so the two whole-directory scans here walk every file,
 not just `*.md` — an absence claim parked in a `.py` or `.sh` would otherwise
@@ -61,6 +74,11 @@ ABSENCE_CLAIMS = (
 )
 # A `~/lloyd/...py` path as it is spelled in skill prose.
 NAMED_PATH = re.compile(r"~/lloyd/[A-Za-z0-9_./-]+\.py")
+# An interpreter as it is spelled on a shell command line: any number of
+# `/segment/` hops (or a `~/` / `./` root) in front of `python`, with optional
+# version digits. Matches `/home/u/lloyd/.venvs/lloyd/bin/python` and `python3`,
+# and never a script path like `relations_index.py`.
+INTERPRETER = re.compile(r"(?:[~.]?/)?(?:[A-Za-z0-9_.-]+/)*python[0-9.]*")
 
 # Trees under ROOT that are not source: vendored deps, caches, build output,
 # git internals, and the venv (which is gitignored and lives inside the
@@ -80,12 +98,31 @@ def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+# The walk is only ever bounded by a size cap, and the cap is never allowed to
+# hide a file: see `_skill_files`.
+_SIZE_CAP = 2_000_000
+
+
 def _skill_files() -> list[Path]:
-    """Every file under the skills tree, as `grep -rn` would walk it."""
-    files = []
-    for path in sorted(SKILLS_DIR.rglob("*")):
-        if path.is_file() and path.stat().st_size <= 2_000_000:
-            files.append(path)
+    """Every file under the skills tree, as `grep -rn` would walk it.
+
+    Nothing is dropped quietly. A file over `_SIZE_CAP` would make the scan a
+    different denominator than the acceptance grep, so rather than skip it (the
+    shape that silently passes a clause it never read) this asserts: the scan
+    fails, names the file, and says what to do. Largest file in the tree
+    measured 2026-09-13 was 242 KB, so the assert is a guard against a future
+    artifact, not a live constraint.
+    """
+    files = sorted(p for p in SKILLS_DIR.rglob("*") if p.is_file())
+    # An empty tree would make every absence claim below vacuously true, so the
+    # denominator is asserted before the contents are.
+    assert files, f"{NO_VAULT} (walked {SKILLS_DIR} and found no files)"
+    oversized = [p for p in files if p.stat().st_size > _SIZE_CAP]
+    assert not oversized, (
+        f"{[p.stat().st_size for p in oversized]} byte(s) exceed the {_SIZE_CAP} "
+        f"read cap: {[p.relative_to(SKILLS_DIR).as_posix() for p in oversized]} — "
+        "raise the cap, do not let the scan walk past them"
+    )
     return files
 
 
@@ -248,31 +285,49 @@ def test_the_testing_block_invokes_the_venv_interpreter():
         assert "python3" not in block, block
 
 
-def _test_command_scripts() -> list[str]:
-    """Script paths named inside a Testing fence block — not anywhere in the
-    file, or a stale bullet in another section would vouch for the command."""
-    found = []
+def _testing_commands() -> list[tuple[str, str]]:
+    """`(interpreter, script)` for each script named in a Testing fence block.
+
+    Both halves are read out of the fence, not from a constant: an interpreter
+    token (a `…/bin/python…` path or a bare `python`/`python3`) and the `.py`
+    path on the same command line. Parsing the interpreter is what lets the test
+    below honestly say "run under the interpreter the block names" — hardcoding
+    the venv here would keep passing if the published command silently reverted
+    to `python3`, which is the defect clause 4 exists to catch. Script paths
+    come from the fence too, so a command that quietly changed script while the
+    prose bullet stayed the same cannot pass.
+    """
+    pairs: list[tuple[str, str]] = []
     for block in _fenced(_section(_text(YAML_SKILL), "## Testing")):
-        for token in re.findall(r"[A-Za-z0-9_./-]+\.py", block):
-            found.append(token)
-    return found
+        # A shell continuation is one command; tokenizing physical lines would
+        # put the interpreter and the script on different lines and find a
+        # command in neither.
+        for line in re.sub(r"\\\s*\n\s*", " ", block).splitlines():
+            tokens = [t for t in re.split(r"\s+", line.strip()) if t]
+            interp = next((t for t in tokens if INTERPRETER.fullmatch(t)), None)
+            for token in tokens:
+                if token.endswith(".py") and interp is not None:
+                    pairs.append((interp, token))
+    return pairs
 
 
 def test_the_command_the_skill_publishes_actually_runs():
-    """Across the interpreter seam: each script the Testing block names, run
-    under the interpreter that block names, exits 0 and prints usage. The
-    block is parsed, so a command that quietly changed script while the prose
-    bullet stayed the same cannot pass."""
-    scripts = _test_command_scripts()
-    assert scripts, "the Testing section's fenced command names no .py file"
-    for rel in scripts:
+    """Across the interpreter seam: each script the Testing fence names, run
+    under the interpreter that same fence names, exits 0 and prints usage. The
+    fence is the only source of both, so the published command is the thing
+    being executed."""
+    commands = _testing_commands()
+    assert commands, "the Testing section's fenced command names no .py file"
+    for interp_token, rel in commands:
+        interpreter = (Path.home() / interp_token.removeprefix("~/")) if interp_token.startswith("~/") else Path(interp_token)
+        assert interpreter.is_file(), f"the Testing fence names {interp_token}, which is not an interpreter on disk"
         script = ROOT / rel
         assert script.is_file(), f"Testing block names {rel}, absent from the checkout"
         proc = subprocess.run(
-            [str(VENV_PY), rel, "--help"], cwd=ROOT, capture_output=True, text=True
+            [str(interpreter), rel, "--help"], cwd=ROOT, capture_output=True, text=True
         )
-        assert proc.returncode == 0, f"{rel} --help: {proc.stderr}"
-        assert "usage:" in proc.stdout, f"{rel} --help printed no usage: {proc.stdout[:200]}"
+        assert proc.returncode == 0, f"{interpreter} {rel} --help: {proc.stderr}"
+        assert "usage:" in proc.stdout, f"{interpreter} {rel} --help printed no usage: {proc.stdout[:200]}"
 
 
 # ── clause 5: the preferred fix, and whose call the removal is ───────────────
@@ -297,6 +352,177 @@ def test_the_skill_says_the_venv_is_the_fix_and_defers_the_class_to_484():
     flat = " ".join(text.split())
     assert re.search(r"#[*]{0,2}484\b[^.]{0,160}?\b(decision|call)\b", flat), (
         "the skill does not defer deleting the fallback class to backlog #484"
+    )
+
+
+# ── seam: what the MCP process actually hands an autonomy run ────────────────
+
+
+def test_the_skills_loader_serves_the_rewritten_page_not_a_degraded_copy():
+    """The process boundary this change crosses. Nothing above imports
+    `agent_mcp.skills`, and an autonomy run never reads the file: it gets
+    `_load_skill`'s dict (the `skills_search` description and the body the
+    prefetch injects) out of the MCP/prefetch processes.
+
+    Two ways that degrades silently while every file-level assertion above
+    still passes, both from `skills.py`:
+
+    * `_parse_frontmatter` catches every exception and returns an empty dict
+      (`agent_mcp/skills.py:51-54`), so one mis-indented continuation line in
+      the rewritten `description:` yields a page that still circulates with an
+      empty description and no `status` — the guidance nobody can find by
+      searching for it;
+    * a `status:` that lands in `_QUARANTINE_STATUSES`
+      (`agent_mcp/skills.py:38,68-71`) drops the page from retrieval entirely,
+      which for a page whose whole job is to stop an agent patching a dead
+      script is the failure mode worth policing.
+
+    So this runs on what the loader returns, not on the file: the description
+    carries the venv guidance, the body it injects has no stale list, and
+    `skills_search` — the tool call an autonomy run makes when a pipeline step
+    dies on yaml — actually reaches the page.
+    """
+    import json
+
+    from agent_mcp import skills
+
+    loaded = skills._load_skill(SKILLS_DIR / "autonomy-pipeline-yaml-fix")
+    assert loaded is not None, (
+        "the loader quarantined the page, so no run can ever be shown the corrected "
+        f"guidance; status: {_parse_status(_text(YAML_SKILL))!r}"
+    )
+    assert loaded["description"].strip(), (
+        "front matter parsed to nothing — the page circulates with an empty description "
+        "and cannot be found by skills_search"
+    )
+    assert "venv" in loaded["description"].lower(), loaded["description"]
+    assert "484" in loaded["description"], (
+        "the deferral is not in the string search returns. Note this is the seam "
+        "that caught a live defect: an unquoted ` #` in a plain YAML scalar opens a "
+        "comment, so '… is backlog #484' parsed to '… is backlog' and the pointer "
+        "was invisible to every agent that found the page"
+    )
+    for claim in ABSENCE_CLAIMS:
+        assert claim not in loaded["description"], f"description still asserts {claim!r}"
+    # The body is what the prefetch injects as the skill hint.
+    assert "Apply the same patch to all three scripts" not in loaded["body"]
+    assert "semantic_relationships" not in loaded["body"], loaded["body"][:200]
+    for block in _fenced(loaded["body"]):
+        assert "python3" not in block, block
+    # Cross the tool seam itself: the search an agent would run on the symptom.
+    hits = json.loads(skills._skills_search(
+        {"query": "yaml frontmatter fallback pipeline script", "max_results": 10}
+    ))["results"]
+    named = [h["name"] for h in hits]
+    assert "autonomy-pipeline-yaml-fix" in named, f"skills_search never surfaced it: {named}"
+    served = next(h for h in hits if h["name"] == "autonomy-pipeline-yaml-fix")
+    assert served["description"] == loaded["description"], "the tool served a different description than the loader parsed"
+    for claim in ABSENCE_CLAIMS:
+        assert not any(claim in h["description"] for h in hits), (
+            f"a skill surfaced on a yaml-pipeline query still asserts {claim!r}"
+        )
+
+
+def _parse_status(text: str) -> str:
+    """The raw `status:` value, for a failure message that says why the loader
+    dropped the page rather than making the reader go look."""
+    match = re.search(r"^status:\s*(.+)$", text, re.M)
+    return match.group(1).strip() if match else "<absent>"
+
+
+def _description_as_written(text: str) -> str:
+    """The `description:` value as a human reads the file: the key's text plus
+    its indented continuation lines, joined the way YAML folds them."""
+    block = re.match(r"^---\n(.*?)\n---", text, re.S)
+    if not block:
+        return ""
+    parts: list[str] = []
+    taking = False
+    for line in block.group(1).splitlines():
+        if line.startswith("description:"):
+            taking = True
+            parts.append(line.split(":", 1)[1].strip())
+        elif taking and line.startswith(" "):
+            parts.append(line.strip())
+        elif taking:
+            break
+    return " ".join(p for p in parts if p)
+
+
+def test_no_skill_description_loses_its_tail_to_a_yaml_comment():
+    """`#` preceded by a space opens a comment inside a plain scalar, so a
+    description that mentions, say, backlog `#484` silently loses everything
+    from the hash on — and `_parse_frontmatter` swallows every exception
+    (`agent_mcp/skills.py:51-54`), so a page can also circulate with a
+    half-sentence for a description and nothing raises.
+
+    Found by the seam test above on this very page, whose served description
+    read "…The supported fix is running under the venv interpreter; deleting
+    the classes is backlog". Checked across every skill, because the cause is a
+    YAML rule and not this page's; the fix on the page under #488 is the words
+    "backlog item 484".
+    """
+    from agent_mcp import skills
+
+    offenders = []
+    pages = sorted(SKILLS_DIR.glob("*/SKILL.md"))
+    assert pages, f"{NO_VAULT} (no SKILL.md under {SKILLS_DIR})"
+    for path in pages:
+        content = _text(path)
+        written = _description_as_written(content)
+        if " #" not in written:
+            continue
+        served = (skills._parse_frontmatter(content)[0].get("description") or "")
+        lost = written.split(" #", 1)[1]
+        if lost.strip() and lost.strip() not in str(served):
+            offenders.append(
+                f"{path.parent.name}: description loses {lost.strip()[:60]!r} "
+                f"as parsed; served {str(served)[-60:]!r}"
+            )
+    assert offenders == [], "\n".join(offenders)
+
+
+def test_a_quarantine_status_pulls_the_page_from_retrieval(tmp_path):
+    """The other half of the loader boundary, driven through the real loader on a
+    fixture rather than re-implemented here: `_QUARANTINE_STATUSES` is what would
+    make this skill vanish from `skills_search` while every file-level assertion
+    above stayed green.
+
+    This proves the mechanism the seam test's `is not None` claim rests on, that
+    all five quarantine values still reach it, and that `active` is not itself one
+    of them — if it were, every retrieval assertion in this file would be vacuous.
+    It also pins the silent half: a *missing* `status` parses to `""` and is not
+    quarantined, so a page whose front matter degraded still circulates, which is
+    what the seam test's non-empty-description assert is for.
+    """
+    from agent_mcp import skills
+
+    assert skills._load_skill(SKILLS_DIR / "autonomy-pipeline-yaml-fix") is not None
+    assert "active" not in skills._QUARANTINE_STATUSES, (
+        "`active` is in the quarantine set, so no skill on this box is retrievable "
+        "and the assertions above prove nothing"
+    )
+
+    def write(tag: str, body: str) -> Path:
+        d = tmp_path / f"skill-{tag}"
+        d.mkdir()
+        (d / "SKILL.md").write_text(body, encoding="utf-8")
+        return d
+
+    assert skills._load_skill(
+        write("active", "---\nname: s\nstatus: active\ndescription: d\n---\n# B\n")
+    ) is not None, "a status: active fixture did not load, so the live result is meaningless"
+    for status in sorted(skills._QUARANTINE_STATUSES):
+        assert skills._load_skill(
+            write(status, f"---\nname: s\nstatus: {status}\ndescription: d\n---\n# B\n")
+        ) is None, (
+            f"status {status!r} no longer pulls a skill out of retrieval, so the "
+            "quarantine this file's seam test guards has changed shape"
+        )
+    degraded = write("no-status", "---\nname: s\ndescription: d\n---\n# B\n")
+    assert skills._load_skill(degraded) is not None, (
+        "a page with no status key is now dropped, which means the seam test should "
+        "be asserting presence rather than description"
     )
 
 
