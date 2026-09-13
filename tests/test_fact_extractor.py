@@ -385,6 +385,15 @@ def test_the_dead_names_stop_being_excluded_from_the_corpus(tmp_path, monkeypatc
     be excluded by that rule whatever the set contained — the check would
     report a verdict it could not see. The set matches on basename, so
     anywhere else exercises the identical branch.
+
+    Why the store guard here is `try/finally` and the four older sites in this
+    file are bare `kg_store.configure(...)` / `kg_store.reset()` statements
+    (:43, :149, :322, :334): `tests/conftest.py` `_isolate_default_store` is an
+    autouse function-scoped fixture that calls `kg_store.reset()` before every
+    test, so a leak at those sites is cleared by the *next* test rather than by
+    the one that leaked — survivable, but only to a reader who already knows
+    the fixture exists. This test covers itself so that knowledge is not a
+    precondition for reading it safely.
     """
     ne = _load("nightly_extraction_deadnames", NE_PATH)
     vault = tmp_path / "obsidian"
@@ -427,21 +436,38 @@ def test_nothing_else_in_the_checkout_names_the_removed_notes():
     `git grep` over tracked content is the denominator, not an `rglob`: the
     tracked checkout is what a reader or a scheduled job can be pointed at, and
     `_pipeline/` is ignored by git, so the generated artefacts that legitimately
-    carry these names cannot inflate the count. Exit status 1 is git's "no
-    matches" — a real answer, distinct from a failed git call, which is asserted
-    rather than swallowed.
+    carry these names cannot inflate the count. Markdown is excluded from the
+    search, because prose is exactly where this removal gets recorded — an
+    architecture note or changelog naming the two files by name is the
+    *expected* outcome, and a fact-extractor test must not fail one. Every
+    code and config surface (`scripts/`, `app/`, `workers/`, `*.py`, `*.yaml`,
+    `*.sh`) stays in scope; those are the files that can actually point at a
+    path. Exit status 1 is git's "no matches" — a real answer, distinct from a
+    failed git call, which is asserted rather than swallowed.
     """
     root = Path(__file__).resolve().parents[1]
+    me = str(Path(__file__).resolve().relative_to(root))
+    probe = ["git", "-C", str(root), "grep", "-l", "--fixed-strings",
+             "-e", DEAD_DERIVED_INDEXES[0], "-e", DEAD_DERIVED_INDEXES[1]]
+
+    # Positive control first: this file names both strings, so a grep that
+    # cannot see it cannot report an honest "nothing else does". Without this
+    # the empty result below would be indistinguishable from a silently
+    # broken call, and a check that cannot fail is not a pin.
+    control = subprocess.run(probe + ["--", ".", ":(exclude)*.md"],
+                             capture_output=True, text=True)
+    assert control.returncode == 0 and me in control.stdout.split(), (
+        f"the reference grep cannot see its own file (rc={control.returncode}, "
+        f"{control.stdout.split()}); the empty-result assertion below would be "
+        "unevaluable")
+
     hits = subprocess.run(
-        ["git", "-C", str(root), "grep", "-l", "--fixed-strings",
-         "-e", DEAD_DERIVED_INDEXES[0], "-e", DEAD_DERIVED_INDEXES[1]],
+        probe + ["--", ".", ":(exclude)*.md", f":(exclude){me}"],
         capture_output=True, text=True)
     assert hits.returncode in (0, 1), (
         f"git grep failed ({hits.stderr.strip()[:160]}); the reference check is "
         "unevaluable and must not report a pass")
-    here = Path(__file__).resolve()
-    others = sorted(f for f in hits.stdout.split()
-                    if f and (root / f).resolve() != here)
+    others = sorted(hits.stdout.split())
     assert others == [], (
         f"{others} name a note whose generator died in 0b3f00b and which the "
         "extractor no longer excludes — whatever reads that path is reading a "
