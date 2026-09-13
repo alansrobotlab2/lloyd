@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, workers, autonomy, inner-voice, sessions]
 type: reference
 status: implemented
-date: 2026-09-10
+date: 2026-09-13
 ---
 
 # Background runs: recorded always, observed on request
@@ -244,8 +244,9 @@ the same test pins that the two agree.
 A background id has four underscore-separated parts; a chat's has three
 (`<ts>_<6hex>` from the chat path, `<ts>_iv<4hex>` from `POST /api/sessions/create`).
 `sessions_io.is_background_session_name` tells them apart without opening the
-file, and at ~240 background sessions a day against 14 chats that is the
-difference between a listing that is bounded and one that grows with the
+file, and at ~300 background sessions a day against ~10 chats (measured over
+2026-09-10 to 09-12: 178, 306, 298 background against 11, 13, 2 chats) that is
+the difference between a listing that is bounded and one that grows with the
 fleet's throughput.
 
 Be precise about what that means, because it is not the same in every
@@ -259,7 +260,12 @@ listing:
   two in the chat router and one in `POST /api/sessions/create`, both three-part.
   `tests/test_api_contracts.py` checks the create endpoint end to end.
 - **Three-part ids are parsed and judged by `platform`.** A chat-shaped name
-  carrying a background platform is still excluded.
+  carrying a background platform is still excluded — and the inverse leak is on
+  disk: 49 sessions carry `platform: browser` (ids `<ts>_iv<4hex>`, written by
+  the Inner Voice bench harness through `POST /api/sessions/create`, whose
+  `platform` field is taken from the request body unchecked). `NON_USER_PLATFORMS`
+  is `{"autonomy", "worker"}`, so those runs read as user sessions: they sit in
+  the chat history and export to `sessions/`, i.e. into the embedded corpus.
 - **`/api/background/sessions` parses every four-part file** and judges it by
   `platform`, so there the name is a hint.
 
@@ -275,11 +281,21 @@ then drop non-user rows, which with 22 of the newest 24 already background
 rendered a nearly empty panel. It now walks mtime order, skips by name, and
 stops at `_RECENT_KEPT` user rows or `_RECENT_CEILING` (400) files opened.
 
+A fifth reader of that directory has no ceiling: `mc_ui._summarize_chat`
+(`app/routers/mc_ui.py:321-343`) sorts the whole glob, opens every file because
+`is_user_session` sits inside the loop's `try` with no name-based skip, and
+globs a second time for `total_session_count`. It runs on every
+`mc_navigate`/`POST /api/mc/state` through `_SUMMARIZERS`, uncached, measured at
+238 ms against 1,420 files where the bounded scans cost 35-182 ms — so it is the
+one place where the interactive path still pays per background file (filed,
+#1017).
+
 ### Post-capture and the titler
 
 `_post_session_capture` and `maybe_title_session` are fired from
 `app/routers/messages.py::_run_turn` and nowhere else, so the only background
-sessions that ever reach them are the session-backed workers — ~70 a day.
+sessions that ever reach them are the session-backed workers — ~200 a day
+(worker sessions created: 142, 203, 212 on 2026-09-10 to 09-12).
 
 - **The markdown export still runs for them**, into
   `_pipeline/vault-derived/sessions-background/` instead of `sessions/`.
@@ -321,16 +337,30 @@ override with a literal reads as broken the one time somebody uses it.
 
 | source | `inner_voice` | why |
 |---|---|---|
-| `autocode` | true | rewrites production |
-| `autotriage` | true | judges items the loop will then implement |
-| `youtube-digest` | true | evaluates untrusted transcripts and files backlog items from them |
+| `autocode` | false | rewrites production — was `true`, see below |
+| `autotriage` | false | judges items the loop will then implement |
+| `youtube-digest` | false | evaluates untrusted transcripts and files backlog items from them |
 | `deep-research` | false | a human reads the note before anything acts on it |
+| `arch-review` | false | reviews docs and edits the one doc it was given (`f80c9d0`) |
+| `board-steward` | **unset** | moves backlog statuses (`6d59b7c`) — so it is *observed* |
 
-Those four are the whole observable set — they are exactly the sources that
-call `run_prompt_in_session`, and only a turn that runs through the chat
-endpoint can be observed at all. A session-backed source that sets no key is
-observed: `source_inner_voice`'s fallback is `True`, because that is what
-these four do today, so opting *out* is the thing config.yaml has to say.
+**All five keyed sources are off since 2026-09-12** (`97a86cc`, cut 1 of
+senses-not-supervision, pinned by `tests/test_background_inner_voice.py:250`):
+the observer's measured effect on unattended turns was negative — round 874
+abandoned at iteration 38 on an invented premise, sixteen false repetition
+fires in one day — and what it provided there is now done by the context
+anchors and the gate. Recording is untouched: all of these are still real
+sessions in the Background tab.
+
+These are the sources that call `run_prompt_in_session`, and only a turn that
+runs through the chat endpoint can be observed at all. A session-backed source
+that sets no key is **observed**: `source_inner_voice`'s fallback is `True`, so
+opting *out* is the thing config.yaml has to say — which is why the "all off"
+above is a list of keys rather than a property of the sources, and why
+`board-steward`, added with no key, is being watched on primary every 15
+minutes against that measured default (filed, #1015). The tests that were
+supposed to catch it name five sources and four files by hand, so an unkeyed
+sixth passes them.
 
 `/api/workers/health` reports the key tri-state for the same reason — `null`
 means "not set", which for a direct-path source means "not observable", and a
