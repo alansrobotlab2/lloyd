@@ -133,7 +133,7 @@ def test_a_human_draft_is_still_a_candidate(isolated):
 
 def test_a_self_filed_item_expires_instead_of_becoming_a_candidate(isolated):
     """Age no longer releases an item into triage; it releases it from the board."""
-    spawned_item(isolated, 500, days_old=B.SPAWN_TRIAGE_MIN_AGE_DAYS + 1)
+    spawned_item(isolated, 500, days_old=B.spawn_expiry_days() + 1)
     assert B.select_candidate(S.LEDGER_PATH) is None
     out = B.expire_stale_spawns(S.LEDGER_PATH)
     assert [r["item_id"] for r in out] == [500]
@@ -145,13 +145,35 @@ def test_a_self_filed_item_expires_instead_of_becoming_a_candidate(isolated):
 
 
 def test_the_expiry_boundary_is_the_documented_one(isolated):
-    spawned_item(isolated, 500, days_old=B.SPAWN_TRIAGE_MIN_AGE_DAYS - 1)
-    spawned_item(isolated, 501, days_old=B.SPAWN_TRIAGE_MIN_AGE_DAYS)
+    spawned_item(isolated, 500, days_old=B.spawn_expiry_days() - 1)
+    spawned_item(isolated, 501, days_old=B.spawn_expiry_days())
     assert [r["item_id"] for r in B.expire_stale_spawns(S.LEDGER_PATH)] == [501]
 
 
+def test_expiry_reads_the_configured_bound_and_the_gauge_reads_the_same_one(isolated, monkeypatch):
+    """One number, three readers. Expiry at 14 while the gauge measures
+    `over_bound` against 30 would read 0 for the fortnight the sweep is
+    supposed to have closed."""
+    from scripts.automod import scorecard as SC
+    monkeypatch.setattr(B, "spawn_expiry_days", lambda: 5)
+    spawned_item(isolated, 500, days_old=6)
+    gauge = SC._self_spawned_gauge([], isolated, now=datetime.now(timezone.utc).timestamp())
+    assert gauge["bound_days"] == 5 and gauge["over_bound"] == 1
+    assert [r["item_id"] for r in B.expire_stale_spawns(S.LEDGER_PATH)] == [500]
+
+
+def test_the_expiry_bound_comes_from_config_and_falls_back_to_the_constant(monkeypatch):
+    from app import config as CFG
+    monkeypatch.setitem(CFG.CONFIG, "workers",
+                        {"sources": {"autocode": {"expire_spawns_after_days": 14}}})
+    assert B.spawn_expiry_days() == 14
+    monkeypatch.setitem(CFG.CONFIG, "workers", {"sources": {"autocode": {}}})
+    assert B.spawn_expiry_days() == B.SPAWN_EXPIRY_DAYS
+    assert B.SPAWN_TRIAGE_MIN_AGE_DAYS == B.SPAWN_EXPIRY_DAYS, "the old name is an alias"
+
+
 def test_expiry_never_touches_grouped_umbrella_needs_human_or_human_authored(isolated):
-    old = B.SPAWN_TRIAGE_MIN_AGE_DAYS + 5
+    old = B.spawn_expiry_days() + 5
     write_item(isolated, 10, days_old=old)                                   # a human's draft
     write_item(isolated, 501, days_old=old, tags=("backlog", "spawned-by-triage", "grouped"))
     write_item(isolated, 502, days_old=old, tags=("backlog", "spawned-by-triage", "umbrella"))
@@ -161,7 +183,7 @@ def test_expiry_never_touches_grouped_umbrella_needs_human_or_human_authored(iso
 
 
 def test_expiry_skips_triaged_implemented_and_landed_items(isolated):
-    old = B.SPAWN_TRIAGE_MIN_AGE_DAYS + 5
+    old = B.spawn_expiry_days() + 5
     spawned_item(isolated, 501, days_old=old)
     spawned_item(isolated, 502, days_old=old)
     p = spawned_item(isolated, 503, days_old=old)
@@ -175,7 +197,7 @@ def test_expiry_skips_triaged_implemented_and_landed_items(isolated):
 
 
 def test_expiry_fires_once_and_a_reopen_clears_the_tag_and_releases_it(isolated):
-    p = spawned_item(isolated, 500, days_old=B.SPAWN_TRIAGE_MIN_AGE_DAYS + 1)
+    p = spawned_item(isolated, 500, days_old=B.spawn_expiry_days() + 1)
     B.expire_stale_spawns(S.LEDGER_PATH)
     # A human sets the status back by hand (Mission Control, or an editor).
     text = p.read_text()
@@ -190,7 +212,7 @@ def test_expiry_fires_once_and_a_reopen_clears_the_tag_and_releases_it(isolated)
 
 
 def test_expiry_can_be_switched_off(isolated):
-    spawned_item(isolated, 500, days_old=B.SPAWN_TRIAGE_MIN_AGE_DAYS + 1)
+    spawned_item(isolated, 500, days_old=B.spawn_expiry_days() + 1)
     assert B.expire_stale_spawns(S.LEDGER_PATH, enabled=False) == []
     assert B.open_items()[0].status == "draft"
 
@@ -275,7 +297,7 @@ def test_an_exhausted_queue_says_whether_it_is_holding_anything(isolated, monkey
     out = asyncio.run(M.execute(_Item()))
     assert out["status"] == "skipped"
     assert "1 self-filed item(s) held" in out["summary"], out["summary"]
-    assert str(B.SPAWN_TRIAGE_MIN_AGE_DAYS) in out["summary"]
+    assert str(B.spawn_expiry_days()) in out["summary"]
 
 
 def test_a_genuinely_empty_queue_still_says_so_plainly(isolated):
@@ -473,8 +495,8 @@ def test_the_two_predicates_answer_differently_for_a_review_finding(isolated):
 
 def test_a_review_finding_nothing_picked_up_expires_on_the_same_bound(isolated):
     """Expiry asks the other question — did anything ever act on this? — and
-    the answer is no for both producers, so the 30-day bound applies to both."""
-    spawned_item(isolated, 500, days_old=B.SPAWN_TRIAGE_MIN_AGE_DAYS + 1, tag=REVIEW_TAG)
+    the answer is no for both producers, so the one bound applies to both."""
+    spawned_item(isolated, 500, days_old=B.spawn_expiry_days() + 1, tag=REVIEW_TAG)
     out = B.expire_stale_spawns(S.LEDGER_PATH)
     assert [d["item_id"] for d in out] == [500]
     ev = [json.loads(l) for l in S.LEDGER_PATH.read_text().splitlines() if l.strip()]

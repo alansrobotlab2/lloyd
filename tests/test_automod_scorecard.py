@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from scripts.automod.backlog import spawn_expiry_days
 from scripts.automod import scorecard as SC
 
 
@@ -65,7 +66,8 @@ def test_an_empty_ledger_is_unmeasured_not_perfect(tmp_path, repo):
     assert row["acceptance"]["hit_rate"] is None
     assert row["review"]["refusal_rate"] is None
     assert row["spawn"]["triage_ratio"] is None and row["spawn"]["implement_ratio"] is None
-    assert row["spawn"]["self_spawned_open"] == {"count": 0, "oldest_days": 0, "bound_days": 30,
+    assert row["spawn"]["self_spawned_open"] == {"count": 0, "oldest_days": 0,
+                                                 "bound_days": spawn_expiry_days(),
                                                  "over_bound": 0}
     assert row["human_touch"]["rate"] is None
     assert row["verdict_plumbing"]["regex_rate"] is None

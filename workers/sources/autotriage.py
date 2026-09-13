@@ -555,7 +555,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         if held:
             summary = (f"{summary}; {held} self-filed item(s) held — they are never "
                        f"triaged one by one, and expire unclustered at "
-                       f"{B.SPAWN_TRIAGE_MIN_AGE_DAYS} days")
+                       f"{B.spawn_expiry_days()} days")
         return {"status": "skipped", "summary": summary}
     if held:
         logger.info("triage pool: %d candidate(s), %d self-filed item(s) quarantined",

@@ -76,7 +76,8 @@ def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -
     # Stdlib-only modules, imported lazily so the CLI stays light: the tag
     # set and the bound live in one place and are not restated here.
     from scripts.automod.backlog import (EXPIRY_EXEMPT_TAGS, LOOP_SPAWN_TAGS,
-                                         SPAWN_TRIAGE_MIN_AGE_DAYS)
+                                         spawn_expiry_days)
+    bound_days = spawn_expiry_days()
     judged: set[int] = set()
     for e in all_events:
         if e.get("item_id") is None:
@@ -113,10 +114,10 @@ def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -
                 pass
             oldest = max(oldest, age)
             if (fm.get("status") == "draft" and int(m.group(1)) not in judged
-                    and not (tags & EXPIRY_EXEMPT_TAGS) and age >= SPAWN_TRIAGE_MIN_AGE_DAYS):
+                    and not (tags & EXPIRY_EXEMPT_TAGS) and age >= bound_days):
                 over += 1
     return {"count": count, "oldest_days": round(oldest, 1),
-            "bound_days": SPAWN_TRIAGE_MIN_AGE_DAYS, "over_bound": over}
+            "bound_days": bound_days, "over_bound": over}
 
 
 def _frontmatter(path: Path) -> dict:

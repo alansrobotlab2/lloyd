@@ -83,10 +83,30 @@ REVIEW_SPAWN_TAGS = frozenset({"spawned-by-review"})
 # is no for both, so the bound applies to both.
 LOOP_SPAWN_TAGS = SPAWN_TAGS | REVIEW_SPAWN_TAGS
 
-# How old a self-filed item must be before triage may judge it. Long enough
-# that 'is this still true?' is a real question about a claim nobody acted
-# on, rather than a re-run of the check that produced it.
-SPAWN_TRIAGE_MIN_AGE_DAYS = 30
+# How long a self-filed draft may sit untouched before `expire_stale_spawns`
+# closes it. The constant is the fallback; the live value is
+# `spawn_expiry_days()`, which reads
+# `workers.sources.autocode.expire_spawns_after_days`. Every reader — expiry,
+# autotriage's skip summary, the scorecard gauge — goes through that function,
+# or `over_bound` reports against one bound while expiry runs at another.
+# Expiry had never fired by 2026-09-13: the oldest self-spawn was six days old
+# against a 30-day bound while 400 open self-spawned items accrued.
+SPAWN_EXPIRY_DAYS = 30
+# The pre-knob name, from when the number was a quarantine age. Alias only;
+# read `spawn_expiry_days()`.
+SPAWN_TRIAGE_MIN_AGE_DAYS = SPAWN_EXPIRY_DAYS
+
+
+def spawn_expiry_days() -> int:
+    """The expiry bound in days: config over `SPAWN_EXPIRY_DAYS`. Lazy, and
+    fail-open to the constant, so the automod CLI does not need a config."""
+    try:
+        from app.config import CONFIG
+        cfg = (((CONFIG or {}).get("workers") or {}).get("sources") or {}).get("autocode") or {}
+        v = int(cfg.get("expire_spawns_after_days") or 0)
+        return v if v > 0 else SPAWN_EXPIRY_DAYS
+    except Exception:  # noqa: BLE001
+        return SPAWN_EXPIRY_DAYS
 
 # Only Lloyd's own board. The backlog is shared: of 52 open items, 3 are Alfie
 # (robot firmware) and 1 is on an Architecture board. Those are legitimately
@@ -2024,17 +2044,20 @@ def triage_pool(ledger: Path,
 
 def expire_stale_spawns(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
                         enabled: bool = True,
-                        max_age_days: int = SPAWN_TRIAGE_MIN_AGE_DAYS) -> list[dict]:
-    """Close self-filed drafts that nothing picked up in `max_age_days`.
+                        max_age_days: int | None = None) -> list[dict]:
+    """Close self-filed drafts that nothing picked up in `max_age_days`
+    (default `spawn_expiry_days()`).
 
     The hard bound on the board. Everything that could have taken the item
-    has had a month: clustering, group triage, a human. Closing it is the
+    has had its window: clustering, group triage, a human. Closing it is the
     honest record that nothing did — the text stays, tagged, and a hand
     reopen brings it back (see `clear_expired_on_reopen`). Human-authored
     items are never touched: the tag test is `is_self_spawned`, not `draft`.
     """
     if not enabled:
         return []
+    if max_age_days is None:
+        max_age_days = spawn_expiry_days()
     from scripts.automod import state as S
     seen = triaged_ids(ledger)
     judged = set(seen) | expired_ids(ledger) | group_kept_ids(ledger)

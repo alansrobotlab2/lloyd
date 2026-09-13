@@ -1036,12 +1036,16 @@ workers:
       # human reads it and its value was measured there.
       inner_voice: false
       # The hard bound on the board. A self-filed draft that nothing —
-      # clustering, group triage, a human — picked up in 30 days is closed,
-      # tagged `expired`, and reopens by setting its status back to draft.
-      # Runs in this source's housekeeping beside close_on_settle. Off: held
-      # items only accumulate, visible in the triage skip summary and the
-      # scorecard's over-bound gauge, never lost.
+      # clustering, group triage, a human — picked up in
+      # expire_spawns_after_days is closed, tagged `expired`, and reopens by
+      # setting its status back to draft. Runs in this source's housekeeping
+      # beside close_on_settle. Off: held items only accumulate, visible in the
+      # triage skip summary and the scorecard's over-bound gauge, never lost.
       expire_spawns: true
+      # 14, not the code's 30-day fallback (Alan, 2026-09-13): at 30 expiry had
+      # never fired while 400 self-spawned items sat open. Read by expiry,
+      # autotriage's skip summary and the scorecard gauge through one function.
+      expire_spawns_after_days: 14
       # When an umbrella (a group-triage consolidation) lands `met`, its
       # members close with it. Off: members stay folded until a human
       # unfolds the umbrella.

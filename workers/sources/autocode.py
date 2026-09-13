@@ -439,8 +439,9 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     except Exception as exc:
         logger.warning("reconcile_statuses failed: %s", exc)
     try:
-        # The hard bound: a self-filed draft nothing picked up in a month is
-        # closed, tagged, reopenable. Same rule as the two above — never takes
+        # The hard bound: a self-filed draft nothing picked up in
+        # `expire_spawns_after_days` (B.spawn_expiry_days) is closed, tagged,
+        # reopenable. Same rule as the two above — never takes
         # the scheduler down. Off: held items only accumulate, visible in the
         # triage skip summary and the scorecard gauge, never lost.
         for r in B.expire_stale_spawns(S.LEDGER_PATH,
