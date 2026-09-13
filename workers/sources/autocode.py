@@ -120,6 +120,13 @@ larger one — abort the round, say why, and the item goes back to a human. \
 Open the round with `automod_start(goal, item_id={item_id})` — the `item_id` \
 is what lets the review rung find these clauses.
 
+**What the review grades.** Name each process boundary your change crosses \
+and put a test across it. Every clause needs a test node in a file this diff \
+changes, or a suite run cited as `tests/ -k <expr>` that was run. Test prose — \
+docstrings, names, assert messages — is graded too: keep its numbers and \
+claims exact. You get two review attempts per round; each refused commit \
+spends one.
+
 **Scope you discover is not scope you take — and it is not a new item \
 either.** A second bug beside the first, a refactor the fix wants, a missing \
 test: each goes **onto this item**, once, as a section: \
@@ -183,7 +190,7 @@ ABANDON_GRACE_SECONDS = 20 * 60
 
 
 def _reoffer_block(reason: str, *, prior: tuple[int, ...] | list[int] = (),
-                   findings_appended: int = 0) -> str:
+                   findings_appended: int = 0, clause_verdicts=()) -> str:
     """The banner an item gets when it is being offered again.
 
     Worded per verdict. "Never reached a verdict" was true of every re-offer
@@ -199,7 +206,32 @@ def _reoffer_block(reason: str, *, prior: tuple[int, ...] | list[int] = (),
     """
     if not reason:
         return ""
-    return _reoffer_verdict(reason) + _reoffer_memory(prior, findings_appended)
+    return (_reoffer_verdict(reason, clause_verdicts)
+            + _reoffer_memory(prior, findings_appended))
+
+
+def _last_review_clauses(item_id: int) -> list[dict]:
+    """The per-clause verdicts of the item's most recent graded review, or []."""
+    from scripts.automod import backlog as B, state as S
+    try:
+        for ev in reversed(B.review_events_for_item(S.LEDGER_PATH, item_id)):
+            if ev.get("ok") and ev.get("clauses"):
+                return [c for c in ev["clauses"] if isinstance(c, dict)]
+    except Exception as exc:  # noqa: BLE001 — a banner line is not the round
+        logger.warning("#%s: could not read the last review's clauses: %s", item_id, exc)
+    return []
+
+
+def _clause_verdicts_line(clauses) -> str:
+    """`clause 1 met; clause 2 partial (downgraded: …): note` — what the
+    grader said per clause. The findings prose names what refused; this is
+    what did NOT, so a re-offered round does not redo a clause already met."""
+    rows = []
+    for c in clauses or []:
+        tag = f" (downgraded: {'; '.join(map(str, c['downgraded']))[:160]})" if c.get("downgraded") else ""
+        note = f": {str(c.get('note') or '')[:160]}" if c.get("verdict") != "met" and c.get("note") else ""
+        rows.append(f"clause {c.get('clause')} {c.get('verdict')}{tag}{note}")
+    return "; ".join(rows)
 
 
 def _reoffer_memory(prior, findings_appended: int) -> str:
@@ -228,17 +260,21 @@ def _human_clauses_block(clauses) -> str:
             f"and not yours to simulate; the item stays open for them:\n\n{rows}\n")
 
 
-def _reoffer_verdict(reason: str) -> str:
+def _reoffer_verdict(reason: str, clause_verdicts=()) -> str:
     verdict = reason.split(":", 1)[0].strip()
     if verdict == "review_retry":
         m = re.search(r"`automod/(SM_[0-9_]+)`", reason)
         branch = f"automod/{m.group(1)}" if m else "the branch named below"
+        verdicts = _clause_verdicts_line(clause_verdicts)
         return (f"**This item is being offered again — the gate's review rung sent its "
                 f"previous round back with findings ({reason}).** The work is on "
                 f"`{branch}`. Pass `from_branch=\"{branch}\"` to `automod_start` so the new "
                 f"worktree starts from it, rebased onto live main; then address each "
                 f"finding by name before anything else, and say in your report which "
-                f"finding each commit answers. The same grader reads the result.\n\n")
+                f"finding each commit answers. The same grader reads the result, and "
+                f"sees its earlier reviews of this item."
+                + (f" Its last per-clause verdicts: {verdicts}." if verdicts else "")
+                + "\n\n")
     if verdict == "partial":
         return (f"**This item is being offered again — its previous round landed, but "
                 f"its own outcome reported clauses not met ({reason}).** The landed change "
@@ -411,7 +447,75 @@ def _age_phrase(ts: float | None) -> str:
     return "today" if days == 0 else f"{days} day{'s' if days != 1 else ''} ago"
 
 
-async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
+HOUSEKEEPING_KEY = "last_housekeeping"
+_last_decline: dict[str, str] = {"why": ""}
+
+
+def _housekeeping_due(queue: WorkQueue, src_cfg: dict) -> bool:
+    """Whether the four board passes are due: once per `interval_seconds`.
+
+    They used to ride the source's own watermark. Now that a declined round
+    check is retried in `retry_seconds`, they need their own, or a 60-second
+    retry would walk the whole board — reap, close, reconcile, expire — every
+    minute a round is under observation.
+    """
+    wait = int(src_cfg.get("interval_seconds", 900))
+    last = queue.wm_get(NAME, HOUSEKEEPING_KEY)
+    if last:
+        try:
+            from datetime import datetime, timezone
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds()
+            if elapsed < wait:
+                return False
+        except ValueError:
+            pass
+    return True
+
+
+async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
+    """Housekeeping on its own clock, then: is the loop free, and is there work?
+
+    Returns `DECLINED` when the loop is not free, so the pool looks again in
+    `retry_seconds` instead of a whole `interval_seconds` — `execute`
+    re-checks the gates at run time, so looking early is safe. Anything else
+    (nothing confirmed, enqueued) returns None and the watermark advances as
+    it always has.
+    """
+    from datetime import datetime, timezone
+
+    from scripts.automod import backlog as B, state as S
+    from workers.sources import DECLINED
+
+    if _housekeeping_due(queue, src_cfg):
+        _housekeeping(src_cfg)
+        queue.wm_set(NAME, HOUSEKEEPING_KEY, datetime.now(timezone.utc).isoformat())
+    free, why = _loop_is_free()
+    if not free:
+        # Once per reason at INFO: at a 60 s retry the same sentence would
+        # otherwise fill the log for the forty minutes a round runs.
+        (logger.info if why != _last_decline["why"] else logger.debug)(
+            "autocode: not queueing — %s", why)
+        _last_decline["why"] = why
+        return DECLINED
+    _last_decline["why"] = ""
+    if B.select_confirmed(S.LEDGER_PATH) is None:
+        return None
+    new_id = queue.enqueue(
+        source=NAME, kind="round",
+        payload={"max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),
+                 # Carried in the payload like the budget, so a queued item runs
+                 # under the config that was live when it was enqueued.
+                 "structured_outcome": bool(src_cfg.get("structured_outcome", True))},
+        priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
+        dedup_key=DEDUP_KEY,
+    )
+    if new_id is not None:
+        logger.info("Enqueued backlog implement id=%d", new_id)
+    return None
+
+
+def _housekeeping(src_cfg: dict) -> None:
+    """The four board passes. Each is guarded: none may take the scheduler down."""
     from scripts.automod import backlog as B, state as S
 
     try:
@@ -449,23 +553,6 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
             logger.info("backlog #%s expired after %s d untouched", r["item_id"], r["age_days"])
     except Exception as exc:
         logger.warning("expire_stale_spawns failed: %s", exc)
-    free, why = _loop_is_free()
-    if not free:
-        logger.info("autocode: not queueing — %s", why)
-        return
-    if B.select_confirmed(S.LEDGER_PATH) is None:
-        return
-    new_id = queue.enqueue(
-        source=NAME, kind="round",
-        payload={"max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),
-                 # Carried in the payload like the budget, so a queued item runs
-                 # under the config that was live when it was enqueued.
-                 "structured_outcome": bool(src_cfg.get("structured_outcome", True))},
-        priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
-        dedup_key=DEDUP_KEY,
-    )
-    if new_id is not None:
-        logger.info("Enqueued backlog implement id=%d", new_id)
 
 
 def _round_opened_since(events: list[dict], since_ts: float) -> str | None:
@@ -546,7 +633,8 @@ async def _run_and_record(item, candidate, triage, budget, started) -> dict[str,
             B.reoffer_reason(S.LEDGER_PATH, candidate.id),
             prior=B.prior_spawned(S.LEDGER_PATH, candidate.id),
             findings_appended=sum(r["findings_appended"]
-                                  for r in B.prior_rounds(S.LEDGER_PATH, candidate.id))),
+                                  for r in B.prior_rounds(S.LEDGER_PATH, candidate.id)),
+            clause_verdicts=_last_review_clauses(candidate.id)),
     )
     want_outcome = bool((item.payload or {}).get("structured_outcome", True))
     # Taken BEFORE the turn: an id the turn claims that is at or below this

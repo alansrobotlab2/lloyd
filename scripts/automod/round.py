@@ -88,6 +88,17 @@ def start(goal: str, *, base: str | None = None, force: bool = False,
         }
         if item_id:
             run_spec["item"] = {"id": int(item_id)}
+            # A pending amendment from an earlier round was never ratified and
+            # is not this round's contract; the implementer reads the clauses
+            # next, so restore them now rather than at the first gate.
+            try:
+                from scripts.automod import backlog as B
+                B.orphan_stale_amendments(int(item_id), rid)
+            except Exception as exc:  # noqa: BLE001 — bookkeeping, never the round
+                # stderr: the CLI prints start()'s result as JSON on stdout.
+                import sys
+                print(f"[warn] could not orphan stale amendments on #{item_id}: {exc}",
+                      file=sys.stderr)
         err = spec.validate_code_run_spec(run_spec)
         if err:
             W.remove(rid)

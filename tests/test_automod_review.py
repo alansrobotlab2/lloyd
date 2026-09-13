@@ -134,6 +134,8 @@ def wt(tmp_path):
     (tmp_path / "app").mkdir(); (tmp_path / "tests").mkdir()
     (tmp_path / "app" / "x.py").write_text("def f():\n    return 1\n")
     (tmp_path / "tests" / "test_x.py").write_text("def test_it():\n    assert 1\n")
+    # A test this diff did not touch, for the existing-test shape.
+    (tmp_path / "tests" / "test_old.py").write_text("def test_before():\n    assert 1\n")
     return tmp_path
 
 
@@ -142,6 +144,7 @@ def test_a_met_with_real_evidence_stands(wt):
     assert parsed["clauses"][0]["verdict"] == "met" and parsed["downgraded"] == []
 
 
+@pytest.mark.parametrize("tests_passed", [False, True])
 @pytest.mark.parametrize("bad", [
     {"evidence_path": "app/nope.py"},
     {"evidence_path": ""},
@@ -149,13 +152,83 @@ def test_a_met_with_real_evidence_stands(wt):
     {"test_node_id": ""},
     {"how_verified": "inferred"},
 ])
-def test_a_met_without_evidence_is_downgraded_in_python(wt, bad):
+def test_a_met_without_evidence_is_downgraded_in_python(wt, bad, tests_passed):
     """The grader's laziness is not the author's pass. A `met` needs a real
     path, a test in a file this diff changed, and ran|read — or it is
-    `partial`, decided here without asking the model again."""
-    parsed = RV.parse_review(_obj(**bad), worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=1)
+    `partial`, decided here without asking the model again. A green tests
+    rung waives none of these five: a missing file is still missing."""
+    parsed = RV.parse_review(_obj(**bad), worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=1,
+                             tests_passed=tests_passed, changed_paths=["app/x.py", "tests/test_x.py"])
     c = parsed["clauses"][0]
     assert c["verdict"] == "partial" and c["downgraded"] and parsed["downgraded"] == [1]
+    assert "accepted" not in c
+
+
+# ── the three shapes a `met` may stand on besides a changed test ─────────────
+
+def _met(wt, *, tests_passed=True, changed_paths=("app/x.py", "tests/test_x.py"), **clause):
+    parsed = RV.parse_review(_obj(**clause), worktree=wt, changed_tests=["tests/test_x.py"],
+                             n_clauses=1, tests_passed=tests_passed, changed_paths=list(changed_paths))
+    return parsed["clauses"][0]
+
+
+def test_a_suite_level_run_stands_on_a_green_tests_rung(wt):
+    """#860's clause 8 — "the autoresearch suite passes" — was refused three
+    times for the only honest node it has: `tests/ -k autoresearch`."""
+    c = _met(wt, test_node_id="tests/ -k autoresearch", how_verified="ran")
+    assert c["verdict"] == "met" and "downgraded" not in c
+    assert "suite-level run" in c["accepted"][0]
+
+
+def test_a_suite_level_run_without_a_green_tests_rung_is_partial(wt):
+    c = _met(wt, tests_passed=False, test_node_id="tests/ -k autoresearch", how_verified="ran")
+    assert c["verdict"] == "partial"
+    assert c["downgraded"] == ["test_node_id not in a test file this diff changed"]
+
+
+def test_a_suite_level_run_the_grader_only_read_is_partial(wt):
+    c = _met(wt, test_node_id="tests/ -k autoresearch", how_verified="read")
+    assert c["verdict"] == "partial"
+
+
+def test_an_existing_test_outside_the_diff_stands_when_it_was_run(wt):
+    """#487's clause 4 named a real test file the round did not change."""
+    c = _met(wt, test_node_id="tests/test_old.py::test_before", how_verified="ran")
+    assert c["verdict"] == "met" and "existing test" in c["accepted"][0]
+    assert _met(wt, test_node_id="tests/test_old.py", how_verified="ran")["verdict"] == "met"
+
+
+@pytest.mark.parametrize("node", ["tests/test_gone.py::test_x", "tests/test_gone.py",
+                                  "app/x.py::f", "pytest -k autoresearch"])
+def test_a_node_that_is_not_a_real_tests_path_is_partial(wt, node):
+    assert _met(wt, test_node_id=node, how_verified="ran")["verdict"] == "partial"
+
+
+def test_evidence_of_a_deleted_file_stands_beside_a_changed_test(wt):
+    """#487's clause 1 was about a report the change removed, and its only
+    evidence was the file's absence."""
+    c = _met(wt, evidence_path="scripts/dead_report.py", test_node_id="tests/test_x.py::test_it",
+             changed_paths=("scripts/dead_report.py", "tests/test_x.py"))
+    assert c["verdict"] == "met" and c["accepted"][0].startswith("evidence of absence")
+    # The shape #487's grader actually wrote (a made-up name, so a real file
+    # in this machine's vault cannot make it pass for the wrong reason).
+    c = _met(wt, evidence_path="~/obsidian/memory/no-such-report-7f3a.md (absent); "
+                               "tests/test_x.py:396-406",
+             test_node_id="tests/test_x.py::test_it")
+    assert c["verdict"] == "met" and c["accepted"][0].startswith("evidence of absence")
+
+
+def test_an_absence_marker_does_not_stand_without_a_node_of_its_own(wt):
+    c = _met(wt, evidence_path="scripts/dead_report.py (deleted)", test_node_id="")
+    assert c["verdict"] == "partial"
+    # ...nor stacked on a suite-level waiver: that pins nothing.
+    c = _met(wt, evidence_path="scripts/dead_report.py (deleted)",
+             test_node_id="tests/ -k report", how_verified="ran")
+    assert c["verdict"] == "partial"
+    assert c["downgraded"][0].startswith("evidence_path missing")
+    # ...and a path the diff never touched, with no marker, is just missing.
+    assert _met(wt, evidence_path="scripts/dead_report.py",
+                test_node_id="tests/test_x.py::test_it")["verdict"] == "partial"
 
 
 def test_a_clause_the_grader_did_not_mention_is_not_met(wt):

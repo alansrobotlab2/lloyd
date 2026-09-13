@@ -788,3 +788,173 @@ def test_a_re_offer_with_every_clause_met_runs_before_a_fresh_confirmation(isola
         remaining.discard(pick[0].id)
         (isolated / f"{pick[0].id}-x.md").unlink()
     assert order == [902, 901, 903], "nearest to landing, then fresh, then other re-offers"
+
+
+# ── landing pace, 2026-09-13 ─────────────────────────────────────────────────
+#
+# Amendments are per round; a pass keeps what the grader still said; the
+# grader sees the item's history while attempts count the round's own.
+
+def _grader_policy(monkeypatch):
+    """The shipped policy, set the same way the autouse fixture sets `table`."""
+    from app.config import CONFIG
+    automod = dict(CONFIG.get("automod") or {})
+    review = dict(automod.get("review") or {})
+    review["policy"] = "grader"
+    automod["review"] = review
+    monkeypatch.setitem(CONFIG, "automod", automod)
+
+
+def _item_with_stale_amendment(d: Path) -> Path:
+    path = write_item(d, 7, clauses=["the thing happens, amended"])
+    fm, body = B._split_frontmatter(path.read_text())
+    fm["clause_amendments"] = [{"clause": 1, "was": "the thing happens once",
+                                "now": "the thing happens, amended", "reason": "r",
+                                "round_id": "SM_OLD", "at": "2026-09-11T18:35:42",
+                                "state": "pending"}]
+    B._write_item(path, fm, body)
+    return path
+
+
+def test_a_stale_amendment_from_another_round_does_not_buy_a_third_attempt(
+        monkeypatch, tmp_path, isolated):
+    """#860 carried a `pending` amendment from SM_20260911_183542 into a round
+    two days later; it skipped the same-head check, the patch-id reuse and the
+    two-attempt cap, and bought a third graded review ("3/2")."""
+    path = _item_with_stale_amendment(isolated)
+    real_contract = RV.item_contract
+    grade = _grader(UNMET)
+    _arm(monkeypatch, tmp_path, grade=grade, head="c" * 40,
+         prior=[_refusal("a" * 40, 1, "first"), _refusal("b" * 40, 2, "second")])
+    monkeypatch.setattr(RV, "item_contract", real_contract)
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert ok is False and data["review_exhausted"] and grade.calls == []
+    fm = _fm(path)
+    assert fm["clause_amendments"][0]["state"] == "orphaned"
+    assert fm["acceptance_clauses"] == ["the thing happens once"], "an unratified amendment is not the contract"
+    assert "SM_OLD" in fm["activity_log"][-1]
+    assert "the thing happens, amended" in fm["activity_log"][-1], "quoted, so it can be re-amended in one call"
+
+
+def test_the_round_filter_holds_even_when_orphaning_cannot_write(monkeypatch, tmp_path):
+    grade = _grader(UNMET)
+    contract = {"id": 7, "title": "t", "body": "b", "clauses": ["c"], "path": "", "human_clauses": [],
+                "amendments": [{"clause": 1, "was": "c0", "now": "c", "reason": "r",
+                                "round_id": "SM_OLD"}]}
+    _arm(monkeypatch, tmp_path, grade=grade, head="c" * 40, contract=contract,
+         prior=[_refusal("a" * 40, 1), _refusal("b" * 40, 2)])
+    def boom(*a, **k):
+        raise OSError("read-only vault")
+    monkeypatch.setattr(B, "orphan_stale_amendments", boom)
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert data["review_exhausted"] and grade.calls == []
+
+
+def test_this_rounds_own_amendment_still_reopens_the_question(monkeypatch, tmp_path):
+    grade = _grader(UNMET)
+    contract = {"id": 7, "title": "t", "body": "b", "clauses": ["c"], "path": "", "human_clauses": [],
+                "amendments": [{"clause": 1, "was": "c0", "now": "c", "reason": "r",
+                                "round_id": "SM_REV"}]}
+    _arm(monkeypatch, tmp_path, grade=grade, head="b" * 40, contract=contract,
+         prior=[_refusal("a" * 40, 1), _refusal("b" * 40, 2)])
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert len(grade.calls) == 1, "same head, but the contract moved: graded once"
+    assert grade.calls[0]["contract"]["amendments"][0]["round_id"] == "SM_REV"
+
+
+def test_orphaning_is_idempotent_and_leaves_the_open_rounds_amendment_alone(isolated):
+    path = _item_with_stale_amendment(isolated)
+    fm, body = B._split_frontmatter(path.read_text())
+    fm["clause_amendments"].append({"clause": 1, "was": "x", "now": "y", "reason": "r",
+                                    "round_id": "SM_NOW", "state": "pending"})
+    B._write_item(path, fm, body)
+    assert B.orphan_stale_amendments(7, "SM_NOW") == [1]
+    assert B.orphan_stale_amendments(7, "SM_NOW") == []
+    fm = _fm(path)
+    assert [a["state"] for a in fm["clause_amendments"]] == ["orphaned", "pending"]
+    assert B.pending_amendments(fm, "SM_NOW") == [fm["clause_amendments"][1]]
+    assert B.pending_amendments(fm, "SM_OLD") == []
+
+
+def test_round_start_orphans_before_the_implementer_reads_the_clauses(monkeypatch, tmp_path, isolated):
+    path = _item_with_stale_amendment(isolated)
+    monkeypatch.setattr(S, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(S, "require_enabled", lambda *a, **k: None)
+    monkeypatch.setattr(S, "is_halted", lambda: False)
+    monkeypatch.setattr(S, "is_broken", lambda: False)
+    class _Lock:
+        def __init__(self, **k): pass
+        def acquire(self): return self
+        def release(self): pass
+    monkeypatch.setattr(S, "Lock", _Lock)
+    monkeypatch.setattr(S, "append_event", lambda e, **k: None)
+    monkeypatch.setattr(W, "dirty_paths", lambda repo=None: [])
+    monkeypatch.setattr(W, "prune_orphans", lambda repo=None: [])
+    monkeypatch.setattr(W, "create", lambda rid, base=None, repo=None: tmp_path / "wt")
+    monkeypatch.setattr(R, "_round_id", lambda: "SM_NEW")
+    R.start("implement #7", base="a" * 40, item_id=7)
+    assert _fm(path)["clause_amendments"][0]["state"] == "orphaned"
+
+
+def test_a_pass_records_advisory_seams_on_the_item_and_in_the_rung_data(monkeypatch, tmp_path, isolated):
+    """The prompt promised the grader an untestable seam is "recorded for the
+    item as a post-landing check"; on a pass the rung kept the clauses and
+    dropped every advisory."""
+    _grader_policy(monkeypatch)
+    path = write_item(isolated, 7, clauses=["the thing happens once"])
+    (tmp_path / "app").mkdir(); (tmp_path / "app" / "x.py").write_text("x = 1\n")
+    (tmp_path / "tests").mkdir(); (tmp_path / "tests" / "test_x.py").write_text("def test_it():\n    pass\n")
+    obj = {"premise": "sound", "summary": "good", "amendments_ok": True, "amendments_note": "",
+           "clauses": [{"clause": 1, "verdict": "met", "evidence_path": "app/x.py", "evidence_line": 1,
+                        "test_node_id": "tests/test_x.py::test_it", "how_verified": "ran", "note": "ok"}],
+           "test_honesty": [{"file": "tests/test_x.py", "line": 1, "severity": "advisory",
+                             "problem": "docstring says 118", "actionable_in_round": True,
+                             "same_as_prior": False}],
+           "seams_unverified": [{"seam": "the nightly job over the live vault",
+                                 "testable_before_landing": False, "actionable_in_round": False,
+                                 "same_as_prior": False}]}
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj), head="",
+                  contract={"id": 7, "title": "t", "body": "b", "clauses": ["the thing happens once"],
+                            "path": str(path), "amendments": [], "human_clauses": []})
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok is True, detail
+    assert data["advisory_seams"] == ["the nightly job over the live vault"]
+    assert data["advisory_findings"] == ["tests/test_x.py:1: docstring says 118"]
+    fm = _fm(path)
+    assert fm["post_landing_seams"] == ["the nightly job over the live vault"]
+    assert "passed round SM_REV with advisories" in fm["activity_log"][-1]
+    assert "docstring says 118" in fm["activity_log"][-1]
+    assert "needs-human" not in (fm.get("tags") or []), "recorded, never held open for a seam"
+    review = [e for e in events if e["event"] == "review"][-1]
+    assert review["seams"] == obj["seams_unverified"], "the whole judgment, for a later re-decide"
+
+
+def test_the_grader_sees_an_earlier_rounds_review_but_attempts_count_this_round_only(
+        monkeypatch, tmp_path):
+    """A re-offered round's first grader saw no history, so it could not call
+    a finding it had already made in the last round a repeat."""
+    grade = _grader(UNMET)
+    earlier = {"event": "review", "round_id": "SM_OLD", "item_id": 7, "ok": True, "blocking": True,
+               "attempt": 2, "head": "o" * 40, "findings": "seam unverified: X",
+               "clauses": [{"clause": 1, "verdict": "partial"}]}
+    other_item = {**earlier, "item_id": 8, "round_id": "SM_OTHER"}
+    ungraded = {**earlier, "ok": False, "round_id": "SM_OLD2"}
+    _arm(monkeypatch, tmp_path, grade=grade, head="c" * 40, prior=[earlier, other_item, ungraded])
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert len(grade.calls) == 1
+    assert [e["round_id"] for e in grade.calls[0]["prior_reviews"]] == ["SM_OLD"]
+    assert data["review_attempt"] == 1 and "1/2" in detail
+
+
+def test_an_identical_diff_that_already_passed_is_reused(monkeypatch, tmp_path):
+    """The patch-id reuse branch read `attempt` before assigning it, so the
+    first rebase re-gate after a pass would have raised UnboundLocalError. It
+    had never fired on the live ledger."""
+    grade = _grader(UNMET)
+    passed = {"event": "review", "round_id": "SM_REV", "ok": True, "blocking": False,
+              "head": "a" * 40, "patch_id": "p" * 40, "clauses": [{"clause": 1, "verdict": "met"}]}
+    _arm(monkeypatch, tmp_path, grade=grade, head="b" * 40, prior=[passed])
+    monkeypatch.setattr(G.Gate, "_patch_id", lambda self: "p" * 40)
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert ok is True and data["review_reused"] and data["review_attempt"] == 1
+    assert grade.calls == []

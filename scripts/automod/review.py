@@ -123,12 +123,13 @@ ACTIONABLE_DESC = (
     "true if the author can fix this INSIDE the round — with a test in this "
     "repo, a code change, or an amendment — before landing. false if only "
     "production can answer it (live traffic, a real pool tick, a deployment "
-    "shape) or if it is advice rather than a defect. Only true findings refuse "
-    "the round; false ones ride into the landing report."
+    "shape) or if it is advice rather than a defect. false always rides into the "
+    "landing report instead of refusing; true refuses only a `blocking` test-honesty "
+    "entry or a testable seam — an `advisory` entry never refuses."
 )
 SAME_AS_PRIOR_DESC = (
-    "true if a PRIOR REVIEW of this round (shown to you) already made this "
-    "finding and the diff has not addressed it. false for a new finding or one "
+    "true if a PRIOR REVIEW of this item (shown to you — this round's or an earlier "
+    "round's) already made this finding and the diff has not addressed it. false for a new finding or one "
     "the author acted on. Two refusals of the same finding escalate to a human."
 )
 
@@ -449,7 +450,13 @@ Procedure, per clause, in order:
 1. Write down the input or situation that would BREAK the clause if the change \
 were wrong. Be concrete: a function argument, a process boundary, a file state.
 2. Find the test in the changed test files that exercises that input. Quote \
-its node id. If no changed test exercises it, the clause is at most `partial`.
+its node id. If no changed test exercises it, the clause is at most `partial` \
+— with three exceptions, the only shapes of evidence besides a changed test \
+that stand as `met`: a suite-level run cited as `tests/ -k <expr>` that you \
+`ran`, an existing test outside this diff that you `ran` (both hold only \
+because the gate's tests rung already passed on this commit), and, for a \
+clause about something the change removed, an evidence_path naming the \
+deleted file marked `(deleted)` beside a node in a changed test file.
 3. Read the code path the clause names. Note the file and line that satisfies \
 it, or the gap.
 4. Decide: `met` only if the code does it AND a changed test pins the breaking \
@@ -496,7 +503,7 @@ positive observation ("no skips, every scenario shown to fail") does not belong 
 in it at all — say it in the summary — and a remark about a non-test file is \
 not test honesty. For each entry also say `actionable_in_round` — can the \
 author fix it before landing with a test or a change in this repo — and \
-`same_as_prior` — did an earlier review of this round (shown above, if any) \
+`same_as_prior` — did an earlier review of this item (shown above, if any) \
 already make it and the diff not address it.
 - **Seams.** List every process boundary this change crosses — a loopback \
 POST to `/api/message/stream`, `_meta` carried over MCP, a `Task` subagent, a \
@@ -878,11 +885,82 @@ def normalize_evidence_path(raw: str, worktree: Path,
     return ""
 
 
+_ABSENCE_MARKERS = ("(absent)", "(deleted)", "(removed)")
+
+
+def evidence_of_absence(raw_path: str, changed_paths=()) -> bool:
+    """Whether an `evidence_path` names something the change REMOVED.
+
+    A clause like "the dead report is gone" is satisfied by a file that no
+    longer exists, and the path rail — which wants a file on disk — could
+    never accept its evidence: #487's clause 1 named the removed vault note
+    followed by `(absent); tests/…` and was downgraded for it. Two readings count: the first path token is one the
+    diff touched and is not on disk (so the diff deleted it), or the grader
+    marked it `(absent)`/`(deleted)`/`(removed)`. Never on its own — the
+    caller waives the path rail only when the test-node rail holds.
+    """
+    text = str(raw_path or "").strip()
+    if not text:
+        return False
+    first = re.split(r"[\s+;]", text, 1)[0].strip().strip("`'\"()[],;")
+    first = re.sub(r":[\d,\-]+$", "", first).split("::", 1)[0].lstrip("./")
+    if first and first in set(changed_paths or ()):
+        return True
+    head = text.split(";", 1)[0].lower()
+    return any(m in head for m in _ABSENCE_MARKERS)
+
+
+def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
+               tests_passed: bool) -> tuple[bool, str]:
+    """`(holds, accepted_reason)` for a `met` clause's `test_node_id`.
+
+    A node in a test file this diff changed holds, as it always has. Two more
+    shapes hold when the grader RAN them and the gate's own `tests` rung
+    passed, because then the suite that contains them is green on this
+    commit by measurement, not by the grader's say-so:
+
+    - **a suite-level run** — `tests/ -k autoresearch`, `tests/test_x.py`
+      with no `::`. "The pre-existing tests still pass" has no single node,
+      and #860's clause 8 was refused three times for writing the only
+      honest one.
+    - **an existing test outside the diff** — a real `tests/` file this
+      round did not touch. A clause the tree already satisfied is pinned by
+      the test that already pinned it (#487's clause 4).
+
+    The path must be under `tests/` and exist: those are what the tests rung
+    ran. `read` is not enough for either — nothing was measured.
+    """
+    if not node:
+        return False, ""
+    file_part = node.split("::", 1)[0].strip()
+    if file_part in changed:
+        return True, ""
+    node_path = (file_part.split() or [""])[0].lstrip("./")
+    if not (node_path == "tests" or node_path.startswith("tests/")):
+        return False, ""
+    if not (worktree / node_path).exists():
+        return False, ""
+    if how != "ran" or not tests_passed:
+        return False, ""
+    if "::" not in node:
+        return True, f"suite-level run `{node[:120]}` ran and the tests rung passed"
+    return True, f"existing test `{node[:120]}` outside the diff ran and the tests rung passed"
+
+
 def parse_review(obj, *, worktree: Path, changed_tests: list[str],
-                 n_clauses: int, require_tests: bool = True) -> dict | None:
+                 n_clauses: int, require_tests: bool = True,
+                 tests_passed: bool = False, changed_paths=()) -> dict | None:
     """The grader's object, validated, with `met` downgraded where the
     evidence does not hold up. None if unusable. `require_tests=False` is
-    the vault shape: prose has no pytest node to point at."""
+    the vault shape: prose has no pytest node to point at.
+
+    `tests_passed` is whether the gate's `tests` rung passed on this commit,
+    and `changed_paths` the diff's whole file list: together they let a
+    suite-level run, an existing test outside the diff, and evidence of a
+    deleted file stand as `met` (see `_node_rail`, `evidence_of_absence`).
+    Each acceptance is recorded on the clause under `accepted`, the mirror
+    of `downgraded`, so a waived rail is visible, not silent.
+    """
     if not isinstance(obj, dict):
         return None
     premise = str(obj.get("premise") or "").strip().lower()
@@ -921,26 +999,40 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             why.append("post_landing without a pinned mechanism "
                        "(evidence_path missing or not on disk)"
                        + (f" (grader wrote {raw_path[:120]!r})" if raw_path else ""))
+        accepted: list[str] = []
         if verdict == "met":
+            node_holds, reason = True, ""
+            if require_tests:
+                node_holds, reason = _node_rail(node, worktree=worktree, changed=changed,
+                                                how=how, tests_passed=tests_passed)
+                if not node_holds:
+                    why.append("test_node_id not in a test file this diff changed")
+                elif reason:
+                    accepted.append(reason)
             if not path:
-                # Keep what the grader wrote: three rounds on 2026-09-11 were
-                # downgraded here and nothing recorded the path that failed.
-                why.append("evidence_path missing or not on disk"
-                           + (f" (grader wrote {raw_path[:120]!r})" if raw_path else ""))
-            node_file = node.split("::", 1)[0]
-            if require_tests and (not node or node_file not in changed):
-                why.append("test_node_id not in a test file this diff changed")
+                # Absence waives the path rail only beside a node that holds
+                # on its own — a changed test file, not a second waiver: a
+                # suite run plus "something is gone" pins nothing.
+                if node_holds and not reason and evidence_of_absence(raw_path, changed_paths):
+                    accepted.append(f"evidence of absence: {raw_path[:120]!r}")
+                else:
+                    # Keep what the grader wrote: three rounds on 2026-09-11 were
+                    # downgraded here and nothing recorded the path that failed.
+                    why.insert(0, "evidence_path missing or not on disk"
+                               + (f" (grader wrote {raw_path[:120]!r})" if raw_path else ""))
             if how not in ("ran", "read"):
                 why.append("how_verified is not ran|read")
             if why:
                 verdict = "partial"
                 downgraded.append(idx)
+                accepted = []
         clauses.append({"clause": idx, "verdict": verdict, "evidence_path": path,
                         "evidence_line": int(raw.get("evidence_line") or 0)
                         if str(raw.get("evidence_line") or "0").lstrip("-").isdigit() else 0,
                         "test_node_id": node, "how_verified": how if how in HOW_VERIFIED else "inferred",
                         "note": " ".join(str(raw.get("note") or "").split())[:600],
-                        **({"downgraded": why} if why else {})})
+                        **({"downgraded": why} if why else {}),
+                        **({"accepted": accepted} if accepted else {})})
     # A clause the grader did not mention is not met — it was not graded.
     for idx in range(1, n_clauses + 1):
         if idx not in seen:
@@ -1010,23 +1102,27 @@ def _judgments(raw: dict) -> dict:
 
 
 def _prior_reviews_block(prior: list[dict]) -> str:
-    """The round's earlier graded reviews, for the grader to judge repeats.
+    """The item's recent graded reviews, for the grader to judge repeats.
 
     Compact on purpose: verdict per clause and the findings, not the notes.
     The grader is asked whether each finding it makes is one of these; what
-    it is not asked to do is re-litigate them.
+    it is not asked to do is re-litigate them. Each row names its round,
+    because the last three reviews of an item usually span a re-offer: keyed
+    on the round alone, a re-offered round's first grader saw no history and
+    could not call anything a repeat.
     """
     rows = [e for e in (prior or []) if e.get("ok")]
     if not rows:
         return ""
     out = ["<prior_reviews>",
-           "Earlier reviews of THIS round, oldest first. For every finding you make, "
-           "set same_as_prior=true if one of these already made it and the diff has "
-           "not addressed it."]
+           "Earlier reviews of THIS item — this round's and the rounds before it — "
+           "oldest first. For every finding you make, set same_as_prior=true if one "
+           "of these already made it and the diff has not addressed it."]
     for e in rows[-3:]:
         verdicts = ", ".join(f"c{c.get('clause')}={c.get('verdict')}"
                              for c in (e.get("clauses") or []))
-        out.append(f"- attempt {e.get('attempt')} on {str(e.get('head') or '')[:8]}: "
+        rid = f"round {e.get('round_id')} " if e.get("round_id") else ""
+        out.append(f"- {rid}attempt {e.get('attempt')} on {str(e.get('head') or '')[:8]}: "
                    f"{'refused' if e.get('blocking') else 'passed'}; {verdicts}")
         findings = str(e.get("findings") or "").strip()
         if findings:
@@ -1035,19 +1131,40 @@ def _prior_reviews_block(prior: list[dict]) -> str:
     return "\n".join(out) + "\n\n"
 
 
-def decide_by_grader(parsed: dict, prechecks: list[dict]) -> tuple[str, str]:
+def decide_by_grader(parsed: dict, prechecks: list[dict],
+                     amendments: list[dict] | None = None, *, attempt: int = 1,
+                     seams_policy: str = "first") -> tuple[str, str]:
     """`(kind, findings)` with the grader's own judgments deciding, not a table.
 
-    Eight lines where `decide` is eighty: an unmet/partial clause refuses; a
-    finding refuses iff the grader said it is actionable inside the round;
-    everything else is advisory and rides into the report. The mechanical
-    prechecks are handed in as findings the grader could not have missed —
-    they are facts, so they keep their old blocking reading.
+    An unmet/partial clause refuses. A test-honesty finding refuses only when
+    the grader called it `blocking` AND fixable inside the round; a seam only
+    when it is testable, new, actionable, and `seams_block` says this attempt
+    still refuses. Everything else is advisory and rides into the report. The
+    mechanical prechecks are facts the grader could not have missed, so they
+    keep their severity reading.
+
+    **Severity decides, and `actionable` only ever demotes.** The first cut
+    blocked any finding the grader called actionable and ignored its own
+    `severity` — and a docstring number, a test name, an assert message is
+    always fixable, so always actionable. Over the grader era's first day
+    (2026-09-12 23:46 → 09-13) that was 60 advisory entries against one
+    blocking, test honesty led 15 of 21 refusals, and 4 of 23 rounds landed;
+    #484 ran four rounds with every clause met and was refused each time on a
+    new advisory nit. The prompt had always said only `blocking` refuses.
+
+    **Seams keep the attempt rule.** `seams_block` was dead code here, so a
+    testable seam refused every attempt and a round could only abort on it.
+    An object without the judgment fields reads as blocking/actionable/new,
+    so it decides exactly as under the table at any attempt.
     """
     if parsed["premise"] == "unsound":
         return "unsound", parsed["summary"] or "the grader judged the premise unsound"
     blocking: list[str] = []
     advisory: list[str] = []
+    if amendments and not parsed.get("amendments_ok", True):
+        idx = ", ".join(str(a.get("clause")) for a in amendments)
+        blocking.append(f"amendment of clause(s) {idx} refused (the clause text is restored): "
+                        f"{parsed.get('amendments_note') or '(no note)'}")
     for c in parsed["clauses"]:
         if c["verdict"] == "unsatisfiable":
             blocking.append(f"clause {c['clause']} unsatisfiable as written: {c['note'] or '(no note)'} "
@@ -1064,23 +1181,38 @@ def decide_by_grader(parsed: dict, prechecks: list[dict]) -> tuple[str, str]:
             f"test honesty {h['file']}:{h['line']}: {h['problem']}")
     for h in parsed["test_honesty"]:
         rep = " [repeat]" if h.get("same_as_prior") else ""
-        line = f"test honesty {h['file']}:{h['line']}: {h['problem']}{rep}"
-        (blocking if h.get("actionable_in_round", True) else advisory).append(line)
+        where = f"{h['file']}:{h['line']}: {h['problem']}{rep}"
+        if h.get("severity", "blocking") != "blocking":
+            # The table's spelling, so a finding reads the same under either policy.
+            advisory.append(f"advisory {where}")
+        elif not h.get("actionable_in_round", True):
+            advisory.append(f"test honesty {where} (blocking, but not fixable in this round)")
+        else:
+            blocking.append(f"test honesty {where}")
+    blocks_this_attempt = seams_block(seams_policy, attempt)
     for s in parsed["seams_unverified"]:
-        rep = " [repeat]" if s.get("same_as_prior") else ""
-        line = f"seam unverified: {s['seam']}{rep}"
+        text = s["seam"] if isinstance(s, dict) else str(s)
+        s = s if isinstance(s, dict) else {}
         # A seam only production can cross is not actionable inside a round
         # whatever the grader wrote in the other field: `testable_before_landing`
         # is a fact about the seam, and the table read it the same way.
-        actionable = (s.get("actionable_in_round", True)
-                      and s.get("testable_before_landing", True))
-        (blocking if actionable else advisory).append(line)
+        if not s.get("testable_before_landing", True):
+            advisory.append(f"post-landing seam (not refusing): {text}")
+        elif s.get("same_as_prior"):
+            advisory.append(f"seam unverified (repeat, not refusing again): {text}")
+        elif not s.get("actionable_in_round", True):
+            advisory.append(f"seam unverified (not actionable in this round): {text}")
+        elif not blocks_this_attempt:
+            advisory.append(f"seam unverified (attempt {attempt}, not refusing again): {text}")
+        else:
+            blocking.append(f"seam unverified: {text}")
     if not blocking:
         summary = parsed["summary"]
         if advisory:
             summary = (summary + " — " if summary else "") + "; ".join(advisory)
         return "pass", summary
-    return "retry", "; ".join(blocking + [f"advisory {a}" for a in advisory])
+    return "retry", "; ".join(blocking + [a if a.startswith("advisory ") else f"advisory {a}"
+                                          for a in advisory])
 
 
 def seams_block(policy: str, attempt: int) -> bool:
@@ -1135,9 +1267,10 @@ def decide(parsed: dict, prechecks: list[dict],
     back to what it was.
     """
     if (mode or review_policy()) == "grader":
-        # Amendments still ride: a refused amendment restores the clause and
-        # the grader's verdict on the restored text is what it graded.
-        return decide_by_grader(parsed, prechecks)
+        # The same three inputs the table reads: a refused amendment is a
+        # refusal under either policy, and the seam rule keys on the attempt.
+        return decide_by_grader(parsed, prechecks, amendments,
+                                attempt=attempt, seams_policy=policy)
     if parsed["premise"] == "unsound":
         return "unsound", parsed["summary"] or "the grader judged the premise unsound"
     lines: list[str] = []

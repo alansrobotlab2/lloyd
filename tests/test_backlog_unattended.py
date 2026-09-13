@@ -326,6 +326,53 @@ def test_a_free_loop_is_free(monkeypatch):
     assert I._loop_is_free() == (True, "free")
 
 
+def _housekeeping_counter(monkeypatch):
+    calls = {"reap": 0}
+    def reap(now=None):
+        calls["reap"] += 1
+        return []
+    monkeypatch.setattr(I, "reap_abandoned_rounds", reap)
+    monkeypatch.setattr(B, "close_settled_items", lambda *a, **k: [])
+    monkeypatch.setattr(B, "reconcile_statuses", lambda *a, **k: [])
+    monkeypatch.setattr(B, "expire_stale_spawns", lambda *a, **k: [])
+    return calls
+
+
+def test_a_busy_loop_declines_and_housekeeping_keeps_its_own_clock(isolated, monkeypatch, tmp_path):
+    """A declined poll is retried in `retry_seconds` by the pool, so the four
+    board passes cannot ride that clock too — they would walk the whole board
+    every minute a round is under observation."""
+    from workers.queue import WorkQueue
+    from workers.sources import DECLINED
+    q = WorkQueue(tmp_path / "workers.db")
+    calls = _housekeeping_counter(monkeypatch)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (False, "promotion abc is under observation"))
+    cfg = {"interval_seconds": 900, "retry_seconds": 60}
+    assert asyncio.run(I.enqueue_if_due(q, cfg)) == DECLINED
+    assert asyncio.run(I.enqueue_if_due(q, cfg)) == DECLINED
+    assert calls["reap"] == 1, "housekeeping ran on the retry clock"
+    # Once its own interval has passed, it runs again.
+    stamp = datetime.fromisoformat(q.wm_get(I.NAME, I.HOUSEKEEPING_KEY))
+    q.wm_set(I.NAME, I.HOUSEKEEPING_KEY, (stamp - timedelta(seconds=901)).isoformat())
+    asyncio.run(I.enqueue_if_due(q, cfg))
+    assert calls["reap"] == 2
+
+
+def test_a_free_loop_enqueues_and_says_nothing_special(isolated, monkeypatch, tmp_path):
+    from workers.queue import WorkQueue
+    q = WorkQueue(tmp_path / "workers.db")
+    _housekeeping_counter(monkeypatch)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
+    write_item(isolated, 2, status="up_next")
+    _confirm(2)
+    assert asyncio.run(I.enqueue_if_due(q, {"interval_seconds": 900})) is None
+    assert q.get(1) is not None and q.get(1).source == I.NAME
+    # Nothing confirmed is not a decline either: the full interval applies.
+    q2 = WorkQueue(tmp_path / "w2.db")
+    monkeypatch.setattr(B, "select_confirmed", lambda ledger: None)
+    assert asyncio.run(I.enqueue_if_due(q2, {"interval_seconds": 900})) is None
+
+
 def test_the_implementer_hands_the_acceptance_check_over_as_the_contract(isolated, monkeypatch):
     write_item(isolated, 2, name="Fix the thing", body="It is broken.")
     _confirm(2, acceptance="grep finds zero hits for the old name")
@@ -947,6 +994,39 @@ def test_the_re_offer_block_lists_what_earlier_rounds_filed(isolated):
                     "round_id": "SM_B", "stop_reason": "stop", "num_turns": 40},
                    path=S.LEDGER_PATH)
     assert B.prior_spawned(S.LEDGER_PATH, 398) == [601, 602, 77]
+
+
+def test_a_review_re_offer_carries_the_last_reviews_clause_verdicts(isolated):
+    """The findings prose names what refused; the verdicts say what did not.
+    Without them a re-offered round cannot tell a clause the grader already
+    accepted from one it never reached, and redoes both."""
+    from workers.sources.autocode import _last_review_clauses, _reoffer_block
+    write_item(isolated, 487)
+    _confirm(487)
+    S.append_event({"event": "backlog_implement", "item_id": 487, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": 487, "phase": "finished",
+                    "round_id": "SM_20260913_173156", "stop_reason": "stop", "num_turns": 60},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "review", "round_id": "SM_20260913_173156", "item_id": 487,
+                    "ok": True, "blocking": True, "kind": "retry", "attempt": 2, "head": "a" * 40,
+                    "clauses": [{"clause": 1, "verdict": "met", "note": "fine"},
+                                {"clause": 4, "verdict": "partial", "note": "no node",
+                                 "downgraded": ["test_node_id not in a test file this diff changed"]}]},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "gate", "round_id": "SM_20260913_173156", "rung": "review",
+                    "ok": False, "review_retry": True, "detail": "sent back",
+                    "review_findings": "clause 4 partial"}, path=S.LEDGER_PATH)
+    reason = B.reoffer_reason(S.LEDGER_PATH, 487)
+    assert reason.startswith("review_retry:"), reason
+    clauses = _last_review_clauses(487)
+    assert [c["clause"] for c in clauses] == [1, 4]
+    block = _reoffer_block(reason, clause_verdicts=clauses)
+    assert "Its last per-clause verdicts: clause 1 met; clause 4 partial" in block
+    assert "(downgraded: test_node_id not in a test file this diff changed): no node" in block
+    assert "sees its earlier reviews of this item" in block
+    # No graded review on record: the banner does not invent a verdict line.
+    assert "per-clause verdicts" not in _reoffer_block(reason)
 
 
 def test_the_skill_covers_a_test_that_pins_old_behaviour_and_the_prompt_points_there(isolated):

@@ -319,6 +319,66 @@ async def test_the_scheduler_survives_a_broken_config(q, monkeypatch):
         await pool.stop()
 
 
+def _age_of_watermark(q, source: str) -> float:
+    from datetime import datetime, timezone
+    stamp = q.wm_get(source, "last_enqueue_check")
+    return (datetime.now(timezone.utc) - datetime.fromisoformat(stamp)).total_seconds()
+
+
+async def _one_pass(q, monkeypatch, outcome, cfg):
+    import workers.sources as sources
+    calls = []
+
+    async def enqueue_if_due(queue, src_cfg):
+        calls.append(src_cfg)
+        return outcome
+
+    monkeypatch.setattr(sources, "SOURCE_REGISTRY",
+                        {"s": SimpleNamespace(NAME="s", enqueue_if_due=enqueue_if_due)},
+                        raising=False)
+    monkeypatch.setattr(sources, "get_sources_config", lambda: {"s": cfg}, raising=False)
+    pool = WorkerPool(q, slots=0, poll_idle_seconds=0.01)
+    await pool._scheduler_pass()
+    return calls
+
+
+async def test_a_declined_check_is_due_again_in_retry_seconds(q, monkeypatch):
+    """The 900 s clock idled the loop: a poll that could not start a round
+    (a promotion under observation) stamped the watermark like one that did,
+    and the next look was a full interval later — ~12 h of a free loop over
+    fifty rounds."""
+    from datetime import datetime, timedelta
+    import workers.sources as sources
+    cfg = {"enabled": True, "interval_seconds": 900, "retry_seconds": 60}
+    assert len(await _one_pass(q, monkeypatch, sources.DECLINED, cfg)) == 1
+    age = _age_of_watermark(q, "s")
+    assert 835 <= age <= 845, f"stamped {age:.0f}s ago; due again in {900 - age:.0f}s"
+    assert await _one_pass(q, monkeypatch, sources.DECLINED, cfg) == [], "not inside the minute"
+    # A minute later it is due, and the source is asked again.
+    stamp = datetime.fromisoformat(q.wm_get("s", "last_enqueue_check"))
+    q.wm_set("s", "last_enqueue_check", (stamp - timedelta(seconds=61)).isoformat())
+    assert len(await _one_pass(q, monkeypatch, sources.DECLINED, cfg)) == 1
+
+
+@pytest.mark.parametrize("outcome", [None, "enqueued", "declined-without-retry"])
+async def test_every_other_outcome_advances_the_full_interval(q, monkeypatch, outcome):
+    import workers.sources as sources
+    cfg = {"enabled": True, "interval_seconds": 900, "retry_seconds": 60}
+    if outcome == "declined-without-retry":
+        outcome, cfg = sources.DECLINED, {"enabled": True, "interval_seconds": 900}
+    await _one_pass(q, monkeypatch, outcome, cfg)
+    assert _age_of_watermark(q, "s") < 5
+    # ...and not due again yet.
+    assert await _one_pass(q, monkeypatch, outcome, cfg) == []
+
+
+async def test_a_broken_retry_seconds_costs_the_fast_retry_not_the_pass(q, monkeypatch):
+    import workers.sources as sources
+    cfg = {"enabled": True, "interval_seconds": 900, "retry_seconds": "soon"}
+    await _one_pass(q, monkeypatch, sources.DECLINED, cfg)
+    assert _age_of_watermark(q, "s") < 5
+
+
 # ---------------------------------------------------------------------------
 # Event-loop discipline
 # ---------------------------------------------------------------------------

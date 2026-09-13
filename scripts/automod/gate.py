@@ -1040,13 +1040,31 @@ class Gate:
         if not self.item_id:
             return True, "SKIPPED (no backlog item bound to this round — no contract to grade)", {
                 "skipped": True, "reason": "no item"}
+        from scripts.automod import backlog as _B
         from scripts.automod import review as RV
+        # Before the contract is read: an amendment another round left
+        # pending was never ratified, so it is not part of the contract this
+        # round is graded on. Best effort — the filter below is what keeps a
+        # stale one from reopening the cap even if this write fails.
+        try:
+            _B.orphan_stale_amendments(self.item_id, self.round_id)
+        except Exception as exc:  # noqa: BLE001 — bookkeeping, not the verdict
+            print(f"[warn] could not orphan stale amendments: {exc}")
         contract = RV.item_contract(self.item_id)
         if not contract["clauses"]:
             return False, f"item #{self.item_id} has no acceptance clauses", {}
+        contract = {**contract, "amendments": [
+            a for a in (contract.get("amendments") or [])
+            if str(a.get("round_id") or "") == str(self.round_id)]}
         head = W.head(self.worktree) or self.report.head or ""
-        prior = [e for e in S.read_events(limit=1000)
-                 if e.get("event") == "review" and e.get("round_id") == self.round_id]
+        reviews = [e for e in S.read_events(limit=1000) if e.get("event") == "review"]
+        prior = [e for e in reviews if e.get("round_id") == self.round_id]
+        # What the GRADER is shown is the item's history, not the round's: a
+        # re-offered round's first review otherwise judges `same_as_prior`
+        # blind to the refusal that sent the item back. Attempts are still
+        # counted on `prior` alone.
+        item_history = [e for e in reviews if e.get("ok")
+                        and str(e.get("item_id") or "") == str(self.item_id)][-3:]
         refused_by_head: dict[str, dict] = {}
         graded_refusals: list[dict] = []
         graded_total = 0
@@ -1069,6 +1087,7 @@ class Gate:
             if any(c.get("verdict") == "unsatisfiable" for c in (e.get("clauses") or [])):
                 continue
             spent += 1
+        attempt = spent + 1
         if graded_total >= RV.REVIEW_HARD_CAP:
             last = graded_refusals[-1] if graded_refusals else {}
             return False, (f"review has graded this round {graded_total} times (ceiling "
@@ -1081,7 +1100,9 @@ class Gate:
         # different question and has to be graded again. 866-c amended a
         # clause, re-gated the same commit, and was answered from the ledger
         # — the amendment was never looked at, and the round aborted on a
-        # refusal of the text it had just replaced.
+        # refusal of the text it had just replaced. THIS round's amendments
+        # only (filtered above): #860's third attempt was bought by one from
+        # a round two days gone.
         pending_amendments = list(contract.get("amendments") or [])
         # A clean rebase produces a new commit with an identical diff. The
         # promoter chases a moved base by re-gating, and `_regate_after_move`
@@ -1112,7 +1133,6 @@ class Gate:
                                "review_retry": True, "review_findings": findings,
                                "review_attempt": int(same.get("attempt") or spent),
                                "review_same_head": True}
-        attempt = spent + 1
         # Same reason: a round holding an unratified amendment has not had
         # its new contract judged even once. The HARD_CAP above still bounds
         # it — that one counts grading turns, not refusals, so amendments
@@ -1146,10 +1166,10 @@ class Gate:
                            contract=contract, changed_paths=changed, test_counts=test_counts,
                            python=self.python, child_env=self._child_env(grade_root),
                            scratch_dir=W.round_dir(self.round_id) / "gate-state",
-                           # The round's own earlier reviews, so the grader
-                           # judges repeats itself (`same_as_prior`) rather
-                           # than the ledger inferring them by head.
-                           prior_reviews=prior)
+                           # The item's recent reviews across rounds, so the
+                           # grader judges repeats itself (`same_as_prior`)
+                           # rather than the ledger inferring them by head.
+                           prior_reviews=item_history)
             base_event.update({"session_id": res.get("session_id"),
                                "seconds": round(time.time() - started, 1),
                                # Waits the grader sat out because another
@@ -1168,7 +1188,12 @@ class Gate:
                                    "retry_after_s": 120,
                                    "review_session": res.get("session_id")}
             parsed = RV.parse_review(res["structured"], worktree=grade_root,
-                                     changed_tests=changed_tests, n_clauses=len(contract["clauses"]))
+                                     changed_tests=changed_tests, n_clauses=len(contract["clauses"]),
+                                     # A suite-level or unchanged-test `met`
+                                     # stands only on a green tests rung.
+                                     tests_passed=any(r.name == "tests" and r.ok
+                                                      for r in self.report.rungs),
+                                     changed_paths=changed)
         finally:
             self._drop_snapshot(snapshot)
         if parsed is None:
@@ -1190,6 +1215,10 @@ class Gate:
                         "seams_untestable": [s["seam"] for s in parsed["seams_unverified"]
                                              if isinstance(s, dict)
                                              and not s.get("testable_before_landing", True)],
+                        # The whole judgment per seam. The two lists above
+                        # lose `actionable_in_round` and `same_as_prior`, so
+                        # re-deciding a recorded review had to guess them.
+                        "seams": [s for s in parsed["seams_unverified"] if isinstance(s, dict)],
                         "downgraded": parsed["downgraded"], "summary": parsed["summary"],
                         "amendments_ok": parsed.get("amendments_ok", True),
                         "amendments_note": parsed.get("amendments_note", ""),
@@ -1219,7 +1248,6 @@ class Gate:
         # Written here rather than by the implementer because it is a fact the
         # grader established about a change that is about to land, not a claim
         # the author made about its own work.
-        from scripts.automod import backlog as _B
         marked: list[int] = []
         for c in parsed["clauses"]:
             if c["verdict"] != "post_landing":
@@ -1236,11 +1264,26 @@ class Gate:
                             "rung": "review", "ok": True, "skipped": False,
                             "post_landing_clauses": marked, "item_id": self.item_id,
                             "detail": "clauses marked observable only after landing"})
+        # Everything a pass did not refuse on is still something the grader
+        # said. It goes onto the item — the prompt promises the grader an
+        # untestable seam is recorded there — and into the rung data, so
+        # `gate.json` and the landing report carry it too.
+        advisory_seams = [s["seam"] if isinstance(s, dict) else str(s)
+                          for s in parsed["seams_unverified"]]
+        advisory_findings = [f"{h['file']}:{h['line']}: {h['problem']}"
+                             for h in list(pre) + list(parsed["test_honesty"])]
+        try:
+            _B.note_review_advisories(self.item_id, self.round_id,
+                                      advisory_seams, advisory_findings)
+        except Exception as exc:  # noqa: BLE001 — a note is not the gate
+            print(f"[warn] could not record review advisories: {exc}")
         return True, (f"review: {RV.summarize_clauses(parsed)} of {len(contract['clauses'])} "
                       f"clause(s); {parsed['summary'][:160]}"), {
                           "review_session": res.get("session_id"),
                           "clauses": parsed["clauses"], "review_attempt": attempt,
                           "post_landing_clauses": marked,
+                          "advisory_seams": advisory_seams,
+                          "advisory_findings": advisory_findings,
                           "amendments_ratified": [a.get("clause") for a in amendments]}
 
     def _patch_id(self) -> str:

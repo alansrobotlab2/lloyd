@@ -797,6 +797,13 @@ Three rails keep the verdict honest without trusting the model:
   tail resolves in the worktree are all accepted; anything left is a genuine
   miss, and the downgrade reason records what the grader actually wrote, so a
   rail that fires wrongly is visible rather than silent.
+  Three shapes stand as `met` besides a changed test, each recorded on the
+  clause as `accepted` (§4.5d): a suite-level node (`tests/ -k expr`, a test
+  file with no `::`) or an existing `tests/` node outside the diff, both only
+  when the grader `ran` it and the gate's own `tests` rung passed on this
+  commit; and an `evidence_path` naming something the diff deleted (in the
+  diff's paths and gone, or marked `(absent)`/`(deleted)`/`(removed)`) beside
+  a node in a changed test file — never stacked on the suite-level waiver.
 - **Deterministic honesty checks run first**, as a delta against the base
   version of each changed test file: `or True`, `assert True`, a new skip or
   xfail, and — when the item has clauses and code changed — no new `def
@@ -812,7 +819,14 @@ Three rails keep the verdict honest without trusting the model:
   in this repo can drive. An untestable seam is recorded on the event
   (`seams_untestable`) and rides the findings. #544's lesson is about seams a
   test *could* have crossed. A bare-string seam keeps the old reading, so the
-  calibration cases and the backfill are unchanged.
+  calibration cases and the backfill are unchanged. A testable seam refuses
+  only while `automod.review.seams_block` says so — attempt 1 under `first` —
+  and never when the grader calls it a repeat; under the `grader` policy the
+  rule was dead code until 2026-09-13 (§4.5d). What a passing review did not
+  refuse on is written onto the item (`post_landing_seams` and one activity
+  line, `backlog.note_review_advisories`) and into the rung's data as
+  `advisory_seams`/`advisory_findings`. It is recorded, never held open: 23
+  of the grader era's first 30 seams were untestable by the grader's own word.
 
 The rung's four outcomes, and where each goes:
 
@@ -981,6 +995,63 @@ The day also showed three dead ends the loop could only escalate:
   loop's half lands; the item waits for the person.
 - **A gate over a running measurement.** Covered in 4.5b: the gate tool
   reads `_task_registry.list_active()` for the bound session and refuses.
+
+### 4.5d The grader era's first day: 4 of 23 landed
+
+`automod.review.policy` flipped to `grader` at 2026-09-12 23:46 (`4c9eb35`),
+on a calibration that showed the grader policy's blocking set inside the
+table's *at attempt 1*. Over the next day 4 of 23 graded rounds landed,
+against 8.1 landings a day in the 30 hours before, and the board's ready
+queue sat at 87 against a depth bound of 55. Re-deciding the recorded
+refusals on their own grader output named the causes, heaviest first:
+
+1. **Advisory findings refused rounds.** `decide_by_grader` blocked any
+   test-honesty entry the grader called `actionable_in_round` and ignored its
+   `severity`. A docstring number is always fixable, so always actionable: 60
+   advisory entries against one blocking, and test honesty led 15 of 21
+   refusals. #484 met every clause in four rounds and was refused on a fresh
+   nit each time. Severity decides now; `actionable` only demotes a blocking
+   entry (to "blocking, but not fixable in this round"), never promotes one.
+2. **A suite-level clause could not be `met`.** "The autoresearch tests
+   pass" has no single node; #860's clause 8 was downgraded three times for
+   writing `tests/ -k autoresearch`. The three `accepted` shapes in §4.5.
+3. **A stale amendment bypassed the cap.** `pending_amendments` read the
+   whole item while `settle_amendments` settled only the current round's, so
+   an amendment left by a round two days gone skipped the same-head check,
+   patch-id reuse and the two-attempt cap and bought #860 a third graded
+   review ("3/2"). Amendments are per round now: `orphan_stale_amendments`
+   marks another round's `pending` record `orphaned` and restores the clause
+   at `round start` and at the review rung, quoting the amended text on the
+   item so the open round can re-amend it in one call; the rung also filters
+   to the round's own, so the cap holds even if that write fails. The same
+   pass found the patch-id reuse branch reading `attempt` before assigning
+   it — it had never fired.
+4. **Seams blocked on every attempt.** `seams_block` was never consulted
+   under `grader` (decisive in 4 of 21 refusals), and an advisory seam on a
+   pass was discarded although the prompt promised the grader it would be
+   recorded.
+5. **A declined poll spent the whole interval.** The pool stamped
+   `last_enqueue_check` after every `enqueue_if_due`, so an autocode poll that
+   found a promotion still under observation waited 900 s to look again —
+   median round-end → next-start 9.6–14.5 min, ~12 h of a free loop over
+   fifty rounds. A source may now return `DECLINED`; with `retry_seconds`
+   (autocode: 60) the pool looks again that much sooner, and autocode's four
+   board passes keep the 900 s clock on their own `last_housekeeping`
+   watermark. The 900 s observation window is untouched.
+6. **The implementer was never told what the grader checks,** and a
+   re-offered round's grader saw no history. The implement prompt now names
+   seams, the suite-run evidence, graded test prose and the two-attempt cap;
+   a `review_retry` re-offer carries the last review's per-clause verdicts;
+   the grader is shown the item's last three graded reviews across rounds,
+   each naming its round, while attempts are still counted on the round.
+
+Both policies now share the severity, seam-attempt and refused-amendment
+rules, and a review object without the two judgment fields decides the same
+under both at attempts 1 and 2 (`tests/test_review_grader_policy.py`).
+`python -m scripts.automod.review_tools redecide --since 2026-09-12T23:46`
+replays every graded review under today's rules without asking a model; at
+landing it re-decided 18 of 22 recorded refusals as passes (14 without the
+step-2 approximation it prints) and turned no recorded pass into a refusal.
 
 ### 4.1 pyflakes is a diff, not a bar
 

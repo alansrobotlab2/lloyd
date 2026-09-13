@@ -259,6 +259,13 @@ def test_the_prompt_no_longer_forbids_what_the_parser_accepts():
     text = _prompt_text()
     assert "not `~/…`" not in text
     assert "a vault path you actually read is" in text
+    # The three shapes `parse_review` accepts besides a changed test are
+    # named, or the grader keeps writing its honest suite-level node and
+    # watching Python downgrade it (#860's clause 8, three times).
+    flat = " ".join(text.split())
+    assert "a suite-level run cited as `tests/ -k <expr>` that you `ran`" in flat
+    assert "an existing test outside this diff that you `ran`" in flat
+    assert "an evidence_path naming the deleted file marked `(deleted)`" in flat
 
 
 def test_the_prompt_teaches_post_landing_rather_than_unsatisfiable():

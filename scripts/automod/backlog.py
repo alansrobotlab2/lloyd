@@ -566,9 +566,66 @@ def _item_path(item_id: int) -> Path | None:
     return paths[0] if paths else None
 
 
-def pending_amendments(frontmatter: dict | None) -> list[dict]:
+def pending_amendments(frontmatter: dict | None, round_id: str | None = None) -> list[dict]:
+    """Unratified amendments on the item; with `round_id`, only that round's.
+
+    An amendment is a move inside ONE round: the round's review judged the
+    clause unsatisfiable, the round amended it, the round's next review
+    ratifies it. Read item-wide, a pending record from a round that ended
+    before its review ran reopened the question for every later round of the
+    item — and a round holding one skips the same-head check, patch-id reuse
+    and the two-attempt cap. #860 bought a third graded attempt ("3/2") that
+    way on an amendment made in SM_20260911_183542, two days earlier.
+    """
     return [dict(a) for a in ((frontmatter or {}).get(AMENDMENTS_KEY) or [])
-            if isinstance(a, dict) and a.get("state") == "pending"]
+            if isinstance(a, dict) and a.get("state") == "pending"
+            and (round_id is None or str(a.get("round_id") or "") == str(round_id))]
+
+
+def orphan_stale_amendments(item_id: int, round_id: str) -> list[int]:
+    """Close every pending amendment another round left on the item.
+
+    `state: orphaned`, and the clause text goes back to `was`: an amendment
+    no review ratified is not part of the contract — the same reading a
+    refusal gets. The activity line names the old round and quotes the
+    amended text, so the round now open can re-amend it in one call if its
+    own review calls the clause unsatisfiable again. Idempotent; returns
+    the clause indices orphaned.
+    """
+    path = _item_path(item_id)
+    if path is None:
+        return []
+    fm, body = _split_frontmatter(path.read_text(encoding="utf-8"))
+    records = fm.get(AMENDMENTS_KEY) or []
+    clauses = list(fm.get("acceptance_clauses") or [])
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    orphaned: list[int] = []
+    quoted: list[str] = []
+    for a in records:
+        if not isinstance(a, dict) or a.get("state") != "pending":
+            continue
+        if str(a.get("round_id") or "") == str(round_id):
+            continue
+        a["state"] = "orphaned"
+        a["settled_at"] = stamp
+        a["note"] = f"its round ended unratified; orphaned when round {round_id} was reviewed"
+        i = int(a.get("clause") or 0) - 1
+        if 0 <= i < len(clauses) and a.get("was"):
+            clauses[i] = a["was"]
+        orphaned.append(i + 1)
+        quoted.append(f"clause {i + 1} from round {a.get('round_id')}: {a.get('now')}")
+    if not orphaned:
+        return []
+    fm["acceptance_clauses"] = clauses
+    log = list(fm.get("activity_log") or [])
+    log.append(f"**{stamp}** — automod: {len(orphaned)} unratified amendment(s) from an earlier "
+               f"round orphaned and the clause text restored before round {round_id} was "
+               f"reviewed; amend again if the review still calls it unsatisfiable. "
+               + " — ".join(quoted))
+    fm["activity_log"] = log
+    fm["updated"] = stamp
+    _write_item(path, fm, body)
+    return orphaned
 
 
 def last_graded_review(ledger: Path, round_id: str) -> dict | None:
@@ -1610,6 +1667,42 @@ def mark_clause_post_landing(item_id: int, clause: int, note: str = "",
                   f"only after landing"
                   + (f" ({round_id})" if round_id else "")
                   + (f": {note}" if note else "")))
+
+
+def note_review_advisories(item_id: int, round_id: str, seams: list[str],
+                           findings: list[str]) -> bool:
+    """Record what a PASSING review still said, on the item.
+
+    The review prompt has always promised the grader that an untestable seam
+    is "recorded for the item as a post-landing check", and nothing did it:
+    on a pass `rung_review` kept the clauses and dropped the advisory text,
+    so the only record was a findings string in `gate.json`, deleted with the
+    round. Seam texts accumulate under `post_landing_seams` (deduplicated);
+    advisory findings go on one activity line with the seams.
+
+    Recorded, not enforced: the item is NOT held open `needs-human` for a
+    seam. 23 of the grader era's first 30 seams were untestable by the
+    grader's own word, and holding on them would park nearly every landing.
+    """
+    seams = [" ".join(str(s).split())[:300] for s in (seams or []) if str(s).strip()]
+    findings = [" ".join(str(f).split())[:300] for f in (findings or []) if str(f).strip()]
+    if not seams and not findings:
+        return False
+    path = _item_path(item_id)
+    if path is None:
+        return False
+    fm, _ = _split_frontmatter(path.read_text(encoding="utf-8"))
+    existing = [str(s) for s in (fm.get("post_landing_seams") or [])]
+    merged = existing + [s for s in seams if s not in existing]
+    parts = []
+    if seams:
+        parts.append("post-landing seams: " + " | ".join(seams))
+    if findings:
+        parts.append("advisory findings: " + " | ".join(findings))
+    return update_frontmatter(
+        path, {"post_landing_seams": merged} if seams else {},
+        activity=(f"automod review passed round {round_id} with advisories — "
+                  + "; ".join(parts))[:2000])
 
 
 def record_human_paths(item_id: int, human_paths: list[dict],

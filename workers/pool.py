@@ -3,7 +3,7 @@
 Sources register into SOURCE_REGISTRY (see workers/sources/__init__.py).
 Each source provides:
   - NAME: str
-  - async enqueue_if_due(queue, config) -> None
+  - async enqueue_if_due(queue, config) -> None | str  (see `_scheduler_pass`)
   - async execute(item) -> dict  (see `normalize_result` for the contract)
 
 **Everything here runs on the backend's one event loop.** That loop also
@@ -19,7 +19,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Optional
 
@@ -206,6 +206,16 @@ def _task_id_of(item: QueueItem, result: Any = None) -> Optional[str]:
     if tid is None:
         tid = item.payload.get("task_id")
     return None if tid is None else str(tid)
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    """A config number that must be > 0, or None. A typo in `retry_seconds`
+    costs the fast retry, never the scheduler pass."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
 
 
 class WorkerPool:
@@ -469,8 +479,6 @@ class WorkerPool:
     # ── Scheduler loop — drives source.enqueue_if_due() ───────────────────
 
     async def _scheduler_loop(self) -> None:
-        from workers.sources import SOURCE_REGISTRY, get_sources_config
-
         # Defined outside the try, because the `sleep` at the bottom is
         # outside it too: if the first `get_sources_config()` raised, the
         # except branch fell through to `sleep(interval)` and died on a
@@ -478,29 +486,50 @@ class WorkerPool:
         interval = 60
         while self._running:
             try:
-                cfg = get_sources_config()
-                for name, source in SOURCE_REGISTRY.items():
-                    src_cfg = cfg.get(name, {})
-                    if not src_cfg.get("enabled", False):
-                        continue
-                    wait = int(src_cfg.get("interval_seconds", 3600))
-                    last_at = await asyncio.to_thread(
-                        self.queue.wm_get, name, "last_enqueue_check")
-                    if last_at:
-                        last_dt = datetime.fromisoformat(last_at)
-                        elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
-                        if elapsed < wait:
-                            continue
-                    try:
-                        await source.enqueue_if_due(self.queue, src_cfg)
-                    except Exception as e:
-                        logger.error("Source %s enqueue_if_due failed: %s", name, e, exc_info=True)
-                    await asyncio.to_thread(
-                        self.queue.wm_set, name, "last_enqueue_check",
-                        datetime.now(timezone.utc).isoformat())
+                await self._scheduler_pass()
             except Exception as e:
                 logger.error("Scheduler loop error: %s", e, exc_info=True)
             await asyncio.sleep(interval)
+
+    async def _scheduler_pass(self) -> None:
+        """One pass over the sources: call each one that is due, stamp it.
+
+        **A declined check is not a spent interval.** The watermark used to
+        be stamped after every call, so a source that looked and could not
+        act yet — autocode with a round still under observation — waited its
+        whole `interval_seconds` (900 s) before looking again. The loop's
+        median gap from a round ending to the next one starting was 9.6–14.5
+        min, ~12 h of a free loop over fifty rounds. A source that returns
+        `DECLINED` and has `retry_seconds` configured is stamped back-dated
+        so it is due again in `retry_seconds`; everything else is stamped
+        now, as before.
+        """
+        from workers.sources import DECLINED, SOURCE_REGISTRY, get_sources_config
+
+        cfg = get_sources_config()
+        for name, source in SOURCE_REGISTRY.items():
+            src_cfg = cfg.get(name, {})
+            if not src_cfg.get("enabled", False):
+                continue
+            wait = int(src_cfg.get("interval_seconds", 3600))
+            last_at = await asyncio.to_thread(
+                self.queue.wm_get, name, "last_enqueue_check")
+            if last_at:
+                last_dt = datetime.fromisoformat(last_at)
+                elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                if elapsed < wait:
+                    continue
+            outcome = None
+            try:
+                outcome = await source.enqueue_if_due(self.queue, src_cfg)
+            except Exception as e:
+                logger.error("Source %s enqueue_if_due failed: %s", name, e, exc_info=True)
+            stamp = datetime.now(timezone.utc)
+            retry = _positive_int(src_cfg.get("retry_seconds"))
+            if outcome == DECLINED and retry and retry < wait:
+                stamp -= timedelta(seconds=wait - retry)
+            await asyncio.to_thread(
+                self.queue.wm_set, name, "last_enqueue_check", stamp.isoformat())
 
     # ── Worker loop — claims items and runs them ──────────────────────────
 

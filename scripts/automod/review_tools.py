@@ -144,7 +144,10 @@ def grade_commit(*, repo: Path, item_id: int, parent: str, commit: str, changed_
             return {"error": res.get("error") or "no structured review", "session_id": res.get("session_id")}
         parsed = RV.parse_review(res["structured"], worktree=wt,
                                  changed_tests=[p for p in paths if p.startswith("tests/")],
-                                 n_clauses=len(contract["clauses"]))
+                                 n_clauses=len(contract["clauses"]),
+                                 # A settled landing passed its tests rung; a
+                                 # tree with its tests stripped never ran one.
+                                 tests_passed=not strip_tests, changed_paths=paths)
         if parsed is None:
             return {"error": "unusable review object", "session_id": res.get("session_id")}
         kind, findings = RV.decide(parsed, pre, mode=policy)
@@ -297,6 +300,110 @@ def backfill(*, repo: Path | None = None, ledger: Path | None = None, limit: int
     return results
 
 
+# ── re-deciding recorded reviews ─────────────────────────────────────────
+
+REDECIDE_NOTE = (
+    "rule 2 is approximated: a recorded clause downgraded ONLY for its test node, "
+    "whose node has no `::` and was `ran`, counts as met (the worktree is gone, so "
+    "the path cannot be re-checked); so does one downgraded ONLY for a missing "
+    "evidence path the grader marked (absent)/(deleted)/(removed)")
+
+
+def parsed_from_event(ev: dict, *, approximate: bool = True) -> tuple[dict, int]:
+    """A recorded `review` event back into `parse_review`'s shape.
+
+    Returns `(parsed, n_approximated)`. Seams come from the full `seams`
+    judgments when the event carries them (since 2026-09-13); older events
+    kept only text, so the untestable list decides testability and the two
+    judgments read as their absent defaults — actionable, not a repeat.
+    """
+    clauses: list[dict] = []
+    approximated = 0
+    for raw in ev.get("clauses") or []:
+        if not isinstance(raw, dict):
+            continue
+        c = dict(raw)
+        c.setdefault("note", "")  # `decide` indexes it; old rows may lack it
+        reasons = [str(r) for r in (c.get("downgraded") or [])]
+        if approximate and c.get("verdict") == "partial" and len(reasons) == 1:
+            node = str(c.get("test_node_id") or "")
+            how = str(c.get("how_verified") or "")
+            only_node = (reasons[0] == "test_node_id not in a test file this diff changed"
+                         and node and "::" not in node and how == "ran")
+            only_absent_path = (reasons[0].startswith("evidence_path missing")
+                                and any(m in reasons[0].lower() for m in RV._ABSENCE_MARKERS)
+                                and how in ("ran", "read"))
+            if only_node or only_absent_path:
+                c["verdict"] = "met"
+                c.pop("downgraded", None)
+                approximated += 1
+        clauses.append(c)
+    if "seams" in ev and isinstance(ev.get("seams"), list):
+        seams = [dict(s) for s in ev["seams"] if isinstance(s, dict)]
+    else:
+        untestable = set(ev.get("seams_untestable") or [])
+        seams = [{"seam": s, "testable_before_landing": s not in untestable,
+                  "actionable_in_round": True, "same_as_prior": False}
+                 for s in (ev.get("seams_unverified") or []) if str(s).strip()]
+    parsed = {"premise": ev.get("premise") or "sound", "clauses": clauses,
+              "test_honesty": [{"file": "", "line": 0, "problem": "", **h}
+                               for h in (ev.get("test_honesty") or []) if isinstance(h, dict)],
+              "seams_unverified": seams, "summary": str(ev.get("summary") or ""),
+              "downgraded": sorted(int(c["clause"]) for c in clauses if c.get("downgraded")),
+              "amendments_ok": ev.get("amendments_ok", True) if isinstance(ev.get("amendments_ok"), bool) else True,
+              "amendments_note": str(ev.get("amendments_note") or "")}
+    return parsed, approximated
+
+
+def redecide(*, since_ts: float, ledger: Path | None = None, policy: str | None = None,
+             seams_policy: str | None = None, approximate: bool = True) -> dict:
+    """Every graded `review` event since `since_ts`, decided again by today's
+    `RV.decide` on the grader output it recorded. No model is asked, nothing
+    is written: a measurement of the decision rules, holding the grader fixed.
+    """
+    from scripts.automod import state as S
+    path = ledger or S.LEDGER_PATH
+    if seams_policy is None:
+        from scripts.automod.gate import _review_policy
+        seams_policy = _review_policy("seams_block")
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("event") != "review" or not ev.get("ok"):
+            continue
+        if float(ev.get("ts") or 0) < since_ts:
+            continue
+        parsed, n_approx = parsed_from_event(ev, approximate=approximate)
+        amendments = [{"clause": c} for c in (ev.get("amendments_shown") or [])]
+        kind, findings = RV.decide(parsed, list(ev.get("prechecks") or []), amendments,
+                                   attempt=int(ev.get("attempt") or 1), policy=seams_policy,
+                                   mode=policy)
+        recorded = ev.get("kind") or ("retry" if ev.get("blocking") else "pass")
+        rows.append({"round_id": ev.get("round_id"), "item_id": ev.get("item_id"),
+                     "attempt": ev.get("attempt"), "ts": ev.get("ts"), "recorded": recorded,
+                     "redecided": kind, "approximated": n_approx, "findings": findings[:400]})
+    refusals = [r for r in rows if r["recorded"] != "pass"]
+    passes = [r for r in rows if r["recorded"] == "pass"]
+    return {"rows": rows, "policy": policy or RV.review_policy(), "seams_policy": seams_policy,
+            "refusals": len(refusals),
+            "refusals_now_pass": sum(1 for r in refusals if r["redecided"] == "pass"),
+            "passes": len(passes),
+            "passes_now_refused": sum(1 for r in passes if r["redecided"] != "pass"),
+            "approximated_clauses": sum(r["approximated"] for r in rows),
+            "note": REDECIDE_NOTE if approximate else ""}
+
+
+def _since_ts(text: str) -> float:
+    from datetime import datetime, timezone
+    dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Calibrate and backfill the automod review rung")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -315,6 +422,12 @@ def main(argv=None) -> int:
     b = sub.add_parser("backfill", help="grade every settled landing with an item")
     b.add_argument("--limit", type=int, default=None)
     b.add_argument("--item", type=int, action="append", default=[])
+    r = sub.add_parser("redecide", help="re-decide recorded reviews under today's rules, offline")
+    r.add_argument("--since", required=True, help="ISO time; naive means UTC")
+    r.add_argument("--policy", default=None, choices=["table", "grader"])
+    r.add_argument("--no-approximate", action="store_true",
+                   help="do not approximate rule 2 on recorded downgrades")
+    r.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
     if args.cmd == "fixture":
@@ -334,6 +447,23 @@ def main(argv=None) -> int:
     if args.cmd == "backfill":
         rows = backfill(limit=args.limit, only_items=args.item or None)
         print(f"\n{len(rows)} graded → {backfill_path()}")
+        return 0
+    if args.cmd == "redecide":
+        out = redecide(since_ts=_since_ts(args.since), policy=args.policy,
+                       approximate=not args.no_approximate)
+        if args.json:
+            print(json.dumps(out, indent=2, default=str))
+            return 0
+        for row in out["rows"]:
+            mark = "" if row["recorded"] == row["redecided"] else "  *"
+            approx = f" (≈{row['approximated']})" if row["approximated"] else ""
+            print(f"{row['round_id']} · #{row['item_id']} · attempt {row['attempt']} · "
+                  f"{row['recorded']} → {row['redecided']}{approx}{mark}")
+        print(f"\npolicy {out['policy']}, seams_block {out['seams_policy']}: "
+              f"{out['refusals_now_pass']} of {out['refusals']} recorded refusals re-decide as pass; "
+              f"{out['passes_now_refused']} of {out['passes']} recorded passes become refusals")
+        if out["note"]:
+            print(f"{out['approximated_clauses']} clause(s) approximated — {out['note']}")
         return 0
     return 2
 

@@ -58,6 +58,20 @@ def _skill_text() -> str:
     return " ".join(SKILL_PATH.read_text(encoding="utf-8").split())
 
 
+def test_the_prompt_says_what_the_review_grades():
+    """Only the vault skill said it, and a round that skipped that section
+    learned the grader's rules one refusal at a time: seams (decisive in 4 of
+    the grader era's first 21 refusals), suite-level evidence (#860's clause
+    8, three times), test-honesty findings — mostly about a test's own prose
+    — which led 15 of the 21, and the two-attempt cap that made each lesson
+    cost."""
+    text = " ".join(_prompt().split())
+    assert "process boundary your change crosses" in text
+    assert "a suite run cited as `tests/ -k <expr>`" in text
+    assert "docstrings, names, assert messages" in text
+    assert "two review attempts per round" in text
+
+
 def test_the_prompt_points_at_the_skill():
     text = _prompt()
     assert "automod-change-own-code" in text

@@ -3,7 +3,11 @@
 A source is a module exposing:
   - NAME: str                   — unique source identifier
   - DEFAULT_PRIORITY: int       — 0..100 (lower = sooner)
-  - async enqueue_if_due(queue, src_cfg) -> None
+  - async enqueue_if_due(queue, src_cfg) -> None | str
+      None (or ENQUEUED) advances the source's watermark a full
+      `interval_seconds`. DECLINED means "I looked and could not act yet";
+      with `retry_seconds` set in the source's config the pool looks again
+      that much sooner (`WorkerPool._scheduler_pass`).
   - async execute(item: QueueItem) -> dict
       dict may contain: summary, artifact_path, response, task_id
 """
@@ -16,6 +20,10 @@ from typing import Any
 from app.config import CONFIG
 
 logger = logging.getLogger("lloyd-workers.sources")
+
+# What `enqueue_if_due` may return. Only DECLINED changes anything.
+ENQUEUED = "enqueued"
+DECLINED = "declined"
 
 
 SOURCE_REGISTRY: dict[str, Any] = {}

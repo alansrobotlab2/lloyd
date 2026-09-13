@@ -191,11 +191,21 @@ A module in `workers/sources/` with:
 ```python
 NAME: str
 DEFAULT_PRIORITY: int
-async def enqueue_if_due(queue, src_cfg) -> None
+async def enqueue_if_due(queue, src_cfg) -> None | str
 async def execute(item) -> dict
 ```
 
 registered in `workers/sources/__init__.py`.
+
+The scheduler calls `enqueue_if_due` once `interval_seconds` have passed
+since the source's `last_enqueue_check`, then stamps it. A source that looked
+and could not act *yet* returns `DECLINED` (`workers.sources`); with
+`retry_seconds` in its config the stamp is back-dated so it is due again that
+much sooner (`WorkerPool._scheduler_pass`). Anything else — `None`,
+`ENQUEUED` — advances the full interval. autocode is the one user: a poll
+that finds a promotion under observation retries in 60 s instead of 900, and
+its board housekeeping keeps the 900 s clock on its own `last_housekeeping`
+watermark (`architecture/automod.md` §4.5d).
 
 ### The result contract
 
