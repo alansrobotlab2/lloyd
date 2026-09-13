@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, tools, safety]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-09-13
 ---
 
 # Editing safeguards: what stands between a turn and the tree
@@ -23,8 +23,8 @@ before assuming a layer can be turned off — or that it is installed.
 | TypeScript diagnostics, later | `agent_mcp/_tsc_runner.py` | `harness.edit_diagnostics.typescript` | a `.tsx` edit that breaks the build; whole-project tsc is ~5 s, so it rides the drain queue |
 | The per-turn change ledger | `agent_mcp/_change_ledger.py` | `harness.change_ledger.enabled` | an edit with no record and no undo; `GET /changes`, `POST /changes/revert` |
 | The effect ledger | `agent_mcp/_tool_effects.py` | `harness.effect_ledger.enabled` | a requeued worker item re-landing every side effect its first attempt made |
-| Destructive-Bash patterns | `app/harness/safety.py` | — | `rm -rf` and friends — on the turns that install it, which is not all of them (below) |
-| The grant gate (#534) | `app/harness/policy.py`, `agent_mcp/builtin_grants.py` | by session platform | an unattended turn minting its own authority |
+| Destructive-Bash patterns | `app/harness/safety.py` | — no config read at all, so no kill switch | `rm -rf` and friends — on the turns that install it, which is not all of them (below) |
+| The grant gate (#534) | `app/harness/policy.py`, `agent_mcp/builtin_grants.py` | armed per session platform | an unattended turn minting its own authority |
 | Automod ban on worker turns | `workers/sources/_common.WORKER_AUTOMOD_BAN` | — | a worker driving the self-modification loop |
 
 ## The rules that are easy to get wrong
@@ -35,12 +35,19 @@ before assuming a layer can be turned off — or that it is installed.
   needs nothing. A successful writer *refreshes* the record, so consecutive
   Edits to one file need one Read between them — `sed -i` from Bash does not,
   and the next Edit is refused until the file is re-Read. Intended.
-- **Diagnostics are a delta, never absolute** (~69 tolerated findings in the
-  tree), position-insensitive, and a multiset. A post-image syntax error is
-  always reported; a pre-image-only syntax error reports nothing.
-- **The blast radius queries the pre-image's symbols** against the graph of
-  the tree *before* the edit, drops anything over `FANOUT_CEILING` (20) call
-  sites, and runs in a thread the edit abandons after `RAIL_BUDGET_S` (90 ms).
+- **Diagnostics are a delta, never absolute**, position-insensitive for
+  pyflakes and a multiset for tsc — one shared normaliser,
+  `app/lint_findings.py`, so the model is never told about a finding the gate
+  will not mind. The tolerated count depends entirely on scope: `app/` alone
+  is 34, the whole tree including `scripts/` is ~160, and `config.yaml`'s
+  "~69" is neither. A post-image syntax error is always reported; a
+  pre-image-only syntax error reports nothing.
+- **The blast radius reports the module-level symbols the edit touched**
+  (`_edit_diagnostics._touched_symbols`, both images, Python only, and a
+  created file has no pre-edit callers so it reports nothing) against the
+  graph of the tree *before* the edit, drops anything over `FANOUT_CEILING`
+  (20) call sites, and runs in a thread the edit abandons after
+  `RAIL_BUDGET_S` (90 ms).
   Its switch is the one key here with no line in `config.yaml` — absent means
   the default, which is on; adding the line is a human-only edit.
 - **The change ledger's first writer per realpath per turn wins**, so a turn
@@ -69,14 +76,21 @@ before assuming a layer can be turned off — or that it is installed.
   gates is the durable-external surface — email, calendar, contacts, tasks.
 - **And `safety.py` is not installed everywhere.** It is a PreToolUse hook,
   so it exists only where a caller built a registry with it:
-  `app/routers/messages.py` — which covers every chat turn and every
-  session-backed worker, since those post to the chat endpoint — and
-  `builtin_task.py` for subagents. The two *direct* paths build their own
-  registries and install the grant gate only, so an `autonomy.run_task` or
-  `run_prompt_on_primary` turn has neither this nor anything else between it
-  and `rm -rf`; `builtin_bash.py` deliberately does not self-check, and says
-  so in its docstring. That asymmetry is the same shape as the one #534
-  closed for the grant gate, one layer down and still open.
+  `app/routers/messages.py` — three sites (`:1907` streaming, `:2045` ambient,
+  `:2175` sync), which covers the session-backed workers too, since those post
+  to the chat endpoint — and `builtin_task.py` for subagents. Two paths build
+  options and get *no* registry at all: **voice**
+  (`app/routers/voice.py:123` passes no `hooks=`, and `_run_turn` fills in
+  every other option but never that one, so an IV-off voice turn has neither
+  this nor the grant gate) and the bare `HookRegistry` that
+  `attach_observer_for_turn` creates when it finds none. The two *direct*
+  paths build their own registries and install the grant gate only, so an
+  `autonomy.run_task` or `run_prompt_on_primary` turn has neither this nor
+  anything else between it and `rm -rf`; `builtin_bash.py` deliberately does
+  not self-check, and says so in its docstring — naming
+  `app/inner_voice/heuristics.py`, a module that no longer exists; the live
+  gate is this file. Voice is the same shape as the one #534 closed for the
+  grant gate, one layer down and still open.
 
 ## The code graph
 
@@ -108,3 +122,17 @@ and `tests/test_automod_hardening.py::test_worker_turns_cannot_drive_the_loop`.
 ## Related
 
 [[harness]], [[automod]], [[tools]], [[background-runs]].
+
+## Review log
+
+- 2026-09-13 — **stale.** The safety-hook coverage claim was wrong in the
+  dangerous direction: voice turns build a `RunOptions` with no `hooks=` and
+  `_run_turn` never fills one, so `safety.py` is absent there too (#869);
+  `builtin_bash.py`'s docstring still names the deleted
+  `app/inner_voice/heuristics.py` (#695); "~69 tolerated pyflakes findings" is
+  `app/`-scoped-34 or whole-tree-~160 depending on scope, so the number now
+  names its scope; the symbol-diff helper is `_touched_symbols`, not
+  `diff_interfaces`; `config.yaml`'s "workers have no turn id and no reader"
+  is half wrong (#963); `safety.py` has no config key, hence no kill switch.
+  Code-graph, effect-ledger and read-stat sections checked claim-by-claim and
+  held.
