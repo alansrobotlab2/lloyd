@@ -28,8 +28,10 @@ and no file under it still claims yaml is missing.
 These assertions read the live vault, so they can go red from a nightly skills
 pass rather than from the change under review. That is the same trade
 `tests/test_skill_tool_names.py` already makes for live skill prose, and it is
-deliberate: a check that the gate deselects pins nothing. The module skips only
-where no vault is present at all, like its neighbour.
+deliberate: the gate runner hardcodes `-m "not live_vault"`, so a marked check
+is deselected from the run meant to enforce it and pins nothing. Nothing here
+skips either — with no vault at all the reads fail with `NO_VAULT` in the
+message, which is a real answer rather than a green-looking absence of evidence.
 """
 
 from __future__ import annotations
@@ -39,8 +41,6 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -72,13 +72,11 @@ _NOT_SOURCE = {
 }
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _skills():
-    if not SKILLS_DIR.is_dir():
-        pytest.skip("no skills directory on this machine")
+NO_VAULT = f"no skills tree at {SKILLS_DIR}: these assertions exist to police that tree"
 
 
 def _text(path: Path) -> str:
+    assert path.is_file(), NO_VAULT
     return path.read_text(encoding="utf-8", errors="replace")
 
 
@@ -245,6 +243,13 @@ def test_the_skill_says_the_venv_is_the_fix_and_defers_the_class_to_484():
         if "preferred" in ln.lower() and ".venvs/lloyd/bin/python" in ln
     ]
     assert preferred, "no line states that running under the venv is the preferred fix"
+    # The other half of clause 5: the preference has to exclude the alternative,
+    # or "preferred" is a suggestion an agent can take or leave.
+    against = [
+        ln for ln in text.splitlines()
+        if re.search(r"\bdo not (add|keep)\b", ln.lower()) and "pars" in ln.lower()
+    ]
+    assert against, "no line tells the reader not to add or keep a partial YAML parser"
     # Backlog reference, not any bare "484": the hash is required, and the
     # deferral has to be the decision about deleting the class.
     flat = " ".join(text.split())
@@ -266,17 +271,22 @@ def test_no_skill_still_claims_the_yaml_module_is_missing():
 
 
 def test_pyyaml_imports_under_the_supported_interpreter():
-    """The measured fact the retired rationale contradicted: the interpreter the
-    skill names is a real venv python, and PyYAML 6.0.3 imports under it, so the
-    fallback branch is never taken on the supported path."""
-    probe = (
-        "import sys, yaml; print(sys.executable); print(yaml.__version__)"
-    )
+    """The measured fact the retired rationale contradicted: under the
+    interpreter the skill names, `import yaml` succeeds and reports the same
+    version the skill's Testing block tells the reader to expect. Both halves
+    can fail — an environment that loses PyYAML reddens the import, and a
+    version bump reddens the prose until the page is updated with it."""
+    probe = "import sys, yaml; print(sys.executable); print(yaml.__version__)"
     proc = subprocess.run(
         [str(VENV_PY), "-c", probe], capture_output=True, text=True
     )
-    assert proc.returncode == 0, f"import yaml under the venv: {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"`import yaml` failed under the interpreter the skill names: {proc.stderr}"
+    )
     executable, _, version = proc.stdout.strip().partition("\n")
     assert Path(executable) == VENV_PY, f"not the venv interpreter: {executable}"
-    parts = tuple(int(n) for n in version.split(".")[:2])
-    assert parts >= (6, 0), f"PyYAML {version} is older than the 6.0.3 the skill states"
+    stated = re.findall(r"PyYAML (\d+\.\d+\.\d+)", _text(YAML_SKILL))
+    assert stated, "the skill states no PyYAML version to expect"
+    assert set(stated) == {version}, (
+        f"interpreter reports PyYAML {version}, the skill tells the reader to expect {stated}"
+    )
