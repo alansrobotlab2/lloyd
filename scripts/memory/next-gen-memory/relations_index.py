@@ -114,9 +114,13 @@ class RelationsIndexGenerator:
     changing content. The vault's content-hash gate
     (``scripts/memory/content_hasher.py``) selects files on sha256 of bytes, so
     every such write re-triggered extraction of a note whose content had not
-    changed — the "byte-churn family" the 2026-08-31 and 2026-09-03
-    vault-maintenance logs recorded, with ``memory/2026-02-22.md`` reprocessed
-    eight times in a day and gaining a blank line each time. No caller survived
+    changed. ``memory/vault-maintenance/vault-maintenance-2026-09-03.md`` is
+    where that pattern got its name — ":167 byte-churn family confirmed",
+    counting ``memory/2026-02-22.md`` from 5 reprocesses that day (:167) to its
+    "10th reprocess today" (:223), with the run-to-run count also logged at :211.
+    ``vault-maintenance-2026-08-30.md`` had already watched the same note come
+    back as changed on consecutive runs (:63, :84, :105, :124) without naming it;
+    there is no 08-31 log. No caller survived
     commit f36c522, which deleted the last production use, so both methods went
     the way of commit 0b3f00b ("delete what nothing runs") rather than staying
     as an unguarded writer aimed at the gate for the next caller to arm. The

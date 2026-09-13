@@ -7,12 +7,16 @@ whole frontmatter with ``yaml.dump`` and rejoined the body with
 and appends one newline byte per call, so it changed bytes without changing
 content — and the nightly content-hash gate
 (`scripts/memory/content_hasher.py::get_changed_files`, sha256 of bytes) reads
-a byte change as new content and re-extracts the note. That is the
-"byte-churn family" the 2026-08-31 and 2026-09-03 vault-maintenance logs
-recorded (``memory/2026-02-22.md`` reprocessed eight times in one day, growing
-a blank line each time). Both functions had no caller left after f36c522, so
-this round deleted them (clause 1) rather than leaving an unguarded writer
-pointed at the gate.
+a byte change as new content and re-extracts the note. That is the pattern
+``memory/vault-maintenance/vault-maintenance-2026-09-03.md`` named the
+"byte-churn family": :167 "churn family unchanged — memory/2026-02-22.md 5×
+reprocessed today (byte-churn family confirmed…)", :211 "now at 9 reprocesses
+today", :223 "the 02-22 byte-churn loop hit its 10th reprocess today". The log
+before it, ``vault-maintenance-2026-08-30.md``, had already recorded the same
+note coming back as changed on consecutive runs (:63, :84, :105, :124) without
+naming it; there is no 08-31 log. Both functions had no caller left after
+f36c522, so this round deleted them (clause 1) rather than leaving an unguarded
+writer pointed at the gate.
 
 Each test below names the clause it pins. Nothing here touches ``~/obsidian``
 or the live ``~/lloyd/_pipeline/relations-index.json``: the generator's
@@ -22,6 +26,7 @@ or the live ``~/lloyd/_pipeline/relations-index.json``: the generator's
 import ast
 import hashlib
 import importlib.util
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -319,11 +324,74 @@ def test_no_write_target_falls_under_the_vault_or_the_live_index(generator, vaul
 
 # --- clause 5: the nightly path ---------------------------------------------
 
-def test_nightly_reaches_the_generator_only_through_rebuild():
-    """#484 clause 5: `nightly_extraction.py` touches RelationsIndexGenerator
-    only through `rebuild()`. Static, because the import crosses a sys.path
-    seam the code graph is blind to; the AST walk is the grep that cannot go
-    stale on a line number."""
+@pytest.fixture
+def nightly_module():
+    """`nightly_extraction.py` actually imported, for the clause-5 seam.
+
+    The file is a script, not an importable package module: it binds
+    `RelationsIndexGenerator` with a bare `from relations_index import …` at :42,
+    which resolves only because running it as a script puts its own directory on
+    `sys.path`. `importlib` does not do that for a file loaded by path, so this
+    fixture injects the directory first and reproduces the shipped resolution.
+    (:40 also inserts `~/obsidian/agents/memory/scripts/next-gen-memory`, a
+    directory deleted from the vault on 2026-09-03 — so nothing else can win the
+    name today, and the origin assertion in the test says so rather than
+    trusting it.)
+
+    Teardown puts `sys.path` and `sys.modules` back as found: `relations_index`,
+    `fact_extractor` and `profile_generator` land in `sys.modules` under those
+    unqualified names, and leaving them would hand a later test a module loaded
+    from this directory under a name it might otherwise resolve elsewhere.
+    """
+    injected = str(NIGHTLY.parent)
+    before_path = list(sys.path)
+    before_modules = set(sys.modules)
+    sys.path.insert(0, injected)
+    spec = importlib.util.spec_from_file_location("nightly_extraction_under_test", NIGHTLY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    yield mod
+    # Only the modules that came off the path this test injected. A plain
+    # set-difference would also evict stdlib modules the exec happened to pull
+    # in first, which is churn this test has no business causing.
+    for name in set(sys.modules) - before_modules:
+        loaded = getattr(sys.modules[name], "__file__", None)
+        if loaded and injected in str(Path(loaded).resolve().parents):
+            sys.modules.pop(name, None)
+    sys.path[:] = before_path
+
+
+def test_nightly_reaches_the_generator_only_through_rebuild(nightly_module, ri):
+    """#484 clause 5, both halves.
+
+    Static half: `nightly_extraction.py` calls `rebuild()` and nothing else on
+    the relations generator — the AST walk is the grep that cannot go stale on a
+    line number.
+
+    Executed half: the AST alone would also pass on a file that no longer
+    imports, so the same test loads the script. An import break, a renamed
+    symbol, or the `from relations_index import …` at :42 resolving to a
+    different file than the one under test all fail here instead of at 02:00 in
+    the nightly job. The last assert is the one that matters for #484: the class
+    the nightly binds must be the class this suite just deleted the writer from —
+    otherwise the deletion protects a module nothing runs.
+    """
+    bound = nightly_module.RelationsIndexGenerator
+    origin = Path(inspect.getsourcefile(bound)).resolve()
+    assert origin == SCRIPT.resolve(), (
+        f"nightly_extraction.py bound RelationsIndexGenerator from {origin}, not the "
+        f"file this suite deleted the writer out of ({SCRIPT}) — clause 5's read-only "
+        "guarantee would be about the wrong module"
+    )
+    assert hasattr(bound, "rebuild")
+    # the deletion is visible from the nightly's own binding, not just from the
+    # copy this module loaded: two importlib loads of one path make two distinct
+    # class objects, so `is` against the `ri` fixture's class would be false even
+    # when both came from this file — origin is the comparison that means it.
+    assert not hasattr(bound, "add_relation")
+    assert not hasattr(bound, "_update_frontmatter")
+    assert hasattr(ri.RelationsIndexGenerator, "rebuild")
+
     tree = ast.parse(NIGHTLY.read_text())
     method_calls = set()
     for node in ast.walk(tree):
