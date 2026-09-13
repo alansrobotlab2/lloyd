@@ -8,6 +8,7 @@ edges that only ever appeared when someone ran a script by hand.
 """
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -348,9 +349,9 @@ VAULT = Path.home() / "obsidian"
 def test_exclusion_set_holds_only_the_live_writer():
     """A name belongs in `_SELF_WRITTEN_MEMORY_NOTES` only while something
     still regenerates it. Both dead reports stayed in the set after their
-    generators were deleted, so the extractor skipped files it had stopped
-    writing — and a `type: report` note asserting 187,368 relationships sat in
-    `memory/` contradicting the live graph by ~46x (#487)."""
+    generators were deleted, so the extractor kept skipping files it had
+    stopped writing, and the relationship counts those dead `type: report`
+    notes asserted in `memory/` were never recomputed by anything (#487)."""
     ne = _load("nightly_extraction_exclset", NE_PATH)
     for name in DEAD_DERIVED_INDEXES:
         assert name not in ne._SELF_WRITTEN_MEMORY_NOTES, (
@@ -393,17 +394,40 @@ def test_the_dead_names_stop_being_excluded_from_the_corpus(tmp_path, monkeypatc
         "only self-written index that may stay out of the corpus")
 
 
+@pytest.mark.live_vault
 def test_the_two_dead_reports_are_out_of_the_vault():
-    """Clause 1 lands on the vault side (vault commit `e4ad7729`), so it is
-    not in this diff — pinned here against the tree a reader actually opens.
-    The directory is asserted first: a check that cannot see its own input
-    reports a pass it cannot justify."""
+    """Clause 1 — neither report exists in the vault working tree.
+
+    The mechanism for this clause is `automod_vault_land`, which landed vault
+    commit `e4ad7729`; a code round's diff cannot carry a vault path, so this
+    is the pin, and it reads the tree a reader actually opens. Marked
+    `live_vault` per pytest.ini: the gate's `tests` rung runs `-m "not
+    live_vault"` because a live-vault assertion judges whatever the previous
+    writer left, not the candidate under test — run it directly, or through
+    the vault route that writes it.
+
+    Two things are asserted, because absence alone is the weaker claim: a file
+    deleted in a dirty tree comes back on the next `git checkout`, so the
+    deletion has to be committed as well as present. The directory is asserted
+    first — a check that cannot see its own input reports a pass it cannot
+    justify, and `ls-files` answers the empty string for a broken git call just
+    as it does for a deleted file.
+    """
     mem = VAULT / "memory"
     assert mem.is_dir(), f"{mem} is not readable — this check cannot report"
     for name in DEAD_DERIVED_INDEXES:
         assert not (mem / name).exists(), (
             f"memory/{name} is back: a report no generator writes, asserting a "
             "relationship count nothing recomputes (#487)")
+        tracked = subprocess.run(
+            ["git", "-C", str(VAULT), "ls-files", "--", f"memory/{name}"],
+            capture_output=True, text=True)
+        assert tracked.returncode == 0, (
+            f"git ls-files failed ({tracked.stderr.strip()[:120]}); the "
+            "committed-deletion half of this check is unevaluable")
+        assert tracked.stdout.strip() == "", (
+            f"memory/{name} is still tracked in the vault: an untracked "
+            "deletion is one `git checkout` away from restoring it")
 
 
 # ── the rebuild's write flag ─────────────────────────────────────────────────

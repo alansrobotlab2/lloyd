@@ -47,10 +47,10 @@ _SELF_WRITTEN_MEMORY_NOTES = frozenset({
     # Derived indexes the pipeline regenerates into `memory/` itself. A name
     # earns its place by having a live writer, not by having had one: two
     # generated reports stayed in this set for nine days after 0b3f00b deleted
-    # their generators, so the extractor skipped files it had stopped writing
-    # while their stale counts — one asserted 187,368 relationships against a
-    # live graph of ~50k edges — sat in the vault looking authoritative
-    # (#487). `tests/test_fact_extractor.py` pins both halves of the rule.
+    # their generators, so the extractor kept skipping files it had stopped
+    # writing, and the relationship counts those dead files asserted in
+    # `memory/` were never recomputed by anything (#487). Pinning the rule as
+    # behaviour, not just as set membership: tests/test_fact_extractor.py.
     "skills-index.md",
 })
 
