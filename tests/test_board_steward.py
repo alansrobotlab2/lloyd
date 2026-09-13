@@ -219,3 +219,13 @@ def test_the_steward_turn_cannot_write(monkeypatch):
     src = inspect.getsource(W.execute)
     for tool in ("Bash", "Edit", "Write", "backlog_write_task", "automod_start", "automod_land"):
         assert f'"{tool}"' in src, tool
+
+
+def test_the_steward_reads_only_the_loops_boards():
+    """The machine scopes itself to `DEFAULT_BOARDS`; a steward shown every
+    board proposes moves on items that are not the loop's to touch, and the
+    metric filed them under `no_opinion` every tick on 2026-09-13."""
+    import inspect
+    src = inspect.getsource(W.execute)
+    assert "B.open_items, B.DEFAULT_BOARDS" in src
+    assert "B.open_items, None" not in src

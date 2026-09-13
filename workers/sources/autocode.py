@@ -366,10 +366,42 @@ def _loop_is_free() -> tuple[bool, str]:
                        f"observation ({current.get('state')})")
     if S.read_rollback_request():
         return False, "a rollback request is pending"
-    worktrees = W.prune_orphans(LIVE_ROOT)
-    if len(worktrees) > 1:
-        return False, f"a round is already open ({len(worktrees) - 1} worktree(s))"
+    # Only worktrees the loop itself owns count as an open round: the round
+    # worktrees and the review/calibration checkouts, all under
+    # `~/lloyd-work`. `git worktree list` also reports anything a model or a
+    # human added elsewhere — on 2026-09-13 a round's own scratch checkout at
+    # `/tmp/wt484` was left behind and blocked every implement poll for
+    # eleven hours ("a round is already open (1 worktree(s))") with nothing
+    # in flight. A stray registration is logged, never counted or removed.
+    owned, stray = _loop_worktrees(W.prune_orphans(LIVE_ROOT))
+    if stray:
+        logger.info("autocode: ignoring %d worktree(s) outside %s: %s",
+                    len(stray), _LOOP_WORKTREE_ROOT, ", ".join(stray[:3]))
+    if owned:
+        return False, f"a round is already open ({len(owned)} worktree(s))"
     return True, "free"
+
+
+_LOOP_WORKTREE_ROOT = Path.home() / "lloyd-work"
+
+
+def _loop_worktrees(paths: list[str]) -> tuple[list[str], list[str]]:
+    """`(owned, stray)`: registered worktrees under the loop's root, and not.
+
+    The main checkout is neither — it is the repo. Resolved, so a symlinked
+    home cannot make an owned worktree look stray."""
+    root = str(_LOOP_WORKTREE_ROOT.resolve())
+    live = str(Path(LIVE_ROOT).resolve())
+    owned, stray = [], []
+    for raw in paths:
+        try:
+            resolved = str(Path(raw).resolve())
+        except OSError:
+            resolved = raw
+        if resolved == live:
+            continue
+        (owned if resolved.startswith(root + "/") or resolved == root else stray).append(raw)
+    return owned, stray
 
 
 def _age_phrase(ts: float | None) -> str:

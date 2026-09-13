@@ -296,7 +296,11 @@ def test_a_closed_item_is_never_implemented(isolated):
     (dict(broken=True), "BROKEN"),
     (dict(current={"commit": "c" * 40, "state": "observing"}), "under observation"),
     (dict(request={"trigger": "manual"}), "rollback request is pending"),
-    (dict(worktrees=["/live", "/live-work/SM_1/home/lloyd"]), "round is already open"),
+    # Under the loop's own root: a registration anywhere else is a stray a
+    # model or a human left behind, and since 2026-09-13 it is logged, not
+    # counted (/tmp/wt484 blocked the loop for eleven hours).
+    (dict(worktrees=["/live", str(Path.home() / "lloyd-work" / "SM_1" / "home" / "lloyd")]),
+     "round is already open"),
 ])
 def test_every_gate_the_loop_enforces_stops_the_implementer(monkeypatch, block, why):
     """Checked BEFORE spending an agent turn, and again at run time."""
@@ -1559,3 +1563,38 @@ def test_item_contract_appends_members_and_keeps_the_umbrella_clauses(isolated):
     assert c["clauses"] == ["the floor gates again"] and c["members"] == [2, 5]
     assert "## Members (consolidated by group triage)" in c["body"]
     assert "### #2" in c["body"] and "Member 5" in c["body"]
+
+
+def test_only_worktrees_under_lloyd_work_count_as_an_open_round(monkeypatch):
+    """A round's scratch checkout at /tmp/wt484 blocked every implement poll
+    for eleven hours on 2026-09-13. `git worktree list` reports every
+    registration; only the loop's own count."""
+    from pathlib import Path
+    from workers.sources import autocode as I
+    root = I._LOOP_WORKTREE_ROOT
+    owned, stray = I._loop_worktrees([
+        str(I.LIVE_ROOT),
+        str(root / "SM_20260913_011137" / "home" / "lloyd"),
+        str(root / "review_cal_544" / "home" / "lloyd"),
+        "/tmp/wt484",
+        "/srv/somebody-elses-checkout",   # not the live repo (which is filtered), not the loop's
+    ])
+    assert owned == [str(root / "SM_20260913_011137" / "home" / "lloyd"),
+                     str(root / "review_cal_544" / "home" / "lloyd")]
+    assert stray == ["/tmp/wt484", "/srv/somebody-elses-checkout"]
+
+
+def test_a_stray_worktree_does_not_block_the_loop(monkeypatch):
+    from workers.sources import autocode as I
+    from scripts.automod import state as S, worktree as W
+    monkeypatch.setattr(S, "is_enabled", lambda root: True)
+    monkeypatch.setattr(S, "is_halted", lambda: False)
+    monkeypatch.setattr(S, "is_broken", lambda: False)
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    monkeypatch.setattr(S, "read_rollback_request", lambda: None)
+    monkeypatch.setattr(W, "prune_orphans", lambda root: [str(I.LIVE_ROOT), "/tmp/wt484"])
+    assert I._loop_is_free() == (True, "free")
+    monkeypatch.setattr(W, "prune_orphans", lambda root: [
+        str(I.LIVE_ROOT), str(I._LOOP_WORKTREE_ROOT / "SM_1" / "home" / "lloyd")])
+    ok, why = I._loop_is_free()
+    assert ok is False and "1 worktree" in why

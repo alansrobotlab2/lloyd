@@ -421,7 +421,11 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     since_ts = float(state.get("last_ts") or 0.0)
     ledger = S.LEDGER_PATH
 
-    open_items = await asyncio.to_thread(B.open_items, None)
+    # The loop's boards only (`DEFAULT_BOARDS`), which is the machine's own
+    # scope: an Alfie hardware item or a purchase decision on another board
+    # is not this loop's to move, and the steward was proposing exactly those
+    # (#38, #40, #626, #756 — filed under `no_opinion` every tick overnight).
+    open_items = await asyncio.to_thread(B.open_items, B.DEFAULT_BOARDS)
     expected = await asyncio.to_thread(B.desired_statuses, ledger)
     current = {i.id: i.status for i in open_items}
     pending = {i for i, want in expected.items() if current.get(i) != want[0]}
