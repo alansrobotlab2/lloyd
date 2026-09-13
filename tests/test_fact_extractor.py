@@ -385,9 +385,15 @@ def test_the_dead_names_stop_being_excluded_from_the_corpus(tmp_path, monkeypatc
     monkeypatch.setattr(ne, "VAULT", vault)
     monkeypatch.setattr(ne, "CONFIG_PATH", cfg)
     kg_store.configure(tmp_path / "kg.sqlite")
-    x = ne.NightlyExtraction()
-    got = {Path(p).name for p in x._eligible_files(full_mode=True)}
-    kg_store.reset()
+    try:
+        x = ne.NightlyExtraction()
+        got = {Path(p).name for p in x._eligible_files(full_mode=True)}
+    finally:
+        # `finally`, not the next statement: `_eligible_files` raises on a bad
+        # config, and a raise here would otherwise leave the temp store
+        # configured for every later test in the process — a leaked fixture
+        # turns an unrelated failure into this test's name.
+        kg_store.reset()
     assert got == {"semantic-relationships.md", "relationship-proposals.md",
                    "control.md"}, (
         "the dead reports are ordinary documents now; skills-index.md is the "
