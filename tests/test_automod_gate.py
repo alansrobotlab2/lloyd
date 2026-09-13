@@ -527,6 +527,52 @@ def test_rung_tests_blames_the_round_for_a_failure_it_introduced(tmp_path, monke
     git(repo, "worktree", "remove", "--force", str(wt))
 
 
+def test_a_round_that_breaks_a_green_tree_is_told_which_tests_by_name(tmp_path, monkeypatch):
+    """#1093: this branch used to return only the last 900 characters of
+    pytest's output, which began mid-name. The round that read it invented a
+    test file and filed a blocker against the gate. Every new failure is named,
+    whole, ahead of the tail."""
+    r = tmp_path / "live"
+    (r / "tests").mkdir(parents=True)
+    git(tmp_path, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@e.com")
+    git(r, "config", "user.name", "t")
+    (r / "tests" / "test_green.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "base")
+    base = git(r, "rev-parse", "HEAD").stdout.strip()
+    monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
+    wt = tmp_path / "work" / "SM_T4" / "home" / "lloyd"
+    wt.parent.mkdir(parents=True)
+    git(r, "worktree", "add", "-q", "-b", "automod/SM_T4", str(wt), base)
+    (wt / "tests" / "test_green.py").write_text(
+        "def test_ok():\n    assert True\n\n"
+        "def test_broken_by_the_round_one():\n    raise TypeError('x' * 400)\n\n"
+        "def test_broken_by_the_round_two():\n    raise TypeError('y' * 400)\n", encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "breaks two tests")
+
+    g = _gate_for(r, wt, base, monkeypatch)
+    g.python = Path(sys.executable)
+    ok, detail, data = g.rung_tests()
+
+    assert ok is False and not data.get("external_blocker")
+    head = detail.split("\n", 1)[0]
+    assert "all 2 failure(s) are new in this round" in head
+    for nid in ("tests/test_green.py::test_broken_by_the_round_one",
+                "tests/test_green.py::test_broken_by_the_round_two"):
+        assert nid in head, nid
+    git(r, "worktree", "remove", "--force", str(wt))
+
+
+def test_named_ids_are_whole_and_capped():
+    ids = [f"tests/test_x.py::test_{i}" for i in range(25)]
+    text = G._name_ids(ids)
+    assert "tests/test_x.py::test_19" in text and "tests/test_x.py::test_20" not in text
+    assert text.endswith("+5 more (all in data.failed_node_ids)")
+    assert G._name_ids(ids[:2]) == "tests/test_x.py::test_0, tests/test_x.py::test_1"
+
+
 def test_a_test_the_round_added_does_not_hide_the_pre_existing_ones(tmp_path, monkeypatch):
     """Regression, found building this: probing by node id is wrong. Handed a
     node id that does not exist at base — a test the round just wrote, in a file

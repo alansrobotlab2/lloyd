@@ -244,6 +244,15 @@ def _classify_test_failure(node_ids: list[str],
     return (bool(node_ids) and not new), new
 
 
+def _name_ids(ids: list[str], cap: int = 20) -> str:
+    """Failing node ids for a rung detail: every one up to `cap`, then a count.
+    Whole ids only — a clipped id reads as the name of a test that does not
+    exist."""
+    shown = ", ".join(ids[:cap])
+    return shown + (f", +{len(ids) - cap} more (all in data.failed_node_ids)"
+                    if len(ids) > cap else "")
+
+
 def _failures_at_base(python: Path, live_root: Path, base: str,
                       node_ids: list[str], scratch: Path,
                       env: dict | None = None) -> tuple[set[str], str]:
@@ -947,12 +956,23 @@ class Gate:
                 data["new_failures"] = new
                 return False, (f"pytest failed ({counts}): {len(new)} of "
                                f"{len(node_ids)} failures are new in this round "
-                               f"({new}); the rest predate it. {probe_note}\n"
+                               f"({_name_ids(new)}); the rest predate it. {probe_note}\n"
                                f"{tail[-600:]}"), data
             # Nothing reproduces at base: every failure is this round's. Say so
             # in the same field the mixed case uses, so a reader of the report
-            # never has to infer the delta from its absence.
+            # never has to infer the delta from its absence — and name the
+            # failures in the detail itself, ahead of the pytest tail. On
+            # 2026-09-13 this branch returned only `tail[-900:]`, which began
+            # mid-name ("e.py::test_global_scan…"); the full list rode in `data`,
+            # and the tool result carrying it back was cut before `data`. Round
+            # SM_20260913_165927 (#472) never saw its twelve real failures,
+            # invented a test file that exists nowhere, and filed blocker #1093
+            # against the gate for it.
             data["new_failures"] = new
+            if node_ids:
+                return False, (f"pytest failed ({counts}): all {len(node_ids)} failure(s) are "
+                               f"new in this round ({_name_ids(node_ids)}). {probe_note}\n"
+                               f"{tail[-600:]}"), data
             return False, f"pytest failed ({counts}): {tail[-900:]}\n{probe_note}", data
 
         if only:
