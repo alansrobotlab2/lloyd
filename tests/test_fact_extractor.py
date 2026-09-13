@@ -347,7 +347,10 @@ VAULT = Path.home() / "obsidian"
 
 
 def test_exclusion_set_holds_only_the_live_writer():
-    """A name belongs in `_SELF_WRITTEN_MEMORY_NOTES` only while something
+    """Clauses 2 and 3 (the set itself) — neither dead name in
+    `_SELF_WRITTEN_MEMORY_NOTES`, `skills-index.md` still in it.
+
+    A name belongs in `_SELF_WRITTEN_MEMORY_NOTES` only while something
     still regenerates it. Both dead reports stayed in the set after their
     generators were deleted, so the extractor kept skipping files it had
     stopped writing, and the relationship counts those dead `type: report`
@@ -362,7 +365,10 @@ def test_exclusion_set_holds_only_the_live_writer():
 
 
 def test_the_dead_names_stop_being_excluded_from_the_corpus(tmp_path, monkeypatch):
-    """The same claim as behaviour, not as set membership: a file under either
+    """Clauses 2 and 3 (as behaviour) — the extractor's eligible set no longer
+    drops either dead name, and still drops `skills-index.md`.
+
+    The same claim as behaviour, not as set membership: a file under either
     dead name is now an ordinary document, while `skills-index.md` — the one
     entry with a live writer — must still never enter the corpus.
 
@@ -398,6 +404,41 @@ def test_the_dead_names_stop_being_excluded_from_the_corpus(tmp_path, monkeypatc
                    "control.md"}, (
         "the dead reports are ordinary documents now; skills-index.md is the "
         "only self-written index that may stay out of the corpus")
+
+
+def test_nothing_else_in_the_checkout_names_the_removed_notes():
+    """Clause 4 — removing the two entries breaks no reference to them.
+
+    An exclusion-set entry is just a name, so the thing that breaks when it
+    goes is a *spelling*: a second deny-list, a report generator, or a job that
+    reads one of the paths by hand. `0b3f00b` deleted the generators and left
+    nothing pointing at either file, which is why this removal is safe; this
+    pins that no future reference creeps back in. It is the suite half of the
+    clause — the rest is the two tests above plus the pre-existing
+    `_eligible_files` tests, which pass unchanged.
+
+    `git grep` over tracked content is the denominator, not an `rglob`: the
+    tracked checkout is what a reader or a scheduled job can be pointed at, and
+    `_pipeline/` is ignored by git, so the generated artefacts that legitimately
+    carry these names cannot inflate the count. Exit status 1 is git's "no
+    matches" — a real answer, distinct from a failed git call, which is asserted
+    rather than swallowed.
+    """
+    root = Path(__file__).resolve().parents[1]
+    hits = subprocess.run(
+        ["git", "-C", str(root), "grep", "-l", "--fixed-strings",
+         "-e", DEAD_DERIVED_INDEXES[0], "-e", DEAD_DERIVED_INDEXES[1]],
+        capture_output=True, text=True)
+    assert hits.returncode in (0, 1), (
+        f"git grep failed ({hits.stderr.strip()[:160]}); the reference check is "
+        "unevaluable and must not report a pass")
+    here = Path(__file__).resolve()
+    others = sorted(f for f in hits.stdout.split()
+                    if f and (root / f).resolve() != here)
+    assert others == [], (
+        f"{others} name a note whose generator died in 0b3f00b and which the "
+        "extractor no longer excludes — whatever reads that path is reading a "
+        "file nothing writes (#487)")
 
 
 @pytest.mark.live_vault
