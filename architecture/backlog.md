@@ -18,6 +18,7 @@ summary: The markdown kanban at ~/obsidian/backlog/ — one file per task, a
   four-word status vocabulary shared by five readers, the four backlog_* MCP
   tools, write-time dedupe, and the tags the unattended loop writes on itself.
 type: reference
+date: 2026-09-13
 
 ---
 
@@ -25,11 +26,12 @@ type: reference
 
 Markdown kanban at `~/obsidian/backlog/`, read and written by the
 [[tools|MCP tools server]], the Mission Control board, the guardian, and the
-unattended triage/implement loop. 828 tasks today: 816 on the `lloyd` board, 7
-`alfie` (robot firmware), 2 `personal`, and one each on `Architecture`,
-`backlog` and `default`. The directory holds one more markdown file than that
-— `verdict-log-2026-09.md` — and every reader skips it, because what makes a
-file a task is the numeric id prefix on its **name**, not anything inside it.
+unattended triage/implement loop. 960 tasks on 2026-09-13: 948 on the `lloyd`
+board, 7 `alfie` (robot firmware), 2 `personal`, and one each on `Architecture`,
+`backlog` and `default`. The directory also holds one markdown file that is not a
+task — `verdict-log-2026-09.md`, plus a handful of `*.pre-maint.bak` copies — and
+every reader skips them, because what makes a file a task is the numeric id
+prefix on its **name**, not anything inside it.
 
 The file **is** the record. There is no database, no index that has to be kept
 in sync, and no writer that holds state between calls — every reader globs the
@@ -84,8 +86,8 @@ way. #287 (`review`) and #304 (`closed`) sat in that gap from April 2026 until
 2026-09-09, stranded when the vocabulary was narrowed to four words and
 nothing migrated what was already on disk.
 
-- `PIPELINE_STATUSES` — `draft`, `up_next`, `in_progress`, `done`. Live counts:
-  418 / 25 / 8 / 377.
+- `PIPELINE_STATUSES` — `draft`, `up_next`, `in_progress`, `done`. Live counts
+  (2026-09-13): 456 / 68 / 0 / 432.
 - `CLOSED_ALIASES` — `closed`, `cancelled`, `wontfix`. Exactly the non-`done`
   members of the set `dashboard._BACKLOG_CLOSED` has carried all along, which
   is the tree's only record that those words ever meant anything. Inventing
@@ -148,9 +150,9 @@ actually on disk:
 | `position` | int | `id * 1000` at creation; the board's manual ordering. |
 | `type` / `segment` | string | Both `backlog`. OKF conformance — see below. |
 | `activity_log` | list | The audit trail. See "The activity log". |
-| `parent` | int | The item this one was split from or found while implementing. Persisted from the prose first line by the clustering pass. 291 items. |
-| `group` | int | The umbrella a member was folded into (tag `grouped`). 60 items. |
-| `members` | list[int] | The items an umbrella consolidates (tag `umbrella`). 19 items. |
+| `parent` | int | The item this one was split from or found while implementing. Persisted from the prose first line by the clustering pass. 317 items. |
+| `group` | int | The umbrella a member was folded into (tag `grouped`). 140 items. |
+| `members` | list[int] | The items an umbrella consolidates (tag `umbrella`). 53 items. |
 | `duplicate_of` | int | Written by a group triage's `duplicate_of` verdict. |
 | `acceptance_clauses` | list | The contract the review rung holds a round to, on the item and not only in the ledger — a human editing them here is editing what the grader enforces. |
 | `human_clauses` | list | What a person must do before the item closes. Kept apart so no round is asked to fake an audit. |
@@ -199,7 +201,7 @@ behind a fifteen-line helper. `tests/test_backlog_tags_shape.py` pins it.
 | `umbrella` | A consolidation item that carries `members`. Never merged by write-time dedupe. |
 | `grouped` | Folded into an umbrella; out of both pools until that umbrella lands. |
 | `blocker` | The one finding an implement round may still file as its own item. Never merged. |
-| `needs-human` | A spent attempt, or a landing whose `human_clauses` are outstanding. `draft` is 250 items deep, so the tag is what makes a decision findable. It comes off when a reopen moves the item back into a pool. |
+| `needs-human` | A spent attempt, or a landing whose `human_clauses` are outstanding. `draft` is 456 items deep, so the tag is what makes a decision findable. It comes off when a reopen moves the item back into a pool. |
 | `expired` | Closed by `expire_stale_spawns`. A human setting the status back to `draft` reopens it. |
 
 **Quarantine.** `backlog.is_quarantined` holds a self-filed item out of the
@@ -248,7 +250,7 @@ an unattended pass is that a human can audit it later.
 **Until early 2026 this was a `## Activity Log` section at the bottom of the
 body**, with lines like `- **2026-03-08 18:05** — Moved to in_review (Lloyd)`.
 204 files still carry that section and the vocabulary it was written in; the
-newest is #263. No live backlog reader or writer touches it — it is inert text
+newest is #365. No live backlog reader or writer touches it — it is inert text
 in the body now. The heading form survives for a different file type
 altogether: `autonomy.py::_append_activity_log` and `agent_mcp/autonomy.py`
 still append to a `## Activity Log` heading in `~/obsidian/autonomy/*.md`,
@@ -257,10 +259,11 @@ find the parser they were looking for.
 
 ## Malformed YAML degrades, but never round-trips
 
-Three items on the lloyd board have an `activity_log` entry with an
-unterminated quote. A strict `yaml.safe_load` raises, every caller here wraps
-its parse in `except Exception: continue`, and those items vanish from the
-listing *and* from the board's task count with nothing logged.
+Nine items on the lloyd board (478, 519, 520, 525, 787, 866, 918, 971, 981 as
+of 2026-09-13) have an `activity_log` entry with an unterminated quote. A strict
+`yaml.safe_load` raises, every caller here wraps its parse in `except Exception:
+continue`, and those items would vanish from the listing *and* from the board's
+task count with nothing logged.
 
 `agent_mcp/_shared.py::parse_frontmatter_text` is the graduated recovery all
 three parsers use: plain parse, then a retry after repairing the known
@@ -275,7 +278,12 @@ would write `_yaml_broken: true` into the file and drop every key it could not
 read — `activity_log` and the timestamps among them.
 `agent_mcp/backlog.py::save_task` returns False, `app/routers/backlog.py::_reject_broken_fm`
 raises 409, and `scripts/automod/backlog.py::update_frontmatter` refuses a file
-whose frontmatter parsed empty for the same reason.
+whose frontmatter parsed empty for the same reason. **That guard is not on every
+writer in the module**: `_apply_status` (line 1648) and `note_item` (line 1872)
+dump their parse back unguarded, and `load_item` defaults an unparseable item to
+`status='draft'`, `board=''`, which admits it to `open_items(None)` — so a status
+move on a file in this shape overwrites its frontmatter with a four-key stub
+(#1020).
 
 ## MCP tools (4)
 
@@ -308,7 +316,7 @@ See [[tools]] for the full parameter list. The `Tools` page and
 ## Write-time dedupe: check the board before writing
 
 The triage prompt used to say "run `backlog_tasks` first to be sure no item
-already covers it" — a tool with no text search returning ~800 title-only rows,
+already covers it" — a tool with no text search returning ~960 title-only rows,
 so the check was a ritual. The loop filed the same finding again every time a
 round re-ran: #549 ran four times in 110 minutes and filed #788, #795 and #799
 for one dead config floor.
@@ -372,7 +380,7 @@ that a merge never loses text.
 | Route | Purpose |
 |---|---|
 | `GET /api/backlog/boards` | Board list with counts, icons and colours for the board tabs. |
-| `GET /api/backlog/tasks` | Rows for the board, optionally filtered by `board_id`/`status`. |
+| `GET /api/backlog/tasks` | Rows for the board, optionally filtered by `board_id`/`status`. Each row carries the item's **whole body** as `description` — unfiltered, 956 rows is 6 MB in 2.2 s, and `BacklogPage` polls it every 15 s (#1021). |
 | `POST /api/backlog/task-update` | Move, rename, retag, re-board. |
 | `POST /api/backlog/task-create` | The UI's create — and the guardian's. |
 | `POST /api/backlog/task-delete` | Unlink the file. The only destructive path. |
@@ -429,8 +437,10 @@ there. `tests/test_backlog_okf_frontmatter.py` pins both writers.
 
 `app/routers/dashboard.py::_backlog` produces the Mission Control counters:
 totals by status and by board, plus `umbrellas`, `grouped` and `recent_open`.
-It is TTL-cached for 10 s — the board is 800+ markdown files and its status
-counts do not change between 2-second polls.
+It is TTL-cached for 10 s — the board is 960+ markdown files, and the sibling
+route `GET /api/backlog/tasks` is *not* cached, so it walks and parses the whole
+directory twice per call (`_backlog_board_map`) while `DashboardPage` polls every
+2 s and `BacklogPage` every 15 s.
 
 **Front matter is bounded by its closing `---`, not by a byte count.**
 `_frontmatter` reads in 4 KB chunks up to a 64 KB ceiling and stops at a
@@ -447,9 +457,12 @@ most active is the worst possible reading of "bounded".
 - Every status move is attributed in the activity log and carries its reason.
   Tag-only writes (`tag_item`) move `updated` and nothing else, so a tag is the
   one change the log does not narrate.
-- All operations are file-based. Concurrency is "last writer wins on a whole
-  file", which is survivable only because writes are small, rare and
-  append-shaped — and because nothing rewrites a file it could not parse.
+- All operations are file-based, with no lock and no atomic replace anywhere in
+  the five writers — concurrency is "last writer wins on a whole file"
+  (#891). It is survivable only because writes are small, rare and
+  append-shaped. "Nothing rewrites a file it could not parse" is the intent and
+  holds for `save_task`, `_reject_broken_fm` and `update_frontmatter`, but not
+  for `_apply_status`/`note_item` — see above, and #1020.
 
 ## Migration history
 
@@ -479,3 +492,13 @@ in #220 and in the vault's 2026-03 daily notes.
 - [[automod]] — the triage/implement loop that reads and writes this board
 - [[subliminal]] — pre-call retrieval, which sees backlog items
 - [[infrastructure]] — services and processes
+
+## Review log
+
+- 2026-09-13 — **stale.** Structure and guards verified accurate; refreshed the
+  census (960 tasks, 456/68/0/432, relation keys 317/140/53, nine `_yaml_broken`
+  items, legacy log newest #365), recorded that `GET /api/backlog/tasks` returns
+  whole bodies uncached (#1021), and corrected the "nothing rewrites a file it
+  could not parse" invariant, which `_apply_status`/`note_item` do not hold
+  (#1020, #1023); the uncached whole-body list route and the board's own
+  counters are #1021. Status moves outside the loop are #1023.
