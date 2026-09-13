@@ -140,3 +140,29 @@ def _isolate_usage_store(tmp_path_factory, monkeypatch):
     """
     monkeypatch.setattr("usage_store.DB_PATH",
                         tmp_path_factory.mktemp("usage") / "usage.db")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_backlog_dedupe(tmp_path_factory, monkeypatch):
+    """No test appends to the live dedupe log or queries the live qmd daemon.
+
+    `backlog_write_task` runs the write-time dedupe on every create, and its
+    log path is a `Path.home()` literal. Tests that patched `BACKLOG_DIR` and
+    nothing else — `test_backlog_okf_frontmatter.py`, `test_backlog_tags_shape.py`
+    — wrote a real row per run and POSTed their fixture text to the daemon. On
+    2026-09-13, 656 of `dedupe.jsonl`'s 1004 rows were fixtures ("A newly
+    written task" 498, "Filed by a digest run" 158): the log that exists to
+    tune the merge threshold was two-thirds noise.
+
+    `dedupe_config` is pinned to the defaults so `config.yaml` cannot flip
+    `merge` under a test. Test-local patches still win — their `monkeypatch`
+    runs after this one — which is how `test_backlog_dedupe.py` feeds rows in.
+    """
+    try:
+        from agent_mcp import backlog_similar as SIM
+    except Exception:          # module not importable in this test's env
+        return
+    monkeypatch.setattr(SIM, "DEDUPE_LOG",
+                        tmp_path_factory.mktemp("dedupe") / "dedupe.jsonl")
+    monkeypatch.setattr(SIM, "semantic_candidates", lambda text, **kw: [])
+    monkeypatch.setattr(SIM, "dedupe_config", lambda: dict(SIM.DEFAULTS))
