@@ -96,8 +96,37 @@ VALID_RELATION_TYPES = set(INVERSE_RELATIONS.keys())
 
 
 class RelationsIndexGenerator:
-    """Generate and maintain document relationships index."""
-    
+    """Generate and maintain document relationships index.
+
+    READ-ONLY with respect to the vault: every path here reads vault ``.md``
+    files and the only thing it writes is ``self.index_file``. Relations are
+    authored in vault frontmatter by hand (or, for conversation-derived ones,
+    land as ``relations:`` frontmatter through the normal vault route) and are
+    *read* from here by :meth:`rebuild`; nothing in this module mutates a vault
+    source document.
+
+    That boundary is load-bearing, not stylistic. This class used to carry a
+    second pair of methods — an "add this relation" entry point and the private
+    frontmatter rewriter behind it. The rewriter rebuilt a note's whole
+    frontmatter with ``yaml.dump`` and rejoined the body with
+    ``f"---\\n{dump}---\\n{body}"``, a round-trip that reorders keys, drops
+    quoting and appends one newline byte per call: it changed bytes without
+    changing content. The vault's content-hash gate
+    (``scripts/memory/content_hasher.py``) selects files on sha256 of bytes, so
+    every such write re-triggered extraction of a note whose content had not
+    changed — the "byte-churn family" the 2026-08-31 and 2026-09-03
+    vault-maintenance logs recorded, with ``memory/2026-02-22.md`` reprocessed
+    eight times in a day and gaining a blank line each time. No caller survived
+    commit f36c522, which deleted the last production use, so both methods went
+    the way of commit 0b3f00b ("delete what nothing runs") rather than staying
+    as an unguarded writer aimed at the gate for the next caller to arm. The
+    history, the clauses and the test are backlog #484,
+    ``tests/test_relations_index_read_only.py``. If relation-writing comes
+    back, it has to splice the ``relations:`` key through as text and skip the
+    write when the result compares equal to what was parsed — and that test
+    belongs in that file.
+    """
+
     def __init__(self):
         self.vault = Path.home() / "obsidian"
         self.index_file = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
@@ -361,130 +390,6 @@ class RelationsIndexGenerator:
             target = target + '.md'
         
         return target
-    
-    def add_relation(self, source: str, target: str, rel_type: str) -> bool:
-        """Add a relationship between two documents.
-        
-        Adds to in-memory index, writes to disk, and optionally
-        updates frontmatter of both documents (bidirectional).
-        
-        Args:
-            source: Source document path (vault-relative)
-            target: Target document path (vault-relative)
-            rel_type: Relationship type (must be valid relation type)
-            
-        Returns:
-            True if relation was added, False if duplicate or invalid
-        """
-        # Validate relation type
-        if rel_type not in VALID_RELATION_TYPES:
-            print(f"  ⚠️ Invalid relation type: {rel_type}")
-            return False
-        
-        # Normalize paths
-        source = self._normalize_path(source, "")
-        target = self._normalize_path(target, "")
-        
-        if not source or not target:
-            return False
-        
-        # Check for duplicate
-        edge_key = (source, target, rel_type)
-        existing_edges = {(e["source"], e["target"], e["type"]) for e in self.index_data["edges"]}
-        
-        if edge_key in existing_edges:
-            return False  # Duplicate
-        
-        # Add to index
-        edge = {
-            "source": source,
-            "target": target,
-            "type": rel_type,
-            "origin": "manual"
-        }
-        self.index_data["edges"].append(edge)
-        
-        # Add inverse relation (unless symmetric)
-        inverse_type = INVERSE_RELATIONS.get(rel_type)
-        if inverse_type and inverse_type != rel_type:
-            inverse_edge = {
-                "source": target,
-                "target": source,
-                "type": inverse_type,
-                "origin": "inverse"
-            }
-            self.index_data["edges"].append(inverse_edge)
-        
-        # Write updated index
-        self.index_file.write_text(json.dumps(self.index_data, indent=2))
-        
-        # Optionally update frontmatter (bidirectional)
-        self._update_frontmatter(source, target, rel_type, add=True)
-        if inverse_type and inverse_type != rel_type:
-            self._update_frontmatter(target, source, inverse_type, add=True)
-        
-        return True
-    
-    def _update_frontmatter(self, doc_path: str, target: str, rel_type: str, add: bool = True):
-        """Update document frontmatter with relation.
-        
-        Args:
-            doc_path: Document to update
-            target: Target document path
-            rel_type: Relation type
-            add: True to add, False to remove
-        """
-        doc_file = self.vault / doc_path
-        if not doc_file.exists():
-            return
-        
-        try:
-            content = doc_file.read_text()
-            
-            # Check if has frontmatter
-            if not content.startswith("---"):
-                return
-            
-            # Parse frontmatter
-            parts = content.split("---", 2)
-            if len(parts) < 3:
-                return
-            
-            frontmatter_text = parts[1]
-            try:
-                frontmatter = yaml.safe_load(frontmatter_text) or {}
-            except:
-                return
-            
-            # Ensure relations block exists
-            if "relations" not in frontmatter or not isinstance(frontmatter["relations"], dict):
-                frontmatter["relations"] = {}
-            
-            relations = frontmatter["relations"]
-            
-            if add:
-                # Add relation
-                if rel_type not in relations:
-                    relations[rel_type] = []
-                elif not isinstance(relations[rel_type], list):
-                    relations[rel_type] = [relations[rel_type]]
-                
-                if target not in relations[rel_type]:
-                    relations[rel_type].append(target)
-            else:
-                # Remove relation
-                if rel_type in relations and isinstance(relations[rel_type], list):
-                    if target in relations[rel_type]:
-                        relations[rel_type].remove(target)
-                    if not relations[rel_type]:
-                        del relations[rel_type]
-            
-            # Write back
-            new_content = f"---\n{yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)}---\n{parts[2]}"
-            doc_file.write_text(new_content)
-            
-        except Exception as e:
-            print(f"  ⚠️ Error updating frontmatter for {doc_path}: {e}")
     
     def scan_documents(self) -> list:
         """Scan documents for potential relationships.
