@@ -5,7 +5,7 @@ import {
 } from 'lucide-react'
 import {
   dashboardApi, sectionOk, sectionError,
-  type AutomodState, type AutonomyState, type AutonomyTaskRow, type BacklogState,
+  type AutomodState, type AutonomyState, type AutonomyTaskRow, type BacklogHealth, type BacklogState,
   type BackgroundTask, type DashboardSnapshot, type GpuInfo,
   type RecentSession, type SubagentRun, type UsageBucket, type VllmEngine,
   type WorkersState, type EnginePressure, type PrefixMissSummary,
@@ -962,6 +962,44 @@ function AutomodPanel({ automod }: { automod: AutomodState }) {
 }
 
 
+/** What the raw status chips hide: how much of `draft` is folded, held or
+ *  waiting on a person, how much of `up_next` a round would actually take,
+ *  and which way the board moved today. The lloyd board only. */
+function BacklogHealthLines({ health }: { health: BacklogHealth }) {
+  const d = health.draft
+  const u = health.up_next
+  const day = health.flow?.['24h']
+  const pool = health.implement_pool
+  const paused = pool && pool.ready >= pool.bound
+  return (
+    <div className="mt-2 space-y-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
+      {d && (
+        <div>
+          draft {d.total} · {d.grouped} folded · {d.quarantined} quarantined · {d.needs_human} needs-human · {d.pool} triageable
+        </div>
+      )}
+      {u && (
+        <div>
+          up_next {u.total} · {u.umbrellas} umbrellas · {u.never_attempted} never attempted · {u.ready} ready
+        </div>
+      )}
+      {day && (
+        <div>
+          24h: {day.created} in / {day.closed} out{' '}
+          <span className={cn(day.net > 0 ? 'text-amber-400' : 'text-emerald-400')}>
+            (net {day.net > 0 ? '+' : ''}{day.net})
+          </span>
+          {pool && (
+            <span>
+              {' · '}pool {pool.ready}/{pool.bound}{paused ? ' — single triage paused' : ''}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function BacklogPanel({ backlog }: { backlog: BacklogState }) {
   // Same rule as AutonomyPanel: a list can be absent, and must read as empty.
   const byBoard = backlog.by_board ?? []
@@ -976,6 +1014,7 @@ function BacklogPanel({ backlog }: { backlog: BacklogState }) {
         </span>
       </div>
       <StatusChips counts={backlog.by_status} />
+      {backlog.health && <BacklogHealthLines health={backlog.health} />}
 
       {byBoard.length > 0 && (
         <div className="mt-2.5 space-y-1 border-t border-border pt-2">

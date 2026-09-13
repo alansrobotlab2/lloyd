@@ -231,3 +231,110 @@ def test_the_steward_reads_only_the_loops_boards():
     src = inspect.getsource(W.execute)
     assert "B.open_items, B.DEFAULT_BOARDS" in src
     assert "B.open_items, None" not in src
+
+
+# ---------------------------------------------------------------------------
+# board health: one definition, and the steward reads it
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+import yaml  # noqa: E402
+
+from scripts.automod import state as S  # noqa: E402
+
+
+def _write(d, iid, status, *, tags=("backlog",), hours_old=48, **fm):
+    created = (datetime.now(timezone.utc) - timedelta(hours=hours_old)).isoformat()
+    data = {"status": status, "priority": "medium", "created": created, "board": "lloyd",
+            "tags": list(tags), **fm}
+    (d / f"{iid}-item-{iid}.md").write_text(
+        f"---\n{yaml.dump(data, default_flow_style=False)}---\n\n# item {iid}\n\nbody\n")
+
+
+@pytest.fixture
+def board(tmp_path, monkeypatch):
+    d = tmp_path / "backlog"
+    d.mkdir()
+    monkeypatch.setattr(B, "BACKLOG_DIR", d)
+    monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
+    return d
+
+
+def _ev(**row):
+    S.append_event(row, path=S.LEDGER_PATH)
+
+
+def _ten_item_board(d):
+    spawn = ("backlog", "spawned-by-triage")
+    _write(d, 1, "draft", hours_old=1)                                   # pool (human)
+    _write(d, 2, "draft", tags=spawn)                                    # quarantined
+    _write(d, 3, "draft", tags=spawn + ("grouped",), group=9)            # grouped beats quarantined
+    _write(d, 4, "draft", tags=("backlog", "needs-human"))               # needs-human beats triaged
+    _ev(event="backlog_triage", item_id=4, verdict="confirmed", acceptance="a")
+    _write(d, 5, "draft")                                                # triaged and parked
+    _ev(event="backlog_triage", item_id=5, verdict="unverifiable")
+    _write(d, 6, "draft", tags=spawn)                                    # released by a keep: pool
+    _ev(event="backlog_group_triage", cluster_id="c-1", judged={"6": "keep"})
+    _write(d, 7, "up_next")                                              # ready
+    _ev(event="backlog_triage", item_id=7, verdict="confirmed", acceptance="it passes")
+    _write(d, 8, "up_next")                                              # no acceptance: unready
+    _ev(event="backlog_triage", item_id=8, verdict="confirmed", acceptance="")
+    _write(d, 9, "up_next", tags=("backlog", "umbrella"), members=[3])   # umbrella, re-offered
+    _ev(event="backlog_triage", item_id=9, verdict="confirmed", acceptance="all of them")
+    _ev(event="backlog_implement", item_id=9, phase="finished", round_id="SM_9",
+        stop_reason="max_turns", num_turns=150)
+    done_at = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    _write(d, 10, "done", hours_old=240, completed=done_at)              # closed today
+
+
+def test_board_health_partitions_the_board(board):
+    _ten_item_board(board)
+    h = B.board_health(S.LEDGER_PATH)
+    assert h["open"] == {"draft": 6, "up_next": 3}
+    assert h["draft"] == {"pool": 2, "quarantined": 1, "grouped": 1, "needs_human": 1,
+                          "triaged": 1, "total": 6}
+    assert h["draft"]["total"] == sum(v for k, v in h["draft"].items() if k != "total")
+    assert h["up_next"] == {"total": 3, "umbrellas": 1, "singles": 2, "never_attempted": 2,
+                            "ready": 2, "unready": 1}
+    assert h["flow"]["24h"] == {"created": 1, "closed": 1, "net": 0}
+    assert h["flow"]["7d"] == {"created": 9, "closed": 1, "net": 8}
+    assert h["self_spawned_open"] == 3
+    assert h["implement_pool"] == {"ready": 2, "bound": 20, "floor": 20}
+
+
+def test_the_prompt_carries_board_health_and_renders_without_it():
+    h = {"open": {"draft": 6}, "draft": {"total": 6, "pool": 2, "quarantined": 1, "grouped": 1,
+                                         "needs_human": 1, "triaged": 1},
+         "up_next": {"total": 3, "umbrellas": 1, "singles": 2, "never_attempted": 2,
+                     "ready": 2, "unready": 1},
+         "flow": {"24h": {"created": 5, "closed": 2, "net": 3}, "7d": {}},
+         "self_spawned_open": 3, "landed_items_7d": 4,
+         "implement_pool": {"ready": 2, "bound": 20, "floor": 20}}
+    text = W.build_prompt(events=[], items=[_item(1, "up_next")], n_open=1, since_ts=0, health=h)
+    block = text[text.index("<board_health>"):text.index("</board_health>")]
+    assert "draft 6: 2 triageable, 1 quarantined" in block
+    assert "flow 24h: 5 created, 2 closed, net +3" in block
+    assert "Lead your `summary` with the 24-hour net flow" in text
+    bare = W.build_prompt(events=[], items=[_item(1, "up_next")], n_open=1, since_ts=0)
+    assert "<board_health>\n(unavailable)\n</board_health>" in bare
+
+
+def test_the_steward_row_records_the_board_health(board, monkeypatch):
+    from workers.sources import _common as C
+    _ten_item_board(board)
+    seen = {}
+
+    async def turn(prompt, **kw):
+        seen["prompt"] = prompt
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": [], "next_pick": 0, "next_pick_reason": "",
+                               "summary": "net 0 today"}}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    assert out["status"] == "success"
+    row = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "board_steward"][-1]
+    assert row["board_health"]["draft"]["total"] == 6
+    assert "<board_health>\nopen: draft 6, up_next 3" in seen["prompt"]

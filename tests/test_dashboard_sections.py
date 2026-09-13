@@ -37,6 +37,8 @@ def vault(tmp_path, monkeypatch):
     (tmp_path / "obsidian" / "autonomy").mkdir(parents=True)
     (tmp_path / "obsidian" / "backlog").mkdir(parents=True)
     monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: tmp_path))
+    # `board_health` reads the ledger too, and its path is bound at import.
+    monkeypatch.setattr("scripts.automod.state.LEDGER_PATH", tmp_path / "ledger.jsonl")
     return tmp_path
 
 
@@ -705,3 +707,30 @@ def test_a_dependency_hidden_by_broken_front_matter_is_still_a_hold(vault):
     assert "upstream" not in held, (
         "the dashboard's own parse cannot read this file, so it must not appear "
         "as a row — the verdict has to come from the shared resolution set")
+
+
+# ── Backlog health ─────────────────────────────────────────────────────
+
+
+def test_the_backlog_section_carries_board_health_beside_the_raw_counts(vault):
+    _backlog_item(vault, 1, "a", "draft")
+    _backlog_item(vault, 2, "b", "up_next")
+    _backlog_item(vault, 3, "c", "done")
+    out = dash._backlog()
+    assert out["by_status"] == {"draft": 1, "up_next": 1, "done": 1}
+    h = out["health"]
+    assert h["draft"]["pool"] == 1 and h["draft"]["total"] == 1
+    assert h["up_next"]["total"] == 1 and h["up_next"]["ready"] == 0
+
+
+def test_a_failing_board_health_costs_the_sub_object_only(vault, monkeypatch):
+    from scripts.automod import backlog as B
+
+    def boom(*a, **k):
+        raise RuntimeError("ledger unreadable")
+    monkeypatch.setattr(B, "board_health", boom)
+    _backlog_item(vault, 1, "a", "draft")
+    out = dash._backlog()
+    assert out["health"] is None
+    assert out["by_status"] == {"draft": 1} and out["open_total"] == 1
+

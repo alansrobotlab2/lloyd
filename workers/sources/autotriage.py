@@ -19,8 +19,10 @@ stale backlog into a pile of unnecessary changes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from typing import Any
 
 from workers.queue import WorkQueue, QueueItem
@@ -36,13 +38,20 @@ LONG_LIVED = True
 DEFAULT_PRIORITY = 55
 DEDUP_KEY = "autotriage:triage"
 
-# How many separate items one triage may file. Measured: the first 40 runs
-# filed 78, averaging 1.95 with a tail to 6. The quarantine in
-# `backlog.is_quarantined` is what stops the queue feeding itself; this cap
-# is about the board a human has to read afterwards. Overflow is folded into
-# a single further-findings item rather than dropped, because a finding that
-# lives only in EVIDENCE is still lost — see #229.
-SPAWN_CAP = 3
+# How many NEW items one triage may file, and only when the item it read is
+# closing. A triage that keeps its item appends its findings to it instead —
+# the rule the implement prompt has carried since 2026-09-11.
+#
+# 3 → 1 on 2026-09-13. The quarantine stopped the queue feeding itself, but
+# the pass still filed 0.989 items per item it closed: 80 of the first 100
+# `confirmed` single triages filed at least one item (0/1/2/3/4 filed in
+# 20/34/29/15/2 runs), and not one `backlog_triage` row carried an append. The
+# prompt was blind to where an item came from and told the model the item was
+# "about to be closed" when a confirmed item was not. Recorded, not enforced:
+# the items exist on disk before SPAWNED is parsed. A finding that lives only
+# in EVIDENCE is still lost — see #229 — so the answer to more findings than
+# the cap is `## Findings` on an item, never fewer findings.
+SPAWN_CAP = 1
 
 # Group mode: one turn over a cluster of related items from clusters.json
 # (scripts/automod/cluster.py). The question is consolidation, not
@@ -120,6 +129,8 @@ ago, and the system has changed since. Your job is to find out whether it is \
 {body}
 </item>
 
+{origin}
+
 Work in this order:
 
 1. **State the premise.** In one sentence, what does this item assert is true \
@@ -144,34 +155,41 @@ an automod round. The backlog is the one thing you write to — step 6 requires 
    - `stale` — the premise no longer describes this system
    - `unverifiable` — the item states no claim that can be checked
    - `not_code` — not about Lloyd's own code
-6. **File everything real that this item does not cover.** A `stale` verdict \
-usually leaves survivors: a narrower claim that still holds, a bug you noticed \
-on the way, a newer premise the old one has become. Each one becomes **its own \
-backlog item, filed by you, now** — with `backlog_write_task` (board `lloyd`, no \
-`task_id`, tag `spawned-by-triage`), before you write the verdict block. The \
-tool checks the board for you: when it answers `merged_into: N`, an open item \
-already covered the finding and your text was appended to it — list N under \
-SPAWNED as you would a new id (the ledger tells the two apart). Every create \
-also returns `similar`; if one of those clearly covers your finding better, \
-append to it (`task_id=N, description_mode="append"`) instead of leaving two. \
-If a merge is wrong, re-file with `force: true` and say why in EVIDENCE. Write \
-the description as a handoff a fresh session can execute alone: the claim, the \
-current state with file paths and line numbers, the check that shows it, and \
-the first line "Split from #{item_id} during automod triage on <date>". The \
-tool returns the id; list every one under SPAWNED. **A finding that lives only in EVIDENCE \
-is lost**: nobody reads this transcript for to-dos, and the item you are \
-triaging is about to be closed. Filing nothing is fine when there is nothing — \
-say `none` — but "those belong in two new items" with no items filed is the \
-one outcome this step exists to prevent.
+6. **Put every finding where it will be read.** A triage nearly always turns \
+up more than its headline premise: a narrower claim that still holds, a bug you \
+noticed on the way, a newer premise the old one has become. Where each goes \
+depends on the verdict, and you write it **now**, before the verdict block:
 
-   **File at most {spawn_cap} separate items.** If more than {spawn_cap} real \
-findings survive, file the {spawn_cap} that would change what someone does \
-next, and put the remainder in **one** further item titled "Further findings \
-from triage of #{item_id}", each with its own paths, line numbers and check. \
-That is a cap on fan-out, not on honesty: nothing is dropped, and the \
-remainder item is still a real handoff. The board is read by a human, and a \
-pass that files six items per item read stops being a triage and becomes a \
-second backlog.
+   - **`confirmed`, `unverifiable` or `not_code` — this item lives on.** Every \
+finding goes **onto this item**, once, as a section: \
+`backlog_write_task(task_id={item_id}, description_mode="append", \
+description="## Findings (triage <date>)\\n\\n- <what is wrong, where \
+(file:line), how to verify>")`. One bullet per finding. File no new item; \
+SPAWNED is `none`. The implementer reads this item; a sibling item is one it \
+never sees, and 80 of the first 100 confirmed triages filed one.
+   - **`stale` or `already_done` — this item is about to be closed**, so a \
+finding that survives it needs another home, in this order. An open item that \
+already covers it — one a create's `similar` names, or one you found — gets \
+it appended (`task_id=N, description_mode="append"`), and N goes under \
+SPAWNED. Else this item's parent from `<origin>`, if still open, the same \
+way. Only when neither exists, file **at most {spawn_cap} new item** with \
+`backlog_write_task` (board `lloyd`, no `task_id`, tag `spawned-by-triage`), \
+first line "Split from #{item_id} during automod triage on <date>", written as \
+a handoff a fresh session can execute alone: the claim, the current state with \
+file paths and line numbers, the check that shows it. More real findings than \
+that go under `## Findings` on the item you filed. That is a cap on fan-out, \
+not on honesty: nothing is dropped.
+
+   The tool checks the board for you: when a create answers `merged_into: N`, \
+an open item already covered the finding and your text was appended to it — \
+list N under SPAWNED as you would a new id (the ledger tells the two apart). \
+If a merge is wrong, re-file with `force: true` and say why in EVIDENCE. \
+`<origin>` names what earlier triages of this item already filed or appended \
+to; append to those rather than filing the same finding again. **A finding \
+that lives only in EVIDENCE is lost**: nobody reads this transcript for \
+to-dos. Filing nothing is fine when there is nothing — say `none` — but \
+"those belong in two new items" with nothing written anywhere is the one \
+outcome this step exists to prevent.
 
 What good triage looks like — learned from the three items closed on \
 2026-09-07, each of which turned on one of these:
@@ -194,7 +212,8 @@ should say which harness.
 and the evidence is the newer item's number.
 - **An item making several claims gets a verdict per claim.** The verdict \
 block judges the item's headline premise; every claim that survives it is \
-filed as its own item (step 6) and named under SPAWNED, not left in EVIDENCE.
+written where step 6 says — under `## Findings` on this item, or for a \
+closing item onto the item that covers it — not left in EVIDENCE.
 
 Rules that matter:
 
@@ -248,13 +267,76 @@ one per line, each numbered "1." "2." … and each one thing a single test can p
 the word none>
 HUMAN_CLAUSES: <if confirmed and any: the conditions only a person can satisfy, one per \
 line, numbered; otherwise the word none>
-SPAWNED: <ids of the items you filed or were merged into in step 6, e.g. #401 #402; otherwise the word none>
+SPAWNED: <for stale/already_done, the ids you filed or appended to in step 6, e.g. #401 #402; otherwise the word none>
 
 The clauses are graded one by one at the gate by a reviewer who sees only the \
 item, the clauses and the diff — so a clause has to name the observable \
 behaviour, not the mechanism ("a retried worker item fires `email_send` once", \
 not "add a ledger"). Three to six clauses is the usual shape.
 """
+
+def _when(ts) -> str:
+    try:
+        return time.strftime("%Y-%m-%d", time.gmtime(float(ts)))
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _origin_block(candidate, ledger) -> str:
+    """Where this item came from and what has already been done with it.
+
+    The prompt used to carry six fields — id, status, priority, name, body,
+    age — and nothing saying "the loop filed this from a live check two days
+    ago", "group triage judged it `keep` last night" or "an earlier triage of
+    this item already filed #601". A model shown none of that re-derives it,
+    and files it again.
+    """
+    from scripts.automod import backlog as B
+    lines: list[str] = []
+    origin = B.spawn_origin(ledger, candidate.id)
+    parent_id = candidate.parent
+    if origin:
+        by, par = origin.get("by"), origin.get("parent")
+        what = f" ({origin['verdict']})" if origin.get("verdict") else ""
+        if by == "arch-review":
+            lines.append(f"filed by the architecture review of {par}{what} on {_when(origin.get('ts'))}")
+        else:
+            lines.append(f"filed by {by} of #{par}{what} on {_when(origin.get('ts'))}")
+            try:
+                parent_id = int(par)
+            except (TypeError, ValueError):
+                pass
+    elif B.is_loop_spawned(candidate):
+        lines.append("tagged as filed by the loop, with no ledger row naming it")
+    else:
+        lines.append("no ledger record of the loop filing it: a human's item, or a writer outside the loop")
+    keep = B.group_keep_note(ledger, candidate.id)
+    if keep:
+        lines.append(f"group triage {keep['cluster_id']} judged it `keep` on {_when(keep.get('ts'))}: "
+                     f"distinct from its cluster, back in the single-item pool")
+    prior = B.prior_triage_spawned(ledger, candidate.id)
+    if prior:
+        lines.append("earlier triages of this item filed or appended to: "
+                     + " ".join(f"#{i}" for i in prior))
+    sections = B.findings_sections(candidate.body)
+    if sections:
+        lines.append(f"{sections} Findings section(s) already on this item")
+    parent_attr = ""
+    if parent_id:
+        parent = B.item_by_id(parent_id)
+        parent_attr = f' parent="#{parent_id} ({parent.status if parent else "not found"})"'
+    return (f'<origin tags="{",".join(candidate.tags)}" created="{(candidate.created or "")[:10]}"'
+            f'{parent_attr}>\n' + "\n".join(lines) + "\n</origin>")
+
+
+def render_prompt(candidate, *, ledger, body_chars: int = 30_000, spawn_cap: int = SPAWN_CAP) -> str:
+    """The single-item prompt for one candidate."""
+    return PROMPT.format(
+        item_id=candidate.id, status=candidate.status, priority=candidate.priority,
+        name=candidate.name, body=candidate.body[:body_chars], age=candidate.age_days,
+        origin=_origin_block(candidate, ledger), spawn_cap=spawn_cap,
+    )
+
 
 def _acceptance_text(value: str) -> str:
     from scripts.automod.backlog import acceptance_text
@@ -388,6 +470,9 @@ def _from_structured(obj: dict, verdicts, surfaces) -> dict | None:
 
 DEFAULT_MAX_TURNS = 90
 DEFAULT_BODY_CHARS = 30_000
+# The depth gate's floor: single-item triage pauses while at least
+# max(floor, items landed in 7 d) confirmed items are ready in up_next.
+DEFAULT_IMPLEMENT_POOL_FLOOR = 20
 
 
 _GROUP_LINE = re.compile(
@@ -502,6 +587,9 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         payload={"max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),
                  "body_chars": int(src_cfg.get("body_chars", DEFAULT_BODY_CHARS)),
                  "structured_verdict": bool(src_cfg.get("structured_verdict", True)),
+                 "spawn_cap": int(src_cfg.get("spawn_cap", SPAWN_CAP)),
+                 "implement_pool_floor": int(src_cfg.get("implement_pool_floor",
+                                                         DEFAULT_IMPLEMENT_POOL_FLOOR)),
                  # Group mode, carried like the budgets. Off: this source runs
                  # exactly as before and clusters.json is ignored.
                  "group_triage": bool(src_cfg.get("group_triage", True)),
@@ -545,6 +633,22 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             # is finite, the single pool is not.
             return await _execute_group(item, pick[0], pick[1])
 
+    # The depth gate. Triage confirmed 59 items on 2026-09-12 against a drain
+    # of ~6 a day, and nothing read the depth: 78 of 89 up_next items had
+    # never been attempted. A confirmation beyond what rounds will take within
+    # a week is inventory that ages until a re-triage finds it stale. Group
+    # triage above is not gated — it folds and closes, net negative on the
+    # board. Counted as `ready_confirmed`, what autocode would actually take.
+    floor = int(payload.get("implement_pool_floor") or DEFAULT_IMPLEMENT_POOL_FLOOR)
+    ready, pool = await asyncio.to_thread(
+        lambda: (len(B.ready_confirmed(S.LEDGER_PATH)),
+                 B.implement_pool_bound(S.LEDGER_PATH, floor=floor)))
+    if ready >= pool["bound"]:
+        return {"status": "skipped",
+                "summary": (f"single-item triage paused: {ready} ready in up_next ≥ bound "
+                            f"{pool['bound']} ({pool['landed_items_7d']} items landed in 7 d, "
+                            f"floor {pool['floor']}); group triage still runs")}
+
     candidates, held = B.triage_pool(S.LEDGER_PATH)
     candidate = B.select_candidate(S.LEDGER_PATH)
     if candidate is None:
@@ -572,11 +676,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     logger.info("triaging backlog #%s (%s days old, budget %d): %s",
                 candidate.id, candidate.age_days, budget, candidate.name[:70])
 
-    prompt = PROMPT.format(
-        item_id=candidate.id, status=candidate.status, priority=candidate.priority,
-        name=candidate.name, body=candidate.body[:body_chars], age=candidate.age_days,
-        spawn_cap=SPAWN_CAP,
-    )
+    spawn_cap = int(payload.get("spawn_cap") or SPAWN_CAP)
+    # Off the event loop: the origin block reads the ledger four times.
+    prompt = await asyncio.to_thread(render_prompt, candidate, ledger=S.LEDGER_PATH,
+                                     body_chars=body_chars, spawn_cap=spawn_cap)
     # Taken BEFORE the turn: an id the turn claims that is at or below this
     # already existed, so it is a merge (or a citation), not a spawn.
     id_floor = B.max_item_id()
@@ -658,6 +761,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     if unverified:
         logger.warning("backlog #%s: SPAWNED names %s but no such item exists",
                        candidate.id, unverified)
+    # Counted off the file, and before `record_verdict` rewrites it: a turn
+    # that says it appended three findings and appended none reads as none.
+    after = B.load_item(candidate.path)
+    findings_appended = B.count_findings(candidate.body, after.body if after else candidate.body)
     B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
                      check=parsed["check"], close=close, spawned=spawned, merged=merged,
                      acceptance=parsed["acceptance"],
@@ -668,14 +775,17 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # we read SPAWNED — unfiling them would destroy real findings. So it is
     # recorded rather than enforced: a number that can be watched, on the one
     # metric that told us the pass had inverted.
-    over_cap = max(0, len(spawned) - (SPAWN_CAP + 1))
+    # No `+1` any more: the overflow item it allowed for is gone, so a second
+    # filing is an overshoot and is logged as one.
+    over_cap = max(0, len(spawned) - spawn_cap)
     if over_cap:
-        logger.warning("backlog #%s filed %d item(s) over the cap of %d(+1)",
-                       candidate.id, over_cap, SPAWN_CAP)
+        logger.warning("backlog #%s filed %d item(s) over the cap of %d",
+                       candidate.id, over_cap, spawn_cap)
 
     S.append_event({"event": "backlog_triage", "item_id": candidate.id,
                     "name": candidate.name[:200], "age_days": candidate.age_days,
-                    "spawn_cap": SPAWN_CAP, "spawned_over_cap": over_cap,
+                    "spawn_cap": spawn_cap, "spawned_over_cap": over_cap,
+                    "findings_appended": findings_appended,
                     "verdict": parsed["verdict"], "surface": parsed["surface"],
                     "check": parsed["check"],
                     "evidence": parsed["evidence"][:1000],

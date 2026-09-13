@@ -257,3 +257,160 @@ def test_the_summary_names_the_boards_it_counted(backlog_dir, tmp_path):
     write_item(backlog_dir, 121, board="alfie")
     s = B.summarize(tmp_path / "none.jsonl")
     assert s["boards"] == ["lloyd"] and s["open_items"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Provenance: the prompt says where the item came from
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+
+from scripts.automod import state as S  # noqa: E402
+from workers.sources import _common as C  # noqa: E402
+
+
+@pytest.fixture
+def ledger(tmp_path, monkeypatch):
+    path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(S, "LEDGER_PATH", path)
+    return path
+
+
+def _ev(ledger, **row):
+    S.append_event(row, path=ledger)
+
+
+def test_the_origin_block_names_who_filed_it_the_keep_prior_filings_and_findings(backlog_dir, ledger):
+    write_item(backlog_dir, 7, status="done", name="Parent")
+    body = "Do it.\n\n## Findings (round A)\n\n- x\n\n## Findings (triage B)\n\n- y\n"
+    write_item(backlog_dir, 42, body=body, name="Child")
+    _ev(ledger, event="backlog_triage", item_id=7, verdict="stale", spawned=[42], merged=[])
+    _ev(ledger, event="backlog_group_triage", cluster_id="c-1", judged={"42": "keep", "43": "fold"})
+    _ev(ledger, event="backlog_triage", item_id=42, verdict="incomplete", spawned=[601], merged=[])
+    item = B.item_by_id(42)
+    text = M.render_prompt(item, ledger=ledger)
+    origin = text[text.index("<origin"):text.index("</origin>")]
+    assert "filed by triage of #7 (stale)" in origin
+    assert 'parent="#7 (done)"' in origin
+    assert "group triage c-1 judged it `keep` on" in origin
+    assert "earlier triages of this item filed or appended to: #601" in origin
+    assert "2 Findings section(s)" in origin
+    assert 'tags="backlog"' in origin
+
+
+def test_a_human_item_says_so(backlog_dir, ledger):
+    write_item(backlog_dir, 5)
+    text = M.render_prompt(B.item_by_id(5), ledger=ledger)
+    assert "a human's item, or a writer outside the loop" in text
+
+
+def test_spawn_origin_reads_all_three_producers(ledger):
+    _ev(ledger, event="backlog_implement", item_id=3, phase="finished", spawned=[30])
+    _ev(ledger, event="arch_review", unit="doc:automod", verdict="stale", filed=[31])
+    assert B.spawn_origin(ledger, 30)["by"] == "autocode"
+    assert B.spawn_origin(ledger, 31) == {"by": "arch-review", "parent": "doc:automod",
+                                          "ts": B.spawn_origin(ledger, 31)["ts"], "verdict": "stale"}
+    assert B.spawn_origin(ledger, 99) is None
+
+
+def test_prior_triage_spawned_keeps_ledger_order_and_skips_the_item_itself(ledger):
+    _ev(ledger, event="backlog_triage", item_id=9, verdict="incomplete", spawned=[602, 9], merged=[])
+    _ev(ledger, event="backlog_triage", item_id=9, verdict="stale", spawned=[601], merged=[602, 400])
+    assert B.prior_triage_spawned(ledger, 9) == [602, 601, 400]
+
+
+# ---------------------------------------------------------------------------
+# The implement-pool depth gate
+# ---------------------------------------------------------------------------
+
+def _ready(backlog_dir, ledger, n, start=1000, **kw):
+    for i in range(start, start + n):
+        write_item(backlog_dir, i, status="up_next", name=f"ready {i}")
+        _ev(ledger, event="backlog_triage", item_id=i, verdict="confirmed",
+            acceptance=kw.get("acceptance", "it passes"))
+
+
+class _QItem:
+    def __init__(self, payload=None):
+        self.payload = payload or {}
+
+
+def _stub_turn(monkeypatch):
+    async def turn(prompt, **kw):
+        turn.calls.append(prompt)
+        return {"text": "VERDICT: unverifiable\nSURFACE: code\nCHECK: -\nEVIDENCE: e\n"
+                        "ACCEPTANCE: none\nSPAWNED: none\n",
+                "session_id": "s", "stop_reason": "stop", "num_turns": 3, "errors": []}
+    turn.calls = []
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    return turn
+
+
+def test_a_full_pool_pauses_single_triage_and_says_both_numbers(backlog_dir, ledger, monkeypatch):
+    _ready(backlog_dir, ledger, 40)
+    write_item(backlog_dir, 7, days_old=300)
+    turn = _stub_turn(monkeypatch)
+    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
+    assert out["status"] == "skipped"
+    assert "single-item triage paused: 40 ready in up_next ≥ bound 40" in out["summary"]
+    assert "0 items landed in 7 d, floor 40" in out["summary"]
+    assert turn.calls == []
+    assert [e for e in S.read_events(path=ledger) if e.get("item_id") == 7] == [], \
+        "a skipped run is not a triage"
+    assert B.select_candidate(ledger).id == 7, "the draft is still a candidate"
+
+
+def test_items_autocode_would_not_take_do_not_fill_the_pool(backlog_dir, ledger, monkeypatch):
+    _ready(backlog_dir, ledger, 39)
+    _ready(backlog_dir, ledger, 3, start=2000, acceptance="human-only: config.yaml")
+    for i in (3000, 3001):     # grouped members parked in up_next
+        p = write_item(backlog_dir, i, status="up_next")
+        B.update_frontmatter(p, {"group": 1})
+        _ev(ledger, event="backlog_triage", item_id=i, verdict="confirmed", acceptance="x")
+    write_item(backlog_dir, 7, days_old=300)
+    turn = _stub_turn(monkeypatch)
+    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
+    assert out["status"] == "success" and out["item_id"] == 7
+    assert len(turn.calls) == 1
+
+
+def test_the_bound_is_the_floor_until_landings_exceed_it(ledger):
+    now = datetime.now(timezone.utc).timestamp()
+    for i, item in enumerate((1, 2, 3)):
+        _ev(ledger, event="vault_land", ok=True, item_id=item, commit=f"c{i}")
+    assert B.implement_pool_bound(ledger, floor=20, now=now + 1) == {
+        "bound": 20, "floor": 20, "landed_items_7d": 3}
+    assert B.implement_pool_bound(ledger, floor=2, now=now + 1)["bound"] == 3
+
+
+def test_landed_items_are_distinct_items_not_rounds(ledger):
+    """#487 landed several times in three days; a pool sized by rows is three
+    times too deep."""
+    for commit in ("a", "b", "c"):
+        _ev(ledger, event="vault_land", ok=True, item_id=487, commit=commit)
+    _ev(ledger, event="vault_land", ok=False, item_id=488, commit="d")
+    _ev(ledger, event="backlog_implement", item_id=9, phase="finished", round_id="SM_1")
+    _ev(ledger, event="promoted", round_id="SM_1", commit="sha1")
+    _ev(ledger, event="settled", commit="sha1")
+    assert B.landed_items_trailing(ledger, 7) == 2
+    later = datetime.now(timezone.utc).timestamp() + 8 * 86400
+    assert B.landed_items_trailing(ledger, 7, now=later) == 0
+
+
+def test_group_triage_still_runs_under_a_full_pool(backlog_dir, ledger, monkeypatch):
+    from scripts.automod import cluster as CL
+    _ready(backlog_dir, ledger, 40)
+    monkeypatch.setattr(B, "select_cluster", lambda *a, **k: ({"id": "c-9"}, ["m"]))
+    monkeypatch.setattr(CL, "load_clusters", lambda *a, **k: {"clusters": []})
+
+    async def group(item, cluster, members):
+        return {"status": "success", "cluster_id": cluster["id"]}
+    monkeypatch.setattr(M, "_execute_group", group)
+    out = asyncio.run(M.execute(_QItem({"group_triage": True, "implement_pool_floor": 20})))
+    assert out == {"status": "success", "cluster_id": "c-9"}
+
+
+def test_the_floor_rides_in_the_payload():
+    import inspect
+    src = inspect.getsource(M.enqueue_if_due)
+    assert '"implement_pool_floor"' in src and '"spawn_cap"' in src

@@ -418,7 +418,11 @@ not re-enter the queue they came out of: the nightly clustering pass and a
 group triage `keep` (the cluster half of the loop), **expiry**, and a human
 reopen. `backlog.expire_stale_spawns` runs in autocode's housekeeping and
 closes a self-filed `draft` that nothing triaged, implemented, clustered or
-tagged in `SPAWN_TRIAGE_MIN_AGE_DAYS` — `done`, tagged `expired`, text kept —
+tagged in `spawn_expiry_days()` — 14, from
+`workers.sources.autocode.expire_spawns_after_days`, since 2026-09-13; at the
+old hardcoded 30 it had never fired while 400 accrued, and the skip summary
+and the scorecard gauge read the same function — `done`, tagged `expired`,
+text kept —
 and a human setting its status back to `draft` reopens it: the reconciler
 strips the tag and `expired_ids` keeps it released, so it is never expired
 twice. Never `grouped`, `umbrella` or `needs-human` items, and never a
@@ -501,18 +505,19 @@ traffic or a nightly run (#520 → #618). Kill switches:
 `workers.sources.autocode.close_on_settle` and `structured_outcome`
 (carried in the queue payload like the budgets).
 
-`SPAWN_CAP` bounds fan-out per run (3 for triage, 1 for autocode); triage's
-overflow goes into one "Further findings from…" item rather than being
-dropped, since #229's lesson still holds. It is **recorded, not enforced** —
+`SPAWN_CAP` bounds fan-out per run — 1 for both since 2026-09-13 (triage's
+was 3 plus a "Further findings from…" overflow item, now gone); findings past
+the cap go under `## Findings` on an item, never nowhere, since #229's lesson
+still holds. It is **recorded, not enforced** —
 the items exist on disk before `SPAWNED:` is parsed, so unfiling them would
 destroy real findings — and the ledger carries `spawn_cap`/`spawned_over_cap`
 on both event types. `tests/test_backlog_spawn_loop.py` pins all of it,
 including the counterfactual: with the spawn tags unrecognised the same run
 grows the queue.
 
-**Inflow is cut at the source, three ways** (2026-09-11; over the four days
-before, 453 items were created against 49 closed, and the implement source
-filed 17 per item it closed):
+**Inflow is cut at the source, four ways** (2026-09-11, the fourth
+2026-09-13; over the four days before the first, 453 items were created
+against 49 closed, and the implement source filed 17 per item it closed):
 
 - **`backlog_write_task` checks the board before it writes.** The triage
   prompt used to say "run `backlog_tasks` to be sure no item already covers
@@ -539,6 +544,45 @@ filed 17 per item it closed):
   round. The "Further findings from implementing" overflow item is gone.
 - **A re-offered round is told what earlier rounds filed** (`prior_spawned`
   in `_reoffer_block`) and told to append rather than re-file.
+- **A single triage appends too** (2026-09-13). The weekend cuts took
+  implement filings from 45 to ~1 a day and missed this one: the board still
+  netted +47 a day, and triage filed 0.989 items per item it closed — 80 of
+  its first 100 `confirmed` runs filed at least one. Its prompt carried six
+  fields and told a `confirmed` item it was "about to be closed". Now step 6
+  is the implement rule: `confirmed`/`unverifiable`/`not_code` append every
+  finding to the item (`## Findings (triage …)`, counted off the file into
+  `findings_appended`), and only a closing verdict's survivor goes elsewhere
+  — an open item that covers it, the parent, then at most `spawn_cap` (1) new
+  item. `render_prompt` adds an `<origin>` block: tags, parent and its
+  status, who filed it (`spawn_origin`, off the ledger rows, not the prose
+  first line), a group `keep` with its date, what earlier triages of the item
+  filed (`prior_triage_spawned`) and how many `## Findings` sections it
+  already carries.
+
+**Confirmations outrun landings, so single triage has a depth gate.**
+`record_verdict` moves `confirmed → up_next` unconditionally and nothing read
+the depth: 59 confirmed on 2026-09-12, 78 of 89 `up_next` never attempted.
+`autotriage.execute` now skips — no ledger row — while
+`backlog.ready_confirmed` (the readiness filter `select_confirmed` orders,
+extracted so both count the same thing) is at least
+`max(implement_pool_floor, landed_items_trailing(7))`: **distinct items**
+landed (settled promotion or ok `vault_land`), because rows overcount about
+3x when a re-offered item lands again (#487). Floor 20. Group triage is not
+gated — it folds and closes. A paused single triage under a full pool is the
+intent, not a fault.
+
+**`backlog.board_health` is the one definition of the board's shape**, for
+three readers: the dashboard (`health` beside the raw `by_status`, its own
+60 s cache because it costs ~2 s), scorecard row 13 (net flow, through the
+ledger-free `board_flow`), and the board steward's `<board_health>` block,
+which it is asked to lead its summary with and which lands on its ledger row.
+`draft` is a partition by precedence (grouped > needs-human > triaged >
+quarantined > pool): on 2026-09-13 480 drafts were 199 triageable, 139
+folded, 94 quarantined, 32 needs-human, 16 parked. Outflow reads `completed`,
+which `record_verdict`'s close now stamps like every other closer.
+
+`tests/conftest.py::_isolate_backlog_dedupe` keeps every test out of the live
+`dedupe.jsonl` and off the qmd daemon: 656 of its 1004 rows were fixtures.
 
 Spawn accounting is mechanical: `max_item_id()` is taken before the turn and
 `split_claimed` reads an id at or below it as a **merge**, above it as a
@@ -665,7 +709,7 @@ is denied `Write` and told never to run `git`. A rejected doc edit does not
 unfile the findings.
 
 `spawned-by-review` is read three ways and they disagree on purpose: merged at
-write time (on the `spawned-by-` prefix), expired at 30 days and counted on the
+write time (on the `spawned-by-` prefix), expired on the same bound and counted on the
 scorecard gauge (`LOOP_SPAWN_TAGS`), and **not** quarantined (`SPAWN_TAGS`
 stays the fixed four). Quarantine asks whether an item can answer the staleness
 question — a triage finding cannot, having been written from a check that just

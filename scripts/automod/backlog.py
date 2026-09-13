@@ -816,13 +816,18 @@ def update_frontmatter(path: Path, updates: dict, *, activity: str = "",
     return True
 
 
-def all_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> list[Item]:
+def all_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+              backlog_dir: Path | None = None) -> list[Item]:
     """Every item on `boards`, whatever its status — including a status
     outside `PIPELINE_STATUSES`, which is the one thing `open_items` cannot
-    show you and the reason the rescue below needs its own walk."""
+    show you and the reason the rescue below needs its own walk.
+
+    `backlog_dir` defaults to the module's `BACKLOG_DIR`, which is bound at
+    import; a reader that resolves the vault at call time (the dashboard)
+    passes its own."""
     wanted = {b.lower() for b in boards} if boards else None
     out = []
-    for path in sorted(BACKLOG_DIR.glob("*.md")):
+    for path in sorted((backlog_dir or BACKLOG_DIR).glob("*.md")):
         item = load_item(path)
         if not item:
             continue
@@ -832,9 +837,10 @@ def all_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> list[Item]:
     return out
 
 
-def open_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> list[Item]:
+def open_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+               backlog_dir: Path | None = None) -> list[Item]:
     """Open items, restricted to `boards` unless it is None."""
-    return [i for i in all_items(boards) if i.status in OPEN_STATUSES]
+    return [i for i in all_items(boards, backlog_dir=backlog_dir) if i.status in OPEN_STATUSES]
 
 
 def _ledger_events(ledger: Path, event: str, *, require_item: bool = True) -> list[dict]:
@@ -924,6 +930,15 @@ def existing_ids(ids) -> list[int]:
         if any(BACKLOG_DIR.glob(f"{i}-*.md")):
             out.append(i)
     return out
+
+
+def item_by_id(item_id: int) -> Item | None:
+    """The item with this id, any status and board, or None."""
+    for path in sorted(BACKLOG_DIR.glob(f"{int(item_id)}-*.md")):
+        item = load_item(path)
+        if item is not None:
+            return item
+    return None
 
 
 def max_item_id() -> int:
@@ -1336,6 +1351,49 @@ def count_findings(body_before: str, body_after: str) -> int:
     not the report, so a round that says it appended three and appended none
     reads as none."""
     return max(0, _findings_bullets(body_after) - _findings_bullets(body_before))
+
+
+def findings_sections(body: str) -> int:
+    """How many `## Findings…` sections an item already carries — what earlier
+    triage and implement turns appended to it."""
+    return len(_FINDINGS_HEADING.findall(body or ""))
+
+
+def prior_triage_spawned(ledger: Path, item_id: int) -> list[int]:
+    """Ids earlier triage runs of this item filed or merged into, in ledger
+    order. `prior_spawned`'s twin over `backlog_triage` rows — including
+    `incomplete` ones, which may have filed before the budget ran out."""
+    seen: list[int] = []
+    for d in _ledger_events(ledger, "backlog_triage"):
+        if int(d["item_id"]) != int(item_id):
+            continue
+        for i in _ints(d.get("spawned")) + _ints(d.get("merged")):
+            if i not in seen and i != int(item_id):
+                seen.append(i)
+    return seen
+
+
+def spawn_origin(ledger: Path, item_id: int) -> dict | None:
+    """Which unattended pass filed this item: `{by, parent, ts, verdict}`.
+
+    Read off the ledger rows that name it as filed — `backlog_triage.spawned`,
+    `backlog_implement.spawned`, `arch_review.filed` — because the `parent`
+    frontmatter key is set only by the cluster pass and the prose first line
+    ("Split from #N") is the model's own spelling. The first row wins: a later
+    row naming the same id is a re-citation, not a second filing.
+    """
+    iid = int(item_id)
+    rows = ([("triage", d, "spawned") for d in _ledger_events(ledger, "backlog_triage")]
+            + [("autocode", d, "spawned") for d in _ledger_events(ledger, "backlog_implement")]
+            + [("arch-review", d, "filed")
+               for d in _ledger_events(ledger, "arch_review", require_item=False)])
+    rows.sort(key=lambda r: float(r[1].get("ts") or 0))
+    for by, d, key in rows:
+        if iid in _ints(d.get(key)):
+            parent = d.get("item_id") if by != "arch-review" else d.get("unit")
+            return {"by": by, "parent": parent, "ts": d.get("ts"),
+                    "verdict": str(d.get("verdict") or d.get("phase") or "")}
+    return None
 
 
 # Every landed item stayed open. Nine promotions settled in the loop's first
@@ -1982,6 +2040,18 @@ def group_kept_ids(ledger: Path) -> set[int]:
     return out
 
 
+def group_keep_note(ledger: Path, item_id: int) -> dict | None:
+    """The latest group triage that judged this item `keep`: `{cluster_id, ts}`.
+    `group_kept_ids` answers whether; this keeps the when, which the single
+    triage of a kept item is shown."""
+    found: dict | None = None
+    for d in _ledger_events(ledger, "backlog_group_triage", require_item=False):
+        judged = d.get("judged") or {}
+        if isinstance(judged, dict) and str(judged.get(str(int(item_id)))) == "keep":
+            found = {"cluster_id": str(d.get("cluster_id") or ""), "ts": d.get("ts")}
+    return found
+
+
 def released_ids(ledger: Path) -> set[int]:
     """Self-filed items the pass may triage after all."""
     return expired_ids(ledger) | group_kept_ids(ledger)
@@ -2133,11 +2203,53 @@ def select_confirmed(ledger: Path,
     An item confirmed with no acceptance check is not ready to implement
     unattended; it is skipped here rather than guessed at.
     """
-    confirmed = confirmed_verdicts(ledger)
     outcomes = implement_outcomes(ledger)
+    ready = ready_confirmed(ledger, boards, outcomes=outcomes)
+    if not ready:
+        return None
+    # Nearest to landing first: a re-offer whose last graded review met
+    # every clause has one small task left (a test across a seam, a clause
+    # amendment to ratify) and lands in one gate; a fresh item costs an hour
+    # and two review attempts. On 2026-09-11 five such re-offers sat behind
+    # fresh umbrellas that each took the hour and aborted. Then fresh
+    # confirmations before other re-offers — oldest-first alone let a
+    # sent-back item be re-picked on the very next round for as long as its
+    # cap allowed, monopolising the loop while the rest of the pool waited.
+    # Cut 3 of senses-not-supervision: when the board steward is APPLYING,
+    # its pick is the order. It read the same ledger and the same board and
+    # was asked the same question, and one judgment with reasons beats three
+    # sort keys. Only a pick that is in `ready` counts — the pick is advice,
+    # the readiness rules are facts.
+    picked = steward_pick()
+    if picked is not None:
+        for item, ev in ready:
+            if item.id == picked:
+                return item, ev
+    near = set(last_review_all_met(ledger))
+    # A FIRST re-offer whose branch still holds the work belongs in the same
+    # tier, for the same reason: it is a fix cycle, not an hour.
+    near |= first_reoffer_with_a_branch(ledger, outcomes)
+    return sorted(ready, key=lambda pair: (pair[0].id not in near,
+                                           pair[0].id in outcomes,
+                                           pair[0].created or "9999", pair[0].id))[0]
+
+
+def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                    items: list[Item] | None = None,
+                    outcomes: dict | None = None) -> list[tuple[Item, dict]]:
+    """Every item autocode would actually take, unordered: `(item, triage_event)`.
+
+    `select_confirmed` orders this; the triage depth gate and `board_health`
+    count it. One definition, because a gate that counted raw `up_next` would
+    count grouped members, human-only items, items with no acceptance and
+    spent attempts — none of which a round will ever start.
+    """
+    confirmed = confirmed_verdicts(ledger)
+    if outcomes is None:
+        outcomes = implement_outcomes(ledger)
     done = {iid for iid, (verdict, _) in outcomes.items() if verdict == "spent"}
     ready = []
-    for item in open_items(boards):
+    for item in (items if items is not None else open_items(boards)):
         ev = confirmed.get(item.id)
         if not ev or item.id in done:
             continue
@@ -2155,33 +2267,56 @@ def select_confirmed(ledger: Path,
         if is_human_only(ev.get("acceptance")):
             continue
         ready.append((item, ev))
-    if not ready:
+    return ready
+
+
+def _iso_ts(value) -> float | None:
+    s = str(value or "").strip()
+    if not s:
         return None
-    # Nearest to landing first: a re-offer whose last graded review met
-    # every clause has one small task left (a test across a seam, a clause
-    # amendment to ratify) and lands in one gate; a fresh item costs an hour
-    # and two review attempts. On 2026-09-11 five such re-offers sat behind
-    # fresh umbrellas that each took the hour and aborted. Then fresh
-    # confirmations before other re-offers — oldest-first alone let a
-    # sent-back item be re-picked on the very next round for as long as its
-    # cap allowed, monopolising the loop while the rest of the pool waited.
-    # Cut 3 of senses-not-supervision: when the board steward is APPLYING,
-    # its pick is the order. It read the same ledger and the same board and
-    # was asked the same question, and one judgment with reasons beats three
-    # sort keys. Only a pick that is in `ready` counts — the pick is advice,
-    # the readiness rules above are facts.
-    picked = steward_pick()
-    if picked is not None:
-        for item, ev in ready:
-            if item.id == picked:
-                return item, ev
-    near = set(last_review_all_met(ledger))
-    # A FIRST re-offer whose branch still holds the work belongs in the same
-    # tier, for the same reason: it is a fix cycle, not an hour.
-    near |= first_reoffer_with_a_branch(ledger, outcomes)
-    return sorted(ready, key=lambda pair: (pair[0].id not in near,
-                                           pair[0].id in outcomes,
-                                           pair[0].created or "9999", pair[0].id))[0]
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def landed_items_trailing(ledger: Path, days: float = 7, *, now: float | None = None) -> int:
+    """Distinct items that reached a landing in the last `days`: a settled code
+    promotion, or an `ok` `vault_land`.
+
+    Items, not rounds. `vault_land` and `promoted` rows overcount the drain by
+    about three times, because a re-offered item lands again — #487 landed
+    several times in three days. The depth gate sizes the implement pool by
+    this, and a pool sized by rounds would be three times too deep.
+    """
+    now = time.time() if now is None else now
+    since = now - float(days) * 86400
+    ids: set[int] = set()
+    for landing in settled_landings(ledger):
+        t = _iso_ts(landing.get("settled_at"))
+        if t is not None and since <= t <= now:
+            ids.add(int(landing["item_id"]))
+    for d in _ledger_events(ledger, "vault_land"):
+        if d.get("ok") and since <= float(d.get("ts") or 0) <= now:
+            ids.add(int(d["item_id"]))
+    return len(ids)
+
+
+# The implement pool is not deeper than this many ready items plus the week's
+# drain. Below it, a triage confirmation is work a round will take within about
+# a week; above it, it is inventory that ages until a re-triage finds it stale.
+IMPLEMENT_POOL_FLOOR = 20
+
+
+def implement_pool_bound(ledger: Path, *, floor: int = IMPLEMENT_POOL_FLOOR,
+                         now: float | None = None) -> dict:
+    """`{bound, floor, landed_items_7d}` — the single-item triage depth gate's
+    bound, derived from the trailing landing rate (Alan, 2026-09-13)."""
+    landed = landed_items_trailing(ledger, 7, now=now)
+    return {"bound": max(int(floor), landed), "floor": int(floor), "landed_items_7d": landed}
 
 
 STEWARD_PICK_MAX_AGE_S = 2 * 3600
@@ -2335,6 +2470,10 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
 
     if close and verdict in RETIRING:
         fm["status"] = "done"
+        # Every other closer stamps it (`_apply_status`, `close_landed`), and
+        # `board_health`'s outflow reads it. This one did not, so a day's
+        # triage retirements dated from whatever next touched the file.
+        fm["completed"] = stamp
         fm["autotriage_retired"] = verdict
     elif verdict == "confirmed" and fm.get("status") != "done":
         # Into the implement pool. Before 2026-09-09 a confirmed item stayed
@@ -2590,4 +2729,106 @@ def summarize(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> 
         "verdicts": counts,
         "retired": sum(counts.get(v, 0) for v in RETIRING),
         "confirmed": counts.get("confirmed", 0),
+    }
+
+
+def board_flow(boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+               backlog_dir: Path | None = None, items: list[Item] | None = None,
+               now: float | None = None) -> dict:
+    """Items created and closed in the last 24 h and 7 d: `{"24h": {created,
+    closed, net}, "7d": {...}}`. Board files only, no ledger — cheap enough
+    for the scorecard to call on its own.
+
+    Inflow is `created`. Outflow is `completed`, else `updated`, on a closed
+    item; both are stamped by the writer that closed it, so a file untouched
+    for a week cannot have closed inside the week and is skipped on mtime
+    without being parsed.
+    """
+    now = time.time() if now is None else now
+    everything = items if items is not None else all_items(boards, backlog_dir=backlog_dir)
+    widest = now - 7 * 86400
+    created_ts = [t for t in (_iso_ts(i.created) for i in everything) if t is not None]
+    closed_ts: list[float] = []
+    for i in everything:
+        if i.status in OPEN_STATUSES:
+            continue
+        try:
+            if i.path.stat().st_mtime < widest:
+                continue
+            fm, _ = _split_frontmatter(i.path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        t = _iso_ts(fm.get("completed") or fm.get("updated"))
+        if t is not None:
+            closed_ts.append(t)
+
+    def _window(seconds: float) -> dict:
+        since = now - seconds
+        created = sum(1 for t in created_ts if since <= t <= now)
+        closed = sum(1 for t in closed_ts if since <= t <= now)
+        return {"created": created, "closed": closed, "net": created - closed}
+
+    return {"24h": _window(86400), "7d": _window(7 * 86400)}
+
+
+def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                 backlog_dir: Path | None = None, now: float | None = None,
+                 floor: int = IMPLEMENT_POOL_FLOOR) -> dict:
+    """What the board is made of and which way it is moving. One definition
+    for three readers: the dashboard's backlog panel, the scorecard's net-flow
+    row and the board steward's prompt.
+
+    The raw status count hides the thing that matters. On 2026-09-13 the board
+    read 480 `draft`, of which 139 were members folded under an umbrella
+    already in `up_next`, 93 quarantined self-spawns and 32 waiting on a
+    person — 200 were actually triageable. And `up_next` 88 was 42 ready.
+
+    `draft` is a partition, each item counted once, by precedence: grouped >
+    needs-human > triaged > quarantined > pool. Reads every item file and the
+    ledger several times; never call it per item.
+    """
+    now = time.time() if now is None else now
+    everything = all_items(boards, backlog_dir=backlog_dir)
+    items = [i for i in everything if i.status in OPEN_STATUSES]
+    seen = triaged_ids(ledger)
+    released = released_ids(ledger)
+    outcomes = implement_outcomes(ledger)
+    attempted = {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}
+
+    open_counts: dict[str, int] = {}
+    for i in items:
+        open_counts[i.status] = open_counts.get(i.status, 0) + 1
+
+    draft = {"pool": 0, "quarantined": 0, "grouped": 0, "needs_human": 0, "triaged": 0}
+    for i in items:
+        if i.status != TRIAGE_POOL_STATUS:
+            continue
+        if is_grouped(i):
+            draft["grouped"] += 1
+        elif NEEDS_HUMAN_TAG in i.tags:
+            draft["needs_human"] += 1
+        elif i.id in seen:
+            draft["triaged"] += 1
+        elif is_quarantined(i, released=released):
+            draft["quarantined"] += 1
+        else:
+            draft["pool"] += 1
+    draft["total"] = sum(draft.values())
+
+    up = [i for i in items if i.status == IMPLEMENT_POOL_STATUS]
+    ready = ready_confirmed(ledger, boards, items=up, outcomes=outcomes)
+    umbrellas = sum(1 for i in up if is_umbrella(i))
+    up_next = {"total": len(up), "umbrellas": umbrellas, "singles": len(up) - umbrellas,
+               "never_attempted": sum(1 for i in up if i.id not in attempted),
+               "ready": len(ready), "unready": len(up) - len(ready)}
+
+    pool = implement_pool_bound(ledger, floor=floor, now=now)
+    return {
+        "open": open_counts,
+        "draft": draft,
+        "up_next": up_next,
+        "flow": board_flow(boards, items=everything, now=now),
+        "self_spawned_open": sum(1 for i in items if is_loop_spawned(i)),
+        "landed_items_7d": pool["landed_items_7d"],
+        "implement_pool": {"ready": len(ready), "bound": pool["bound"], "floor": pool["floor"]},
     }

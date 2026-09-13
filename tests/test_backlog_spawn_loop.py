@@ -320,30 +320,53 @@ def _impl_prompt(**over):
     return I.PROMPT.format(**kw)
 
 
-def test_both_prompts_state_the_cap():
-    """A cap nobody is told about is not a cap."""
-    triage = M.PROMPT.format(item_id=9, status="draft", priority="low", name="n",
-                             body="b", age=1, spawn_cap=M.SPAWN_CAP)
-    assert f"at most {M.SPAWN_CAP} separate items" in triage
-    assert "Further findings from triage of #9" in triage
+def _triage_prompt(item_id=9, **kw):
+    item = B.Item(path=Path(f"/nonexistent/{item_id}-n.md"), id=item_id, name="n",
+                  status="draft", priority="low", created="", body="b")
+    return M.render_prompt(item, ledger=S.LEDGER_PATH, spawn_cap=kw.get("spawn_cap", M.SPAWN_CAP))
+
+
+def test_both_prompts_send_findings_to_the_item_and_file_at_most_one():
+    """A cap nobody is told about is not a cap — and since 2026-09-13 the two
+    prompts carry the same rule. Triage's cap used to be three with an
+    overflow item on top, and 80 of its first 100 confirmed runs filed at
+    least one item the implementer would never read."""
+    triage = _triage_prompt()
+    assert 'backlog_write_task(task_id=9, description_mode="append"' in triage
+    assert "## Findings (triage" in triage
+    assert "at most 1 new item" in triage
+    assert "Further findings from triage" not in triage, "the overflow item is gone"
 
     impl = _impl_prompt()
     assert f"File at most {I.SPAWN_CAP}" in impl
-    # Implement's cap is deliberately tighter than triage's: triage splits an
-    # item into claims, so filing is its output; an implement round's output is
-    # a landing, and its rounds filed 120 items against 7 closed.
-    assert I.SPAWN_CAP < M.SPAWN_CAP
+    # The asymmetry is abolished, not relaxed: one blocker per round, one
+    # survivor per closing triage.
+    assert I.SPAWN_CAP == M.SPAWN_CAP == 1
 
 
-def test_the_overflow_item_keeps_the_anti_229_property():
+def test_a_kept_item_files_nothing_and_a_closing_one_files_last():
+    """The verdict decides where a finding goes. `confirmed` was told "the
+    item you are triaging is about to be closed", which was false."""
+    text = " ".join(_triage_prompt().split())
+    kept = text.index("`confirmed`, `unverifiable` or `not_code` — this item lives on")
+    closing = text.index("`stale` or `already_done` — this item is about to be closed")
+    assert kept < closing
+    assert "File no new item; SPAWNED is `none`" in text[kept:closing]
+    # a closing item's survivors look for an existing home before a new one
+    tail = text[closing:]
+    assert tail.index("already covers it") < tail.index("parent from `<origin>`") < tail.index("at most 1 new item")
+    assert "item you are triaging is about to be closed" not in text
+
+
+def test_the_cap_still_does_not_drop_findings():
     """The cap may not become a licence to drop findings. #229 said two claims
     "belong in two new items" and filed none; the answer to too many findings
     is somewhere for them to go, not fewer findings."""
-    triage = M.PROMPT.format(item_id=9, status="draft", priority="low", name="n",
-                             body="b", age=1, spawn_cap=M.SPAWN_CAP)
+    triage = _triage_prompt()
     assert "A finding that lives only in EVIDENCE is lost" in triage
     assert "cap on fan-out, not on honesty" in triage
     assert "nothing is dropped" in triage
+    assert "Filing nothing is fine when there is nothing" in triage
 
     impl = _impl_prompt()
     assert "do not leave them only in your report" in impl
@@ -365,19 +388,18 @@ def test_the_autocode_prompt_sends_findings_to_the_parent_and_files_only_blocker
 def test_the_triage_prompt_tells_the_model_what_a_merge_means():
     """`backlog_tasks` has no text search; the check it used to ask for was a
     ritual. The tool does it now, and the prompt says how to read the answer."""
-    triage = M.PROMPT.format(item_id=9, status="draft", priority="low", name="n",
-                             body="b", age=1, spawn_cap=M.SPAWN_CAP)
+    triage = _triage_prompt()
     assert "merged_into: N" in triage and "force: true" in triage
     assert "run `backlog_tasks` to be sure" not in triage
 
 
-def test_the_ledger_records_the_cap_and_the_overshoot(isolated, monkeypatch):
+@pytest.mark.parametrize("filed,over", [(6, 5), (2, 1), (1, 0)])
+def test_the_ledger_records_the_cap_and_the_overshoot(isolated, monkeypatch, filed, over):
     """Recorded, not enforced — the items are on disk before the verdict is
-    parsed, and unfiling them would destroy real findings. A number that can
-    be watched is the honest version, on the one metric that told us the pass
-    had inverted."""
+    parsed, and unfiling them would destroy real findings. With the overflow
+    item gone there is no `+1`: a second filing is an overshoot."""
     write_item(isolated, 7, days_old=300)
-    ids = [401, 402, 403, 404, 405, 406]
+    ids = list(range(401, 401 + filed))
     monkeypatch.setattr(C, "run_prompt_in_session",
                         _turn_that_files(_verdict(" ".join(f"#{i}" for i in ids)),
                                          ids, isolated))
@@ -385,17 +407,63 @@ def test_the_ledger_records_the_cap_and_the_overshoot(isolated, monkeypatch):
     asyncio.run(M.execute(_Item({"max_turns": 90})))
 
     ev = S.read_events(path=S.LEDGER_PATH)[-1]
-    assert ev["spawn_cap"] == M.SPAWN_CAP
-    # cap + 1 is allowed: the N best, plus the single overflow item.
-    assert ev["spawned_over_cap"] == len(ids) - (M.SPAWN_CAP + 1) == 2
+    assert ev["spawn_cap"] == M.SPAWN_CAP == 1
+    assert ev["spawned_over_cap"] == over
 
 
-def test_filing_within_the_cap_records_no_overshoot(isolated, monkeypatch):
+def test_the_cap_rides_in_the_payload(isolated, monkeypatch):
     write_item(isolated, 7, days_old=300)
-    monkeypatch.setattr(C, "run_prompt_in_session",
-                        _turn_that_files(_verdict("#401 #402"), [401, 402], isolated))
+    fake = _turn_that_files(_verdict("#401 #402"), [401, 402], isolated)
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+    asyncio.run(M.execute(_Item({"max_turns": 90, "spawn_cap": 2})))
+    ev = S.read_events(path=S.LEDGER_PATH)[-1]
+    assert ev["spawn_cap"] == 2 and ev["spawned_over_cap"] == 0
+    assert "at most 2 new item" in fake.calls[0]["prompt"]
+
+
+# ===========================================================================
+# Findings go onto the item
+# ===========================================================================
+
+def _confirmed(spawned="none"):
+    return ("...analysis...\n\nVERDICT: confirmed\nSURFACE: code\nCHECK: grep -n foo\n"
+            "EVIDENCE: still there.\nACCEPTANCE: foo is gone\n"
+            "ACCEPTANCE_CLAUSES:\n1. foo is gone\nHUMAN_CLAUSES: none\n"
+            f"SPAWNED: {spawned}\n")
+
+
+def test_a_confirmed_triage_appends_its_findings_and_files_nothing(isolated, monkeypatch):
+    path = write_item(isolated, 7, days_old=300)
+
+    async def turn(prompt, **kw):
+        text = path.read_text()
+        path.write_text(text.rstrip() + "\n\n## Findings (triage 2026-09-13)\n\n- one\n- two\n")
+        return {"text": _confirmed(), "session_id": "s", "stop_reason": "stop",
+                "num_turns": 20, "errors": []}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(M.execute(_Item({"max_turns": 90})))
+    assert out["verdict"] == "confirmed"
+    ev = S.read_events(path=S.LEDGER_PATH)[-1]
+    assert ev["findings_appended"] == 2 and ev["spawned"] == [] and ev["spawned_over_cap"] == 0
+    after = path.read_text()
+    assert "- one" in after and "- two" in after, "record_verdict kept the appended section"
+    assert B.item_by_id(7).status == "up_next"
+
+
+def test_a_stale_triage_appends_a_survivor_to_an_existing_item_as_a_merge(isolated, monkeypatch):
+    write_item(isolated, 7, days_old=300)
+    existing = spawned_item(isolated, 401, days_old=2, name="Covers it")
+
+    async def turn(prompt, **kw):
+        existing.write_text(existing.read_text().rstrip() + "\n\n## Findings (triage)\n\n- survivor\n")
+        return {"text": _verdict("#401"), "session_id": "s", "stop_reason": "stop",
+                "num_turns": 20, "errors": []}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
     asyncio.run(M.execute(_Item({"max_turns": 90})))
-    assert S.read_events(path=S.LEDGER_PATH)[-1]["spawned_over_cap"] == 0
+    ev = S.read_events(path=S.LEDGER_PATH)[-1]
+    assert ev["merged"] == [401] and ev["spawned"] == [] and ev["closed"] is True
+    fm = yaml.safe_load(next(isolated.glob("7-*.md")).read_text().split("---")[1])
+    assert fm["status"] == "done" and fm.get("completed"), "a triage close stamps completed"
 
 
 # ===========================================================================

@@ -286,11 +286,11 @@ Two more were found by the first unattended run itself (#229, 2026-09-07:
   the held count beside the candidates so the skip summary can say which one:
   "every open backlog item has been triaged" was true, and misleading, on a
   board of 122 where 106 were this loop's own drafts. `SPAWN_CAP` bounds
-  fan-out per run — 3 for triage, whose remainder folds into a single
-  "Further findings from…" item rather than being dropped (#229's lesson
-  still holds), and 1 for autocode, where the one thing that may become an
-  item is a **blocker** and every other finding goes onto the item itself
-  (§3.2c). It is **recorded, not enforced**: the items are on disk before
+  fan-out per run — 1 for both since 2026-09-13. For autocode the one thing
+  that may become an item is a **blocker**; for triage it is one survivor of
+  a closing verdict; every other finding goes onto an item as `## Findings`
+  (§3.2c), never nowhere (#229's lesson still holds). Triage's cap was 3 plus
+  a "Further findings from…" overflow item until then. It is **recorded, not enforced**: the items are on disk before
   `SPAWNED:` is parsed, so unfiling them would destroy real work. Both event
   types carry `spawn_cap` and `spawned_over_cap`.
   `tests/test_backlog_spawn_loop.py` pins it, including the counterfactual —
@@ -503,6 +503,24 @@ umbrellas — and none of them deletes anything.
   findings and filed none.
 - **A re-offered round is told what earlier rounds filed** (`prior_spawned`
   in `_reoffer_block`) and told to append rather than re-file.
+- **A single triage appends as well** (2026-09-13). After the cuts above the
+  board still netted +48 and +47 on 09-11 and 09-12, and scorecard row 4 read
+  triage at 0.989 items filed per item closed: 80 of the first 100
+  `confirmed` single triages filed at least one item (0/1/2/3/4 in
+  20/34/29/15/2 runs) and not one row carried an append. The prompt was
+  formatted with six fields — nothing about tags, parent, who filed it or a
+  group `keep` — and step 6 told every verdict "the item you are triaging is
+  about to be closed", which is false for `confirmed`. Step 6 is now the
+  implement rule: `confirmed`, `unverifiable` and `not_code` append each
+  finding to the item and file nothing; `stale`/`already_done` send a
+  survivor to an open item that covers it, then the parent, then at most
+  `spawn_cap` (1) new item. `render_prompt` carries an `<origin>` block
+  (tags; parent and its status; `spawn_origin` off the ledger's
+  `backlog_triage.spawned`/`backlog_implement.spawned`/`arch_review.filed`
+  rows; the group `keep` with its date; `prior_triage_spawned`, `incomplete`
+  rows included; the count of `## Findings` sections). `findings_appended` is
+  counted off the file before `record_verdict` rewrites it, and the overshoot
+  tolerance lost its `+1` with the overflow item.
 - **Spawn accounting is mechanical**: `max_item_id()` before the turn, and
   `split_claimed` reads an id at or below it as a merge, above it as a
   spawn — #370's finished row had listed itself and a pre-existing #221 as
@@ -510,8 +528,15 @@ umbrellas — and none of them deletes anything.
 
 **Expiry is the hard bound.** `backlog.expire_stale_spawns` runs in
 autocode's housekeeping and closes a self-filed `draft` that nothing
-triaged, implemented, clustered or tagged in `SPAWN_TRIAGE_MIN_AGE_DAYS` —
-`done`, tagged `expired`, text kept. A human setting its status back to
+triaged, implemented, clustered or tagged in `spawn_expiry_days()` —
+`done`, tagged `expired`, text kept. The bound is
+`workers.sources.autocode.expire_spawns_after_days`, 14 since 2026-09-13,
+failing open to `SPAWN_EXPIRY_DAYS` (30; `SPAWN_TRIAGE_MIN_AGE_DAYS` is its
+old alias). At a hardcoded 30 it had never fired — the oldest self-spawn was
+six days old — while 400 self-spawned items sat open, and `over_bound 0`
+read healthy throughout. Expiry, autotriage's skip summary and the scorecard
+gauge all read the one function, or `over_bound` would be measured against
+a different bound from the one expiry runs at. A human setting its status back to
 `draft` reopens it: the reconciler strips the tag and `expired_ids` keeps it
 released, so it is never expired twice. Never `grouped`, `umbrella` or
 `needs-human` items, never a human's draft. Scorecard row 4 carries the open
@@ -586,6 +611,34 @@ members still folded — a wrong `unnecessary` on six findings is the one
 claim the loop should not make alone. `backlog.unfold_umbrella(id, reason)`
 is the human escape hatch. Scorecard row 11 counts all of it; folds and
 duplicates count as closures on row 4.
+
+**Single triage pauses while the implement pool is full** (2026-09-13).
+Triage confirmed 59 items on 09-12 and 28 by 08:00 on 09-13; `record_verdict`
+moves each to `up_next` unconditionally and no code counted the depth, so 78
+of 89 `up_next` items had never been attempted. After the cluster pick and
+before `select_candidate`, `autotriage.execute` computes
+`backlog.ready_confirmed` — the readiness filter `select_confirmed` used to
+hold inline (up_next, not grouped, acceptance present, not human-only, not
+spent), extracted so the gate counts exactly what autocode would take — and
+`implement_pool_bound`: `max(implement_pool_floor, landed_items_trailing(7))`.
+The trailing count is **distinct items** with a settled code landing or an ok
+`vault_land`, not rows, because a re-offered item lands repeatedly. At or
+above the bound the run is `skipped` with both numbers in the summary and no
+ledger row; group triage keeps running, since it is net negative on open
+items. `implement_pool_floor` (20) and `spawn_cap` ride in the queue payload
+like the budgets. On landing day it read 87 ready against a bound of 55.
+
+**One definition of the board's shape.** `backlog.board_health` returns the
+open counts, a `draft` partition (grouped > needs-human > triaged >
+quarantined > pool, each item once), `up_next`
+(umbrellas/singles/never-attempted/ready/unready), 24 h and 7 d flow
+(`board_flow`: `created` in, `completed` else `updated` out — `record_verdict`
+now stamps `completed` on a close like the other closers), the open
+self-spawned count and the pool bound. Three readers: the dashboard's backlog
+panel (a `health` sub-object on its own 60 s cache, `by_status` left raw),
+scorecard row 13 (board net flow, plus `spawn.triage_findings_appended`), and
+the board steward's `<board_health>` block, recorded on its ledger row. No
+announce: board health is a dashboard and scorecard number.
 
 Triage polls every 15 minutes again (it was raised to an hour on 09-08 as
 the second half of the quarantine fix, for a pass that filed two items per

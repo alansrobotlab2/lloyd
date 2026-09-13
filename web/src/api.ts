@@ -2080,6 +2080,24 @@ export interface BacklogState {
   by_board: Array<{ board: string; open: number; total: number }>
   open_total: number
   recent_open: Array<{ name: string; status: string; board: string; mtime: number }>
+  umbrellas?: number
+  grouped?: number
+  // scripts/automod/backlog.py board_health, the lloyd board only. Absent from
+  // an older backend and null when the computation failed — `by_status` above
+  // stays the raw count either way.
+  health?: BacklogHealth | null
+}
+
+export interface BacklogFlowWindow { created: number; closed: number; net: number }
+
+export interface BacklogHealth {
+  open: Record<string, number>
+  draft: { pool: number; quarantined: number; grouped: number; needs_human: number; triaged: number; total: number }
+  up_next: { total: number; umbrellas: number; singles: number; never_attempted: number; ready: number; unready: number }
+  flow: { '24h': BacklogFlowWindow; '7d': BacklogFlowWindow }
+  self_spawned_open: number
+  landed_items_7d: number
+  implement_pool: { ready: number; bound: number; floor: number }
 }
 
 // scripts/automod/scorecard.py, last 7 days. Every rate is null when its

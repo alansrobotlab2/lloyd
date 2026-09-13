@@ -22,8 +22,10 @@ gated on a fact — a settled promotion whose outcome said `met` — and stays i
 `close_settled_items`. A closed item is never re-triaged, so this is the one
 move the loop cannot recover from, and it is the one move no judgment makes.
 
-It runs on the secondary by default: a judgment over frontmatter and ledger
-rows does not need the primary, and the primary is what a round is using.
+It runs on the primary (see `DEFAULT_MODEL` for why the secondary lost), at
+priority 2, every fifteen minutes. It is also the one agent-side reader of the
+board's shape: `<board_health>` gives it the counts and the flow that the
+eighty items it is shown cannot.
 """
 
 from __future__ import annotations
@@ -40,9 +42,9 @@ from workers.queue import WorkQueue, QueueItem
 logger = logging.getLogger("lloyd-workers.board-steward")
 
 NAME = "board-steward"
-# Behind research (70) — a steward pass can wait for a research job — and
-# never held by the KV gate or the round hold: it runs on the secondary and
-# is what tells the pool which round to run next.
+# Behind research (70) — a steward pass can wait for a research job. Not
+# LONG_LIVED, so the KV gate does not hold it; it is what tells the pool which
+# round to run next.
 DEFAULT_PRIORITY = 68
 LONG_LIVED = False
 DEDUP_KEY = "board-steward:tick"
@@ -183,6 +185,10 @@ in flight, never a `grouped` member, never one whose acceptance begins \
 {events}
 </ledger>
 
+<board_health>
+{health}
+</board_health>
+
 <board items="{n_items}" of="{n_open}">
 {board}
 </board>
@@ -191,7 +197,8 @@ Decide with the evidence above only. **Do not open items or run tools** — \
 every item you may move is shown above with its history, and a pass that \
 reads its way through the board runs out of budget before it answers (the \
 first live pass did exactly that). Write your decision directly; when you \
-finish you will be asked to restate it as one JSON object.
+finish you will be asked to restate it as one JSON object. Lead your `summary` \
+with the 24-hour net flow from `<board_health>` and name the bucket that grew.
 """
 
 
@@ -313,11 +320,40 @@ def _item_line(i: Any) -> str:
             f"tags={tags or '-'} {' '.join(rel)}\n    {body}")
 
 
-def build_prompt(*, events: list[dict], items: list[Any], n_open: int, since_ts: float) -> str:
+def _health_lines(h: dict | None) -> str:
+    """`backlog.board_health` as the eight lines the steward reads. The board
+    below is at most eighty items of ~560; these are the counts it cannot see."""
+    if not h:
+        return "(unavailable)"
+    d, u, f = h.get("draft") or {}, h.get("up_next") or {}, h.get("flow") or {}
+    pool = h.get("implement_pool") or {}
+    def fl(key: str) -> str:
+        w = f.get(key) or {}
+        return f"{w.get('created', 0)} created, {w.get('closed', 0)} closed, net {w.get('net', 0):+d}"
+    return "\n".join([
+        "open: " + ", ".join(f"{k} {v}" for k, v in sorted((h.get("open") or {}).items())),
+        (f"draft {d.get('total', 0)}: {d.get('pool', 0)} triageable, {d.get('quarantined', 0)} "
+         f"quarantined self-spawns, {d.get('grouped', 0)} folded under an umbrella, "
+         f"{d.get('needs_human', 0)} needs-human, {d.get('triaged', 0)} triaged and parked"),
+        (f"up_next {u.get('total', 0)}: {u.get('umbrellas', 0)} umbrellas, {u.get('singles', 0)} "
+         f"singles, {u.get('never_attempted', 0)} never attempted, {u.get('ready', 0)} ready, "
+         f"{u.get('unready', 0)} not takeable"),
+        f"flow 24h: {fl('24h')}",
+        f"flow 7d: {fl('7d')}",
+        f"loop-filed items open: {h.get('self_spawned_open', 0)}",
+        f"items landed in 7 d: {h.get('landed_items_7d', 0)}",
+        (f"implement pool: {pool.get('ready', 0)} ready against a bound of {pool.get('bound', 0)} "
+         f"(floor {pool.get('floor', 0)}); single-item triage pauses at or above it"),
+    ])
+
+
+def build_prompt(*, events: list[dict], items: list[Any], n_open: int, since_ts: float,
+                 health: dict | None = None) -> str:
     since = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(since_ts)) if since_ts else "the beginning"
     return PROMPT.format(
         since=since, n_events=len(events),
         events="\n".join(_event_line(d) for d in events) or "(none)",
+        health=_health_lines(health),
         n_items=len(items), n_open=n_open,
         board="\n".join(_item_line(i) for i in items) or "(empty)",
     )
@@ -445,10 +481,16 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     events = await asyncio.to_thread(events_since, ledger, since_ts,
                                      limit=int(p.get("max_events", DEFAULT_MAX_EVENTS)),
                                      for_items={i.id for i in shown})
+    try:
+        health = await asyncio.to_thread(B.board_health, ledger)
+    except Exception as exc:  # noqa: BLE001 — the counts are context, not the job
+        logger.warning("board_health failed: %s", exc)
+        health = None
     if not events and not any(i.status in ("up_next", "in_progress") for i in shown):
         return {"status": "skipped", "summary": "nothing happened since the last pass"}
 
-    prompt = build_prompt(events=events, items=shown, n_open=len(open_items), since_ts=since_ts)
+    prompt = build_prompt(events=events, items=shown, n_open=len(open_items), since_ts=since_ts,
+                          health=health)
     try:
         run = await run_prompt_in_session(
             prompt, title=f"board steward ({len(events)} events)", source=NAME,
@@ -492,7 +534,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "items_shown": len(shown), "moves": parsed["moves"],
                     "next_pick": parsed["next_pick"],
                     "next_pick_reason": parsed["next_pick_reason"],
-                    "agreement": agree, "applied": applied,
+                    "agreement": agree, "applied": applied, "board_health": health,
                     "session_id": run.get("session_id"), "summary": parsed["summary"]})
     verb = "applied" if apply else "proposed (dry run)"
     return {"status": "success",

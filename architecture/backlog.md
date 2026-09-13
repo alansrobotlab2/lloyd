@@ -219,7 +219,8 @@ days, and by 2026-09-11 that was 291 items due to re-enter triage in October,
 each spawning ~2 more. The exits now are the ones that do not re-enter the
 queue they came out of (`released_ids`): **expiry**, and a group triage `keep`.
 `expire_stale_spawns` closes a self-filed `draft` that nothing triaged,
-implemented, clustered or tagged in `SPAWN_TRIAGE_MIN_AGE_DAYS` (30) — `done`,
+implemented, clustered or tagged in `spawn_expiry_days()` (14 from config since
+2026-09-13, falling back to `SPAWN_EXPIRY_DAYS` = 30) — `done`,
 tagged `expired`, text kept — and never an item carrying `EXPIRY_EXEMPT_TAGS`
 (`grouped`, `umbrella`, `needs-human`, `expired`). The gate keys on the spawn
 tags and **not** on `draft`, which is the status of most of a stale backlog: a
@@ -436,7 +437,37 @@ there. `tests/test_backlog_okf_frontmatter.py` pins both writers.
 ## Who counts the board
 
 `app/routers/dashboard.py::_backlog` produces the Mission Control counters:
-totals by status and by board, plus `umbrellas`, `grouped` and `recent_open`.
+totals by status and by board, plus `umbrellas`, `grouped`, `recent_open` and
+`health`.
+
+**Raw status counts hide the board's shape**, so `scripts/automod/backlog.py::board_health`
+is the one definition of it, and it has three readers: that `health`
+sub-object, scorecard row 13, and the board steward's `<board_health>` prompt
+block (also written onto its `board_steward` ledger row). On 2026-09-13 the
+board read 480 `draft` + 88 `up_next`; `board_health` said the drafts were 199
+triageable, 94 quarantined self-spawns, 139 members folded under an umbrella,
+32 `needs-human` and 16 triaged-and-parked, and that 87 of the 88 `up_next`
+were `ready`.
+
+- `draft` is a **partition**, by precedence grouped > needs-human > triaged
+  (a terminal verdict in `triaged_ids`) > quarantined (`is_quarantined`, not
+  released) > pool, so a grouped self-spawn counts once and the buckets sum to
+  the total.
+- `up_next` splits into umbrellas and singles, `never_attempted` (no
+  `backlog_implement` row), and `ready` / `unready`. `ready` is
+  `ready_confirmed` — what autocode would actually take — and `unready` is the
+  rest: a confirmed item with empty acceptance, a human-only one, a spent one.
+- `flow` (`board_flow`, no ledger) counts `created` in and `completed`, else
+  `updated`, out on closed items, over 24 h and 7 d. A closed file untouched
+  for a week is skipped on mtime without being parsed.
+- `implement_pool` is `{ready, bound, floor}` — the single-item triage depth
+  gate's numbers (`implement_pool_bound`, [[automod]] §3.2c).
+
+It reads every item file and the ledger several times (~2 s on the live board),
+so the dashboard caches it for 60 s apart from the 10 s vault scan, and a
+failure costs `health` only — it becomes `null` and `by_status` is unchanged.
+`all_items`/`open_items` take `backlog_dir` for readers like this one that
+resolve the vault at call time: `BACKLOG_DIR` is bound at import.
 It is TTL-cached for 10 s — the board is 960+ markdown files, and the sibling
 route `GET /api/backlog/tasks` is *not* cached, so it walks and parses the whole
 directory twice per call (`_backlog_board_map`) while `DashboardPage` polls every

@@ -185,8 +185,8 @@ single triage is for. Expiry asks the other question — did anything ever act o
 this? — and the answer is no for both, so the bound applies to both.
 
 Inflow is bounded at three points, but only two of them bind. `max_open_items`
-(25) open `arch-review` drafts across both kinds stops the whole tick, and the
-30-day expiry closes anything untouched; `spawn_cap` (5) per run is a prompt
+(25) open `arch-review` drafts across both kinds stops the whole tick, and
+expiry (`spawn_expiry_days()`, 14 days) closes anything untouched; `spawn_cap` (5) per run is a prompt
 instruction plus the `spawned_over_cap` field on the ledger event — nothing
 truncates a turn that files a sixth finding. The middle one is the R > 1 lesson
 applied before it can happen — a pass that files faster than the board closes

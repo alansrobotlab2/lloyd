@@ -282,13 +282,18 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
     t_merged = sum(len(e.get("merged") or []) for e in triage)
     i_merged = sum(len(e.get("merged") or []) for e in finished)
     appended = sum(int(e.get("findings_appended") or 0) for e in finished)
+    # Triage's own appends, apart: `findings_appended` above is implement's
+    # and a test pins it that way. Since 2026-09-13 a triage that keeps its
+    # item appends its findings to it instead of filing them.
+    t_appended = sum(int(e.get("findings_appended") or 0) for e in triage)
     expired = len(by("backlog_expired"))
     spawn = {"triage_filed": t_filed, "triage_closed": t_closed,
              "triage_ratio": _rate(t_filed, t_closed),
              "implement_filed": i_filed, "implement_closed": i_closed,
              "implement_ratio": _rate(i_filed, i_closed),
              "triage_merged": t_merged, "implement_merged": i_merged,
-             "findings_appended": appended, "expired": expired,
+             "findings_appended": appended, "triage_findings_appended": t_appended,
+             "expired": expired,
              "self_spawned_open": _self_spawned_gauge(_events(ledger), backlog_dir, now)}
 
     # ── 4b grouping ─────────────────────────────────────────────────────
@@ -410,12 +415,21 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
                       for v in sorted({str(e.get("verdict")) for e in arch if e.get("verdict")})},
     }
 
+    # ── 13 board net flow ───────────────────────────────────────────────
+    # Items created minus items closed, off the board files. The ratio in
+    # row 4 is per run; this is whether the board is actually shrinking.
+    try:
+        from scripts.automod.backlog import board_flow
+        flow = board_flow(backlog_dir=backlog_dir, now=now) if backlog_dir.exists() else {}
+    except Exception:
+        flow = {}
+
     return {"computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
             "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
             "human_touch": human, "test_honesty": honesty, "bookkeeping": bookkeeping,
             "verdict_plumbing": plumbing, "throughput": throughput, "rollbacks": rollbacks,
-            "arch_review": arch_review}
+            "arch_review": arch_review, "flow": flow}
 
 
 # ── output ───────────────────────────────────────────────────────────────
@@ -455,6 +469,14 @@ def render(row: dict) -> str:
         f"appended {ar.get('appended_to', 0)}; "
         f"{ar.get('stray_writes', 0)} stray writes reverted; "
         f"{', '.join(f'{k} {v}' for k, v in statuses.items()) or 'no verdicts'} |")
+    flow = row.get("flow") or {}
+    day, week = flow.get("24h") or {}, flow.get("7d") or {}
+    headline = f"{int(day.get('net', 0)):+d} / 24 h" if day else "—"
+    lines.append(
+        f"| 13 | board net flow | {headline} | "
+        f"24 h: {day.get('created', 0)} created, {day.get('closed', 0)} closed; "
+        f"7 d: {week.get('created', 0)} created, {week.get('closed', 0)} closed, "
+        f"net {week.get('net', 0):+d}; triage appended {s.get('triage_findings_appended', 0)} findings |")
     return "\n".join(lines)
 
 

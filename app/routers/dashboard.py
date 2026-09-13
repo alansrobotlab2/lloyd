@@ -652,7 +652,24 @@ def _backlog() -> dict[str, Any]:
             "grouped": grouped,
         }
 
-    return _cached("backlog", _VAULT_SCAN_TTL_S, _scan)
+    out = _cached("backlog", _VAULT_SCAN_TTL_S, _scan)
+    # What the raw counts hide — folded members, quarantined self-spawns, the
+    # ready share of `up_next`, the day's net flow. `board_health` reads every
+    # item and the ledger (~2 s on the live board), so it sits on the
+    # scorecard's minute rather than the vault scan's ten seconds, and a
+    # failure costs this sub-object only: `by_status` stays the raw count.
+    return {**out, "health": _cached("backlog_health", _SCORECARD_TTL_S,
+                                     lambda: _backlog_health(backlog_dir))}
+
+
+def _backlog_health(backlog_dir) -> dict[str, Any] | None:
+    try:
+        from scripts.automod import backlog as B, state as S
+        if not backlog_dir.exists():
+            return None
+        return B.board_health(S.LEDGER_PATH, backlog_dir=backlog_dir)
+    except Exception:
+        return None
 
 
 # Statuses that take a task off the board, canonical and legacy.

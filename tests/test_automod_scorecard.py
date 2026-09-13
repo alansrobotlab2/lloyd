@@ -329,3 +329,57 @@ def test_row_12_renders_for_a_row_recorded_before_it_existed():
     text = SC.render(old)
     assert "| 12 | arch review | 0 units |" in text
     assert "no verdicts" in text
+
+
+def test_triage_appends_are_counted_apart_and_row_13_reads_the_board(tmp_path, repo):
+    ledger = _ledger(tmp_path, [
+        _ev("backlog_triage", 2, item_id=1, verdict="confirmed", spawned=[], findings_appended=2),
+        _ev("backlog_implement", 1, item_id=2, phase="finished", round_id="SM_A",
+            spawned=[], findings_appended=3),
+    ])
+    board = tmp_path / "backlog"; board.mkdir()
+    def item(iid, *, hours, status="draft", completed_hours=None):
+        fm = {"status": status, "board": "lloyd",
+              "created": datetime.fromtimestamp(NOW - hours * 3600, tz=timezone.utc).isoformat()}
+        if completed_hours is not None:
+            fm["completed"] = datetime.fromtimestamp(NOW - completed_hours * 3600,
+                                                     tz=timezone.utc).isoformat()
+        (board / f"{iid}-x.md").write_text("---\n" + yaml.dump(fm) + "---\n\n# x\n")
+    item(10, hours=2)
+    item(11, hours=3)
+    item(12, hours=100, status="done", completed_hours=1)
+    # `board_flow` skips closed files untouched for a week by mtime; these are
+    # written now, and NOW is in the future, so pin the clock the test reads.
+    import os
+    for f in board.glob("*.md"):
+        os.utime(f, (NOW, NOW))
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=board, repo=repo, now=NOW)
+    assert row["spawn"]["triage_findings_appended"] == 2
+    assert row["spawn"]["findings_appended"] == 3, "implement's key stays implement's"
+    assert row["flow"]["24h"] == {"created": 2, "closed": 1, "net": 1}
+    text = SC.render(row)
+    assert "| 13 | board net flow | +1 / 24 h |" in text
+    assert "triage appended 2 findings" in text
+
+
+def test_row_13_renders_for_a_row_recorded_before_it_existed():
+    old = {"since_days": 7, "events": 0, "computed_at": "2026-09-01T00:00:00+00:00",
+           "acceptance": {"landed": 0, "with_outcome": 0, "met": 0, "hit_rate": None},
+           "audit": {"delta": None, "grader_met": 0, "author_met": 0, "rounds_compared": 0},
+           "review": {"refusal_rate": None, "rounds_refused": 0, "rounds_graded": 0,
+                      "fixed_in_turn": 0, "premise_unsound": 0, "escalated": 0,
+                      "grader_unavailable": 0},
+           "spawn": {"triage_ratio": None, "implement_ratio": None, "triage_filed": 0,
+                     "triage_closed": 0, "implement_filed": 0, "implement_closed": 0},
+           "human_touch": {"rate": None, "touched_within_7d": 0, "landed": 0},
+           "test_honesty": {"grader_findings": 0, "per_gated_round": None,
+                            "landed_with_or_true": 0},
+           "bookkeeping": {"nameless_deferrals": 0, "stranded_landings": 0, "bare_aborts": 0},
+           "verdict_plumbing": {"regex_rate": None, "regex": 0, "verdicts_with_source": 0,
+                                "truncated": 0, "finalizer_tokens_median": None},
+           "throughput": {"items_closed": 0, "items_closed_per_day": 0.0, "rounds_finished": 0,
+                          "rounds_landed": 0, "median_turns_landed": None,
+                          "median_gate_seconds": None},
+           "rollbacks": {"count": 0, "triggers": [], "true_positives": None}}
+    assert "| 13 | board net flow | — |" in SC.render(old)
+
