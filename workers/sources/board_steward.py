@@ -135,7 +135,15 @@ outcome of `met` closes by itself; `not_met` / `deferred` leave it `up_next` \
 for one more attempt on exactly the unmet clauses.
 - A round that aborted for a reason outside its diff (`external`, a grader \
 that was down, a pre-existing red test, a rebase conflict) has NOT spent the \
-item: `up_next`. A round that spent its one attempt on a judgment of the \
+item: `up_next`.
+- **A review refusal on the contract spends nothing either.** A round sent \
+back because the grader marked a clause `unsatisfiable` (or `post_landing`) \
+was refused for a defect in the item's clauses, not in the diff; the item is \
+offered again with its branch kept and the finding attached, and the next \
+round amends the clause. That is `review_retry` → `up_next`. A `status_moved` \
+to `draft` "spent" followed two minutes later by `up_next` "offered again — \
+review_retry" is the machine correcting its own first pass, not a human \
+reopen you should undo (#860, 2026-09-11 19:04 → 19:06). A round that spent its one attempt on a judgment of the \
 change — a review refusal twice, `spent` — goes back to `draft` with the tag \
 `needs-human`; the tag comes off with any move back into the pool.
 - **`in_progress` means a round is running on it right now, and nothing \

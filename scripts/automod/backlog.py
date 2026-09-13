@@ -2202,7 +2202,11 @@ def rounds_for_item(ledger: Path) -> dict[int, list[str]]:
     out: dict[int, list[str]] = {}
     for d in _ledger_events(ledger, "backlog_implement"):
         rid = str(d.get("round_id") or "")
-        if d.get("phase") != "started" or not rid:
+        # Any phase that names the round. On the live ledger only `finished`
+        # carries `round_id` — `started` has `budget`, `item_id`, `phase` —
+        # so reading `started` alone returned nothing for every item and the
+        # first-re-offer ordering (`first_reoffer_with_a_branch`) never fired.
+        if not rid:
             continue
         try:
             iid = int(d["item_id"])
