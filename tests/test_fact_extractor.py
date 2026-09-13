@@ -361,7 +361,14 @@ def test_exclusion_set_holds_only_the_live_writer():
             f"{name} has no generator left; excluding it protects a dead file "
             "instead of letting a stale one be noticed")
     assert "skills-index.md" in ne._SELF_WRITTEN_MEMORY_NOTES, \
-        "skills-index.md still has a live writer — excluding it is load-bearing"
+        ("skills-index.md still has a live writer (memory/skills-index.md, "
+         "written nightly), so the basename entry stays. It is defence in "
+         "depth for roots other than `memory/`, not the sole reason the live "
+         "file stays out: `nightly_extraction.py:401` also drops any `memory/` "
+         "note whose stem sorts >= today, and 'skills-index' always does. The "
+         "behaviour that depends on THIS entry is pinned by "
+         "test_the_dead_names_stop_being_excluded_from_the_corpus, under a "
+         "non-`memory/` root where the date rule cannot interfere")
 
 
 def test_the_dead_names_stop_being_excluded_from_the_corpus(tmp_path, monkeypatch):
