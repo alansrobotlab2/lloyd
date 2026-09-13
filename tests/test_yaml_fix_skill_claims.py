@@ -4,27 +4,37 @@ The skill is `status: active` and matched by `skills_search`, so an autonomy run
 can follow it verbatim. Written on 2026-04-03, it had drifted three ways (backlog
 #488, confirmed at triage 2026-09-12):
 
-* its "Scripts Requiring This Fix" list named a script deleted in vault-side
-  commit `0b3f00b` (2026-09-03, "kg phase 7: delete what nothing runs") and
-  missed one of the two scripts that still carry the fallback class;
+* its "Scripts Requiring This Fix" list named a script deleted in vault commit
+  `0b3f00b` (2026-09-03, "kg phase 7: delete what nothing runs") and missed one
+  of the two scripts that still carry the fallback class;
 * its Testing block invoked the system interpreter instead of the venv the
   pipeline is supported on;
 * its rationale asserted that the yaml module is unavailable in this
-  environment. Measured 2026-09-12: PyYAML 6.0.3 on Python 3.14.7
-  (`/usr/bin/python3`) and on Python 3.12.14 (`.venvs/lloyd/bin/python`). The
-  trigger for the fallback no longer reproduces on either interpreter, so the
-  claim was what was holding a partial YAML parser in the tree. Whether the
-  class goes outright is #484's call, not this file's.
+  environment. Measured 2026-09-12: PyYAML 6.0.3 imports on Python 3.14.7
+  (`/usr/bin/python3`) and on Python 3.12.14 (`.venvs/lloyd/bin/python`), so the
+  fallback's trigger no longer reproduces on either interpreter, and the claim
+  was what was keeping a partial YAML parser in the tree.
 
-Only claims that mislead an operator are pinned — not prose. The checks read the
-live vault, hence `live_vault`: an hourly autoresearch promotion or a nightly
-skills pass can rewrite the file between rounds (see `pytest.ini`). If #484
-removes the fallback class, the carrier set goes empty and the skill becomes a
-historical note; that item owns updating this file along with it.
+Whether the fallback classes go outright is backlog #484's call, not this
+file's; the skill now defers to it, and one test below pins that it defers.
+
+Scope of the scans: the acceptance greps are `grep -rn` over every file under
+`~/obsidian/skills/`, so the two whole-directory scans here walk every file,
+not just `*.md` — an absence claim parked in a `.py` or `.sh` would otherwise
+pass the test while failing the clause. Measured 2026-09-13, the only file under
+that tree still mentioning the deleted script is `autonomy-data-pipeline/SKILL.md`,
+and no file under it still claims yaml is missing.
+
+These assertions read the live vault, so they can go red from a nightly skills
+pass rather than from the change under review. That is the same trade
+`tests/test_skill_tool_names.py` already makes for live skill prose, and it is
+deliberate: a check that the gate deselects pins nothing. The module skips only
+where no vault is present at all, like its neighbour.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -40,10 +50,10 @@ SKILLS_DIR = Path.home() / "obsidian" / "skills"
 YAML_SKILL = SKILLS_DIR / "autonomy-pipeline-yaml-fix" / "SKILL.md"
 PIPELINE_SKILL = SKILLS_DIR / "autonomy-data-pipeline" / "SKILL.md"
 # The venv lives in the live checkout, not in a round's worktree (it is
-# gitignored), so it is resolved from $HOME like the skill prose does.
+# gitignored), so it is resolved from $HOME the way the skill prose spells it.
 VENV_PY = Path.home() / "lloyd" / ".venvs" / "lloyd" / "bin" / "python"
 
-# The literal strings the acceptance grep looks for across every skill.
+# The literal strings the acceptance grep looks for across the skills tree.
 ABSENCE_CLAIMS = (
     "No module named 'yaml'",
     "not available in the restricted",
@@ -52,14 +62,33 @@ ABSENCE_CLAIMS = (
 # A `~/lloyd/...py` path as it is spelled in skill prose.
 NAMED_PATH = re.compile(r"~/lloyd/[A-Za-z0-9_./-]+\.py")
 
-pytestmark = [
-    pytest.mark.live_vault,
-    pytest.mark.skipif(not YAML_SKILL.exists(), reason="vault skill not present"),
-]
+# Trees under ROOT that are not source: vendored deps, caches, build output,
+# git internals, and the venv (which is gitignored and lives inside the
+# checkout, so a raw walk would descend tens of thousands of site-packages
+# files looking for one class definition).
+_NOT_SOURCE = {
+    ".git", ".venv", ".venvs", "node_modules", "__pycache__",
+    ".pytest_cache", ".mypy_cache", "dist", "build",
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _skills():
+    if not SKILLS_DIR.is_dir():
+        pytest.skip("no skills directory on this machine")
 
 
 def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _skill_files() -> list[Path]:
+    """Every file under the skills tree, as `grep -rn` would walk it."""
+    files = []
+    for path in sorted(SKILLS_DIR.rglob("*")):
+        if path.is_file() and path.stat().st_size <= 2_000_000:
+            files.append(path)
+    return files
 
 
 def _section(text: str, heading: str) -> str:
@@ -76,17 +105,32 @@ def _fenced(text: str) -> list[str]:
     return [parts[i] for i in range(1, len(parts), 2)]
 
 
+# The block as the two carriers actually write it. Matching the shape rather
+# than the substrings `"class yaml:"` and `"except ImportError"` is what keeps
+# this file — a test about that block, containing both substrings — out of its
+# own result set.
+_FALLBACK_BLOCK = re.compile(
+    r"^\s*try:\s*\n\s*import\s+yaml\s*\n\s*except\s+ImportError:.*?^\s*class\s+yaml\s*:",
+    re.M | re.S,
+)
+
+
 def _fallback_carriers() -> set[str]:
-    """Scripts whose `try: import yaml / except ImportError: class yaml` block
-    exists on disk right now, as skill-prose paths."""
-    carriers = set()
-    for py in (ROOT / "scripts").rglob("*.py"):
-        try:
-            body = py.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if "class yaml:" in body and "except ImportError" in body:
-            carriers.add("~/lloyd/" + py.relative_to(ROOT).as_posix())
+    """Scripts under ROOT whose `try: import yaml / except ImportError: class
+    yaml` block exists on disk right now, as skill-prose paths."""
+    carriers: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [d for d in dirnames if d not in _NOT_SOURCE]
+        for name in filenames:
+            if not name.endswith(".py"):
+                continue
+            py = Path(dirpath) / name
+            try:
+                body = py.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if _FALLBACK_BLOCK.search(body):
+                carriers.add("~/lloyd/" + py.relative_to(ROOT).as_posix())
     return carriers
 
 
@@ -94,7 +138,9 @@ def _fallback_carriers() -> set[str]:
 
 
 def test_exactly_two_scripts_still_carry_the_fallback_class():
-    """Disk truth behind clause 2: two carriers, both under `scripts/`."""
+    """Disk truth behind clause 2, over the whole checkout: two carriers, both
+    under `scripts/`. The skill's claim that they are the only two is only as
+    good as this detector, which is why it walks the repo and not one subtree."""
     assert _fallback_carriers() == {
         "~/lloyd/scripts/memory/rebuild_index.py",
         "~/lloyd/scripts/memory/next-gen-memory/relations_index.py",
@@ -105,13 +151,12 @@ def test_exactly_two_scripts_still_carry_the_fallback_class():
 
 
 def test_only_the_historical_mention_of_the_deleted_script_survives():
-    """`semantic_relationships` remains only as prose in autonomy-data-pipeline
+    """`semantic_relationships` survives only as prose in autonomy-data-pipeline
     saying the old Step 2 ran it and it is gone."""
-    assert SKILLS_DIR.exists(), f"no skills dir at {SKILLS_DIR}"
     hits = sorted(
-        md.relative_to(SKILLS_DIR).as_posix()
-        for md in SKILLS_DIR.rglob("*.md")
-        if "semantic_relationships" in _text(md)
+        f.relative_to(SKILLS_DIR).as_posix()
+        for f in _skill_files()
+        if "semantic_relationships" in _text(f)
     )
     assert hits == ["autonomy-data-pipeline/SKILL.md"], hits
     line = next(
@@ -133,20 +178,20 @@ def test_the_scripts_section_names_the_real_carriers_only():
 
 
 def test_every_script_path_the_skill_names_resolves_on_disk_and_at_head():
-    """A skill that orders a patch to a deleted file is the defect this is."""
+    """A skill that orders a patch to a deleted file is the defect this is. The
+    live checkout is consulted for both halves: the file on disk, and the same
+    path at HEAD, which is what prose is allowed to cite."""
+    live = Path.home() / "lloyd"
     named = sorted(set(NAMED_PATH.findall(_text(YAML_SKILL))))
     assert named, "the skill names no script at all — did the section move?"
     for prose_path in named:
         rel = prose_path.removeprefix("~/lloyd/")
-        assert (Path.home() / "lloyd" / rel).is_file(), (
-            f"{prose_path} named in the skill, but absent from disk"
-        )
+        assert (live / rel).is_file(), f"{prose_path} named in the skill, but absent from disk"
         probe = subprocess.run(
-            ["git", "-C", str(ROOT), "cat-file", "-e", f"HEAD:{rel}"],
+            ["git", "-C", str(live), "cat-file", "-e", f"HEAD:{rel}"],
             capture_output=True, text=True,
         )
         assert probe.returncode == 0, f"{prose_path} is not at HEAD: {probe.stderr.strip()}"
-
 
 
 # ── clause 4: the Testing block runs the venv, not the system interpreter ────
@@ -163,16 +208,31 @@ def test_the_testing_block_invokes_the_venv_interpreter():
         assert "python3" not in block, block
 
 
+def _test_command_scripts() -> list[str]:
+    """Script paths named inside a Testing fence block — not anywhere in the
+    file, or a stale bullet in another section would vouch for the command."""
+    found = []
+    for block in _fenced(_section(_text(YAML_SKILL), "## Testing")):
+        for token in re.findall(r"[A-Za-z0-9_./-]+\.py", block):
+            found.append(token)
+    return found
+
+
 def test_the_command_the_skill_publishes_actually_runs():
-    """Across the interpreter seam: the script the Testing block tells a reader
-    to run, run under the interpreter it names, exits 0."""
-    script = "scripts/memory/next-gen-memory/relations_index.py"
-    assert script in _text(YAML_SKILL), "the Testing block no longer names a runnable script"
-    proc = subprocess.run(
-        [str(VENV_PY), script, "--help"], cwd=ROOT, capture_output=True, text=True
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "usage: relations_index.py" in proc.stdout
+    """Across the interpreter seam: each script the Testing block names, run
+    under the interpreter that block names, exits 0 and prints usage. The
+    block is parsed, so a command that quietly changed script while the prose
+    bullet stayed the same cannot pass."""
+    scripts = _test_command_scripts()
+    assert scripts, "the Testing section's fenced command names no .py file"
+    for rel in scripts:
+        script = ROOT / rel
+        assert script.is_file(), f"Testing block names {rel}, absent from the checkout"
+        proc = subprocess.run(
+            [str(VENV_PY), rel, "--help"], cwd=ROOT, capture_output=True, text=True
+        )
+        assert proc.returncode == 0, f"{rel} --help: {proc.stderr}"
+        assert "usage:" in proc.stdout, f"{rel} --help printed no usage: {proc.stdout[:200]}"
 
 
 # ── clause 5: the preferred fix, and whose call the removal is ───────────────
@@ -185,7 +245,12 @@ def test_the_skill_says_the_venv_is_the_fix_and_defers_the_class_to_484():
         if "preferred" in ln.lower() and ".venvs/lloyd/bin/python" in ln
     ]
     assert preferred, "no line states that running under the venv is the preferred fix"
-    assert re.search(r"#?484", text), "the skill does not point at #484 for the removal decision"
+    # Backlog reference, not any bare "484": the hash is required, and the
+    # deferral has to be the decision about deleting the class.
+    flat = " ".join(text.split())
+    assert re.search(r"#[*]{0,2}484\b[^.]{0,160}?\b(decision|call)\b", flat), (
+        "the skill does not defer deleting the fallback class to backlog #484"
+    )
 
 
 # ── clause 6: the yaml-absence rationale is retired everywhere ────────────────
@@ -193,21 +258,25 @@ def test_the_skill_says_the_venv_is_the_fix_and_defers_the_class_to_484():
 
 def test_no_skill_still_claims_the_yaml_module_is_missing():
     offenders = []
-    for md in sorted(SKILLS_DIR.rglob("*.md")):
-        for n, line in enumerate(_text(md).splitlines(), 1):
+    for path in _skill_files():
+        for n, line in enumerate(_text(path).splitlines(), 1):
             if any(claim in line for claim in ABSENCE_CLAIMS):
-                offenders.append(f"{md.relative_to(SKILLS_DIR)}:{n}: {line.strip()}")
+                offenders.append(f"{path.relative_to(SKILLS_DIR)}:{n}: {line.strip()}")
     assert offenders == [], "\n".join(offenders)
 
 
 def test_pyyaml_imports_under_the_supported_interpreter():
-    """The measured fact the retired rationale contradicted: PyYAML 6.0.3 on
-    Python 3.12.14 in the venv, so the fallback class never fires there."""
-    proc = subprocess.run(
-        [str(VENV_PY), "-c", "import sys, yaml; print(sys.version_info[0], yaml.__version__)"],
-        capture_output=True, text=True,
+    """The measured fact the retired rationale contradicted: the interpreter the
+    skill names is a real venv python, and PyYAML 6.0.3 imports under it, so the
+    fallback branch is never taken on the supported path."""
+    probe = (
+        "import sys, yaml; print(sys.executable); print(yaml.__version__)"
     )
-    assert proc.returncode == 0, proc.stderr
-    python_major, _, version = proc.stdout.strip().partition(" ")
-    assert python_major == "3"
-    assert tuple(int(n) for n in version.split(".")[:2]) >= (6, 0), version
+    proc = subprocess.run(
+        [str(VENV_PY), "-c", probe], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, f"import yaml under the venv: {proc.stderr}"
+    executable, _, version = proc.stdout.strip().partition("\n")
+    assert Path(executable) == VENV_PY, f"not the venv interpreter: {executable}"
+    parts = tuple(int(n) for n in version.split(".")[:2])
+    assert parts >= (6, 0), f"PyYAML {version} is older than the 6.0.3 the skill states"
