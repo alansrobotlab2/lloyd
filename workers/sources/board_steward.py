@@ -156,7 +156,14 @@ Do not send it back to `up_next` because the outcome looks recoverable.
 its own history; the umbrella carries it.
 - A human moved it by hand if the board disagrees with the ledger and the \
 last event is older than the item's `updated`. Honour the human.
-- Never move an item you have no event for. Silence is not evidence.
+- **An item with no triage verdict that sits in `up_next` goes back to \
+`draft`.** `up_next` means the loop may implement it, and the loop only takes \
+items triage confirmed; nothing can pull an untriaged item out of there, and \
+autotriage only reads `draft`. A writer that files straight into `up_next` \
+(the first tick under the shared rule missed #1024 and #1025, both filed by \
+a triage turn that way) has parked it where nothing will look.
+- Otherwise, never move an item you have no event for. Silence is not \
+evidence — the untriaged-in-`up_next` case above is the one silence that is.
 
 `next_pick`: the `up_next` item the loop should implement next. A first \
 re-offer whose branch `automod/<round>` still exists is one fix cycle, not an \
