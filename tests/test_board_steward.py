@@ -195,7 +195,13 @@ def test_the_shipped_state_is_dry_run():
     cfg = CONFIG["workers"]["sources"]["board-steward"]
     assert cfg["enabled"] is True
     assert cfg["apply"] is False
-    assert cfg["model"] == "secondary"
+    assert cfg["model"] == "primary"      # since the first live tick; see the source
+    assert int(cfg["max_turns"]) >= 16
+
+
+def test_the_prompt_tells_it_not_to_read_its_way_through_the_board():
+    text = W.build_prompt(events=[], items=[_item(1, "up_next")], n_open=1, since_ts=0)
+    assert "Do not open items or run tools" in text
 
 
 def test_the_source_is_registered():

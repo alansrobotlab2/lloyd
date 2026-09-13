@@ -46,8 +46,17 @@ NAME = "board-steward"
 DEFAULT_PRIORITY = 68
 LONG_LIVED = False
 DEDUP_KEY = "board-steward:tick"
-DEFAULT_MODEL = "secondary"
-DEFAULT_MAX_TURNS = 8
+# Primary, not secondary, since the first live tick. Five dry-runs and one
+# live tick on the secondary: two runs with ordering errors (an older event
+# read over the latest), and the live tick spent all eight iterations on
+# tool reads and died at `max_turns` with no structured answer. The primary
+# made no ordering errors and answered in 90-170 s. A steward pass is a
+# two-minute judgment every fifteen minutes; the primary can afford it, and
+# the round hold keeps it off the engine while a round is running.
+DEFAULT_MODEL = "primary"
+# Headroom, not a target: the prompt says decide from what is shown, and a
+# pass that needs sixteen tool calls is one that ignored the prompt.
+DEFAULT_MAX_TURNS = 16
 DEFAULT_MAX_EVENTS = 300
 DEFAULT_MAX_ITEMS = 80
 BODY_CHARS = 280
@@ -160,8 +169,11 @@ in flight, never a `grouped` member, never one whose acceptance begins \
 {board}
 </board>
 
-Decide with the evidence above only. You have no tools to run and need none. \
-When you finish you will be asked to restate the result as one JSON object.
+Decide with the evidence above only. **Do not open items or run tools** — \
+every item you may move is shown above with its history, and a pass that \
+reads its way through the board runs out of budget before it answers (the \
+first live pass did exactly that). Write your decision directly; when you \
+finish you will be asked to restate it as one JSON object.
 """
 
 

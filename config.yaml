@@ -865,16 +865,19 @@ workers:
     # `select_confirmed` takes its pick; then `autocode.status_pipeline`
     # and `close_on_settle` come off. It may never set `done`: closing is
     # gated on a settled promotion that said `met`, and stays mechanical.
-    # Secondary model — a judgment over frontmatter needs no primary, and
-    # the primary is what a round is using.
+    # Primary since the first live tick: on the secondary it made ordering
+    # errors in two of five dry-runs and the live tick died at max_turns on
+    # tool reads with no answer. A two-minute judgment every fifteen minutes
+    # is a cost the primary can carry, and the round hold keeps it off the
+    # engine while a round runs.
     board-steward:
       enabled: true
       apply: false
       interval_seconds: 900
       max_inflight: 1
       max_duration_seconds: 600
-      model: secondary
-      max_turns: 8
+      model: primary
+      max_turns: 16
       max_events: 300
       max_items: 80
       priority: 68
