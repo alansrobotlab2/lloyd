@@ -139,6 +139,30 @@ def _digests(root: Path) -> dict:
             for p in sorted(root.rglob("*.md"))}
 
 
+def _redump_like_deleted_writer(ri, raw: bytes) -> bytes:
+    """The write the deleted method performed, reconstructed from the shape
+    recorded in backlog #484: split the file on `---`, re-serialise the parsed
+    frontmatter with `yaml.dump`, rejoin as
+    `f"---\\n{dump}---\\n{body}"`.
+
+    The mutation is the add branch run on a triple the note already carries, so
+    it changes nothing semantically — which is the whole point: the old code
+    reached `write_text` regardless, and the reassembly alone moved the bytes
+    (key reordering, and one newline byte per call). Used only to prove the
+    digest comparison in the test below has a trigger; nothing here imports the
+    module's own writer, which is deleted.
+    """
+    parts = raw.decode().split("---", 2)
+    assert len(parts) == 3, "fixture note is not frontmatter + body"
+    frontmatter = ri.yaml.safe_load(parts[1]) or {}
+    relations = frontmatter.setdefault("relations", {})
+    existing = relations.setdefault("depends-on", [])
+    if "knowledge/d.md" not in existing:          # the already-present triple
+        existing.append("knowledge/d.md")
+    dump = ri.yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)
+    return f"---\n{dump}---\n{parts[2]}".encode()
+
+
 # --- clause 1: the deletion route -------------------------------------------
 
 def test_deletion_leaves_no_frontmatter_rewriter(ri):
@@ -167,19 +191,46 @@ def test_module_imports_and_is_read_only_by_construction(ri):
     is `self.index_file`. A future `doc_file.write_text(...)` in here fails
     this test even if it comes back under a different name."""
     tree = ast.parse(SCRIPT.read_text())
-    write_calls = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr in {"write_text", "write_bytes", "open"}
-    ]
+
+    # Every way this module can put bytes on disk, and what each one's
+    # destination argument has to be. `atomic_write_text` is in here as a bare
+    # name because the runtime spy in the `write_targets` fixture patches
+    # `app.atomic_io.atomic_write_text` — a `from app.atomic_io import
+    # atomic_write_text` at module level binds the function before the spy is
+    # installed, so that route is invisible to the spy and only catchable
+    # statically. Same reasoning for the os/shutil renames below: they move a
+    # file into place without any call the spy or the digest test would see as
+    # a write to a note.
+    write_calls = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in {"write_text", "write_bytes", "open"}:
+            write_calls.append((node, func.value))
+        elif isinstance(func, ast.Name) and func.id == "atomic_write_text":
+            write_calls.append((node, node.args[0] if node.args else None))
+
     assert write_calls, "the module stopped writing anything at all — the index write moved?"
-    for call in write_calls:
-        receiver = call.func.value
-        assert isinstance(receiver, ast.Attribute) and receiver.attr == "index_file", (
+    for call, destination in write_calls:
+        ok = isinstance(destination, ast.Attribute) and destination.attr == "index_file"
+        assert ok, (
             f"relations_index.py line {call.lineno} writes something other than "
             f"self.index_file; a vault-note writer is back (#484)"
         )
+
+    renamed = sorted({
+        node.func.attr for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in {"os", "shutil"}
+        and node.func.attr in {"replace", "rename", "remove", "unlink", "move", "rmtree"}
+    })
+    assert not renamed, (
+        f"relations_index.py now uses os/shutil {renamed}, which relocates a file "
+        f"without a write any guard here covers (#484)"
+    )
 
 
 def test_rebuild_edge_count_is_the_document_relations(ri, generator):
@@ -218,11 +269,29 @@ def test_rebuild_edge_count_is_stable_across_calls(generator):
 # path twice with a triple already present" — the relation is already in the
 # fixture's frontmatter, and the note must not move.
 
-def test_rebuild_leaves_every_note_byte_identical(ri, generator, vault, write_targets):
+def test_rebuild_leaves_every_note_byte_identical(ri, generator, vault):
     """#484 clauses 2 + 3: the fixture note whose relation is already present,
     with non-alphabetical frontmatter keys and a body preceded by a blank
     line, is unchanged — byte for byte — by any path the module still has.
-    Run twice, because the old writer's damage was per-call growth."""
+    Run twice, because the old writer's damage was per-call growth.
+
+    The byte-digest comparison this test rests on is proved able to fail before
+    it is trusted to pass: the first block re-applies the deleted writer's
+    exact reassembly to one fixture note and requires the digest to move. A
+    fixture that could not tell a re-dumped note from an untouched one would
+    make the real assertion vacuous, and fails here instead.
+    """
+    churned = vault / "knowledge" / "c.md"
+    original = churned.read_bytes()
+    churned.write_bytes(_redump_like_deleted_writer(ri, original))
+    assert hashlib.sha256(churned.read_bytes()).hexdigest() != hashlib.sha256(original).hexdigest(), (
+        "the fixture survives a yaml frontmatter round-trip unchanged, so the "
+        "byte-identity assertion below proves nothing — give the note "
+        "non-alphabetical keys and a quoted value"
+    )
+    churned.write_bytes(original)
+    assert _digests(vault)[churned.relative_to(vault).as_posix()] == hashlib.sha256(original).hexdigest()
+
     before = _digests(vault)
     generator.rebuild()
     generator.rebuild()
@@ -231,10 +300,6 @@ def test_rebuild_leaves_every_note_byte_identical(ri, generator, vault, write_ta
         "rebuild() rewrote a vault note: "
         + ", ".join(k for k in before if before[k] != after[k])
     )
-    # the note named in the item's own reproduction is among those checked
-    assert (vault / "knowledge" / "c.md").read_text().startswith(
-        "---\nsegment: knowledge\ntype: knowledge-note\n"
-    ), "the fixture lost its key order — something re-dumped this frontmatter"
 
 
 def test_no_write_target_falls_under_the_vault_or_the_live_index(generator, vault, write_targets):
@@ -273,17 +338,16 @@ def test_nightly_reaches_the_generator_only_through_rebuild():
     )
 
 
-def test_write_text_during_rebuild_records_only_the_index_file(generator, tmp_path, write_targets):
+def test_write_text_during_rebuild_records_only_the_index_file(generator, write_targets):
     """#484 clause 5: with `write_text` monkeypatched, a rebuild records only
-    `self.index_file` — no vault note, and the index it writes is the tmp one,
-    so this test never writes the live index either."""
+    `self.index_file` — no vault note. The generator's index is the tmp one the
+    fixture set, so this also cannot write the live index from under the run."""
     write_targets.clear()
     generator.rebuild()
     recorded = sorted(t.resolve() for t in write_targets)
     assert recorded == [generator.index_file.resolve()], (
         f"rebuild() wrote {recorded}, expected only {generator.index_file}"
     )
-    assert generator.index_file.parent == tmp_path / "pipeline"
 
 
 def test_rebuild_merges_approved_proposals_without_touching_the_vault(
