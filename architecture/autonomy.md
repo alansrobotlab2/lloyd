@@ -5,12 +5,12 @@ tags:
 - lloyd
 status: active
 type: reference
-timestamp: '2026-07-06T14:36:37'
+timestamp: '2026-09-13T00:00:00'
 ---
 # Autonomy System Architecture
 
 **Created:** 2026-03-22
-**Last updated:** 2026-09-11
+**Last updated:** 2026-09-13
 **Status:** Active — 32 task files, dispatched by the `scheduled-task` worker source
 
 ## Overview
@@ -125,8 +125,12 @@ Five steps, three processes, and the seams are where it has gone wrong.
    schedule and the gates; `skill_name` names the skill under
    `~/obsidian/skills/<slug>/SKILL.md` that is the actual instruction.
 2. **Due-ness.** Every 60 s (`workers.sources.scheduled-task.interval_seconds`)
-   `enqueue_if_due` calls `autonomy.get_due_tasks()`, which runs `_is_task_due`
-   over the runnable set and sorts by priority, then by staleness.
+   `enqueue_if_due` calls `autonomy.get_due_tasks()`, which reads the directory
+   once into **two** lists — `dependency_resolution_set()` (the whole board) to
+   resolve `depends_on` against, `_all_runnable_tasks(resolution)` (status- and
+   grant-filtered) for the candidates — pins one `now` for the whole pass, then
+   runs `_is_task_due` over the runnable set and sorts by priority, then by
+   staleness.
 3. **The queue.** Due tasks are enqueued under `dedup_key =
    scheduled-task:<id>`, so one already waiting is never enqueued twice, at a
    priority mapped from the frontmatter word:
@@ -181,10 +185,18 @@ as `blocked`, and `dashboard._autonomy` to split past-due rows into `overdue`
 `classifier: "naive"` when `import autonomy` failed and every past-due task is
 being called overdue again, because a downgrade that looks like success is the
 failure this split exists to prevent. Note that the dependency gate resolves
-`depends_on` by id and treats an unresolvable id as **met**, so both callers
-must hand it the *whole* board: `/api/autonomy/tasks?status=up_next`
+`depends_on` by id and treats an unresolvable id as **met**, so every caller
+must resolve against the *whole* board: `/api/autonomy/tasks?status=up_next`
 classified against its own filtered list would report every dependency
 satisfied, since the upstream is usually the task that just left that status.
+That is no longer a convention each caller honouring on its own — #870 made it
+one function, `autonomy.dependency_resolution_set(directory)`, and dispatch
+(`get_due_tasks`), `_grossly_overdue`, `/api/autonomy/tasks` and
+`dashboard._autonomy` all call it. Before that, dispatch resolved the same
+`depends_on` against the status-filtered runnable set while the board resolved
+it against everything: a `paused` upstream was invisible to the scheduler, and
+the board printed `waiting on #42` in the same second the scheduler dispatched
+the task underneath it.
 
 ### Dependencies, and failing forward
 
@@ -229,8 +241,10 @@ window.
 `last_run` is a *completion* time, so the due moment drifts later by the run's
 own duration every cycle; for a task pinned to a one-hour window that drift
 eventually steps past the window and skips a day. So when a window is in force
-the interval check allows `min(3600, interval * 0.25)` of slack. Thirteen of
-the 32 tasks set a real window.
+the interval check allows `min(3600, interval * 0.25)` of slack. Fourteen of
+the 32 tasks end up with an enforced window: thirteen set
+`preferred_hours`, and #84's empty list falls through to the hour in its
+`scheduled_at`.
 
 ## Failure is a state machine, not a log line
 
@@ -255,8 +269,10 @@ activity log, alert — and it splits two kinds:
   `_INFRA_EMPTY_MAX_SECONDS` (15 s) **with no tool call**: that fast and that
   silent, it is a thinking-only turn or a 200 with no content, not work.
 
-`_DEFAULT_MAX_RETRIES` is 5, but every live task file carries `max_retries: 3`
-and that is what the create path writes, so 3 is the number in practice.
+`_DEFAULT_MAX_RETRIES` is 5. Thirty of the 31 runnable task files carry
+`max_retries: 3`, which is also what the create path writes, so 3 is the number
+in practice; #84 carries 2, and #83 carries none, so a failure of that task
+counts against 5 rather than 3.
 
 **`last_run` means the last success; `last_attempt` means every attempt.** The
 cooldown reads "last_attempt newer than last_run" as "the most recent attempt
@@ -286,7 +302,12 @@ without that collection they never reach the record at all.
 nothing else means "nothing to report", and it suppresses the Discord
 completion embed. Combining it with content is explicitly refused, because a
 delivery decision made by substring against a long answer is one made by
-accident. `compute_health` tracks the rate.
+accident. `compute_health` tracks the rate, and the rate is almost entirely a
+cadence artefact rather than a behaviour: **337 of 808 runs in the week to
+2026-09-13 came back `[SILENT]`**, 306 of them from two tasks — #68 Email &
+Calendar Triage at every-15-minutes (132 of 428) and #75 AI Engineer YouTube
+Monitor (174 of 180), which was archived on 2026-09-09 and will age out of the
+window.
 
 ## Two timeouts, and the thirty seconds between them
 
@@ -295,8 +316,9 @@ frontmatter, enforced by `run_task`'s `asyncio.timeout`, and
 `workers.sources.scheduled-task.max_duration_seconds` (3600), enforced by the
 pool's `asyncio.wait_for`. When the two were equal the **pool** timer won the
 race, cancelling `run_task` before its own handler could run: no run record, no
-activity-log line, the task file left `in_progress`. 237 such runs — 73.6
-GPU-hours — sit in `workers.db` with a NULL `task_id`.
+activity-log line, the task file left `in_progress`. 309 such runs — 96.9
+GPU-hours, the last one on 2026-09-03 and none since — sit in `workers.db` with
+a NULL `task_id`.
 
 So `run_task` derives `max(60, min(declared, cap − 30))`
 (`_POOL_TIMEOUT_MARGIN`) and the task handler always wins.
@@ -361,7 +383,7 @@ Read by the scheduler, and therefore worth getting right:
 | `model` | alias, resolved through `config.resolve_model_alias` |
 | `expected_error_patterns` | suppressions for the silent-failure detector |
 | `inner_voice` | per-task observer opt-in |
-| `notify_on_complete` | whether a non-`[SILENT]` result posts to Discord |
+| `notify_on_complete` | whether the completion notice posts to Discord — read by `execute` *after* the run, and only for a successful non-`[SILENT]` result, so a failed or timed-out run cannot notify whatever this says |
 | `grants` | #534 authority; an unreadable block makes the task **not runnable** |
 
 Written and displayed, read by no scheduling decision: `agent_id`,
@@ -397,6 +419,17 @@ regex extraction of a named field list. A task can come back degraded
 `yaml.dump` write normalizes the file on disk. That `fallback_fields` list is
 the contract — a field missing from it is lost on a degraded file, which is why
 `inner_voice` was added there and not only to the reader.
+
+**The list is the scheduler's, and only the scheduler's.** Two other readers
+parse the same files with their own shorter lists:
+`agent_mcp/autonomy.py::_parse_task_file` names 13 fields — no `preferred_hours`,
+`depends_on`, `model`, `stale_bypass_hours`, `last_attempt` or `inner_voice`,
+and one (`board_id`) the scheduler's list has never carried — and
+`app/routers/autonomy.py::_autonomy_parse` passes no fallback list at all, so a
+YAML-broken file returns `None` and vanishes from `/api/autonomy/tasks` while
+the scheduler still dispatches it. The invariant holds where it has to; the
+display and MCP paths can report a degraded task as window-less, chain-less and
+model-less, and no test pins the two lists against each other.
 
 Two things guard the same failure from outside:
 `scripts/autonomy/validate_tasks.py` is a fail-loud linter (exit 1 unparseable,
@@ -456,6 +489,16 @@ forever is what fired this alarm 100 times in six days. It needs 5 consecutive
 ticks and re-alerts at most every 6 h. `_queue_starving` catches the mirror
 case (dispatch fine, workers dead) from the age of the oldest claimable item.
 
+A **second, quieter assertion** sits beside it (`_next_run_stalled`, #421,
+2026-09-12), keyed on each task's own `next_run` rather than on due-ness: any
+`up_next` task more than one whole period past its `next_run`, on a separate
+streak counter with a 24 h cooldown, so neither alarm can reset the other's. It
+exists because the three exclusions that make the first alarm survivable are
+exactly the shapes that sat silent for 41 h on #51 and 60 h on #40 — a
+dependent whose upstream's run was never recorded is *not due*, so the due-ness
+alarm cannot see it. Each entry carries `hold_reason`, dispatch's own words, so
+the alert says why it has not run rather than only that it has not.
+
 Alerts and completion notices go to Discord (`app/discord_notify.py`). That is
 this subsystem's own channel and predates the guardian's six-channel fan-out;
 `agent-services/guardian/notify.py` does not cover it.
@@ -463,7 +506,7 @@ this subsystem's own channel and predates the guardian's six-channel fan-out;
 ## Fleet health
 
 `GET /api/autonomy/health?days=7` and the `autonomy_health` MCP tool read
-**`workers.db`**, not the per-task run records, because the 237 pool-timeout
+**`workers.db`**, not the per-task run records, because the 309 pool-timeout
 rows with a NULL `task_id` were unreachable from any per-task view by
 construction — and `/api/autonomy/runs` requires a `task_id`. A task that timed
 out on every single run was indistinguishable from a healthy one.
@@ -487,15 +530,28 @@ rather than the task file: the gap list is ledger state, and a human-edited
 vault file is not somewhere a worker should be writing hourly. A run with no
 bundle counts as `runs_without_bundle` and never as clean, because a metric
 that reads its own missing input as zero is the failure mode this file has been
-burned on three times.
+burned on three times. **Today that is exactly what the pilot is, for the whole
+fleet: across 808 runs in the week to 2026-09-13, `runs_with_bundle` is 0 and
+`claims_checked` is 0.** Not because the four tasks stopped emitting claims —
+because `scheduled-task.execute` returns a hand-written result dict that never
+includes the `claims` key `pool.py` reads, so the bundle is dropped one hop
+before the verifier is called. The counting rule below is sound and its input is
+empty; #945 (umbrella #966) is the fix, and until it lands every
+`claims_checked: 0` in a report means "never measured", which is the reading the
+rule was written to force.
 
 ## The fleet today
 
-32 task files: 30 `up_next`, one `in_progress`, one `draft` (#85, pinned to a
-`model: eco` that no `models:` block defines). 30 run on `primary`, #68 on
-`secondary`, and **no task sets `inner_voice: true`** — the fleet is recorded
-and unobserved. Fourteen more sit in `_archived/`, invisible to a
-non-recursive walk rather than merely inactive.
+32 task files: **31 `up_next` and one `draft`** (#85, pinned to a `model: eco`
+that no `models:` block defines) — nothing sits `in_progress` between runs,
+which is the point of the recovery path rather than a normal state. 30 run on
+`primary`, #68 on `secondary`, #85 on that undefined alias, and **no task sets
+`inner_voice: true`** — the fleet is recorded and unobserved. Fourteen more sit
+in `_archived/`, invisible to a non-recursive walk rather than merely inactive;
+three of those fourteen (#52, #59, #73) still have run rows in the seven-day
+window, because the retention sweep does not delete run history and
+`compute_health` reports a task id with no file as `task: null` and never as a
+ghost.
 
 The nightly chain is **#38 → #42 → #39 → #40 → #47**, and two of the ids this
 document used to give were wrong: Knowledge Analysis is **#42**, never "#39a",
@@ -519,7 +575,7 @@ reflection chain, trace2skill, and the knowledge-graph chain below.
 
 ## Config
 
-`autonomy:` in config.yaml has four keys and two of them are read:
+`autonomy:` in config.yaml has five keys and two of them are read:
 
 | key | status |
 |---|---|
@@ -561,3 +617,23 @@ applies.
 **One store.** Edges, aliases, the entity registry and the fact index live in
 `_pipeline/vault-derived/kg.sqlite`, behind `app.kg_store`. Nothing else opens
 it. See `architecture/knowledge-graph.md`.
+
+## Review log
+
+- **2026-09-13 — `current`.** Every mechanism described here still runs: the
+  five gates and their order, the two-list dispatch (`dependency_resolution_set`
+  + `_all_runnable_tasks`, #870), the failure ladder and its two kinds, both
+  timeout margins, the deadline anchor, the four joined records, the graduated
+  parser. What had moved is the snapshots: 30 `up_next` + 1 `in_progress` is now
+  31 `up_next` + 1 `draft`; the pool-timeout residue is 309 rows / 96.9 GPU-h and
+  closed on 2026-09-03, not 237 / 73.6 and ongoing; the enforced-window count is
+  14 (thirteen `preferred_hours` plus #84 via its `scheduled_at` hour), not 13;
+  and `max_retries: 3` is on thirty of thirty-one files, with #84 at 2 and #83
+  carrying none. Two statements were aspirational in the bad sense and are now
+  marked: the #525 evidence pilot has verified **nothing** — 0 bundles and 0
+  `claims_checked` across 808 runs — because `scheduled-task.execute` returns a
+  result dict with no `claims` key for `pool.py` to read (#945, umbrella #966);
+  and `[SILENT]`'s 42% fleet rate is two high-frequency tasks, not a behaviour.
+  Added the second stall alarm (`_next_run_stalled`, #421) beside the due-ness
+  one, and one sentence naming what the display readers do with a degraded task
+  (#1014).
