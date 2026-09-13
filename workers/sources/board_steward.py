@@ -138,12 +138,15 @@ that was down, a pre-existing red test, a rebase conflict) has NOT spent the \
 item: `up_next`. A round that spent its one attempt on a judgment of the \
 change — a review refusal twice, `spent` — goes back to `draft` with the tag \
 `needs-human`; the tag comes off with any move back into the pool.
-- **A landed item that is waiting on a person stays where it is.** An \
-`item_landed` with `closed=false` and a reason naming what a person still \
-owes it (a post-landing check, a human clause, a `human_paths` entry) is \
-held deliberately — the code is live and the item is open for someone to \
-confirm. It is not "stuck in_progress"; propose no move and say so in your \
-summary if you think the vocabulary is wrong for it.
+- **`in_progress` means a round is running on it right now, and nothing \
+else** (Alan's ruling, 2026-09-13). A landing that settled and left the item \
+open is not running. `item_landed` with `closed=false`: acceptance `met` with \
+a person still owed a check → `draft` + `needs-human`; `not_met` → `up_next` \
+(offered once more for exactly those clauses) unless its attempt is `spent`, \
+then `draft` + `needs-human`; `deferred` to other items → `draft`, no tag; no \
+recorded outcome → `draft` + `needs-human`. A promotion still under \
+observation (promoted, not yet settled) is the one landed state that stays \
+`in_progress` — the round is not over until the guardian says so.
 - `spent` is spent. An item whose one attempt was consumed by a verdict on \
 the change (`spent` in an outcome, "a human decides" in its status reason) \
 goes to `draft` with `needs-human` and stays there until a human reopens it. \

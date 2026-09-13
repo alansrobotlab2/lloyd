@@ -1083,6 +1083,43 @@ def test_not_met_leaves_the_item_open(isolated):
     assert _fm(p)["status"] == "up_next"
 
 
+def test_in_progress_means_a_round_is_running_and_nothing_else(isolated):
+    """Alan's ruling, 2026-09-13. Seventeen landed items sat `in_progress`
+    with nothing running and the dashboard counted them as active work. A
+    settled landing that left the item open is waiting — on a person, on
+    other items, or on another attempt — and each has a status that says so.
+    The one landed state that stays `in_progress` is a promotion still under
+    observation, because the round is not over until the guardian says so.
+    """
+    p640 = write_item(isolated, 640)
+    for i in (641, 642, 643):
+        write_item(isolated, i)
+    _landed(640, "SM_640", "a640a640a640", outcome={"acceptance": "met", "landed": True,
+            "deferred_to": [], "summary": "", "spawned": [], "clause_outcomes": []})
+    # A human clause is what holds a `met` landing open (#578's shape).
+    B.update_frontmatter(p640, {"human_clauses": ["Alan confirms the dashboard shows it"]})
+    _landed(641, "SM_641", "a641a641a641", outcome={"acceptance": "not_met", "landed": True,
+            "deferred_to": [], "summary": "", "spawned": [],
+            "clause_outcomes": [{"clause": 1, "outcome": "not_met", "evidence": "", "deferred_to": []}]})
+    _landed(642, "SM_642", "a642a642a642", outcome={"acceptance": "deferred", "landed": True,
+            "deferred_to": [999], "summary": "", "spawned": [], "clause_outcomes": []})
+    _landed(643, "SM_643", "a643a643a643", outcome=None)
+    B.close_settled_items(S.LEDGER_PATH)
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    # met, a person owed a check: draft + needs-human
+    assert want[640][0] == "draft" and want[640][2] is True and "person" in want[640][1]
+    # not_met, attempt still owed: offered once more (the existing `partial`
+    # re-offer path says "offered again"; the new branch only speaks when
+    # that attempt is spent, and then it says draft + needs-human)
+    assert want[641][0] == "up_next" and ("offered again" in want[641][1]
+                                           or "once more" in want[641][1])
+    # deferred to other items: draft, no tag, the reason names what it waits on
+    assert want[642][0] == "draft" and len(want[642]) == 2 and "#999" in want[642][1]
+    # no outcome: a human decides
+    assert want[643][0] == "draft" and want[643][2] is True
+    assert not any(w[0] == "in_progress" for w in want.values()), "nothing is running"
+
+
 def test_the_sweep_is_idempotent(isolated):
     write_item(isolated, 603)
     _landed(603, "SM_603", "f00df00df00d", outcome={"acceptance": "deferred", "landed": True,
@@ -1291,12 +1328,15 @@ def test_desired_statuses_covers_every_branch(isolated):
     want = B.desired_statuses(S.LEDGER_PATH, None)
     assert want[710][0] == "in_progress" and "in flight" in want[710][1]
     assert want[711][0] == "in_progress" and "observation" in want[711][1]
-    assert want[712][0] == "in_progress" and "landed" in want[712][1]
+    # Landed, swept, still open, with no `item_landed` outcome on the ledger:
+    # nothing is running on it, so it is not `in_progress` (Alan's ruling,
+    # 2026-09-13) — it is a landing a human has to judge.
+    assert want[712][0] == "draft" and "landed" in want[712][1] and want[712][2] is True
     assert want[713][0] == "up_next" and "offered again" in want[713][1]
     assert want[714][0] == "draft" and "spent" in want[714][1], (
         "up_next means implement will take it, and it will not; a human decides")
     assert want[714][2] is True, "spent is the one case that needs a human"
-    assert all(len(w) == 2 for i, w in want.items() if i != 714), "nothing else is tagged"
+    assert all(len(w) == 2 for i, w in want.items() if i not in (712, 714)), "nothing else is tagged"
     assert want[715][0] == "up_next" and "confirmed" in want[715][1]
     assert want[716][0] == "draft" and "not for the unattended loop" in want[716][1]
     assert want[717][0] == "draft" and "never triaged" in want[717][1]

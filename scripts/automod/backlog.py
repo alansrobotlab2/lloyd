@@ -1705,6 +1705,15 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     for d in _ledger_events(ledger, "backlog_implement"):
         if d.get("phase") == "finished" and str(d.get("round_id") or "") in live_promoted:
             observing.add(int(d["item_id"]))
+    # The landing's own outcome, last per item. `in_progress` means a round
+    # is running on the item and nothing else (Alan's ruling, 2026-09-13):
+    # a landing that settled and left the item open is not running — it is
+    # waiting on a person, on other items, or on another attempt — and each
+    # of those has a status that says so. Seventeen items sat `in_progress`
+    # with nothing running and the dashboard counted them as active work.
+    landed_outcome: dict[int, dict] = {}
+    for d in _ledger_events(ledger, "item_landed"):
+        landed_outcome[int(d["item_id"])] = d
     out: dict[int, tuple[str, str]] = {}
     for item in open_items(boards):
         iid = item.id
@@ -1721,8 +1730,32 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
             out[iid] = ("draft", f"folded into umbrella #{item.group}; it closes when that lands")
         elif iid in in_flight:
             out[iid] = ("in_progress", "an automod round is in flight for it")
+        elif landed and not partial and landed_outcome.get(iid, {}).get("acceptance") == "not_met":
+            # Documented rule: "a landed round with a not_met clause is offered
+            # once more for exactly those clauses". Fall through to the
+            # `outcomes` branch below, which knows whether that attempt is
+            # still owed (`up_next`) or spent (`draft`, needs-human). This
+            # branch used to park it `in_progress` and contradict the rule.
+            verdict, detail = outcomes.get(iid, ("", ""))
+            if verdict == "spent":
+                out[iid] = ("draft", "landed with a clause not met and its one unattended attempt "
+                                     "is spent; a human decides (reopen_item to grant another)", True)
+            else:
+                out[iid] = ("up_next", "landed with a clause not met; offered once more for "
+                                       "exactly those clauses")
         elif landed and not partial:
-            out[iid] = ("in_progress", "landed, awaiting the acceptance check or a human close")
+            ev = landed_outcome.get(iid, {})
+            acc = ev.get("acceptance")
+            if acc == "met":
+                out[iid] = ("draft", "landed with every clause met; the code is live and a person "
+                                     "still owes it: " + (ev.get("reason") or "")[:160], True)
+            elif acc == "deferred":
+                # The landing's reason already names the ids it waits on.
+                out[iid] = ("draft", "landed; not running, waiting on other items — "
+                                     + (ev.get("reason") or "deferred")[:160])
+            else:
+                out[iid] = ("draft", "landed with no structured outcome recorded (predates the "
+                                     "finalizer); a human decides", True)
         elif iid in observing and not (landed and partial):
             # Promoted, not yet settled: the guardian is watching it and the
             # sweep has not run. Neither back in the pool nor done.
