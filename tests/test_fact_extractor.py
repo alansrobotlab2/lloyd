@@ -336,6 +336,76 @@ def test_empty_sources_is_an_error_not_a_whole_vault_walk(tmp_path, monkeypatch)
     kg_store.reset()
 
 
+# ── self-written derived indexes (#487) ──────────────────────────────────────
+
+NE_PATH = "scripts/memory/next-gen-memory/nightly_extraction.py"
+# Reports whose generators died in 0b3f00b ("kg phase 7: delete what nothing
+# runs", 2026-09-03). Nothing regenerates them; nothing read them either.
+DEAD_DERIVED_INDEXES = ("semantic-relationships.md", "relationship-proposals.md")
+VAULT = Path.home() / "obsidian"
+
+
+def test_exclusion_set_holds_only_the_live_writer():
+    """A name belongs in `_SELF_WRITTEN_MEMORY_NOTES` only while something
+    still regenerates it. Both dead reports stayed in the set after their
+    generators were deleted, so the extractor skipped files it had stopped
+    writing — and a `type: report` note asserting 187,368 relationships sat in
+    `memory/` contradicting the live graph by ~46x (#487)."""
+    ne = _load("nightly_extraction_exclset", NE_PATH)
+    for name in DEAD_DERIVED_INDEXES:
+        assert name not in ne._SELF_WRITTEN_MEMORY_NOTES, (
+            f"{name} has no generator left; excluding it protects a dead file "
+            "instead of letting a stale one be noticed")
+    assert "skills-index.md" in ne._SELF_WRITTEN_MEMORY_NOTES, \
+        "skills-index.md still has a live writer — excluding it is load-bearing"
+
+
+def test_the_dead_names_stop_being_excluded_from_the_corpus(tmp_path, monkeypatch):
+    """The same claim as behaviour, not as set membership: a file under either
+    dead name is now an ordinary document, while `skills-index.md` — the one
+    entry with a live writer — must still never enter the corpus.
+
+    The fixtures sit under `knowledge/`, not `memory/`: the walk also drops any
+    `memory/` file whose stem sorts >= today's date, and `'semantic…' >
+    '2026-09-13'`, so in their real directory every one of these names would
+    be excluded by that rule whatever the set contained — the check would
+    report a verdict it could not see. The set matches on basename, so
+    anywhere else exercises the identical branch.
+    """
+    ne = _load("nightly_extraction_deadnames", NE_PATH)
+    vault = tmp_path / "obsidian"
+    for rel in ("knowledge/skills-index.md", "knowledge/semantic-relationships.md",
+                "knowledge/relationship-proposals.md", "knowledge/control.md"):
+        p = vault / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+    cfg = tmp_path / "pipeline_config.yaml"
+    cfg.write_text(yaml.dump({"sources": {"paths": ["knowledge"]}}))
+    monkeypatch.setattr(ne, "VAULT", vault)
+    monkeypatch.setattr(ne, "CONFIG_PATH", cfg)
+    kg_store.configure(tmp_path / "kg.sqlite")
+    x = ne.NightlyExtraction()
+    got = {Path(p).name for p in x._eligible_files(full_mode=True)}
+    kg_store.reset()
+    assert got == {"semantic-relationships.md", "relationship-proposals.md",
+                   "control.md"}, (
+        "the dead reports are ordinary documents now; skills-index.md is the "
+        "only self-written index that may stay out of the corpus")
+
+
+def test_the_two_dead_reports_are_out_of_the_vault():
+    """Clause 1 lands on the vault side (vault commit `e4ad7729`), so it is
+    not in this diff — pinned here against the tree a reader actually opens.
+    The directory is asserted first: a check that cannot see its own input
+    reports a pass it cannot justify."""
+    mem = VAULT / "memory"
+    assert mem.is_dir(), f"{mem} is not readable — this check cannot report"
+    for name in DEAD_DERIVED_INDEXES:
+        assert not (mem / name).exists(), (
+            f"memory/{name} is back: a report no generator writes, asserting a "
+            "relationship count nothing recomputes (#487)")
+
+
 # ── the rebuild's write flag ─────────────────────────────────────────────────
 
 def test_fact_writes_can_be_disabled_for_a_rebuild(extractor, monkeypatch):
