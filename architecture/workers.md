@@ -203,9 +203,17 @@ and could not act *yet* returns `DECLINED` (`workers.sources`); with
 `retry_seconds` in its config the stamp is back-dated so it is due again that
 much sooner (`WorkerPool._scheduler_pass`). Anything else — `None`,
 `ENQUEUED` — advances the full interval. autocode is the one user: a poll
-that finds a promotion under observation retries in 60 s instead of 900, and
-its board housekeeping keeps the 900 s clock on its own `last_housekeeping`
-watermark (`architecture/automod.md` §4.5d).
+that finds a promotion under observation — or whose enqueue coalesced against
+the previous round's row, still `running` through its finalizer — retries in
+60 s instead of 900, and its board housekeeping keeps the 900 s clock on its
+own `last_housekeeping` watermark (`architecture/automod.md` §4.5d, §3.2d).
+
+A source that sets `REPOLL_ON_COMPLETE = True` is also made due the moment one
+of its runs ends: the worker loop's `finally` back-dates its
+`last_enqueue_check` to the epoch (`WorkerPool._repoll_on_complete`), so the
+next scheduler pass — at most 60 s later — asks it again. autocode sets it;
+without it the next round was queued up to a full interval after the last one
+ended. A failed write costs the early look, never the run's record.
 
 ### The result contract
 

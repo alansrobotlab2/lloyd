@@ -357,12 +357,16 @@ that and a lost round, in order:
    with no report; if the gate passed, land it" into the same session, and
    that turn gated, landed, and the feature was live at 17:34. The first
    responder.
-3. **`reap_abandoned_rounds`**, the backstop, run from the implementer's
-   scheduler tick: a round this source opened, still open, nothing under
-   observation, its session idle, twenty minutes after the turn ended, is
-   aborted with its branch kept and the item told where the work is. Not at
-   turn end — that would have raced the rescue and thrown away 875 lines
-   the gate then passed.
+3. **`reap_abandoned_rounds`**, the backstop: a round this source opened,
+   still open, nothing under observation, its session idle, is aborted with
+   its branch kept and the item told where the work is. How long it waits
+   follows `autocode.inner_voice`. Observed, twenty minutes after the turn
+   ended, on the scheduler tick — at turn end it would have raced #278's
+   rescue and thrown away 875 lines the gate then passed. Unobserved (since
+   2026-09-12), no wait: nothing can rescue the round, and `_run_and_record`
+   reaps it the moment the turn ends (see §3.2d). Either way it never reaps a
+   round whose detached gate (`gate.running`) or landing (`land.running`) is
+   still alive — protections the twenty minutes used to provide by accident.
 
 **Human-only.** Some paths the loop may never touch remain: `config.yaml`,
 `data/**`, `.env*`, `pytest.ini`, `.gitignore`, and the frontend's build
@@ -530,7 +534,9 @@ umbrellas — and none of them deletes anything.
 autocode's housekeeping and closes a self-filed `draft` that nothing
 triaged, implemented, clustered or tagged in `spawn_expiry_days()` —
 `done`, tagged `expired`, text kept. The bound is
-`workers.sources.autocode.expire_spawns_after_days`, 14 since 2026-09-13,
+`workers.sources.autocode.expire_spawns_after_days`, 7 since 2026-09-14 (14
+from 09-13, when it still had never fired: the oldest open self-spawn was 7.0
+days old),
 failing open to `SPAWN_EXPIRY_DAYS` (30; `SPAWN_TRIAGE_MIN_AGE_DAYS` is its
 old alias). At a hardcoded 30 it had never triggered — the oldest self-spawn was
 six days old — while 400 self-spawned items sat open, and `over_bound 0`
@@ -574,7 +580,7 @@ parents persisted.
 before it takes a single item (`backlog.select_cluster`: re-validated
 against disk, ids a group run already judged dropped, duplicate pairs kept
 together, largest surviving cluster, `group_min_items` 2 /
-`group_max_items` 8). One turn, `GROUP_PROMPT`, `GROUP_TRIAGE_SCHEMA` built
+`group_max_items` 4, 8 until 2026-09-14). One turn, `GROUP_PROMPT`, `GROUP_TRIAGE_SCHEMA` built
 from `RETIRING`/`SURFACES`, per-item verdicts:
 
 - `duplicate_of #t` → `done`, `duplicate_of` in frontmatter, a `stale`
@@ -591,7 +597,7 @@ from `RETIRING`/`SURFACES`, per-item verdicts:
   quarantine so single triage reaches it.
 - The **umbrella** the turn filed (tags `umbrella`, `spawned-by-triage`) is
   confirmed through `record_verdict` exactly like any confirmed item —
-  `up_next`, `acceptance_clauses` on disk, ≤12 clauses — plus `members`. Two
+  `up_next`, `acceptance_clauses` on disk, ≤`MAX_CLAUSES` (6) — plus `members`. Two
   folds minimum: one fold is a keep. No umbrella on disk turns every fold
   into a keep and records `umbrella_missing`.
 
@@ -614,7 +620,8 @@ umbrella #u" and an `item_closed {by: umbrella}` event
 folded; `unnecessary` closes the umbrella but tags it `needs-human` with the
 members still folded — a wrong `unnecessary` on six findings is the one
 claim the loop should not make alone. `backlog.unfold_umbrella(id, reason)`
-is the human escape hatch. Scorecard row 11 counts all of it; folds and
+is the human escape hatch; `unfold_spent_umbrellas` applies it to every open
+umbrella whose attempt is spent (§3.2d). Scorecard row 11 counts all of it; folds and
 duplicates count as closures on row 4.
 
 **Single triage pauses while the implement pool is full** (2026-09-13).
@@ -671,8 +678,128 @@ the second half of the quarantine fix, for a pass that filed two items per
 item it read). It never opens a round, so it may overlap an autocode round
 or its observation window; two pool slots and the KV gate arbitrate for the
 primary. Autocode's own gate (`_loop_is_free`) is what keeps two rounds
-apart: no worktree open, no promotion under observation, no rollback
-pending, checked at enqueue and again at run.
+apart: no worktree open, no promotion under observation (an `observing` one
+is allowed with `automod.chamber` on, §3.2d), no rollback pending, checked at
+enqueue and again at run.
+
+### 3.2d Throughput: the loop must not idle between rounds
+
+Measured over the week to 2026-09-14 (`promotions.jsonl`, `workers.db`,
+`logs/server.err`): 137 rounds, 54 promoted, 48.3 h of autocode turns
+running and **61.6 h idle between a run's end and the next enqueue** — 31.7 h
+of landing plus observation window (46 landings, median 20.9 min), ~20 h of
+an enqueue race (56 gaps, median 12.6 min), ~7 h of reaper grace (15 rounds,
+median 26 min). And of the rounds that ran, the review rung refused 109 of 147
+reviews. Five changes, each with a switch.
+
+**Pacing.** Three idle sources, three fixes:
+
+- *The coalesce race.* `enqueue_if_due` returned `DECLINED` only when
+  `_loop_is_free` said no. When the model called `automod_abort` (worktree
+  gone) and then spent one to three minutes on its finalizer, the loop read
+  free while the round's queue row was still `running`, so the enqueue
+  coalesced on `autocode:round`, the source returned None, and the pool
+  stamped a full `interval_seconds`. A coalesced enqueue returns `DECLINED`.
+- *Nothing woke the source.* A source with `REPOLL_ON_COMPLETE = True` has its
+  `last_enqueue_check` back-dated to the epoch in `WorkerPool._worker_loop`'s
+  `finally`, so the next 60 s scheduler pass asks it. Autocode opts in; it
+  covers a `skipped` run that took milliseconds and a round shorter than the
+  interval.
+- *The reaper's grace.* See §3.2 item 3. The grace existed for the observer's
+  ambient follow-up, which cannot come with `autocode.inner_voice: false`, and
+  27 of 136 turns ended with the round open. `_run_and_record` calls the
+  reaper (off the event loop) after the `finished` row and in the
+  `TurnTimeout` branch, passing the session that just ended so its own
+  wind-down is not read as busy; not on `infra_failed`. Housekeeping's 900 s
+  pass stays the backstop. `land.running` is the gate marker's twin:
+  `_land_detached` writes it with the child's pid before `automod_land`
+  returns, `round.land` rewrites it with its own pid and clears only its own
+  in a `finally`, a dry run never touches it, and a second landing of one round
+  is refused.
+
+**The chamber** (`automod.chamber`, **ships false**). `_loop_is_free` refused
+a new round for a promotion's whole window, though only `land` needs it — the
+turn and gate touch the worktree and the canary ports, and triage and digest
+turns already run on the live backend during observation. With the switch on
+an `observing` promotion is free; `landing`, a rollback request, halt and
+BROKEN are not. The next round's turn and gate (~33 min median) then hide the
+15-minute window entirely, and only its landing waits:
+`promote.wait_for_settle`, called by `round.land` *outside* the automod lock
+(round starts and arch-review commits take it) and before `wait_idle` pauses
+the pool, polls `current.json` every 10 s for up to `ERRORS_WINDOW` + 120 s,
+then asks halt, BROKEN and the rollback request again. Each way it ends
+without a landing is an external `land_failed` (`waited_for_settle: true`),
+so the item keeps its attempt; `promote`'s "still under observation" refusal
+stays behind it for any caller that did not wait, and a moved `main` takes
+the existing `_regate_after_move` path. Accepted failure mode: a rollback of
+the observed promotion restarts the stack under the next round's turn, which
+ends `infra_failed` and is re-offered as `infra`. It ships off because a round
+waiting to land is exactly what the turn-end reaper must not touch, and that
+wants a few days of `land.running` in production first. True two-wide
+concurrency was considered and not taken: five single-writer resources
+(`current.json`, fixed canary ports, the worktree count, `S.Lock`,
+`select_confirmed`) would need sharding, and two 150k-token turns contend for
+one primary's KV pool.
+
+**The clause budget.** The per-clause not-met rate was 13%, so six clauses
+pass together ~43% of the time and twelve ~19%; first reviews by clause count
+promoted 3/16 at ≤4, 21/52 at 5–8, 3/11 at 9+; 62 confirmations in the week
+carried 9–12. `MAX_CLAUSES` 12 → 6, capped on all four parse paths (single
+and group, regex and structured) through `cap_new_clauses` and again in
+`record_verdict`, with `clauses_dropped` on the verdict row;
+`SINGLE_MAX_CLAUSES` (5) is interpolated into the single prompt; each clause
+ends with the test file that pins it (the grader downgrades a `met` with no
+test node). A contract already **on disk** is read at `READ_MAX_CLAUSES` (12):
+56 umbrellas carried 8–12, and capping the readers would grade a round on
+half its contract, close the item on the half it met, and let `amend_clause`
+write the truncation back. `group_max_items` 8 → 4.
+
+**Spent umbrellas unfold.** Umbrellas were 56 of 92 `up_next`, 5 of 68 formed
+had landed, and 156 members sat `grouped` — expiry-exempt, triageable by
+nothing. `unfold_spent_umbrellas` (autocode housekeeping, before the
+reconcile): an open umbrella whose outcome is `spent` and that carries no
+landed marker is unfolded, closed `done` tagged `unfolded` with
+`needs-human` removed, and a `backlog_umbrella_unfolded` row written. Members
+are not re-clustered (`group_triaged_ids`) and self-filed ones stay
+quarantined and expire; `grouped` stays in `EXPIRY_EXEMPT_TAGS`, because a
+member of a live umbrella closed by expiry would be misattributed by
+`close_settled_items`. Switch `workers.sources.autotriage.unfold_spent_umbrellas`.
+
+**One automatic second life.** A spent attempt parked the item for a human:
+~35 a week, and 42 of the 67 a person reopened later landed.
+`retriage_spent_items` (autocode housekeeping, after the unfold, before the
+reconcile) sends an item back through *triage* — because what failed was
+usually the contract — once. Eligible: outcome `spent`, latest row not
+`started`, not an umbrella or member, no live promoted round and no landed
+marker (a landed `met` item owing human clauses is a person's), fewer than
+`RETRIAGE_CAP` (1) prior re-triages. It is moved to `draft`, tagged
+`re-triage`, loses `needs-human` and `review-disagreement`, and gets a
+`backlog_retriage` row with the refused round, the review's findings, its last
+per-clause verdicts and `unmet_twice`. That row is a **mark**:
+`retriage_marks` feeds `triaged_ids`, `confirmed_verdicts` (and through it
+`held_confirmations`), `incomplete_counts`, `implement_outcomes`,
+`review_events_for_item`, `last_review_all_met` and the review rung's
+`prior_reviews`, which all ignore rows at or before it; `released_ids`
+includes it. The item is therefore untriaged, unattempted and unquarantined,
+and oldest-first puts it near the front. Single triage's `<origin>` carries a
+`RE-TRIAGED` line and its prompt says: a new contract without the
+twice-refused clauses, within the cap, or retire. The second spend parks for
+a human as before. `implement_outcomes` also resets its attempt count at a
+human `reopen_item` now — it reset only the latest row, so a reopened item's
+first new round could already be past every re-offer cap. While a re-triage is
+still owed, a review disagreement is not announced as "needs you". Switch
+`workers.sources.autocode.retriage_spent`.
+
+**youtube-eval is loop output** (Alan, 2026-09-14). `EVAL_SPAWN_TAGS`
+(`youtube-eval`) is in `LOOP_SPAWN_TAGS` (expiry, gauge) and a new
+`QUARANTINE_TAGS`, with `SPAWN_TAGS` itself unchanged; the MCP dedupe merges a
+`youtube-eval` write like a `spawned-by-*` one. Readers call
+`quarantine_tags()` / `loop_spawn_tags()`, which honour
+`workers.sources.youtube-digest.loop_spawned`. 125 were filed in the week and
+101 were open. Quarantine as well as expiry, because a confirmed eval item
+would become `confirmed-held`, which expiry exempts. The scorecard gauge now
+coerces tags through `normalize_tags`, since the digest has written them as a
+string.
 
 ### 3.3 For humans (this repo's development)
 
@@ -1342,7 +1469,10 @@ that reconcile is a no-op by construction.
 `scripts/automod/promote.py`, **in a detached session**, in this order:
 
 0. **Refuse unless the candidate is the commit the gate judged, and unless
-   nothing else is under observation.** `land` passed the base along but the
+   nothing else is under observation.** With `automod.chamber` on, `round.land`
+   first *waits* for an observed promotion to settle (§3.2d) and this refusal is
+   the backstop; throughout, `land.running` tells the implement source's reaper
+   the round is being landed, not abandoned. `land` passed the base along but the
    candidate HEAD was re-read from the worktree, so a commit made after a
    passing gate landed completely ungated. And a second landing simply
    overwrote `current.json`: the first promotion never settled, never advanced
