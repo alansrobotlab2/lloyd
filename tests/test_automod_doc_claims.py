@@ -39,11 +39,47 @@ ARMED_STATEMENT_RE = re.compile(
 NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
                 "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 
+# Any number word standing next to "armed", in either English order:
+# "the armed three", "three metrics are armed", "all seven are armed".
+_NUM = "|".join(NUMBER_WORDS)
+ARMED_COUNT_RES = (
+    re.compile(rf"\barmed\s+(?:metrics?\s+)?({_NUM})\b"),
+    re.compile(rf"\b({_NUM})\s+(?:metrics?\s+)?(?:are|were|is|was)\s+armed\b"),
+)
+
+# The comment header above the armed tuples. It shipped duplicated.
+ARMED_SET_HEADER = ("# What the armed set can and cannot see, MEASURED "
+                    "rather than assumed.")
+
 # Sentences that tell the reader the document metrics cannot fire. Each one
 # was true while the corpus moved between arms and is false under the pin.
 DISARMING_PHRASES = ("reported and never fire",
                      "doc-side four are now reported",
                      "Re-arming a doc-side metric")
+
+# The same claim in words the three above do not cover, checked per sentence
+# against the names in ARMED_METRICS rather than against a fixed string: a
+# reworded disarm ("`mrr_doc` is not armed and can never fire") reintroduces
+# the #505 defect while every literal blocklist stays green.
+DISARM_CLAIM_WORDS = ("never fire", "never fires", "cannot fire", "not armed",
+                      "no longer armed", "is unarmed", "are unarmed", "disarm",
+                      "reported only", "only reported")
+
+
+def _disarm_claims(text: str, metrics) -> list[str]:
+    """Sentences naming one armed metric AND that it cannot fire."""
+    hits = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        low = sentence.lower()
+        named = [m for m in metrics
+                 if re.search(rf"\b{re.escape(m)}\b", sentence)]
+        if not named:
+            continue
+        for word in DISARM_CLAIM_WORDS:
+            if word in low:
+                hits.append(f"{named[0]}: {sentence}")
+                break
+    return hits
 
 
 def _flat(path: Path) -> str:
@@ -183,18 +219,54 @@ def test_the_doc_states_the_armed_set_the_code_has():
     number and every name is the only way a count in prose stays a fact.
     """
     from workers.sources import automod_regression as R
-    match = ARMED_STATEMENT_RE.search(_flat(DOC))
-    assert match, ('the doc must state the armed set as '
-                   '"**All N are armed:**" followed by the metric names')
-    stated_count = NUMBER_WORDS[match.group(1).lower()]
-    assert stated_count == len(R.ARMED_METRICS), (
-        f"the doc says {match.group(1)} armed, the code has "
-        f"{len(R.ARMED_METRICS)}")
-    named = re.findall(r"`([a-z0-9_]+)`", match.group(2))
-    assert len(named) == len(R.ARMED_METRICS), (
-        f"the doc names {len(named)} metrics, the code arms "
-        f"{len(R.ARMED_METRICS)}")
-    assert set(named) == set(R.ARMED_METRICS)
+    flat = _flat(DOC)
+    matches = list(ARMED_STATEMENT_RE.finditer(flat))
+    assert matches, ('the doc must state the armed set as '
+                     '"**All N are armed:**" followed by the metric names')
+    for match in matches:  # every statement, not just the first
+        stated_count = NUMBER_WORDS[match.group(1).lower()]
+        assert stated_count == len(R.ARMED_METRICS), (
+            f"the doc says {match.group(1)} armed, the code has "
+            f"{len(R.ARMED_METRICS)}")
+        named = re.findall(r"`([a-z0-9_]+)`", match.group(2))
+        assert len(named) == len(R.ARMED_METRICS), (
+            f"the doc names {len(named)} metrics, the code arms "
+            f"{len(R.ARMED_METRICS)}")
+        assert set(named) == set(R.ARMED_METRICS)
+
+
+def test_the_doc_states_no_armed_count_other_than_the_real_one():
+    """§8.1: the count itself, in any phrasing, not just the canonical sentence.
+
+    `08e998a` armed seven metrics and left "the armed three" standing twice in
+    this doc, so a guard that reads only one sentence shape leaves the other
+    shape open. Any number word beside "armed" has to be the number the code
+    actually has, which also means a reworded disarm that keeps a wrong count
+    is caught here even when it dodges the phrase list below.
+    """
+    from workers.sources import automod_regression as R
+    flat = _flat(DOC)
+    wrong = []
+    for pattern in ARMED_COUNT_RES:
+        for word in pattern.findall(flat):
+            if NUMBER_WORDS[word.lower()] != len(R.ARMED_METRICS):
+                wrong.append(word)
+    assert not wrong, (
+        f"architecture/automod.md states an armed count of "
+        f"{sorted(set(wrong))}, the code has {len(R.ARMED_METRICS)}")
+
+
+def test_the_armed_set_comment_header_is_not_duplicated():
+    """§8.1: one comment header, not two, above the armed tuples.
+
+    `9a6861c` landed the line twice in a row. Harmless to read, but it is the
+    only marker separating the armed-set justification from the tuples below
+    it, and a duplicated marker is what a stale copy of the block looks like.
+    """
+    src = REGRESSION_SRC.read_text(encoding="utf-8")
+    assert src.count(ARMED_SET_HEADER) == 1, (
+        f"{ARMED_SET_HEADER!r} occurs {src.count(ARMED_SET_HEADER)} times in "
+        "workers/sources/automod_regression.py")
 
 
 def test_the_doc_never_disarms_a_metric_the_code_has_armed():
@@ -215,6 +287,8 @@ def test_the_doc_never_disarms_a_metric_the_code_has_armed():
         assert " ".join(phrase.split()) not in flat, (
             f"architecture/automod.md tells the reader {phrase!r} while the "
             "code has that metric armed")
+    claims = _disarm_claims(flat, R.ARMED_METRICS)
+    assert not claims, "architecture/automod.md disarms an armed metric: " + claims[0]
 
 
 def test_the_regression_module_comment_never_disarms_an_armed_metric():
@@ -232,6 +306,10 @@ def test_the_regression_module_comment_never_disarms_an_armed_metric():
         assert " ".join(phrase.split()) not in flat, (
             f"workers/sources/automod_regression.py says {phrase!r} while "
             "the code has that metric armed")
+    claims = _disarm_claims(flat, R.ARMED_METRICS)
+    assert not claims, (
+        "workers/sources/automod_regression.py disarms an armed metric: "
+        + claims[0])
 
 
 def test_the_doc_still_states_the_limits_that_survive_the_pin():
