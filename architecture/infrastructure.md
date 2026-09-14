@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, infrastructure, supervisord, systemd]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-09-14
 ---
 
 # Infrastructure
@@ -136,7 +136,10 @@ Three venvs can serve the primary's model family, which is why `VLLM_VENV` is
 pinned in the conf rather than left to the launcher: `vllm-flash-next-main`
 (what the program names, and the only one with the fp8 QSA path),
 `vllm-qwen38-flash-next` (the PLE-offload-worker build — and the launcher's
-*own* fallback default, so a dropped `VLLM_VENV` boots BF16), and
+*own* fallback default — but a dropped `VLLM_VENV` no longer reaches BF16:
+the conf still exports `KV_CACHE_DTYPE=fp8`, that build's QSA kernel has no
+fp8 path, and the guard at `:526-531` exits 1. It boots BF16 only if both
+variables go), and
 `vllm-qwen3.8`, which belongs to the 27B revert target at
 `start-qwen3.8-27b-nvfp4.sh`. `SETUP.md` Part 4 (venvs) and Part 9 (LLM
 models) carry the builds and the weights.
@@ -167,7 +170,7 @@ guardian is a separate unit ([[vllm]] §8 has the cadence rule).
 | `agent-llm-primary` | 8096 | vLLM, Qwen3.8-Flash-Next, FP8 KV | `bin/start-qwen38-flash-next.sh` |
 | `agent-llm-secondary` | 8091 | llama-server, Qwen3.6-35B-A3B | `bin/start-secondary.sh` |
 | `agent-tts` | 8090 | Qwen3-TTS API | `bin/start-qwen3-tts.sh` |
-| `agent-livekit-server` | 7880 | LiveKit SFU (binds the Tailscale IP when up) | `bin/start-livekit-server.sh` |
+| `agent-livekit-server` | 7880 | LiveKit SFU; signal/WS bind `0.0.0.0` (`conf/livekit.yaml` `bind_addresses`) and it is the **advertised ICE address** (`rtc.node_ip`) that resolves to the Tailscale address at boot | `bin/start-livekit-server.sh` |
 | `lloyd-agent-worker` | 8501 | the LiveKit voice agent: STT, TTS shaping, wake word (8501 is the loopback wake-miss diagnostic rig) | `agent-services/livekit_worker.py` |
 | `agent-qmd-daemon` | 8181 | qmd vector search over the vault (the fork in `~/lloyd/qmd`) | `node qmd/dist/cli/qmd.js mcp --http` |
 | `agent-qmd-watcher` | — | re-embeds on vault change | `scripts/qmd-watcher.sh` |
@@ -234,16 +237,23 @@ each. Stop the hands before moving the floor.
 | `lloyd-groundskeeper-survey.timer` | user timer, 02:30 | `scripts/groundskeeper/groundskeeper-survey.py` — the vault-health scan ([[autonomy-jobs]], #36) |
 | `lloyd-graph-backup.timer` | user timer, 05:30 | `scripts/backup/backup-graph.sh` — the knowledge-graph store |
 | `thunderbird.service` | user service | Thunderbird itself, hosting the `thunderbird-mcp` extension and its bridge on `:8765` |
-| `nvidia-power-limit.service` | system service | GPU power clamp, via `/usr/local/sbin/set-gpu-power-limit.sh` |
+| `nvidia-power-limit.service` | system service, root scope | GPU power clamp, via `/usr/local/sbin/set-gpu-power-limit.sh`. **Declared and live disagree as of this writing**: `nvidia-smi` reads 275 / **450** / 275 W while the unit declares `GPU_POWER_LIMIT_W_1=400` — the 450 on the Xid-79 card was set by hand on 09-11 at 08:43, eleven minutes after the unit's last run, so the next boot drops it back and prints a success line either way (#1107) |
 
-Unit files live in `agent-services/systemd/` and are **symlinked** into
-`~/.config/systemd/user/`, so editing the repo copy is the deploy. Two
-exceptions. The `lloyd-*` timers for the groundskeeper and the graph backup
-exist only in `~/.config/systemd/user/` today, untracked. And
-`nvidia-power-limit.service` is root-executed, so it runs from a *copy* at
-`/etc/systemd/system/` rather than the repo checkout — editing the tracked
-file changes nothing until it is reinstalled, which the unit's own header
-spells out.
+Unit files live in `agent-services/systemd/` and `install-services.sh:36`
+**symlinks** every `.service` and `.timer` in that directory into
+`~/.config/systemd/user/`, so editing the repo copy is the deploy. Four
+exceptions to that rule, all of them gaps rather than design. The
+groundskeeper and graph-backup timers, plus `thunderbird.service` and
+`voxtype.service`, exist only as plain untracked files under
+`~/.config/systemd/user/` — a rebuild from `SETUP.md` loses the timers and
+with them Thunderbird's `:8765` bridge (40 MCP tools) and the push-to-talk
+trigger (#1109). The same glob also links the root-only
+`nvidia-power-limit.service` into the user manager, where it can never clamp
+anything, while the copy that does run is at `/etc/systemd/system/` with
+nothing checking it against the tracked one (#1108). And one tracked unit
+sits outside the directory — `agent-services/autonomy.service`, a dead Idler
+heartbeat whose `WorkingDirectory` and venv have both been deleted for a
+year (#1110).
 
 Thunderbird runs as a user service because `agent_mcp/thunderbird.py` talks
 to a live instance; a closed Thunderbird is the usual reason the aggregator
@@ -354,12 +364,12 @@ voice *change*. So a voice change needs the guardian re-staged
 | Port | Owner |
 |---|---|
 | 5173 | Vite (TLS) |
-| 7880 | LiveKit |
+| 7880 / 7881 | LiveKit — signal HTTP and its TCP fallback (`conf/livekit.yaml`: `bind_addresses: [0.0.0.0]`, `rtc.tcp_port: 7881`) |
 | 8080 | backend |
 | 8090 | Qwen3-TTS |
 | 8091 | secondary LLM |
 | 8096 | primary LLM |
-| 8181 | qmd |
+| 8181 | qmd — listening on `[::1]` only, so an IPv4-literal probe exits 7 against a healthy daemon (`scripts/service_health_check.py:51`) |
 | 8500 | lloyd-mcp |
 | 8765 | the Thunderbird extension's bridge |
 | 18080 / 18500 | the automod **canary**: a candidate backend and aggregator booted from the round's worktree by the gate |
@@ -379,7 +389,12 @@ disk, so the private server cert is what is served.
 describing it. iOS Chrome and every other third-party iOS browser cannot
 present keychain identities for mutual TLS — only Safari can — so Vite no
 longer requests or requires a client cert, and any browser on the tailnet
-works. Tailscale is the access boundary now rather than the certificate.
+works. Tailscale is the front door now rather than the certificate — but it
+is not yet the boundary of the API: `config.yaml` binds the backend to
+`server.host: 0.0.0.0`, so anything routable to the machine reaches `:8080`
+directly, and a request with no fingerprint header is not refused. Vite
+proxies `/api` to `http://localhost:8080`, so loopback would cover every real
+caller; closing the bind is #683.
 
 The allowlist did not go away, it became conditional, and the distinction
 matters when reading `server.py::_require_client_cert`. Vite still injects
@@ -406,6 +421,21 @@ backend ([[workers]]): the autonomy fleet in `~/obsidian/autonomy/*.md`
 ([[autonomy]] for the mechanism, [[autonomy-jobs]] for what each job is for), backlog
 triage and implementation ([[automod]]), research, digests and session
 mining. The systemd timers above are the only wall-clock schedules.
+
+## Review log
+
+- **2026-09-14 — stale.** Checked every path, port, cadence, `startsecs`
+  value and model/venv row against the tree and the live box; most held, and
+  the corrections were small. Wrong: the fp8 fallback (a dropped `VLLM_VENV`
+  now exits 1 at the launcher's QSA guard instead of booting BF16), the
+  access boundary (the backend binds `0.0.0.0` and serves an unauthenticated
+  `/api/*` to the LAN — #683), LiveKit's bind (signal is `0.0.0.0`;
+  `rtc.node_ip` is only the *advertised* ICE address), the port table (no
+  7881), and the unit-file exception list (four gaps, not two: untracked
+  timers plus `thunderbird`/`voxtype` #1109, the installer linking the
+  root-only power unit into the user manager #1108, and a dead tracked
+  `agent-services/autonomy.service` #1110). Recorded without changing: GPU 1
+  at 450 W against a declared 400 W (#1107).
 
 ## Related
 
