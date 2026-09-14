@@ -55,6 +55,15 @@ SKILLS_DIRS = [Path.home() / "obsidian" / "skills", ROOT / "skills"]
 # this item's pin.
 SKILLS_UNDER_TEST = ["youtube-content", "youtube-transcript"]
 
+# A machine with no vault checkout at all (a CI runner) has no skill files to read, so the
+# live-vault cases cannot run there. That condition is a property of the MACHINE, stated once
+# as a marker — same form as `vault_only` in tests/test_prompt_surface_budget.py. It is
+# deliberately not an in-test `pytest.skip("skill not installed")`: a missing SKILL.md on a
+# box that DOES have the vault is exactly the defect these tests exist to catch, and skipping
+# on it would let the pin pass by going away.
+_skills_on_disk = pytest.mark.skipif(
+    not SKILLS_DIRS[0].is_dir(), reason="no vault skill files on this machine")
+
 # What the Artifact Phase must state, as (requirement, pattern). Each one is a distinct
 # failure mode from the item, not a stylistic preference.
 ARTIFACT_PHASE_REQUIREMENTS: dict[str, re.Pattern[str]] = {
@@ -110,15 +119,42 @@ ARTIFACT_PHASE_REQUIREMENTS: dict[str, re.Pattern[str]] = {
 }
 
 
-def missing_artifact_phase(text: str) -> list[str]:
+# Which save form each skill's OWN prescribed route has to carry. Both skills satisfy the
+# shared save-step requirement on either form, and that latitude is wrong here: this box has
+# no Node runtime, so youtube-transcript's Environment Guardrail (2026-08-19) forbids yt-dlp
+# outright and the youtube-transcript-api block is the route that actually runs. Review on
+# round SM_20260914_184202 deleted that block and the skill still passed — the `-o` line was
+# holding the requirement up. So the route that runs is pinned by name, per skill.
+SKILL_ROUTE_REQUIREMENTS: dict[str, dict[str, re.Pattern[str]]] = {
+    "youtube-transcript": {
+        "the yt-dlp step writes into the scratch dir":
+            re.compile(r'-o\s+"?\$TRANSCRIPT_DIR/'),
+        # One fenced block only (the `(?!```)` guards): the path is built from `_pipeline`/`tmp`
+        # AND written, in the same snippet. Naming it without writing it does not save a file.
+        "the youtube-transcript-api route builds the scratch path and writes it":
+            re.compile(r'_pipeline(?:(?!```)[\s\S]){0,300}?tmp(?:(?!```)[\s\S]){0,300}?write_text'),
+    },
+    "youtube-content": {
+        # Every mode of its helper script is stdout-only, so a redirect IS the save step.
+        "the helper script's stdout is redirected into the scratch dir":
+            re.compile(r'>\s*"\$TRANSCRIPT_DIR/'),
+    },
+}
+
+
+def missing_artifact_phase(text: str, skill: str | None = None) -> list[str]:
     """Return every Artifact-Phase requirement ``text`` fails to state.
 
     Pure over skill text, so the gate can run it on fixtures and the live_vault cases can run
-    it on the real files with no duplicated logic.
+    it on the real files with no duplicated logic. Pass ``skill`` to also grade the save form
+    that skill's own prescribed extraction route must carry.
     """
+    required = dict(ARTIFACT_PHASE_REQUIREMENTS)
+    if skill is not None:
+        required.update(SKILL_ROUTE_REQUIREMENTS.get(skill, {}))
     return [
         label
-        for label, pattern in ARTIFACT_PHASE_REQUIREMENTS.items()
+        for label, pattern in required.items()
         if not pattern.search(text)
     ]
 
@@ -129,6 +165,18 @@ def _skill_file(name: str) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _require_skill_text(name: str) -> str:
+    """Read a live skill, or fail. The only skip these live cases take is the machine-level
+    one (`_skills_on_disk`): a vault checkout that is missing a SKILL.md is the regression
+    under test, not a reason to pass."""
+    path = _skill_file(name)
+    assert path is not None, (
+        f"skills/{name}/SKILL.md is not installed under {SKILLS_DIRS} — the skill that "
+        "carries this rule has gone missing, which is how a pinned requirement disappears "
+        "without a diff to it")
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +252,33 @@ def test_removing_one_requirement_is_caught(strip: str):
     assert missing, f"stripping {strip!r} should have been caught, but the checker passed"
 
 
+# The shape the youtube-transcript-api route uses to save (its skill section, condensed): the
+# path built from `_pipeline`/`tmp`, and the transcript written to it in the same snippet.
+_YTA_SAVE_BLOCK = (
+    "```python\n"
+    'scratch = Path.home() / "lloyd" / "_pipeline" / "tmp" / f"{video_id}.txt"\n'
+    'scratch.parent.mkdir(parents=True, exist_ok=True)\n'
+    'scratch.write_text("\\n".join(s.text for s in transcript), encoding="utf-8")\n'
+    "```\n"
+)
+
+
+def test_each_prescribed_route_save_form_is_load_bearing():
+    """`_CANONICAL` carries only the yt-dlp save step, so grading it AS each skill must
+    report exactly the save form that skill still owes — and handing it the real
+    youtube-transcript-api block closes that one gap and no other.
+
+    This is the round-SM_20260914_184202 review's finding as a permanent test: the shared
+    save-step requirement accepts either form, so deleting the Python block from
+    youtube-transcript — the route this box must use, since the skill's Environment Guardrail
+    (2026-08-19) forbids yt-dlp on a box with no Node — left the skill passing."""
+    assert missing_artifact_phase(_CANONICAL, skill="youtube-transcript") == [
+        "the youtube-transcript-api route builds the scratch path and writes it"]
+    assert missing_artifact_phase(_CANONICAL, skill="youtube-content") == [
+        "the helper script's stdout is redirected into the scratch dir"]
+    assert missing_artifact_phase(_CANONICAL + _YTA_SAVE_BLOCK, skill="youtube-transcript") == []
+
+
 def test_a_pre_448_skill_file_fails_the_checker():
     """The failure this test was written against: an extraction skill that documents
     fetching and formatting but never says where the digest lands."""
@@ -229,21 +304,20 @@ python3 SKILL_DIR/scripts/fetch_transcript.py "https://youtube.com/watch?v=VIDEO
 # live vault — excluded from the gate rung, run in the ordinary suite
 # ---------------------------------------------------------------------------
 
+@_skills_on_disk
 @pytest.mark.live_vault
 @pytest.mark.parametrize("skill", SKILLS_UNDER_TEST)
 def test_extraction_skill_states_the_artifact_phase(skill: str):
     """#448's acceptance, on the real files: both extraction skills must carry a named
     Artifact Phase that says where the digest lands, how to verify it on disk, and to
     report the absolute path."""
-    path = _skill_file(skill)
-    if path is None:
-        pytest.skip(f"{skill} not installed on this machine")
-    missing = missing_artifact_phase(path.read_text(encoding="utf-8", errors="replace"))
+    missing = missing_artifact_phase(_require_skill_text(skill), skill=skill)
     assert missing == [], (
         f"skills/{skill}/SKILL.md lost its Artifact Phase requirements: {missing}. "
         "A transcript digest written only to the chat transcript is lost when the session "
         "ends (backlog #448); the phase must name a vault path, a verification step, and "
-        "the path report."
+        "the path report — and per #566 the scratch dir, the save form its own extraction "
+        "route uses, and the two transcript provenance keys."
     )
 
 
@@ -299,16 +373,13 @@ def test_the_scratch_store_is_neither_tmp_nor_the_vault():
     assert Path.home() / "obsidian" not in scratch.parents, f"{scratch} is inside the vault"
 
 
+@_skills_on_disk
 @pytest.mark.live_vault
 @pytest.mark.parametrize("skill", SKILLS_UNDER_TEST)
 def test_the_skill_and_the_sweep_name_the_same_scratch_dir(skill: str):
     """The shipped seam, read off both files: the directory a session writes to and the
     directory the sweep bounds must be one directory."""
-    path = _skill_file(skill)
-    if path is None:
-        pytest.skip(f"{skill} not installed on this machine")
-    text = path.read_text(encoding="utf-8", errors="replace")
-    m = re.search(r'TRANSCRIPT_DIR\s*=\s*"?\$HOME/(?P<rel>[^"\n]+)', text)
+    m = re.search(r'TRANSCRIPT_DIR\s*=\s*"?\$HOME/(?P<rel>[^"\n]+)', _require_skill_text(skill))
     assert m, f"skills/{skill}/SKILL.md no longer declares TRANSCRIPT_DIR"
     mod = _load_sweep_module()
     assert mod.TRANSCRIPT_SCRATCH_DIR == Path.home() / m.group("rel"), (
@@ -316,27 +387,27 @@ def test_the_skill_and_the_sweep_name_the_same_scratch_dir(skill: str):
         f"retention-sweep.py bounds {mod.TRANSCRIPT_SCRATCH_DIR}")
 
 
+@_skills_on_disk
 @pytest.mark.live_vault
 def test_the_retention_skill_table_states_the_sweep_age():
     """The policy table in skills/retention-sweep/SKILL.md is what the weekly operator reads
     before running --apply. If its number for the scratch store drifts from
     ``TRANSCRIPT_MAX_AGE_DAYS``, the operator is approving an age the script does not
-    implement."""
-    path = _skill_file("retention-sweep")
-    if path is None:
-        pytest.skip("retention-sweep skill not installed on this machine")
+    implement. Every row naming the store is graded, not the first one: a second row with a
+    different age is the drift, and reading only rows[0] would let it sit there unread."""
     mod = _load_sweep_module()
     needle = "~/" + str(mod.TRANSCRIPT_SCRATCH_DIR.relative_to(Path.home()))
-    rows = [ln for ln in path.read_text(encoding="utf-8", errors="replace").splitlines()
-            if needle in ln]
+    rows = [ln for ln in _require_skill_text("retention-sweep").splitlines() if needle in ln]
     assert rows, f"no retention-sweep table row names {needle}"
-    stated = re.search(r">\s*(\d+)\s*d", rows[0])
-    assert stated, f"row for {needle} states no age: {rows[0]!r}"
-    assert int(stated.group(1)) == mod.TRANSCRIPT_MAX_AGE_DAYS, (
-        f"skills/retention-sweep/SKILL.md says >{stated.group(1)}d but "
-        f"retention-sweep.py uses TRANSCRIPT_MAX_AGE_DAYS={mod.TRANSCRIPT_MAX_AGE_DAYS}")
+    for row in rows:
+        stated = re.search(r">\s*(\d+)\s*d", row)
+        assert stated, f"row for {needle} states no age: {row!r}"
+        assert int(stated.group(1)) == mod.TRANSCRIPT_MAX_AGE_DAYS, (
+            f"skills/retention-sweep/SKILL.md says >{stated.group(1)}d but "
+            f"retention-sweep.py uses TRANSCRIPT_MAX_AGE_DAYS={mod.TRANSCRIPT_MAX_AGE_DAYS}")
 
 
+@_skills_on_disk
 @pytest.mark.live_vault
 @pytest.mark.parametrize("skill", SKILLS_UNDER_TEST)
 def test_extraction_skill_still_loads(skill: str):
@@ -345,8 +416,7 @@ def test_extraction_skill_still_loads(skill: str):
     from prompt_builder import _is_quarantined_skill
 
     path = _skill_file(skill)
-    if path is None:
-        pytest.skip(f"{skill} not installed on this machine")
+    assert path is not None, f"skills/{skill}/SKILL.md is not installed"
     body = path.read_text(encoding="utf-8", errors="replace")
     assert body.startswith("---"), f"{skill}: front matter must parse"
     assert not _is_quarantined_skill(path), f"{skill} is quarantined and would not load"

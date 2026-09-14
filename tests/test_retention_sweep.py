@@ -153,34 +153,45 @@ def test_legacy_epoch_named_records_are_swept(rs, tmp_path):
 
 
 def test_transcript_scratch_old_deleted_recent_kept(rs):
-    """Backlog #566: the raw transcript scratch home is a bounded store. Nothing ever
-    deleted a transcript before this — the real directory held 7 files on 2026-09-14 with
-    the oldest 6 days past any policy it was nominally under. Deleting is licence the video
-    note grants it (transcript_path + transcript_md5 ride along), not a guess."""
+    """Backlog #566: the raw transcript scratch home is a bounded store. Measured on the
+    live directory 2026-09-14: 5 files, 208,885 B, oldest mtime 2026-09-08 — nothing had
+    ever been deleted, because nothing owned the directory. Deleting is licence the video
+    note grants it (transcript_path + transcript_md5 ride along), not a guess.
+
+    Every non-target here is backdated past the window, so each guard is falsifiable: an
+    entry that is young can survive a sweep that has no guard at all, which is how a
+    `recent.exists()` assertion starts checking nothing."""
     now = time.time()
     old = rs.TRANSCRIPT_SCRATCH_DIR / "T2v2pf_uypE.txt"
     old.write_text("t" * 500)
     _backdate(old, 45)
     recent = rs.TRANSCRIPT_SCRATCH_DIR / "1_8pzU44n-M.txt"
     recent.write_text("n" * 100)
+    # Aged like a stale transcript: if the sweep dropped its is_file() check or recursed,
+    # this is what would disappear.
     subdir = rs.TRANSCRIPT_SCRATCH_DIR / "0NvD6qNapiU"
     subdir.mkdir()
+    _backdate(subdir, 45)
     outside = rs.TRANSCRIPT_SCRATCH_DIR.parent / "not-in-scratch.txt"
     outside.write_text("x")
+    _backdate(outside, 45)
     link = rs.TRANSCRIPT_SCRATCH_DIR / "escape.txt"
     link.symlink_to(outside)
-    _backdate(link.resolve(), 45)  # the TARGET is old; following the link would delete it
 
     n, freed = rs.sweep_transcript_scratch(apply=False, now=now)
     assert (n, freed) == (1, 500)
     assert old.exists(), "dry run must touch nothing"
 
     n, freed = rs.sweep_transcript_scratch(apply=True, now=now)
+    # Exactly one file's worth of bytes: the dir, the symlink and the target outside it are
+    # all past the window and none of them may count. This count is what pins the symlink
+    # skip; the assertions below catch the variants that delete or follow anyway.
     assert (n, freed) == (1, 500)
     assert not old.exists()
     assert recent.exists(), "a transcript inside the window must survive"
     assert subdir.exists(), "a stray directory is not a transcript; leave it"
-    assert outside.exists(), "a symlink target outside the scratch dir must survive"
+    assert link.is_symlink(), "the sweep must skip a symlink, not unlink it"
+    assert outside.exists(), "nothing outside the scratch dir may be unlinked through a link"
 
 
 def test_transcript_scratch_missing_dir_is_zero(rs):
