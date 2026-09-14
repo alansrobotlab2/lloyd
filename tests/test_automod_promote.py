@@ -570,3 +570,74 @@ def test_work_title_falls_back_to_the_goal_then_to_nothing(monkeypatch, tmp_path
     t = B.work_title_for_round(S.LEDGER_PATH, "SM_L")
     assert len(t) <= 121 and t.endswith("…")
     assert B.work_title_for_round(S.LEDGER_PATH, "SM_NOPE") == ""
+
+
+# ---------------------------------------------------------------------------
+# The chamber: a round gated during observation waits to land
+# ---------------------------------------------------------------------------
+
+def _chamber_land(monkeypatch, tmp_path, currents, *, chamber=True):
+    """`round.land` with the promoter stubbed: `currents` is what successive
+    `read_current` calls return. Returns the list `promote` appends to."""
+    from scripts.automod import round as R
+    monkeypatch.setattr(S, "ROLLBACK_REQUEST_PATH", tmp_path / "rollback_request.json")
+    monkeypatch.setattr(P, "SETTLE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(P, "SETTLE_MAX_WAIT", 0.2)
+    monkeypatch.setattr(S, "chamber_enabled", lambda repo=None: chamber)
+    monkeypatch.setattr(S, "require_enabled", lambda *a, **k: None)
+    seq = list(currents)
+    monkeypatch.setattr(S, "read_current", lambda: seq.pop(0) if len(seq) > 1 else seq[0])
+    promoted: list[str] = []
+    monkeypatch.setattr(R.P, "promote", lambda rid, wt, base, **kw: promoted.append(rid) or {"promoted": True})
+    monkeypatch.setattr(R.W, "remove", lambda *a, **k: None)
+    (tmp_path / "SM_C").mkdir(exist_ok=True)
+    (tmp_path / "SM_C" / "gate.json").write_text(json.dumps({"ok": True, "base": "a" * 40}))
+    return R, promoted
+
+
+OBSERVING = {"commit": "c" * 40, "state": "observing", "errors_until_ts": time.time() + 600}
+
+
+def test_land_waits_for_the_window_then_refuses_if_it_never_settles(monkeypatch, tmp_path):
+    """With the chamber on, a round gated while the last promotion was under
+    observation waits for it to settle, then lands. One that never settles is
+    refused, recorded as someone else's promotion — never as the round's."""
+    R, promoted = _chamber_land(monkeypatch, tmp_path, [OBSERVING, OBSERVING, None])
+    R.land("SM_C")
+    assert promoted == ["SM_C"], "landed once the window cleared"
+
+    R, promoted = _chamber_land(monkeypatch, tmp_path, [OBSERVING])
+    with pytest.raises(P.PromoteError, match="still under observation"):
+        R.land("SM_C")
+    assert promoted == []
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "land_failed"][-1]
+    assert ev["round_id"] == "SM_C" and ev["external_blocker"] is True and ev["waited_for_settle"]
+
+
+def test_a_rollback_requested_during_the_wait_is_never_landed_over(monkeypatch, tmp_path):
+    R, promoted = _chamber_land(monkeypatch, tmp_path, [OBSERVING, None])
+    S.write_json(S.ROLLBACK_REQUEST_PATH, {"trigger": "errors", "commit": "c" * 40})
+    with pytest.raises(P.PromoteError, match="rollback request is pending"):
+        R.land("SM_C")
+    assert promoted == []
+
+
+def test_with_the_chamber_off_land_does_not_wait(monkeypatch, tmp_path):
+    """Off, nothing starts during observation, and a human's `round land`
+    keeps meeting the promoter's immediate refusal rather than a quarter-hour
+    wait."""
+    R, promoted = _chamber_land(monkeypatch, tmp_path, [OBSERVING], chamber=False)
+    calls = []
+    monkeypatch.setattr(P, "wait_for_settle", lambda **kw: calls.append(kw))
+    R.land("SM_C")
+    assert calls == [] and promoted == ["SM_C"], "the stubbed promoter is where the refusal lives"
+
+
+def test_the_chamber_switch_is_read_raw_and_defaults_off(tmp_path):
+    """Read like `automod.enabled`, straight from the repo's config.yaml, so the
+    detached promoter and the backend agree without `app.config`."""
+    assert S.chamber_enabled(tmp_path) is False, "no config at all is off"
+    (tmp_path / "config.yaml").write_text("automod:\n  enabled: true\n")
+    assert S.chamber_enabled(tmp_path) is False, "absent is off"
+    (tmp_path / "config.yaml").write_text("automod:\n  enabled: true\n  chamber: true\n")
+    assert S.chamber_enabled(tmp_path) is True

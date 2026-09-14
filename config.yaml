@@ -706,6 +706,16 @@ automod:
   # driven from a terminal — the MCP path would have failed on first use,
   # because the promoter ran inside the process it restarts.
   enabled: true
+  # The chamber (2026-09-14). On: the next autocode round may start while a
+  # promotion is `observing` — its turn and gate (~33 min median) hide the
+  # 15-minute window — and its landing waits for that promotion to settle
+  # before it lands (scripts/automod/promote.py wait_for_settle). A
+  # `landing` promotion, a pending rollback request and a halt still stop
+  # new rounds. The observation windows cost 31.7 h in the week to 09-14.
+  # Ships OFF: the plan turns it on after the turn-end reaper and the
+  # land.running marker (a round waiting to land must not be reaped while it
+  # waits) have run in production for 2-3 days.
+  chamber: false
   # A round may only be opened from a turn with Inner Voice attached. Two
   # reasons: the observer watches the one activity that rewrites production,
   # and an IV session is the only kind the Inner Voice tab lists, so this is

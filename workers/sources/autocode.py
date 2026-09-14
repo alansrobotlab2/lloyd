@@ -427,7 +427,14 @@ def _loop_is_free() -> tuple[bool, str]:
     if S.is_broken():
         return False, "guardian is BROKEN"
     current = S.read_current()
-    if current:
+    # The chamber (`automod.chamber`): only `land` needs the observation
+    # window closed. The turn and the gate touch the round's worktree and the
+    # canary ports, and triage and digest turns already run on the live
+    # backend while a promotion is observed. So an `observing` promotion no
+    # longer holds the next round back — its landing waits for the settle
+    # (`promote.wait_for_settle`). A `landing` one still does: the backend is
+    # about to restart underneath whatever starts.
+    if current and not (current.get("state") == "observing" and S.chamber_enabled(LIVE_ROOT)):
         return False, (f"promotion {str(current.get('commit'))[:8]} is under "
                        f"observation ({current.get('state')})")
     if S.read_rollback_request():

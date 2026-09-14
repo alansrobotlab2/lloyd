@@ -591,6 +591,24 @@ def is_enabled(repo=None) -> bool:
     return bool((raw.get("automod") or {}).get("enabled", False))
 
 
+def chamber_enabled(repo=None) -> bool:
+    """Read `automod.chamber` straight from config.yaml, like `is_enabled`.
+
+    On, the next round may start while a promotion is under observation — the
+    turn and gate touch only the worktree and the canary ports — and its
+    landing waits for that promotion to settle (`promote.wait_for_settle`).
+    Off, or unreadable, the loop keeps one promotion's whole window closed to
+    new rounds, as it always has.
+    """
+    root = Path(repo) if repo else Path(__file__).resolve().parent.parent.parent
+    try:
+        import yaml
+        raw = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:
+        return False
+    return bool((raw.get("automod") or {}).get("chamber", False))
+
+
 def require_enabled(action: str, repo=None) -> None:
     if not is_enabled(repo):
         raise AutomodDisabled(

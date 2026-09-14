@@ -407,6 +407,60 @@ def _land_failed(round_id: str, why: str, *, external: bool, **extra) -> None:
 # kept, and the item comes back.
 MAX_REBASES_PER_LANDING = 2
 
+# The chamber (`automod.chamber`). The next round may run its turn and gate
+# while the previous promotion is under observation; only the landing needs
+# the window closed. So a landing that finds a promotion observed waits for
+# it to settle — up to the window plus slack — instead of refusing at once
+# and throwing away a gated round. A landing is written `current.json` with
+# its own window only after the restart verifies, so the whole window can
+# still be ahead of it.
+SETTLE_MAX_WAIT = ERRORS_WINDOW + 120.0
+SETTLE_POLL_SECONDS = 10.0
+
+
+def wait_for_settle(max_wait: float | None = None, *, poll: float | None = None,
+                    round_id: str = "") -> dict | None:
+    """Wait while a promotion is recorded in `current.json`; None once it
+    clears, `PromoteError` if it never does. `promote` keeps its own "still
+    under observation" refusal behind this, for any caller that did not wait.
+
+    Every way this ends without a landing is someone else's promotion, not
+    this round's change, so with a `round_id` it is recorded as an external
+    `land_failed` and the item keeps its attempt — a gated round refused
+    because the promotion ahead of it was rolled back is not a verdict.
+
+    Called by `round.land` BEFORE it takes the automod lock and before
+    `wait_idle` pauses the pool, so neither a round start nor the worker pool
+    is held up for the quarter hour this can take. After the wait, the three
+    things that can change underneath it are asked again: a halt, BROKEN, and
+    a pending rollback request — the observed promotion may have been the one
+    rolled back, and landing on top of a revert in flight is the one case a
+    wait must never end in. A moved `main` needs nothing here: `promote`
+    compares live HEAD with the gated base and re-gates (`_regate_after_move`).
+    """
+    max_wait = SETTLE_MAX_WAIT if max_wait is None else float(max_wait)
+    poll = SETTLE_POLL_SECONDS if poll is None else float(poll)
+    deadline = time.monotonic() + max_wait
+    observed = S.read_current()
+    while observed and time.monotonic() < deadline:
+        time.sleep(poll)
+        observed = S.read_current()
+    why = ""
+    if S.is_halted():
+        why = f"promotions are halted: {S.HALTED_PATH}"
+    elif S.is_broken():
+        why = f"guardian is in a BROKEN state: {S.BROKEN_PATH}"
+    elif S.read_rollback_request():
+        why = "a rollback request is pending — not landing on top of a revert"
+    elif observed:
+        why = (f"{str(observed.get('commit'))[:8]} is still under observation "
+               f"({observed.get('state')}) after waiting {max_wait / 60:.0f} min for it to settle")
+    if why:
+        if round_id:
+            _land_failed(round_id, why, external=True, waited_for_settle=True)
+        raise PromoteError(why)
+    return None
+
 
 def _regate_after_move(round_id: str, worktree: Path, live: Path, base: str,
                        live_head: str) -> tuple[str, str, dict]:

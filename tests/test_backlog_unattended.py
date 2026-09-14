@@ -295,6 +295,10 @@ def test_a_closed_item_is_never_implemented(isolated):
     (dict(halted=True), "halted"),
     (dict(broken=True), "BROKEN"),
     (dict(current={"commit": "c" * 40, "state": "observing"}), "under observation"),
+    # With the chamber on, `observing` no longer stops it; `landing` still does.
+    (dict(current={"commit": "c" * 40, "state": "landing"}, chamber=True), "under observation"),
+    (dict(current={"commit": "c" * 40, "state": "observing"}, chamber=True,
+          request={"trigger": "errors"}), "rollback request is pending"),
     (dict(request={"trigger": "manual"}), "rollback request is pending"),
     # Under the loop's own root: a registration anywhere else is a stray a
     # model or a human left behind, and since 2026-09-13 it is logged, not
@@ -310,9 +314,32 @@ def test_every_gate_the_loop_enforces_stops_the_implementer(monkeypatch, block, 
     monkeypatch.setattr(S, "is_broken", lambda: block.get("broken", False))
     monkeypatch.setattr(S, "read_current", lambda: block.get("current"))
     monkeypatch.setattr(S, "read_rollback_request", lambda: block.get("request"))
+    monkeypatch.setattr(S, "chamber_enabled", lambda repo=None: block.get("chamber", False))
     monkeypatch.setattr(W, "prune_orphans", lambda repo=None: block.get("worktrees", ["/live"]))
     free, reason = I._loop_is_free()
     assert free is False and why in reason
+
+
+@pytest.mark.parametrize("chamber, state, free", [
+    (False, "observing", False),   # the window holds the loop closed, as before
+    (True, "observing", True),     # the chamber: only `land` needs the window
+    (True, "landing", False),      # the backend is about to restart under it
+    (True, "rolling_back", False), # anything but observing still stops it
+])
+def test_the_chamber_frees_the_loop_while_a_promotion_is_observed(monkeypatch, chamber, state, free):
+    from scripts.automod import worktree as W
+    monkeypatch.setattr(S, "is_enabled", lambda repo=None: True)
+    monkeypatch.setattr(S, "is_halted", lambda: False)
+    monkeypatch.setattr(S, "is_broken", lambda: False)
+    monkeypatch.setattr(S, "read_current", lambda: {"commit": "c" * 40, "state": state})
+    monkeypatch.setattr(S, "read_rollback_request", lambda: None)
+    monkeypatch.setattr(S, "chamber_enabled", lambda repo=None: chamber)
+    monkeypatch.setattr(W, "prune_orphans", lambda repo=None: ["/live"])
+    assert I._loop_is_free()[0] is free
+    if free:
+        # ...and a pending rollback or an open round still refuse it.
+        monkeypatch.setattr(S, "read_rollback_request", lambda: {"trigger": "errors"})
+        assert I._loop_is_free() == (False, "a rollback request is pending")
 
 
 def test_a_free_loop_is_free(monkeypatch):

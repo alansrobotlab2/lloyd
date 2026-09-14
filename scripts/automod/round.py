@@ -192,6 +192,11 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
             raise RuntimeError(f"gate did not pass (failed: {failed})")
 
         wt = W.worktree_path(round_id)
+        if not dry_run and S.chamber_enabled(LIVE_ROOT) and S.read_current():
+            # The chamber: this round ran while the last promotion was under
+            # observation. Wait for it here, outside the lock and before the
+            # pool is paused; `promote` still refuses if it never settled.
+            P.wait_for_settle(round_id=round_id)
         lock = S.Lock(owner=f"land-{round_id}").acquire()
         try:
             result = P.promote(round_id, wt, report["base"],
