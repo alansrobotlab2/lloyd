@@ -373,6 +373,29 @@ def test_a_free_loop_enqueues_and_says_nothing_special(isolated, monkeypatch, tm
     assert asyncio.run(I.enqueue_if_due(q2, {"interval_seconds": 900})) is None
 
 
+def test_a_free_loop_with_a_live_round_row_declines(isolated, monkeypatch, tmp_path):
+    """The coalesce race. `automod_abort` removes the worktree, so the loop
+    reads free, while the turn's queue row is still `running` through its
+    finalizer. The enqueue coalesces; returning None stamped a full 900 s
+    interval — 56 gaps, median 12.6 min, in the week to 2026-09-14."""
+    from workers.queue import WorkQueue
+    from workers.sources import DECLINED
+    q = WorkQueue(tmp_path / "workers.db")
+    _housekeeping_counter(monkeypatch)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
+    write_item(isolated, 2, status="up_next")
+    _confirm(2)
+    cfg = {"interval_seconds": 900, "retry_seconds": 60}
+    assert asyncio.run(I.enqueue_if_due(q, cfg)) is None
+    first = q.claim_next("worker-0")
+    q.mark_running(first.id)
+    assert asyncio.run(I.enqueue_if_due(q, cfg)) == DECLINED, "a coalesced enqueue is a decline"
+    assert [i.id for i in q.list_items(source=I.NAME)] == [first.id], "and it queued nothing"
+    q.mark_completed(first.id)
+    assert asyncio.run(I.enqueue_if_due(q, cfg)) is None
+    assert len(q.list_items(source=I.NAME)) == 2, "once the row completes, a new round is queued"
+
+
 def test_the_implementer_hands_the_acceptance_check_over_as_the_contract(isolated, monkeypatch):
     write_item(isolated, 2, name="Fix the thing", body="It is broken.")
     _confirm(2, acceptance="grep finds zero hits for the old name")

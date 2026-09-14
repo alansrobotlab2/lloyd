@@ -475,7 +475,8 @@ def _housekeeping_due(queue: WorkQueue, src_cfg: dict) -> bool:
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
     """Housekeeping on its own clock, then: is the loop free, and is there work?
 
-    Returns `DECLINED` when the loop is not free, so the pool looks again in
+    Returns `DECLINED` when the loop is not free, or when the enqueue
+    coalesced against a round row still in flight, so the pool looks again in
     `retry_seconds` instead of a whole `interval_seconds` — `execute`
     re-checks the gates at run time, so looking early is safe. Anything else
     (nothing confirmed, enqueued) returns None and the watermark advances as
@@ -509,8 +510,17 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
         priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
         dedup_key=DEDUP_KEY,
     )
-    if new_id is not None:
-        logger.info("Enqueued backlog implement id=%d", new_id)
+    if new_id is None:
+        # Coalesced: the previous round's queue row is still `running`. The
+        # loop reads free the moment `automod_abort` removes the worktree, but
+        # the turn then spends one to three minutes on its finalizer, and
+        # returning None here stamped the watermark as a spent interval — the
+        # next look came 900 s later. 56 such gaps in the week to 2026-09-14,
+        # median 12.6 min, ~20 h of a free loop. It is a decline: look again
+        # in `retry_seconds`.
+        logger.debug("autocode: not queueing — the previous round's row is still in flight")
+        return DECLINED
+    logger.info("Enqueued backlog implement id=%d", new_id)
     return None
 
 
