@@ -34,14 +34,23 @@ The rows below are that recorded arm, in reply order, with the task files at the
 observed ranks. What is under test there is everything downstream of the daemon's
 answer — the depth of the request, the pool handed to the final ranker, the fold back
 onto the segment view, and the slice in between. Those tests can only fail on a
-client-side cut, because the reply they assert against is one this file wrote: a
-daemon that stopped returning the five files would still satisfy them. The last test
-in the file is the other half — `live_vault`, one real POST to the daemon on :8181
-with the real payload, asserting the same five paths reach the same pool. The gate
-runs `-m "not live_vault"` precisely because a round under test does not control that
-corpus, so that test is not evidence the gate holds; it was run by hand and cited in
-the round report, and if the vault moves under it the eval is the thing that has
-moved, not the client.
+client-side cut, because the reply they assert against is one this file wrote. Two
+things hold the daemon-side half, and neither is a unit test:
+
+  - `test_the_live_daemon_hands_the_five_task_files_to_the_pre_rank_pool`, at the end
+    of the file, POSTs the real payload through the real `_vault_recall` to the index
+    production queries and asserts the same five paths enter the pre-rank pool. Run by
+    hand (2026-09-14): 235-row pool, the five at ranks 14, 17, 35, 39 and 175 — the
+    recording's own numbers. It is marked `live_vault` because a round under test does
+    not control that corpus, and the gate runs `-m "not live_vault"`, so this file is
+    NOT the thing that stops a retrieval regression in review.
+  - The thing that does is the eval: `doc_hit_rate`, `mrr_doc`, `ndcg10` and
+    `doc_recall_avg` are ARMED metrics of the paired promotion comparison
+    (`workers/sources/automod_regression.py:101`), measured on a pinned corpus on
+    every promotion, and `kg-maintenance-tasks` is one of its 20 queries. A daemon
+    that stops handing those five files to the pool moves `doc_hit_rate` 1.00 -> 0.95
+    and a promotion fails on it. That is where retrieval is gated; this file gates the
+    client, which is the half the eval cannot localise.
 """
 import urllib.error
 
@@ -175,10 +184,15 @@ def test_the_pool_is_bounded_so_a_small_ask_stays_cheap(wire):
     """
     vault._qmd_daemon_search("entity resolution", 2, list(vault.VAULT_SEGMENTS))
     small = wire[-1]["limit"]
-    # Asserted against the constant the code is supposed to apply, not against the
-    # ceiling the same code sets: `4 <= small <= QMD_POOL_MAX` read as a bound but
-    # only ever tested the floor, because no factor could push `small` past a cap it
-    # was itself min()'d against.
+    # The WIDTH, as a number. `small == 2 * QMD_POOL_FACTOR` (the form here before)
+    # only failed if the factor stopped applying: it stayed green for any factor, so
+    # it described the rule and pinned no pool. 6 rows is what a `limit=2` caller
+    # actually gets and what the paired latency measurement priced (+2 ms per call,
+    # six calls per entity). Changing the pool a hot caller pays for is now an edit
+    # that has to happen twice.
+    assert small == 6, (
+        f"a limit=2 caller (`_lookup_entity_facts` calls it six times per entity) got "
+        f"a {small}-row ask, not 6: the pool is 3x the answer, capped at 240")
     assert small == 2 * vault.QMD_POOL_FACTOR, (
         f"a limit-2 caller got a {small}-row ask; the pool is QMD_POOL_FACTOR "
         f"(={vault.QMD_POOL_FACTOR}) times the answer, so a small caller gets a pool "
@@ -191,10 +205,13 @@ def test_the_pool_is_bounded_so_a_small_ask_stays_cheap(wire):
     # The ceiling, falsified by an input above it rather than by one sitting on it.
     vault._qmd_daemon_search("some vault question", 4 * vault.QMD_POOL_MAX,
                              list(vault.VAULT_SEGMENTS))
-    assert wire[-1]["limit"] == vault.QMD_POOL_MAX, (
+    assert wire[-1]["limit"] == 240, (
         f"a caller asking for {4 * vault.QMD_POOL_MAX} rows got "
-        f"{wire[-1]['limit']}: above the ceiling the factor must stop multiplying, or "
-        "QMD_POOL_MAX bounds nothing")
+        f"{wire[-1]['limit']}, not the 240-row ceiling: above the cap the factor must "
+        "stop multiplying, or QMD_POOL_MAX bounds nothing")
+    assert wire[-1]["limit"] == vault.QMD_POOL_MAX, (
+        "the 240 written here and QMD_POOL_MAX disagree; the pool the recall doc leg "
+        "asks for is the number a human reads in this file")
     # And the reachable version of the same ask — `RECALL_DOC_POOL` is exactly
     # `QMD_POOL_MAX`, which is what `_vault_recall`'s doc leg hands this function.
     vault._qmd_daemon_search("some vault question", vault.QMD_POOL_MAX,
@@ -273,9 +290,17 @@ def test_the_five_task_files_reach_the_pre_rank_candidate_pool(wire, monkeypatch
         f"{len(missing)} of the five KG-maintenance task files never reached the "
         f"pre-ranking candidate pool ({len(pool)} rows): {missing}"
     )
-    assert len(pool) >= vault.RECALL_DOC_POOL // 2, (
-        f"pre-rank pool is {len(pool)} rows for a 20-document answer; a pool that thin "
-        "is what made this query unanswerable in the first place")
+    assert len(pool) == vault.RECALL_DOC_POOL, (
+        f"pre-rank pool is {len(pool)} rows, not the {vault.RECALL_DOC_POOL} this "
+        f"query needs: `autonomy/67-semantic-entity-resolution.md` arrives at rank "
+        f"{RECORDED_RANKS['autonomy/67-semantic-entity-resolution.md']}, so any pool "
+        "narrower than that silently loses it again — which is the failure mode this "
+        "test exists to catch, and the `// 2` floor it had before accepted 120"
+    )
+    assert len(pool) > RECORDED_RANKS["autonomy/67-semantic-entity-resolution.md"], (
+        "the pool is shallower than the deepest expected file, so that file cannot be "
+        "in it regardless of the reply"
+    )
     assert out["documents"], "the ranker still has to return an answer"
 
 
@@ -405,3 +430,51 @@ def test_the_live_daemon_hands_the_five_task_files_to_the_pre_rank_pool(monkeypa
         f"{len(pool)} real rows (pool width {vault.RECALL_DOC_POOL}): {missing}"
     )
     assert out["documents"], "the query still has to return an answer"
+
+
+@pytest.mark.live_vault
+def test_the_eval_scorer_itself_reports_the_target_query_hitting():
+    """The claim of #504, asserted at the scorer rather than at the pool.
+
+    Everything above asserts a *pool*, which is the mechanism; the acceptance is what
+    `eval/run_eval.py` reports. So this runs the eval's own `_score` over the eval's
+    own yaml entry for `kg-maintenance-tasks` — the expectations are read from the
+    file, not copied into this test, which is what keeps clause 4 honest: it cannot
+    drift into matching what the retriever happens to return, because it asks the
+    retriever and then lets the yaml decide.
+
+    Marked `live_vault` and therefore excluded from the gate run: it POSTs to the
+    daemon on :8181 against a corpus the nightly jobs rewrite. Run by hand and cited
+    in the round report. `ndcg10` is deliberately NOT asserted: `_ndcg_at_k` scores
+    only the ten returned rows and the first expected file lands at rank 17, so this
+    record reads `ndcg10: 0.0` while `doc_hit` is true — see the finding appended to
+    #504. `doc_hit` and `first_doc_rank` are the two numbers this item is about.
+    """
+    import sys
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(vault.__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from eval.run_eval import _score
+
+    specs = yaml.safe_load(
+        (root / "eval" / "vault_recall_queries.yaml").read_text())["queries"]
+    spec = next(s for s in specs if s.get("id") == "kg-maintenance-tasks")
+
+    out = vault._vault_recall({"query": spec["query"], "limit": 20,
+                               "grep_code": False, "include_facts": False,
+                               "expand_graph": False})
+    scoring = _score(spec, out)
+
+    assert scoring["doc_hit"] is True, (
+        f"the eval's scorer still reports doc_hit false for {spec['query']!r} against "
+        f"the live corpus — the expectation is unmet, not unmeasured: "
+        f"{[d.get('path') for d in out['documents'][:10]]}"
+    )
+    assert scoring["first_doc_rank"] is not None, (
+        "doc_hit true with a null first_doc_rank is a scorer bug, not a pass")
+    assert scoring["docs_matched"], (
+        "no expected doc matched, so the scorer and the yaml disagree about the query")

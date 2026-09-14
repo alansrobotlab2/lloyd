@@ -745,6 +745,15 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
         # crosses the pool on `qmd_fut.result()` below and comes back as an
         # error reply in `_vault_search`. The grep leg's hits are deliberately
         # not handed back as if they were vault results during an outage.
+        #
+        # What #504's wider pool costs THIS caller, paired on the live daemon
+        # (medians of 5 alternating runs, 2026-09-14): `max_results=10` asked 20
+        # rows in 16 ms before, asks 30 in 19 ms now — +3 ms, because the pool is
+        # a filter on one search, not a fan-out (12 named collections at 240 rows
+        # costs 322 ms against 43 ms for 40 globally; a 12x scan would be ~516).
+        # `_lookup_entity_facts` pays +2 ms on each of its six `limit=2` calls.
+        # The only ask that moves materially is `_vault_recall`'s doc leg, 43 ms
+        # -> 322 ms, and that is the ask this change exists to widen.
         return _qmd_daemon_search(query, max_results, coll_list)
 
     def _do_grep():
