@@ -50,7 +50,7 @@ gets here through an agent's Bash tool, so 2 is that tool call's result; the run
 status is the agent's turn, which exits 0 whether or not the series breached. What
 closes that seam is not this script — it is the printed verdict line, which on a breach
 contains the literal text `exit code 2`, which is what `_detect_silent_failures`
-(`autonomy.py:27-33`) scans a run's final prose for. Quote the line and the run is
+(`autonomy.py:26-33`, regex at `:29`) scans a run's final prose for. Quote the line and the run is
 flagged; that is the only automated surface, and `alert: true` in the task frontmatter
 is what carries it to a human. See `EXIT_BREACH` for why the number is in the prose.
 """
@@ -133,7 +133,7 @@ def _dropped_verdicts(report: dict) -> tuple[int, int, dict]:
     the deadline text is part of the key, which is what makes "did a retuned
     deadline help?" a field comparison rather than a re-read of prose. A dropped
     verdict is recorded `action='noop'` with `error` set
-    (`app/inner_voice/observer.py:926` writes the label, `:954-959` folds it into a
+    (`app/inner_voice/observer.py:926` writes the label, `:956-960` folds it into a
     noop), so `http_error` and anything else carrying an `error` also produced no
     verdict and belongs in the numerator. Because the grader's counter only sees
     truthy `error` values, every key here is evidence of a dropped call; the
@@ -298,7 +298,7 @@ def _verdict(row: dict, rates: list, malformed: int) -> tuple[bool, str]:
         # agent's Bash tool, so 2 is that tool's result, not the task's, and the
         # run's own exit status is the agent's turn — which completes successfully
         # whether or not anything was wrong. The one automated surface that exists
-        # is `_detect_silent_failures` (`autonomy.py:27-33`) scanning the run's
+        # is `_detect_silent_failures` (`autonomy.py:26-33`, regex at `:29`) scanning the run's
         # FINAL PROSE for `exit code [1-9]`. So the verdict line has to name its own
         # exit code, and the task tells the agent to quote this line verbatim: the
         # alert then survives an agent that describes the night in calm prose,
@@ -307,7 +307,7 @@ def _verdict(row: dict, rates: list, malformed: int) -> tuple[bool, str]:
     elif row["flagged"]:
         # Deliberately without the token above: one bad night is a report, not a
         # fault, and a run whose summary trips the failure detector when nothing is
-        # sustained is how indicators get ignored (autonomy.py:38-40 records 33 false
+        # sustained is how indicators get ignored (autonomy.py:35-44 records 33 false
         # positives in a week doing exactly that).
         parts[0] = "flagged (not sustained) " + parts[0]
     return breach, " | ".join(parts)
@@ -381,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
         # that tool call's status and the run's own exit status is the agent's turn,
         # which is 0 either way. The alert is the prose `_verdict` printed above —
         # it carries the literal text "exit code 2", which `_detect_silent_failures`
-        # (`autonomy.py:27-33`) matches out of the run's summary — and the task's
+        # (`autonomy.py:26-33`, regex at `:29`) matches out of the run's summary — and the task's
         # `alert: true` carries that flag to a human. Pinned by
         # tests/test_iv_metrics_series.py::a_breach_verdict_trips_the_runner_detector.
         print(verdict, file=sys.stderr)
