@@ -9,7 +9,6 @@ Output: ~/obsidian/skills/candidates/candidate-{pattern-slug}-{YYYYMMDD}.md
 """
 
 import argparse
-import importlib.util
 import json
 import os
 import re
@@ -24,72 +23,6 @@ from typing import Any
 
 TRAJECTORY_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
 OUTPUT_DIR = Path.home() / "lloyd" / "_pipeline" / "skills" / "candidates"
-SESSION_STORE_DIR = Path.home() / "lloyd" / "sessions"
-
-# ── Session class (#493) ─────────────────────────────────────────────────────
-#
-# The gate qualifies a pattern on *distinct sessions*, so the loop's own traffic
-# inflates it: machine share of the corpus measured on the stored `platform` field
-# is 938 of 1083 sessions (86.6%) across 2026-09-02→12, monotone per day, and
-# 10,611 of 11,813 `Sessions Affected` bullets in the 2026-09-12 candidates are
-# machine sessions. Only `interactive` work — a Mission Control turn the inner
-# voice did not take — is human-initiated.
-#
-# The class is written by `extract-trajectories.py` and is one string: these two
-# scripts are separate processes, so
-# `tests/test_trajectory_extraction.py` pins that they agree on it.
-INTERACTIVE_CLASS = "interactive"
-UNCODED_CLASS = "uncoded"   # no emitted class and no session JSON to join to
-
-
-def _extractor_module():
-    """The sibling extractor module, for its session classifier.
-
-    Loaded by path (hyphenated filename, and `scripts/` is not a package) the same
-    way `_verdicts_module()` loads its sibling. One classifier, not two: the
-    meaning of `interactive` is clause 2 of #493 and cannot drift between the
-    writer and the reader of the corpus.
-    """
-    global _EXTRACTOR_MOD
-    if _EXTRACTOR_MOD is None:
-        path = Path(__file__).resolve().parent / "extract-trajectories.py"
-        spec = importlib.util.spec_from_file_location("extract_trajectories", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _EXTRACTOR_MOD = module
-    return _EXTRACTOR_MOD
-
-
-_EXTRACTOR_MOD: Any = None
-
-
-def join_session_class(traj: dict, cache: dict) -> str:
-    """Class of a corpus row that carries no `session_class`.
-
-    Every row written before the field existed lacks it, and the mining window is
-    7 days while extraction is incremental — so the legacy rows are never rewritten
-    and an exclusion that only understood the new field would blank the corpus for
-    a week and emit nothing (the failure #493 clause 6 forbids). The class is
-    therefore joined in from the session store on `session_key`, which is the
-    corpus↔store join the acceptance check is written on. A row with no session
-    file behind it is `uncoded`: dropped under the exclusion and reported, never
-    assumed human.
-    """
-    key = traj.get("session_key") or ""
-    if key in cache:
-        return cache[key]
-    resolved = UNCODED_CLASS
-    if key and "/" not in key and ".." not in key:
-        path = SESSION_STORE_DIR / f"{key}.json"
-        if path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-            except (OSError, json.JSONDecodeError):
-                data = None
-            if isinstance(data, dict):
-                resolved = _extractor_module().classify_session(data)
-    cache[key] = resolved
-    return resolved
 
 
 def set_trajectory_dir(path: Path) -> None:
@@ -440,6 +373,75 @@ def is_corroborated_error(step: dict) -> bool:
         # exit state, which is itself a corroborating field.
         return step.get("exit_code") not in (None, 0)
     return source in CORROBORATED_ERROR_SOURCES
+
+
+SESSION_STORE_DIR = Path.home() / "lloyd" / "sessions"
+
+# ── Session class (#493) ─────────────────────────────────────────────────────
+#
+# The gate qualifies a pattern on *distinct sessions*, so the loop's own traffic
+# inflates it: machine share of the corpus measured on the stored `platform` field
+# is 938 of 1083 sessions (86.6%) across 2026-09-02→12, monotone per day, and
+# 10,611 of 11,813 `Sessions Affected` bullets in the 2026-09-12 candidates are
+# machine sessions. Only `interactive` work — a Mission Control turn the inner
+# voice did not take — is human-initiated.
+#
+# The class is written by `extract-trajectories.py` and is one string: these two
+# scripts are separate processes, so
+# `tests/test_trajectory_extraction.py` pins that they agree on it.
+INTERACTIVE_CLASS = "interactive"
+UNCODED_CLASS = "uncoded"   # no emitted class and no session JSON to join to
+
+
+def _extractor_module():
+    """The sibling extractor module, for its session classifier.
+
+    Loaded by path (hyphenated filename, and `scripts/` is not a package) the same
+    way `_verdicts_module()` loads its sibling. One classifier, not two: the
+    meaning of `interactive` is clause 2 of #493 and cannot drift between the
+    writer and the reader of the corpus.
+    """
+    import importlib.util   # sibling script, loaded by path
+    global _EXTRACTOR_MOD
+    if _EXTRACTOR_MOD is None:
+        path = Path(__file__).resolve().parent / "extract-trajectories.py"
+        spec = importlib.util.spec_from_file_location("extract_trajectories", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _EXTRACTOR_MOD = module
+    return _EXTRACTOR_MOD
+
+
+_EXTRACTOR_MOD: Any = None
+
+
+def join_session_class(traj: dict, cache: dict) -> str:
+    """Class of a corpus row that carries no `session_class`.
+
+    Every row written before the field existed lacks it, and the mining window is
+    7 days while extraction is incremental — so the legacy rows are never rewritten
+    and an exclusion that only understood the new field would blank the corpus for
+    a week and emit nothing (the failure #493 clause 6 forbids). The class is
+    therefore joined in from the session store on `session_key`, which is the
+    corpus↔store join the acceptance check is written on. A row with no session
+    file behind it is `uncoded`: dropped under the exclusion and reported, never
+    assumed human.
+    """
+    key = traj.get("session_key") or ""
+    if key in cache:
+        return cache[key]
+    resolved = UNCODED_CLASS
+    if key and "/" not in key and ".." not in key:
+        path = SESSION_STORE_DIR / f"{key}.json"
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, json.JSONDecodeError):
+                data = None
+            if isinstance(data, dict):
+                resolved = _extractor_module().classify_session(data)
+    cache[key] = resolved
+    return resolved
 
 
 # ── Data loading ─────────────────────────────────────────────────────────────
