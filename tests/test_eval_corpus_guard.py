@@ -110,6 +110,57 @@ def test_allow_empty_corpus_completes_and_records_corpus_ok_false(tmp_path):
         _cleanup(label)
 
 
+def _production_knobs() -> dict:
+    """Production's four retrieval defaults, read the way the eval reads them:
+    from `agent_mcp.vault`, in a process of its own. This file is subprocess-only
+    because `app.paths` reads LLOYD_FACTS_ROOT / LLOYD_KG_DB at import time, and
+    restating the values here is the drift this round exists to remove."""
+    code = (
+        "import json;"
+        "from agent_mcp import vault;"
+        "print(json.dumps({'graph_rerank': vault.RECALL_GRAPH_RERANK,"
+        " 'rerank_alpha': vault.RECALL_RERANK_ALPHA,"
+        " 'graph_top_k': vault.RECALL_GRAPH_TOP_K,"
+        " 'graph_hops': vault.RECALL_GRAPH_HOPS}))"
+    )
+    proc = subprocess.run([str(PY), "-c", code], cwd=str(ROOT),
+                          capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_a_default_run_records_production_config(tmp_path):
+    """The nightly CLI path is what the trend compares on, and #498 changed only
+    how run_eval()'s defaults are DERIVED — so a default invocation must still
+    record production's config for all four knobs.
+
+    --allow-empty-corpus is here solely so the run completes without depending on
+    the live fact tree; every knob asserted is still the default.
+
+    `matches_production_defaults` is asserted True because a default run is
+    exactly the case that flag exists for. #1000 may make a graph-on run report
+    False — production defaults expand_graph False while the eval runs it on —
+    and when that lands, this line moves with it."""
+    label = "pytest-default-config"
+    _cleanup(label)
+    try:
+        proc = _run(tmp_path, "--label", label, "--allow-empty-corpus")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = list(BASELINES.glob(f"{label}-*.json"))
+        assert len(written) == 1, written
+        rec = json.loads(written[0].read_text())
+
+        for knob, value in _production_knobs().items():
+            assert knob in rec, knob
+            assert rec[knob] == value, (knob, rec[knob], value)
+        assert rec["matches_production_defaults"] is True
+        # The graph leg runs expanded by the eval's own choice, not production's:
+        # there is no RECALL_EXPAND_GRAPH to compare it against (#1000).
+        assert rec["expand_graph"] is True
+    finally:
+        _cleanup(label)
+
+
 def test_unreadable_store_is_its_own_failure_and_ignores_the_flag(tmp_path):
     """`StoreUnavailable` is 'I could not read it', not 'it is empty'.
 

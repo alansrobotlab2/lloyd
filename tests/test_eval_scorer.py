@@ -3,6 +3,8 @@
 `_score` and `_ndcg_at_k` had no tests, so a scoring change would have moved
 the trend line with no code review signal that it had.
 """
+import importlib
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -92,6 +94,104 @@ def test_eval_defaults_are_productions(monkeypatch):
     ap_defaults["alpha"] = args.alpha
     assert ap_defaults["graph_rerank"] is vault.RECALL_GRAPH_RERANK
     assert ap_defaults["alpha"] == vault.RECALL_RERANK_ALPHA
+
+
+# ── the configuration a programmatic caller inherits (#498) ─────────────────
+
+# The four knobs the eval and the live tool must agree on. `expand_graph` is
+# deliberately NOT one of them: production's default is False (`_vault_recall`
+# reads `params.get("expand_graph", False)`) while the eval runs the graph leg
+# expanded as a measurement choice, and #1000 owns that claim.
+KNOBS = {"graph_rerank": "RECALL_GRAPH_RERANK",
+         "rerank_alpha": "RECALL_RERANK_ALPHA",
+         "graph_top_k": "RECALL_GRAPH_TOP_K",
+         "graph_hops": "RECALL_GRAPH_HOPS"}
+
+
+def test_run_eval_signature_defaults_are_the_production_constants():
+    """run_eval()'s signature carried `rerank_alpha=0.5` while production's
+    RECALL_RERANK_ALPHA is 0.3, so any programmatic caller measured a
+    configuration nothing serves. Commit 59cd7bf rewired main()'s argparse only
+    — the one live programmatic caller (agent_mcp/fact_improvement.py
+    ._fact_entity_recall) inherited the stale value in its first version."""
+    from agent_mcp import vault
+    params = inspect.signature(ev.run_eval).parameters
+    for knob, const in KNOBS.items():
+        production = getattr(vault, const)
+        assert params[knob].default == production, knob
+        # 0 == False in Python, so a bool knob that quietly became an int would
+        # pass the line above. Pin the kind as well as the value.
+        assert type(params[knob].default) is type(production), knob
+
+
+def test_run_eval_signature_defaults_derive_from_the_constants():
+    """Equal today is not derived. The fix puts the imported constants in the
+    signature, so patching a constant and reloading the module must move the
+    default — a restated literal does not move."""
+    from agent_mcp import vault
+    sentinels = {"RECALL_GRAPH_RERANK": True, "RECALL_RERANK_ALPHA": 0.42,
+                 "RECALL_GRAPH_TOP_K": 77, "RECALL_GRAPH_HOPS": 9}
+    originals = {const: getattr(vault, const) for const in sentinels}
+    try:
+        for const, value in sentinels.items():
+            setattr(vault, const, value)
+        importlib.reload(ev)
+        params = inspect.signature(ev.run_eval).parameters
+        assert params["graph_rerank"].default is True
+        assert params["rerank_alpha"].default == 0.42
+        assert params["graph_top_k"].default == 77
+        assert params["graph_hops"].default == 9
+    finally:
+        # `ev` is this file's module-level handle, shared with every other test
+        # here: restore the constants BEFORE reloading, or a sentinel default
+        # leaks into whichever test runs next.
+        for const, value in originals.items():
+            setattr(vault, const, value)
+        importlib.reload(ev)
+    assert (inspect.signature(ev.run_eval).parameters["rerank_alpha"].default
+            == originals["RECALL_RERANK_ALPHA"])
+
+
+def test_argparse_defaults_and_the_signature_default_cannot_disagree():
+    """`--alpha` and run_eval(rerank_alpha=…) set one knob from two places. This
+    reads `ev.build_parser()` — the parser main() actually parses with — never a
+    hand-mirrored copy of it, which is the tautology the test above falls into
+    and what #999 tracks."""
+    from agent_mcp import vault
+    parser = ev.build_parser()
+    params = inspect.signature(ev.run_eval).parameters
+    # Two of the four dest names differ from the parameter names.
+    dests = {"graph_rerank": "graph_rerank", "rerank_alpha": "alpha",
+             "graph_top_k": "graph_top_k", "graph_hops": "graph_hops"}
+    for knob, dest in dests.items():
+        assert parser.get_default(dest) == params[knob].default, knob
+    # The help text quotes the same number, so operator and function cannot be
+    # told two different things about what production runs.
+    alpha_help = next(a for a in parser._actions if a.dest == "alpha").help
+    assert str(vault.RECALL_RERANK_ALPHA) in alpha_help
+    rerank_help = next(a for a in parser._actions if a.dest == "graph_rerank").help
+    assert str(vault.RECALL_GRAPH_RERANK) in rerank_help
+
+
+def test_production_knobs_keep_their_measured_values():
+    """This rewires wiring, not the measured configuration. The constants are
+    the answer to the 2026-09-04 sweep (agent_mcp/vault.py:113-124); a change
+    that moved one would move the nightly baseline with it."""
+    from agent_mcp import vault
+    assert vault.RECALL_GRAPH_RERANK is False
+    assert vault.RECALL_RERANK_ALPHA == 0.3
+    assert vault.RECALL_GRAPH_TOP_K == 5
+    assert vault.RECALL_GRAPH_HOPS == 1
+
+
+def test_vault_recall_still_falls_back_to_the_same_constants():
+    """The other half of "wiring, not configuration": the live tool's own
+    fallbacks must stay the constants, so the tool's default and the eval's
+    default have one source instead of two that can drift apart."""
+    from agent_mcp import vault
+    src = inspect.getsource(vault._vault_recall)
+    for param, const in KNOBS.items():
+        assert f'params.get("{param}", {const})' in src, param
 
 
 def test_a_run_record_declares_whether_it_matched_production(tmp_path):

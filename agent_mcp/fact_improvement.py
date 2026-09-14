@@ -371,12 +371,16 @@ def _fact_entity_recall(limit: int = 20) -> float | None:
     `eval/run_eval.py` is a script, not a package, so it is loaded by path. Two
     traps, both documented in that file and both hit here on the first try:
 
-      * `run_eval()`'s **signature** defaults are the pre-#322 configuration
-        (`graph_rerank=False`, `rerank_alpha=0.5`) — it is the *argparse*
-        defaults that are imported from `agent_mcp.vault`. Calling
-        `run_eval(queries)` directly measures a configuration nothing serves,
-        which is the blind spot the 2026-09-03 review closed. So the production
-        knobs are passed explicitly and cross-checked.
+      * `run_eval()`'s **signature** defaults are production's, because they are
+        the same `agent_mcp.vault.RECALL_*` constants its argparse defaults use
+        (#498). They used to be restated literals, and one of them —
+        `rerank_alpha=0.5` against production's 0.3 — was stale, so calling
+        `run_eval(queries)` directly measured a configuration nothing serves;
+        this function's first version reported such a number. The knobs are
+        still passed explicitly, so the measurement never depends on the
+        pinning test holding. `expand_graph=True` is the one knob deliberately
+        not production's (the eval runs the graph leg expanded; #1000 owns that
+        claim).
       * the corpus underneath must be readable. Measured rather than assumed:
         a failure to score returns None, not 0.0.
 

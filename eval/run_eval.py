@@ -181,10 +181,22 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
     }
 
 
+# The four retrieval knobs default to production's value BY IMPORT, never by a
+# restated literal. Until #498 the literals here were the pre-#322 settings —
+# `rerank_alpha=0.5` against production's 0.3 — and 59cd7bf fixed only the
+# argparse half, so any programmatic caller inherited a configuration nothing
+# serves (its first version of `agent_mcp/fact_improvement.py:_fact_entity_recall`
+# reported exactly such a number). `expand_graph` is deliberately NOT one of the
+# four: production's default for that knob is False (`_vault_recall`) while the
+# eval runs it on as a measurement choice, and #1000 owns that claim.
+# tests/test_eval_scorer.py pins both directions: the signature equals the
+# constants, and build_parser()'s defaults equal the signature.
 def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
-             graph_rerank: bool = False, rerank_alpha: float = 0.5,
+             graph_rerank: bool = RECALL_GRAPH_RERANK,
+             rerank_alpha: float = RECALL_RERANK_ALPHA,
              demote_factor: float | None = None,
-             graph_top_k: int = 5, graph_hops: int = 1,
+             graph_top_k: int = RECALL_GRAPH_TOP_K,
+             graph_hops: int = RECALL_GRAPH_HOPS,
              counterfactual: bool = True) -> list[dict]:
     records = []
     # Frozen perturbation records, loaded once. Absent or short is surfaced per
@@ -419,16 +431,32 @@ def print_table(records: list[dict], summary: dict) -> None:
               f"MRR={s['mrr_doc']:.3f}  NDCG10={s['ndcg10']:.3f}  fER={s['fact_entity_recall_avg'] or 0:.3f}")
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI's parser, as a function so a test can read its real defaults.
+
+    A test that hand-mirrors these `add_argument` calls asserts about values it
+    set itself and cannot fail (`tests/test_eval_scorer.py::test_eval_defaults_are_productions`
+    is that tautology, and #999 tracks it). Reading this parser is the only
+    check that can catch drift, which is why it is a function and not a line
+    inside `main()`.
+
+    Every retrieval knob defaults to the production constant it names, imported
+    from `agent_mcp.vault`. The nightly eval used to run `graph_rerank=False,
+    alpha=0.5` against a production that measured differently — it measured a
+    configuration nothing serves, so a retrieval regression could not show up in
+    it (2026-09-03 review; the CLI half was fixed in 59cd7bf, `run_eval()`'s
+    signature in #498). Say "whatever the constant says" rather than naming a
+    value: `RECALL_GRAPH_RERANK` is False today (agent_mcp/vault.py:113-124, the
+    2026-09-04 sweep), and a stale comment above its read in `_vault_recall`
+    still claims default-on — that comment is #1001.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--queries", default=str(HERE / "vault_recall_queries.yaml"))
     ap.add_argument("--label", default="baseline", help="Label embedded in the output filename")
     ap.add_argument("--notes", default="", help="Free-text notes saved with the run (e.g. config knobs)")
     ap.add_argument("--limit", type=int, default=20)
-    # Defaults ARE production's, imported from agent_mcp.vault. The nightly
-    # eval used to run graph_rerank=False, alpha=0.5 against a production
-    # that runs True and 0.3 — it measured a configuration nothing serves,
-    # so a retrieval regression could not show up in it (2026-09-03 review).
+    # Defaults ARE production's, imported from agent_mcp.vault — see the
+    # build_parser() docstring for why naming a value here would go stale.
     ap.add_argument("--no-graph", action="store_true", help="Disable expand_graph (default: on)")
     ap.add_argument("--no-graph-rerank", dest="graph_rerank", action="store_false",
                     default=RECALL_GRAPH_RERANK,
@@ -450,7 +478,11 @@ def main() -> int:
                     default=True,
                     help="Skip the perturbed twin of every query (halves the "
                          "run; summary then carries null counterfactual rates)")
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     spec_file = Path(args.queries)
     spec = yaml.safe_load(spec_file.read_text())
