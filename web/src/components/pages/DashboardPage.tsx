@@ -975,12 +975,12 @@ function BacklogHealthLines({ health }: { health: BacklogHealth }) {
     <div className="mt-2 space-y-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
       {d && (
         <div>
-          draft {d.total} · {d.grouped} folded · {d.quarantined} quarantined · {d.needs_human} needs-human · {d.pool} triageable
+          draft {d.total} · folded {d.grouped} · quarantined {d.quarantined} · needs-human {d.needs_human} · triaged {d.triaged} · triageable {d.pool}
         </div>
       )}
       {u && (
         <div>
-          up_next {u.total} · {u.umbrellas} umbrellas · {u.never_attempted} never attempted · {u.ready} ready
+          up_next {u.total} · umbrellas {u.umbrellas} · never attempted {u.never_attempted} · ready {u.ready}
         </div>
       )}
       {day && (
