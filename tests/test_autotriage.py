@@ -565,7 +565,7 @@ def test_autocode_housekeeping_releases_with_triages_floor(monkeypatch, tmp_path
                                                         "hold_confirmations": False}
                         if name == "autotriage" else {})
     for name in ("reap_abandoned_rounds",):
-        monkeypatch.setattr(A, name, lambda: [])
+        monkeypatch.setattr(A, name, lambda *a, **k: [])
     monkeypatch.setattr(B, "close_settled_items", lambda *a, **k: [])
     monkeypatch.setattr(B, "reconcile_statuses", lambda *a, **k: [])
     monkeypatch.setattr(B, "expire_stale_spawns", lambda *a, **k: [])

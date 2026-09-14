@@ -232,6 +232,20 @@ def test_land_refuses_while_a_gate_is_running(monkeypatch, tmp_path):
     assert "still running" in T._land_detached("SM_l")["error"]
 
 
+def test_land_marks_the_round_before_the_turn_can_end(monkeypatch, tmp_path):
+    """The implement source reaps an open round the moment its turn ends, and
+    `automod_land` returns before the detached promoter has imported anything.
+    The marker, with the child's pid, is what keeps that round alive."""
+    (S.ROUNDS_DIR / "SM_m").mkdir(parents=True)
+    (S.ROUNDS_DIR / "SM_m" / "gate.json").write_text(json.dumps({"ok": True, "rungs": []}))
+    monkeypatch.setattr(W, "worktree_path", lambda rid: tmp_path)
+    monkeypatch.setattr(S, "spawn_detached", lambda argv, log, cwd=None: os.getpid())
+    out = T._land_detached("SM_m")
+    assert out["pid"] == os.getpid()
+    assert S.land_in_progress("SM_m")["by"] == "automod_land"
+    assert "already running" in T._land_detached("SM_m")["error"], "a second landing of one round"
+
+
 # ── the rung: attempts are graded refusals of distinct commits ────────────
 
 class _Gate(G.Gate):

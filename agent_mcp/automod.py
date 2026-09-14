@@ -162,6 +162,8 @@ def _land_detached(round_id: str) -> dict:
 
     if S.gate_in_progress(round_id):
         return {"error": f"a gate is still running for {round_id} — automod_gate_wait first"}
+    if S.land_in_progress(round_id):
+        return {"error": f"a landing is already running for {round_id} — end your turn"}
     gate_path = S.ROUNDS_DIR / round_id / "gate.json"
     if not gate_path.exists():
         return {"error": f"{round_id} has no gate report — run automod_gate first"}
@@ -177,6 +179,10 @@ def _land_detached(round_id: str) -> dict:
     pid = S.spawn_detached(
         [python, "-m", "scripts.automod.round", "land", round_id],
         log, cwd=W.LIVE_ROOT)
+    # Before this call returns and the turn ends: the child takes seconds to
+    # import and write its own, and the implement source reaps an open round
+    # the moment the turn is over. Same pid, so the child's write replaces it.
+    S.write_land_marker(round_id, pid=pid, by="automod_land")
     return {
         "landing": round_id, "pid": pid, "log": str(log),
         "next": "END YOUR TURN NOW. Do not poll, do not call another tool.",

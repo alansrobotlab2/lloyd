@@ -650,9 +650,13 @@ def test_a_human_can_grant_a_second_attempt_and_only_one(isolated):
 # A round left open by a turn that died at its budget
 # ===========================================================================
 
-def _reaper_env(monkeypatch, tmp_path, *, worktree=True, busy=(), current=None):
+def _reaper_env(monkeypatch, tmp_path, *, worktree=True, busy=(), current=None, observed=True):
+    """`observed` is `autocode.inner_voice`: the grace exists only while an
+    observer could still rescue the round."""
     from scripts.automod import round as R, worktree as W
     import app.sessions_io as sio
+    monkeypatch.setattr(C, "source_inner_voice", lambda source, default=True: observed)
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path / "rounds")
     aborted: list[str] = []
     monkeypatch.setattr(R, "abort", lambda rid, reason="": aborted.append(rid) or {"aborted": rid})
     import shutil
@@ -708,6 +712,97 @@ def test_reaper_leaves_landed_observed_and_cleaned_rounds_alone(isolated, monkey
     aborted2 = _reaper_env(monkeypatch, tmp_path, worktree=False)
     _finished("SM_GONE")
     assert I.reap_abandoned_rounds(now=later) == [] and aborted2 == [], "already cleaned up"
+
+
+def test_with_no_observer_a_round_left_open_is_reaped_at_turn_end(isolated, monkeypatch, tmp_path):
+    """`autocode.inner_voice: false` since 2026-09-12: no ambient follow-up can
+    come, and the 20-minute grace only held the loop closed — 15 rounds in a
+    week waited a median 26 minutes for a rescue that could not arrive."""
+    import time as _t
+    write_item(isolated, 2)
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False, busy=("s1",))
+    _finished()
+    assert I.reap_abandoned_rounds(now=_t.time() + 1) == [], "its own session still reads busy"
+    out = I.reap_abandoned_rounds(now=_t.time() + 1, finished_session="s1")
+    assert [r["round_id"] for r in out] == ["SM_X"] and aborted == ["SM_X"]
+    assert "no observer to rescue it" in out[0]["reason"]
+
+
+def test_with_an_observer_the_grace_still_holds(isolated, monkeypatch, tmp_path):
+    import time as _t
+    write_item(isolated, 2)
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=True)
+    _finished()
+    assert I.reap_abandoned_rounds(now=_t.time() + 1, finished_session="s1") == []
+    assert aborted == [], "#278's rescue came two minutes after the cut-off"
+
+
+@pytest.mark.parametrize("marker", ["gate", "land"])
+def test_a_round_with_a_running_gate_or_landing_is_never_reaped(isolated, monkeypatch, tmp_path, marker):
+    """The two things the grace was silently protecting. A turn that called
+    `automod_land` ends at once while the detached promoter waits up to 15
+    minutes for idle — reaping it then would abort a round mid-landing."""
+    import os
+    import time as _t
+    write_item(isolated, 2)
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False)
+    _finished()
+    write = S.write_gate_marker if marker == "gate" else S.write_land_marker
+    write("SM_X", pid=os.getpid())
+    later = _t.time() + I.ABANDON_GRACE_SECONDS + 1
+    assert I.reap_abandoned_rounds(now=later, finished_session="s1") == [] and aborted == []
+    # A marker whose process is dead protects nothing.
+    write("SM_X", pid=2 ** 22 + 12345)
+    assert [r["round_id"] for r in I.reap_abandoned_rounds(now=later)] == ["SM_X"]
+
+
+def test_execute_reaps_the_round_its_turn_left_open(isolated, monkeypatch, tmp_path):
+    """End to end through `execute`: the turn opens a round, ends without
+    landing or aborting, and the round is closed before `execute` returns."""
+    write_item(isolated, 2, status="up_next")
+    _confirm(2)
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
+    base = _fake_turn("Gated; ran out of room before landing.", stop_reason="stop")
+
+    async def turn(prompt, **kw):
+        S.append_event({"event": "round_start", "round_id": "SM_T"}, path=S.LEDGER_PATH)
+        return await base(prompt, **kw)
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+
+    out = asyncio.run(I.execute(_Item({"max_turns": 100})))
+    assert out["round_id"] == "SM_T" and aborted == ["SM_T"]
+    rows = [(e["event"], e.get("phase")) for e in S.read_events(path=S.LEDGER_PATH)
+            if e["event"] in ("backlog_implement", "round_abandoned")]
+    assert rows.index(("round_abandoned", None)) > rows.index(("backlog_implement", "finished"))
+
+
+def test_a_landing_owns_its_marker_and_a_dry_run_leaves_it_alone(monkeypatch, tmp_path):
+    """`round.land` holds the marker for its whole life and clears only its
+    own — `_land_detached` wrote the child's pid first, and a dry run beside a
+    real landing must not clear the real one's."""
+    import os
+    from scripts.automod import round as R
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path)
+    seen = {}
+
+    def promote(round_id, wt, base, **kw):
+        seen["marker"] = S.land_in_progress(round_id)
+        return {"promoted": True}
+    monkeypatch.setattr(R.P, "promote", promote)
+    monkeypatch.setattr(R.W, "remove", lambda *a, **k: None)
+    monkeypatch.setattr(R.S, "Lock", lambda owner="": type("L", (), {
+        "acquire": lambda self: self, "release": lambda self: None})())
+    monkeypatch.setattr(S, "require_enabled", lambda *a, **k: None)
+    (tmp_path / "SM_L").mkdir()
+    (tmp_path / "SM_L" / "gate.json").write_text(json.dumps({"ok": True, "base": "b" * 40}))
+    R.land("SM_L")
+    assert seen["marker"]["pid"] == os.getpid() and S.read_land_marker("SM_L") is None
+    S.write_land_marker("SM_L", pid=os.getppid())
+    with pytest.raises(RuntimeError, match="already running"):
+        R.land("SM_L")
+    R.land("SM_L", dry_run=True)
+    assert S.read_land_marker("SM_L")["pid"] == os.getppid(), "a dry run cleared a real landing's marker"
 
 
 # ===========================================================================

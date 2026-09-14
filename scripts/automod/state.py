@@ -454,6 +454,59 @@ def gate_in_progress(round_id: str) -> dict | None:
     return rec
 
 
+# A landing in flight, the same shape as the gate marker and for the same
+# kind of reader. `automod_land` returns at once and the turn ends, while the
+# detached promoter can spend minutes before it writes `current.json` — a
+# re-gate when `main` moved, then up to 15 minutes in `wait_idle`. The
+# implement source's reaper used to be kept off such a round only by its
+# 20-minute grace; once it runs at turn end, this marker is what says "the
+# round is not abandoned, it is being landed". `_land_detached` writes it with
+# the child's pid the moment it spawns; `round.land` rewrites it with its own
+# and clears it in a `finally`.
+
+def land_marker_path(round_id: str) -> Path:
+    return ROUNDS_DIR / round_id / "land.running"
+
+
+def write_land_marker(round_id: str, *, pid: int, by: str = "") -> dict:
+    path = land_marker_path(round_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"pid": int(pid), "started_at": time.time(), "started_iso": now_iso(), "by": by or ""}
+    path.write_text(json.dumps(rec), encoding="utf-8")
+    return rec
+
+
+def read_land_marker(round_id: str) -> dict | None:
+    path = land_marker_path(round_id)
+    if not path.exists():
+        return None
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def clear_land_marker(round_id: str, *, pid: int | None = None) -> None:
+    """Remove the marker. With `pid`, only a marker that process owns."""
+    if pid is not None:
+        rec = read_land_marker(round_id)
+        if rec is not None and int(rec.get("pid") or 0) != int(pid):
+            return
+    try:
+        land_marker_path(round_id).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def land_in_progress(round_id: str) -> dict | None:
+    """The marker when its process is still alive, else None."""
+    rec = read_land_marker(round_id)
+    if rec is None or not pid_alive(rec.get("pid") or 0):
+        return None
+    return rec
+
+
 def update_run_spec_base(round_id: str, base: str) -> bool:
     """Move the round's recorded base after a rebase.
 

@@ -31,6 +31,7 @@ did afterwards.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -325,25 +326,45 @@ def _review_note(events: list[dict], round_id: str | None) -> dict | None:
     return None
 
 
-def reap_abandoned_rounds(now: float | None = None) -> list[dict]:
-    """Close rounds this source opened that nobody finished — after a grace
-    period, and only while nothing is happening in their session.
+def _abandon_grace_seconds() -> int:
+    """How long a round left open waits for a rescue: `ABANDON_GRACE_SECONDS`
+    while the Inner Voice observer watches this source, else none — the
+    observer's ambient follow-up is the only rescue the grace ever waited
+    for, and with `autocode.inner_voice: false` (2026-09-12) none can come."""
+    from workers.sources import _common as C
+    return ABANDON_GRACE_SECONDS if C.source_inner_voice(NAME) else 0
 
-    Not at turn end, and the reason is #278. Its implement turn died at the
-    100-iteration cap with the change written, tested and un-gated, and the
-    ledger row said `max_turns`. Two minutes later the Inner Voice observer
-    queued an ambient follow-up into that same session — "the round ended at
-    the cap with no report; if the gate passed, land it" — and that second
-    turn gated, landed, and the whole feature was live at 17:34. A reaper
-    that aborted at turn end would have raced the rescue and thrown away
-    875 lines the gate then passed. So the observer is the first responder
-    and this is the backstop: a round the implementer opened, still open,
-    nothing under observation, its session idle, `ABANDON_GRACE_SECONDS`
-    after the turn ended. The branch is kept — it is the only record of
-    what was attempted — and the item is told where it is.
+
+def reap_abandoned_rounds(now: float | None = None, *,
+                          finished_session: str | None = None) -> list[dict]:
+    """Close rounds this source opened that nobody finished — after a grace
+    period when someone may still finish them, and only while nothing is
+    happening in their session.
+
+    The grace is #278's. Its implement turn died at the 100-iteration cap
+    with the change written, tested and un-gated, and the ledger row said
+    `max_turns`. Two minutes later the Inner Voice observer queued an ambient
+    follow-up into that same session — "the round ended at the cap with no
+    report; if the gate passed, land it" — and that second turn gated, landed,
+    and the whole feature was live at 17:34. A reaper that aborted at turn end
+    would have raced the rescue and thrown away 875 lines the gate then
+    passed. So while the source is observed, the observer is the first
+    responder and this is the backstop, `ABANDON_GRACE_SECONDS` after the turn
+    ended. While it is not observed nothing can rescue the round, and the
+    grace only held the loop closed: 15 rounds in the week to 2026-09-14
+    waited a median 26 minutes each. Then `_run_and_record` calls this the
+    moment the turn ends, passing the session that just ended so its own
+    wind-down is not read as activity.
+
+    Two protections the grace was silently providing are explicit instead: a
+    round whose detached gate is still running (`S.gate_in_progress`) or whose
+    landing is in flight (`S.land_in_progress` — waiting for idle, or
+    re-gating after `main` moved) is never reaped. The branch is kept — it is
+    the only record of what was attempted — and the item is told where it is.
     """
     from scripts.automod import backlog as B, round as R, state as S, worktree as W
     now = now or time.time()
+    grace = _abandon_grace_seconds()
     events = S.read_events(limit=500)
     # `infra_failed` too: a turn can open a round and then lose its stream, and
     # a round nobody will ever close blocks `_loop_is_free` for every item
@@ -357,6 +378,7 @@ def reap_abandoned_rounds(now: float | None = None) -> list[dict]:
         busy = {s.get("session_id") for s in active_sessions_snapshot()}
     except Exception:
         busy = set()
+    busy.discard(finished_session)
     current = S.read_current() or {}
     reaped: list[dict] = []
     for e in finished:
@@ -364,14 +386,18 @@ def reap_abandoned_rounds(now: float | None = None) -> list[dict]:
         if rid in closed or current.get("round_id") == rid:
             continue
         age = now - float(e.get("ts") or 0)
-        if age < ABANDON_GRACE_SECONDS or e.get("session_id") in busy:
+        if age < grace or e.get("session_id") in busy:
             continue
         if not W.worktree_path(rid).exists():
+            continue
+        if S.gate_in_progress(rid) or S.land_in_progress(rid):
             continue
         review = _review_note(events, rid)
         why = (f"implement turn ended ({e.get('stop_reason')}) and the round "
                f"stayed open for {int(age // 60)} min with nothing running in "
-               f"its session")
+               f"its session" if grace else
+               f"implement turn ended ({e.get('stop_reason')}) with the round still "
+               f"open, no gate or landing running, and no observer to rescue it")
         if review is not None:
             why = (f"the review rung sent the round back and the turn ended without "
                    f"abort or re-gate; {why}")
@@ -639,6 +665,22 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             logger.warning("reconcile_statuses after #%s failed: %s", candidate.id, exc)
 
 
+async def _reap_at_turn_end(session_id: str | None) -> None:
+    """The reaper, the moment an implement turn ends, off the event loop.
+
+    With no observer the round a turn left open cannot be rescued, and every
+    minute it stays open is a minute `_loop_is_free` refuses the next item.
+    With one, the grace inside `reap_abandoned_rounds` still holds it and
+    this call finds nothing. A failure costs the early close, never the run:
+    housekeeping's pass is the backstop.
+    """
+    try:
+        for r in await asyncio.to_thread(reap_abandoned_rounds, finished_session=session_id):
+            logger.info("reaped round %s at turn end: %s", r["round_id"], r["reason"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reap at turn end failed: %s", exc)
+
+
 def _reoffer_for(item_id: int) -> str:
     """The re-offer banner for an item, from the ledger as it stands NOW.
 
@@ -724,6 +766,7 @@ async def _run_and_record(item, candidate, triage, budget, started,
                         "round_id": _round_opened_since(S.read_events(limit=200), started),
                         "stop_reason": "turn_timeout"})
         logger.warning("backlog #%s: %s", candidate.id, exc)
+        await _reap_at_turn_end(None)
         return {"status": "failed", "item_id": candidate.id,
                 "summary": f"#{candidate.id}: {exc}"}
 
@@ -846,6 +889,11 @@ async def _run_and_record(item, candidate, triage, budget, started,
                f"vault commit {vault_commits[-1][:8]}" if vault_commits else "no round opened")
     logger.info("backlog #%s: %s (session %s, %s)", candidate.id, outcome,
                 run["session_id"], run.get("stop_reason"))
+    # After `finished`, which is the row the reaper reads. Not on the
+    # `infra_failed` branch above: a stream that dropped says nothing about
+    # whether the backend is still running the turn, so that round waits for
+    # housekeeping's pass.
+    await _reap_at_turn_end(run["session_id"])
     return {"status": "success", "item_id": candidate.id, "round_id": round_id,
             "session_id": run["session_id"], "stop_reason": run.get("stop_reason"),
             "summary": f"#{candidate.id}: {outcome}"}

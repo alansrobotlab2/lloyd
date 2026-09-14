@@ -167,27 +167,43 @@ def run_gate(round_id: str, *, skip_smoke: bool = False) -> dict:
 
 
 def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
-    """Promote a round whose gate passed. Refuses otherwise."""
-    if not (force or dry_run):
-        S.require_enabled("land a round", LIVE_ROOT)
-    gate_path = S.ROUNDS_DIR / round_id / "gate.json"
-    if not gate_path.exists():
-        raise RuntimeError(f"{round_id} has no gate report — run the gate first")
-    report = json.loads(gate_path.read_text())
-    if not report.get("ok"):
-        failed = [r["name"] for r in report.get("rungs", []) if not r["ok"]]
-        raise RuntimeError(f"gate did not pass (failed: {failed})")
+    """Promote a round whose gate passed. Refuses otherwise.
 
-    wt = W.worktree_path(round_id)
-    lock = S.Lock(owner=f"land-{round_id}").acquire()
-    try:
-        result = P.promote(round_id, wt, report["base"],
-                           gate_report=report, dry_run=dry_run)
-    finally:
-        lock.release()
+    A real landing owns the round's land marker for its whole life, so the
+    implement source's reaper — which runs the moment the turn that called
+    `automod_land` ends — cannot abort a round that is waiting for idle or
+    chasing a moved `main`. A dry run neither writes nor clears it.
+    """
     if not dry_run:
-        W.remove(round_id, keep_branch=False, repo=LIVE_ROOT)
-    return result
+        live = S.land_in_progress(round_id)
+        if live and int(live.get("pid") or 0) != os.getpid():
+            raise RuntimeError(f"a landing is already running for {round_id} (pid "
+                               f"{live['pid']}, started {live.get('started_iso')})")
+        S.write_land_marker(round_id, pid=os.getpid(), by="round.land")
+    try:
+        if not (force or dry_run):
+            S.require_enabled("land a round", LIVE_ROOT)
+        gate_path = S.ROUNDS_DIR / round_id / "gate.json"
+        if not gate_path.exists():
+            raise RuntimeError(f"{round_id} has no gate report — run the gate first")
+        report = json.loads(gate_path.read_text())
+        if not report.get("ok"):
+            failed = [r["name"] for r in report.get("rungs", []) if not r["ok"]]
+            raise RuntimeError(f"gate did not pass (failed: {failed})")
+
+        wt = W.worktree_path(round_id)
+        lock = S.Lock(owner=f"land-{round_id}").acquire()
+        try:
+            result = P.promote(round_id, wt, report["base"],
+                               gate_report=report, dry_run=dry_run)
+        finally:
+            lock.release()
+        if not dry_run:
+            W.remove(round_id, keep_branch=False, repo=LIVE_ROOT)
+        return result
+    finally:
+        if not dry_run:
+            S.clear_land_marker(round_id, pid=os.getpid())
 
 
 def abort(round_id: str, reason: str = "") -> dict:
