@@ -58,7 +58,10 @@ SPAWN_CAP = 1
 # staleness, so quarantine does not apply and the fan-out is one item.
 GROUP_SPAWN_CAP = 1
 DEFAULT_GROUP_MIN_ITEMS = 2
-DEFAULT_GROUP_MAX_ITEMS = 8
+# 8 -> 4 on 2026-09-14. An umbrella carries a clause or two per member, and
+# umbrellas of 8-12 clauses were 56 of 92 `up_next` items while 5 of 68
+# formed had landed. Four members is a contract a round can meet.
+DEFAULT_GROUP_MAX_ITEMS = 4
 DEFAULT_GROUP_MAX_TURNS = 120
 PER_ITEM_MIN_CHARS = 2500
 
@@ -272,7 +275,11 @@ SPAWNED: <for stale/already_done, the ids you filed or appended to in step 6, e.
 The clauses are graded one by one at the gate by a reviewer who sees only the \
 item, the clauses and the diff — so a clause has to name the observable \
 behaviour, not the mechanism ("a retried worker item fires `email_send` once", \
-not "add a ledger"). Three to six clauses is the usual shape.
+not "add a ledger"). **At most {max_clauses} clauses**: every clause is graded \
+on its own and one unmet clause refuses the round, so six pass together less \
+than half the time and twelve one time in five. If the work needs more, \
+confirm the part one small change can finish and append the rest to this item \
+under `## Findings` (step 6) — clauses past the cap are dropped, not graded.
 """
 
 def _when(ts) -> str:
@@ -329,12 +336,18 @@ def _origin_block(candidate, ledger) -> str:
             f'{parent_attr}>\n' + "\n".join(lines) + "\n</origin>")
 
 
+def _single_max_clauses() -> int:
+    from scripts.automod.backlog import SINGLE_MAX_CLAUSES
+    return SINGLE_MAX_CLAUSES
+
+
 def render_prompt(candidate, *, ledger, body_chars: int = 30_000, spawn_cap: int = SPAWN_CAP) -> str:
     """The single-item prompt for one candidate."""
     return PROMPT.format(
         item_id=candidate.id, status=candidate.status, priority=candidate.priority,
         name=candidate.name, body=candidate.body[:body_chars], age=candidate.age_days,
         origin=_origin_block(candidate, ledger), spawn_cap=spawn_cap,
+        max_clauses=_single_max_clauses(),
     )
 
 
@@ -353,11 +366,26 @@ _FIELD = re.compile(
     re.I)
 
 
-def _clauses(value) -> list[str]:
+def _clause_list(value, limit: int) -> list[str]:
     from scripts.automod.backlog import clean_clauses, split_clause_lines
     if isinstance(value, list):
-        return clean_clauses(value)
-    return split_clause_lines(str(value or ""))
+        return clean_clauses(value, limit=limit)
+    return split_clause_lines(str(value or ""), limit=limit)
+
+
+def _clauses(value) -> list[str]:
+    """Human clauses: not graded, so the read bound."""
+    from scripts.automod.backlog import READ_MAX_CLAUSES
+    return _clause_list(value, READ_MAX_CLAUSES)
+
+
+def _contract_clauses(value) -> tuple[list[str], int]:
+    """`(acceptance clauses, dropped)`: the contract a round will be graded
+    against, capped at `MAX_CLAUSES` on both parse paths, and how many fell
+    past the cap so the verdict row can say so."""
+    from scripts.automod.backlog import MAX_CLAUSES
+    every = _clause_list(value, 10_000)
+    return every[:MAX_CLAUSES], max(0, len(every) - MAX_CLAUSES)
 
 
 def parse_verdict(text: str, structured: dict | None = None) -> dict | None:
@@ -411,6 +439,7 @@ def parse_verdict(text: str, structured: dict | None = None) -> dict | None:
         surface = "external" if verdict == "not_code" else "code"
     def joined(key: str, limit: int) -> str:
         return "\n".join(fields.get(key, [])).strip()[:limit]
+    clauses, dropped = _contract_clauses(joined("ACCEPTANCE_CLAUSES", 8000))
     return {
         "verdict": verdict,
         "surface": surface,
@@ -422,7 +451,8 @@ def parse_verdict(text: str, structured: dict | None = None) -> dict | None:
         # Its own field, not `- ` bullets under ACCEPTANCE: `ACCEPTANCE: -` is
         # the placeholder the text path already reads as "none", and a bullet
         # would collide with it.
-        "acceptance_clauses": _clauses(joined("ACCEPTANCE_CLAUSES", 8000)),
+        "acceptance_clauses": clauses,
+        "clauses_dropped": dropped,
         "human_clauses": _clauses(joined("HUMAN_CLAUSES", 4000)),
         "spawned": _parse_spawned(joined("SPAWNED", 400)),
         "source": "regex",
@@ -455,13 +485,15 @@ def _from_structured(obj: dict, verdicts, surfaces) -> dict | None:
         spawned = ids
     else:
         spawned = _parse_spawned(str(spawned or ""))
+    clauses, dropped = _contract_clauses(obj.get("acceptance_clauses"))
     return {
         "verdict": verdict,
         "surface": surface,
         "check": " ".join(str(obj.get("check") or "").split())[:400],
         "evidence": str(obj.get("evidence") or "").strip()[:2000],
         "acceptance": _acceptance_text(str(obj.get("acceptance") or ""))[:3000],
-        "acceptance_clauses": _clauses(obj.get("acceptance_clauses")),
+        "acceptance_clauses": clauses,
+        "clauses_dropped": dropped,
         "human_clauses": _clauses(obj.get("human_clauses")),
         "spawned": spawned,
         "source": "structured",
@@ -523,8 +555,9 @@ def parse_group_verdict(text: str, structured: dict | None, member_ids: list[int
                         "surface": u.get("surface") if u.get("surface") in SURFACES else "code",
                         "check": str(u.get("check") or ""),
                         "evidence": str(u.get("evidence") or ""),
-                        "acceptance": _acceptance_text(u.get("acceptance")),
-                        "acceptance_clauses": _clauses(u.get("acceptance_clauses"))}
+                        "acceptance": _acceptance_text(u.get("acceptance"))}
+            umbrella["acceptance_clauses"], umbrella["clauses_dropped"] = \
+                _contract_clauses(u.get("acceptance_clauses"))
         spawned = _parse_spawned(structured.get("spawned")) if isinstance(structured.get("spawned"), (str, list)) else []
         if items:
             source = "structured"
@@ -559,8 +592,9 @@ def parse_group_verdict(text: str, structured: dict | None, member_ids: list[int
                     "members": _parse_spawned(fields.get("UMBRELLA_MEMBERS")),
                     "surface": (fields.get("SURFACE") or "code").strip().lower(),
                     "check": fields.get("CHECK", ""), "evidence": fields.get("EVIDENCE", ""),
-                    "acceptance": _acceptance_text(fields.get("ACCEPTANCE", "")),
-                    "acceptance_clauses": _clauses(fields.get("ACCEPTANCE_CLAUSES", ""))}
+                    "acceptance": _acceptance_text(fields.get("ACCEPTANCE", ""))}
+        umbrella["acceptance_clauses"], umbrella["clauses_dropped"] = \
+            _contract_clauses(fields.get("ACCEPTANCE_CLAUSES", ""))
         if umbrella["surface"] not in SURFACES:
             umbrella["surface"] = "code"
         spawned = _parse_spawned(fields.get("SPAWNED"))
@@ -818,6 +852,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "evidence": parsed["evidence"][:1000],
                     "acceptance": parsed["acceptance"],
                     "acceptance_clauses": parsed.get("acceptance_clauses") or [],
+                    # Real clauses the verdict wrote past MAX_CLAUSES and the
+                    # parser dropped. Non-zero says the prompt's budget was
+                    # ignored, which is worth watching rather than inferring.
+                    "clauses_dropped": int(parsed.get("clauses_dropped") or 0),
                     "human_clauses": parsed.get("human_clauses") or [],
                     "closed": close,
                     "spawned": spawned, "merged": merged, "id_floor": id_floor,

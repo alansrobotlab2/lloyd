@@ -964,7 +964,10 @@ workers:
       # ignored.
       group_triage: true
       group_min_items: 2
-      group_max_items: 8
+      # 8 -> 4 (2026-09-14): umbrellas of 8-12 clauses were 56 of 92 up_next
+      # items and 5 of 68 formed had landed; four members is a contract one
+      # round can meet. Clauses are capped at 6 (backlog.MAX_CLAUSES).
+      group_max_items: 4
       group_max_turns: 120
       # An umbrella whose one unattended implement attempt is spent unfolds
       # and closes (`done`, tag `unfolded`); its members drop `grouped` and

@@ -215,7 +215,7 @@ def _seed(isolated, ids=(1, 2, 3, 4, 5, 6, 7)):
 def test_a_group_run_closes_duplicates_retires_folds_and_confirms_the_umbrella(isolated, monkeypatch):
     _seed(isolated)
     monkeypatch.setattr(C, "run_prompt_in_session", _turn(BLOCK, backlog_dir=isolated))
-    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2})))
+    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2, "group_max_items": 8})))
     assert out["status"] == "success"
     assert out["duplicates"] == 2 and out["retired"] == 1 and out["folded"] == 2 and out["kept"] == 2
     assert out["umbrella_id"] == 50
@@ -259,7 +259,7 @@ def test_the_umbrella_is_never_merged_into_a_member_by_dedupe(isolated, monkeypa
 def test_fold_without_an_umbrella_on_disk_is_recorded_as_keep(isolated, monkeypatch):
     _seed(isolated)
     monkeypatch.setattr(C, "run_prompt_in_session", _turn(BLOCK, files_umbrella=False, backlog_dir=isolated))
-    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2})))
+    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2, "group_max_items": 8})))
     assert out["folded"] == 0 and out["kept"] == 4 and out["umbrella_id"] is None
     assert _fm(_path(isolated, 2))["status"] == "draft" and "group" not in _fm(_path(isolated, 2))
     summary = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "backlog_group_triage"][-1]
@@ -270,7 +270,7 @@ def test_a_single_fold_is_a_keep_and_the_umbrella_is_not_confirmed(isolated, mon
     block = BLOCK.replace("#5 -> fold", "#5: keep — on its own")
     _seed(isolated)
     monkeypatch.setattr(C, "run_prompt_in_session", _turn(block, backlog_dir=isolated))
-    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2})))
+    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2, "group_max_items": 8})))
     assert out["folded"] == 0 and out["umbrella_id"] is None
     assert _fm(_path(isolated, 50))["status"] == "draft", "filed but not confirmed"
     assert B.select_confirmed(S.LEDGER_PATH) is None
@@ -281,10 +281,10 @@ def test_running_out_of_budget_twice_abandons_the_cluster_writing_nothing_on_ite
     monkeypatch.setattr(C, "run_prompt_in_session",
                         _turn("...never reached the block", files_umbrella=False,
                               backlog_dir=isolated, stop_reason="max_turns"))
-    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2})))
+    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2, "group_max_items": 8})))
     assert out["status"] == "skipped" and "incomplete" in out["summary"]
     assert B.select_cluster(S.LEDGER_PATH, CL.load_clusters(), min_size=2) is not None, "comes back once"
-    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2})))
+    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2, "group_max_items": 8})))
     assert out["status"] == "success" and "abandoned" in out["summary"]
     assert B.select_cluster(S.LEDGER_PATH, CL.load_clusters(), min_size=2) is None
     assert all(_fm(_path(isolated, i))["status"] == "draft" and "group" not in _fm(_path(isolated, i))
@@ -308,7 +308,7 @@ def test_a_qualifying_cluster_wins_over_the_single_pool(isolated, monkeypatch):
     write_item(isolated, 9, days_old=300)
     fake = _turn(BLOCK, files_umbrella=False, backlog_dir=isolated)
     monkeypatch.setattr(C, "run_prompt_in_session", fake)
-    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2})))
+    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2, "group_max_items": 8})))
     assert out.get("cluster_id") == CL.cluster_id([1, 2, 3])
     assert "<cluster" in fake.calls[0]["prompt"] and fake.calls[0]["final_schema"] is B.GROUP_TRIAGE_SCHEMA
 
@@ -320,7 +320,8 @@ def test_the_group_prompt_fits_the_body_budget_for_eight_items(isolated, monkeyp
     CL.write_clusters(_clusters(list(ids)))
     fake = _turn("nothing", files_umbrella=False, backlog_dir=isolated)
     monkeypatch.setattr(C, "run_prompt_in_session", fake)
-    asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2, "body_chars": 30_000})))
+    asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2, "group_max_items": 8,
+                               "body_chars": 30_000})))
     prompt = fake.calls[0]["prompt"]
     assert prompt.count("<item id=") == 8
     assert len(prompt) < 30_000 + 8 * 400 + len(M.GROUP_PROMPT), "per-item cap holds"
@@ -350,7 +351,7 @@ def test_under_a_full_pool_the_umbrella_is_held_and_the_folds_still_apply(isolat
     monkeypatch.setattr(B, "implement_pool_full",
                         lambda *a, **k: {"full": True, "ready": 40, "bound": 20, "floor": 20,
                                          "landed_items_7d": 0})
-    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2})))
+    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2, "group_max_items": 8})))
     assert out["status"] == "success" and out["umbrella_id"] == 50
     assert out["duplicates"] == 2 and out["retired"] == 1 and out["folded"] == 2
     fm50 = _fm(_path(isolated, 50))

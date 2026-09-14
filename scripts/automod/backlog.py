@@ -471,20 +471,42 @@ GROUP_TRIAGE_SCHEMA: dict = {
     "additionalProperties": False,
 }
 
-MAX_CLAUSES = 12
+# The clause budget of a contract triage writes. 12 -> 6 on 2026-09-14: the
+# review rung refused 109 of 147 reviews, and at a per-clause not-met rate of
+# 13% six clauses pass together ~43% of the time and twelve ~19%. First
+# reviews by clause count: <=4 promoted 3/16, 5-8 21/52, 9+ 3/11 — and 62
+# confirmations in the week carried 9-12. The single-item prompt asks for at
+# most SINGLE_MAX_CLAUSES and the group prompt for MAX_CLAUSES; both parse
+# paths and `record_verdict` cap at MAX_CLAUSES and the verdict row records
+# `clauses_dropped`. The review rung assumes no count.
+MAX_CLAUSES = 6
+SINGLE_MAX_CLAUSES = 5
+# What a READER of a contract already on disk keeps. Not MAX_CLAUSES: 56
+# umbrellas confirmed before the cut carry 8-12, and truncating them on read
+# would grade a round against half its contract, close the item on the half
+# it met — and `amend_clause` would write the truncated half back.
+READ_MAX_CLAUSES = 12
 CLAUSE_MAX_CHARS = 600
 
 
-def clean_clauses(values) -> list[str]:
-    """Clauses as a bounded list of non-placeholder strings."""
+def clean_clauses(values, *, limit: int = READ_MAX_CLAUSES) -> list[str]:
+    """Clauses as a bounded list of non-placeholder strings. `limit` is
+    `MAX_CLAUSES` where a new contract is written, else the read bound."""
     out: list[str] = []
     for v in (values or []):
         s = acceptance_text(v)
         if s and s not in out:
             out.append(s[:CLAUSE_MAX_CHARS])
-        if len(out) >= MAX_CLAUSES:
+        if len(out) >= limit:
             break
     return out
+
+
+def cap_new_clauses(values) -> tuple[list[str], int]:
+    """`(clauses, dropped)` for a contract being written: cleaned, capped at
+    `MAX_CLAUSES`, and how many real clauses fell past the cap."""
+    every = clean_clauses(values, limit=10_000)
+    return every[:MAX_CLAUSES], max(0, len(every) - MAX_CLAUSES)
 
 
 # A clause that can only be OBSERVED once the change is live. The prompt tells
@@ -529,14 +551,14 @@ def split_post_landing_clauses(clauses) -> tuple[list[str], list[str]]:
 _CLAUSE_LINE = re.compile(r"^\s*(\d{1,2})[.)]\s+(.*\S)\s*$")
 
 
-def split_clause_lines(text: str) -> list[str]:
+def split_clause_lines(text: str, *, limit: int = READ_MAX_CLAUSES) -> list[str]:
     """Numbered lines (`1. …`, `2) …`) into clauses; unnumbered prose is one
     clause. A `-` or `none` placeholder is no clause at all."""
     lines = [ln for ln in str(text or "").splitlines() if ln.strip()]
     numbered = [m.group(2) for m in (_CLAUSE_LINE.match(ln) for ln in lines) if m]
     if numbered:
-        return clean_clauses(numbered)
-    return clean_clauses([" ".join(str(text or "").split())])
+        return clean_clauses(numbered, limit=limit)
+    return clean_clauses([" ".join(str(text or "").split())], limit=limit)
 
 
 def acceptance_clauses_of(event: dict | None, frontmatter: dict | None = None) -> list[str]:
@@ -2743,7 +2765,7 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
             # Into the implement pool. Before 2026-09-09 a confirmed item
             # stayed wherever it was, and #353 landed while still `draft`.
             fm["status"] = IMPLEMENT_POOL_STATUS
-    clauses = clean_clauses(acceptance_clauses)
+    clauses, _dropped = cap_new_clauses(acceptance_clauses)
     # Backstop for the rule the prompt states: a clause whose evidence only
     # arrives with time cannot be graded before landing, and holding a round
     # to one can only refuse it. #859 was refused twice on "needs a day of
@@ -2793,7 +2815,7 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
     return item.path
 
 
-def select_cluster(ledger: Path, clusters: dict, *, min_size: int = 3, max_size: int = 8,
+def select_cluster(ledger: Path, clusters: dict, *, min_size: int = 3, max_size: int = 4,
                    boards: tuple[str, ...] | None = DEFAULT_BOARDS
                    ) -> tuple[dict, list[Item]] | None:
     """The cluster a group triage should take: re-validated against disk.
@@ -2924,14 +2946,15 @@ def record_group_verdict(cluster: dict, members: list[Item], verdicts: dict[int,
                          + (f" — {evidence}" if evidence else ""))
             counts["kept"] += 1
     if umbrella is not None and fold_ids:
-        clauses = clean_clauses(umbrella_fields.get("acceptance_clauses") or ())
+        clauses, dropped = cap_new_clauses(umbrella_fields.get("acceptance_clauses") or ())
+        dropped += int(umbrella_fields.get("clauses_dropped") or 0)
         record_verdict(umbrella, "confirmed", str(umbrella_fields.get("evidence") or ""),
                        check=str(umbrella_fields.get("check") or ""),
                        acceptance=str(umbrella_fields.get("acceptance") or ""),
                        acceptance_clauses=clauses, hold=hold)
         update_frontmatter(umbrella.path, {"members": sorted(fold_ids)}, add_tags=("umbrella",))
         S.append_event({"event": "backlog_triage", "item_id": umbrella.id, "verdict": "confirmed",
-                        "held": bool(hold),
+                        "held": bool(hold), "clauses_dropped": dropped,
                         "surface": str(umbrella_fields.get("surface") or "code"),
                         "check": str(umbrella_fields.get("check") or ""),
                         "evidence": str(umbrella_fields.get("evidence") or "")[:1000],
