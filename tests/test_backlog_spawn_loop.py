@@ -696,3 +696,14 @@ def test_an_item_never_retriaged_has_no_refusal_line(isolated):
     write_item(isolated, 911, days_old=20)
     assert "RE-TRIAGED" not in M.render_prompt(B.item_by_id(911), ledger=S.LEDGER_PATH).split(
         "</origin>", 1)[0]
+
+
+def test_the_refusal_line_names_the_refused_clauses_and_the_kept_branch(isolated):
+    write_item(isolated, 912, days_old=20)
+    S.append_event({"event": "backlog_retriage", "item_id": 912, "round_id": "SM_KEPT",
+                    "previous_clauses": ["the retry fires once", "the nightly job reports it"],
+                    "unmet_twice": [2], "clauses": []}, path=S.LEDGER_PATH)
+    origin = M.render_prompt(B.item_by_id(912), ledger=S.LEDGER_PATH).split("</origin>", 1)[0]
+    assert "clause(s) 2. the nightly job reports it" in origin
+    assert "1. the retry fires once | 2. the nightly job reports it" in origin
+    assert "`automod/SM_KEPT`" in origin

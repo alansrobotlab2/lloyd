@@ -112,7 +112,7 @@ def dirty_paths(repo: Path, limit: int | None = None) -> list[str]:
     return out[:limit] if limit else out
 
 
-def rebase_onto(worktree: Path, onto: str) -> tuple[bool, str, list[str]]:
+def rebase_onto(worktree: Path, onto: str, *, upstream: str | None = None) -> tuple[bool, str, list[str]]:
     """Rebase the round's branch onto `onto`. `(ok, detail, conflicting_paths)`.
 
     The tree is shared. A human commits to `main` while a round is open, and
@@ -128,10 +128,17 @@ def rebase_onto(worktree: Path, onto: str) -> tuple[bool, str, list[str]]:
     changes is refused rather than autostashed — those changes are not in the
     round's diff either way, and carrying them silently across a rebase is
     how a round comes to believe it gated work it never committed.
+
+    `upstream` is the round's recorded base, and passing it keeps the replay
+    to the round's own commits (`git rebase --onto <onto> <upstream>`). A bare
+    `git rebase <onto>` replays everything reachable from the branch and not
+    from `onto` — which, when the base was a promotion the guardian has since
+    reset away, is that promotion too, re-landed under a new sha and a tree
+    hash the denylist cannot match.
     """
     if not is_clean(worktree):
         return False, "worktree has uncommitted changes — commit them before gating", []
-    r = git(worktree, "rebase", onto)
+    r = git(worktree, *(("rebase", "--onto", onto, upstream) if upstream else ("rebase", onto)))
     if r.returncode == 0:
         return True, "", []
     c = git(worktree, "diff", "--name-only", "--diff-filter=U")

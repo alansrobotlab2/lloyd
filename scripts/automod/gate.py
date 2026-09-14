@@ -618,7 +618,9 @@ class Gate:
             # every rung below runs against the round's change ON TOP of what
             # landed, which is the only thing worth testing. Only a conflict
             # fails, and it names the files.
-            ok, why, conflicts = W.rebase_onto(self.worktree, live_head)
+            # `upstream`: replay only the round's own commits, never a base
+            # the guardian reset away (see `W.rebase_onto`).
+            ok, why, conflicts = W.rebase_onto(self.worktree, live_head, upstream=self.base)
             if not ok and conflicts:
                 return False, (f"live HEAD moved: {live_head[:8]} != base "
                                f"{self.base[:8]}, and rebasing onto it conflicts in "

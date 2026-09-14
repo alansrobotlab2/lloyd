@@ -483,3 +483,18 @@ def test_execute_does_not_block_the_event_loop():
     src = inspect.getsource(Y.execute) + inspect.getsource(Y.enqueue_if_due)
     for pattern in ("subprocess.run", "subprocess.check_output", "time.sleep(", "urlopen("):
         assert pattern not in src
+
+
+def test_a_filing_merged_into_an_existing_item_still_verifies(tmp_path):
+    """`youtube-eval` writes merge like the loop's own since 2026-09-14. The
+    item merged into need not carry the eval tag, and the merged text is at
+    the end of the file, past the 20 kB head the check read — so a merged
+    filing was recorded `filed_unverified`, "no such item on disk"."""
+    d = tmp_path
+    (d / "10-existing.md").write_text(
+        "---\nstatus: draft\ntags: [backlog]\n---\n\n# Existing\n\n" + "x" * 30_000
+        + "\n\n## Merged finding — 2026-09-14\n\nFrom video abc123XYZ: the idea.\n")
+    assert Y._filed_item_exists(10, "abc123XYZ", backlog_dir=d)
+    assert not Y._filed_item_exists(10, "other0video", backlog_dir=d)
+    (d / "11-plain.md").write_text("---\nstatus: draft\ntags: [backlog]\n---\n\n# P\n\nabc123XYZ\n")
+    assert not Y._filed_item_exists(11, "abc123XYZ", backlog_dir=d), "neither the tag nor a merge"

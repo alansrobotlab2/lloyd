@@ -190,3 +190,19 @@ def test_a_contract_already_on_disk_is_read_whole(isolated):
     B.amend_clause(9, 10, "clause ten, satisfiable", "the grader said so", round_id="SM_A")
     after = _fm(p)["acceptance_clauses"]
     assert len(after) == 12 and after[9] == "clause ten, satisfiable" and after[11] == "clause 12"
+
+
+def test_clauses_past_the_budget_are_kept_as_text_on_the_row_and_the_item(isolated, monkeypatch):
+    """A count alone lost what the dropped clauses said, while the prose
+    ACCEPTANCE still stated them."""
+    p = write_item(isolated, 12)
+
+    async def turn(prompt, **kw):
+        return {"text": _block(), "session_id": "s", "stop_reason": "stop", "num_turns": 9,
+                "errors": []}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    asyncio.run(M.execute(_Item({"group_triage": False})))
+    row = [e for e in S.read_events(path=S.LEDGER_PATH) if e["event"] == "backlog_triage"][-1]
+    assert row["clauses_dropped_text"] == NINE[B.MAX_CLAUSES:]
+    text = p.read_text()
+    assert "not graded, not part of the contract" in text and NINE[-1] in text

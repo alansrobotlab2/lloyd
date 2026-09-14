@@ -63,7 +63,7 @@ def start(goal: str, *, base: str | None = None, force: bool = False,
         resumed: dict = {}
         if from_branch and from_branch != f"automod/{rid}" and W.branch_exists(LIVE_ROOT, from_branch):
             wt = W.create_from_branch(rid, from_branch, repo=LIVE_ROOT)
-            ok, why, conflicts = W.rebase_onto(wt, base)
+            ok, why, conflicts = W.rebase_onto(wt, base, upstream=_recorded_base(from_branch))
             if ok:
                 W.delete_branch(LIVE_ROOT, from_branch)
                 resumed = {"from_branch": from_branch, "rebased_onto": base}
@@ -166,6 +166,27 @@ def run_gate(round_id: str, *, skip_smoke: bool = False) -> dict:
     return report.to_dict()
 
 
+def _recorded_base(branch: str) -> str | None:
+    """The base the round behind `automod/SM_…` was gated against, when its
+    run spec still says and that commit is really in the branch's history.
+    Resuming from it replays only that round's commits; see `W.rebase_onto`."""
+    import re
+    import yaml
+    m = re.fullmatch(r"automod/(SM_[0-9A-Za-z_]+)", str(branch or ""))
+    if not m:
+        return None
+    try:
+        spec = yaml.safe_load((S.ROUNDS_DIR / m.group(1) / "run_spec.yaml").read_text()) or {}
+        base = str((spec.get("code") or {}).get("base_commit") or "")
+    except Exception:  # noqa: BLE001 — no spec: the plain rebase, as before
+        return None
+    if not base:
+        return None
+    ok = subprocess.run(["git", "-C", str(LIVE_ROOT), "merge-base", "--is-ancestor", base, branch],
+                        capture_output=True).returncode == 0
+    return base if ok else None
+
+
 def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
     """Promote a round whose gate passed. Refuses otherwise.
 
@@ -192,11 +213,12 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
             raise RuntimeError(f"gate did not pass (failed: {failed})")
 
         wt = W.worktree_path(round_id)
-        if not dry_run and S.chamber_enabled(LIVE_ROOT) and S.read_current():
+        observed = S.read_current() if not dry_run and S.chamber_enabled(LIVE_ROOT) else None
+        if observed:
             # The chamber: this round ran while the last promotion was under
             # observation. Wait for it here, outside the lock and before the
             # pool is paused; `promote` still refuses if it never settled.
-            P.wait_for_settle(round_id=round_id)
+            P.wait_for_settle(round_id=round_id, observed=observed)
         lock = S.Lock(owner=f"land-{round_id}").acquire()
         try:
             result = P.promote(round_id, wt, report["base"],

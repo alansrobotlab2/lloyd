@@ -440,11 +440,20 @@ def tracked_items(backlog_dir: Path | None = None) -> list[dict]:
 
 def _filed_item_exists(item_id: int, video_id: str, backlog_dir: Path | None = None) -> bool:
     """A `FILED: #n` claim holds only if that file exists, carries the eval
-    tag, and mentions this video — the shape the prompt asked for."""
+    tag, and mentions this video — the shape the prompt asked for.
+
+    Or, since `youtube-eval` writes merge like the loop's own (2026-09-14),
+    if the tool folded the filing into an existing item: that item need not
+    carry the eval tag, and the merged text sits at the END of its file under
+    a "Merged finding" heading, past any head read. So the whole file is read
+    for that case."""
     d = backlog_dir or BACKLOG_DIR
     for f in d.glob(f"{int(item_id)}-*.md"):
         text = _read_head(f, 20000)
-        return EVAL_TAG in text and video_id in text
+        if EVAL_TAG in text and video_id in text:
+            return True
+        whole = _read_head(f, 2_000_000)
+        return "## Merged finding" in whole and video_id in whole.split("## Merged finding", 1)[1]
     return False
 
 

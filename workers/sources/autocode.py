@@ -376,8 +376,11 @@ def reap_abandoned_rounds(now: float | None = None, *,
     try:
         from app.sessions_io import active_sessions_snapshot
         busy = {s.get("session_id") for s in active_sessions_snapshot()}
-    except Exception:
-        busy = set()
+    except Exception as exc:  # noqa: BLE001
+        # Closed, not open: with no grace, "could not tell which sessions are
+        # busy" would otherwise read as "none are" and abort a live round.
+        logger.warning("reaper: session snapshot unavailable, reaping nothing: %s", exc)
+        return []
     busy.discard(finished_session)
     current = S.read_current() or {}
     reaped: list[dict] = []
@@ -539,6 +542,12 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
         _last_decline["why"] = why
         return DECLINED
     _last_decline["why"] = ""
+    # A round row still queued or running coalesces any enqueue below. Asked
+    # first, because `select_confirmed` walks the whole board (~2 s) and a
+    # decline is retried every `retry_seconds`.
+    if await asyncio.to_thread(queue.has_live, DEDUP_KEY):
+        logger.debug("autocode: not queueing — the previous round's row is still in flight")
+        return DECLINED
     if await asyncio.to_thread(B.select_confirmed, S.LEDGER_PATH) is None:
         return None
     new_id = queue.enqueue(
@@ -634,14 +643,46 @@ def _housekeeping(src_cfg: dict) -> None:
         logger.warning("expire_stale_spawns failed: %s", exc)
 
 
-def _retriage_still_owed(item_id: int) -> bool:
-    """Whether the next housekeeping pass will re-triage this item: the switch
-    is on and it has not had its one re-triage."""
+def _escalate_review_disagreement(candidate, round_id: str | None) -> bool:
+    """When the round just recorded is a review disagreement: note it, tag it,
+    write `review_escalated`, and tell a person — unless the loop's own second
+    life is still owed (`_second_life_owed`). True when it escalated."""
+    from scripts.automod import backlog as B, state as S
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH).get(candidate.id, ("", ""))
+    if not detail.startswith("review disagreement"):
+        return False
+    B.note_item(candidate.id, f"escalated: {detail}")
+    B.tag_item(candidate.id, add=("review-disagreement",))
+    S.append_event({"event": "review_escalated", "item_id": candidate.id,
+                    "round_id": round_id, "reason": detail[:400]})
+    if _second_life_owed(candidate):
+        # Housekeeping re-triages it (or unfolds the umbrella) with this refusal
+        # attached; nobody is needed yet, and a toast saying otherwise is one a
+        # person learns to ignore.
+        logger.info("#%s: review disagreement; the automatic second life is still owed, "
+                    "not announcing", candidate.id)
+        return True
+    try:
+        from scripts.automod.promote import announce
+        announce(f"#{candidate.id} needs you",
+                 f"review sent it back twice on the same clause: {detail[:160]}")
+    except Exception as exc:  # noqa: BLE001 — an announcement never fails a round
+        logger.warning("announce failed: %s", exc)
+    return True
+
+
+def _second_life_owed(candidate) -> bool:
+    """Whether housekeeping, not a person, handles this spend next: an
+    umbrella is unfolded while `autotriage.unfold_spent_umbrellas` is on; any
+    other item is re-triaged while `retriage_spent` is on and it has not had
+    its one re-triage."""
     from scripts.automod import backlog as B, state as S
     try:
+        if B.is_umbrella(candidate):
+            return bool(_source_cfg("autotriage").get("unfold_spent_umbrellas", True))
         if not bool(_source_cfg(NAME).get("retriage_spent", True)):
             return False
-        return B.retriage_counts(S.LEDGER_PATH).get(int(item_id), 0) < B.RETRIAGE_CAP
+        return B.retriage_counts(S.LEDGER_PATH).get(int(candidate.id), 0) < B.RETRIAGE_CAP
     except Exception:  # noqa: BLE001 — when unsure, tell the human
         return False
 
@@ -882,25 +923,6 @@ async def _run_and_record(item, candidate, triage, budget, started,
                         f"automod review sent round {round_id} back: "
                         f"{str(review.get('review_findings') or review.get('detail') or '')[:800]} "
                         f"— work is on branch `automod/{round_id}`")
-    verdict, detail = B.implement_outcomes(S.LEDGER_PATH).get(candidate.id, ("", ""))
-    if detail.startswith("review disagreement"):
-        B.note_item(candidate.id, f"escalated: {detail}")
-        B.tag_item(candidate.id, add=("review-disagreement",))
-        S.append_event({"event": "review_escalated", "item_id": candidate.id,
-                        "round_id": round_id, "reason": detail[:400]})
-        if _retriage_still_owed(candidate.id):
-            # Housekeeping sends it back through triage with this refusal
-            # attached; nobody is needed yet, and a toast saying otherwise
-            # is one a person learns to ignore.
-            logger.info("#%s: review disagreement; re-triage is still owed, not announcing",
-                        candidate.id)
-        else:
-            try:
-                from scripts.automod.promote import announce
-                announce(f"#{candidate.id} needs you",
-                         f"review sent it back twice on the same clause: {detail[:160]}")
-            except Exception as exc:  # noqa: BLE001 — an announcement never fails a round
-                logger.warning("announce failed: %s", exc)
     claimed = B.parse_spawned_line(run.get("text") or "")
     spawned, merged = B.split_claimed(claimed, id_floor=id_floor, self_id=candidate.id)
     # Findings are counted off the item file, not the report.
@@ -935,6 +957,14 @@ async def _run_and_record(item, candidate, triage, budget, started,
                f"vault commit {vault_commits[-1][:8]}" if vault_commits else "no round opened")
     logger.info("backlog #%s: %s (session %s, %s)", candidate.id, outcome,
                 run["session_id"], run.get("stop_reason"))
+    # After `finished` too: `implement_outcomes` judges an item by its latest
+    # row, and before that row is written the latest is `started`, whose
+    # detail is empty — so this escalation, placed above it, never fired
+    # (zero `review_escalated` rows on the ledger ever).
+    try:
+        await asyncio.to_thread(_escalate_review_disagreement, candidate, round_id)
+    except Exception as exc:  # noqa: BLE001 — bookkeeping never fails a round
+        logger.warning("#%s: review escalation failed: %s", candidate.id, exc)
     # After `finished`, which is the row the reaper reads. Not on the
     # `infra_failed` branch above: a stream that dropped says nothing about
     # whether the backend is still running the turn, so that round waits for

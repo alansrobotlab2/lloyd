@@ -418,8 +418,14 @@ SETTLE_MAX_WAIT = ERRORS_WINDOW + 120.0
 SETTLE_POLL_SECONDS = 10.0
 
 
+def _settled(commit: str) -> bool:
+    """Whether the guardian recorded `settled` for this commit."""
+    return any(e.get("event") == "settled" and str(e.get("commit") or "") == commit
+               for e in S.read_events(limit=400))
+
+
 def wait_for_settle(max_wait: float | None = None, *, poll: float | None = None,
-                    round_id: str = "") -> dict | None:
+                    round_id: str = "", observed: dict | None = None) -> dict | None:
     """Wait while a promotion is recorded in `current.json`; None once it
     clears, `PromoteError` if it never does. `promote` keeps its own "still
     under observation" refusal behind this, for any caller that did not wait.
@@ -441,7 +447,13 @@ def wait_for_settle(max_wait: float | None = None, *, poll: float | None = None,
     max_wait = SETTLE_MAX_WAIT if max_wait is None else float(max_wait)
     poll = SETTLE_POLL_SECONDS if poll is None else float(poll)
     deadline = time.monotonic() + max_wait
+    # `observed` is the record the caller decided to wait on. Read again here
+    # regardless, and remember the commit from whichever saw it: a promotion
+    # that clears between the caller's read and this one must still be proved
+    # settled, not assumed.
+    waited_on = str((observed or {}).get("commit") or "")
     observed = S.read_current()
+    waited_on = waited_on or str((observed or {}).get("commit") or "")
     while observed and time.monotonic() < deadline:
         time.sleep(poll)
         observed = S.read_current()
@@ -455,6 +467,13 @@ def wait_for_settle(max_wait: float | None = None, *, poll: float | None = None,
     elif observed:
         why = (f"{str(observed.get('commit'))[:8]} is still under observation "
                f"({observed.get('state')}) after waiting {max_wait / 60:.0f} min for it to settle")
+    elif waited_on and not _settled(waited_on):
+        # `current.json` also clears when the guardian ROLLS BACK: it deletes
+        # a rollback request the moment it reads one, and its own error-window
+        # rollbacks never write one, so an empty request file proves nothing.
+        # Only a `settled` row for the commit waited on says it survived.
+        why = (f"{waited_on[:8]} left observation without settling (rolled back?) — "
+               f"not landing a round that ran on top of it")
     if why:
         if round_id:
             _land_failed(round_id, why, external=True, waited_for_settle=True)

@@ -790,6 +790,28 @@ first new round could already be past every re-offer cap. While a re-triage is
 still owed, a review disagreement is not announced as "needs you". Switch
 `workers.sources.autocode.retriage_spent`.
 
+**What the first review of this section found** (same day, before landing).
+`spent` is not "over": `implement_outcomes` reads it for a turn in flight, for
+a round whose landing is still waiting for idle or re-gating, for an observed
+round and for a promotion the settle sweep has not reached. The unfold pass had
+no guard at all and would have closed nearly every umbrella under its own
+round; re-triage guarded only two of the shapes. `items_with_unfinished_rounds`
+is the one guard both read. `implement_history` drops a `started`/`skipped`
+pair (a landing drain refused the turn) so a turn that never ran is not a
+spend. `desired_statuses` keeps a marked item `draft` until a post-mark
+confirmation, or a reopen or a raced landing would have stranded it in
+`up_next`. The re-triage mark clears the refused contract from the front
+matter. The review-disagreement escalation had run before the `finished` row,
+read an empty detail and never fired; it runs after it. The enqueue asks the
+queue for a live round row (`WorkQueue.has_live`) before the two-second board
+walk. With the chamber, a wait that ends with `current.json` clear but no
+`settled` row for the commit waited on is a rollback, not a settle, and
+preflight rebases `--onto <live> <base>` so a reset-away base is never
+replayed. Smaller: dropped clause text is kept (row and item), the writers
+coerce string `tags`, a zombie child's marker reads dead, the reaper reaps
+nothing when it cannot read the session snapshot, and a YouTube filing merged
+into another item verifies.
+
 **youtube-eval is loop output** (Alan, 2026-09-14). `EVAL_SPAWN_TAGS`
 (`youtube-eval`) is in `LOOP_SPAWN_TAGS` (expiry, gauge) and a new
 `QUARANTINE_TAGS`, with `SPAWN_TAGS` itself unchanged; the MCP dedupe merges a

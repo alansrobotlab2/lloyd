@@ -745,9 +745,13 @@ idle between rounds (61.6 h) than running them (48.3 h).
   waits instead — `promote.wait_for_settle`, called by `round.land` outside
   the automod lock and before `wait_idle` pauses the pool, up to the window
   + 120 s, then halt/BROKEN/rollback re-checked; every way it ends without a
-  landing is an *external* `land_failed`, so the item keeps its attempt.
-  Turn it on after the turn-end reaper and `land.running` have run in
-  production for a few days.
+  landing is an *external* `land_failed`, so the item keeps its attempt —
+  including a promotion that left observation **without a `settled` row**,
+  because the guardian deletes a rollback request on reading it and its own
+  window rollbacks never write one. Preflight rebases with `--onto <live>
+  <base>` (`W.rebase_onto(upstream=)`), so a base the guardian reset away is
+  never replayed into the round. Turn it on after the turn-end reaper and
+  `land.running` have run in production for a few days.
 - **A contract is at most six clauses** (`MAX_CLAUSES`, 12 until 09-14;
   the single prompt asks for `SINGLE_MAX_CLAUSES` = 5): at a 13% per-clause
   not-met rate six pass together ~43%, twelve ~19%. Capped on both parse
@@ -765,11 +769,23 @@ idle between rounds (61.6 h) than running them (48.3 h).
   `incomplete_counts`, `implement_outcomes`, `review_events_for_item`,
   `last_review_all_met` and the gate's grader history all ignore rows at or
   before it, and `released_ids` includes it — the item is untriaged and
-  unattempted again. Never umbrellas, members, rounds in flight or landings;
+  unattempted again; the refused `acceptance_clauses` come off the item (front
+  matter wins in `acceptance_clauses_of`) and ride the row as
+  `previous_clauses`, and `desired_statuses` keeps a marked item in `draft`
+  until triage confirms it again. Never umbrellas, members, or an item
+  `items_with_unfinished_rounds` names — **`spent` is not "over"**: it is
+  also what a turn in flight, a landing waiting for idle, an observed round
+  and an unswept promotion read as, and both this pass and the umbrella
+  unfold check that guard (latest row `started`, a live promoted round, the
+  round in `current.json`, its worktree, or a live gate/land marker). A turn a
+  landing drain refused (`started` then `skipped`) is not an attempt at all
+  (`implement_history`);
   `RETRIAGE_CAP` 1, so the second spend is a human's. A human `reopen_item`
   now resets the attempt count too (it used to reset only the latest row).
-  A review disagreement is not announced "needs you" while the re-triage is
-  owed. Switch `workers.sources.autocode.retriage_spent`. ~35 items a week
+  A review disagreement is escalated after the `finished` row now — above it
+  the latest row was `started` and the escalation had never once fired — and
+  is not announced "needs you" while the re-triage (or, for an umbrella, the
+  unfold) is owed. Switch `workers.sources.autocode.retriage_spent`. ~35 items a week
   went to `needs-human`, and 42 of the 67 a person reopened later landed.
 
 The verdict's `SURFACE:` picks the implementer's route. `code` and `frontend`

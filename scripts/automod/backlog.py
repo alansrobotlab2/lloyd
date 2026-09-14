@@ -504,11 +504,13 @@ def clean_clauses(values, *, limit: int = READ_MAX_CLAUSES) -> list[str]:
     return out
 
 
-def cap_new_clauses(values) -> tuple[list[str], int]:
+def cap_new_clauses(values) -> tuple[list[str], list[str]]:
     """`(clauses, dropped)` for a contract being written: cleaned, capped at
-    `MAX_CLAUSES`, and how many real clauses fell past the cap."""
+    `MAX_CLAUSES`, and the real clauses that fell past the cap — kept as text,
+    because the prose ACCEPTANCE still states them and a count alone would
+    lose what they said."""
     every = clean_clauses(values, limit=10_000)
-    return every[:MAX_CLAUSES], max(0, len(every) - MAX_CLAUSES)
+    return every[:MAX_CLAUSES], every[MAX_CLAUSES:]
 
 
 # A clause that can only be OBSERVED once the change is live. The prompt tells
@@ -916,9 +918,10 @@ def update_frontmatter(path: Path, updates: dict, *, activity: str = "",
         elif fm.get(k) != v:
             fm[k] = v
             changed = True
-    tags = [str(t) for t in (fm.get("tags") or [])]
+    raw_tags = fm.get("tags")
+    tags = normalize_tags(raw_tags)
     new_tags = [t for t in tags if t not in remove_tags] + [t for t in add_tags if t not in tags]
-    if new_tags != tags:
+    if new_tags != tags or (add_tags or remove_tags) and not isinstance(raw_tags, list):
         fm["tags"] = new_tags
         changed = True
     if not changed and not activity:
@@ -1115,6 +1118,84 @@ def _after_mark(d: dict, marks: dict[int, float]) -> bool:
     """Whether a row counts: no mark for its item, or written after it."""
     m = marks.get(int(d["item_id"]))
     return m is None or float(d.get("ts") or 0) > m
+
+
+def implement_history(ledger: Path, marks: dict[int, float] | None = None) -> dict[int, list[dict]]:
+    """`{item_id: [backlog_implement rows]}` in ledger order, counting from the
+    item's last re-triage mark, with every attempt a landing drain refused
+    removed.
+
+    `_run_and_record` writes `started` and then, when `DrainActive` refuses
+    the turn before it runs, `skipped`. Read raw, the item's latest row is
+    `skipped` — no round, no stop reason — and `implement_outcomes` fell
+    through to `spent` for a turn that never ran. That was a quiet loss while
+    a spend parked the item; with re-triage a spend discards its contract. So
+    a `skipped` row takes its `started` with it.
+    """
+    marks = retriage_marks(ledger) if marks is None else marks
+    out: dict[int, list[dict]] = {}
+    for d in _ledger_events(ledger, "backlog_implement"):
+        if not _after_mark(d, marks):
+            continue
+        rows = out.setdefault(int(d["item_id"]), [])
+        if str(d.get("phase") or "") == "skipped":
+            for i in range(len(rows) - 1, -1, -1):
+                if str(rows[i].get("phase") or "") == "started":
+                    del rows[i:]
+                    break
+            continue
+        rows.append(d)
+    return {iid: rows for iid, rows in out.items() if rows}
+
+
+def _live_promoted_rounds(ledger: Path) -> set[str]:
+    reverted = {str(d.get("commit") or "") for d in
+                _ledger_events(ledger, "rollback_succeeded", require_item=False)}
+    return {str(d.get("round_id") or "") for d in
+            _ledger_events(ledger, "promoted", require_item=False)
+            if d.get("round_id") and str(d.get("commit") or "") not in reverted}
+
+
+def items_with_unfinished_rounds(ledger: Path, *,
+                                 history: dict[int, list[dict]] | None = None) -> set[int]:
+    """Items whose attempt is not over, whatever `implement_outcomes` reads.
+
+    `implement_outcomes` answers "is another attempt owed"; it reads `spent`
+    for a turn in flight (`started` with nothing after), for a round whose
+    turn has ended while its detached landing waits for idle, re-gates or —
+    with the chamber — waits for a settle, and for a promotion not yet swept.
+    None of those may be unfolded or re-triaged: the umbrella would close
+    under its own landing, the item would be re-judged under a change about to
+    go live. So, an item is mid-round when its latest row is `started`, when
+    any of its rounds promoted and was not reverted (the settle sweep or a
+    person owns it), or when its latest round is named by `current.json`,
+    still has a worktree, or has a live gate or land marker. Fails closed.
+    """
+    from scripts.automod import state as S, worktree as W
+    history = implement_history(ledger) if history is None else history
+    live_promoted = _live_promoted_rounds(ledger)
+    try:
+        current_rid = str((S.read_current() or {}).get("round_id") or "")
+    except Exception:  # noqa: BLE001
+        current_rid = ""
+    out: set[int] = set()
+    for iid, rows in history.items():
+        if str(rows[-1].get("phase") or "") == "started":
+            out.add(iid)
+            continue
+        rids = [str(r["round_id"]) for r in rows if r.get("round_id")]
+        if not rids:
+            continue
+        if any(r in live_promoted for r in rids) or rids[-1] == current_rid:
+            out.add(iid)
+            continue
+        try:
+            if (W.worktree_path(rids[-1]).exists() or S.gate_in_progress(rids[-1])
+                    or S.land_in_progress(rids[-1])):
+                out.add(iid)
+        except Exception:  # noqa: BLE001 — unsure means unfinished
+            out.add(iid)
+    return out
 
 
 def triaged_ids(ledger: Path) -> dict[int, str]:
@@ -1342,20 +1423,20 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
     And a human `reopen_item` resets the attempt count: it used to reset only
     the latest row, so an item reopened after four external blocks read
     `n = 5` on its first new round and every cap below was already spent.
+    A turn a landing drain refused before it ran is not an attempt at all
+    (see `implement_history`).
     """
-    marks = retriage_marks(ledger)
+    history = implement_history(ledger)
     latest: dict[int, dict] = {}
     attempts: dict[int, int] = {}
-    for d in _ledger_events(ledger, "backlog_implement"):
-        if not _after_mark(d, marks):
-            continue
-        iid = int(d["item_id"])
-        latest[iid] = d
-        phase = str(d.get("phase") or "")
-        if phase == "reopened":
-            attempts[iid] = 0
-        elif phase in ("finished", "infra_failed"):
-            attempts[iid] = attempts.get(iid, 0) + 1
+    for iid, rows in history.items():
+        for d in rows:
+            latest[iid] = d
+            phase = str(d.get("phase") or "")
+            if phase == "reopened":
+                attempts[iid] = 0
+            elif phase in ("finished", "infra_failed"):
+                attempts[iid] = attempts.get(iid, 0) + 1
 
     blocked = externally_blocked_rounds(ledger)
     reverted = rolled_back_rounds(ledger)
@@ -1953,7 +2034,9 @@ def _apply_status(path: Path, status: str, why: str, *,
     log.append(f"**{stamp}** — {fm.get('status')} → {status}: {why}")
     fm["activity_log"] = log
     fm["status"] = status
-    tags = [str(t) for t in (fm.get("tags") or [])]
+    # `normalize_tags`, never a bare iteration: a `tags` string that looks like
+    # a list (the eval digest writes them) would come back one tag per character.
+    tags = normalize_tags(fm.get("tags"))
     tags = [t for t in tags if t not in remove_tags] + [t for t in add_tags if t not in tags]
     fm["tags"] = tags
     fm["updated"] = stamp
@@ -1981,6 +2064,13 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     held = held_confirmations(ledger)
     verdicts = triaged_ids(ledger)
     outcomes = implement_outcomes(ledger)
+    marks = retriage_marks(ledger)
+    # Re-triaged and not yet confirmed again: whatever the implement history
+    # after the mark says (a landing that raced the mark, a human reopen before
+    # the second triage), `up_next` would strand it — no contract, so neither
+    # a round nor triage would take it.
+    def _awaits_triage(iid: int) -> bool:
+        return iid in marks and iid not in confirmed
     # A turn in flight is a `started` with nothing after it. `implement_outcomes`
     # reads that shape as `spent` (it is not a verdict either way), so the
     # reconciler decides in-flight for itself rather than trusting a caller
@@ -2031,6 +2121,8 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
             if verdict == "spent":
                 out[iid] = ("draft", "landed with a clause not met and its one unattended attempt "
                                      "is spent; a human decides (reopen_item to grant another)", True)
+            elif _awaits_triage(iid):
+                out[iid] = ("draft", "re-triaged; waiting for its second triage to confirm a contract")
             else:
                 out[iid] = ("up_next", "landed with a clause not met; offered once more for "
                                        "exactly those clauses")
@@ -2060,6 +2152,8 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
                 # looks for things that need a judgment.
                 out[iid] = ("draft", "its one unattended attempt is spent; a human decides "
                                      "(reopen_item to grant another)", True)
+            elif _awaits_triage(iid):
+                out[iid] = ("draft", "re-triaged; waiting for its second triage to confirm a contract")
             else:
                 out[iid] = ("up_next", f"offered again — {verdict}: {detail[:120]}")
         elif iid in confirmed and not is_human_only(confirmed[iid].get("acceptance")):
@@ -2749,9 +2843,9 @@ def tag_item(item_id: int, *, add: tuple[str, ...] = (), remove: tuple[str, ...]
     for item in open_items(None):
         if item.id == int(item_id):
             fm, body = _split_frontmatter(item.path.read_text(encoding="utf-8"))
-            tags = [str(t) for t in (fm.get("tags") or [])]
+            tags = normalize_tags(fm.get("tags"))
             new = [t for t in tags if t not in remove] + [t for t in add if t not in tags]
-            if new == tags:
+            if new == tags and isinstance(fm.get("tags"), list):
                 return False
             fm["tags"] = new
             fm["updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
@@ -2769,6 +2863,7 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
                    acceptance: str = "",
                    acceptance_clauses: list[str] | tuple[str, ...] = (),
                    human_clauses: list[str] | tuple[str, ...] = (),
+                   dropped_clauses: list[str] | tuple[str, ...] = (),
                    hold: bool = False) -> Path:
     """Append the verdict to the item's activity log, optionally closing it.
 
@@ -2816,7 +2911,8 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
             # Into the implement pool. Before 2026-09-09 a confirmed item
             # stayed wherever it was, and #353 landed while still `draft`.
             fm["status"] = IMPLEMENT_POOL_STATUS
-    clauses, _dropped = cap_new_clauses(acceptance_clauses)
+    clauses, past_cap = cap_new_clauses(acceptance_clauses)
+    past_cap = list(dropped_clauses) + past_cap
     # Backstop for the rule the prompt states: a clause whose evidence only
     # arrives with time cannot be graded before landing, and holding a round
     # to one can only refuse it. #859 was refused twice on "needs a day of
@@ -2858,6 +2954,9 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
     if verdict == "confirmed" and clauses:
         section += "\n**Acceptance clauses** (graded one by one at the gate):\n" + "\n".join(
             f"{i}. {c}" for i, c in enumerate(clauses, 1)) + "\n"
+    if verdict == "confirmed" and past_cap:
+        section += (f"\n**Past the {MAX_CLAUSES}-clause budget — not graded, not part of the "
+                    f"contract:**\n" + "\n".join(f"- {c}" for c in past_cap) + "\n")
 
     item.path.write_text(
         f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
@@ -2998,14 +3097,15 @@ def record_group_verdict(cluster: dict, members: list[Item], verdicts: dict[int,
             counts["kept"] += 1
     if umbrella is not None and fold_ids:
         clauses, dropped = cap_new_clauses(umbrella_fields.get("acceptance_clauses") or ())
-        dropped += int(umbrella_fields.get("clauses_dropped") or 0)
+        dropped = list(umbrella_fields.get("clauses_dropped_text") or []) + dropped
         record_verdict(umbrella, "confirmed", str(umbrella_fields.get("evidence") or ""),
                        check=str(umbrella_fields.get("check") or ""),
                        acceptance=str(umbrella_fields.get("acceptance") or ""),
-                       acceptance_clauses=clauses, hold=hold)
+                       acceptance_clauses=clauses, dropped_clauses=dropped, hold=hold)
         update_frontmatter(umbrella.path, {"members": sorted(fold_ids)}, add_tags=("umbrella",))
         S.append_event({"event": "backlog_triage", "item_id": umbrella.id, "verdict": "confirmed",
-                        "held": bool(hold), "clauses_dropped": dropped,
+                        "held": bool(hold), "clauses_dropped": len(dropped),
+                        "clauses_dropped_text": dropped,
                         "surface": str(umbrella_fields.get("surface") or "code"),
                         "check": str(umbrella_fields.get("check") or ""),
                         "evidence": str(umbrella_fields.get("evidence") or "")[:1000],
@@ -3080,13 +3180,15 @@ def unfold_spent_umbrellas(ledger: Path, boards: tuple[str, ...] | None = DEFAUL
     if not enabled:
         return []
     from scripts.automod import state as S
+    history = implement_history(ledger)
     outcomes = implement_outcomes(ledger)
+    unfinished = items_with_unfinished_rounds(ledger, history=history)
     out: list[dict] = []
     for item in open_items(boards):
         if not is_umbrella(item):
             continue
         verdict, detail = outcomes.get(item.id, ("", ""))
-        if verdict != "spent":
+        if verdict != "spent" or item.id in unfinished:
             continue
         fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
         if fm.get(LANDED_MARKER) or any(fm.get(m) for m in _LEGACY_LANDED_MARKERS):
@@ -3162,11 +3264,11 @@ def retriage_spent_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_
     is the pass that writes contracts. It sees the refused round's findings
     and per-clause verdicts in `<origin>`.
 
-    Eligible: implement outcome `spent`, not in flight, never re-triaged
-    (`RETRIAGE_CAP`), not an umbrella or a member (`unfold_spent_umbrellas`
-    owns those), and never a landing — a promoted round, or the landed marker,
-    is the settle sweep's or a person's (a landed `met` item owing human
-    clauses among them). The item moves to `draft` tagged `re-triage`, drops
+    Eligible: implement outcome `spent`, never re-triaged (`RETRIAGE_CAP`),
+    not an umbrella or a member (`unfold_spent_umbrellas` owns those), and not
+    mid-round (`items_with_unfinished_rounds`: in flight, landing, observed or
+    promoted — a promotion and the landed marker are the settle sweep's or a
+    person's, a landed `met` item owing human clauses among them). The item moves to `draft` tagged `re-triage`, drops
     `needs-human` and `review-disagreement`, and a `backlog_retriage` row is
     the mark every history reader starts from. The second spend parks it for
     a human, as before.
@@ -3174,23 +3276,12 @@ def retriage_spent_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_
     if not enabled:
         return []
     from scripts.automod import state as S
+    history = implement_history(ledger)
     outcomes = implement_outcomes(ledger)
     counts = retriage_counts(ledger)
-    marks = retriage_marks(ledger)
-    rows = [d for d in _ledger_events(ledger, "backlog_implement") if _after_mark(d, marks)]
-    latest: dict[int, dict] = {}
-    last_round: dict[int, str] = {}
-    for d in rows:
-        latest[int(d["item_id"])] = d
-        if d.get("round_id"):
-            last_round[int(d["item_id"])] = str(d["round_id"])
-    reverted = {str(d.get("commit") or "") for d in
-                _ledger_events(ledger, "rollback_succeeded", require_item=False)}
-    live_promoted = {str(d.get("round_id") or "") for d in
-                     _ledger_events(ledger, "promoted", require_item=False)
-                     if str(d.get("commit") or "") not in reverted}
-    landed_items = {int(d["item_id"]) for d in rows
-                    if d.get("round_id") and str(d["round_id"]) in live_promoted}
+    unfinished = items_with_unfinished_rounds(ledger, history=history)
+    last_round = {iid: next((str(r["round_id"]) for r in reversed(rows) if r.get("round_id")), "")
+                  for iid, rows in history.items()}
     out: list[dict] = []
     for item in open_items(boards):
         verdict, detail = outcomes.get(item.id, ("", ""))
@@ -3198,9 +3289,9 @@ def retriage_spent_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_
             continue
         if is_umbrella(item) or is_grouped(item):
             continue
-        if str((latest.get(item.id) or {}).get("phase") or "") == "started":
-            continue
-        if item.id in landed_items:
+        # In flight, landing, observed, or promoted: not over, whatever
+        # `spent` says.
+        if item.id in unfinished:
             continue
         fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
         if fm.get(LANDED_MARKER) or any(fm.get(m) for m in _LEGACY_LANDED_MARKERS):

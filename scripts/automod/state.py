@@ -408,12 +408,22 @@ def gate_marker_path(round_id: str) -> Path:
 
 
 def pid_alive(pid) -> bool:
+    """A process that exists and is not a zombie. The detached gate and land
+    children are never waited on by the lloyd-mcp that spawned them, so one
+    that died stays a zombie — `kill(pid, 0)` succeeds on it — until that
+    process spawns again or restarts, and its marker would read as live."""
     try:
         os.kill(int(pid), 0)
     except (ProcessLookupError, ValueError, TypeError, OverflowError):
         return False
     except PermissionError:
         return True
+    try:
+        stat = Path(f"/proc/{int(pid)}/stat").read_text()
+        if stat.rsplit(")", 1)[1].split()[0] == "Z":
+            return False
+    except (OSError, IndexError):
+        pass
     return True
 
 

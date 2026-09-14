@@ -1090,13 +1090,58 @@ def test_retriage_can_be_switched_off_and_housekeeping_reads_the_switch(isolated
     assert seen == {"enabled": False}
 
 
-def test_a_review_disagreement_is_not_announced_while_retriage_is_owed(isolated, monkeypatch):
+def _disagreement_turn(monkeypatch, item_id, round_id):
+    """A turn whose round the review rung refused twice on clause 2."""
+    base = _fake_turn("Refused twice on clause 2.", stop_reason="stop")
+
+    async def turn(prompt, **kw):
+        S.append_event({"event": "round_start", "round_id": round_id}, path=S.LEDGER_PATH)
+        for head in ("a" * 40, "b" * 40):
+            S.append_event({"event": "review", "round_id": round_id, "item_id": item_id, "ok": True,
+                            "blocking": True, "head": head, "findings": "no seam test",
+                            "clauses": [{"clause": 2, "verdict": "unmet"}]}, path=S.LEDGER_PATH)
+        S.append_event({"event": "gate", "round_id": round_id, "rung": "review", "ok": False,
+                        "review_retry": True, "review_findings": "no seam test"}, path=S.LEDGER_PATH)
+        return await base(prompt, **kw)
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+
+
+@pytest.mark.parametrize("retriaged_before", [False, True])
+def test_a_review_disagreement_escalates_after_the_finished_row(isolated, monkeypatch, tmp_path,
+                                                                retriaged_before):
+    """The escalation read `implement_outcomes` before the `finished` row was
+    written, when the latest row was `started` and its detail empty — so it
+    never fired (zero `review_escalated` rows on the live ledger). Through
+    `execute` now; and while the automatic second life is owed nobody is
+    told they are needed."""
+    from scripts.automod import promote as P
+    write_item(isolated, 930, status="up_next")
+    _confirm(930)
+    if retriaged_before:
+        S.append_event({"event": "backlog_retriage", "item_id": 930, "ts": 1.0}, path=S.LEDGER_PATH)
+    _reaper_env(monkeypatch, tmp_path, observed=False, worktree=False)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
     monkeypatch.setattr(I, "_source_cfg", lambda name: {})
-    assert I._retriage_still_owed(907) is True
-    S.append_event({"event": "backlog_retriage", "item_id": 907}, path=S.LEDGER_PATH)
-    assert I._retriage_still_owed(907) is False, "the second disagreement needs a person"
-    monkeypatch.setattr(I, "_source_cfg", lambda name: {"retriage_spent": False})
-    assert I._retriage_still_owed(908) is False
+    told = []
+    monkeypatch.setattr(P, "announce", lambda head, body: told.append(head))
+    _disagreement_turn(monkeypatch, 930, "SM_DIS")
+    asyncio.run(I.execute(_Item({"max_turns": 100})))
+    esc = [e for e in S.read_events(path=S.LEDGER_PATH) if e["event"] == "review_escalated"]
+    assert [e["item_id"] for e in esc] == [930]
+    fm = yaml.safe_load(next(isolated.glob("930-*.md")).read_text().split("---")[1])
+    assert "review-disagreement" in fm["tags"]
+    assert told == (["#930 needs you"] if retriaged_before else []), (
+        "a person is told only once the loop's own second life is used up")
+
+
+def test_an_umbrella_disagreement_is_left_to_the_unfold_pass(isolated, monkeypatch):
+    monkeypatch.setattr(I, "_source_cfg", lambda name: {})
+    write_item(isolated, 931)
+    umbrella = B.item_by_id(931)
+    umbrella.tags.append("umbrella")
+    assert I._second_life_owed(umbrella) is True
+    monkeypatch.setattr(I, "_source_cfg", lambda name: {"unfold_spent_umbrellas": False})
+    assert I._second_life_owed(umbrella) is False
 
 
 # ===========================================================================
@@ -1989,3 +2034,116 @@ def test_a_stray_worktree_does_not_block_the_loop(monkeypatch):
         str(I.LIVE_ROOT), str(I._LOOP_WORKTREE_ROOT / "SM_1" / "home" / "lloyd")])
     ok, why = I._loop_is_free()
     assert ok is False and "1 worktree" in why
+
+
+# ===========================================================================
+# Review of the throughput branch, 2026-09-14: what `spent` does not know
+# ===========================================================================
+
+def test_an_item_whose_landing_is_in_flight_is_never_retriaged(isolated, monkeypatch, tmp_path):
+    """After `automod_land` the turn ends and `finished` is written; `promoted`
+    arrives only after the idle wait, a re-gate and the restart. In between the
+    item reads `spent`, and re-triage re-judged a change about to go live."""
+    import os
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path / "rounds")
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    write_item(isolated, 940)
+    _spent_after_review(940, round_id="SM_LAND")
+    S.write_land_marker("SM_LAND", pid=os.getpid())
+    assert B.retriage_spent_items(S.LEDGER_PATH) == []
+    S.clear_land_marker("SM_LAND")
+    monkeypatch.setattr(S, "read_current", lambda: {"round_id": "SM_LAND", "state": "landing"})
+    assert B.retriage_spent_items(S.LEDGER_PATH) == [], "named by current.json"
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    from scripts.automod import worktree as W
+    (tmp_path / "wt").mkdir()
+    monkeypatch.setattr(W, "worktree_path", lambda rid: tmp_path / "wt")
+    assert B.retriage_spent_items(S.LEDGER_PATH) == [], "its worktree is still there"
+    monkeypatch.setattr(W, "worktree_path", lambda rid: tmp_path / "gone")
+    assert [r["item_id"] for r in B.retriage_spent_items(S.LEDGER_PATH)] == [940]
+
+
+def test_a_marked_item_never_goes_to_up_next_before_its_second_triage(isolated):
+    """A human reopen after the mark, or a landing that raced it, left the item
+    `up_next` with no post-mark confirmation: in neither `ready_confirmed` nor
+    the triage pool — stranded."""
+    write_item(isolated, 941)
+    _spent_after_review(941)
+    B.retriage_spent_items(S.LEDGER_PATH)
+    B.reopen_item(941, "a human wants another go", ledger=S.LEDGER_PATH)
+    want = B.desired_statuses(S.LEDGER_PATH).get(941)
+    assert want and want[0] == "draft", want
+    B.reconcile_statuses(S.LEDGER_PATH)
+    assert B.select_candidate(S.LEDGER_PATH).id == 941, "triage can reach it"
+
+
+def test_a_turn_a_landing_drain_refused_is_not_an_attempt(isolated):
+    """`started` then `skipped` read as `spent`: a turn that never ran lost its
+    item — and, with re-triage, its contract."""
+    write_item(isolated, 942, status="up_next")
+    _confirm(942)
+    for _ in range(3):
+        S.append_event({"event": "backlog_implement", "item_id": 942, "phase": "started"},
+                       path=S.LEDGER_PATH)
+        S.append_event({"event": "backlog_implement", "item_id": 942, "phase": "skipped",
+                        "reason": "landing in progress"}, path=S.LEDGER_PATH)
+    assert 942 not in B.implement_outcomes(S.LEDGER_PATH)
+    assert B.select_confirmed(S.LEDGER_PATH)[0].id == 942
+    assert B.retriage_spent_items(S.LEDGER_PATH) == []
+
+
+def test_a_live_round_row_declines_before_the_board_walk(isolated, monkeypatch, tmp_path):
+    """`select_confirmed` is ~2 s over the live board; a decline retries every
+    60 s. The queue is asked first."""
+    from workers.queue import WorkQueue
+    from workers.sources import DECLINED
+    q = WorkQueue(tmp_path / "workers.db")
+    _housekeeping_counter(monkeypatch)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
+    q.enqueue(I.NAME, "round", dedup_key=I.DEDUP_KEY)
+    walked = []
+    monkeypatch.setattr(B, "select_confirmed", lambda ledger: walked.append(1))
+    assert asyncio.run(I.enqueue_if_due(q, {"interval_seconds": 900})) == DECLINED
+    assert walked == [] and q.has_live(I.DEDUP_KEY)
+
+
+def test_the_reaper_reaps_nothing_when_it_cannot_tell_which_sessions_are_busy(isolated, monkeypatch, tmp_path):
+    import time as _t
+    import app.sessions_io as sio
+    write_item(isolated, 2)
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False)
+
+    def broken():
+        raise RuntimeError("snapshot unavailable")
+    monkeypatch.setattr(sio, "active_sessions_snapshot", broken)
+    _finished()
+    assert I.reap_abandoned_rounds(now=_t.time() + 1) == [] and aborted == []
+
+
+def test_a_zombie_marker_process_is_dead(tmp_path):
+    """The detached land child is never waited on by lloyd-mcp; dead, it is a
+    zombie `kill(pid, 0)` still answers, and its marker read as live."""
+    import subprocess
+    import time as _t
+    child = subprocess.Popen(["true"])
+    for _ in range(100):
+        stat = Path(f"/proc/{child.pid}/stat").read_text()
+        if stat.rsplit(")", 1)[1].split()[0] == "Z":
+            break
+        _t.sleep(0.02)
+    assert S.pid_alive(child.pid) is False
+    child.wait()
+
+
+def test_a_string_tags_field_survives_the_writers(isolated):
+    """The eval digest has written `tags` as a string that looks like a list;
+    the writers iterated it one character per tag."""
+    p = write_item(isolated, 943)
+    p.write_text(p.read_text().replace("tags:\n- backlog\n", "tags: '[youtube-eval, ai-engineer]'\n", 1))
+    B.tag_item(943, add=(B.RETRIAGE_TAG,))
+    fm = yaml.safe_load(p.read_text().split("---")[1])
+    assert fm["tags"] == ["youtube-eval", "ai-engineer", B.RETRIAGE_TAG]
+    B.set_status(943, "up_next", "test")
+    B.update_frontmatter(p, {"parent": 1}, remove_tags=("ai-engineer",))
+    fm = yaml.safe_load(p.read_text().split("---")[1])
+    assert fm["tags"] == ["youtube-eval", B.RETRIAGE_TAG] and fm["status"] == "up_next"

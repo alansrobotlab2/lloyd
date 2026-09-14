@@ -603,8 +603,9 @@ def test_land_waits_for_the_window_then_refuses_if_it_never_settles(monkeypatch,
     observation waits for it to settle, then lands. One that never settles is
     refused, recorded as someone else's promotion — never as the round's."""
     R, promoted = _chamber_land(monkeypatch, tmp_path, [OBSERVING, OBSERVING, None])
+    S.append_event({"event": "settled", "commit": OBSERVING["commit"]}, path=S.LEDGER_PATH)
     R.land("SM_C")
-    assert promoted == ["SM_C"], "landed once the window cleared"
+    assert promoted == ["SM_C"], "landed once the window cleared and the promotion settled"
 
     R, promoted = _chamber_land(monkeypatch, tmp_path, [OBSERVING])
     with pytest.raises(P.PromoteError, match="still under observation"):
@@ -641,3 +642,48 @@ def test_the_chamber_switch_is_read_raw_and_defaults_off(tmp_path):
     assert S.chamber_enabled(tmp_path) is False, "absent is off"
     (tmp_path / "config.yaml").write_text("automod:\n  enabled: true\n  chamber: true\n")
     assert S.chamber_enabled(tmp_path) is True
+
+
+def test_a_promotion_that_leaves_observation_without_settling_is_never_landed_over(monkeypatch, tmp_path):
+    """The guardian deletes a rollback request the moment it reads one, and
+    its own error-window rollbacks never write one, so `current.json` clearing
+    with no request on disk can be a rollback. Only a `settled` row for the
+    commit waited on says the round's base survived."""
+    R, promoted = _chamber_land(monkeypatch, tmp_path, [OBSERVING, None])
+    with pytest.raises(P.PromoteError, match="without settling"):
+        R.land("SM_C")
+    assert promoted == []
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "land_failed"][-1]
+    assert ev["external_blocker"] is True
+
+
+def _sh(repo, *args):
+    import subprocess
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def test_a_rebase_replays_only_the_rounds_own_commits(tmp_path):
+    """Round B was cut on promotion A while A was observed; the guardian reset
+    A away. A bare `git rebase <live>` replays A inside B (a re-landing the
+    denylist cannot match); `--onto <live> <base>` replays only B's commit."""
+    from scripts.automod import worktree as W
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sh(repo, "init", "-q", "-b", "main")
+    _sh(repo, "config", "user.email", "t@t"); _sh(repo, "config", "user.name", "t")
+    (repo / "f.txt").write_text("base\n"); _sh(repo, "add", "."); _sh(repo, "commit", "-qm", "base")
+    root = _sh(repo, "rev-parse", "HEAD")
+    (repo / "a.txt").write_text("promotion A\n"); _sh(repo, "add", "."); _sh(repo, "commit", "-qm", "A")
+    a = _sh(repo, "rev-parse", "HEAD")
+    wt = tmp_path / "wt"
+    _sh(repo, "worktree", "add", "-q", "-b", "round-b", str(wt), a)
+    (wt / "b.txt").write_text("round B\n"); _sh(wt, "add", "."); _sh(wt, "commit", "-qm", "B")
+    _sh(repo, "reset", "-q", "--hard", root)          # the guardian's rollback of A
+    (repo / "h.txt").write_text("human\n"); _sh(repo, "add", "."); _sh(repo, "commit", "-qm", "human")
+    live = _sh(repo, "rev-parse", "HEAD")
+    ok, why, conflicts = W.rebase_onto(wt, live, upstream=a)
+    assert ok, why
+    assert not (wt / "a.txt").exists(), "the rolled-back promotion was replayed into the round"
+    assert (wt / "b.txt").exists() and (wt / "h.txt").exists()
+    assert _sh(wt, "rev-list", "--count", f"{live}..HEAD") == "1"

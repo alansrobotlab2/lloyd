@@ -371,9 +371,16 @@ def _retriage_line(ev: dict) -> str:
         for c in (ev.get("clauses") or []) if isinstance(c, dict))
     if per_clause:
         parts.append(f"the grader per clause: {per_clause}")
+    previous = [str(c) for c in (ev.get("previous_clauses") or [])]
     if ev.get("unmet_twice"):
-        parts.append("graded unmet or unsatisfiable on two reviews, so drop them: clause(s) "
-                     + ", ".join(str(n) for n in ev["unmet_twice"]))
+        named = "; ".join(f"{n}. {previous[n - 1][:200]}" if 0 < int(n) <= len(previous) else str(n)
+                          for n in ev["unmet_twice"])
+        parts.append("graded unmet or unsatisfiable on two reviews, so drop them: clause(s) " + named)
+    if previous:
+        parts.append("the refused contract was: "
+                     + " | ".join(f"{i}. {c[:200]}" for i, c in enumerate(previous, 1)))
+    if ev.get("round_id"):
+        parts.append(f"its work is kept on branch `automod/{ev['round_id']}`")
     return " — ".join(parts)
 
 
@@ -420,13 +427,13 @@ def _clauses(value) -> list[str]:
     return _clause_list(value, READ_MAX_CLAUSES)
 
 
-def _contract_clauses(value) -> tuple[list[str], int]:
+def _contract_clauses(value) -> tuple[list[str], list[str]]:
     """`(acceptance clauses, dropped)`: the contract a round will be graded
-    against, capped at `MAX_CLAUSES` on both parse paths, and how many fell
-    past the cap so the verdict row can say so."""
+    against, capped at `MAX_CLAUSES` on both parse paths, and the clauses that
+    fell past the cap — as text, for the verdict row and the item."""
     from scripts.automod.backlog import MAX_CLAUSES
     every = _clause_list(value, 10_000)
-    return every[:MAX_CLAUSES], max(0, len(every) - MAX_CLAUSES)
+    return every[:MAX_CLAUSES], every[MAX_CLAUSES:]
 
 
 def parse_verdict(text: str, structured: dict | None = None) -> dict | None:
@@ -493,7 +500,8 @@ def parse_verdict(text: str, structured: dict | None = None) -> dict | None:
         # the placeholder the text path already reads as "none", and a bullet
         # would collide with it.
         "acceptance_clauses": clauses,
-        "clauses_dropped": dropped,
+        "clauses_dropped": len(dropped),
+        "clauses_dropped_text": dropped,
         "human_clauses": _clauses(joined("HUMAN_CLAUSES", 4000)),
         "spawned": _parse_spawned(joined("SPAWNED", 400)),
         "source": "regex",
@@ -534,7 +542,8 @@ def _from_structured(obj: dict, verdicts, surfaces) -> dict | None:
         "evidence": str(obj.get("evidence") or "").strip()[:2000],
         "acceptance": _acceptance_text(str(obj.get("acceptance") or ""))[:3000],
         "acceptance_clauses": clauses,
-        "clauses_dropped": dropped,
+        "clauses_dropped": len(dropped),
+        "clauses_dropped_text": dropped,
         "human_clauses": _clauses(obj.get("human_clauses")),
         "spawned": spawned,
         "source": "structured",
@@ -597,7 +606,7 @@ def parse_group_verdict(text: str, structured: dict | None, member_ids: list[int
                         "check": str(u.get("check") or ""),
                         "evidence": str(u.get("evidence") or ""),
                         "acceptance": _acceptance_text(u.get("acceptance"))}
-            umbrella["acceptance_clauses"], umbrella["clauses_dropped"] = \
+            umbrella["acceptance_clauses"], umbrella["clauses_dropped_text"] = \
                 _contract_clauses(u.get("acceptance_clauses"))
         spawned = _parse_spawned(structured.get("spawned")) if isinstance(structured.get("spawned"), (str, list)) else []
         if items:
@@ -634,7 +643,7 @@ def parse_group_verdict(text: str, structured: dict | None, member_ids: list[int
                     "surface": (fields.get("SURFACE") or "code").strip().lower(),
                     "check": fields.get("CHECK", ""), "evidence": fields.get("EVIDENCE", ""),
                     "acceptance": _acceptance_text(fields.get("ACCEPTANCE", ""))}
-        umbrella["acceptance_clauses"], umbrella["clauses_dropped"] = \
+        umbrella["acceptance_clauses"], umbrella["clauses_dropped_text"] = \
             _contract_clauses(fields.get("ACCEPTANCE_CLAUSES", ""))
         if umbrella["surface"] not in SURFACES:
             umbrella["surface"] = "code"
@@ -870,6 +879,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                      acceptance=parsed["acceptance"],
                      acceptance_clauses=parsed.get("acceptance_clauses") or (),
                      human_clauses=parsed.get("human_clauses") or (),
+                     dropped_clauses=parsed.get("clauses_dropped_text") or (),
                      hold=hold)
 
     # The cap is a prompt instruction, and the items exist on disk by the time
@@ -897,6 +907,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     # parser dropped. Non-zero says the prompt's budget was
                     # ignored, which is worth watching rather than inferring.
                     "clauses_dropped": int(parsed.get("clauses_dropped") or 0),
+                    "clauses_dropped_text": parsed.get("clauses_dropped_text") or [],
                     "human_clauses": parsed.get("human_clauses") or [],
                     "closed": close,
                     "spawned": spawned, "merged": merged, "id_floor": id_floor,

@@ -249,6 +249,16 @@ class WorkQueue:
             conn.commit()
             return cur.lastrowid
 
+    def has_live(self, dedup_key: str) -> bool:
+        """Whether a row holding `dedup_key` is queued, claimed or running —
+        exactly the rows an `enqueue` with that key would coalesce against."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM queue WHERE dedup_key = ? AND state IN ('queued','claimed','running')",
+                (dedup_key,),
+            ).fetchone()
+            return row is not None
+
     # ── Claim (atomic) ────────────────────────────────────────────────────
 
     def claim_next(

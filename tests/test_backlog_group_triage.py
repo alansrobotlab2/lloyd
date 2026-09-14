@@ -458,3 +458,35 @@ def test_a_board_pass_by_hand_runs_the_passes_once_and_records_it(isolated, monk
     ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e["event"] == "board_pass"][-1]
     assert ev["expired"] == [70] and ev["unfolded"] == {"50": [2, 5]} and ev["by"] == "human"
     assert R.main(["board-pass"]) == 0
+
+
+# ── an umbrella whose round is not over is never unfolded (review, 2026-09-14) ─
+
+@pytest.mark.parametrize("shape", ["in_flight", "landing", "promoted_not_swept", "observed"])
+def test_an_umbrella_mid_round_is_never_unfolded(isolated, monkeypatch, tmp_path, shape):
+    """`implement_outcomes` reads `spent` for all four shapes. Unfolding then
+    closed the umbrella under its own landing: the settle sweep skipped it as
+    not open, and members expired as never picked up although the work landed."""
+    import os
+    _folded_umbrella(isolated)
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path / "rounds")
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    if shape == "in_flight":
+        S.append_event({"event": "backlog_implement", "item_id": 50, "phase": "started"},
+                       path=S.LEDGER_PATH)
+    else:
+        S.append_event({"event": "backlog_implement", "item_id": 50, "phase": "started"},
+                       path=S.LEDGER_PATH)
+        S.append_event({"event": "backlog_implement", "item_id": 50, "phase": "finished",
+                        "round_id": "SM_U50", "stop_reason": "stop", "num_turns": 50},
+                       path=S.LEDGER_PATH)
+        if shape == "landing":
+            S.write_land_marker("SM_U50", pid=os.getpid())
+        elif shape == "promoted_not_swept":
+            S.append_event({"event": "promoted", "round_id": "SM_U50", "commit": "d" * 40},
+                           path=S.LEDGER_PATH)
+        else:
+            monkeypatch.setattr(S, "read_current", lambda: {"round_id": "SM_U50", "state": "observing"})
+    assert B.implement_outcomes(S.LEDGER_PATH)[50][0] == "spent"
+    assert B.unfold_spent_umbrellas(S.LEDGER_PATH) == []
+    assert _fm(_path(isolated, 50))["status"] != "done" and _fm(_path(isolated, 2))["group"] == 50
