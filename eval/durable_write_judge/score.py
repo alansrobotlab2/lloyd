@@ -135,6 +135,7 @@ def render(samples: list[dict], raw_paths: dict[str, Path]) -> str:
     ms = {name: metrics(samples, vs[name]) for name in vs}
     sq = selection_quality(samples)
     classes_present = sorted(class_counts(samples).items())
+    n_bad = sum(1 for s in samples if s["label"] == "bad")
 
     lines = [
         "# Durable-write judge calibration — backlog #580",
@@ -319,8 +320,14 @@ def render(samples: list[dict], raw_paths: dict[str, Path]) -> str:
         "- **`good` means no class signature fired**, not verified-clean. A judge "
         "flagging a `good` sample may be right, which inflates the measured "
         "false-positive rate and makes the reported silent-pass rate optimistic.",
-        "- **Small n.** 20 bad across 5 classes; two classes have n<2. Percentages "
-        "move by ~5 points per sample.",
+        # Computed, never written: this line used to assert a class count by hand
+        # ("two classes have n<2") that the shipped corpus contradicts — its smallest
+        # class has n = 2. A caveat that drifts from the corpus it describes is worse
+        # than no caveat, because it is the sentence a reader trusts about n.
+        f"- **Small n.** {n_bad} bad across {len(classes_present)} classes"
+        + (f", smallest class at n = {min(n for _, n in classes_present)}"
+           if classes_present else "")
+        + ". Percentages move by ~5 points per sample.",
         "- **The model cannot check the claim against the transcript.** It is judging "
         "internal plausibility, which is exactly the residue a rubric can reach; "
         "invented-but-plausible URLs are only detectable here against the retrieved "

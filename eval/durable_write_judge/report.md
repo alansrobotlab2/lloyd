@@ -111,7 +111,7 @@ Fox's open question is whether the retrieved-case leg picks the wrong shape of c
 - **One rater.** Every label derives from Lloyd's own recorded repair; Alan is the domain expert who would have to ratify them, and inter-rater reliability is unavailable. Correction evidence travels with each sample (`correction_evidence`) so a rater can re-judge the label, not just the text.
 - **Rule-derived labels are conservative and partial.** A class is assigned only when its signature is visible in the repair diff; a repair that reworded prose without removing a URL or adding a heading is unlabelled here. Meaning-reversals and misattributed speakers — both recorded in `memory/2026-09-09.md` — are classes the detector has **no signature for**, so the corpus under-represents them; that is a limitation of the corpus, not evidence they are rare.
 - **`good` means no class signature fired**, not verified-clean. A judge flagging a `good` sample may be right, which inflates the measured false-positive rate and makes the reported silent-pass rate optimistic.
-- **Small n.** 20 bad across 5 classes; two classes have n<2. Percentages move by ~5 points per sample.
+- **Small n.** 20 bad across 5 classes, smallest class at n = 2. Percentages move by ~5 points per sample.
 - **The model cannot check the claim against the transcript.** It is judging internal plausibility, which is exactly the residue a rubric can reach; invented-but-plausible URLs are only detectable here against the retrieved examples, which is the hypothesis under test.
 
 ## Reproduce

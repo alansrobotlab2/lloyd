@@ -504,3 +504,47 @@ def test_every_bad_row_carries_class_text_and_a_reconstructible_git_object():
         assert s["pre_repair_text"].strip(), s["id"]
         assert s["recovered_from"] == (
             f'git show {s["repair_commit"]}^:{s["vault_path"]}'), s["id"]
+
+
+def test_the_readme_measured_section_agrees_with_the_shipped_artifacts():
+    """The README's headline numbers and its test citations must be re-measurable.
+
+    Two drifts this pins, both of them real here. (1) The Measured section quoted a
+    retrieval class-match rate and a twin-leak rate from an earlier corpus build
+    (36.8 % and 68.4 %) while the shipped corpus measures 75.0 % and 0 % — a summary
+    that no longer matches the table it summarises is the defect this item exists to
+    measure, one file up. (2) The README cites tests by name, and a rename in this
+    file leaves the citation pointing at nothing, which reads as satisfied to the
+    next reader. So every figure in the Measured section must equal what score.py
+    re-derives from the shipped corpus and raws, and every ``test_...`` name quoted
+    anywhere in the README must be a test defined in this file.
+    """
+    readme = (HERE / "README.md").read_text()
+    samples = load_shipped_corpus()
+
+    measured = readme.split("## Measured", 1)[1]
+    vs = {j: sc.verdicts_by_id(sc.load_jsonl(HERE / f"judge_raw_{j}.jsonl"))
+          for j in ("a", "b")}
+    ma, mb = sc.metrics(samples, vs["a"]), sc.metrics(samples, vs["b"])
+    sq = sc.selection_quality(samples)
+    for value in (ma["recall_on_bad"], ma["false_positive_rate"],
+                  ma["silent_pass_rate"], mb["recall_on_bad"],
+                  mb["false_positive_rate"], mb["silent_pass_rate"]):
+        assert f"{abs(value)} %" in measured, (
+            f"README Measured section does not state {value} %")
+    margin = round(mb["recall_on_bad"] - ma["recall_on_bad"], 1)
+    assert f"{abs(margin)} points" in measured, (
+        f"README Measured section does not state the {margin}-point margin")
+    assert f"**{sq['same_class_rate']} %**" in measured, sq["same_class_rate"]
+    assert f"**{int(sq['twin_leak_rate'])} % same-file twin leakage**" in measured
+
+    counts = bc.class_counts(samples)
+    n_bad = sum(1 for s in samples if s["label"] == "bad")
+    assert f"{n_bad} bad across {len(counts)} classes" in readme
+    assert f"the smallest class at n = {min(counts.values())}" in readme
+
+    defined = set(re.findall(r"^def (test_\w+)", Path(__file__).read_text(), re.M))
+    cited = set(re.findall(r"`(test_\w+)`", readme))
+    assert cited, "the README cites no tests, so the citation half is vacuous"
+    assert not (cited - defined), (
+        f"README cites tests that do not exist in this file: {sorted(cited - defined)}")

@@ -110,9 +110,14 @@ $PY -m pytest tests/test_durable_write_judge.py -q      # the pinned clauses
 Determinism: the corpus builder is `--since`/`--until`-bounded and path-ordered
 with a per-class quota; Judge A's draw is seeded (`SEED = 580`); Judge B's is
 inherited from the corpus order; both judge at `temperature=0`. Re-running
-`judge.py` reproduces the same `example_ids`, and
-`test_no_judged_sample_was_its_own_retrieved_example_in_the_shipped_run` proves
-the shipped run is reconstructible from the shipped corpus.
+`judge.py` reproduces the same `example_ids` for **all 100 shipped rows** —
+Judge B's five re-derived as the BM25 top-k, Judge A's five re-derived as the
+seeded draw, and the same-file twin guard asserted for both arms — which
+`test_the_examples_every_shipped_row_showed_reproduce_from_the_shipped_corpus`
+proves against the shipped corpus. Every number `report.md` states is re-derived
+too: `test_shipped_artifacts_exist_and_their_counts_are_the_ones_reported`
+asserts that file equals `score.render()` over the shipped corpus and both raw
+files, byte for byte, so no figure in it is hand-written.
 
 ## Known limits, stated before the number
 
@@ -132,8 +137,13 @@ Judge B (same model, same preamble, 5 nearest-retrieved examples): recall **20.0
 FPR **13.3 %**, silent pass **38.1 %**. Margin **−25.0 points** — the item's stop
 rule fires: retrieval-conditioned judging did not transfer to this corpus, and no
 step-7 shadow run was started. Two further findings, both in the report: the
-retrieval leg's class-match rate is **36.8 %** with **68.4 % twin leakage**, so
-selection quality is a real defect rather than a footnote; and every
-`invented_url` miss carries a confident reason naming a *different* missing URL
-than the one the repair removed — a judge can flag the right class for a reason
-that does not match the record.
+retrieval leg put a same-class case in the five for **75.0 %** of the 20 bad
+samples, with **0 % same-file twin leakage** — so selection quality is *not* what
+made Judge B lose, the judgement leg did; and every `invented_url` miss carries a
+confident reason naming a *different* missing URL than the one the repair removed
+— a judge can flag the right class for a reason that does not match the record.
+Every figure in this section is re-derived from the shipped corpus and both raw
+files by `test_the_readme_measured_section_agrees_with_the_shipped_artifacts`,
+which also fails if any test name cited in this file stops existing — the
+paragraph before that test was written quoted two selection figures from an
+earlier corpus build.
