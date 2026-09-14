@@ -31,6 +31,7 @@ def rs(tmp_path, monkeypatch):
         ("AUTONOMY_RUNS_DIR", "autonomy-runs"),
         ("AUTONOMY_TASKS_DIR", "autonomy"),
         ("CANDIDATES_DIR", "skill-candidates"),
+        ("TRANSCRIPT_SCRATCH_DIR", "transcript-scratch"),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -149,3 +150,43 @@ def test_legacy_epoch_named_records_are_swept(rs, tmp_path):
     assert count == 1
     assert not legacy.exists()
     assert keep.exists(), "non-record files must be left alone"
+
+
+def test_transcript_scratch_old_deleted_recent_kept(rs):
+    """Backlog #566: the raw transcript scratch home is a bounded store. Nothing ever
+    deleted a transcript before this — the real directory held 7 files on 2026-09-14 with
+    the oldest 6 days past any policy it was nominally under. Deleting is licence the video
+    note grants it (transcript_path + transcript_md5 ride along), not a guess."""
+    now = time.time()
+    old = rs.TRANSCRIPT_SCRATCH_DIR / "T2v2pf_uypE.txt"
+    old.write_text("t" * 500)
+    _backdate(old, 45)
+    recent = rs.TRANSCRIPT_SCRATCH_DIR / "1_8pzU44n-M.txt"
+    recent.write_text("n" * 100)
+    subdir = rs.TRANSCRIPT_SCRATCH_DIR / "0NvD6qNapiU"
+    subdir.mkdir()
+    outside = rs.TRANSCRIPT_SCRATCH_DIR.parent / "not-in-scratch.txt"
+    outside.write_text("x")
+    link = rs.TRANSCRIPT_SCRATCH_DIR / "escape.txt"
+    link.symlink_to(outside)
+    _backdate(link.resolve(), 45)  # the TARGET is old; following the link would delete it
+
+    n, freed = rs.sweep_transcript_scratch(apply=False, now=now)
+    assert (n, freed) == (1, 500)
+    assert old.exists(), "dry run must touch nothing"
+
+    n, freed = rs.sweep_transcript_scratch(apply=True, now=now)
+    assert (n, freed) == (1, 500)
+    assert not old.exists()
+    assert recent.exists(), "a transcript inside the window must survive"
+    assert subdir.exists(), "a stray directory is not a transcript; leave it"
+    assert outside.exists(), "a symlink target outside the scratch dir must survive"
+
+
+def test_transcript_scratch_missing_dir_is_zero(rs):
+    """The scratch dir is created by an extraction session, not installed — first boot and
+    every box that never extracted a video has no directory at all. That reports 0, it does
+    not crash the sweep the rest of the stores depend on."""
+    import shutil
+    shutil.rmtree(rs.TRANSCRIPT_SCRATCH_DIR)
+    assert rs.sweep_transcript_scratch(apply=True, now=time.time()) == (0, 0)

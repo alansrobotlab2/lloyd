@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Groundskeeper Retention Sweep
 
-Bounds the two unbounded-growth stores (2026-06-11 architecture review,
-Tier 3.1):
+Bounds the unbounded-growth stores — the two from the 2026-06-11
+architecture review (Tier 3.1), the autonomy stores added in June, and
+the transcript scratch home from backlog #566:
 
 1. ~/lloyd/_pipeline/tasks/   — background-bash task logs, never evicted
    by the harness. DELETE entries older than TASK_LOG_MAX_AGE_DAYS.
@@ -11,9 +12,20 @@ Tier 3.1):
    .gz keeps them recoverable) sessions whose `last_active` is older than
    SESSION_ARCHIVE_AGE_DAYS. Live consumers all glob *.json, so archived
    sessions intentionally drop out of session lists and session_recall.
+3. ~/lloyd/_pipeline/tmp/     — raw YouTube transcript scratch, the one
+   directory skills/youtube-transcript and skills/youtube-content name as
+   TRANSCRIPT_DIR (backlog #566). DELETE files older than
+   TRANSCRIPT_MAX_AGE_DAYS. Deleting is safe here specifically because
+   every video note records transcript_path + transcript_md5: the note is
+   the durable artifact, the scratch file only has to survive long enough
+   to be re-read, and a missing input stays detectable. Before this store
+   existed nothing bounded it — and the sessions that skipped the named
+   directory wrote into /tmp, where systemd-tmpfiles-clean.timer reaps
+   them on a clock nobody in Lloyd controls.
 
 Age signal: sessions are aged by the `last_active` field in the JSON
-(mtime lies — any reprocessing touches the file); task logs by mtime.
+(mtime lies — any reprocessing touches the file); task logs and transcript
+scratch by mtime (a transcript is written once and only ever read back).
 
 Usage:
     retention-sweep.py            # dry run — report only
@@ -35,6 +47,12 @@ SESSIONS_DIR = Path.home() / "lloyd" / "sessions"
 AUTONOMY_RUNS_DIR = Path.home() / "lloyd" / "autonomy-runs"
 AUTONOMY_TASKS_DIR = Path.home() / "obsidian" / "autonomy"
 CANDIDATES_DIR = Path.home() / "lloyd" / "_pipeline" / "skills" / "candidates"
+# The one transcript scratch home. Both youtube skills name it as TRANSCRIPT_DIR, so this
+# constant and that literal are the same directory — tests/test_youtube_artifact_phase.py
+# pins the pair, because a scratch dir the sweep has never heard of is an unbounded store
+# that reads as bounded. Deliberately not under /tmp (systemd-tmpfiles-clean.timer reaps it
+# daily) and not in the vault (raw inputs are not what the Obsidian Sync quota is for).
+TRANSCRIPT_SCRATCH_DIR = Path.home() / "lloyd" / "_pipeline" / "tmp"
 
 TASK_LOG_MAX_AGE_DAYS = 30
 SESSION_ARCHIVE_AGE_DAYS = 90
@@ -52,6 +70,13 @@ BACKGROUND_SESSION_ARCHIVE_AGE_DAYS = 30
 RUN_RECORD_MAX_AGE_DAYS = 30
 ACTIVITY_LOG_MAX_ENTRIES = 200
 CANDIDATE_MAX_AGE_DAYS = 30
+# How long a raw transcript survives after it was fetched. Long enough for the two follow-ups
+# that actually re-read it — a re-digest within the week, and an audit asking whether a digest
+# matched its input — and short enough that the directory holds a rolling month instead of
+# everything ever extracted (it held 7 files / 349 KiB on 2026-09-14, all of it older than a
+# week, because nothing had ever deleted a transcript). Deleting is safe at all only because
+# the video note carries transcript_path + transcript_md5.
+TRANSCRIPT_MAX_AGE_DAYS = 30
 # candidates still awaiting action are never pruned regardless of age
 CANDIDATE_KEEP_STATUSES = ("pending", "proposed", "flagged_for_authoring")
 _CANDIDATE_STATUS_RE = re.compile(r"^status:\s*(\S+)", re.MULTILINE)
@@ -313,6 +338,33 @@ def sweep_candidates(apply: bool, now: float) -> tuple[int, int]:
     return count, freed
 
 
+def sweep_transcript_scratch(apply: bool, now: float) -> tuple[int, int]:
+    """Delete raw transcript scratch older than TRANSCRIPT_MAX_AGE_DAYS.
+
+    Only plain files directly in TRANSCRIPT_SCRATCH_DIR are touched, and symlinks are
+    skipped — the directory is written by ad-hoc extraction sessions, so what is in it is
+    not guaranteed to be a transcript, and a sweep of a scratch dir must never follow a
+    symlink out of it. Returns (count, bytes)."""
+    count = freed = 0
+    if not TRANSCRIPT_SCRATCH_DIR.exists():
+        return 0, 0
+    cutoff = now - TRANSCRIPT_MAX_AGE_DAYS * 86400
+    for path in TRANSCRIPT_SCRATCH_DIR.iterdir():
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.stat().st_mtime >= cutoff:
+                continue
+            size = path.stat().st_size
+            if apply:
+                path.unlink()
+            count += 1
+            freed += size
+        except OSError as e:
+            print(f"  ! skip {path.name}: {e}", file=sys.stderr)
+    return count, freed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -326,6 +378,7 @@ def main() -> int:
     runs_n, runs_b = sweep_autonomy_runs(args.apply, now)
     act_f, act_l = sweep_activity_logs(args.apply)
     cand_n, cand_b = sweep_candidates(args.apply, now)
+    scr_n, scr_b = sweep_transcript_scratch(args.apply, now)
 
     print(f"[retention-sweep] {mode}")
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
@@ -340,6 +393,8 @@ def main() -> int:
           f"{act_l} entries pruned (keep last {ACTIVITY_LOG_MAX_ENTRIES})")
     print(f"  skill candidates >{CANDIDATE_MAX_AGE_DAYS}d processed: "
           f"{cand_n} deleted, {cand_b / 1024:.0f} KiB freed")
+    print(f"  transcript scratch >{TRANSCRIPT_MAX_AGE_DAYS}d: "
+          f"{scr_n} deleted, {scr_b / 1024:.0f} KiB freed")
     return 0
 
 

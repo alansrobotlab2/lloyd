@@ -16,6 +16,15 @@ Alan stated the failure twice on 2026-09-07 (17:39, 21:02); the second statement
 Transcript-only is doubly unreliable because auto-capture compresses whole days — 09-05
 produced 3 sections for 14+ session files.
 
+Backlog #566 widened the pin: #448 had fixed the *derived* half and left the *input* half
+half-true. The raw transcript lands in scratch that is gitignored and, since 2026-09-11 in
+some sessions, under ``/tmp`` where ``systemd-tmpfiles-clean.timer`` reaps it daily; no skill
+named a directory (a bare ``-o "%(id)s"`` writes wherever the shell happened to be) and no
+note recorded a hash, so a lost transcript was undetectable from the note. So: one named
+scratch dir, a save step that writes into it, and ``transcript_path`` + ``transcript_md5`` in
+the video-note front matter, with ``scripts/groundskeeper/retention-sweep.py`` owning the age
+of that directory.
+
 Both skills now carry a named ``## Artifact Phase`` section. This test pins it, so rewriting
 either skill cannot silently drop the requirement again. The check is expressed as a pure
 function over skill text and exercised hermetically on fixtures below — those cases RUN under
@@ -75,6 +84,29 @@ ARTIFACT_PHASE_REQUIREMENTS: dict[str, re.Pattern[str]] = {
     # Why the rule exists, in the place it will be reread: _pipeline/tmp is gitignored and
     # the transcript compresses. Without this line the next rewrite treats it as noise.
     "why transcript/tmp is not persistence": re.compile(r"_pipeline/tmp|gitignored"),
+
+    # --- backlog #566: the INPUT half. The scratch file has to have one owner and the note
+    # has to be able to prove the input is still there.
+    # One named directory, stated as the variable both save forms use. Before #566 neither
+    # skill named a location, so sessions invented one: `~/lloyd/_pipeline/tmp/` in some,
+    # `/tmp/yt/` in others (measured 2026-09-13: both trees live the same week).
+    "the one named transcript scratch dir":
+        re.compile(r'TRANSCRIPT_DIR\s*=\s*"?\$HOME/lloyd/_pipeline/tmp'),
+    # Naming a directory is not saving to it: yt-dlp needs `-o "$TRANSCRIPT_DIR/%(id)s"`
+    # rather than the bare cwd-relative `%(id)s`, and the stdout-only helper script needs a
+    # redirect. This is the half that actually moves the bytes.
+    "a save step that writes into that dir":
+        re.compile(r'(?:-o\s+"|>\s*")\$TRANSCRIPT_DIR/'),
+    # The scratch file is swept (see sweep_transcript_scratch), so the note must carry the
+    # pointer. Key-line form on purpose: the prose names these keys in backticks, and a note
+    # that only ever said it in prose would leave the input unprovable.
+    "transcript_path as a front-matter key": re.compile(r"^transcript_path:\s+\S", re.MULTILINE),
+    # ...and the digest, so a swept or edited transcript is detectable from the note alone.
+    "transcript_md5 as a front-matter key": re.compile(r"^transcript_md5:\s+\S", re.MULTILINE),
+    # Which of the two files is the artifact. Stated, because "save the transcript too" is
+    # what made #448 read as satisfied while the input rotting in gitignore stayed invisible.
+    "the note is durable and the scratch file disposable":
+        re.compile(r"durable artifact[\s\S]{0,200}disposable|disposable[\s\S]{0,200}durable artifact"),
 }
 
 
@@ -111,9 +143,21 @@ whole days and `~/lloyd/_pipeline/tmp/` is gitignored, so neither one is persist
 Write the derived output to `~/obsidian/knowledge/youtube/<Channel>/<YYYYMMDD>-<slug>.md`
 **before** reporting anything.
 
+The raw transcript goes to the one scratch dir — never a bare `-o "%(id)s"`, never `/tmp`:
+
+```bash
+TRANSCRIPT_DIR="$HOME/lloyd/_pipeline/tmp"
+mkdir -p "$TRANSCRIPT_DIR"
+yt-dlp --write-auto-sub --skip-download --sub-lang en -o "$TRANSCRIPT_DIR/%(id)s" "$URL"
+```
+
+The vault note is the durable artifact; the scratch file is disposable.
+
 ```yaml
 type: video-note
 video_id: <videoId>
+transcript_path: /home/alansrobotlab/lloyd/_pipeline/tmp/<videoId>.txt
+transcript_md5: <md5sum computed at write time>
 ---
 ```
 
@@ -131,9 +175,10 @@ def test_canonical_phase_satisfies_every_requirement():
 
 
 def test_checker_is_not_vacuous():
-    """Ten requirements is the pin's resolution. A checker with one loose regex would
-    pass a stripped skill file, which is the failure this whole test exists to catch."""
-    assert len(ARTIFACT_PHASE_REQUIREMENTS) >= 8
+    """Fifteen requirements is the pin's resolution: the ten #448 clauses plus the five
+    #566 ones. A checker with one loose regex would pass a stripped skill file, which is the
+    failure this whole test exists to catch."""
+    assert len(ARTIFACT_PHASE_REQUIREMENTS) >= 15
 
 
 @pytest.mark.parametrize("strip", [
@@ -142,6 +187,11 @@ def test_checker_is_not_vacuous():
     "type: video-note\nvideo_id: <videoId>\n",
     "grep -rl \"<videoId>\" ~/obsidian/",
     "Final message ends with the path, e.g. `Saved: /home/alansrobotlab/obsidian/...md`.",
+    'TRANSCRIPT_DIR="$HOME/lloyd/_pipeline/tmp"\n',
+    '-o "$TRANSCRIPT_DIR/%(id)s" ',
+    "transcript_path: /home/alansrobotlab/lloyd/_pipeline/tmp/<videoId>.txt\n",
+    "transcript_md5: <md5sum computed at write time>\n",
+    "The vault note is the durable artifact; the scratch file is disposable.",
 ])
 def test_removing_one_requirement_is_caught(strip: str):
     """Each requirement is individually load-bearing: delete exactly one line group and
@@ -195,6 +245,96 @@ def test_extraction_skill_states_the_artifact_phase(skill: str):
         "ends (backlog #448); the phase must name a vault path, a verification step, and "
         "the path report."
     )
+
+
+# ---------------------------------------------------------------------------
+# the seam between the rule and the job that enforces it (backlog #566)
+#
+# The skill text lives in ~/obsidian/skills (a live tree no round under test controls — the
+# same reason the live-file assertions above carry `live_vault`); the retention policy lives
+# in scripts/groundskeeper/retention-sweep.py in THIS repo. Those two files are read by
+# different actors a day apart — the extraction session follows the skill, the weekly sweep
+# obeys the script — so renaming the directory on one side leaves a store that the session
+# believes is bounded and the sweep has never heard of. Two cases, split by what they can see:
+# the hermetic one runs under the gate's `-m "not live_vault"` rung, so a round that moves
+# the store and not the rule is caught without the vault; the live one pins the shipped text.
+# ---------------------------------------------------------------------------
+
+_SWEEP_SCRIPT = ROOT / "scripts" / "groundskeeper" / "retention-sweep.py"
+
+
+def _load_sweep_module():
+    """Load the groundskeeper script by path — a hyphenated filename with no package, so
+    plain ``import`` cannot reach it. Same loader tests/test_retention_sweep.py uses."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "retention_sweep_under_artifact_test", _SWEEP_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_sweep_constant_still_satisfies_the_pinned_requirement():
+    """What the sweep actually bounds must be the directory the skill rule pins, checked
+    from the repo side alone so it RUNS under the gate."""
+    mod = _load_sweep_module()
+    literal = str(mod.TRANSCRIPT_SCRATCH_DIR).replace(str(Path.home()), "$HOME")
+    named = ARTIFACT_PHASE_REQUIREMENTS["the one named transcript scratch dir"]
+    assert named.search(f'TRANSCRIPT_DIR="{literal}"'), (
+        f"retention-sweep.py bounds {mod.TRANSCRIPT_SCRATCH_DIR} but the skill requirement "
+        "pins a different directory — one of the two is renamed and the scratch store now "
+        "has no owner")
+
+
+def test_the_scratch_store_is_neither_tmp_nor_the_vault():
+    """#566's location clause, from the constant alone. `/tmp` is reaped daily by
+    ``systemd-tmpfiles-clean.timer`` — that is how ``/tmp/yt/6IFVTcM28KA.txt`` was set to
+    vanish — and the vault is Obsidian-synced, where 40 KB raw transcripts at ~48 videos a
+    day is not what the sync quota is for. A durable artifact belongs in the note; the input
+    belongs somewhere Lloyd owns and sweeps."""
+    mod = _load_sweep_module()
+    scratch: Path = mod.TRANSCRIPT_SCRATCH_DIR
+    assert not str(scratch).startswith("/tmp"), f"{scratch} is under the tmpfiles reaper"
+    assert Path.home() / "obsidian" not in scratch.parents, f"{scratch} is inside the vault"
+
+
+@pytest.mark.live_vault
+@pytest.mark.parametrize("skill", SKILLS_UNDER_TEST)
+def test_the_skill_and_the_sweep_name_the_same_scratch_dir(skill: str):
+    """The shipped seam, read off both files: the directory a session writes to and the
+    directory the sweep bounds must be one directory."""
+    path = _skill_file(skill)
+    if path is None:
+        pytest.skip(f"{skill} not installed on this machine")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    m = re.search(r'TRANSCRIPT_DIR\s*=\s*"?\$HOME/(?P<rel>[^"\n]+)', text)
+    assert m, f"skills/{skill}/SKILL.md no longer declares TRANSCRIPT_DIR"
+    mod = _load_sweep_module()
+    assert mod.TRANSCRIPT_SCRATCH_DIR == Path.home() / m.group("rel"), (
+        f"skills/{skill}/SKILL.md saves to ~/{m.group('rel')} but "
+        f"retention-sweep.py bounds {mod.TRANSCRIPT_SCRATCH_DIR}")
+
+
+@pytest.mark.live_vault
+def test_the_retention_skill_table_states_the_sweep_age():
+    """The policy table in skills/retention-sweep/SKILL.md is what the weekly operator reads
+    before running --apply. If its number for the scratch store drifts from
+    ``TRANSCRIPT_MAX_AGE_DAYS``, the operator is approving an age the script does not
+    implement."""
+    path = _skill_file("retention-sweep")
+    if path is None:
+        pytest.skip("retention-sweep skill not installed on this machine")
+    mod = _load_sweep_module()
+    needle = "~/" + str(mod.TRANSCRIPT_SCRATCH_DIR.relative_to(Path.home()))
+    rows = [ln for ln in path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if needle in ln]
+    assert rows, f"no retention-sweep table row names {needle}"
+    stated = re.search(r">\s*(\d+)\s*d", rows[0])
+    assert stated, f"row for {needle} states no age: {rows[0]!r}"
+    assert int(stated.group(1)) == mod.TRANSCRIPT_MAX_AGE_DAYS, (
+        f"skills/retention-sweep/SKILL.md says >{stated.group(1)}d but "
+        f"retention-sweep.py uses TRANSCRIPT_MAX_AGE_DAYS={mod.TRANSCRIPT_MAX_AGE_DAYS}")
 
 
 @pytest.mark.live_vault
