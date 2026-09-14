@@ -12,6 +12,25 @@ from .profile import load_profile, get_all_keywords, keyword_match
 from ._paths import VAULT_ROOT, KNOWLEDGE_DIR, FEEDS_DIR as SCORED_FEEDS_DIR, VAULT_WRITTEN_STATE
 
 
+# Items scoring below this are not written anywhere.
+#
+# There was no floor until 2026-09-11 (backlog #570): `write_all_to_vault()`
+# appended every scored item regardless of relevance, and since the scorer could
+# only ever produce 1 or 10, ~85% of what reached the vault was 1/10 noise.
+# `knowledge/feeds/youtube-uncategorized.md` reached 2,545 sections / 493 KB
+# that way, growing one entry per item per day. `interests.md` said a
+# non-matching item "gets ignored"; the floor is what makes that sentence true.
+RELEVANCE_FLOOR = 4
+
+
+def below_floor(item: ScoredItem) -> bool:
+    """True when an item is too weak to write to the vault."""
+    try:
+        return int(item.relevance) < RELEVANCE_FLOOR
+    except (TypeError, ValueError):
+        return True  # an unscored item is not evidence of relevance
+
+
 def load_scored_items(date_str: str) -> List[ScoredItem]:
     """Load scored items from JSONL file."""
     scored_path = SCORED_FEEDS_DIR / f"intel-{date_str}.jsonl"
@@ -222,7 +241,15 @@ def write_all_to_vault(date_str: Optional[str] = None) -> int:
         return 0
     
     print(f"Loaded {len(items)} scored items")
-    
+
+    # Relevance floor: noise never enters the vault, so the feed files stop
+    # growing one section per junk item per day.
+    keepers = [item for item in items if not below_floor(item)]
+    held = len(items) - len(keepers)
+    if held:
+        print(f"Held {held} item(s) below relevance floor {RELEVANCE_FLOOR} "
+              f"(set in vault_writer.RELEVANCE_FLOOR)")
+
     # Load written state
     written_state = load_written_state()
     
@@ -231,11 +258,11 @@ def write_all_to_vault(date_str: Optional[str] = None) -> int:
     
     # Write items
     written_count = 0
-    for item in items:
+    for item in keepers:
         if is_written(item.id, written_state):
             print(f"  Skipping (already written): {item.id}")
             continue
-        
+
         try:
             if write_item_to_vault(item, profile):
                 mark_written(item.id, written_state)

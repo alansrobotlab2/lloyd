@@ -7,19 +7,75 @@ from typing import List, Dict, Any, Optional
 # Vault root interests file
 PROFILE_FILE = Path.home() / "obsidian/interests.md"
 
+# Optional per-topic field block, one field per line, bullet optional:
+#   ## Robotics
+#   **Weight:** 0.7
+#   **Projects:** Alfie
+#   humanoid, actuator, servo
+# Until 2026-09-11 none of these were read (backlog #570): the loader hardcoded
+# weight 1.0 and projects [] for every topic, which made the 1-10 relevance
+# scale mathematically binary and match_projects() permanently empty.
+_FIELD_LINE = re.compile(
+    r'^\s*[-*]?\s*\*\*(Weight|Projects|Keywords|Depth)\s*:?\*\*\s*:?\s*(.*?)\s*$',
+    re.IGNORECASE)
+
 
 def slugify(text: str) -> str:
     """Convert text to slug format (lowercase, spaces to hyphens)."""
     return re.sub(r'[^a-z0-9]+', '-', text.lower().strip()).strip('-')
 
 
+def _split_list(value: str) -> List[str]:
+    return [v.strip() for v in re.split(r'[,;]', value) if v.strip()]
+
+
+def _parse_topic_body(body: str) -> Dict[str, Any]:
+    """Split a topic body into its declared fields and its leftover keywords.
+
+    Field lines are consumed, never kept as keywords: a `**Weight:** 0.7` line
+    passing through as a keyword would displace a real one and match nothing.
+    """
+    fields: Dict[str, Any] = {}
+    leftover: List[str] = []
+
+    for line in body.split("\n"):
+        m = _FIELD_LINE.match(line)
+        if not m:
+            leftover.append(line)
+            continue
+        key, value = m.group(1).lower(), m.group(2).strip()
+        if key == "weight":
+            try:
+                fields["weight"] = max(0.0, min(1.0, float(value)))
+            except ValueError:
+                pass  # an unparseable weight leaves the default, not a crash
+        elif key == "projects":
+            fields["projects"] = _split_list(value)
+        elif key == "keywords":
+            fields["keywords"] = _split_list(value)
+        elif key == "depth":
+            fields["depth"] = value
+
+    if "keywords" not in fields:
+        bare = [ln.strip().lstrip("-* ").strip() for ln in leftover]
+        fields["keywords"] = _split_list(",".join(b for b in bare if b))
+    fields.setdefault("weight", 1.0)
+    fields.setdefault("projects", [])
+    fields.setdefault("depth", "deep")
+    return fields
+
+
 def load_profile(path: Optional[str] = None) -> dict:
     """Load interest profile from markdown file.
     
     Format: H2 headings as topic names, comma-separated keywords as body text.
+    A topic may also declare `**Weight:**` (0-1), `**Projects:**`,
+    `**Keywords:**` and `**Depth:**` as one-per-line fields.
     
     Example:
         ## Robotics
+        **Weight:** 0.7
+        **Projects:** Alfie
         humanoid, actuator, servo, DOF, gait
         
         ## AI & LLMs
@@ -45,23 +101,30 @@ def load_profile(path: Optional[str] = None) -> dict:
         end = h2_matches[i + 1].start() if i + 1 < len(h2_matches) else len(content)
         body = content[start:end].strip()
         
-        # Parse comma-separated keywords from body text
-        keywords = [kw.strip() for kw in body.split(",") if kw.strip()]
+        # Parse declared fields first, then whatever keyword text is left over
+        parsed = _parse_topic_body(body)
+        keywords = parsed["keywords"]
         
         if keywords:
             topics.append({
                 "name": slugify(topic_name),
-                "weight": 1.0,
+                "weight": parsed["weight"],
                 "keywords": keywords,
-                "projects": [],
-                "depth": "deep"
+                "projects": parsed["projects"],
+                "depth": parsed["depth"]
             })
     
     all_kw = []
     for t in topics:
         all_kw.extend(t["keywords"])
     
-    return {"topics": topics, "all_keywords": all_kw, "all_projects": []}
+    all_projects = []
+    for t in topics:
+        for p in t["projects"]:
+            if p not in all_projects:
+                all_projects.append(p)
+    
+    return {"topics": topics, "all_keywords": all_kw, "all_projects": all_projects}
 
 
 def get_all_keywords(profile: dict) -> List[str]:
