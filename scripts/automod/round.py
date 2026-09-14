@@ -369,6 +369,58 @@ def recover(clear_broken: bool = True, clear_halt: bool = True) -> dict:
     return out
 
 
+_HEALTH_KEYS = ("open", "draft", "up_next", "self_spawned_open", "implement_pool")
+
+
+def board_pass() -> dict:
+    """autocode's board passes, once, by hand, in housekeeping's order.
+
+    For the moment a rule changes and the board should reflect it now rather
+    than at the next 900 s housekeeping tick — the first run after the
+    2026-09-14 throughput changes, which expire, unfold and re-triage what had
+    accumulated. Each pass honours the same config switch housekeeping reads.
+    The reaper is left out: it closes rounds, which is not a board question.
+    Board health before and after, and a `board_pass` ledger row.
+    """
+    from scripts.automod import backlog as B
+
+    def cfg(name: str) -> dict:
+        try:
+            from app.config import CONFIG
+            return dict(((CONFIG.get("workers") or {}).get("sources") or {}).get(name) or {})
+        except Exception:  # noqa: BLE001 — every switch defaults on
+            return {}
+    auto, tri = cfg("autocode"), cfg("autotriage")
+    before = B.board_health(S.LEDGER_PATH)
+    closed = B.close_settled_items(S.LEDGER_PATH, enabled=bool(auto.get("close_on_settle", True)),
+                                   close_members=bool(auto.get("close_members_on_settle", True)))
+    unfolded = B.unfold_spent_umbrellas(S.LEDGER_PATH,
+                                        enabled=bool(tri.get("unfold_spent_umbrellas", True)))
+    retriaged = B.retriage_spent_items(S.LEDGER_PATH, enabled=bool(auto.get("retriage_spent", True)))
+    moved = B.reconcile_statuses(S.LEDGER_PATH, enabled=bool(auto.get("status_pipeline", True)))
+    released = B.release_held_confirmations(
+        S.LEDGER_PATH, floor=int(tri.get("implement_pool_floor", B.IMPLEMENT_POOL_FLOOR)),
+        enabled=bool(tri.get("hold_confirmations", True)))
+    expired = B.expire_stale_spawns(S.LEDGER_PATH, enabled=bool(auto.get("expire_spawns", True)))
+    after = B.board_health(S.LEDGER_PATH)
+    out = {"closed_settled": [r["item_id"] for r in closed if r.get("closed")],
+           "unfolded": {r["umbrella_id"]: r["released"] for r in unfolded},
+           "retriaged": [r["item_id"] for r in retriaged],
+           "status_moves": len(moved),
+           "released_from_hold": [r["item_id"] for r in released if r.get("moved")],
+           "expired": [r["item_id"] for r in expired],
+           "before": {k: before.get(k) for k in _HEALTH_KEYS},
+           "after": {k: after.get(k) for k in _HEALTH_KEYS}}
+    S.append_event({"event": "board_pass", "by": "human",
+                    **{k: out[k] for k in ("closed_settled", "retriaged", "status_moves",
+                                           "released_from_hold", "expired")},
+                    "unfolded": {str(k): v for k, v in out["unfolded"].items()},
+                    "draft_before": before.get("draft"), "draft_after": after.get("draft"),
+                    "self_spawned_before": before.get("self_spawned_open"),
+                    "self_spawned_after": after.get("self_spawned_open")})
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Self-modification rounds")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -407,6 +459,8 @@ def main(argv=None) -> int:
     sub.add_parser("cluster", help="group the open backlog by what it is about "
                                    "(scripts/automod/cluster.py; its own flags pass through: "
                                    "--write --threshold --no-judge --json …)")
+    sub.add_parser("board-pass", help="run autocode's board passes once, now, with board "
+                                      "health before and after (the reaper excepted)")
     # `cluster` hands everything after it to cluster.py's parser. REMAINDER
     # on a subparser does not swallow `--flags`, so the unknowns are collected
     # here instead of refused.
@@ -445,6 +499,8 @@ def main(argv=None) -> int:
     elif args.cmd == "cluster":
         from scripts.automod import cluster as CL
         return CL.main(extra)
+    elif args.cmd == "board-pass":
+        print(json.dumps(board_pass(), indent=2, default=str))
     return 0
 
 

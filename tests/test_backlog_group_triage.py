@@ -442,3 +442,19 @@ def test_autocode_housekeeping_unfolds_with_triages_switch(monkeypatch):
         monkeypatch.setattr(B, name, lambda *a, **k: [])
     A._housekeeping({})
     assert seen == {"enabled": False}
+
+
+def test_a_board_pass_by_hand_runs_the_passes_once_and_records_it(isolated, monkeypatch):
+    """`round board-pass`: the first run after a rule change should not wait
+    for the next housekeeping tick, and should say what it moved."""
+    from app import config as CFG
+    from scripts.automod import round as R
+    monkeypatch.setitem(CFG.CONFIG, "workers", {"sources": {"autocode": {"expire_spawns_after_days": 7}}})
+    _folded_umbrella(isolated)
+    write_item(isolated, 70, days_old=9, tags=("backlog", "spawned-by-triage"))
+    out = R.board_pass()
+    assert out["unfolded"] == {50: [2, 5]} and out["expired"] == [70]
+    assert out["before"]["draft"]["grouped"] == 2 and out["after"]["draft"]["grouped"] == 0
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e["event"] == "board_pass"][-1]
+    assert ev["expired"] == [70] and ev["unfolded"] == {"50": [2, 5]} and ev["by"] == "human"
+    assert R.main(["board-pass"]) == 0
