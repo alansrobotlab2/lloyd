@@ -340,3 +340,22 @@ def test_unfold_umbrella_releases_members_and_records_why(isolated):
     assert _fm(_path(isolated, 50))["members"] == []
     assert B.select_candidate(S.LEDGER_PATH).id in (2, 5)
     assert S.read_events(path=S.LEDGER_PATH)[-1]["event"] == "backlog_group_unfold"
+
+
+def test_under_a_full_pool_the_umbrella_is_held_and_the_folds_still_apply(isolated, monkeypatch):
+    """Group triage's retirements and folds are net negative and apply now;
+    its umbrella is a confirmation and waits for room like any other."""
+    _seed(isolated)
+    monkeypatch.setattr(C, "run_prompt_in_session", _turn(BLOCK, backlog_dir=isolated))
+    monkeypatch.setattr(B, "implement_pool_full",
+                        lambda *a, **k: {"full": True, "ready": 40, "bound": 20, "floor": 20,
+                                         "landed_items_7d": 0})
+    out = asyncio.run(M.execute(_Item({"group_triage": True, "group_min_items": 2})))
+    assert out["status"] == "success" and out["umbrella_id"] == 50
+    assert out["duplicates"] == 2 and out["retired"] == 1 and out["folded"] == 2
+    fm50 = _fm(_path(isolated, 50))
+    assert fm50["status"] == "draft" and B.HELD_TAG in fm50["tags"] and fm50["members"] == [2, 5]
+    assert set(B.held_confirmations(S.LEDGER_PATH)) == {50}
+    assert B.select_confirmed(S.LEDGER_PATH) is None
+    assert _fm(_path(isolated, 1))["status"] == "done"
+    assert _fm(_path(isolated, 2))["group"] == 50

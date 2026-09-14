@@ -335,22 +335,24 @@ class _QItem:
         self.payload = payload or {}
 
 
-def _stub_turn(monkeypatch):
+def _stub_turn(monkeypatch, verdict="unverifiable", acceptance="none"):
     async def turn(prompt, **kw):
         turn.calls.append(prompt)
-        return {"text": "VERDICT: unverifiable\nSURFACE: code\nCHECK: -\nEVIDENCE: e\n"
-                        "ACCEPTANCE: none\nSPAWNED: none\n",
+        return {"text": f"VERDICT: {verdict}\nSURFACE: code\nCHECK: grep -n x app.py\nEVIDENCE: e\n"
+                        f"ACCEPTANCE: {acceptance}\nSPAWNED: none\n",
                 "session_id": "s", "stop_reason": "stop", "num_turns": 3, "errors": []}
     turn.calls = []
     monkeypatch.setattr(C, "run_prompt_in_session", turn)
     return turn
 
 
-def test_a_full_pool_pauses_single_triage_and_says_both_numbers(backlog_dir, ledger, monkeypatch):
+def test_with_holding_off_a_full_pool_pauses_single_triage_and_says_both_numbers(backlog_dir, ledger, monkeypatch):
+    """The kill switch restores the 2026-09-13 gate exactly."""
     _ready(backlog_dir, ledger, 40)
     write_item(backlog_dir, 7, days_old=300)
     turn = _stub_turn(monkeypatch)
-    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
+    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40,
+                                        "hold_confirmations": False})))
     assert out["status"] == "skipped"
     assert "single-item triage paused: 40 ready in up_next ≥ bound 40" in out["summary"]
     assert "0 items landed in 7 d, floor 40" in out["summary"]
@@ -414,3 +416,158 @@ def test_the_floor_rides_in_the_payload():
     import inspect
     src = inspect.getsource(M.enqueue_if_due)
     assert '"implement_pool_floor"' in src and '"spawn_cap"' in src
+
+
+# ---------------------------------------------------------------------------
+# Held confirmations: the gate holds a verdict instead of pausing the pass
+# ---------------------------------------------------------------------------
+
+def _held(backlog_dir, ledger, iid, **kw):
+    """An item triage confirmed into a full pool, exactly as `execute` leaves it."""
+    path = write_item(backlog_dir, iid, name=f"held {iid}", **kw)
+    B.record_verdict(B.load_item(path), "confirmed", "still real", acceptance="it passes", hold=True)
+    _ev(ledger, event="backlog_triage", item_id=iid, verdict="confirmed",
+        acceptance="it passes", held=True)
+    return path
+
+
+def _status(backlog_dir, iid):
+    item = B.item_by_id(iid)
+    return item.status, item.tags
+
+
+def test_a_full_pool_holds_a_confirmation_instead_of_pausing(backlog_dir, ledger, monkeypatch):
+    """The first cut returned before the turn and stopped retirements with the
+    confirmations. Now the turn runs, and only the move into up_next waits."""
+    _ready(backlog_dir, ledger, 40)
+    write_item(backlog_dir, 7, days_old=300)
+    turn = _stub_turn(monkeypatch, verdict="confirmed", acceptance="it passes")
+    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
+    assert out["status"] == "success" and out["item_id"] == 7 and out["held"] is True
+    assert "held: implement pool full" in out["summary"]
+    assert len(turn.calls) == 1
+    status, tags = _status(backlog_dir, 7)
+    assert status == "draft" and B.HELD_TAG in tags
+    row = [e for e in S.read_events(path=ledger) if e.get("item_id") == 7][-1]
+    assert row["verdict"] == "confirmed" and row["held"] is True
+    assert set(B.held_confirmations(ledger)) == {7}
+    assert len(B.ready_confirmed(ledger)) == 40, "a held item does not deepen the pool"
+    assert B.desired_statuses(ledger)[7][0] == "draft"
+    assert B.reconcile_statuses(ledger) == [], "the reconciler leaves a held item where it is"
+    assert "**Held:**" in B.item_by_id(7).path.read_text()
+
+
+def test_a_full_pool_still_retires(backlog_dir, ledger, monkeypatch):
+    """The reason the pass must keep running: stale and already_done were the
+    loop's largest closer."""
+    _ready(backlog_dir, ledger, 40)
+    write_item(backlog_dir, 7, days_old=300)
+    _stub_turn(monkeypatch, verdict="stale", acceptance="-")
+    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
+    assert out["status"] == "success" and out["closed"] is True and out["held"] is False
+    assert B.item_by_id(7).status == "done"
+
+
+def test_room_in_the_pool_confirms_straight_into_up_next(backlog_dir, ledger, monkeypatch):
+    _ready(backlog_dir, ledger, 3)
+    write_item(backlog_dir, 7, days_old=300)
+    _stub_turn(monkeypatch, verdict="confirmed", acceptance="it passes")
+    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
+    assert out["held"] is False
+    status, tags = _status(backlog_dir, 7)
+    assert status == "up_next" and B.HELD_TAG not in tags
+    assert B.held_confirmations(ledger) == {}
+
+
+def test_a_human_only_confirmation_is_never_held(backlog_dir, ledger, monkeypatch):
+    """It never enters the pool anyway, so holding it would park it twice."""
+    _ready(backlog_dir, ledger, 40)
+    write_item(backlog_dir, 7, days_old=300)
+    _stub_turn(monkeypatch, verdict="confirmed", acceptance="human-only: config.yaml")
+    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
+    assert out["held"] is False and B.held_confirmations(ledger) == {}
+
+
+def test_room_releases_held_items_oldest_first_and_only_as_many_as_fit(backlog_dir, ledger):
+    _ready(backlog_dir, ledger, 2)
+    for iid in (10, 11, 12):
+        _held(backlog_dir, ledger, iid)
+    out = B.release_held_confirmations(ledger, floor=3)
+    assert [r["item_id"] for r in out] == [10] and out[0]["moved"] is True
+    assert "2 ready < bound 3" in out[0]["reason"]
+    status, tags = _status(backlog_dir, 10)
+    assert status == "up_next" and B.HELD_TAG not in tags
+    assert set(B.held_confirmations(ledger)) == {11, 12}
+    assert [_status(backlog_dir, i)[0] for i in (11, 12)] == ["draft", "draft"]
+    assert B.release_held_confirmations(ledger, floor=3) == [], "the pool is full again"
+    assert {i.id for i, _ in B.ready_confirmed(ledger)} >= {10}
+    assert B.reconcile_statuses(ledger) == [], "released and held items agree with the ledger"
+    moves = [e for e in S.read_events(path=ledger) if e.get("event") == "status_moved"]
+    assert [(m["item_id"], m["to"]) for m in moves] == [(10, "up_next")]
+
+
+def test_a_held_item_moved_by_hand_is_released_where_it_stands(backlog_dir, ledger):
+    """A human moving it is the decision; the reconciler must not undo it."""
+    _ready(backlog_dir, ledger, 40)
+    _held(backlog_dir, ledger, 10)
+    assert B.set_status(10, "up_next", "by hand")
+    moved = B.reconcile_statuses(ledger)
+    assert all(m["item_id"] != 10 for m in moved)
+    status, tags = _status(backlog_dir, 10)
+    assert status == "up_next" and B.HELD_TAG not in tags
+    assert B.held_confirmations(ledger) == {}
+    rel = [e for e in S.read_events(path=ledger) if e.get("event") == "backlog_confirm_released"]
+    assert rel[-1]["item_id"] == 10 and rel[-1]["moved"] is False
+
+
+def test_switching_holding_off_releases_everything_so_nothing_strands(backlog_dir, ledger):
+    _ready(backlog_dir, ledger, 40)
+    for iid in (10, 11):
+        _held(backlog_dir, ledger, iid)
+    out = B.release_held_confirmations(ledger, floor=20, enabled=False)
+    assert [r["item_id"] for r in out] == [10, 11]
+    assert [_status(backlog_dir, i)[0] for i in (10, 11)] == ["up_next", "up_next"]
+
+
+def test_a_later_confirmation_that_is_not_held_supersedes_the_hold(backlog_dir, ledger):
+    _held(backlog_dir, ledger, 10)
+    _ev(ledger, event="backlog_triage", item_id=10, verdict="confirmed", acceptance="a")
+    assert B.held_confirmations(ledger) == {}
+    assert B.desired_statuses(ledger)[10][0] == "up_next"
+
+
+def test_triage_releases_room_before_it_triages(backlog_dir, ledger, monkeypatch):
+    """A confirmation held on an earlier run enters the pool before this run
+    adds another behind it."""
+    _ready(backlog_dir, ledger, 1)
+    _held(backlog_dir, ledger, 10, days_old=1)
+    write_item(backlog_dir, 7, days_old=300)
+    _stub_turn(monkeypatch)
+    asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 5})))
+    assert B.item_by_id(10).status == "up_next"
+
+
+def test_holding_rides_in_the_payload():
+    import inspect
+    assert '"hold_confirmations"' in inspect.getsource(M.enqueue_if_due)
+
+
+def test_autocode_housekeeping_releases_with_triages_floor(monkeypatch, tmp_path):
+    """The path that still works with triage switched off."""
+    from workers.sources import autocode as A
+    seen = {}
+
+    def release(ledger, **kw):
+        seen.update(kw)
+        return []
+    monkeypatch.setattr(B, "release_held_confirmations", release)
+    monkeypatch.setattr(A, "_source_cfg", lambda name: {"implement_pool_floor": 7,
+                                                        "hold_confirmations": False}
+                        if name == "autotriage" else {})
+    for name in ("reap_abandoned_rounds",):
+        monkeypatch.setattr(A, name, lambda: [])
+    monkeypatch.setattr(B, "close_settled_items", lambda *a, **k: [])
+    monkeypatch.setattr(B, "reconcile_statuses", lambda *a, **k: [])
+    monkeypatch.setattr(B, "expire_stale_spawns", lambda *a, **k: [])
+    A._housekeeping({})
+    assert seen == {"floor": 7, "enabled": False}

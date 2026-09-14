@@ -1004,13 +1004,18 @@ workers:
       # 2026-09-13: triage filed 0.989 items per item it closed, and 80 of
       # the first 100 confirmed triages filed at least one.
       spawn_cap: 1
-      # The implement-pool depth gate. Single-item triage pauses while the
-      # items autocode would actually take (backlog.ready_confirmed) number at
+      # The implement-pool depth gate. The pool is full while the items
+      # autocode would actually take (backlog.ready_confirmed) number at
       # least max(implement_pool_floor, distinct items landed in the last
-      # 7 d). A paused single triage under a full pool is the intent, not a
-      # fault: confirmations beyond a week's drain only age. Group triage is
-      # never paused — it folds and closes. Raise the floor to loosen it.
+      # 7 d): confirmations beyond a week's drain only age. Raise the floor
+      # to loosen it.
       implement_pool_floor: 20
+      # Under a full pool, triage still runs — its stale/already_done closes
+      # are the loop's largest outflow — and a `confirmed` verdict is HELD in
+      # draft (tag confirmed-held) until a slot opens, oldest first. false:
+      # a full pool pauses single triage outright (the 2026-09-13 gate, which
+      # stopped the retirements too) and everything held is released.
+      hold_confirmations: true
     # Picks up items triage has CONFIRMED (with an acceptance check) and runs
     # one automod round on each through the normal gate. This is the only
     # automated path from a backlog item to landed code, and it is gated
@@ -1096,6 +1101,9 @@ workers:
       enabled: true
       interval_seconds: 3600
       min_age_seconds: 72000
+      # A younger file is rebuilt anyway once group triage has used it up
+      # (nothing select_cluster would take), but no more often than this.
+      exhausted_min_age_seconds: 7200
       max_inflight: 1
       max_duration_seconds: 900
       # No session: a numpy pass plus a few JSON calls to the secondary.

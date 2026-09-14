@@ -411,10 +411,16 @@ def cluster_id(item_ids) -> str:
 
 def clusterable_items(ledger: Path, boards: tuple[str, ...] | None = B.DEFAULT_BOARDS
                       ) -> list[B.Item]:
-    """Open drafts nobody has judged: not triaged, not folded into an
-    umbrella, not an umbrella, not parked for a human, not expired.
-    Quarantine does not apply — see the module docstring."""
-    seen = B.triaged_ids(ledger)
+    """Open drafts nobody has judged: not triaged, not already judged by a
+    group triage (a `keep` answered the sameness question), not folded into
+    an umbrella, not an umbrella, not parked for a human, not expired.
+    Quarantine does not apply — see the module docstring.
+
+    Group-judged ids are excluded here, not only in `select_cluster`, since a
+    pass now re-runs when the last one is used up: left in, they re-form the
+    same clusters around themselves, `select_cluster` drops them below the
+    minimum, and the fresh items peeled into those groups are never offered."""
+    seen = set(B.triaged_ids(ledger)) | B.group_triaged_ids(ledger)
     skip_tags = {"umbrella", B.NEEDS_HUMAN_TAG, B.EXPIRED_TAG}
     return [i for i in B.open_items(boards)
             if i.status == B.TRIAGE_POOL_STATUS and i.id not in seen

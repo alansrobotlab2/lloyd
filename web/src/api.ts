@@ -2092,7 +2092,8 @@ export interface BacklogFlowWindow { created: number; closed: number; net: numbe
 
 export interface BacklogHealth {
   open: Record<string, number>
-  draft: { pool: number; quarantined: number; grouped: number; needs_human: number; triaged: number; total: number }
+  // `held` is optional: a tab left open across the backend restart that added it reads a snapshot without it.
+  draft: { pool: number; quarantined: number; grouped: number; needs_human: number; held?: number; triaged: number; total: number }
   up_next: { total: number; umbrellas: number; singles: number; never_attempted: number; ready: number; unready: number }
   flow: { '24h': BacklogFlowWindow; '7d': BacklogFlowWindow }
   self_spawned_open: number

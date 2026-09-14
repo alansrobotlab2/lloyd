@@ -452,7 +452,7 @@ _last_decline: dict[str, str] = {"why": ""}
 
 
 def _housekeeping_due(queue: WorkQueue, src_cfg: dict) -> bool:
-    """Whether the four board passes are due: once per `interval_seconds`.
+    """Whether the board passes are due: once per `interval_seconds`.
 
     They used to ride the source's own watermark. Now that a declined round
     check is retried in `retry_seconds`, they need their own, or a 60-second
@@ -515,7 +515,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
 
 
 def _housekeeping(src_cfg: dict) -> None:
-    """The four board passes. Each is guarded: none may take the scheduler down."""
+    """The board passes. Each is guarded: none may take the scheduler down."""
     from scripts.automod import backlog as B, state as S
 
     try:
@@ -543,6 +543,18 @@ def _housekeeping(src_cfg: dict) -> None:
     except Exception as exc:
         logger.warning("reconcile_statuses failed: %s", exc)
     try:
+        # Held confirmations enter the pool as rounds drain it. Triage releases
+        # at the start of its own runs too; this is the path that still works
+        # when triage is switched off, so nothing it held can strand. Floor and
+        # switch come from triage's config block, which owns the gate.
+        tri = _source_cfg("autotriage")
+        for r in B.release_held_confirmations(
+                S.LEDGER_PATH, floor=int(tri.get("implement_pool_floor", B.IMPLEMENT_POOL_FLOOR)),
+                enabled=bool(tri.get("hold_confirmations", True))):
+            logger.info("backlog #%s released from hold: %s", r["item_id"], r["reason"])
+    except Exception as exc:
+        logger.warning("release_held_confirmations failed: %s", exc)
+    try:
         # The hard bound: a self-filed draft nothing picked up in
         # `expire_spawns_after_days` (B.spawn_expiry_days) is closed, tagged,
         # reopenable. Same rule as the two above — never takes
@@ -553,6 +565,15 @@ def _housekeeping(src_cfg: dict) -> None:
             logger.info("backlog #%s expired after %s d untouched", r["item_id"], r["age_days"])
     except Exception as exc:
         logger.warning("expire_stale_spawns failed: %s", exc)
+
+
+def _source_cfg(name: str) -> dict:
+    """Another worker source's config block, or `{}` when config is unreadable."""
+    try:
+        from app.config import CONFIG
+        return dict(((CONFIG.get("workers") or {}).get("sources") or {}).get(name) or {})
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _round_opened_since(events: list[dict], since_ts: float) -> str | None:

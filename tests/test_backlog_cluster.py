@@ -337,3 +337,55 @@ def test_the_round_cli_passes_cluster_flags_through(monkeypatch):
     monkeypatch.setattr(CL, "main", lambda argv: (seen.__setitem__("argv", argv), 0)[1])
     assert R.main(["cluster", "--write", "--no-judge", "--threshold", "0.8"]) == 0
     assert seen["argv"] == ["--write", "--no-judge", "--threshold", "0.8"]
+
+
+# ── re-clustering once the file is used up ────────────────────────────────
+
+def _age(seconds):
+    import os
+    import time
+    t = time.time() - seconds
+    os.utime(CL.CLUSTERS_PATH, (t, t))
+
+
+def test_a_used_up_file_is_rebuilt_early_but_not_more_often_than_the_floor(isolated):
+    """2026-09-13: the night's 31 clusters were judged by mid-morning and group
+    triage then sat idle for the rest of the day."""
+    from workers.sources import backlog_cluster as SRC
+    write_item(isolated, 1)
+    write_item(isolated, 2)
+    CL.write_clusters({"schema": 1, "clusters": [{"id": CL.cluster_id([1, 2]), "item_ids": [1, 2]}]})
+    cfg = {"min_age_seconds": 72000, "exhausted_min_age_seconds": 7200}
+    q = _Queue()
+    _age(3 * 3600)
+    asyncio.run(SRC.enqueue_if_due(q, cfg))
+    assert q.rows == [], "a fresh file with a cluster left in it is not rebuilt"
+    S.append_event({"event": "backlog_group_triage", "cluster_id": CL.cluster_id([1, 2]),
+                    "judged": {"1": "keep", "2": "keep"}}, path=S.LEDGER_PATH)
+    _age(1 * 3600)
+    asyncio.run(SRC.enqueue_if_due(q, cfg))
+    assert q.rows == [], "used up, but younger than the exhausted floor"
+    _age(3 * 3600)
+    asyncio.run(SRC.enqueue_if_due(q, cfg))
+    assert len(q.rows) == 1 and q.rows[0]["payload"]["trigger"] == "exhausted"
+    assert q.rows[0]["dedup_key"] == SRC.DEDUP_KEY
+
+
+def test_the_exhaustion_check_runs_off_the_loop_and_the_event_carries_the_trigger(isolated):
+    import inspect
+    from workers.sources import backlog_cluster as SRC
+    assert "to_thread" in inspect.getsource(SRC.enqueue_if_due)
+    out = asyncio.run(SRC.execute(_Item({"judge": False, "trigger": "exhausted"})))
+    assert out["status"] == "success"
+    assert S.read_events(path=S.LEDGER_PATH)[-1]["trigger"] == "exhausted"
+
+
+def test_items_a_group_triage_already_judged_are_not_clustered_again(isolated):
+    """Left in, a rebuild re-forms the same groups around them and
+    `select_cluster` drops those below the minimum — hiding any fresh item
+    peeled into them."""
+    for i in (1, 2, 3):
+        write_item(isolated, i)
+    S.append_event({"event": "backlog_group_triage", "cluster_id": "c-x",
+                    "judged": {"1": "keep"}}, path=S.LEDGER_PATH)
+    assert [i.id for i in _items()] == [2, 3]

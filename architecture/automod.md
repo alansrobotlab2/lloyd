@@ -562,6 +562,11 @@ not applied — its question is staleness, this one is sameness. The
 `backlog-cluster` worker source runs it nightly ("nightly" = the output is
 older than `min_age_seconds`, so a restart never doubles it up) and writes
 `clusters.json` in the state dir; `round cluster --write` runs it by hand.
+Since 2026-09-14 it also rebuilds a used-up file early — at least
+`exhausted_min_age_seconds` (2 h) old, with nothing `select_cluster` would
+take — and the ledger row carries `trigger: nightly|exhausted`;
+`clusterable_items` leaves out ids a group triage already judged, so a
+rebuild offers only fresh items.
 First live run: 53 clusters over 322 of 407 drafts, 200 pairs judged, 291
 parents persisted.
 
@@ -623,17 +628,38 @@ spent), extracted so the gate counts exactly what autocode would take — and
 `implement_pool_bound`: `max(implement_pool_floor, landed_items_trailing(7))`.
 The trailing count is **distinct items** with a settled code landing or an ok
 `vault_land`, not rows, because a re-offered item lands repeatedly. At or
-above the bound the run is `skipped` with both numbers in the summary and no
-ledger row; group triage keeps running, since it is net negative on open
+above the bound the run was `skipped` with both numbers in the summary and no
+ledger row; group triage kept running, since it is net negative on open
 items. `implement_pool_floor` (20) and `spawn_cap` ride in the queue payload
 like the budgets. On landing day it read 87 ready against a bound of 55.
 
+**…and since 2026-09-14 it holds the confirmation instead.** Skipping the run
+stopped triage's retirements with its confirmations — 23 `stale` /
+`already_done` closes the day before, the loop's largest closer — and in the
+gate's first ten hours the loop filed 6 items and closed 3, with ready (103)
+too far above the bound (58) to reopen for days. Now the run always goes
+ahead. When the verdict is `confirmed` (and not human-only) the gate is asked
+again at record time (`backlog.implement_pool_full`, since a turn runs for
+minutes); if full, `record_verdict(hold=True)` leaves the item `draft` tagged
+`confirmed-held` and the ledger row carries `held: true`.
+`backlog.held_confirmations` reads that row minus any later
+`backlog_confirm_released`; `desired_statuses` keeps a held item `draft`;
+`release_held_confirmations` moves held items to `up_next` oldest first while
+`bound − ready > 0`, from the top of every triage run and from autocode's
+housekeeping (which reads triage's config block, so a disabled triage cannot
+strand them). A held item a human moved out of `draft` is released where it
+stands (`reconcile_statuses` runs that first). Group triage passes `hold` to
+`record_group_verdict` for its umbrella. `hold_confirmations: false` restores
+the skip and releases everything held.
+
 **One definition of the board's shape.** `backlog.board_health` returns the
-open counts, a `draft` partition (grouped > needs-human > triaged >
+open counts, a `draft` partition (grouped > needs-human > held > triaged >
 quarantined > pool, each item once), `up_next`
 (umbrellas/singles/never-attempted/ready/unready), 24 h and 7 d flow
 (`board_flow`: `created` in, `completed` else `updated` out — `record_verdict`
-now stamps `completed` on a close like the other closers), the open
+now stamps `completed` on a close like the other closers; each stamp is read
+in its writer's clock, `created` and a `completed`-less `updated` as local
+time, `completed` as UTC), the open
 self-spawned count and the pool bound. Three readers: the dashboard's backlog
 panel (a `health` sub-object on its own 60 s cache, `by_status` left raw),
 scorecard row 13 (board net flow, plus `spawn.triage_findings_appended`), and

@@ -74,7 +74,7 @@ _SHOWN_EVENTS = {
     "backlog_triage", "backlog_group_triage", "backlog_implement", "item_landed",
     "item_closed", "promoted", "settled", "rollback_succeeded", "round_abort",
     "land_failed", "status_moved", "review_escalated", "human_paths",
-    "amend_clause", "reopen",
+    "amend_clause", "reopen", "backlog_confirm_released",
 }
 
 STEWARD_SCHEMA: dict = {
@@ -127,7 +127,12 @@ puts it in `up_next` — whatever it is now, unless a round is in flight or a \
 human moved it since. `already_done` and `stale` close it, which is not \
 yours to do. Any other verdict leaves it `draft`. An item that is `draft` \
 with a `confirmed` verdict and no later event is the commonest move on this \
-board, and the first dry-run missed exactly that (#898).
+board, and the first dry-run missed exactly that (#898). **Except a held \
+confirmation:** a `confirmed` row carrying `held: true` arrived while the \
+implement pool was full, and the item stays `draft` (tagged `confirmed-held`) \
+until a `backlog_confirm_released` row follows it — the loop releases held \
+items oldest first as rounds drain the pool. Do not move a held item to \
+`up_next` yourself.
 - An `umbrella` is an ordinary confirmed item: it goes to `up_next` and the \
 loop implements it. Its `members` (tagged `grouped`) are the ones that stay \
 `draft` — the umbrella carries them. Do not confuse the two.
@@ -334,7 +339,8 @@ def _health_lines(h: dict | None) -> str:
         "open: " + ", ".join(f"{k} {v}" for k, v in sorted((h.get("open") or {}).items())),
         (f"draft {d.get('total', 0)}: {d.get('pool', 0)} triageable, {d.get('quarantined', 0)} "
          f"quarantined self-spawns, {d.get('grouped', 0)} folded under an umbrella, "
-         f"{d.get('needs_human', 0)} needs-human, {d.get('triaged', 0)} triaged and parked"),
+         f"{d.get('needs_human', 0)} needs-human, {d.get('held', 0)} confirmed and held for "
+         f"implement-pool room, {d.get('triaged', 0)} triaged and parked"),
         (f"up_next {u.get('total', 0)}: {u.get('umbrellas', 0)} umbrellas, {u.get('singles', 0)} "
          f"singles, {u.get('never_attempted', 0)} never attempted, {u.get('ready', 0)} ready, "
          f"{u.get('unready', 0)} not takeable"),

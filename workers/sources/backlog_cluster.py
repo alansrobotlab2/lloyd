@@ -30,6 +30,8 @@ DEFAULT_PRIORITY = 65
 LONG_LIVED = False
 DEDUP_KEY = "backlog-cluster:nightly"
 DEFAULT_MIN_AGE_SECONDS = 20 * 3600
+# A used-up `clusters.json` is rebuilt early, but no more often than this.
+DEFAULT_EXHAUSTED_MIN_AGE_SECONDS = 2 * 3600
 
 
 def _clusters_age_seconds() -> float | None:
@@ -40,15 +42,45 @@ def _clusters_age_seconds() -> float | None:
         return None
 
 
+def _clusters_exhausted(min_size: int, max_size: int) -> bool:
+    """True when group triage has nothing left to take from `clusters.json`:
+    every cluster in it is judged, closed, or below the minimum. Reads the
+    board and the ledger, so the caller runs it off the event loop."""
+    from scripts.automod import backlog as B, cluster as CL, state as S
+    return B.select_cluster(S.LEDGER_PATH, CL.load_clusters(),
+                            min_size=min_size, max_size=max_size) is None
+
+
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
+    """Nightly by age — and sooner, once the last pass is used up.
+
+    Group triage takes its clusters from this file and judges each once. On
+    2026-09-13 the night's 31 clusters were consumed by mid-morning, and group
+    triage then had nothing to do for the rest of the day. So a file younger
+    than `min_age_seconds` is still rebuilt when it is at least
+    `exhausted_min_age_seconds` old and `select_cluster` finds nothing in it.
+    The pass is offline arithmetic plus pair-judge calls cached by body hash,
+    so a rebuild over an unchanged board is cheap and simply finds nothing.
+    """
     from scripts.automod import cluster as CL
     min_age = float(src_cfg.get("min_age_seconds", DEFAULT_MIN_AGE_SECONDS))
     age = _clusters_age_seconds()
+    trigger = "nightly"
     if age is not None and age < min_age:
-        return
+        if age < float(src_cfg.get("exhausted_min_age_seconds", DEFAULT_EXHAUSTED_MIN_AGE_SECONDS)):
+            return
+        from workers.sources import autotriage as T
+        exhausted = await asyncio.to_thread(
+            _clusters_exhausted,
+            int(src_cfg.get("group_min_items", T.DEFAULT_GROUP_MIN_ITEMS)),
+            int(src_cfg.get("group_max_items", T.DEFAULT_GROUP_MAX_ITEMS)))
+        if not exhausted:
+            return
+        trigger = "exhausted"
     new_id = queue.enqueue(
         source=NAME, kind="cluster",
-        payload={"threshold": float(src_cfg.get("threshold", CL.DEFAULT_THRESHOLD)),
+        payload={"trigger": trigger,
+                 "threshold": float(src_cfg.get("threshold", CL.DEFAULT_THRESHOLD)),
                  "judge": bool(src_cfg.get("judge", True)),
                  "max_pairs_judged": int(src_cfg.get("max_pairs_judged", 200)),
                  "persist_parents": bool(src_cfg.get("persist_parents", True))},
@@ -56,7 +88,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         dedup_key=DEDUP_KEY,
     )
     if new_id is not None:
-        logger.info("Enqueued backlog clustering id=%d", new_id)
+        logger.info("Enqueued backlog clustering id=%d (%s)", new_id, trigger)
 
 
 async def execute(item: QueueItem) -> dict[str, Any]:
@@ -70,7 +102,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         persist_parents_=bool(p.get("persist_parents", True)))
     path = await asyncio.to_thread(CL.write_clusters, data)
     n_items = sum(len(c["item_ids"]) for c in data["clusters"])
-    S.append_event({"event": "backlog_cluster", "clusters": len(data["clusters"]),
+    S.append_event({"event": "backlog_cluster", "trigger": str(p.get("trigger") or "nightly"),
+                    "clusters": len(data["clusters"]),
                     "items": n_items, "items_considered": data["items_considered"],
                     "vectors_found": data["vectors_found"],
                     "pairs_candidate": data["pairs_candidate"],

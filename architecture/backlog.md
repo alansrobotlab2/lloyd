@@ -449,7 +449,8 @@ triageable, 94 quarantined self-spawns, 139 members folded under an umbrella,
 32 `needs-human` and 16 triaged-and-parked, and that 87 of the 88 `up_next`
 were `ready`.
 
-- `draft` is a **partition**, by precedence grouped > needs-human > triaged
+- `draft` is a **partition**, by precedence grouped > needs-human > held (a
+  confirmation waiting for implement-pool room, `held_confirmations`) > triaged
   (a terminal verdict in `triaged_ids`) > quarantined (`is_quarantined`, not
   released) > pool, so a grouped self-spawn counts once and the buckets sum to
   the total.
@@ -459,7 +460,11 @@ were `ready`.
   rest: a confirmed item with empty acceptance, a human-only one, a spent one.
 - `flow` (`board_flow`, no ledger) counts `created` in and `completed`, else
   `updated`, out on closed items, over 24 h and 7 d. A closed file untouched
-  for a week is skipped on mtime without being parsed.
+  for a week is skipped on mtime without being parsed. Stamps are read in
+  their writer's clock: `created` (MCP store, Mission Control router) and a
+  `completed`-less `updated` as naive local time, `completed` (automod's
+  closers) as naive UTC. Until 2026-09-14 all were read as UTC, which on this
+  box shifted the inflow window seven hours earlier than the outflow window.
 - `implement_pool` is `{ready, bound, floor}` — the single-item triage depth
   gate's numbers (`implement_pool_bound`, [[automod]] §3.2c).
 

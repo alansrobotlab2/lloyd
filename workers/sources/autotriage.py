@@ -590,6 +590,10 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
                  "spawn_cap": int(src_cfg.get("spawn_cap", SPAWN_CAP)),
                  "implement_pool_floor": int(src_cfg.get("implement_pool_floor",
                                                          DEFAULT_IMPLEMENT_POOL_FLOOR)),
+                 # Kill switch for holding: off, a full pool pauses single
+                 # triage outright (the 2026-09-13 behaviour) and anything
+                 # already held is released.
+                 "hold_confirmations": bool(src_cfg.get("hold_confirmations", True)),
                  # Group mode, carried like the budgets. Off: this source runs
                  # exactly as before and clusters.json is ignored.
                  "group_triage": bool(src_cfg.get("group_triage", True)),
@@ -623,6 +627,19 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
 
     payload = item.payload or {}
+    floor = int(payload.get("implement_pool_floor") or DEFAULT_IMPLEMENT_POOL_FLOOR)
+    hold_on = bool(payload.get("hold_confirmations", True))
+    # Room first: a confirmation held on an earlier run enters the pool
+    # before this run adds to the queue behind it.
+    try:
+        released = await asyncio.to_thread(B.release_held_confirmations, S.LEDGER_PATH,
+                                           floor=floor, enabled=hold_on)
+        if released:
+            logger.info("released %d held confirmation(s): %s", len(released),
+                        [r["item_id"] for r in released])
+    except Exception as exc:  # noqa: BLE001 — a release that fails costs a poll, not the run
+        logger.warning("release_held_confirmations failed: %s", exc)
+
     if bool(payload.get("group_triage", True)):
         from scripts.automod import cluster as CL
         pick = B.select_cluster(S.LEDGER_PATH, CL.load_clusters(),
@@ -636,18 +653,20 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # The depth gate. Triage confirmed 59 items on 2026-09-12 against a drain
     # of ~6 a day, and nothing read the depth: 78 of 89 up_next items had
     # never been attempted. A confirmation beyond what rounds will take within
-    # a week is inventory that ages until a re-triage finds it stale. Group
-    # triage above is not gated — it folds and closes, net negative on the
-    # board. Counted as `ready_confirmed`, what autocode would actually take.
-    floor = int(payload.get("implement_pool_floor") or DEFAULT_IMPLEMENT_POOL_FLOOR)
-    ready, pool = await asyncio.to_thread(
-        lambda: (len(B.ready_confirmed(S.LEDGER_PATH)),
-                 B.implement_pool_bound(S.LEDGER_PATH, floor=floor)))
-    if ready >= pool["bound"]:
+    # a week is inventory that ages until a re-triage finds it stale. Counted
+    # as `ready_confirmed`, what autocode would actually take.
+    #
+    # It gates the CONFIRMATION, not the turn. Its first cut returned here,
+    # which also stopped triage's retirements — the loop's largest closer
+    # (23 of 103 verdicts the day before) — and left it filing faster than it
+    # closed. A full pool now holds a `confirmed` verdict in `draft` (see
+    # `B.held_confirmations`); only with holding switched off does it pause.
+    gate = await asyncio.to_thread(B.implement_pool_full, S.LEDGER_PATH, floor=floor)
+    if gate["full"] and not hold_on:
         return {"status": "skipped",
-                "summary": (f"single-item triage paused: {ready} ready in up_next ≥ bound "
-                            f"{pool['bound']} ({pool['landed_items_7d']} items landed in 7 d, "
-                            f"floor {pool['floor']}); group triage still runs")}
+                "summary": (f"single-item triage paused: {gate['ready']} ready in up_next ≥ bound "
+                            f"{gate['bound']} ({gate['landed_items_7d']} items landed in 7 d, "
+                            f"floor {gate['floor']}); group triage still runs")}
 
     candidates, held = B.triage_pool(S.LEDGER_PATH)
     candidate = B.select_candidate(S.LEDGER_PATH)
@@ -765,11 +784,18 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # that says it appended three findings and appended none reads as none.
     after = B.load_item(candidate.path)
     findings_appended = B.count_findings(candidate.body, after.body if after else candidate.body)
+    # Asked again now, not at the start: a triage turn runs for many minutes,
+    # and rounds land and take items in the meantime.
+    hold = False
+    if hold_on and parsed["verdict"] == "confirmed" and not B.is_human_only(parsed["acceptance"]):
+        gate = await asyncio.to_thread(B.implement_pool_full, S.LEDGER_PATH, floor=floor)
+        hold = bool(gate["full"])
     B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
                      check=parsed["check"], close=close, spawned=spawned, merged=merged,
                      acceptance=parsed["acceptance"],
                      acceptance_clauses=parsed.get("acceptance_clauses") or (),
-                     human_clauses=parsed.get("human_clauses") or ())
+                     human_clauses=parsed.get("human_clauses") or (),
+                     hold=hold)
 
     # The cap is a prompt instruction, and the items exist on disk by the time
     # we read SPAWNED — unfiling them would destroy real findings. So it is
@@ -787,6 +813,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "spawn_cap": spawn_cap, "spawned_over_cap": over_cap,
                     "findings_appended": findings_appended,
                     "verdict": parsed["verdict"], "surface": parsed["surface"],
+                    "held": hold,
                     "check": parsed["check"],
                     "evidence": parsed["evidence"][:1000],
                     "acceptance": parsed["acceptance"],
@@ -805,12 +832,14 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "session_id": session_id, "stop_reason": stop_reason,
                     "num_turns": run.get("num_turns"), "budget": budget})
 
-    logger.info("backlog #%s → %s%s (session %s)", candidate.id, parsed["verdict"],
-                " (closed)" if close else "", session_id)
+    logger.info("backlog #%s → %s%s%s (session %s)", candidate.id, parsed["verdict"],
+                " (closed)" if close else "", " (held: pool full)" if hold else "", session_id)
     return {"status": "success", "item_id": candidate.id, "name": candidate.name,
-            "verdict": parsed["verdict"], "closed": close, "session_id": session_id,
+            "verdict": parsed["verdict"], "closed": close, "held": hold,
+            "session_id": session_id,
             "summary": f"#{candidate.id} → {parsed['verdict']}"
-                       f"{' (closed)' if close else ''}"}
+                       f"{' (closed)' if close else ''}"
+                       f"{' (held: implement pool full)' if hold else ''}"}
 
 
 
@@ -880,8 +909,15 @@ async def _execute_group(item: QueueItem, cluster: dict, members: list) -> dict[
         B.note_item(uid, f"filed by group triage {cid} over fewer than two folds; not confirmed")
         umbrella = None
     spawned = [i for i in spawned if i != uid]
+    # The umbrella is a confirmation like any other, so it waits for room like
+    # any other. Its folds and retirements still apply now.
+    hold = False
+    if umbrella is not None and bool(payload.get("hold_confirmations", True)):
+        floor = int(payload.get("implement_pool_floor") or DEFAULT_IMPLEMENT_POOL_FLOOR)
+        gate = await asyncio.to_thread(B.implement_pool_full, S.LEDGER_PATH, floor=floor)
+        hold = bool(gate["full"])
     result = B.record_group_verdict(cluster, members, parsed["items"], umbrella, parsed["umbrella"],
-                                    session_id=session_id, spawned=spawned, merged=merged,
+                                    session_id=session_id, spawned=spawned, merged=merged, hold=hold,
                                     extra={"verdict_source": parsed["source"],
                                            "structured_error": str(run.get("structured_error") or ""),
                                            "stop_reason": stop_reason,

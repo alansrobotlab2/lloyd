@@ -576,23 +576,42 @@ against 49 closed, and the implement source filed 17 per item it closed):
 **Confirmations outrun landings, so single triage has a depth gate.**
 `record_verdict` moves `confirmed → up_next` unconditionally and nothing read
 the depth: 59 confirmed on 2026-09-12, 78 of 89 `up_next` never attempted.
-`autotriage.execute` now skips — no ledger row — while
-`backlog.ready_confirmed` (the readiness filter `select_confirmed` orders,
-extracted so both count the same thing) is at least
-`max(implement_pool_floor, landed_items_trailing(7))`: **distinct items**
-landed (settled promotion or ok `vault_land`), because rows overcount about
-3x when a re-offered item lands again (#487). Floor 20. Group triage is not
-gated — it folds and closes. A paused single triage under a full pool is the
-intent, not a fault.
+The pool is full while `backlog.ready_confirmed` (the readiness filter
+`select_confirmed` orders, extracted so both count the same thing) is at
+least `max(implement_pool_floor, landed_items_trailing(7))`: **distinct
+items** landed (settled promotion or ok `vault_land`), because rows overcount
+about 3x when a re-offered item lands again (#487). Floor 20.
+
+**The gate holds the confirmation, not the turn** (2026-09-14). Its first
+cut skipped the whole single-triage run, which also stopped the retirements —
+`stale`/`already_done` were 23 of triage's 103 verdicts the day before, the
+loop's largest closer — so in its first ten hours the loop filed 6 items and
+closed 3, and the gate could not reopen for days (ready 103 against a bound
+of 58, draining at ~8 landings a day). Now triage always runs; a `confirmed`
+verdict into a full pool is recorded with `held: true`, the item stays
+`draft` tagged `confirmed-held`, and `backlog.release_held_confirmations`
+moves held items into `up_next` oldest first as room opens — at the start of
+each triage run and in autocode's housekeeping, so nothing strands if triage
+is switched off. A held item a human moves by hand is released where it
+stands, and `reconcile_statuses` honours it. Group triage's umbrella is held
+the same way; its folds and retirements apply at once. Kill switch
+`workers.sources.autotriage.hold_confirmations` (off = pause the run, as
+before, and release everything held). `board_health` counts `held` as its
+own `draft` bucket.
 
 **`backlog.board_health` is the one definition of the board's shape**, for
 three readers: the dashboard (`health` beside the raw `by_status`, its own
 60 s cache because it costs ~2 s), scorecard row 13 (net flow, through the
 ledger-free `board_flow`), and the board steward's `<board_health>` block,
 which it is asked to lead its summary with and which lands on its ledger row.
-`draft` is a partition by precedence (grouped > needs-human > triaged >
-quarantined > pool): on 2026-09-13 480 drafts were 199 triageable, 139
-folded, 94 quarantined, 32 needs-human, 16 parked. Outflow reads `completed`,
+`draft` is a partition by precedence (grouped > needs-human > held >
+triaged > quarantined > pool): on 2026-09-13 480 drafts were 199 triageable, 139
+folded, 94 quarantined, 32 needs-human, 16 parked. Each stamp is read in its
+writer's clock — `created` naive local (MCP store, Mission Control router),
+`completed` naive UTC (this loop's closers), a close with no `completed`
+local — because reading all three as UTC put every creation seven hours
+before every close and made the 24 h net compare two different days
+(fixed 2026-09-14). Outflow reads `completed`,
 which `record_verdict`'s close now stamps like every other closer.
 
 `tests/conftest.py::_isolate_backlog_dedupe` keeps every test out of the live
@@ -628,7 +647,13 @@ edges; an error keeps the edge. Quarantine is deliberately not applied —
 its question is staleness, this one is sameness. Output is `clusters.json`
 in the automod state dir, written nightly by the `backlog-cluster` worker
 source ("nightly" = the file is older than `min_age_seconds`, so a restart
-never doubles it up); `round cluster --no-judge` prints without writing.
+never doubles it up) — and sooner once group triage has used it up: a file
+at least `exhausted_min_age_seconds` (2 h) old in which `select_cluster`
+finds nothing is rebuilt, because on 2026-09-13 the night's 31 clusters were
+gone by mid-morning and group triage sat idle all day. Items a group triage
+already judged are left out of the rebuild, or they re-form the same groups
+and hide the fresh items peeled in with them. `round cluster --no-judge`
+prints without writing.
 Every path default resolves at call time: a default bound at import made
 the first test run write to the real state dir.
 

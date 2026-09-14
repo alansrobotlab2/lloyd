@@ -1802,6 +1802,13 @@ IMPLEMENT_POOL_STATUS = "up_next"
 # draft as spent, off when a reopen takes it back into the pool.
 NEEDS_HUMAN_TAG = "needs-human"
 
+# A confirmation that arrived while the implement pool was full: triaged,
+# judged real, parked in `draft` until a slot opens. Visible on the item
+# the way `needs-human` is; the ledger (`held: true` on the verdict, then a
+# `backlog_confirm_released`) is the source of truth. See
+# `held_confirmations`.
+HELD_TAG = "confirmed-held"
+
 
 def set_status(item_id: int, status: str, why: str, *,
                add_tags: tuple[str, ...] = (), remove_tags: tuple[str, ...] = ()) -> bool:
@@ -1859,6 +1866,7 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     the reconciler passes it, the migration passes what it can see.
     """
     confirmed = confirmed_verdicts(ledger)
+    held = held_confirmations(ledger)
     verdicts = triaged_ids(ledger)
     outcomes = implement_outcomes(ledger)
     # A turn in flight is a `started` with nothing after it. `implement_outcomes`
@@ -1943,7 +1951,10 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
             else:
                 out[iid] = ("up_next", f"offered again — {verdict}: {detail[:120]}")
         elif iid in confirmed and not is_human_only(confirmed[iid].get("acceptance")):
-            out[iid] = ("up_next", "triage confirmed it with an acceptance check")
+            if iid in held:
+                out[iid] = ("draft", "triage confirmed it; held until the implement pool has room")
+            else:
+                out[iid] = ("up_next", "triage confirmed it with an acceptance check")
         elif iid in verdicts:
             # unverifiable / not_code / incomplete / human-only: triaged, not for
             # the loop. Stays where triage found it.
@@ -2008,6 +2019,9 @@ def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BO
     # make; the tag comes off here the way `needs-human` rides its move.
     for iid in clear_expired_on_reopen(ledger, boards):
         moved.append({"item_id": iid, "from": "done", "to": TRIAGE_POOL_STATUS})
+    # Likewise a held confirmation a human moved into the pool by hand: that
+    # is the release, and the pass below must not move it back.
+    release_held_confirmations(ledger, boards, hand_moves_only=True)
     current = {i.id: i.status for i in open_items(boards)}
     for iid, want in desired_statuses(ledger, boards, open_round_items=open_round_items).items():
         status, why = want[0], want[1]
@@ -2109,7 +2123,7 @@ EXPIRED_TAG = "expired"
 # Never expired: a member's fate is its umbrella's, an umbrella is confirmed
 # work, a `needs-human` item is waiting on a decision, and an expired item
 # has already been judged once.
-EXPIRY_EXEMPT_TAGS = frozenset({"grouped", "umbrella", NEEDS_HUMAN_TAG, EXPIRED_TAG})
+EXPIRY_EXEMPT_TAGS = frozenset({"grouped", "umbrella", NEEDS_HUMAN_TAG, EXPIRED_TAG, HELD_TAG})
 
 
 def expired_ids(ledger: Path) -> set[int]:
@@ -2363,7 +2377,12 @@ def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARD
     return ready
 
 
-def _iso_ts(value) -> float | None:
+def _iso_ts(value, *, naive_local: bool = False) -> float | None:
+    """An ISO stamp as epoch seconds. A naive stamp is UTC unless
+    `naive_local` says its writer used the machine's local clock — the board
+    has both: `agent_mcp/backlog.py` and the Mission Control router write
+    `created`/`updated` with `datetime.now()`, and every closer in this module
+    writes `completed`/`updated` in UTC."""
     s = str(value or "").strip()
     if not s:
         return None
@@ -2372,7 +2391,7 @@ def _iso_ts(value) -> float | None:
     except ValueError:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone() if naive_local else dt.replace(tzinfo=timezone.utc)
     return dt.timestamp()
 
 
@@ -2410,6 +2429,105 @@ def implement_pool_bound(ledger: Path, *, floor: int = IMPLEMENT_POOL_FLOOR,
     bound, derived from the trailing landing rate (Alan, 2026-09-13)."""
     landed = landed_items_trailing(ledger, 7, now=now)
     return {"bound": max(int(floor), landed), "floor": int(floor), "landed_items_7d": landed}
+
+
+# ── Held confirmations ──────────────────────────────────────────────────────
+#
+# The depth gate's first cut (2026-09-13) paused single-item triage outright
+# while the pool was full. Triage does two things, though: it confirms, which
+# is what fills the pool, and it retires — `stale` and `already_done` were 23
+# of its 103 verdicts the day before the gate, the largest closer the loop
+# had. Pausing the pass stopped both. In the first ten hours under the gate
+# the loop filed 6 items and closed 3, and single triage stayed off because
+# ready (84, then 103) sat far above a bound (57) that drains at about eight
+# landings a day. The gate now holds a confirmation instead of refusing the
+# turn: the verdict is recorded, the item stays in `draft`, and it enters
+# `up_next` oldest-first as room opens.
+
+def held_confirmations(ledger: Path) -> dict[int, float]:
+    """`{item_id: ts}` of confirmations still waiting for room, oldest first
+    by `ts`. Held means the item's latest `confirmed` verdict carries
+    `held: true` and no `backlog_confirm_released` row has followed it."""
+    latest: dict[int, dict] = {}
+    for d in _ledger_events(ledger, "backlog_triage"):
+        if d.get("verdict") == "confirmed":
+            latest[int(d["item_id"])] = d
+    released: dict[int, float] = {}
+    for d in _ledger_events(ledger, "backlog_confirm_released"):
+        released[int(d["item_id"])] = float(d.get("ts") or 0)
+    out: dict[int, float] = {}
+    for iid, ev in latest.items():
+        if not ev.get("held"):
+            continue
+        ts = float(ev.get("ts") or 0)
+        if released.get(iid, float("-inf")) >= ts:
+            continue
+        out[iid] = ts
+    return out
+
+
+def implement_pool_full(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                        floor: int = IMPLEMENT_POOL_FLOOR, now: float | None = None) -> dict:
+    """`{full, ready, bound, floor, landed_items_7d}` — the depth gate's one
+    question, asked the same way by the triage pass and the releaser."""
+    pool = implement_pool_bound(ledger, floor=floor, now=now)
+    ready = len(ready_confirmed(ledger, boards))
+    return {"full": ready >= pool["bound"], "ready": ready, **pool}
+
+
+def release_held_confirmations(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                               floor: int = IMPLEMENT_POOL_FLOOR, enabled: bool = True,
+                               hand_moves_only: bool = False,
+                               now: float | None = None) -> list[dict]:
+    """Move held confirmations into `up_next`, oldest first, while the pool
+    has room. Returns one `{item_id, reason, moved}` per release.
+
+    A held item a human already moved out of `draft` is released where it
+    stands — the move was the decision, and the reconciler must not undo it
+    (`hand_moves_only` does just that part, for `reconcile_statuses`).
+    `enabled=False` is the kill switch: everything held is released at once,
+    so switching holding off never strands an item.
+    """
+    from scripts.automod import state as S
+    held = held_confirmations(ledger)
+    if not held:
+        return []
+    open_by_id = {i.id: i for i in open_items(boards)}
+    out: list[dict] = []
+
+    def _release(iid: int, why: str, move: bool) -> None:
+        S.append_event({"event": "backlog_confirm_released", "item_id": iid,
+                        "reason": why[:200], "moved": move}, path=ledger)
+        if move:
+            if set_status(iid, IMPLEMENT_POOL_STATUS, f"released from hold: {why}",
+                          remove_tags=(HELD_TAG,)):
+                S.append_event({"event": "status_moved", "item_id": iid,
+                                "from": TRIAGE_POOL_STATUS, "to": IMPLEMENT_POOL_STATUS,
+                                "reason": f"released from hold: {why}"[:200]}, path=ledger)
+        else:
+            tag_item(iid, remove=(HELD_TAG,))
+        out.append({"item_id": iid, "reason": why, "moved": move})
+
+    waiting: list[int] = []
+    for iid, _ts in sorted(held.items(), key=lambda kv: kv[1]):
+        item = open_by_id.get(iid)
+        if item is None:
+            continue
+        if item.status != TRIAGE_POOL_STATUS:
+            _release(iid, f"moved to {item.status} by hand", move=False)
+            continue
+        waiting.append(iid)
+    if hand_moves_only or not waiting:
+        return out
+    if enabled:
+        gate = implement_pool_full(ledger, boards, floor=floor, now=now)
+        room = gate["bound"] - gate["ready"]
+        why = f"the implement pool has room ({gate['ready']} ready < bound {gate['bound']})"
+    else:
+        room, why = len(waiting), "holding confirmations is switched off"
+    for iid in waiting[:max(0, room)]:
+        _release(iid, why, move=True)
+    return out
 
 
 STEWARD_PICK_MAX_AGE_S = 2 * 3600
@@ -2535,13 +2653,19 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
                    merged: list[int] | tuple[int, ...] = (),
                    acceptance: str = "",
                    acceptance_clauses: list[str] | tuple[str, ...] = (),
-                   human_clauses: list[str] | tuple[str, ...] = ()) -> Path:
+                   human_clauses: list[str] | tuple[str, ...] = (),
+                   hold: bool = False) -> Path:
     """Append the verdict to the item's activity log, optionally closing it.
 
     Always writes the evidence, never just the conclusion. An item closed as
     stale with no stated reason is indistinguishable from one closed by
     mistake, and the whole value of this pass is that a human can audit it
     later.
+
+    `hold` parks a `confirmed` item in `draft`, tagged `confirmed-held`,
+    instead of moving it into the implement pool — the caller found the pool
+    full. The caller's ledger row must carry `held: true`; that row, not the
+    tag, is what `held_confirmations` reads.
     """
     if verdict not in VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r}")
@@ -2569,9 +2693,14 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         fm["completed"] = stamp
         fm["autotriage_retired"] = verdict
     elif verdict == "confirmed" and fm.get("status") != "done":
-        # Into the implement pool. Before 2026-09-09 a confirmed item stayed
-        # wherever it was, and #353 landed while still `draft`.
-        fm["status"] = IMPLEMENT_POOL_STATUS
+        if hold:
+            # The pool is full: judged real, parked until a slot opens.
+            tags = [str(t) for t in (fm.get("tags") or [])]
+            fm["tags"] = tags + ([HELD_TAG] if HELD_TAG not in tags else [])
+        else:
+            # Into the implement pool. Before 2026-09-09 a confirmed item
+            # stayed wherever it was, and #353 landed while still `draft`.
+            fm["status"] = IMPLEMENT_POOL_STATUS
     clauses = clean_clauses(acceptance_clauses)
     # Backstop for the rule the prompt states: a clause whose evidence only
     # arrives with time cannot be graded before landing, and holding a round
@@ -2591,6 +2720,9 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
 
     section = (f"\n\n## Automod triage — {stamp[:10]}\n\n"
                f"**Verdict:** {verdict}\n\n{evidence.strip()}\n")
+    if verdict == "confirmed" and hold:
+        section += ("\n**Held:** the implement pool was full when this was confirmed. It stays "
+                    "in `draft` and enters `up_next`, oldest first, when a slot opens.\n")
     if moved_later:
         section += ("\n**Moved to human clauses** (observable only after "
                     "landing, so no gate can judge them): "
@@ -2691,7 +2823,7 @@ def _resolve_duplicates(verdicts: dict[int, dict], members: set[int]) -> dict[in
 def record_group_verdict(cluster: dict, members: list[Item], verdicts: dict[int, dict],
                          umbrella: Item | None, umbrella_fields: dict, *,
                          session_id: str = "", spawned=(), merged=(),
-                         extra: dict | None = None) -> dict:
+                         extra: dict | None = None, hold: bool = False) -> dict:
     """Write a group triage's verdicts onto the items and the ledger.
 
     One `backlog_triage` row per member so every existing reader — the
@@ -2754,9 +2886,10 @@ def record_group_verdict(cluster: dict, members: list[Item], verdicts: dict[int,
         record_verdict(umbrella, "confirmed", str(umbrella_fields.get("evidence") or ""),
                        check=str(umbrella_fields.get("check") or ""),
                        acceptance=str(umbrella_fields.get("acceptance") or ""),
-                       acceptance_clauses=clauses)
+                       acceptance_clauses=clauses, hold=hold)
         update_frontmatter(umbrella.path, {"members": sorted(fold_ids)}, add_tags=("umbrella",))
         S.append_event({"event": "backlog_triage", "item_id": umbrella.id, "verdict": "confirmed",
+                        "held": bool(hold),
                         "surface": str(umbrella_fields.get("surface") or "code"),
                         "check": str(umbrella_fields.get("check") or ""),
                         "evidence": str(umbrella_fields.get("evidence") or "")[:1000],
@@ -2836,11 +2969,20 @@ def board_flow(boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
     item; both are stamped by the writer that closed it, so a file untouched
     for a week cannot have closed inside the week and is skipped on mtime
     without being parsed.
+
+    Each stamp is read in its writer's clock. `created` comes from the MCP
+    store or the Mission Control router, in naive local time; `completed` only
+    ever from this module's closers, in naive UTC; a closed item with no
+    `completed` was closed by one of the local-time writers, so its `updated`
+    is local too. Until 2026-09-14 all three were read as UTC, which on this
+    box put every creation seven hours before every close — the 24-hour net
+    compared two different days.
     """
     now = time.time() if now is None else now
     everything = items if items is not None else all_items(boards, backlog_dir=backlog_dir)
     widest = now - 7 * 86400
-    created_ts = [t for t in (_iso_ts(i.created) for i in everything) if t is not None]
+    created_ts = [t for t in (_iso_ts(i.created, naive_local=True) for i in everything)
+                  if t is not None]
     closed_ts: list[float] = []
     for i in everything:
         if i.status in OPEN_STATUSES:
@@ -2851,7 +2993,10 @@ def board_flow(boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
             fm, _ = _split_frontmatter(i.path.read_text(encoding="utf-8"))
         except OSError:
             continue
-        t = _iso_ts(fm.get("completed") or fm.get("updated"))
+        if fm.get("completed"):
+            t = _iso_ts(fm.get("completed"))
+        else:
+            t = _iso_ts(fm.get("updated"), naive_local=True)
         if t is not None:
             closed_ts.append(t)
 
@@ -2877,14 +3022,16 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
     person — 200 were actually triageable. And `up_next` 88 was 42 ready.
 
     `draft` is a partition, each item counted once, by precedence: grouped >
-    needs-human > triaged > quarantined > pool. Reads every item file and the
-    ledger several times; never call it per item.
+    needs-human > held > triaged > quarantined > pool. `held` is a confirmation
+    waiting for room in the implement pool (see `held_confirmations`). Reads
+    every item file and the ledger several times; never call it per item.
     """
     now = time.time() if now is None else now
     everything = all_items(boards, backlog_dir=backlog_dir)
     items = [i for i in everything if i.status in OPEN_STATUSES]
     seen = triaged_ids(ledger)
     released = released_ids(ledger)
+    held = held_confirmations(ledger)
     outcomes = implement_outcomes(ledger)
     attempted = {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}
 
@@ -2892,7 +3039,8 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
     for i in items:
         open_counts[i.status] = open_counts.get(i.status, 0) + 1
 
-    draft = {"pool": 0, "quarantined": 0, "grouped": 0, "needs_human": 0, "triaged": 0}
+    draft = {"pool": 0, "quarantined": 0, "grouped": 0, "needs_human": 0, "held": 0,
+             "triaged": 0}
     for i in items:
         if i.status != TRIAGE_POOL_STATUS:
             continue
@@ -2900,6 +3048,8 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
             draft["grouped"] += 1
         elif NEEDS_HUMAN_TAG in i.tags:
             draft["needs_human"] += 1
+        elif i.id in held:
+            draft["held"] += 1
         elif i.id in seen:
             draft["triaged"] += 1
         elif is_quarantined(i, released=released):

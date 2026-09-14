@@ -295,7 +295,7 @@ def test_board_health_partitions_the_board(board):
     h = B.board_health(S.LEDGER_PATH)
     assert h["open"] == {"draft": 6, "up_next": 3}
     assert h["draft"] == {"pool": 2, "quarantined": 1, "grouped": 1, "needs_human": 1,
-                          "triaged": 1, "total": 6}
+                          "held": 0, "triaged": 1, "total": 6}
     assert h["draft"]["total"] == sum(v for k, v in h["draft"].items() if k != "total")
     assert h["up_next"] == {"total": 3, "umbrellas": 1, "singles": 2, "never_attempted": 2,
                             "ready": 2, "unready": 1}
@@ -303,6 +303,52 @@ def test_board_health_partitions_the_board(board):
     assert h["flow"]["7d"] == {"created": 9, "closed": 1, "net": 8}
     assert h["self_spawned_open"] == 3
     assert h["implement_pool"] == {"ready": 2, "bound": 20, "floor": 20}
+
+
+def test_board_flow_reads_each_stamp_in_its_writers_clock(board):
+    """`created` is naive local (the MCP store and the Mission Control router
+    use `datetime.now()`), `completed` is naive UTC (this module's closers),
+    and a close with no `completed` came from a local-time writer. Read all
+    as UTC, the two sides of the 24 h window sat seven hours apart here."""
+    import os
+    import time as _time
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    _time.tzset()
+    try:
+        now = datetime.now(timezone.utc)
+        local = lambda h: (now - timedelta(hours=h)).astimezone().replace(tzinfo=None).isoformat()
+        utc = lambda h: (now - timedelta(hours=h)).replace(tzinfo=None).isoformat()
+        _write(board, 1, "draft", created=local(20))          # in
+        _write(board, 2, "draft", created=local(30))          # out; read as UTC it was 23 h old
+        _write(board, 3, "done", hours_old=240, completed=utc(3))                      # in
+        _write(board, 4, "done", hours_old=240, updated=local(26))                     # out; as UTC, 19 h
+        _write(board, 5, "done", hours_old=240, completed=utc(30), updated=local(1))  # out: completed wins
+        flow = B.board_flow(backlog_dir=board, now=now.timestamp())
+        assert flow["24h"] == {"created": 1, "closed": 1, "net": 0}
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        _time.tzset()
+
+
+def test_a_held_confirmation_is_its_own_draft_bucket_and_the_prompt_names_it(board):
+    """Held is a verdict waiting for pool room, not a parked triage: it counts
+    once, below needs-human and above triaged, and the steward is told."""
+    _write(board, 1, "draft", tags=("backlog", B.HELD_TAG))
+    _ev(event="backlog_triage", item_id=1, verdict="confirmed", acceptance="a", held=True)
+    _write(board, 2, "draft", tags=("backlog", "needs-human", B.HELD_TAG))
+    _ev(event="backlog_triage", item_id=2, verdict="confirmed", acceptance="a", held=True)
+    _write(board, 3, "draft")                                              # released: triaged
+    _ev(event="backlog_triage", item_id=3, verdict="confirmed", acceptance="a", held=True)
+    _ev(event="backlog_confirm_released", item_id=3, reason="room", moved=False)
+    h = B.board_health(S.LEDGER_PATH)
+    assert (h["draft"]["held"], h["draft"]["needs_human"], h["draft"]["triaged"]) == (1, 1, 1)
+    assert h["draft"]["total"] == sum(v for k, v in h["draft"].items() if k != "total") == 3
+    text = W.build_prompt(events=[], items=[_item(1, "draft")], n_open=1, since_ts=0, health=h)
+    assert "1 confirmed and held for implement-pool room" in text
 
 
 def test_the_prompt_carries_board_health_and_renders_without_it():
@@ -338,3 +384,11 @@ def test_the_steward_row_records_the_board_health(board, monkeypatch):
     row = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "board_steward"][-1]
     assert row["board_health"]["draft"]["total"] == 6
     assert "<board_health>\nopen: draft 6, up_next 3" in seen["prompt"]
+
+
+def test_the_steward_is_told_a_held_confirmation_stays_draft_and_sees_its_release(tmp_path):
+    text = W.build_prompt(events=[], items=[_item(1, "draft", tags=(B.HELD_TAG,))], n_open=1, since_ts=0)
+    assert "held: true" in text and "Do not move a held item to" in text
+    ledger = tmp_path / "l.jsonl"
+    ledger.write_text(json.dumps({"event": "backlog_confirm_released", "ts": 10, "item_id": 1}) + "\n")
+    assert [e["event"] for e in W.events_since(ledger, since_ts=0)] == ["backlog_confirm_released"]
