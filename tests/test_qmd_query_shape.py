@@ -61,10 +61,21 @@ def test_rerank_travels_as_the_key_qmd_actually_reads(sent):
     assert sent[0]["rerank"] is False, "an explicit skip must reach the wire"
 
 
-def test_unrestricted_search_sends_an_empty_collection_list(sent):
-    """Empty list -> qmd resolves `collections` to undefined -> one ANN scan."""
+def test_unrestricted_search_names_the_segments_it_filters_to(sent):
+    """An unrestricted search says what it will keep (#504).
+
+    It used to send `collections: []`, which qmd resolves to `undefined` and answers
+    with one global ANN scan — faster, and the shape that made the eval query
+    `kg-maintenance-tasks` unanswerable: its global top-k of 36 rows folded to 21
+    paths the client was willing to keep, and none of the five files the query is
+    scored against were among them, while the segment's neighbour `autonomy/39-`
+    was. The speed pair this test used to justify (826ms -> 462ms) was measured on
+    the other arm by now; the named arm costs ~130ms more warm on a call whose eval
+    average is 577ms, and buys the only five hits the corpus has for that query. See
+    `tests/test_doc_candidate_pool.py` for the membership this is really about.
+    """
     vault._qmd_daemon_search("guardian rollback", 10, list(vault.VAULT_SEGMENTS))
-    assert sent[0]["collections"] == []
+    assert sent[0]["collections"] == list(vault.VAULT_SEGMENTS)
 
 
 def test_scope_restricted_search_keeps_its_collections(sent):
@@ -78,10 +89,20 @@ def test_scope_restricted_search_keeps_its_collections(sent):
     assert sent[0]["collections"] == ["backlog", "architecture"]
 
 
-def test_global_scan_over_requests_then_trims(sent):
-    """`subliminal` doubles every hit before dedup, so ask for more."""
+def test_an_unrestricted_search_over_requests_for_the_pool(sent):
+    """`limit` sizes the answer; the ask sizes the pool it is ranked out of.
+
+    Renamed from `test_global_scan_over_requests_then_trims` by #504: the over-ask
+    used to be 2x to survive `subliminal`'s duplicate copies, and the fold then
+    trimmed it back to `limit`. The duplicates are gone with the global scan, so the
+    remaining reason for the over-ask is the only one that matters — a document that
+    never enters the reply is missing at every rank.
+    """
     vault._qmd_daemon_search("guardian rollback", 10, list(vault.VAULT_SEGMENTS))
-    assert sent[0]["limit"] == 10 * vault.QMD_GLOBAL_LIMIT_FACTOR
+    assert sent[0]["limit"] == 10 * vault.QMD_POOL_FACTOR
+    assert sent[0]["candidateLimit"] == 10 * vault.QMD_POOL_FACTOR, (
+        "qmd's own rerank window defaults to 40 and slices BEFORE scoring, so a wide "
+        "ask that leaves it implicit ranks 40 documents and returns more of them")
 
 
 def test_scoped_search_does_not_over_request(sent):

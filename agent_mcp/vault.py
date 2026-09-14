@@ -74,16 +74,42 @@ VAULT_SEGMENTS = [
     "memory", "knowledge", "projects", "personal", "work", "skills",
     "architecture", "lloyd", "autonomy", "backlog", "people",
 ]
-# Over-request factor for the global-scan path in `_qmd_daemon_search`.
-# `subliminal` indexes the whole vault, so every hit arrives twice before
-# dedup; qmd also derives its ANN k from `limit` (k = limit*3), so a bigger
-# ask widens the candidate pool as well as the reply. Measured free on the
-# fork, 2026-09-09: limit 10 and limit 20 both land at ~470ms (rerank on),
-# so the wider ask costs nothing. The recall gain (0.32 -> 0.35) is carried
-# from the original 2.8.3 measurement and has NOT been re-run against the
-# fork — the latency claim beside it had shifted, so treat it as the weaker
-# of the two.
-QMD_GLOBAL_LIMIT_FACTOR = 2
+# Over-request factor for the unrestricted path in `_qmd_daemon_search`, and the
+# ceiling on it. `limit` is the size of the *answer*; these size the *pool* it is
+# ranked out of.
+#
+# The factor used to be 2, for two reasons that are now both on the other side of
+# the argument. (1) `subliminal` re-indexes the whole vault, so every hit arrived
+# twice — that duplication is gone now the unrestricted path names its segments
+# (#504). (2) qmd derives its retrieval width from `limit`, so a bigger ask widens
+# the pool — true, and now the whole point: for the eval query
+# `kg-maintenance-tasks` a 40-row pool yields 0 of its 5 expected documents, 60
+# yields 1, and 240 yields all five (measured 2026-09-14 on the live daemon, named
+# segments, rerank on). 3x keeps a small caller's pool a real pool (limit 5 -> 15)
+# and `QMD_POOL_MAX` stops the factor running away for a caller already asking for
+# hundreds — `vault_search`'s `max_results` reaches it, and so does the doc leg's
+# own `RECALL_DOC_POOL`.
+#
+# "Measured free" was true of the *global* arm. On the named arm — the one #504
+# switches to — the ask is the only thing that decides how much qmd does, and it is
+# still cheap on this box: 110 ms at a 40-row pool, 140 ms at 60, 165 ms at 240
+# (live daemon, rerank on, warm, median of 3). The 826 ms -> 462 ms pair quoted in
+# `_qmd_daemon_search` was measured on the other arm and does not describe this
+# one, which is why the re-measurement went to a finding on #504 instead of staying
+# a justification here.
+QMD_POOL_FACTOR = 3
+QMD_POOL_MAX = 240
+# The size of the pool `_vault_recall`'s document leg ranks its answer out of,
+# asked for by name because it is the recall path's decision, not a property of the
+# search: `vault_search` and the entity lookup ask for a document list and take
+# `QMD_POOL_FACTOR` times it, which is right for them and not nearly deep enough
+# here. The value is `QMD_POOL_MAX` for one reason — for the query this replaced,
+# "which autonomy tasks maintain the knowledge graph?", the daemon returned 1 of the
+# 5 expected files at a 60-row pool, 3 at 120 and all 5 at 240 (live daemon, named
+# segments, rerank on, measured 2026-09-14). Asking for the whole pool also means
+# `QMD_POOL_FACTOR` has nothing left to widen, so the ask, the fold and the
+# pre-rank slice are one number stated once.
+RECALL_DOC_POOL = QMD_POOL_MAX
 
 VAULT_EXCLUDE_DIRS = {"templates", "images"}
 VAULT_EXCLUDE_FILES = {"tags.md"}
@@ -410,38 +436,54 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
     and the full hybrid as a straggler whose result carries over to the
     next turn.
 
-    **An unrestricted search sends `collections: []`, not the segment list.**
-    826ms -> 462ms on the arm this client actually runs (rerank on), and
-    136ms -> 50ms with rerank off. The mechanism is not fan-out: qmd falls
-    back to an exact cosine scan — `WHERE hash_seq IN (400 placeholders)` per
-    batch — for any collection under `COLLECTION_VEC_EXACT_SCAN_MAX` (20,000
-    chunks). Every segment here is under it, so *none* of them reach
-    sqlite-vec's native `MATCH` index. Querying `subliminal` alone, the same
-    corpus in one collection, was no faster: the collection *count* was never
-    the driver, the chunk count was.
+    **An unrestricted search names `VAULT_SEGMENTS`; a restricted one names its
+    subset.** Both now say what they are willing to keep, and
+    `_qmd_normalize_global` still folds the unrestricted reply back onto the
+    segment view (strip `subliminal/`, drop non-vault heads, dedupe keeping the
+    best score), so what changed is which documents are *reachable*, not which are
+    allowed.
 
-    An empty list makes the REST handler resolve `collections` to `undefined`,
-    which takes the `MATCH` path — one ANN scan instead of eleven exact ones.
-    `_qmd_normalize_global` folds the wider result set back onto the segment
-    view.
+    Empty used to buy speed. qmd falls back to an exact cosine scan —
+    `WHERE hash_seq IN (400 placeholders)` per batch — for any collection under
+    `COLLECTION_VEC_EXACT_SCAN_MAX` (20,000 chunks), and every segment here is
+    under it, so an empty list (which the REST handler resolves to `undefined`)
+    took sqlite-vec's native `MATCH` path: one ANN scan instead of eleven exact
+    ones. That is still true and still costs: warm on this box today, the same
+    query returns in 31-38 ms globally and 110 ms named at a 40-row pool, 165 ms
+    named at 240 (medians of 3, rerank on, rotated arm order). ~130 ms on a
+    recall whose eval average is 577 ms.
 
-    The numbers above are the fork's, re-measured 2026-09-09 because the
-    original ones were not. This was written against published 2.8.3, where
-    the same change read as 4.2s -> 269ms; the fork closed most of that gap
-    on its own (see the paragraph above), so a margin justified by 2.8.3's
-    per-collection scan had to be re-derived before it could be trusted. It
-    survived, smaller: 1.8x rather than 5x. Measured with a fresh query per
-    sample and rotated arm order — the daemon caches query embeddings, and a
-    sequential A/B reading the same queries through each arm measures arm
-    order, not arm.
+    What it bought in recall turned out to be the thing it was breaking. The
+    global reply is one top-k whose width qmd derives from `limit`, and
+    `subliminal` re-indexes the whole vault, so for the eval query
+    "which autonomy tasks maintain the knowledge graph?" a 40-slot global ask came
+    back with 36 rows of which `_qmd_normalize_global` kept 21 — and not one of the
+    five autonomy task files the query expects was among them, while their
+    neighbour `autonomy/39-` was. Named, at the pool `RECALL_DOC_POOL` asks for, all
+    five arrive (ranks 14, 17, 35, 39, 175). That is #504: the doc leg's only
+    remaining zero, and the mechanism behind it is #1005.
 
-    The trade is real and bounded: a global top-k can starve a small
-    collection that a per-collection scan would have surfaced (qmd's own
-    #791/#803). Two of five small-collection probes lost their top hit. So a
-    **scope-restricted** search keeps the per-collection path — it names a
-    subset deliberately, and a subset small enough to scope to is cheap to
-    scan exactly. Only the unrestricted search, where the global top-k is the
-    honest question anyway, takes the fast path.
+    The fairness property is the one the restricted path has always relied on.
+    qmd's `collections` array is a per-collection quota (`ftsLimit = limit * 10`,
+    plus an exact vec scan per collection), so naming the segments means `autonomy`
+    — 242 files, 1% of the corpus — is competing for autonomy's slots instead of
+    against the whole index. The original write-up recorded that hazard as the cost
+    ("a global top-k can starve a small collection... two of five small-collection
+    probes lost their top hit", qmd #791/#803); this change pays the *other* side of
+    that trade, and #504 is the probe for whether paying it is net-positive across
+    all 20 queries. The 826ms -> 462ms and 4.2s -> 269ms pairs in the history below
+    were measured on other builds of the other arm; they are kept as history, not as
+    the justification, and the re-measurement is a finding on #504.
+
+    A **scope-restricted** search is untouched: its own subset, `[:limit]` back
+    with no fold, and its pool equal to its answer — so `prefetch`'s nine-collection
+    request on the turn-critical path does not inherit the widened ask.
+
+    History, as recorded: the switch to empty was made against published 2.8.3,
+    where it read as 4.2s -> 269ms; the fork closed most of that gap on its own, and
+    a re-measurement on 2026-09-09 (fresh query per sample, rotated arm order — the
+    daemon caches query embeddings, so a sequential A/B measures arm order, not arm)
+    found the margin survived at 1.8x rather than 5x.
 
     `lex_query`, when given, replaces the lex leg's text. The lex leg is
     FTS5 with implicit AND (every term must match), so it wants a short,
@@ -462,20 +504,29 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
     if lex_query:
         lex_q = _qmd_strip_stopwords(_qmd_sanitize(lex_query)) or stripped
 
-    # Unrestricted == "every segment we know about". Anything narrower is a
-    # deliberate scope and keeps the exact-scan path.
+    # Unrestricted == "every segment we know about", and it now says so: naming
+    # the segments puts the scan on qmd's per-collection path, where each one is
+    # fetched for its own quota before fusion. Anything narrower is a deliberate
+    # scope and keeps its own shape exactly as it had it.
     allowed = set(VAULT_SEGMENTS)
-    global_scan = allowed.issubset(set(collections or []))
-    # Over-request on the global path: `subliminal` doubles every hit before
-    # dedup, and qmd derives its ANN k from `limit` (k = limit*3), so asking
-    # for more also widens the candidate pool. Measured free — limit 10 and
-    # limit 20 both land at ~267ms.
-    wire_limit = limit * QMD_GLOBAL_LIMIT_FACTOR if global_scan else limit
+    unrestricted = allowed.issubset(set(collections or []))
+    # `limit` sizes the answer; `pool` sizes what it is ranked out of, because a
+    # document that is not in the reply is not in the answer at any rank. The
+    # restricted path keeps pool == limit — it gets `[:limit]` back with no fold,
+    # so a wider ask there buys nothing and prefetch is on a latency budget.
+    pool = min(limit * QMD_POOL_FACTOR, QMD_POOL_MAX) if unrestricted else limit
     payload = {
         "searches": [{"type": leg, "query": lex_q if leg == "lex" else stripped}
                      for leg in legs],
-        "limit": wire_limit,
-        "collections": [] if global_scan else collections,
+        "limit": pool,
+        # qmd applies `candidateLimit` as `fused.slice(0, candidateLimit)` BEFORE
+        # its cross-encoder rerank, and its default is RERANK_CANDIDATE_LIMIT = 40.
+        # So `limit` alone does not widen what gets ranked: a 240-row ask that
+        # leaves this at 40 has its other 200 rows returned but never scored, which
+        # is the same miss with a bigger payload (recorded: 0 of 5 expected files
+        # at pool 40, all 5 at 240). Always explicit, like `rerank` below.
+        "candidateLimit": pool,
+        "collections": list(VAULT_SEGMENTS) if unrestricted else collections,
         # Always explicit. Omitting it means "the daemon's default", which
         # is rerank-on today and is not something this client should lean on.
         # The stash this came from made the key conditional; that undoes a
@@ -485,9 +536,15 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
     }
 
     def _finish(rows: list) -> list:
-        if not global_scan:
+        if not unrestricted:
             return rows
-        return _qmd_normalize_global(rows, allowed)[:limit]
+        # Slice to the pool, not to `limit`. Trimming the folded reply back to the
+        # size of the answer is where a deep ask goes to die: qmd has already
+        # ranked it, the caller still only ever sees `limit` documents, and every
+        # file between rank `limit` and the pool — `autonomy/67-` at recorded rank
+        # 175 among them — is unreachable again. `_vault_recall`'s doc leg keeps
+        # its own `[:RECALL_DOC_POOL]`; that is where the answer gets cut.
+        return _qmd_normalize_global(rows, allowed)[:pool]
 
     try:
         return _finish(_qmd_post(payload))
@@ -991,7 +1048,16 @@ def _vault_recall(params: dict) -> dict:
         # and comes back as an error, which is the whole point. A genuine
         # zero-hit answer is an empty list and still merges with the grep and
         # graph legs as usual.
-        return _qmd_daemon_search(query, limit, VAULT_SEGMENTS)
+        #
+        # Ask for the pool, not for `limit` (#504). The pool is not decoration: for
+        # the eval query "which autonomy tasks maintain the knowledge graph?", the
+        # live daemon returned 1 of its 5 expected files from a 60-row pool, 3 from
+        # 120, and all 5 from 240 — a document that never enters the reply is missing
+        # at every rank, so no re-ranking downstream could have found it.
+        # `_qmd_daemon_search` slices its folded reply at the same `pool`, so nothing
+        # here re-cuts it; the list gets smaller further down only at the `[:limit]`
+        # that hands the answer over.
+        return _qmd_daemon_search(query, RECALL_DOC_POOL, VAULT_SEGMENTS)
 
     def _do_code_grep():
         if not params.get("grep_code", True):
@@ -1149,9 +1215,20 @@ def _vault_recall(params: dict) -> dict:
                 raw_results.append(gl)
                 existing_files.add(gl.get("file", ""))
         documents = []
-        # When graph_rerank is on (or demote_daily_logs is on, since post-
-        # processing may swap docs) we over-fetch from QMD then re-sort.
-        pool_size = max(limit * 3, limit) if (graph_rerank or demote_daily_logs) else limit
+        # The pre-rank pool is `RECALL_DOC_POOL` wide, not `limit * 3` wide. Both
+        # legs of this function now agree on that number: `_do_search` asks the
+        # daemon for it, and this is where it would quietly be thrown away again —
+        # `limit * 3` is 60 for the eval's 20, and the recorded ranks of the five
+        # files `kg-maintenance-tasks` is scored against are 14, 17, 35, 39 and 175,
+        # so a 3x slice loses one of them on the way to the ranker even after the
+        # daemon handed it back. It stays a floor on `limit` so a caller asking for
+        # more than the pool still gets the list it asked for.
+        #
+        # `pool_size` was conditional on "we re-sort, so over-fetch". That is now
+        # unconditional: `demote_daily_logs` re-sorts the pool by *path shape* alone,
+        # so its slice is not a quality order and narrowing it is a quality decision
+        # made by a path regex.
+        pool_size = max(RECALL_DOC_POOL, limit)
         prerank_pool = raw_results[:pool_size]
         for r in prerank_pool:
             path = r.get("file", "").removeprefix("qmd://")

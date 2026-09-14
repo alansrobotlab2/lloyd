@@ -1,0 +1,307 @@
+"""#504 — the document leg's *pre-ranking* pool must be able to contain the answer.
+
+`kg-maintenance-tasks` ("which autonomy tasks maintain the knowledge graph?")
+expects five autonomy task files and has scored `doc_hit: false` /
+`first_doc_rank: null` in every eval artifact since it was written. The triage that
+confirmed it proved the miss is candidate generation, not ranking: the same daemon
+returns those files at ranks 2, 3, 6, 8 and 20 for a name-shaped query, and returns
+none of them for this query at any depth the client can consume.
+
+The mechanism is the unrestricted search (`_qmd_daemon_search`). It asked qmd for a
+**global** top-k — `collections: []` — whose ANN width qmd derives from `limit`
+(`annVecScan(db, embedding, limit * 3)`). That is not "top-k of each collection", it
+is "top-k of every chunk in the index, whichever collection owns it", and
+`subliminal` re-indexes the whole vault, so it spends most of that k on copies of
+documents the reply already carries. `_qmd_normalize_global` then discards every row
+whose head is not a vault segment. Measured on the pre-fix tree, live daemon, 2026-09-14:
+`_qmd_daemon_search(KG_QUERY, 20, VAULT_SEGMENTS)` — the eval's own ask — answered 36
+rows, 21 distinct paths, **17 of them inside a vault segment**, and none of the five
+task files among those 17.
+
+Naming the segments switches qmd to its per-collection path, where each named
+collection is scanned for its own quota before fusion (`ftsLimit = limit * 10`, and
+an exact vector scan under 20k vectors per collection) — the per-collection fairness
+#1005 asked for, so a 242-file collection stops competing against the whole index for
+slots. It also makes `limit` mean the *pool* rather than the answer, which has to be
+said to the reranker explicitly: qmd caps its own ranking window at
+`RERANK_CANDIDATE_LIMIT = 40`, applied as `fused.slice(0, candidateLimit)` *before*
+it reranks, so a deep ask that leaves the default still only ever ranks 40
+candidates. Recorded against the live daemon, named segments, pool 240, rerank on,
+the same wire text the client sends: the five files enter the reply at ranks 14, 17,
+35, 39 and 175. Zero of the five at a pool of 40.
+
+The rows below are that recorded arm, in reply order, with the task files at their
+observed ranks. What is under test is everything downstream of the daemon's answer —
+the depth of the request, the pool handed to the final ranker, the fold back onto the
+segment view, and the slice in between. Whether the daemon really returns those rows
+for this query is the eval's question, not this file's.
+"""
+import urllib.error
+
+import pytest
+
+from agent_mcp import vault
+
+# The eval query verbatim, from eval/vault_recall_queries.yaml — the string
+# `_vault_recall` is asked to answer as `kg-maintenance-tasks`.
+KG_QUERY = "which autonomy tasks maintain the knowledge graph?"
+
+# The five files that query expects, each at the rank it occupies in the recorded
+# 240-deep named-collection reply (measured 2026-09-14, live daemon, both search legs
+# on, rerank on). `autonomy/67-` at 175 is what makes the pool depth load-bearing:
+# any pool narrower than ~180 loses it again, silently.
+RECORDED_RANKS = {
+    "autonomy/24-data-pipeline.md": 14,
+    "autonomy/48-entity-resolution-sweep.md": 17,
+    "autonomy/74-kg-mention-classifier.md": 35,
+    "autonomy/51-conversation-relation-linking.md": 39,
+    "autonomy/67-semantic-entity-resolution.md": 175,
+}
+EXPECTED_TASKS = list(RECORDED_RANKS)
+RECORDED_REPLY_DEPTH = 240
+
+
+def _snapshot_reply(depth=RECORDED_REPLY_DEPTH):
+    """The recorded reply in order: filler documents with the task files slotted at
+    their measured ranks. One row per path, scores descending, so a fold or a slice
+    that treats a deep row differently from a shallow one is exercised.
+    """
+    by_rank = {rank: path for path, rank in RECORDED_RANKS.items()}
+    filler_heads = ["memory", "knowledge", "backlog", "skills", "architecture",
+                    "projects", "lloyd", "work", "people", "personal"]
+    rows = []
+    for rank in range(1, depth + 1):
+        path = by_rank.get(rank) or (
+            f"{filler_heads[rank % len(filler_heads)]}/filler-{rank:03d}.md")
+        rows.append({
+            "file": f"qmd://{path}",
+            "title": path,
+            "snippet": "kg maintenance",
+            "score": round(max(0.01, 1.0 - rank * 0.004), 4),
+        })
+    return rows
+
+
+@pytest.fixture
+def wire(monkeypatch):
+    """Capture every payload the client sends; answer with the recorded reply."""
+    seen = []
+
+    def fake_post(payload):
+        seen.append(payload)
+        return _snapshot_reply()
+
+    monkeypatch.setattr(vault, "_qmd_post", fake_post)
+    return seen
+
+
+def _paths_seen_by_the_demoter(monkeypatch):
+    """Record the pool in the config production actually runs.
+
+    `RECALL_GRAPH_RERANK` is False, so `_graph_rerank` is not the last function to
+    see every candidate there: with `demote_daily_logs` on (the default) that is the
+    `_DAILY_LOG_RE.search` inside the demote loop, which runs once per document in
+    the pool before the sort and the `[:limit]` slice. Spying its pattern is the
+    only seam onto the pre-ranking pool in that config.
+    """
+    seen: list = []
+
+    class Spy:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def search(self, text, *a, **kw):
+            seen.append(text or "")
+            return self._inner.search(text, *a, **kw)
+
+    monkeypatch.setattr(vault, "_DAILY_LOG_RE", Spy(vault._DAILY_LOG_RE))
+    return seen
+
+
+# ── The request: name the segments, ask for a pool, widen the rerank window ───
+
+def test_unrestricted_search_names_the_segments_it_is_willing_to_keep(wire):
+    """The request may not ask for rows the client is going to discard.
+
+    The old shape sent `collections: []` — one global scan across all fifteen
+    collections, including `sessions` (629 files), `autonomy-runs` (4,339) and
+    `skill-cards` (189), every one of which `_qmd_normalize_global` throws away.
+    Those rows are not merely waste: they occupy slots in a top-k whose width is
+    derived from `limit`, which is how the documents of a 242-file collection get
+    pushed out of the reply while its *neighbours* (`autonomy/39-`) stay in.
+    """
+    vault._qmd_daemon_search(KG_QUERY, 20, list(vault.VAULT_SEGMENTS))
+    assert wire[0]["collections"] == list(vault.VAULT_SEGMENTS), (
+        "an unrestricted search must name the segments it filters to, so qmd scans "
+        "each one for its own quota instead of spending a global top-k on collections "
+        "the client discards"
+    )
+
+
+def test_unrestricted_search_over_asks_and_widens_the_rerank_window_with_it(wire):
+    """`limit` is the size of the answer; the rerank pool is a separate number.
+
+    Both halves had to move together. The ask has to be deeper than the answer (at a
+    40-row pool none of the five arrive; at 240 all five do, ranks 14-175), and qmd's
+    `candidateLimit` has to be raised with it — `fused.slice(0, candidateLimit)` runs
+    before the rerank, at a default of 40. The recorded arm that asked deep and left
+    the default at 40 returned 0 of the 5: a deep reply whose extra depth was never
+    ranked is the same miss with a bigger payload.
+    """
+    vault._qmd_daemon_search(KG_QUERY, 20, list(vault.VAULT_SEGMENTS))
+    asked = wire[0]["limit"]
+    assert asked >= 20 * 3, (
+        f"asked for {asked} rows to answer a 20-document question; the recorded ranks "
+        "put the five expected files between 14 and 175")
+    assert wire[0].get("candidateLimit") == asked, (
+        "the rerank window has to be as wide as the ask, or qmd re-ranks only its "
+        f"default 40 candidates and the other {asked - 40} rows are never ranked")
+
+
+def test_the_pool_is_bounded_so_a_small_ask_stays_cheap(wire):
+    """The pool is a ceiling, not a multiplier that runs away.
+
+    `_lookup_entity_facts` calls this same function six times with `limit=2` on a
+    recall that opts into the graph lookup, and `vault_search` calls it with
+    `max_results=10`. Neither is asking for a 240-row pool. The width is bounded, and
+    a small caller still gets a pool a few times the size of its answer.
+    """
+    vault._qmd_daemon_search("entity resolution", 2, list(vault.VAULT_SEGMENTS))
+    small = wire[-1]["limit"]
+    assert 4 <= small <= vault.QMD_POOL_MAX, small
+    vault._qmd_daemon_search("some vault question", vault.QMD_POOL_MAX,
+                             list(vault.VAULT_SEGMENTS))
+    assert wire[-1]["limit"] == vault.QMD_POOL_MAX, (
+        "the deep ask is a fixed pool: a caller already asking for the whole pool must "
+        "not have the factor applied on top of it")
+
+
+def test_scope_restricted_search_keeps_its_own_shape(wire):
+    """Unchanged: a deliberate scope names its subset and its own depth.
+
+    A caller that scoped to `backlog` is asking for exactly the hits a wide scan might
+    drop, and it gets `[:limit]` back with no fold — so the pool belongs to the
+    unrestricted path only. `prefetch` runs nine collections (including `sessions`)
+    through this function on the latency-critical turn path and must not inherit it.
+    """
+    vault._qmd_daemon_search("guardian rollback", 10, ["backlog", "architecture"])
+    assert wire[0]["collections"] == ["backlog", "architecture"]
+    assert wire[0]["limit"] == 10
+    assert wire[0].get("candidateLimit", 10) == 10
+
+
+def test_the_recall_doc_leg_asks_for_the_whole_pool(wire):
+    """The leg that feeds the final ranker is the one that must ask deep.
+
+    `QMD_POOL_FACTOR` on `limit` alone would give this query a 60-row pool, which the
+    recording shows holding three of the five. So `_vault_recall` asks for
+    `RECALL_DOC_POOL` documents and slices its pre-rank pool to the same number: the
+    ask, the fold and the slice are one width, stated once.
+    """
+    vault._vault_recall({"query": KG_QUERY, "limit": 20, "grep_code": False,
+                         "include_facts": False, "expand_graph": False})
+    assert wire[0]["limit"] >= vault.RECALL_DOC_POOL, (
+        f"the doc leg asked for {wire[0]['limit']} rows but the pre-rank pool is "
+        f"{vault.RECALL_DOC_POOL}: whatever is between the two is unreachable")
+
+
+# ── The pool: what the final ranker is actually handed ────────────────────────
+
+def test_the_five_task_files_reach_the_pre_rank_candidate_pool(wire, monkeypatch):
+    """Clause 5 of #504, asserted one stage before the ranking that hides it.
+
+    The returned top-10 is the wrong place to assert: `_graph_rerank` can hoist a
+    document into view or drop one out, so a top-10 assertion passes and fails for
+    reasons that have nothing to do with candidate generation. This asserts on the list
+    handed *to* the ranker. Narrow the pool afterwards — revert to a global scan, drop
+    the depth, trim the folded reply back to `limit` or to `limit * 3`, or leave
+    `candidateLimit` at qmd's default 40 — and `autonomy/67-` at recorded rank 175
+    falls out and this fails, instead of the eval quietly reporting
+    `first_doc_rank: null` for a fortnight.
+    """
+    handed = {}
+
+    def spy_rank(documents, seed_entities, weighted_neighbors, alpha=0.5):
+        handed["paths"] = [d.get("path") or "" for d in documents]
+        return documents
+
+    monkeypatch.setattr(vault, "_graph_rerank", spy_rank)
+    out = vault._vault_recall({"query": KG_QUERY, "limit": 20, "grep_code": False,
+                               "include_facts": False, "expand_graph": False,
+                               "graph_rerank": True})
+
+    pool = handed.get("paths") or []
+    missing = [p for p in EXPECTED_TASKS if p not in pool]
+    assert not missing, (
+        f"{len(missing)} of the five KG-maintenance task files never reached the "
+        f"pre-ranking candidate pool ({len(pool)} rows): {missing}"
+    )
+    assert len(pool) >= vault.RECALL_DOC_POOL // 2, (
+        f"pre-rank pool is {len(pool)} rows for a 20-document answer; a pool that thin "
+        "is what made this query unanswerable in the first place")
+    assert out["documents"], "the ranker still has to return an answer"
+
+
+def test_the_production_config_hands_the_same_pool_to_its_final_slice(
+        wire, monkeypatch):
+    """The same property in the config the eval runs, where nothing is called
+    `_graph_rerank`.
+
+    With `RECALL_GRAPH_RERANK` False the final ranking is demote -> sort ->
+    `[:limit]`, so the candidate set is whatever reaches the demote loop. It must be
+    the same width as the rerank arm's, or the fix would only exist in a config
+    nobody runs.
+    """
+    seen = _paths_seen_by_the_demoter(monkeypatch)
+    out = vault._vault_recall({"query": KG_QUERY, "limit": 20, "grep_code": False,
+                               "include_facts": False, "expand_graph": False})
+    assert vault.RECALL_GRAPH_RERANK is False, (
+        "RECALL_GRAPH_RERANK moved: this arm and the one above are now the same test")
+    missing = [p for p in EXPECTED_TASKS if p not in seen]
+    assert not missing, (
+        f"{len(missing)} of the five expected files never reached the pre-slice pool "
+        f"({len(seen)} rows) in the default config: {missing}"
+    )
+    assert len(out["documents"]) <= 20, "the answer is still `limit` documents"
+
+
+def test_the_fold_still_drops_rows_outside_the_segment_view(monkeypatch):
+    """Naming collections is not the same as trusting the reply.
+
+    The discard rule stays, and stays exercised: `sessions/` and `skill-cards/` rows
+    turn up whenever the daemon fans out for another caller's reason, and the point of
+    this change is that the vault view never contains them. The discarded
+    `skill-cards/autonomy-data-pipeline.md` card is the stand-in that used to be the
+    closest thing this query could return for `autonomy/24-data-pipeline.md`.
+    """
+    def fake_post(payload):
+        return [
+            {"file": "qmd://sessions/2026-09-08/leak.md", "title": "s",
+             "snippet": "", "score": 2.0},
+            {"file": "qmd://skill-cards/autonomy-data-pipeline.md", "title": "c",
+             "snippet": "", "score": 1.5},
+            {"file": "qmd://autonomy/24-data-pipeline.md", "title": "t",
+             "snippet": "", "score": 1.0},
+        ]
+
+    monkeypatch.setattr(vault, "_qmd_post", fake_post)
+    out = vault._qmd_daemon_search(KG_QUERY, 20, list(vault.VAULT_SEGMENTS))
+    assert [r["file"] for r in out] == ["qmd://autonomy/24-data-pipeline.md"]
+
+
+def test_a_daemon_that_does_not_answer_is_still_not_a_zero_hit():
+    """The outage contract survives a wider payload.
+
+    A wider request is more surface, so this pins the one property that must hold for
+    any payload change: no answer is an exception, never an empty list.
+    """
+    def boom(payload):
+        raise urllib.error.URLError("connection refused")
+
+    original = vault._qmd_post
+    vault._qmd_post = boom
+    try:
+        with pytest.raises(vault.QmdUnavailable):
+            vault._qmd_daemon_search(KG_QUERY, 20, list(vault.VAULT_SEGMENTS))
+    finally:
+        vault._qmd_post = original
