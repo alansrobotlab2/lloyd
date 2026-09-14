@@ -1075,6 +1075,11 @@ workers:
       # answer. Stall rescue, budget and context pressure are deterministic
       # anchors now; the gate is the real check. Stays on for chat, where a
       # human reads it and its value was measured there.
+      # The abandoned-round reaper's grace follows this key (2026-09-14): 20
+      # minutes while an observer could still send #278's rescue, none while
+      # it is off — a round the turn left open is then closed the moment the
+      # turn ends, unless its gate or landing is still running. Turning this
+      # back on brings the grace back with it.
       inner_voice: false
       # The hard bound on the board. A self-filed draft that nothing —
       # clustering, group triage, a human — picked up in

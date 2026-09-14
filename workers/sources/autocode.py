@@ -517,8 +517,11 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
     from scripts.automod import backlog as B, state as S
     from workers.sources import DECLINED
 
+    # Both board walks off the event loop: each reads every item file and the
+    # ledger several times (~2 s for `select_confirmed` alone), and this loop
+    # serves every HTTP request and streams every chat turn.
     if _housekeeping_due(queue, src_cfg):
-        _housekeeping(src_cfg)
+        await asyncio.to_thread(_housekeeping, src_cfg)
         queue.wm_set(NAME, HOUSEKEEPING_KEY, datetime.now(timezone.utc).isoformat())
     free, why = _loop_is_free()
     if not free:
@@ -529,7 +532,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
         _last_decline["why"] = why
         return DECLINED
     _last_decline["why"] = ""
-    if B.select_confirmed(S.LEDGER_PATH) is None:
+    if await asyncio.to_thread(B.select_confirmed, S.LEDGER_PATH) is None:
         return None
     new_id = queue.enqueue(
         source=NAME, kind="round",
