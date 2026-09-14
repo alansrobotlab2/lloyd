@@ -715,6 +715,30 @@ class WorkerPool:
                 current_effect_scope.reset(effect_token)
                 current_run_sessions.reset(sessions_token)
                 self._in_flight.pop(item.id, None)
+                await self._repoll_on_complete(source)
+
+    async def _repoll_on_complete(self, source) -> None:
+        """Make a source due at the next scheduler pass once its run ends.
+
+        Nothing woke a source when its own job finished: the next look was
+        whenever its watermark said, up to `interval_seconds` later. For
+        autocode that is the gap between one round ending and the next being
+        queued — a `skipped` run that took milliseconds, or a round shorter
+        than the interval, left a free loop idle for most of 15 minutes. A
+        source opts in with `REPOLL_ON_COMPLETE = True`; the watermark is
+        back-dated to the epoch, so the scheduler (a 60 s pass) asks it again.
+        Failing to write it costs the early look, never the run's record.
+        """
+        if not getattr(source, "REPOLL_ON_COMPLETE", False):
+            return
+        name = getattr(source, "NAME", None)
+        if not name:
+            return
+        try:
+            await asyncio.to_thread(self.queue.wm_set, name, "last_enqueue_check",
+                                    datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not re-arm %s after its run: %s", name, e)
 
 
 # ── Module-level singleton ────────────────────────────────────────────────

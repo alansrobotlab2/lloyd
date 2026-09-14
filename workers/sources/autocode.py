@@ -53,6 +53,10 @@ LONG_LIVED = True
 # is the rarest and most valuable job in this pool; it goes first.
 DEFAULT_PRIORITY = 40
 DEDUP_KEY = "autocode:round"
+# The pool back-dates this source's watermark when one of its runs ends
+# (`WorkerPool._repoll_on_complete`), so the next round is asked for at the
+# next scheduler pass rather than up to `interval_seconds` later.
+REPOLL_ON_COMPLETE = True
 
 # Blockers, not findings. Over the loop's first four days implement rounds
 # filed 102 items against 7 closed, hit the then-cap of 3 in 21 of 43 rounds,

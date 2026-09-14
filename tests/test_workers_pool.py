@@ -186,6 +186,48 @@ async def test_a_run_that_overruns_its_cap_is_stopped_and_recorded(q, monkeypatc
     assert runs[0]["task_id"] == "7", "a timed-out run must still name its task"
 
 
+@pytest.mark.parametrize("opted_in", [True, False])
+async def test_a_source_that_opts_in_is_due_again_when_its_run_ends(q, monkeypatch, opted_in):
+    """Nothing woke a source when its own job finished, so autocode's next
+    round was queued up to `interval_seconds` after the last one ended — a
+    run `skipped` in milliseconds idled a free loop for most of 15 minutes."""
+    from datetime import datetime, timezone
+    import workers.sources as sources
+
+    async def execute(item):
+        return {"status": "skipped", "summary": "loop busy"}
+
+    src = SimpleNamespace(NAME="s", execute=execute)
+    if opted_in:
+        src.REPOLL_ON_COMPLETE = True
+    now = datetime.now(timezone.utc).isoformat()
+    q.wm_set("s", "last_enqueue_check", now)
+    q.enqueue("s", "k")
+    monkeypatch.setattr(sources, "SOURCE_REGISTRY", {"s": src}, raising=False)
+    monkeypatch.setattr(sources, "get_sources_config",
+                        lambda: {"s": {"max_duration_seconds": 30}}, raising=False)
+    pool = WorkerPool(q, slots=1, poll_idle_seconds=0.01)
+    await pool.start()
+    try:
+        for _ in range(200):
+            if q.get(1).state == "completed" and not pool.status()["in_flight_count"]:
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.1)
+    finally:
+        await pool.stop()
+    stamp = q.wm_get("s", "last_enqueue_check")
+    if opted_in:
+        assert datetime.fromisoformat(stamp).year == 1970, "not re-armed for the next pass"
+    else:
+        assert stamp == now, "a source that did not opt in had its clock moved"
+
+
+def test_the_implement_source_opts_in_to_the_early_repoll():
+    from workers.sources import autocode
+    assert autocode.REPOLL_ON_COMPLETE is True
+
+
 async def test_an_unregistered_source_is_poisoned_rather_than_retried(q, monkeypatch):
     import workers.sources as sources
     monkeypatch.setattr(sources, "SOURCE_REGISTRY", {}, raising=False)
