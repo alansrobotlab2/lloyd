@@ -115,6 +115,153 @@ def test_repetition_needs_more_than_one_refinement():
     print("test_repetition_needs_more_than_one_refinement: OK")
 
 
+# ---------------------------------------------------------------------------
+# #523 — scan roots, filenames and filter operands cannot carry a near match
+# ---------------------------------------------------------------------------
+#
+# The surviving false-fire channel measured on 2026-09-08: 75 firings in 37
+# sessions whose NAMED terms were `_pipeline` 25, `trajectories` 9,
+# `node_modules` 2 — the directories the primary was looking in, inside a
+# message asserting it kept chasing one target. Restricting to sessions begun
+# after the round-id fix (`5531f21`) left 9 firings in 3 sessions and not one
+# naming a round id, so this channel, not that one, is what remains live.
+#
+# `SCAN_ROOT` is one path in three shapes so the calls really do share it;
+# `_pipeline`, `trajectories` and `node_modules` are the tokens the histogram
+# named, and `node_modules` arrives as a filter operand because that is the
+# shape it appeared in (`--exclude-dir`, `grep -v`).
+
+SCAN_ROOT = "/home/alansrobotlab/lloyd/_pipeline/vault-derived/trajectories"
+
+
+def test_repetition_ignores_three_greps_sharing_only_a_scan_root():
+    """Clause 1: three patterns, one root, no shared hunt — and no fire.
+
+    Every token the three calls share is a directory of the root they were
+    pointed at. Before #523 this fired on `('_pipeline', 'trajectories')`,
+    because two shared identifiers is all a near match used to need.
+    """
+    cmds = [
+        f"grep -rn iv_cancel_requested {SCAN_ROOT}",
+        f"grep -rn build_subliminal_context {SCAN_ROOT}",
+        f"grep -rn facts_idx {SCAN_ROOT}",
+    ]
+    sigs = _sigs(cmds)
+    # Precondition: the calls DO share the scan root as identifiers — if the
+    # tokenizer stopped seeing them this test would pass for the wrong reason.
+    assert {"_pipeline", "trajectories"} <= (sigs[0].idents & sigs[2].idents)
+    assert all(s.path_idents for s in sigs), "root must be classified as a path"
+    assert guards.repetition_verdict(sigs) is None
+    print("test_repetition_ignores_three_greps_sharing_only_a_scan_root: OK")
+
+
+def test_repetition_never_names_a_path_operand_as_the_target():
+    """Clause 2: a firing on grep/rg/find names the hunt, never the location.
+
+    Same three shapes over the same root, but this time one symbol is really
+    being chased — so the guard must fire, and must name only that symbol.
+    Asserted over every prefix, so the claim covers each verdict the sequence
+    can produce and not just the last one.
+    """
+    cmds = [
+        f"grep -rn iv_inject_queue {SCAN_ROOT} --exclude-dir=node_modules",
+        f"grep -rn iv_inject_queue {SCAN_ROOT} -l | head -5",
+        f"find {SCAN_ROOT} -name '*.py' | xargs grep -l iv_inject_queue",
+    ]
+    sigs = _sigs(cmds)
+    fired = 0
+    for i in range(2, len(sigs) + 1):
+        verdict = guards.repetition_verdict(sigs[:i])
+        if verdict is None:
+            continue
+        fired += 1
+        for location in ("_pipeline", "trajectories", "node_modules"):
+            assert location not in verdict.shared_terms, verdict.shared_terms
+    assert fired, f"the guard stopped firing on a real hunt: {cmds}"
+    final = guards.repetition_verdict(sigs)
+    assert final is not None and "iv_inject_queue" in final.shared_terms, final
+    print("test_repetition_never_names_a_path_operand_as_the_target: OK")
+
+
+def test_repetition_requires_a_carrier_that_is_not_a_path():
+    """Clause 3: with `ambient=frozenset()` the carrier rule is load-bearing.
+
+    Passing the empty ambient set means the ambient pass cannot be what makes
+    the first three calls silent — `ubiquitous_identifiers` would have called
+    the shared root turn-ambient on its own, and this pins that it does not
+    have to. The last three commands are the same calls with one real symbol
+    added to the hunt, and they must fire.
+    """
+    path_only = [
+        f"grep -rn alpha_marker {SCAN_ROOT}",
+        f"grep -rn beta_marker {SCAN_ROOT} --include=*.log",
+        "grep -rn gamma_marker /home/alansrobotlab/lloyd/_pipeline/vault-derived/trajectories | head -5",
+    ]
+    assert all(s.path_idents for s in _sigs(path_only))
+    assert guards.repetition_verdict(_sigs(path_only), ambient=frozenset()) is None
+
+    with_symbol = [
+        f"grep -rn iv_inject_queue {SCAN_ROOT}",
+        f'grep -rn "iv_inject_queue" {SCAN_ROOT} --include=*.py',
+        f"grep -rn iv_inject_queue {SCAN_ROOT} | head -40",
+    ]
+    verdict = guards.repetition_verdict(_sigs(with_symbol), ambient=frozenset())
+    assert verdict is not None, "a real hunt sharing a root must still fire"
+    assert "iv_inject_queue" in verdict.shared_terms
+    assert not {"_pipeline", "trajectories"} & set(verdict.shared_terms)
+    print("test_repetition_requires_a_carrier_that_is_not_a_path: OK")
+
+
+def test_repetition_ignores_filter_operands():
+    """Clause 4: `--exclude-dir=` and `grep -v` operands are boilerplate.
+
+    Three greps differing only in the pattern and the length of the exclusion
+    list share `__pycache__` and `node_modules` and nothing else. Both render
+    forms are driven — `--exclude-dir=X` and a piped `grep -v X` — because the
+    histogram showed the token arriving both ways.
+    """
+    dash = [
+        "grep -rn alpha_marker app/ --exclude-dir=__pycache__ --exclude-dir=node_modules",
+        "grep -rn beta_marker app/ --exclude-dir=__pycache__ --exclude-dir=node_modules --exclude-dir=.git",
+        "grep -rn gamma_marker app/ --exclude-dir=__pycache__ --exclude-dir=node_modules",
+    ]
+    pipe = [
+        "grep -rn alpha_marker app/ | grep -v node_modules | grep -v __pycache__",
+        "grep -rn beta_marker app/ | grep -v node_modules | grep -v __pycache__ | head",
+        "grep -rn gamma_marker app/ | grep -v node_modules | grep -v __pycache__ | wc -l",
+    ]
+    for cmds in (dash, pipe):
+        sigs = _sigs(cmds)
+        shared = set(sigs[0].idents) & set(sigs[2].idents)
+        assert {"__pycache__", "node_modules"} <= shared, shared
+        assert guards.repetition_verdict(sigs) is None, cmds
+    print("test_repetition_ignores_filter_operands: OK")
+
+
+def test_repetition_still_fires_on_one_symbol_over_different_files():
+    """Clause 5 — the purpose clause, kept alive by the same edit as 1-4.
+
+    One symbol reformulated across DIFFERENT targets (the calibration turn
+    20260905_011748_iv84e4 shape) still fires and still names the symbol; and
+    a byte-identical Bash repeat still fires as `exact`, which is the path a
+    path-blind carrier rule could otherwise have broken.
+    """
+    reformulations = [
+        "grep -rn iv_inject_queue app/inner_voice",
+        "grep -rn iv_inject_queue app/routers --include=*.py | head -40",
+        'grep -rn "iv_inject_queue" workers/; echo EXIT=$?',
+    ]
+    verdict = guards.repetition_verdict(_sigs(reformulations))
+    assert verdict is not None, "the guard stopped catching a reformulated hunt"
+    assert "iv_inject_queue" in verdict.shared_terms, verdict.shared_terms
+
+    verbatim = _sigs([f"grep -rn iv_inject_queue {SCAN_ROOT}"] * 3)
+    exact = guards.repetition_verdict(verbatim)
+    assert exact is not None and exact.exact, "verbatim Bash repeat not caught"
+    assert "the same call" in guards.repetition_inject_content(exact)
+    print("test_repetition_still_fires_on_one_symbol_over_different_files: OK")
+
+
 def test_repetition_catches_verbatim_repeats_of_any_tool():
     """Exact re-runs need no similarity heuristic — three identical Reads."""
     sigs = [
@@ -125,6 +272,72 @@ def test_repetition_catches_verbatim_repeats_of_any_tool():
     assert verdict is not None and verdict.exact
     assert "the same call" in guards.repetition_inject_content(verdict)
     print("test_repetition_catches_verbatim_repeats_of_any_tool: OK")
+
+
+def test_operand_classification_survives_two_shell_shapes():
+    """The path rule reads operands by position, so it is only as good as its
+    shell split — and each of these two shapes silently destroyed a real fire
+    while every other test in this file stayed green.
+
+    (a) A separator glued to the path with no space (`…py; echo`), which is how
+        generated shell usually reads. Taken as one token, the trailing `;`
+        defeats the file-suffix test, the whole path is marked as a location,
+        and the file's own stem goes with it.
+    (b) A flag whose value is inline (`--include='*'`) ahead of the pattern. If
+        the split breaks that flag in two, the operand counter is off by one and
+        the hunted symbol is read as the scan target instead.
+    """
+    glued = _sigs([
+        "head -20 app/routers/_messages_subliminal.py; echo ===",
+        "sed -n '20,120p' app/routers/_messages_subliminal.py; echo ===",
+        "grep -n state app/routers/_messages_subliminal.py | head",
+    ])
+    v = guards.repetition_verdict(glued)
+    assert v is not None, "three probes of one FILE must stay a repeat"
+    assert "_messages_subliminal" in v.shared_terms, v.shared_terms
+
+    inline_flags = _sigs([
+        "grep -rn --include='*' \"iv_inject_queue\" app/inner_voice",
+        "grep -rn --exclude='*.pyc' \"iv_inject_queue\" app/routers",
+        "grep -rn --include='*.py' \"iv_inject_queue\" workers/ | head",
+    ])
+    v2 = guards.repetition_verdict(inline_flags)
+    assert v2 is not None, "--include='*' must not shift the pattern into path position"
+    assert "iv_inject_queue" in v2.shared_terms, v2.shared_terms
+    print("test_operand_classification_survives_two_shell_shapes: OK")
+
+
+def test_verbatim_bash_repeat_over_a_scan_root_still_fires_exact():
+    """The path rule narrows the NEAR signal; re-running one command word for
+    word is the other signal and stays untouched. Same command three times,
+    aimed at the scan root #523 otherwise refuses to name."""
+    cmd = f"grep -rn iv_inject_queue {SCAN_ROOT} --include=*.py"
+    verdict = guards.repetition_verdict(_sigs([cmd] * 3))
+    assert verdict is not None and verdict.exact
+    assert "_pipeline" not in verdict.shared_terms, verdict.shared_terms
+    assert "iv_inject_queue" in verdict.shared_terms, verdict.shared_terms
+    assert "the same call" in guards.repetition_inject_content(verdict)
+    print("test_verbatim_bash_repeat_over_a_scan_root_still_fires_exact: OK")
+
+
+def test_find_name_glob_is_the_hunt_not_the_tree():
+    """`find` marks every bare operand as a path, so its pattern has to be
+    recovered from behind the flag: three of these are one pattern chased
+    three times, and the directory they share must not be what the guard
+    reports. `grep -e` takes the same shape for the same reason."""
+    sigs = _sigs([
+        "find /home/alansrobotlab/lloyd/_pipeline -name '*iv_inject_queue*' | head",
+        "find /home/alansrobotlab/lloyd/_pipeline -name '*iv_inject_queue*' -type f",
+        "find /home/alansrobotlab/lloyd/_pipeline -iname '*iv_inject_queue*' | wc -l",
+    ])
+    verdict = guards.repetition_verdict(sigs)
+    assert verdict is not None, "one -name glob repeated three times is a loop"
+    assert "iv_inject_queue" in verdict.shared_terms, verdict.shared_terms
+    assert not (set(verdict.shared_terms) & {"_pipeline", "vault", "derived"}), (
+        f"-name globs are the hunt, so no scan-root token may be named: "
+        f"{verdict.shared_terms}"
+    )
+    print("test_find_name_glob_is_the_hunt_not_the_tree: OK")
 
 
 def test_repetition_ignores_different_tools():

@@ -560,6 +560,190 @@ REPETITION_CONTAINMENT = 0.5
 REPETITION_THRESHOLD = 2
 
 
+# ---------------------------------------------------------------------------
+# Path and filter operands — where a call looked, not what it hunted (#523)
+# ---------------------------------------------------------------------------
+#
+# `_identifiers` keeps every `_`-bearing token, and a scan root is full of
+# them: `_pipeline`, `trajectories`, `node_modules`, `__pycache__`, plus the
+# file a call is pointed at (`test_trajectory_extraction`). So the operands
+# alone cleared `min_overlap`, and two probes aimed at the same directory read
+# as the same hunt. Measured over the 2026-09-07/08 session digests: 75
+# firings, and the terms the message named were `_pipeline` 25, `trajectories`
+# 9, `agent_mcp` 7, `read_text` 4, `test_trajectory_extraction` 4 — where the
+# primary looked, inside a sentence asserting the primary keeps chasing one
+# target. `_EXACT_ONLY_TOOLS` narrows this for path-addressed *tools*, but the
+# probes that fire are `Bash` `grep -r` / `find` calls, whose subject is a path
+# and which are not in that set.
+#
+# The fix is positional, not lexical. A deny list of "boring directory names"
+# cannot work because the same token is a hunt in one call and a location in
+# another — `kg_store` is both the table being hunted and `app/kg_store.py`,
+# and `_is_distinctive` already admits both. So: classify each operand by the
+# position it occupies, and let a token that BOTH calls use only as a place to
+# look (or a thing to skip) carry nothing. A token either call names outside a
+# path position stays eligible, which is what keeps a real hunt alive when the
+# hunter also happens to `cat` the module it is chasing.
+_SEARCH_COMMANDS = frozenset({"grep", "egrep", "fgrep", "rg", "ag", "find", "fd"})
+_GREP_LIKE_COMMANDS = frozenset({"grep", "egrep", "fgrep", "rg", "ag"})
+# Flags whose operand says what to skip or scope, not what to find. `--include`
+# is here too: its operand is a filename glob, and a glob is not a hunt.
+_FILTER_VALUE_FLAGS = frozenset({
+    "--exclude-dir", "--exclude", "--exclude-from", "--ignore", "--ignore-file",
+    "--include", "--include-dir", "-g",
+})
+# Flags whose operand is the HUNT, so it must stay eligible to carry a match
+# even though it arrives after a flag rather than as the leading operand:
+# `find . -name '*iv_inject*'`, `grep -e PATTERN`. Skipping classification for
+# these leaves the operand untouched, which is the direction that keeps a real
+# loop alive.
+# `-f` is deliberately absent: `grep -f patterns.txt` names a FILE, so its
+# operand is a path, which is the default classification here.
+_PATTERN_VALUE_FLAGS = frozenset({
+    "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
+    "-lname", "-ilname", "-regex", "-iregex", "-e",
+})
+# `grep -v`, `-vn`, `-vc`: an inverted match, so its operand is boilerplate.
+_V_FLAG_RE = re.compile(r"^-[A-Za-z]*v[A-Za-z]*$")
+# Quote-aware-ish shell split, built for the classifier below and used by it
+# alone. Two requirements the obvious patterns each miss:
+#
+# * a bare word must STOP at `|;&`. Generated shell glues the separator to the
+#   path with no space (`head -20 app/routers/_messages_subliminal.py; echo …`),
+#   and a `\S+` fallback returns the path plus its `;` as one token — which
+#   defeats `_dir_part`'s suffix test, marking the whole path as a location and
+#   losing the file's own stem. That stem is the sole carrier of the
+#   calibration turn's second fire (message 76).
+# * a bare word must ALLOW quotes, since `--include='*'` and `grep -e "sym"`
+#   mix quoting into one word. A bare-word class that excludes quote characters
+#   splits `--include='*'` into two tokens, the operand counter is then off by
+#   one, and the real pattern reads as the scan target instead.
+#
+# So: quoted run | metacharacter run | run of anything that is not whitespace or
+# a separator. Not a shell parser; it only has to get operand ORDER right.
+_SHELL_TOKEN_RE = re.compile(r"'[^']*'|\"[^\"]*\"|[|;&]+|[^|;&\s]+")
+
+
+_FILE_SUFFIX_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9]*$")
+
+
+def _dir_part(token: str) -> str:
+    """The directory components of a path operand, minus any file it names.
+
+    A scan root and a specific file are different claims about a call. Three
+    probes of one tree say nothing about the same hunt — that is #523 — while
+    three probes of one FILE are the same target three times, and the guard's
+    calibration case depends on reading it that way: turn
+    20260905_011748_iv84e4's second cluster re-opens
+    `app/routers/_messages_subliminal.py` three ways, and its shared token is
+    that file's stem (`test_iv_loop_guards.py
+    ::test_repetition_fires_on_the_real_loop` pins the fire, and
+    `test_real_turn_replayed_through_the_pretool_hook` pins that the inject
+    names it). So a file operand marks its directories and leaves its own
+    stem eligible; a directory operand marks everything it has.
+    """
+    bare = token.rstrip("/")
+    if bare in ("", ".", ".."):
+        return token
+    if _FILE_SUFFIX_RE.search(bare.rsplit("/", 1)[-1]):
+        return bare.rsplit("/", 1)[0] if "/" in bare else ""
+    return bare
+
+
+def _path_operand_text(command: str) -> str:
+    """The operands of a shell command that say WHERE to look or WHAT to skip.
+
+    Text, not a token set: `_identifiers()` runs over the result, so the same
+    lowercasing and length rules apply as everywhere else in this module.
+
+    Per pipeline stage, the command word decides what a bare operand means:
+
+    * `grep`/`rg`/`ag` family — the first operand is the PATTERN (the hunt) and
+      every later one is a file or directory to search.
+    * `find`/`fd` — a bare operand is a path. Their patterns arrive after
+      `-name`/`-path`/`-regex`, which are in `_PATTERN_VALUE_FLAGS` and so keep
+      the operand eligible: `find . -name '*iv_inject*'` three times over is one
+      pattern chased three times, not a directory being looked at.
+    * anything else (`cat`, `sed`, `wc`, `pytest`, …) — an operand is a path
+      when it looks like one (carries a `/`, or is a `~` hop). A bare
+      `prompt_builder.py` handed to pyflakes names a module the call is about,
+      and stays eligible.
+    * a filter flag's operand (`--exclude-dir=X`, `grep -v X`, `-g GLOB`) is
+      boilerplate in every stage.
+
+    A token enters the returned text only when a position decides it; anything
+    else is left out and stays eligible to carry a match. So an unrecognised
+    shape degrades to this guard's pre-#523 behaviour for that call — it can
+    cost the guard a carrier, and never grant one it did not have.
+    """
+    try:
+        tokens = _SHELL_TOKEN_RE.findall(command or "")
+    except Exception:  # noqa: BLE001 — a command that will not split is not a match
+        return ""
+    out: list[str] = []
+    stage = ""           # command word of the current pipeline stage
+    positional = 0       # non-flag operands seen in this stage
+    filtering = False    # the next operand filters, per `--exclude-dir`/`grep -v`
+    hunting = False      # the next operand is a pattern, per `-name`/`-e`
+    for tok in tokens:
+        if not tok or tok[0] in "|;&()" or tok in ("{", "}"):
+            stage = ""
+            positional = 0
+            filtering = False
+            hunting = False
+            continue
+        bare = tok.strip("'\"")
+        if not stage:
+            if tok.startswith("-"):
+                continue
+            stage = bare.lower().rsplit("/", 1)[-1].lstrip("$(").strip()
+            continue
+        # A flag written `--exclude-dir=X` carries its operand INSIDE the token,
+        # so no further token belongs to it. Getting that wrong is how
+        # `grep -rn --include='*' "sym" dir` came to mark `sym` — the hunted
+        # term, and the sole shared identifier in
+        # `test_iv_v52_review.py::test_repetition_catches_a_single_distinctive_symbol`
+        # — as a filter operand, defanging the guard on exactly the case it
+        # exists for.
+        flag = bare.lower().split("=", 1)[0]
+        inline = "=" in bare
+        if flag in _FILTER_VALUE_FLAGS:
+            if inline:
+                out.append(bare.split("=", 1)[1])   # mark X where it stands
+            else:
+                filtering = True                    # mark the token that follows
+            continue
+        if tok.startswith("-"):
+            # `find . -name GLOB` / `grep -e PATTERN`: the operand after such a
+            # flag is the hunt, so it must not be read as a place to look. With
+            # the value inline (`-name='*.py'`) there is no operand after it, and
+            # claiming one would shift the count onto the next real path.
+            if not inline and flag in _PATTERN_VALUE_FLAGS:
+                hunting = True
+            if stage in _GREP_LIKE_COMMANDS and _V_FLAG_RE.match(tok):
+                filtering = True
+            continue
+        if hunting:
+            positional += 1
+            hunting = False
+            continue
+        positional += 1
+        if filtering:
+            # An excluded thing is not a hunted thing: mark the whole operand,
+            # file-shaped or not.
+            out.append(bare)
+            filtering = False
+            continue
+        if (
+            stage in ("find", "fd")
+            or (stage in _SEARCH_COMMANDS and positional > 1)
+            or "/" in bare
+            or bare.startswith("~")
+        ):
+            out.append(_dir_part(bare))
+    return " ".join(out)
+
+
 @dataclass(frozen=True)
 class ToolCallSignature:
     """What a tool call was 'about', for repetition comparison."""
@@ -576,6 +760,13 @@ class ToolCallSignature:
     # others — so it survived in exactly the minority that used the other
     # idiom. That is the second false fire of round SM_20260908_165950.
     all_idents: frozenset[str] = frozenset()
+    # Identifiers that sit in a path or filter-operand POSITION (`#523`, see
+    # `_path_operand_text`). A subset of `idents` — they stay in `idents` so
+    # the ambient detector keeps seeing them, and so an exact repeat still
+    # compares the whole command — but they may not carry a near match. The
+    # rule needs the position, not just the token: `P` in one call and `Q` in
+    # another are both hunts even when `P` is a directory name elsewhere.
+    path_idents: frozenset[str] = frozenset()
 
 
 def _identifiers(text: str) -> frozenset[str]:
@@ -595,14 +786,21 @@ def tool_call_signature(tool_name: str, tool_args: Any) -> ToolCallSignature:
     counting them as shared identifiers meant `file_path` and `old_string`
     alone could carry a near match between three unrelated Edits.
     """
+    path_text = ""
     if isinstance(tool_args, dict):
         items = [(k, tool_args[k]) for k in sorted(tool_args) if k != "description"]
         if tool_name == "Bash":
             raw = str(tool_args.get("command") or "")
             full_text = raw
             value_text = _strip_cd_prefix(raw)
+            path_text = _path_operand_text(value_text)
         else:
             # Sorted so key order can't make two identical calls look different.
+            # `path_text` stays empty here on purpose: every path-addressed
+            # tool that could need it is already in `_EXACT_ONLY_TOOLS`, and
+            # the near-matching tools addressed by a path argument (the MCP
+            # `Grep` tool's `path`) are a separate channel — see the finding
+            # appended to #523. Widening it is not this change's to take.
             raw = " ".join(f"{k}={v!r}" for k, v in items)
             value_text = full_text = " ".join(str(v) for _, v in items)
     else:
@@ -610,14 +808,21 @@ def tool_call_signature(tool_name: str, tool_args: Any) -> ToolCallSignature:
         value_text = full_text = raw
     normalized = " ".join(raw.split())
     preview = normalized if len(normalized) <= 160 else normalized[:157] + "..."
-    ident_src = _strip_ambient(" ".join(value_text.split())[:_IDENT_SCAN_CHARS])
-    all_src = _strip_ambient(" ".join(full_text.split())[:_IDENT_SCAN_CHARS])
+    ident_src = " ".join(value_text.split())[:_IDENT_SCAN_CHARS]
+    idents = _identifiers(_strip_ambient(ident_src))
     return ToolCallSignature(
         tool=tool_name or "",
         exact=normalized,
-        idents=_identifiers(ident_src),
+        idents=idents,
         preview=preview,
-        all_idents=_identifiers(all_src),
+        all_idents=_identifiers(_strip_ambient(
+            " ".join(full_text.split())[:_IDENT_SCAN_CHARS]
+        )),
+        # The AND is what keeps `path_idents ⊆ idents` true unconditionally —
+        # a marked operand that the length or identifier rules reject is not in
+        # either set, and a token cut off by the scan cap above must not count
+        # as classified.
+        path_idents=_identifiers(_strip_ambient(path_text)) & idents,
     )
 
 
@@ -757,6 +962,13 @@ def repetition_verdict(
     * near  — same tool, >= `min_overlap` shared identifiers AND containment
       >= `containment`. Containment rather than Jaccard because a command
       wrapped in extra `echo` labels should still match the bare one.
+
+    A near match additionally needs at least one shared identifier that is not
+    path-shaped in either call — a scan root, a directory component or a
+    filter operand cannot carry it (#523). See `_path_operand_text`. The
+    carrier test is per pair, on the pair's own two signatures, because the
+    claim being made is about the two calls being compared: a term one of them
+    used as a location does not evidence a shared hunt.
     """
     if len(recent) < 2:
         return None
@@ -776,15 +988,23 @@ def repetition_verdict(
     if ambient is None:
         ambient = ubiquitous_identifiers(recent)
     cur_idents = current.idents - ambient
+    # Terms the current call uses to say where it looked or what it skipped.
+    # They cannot carry a near match, and they are not named when one fires.
+    cur_carriers = cur_idents - current.path_idents
     # Path-addressed tools compare by exact repeat only — see _EXACT_ONLY_TOOLS.
     near_allowed = current.tool not in _EXACT_ONLY_TOOLS
     for p in prior:
         if p.tool != current.tool:
             continue
+        p_carriers = (p.idents - ambient) - p.path_idents
         if current.exact and p.exact == current.exact:
             matches.append(p)
             exact = True
-            shared |= cur_idents
+            # A verbatim repeat names the hunt, not the location it aimed at
+            # (clause 2 of #523 admits no path operand into `shared_terms`,
+            # exact included). When every identifier is a location there is
+            # nothing to name, and the inject quotes the command instead.
+            shared |= cur_carriers
             continue
         if not near_allowed:
             continue
@@ -792,14 +1012,24 @@ def repetition_verdict(
         overlap = cur_idents & p_idents
         if not overlap:
             continue
+        # The terms that are locations in EITHER call evidence nothing about a
+        # shared hunt, so the match must be carried by what is left (#523).
+        # Symmetric on purpose: `kg_store` as the pattern here and as
+        # `app/kg_store.py` there is one call looking at a file and one asking
+        # a question, not the same target chased twice. Empty carriers means
+        # every shared identifier was a scan root, a directory component, or a
+        # filter operand in at least one of the two calls.
+        carriers = overlap & cur_carriers & p_carriers
+        if not carriers:
+            continue
         # Either several shared identifiers, or one distinctive enough to
         # stand alone. See `_is_distinctive`.
-        enough = len(overlap) >= min_overlap or any(
-            _is_distinctive(t) for t in overlap
+        enough = len(carriers) >= min_overlap or any(
+            _is_distinctive(t) for t in carriers
         )
         if enough and _containment(cur_idents, p_idents) >= containment:
             matches.append(p)
-            shared |= overlap
+            shared |= carriers
     if len(matches) < threshold:
         return None
     # Rarest first. A term carried by every recent call is ambient — the `cd
