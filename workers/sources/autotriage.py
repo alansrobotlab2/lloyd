@@ -95,7 +95,9 @@ implemented together are `fold`; an item that is genuinely separate work is \
 "Umbrella for #a #b #c, formed by automod group triage of {cluster_id} on <date>"; \
 then the claim, the current state with file paths and line numbers, the check \
 that shows it, and the acceptance clauses — at most {max_clauses}, each one \
-thing a single test can pin. The tool returns the id; that is UMBRELLA. Do not \
+thing a single test can pin, each ending with the test file that pins it \
+(`— tests/test_<area>.py`, an existing file or the one the round should \
+create). The tool returns the id; that is UMBRELLA. Do not \
 file an umbrella for a single item: one `fold` is a `keep`.
 5. **File at most {spawn_cap} further item**, only for a finding none of these \
 covers (tag `spawned-by-triage`). If the tool answers `merged_into: N`, list N.
@@ -110,7 +112,7 @@ SURFACE: <one of code|frontend|vault|mixed|external>
 CHECK: <the one check you ran, one line>
 EVIDENCE: <2-4 sentences>
 ACCEPTANCE: <the umbrella's contract, or none>
-ACCEPTANCE_CLAUSES: <numbered, one per line, or none>
+ACCEPTANCE_CLAUSES: <numbered, one per line, each ending "— tests/<file>.py", or none>
 SPAWNED: <ids from step 5, or none>
 
 Rules: closing a duplicate is a success and folding is a success; `keep` for \
@@ -276,8 +278,9 @@ CHECK: <the command or method you ran, one line>
 EVIDENCE: <2-4 sentences citing what you actually observed>
 ACCEPTANCE: <if confirmed: what must become true for this to be done; otherwise the word none>
 ACCEPTANCE_CLAUSES: <if confirmed: the same contract as separately checkable clauses, \
-one per line, each numbered "1." "2." … and each one thing a single test can pin; otherwise \
-the word none>
+one per line, each numbered "1." "2." …, each one thing a single test can pin, and each \
+ending with the test file that pins it, e.g. "— tests/test_workers_pool.py"; otherwise the \
+word none>
 HUMAN_CLAUSES: <if confirmed and any: the conditions only a person can satisfy, one per \
 line, numbered; otherwise the word none>
 SPAWNED: <for stale/already_done, the ids you filed or appended to in step 6, e.g. #401 #402; otherwise the word none>
@@ -285,7 +288,11 @@ SPAWNED: <for stale/already_done, the ids you filed or appended to in step 6, e.
 The clauses are graded one by one at the gate by a reviewer who sees only the \
 item, the clauses and the diff — so a clause has to name the observable \
 behaviour, not the mechanism ("a retried worker item fires `email_send` once", \
-not "add a ledger"). **At most {max_clauses} clauses**: every clause is graded \
+not "add a ledger"). **End each clause with the test file that pins it** \
+(`— tests/<file>.py`: an existing file whose area it is, or the new file the \
+round should create). The grader downgrades a `met` it cannot tie to a test \
+node to `partial`, and naming the file removes the round's guesswork about \
+where that node belongs. **At most {max_clauses} clauses**: every clause is graded \
 on its own and one unmet clause refuses the round, so six pass together less \
 than half the time and twelve one time in five. If the work needs more, \
 confirm the part one small change can finish and append the rest to this item \

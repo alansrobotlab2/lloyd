@@ -404,7 +404,9 @@ TRIAGE_VERDICT_SCHEMA: dict = {
         "acceptance_clauses": {"type": "array", "items": {"type": "string"},
                                "description": ("For `confirmed`: the same contract split into "
                                                "separately checkable clauses, each one thing a "
-                                               "test can pin, in order. The implementer reports "
+                                               "test can pin and ending with the test file that "
+                                               "pins it (`— tests/<file>.py`), in order. The "
+                                               "implementer reports "
                                                "per clause and the review rung grades per "
                                                "clause. Empty otherwise.")},
         "human_clauses": {"type": "array", "items": {"type": "string"},

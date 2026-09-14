@@ -83,6 +83,22 @@ def test_both_prompts_state_the_cap(isolated):
     assert f"at most {B.MAX_CLAUSES}" in group
 
 
+def test_both_prompts_ask_each_clause_for_the_test_file_that_pins_it(isolated):
+    """The grader downgrades a `met` with no test node to `partial`; a clause
+    that names its test file tells the round where that node belongs."""
+    write_item(isolated, 7)
+    single = " ".join(M.render_prompt(B.item_by_id(7), ledger=S.LEDGER_PATH).split())
+    assert "End each clause with the test file that pins it" in single
+    assert 'ending with the test file that pins it, e.g. "— tests/test_workers_pool.py"' in single
+    group = " ".join(M.GROUP_PROMPT.format(n=2, reason="r", cluster_id="c", anchor_paths="a",
+                                           parent="none", items="", max_clauses=B.MAX_CLAUSES,
+                                           spawn_cap=1).split())
+    assert "each ending with the test file that pins it" in group
+    assert 'ACCEPTANCE_CLAUSES: <numbered, one per line, each ending "— tests/<file>.py", or none>' in group
+    desc = B.TRIAGE_VERDICT_SCHEMA["properties"]["acceptance_clauses"]["description"]
+    assert "tests/<file>.py" in desc
+
+
 @pytest.mark.parametrize("path", ["regex", "structured"])
 def test_an_overlong_verdict_is_capped_and_says_how_much(path):
     if path == "regex":
