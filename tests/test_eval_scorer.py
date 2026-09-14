@@ -173,6 +173,24 @@ def test_argparse_defaults_and_the_signature_default_cannot_disagree():
     assert str(vault.RECALL_GRAPH_RERANK) in rerank_help
 
 
+def test_a_caller_that_loads_the_script_by_path_gets_production_defaults():
+    """The caller that made this defect live reaches run_eval() through a file
+    path, not an import: agent_mcp/fact_improvement.py::_fact_entity_recall
+    builds a module with importlib.util.spec_from_file_location, so it does not
+    share this file's `ev` handle and nothing here would have told it the
+    defaults had been fixed. Load it the same way and read the same signature."""
+    import importlib.util
+
+    from agent_mcp import vault
+    script = ROOT / "eval" / "run_eval.py"
+    spec = importlib.util.spec_from_file_location("lloyd_run_eval_probe", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    params = inspect.signature(module.run_eval).parameters
+    for knob, const in KNOBS.items():
+        assert params[knob].default == getattr(vault, const), knob
+
+
 def test_production_knobs_keep_their_measured_values():
     """This rewires wiring, not the measured configuration. The constants are
     the answer to the 2026-09-04 sweep (agent_mcp/vault.py:113-124); a change
