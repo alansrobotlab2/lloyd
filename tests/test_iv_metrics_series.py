@@ -268,11 +268,14 @@ def test_row_carries_rates_as_numbers_when_the_grader_scored_something():
 
     The end-to-end fixtures above leave both null (nothing to score), which is the
     honest value — but a field that is only ever null in tests is not a field
-    anyone can take a delta of. This drives `_row` with a report shaped exactly as
-    `iv_grade.py:289-300` emits it: two deadline buckets plus one `http_error` (all
-    three produced no verdict, so all three belong in the numerator). The grader only
-    buckets rows whose `error` is truthy (`iv_grade.py:257-259`), so there is no
-    healthy bucket to exclude — and the row still asserts the arithmetic.
+    anyone can take a delta of. This drives `_row` with a report shaped as
+    `iv_grade.py:289-300` emits it (`_cost` at `:221-260`): `cost.errors` holds two
+    deadline buckets plus one `http_error` and no `no reason` key, because the
+    counter at `:257-259` only buckets rows whose `error` is truthy. The fixture
+    matches that, and the asserts below spell out what each field must then be:
+    `dropped_verdicts` and `error_total` are both 353 — every key in the map is a
+    dropped call — while `timeout_by_deadline` keeps only the two `timeout` keys,
+    excluding `http_error`.
     """
     report = {
         "scope": {"session": "all", "since": "2026-09-13T01:00:00",
