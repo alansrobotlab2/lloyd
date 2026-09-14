@@ -73,9 +73,9 @@ CANDIDATE_MAX_AGE_DAYS = 30
 # How long a raw transcript survives after it was fetched. Long enough for the two follow-ups
 # that actually re-read it — a re-digest within the week, and an audit asking whether a digest
 # matched its input — and short enough that the directory holds a rolling month instead of
-# everything ever extracted (it held 7 files / 349 KiB on 2026-09-14, all of it older than a
-# week, because nothing had ever deleted a transcript). Deleting is safe at all only because
-# the video note carries transcript_path + transcript_md5.
+# everything ever extracted. Measured 2026-09-14: 5 files, 208,885 B, oldest mtime 2026-09-08
+# — every byte of it written by a session and none of it ever deleted. Deleting is safe at
+# all only because the video note carries transcript_path + transcript_md5.
 TRANSCRIPT_MAX_AGE_DAYS = 30
 # candidates still awaiting action are never pruned regardless of age
 CANDIDATE_KEEP_STATUSES = ("pending", "proposed", "flagged_for_authoring")
