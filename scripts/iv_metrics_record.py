@@ -43,8 +43,16 @@ local clock the rows use, so the window in the row is the window that was asked 
 and the job that hands it the bound is told to hand it in local wall clock.
 
 Exit codes: 0 normal · 2 sustained breach (see the threshold block) · 3 nothing
-usable on stdin. An exit code, not a sentence, because the autonomy runner
-consumes exit codes reliably and prose only when told.
+usable on stdin.
+
+Exit 2 is this process's, and it is *not* the autonomy run's exit code. The nightly
+gets here through an agent's Bash tool, so 2 is that tool call's result; the run's own
+status is the agent's turn, which exits 0 whether or not the series breached. What
+closes that seam is not this script — it is the printed verdict line, which on a breach
+contains the literal text `exit code 2`, which is what `_detect_silent_failures`
+(`autonomy.py:27-33`) scans a run's final prose for. Quote the line and the run is
+flagged; that is the only automated surface, and `alert: true` in the task frontmatter
+is what carries it to a human. See `EXIT_BREACH` for why the number is in the prose.
 """
 
 from __future__ import annotations
@@ -77,6 +85,14 @@ DEFAULT_WINDOW_ROWS = 7
 MIN_BREACH_ROWS = 3
 #: Extra rows read behind the median window when counting unreadable ones.
 READ_SLACK = 100
+#: Sustained breach. 2 is the "refused/anomaly" code this repo already uses
+#: (`scripts/skill_verdicts.py:320`, `scripts/validate_handoff.py:70`). Named so the
+#: value returned and the value printed in the verdict prose cannot drift apart —
+#: `_verdict` embeds it in the line the runner scans for `exit code [1-9]`, so a
+#: retuned code that only reached the `return` would silently un-arm the alert.
+EXIT_BREACH = 2
+#: Nothing usable on stdin (empty, unparseable, or a windowless report).
+EXIT_NO_INPUT = 3
 
 
 def _env_threshold() -> float | None:
@@ -277,7 +293,22 @@ def _verdict(row: dict, rates: list, malformed: int) -> tuple[bool, str]:
         parts.append(f"WARNING {malformed} unreadable prior row(s) in the series")
     if breach:
         parts[0] = "BREACH " + parts[0]
+        # The token the autonomy runner actually reads. This process's exit code
+        # never reaches the scheduler: the nightly runs the pipeline through an
+        # agent's Bash tool, so 2 is that tool's result, not the task's, and the
+        # run's own exit status is the agent's turn — which completes successfully
+        # whether or not anything was wrong. The one automated surface that exists
+        # is `_detect_silent_failures` (`autonomy.py:27-33`) scanning the run's
+        # FINAL PROSE for `exit code [1-9]`. So the verdict line has to name its own
+        # exit code, and the task tells the agent to quote this line verbatim: the
+        # alert then survives an agent that describes the night in calm prose,
+        # because the trigger is a substring of what it was told to paste.
+        parts.append(f"dropped-verdict breach: exit code {EXIT_BREACH}")
     elif row["flagged"]:
+        # Deliberately without the token above: one bad night is a report, not a
+        # fault, and a run whose summary trips the failure detector when nothing is
+        # sustained is how indicators get ignored (autonomy.py:38-40 records 33 false
+        # positives in a week doing exactly that).
         parts[0] = "flagged (not sustained) " + parts[0]
     return breach, " | ".join(parts)
 
@@ -301,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     if not raw.strip():
         print("iv-metrics: nothing on stdin; expected `iv_grade.py --json` piped in",
               file=sys.stderr)
-        return 3
+        return EXIT_NO_INPUT
     try:
         report = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -309,10 +340,10 @@ def main(argv: list[str] | None = None) -> int:
         # failure is the usual sign that a window bound selected nothing. Loud.
         print(f"iv-metrics: stdin is not a grader JSON report ({exc}); first "
               f"80 chars: {raw[:80]!r}", file=sys.stderr)
-        return 3
+        return EXIT_NO_INPUT
     if not isinstance(report, dict) or "scope" not in report:
         print("iv-metrics: not an iv_grade report", file=sys.stderr)
-        return 3
+        return EXIT_NO_INPUT
     since = (report.get("scope") or {}).get("since")
     if not str(since or "").strip() or str(since) == "all time":
         # A windowless report is "all time": its rate would sit in the series
@@ -321,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
         print("iv-metrics: report has no window bound (`since` is null) — run "
               "iv_grade.py with --since; refusing to store an all-time row",
               file=sys.stderr)
-        return 3
+        return EXIT_NO_INPUT
 
     env_threshold = _env_threshold()
     threshold = (args.threshold if args.threshold is not None
@@ -345,13 +376,16 @@ def main(argv: list[str] | None = None) -> int:
 
     print(verdict)
     if breach:
-        # Distinct from 0 and from 3 so a runner that never reads the prose still
-        # sees a sustained fault: 2 is the "refused/anomaly" code this repo already
-        # uses (`scripts/skill_verdicts.py:320`, `scripts/validate_handoff.py:70`),
-        # and `_detect_silent_failures` (`autonomy.py:26-32`) flags an "exit code 2"
-        # appearing in a run's summary even when the turn itself succeeded.
+        # Returned for anyone running this by hand or in a pipeline that checks it.
+        # Not the alert: the nightly arrives through an agent's Bash tool, so this is
+        # that tool call's status and the run's own exit status is the agent's turn,
+        # which is 0 either way. The alert is the prose `_verdict` printed above —
+        # it carries the literal text "exit code 2", which `_detect_silent_failures`
+        # (`autonomy.py:27-33`) matches out of the run's summary — and the task's
+        # `alert: true` carries that flag to a human. Pinned by
+        # tests/test_iv_metrics_series.py::a_breach_verdict_trips_the_runner_detector.
         print(verdict, file=sys.stderr)
-    return 2 if breach else 0
+    return EXIT_BREACH if breach else 0
 
 
 if __name__ == "__main__":

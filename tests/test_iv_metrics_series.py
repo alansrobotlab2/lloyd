@@ -27,6 +27,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -144,6 +145,100 @@ def _rows_of(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def test_the_default_out_is_the_path_the_nightly_writes(tmp_path):
+    """The recorder with no `--out` lands in `<repo>/_pipeline/reflection/iv-metrics.jsonl`.
+
+    The task file's Step 1 command passes no `--out`, so the default *is* the nightly's
+    destination and the item's acceptance names that exact path. `REPO_ROOT` derives
+    from the script's own file, not the cwd, so the fixture is a copy of the script in
+    a fake repo — which is what pins the derivation rather than re-reading the constant.
+    Run without touching the live tree: nothing here writes to `$HOME/lloyd`.
+    """
+    fake = tmp_path / "repo"
+    (fake / "scripts").mkdir(parents=True)
+    shutil.copy(RECORDER, fake / "scripts" / "iv_metrics_record.py")
+    report = json.dumps({"meta": {}, "scope": {"since": "2026-09-12T00:00:00",
+                                               "until": "2026-09-13T00:00:00",
+                                               "first": None, "last": None},
+                         "coverage": {"observations": 1, "turns": 1},
+                         "cost": {"llm_calls": 10, "observations_per_llm_call": 0.1,
+                                  "tokens": {"in": 1, "out": 1, "total": 2},
+                                  "by_trigger": {}, "errors": {}},
+                         "prompt_following": {"landed_rate": 1.0, "miss_rate": 0.0}})
+
+    result = subprocess.run(["bash", "-c",
+                             f"echo {shlex.quote(report)} | python3 scripts/iv_metrics_record.py"],
+                            capture_output=True, text=True, check=False, cwd=str(fake))
+
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    written = fake / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    assert written.exists(), (
+        "no --out was passed and the default wrote nowhere near "
+        f"{written}; stdout={result.stdout[:160]!r}")
+    assert len(_rows_of(written)) == 1
+
+
+def test_the_alert_reaches_the_autonomy_runner(tmp_path):
+    """The seam the round exists on: a breach makes the RUN get flagged, not just exit 2.
+
+    The nightly reaches the recorder through an agent's Bash tool, so the process's
+    exit status is a tool result and the task's own exit code is the agent's turn — 0
+    whether or not anything was wrong. The one automated consumer that exists is
+    `autonomy._detect_silent_failures`, applied to the run's FINAL PROSE
+    (`autonomy.py:1263`), whose patterns include `exit code [1-9]`. So this runs the
+    real pipeline three ways — breach / one-night-flagged / healthy — feeds each run's
+    actual stdout to that production detector, and requires that only the breach trips
+    it. A breach that only moved an exit code nobody reads would pass every other test
+    in this file and leave the item's own "something reads it against a bound" false,
+    which is why it is asserted here rather than documented.
+    """
+    sys.path.insert(0, str(ROOT))
+    from autonomy import _detect_silent_failures
+
+    since = _iso(NOW_LOCAL - datetime.timedelta(hours=26))
+    # 10 observations each, one of them carrying an `error`, so dropped/llm_calls is
+    # 1/10 = 0.1 against the default bound; the breach case adds three prior rows at
+    # 0.20 so the median of the window is over it too. `healthy` has no error row.
+    scenarios = {
+        "breach": ({"error": "timeout after 5.0s"}, [0.20, 0.20, 0.20]),
+        "flagged": ({"error": "timeout after 5.0s"}, []),
+        "healthy": ({}, []),
+    }
+    lines = {}
+    for label, (error_row, prior_rates) in scenarios.items():
+        repo = _make_repo(tmp_path / label)
+        rows = [{"created_at": NOW_LOCAL - datetime.timedelta(hours=2), **error_row}]
+        rows += [{"created_at": NOW_LOCAL - datetime.timedelta(hours=3)}] * 9
+        _make_db(repo, rows)
+        out = repo / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+        out.parent.mkdir(parents=True)
+        for i, rate in enumerate(prior_rates):
+            out.open("a").write(json.dumps({"since": f"p-{i}",
+                                            "dropped_rate": rate}) + "\n")
+
+        result = _call(since=since, repo=repo, out=out, extra=["--hours 26"])
+        row = _rows_of(out)[-1]
+        assert iv_metrics_record.over_bound(row) is bool(row["flagged"]), (
+            label, row)
+        lines[label] = result.stdout
+        if label == "breach":
+            assert result.returncode == 2 and row["breach"] is True, result.stdout
+        else:
+            assert result.returncode == 0, (label, result.stdout, result.stderr)
+            assert row["breach"] is False
+
+    assert "exit code 2" in lines["breach"], (
+        "the BREACH verdict line must name its own exit code — that literal is the "
+        f"only token the runner's prose regex can match; got {lines['breach'][:200]!r}")
+    assert _detect_silent_failures(lines["breach"]), (
+        "the autonomy runner's own detector does not trip on a BREACH verdict line, "
+        "so the alert has no automated surface at all")
+
+    for label in ("flagged", "healthy"):
+        assert "exit code" not in lines[label], (label, lines[label][:200])
+        assert _detect_silent_failures(lines[label]) == [], (
+            f"a {label} night must not trip the failure detector — a nightly that "
+            f"cries wolf is how alerts get muted: {lines[label][:160]!r}")
 def _numeric(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -401,7 +496,12 @@ def test_the_recorder_itself_opens_no_database():
     code = re.sub(r'"""[\s\S]*?"""|#[^\n]*', "", RECORDER.read_text())
     assert "import sqlite3" not in code
     assert "usage.db" not in code, "the recorder must not name the database at all"
-    assert "--out" in RECORDER.read_text(), "the destination must not be hardcoded"
+    # Against the stripped `code`, not the raw file: the docstring above discusses
+    # `--out` in prose, so a raw read would still pass with the flag deleted.
+    assert '"--out"' in code, (
+        "the destination must be a flag with a default, not a hardcoded write path")
+    assert "add_argument(\"--out\"" in code or "add_argument('--out'" in code, (
+        "--out must be the argparse destination flag")
 
 
 # ── clause 5: a stated threshold, compared over fields ────────────────────────
