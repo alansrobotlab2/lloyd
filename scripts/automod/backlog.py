@@ -3211,11 +3211,19 @@ def retriage_spent_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_
                + "; sent back through triage once, with the refusal, for a contract a round "
                  "can meet or a retirement")
         tag_item(item.id, add=(RETRIAGE_TAG,), remove=(NEEDS_HUMAN_TAG, "review-disagreement"))
+        # The old contract comes off the item: `acceptance_clauses_of` prefers
+        # front matter, so a second triage that confirms in prose alone would
+        # otherwise hand the next round the contract that was just refused.
+        # It stays on the ledger row, and in the item's triage section.
+        update_frontmatter(item.path, {"acceptance_clauses": None, "human_clauses": None,
+                                       AMENDMENTS_KEY: None})
         if item.status != TRIAGE_POOL_STATUS:
             set_status(item.id, TRIAGE_POOL_STATUS, why)
         note_item(item.id, why)
         S.append_event({"event": "backlog_retriage", "item_id": item.id, "round_id": rid,
-                        "outcome_detail": detail[:600], **refusal}, path=ledger)
+                        "outcome_detail": detail[:600],
+                        "previous_clauses": list(fm.get("acceptance_clauses") or []),
+                        **refusal}, path=ledger)
         out.append({"item_id": item.id, "round_id": rid, "reason": why})
     return out
 
