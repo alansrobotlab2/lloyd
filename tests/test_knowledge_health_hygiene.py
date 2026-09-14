@@ -179,5 +179,10 @@ def test_the_script_prints_the_fact_level_total(tmp_path):
         env={**os.environ, "LLOYD_KG_DB": str(db), "LLOYD_FACTS_ROOT": str(root)})
     assert proc.returncode == 0, proc.stderr[-2000:]
     report = next(out.glob("knowledge-health-*.md")).read_text()
-    assert "| Exact-duplicate fact rows (facts_idx.text_hash) | 1 redundant of 2 rows " \
-           "(entities with an exact twin: 1; distinct texts: 1) |" in report
+    expected = ("| Exact-duplicate fact rows (facts_idx.text_hash) | 1 redundant of 2 rows "
+                "(entities with an exact twin: 1; distinct texts: 1) |")
+    assert expected in report, report[-1200:]
+    # And on stdout, in that line's own form — the job log keeps stdout, which
+    # is what a nightly run is actually read from.
+    assert ("  Exact-duplicate fact rows (facts_idx.text_hash): 1 redundant of 2 rows "
+            "(entities with an exact twin: 1; distinct texts: 1)") in proc.stdout, proc.stdout[-1500:]

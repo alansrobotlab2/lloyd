@@ -318,7 +318,10 @@ def _fact_add(params: dict) -> dict:
         # The store learns about the entity and the new fact here rather than
         # waiting for the nightly reindex, so a fact added in chat is visible
         # to the router and to `facts_idx` immediately.
-        result: dict = {"success": True, "fact_id": fact_id, "entity": entity, "category": category}
+        # `skipped` is on both outcomes, so an absent key is never how a
+        # caller learns the difference between the two.
+        result: dict = {"success": True, "skipped": False, "fact_id": fact_id,
+                        "entity": entity, "category": category}
         try:
             st = _store()
             st.entities.register(entity)
