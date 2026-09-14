@@ -152,7 +152,7 @@ def test_legacy_epoch_named_records_are_swept(rs, tmp_path):
     assert keep.exists(), "non-record files must be left alone"
 
 
-def test_transcript_scratch_old_deleted_recent_kept(rs):
+def test_transcript_scratch_old_deleted_recent_kept(rs, capsys):
     """Backlog #566: the raw transcript scratch home is a bounded store. Measured on the
     live directory 2026-09-14: 5 files, 208,885 B, oldest mtime 2026-09-08 — nothing had
     ever been deleted, because nothing owned the directory. Deleting is licence the video
@@ -160,18 +160,32 @@ def test_transcript_scratch_old_deleted_recent_kept(rs):
 
     Every non-target here is backdated past the window, so each guard is falsifiable: an
     entry that is young can survive a sweep that has no guard at all, which is how a
-    `recent.exists()` assertion starts checking nothing."""
+    `recent.exists()` assertion starts checking nothing.
+
+    Round SM_20260914_184202's review found the first draft still left one guard unfalsifiable,
+    and it was right: `Path.unlink()` on a directory raises OSError, which the `except OSError`
+    below catches and prints as a skip — so deleting `sweep_transcript_scratch`'s `is_file()`
+    check changed neither the (1, 500) counts nor a `subdir.exists()`. Two things close that,
+    both aimed at what a recursive or exception-fed implementation would actually do:
+    a backdated file INSIDE the stray directory (a recursive sweep deletes it, and the byte
+    count grows), and a check that the stray directory was never reported as a skip (a
+    guard-less loop "survives" only by catching the EISDIR it caused, so it logs one)."""
     now = time.time()
     old = rs.TRANSCRIPT_SCRATCH_DIR / "T2v2pf_uypE.txt"
     old.write_text("t" * 500)
     _backdate(old, 45)
     recent = rs.TRANSCRIPT_SCRATCH_DIR / "1_8pzU44n-M.txt"
     recent.write_text("n" * 100)
-    # Aged like a stale transcript: if the sweep dropped its is_file() check or recursed,
-    # this is what would disappear.
+    # A stray per-video subdir of the kind `/tmp/yt/0NvD6qNapiU/` was, aged past the window.
     subdir = rs.TRANSCRIPT_SCRATCH_DIR / "0NvD6qNapiU"
     subdir.mkdir()
     _backdate(subdir, 45)
+    # Aged too, and out of reach of `iterdir()` — so it survives ONLY because the sweep does not
+    # walk. This is the assertion that bites a recursive implementation; `subdir.exists()` alone
+    # could not, because unlinking a directory raises and the sweep's OSError handler swallows it.
+    stale_inside = subdir / "chunks.txt"
+    stale_inside.write_text("c" * 700)
+    _backdate(stale_inside, 45)
     outside = rs.TRANSCRIPT_SCRATCH_DIR.parent / "not-in-scratch.txt"
     outside.write_text("x")
     _backdate(outside, 45)
@@ -190,8 +204,18 @@ def test_transcript_scratch_old_deleted_recent_kept(rs):
     assert not old.exists()
     assert recent.exists(), "a transcript inside the window must survive"
     assert subdir.exists(), "a stray directory is not a transcript; leave it"
+    assert stale_inside.exists(), "the sweep must not walk into a stray subdir and delete it"
     assert link.is_symlink(), "the sweep must skip a symlink, not unlink it"
     assert outside.exists(), "nothing outside the scratch dir may be unlinked through a link"
+
+    # Skipped by policy, not by an accident: the only way the stray directory reaches the
+    # `except OSError` handler is if the `is_file()` guard is gone and `unlink()` raised EISDIR
+    # on it. The pass would still report (1, 500) and leave the directory in place — that is
+    # precisely the version this catches and the counts above cannot.
+    logged = capsys.readouterr().err
+    assert subdir.name not in logged, (
+        f"sweep logged a skip for the stray directory — it is being rejected by an exception, "
+        f"not by the is_file() guard:\n{logged}")
 
 
 def test_transcript_scratch_missing_dir_is_zero(rs):
