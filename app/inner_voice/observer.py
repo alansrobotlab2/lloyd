@@ -143,6 +143,13 @@ def _observer_cfg() -> dict[str, Any]:
     # them on a spawned non-terminal call. Bounded by
     # async_drain_timeout_seconds at the next terminal event either way.
     obs.setdefault("async_timeout_seconds", 12.0)
+    # Budget for the async path's pre-flight liveness probe (#458). The 351
+    # dropped async judgments in 2026-09-01..12 are episodic saturation, not
+    # a latency tail — three one-hour windows hold 24 % of them, with the
+    # worst hour at 81.8 %. A probe capped at ~1 s answers "is the engine
+    # answering anything at all" long before the 12 s deadline does, so a
+    # saturated engine costs the probe instead of a full judgment budget.
+    obs.setdefault("probe_timeout_seconds", DEFAULT_PROBE_TIMEOUT_SECONDS)
     # vLLM scheduling priority. Lower is HIGHER priority, and the primary
     # runs at 0 — an observer also at 0 competes with the agent it is
     # supposed to be watching rather than yielding to it.
@@ -350,6 +357,42 @@ async def _post_chat_completion_with_tools(
     resp = await _client().post(url, json=payload, timeout=timeout_seconds)
     resp.raise_for_status()
     return resp.json()
+
+
+# Wall-clock budget for the async path's pre-flight liveness probe. ~1 s is
+# what "detected in about a second instead of twelve" costs; clause 5 of
+# backlog #458 caps the abandoned-call latency at 2,000 ms, so 1.0 + margin.
+DEFAULT_PROBE_TIMEOUT_SECONDS = 1.0
+
+
+async def _probe_engine(base_url: str, timeout_seconds: float) -> tuple[bool, str]:
+    """Fast liveness probe: is the engine's HTTP layer answering at all?
+
+    The client-side deadline in `_call_observer` charges engine QUEUE time
+    and inference time to the same budget, so a dropped row cannot tell
+    "the engine never got to us" from "the engine was still thinking" —
+    which is why every one of #458's 351 dropped calls reads identically
+    while the data says two different conditions produced them. This probe
+    separates the two for the cost of one GET: vLLM serves `/health` from
+    the API server without touching the inference queue, so ANY HTTP status
+    below 500 counts as answering — an engine that lacks the route
+    (404/405) is still demonstrably a live process. Only silence (a read
+    timeout), a connection failure, or a 5xx says "unresponsive".
+    """
+    url = f"{base_url}/health"
+    try:
+        resp = await _client().get(url, timeout=timeout_seconds)
+    # Same subclass trap as `_call_observer`: httpx timeouts subclass
+    # httpx.HTTPError and must be caught first to be labelled distinctly.
+    except httpx.TimeoutException:
+        return False, f"no response in {timeout_seconds:.1f}s"
+    except httpx.HTTPError as e:
+        return False, f"{type(e).__name__}"
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}"
+    if resp.status_code >= 500:
+        return False, f"replied {resp.status_code}"
+    return True, f"replied {resp.status_code}"
 
 
 async def extract_goal_card(
@@ -780,6 +823,7 @@ async def _call_observer(
     cfg: dict[str, Any] | None = None,
     timeout_override: float | None = None,
     priority: int | None = None,
+    async_call: bool = False,
 ) -> ObserverDecision:
     """One observer LLM call. Returns a parsed ObserverDecision.
 
@@ -787,6 +831,28 @@ async def _call_observer(
     function calls. The tool name IS the action; args carry reason/content.
     Errors fold into a noop decision so the primary stream is never blocked
     by observer faults.
+
+    `async_call=True` marks a judgment running OFF the critical path — the
+    spawned pretool / assistant_message / tool_result calls, i.e. every
+    caller whose deadline came from `_judge_timeout(True)`. For those only,
+    a moment of engine saturation no longer discards the judgment whole
+    (backlog #458):
+
+    * a fast liveness probe runs BEFORE the request is submitted, so an
+      engine that answers nothing is detected in `probe_timeout_seconds`
+      (~1 s) instead of at the far end of the 12 s budget, and the drop
+      records `engine_unresponsive`;
+    * a call the deadline cut off anyway is retried exactly once — a live
+      engine under transient queue pressure usually admits the second
+      arrival — and a drop after BOTH attempts labels which condition
+      killed it: `engine_unresponsive` if the probe can no longer reach
+      the engine, `call_slow` if the probe reaches it fine and only this
+      request overran.
+
+    The two synchronous terminal calls leave `async_call` False and keep
+    first-deadline-returns behaviour byte-for-byte: the primary is blocked
+    on them, so neither the probe's cost nor a second attempt may lengthen
+    the critical path.
     """
     cfg = cfg or _observer_cfg()
     base_url, model_name = _resolve_endpoint()
@@ -802,6 +868,12 @@ async def _call_observer(
         else cfg.get("timeout_seconds", _prompt.DEFAULT_TIMEOUT_SECONDS)
     )
     max_tokens = int(cfg.get("max_tokens", _prompt.DEFAULT_MAX_TOKENS))
+    probe_timeout = float(
+        cfg.get("probe_timeout_seconds", DEFAULT_PROBE_TIMEOUT_SECONDS)
+    )
+    # Off-critical-path calls get exactly one second chance; the synchronous
+    # terminal calls stay one-shot (#458 clause 3).
+    max_attempts = 2 if async_call else 1
 
     started = time.perf_counter()
     body: dict[str, Any] | None = None
@@ -810,33 +882,72 @@ async def _call_observer(
     out_tok = 0
     cache_read = 0
     cache_create = 0
-    try:
-        body = await _post_chat_completion_with_tools(
-            base_url=base_url,
-            model_name=model_name,
-            system_prompt=_prompt.get_system_prompt(),
-            user_prompt=user_prompt,
-            tools=LEVER_TOOLS,
-            max_tokens=max_tokens,
-            timeout_seconds=timeout,
-            priority=priority,
-        )
-        usage = body.get("usage") or {}
-        in_tok = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
-        out_tok = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
-        cache_read = _cached_prompt_tokens(usage)
-        cache_create = int(usage.get("cache_create") or 0)
-    # httpx timeouts subclass httpx.HTTPError, NOT asyncio.TimeoutError, so
-    # they must be caught first or every timeout is mislabeled. In the first
-    # production window all five deadline hits recorded `http_error: ` with
-    # an empty message, which is exactly what an httpx.TimeoutException
-    # stringifies to.
-    except (httpx.TimeoutException, asyncio.TimeoutError):
-        err = f"timeout after {timeout:.1f}s"
-    except httpx.HTTPError as e:
-        err = f"http_error: {type(e).__name__}: {e}"
-    except Exception as e:  # noqa: BLE001
-        err = f"exception: {e}"
+
+    if async_call:
+        healthy, probe_note = await _probe_engine(base_url, probe_timeout)
+        if not healthy:
+            # Detected before spending the judgment's full deadline queueing
+            # behind a wedge a GET could have found for a second's cost.
+            err = f"timeout: engine_unresponsive (pre-flight probe {probe_note})"
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            logger.warning(
+                "[iv.observer] async call abandoned pre-flight in %dms: %s",
+                latency_ms, err,
+            )
+            return ObserverDecision(
+                action="noop", reason=err, latency_ms=latency_ms, error=err,
+            )
+
+    attempts = 0
+    while err is None and attempts < max_attempts:
+        attempts += 1
+        try:
+            body = await _post_chat_completion_with_tools(
+                base_url=base_url,
+                model_name=model_name,
+                system_prompt=_prompt.get_system_prompt(),
+                user_prompt=user_prompt,
+                tools=LEVER_TOOLS,
+                max_tokens=max_tokens,
+                timeout_seconds=timeout,
+                priority=priority,
+            )
+            usage = body.get("usage") or {}
+            in_tok = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+            out_tok = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+            cache_read = _cached_prompt_tokens(usage)
+            cache_create = int(usage.get("cache_create") or 0)
+        # httpx timeouts subclass httpx.HTTPError, NOT asyncio.TimeoutError,
+        # so they must be caught first or every timeout is mislabeled. In the
+        # first production window all five deadline hits recorded
+        # `http_error: ` with an empty message, which is exactly what an
+        # httpx.TimeoutException stringifies to.
+        except (httpx.TimeoutException, asyncio.TimeoutError):
+            err = f"timeout after {timeout:.1f}s"
+        except httpx.HTTPError as e:
+            err = f"http_error: {type(e).__name__}: {e}"
+        except Exception as e:  # noqa: BLE001
+            err = f"exception: {e}"
+        if (
+            err is not None
+            and attempts < max_attempts
+            and err.startswith("timeout after ")
+        ):
+            # The one retry for an async call the deadline cut off. Only a
+            # deadline earns a second attempt: an HTTP-level error is the
+            # engine ANSWERING, and answering badly is not queue saturation
+            # that a re-submit would outrun.
+            body = None
+            err = None
+
+    if err is not None and async_call and err.startswith("timeout after "):
+        # Distinguish the two states the shared client-side deadline
+        # conflates: the engine not getting to us (queued/starved, or dead)
+        # vs the engine still working on an over-large prompt. A live engine
+        # answers /health; a starved API server or a dead process does not.
+        healthy, probe_note = await _probe_engine(base_url, probe_timeout)
+        tag = "engine_unresponsive" if not healthy else "call_slow"
+        err = f"{err} ({tag})"
 
     latency_ms = int((time.perf_counter() - started) * 1000)
 
@@ -2134,6 +2245,11 @@ def install_observer(
         `timeout_seconds` — the primary is blocked on them. Everything else
         runs off the critical path, where a short deadline buys nothing and
         throws the judgment away; `_drain_pending` is the real bound there.
+
+        Each call site passes the SAME `is_async` into `_call_observer` as
+        `async_call` — the flag that grants the pre-flight probe and the one
+        retry — so a call can never carry the async deadline while being
+        treated as critical-path for recovery, or the reverse.
         """
         return async_timeout if is_async else None
     # `inject_cooldown_iterations` is read from `state.cfg` inside
@@ -2297,6 +2413,7 @@ def install_observer(
             decision = await _call_observer(
                 user_prompt=user_prompt, cfg=state.cfg, priority=state.priority,
                 timeout_override=_judge_timeout(async_nonterminal),
+                async_call=async_nonterminal,
             )
             if state.closed or state.cancel_event.is_set():
                 decision.action = "noop_pretool_after_cancel"
@@ -2428,6 +2545,7 @@ def install_observer(
                     timeout_override=_judge_timeout(
                         async_nonterminal and not is_terminal
                     ),
+                    async_call=async_nonterminal and not is_terminal,
                 )
                 if state.closed or state.cancel_event.is_set():
                     decision.action = "noop_assistant_after_cancel"
@@ -2598,6 +2716,7 @@ def install_observer(
                 decision = await _call_observer(
                     user_prompt=user_prompt, cfg=state.cfg, priority=state.priority,
                     timeout_override=_judge_timeout(async_nonterminal),
+                    async_call=async_nonterminal,
                 )
                 if state.closed or state.cancel_event.is_set():
                     decision.action = "noop_tool_result_after_cancel"
