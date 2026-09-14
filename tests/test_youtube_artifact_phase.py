@@ -55,17 +55,51 @@ SKILLS_DIRS = [Path.home() / "obsidian" / "skills", ROOT / "skills"]
 # this item's pin.
 SKILLS_UNDER_TEST = ["youtube-content", "youtube-transcript"]
 
-# A machine with no vault checkout at all (a CI runner) has no skill files to read, so the
-# live-vault cases cannot run there. That condition is a property of the MACHINE, stated once
-# as a marker — same form as `vault_only` in tests/test_prompt_surface_budget.py. It is
-# deliberately not an in-test `pytest.skip("skill not installed")`: a missing SKILL.md on a
-# box that DOES have the vault is exactly the defect these tests exist to catch, and skipping
-# on it would let the pin pass by going away.
-_skills_on_disk = pytest.mark.skipif(
-    not SKILLS_DIRS[0].is_dir(), reason="no vault skill files on this machine")
+# These live cases carry no skip of any kind. The gate runs `-m "not live_vault"`, so they
+# execute in the ordinary suite and in CI, on a machine that has the vault. A vault checkout
+# missing one of these SKILL.md files is the regression under test, not a reason to pass, so
+# `_require_skill_text` asserts rather than skipping. Round SM_20260914_184202 was refused over
+# exactly one line: a `skipif(not SKILLS_DIRS[0].is_dir())` marker on these cases. A pin that
+# can disappear by its own subject going missing is not a pin, whatever the reason string says.
+
+def _fenced_blocks(text: str) -> list[str]:
+    """The bodies of ```-fenced blocks, fence lines dropped, in document order.
+
+    Structural rather than a regex trick: a pattern can only say "a fence appears somewhere
+    before the key", and that is still satisfied by a key sitting in prose immediately AFTER a
+    closing fence — the exact rewrite this has to refuse. Toggling on a line that opens with
+    three backticks is what markdown itself does with them, so these are the real boundaries.
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            if inside:
+                blocks.append("\n".join(current))
+                current = []
+            inside = not inside
+            continue
+        if inside:
+            current.append(line)
+    return blocks
+
+
+# Requirements that must hold INSIDE a fenced block, not merely somewhere in the file. Round
+# SM_20260914_184202 was refused for grading these two position-blind: `^transcript_path:` with
+# MULTILINE matches the key anywhere, so a rewrite that moved it out of the front-matter template
+# the skill ships and into a sentence kept the pin green while making the key unqueryable — which
+# is the only reason #566 asks for front matter rather than prose. The scope lives here beside the
+# labels, so loosening it is one visible deletion instead of a quiet edit to a regex.
+TEMPLATE_SCOPED = frozenset({
+    "transcript_path as a front-matter key",
+    "transcript_md5 as a front-matter key",
+})
+
 
 # What the Artifact Phase must state, as (requirement, pattern). Each one is a distinct
-# failure mode from the item, not a stylistic preference.
+# failure mode from the item, not a stylistic preference. A label in TEMPLATE_SCOPED is graded
+# per fenced block rather than over the whole file.
 ARTIFACT_PHASE_REQUIREMENTS: dict[str, re.Pattern[str]] = {
     # The phase must be a NAMED phase, so it reads as a step and not as prose.
     "an '## Artifact Phase' heading": re.compile(r"^##\s+Artifact Phase", re.MULTILINE),
@@ -107,8 +141,9 @@ ARTIFACT_PHASE_REQUIREMENTS: dict[str, re.Pattern[str]] = {
     "a save step that writes into that dir":
         re.compile(r'(?:-o\s+"|>\s*")\$TRANSCRIPT_DIR/'),
     # The scratch file is swept (see sweep_transcript_scratch), so the note must carry the
-    # pointer. Key-line form on purpose: the prose names these keys in backticks, and a note
-    # that only ever said it in prose would leave the input unprovable.
+    # pointer. Both keys are TEMPLATE_SCOPED: they have to sit inside the front-matter template
+    # the skill ships, because both skills ALSO mention the keys in prose and a whole-file match
+    # would grade that prose as if it were the template.
     "transcript_path as a front-matter key": re.compile(r"^transcript_path:\s+\S", re.MULTILINE),
     # ...and the digest, so a swept or edited transcript is detectable from the note alone.
     "transcript_md5 as a front-matter key": re.compile(r"^transcript_md5:\s+\S", re.MULTILINE),
@@ -148,15 +183,22 @@ def missing_artifact_phase(text: str, skill: str | None = None) -> list[str]:
     Pure over skill text, so the gate can run it on fixtures and the live_vault cases can run
     it on the real files with no duplicated logic. Pass ``skill`` to also grade the save form
     that skill's own prescribed extraction route must carry.
+
+    A label in ``TEMPLATE_SCOPED`` is satisfied only by a match inside some fenced block; every
+    other label is graded over the whole file.
     """
     required = dict(ARTIFACT_PHASE_REQUIREMENTS)
     if skill is not None:
         required.update(SKILL_ROUTE_REQUIREMENTS.get(skill, {}))
-    return [
-        label
-        for label, pattern in required.items()
-        if not pattern.search(text)
-    ]
+    blocks = _fenced_blocks(text) if TEMPLATE_SCOPED else []
+    missing: list[str] = []
+    for label, pattern in required.items():
+        if label in TEMPLATE_SCOPED:
+            if not any(pattern.search(block) for block in blocks):
+                missing.append(label)
+        elif not pattern.search(text):
+            missing.append(label)
+    return missing
 
 
 def _skill_file(name: str) -> Path | None:
@@ -168,9 +210,8 @@ def _skill_file(name: str) -> Path | None:
 
 
 def _require_skill_text(name: str) -> str:
-    """Read a live skill, or fail. The only skip these live cases take is the machine-level
-    one (`_skills_on_disk`): a vault checkout that is missing a SKILL.md is the regression
-    under test, not a reason to pass."""
+    """Read a live skill, or fail outright. These live cases take no skip at all: a vault
+    checkout that is missing a SKILL.md is the regression under test, not a reason to pass."""
     path = _skill_file(name)
     assert path is not None, (
         f"skills/{name}/SKILL.md is not installed under {SKILLS_DIRS} — the skill that "
@@ -252,6 +293,31 @@ def test_removing_one_requirement_is_caught(strip: str):
     assert missing, f"stripping {strip!r} should have been caught, but the checker passed"
 
 
+_KEY_LINES = ("transcript_path: /home/alansrobotlab/lloyd/_pipeline/tmp/<videoId>.txt\n"
+              "transcript_md5: <md5sum computed at write time>\n")
+
+
+def test_provenance_keys_belong_in_the_fenced_template_not_in_prose():
+    """SM_20260914_184202's second finding, made permanent.
+
+    Move the two key lines out of the front-matter template the skill ships and say the same
+    thing in prose — placed immediately after the closing fence, where a whole-file
+    `^transcript_path:` match still lands. Nothing is deleted; the keys have only stopped being
+    queryable front matter, which is the failure #566 asked for keys rather than sentences about
+    keys in the first place. Grade these labels over the whole file again and this case goes red.
+    """
+    assert any("transcript_path:" in b for b in _fenced_blocks(_CANONICAL)), \
+        "the fixture below is meaningless unless the template is a fenced block"
+    moved = _CANONICAL.replace(_KEY_LINES, "").replace(
+        "Then verify on disk:", _KEY_LINES + "\nThen verify on disk:")
+    assert not any("transcript_path:" in b for b in _fenced_blocks(moved)), \
+        "the relocation must actually have happened to prove anything"
+    assert "transcript_path:" in moved, "this is relocation, not deletion — the old check passed"
+    missing = missing_artifact_phase(moved)
+    assert "transcript_path as a front-matter key" in missing, missing
+    assert "transcript_md5 as a front-matter key" in missing, missing
+
+
 # The shape the youtube-transcript-api route uses to save (its skill section, condensed): the
 # path built from `_pipeline`/`tmp`, and the transcript written to it in the same snippet.
 _YTA_SAVE_BLOCK = (
@@ -304,7 +370,6 @@ python3 SKILL_DIR/scripts/fetch_transcript.py "https://youtube.com/watch?v=VIDEO
 # live vault — excluded from the gate rung, run in the ordinary suite
 # ---------------------------------------------------------------------------
 
-@_skills_on_disk
 @pytest.mark.live_vault
 @pytest.mark.parametrize("skill", SKILLS_UNDER_TEST)
 def test_extraction_skill_states_the_artifact_phase(skill: str):
@@ -373,7 +438,6 @@ def test_the_scratch_store_is_neither_tmp_nor_the_vault():
     assert Path.home() / "obsidian" not in scratch.parents, f"{scratch} is inside the vault"
 
 
-@_skills_on_disk
 @pytest.mark.live_vault
 @pytest.mark.parametrize("skill", SKILLS_UNDER_TEST)
 def test_the_skill_and_the_sweep_name_the_same_scratch_dir(skill: str):
@@ -387,7 +451,6 @@ def test_the_skill_and_the_sweep_name_the_same_scratch_dir(skill: str):
         f"retention-sweep.py bounds {mod.TRANSCRIPT_SCRATCH_DIR}")
 
 
-@_skills_on_disk
 @pytest.mark.live_vault
 def test_the_retention_skill_table_states_the_sweep_age():
     """The policy table in skills/retention-sweep/SKILL.md is what the weekly operator reads
@@ -407,7 +470,6 @@ def test_the_retention_skill_table_states_the_sweep_age():
             f"retention-sweep.py uses TRANSCRIPT_MAX_AGE_DAYS={mod.TRANSCRIPT_MAX_AGE_DAYS}")
 
 
-@_skills_on_disk
 @pytest.mark.live_vault
 @pytest.mark.parametrize("skill", SKILLS_UNDER_TEST)
 def test_extraction_skill_still_loads(skill: str):

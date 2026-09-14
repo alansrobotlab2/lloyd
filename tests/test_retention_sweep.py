@@ -176,16 +176,21 @@ def test_transcript_scratch_old_deleted_recent_kept(rs, capsys):
     _backdate(old, 45)
     recent = rs.TRANSCRIPT_SCRATCH_DIR / "1_8pzU44n-M.txt"
     recent.write_text("n" * 100)
-    # A stray per-video subdir of the kind `/tmp/yt/0NvD6qNapiU/` was, aged past the window.
+    # A stray per-video subdir of the kind `/tmp/yt/0NvD6qNapiU/` was, aged past the window,
+    # holding an aged file. Order matters: creating an entry inside a directory rewrites that
+    # directory's mtime, so the inner file has to be written BEFORE the directory is backdated —
+    # backdate first and the directory comes out young, which silently un-tests every guard
+    # below (self-caught: the first draft did exactly that, and a mutation removing the sweep's
+    # is_file() guard passed green).
     subdir = rs.TRANSCRIPT_SCRATCH_DIR / "0NvD6qNapiU"
     subdir.mkdir()
-    _backdate(subdir, 45)
-    # Aged too, and out of reach of `iterdir()` — so it survives ONLY because the sweep does not
-    # walk. This is the assertion that bites a recursive implementation; `subdir.exists()` alone
-    # could not, because unlinking a directory raises and the sweep's OSError handler swallows it.
+    # Out of reach of `iterdir()` — so it survives ONLY because the sweep does not walk. This is
+    # the assertion that bites a recursive implementation; `subdir.exists()` alone could not,
+    # because unlinking a directory raises and the sweep's OSError handler swallows it.
     stale_inside = subdir / "chunks.txt"
     stale_inside.write_text("c" * 700)
     _backdate(stale_inside, 45)
+    _backdate(subdir, 45)
     outside = rs.TRANSCRIPT_SCRATCH_DIR.parent / "not-in-scratch.txt"
     outside.write_text("x")
     _backdate(outside, 45)
@@ -208,10 +213,15 @@ def test_transcript_scratch_old_deleted_recent_kept(rs, capsys):
     assert link.is_symlink(), "the sweep must skip a symlink, not unlink it"
     assert outside.exists(), "nothing outside the scratch dir may be unlinked through a link"
 
-    # Skipped by policy, not by an accident: the only way the stray directory reaches the
-    # `except OSError` handler is if the `is_file()` guard is gone and `unlink()` raised EISDIR
-    # on it. The pass would still report (1, 500) and leave the directory in place — that is
-    # precisely the version this catches and the counts above cannot.
+    # A second, independent net for the same defect, and the one that survives a change of
+    # implementation: the only way the stray directory can reach the `except OSError` handler is
+    # with the `is_file()` guard gone and `unlink()` raising EISDIR on it. An implementation that
+    # counts only after a successful unlink keeps (1, 500) intact through that path — the counts
+    # above then say nothing and this is what remains.
+    # Verified to fire, 2026-09-14, because the first draft of this check passed green for the
+    # wrong reason (see the backdating note above): with the guard removed the handler really does
+    # print `! skip 0NvD6qNapiU: [Errno 21] Is a directory`, and the assertion below rejects it.
+    # With the count assertions relaxed, that mutation fails on THIS assertion alone.
     logged = capsys.readouterr().err
     assert subdir.name not in logged, (
         f"sweep logged a skip for the stray directory — it is being rejected by an exception, "
@@ -225,3 +235,22 @@ def test_transcript_scratch_missing_dir_is_zero(rs):
     import shutil
     shutil.rmtree(rs.TRANSCRIPT_SCRATCH_DIR)
     assert rs.sweep_transcript_scratch(apply=True, now=time.time()) == (0, 0)
+
+
+def test_dry_run_reports_the_transcript_store(rs, capsys, monkeypatch):
+    """#566 clause 6's second half: the operator approves `--apply` from the dry run's printed
+    line, so a store the sweep bounds but never prints is a store nobody can see being bounded.
+    Run through `main()` with every deletable root redirected into tmp_path by the fixture, which
+    is also what makes this safe to execute — the printed number has to come from the same call
+    path an operator runs, not from a re-implementation of it."""
+    stale = rs.TRANSCRIPT_SCRATCH_DIR / "cpqC9ib0-Kw.txt"
+    stale.write_text("z" * 2048)
+    _backdate(stale, 45)
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+
+    assert rs.main() == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if "transcript scratch" in ln]
+    assert len(lines) == 1, f"expected exactly one transcript-scratch line, got {lines}"
+    assert f">{rs.TRANSCRIPT_MAX_AGE_DAYS}d" in lines[0], lines[0]
+    assert "1 deleted" in lines[0] and "2 KiB freed" in lines[0], \
+        f"the dry run must report the store's count and bytes like the others: {lines[0]!r}"
