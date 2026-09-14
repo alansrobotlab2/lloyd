@@ -31,10 +31,17 @@ the same wire text the client sends: the five files enter the reply at ranks 14,
 35, 39 and 175. Zero of the five at a pool of 40.
 
 The rows below are that recorded arm, in reply order, with the task files at their
-observed ranks. What is under test is everything downstream of the daemon's answer —
-the depth of the request, the pool handed to the final ranker, the fold back onto the
-segment view, and the slice in between. Whether the daemon really returns those rows
-for this query is the eval's question, not this file's.
+observed ranks. What is under test there is everything downstream of the daemon's
+answer — the depth of the request, the pool handed to the final ranker, the fold back
+onto the segment view, and the slice in between. Those tests can only fail on a
+client-side cut, because the reply they assert against is one this file wrote: a
+daemon that stopped returning the five files would still satisfy them. The last test
+in the file is the other half — `live_vault`, one real POST to the daemon on :8181
+with the real payload, asserting the same five paths reach the same pool. The gate
+runs `-m "not live_vault"` precisely because a round under test does not control that
+corpus, so that test is not evidence the gate holds; it was run by hand and cited in
+the round report, and if the vault moves under it the eval is the thing that has
+moved, not the client.
 """
 import urllib.error
 
@@ -168,7 +175,28 @@ def test_the_pool_is_bounded_so_a_small_ask_stays_cheap(wire):
     """
     vault._qmd_daemon_search("entity resolution", 2, list(vault.VAULT_SEGMENTS))
     small = wire[-1]["limit"]
-    assert 4 <= small <= vault.QMD_POOL_MAX, small
+    # Asserted against the constant the code is supposed to apply, not against the
+    # ceiling the same code sets: `4 <= small <= QMD_POOL_MAX` read as a bound but
+    # only ever tested the floor, because no factor could push `small` past a cap it
+    # was itself min()'d against.
+    assert small == 2 * vault.QMD_POOL_FACTOR, (
+        f"a limit-2 caller got a {small}-row ask; the pool is QMD_POOL_FACTOR "
+        f"(={vault.QMD_POOL_FACTOR}) times the answer, so a small caller gets a pool "
+        "rather than only its answer")
+    assert 2 < small < vault.QMD_POOL_MAX, (
+        f"{small} is not strictly between the answer (2) and the ceiling "
+        f"({vault.QMD_POOL_MAX}): if the factor reached the ceiling then `min` clamps "
+        "every ask in the tree and QMD_POOL_FACTOR is decorative")
+
+    # The ceiling, falsified by an input above it rather than by one sitting on it.
+    vault._qmd_daemon_search("some vault question", 4 * vault.QMD_POOL_MAX,
+                             list(vault.VAULT_SEGMENTS))
+    assert wire[-1]["limit"] == vault.QMD_POOL_MAX, (
+        f"a caller asking for {4 * vault.QMD_POOL_MAX} rows got "
+        f"{wire[-1]['limit']}: above the ceiling the factor must stop multiplying, or "
+        "QMD_POOL_MAX bounds nothing")
+    # And the reachable version of the same ask — `RECALL_DOC_POOL` is exactly
+    # `QMD_POOL_MAX`, which is what `_vault_recall`'s doc leg hands this function.
     vault._qmd_daemon_search("some vault question", vault.QMD_POOL_MAX,
                              list(vault.VAULT_SEGMENTS))
     assert wire[-1]["limit"] == vault.QMD_POOL_MAX, (
@@ -187,7 +215,16 @@ def test_scope_restricted_search_keeps_its_own_shape(wire):
     vault._qmd_daemon_search("guardian rollback", 10, ["backlog", "architecture"])
     assert wire[0]["collections"] == ["backlog", "architecture"]
     assert wire[0]["limit"] == 10
-    assert wire[0].get("candidateLimit", 10) == 10
+    # Direct index, no default: `.get("candidateLimit", 10) == 10` was satisfied by
+    # the key being ABSENT, which is the one thing this asserts against — an absent
+    # key hands the width back to the daemon's default 40, wider than the answer.
+    assert "candidateLimit" in wire[0], (
+        "the rerank window is stated explicitly on every arm, restricted included; a "
+        "payload that omits it lets the daemon's default decide the width")
+    assert wire[0]["candidateLimit"] == 10, (
+        f"a restricted search asked to rank {wire[0]['candidateLimit']} candidates for "
+        "a 10-document answer; its pool is its depth, so prefetch does not inherit the "
+        "widened ask")
 
 
 def test_the_recall_doc_leg_asks_for_the_whole_pool(wire):
@@ -305,3 +342,66 @@ def test_a_daemon_that_does_not_answer_is_still_not_a_zero_hit():
             vault._qmd_daemon_search(KG_QUERY, 20, list(vault.VAULT_SEGMENTS))
     finally:
         vault._qmd_post = original
+
+
+# The five expectations exactly as `eval/vault_recall_queries.yaml` writes them for
+# `kg-maintenance-tasks`: prefixes rather than filenames, so the assertion below is
+# the eval's own contract and not a transcription of it.
+EVAL_DOC_PREFIXES = ("autonomy/24-", "autonomy/48-", "autonomy/51-",
+                     "autonomy/67-", "autonomy/74-")
+
+
+@pytest.mark.live_vault
+def test_the_live_daemon_hands_the_five_task_files_to_the_pre_rank_pool(monkeypatch):
+    """The half every test above cannot check: the daemon, over the real seam.
+
+    Each assertion above answers a reply this file wrote, so the only failure they can
+    report is a client-side cut. This one posts the payload `_vault_recall` really
+    builds — `VAULT_SEGMENTS` named, `limit` and `candidateLimit` both at
+    `RECALL_DOC_POOL` (240), rerank on — to the index on :8181, and asserts the five
+    files reach the pool the final ranker is handed. It is the only assertion here that
+    can fail because retrieval, rather than the client, stopped returning them.
+
+    Marked `live_vault`, which the automod gate excludes with `-m "not live_vault"`: a
+    round under test does not control this corpus, and nightly jobs rewrite it. Not
+    skip-guarded on the daemon being up — same reading as `test_conversation_relations`
+    — because an unreachable daemon is exactly the outage this test exists to catch.
+    Run by hand against the corpus production is serving; cite the run in the round
+    report, do not count the gate as having run it.
+    """
+    payloads: list = []
+    real_post = vault._qmd_post
+
+    def spy_post(payload):
+        payloads.append(payload)
+        return real_post(payload)          # straight through: the POST is the point
+
+    monkeypatch.setattr(vault, "_qmd_post", spy_post)
+    seen = _paths_seen_by_the_demoter(monkeypatch)
+
+    out = vault._vault_recall({"query": KG_QUERY, "limit": 20, "grep_code": False,
+                               "include_facts": False, "expand_graph": False})
+
+    assert payloads, "no query POST reached the qmd daemon on :8181"
+    doc_leg = payloads[0]
+    assert doc_leg["collections"] == list(vault.VAULT_SEGMENTS), (
+        "the live doc leg did not name the segments, so it is asking for a global "
+        "top-k again — the shape that returned none of the five at any depth")
+    assert doc_leg["limit"] >= vault.RECALL_DOC_POOL, (
+        f"the live doc leg asked for {doc_leg['limit']} rows, below the "
+        f"{vault.RECALL_DOC_POOL}-row pool the recorded ranks require")
+    assert doc_leg.get("candidateLimit") == doc_leg["limit"], (
+        "the live ask did not widen qmd's own rerank window with it, so rows past "
+        "the daemon's default 40 candidates come back unranked")
+
+    pool = list(dict.fromkeys(seen))
+    assert pool, (
+        f"the doc leg POSTed and the pre-rank pool is empty — the daemon answered "
+        f"{len(payloads)} request(s) and nothing survived the fold")
+    missing = [p for p in EVAL_DOC_PREFIXES
+               if not any(path.startswith(p) for path in pool)]
+    assert not missing, (
+        f"{len(missing)} of the five expectations never reached the pre-rank pool of "
+        f"{len(pool)} real rows (pool width {vault.RECALL_DOC_POOL}): {missing}"
+    )
+    assert out["documents"], "the query still has to return an answer"
