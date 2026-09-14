@@ -384,24 +384,47 @@ def test_shipped_artifacts_exist_and_their_counts_are_the_ones_reported():
     good = sum(1 for s in samples if s["label"] == "good")
     assert f"bad: **{bad}** / good: **{good}**" in report
 
-    # Recompute Judge A's row from the raw verdicts, independently of sc.metrics,
-    # and require the shipped report to carry exactly those numbers.
-    verdicts = {r["sample_id"]: r["verdict"]
-                for r in sc.load_jsonl(HERE / "judge_raw_a.jsonl")}
-    fn = sum(1 for s in samples if s["label"] == "bad" and verdicts.get(s["id"]) == "accept")
-    tn = sum(1 for s in samples if s["label"] == "good" and verdicts.get(s["id"]) == "accept")
-    tp = sum(1 for s in samples if s["label"] == "bad" and verdicts.get(s["id"]) == "flag")
-    fp = sum(1 for s in samples if s["label"] == "good" and verdicts.get(s["id"]) == "flag")
-    judged_bad, accepted = tp + fn, fn + tn
-    recall = round(100.0 * tp / judged_bad, 1) if judged_bad else None
-    fpr = round(100.0 * fp / (fp + tn), 1) if (fp + tn) else None
-    silent = round(100.0 * fn / accepted, 1) if accepted else None
-    assert f"| **{recall}** | {fpr} | **{silent}** |" in report, (
-        f"report disagrees with raws: recall={recall} fpr={fpr} silent={silent}")
+    # Recompute EACH judge's whole row from its own raw verdicts, independently of
+    # sc.metrics, and require the shipped report to carry exactly those numbers.
+    # Re-deriving only Judge A's row would leave B's recall, false-positive rate and
+    # silent-pass rate as literal prose that a wrong number still satisfies — and
+    # clause 3 asks for one of each *per judge*.
+    for judge in ("a", "b"):
+        verdicts = {r["sample_id"]: r["verdict"]
+                    for r in sc.load_jsonl(HERE / f"judge_raw_{judge}.jsonl")}
+        fn = sum(1 for s in samples if s["label"] == "bad" and verdicts.get(s["id"]) == "accept")
+        tn = sum(1 for s in samples if s["label"] == "good" and verdicts.get(s["id"]) == "accept")
+        tp = sum(1 for s in samples if s["label"] == "bad" and verdicts.get(s["id"]) == "flag")
+        fp = sum(1 for s in samples if s["label"] == "good" and verdicts.get(s["id"]) == "flag")
+        judged_bad, judged_good, accepted = tp + fn, fp + tn, fn + tn
+        unjudged = len(samples) - judged_bad - judged_good
+        recall = round(100.0 * tp / judged_bad, 1) if judged_bad else None
+        fpr = round(100.0 * fp / judged_good, 1) if judged_good else None
+        silent = round(100.0 * fn / accepted, 1) if accepted else None
+        assert (f"| {sc.JUDGE_NAMES[judge]} | {judged_bad}/{judged_good} "
+                f"(unjudged {unjudged}) | **{recall}** | {fpr} | **{silent}** |") in report, (
+            f"report disagrees with judge_raw_{judge}.jsonl: "
+            f"recall={recall} fpr={fpr} silent={silent}")
     assert counts and all(f"| `{c}` | {n}" in report for c, n in counts.items())
+    # Every other figure the report states — the per-class recall table, the
+    # selection-quality percentages, the moved-case rows — is re-derived the same
+    # way: the shipped artifact must be exactly what score.py renders from these
+    # two raw files and this corpus, so no reported number is hand-written.
+    assert report == sc.render(samples, {"a": HERE / "judge_raw_a.jsonl",
+                                        "b": HERE / "judge_raw_b.jsonl"}), (
+        "report.md is not what score.py renders from the shipped corpus and raws")
 
 
-def test_no_judged_sample_was_its_own_retrieved_example_in_the_shipped_run():
+def test_the_examples_every_shipped_row_showed_reproduce_from_the_shipped_corpus():
+    """Clause 2 is a claim about the *shipped run*, not only about the functions.
+
+    Every one of the 100 shipped rows must show exactly five examples, none from
+    the judged sample's own file, and the same five the shipped code would pick
+    again: Judge B's by recomputing the BM25 top-k, Judge A's by recomputing the
+    seeded draw. Half-pinning this (B only) would leave the README's claim that
+    re-running ``judge.py`` reproduces the same ``example_ids`` untrue for A, and
+    A's five examples are the comparison's control arm.
+    """
     samples = load_shipped_corpus()
     by_id = {s["id"]: s for s in samples}
     index = rt.build_index(samples)
@@ -415,8 +438,15 @@ def test_no_judged_sample_was_its_own_retrieved_example_in_the_shipped_run():
             r["id"] for r in rt.top_k(index, samples, sample, k=jd.EXAMPLE_K)}, (
             "the shipped run must be reproducible from the shipped corpus")
     for row in sc.load_jsonl(HERE / "judge_raw_a.jsonl"):
+        sample = by_id[row["sample_id"]]
         assert len(row["example_ids"]) == jd.EXAMPLE_K
         assert row["sample_id"] not in row["example_ids"]
+        twins = {s["id"] for s in samples if s["vault_path"] == sample["vault_path"]}
+        assert not (twins & set(row["example_ids"])), row["sample_id"]
+        assert set(row["example_ids"]) == {
+            e["id"] for e in jd.random_examples(samples, sample)}, (
+            "Judge A's five examples are a seeded draw (SEED=580); re-drawing them "
+            "must give the shipped five, or A is not a reproducible control")
 
 
 def _fixture_raws(tmp_path, corpus, verdict):
