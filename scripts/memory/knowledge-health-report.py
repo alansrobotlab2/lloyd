@@ -291,6 +291,39 @@ def _facts_root_for(entities: dict) -> Path:
     return FACTS_DIR
 
 
+def fact_duplicate_stats() -> dict:
+    """Exact-duplicate FACT totals, read from `facts_idx.text_hash`.
+
+    Nothing else in this report measures a duplicated fact. The line that reads
+    "Near-duplicate name clusters" comes from `kg_hygiene.near_duplicates`,
+    which clusters entity-name DIRECTORIES (`_clusters(root)`, on `d.name`) — so
+    a report could print zero near-duplicates while the store held thousands of
+    rows whose text was identical (#499: 11,775 duplicate rows measured
+    2026-09-12). This is the fact-level number the trend is read on.
+
+    Counted over every indexed row, expired and invalid included: a retired row
+    is still a row ingestion wrote, and #499's guard forbids expiring anything,
+    so retirement is not in this denominator either way.
+
+    An unreadable store reports `unavailable` with the reason, never a 0 —
+    a check that prints a verdict for an input it could not read is the exact
+    defect class #499 is catalogued under.
+    """
+    try:
+        return {"unavailable": False, **_kg_store().facts_idx.exact_duplicate_stats()}
+    except StoreUnavailable as e:
+        return {"unavailable": True, "reason": str(e)}
+
+
+def _fact_duplicate_cell(d: dict) -> str:
+    """One table cell: the total, with the denominator it is a fraction of."""
+    if d.get("unavailable"):
+        return f"not measured: {d.get('reason', 'store unavailable')}"
+    return (f"{d['same_entity_redundant_rows']} redundant of {d['rows']} rows "
+            f"(entities with an exact twin: {d['entities_with_exact_dupes']}; "
+            f"distinct texts: {d['distinct_texts']})")
+
+
 def generate_report(
     entity_stats: dict,
     rel_stats: dict,
@@ -298,6 +331,7 @@ def generate_report(
     stale_facts: list[dict],
     now: datetime,
     hygiene: dict | None = None,
+    fact_dups: dict | None = None,
 ) -> str:
     """Generate the markdown health report."""
     lines: list[str] = []
@@ -323,6 +357,12 @@ def generate_report(
     lines.append(f"| Total facts | {total_facts} |")
     lines.append(f"| Active facts | {active_facts} |")
     lines.append(f"| Expired facts | {expired_facts} |")
+    # Fact-level duplicates, from `facts_idx.text_hash`. Kept apart from the
+    # Hygiene section's "Near-duplicate name clusters" line on purpose: that one
+    # counts entity-name directories, this one counts rows whose text is the
+    # same claim twice. See `fact_duplicate_stats`.
+    lines.append(f"| Exact-duplicate fact rows (facts_idx.text_hash) | "
+                 f"{_fact_duplicate_cell(fact_dups or {'unavailable': True, 'reason': 'not computed'})} |")
     lines.append(f"| Total relationships | {total_rels} |")
     lines.append(f"| Active relationships | {active_rels} |")
     lines.append(f"| Expired relationships | {expired_rels} |")
@@ -578,10 +618,12 @@ def main():
     stale_facts = find_stale_facts(entities, now, STALE_DAYS_THRESHOLD)
 
     hygiene = compute_hygiene(entities, now)
+    fact_dups = fact_duplicate_stats()
     dup_id_files = _duplicate_id_files(entities)
 
     # Generate report
-    report = generate_report(entity_stats, rel_stats, edges, stale_facts, now, hygiene)
+    report = generate_report(entity_stats, rel_stats, edges, stale_facts, now, hygiene,
+                             fact_dups=fact_dups)
 
     # Write output
     output_dir = args.output_dir
@@ -597,6 +639,9 @@ def main():
     print(f"  Stale facts: {len(stale_facts)}")
     print(f"  Contaminated dirs: {hygiene['contaminated_dirs']} ({hygiene['foreign_facts']} foreign facts)")
     print(f"  Near-dup clusters: {hygiene['near_dup_clusters']}; regrown in {hygiene['regrowth_days']}d: {len(hygiene['regrown'])}")
+    # On its own line, right under the name-cluster line, because the two are
+    # different measurements and the #499 trend is read from this one.
+    print(f"  Exact-duplicate fact rows (facts_idx.text_hash): {_fact_duplicate_cell(fact_dups)}")
     print(f"  Files with duplicate fact IDs: {dup_id_files}")
     pv = hygiene.get("provenance") or {}
     if "both_pct" in pv:

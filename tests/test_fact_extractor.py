@@ -132,6 +132,46 @@ def test_merge_facts_dedupes_by_text(extractor):
     assert [f["fact"] for f in fm["facts"]] == ["same text", "new text"]
 
 
+def test_one_pass_repairs_a_duplicate_already_in_the_file(extractor):
+    """#499 clause 4. 708 fact files hold the same text twice *inside one file*:
+    `_merge_facts` started from `merged = existing.copy()`, so it refused a
+    repeat coming IN but preserved the repeat already THERE, and one more
+    extraction pass re-indexed both copies. A pass over such a file now leaves
+    one copy in the markdown and one row in `facts_idx`."""
+    e = extractor
+    path = e.write_fact_file("Lloyd", "state", {"facts": [_fact("twin text")]})
+    fm = _read(path)
+    fm["facts"].append({**fm["facts"][0], "id": "stat-002"})   # the legacy pair
+    path.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\nbody\n", encoding="utf-8")
+    assert [f["fact"] for f in _read(path)["facts"]] == ["twin text", "twin text"]
+
+    e.write_fact_file("Lloyd", "state", {"facts": [_fact("one more")]})
+
+    assert [f["fact"] for f in _read(path)["facts"]] == ["twin text", "one more"]
+    rows = kg_store.store().facts_idx.for_entity("Lloyd", include_expired=True)
+    assert [r["fact"] for r in rows] == ["twin text", "one more"], rows
+
+
+def test_merge_facts_keeps_the_copy_that_carries_an_expiry(extractor):
+    """Repairing a pair must not retire anything: #499 records that expiring
+    one copy of a pair is what deleted useful facts, so an expired or invalid
+    member of the pair has to survive the merge on its own id."""
+    existing = [
+        {"fact": "dated claim", "id": "stat-001", "confidence": 0.9,
+         "expired_at": "2026-01-01T00:00:00+00:00"},
+        {"fact": "dated claim", "id": "stat-002", "confidence": 0.9, "expired_at": None},
+        {"fact": "keep me", "id": "stat-003", "confidence": 0.9},
+    ]
+    merged = extractor._merge_facts(existing, [{"fact": "new", "id": "stat-004",
+                                                "confidence": 0.9}])
+    assert [(f["fact"], f["id"], f.get("expired_at")) for f in merged] == [
+        ("dated claim", "stat-001", "2026-01-01T00:00:00+00:00"),
+        ("dated claim", "stat-002", None),
+        ("keep me", "stat-003", None),
+        ("new", "stat-004", None),
+    ]
+
+
 # ── LLM failure ──────────────────────────────────────────────────────────────
 
 def test_llm_failure_raises_rather_than_returning_empty(extractor, monkeypatch):

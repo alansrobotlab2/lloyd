@@ -46,7 +46,7 @@ from agent_mcp._shared import (
 )
 from app.atomic_io import locked_file
 from app.fact_ids import assign_ids as _assign_fact_ids, category_prefix, next_fact_id
-from app.kg_store import StoreUnavailable, store as _store
+from app.kg_store import StoreUnavailable, text_hash as _text_hash, store as _store
 from agent_mcp.retrieval import (  # noqa: F401  (re-exported compat names)
     EDGE_TYPE_WEIGHTS,
     RelationshipsCorrupt,
@@ -89,6 +89,75 @@ def _reindex_files(paths) -> None:
         _store().facts_idx.reindex(list(paths), root=FACTS_ROOT)
     except StoreUnavailable:
         pass          # markdown is written; `kg reindex` rebuilds the index
+
+
+# ── write-time duplicate refusal (#499) ──────────────────────────────────────
+#
+# One session event used to reach the store twice with slightly different
+# wording, and a second time verbatim, because every writer of a fact file
+# checked only the file it was about to append to. `remember` had a verbatim
+# check; `_fact_add`, the tool and `app/post_capture.py` did not — so the one
+# guard that existed was bypassed by the highest-volume writer. The measured
+# cost: 5,591 same-entity duplicate groups in the live store on 2026-09-12,
+# 4,839 of them cross-file AND cross-category, which a file-scoped check
+# structurally cannot see.
+#
+# The key is `(entity, text_hash)` against `facts_idx` — `text_hash` because
+# `fact_id` is a per-file counter that restarts in every file, so it cannot
+# identify a claim. Refusing at the write is also the whole point: #499
+# records that retiring the lower-confidence copy of a pair after the fact
+# moved `fact_entity_recall` 0.35 → 0.30. Nothing here expires anything.
+
+def _store_copy_of(entity, fact_text):
+    """The `facts_idx` row already holding `fact_text` for `entity`, any category.
+
+    None when there is none, and also None when the store cannot be read —
+    the caller falls back to the file-scoped check, so an unreadable store
+    narrows the guard instead of disabling it.
+    """
+    try:
+        return _store().facts_idx.find_duplicate(entity, fact_text)
+    except StoreUnavailable:
+        return None
+
+
+def _in_file_copy_of(existing, fact_text, fact_file, entity, category):
+    """The entry in this one file that already carries `fact_text`, or None.
+
+    The fallback refusal while the store is unreadable: the guard degrades to
+    the narrow same-file check it had before #499 rather than to appending.
+    Reported in the same shape as an index row so a caller sees one thing
+    either way.
+    """
+    h = _text_hash(fact_text)
+    for f in existing:
+        if not isinstance(f, dict):
+            continue
+        if _text_hash(str(f.get("fact") or "")) != h:
+            continue
+        if f.get("expired_at") or f.get("invalid_at"):
+            continue          # a superseded copy does not refuse a new claim
+        try:
+            rel = str(fact_file.relative_to(FACTS_ROOT))
+        except ValueError:
+            rel = str(fact_file)
+        return {"entity": entity, "category": category, "fact_id": f.get("id"),
+                "text_hash": h, "file_path": rel}
+    return None
+
+
+def _duplicate_refusal(entity, category, dup) -> dict:
+    """What `fact_add` returns when the entity already carries the text.
+
+    Success, and nothing written: the claim is in the store, it just does not
+    need a second row. Deliberately not an error — every caller here treats a
+    non-success `fact_add` as a lost fact and retries or reports a drop, which
+    is how a duplicate check turns into a data-loss warning on every retry.
+    """
+    return {"success": True, "skipped": True, "duplicate": True,
+            "entity": entity, "category": category, "duplicate_of": dup,
+            "reason": "duplicate: this entity already carries that fact "
+                      "verbatim (same entity, same text_hash); nothing was appended"}
 
 
 def _generate_fact_id(category: str, existing_ids=()) -> str:
@@ -228,6 +297,12 @@ def _fact_add(params: dict) -> dict:
             if not frontmatter:
                 frontmatter = {"type": "facts", "entity": entity, "category": category, "facts": []}
             existing = frontmatter.setdefault("facts", [])
+            # Refused here, inside the lock, so two concurrent writers adding
+            # the same claim cannot both pass an earlier check and both append.
+            dup = _store_copy_of(entity, fact_text) or _in_file_copy_of(
+                existing, fact_text, fact_file, entity, category)
+            if dup:
+                return _duplicate_refusal(entity, category, dup)
             fact_id = _generate_fact_id(category, [f.get("id") for f in existing if isinstance(f, dict)])
             new_fact = {"fact": fact_text, "confidence": confidence, "category": category,
                         "id": fact_id, "created_at": now_iso, "valid_at": params.get("valid_at"),
@@ -648,7 +723,7 @@ async def list_tools():
     return [
         Tool(name="fact_get", description="Retrieve structured facts for a named entity. Supports temporal queries with as_of and include_expired.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "as_of": {"type": "string", "description": "ISO date — return facts valid at this point in time"}, "include_expired": {"type": "boolean", "description": "If true, include expired/invalidated facts"}}, "required": ["entity"]}),
-        Tool(name="fact_add", description="Add a structured fact for a named entity and category. Writes a line to the entity's markdown fact file and indexes it; use one clear sentence per call rather than a paragraph.", inputSchema={
+        Tool(name="fact_add", description="Add a structured fact for a named entity and category. Writes a line to the entity's markdown fact file and indexes it; use one clear sentence per call rather than a paragraph. An entity that already carries that text verbatim is refused: the result reports success with skipped=true and the surviving copy in `duplicate_of`, and nothing is written, whatever category was asked for.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "fact": {"type": "string", "description": "The fact, as one self-contained sentence that will still make sense read on its own"}, "confidence": {"type": "number", "description": "0.0-1.0 belief in the fact (default 0.9); the weaker side loses a contradiction"}, "valid_at": {"type": "string", "description": "ISO date the fact started being true (default: today)"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the fact was derived (default: STATED)"}, "source_doc": {"type": "string", "description": "Vault path this fact came from, for provenance"}}, "required": ["entity", "category", "fact"]}),
         Tool(name="fact_profile", description=f"Synthesized profile for an entity: facts grouped by category, capped at {FACT_RANK_CAP_SEED} per category. Pass `query` to rank each category by relevance instead of recency.", inputSchema={
             "type": "object", "properties": {

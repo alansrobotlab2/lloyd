@@ -31,7 +31,7 @@ from app.entity_naming import ENTITY_CANDIDATES_PATH, SCHEMA_TYPES
 from app.entity_naming import gate_entity_name as _identity_gate
 from app.atomic_io import atomic_write_text, locked_file
 from app.fact_ids import assign_ids as _assign_fact_ids
-from app.kg_store import StoreUnavailable, store as _kg_store
+from app.kg_store import StoreUnavailable, text_hash, store as _kg_store
 
 # The seven fallback classes that used to sit here (a hand-rolled YAML parser,
 # a pass-through entity normaliser, a never-junk predicate) each turned a
@@ -566,18 +566,39 @@ class FactExtractor:
             print(f"  ⚠ index/link failed for {fact_file.name}: {e}")
 
     def _merge_facts(self, existing: list, new: list) -> list:
-        """Merge new facts with existing, avoiding duplicates."""
-        # Simple dedup by fact text similarity
-        existing_texts = {f.get("fact", "") for f in existing}
-        merged = existing.copy()
-        
-        for fact in new:
-            fact_text = fact.get("fact", "")
-            # Simple duplicate check
-            if fact_text not in existing_texts:
-                merged.append(fact)
-                existing_texts.add(fact_text)
-        
+        """Merge new facts into existing, keeping one copy of each claim.
+
+        The key is the store's own `text_hash` (strip, casefold, sha256[:16])
+        rather than raw string equality, so "a duplicate here" and "a duplicate
+        row in `facts_idx`" are the same relation. A casing difference used to
+        pass this check and land as two indexed rows.
+
+        #499 clause 4: this used to open with `merged = existing.copy()`, which
+        refused a repeat arriving IN while preserving a repeat already THERE —
+        so every pass over one of the 708 files holding the same text twice
+        re-indexed both copies, forever. Existing copies are folded now too.
+
+        Except where two copies disagree about retirement. One carrying
+        `expired_at` or `invalid_at` and one carrying neither are not
+        interchangeable: folding them either resurrects a retired claim or
+        deletes the record that it was retired — and #499 records what deciding
+        that by confidence did to `fact_entity_recall` (0.35 → 0.30). Those
+        survive, one per status. This merge still never expires anything.
+        """
+        merged: list = []
+        seen: set = set()
+
+        for fact in list(existing) + list(new):
+            if not isinstance(fact, dict):
+                merged.append(fact)          # not ours to fold; keep it verbatim
+                continue
+            key = (text_hash(fact.get("fact", "")),
+                   bool(fact.get("expired_at")), bool(fact.get("invalid_at")))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(fact)
+
         return merged
     
     def _assign_ids(self, facts: list, category: str) -> list:

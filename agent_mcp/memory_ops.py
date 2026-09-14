@@ -81,7 +81,12 @@ def remember(params: dict) -> dict:
     result = _fact_add(params)
     if result.get("error"):
         return result
-    result["skipped"] = False
+    # `skipped` means "nothing was written", so it has to be true when the
+    # write-time guard (#499) refused the add from a category this router's own
+    # read-through view never loaded — a text-only difference, or the claim
+    # living under another category. A false report of a write is exactly the
+    # failure this item is about.
+    result["skipped"] = bool(result.get("skipped"))
     return result
 
 

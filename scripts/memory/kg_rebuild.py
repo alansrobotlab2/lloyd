@@ -480,11 +480,14 @@ def cmd_import_worker(args) -> int:
     # is a fact about to be lost, and fails the import rather than becoming a
     # line in a stats dict.
     for f in json.loads((carry / "facts.json").read_text()):
-        # `fact_add` appends unconditionally -- it has no duplicate check --
-        # so without this, re-running `import` writes every carried-over fact
-        # a second time. Both the dropped-fact message below and `swap`'s
-        # refusal tell you to re-run it, so the advice this tool prints was
-        # the thing that would corrupt the tree.
+        # This pre-check is the one that catches a re-run of `import`: it
+        # matches the entity CASE-INSENSITIVELY through the alias layer, which
+        # the write-time guard below cannot. `fact_add` now refuses a claim the
+        # entity already carries (#499), so a second copy would be refused even
+        # without this — but it would come back as a success and be counted as
+        # a fact this import wrote, when it wrote none. Both the dropped-fact
+        # message below and `swap`'s refusal tell you to re-run `import`, so the
+        # advice this tool prints is the thing that used to corrupt the tree.
         if _carryover_present(st, f):
             stats["already_present"] += 1
             continue
@@ -494,7 +497,9 @@ def cmd_import_worker(args) -> int:
             "provenance": f.get("provenance") or "STATED",
             "source_doc": f.get("source_doc"), "valid_at": f.get("valid_at"),
         })
-        if res.get("success"):
+        if res.get("skipped"):
+            stats["already_present"] += 1
+        elif res.get("success"):
             stats["facts"] += 1
         elif res.get("code") == "INVALID_PARAM":
             stats["rejected_junk"] += 1

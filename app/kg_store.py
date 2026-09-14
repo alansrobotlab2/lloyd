@@ -154,8 +154,18 @@ def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat()
 
 
-def _text_hash(text: str) -> str:
+def text_hash(text: str) -> str:
+    """The store's key for "the same claim": strip, casefold, sha256[:16].
+
+    Public because it is what a writer must compute to ask the store whether
+    it already holds a fact — see `_FactsIdx.find_duplicate`. Two copies of
+    this function is how a dedupe guard and the index disagree; there was
+    already a second one at `scripts/memory/kg_rebuild.py:174`.
+    """
     return hashlib.sha256((text or "").strip().lower().encode("utf-8")).hexdigest()[:16]
+
+
+_text_hash = text_hash   # internal call sites and existing tests
 
 
 def _jsonable(v: Any) -> Any:
@@ -1051,6 +1061,55 @@ class _FactsIdx:
     def categories_for(self, entity: str) -> list[str]:
         return [r["category"] for r in self._s._query(
             "SELECT DISTINCT category FROM facts_idx WHERE entity=? ORDER BY category", (entity,))]
+
+    def find_duplicate(self, entity: str, text: str, *,
+                       include_expired: bool = False) -> Optional[dict]:
+        """The row that already holds `text` for `entity`, in ANY category.
+
+        Keyed on `(entity, text_hash)` and read from the index rather than
+        from the file a writer is about to append to. That distinction is the
+        defect: of the 5,591 same-entity duplicate groups measured in the live
+        store on 2026-09-12, 4,839 are cross-file AND cross-category, so a
+        check scoped to the target file structurally cannot see them.
+
+        Returns the earliest indexed copy (`entity`, `category`, `fact_id`,
+        `text_hash`, `file_path`) or None. Expired/invalid copies do not
+        refuse a new one unless `include_expired`: re-stating a superseded
+        claim is a new claim — the same rule `remember` documents, and the
+        reason this method refuses nothing and expires nothing.
+        """
+        where, params = ["entity=?", "text_hash=?"], [entity, _text_hash(text)]
+        if not include_expired:
+            where.append("expired_at IS NULL AND invalid_at IS NULL")
+        rows = self._s._query(
+            "SELECT entity, category, fact_id, text_hash, file_path FROM facts_idx WHERE "
+            + " AND ".join(where) + " ORDER BY rowid LIMIT 1", tuple(params))
+        return self._row(rows[0]) if rows else None
+
+    def exact_duplicate_stats(self) -> dict:
+        """Store-wide exact-duplicate totals, measured on `text_hash`.
+
+        `fact_id` cannot answer this: it is a per-file counter (`fact-001`
+        restarts in every entity/category file), so two rows sharing one are
+        normal, not duplicated. Rows include expired and invalid ones — this
+        is the number the #499 trend is read on, and a retired row is still a
+        row ingestion wrote. `same_entity_*` is the #499 denominator: one text
+        held twice by one entity, in any pair of categories.
+        """
+        r = self._s._query("SELECT COUNT(*), COUNT(DISTINCT text_hash) FROM facts_idx")[0]
+        rows, distinct_texts = int(r[0]), int(r[1])
+        groups = int(self._s._query(
+            "SELECT COUNT(*) FROM (SELECT text_hash FROM facts_idx "
+            "GROUP BY text_hash HAVING COUNT(*) > 1)")[0][0])
+        se = self._s._query(
+            "SELECT COUNT(*), COALESCE(SUM(n - 1), 0), COUNT(DISTINCT entity) FROM "
+            "(SELECT entity, text_hash, COUNT(*) AS n FROM facts_idx "
+            "GROUP BY entity, text_hash HAVING COUNT(*) > 1)")[0]
+        return {"rows": rows, "distinct_texts": distinct_texts,
+                "duplicate_rows": rows - distinct_texts, "groups": groups,
+                "same_entity_groups": int(se[0]),
+                "same_entity_redundant_rows": int(se[1]),
+                "entities_with_exact_dupes": int(se[2])}
 
     def entities_with_category(self, category: str) -> set[str]:
         return {r["entity"] for r in self._s._query(
