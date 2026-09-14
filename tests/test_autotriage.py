@@ -567,6 +567,7 @@ def test_autocode_housekeeping_releases_with_triages_floor(monkeypatch, tmp_path
     for name in ("reap_abandoned_rounds",):
         monkeypatch.setattr(A, name, lambda *a, **k: [])
     monkeypatch.setattr(B, "close_settled_items", lambda *a, **k: [])
+    monkeypatch.setattr(B, "unfold_spent_umbrellas", lambda *a, **k: [])
     monkeypatch.setattr(B, "reconcile_statuses", lambda *a, **k: [])
     monkeypatch.setattr(B, "expire_stale_spawns", lambda *a, **k: [])
     A._housekeeping({})

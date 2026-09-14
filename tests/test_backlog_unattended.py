@@ -328,11 +328,12 @@ def test_a_free_loop_is_free(monkeypatch):
 
 def _housekeeping_counter(monkeypatch):
     calls = {"reap": 0}
-    def reap(now=None):
+    def reap(now=None, **kw):
         calls["reap"] += 1
         return []
     monkeypatch.setattr(I, "reap_abandoned_rounds", reap)
     monkeypatch.setattr(B, "close_settled_items", lambda *a, **k: [])
+    monkeypatch.setattr(B, "unfold_spent_umbrellas", lambda *a, **k: [])
     monkeypatch.setattr(B, "reconcile_statuses", lambda *a, **k: [])
     monkeypatch.setattr(B, "expire_stale_spawns", lambda *a, **k: [])
     return calls

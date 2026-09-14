@@ -966,6 +966,13 @@ workers:
       group_min_items: 2
       group_max_items: 8
       group_max_turns: 120
+      # An umbrella whose one unattended implement attempt is spent unfolds
+      # and closes (`done`, tag `unfolded`); its members drop `grouped` and
+      # are triaged or expire on their own (Alan, 2026-09-14). Runs in
+      # autocode's housekeeping. On 09-14, 156 members sat under umbrellas,
+      # expiry-exempt, and 5 of 68 umbrellas formed had landed. false: a
+      # spent umbrella parks needs-human with its members folded, as before.
+      unfold_spent_umbrellas: true
       # Inner Voice. Every background run is RECORDED regardless
       # (`harness.background_recording`); this is whether the observer
       # watches. It runs on the primary at priority 1 and spends a

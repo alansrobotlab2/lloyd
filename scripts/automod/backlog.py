@@ -2982,6 +2982,54 @@ def unfold_umbrella(umbrella_id: int, reason: str, *, ledger: Path | None = None
     return {"umbrella_id": int(umbrella_id), "released": released, "reason": reason}
 
 
+UNFOLDED_TAG = "unfolded"
+
+
+def unfold_spent_umbrellas(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                           enabled: bool = True) -> list[dict]:
+    """Unfold every open umbrella whose one unattended attempt is spent, and
+    close it. Returns one `{umbrella_id, released, reason}` per umbrella.
+
+    A spent umbrella parked `draft` + `needs-human` and held its members
+    with it: `grouped` is expiry-exempt, so 156 members on 2026-09-14 could
+    be neither triaged nor expired, and of 68 umbrellas formed 5 had landed.
+    Alan's ruling that day: a spent umbrella unfolds and its members expire.
+    So the members drop `group`/`grouped` and are otherwise left alone — a
+    self-filed one stays quarantined and closes under the self-spawn expiry;
+    none re-forms its cluster, because a group triage already judged it
+    (`group_triaged_ids`) — and the umbrella closes `done`, tagged `unfolded`,
+    text kept. A landed umbrella (the landed marker) is never touched: that
+    one is waiting on a person, not spent. `grouped` stays in
+    `EXPIRY_EXEMPT_TAGS`, because a member of a still-live umbrella closed by
+    expiry would be misattributed by `close_settled_items` when it lands.
+    """
+    if not enabled:
+        return []
+    from scripts.automod import state as S
+    outcomes = implement_outcomes(ledger)
+    out: list[dict] = []
+    for item in open_items(boards):
+        if not is_umbrella(item):
+            continue
+        verdict, detail = outcomes.get(item.id, ("", ""))
+        if verdict != "spent":
+            continue
+        fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+        if fm.get(LANDED_MARKER) or any(fm.get(m) for m in _LEGACY_LANDED_MARKERS):
+            continue
+        reason = ("its one unattended implement attempt is spent"
+                  + (f" ({detail[:200]})" if detail else "")
+                  + "; members released to be triaged or expire on their own")
+        res = unfold_umbrella(item.id, reason, ledger=ledger)
+        set_status(item.id, "done", f"unfolded: {reason}",
+                   add_tags=(UNFOLDED_TAG,), remove_tags=(NEEDS_HUMAN_TAG,))
+        S.append_event({"event": "backlog_umbrella_unfolded", "item_id": item.id,
+                        "released": res["released"], "reason": reason[:400],
+                        "auto": True}, path=ledger)
+        out.append({"umbrella_id": item.id, "released": res["released"], "reason": reason})
+    return out
+
+
 def summarize(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> dict:
     seen = triaged_ids(ledger)
     counts: dict[str, int] = {}

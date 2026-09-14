@@ -576,6 +576,16 @@ def _housekeeping(src_cfg: dict) -> None:
                         "closed" if r["closed"] else "noted, left open", r["acceptance"])
     except Exception as exc:
         logger.warning("close_settled_items failed: %s", exc)
+    tri = _source_cfg("autotriage")
+    try:
+        # Before the reconcile, so a released member is judged in the same
+        # pass. The switch lives in triage's block, which owns umbrellas.
+        for r in B.unfold_spent_umbrellas(S.LEDGER_PATH,
+                                          enabled=bool(tri.get("unfold_spent_umbrellas", True))):
+            logger.info("umbrella #%s unfolded, %d member(s) released: %s",
+                        r["umbrella_id"], len(r["released"]), r["reason"])
+    except Exception as exc:
+        logger.warning("unfold_spent_umbrellas failed: %s", exc)
     try:
         # Status is the pipeline's state machine and the ledger is its source
         # of truth: every poll, anything the two disagree on moves. This is
@@ -590,7 +600,6 @@ def _housekeeping(src_cfg: dict) -> None:
         # at the start of its own runs too; this is the path that still works
         # when triage is switched off, so nothing it held can strand. Floor and
         # switch come from triage's config block, which owns the gate.
-        tri = _source_cfg("autotriage")
         for r in B.release_held_confirmations(
                 S.LEDGER_PATH, floor=int(tri.get("implement_pool_floor", B.IMPLEMENT_POOL_FLOOR)),
                 enabled=bool(tri.get("hold_confirmations", True))):

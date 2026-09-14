@@ -359,3 +359,85 @@ def test_under_a_full_pool_the_umbrella_is_held_and_the_folds_still_apply(isolat
     assert B.select_confirmed(S.LEDGER_PATH) is None
     assert _fm(_path(isolated, 1))["status"] == "done"
     assert _fm(_path(isolated, 2))["group"] == 50
+
+
+# ── a spent umbrella unfolds (Alan, 2026-09-14) ─────────────────────────────
+
+def _folded_umbrella(isolated, uid=50, members=(2, 5), *, stop_reason="stop"):
+    """An umbrella over self-filed members, confirmed, with one finished
+    implement attempt that ended `stop_reason` and opened no round."""
+    write_item(isolated, uid, status="draft", tags=("backlog", "umbrella", "spawned-by-triage",
+                                                     B.NEEDS_HUMAN_TAG))
+    B.update_frontmatter(_path(isolated, uid), {"members": list(members)})
+    for i in members:
+        write_item(isolated, i, days_old=2, tags=("backlog", "spawned-by-autocode"))
+        B.update_frontmatter(_path(isolated, i), {"group": uid}, add_tags=("grouped",))
+    ids = sorted(members)
+    S.append_event({"event": "backlog_group_triage", "cluster_id": CL.cluster_id(ids),
+                    "judged": {str(i): "fold" for i in ids}, "umbrella_id": uid}, path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_triage", "item_id": uid, "verdict": "confirmed",
+                    "acceptance": "it works", "umbrella": True, "members": ids}, path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": uid, "phase": "started"}, path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": uid, "phase": "finished",
+                    "stop_reason": stop_reason, "num_turns": 40}, path=S.LEDGER_PATH)
+
+
+def test_a_spent_umbrella_unfolds_closes_and_its_members_are_not_retaken(isolated):
+    """156 members sat under spent umbrellas, expiry-exempt as `grouped`,
+    triageable by nothing: of 68 umbrellas formed, 5 had landed."""
+    _folded_umbrella(isolated)
+    assert B.implement_outcomes(S.LEDGER_PATH)[50][0] == "spent"
+    out = B.unfold_spent_umbrellas(S.LEDGER_PATH)
+    assert out == [{"umbrella_id": 50, "released": [2, 5], "reason": out[0]["reason"]}]
+    fm50 = _fm(_path(isolated, 50))
+    assert fm50["status"] == "done" and B.UNFOLDED_TAG in fm50["tags"]
+    assert B.NEEDS_HUMAN_TAG not in fm50["tags"] and fm50["members"] == []
+    for i in (2, 5):
+        fm = _fm(_path(isolated, i))
+        assert fm["status"] == "draft" and "group" not in fm and "grouped" not in fm["tags"]
+    assert B.select_candidate(S.LEDGER_PATH) is None, "self-filed members stay quarantined"
+    assert B.select_cluster(S.LEDGER_PATH, _clusters([2, 5]), min_size=2) is None, "not re-clustered"
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e["event"] == "backlog_umbrella_unfolded"]
+    assert ev and ev[-1]["item_id"] == 50 and ev[-1]["released"] == [2, 5]
+    assert B.unfold_spent_umbrellas(S.LEDGER_PATH) == [], "once"
+
+
+def test_an_unfolded_member_expires_on_the_self_spawn_bound(isolated):
+    _folded_umbrella(isolated)
+    for i in (2, 5):
+        p = _path(isolated, i)
+        old = (datetime.now(timezone.utc) - timedelta(days=B.spawn_expiry_days() + 1)).isoformat()
+        fm = _fm(p)
+        p.write_text(p.read_text().replace(str(fm["created"]), old, 1))
+    assert B.expire_stale_spawns(S.LEDGER_PATH) == [], "grouped is expiry-exempt"
+    B.unfold_spent_umbrellas(S.LEDGER_PATH)
+    assert sorted(r["item_id"] for r in B.expire_stale_spawns(S.LEDGER_PATH)) == [2, 5]
+
+
+def test_an_umbrella_still_owed_an_attempt_or_landed_is_left_alone(isolated):
+    _folded_umbrella(isolated, stop_reason="max_turns")     # incomplete: offered again
+    assert B.implement_outcomes(S.LEDGER_PATH)[50][0] == "incomplete"
+    _folded_umbrella(isolated, uid=60, members=(7, 8))
+    B.update_frontmatter(_path(isolated, 60), {B.LANDED_MARKER: "abc123"})
+    assert B.unfold_spent_umbrellas(S.LEDGER_PATH) == []
+    assert _fm(_path(isolated, 2))["group"] == 50 and _fm(_path(isolated, 7))["group"] == 60
+
+
+def test_unfolding_spent_umbrellas_can_be_switched_off(isolated):
+    _folded_umbrella(isolated)
+    assert B.unfold_spent_umbrellas(S.LEDGER_PATH, enabled=False) == []
+    assert _fm(_path(isolated, 2))["group"] == 50
+
+
+def test_autocode_housekeeping_unfolds_with_triages_switch(monkeypatch):
+    from workers.sources import autocode as A
+    seen = {}
+    monkeypatch.setattr(B, "unfold_spent_umbrellas", lambda ledger, **kw: seen.update(kw) or [])
+    monkeypatch.setattr(A, "_source_cfg", lambda name: {"unfold_spent_umbrellas": False}
+                        if name == "autotriage" else {})
+    monkeypatch.setattr(A, "reap_abandoned_rounds", lambda *a, **k: [])
+    for name in ("close_settled_items", "reconcile_statuses", "expire_stale_spawns",
+                 "release_held_confirmations"):
+        monkeypatch.setattr(B, name, lambda *a, **k: [])
+    A._housekeeping({})
+    assert seen == {"enabled": False}
