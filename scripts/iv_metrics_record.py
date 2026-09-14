@@ -25,14 +25,22 @@ writer on `usage.db`.
 `usage.db` is absent from this file on purpose, and `--out` exists so the
 destination is never hardcoded — the tests run this against a fixture root.
 
-Window bounds. `inner_voice_observations.created_at` is written **local-naive**,
-while SQLite's own `datetime('now')` is UTC, and #835 documents the consequence: a
-UTC bound against local rows is decided lexically against the stored ISO `T`, which
-sorts above a space, so *every* row of the bound's own day compares as "greater
-than the bound" regardless of hour — a 3-hour window reported 3,634 rows whose
-honest count was 0. This script stores the bound it was handed verbatim and stamps
-`until` from the same local clock the rows use, so the skew is visible in the row
-instead of silently dropping the newest hours.
+Window bounds. `inner_voice_observations.created_at` is written **local-naive**, while
+UTC runs hours ahead of it, and #835 documents what that does to a bound: it is
+compared **lexically** against the stored ISO `T`, so a bound authored in a different
+clock does not shift the window — it moves one end of it, silently. On this box
+(UTC−7) a `date -u` bound names a local instant 7 hours later than intended, and the
+window loses its **oldest** 7 hours: measured 2026-09-13 on one fixed 26-hour window,
+182 LLM calls with the local bound against 130 with `date -u`, `last` identical both
+ways. The query succeeds either way, so the wrong one looks like a quiet night.
+(#835's other face: a date-only bound or SQLite's `datetime('now')` renders with a
+*space*, which sorts below the stored `T`, so every row of that day compares "greater
+than the bound" regardless of hour and a 3-hour window reported 3,634 rows whose
+honest count was 0.)
+
+This script stores the bound it was handed verbatim and stamps `until` from the same
+local clock the rows use, so the window in the row is the window that was asked for,
+and the job that hands it the bound is told to hand it in local wall clock.
 
 Exit codes: 0 normal · 2 sustained breach (see the threshold block) · 3 nothing
 usable on stdin. An exit code, not a sentence, because the autonomy runner
@@ -129,6 +137,29 @@ def _dropped_verdicts(report: dict) -> tuple[int, int, dict]:
     return dropped, error_total, by_deadline
 
 
+def over_bound(row: dict) -> bool:
+    """Does this row's dropped-verdict count exceed its own recorded bound?
+
+    The one-line check #460 asks a consumer to be able to do — `dropped_verdicts`
+    against `threshold * llm_calls`, both read off the row, with no prose parsing and
+    no re-derivation of the rate. Kept as a function rather than an expression inside
+    `_row` so the nightly `flagged` field and anyone reading the file afterwards apply
+    *the same* comparison: a threshold two places in the file, one of which can be
+    edited, is how a bound stops meaning anything. Strictly `>` — a row sitting
+    exactly on the bound is not a breach of it.
+
+    Rows with no LLM calls or no bound answer False rather than raising or dividing:
+    a night with no traffic has no rate to compare, and "could not measure" must not
+    become "measured clean" — but it is `dropped_rate: null` in the row that says so,
+    not this function silently reporting False for a row that did have a rate.
+    """
+    llm_calls = row.get("llm_calls") or 0
+    threshold = row.get("threshold")
+    if not llm_calls or threshold is None:
+        return False
+    return (row.get("dropped_verdicts") or 0) > threshold * llm_calls
+
+
 def _row(report: dict, *, window_hours: float | None, threshold: float,
          threshold_source: str, window_rows: int) -> dict:
     """The JSONL row: every field a delta needs, numeric and flat.
@@ -175,7 +206,8 @@ def _row(report: dict, *, window_hours: float | None, threshold: float,
         "threshold": threshold,
         "threshold_source": threshold_source,
         "window_rows": window_rows,
-        "flagged": bool(dropped > threshold * llm_calls) if llm_calls else False,
+        "flagged": over_bound({"llm_calls": llm_calls, "threshold": threshold,
+                               "dropped_verdicts": dropped}),
         "models": sorted((cost.get("models") or {}).keys()),
         "recorded_at": datetime.datetime.now(datetime.timezone.utc)
         .isoformat(timespec="seconds"),

@@ -61,8 +61,14 @@ PIPELINE_RE = re.compile(r"(cd ~/lloyd && python3 scripts/iv_grade\.py .*?--hour
 # than "whatever the clock said when pytest ran". Local-naive, because `created_at` is
 # written local-naive (#835) — this is the clock the grader filters on.
 NOW_LOCAL = datetime.datetime(2026, 9, 14, 3, 0, 0)
-#: This box's UTC offset (PDT). The whole of #835 is this number.
-UTC_OFFSET_HOURS = 8
+#: How far UTC runs *ahead* of this box's wall clock on the fixture date. The whole of
+#: #835 is this number, so it is measured from the fixture instant and the system's own
+#: timezone rather than written down: the previous constant said `8 # PDT`, which was
+#: wrong twice over — PDT is UTC−7, and a hardcoded value does not move when the
+#: fixture does. A naive `datetime` read as local gives the offset in force on that
+#: date, so a fixture that crosses a DST change moves with it.
+LOCAL_UTC_AHEAD_HOURS = -(
+    NOW_LOCAL.astimezone().utcoffset().total_seconds()) / 3600.0
 
 _OBS_COLUMNS = """id, session_id, turn_id, sequence_in_turn, trigger, action,
                   reason, content, related_tool, input_tokens, output_tokens,
@@ -179,7 +185,14 @@ def test_documented_pipeline_appends_exactly_one_json_object(tmp_path):
     assert out.exists(), "the series file was not created"
     rows = _rows_of(out)
     assert len(rows) == 1, f"expected exactly 1 appended row, got {len(rows)}"
-    assert isinstance(rows[0], dict)
+    # `_rows_of` already json.loads each line, so "is a dict" is a fact about the
+    # helper, not the row. What clause 2's one-shot run actually has to produce is a
+    # row carrying the grader's numbers — a `{"written": true}` stub would satisfy a
+    # type check and leave nothing to trend.
+    row = rows[0]
+    assert row["llm_calls"] == 1, row
+    assert row["since"] == _iso(NOW_LOCAL - datetime.timedelta(hours=26))
+    assert _numeric(row["dropped_verdicts"]) and _numeric(row["turns"])
 
 
 def test_second_run_appends_one_more_row(tmp_path):
@@ -251,16 +264,26 @@ def test_until_is_stamped_from_the_local_clock():
 
     Clause 3 names the window bounds and clause 6 forbids the UTC skew from
     silently moving them. `datetime.utcnow()` in the recorder would put `until`
-    8 hours ahead of the newest row it claims to bound — invisible in the row, and
-    exactly what #835 is. Asserted against the live clock rather than a pinned one,
-    because the defect is which clock, not what time.
+    `LOCAL_UTC_AHEAD_HOURS` ahead of the newest row it claims to bound — invisible in
+    the row, and exactly what #835 is. Asserted against the live clock rather than a
+    pinned one, because the defect is which clock, not what time.
+
+    The second assert is unguarded. It previously read `if UTC_OFFSET_HOURS:` on a
+    hardcoded constant, which is a permanently-true condition: the branch could never
+    be skipped, so the guard documented nothing and a fixture move that changed the
+    offset would not have flipped it. The offset is now measured, and this box could
+    in principle be UTC, where `until` and UTC coincide — so the counterfactual is
+    expressed as a distance from the *fixture's* offset, not as a truthiness test.
     """
     until = iv_metrics_record._local_now_text()
     assert _near_local_now(until), f"until={until} is not local wall clock"
-    if UTC_OFFSET_HOURS:
-        now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-        assert abs((now_utc - datetime.datetime.fromisoformat(until)
-                    ).total_seconds()) > 300, "until is stamped in UTC, not local"
+    now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    drift = (now_utc - datetime.datetime.fromisoformat(until)).total_seconds()
+    expected = LOCAL_UTC_AHEAD_HOURS * 3600
+    assert abs(drift - expected) < 300, (
+        f"until is {drift/3600:.2f} h from UTC; the fixture's offset says it should "
+        f"be {expected/3600:.2f} h — a stamp in the wrong clock drifts by exactly "
+        f"the offset, so this fails only if `until` is not local")
 
 
 def test_row_carries_rates_as_numbers_when_the_grader_scored_something():
@@ -534,21 +557,42 @@ def test_local_naive_bound_keeps_the_newest_row_and_drops_the_old_one(tmp_path):
 def test_a_utc_authored_bound_on_the_same_rows_would_have_measured_nothing(tmp_path):
     """The #835 defect reproduced on the same fixture, as the counterfactual.
 
-    The fixture clock is a local 03:00 while UTC is 8 hours ahead, so a
-    `utcnow - 26h` bound lands 8 hours *later* in local terms than the honest one —
-    past both stored rows — and the honest count is 0. Pinned so nobody "simplifies"
-    the task file's bound to `date -u` and quietly empties the series: the recorder
-    stores whatever bound it is handed, so the bound the job passes is the only
-    defence that exists.
+    A bound authored in UTC is `utcnow - 26h` written as a naive string. Since UTC
+    runs `LOCAL_UTC_AHEAD_HOURS` ahead of this box, that string reads
+    `NOW_LOCAL - (26 - offset)` hours in local terms — *later* than the honest bound
+    by the whole offset. Here it lands past both stored rows, so the honest count is
+    0 and the run must fail loudly rather than record a clean-looking night.
+
+    Pinned so nobody "simplifies" the task file's bound to `date -u` and quietly
+    empties the series: the recorder stores whatever bound it is handed, so the bound
+    the job passes is the only defence that exists.
+
+    The offset is measured, not asserted as 7 or 8 — the first version hardcoded 8 and
+    was wrong about this box (UTC−7), and the test still passed because the counterfactual
+    survives at either value. What makes that a real pin is the precondition below: the
+    geometry only discriminates while the dishonest bound lands *after* the newest stored
+    row, so rather than pass vacuously on a box with a small offset, the test says so.
     """
+    # Newest fixture row is NOW_LOCAL-20h; the dishonest bound is NOW_LOCAL-(26-offset)h,
+    # which passes it only once 26-offset > 20, i.e. offset > 6 h. At or below 6 the two
+    # bounds select the same rows and this test can no longer tell them apart — a fixture
+    # or timezone move into that regime must fail here rather than quietly go green.
+    assert LOCAL_UTC_AHEAD_HOURS > 6, (
+        f"this box is only {LOCAL_UTC_AHEAD_HOURS} h behind UTC, so a `date -u` bound "
+        "and the honest bound select the same rows and this test can't distinguish "
+        "them — widen the fixture window past `26 + offset` hours rather than deleting "
+        "the test")
+
     repo = _make_repo(tmp_path)
     _make_db(repo, [
         {"created_at": NOW_LOCAL - datetime.timedelta(hours=20), "turn_id": "new"},
         {"created_at": NOW_LOCAL - datetime.timedelta(hours=30), "turn_id": "old"},
     ])
     out = repo / "_pipeline" / "reflection" / "iv-metrics.jsonl"
-    utc_authored = (NOW_LOCAL + datetime.timedelta(hours=UTC_OFFSET_HOURS)
+    honest = NOW_LOCAL - datetime.timedelta(hours=26)
+    utc_authored = (NOW_LOCAL + datetime.timedelta(hours=LOCAL_UTC_AHEAD_HOURS)
                     - datetime.timedelta(hours=26))
+    assert utc_authored > honest, "the counterfactual bound must be the later one"
 
     result = _call(since=_iso(utc_authored), repo=repo, out=out,
                    extra=["--hours 26"])
@@ -595,6 +639,31 @@ def test_task_file_frontmatter_parses_and_is_schedulable():
     ).exists(), f"skill {fm['skill_name']!r} does not resolve"
     assert int(fm["id"]) == int(re.match(r"(\d+)-", _task_file().name).group(1))
     assert fm["preferred_hours"], "nightly work needs a window in the schedule"
+
+    # The `model:` value has to name a configured model. The first version said
+    # `eco`, which is no key under `config.models` and no alias — 30 of the other 33
+    # task files say `primary`. `autonomy.run_task` hands an unmatched name to
+    # `_get_model_env`, which returns `{}` rather than failing, so the run boots with
+    # no `ANTHROPIC_BASE_URL` override and inherits whatever the parent had. A
+    # nightly that silently runs on the wrong engine is worse than one that fails:
+    # its numbers still look like measurements. Asserted against config.yaml so a
+    # future `eco` tier is a green test, not a guess.
+    models = (yaml.safe_load((ROOT / "config.yaml").read_text())
+              .get("models") or {})
+    names = {*(models.keys()), *(m.get("alias") for m in models.values())}
+    assert fm["model"] in names, (
+        f"model {fm['model']!r} is not a config.models name or alias {sorted(n for n in names if n)}")
+
+    # And the inverse of "the task file exists": an ARMED task dispatches nightly,
+    # so the script its body names has to exist in the live tree by then. The
+    # previous round hit this exactly — the reviewer ran the documented command
+    # against ~/lloyd and got `can't open file .../iv_metrics_record.py`, which is
+    # why the task shipped `status: draft`. Arming and landing are one change; if
+    # this ever fails, the fix is to land the script or disarm the task, never to
+    # leave both halves half-done.
+    assert fm["status"] != "up_next" or (ROOT / "scripts" / "iv_metrics_record.py").exists(), (
+        "task is armed but scripts/iv_metrics_record.py is not in the live checkout — "
+        "the nightly would dispatch into a FileNotFoundError")
 
 
 def test_task_body_invokes_the_grader_with_an_explicit_window():
@@ -670,14 +739,23 @@ def test_task_file_threshold_matches_the_code_default():
     magnitude. Retune both together and it stays green.
     """
     text = _task_file().read_text()
-    desc = str(yaml.safe_load(text.split("---\n", 2)[1]).get("description", ""))
+    frontmatter, body = text.split("---\n", 2)[1], text.split("---\n", 2)[2]
+    desc = str(yaml.safe_load(frontmatter).get("description", ""))
 
     # The bound is the number named *by the word "bound"*, in both halves: finding it
     # separately means neither the frontmatter the runner sees nor the body a human
     # reads can silently drift from the code.
-    for label, chunk in (("description", desc), ("body", text)):
-        stated = re.search(r"[Bb]ound\D{0,24}?(\d\.\d+)", chunk)
-        assert stated, f'the {label} must state the bound, e.g. "Bound: 0.10"'
+    #
+    # `body` is the markdown after the closing fence, not the whole file. Passed the
+    # whole file, `re.search` returns the *frontmatter* match again — the first
+    # iteration of this test did exactly that, so both iterations graded the same
+    # string and the body's own "**Bound: 0.10**" was never located. Anchored on the
+    # word `Bound:` at the start of a line so a stray "bound" in prose can't stand in.
+    for label, chunk in (("description", desc), ("body", body)):
+        stated = (re.search(r"[Bb]ound\D{0,24}?(\d\.\d+)", chunk) if label == "description"
+                  else re.search(r"Bound:\s*(\d\.\d+)", chunk))
+        assert stated, (f'the {label} must state the bound, e.g. "Bound: 0.10" — '
+                        f"searched {len(chunk)} chars of the {label}")
         assert float(stated.group(1)) == pytest.approx(
             iv_metrics_record.DEFAULT_THRESHOLD), (
             f"{label} says {stated.group(1)}, DEFAULT_THRESHOLD is "
@@ -685,27 +763,96 @@ def test_task_file_threshold_matches_the_code_default():
     assert "0.039" in text, "the measured baseline belongs next to the bound"
 
 
-def test_series_file_on_this_machine_has_comparable_rows():
-    """The item's own verification command: the JSONL exists and its rows compare.
+def test_the_live_series_has_two_dated_rows_and_a_computable_delta():
+    """The item's own verification command, as an assertion rather than a skip.
 
-    #460's acceptance says "the JSONL must exist with ≥2 dated rows". The rows here
-    are this round's two manual runs against two different window bounds — real
-    measurements, not placeholders. *Two consecutive scheduled nights* is a separate
-    person-decision on the item and is not claimed here.
+    #460's acceptance: "the JSONL must exist with ≥2 dated rows" so a delta is
+    computable. The previous version of this test bailed out with `pytest.skip` when
+    there was no `usage.db` next to it, which in practice meant every gate run — the
+    ladder tests a worktree, which has no database and no `_pipeline/`, so the clause
+    was pinned by a test that never executed. Skips are not a way to keep a clause
+    pinned.
+
+    So the path is the *live checkout's*, resolved from `HOME` rather than from this
+    file's own tree: the artifact is data, not source, and the round wrote its two
+    seed rows into the same file the nightly job will append to. Same instant, same
+    command the reviewer ran (`wc -l ~/lloyd/_pipeline/reflection/iv-metrics.jsonl`).
+
+    *Two consecutive scheduled nights* is the item's own person-decision and is not
+    claimed here; what this pins is that the file exists, every row is dated, and the
+    delta is a field read.
     """
-    series = ROOT / "_pipeline" / "reflection" / "iv-metrics.jsonl"
-    if not (ROOT / "usage.db").exists():
-        pytest.skip("not the live checkout: the series file is a data artifact and "
-                    "lives in the tree that has a database to grade")
+    series = Path.home() / "lloyd" / "_pipeline" / "reflection" / "iv-metrics.jsonl"
     assert series.exists(), (
-        "no series file at _pipeline/reflection/iv-metrics.jsonl — the manual "
-        "verification run is part of this round")
+        f"no series file at {series} — the one-shot manual verification run is part "
+        "of this round, and clause 2 is not met without it")
+
     rows = _rows_of(series)
-    assert len(rows) >= 2, f"expected ≥2 rows, got {len(rows)}"
+    assert len(rows) >= 2, (
+        f"clause 2 needs ≥2 dated rows so a delta exists; {series} has {len(rows)}")
     for row in rows:
-        assert _numeric(row["dropped_rate"]) and _numeric(row["threshold"])
-    # What the item asks a consumer to be able to do: compare the timeout count
-    # against a bound, as a field read over the last N rows.
-    over = [r["since"] for r in rows
-            if r["dropped_verdicts"] > r["llm_calls"] * r["threshold"]]
-    assert isinstance(over, list)
+        for field in ("since", "until", "recorded_at"):
+            assert datetime.datetime.fromisoformat(row[field]), (
+                f"{field}={row.get(field)!r} is not an ISO timestamp")
+        assert _numeric(row["llm_calls"]) and _numeric(row["threshold"])
+        assert _numeric(row["dropped_rate"]) or row["llm_calls"] == 0, (
+            "a null dropped_rate is only honest for a night with no calls")
+
+    # The delta itself — the thing #460 exists to make possible — computed the way
+    # the task file documents Step 3, from fields, over the last two rows.
+    delta = rows[-1]["dropped_rate"] - rows[-2]["dropped_rate"]
+    assert _numeric(delta), delta
+    assert rows[-1]["since"] != rows[-2]["since"], (
+        "two rows with the same window bound are one measurement written twice, not a "
+        "trend; the seed rows differ in `since` on purpose")
+
+
+def test_a_consumer_compares_the_timeout_count_against_the_bound():
+    """Clause 5's other half: something can read the count against the bound.
+
+    The item says the timeout count has to sit in the row "so a threshold on it is a
+    one-line check over the last N rows rather than a parse of prose". The previous
+    version of this test computed that check and then asserted `isinstance(over,
+    list)`, which cannot fail for any input — it asserted the type of a list
+    comprehension, not that the comparison discriminates.
+
+    So: hand `over_bound` four rows whose answers are known independently of the
+    code — under the bound, over it, exactly on it, and one with no calls — and
+    require exact membership. Then check the live rows agree with their own stored
+    `flagged` field, so the shipped nightly decision and the consumer are the same
+    function rather than two readings of the same number.
+    """
+    rows = [
+        # under: 5 of 100 against 0.10 -> bound is 10 calls, 5 < 10
+        {"llm_calls": 100, "threshold": 0.10, "dropped_verdicts": 5, "flagged": False},
+        # over: 20 of 100 -> 20 > 10
+        {"llm_calls": 100, "threshold": 0.10, "dropped_verdicts": 20, "flagged": True},
+        # exactly on the bound: 10 of 100 -> 10 > 10 is False
+        {"llm_calls": 100, "threshold": 0.10, "dropped_verdicts": 10, "flagged": False},
+        # no traffic: no rate, so nothing to breach
+        {"llm_calls": 0, "threshold": 0.10, "dropped_verdicts": 0, "flagged": False},
+    ]
+    for row in rows:
+        assert iv_metrics_record.over_bound(row) is row["flagged"], row
+
+    over = [r for r in rows if iv_metrics_record.over_bound(r)]
+    assert [r["dropped_verdicts"] for r in over] == [20], (
+        f"exactly one of the four rows is over the bound, got {over}")
+
+    # The four constructed rows above are the check that discriminates. This half
+    # asks whether the *real* rows agree with the `flagged` they stored at write
+    # time, which is only meaningful where the file is. It cannot silently be a
+    # no-op: the assert below is satisfied by an empty file only when the file
+    # genuinely isn't there, and its message says which happened.
+    series = Path.home() / "lloyd" / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    if not series.exists():
+        assert not (Path.home() / "lloyd" / "usage.db").exists(), (
+            f"{series} is missing but the database to grade it is here — a recorder "
+            "that ran against a live db wrote no row")
+        print(f"note: no live series at {series}; checked the consumer against "
+              f"{len(rows)} constructed rows only")
+    for row in _rows_of(series) if series.exists() else []:
+        assert iv_metrics_record.over_bound(row) is bool(row["flagged"]), (
+            f"row since={row['since']} stored flagged={row['flagged']} but the "
+            f"consumer says otherwise — the nightly verdict and the reader would "
+            "disagree about the same row")
