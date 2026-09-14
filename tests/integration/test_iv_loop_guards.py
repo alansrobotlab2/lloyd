@@ -158,29 +158,76 @@ def test_repetition_ignores_three_greps_sharing_only_a_scan_root():
 def test_repetition_never_names_a_path_operand_as_the_target():
     """Clause 2: a firing on grep/rg/find names the hunt, never the location.
 
-    Same three shapes over the same root, but this time one symbol is really
-    being chased — so the guard must fire, and must name only that symbol.
-    Asserted over every prefix, so the claim covers each verdict the sequence
-    can produce and not just the last one.
+    Five search shapes over the same root, one symbol really being chased. Each
+    usable prefix is screened, not just the last: `threshold` is 2, so the first
+    two calls can only ever have one prior between them and `sigs[:2]` is out of
+    reach — `sigs[:3]`, `sigs[:4]` and `sigs[:5]` can all fire, and each one is
+    asserted to, so a guard that goes quiet at the third shape but not the fifth
+    fails here. No verdict at any prefix may name the root those calls share or a
+    filter's operand; the one term all five aim at is the symbol.
     """
     cmds = [
         f"grep -rn iv_inject_queue {SCAN_ROOT} --exclude-dir=node_modules",
         f"grep -rn iv_inject_queue {SCAN_ROOT} -l | head -5",
         f"find {SCAN_ROOT} -name '*.py' | xargs grep -l iv_inject_queue",
+        f"rg iv_inject_queue {SCAN_ROOT} --glob '!node_modules'",
+        f"grep -rn iv_inject_queue {SCAN_ROOT} --include=*.py | head -40",
     ]
     sigs = _sigs(cmds)
-    fired = 0
-    for i in range(2, len(sigs) + 1):
+    fired = checked = 0
+    for i in range(3, len(sigs) + 1):
         verdict = guards.repetition_verdict(sigs[:i])
+        checked += 1
         if verdict is None:
             continue
         fired += 1
         for location in ("_pipeline", "trajectories", "node_modules"):
-            assert location not in verdict.shared_terms, verdict.shared_terms
-    assert fired, f"the guard stopped firing on a real hunt: {cmds}"
+            assert location not in verdict.shared_terms, (i, verdict.shared_terms)
+    assert checked == 3, checked
+    assert fired == checked, (
+        f"a real hunt stopped firing at some prefix ({fired} of {checked}): {cmds}"
+    )
     final = guards.repetition_verdict(sigs)
-    assert final is not None and "iv_inject_queue" in final.shared_terms, final
+    assert final is not None and final.shared_terms == ("iv_inject_queue",), final
     print("test_repetition_never_names_a_path_operand_as_the_target: OK")
+
+
+def test_repetition_ignores_three_greps_sharing_only_a_filename():
+    """Clause 1's other measured shape: the shared operand is ONE file.
+
+    #523's Claim names two token classes, not one. The second is the file a
+    search is pointed at: three greps of
+    `tests/integration/test_trajectory_extraction.py` for three different test
+    names measured `('test_trajectory_extraction',)` as the shared terms both at
+    triage (HEAD `a0a127a`) and at the start of this round (HEAD `f31e87f`) — the
+    file being scanned, reported to the primary as the target it keeps chasing. A
+    search's file operand is scope, so it is marked in full, stem included, and
+    carries nothing. The control half pins the narrowing to searches: three READS
+    of that same file (`head`/`sed`/`wc`) are one target revisited three ways and
+    must still fire on its stem — that is the shape calibration message 76 has.
+    """
+    target = "tests/integration/test_trajectory_extraction.py"
+    greps = _sigs([
+        f"grep -rn test_extract_from_session {target}",
+        f"grep -rn test_write_text_blob {target}",
+        f"grep -rn test_scan_root_tokens {target}",
+    ])
+    # Precondition: the filename IS shared as an identifier, so the silence
+    # below is the carrier rule and not the tokenizer failing to see it.
+    assert "test_trajectory_extraction" in (greps[0].idents & greps[2].idents)
+    assert all("test_trajectory_extraction" in s.path_idents for s in greps)
+    assert guards.repetition_verdict(greps) is None
+    assert guards.repetition_verdict(greps, ambient=frozenset()) is None
+
+    reads = _sigs([
+        f"head -30 {target}",
+        f"sed -n '40,90p' {target}",
+        f"wc -l {target}",
+    ])
+    verdict = guards.repetition_verdict(reads, ambient=frozenset())
+    assert verdict is not None, "three reads of one file are one target"
+    assert "test_trajectory_extraction" in verdict.shared_terms, verdict.shared_terms
+    print("test_repetition_ignores_three_greps_sharing_only_a_filename: OK")
 
 
 def test_repetition_requires_a_carrier_that_is_not_a_path():
@@ -333,9 +380,16 @@ def test_find_name_glob_is_the_hunt_not_the_tree():
     verdict = guards.repetition_verdict(sigs)
     assert verdict is not None, "one -name glob repeated three times is a loop"
     assert "iv_inject_queue" in verdict.shared_terms, verdict.shared_terms
-    assert not (set(verdict.shared_terms) & {"_pipeline", "vault", "derived"}), (
+    # Intersected with what the classifier itself marked, so this can fail: a
+    # hand-picked name list here would also have to name the tokens the
+    # identifier rules never produce (`vault`, `derived` are dropped — no
+    # underscore, under 12 chars), and an assertion over those passes no matter
+    # what the guard does.
+    locations = sigs[0].path_idents | sigs[1].path_idents | sigs[2].path_idents
+    assert "_pipeline" in locations, sorted(locations)
+    assert not (set(verdict.shared_terms) & locations), (
         f"-name globs are the hunt, so no scan-root token may be named: "
-        f"{verdict.shared_terms}"
+        f"{verdict.shared_terms} vs {sorted(locations)}"
     )
     print("test_find_name_glob_is_the_hunt_not_the_tree: OK")
 

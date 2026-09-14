@@ -591,6 +591,10 @@ _GREP_LIKE_COMMANDS = frozenset({"grep", "egrep", "fgrep", "rg", "ag"})
 _FILTER_VALUE_FLAGS = frozenset({
     "--exclude-dir", "--exclude", "--exclude-from", "--ignore", "--ignore-file",
     "--include", "--include-dir", "-g",
+    # ripgrep spells the same thing `--glob GLOB` / `-g GLOB`. Its operand is a
+    # filename pattern saying what to skip, and `rg SYM ROOT --glob '!node_modules'`
+    # is the shape that appeared in live traffic.
+    "--glob", "--iglob",
 })
 # Flags whose operand is the HUNT, so it must stay eligible to carry a match
 # even though it arrives after a flag rather than as the leading operand:
@@ -630,17 +634,19 @@ _FILE_SUFFIX_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9]*$")
 def _dir_part(token: str) -> str:
     """The directory components of a path operand, minus any file it names.
 
-    A scan root and a specific file are different claims about a call. Three
-    probes of one tree say nothing about the same hunt — that is #523 — while
-    three probes of one FILE are the same target three times, and the guard's
-    calibration case depends on reading it that way: turn
-    20260905_011748_iv84e4's second cluster re-opens
-    `app/routers/_messages_subliminal.py` three ways, and its shared token is
-    that file's stem (`test_iv_loop_guards.py
-    ::test_repetition_fires_on_the_real_loop` pins the fire, and
+    Used only for a NON-search command's operand (`_path_operand_text`): a scan
+    root and a file the call opens are different claims. Three greps over one
+    tree say nothing about the same hunt — that is #523, and their whole scope is
+    marked without reaching here — while `head`/`cat`/`sed` of one FILE is that
+    file being re-opened, which is one target revisited. The guard's calibration
+    case depends on the difference: turn 20260905_011748_iv84e4's second cluster
+    reaches `app/routers/_messages_subliminal.py` as `grep -rn … <file>` (call
+    70) and as `head -20 <file>` (call 76), and that file's stem is the pair's
+    only shared token (`test_iv_loop_guards.py
+    ::test_repetition_fires_on_the_real_loop` pins the fire at 62 and 76, and
     `test_real_turn_replayed_through_the_pretool_hook` pins that the inject
-    names it). So a file operand marks its directories and leaves its own
-    stem eligible; a directory operand marks everything it has.
+    names it). So a read marks its file's directories and leaves the stem
+    eligible; a search scope marks everything it has.
     """
     bare = token.rstrip("/")
     if bare in ("", ".", ".."):
@@ -659,7 +665,8 @@ def _path_operand_text(command: str) -> str:
     Per pipeline stage, the command word decides what a bare operand means:
 
     * `grep`/`rg`/`ag` family — the first operand is the PATTERN (the hunt) and
-      every later one is a file or directory to search.
+      every later one is SCOPE: a file or directory to search, marked in full,
+      its filename's stem included. A search is not about the file it reads.
     * `find`/`fd` — a bare operand is a path. Their patterns arrive after
       `-name`/`-path`/`-regex`, which are in `_PATTERN_VALUE_FLAGS` and so keep
       the operand eligible: `find . -name '*iv_inject*'` three times over is one
@@ -734,12 +741,22 @@ def _path_operand_text(command: str) -> str:
             out.append(bare)
             filtering = False
             continue
-        if (
-            stage in ("find", "fd")
-            or (stage in _SEARCH_COMMANDS and positional > 1)
-            or "/" in bare
-            or bare.startswith("~")
+        if stage in ("find", "fd") or (
+            stage in _SEARCH_COMMANDS and positional > 1
         ):
+            # A search's remaining operands are its SCOPE — the tree, or the one
+            # file it is pointed at. Both are locations, so the whole operand is
+            # marked, filename included. Dropping only the directories would
+            # leave the file's stem to carry the match, and that is the second
+            # measured false-fire channel of #523: three greps of
+            # `tests/integration/test_trajectory_extraction.py` for three
+            # different test names fired on `('test_trajectory_extraction',)`
+            # alone — the file being scanned, named as the target.
+            out.append(bare)
+        elif "/" in bare or bare.startswith("~"):
+            # Not a search: a `head`/`cat`/`sed`/`wc` operand is the file the
+            # call is ABOUT, and that is a target, so only its directories are
+            # locations here. See `_dir_part`.
             out.append(_dir_part(bare))
     return " ".join(out)
 
@@ -760,12 +777,16 @@ class ToolCallSignature:
     # others — so it survived in exactly the minority that used the other
     # idiom. That is the second false fire of round SM_20260908_165950.
     all_idents: frozenset[str] = frozenset()
-    # Identifiers that sit in a path or filter-operand POSITION (`#523`, see
-    # `_path_operand_text`). A subset of `idents` — they stay in `idents` so
-    # the ambient detector keeps seeing them, and so an exact repeat still
-    # compares the whole command — but they may not carry a near match. The
-    # rule needs the position, not just the token: `P` in one call and `Q` in
-    # another are both hunts even when `P` is a directory name elsewhere.
+    # Identifiers that sit in a path or filter-operand POSITION IN THIS CALL
+    # (`#523`, see `_path_operand_text`): a scan root, a directory component, a
+    # search's file scope, a `--exclude-dir` operand. A subset of `idents` — they
+    # stay in `idents` so the ambient detector keeps seeing them, and so an exact
+    # repeat still compares the whole command — and they cannot carry a near
+    # match on their own: a pair whose every shared term is in BOTH calls'
+    # `path_idents` shared only locations. The rule needs the position, not the
+    # token: `P` in one call and `Q` in another are both hunts even when `P` is a
+    # directory name elsewhere, and one call's `path_idents` entry can still be
+    # the other call's subject — see `repetition_verdict`.
     path_idents: frozenset[str] = frozenset()
 
 
@@ -963,12 +984,15 @@ def repetition_verdict(
       >= `containment`. Containment rather than Jaccard because a command
       wrapped in extra `echo` labels should still match the bare one.
 
-    A near match additionally needs at least one shared identifier that is not
-    path-shaped in either call — a scan root, a directory component or a
-    filter operand cannot carry it (#523). See `_path_operand_text`. The
-    carrier test is per pair, on the pair's own two signatures, because the
-    claim being made is about the two calls being compared: a term one of them
-    used as a location does not evidence a shared hunt.
+    A near match additionally needs at least one shared identifier that is a
+    SUBJECT and not a place to look: a term both calls used only as a scan root,
+    a directory component, a search's file scope or a filter operand cannot carry
+    it (#523). See `_path_operand_text`. The test is per pair, on the pair's own
+    two signatures, because the claim being judged is about the two calls being
+    compared — and it asks whether EITHER call aimed at the term, not whether
+    both did, because a hunt (`grep -rn SYM …`) and a read (`head -20 SYM_FILE`)
+    of the same thing are one target pursued two ways. Calibration turn
+    20260905_011748_iv84e4 depends on exactly that asymmetry at message 76.
     """
     if len(recent) < 2:
         return None
@@ -988,8 +1012,9 @@ def repetition_verdict(
     if ambient is None:
         ambient = ubiquitous_identifiers(recent)
     cur_idents = current.idents - ambient
-    # Terms the current call uses to say where it looked or what it skipped.
-    # They cannot carry a near match, and they are not named when one fires.
+    # What the current call AIMS at, as opposed to where it looked or what it
+    # skipped. Pairwise eligibility against each prior is applied below; a
+    # carrier is also the only thing this verdict is allowed to name.
     cur_carriers = cur_idents - current.path_idents
     # Path-addressed tools compare by exact repeat only — see _EXACT_ONLY_TOOLS.
     near_allowed = current.tool not in _EXACT_ONLY_TOOLS
@@ -1012,14 +1037,22 @@ def repetition_verdict(
         overlap = cur_idents & p_idents
         if not overlap:
             continue
-        # The terms that are locations in EITHER call evidence nothing about a
-        # shared hunt, so the match must be carried by what is left (#523).
-        # Symmetric on purpose: `kg_store` as the pattern here and as
-        # `app/kg_store.py` there is one call looking at a file and one asking
-        # a question, not the same target chased twice. Empty carriers means
-        # every shared identifier was a scan root, a directory component, or a
-        # filter operand in at least one of the two calls.
-        carriers = overlap & cur_carriers & p_carriers
+        # Eligible when EITHER call aimed at the term; only a term that BOTH
+        # calls used as a location is disqualified. Requiring both to aim
+        # (intersecting the two carrier sets) silences the calibration turn:
+        # message 76 reaches `app/routers/_messages_subliminal.py` with
+        # `head -20`, a read whose subject is that file, while calls 66/70 name
+        # it as a grep scope, and its stem is the pair's only shared token —
+        # `test_repetition_fires_on_the_real_loop` expects a fire at 76 and
+        # `test_operand_classification_survives_two_shell_shapes` pins the same
+        # shape. #523's false fires survive the widening because they are
+        # symmetric: `_pipeline` in three greps is scope in all three, so it sits
+        # in no carrier set and no pair finds it — while a real hunt is carried in
+        # at least one of the pair by construction, since a hunt puts its pattern
+        # in operand position 1. Empty carriers therefore means every shared
+        # identifier was a location — a scan root, a directory component, a
+        # search's file scope, or a filter operand — in both calls of the pair.
+        carriers = overlap & (cur_carriers | p_carriers)
         if not carriers:
             continue
         # Either several shared identifiers, or one distinctive enough to
