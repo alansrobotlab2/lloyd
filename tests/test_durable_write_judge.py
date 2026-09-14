@@ -417,3 +417,60 @@ def test_no_judged_sample_was_its_own_retrieved_example_in_the_shipped_run():
     for row in sc.load_jsonl(HERE / "judge_raw_a.jsonl"):
         assert len(row["example_ids"]) == jd.EXAMPLE_K
         assert row["sample_id"] not in row["example_ids"]
+
+
+def _fixture_raws(tmp_path, corpus, verdict):
+    """Both judges agree on `verdict` for every sample: enough to render."""
+    raws = {}
+    for name in ("a", "b"):
+        path = tmp_path / f"judge_raw_{name}.jsonl"
+        path.write_text("\n".join(
+            json.dumps({"sample_id": s["id"], "judge": name, "verdict": verdict})
+            for s in corpus) + "\n")
+        raws[name] = path
+    return raws
+
+
+def test_a_single_example_class_is_named_by_name_when_one_exists(tmp_path, mini_corpus):
+    raws = _fixture_raws(tmp_path, mini_corpus, "accept")
+    line = next(ln for ln in sc.render(mini_corpus, raws).splitlines()
+                if "single example" in ln)
+    assert "`false_cutoff_claim`" in line, (
+        "this fixture has exactly one bad false_cutoff_claim sample, so the report "
+        "must name it: its recall row is one sample")
+    assert "`invented_url`" not in line, "invented_url has 2 bad examples here"
+
+
+def test_a_corpus_whose_thinnest_class_has_two_examples_makes_no_thin_claim(tmp_path):
+    """The shipped corpus's thinnest class is `false_cutoff_claim` at n=2, so the
+    sentence is conditional on the corpus and not a fixed line about a named class."""
+    pair = [
+        fixture_sample("bad-001", "bad", "first transcript cut-off note here.",
+                       ["false_cutoff_claim"], {"false_cutoff_claim": ["x"]},
+                       path="knowledge/youtube/CH/cutoff-one.md"),
+        fixture_sample("bad-002", "bad", "second transcript cut-off note here.",
+                       ["false_cutoff_claim"], {"false_cutoff_claim": ["y"]},
+                       path="knowledge/youtube/CH/cutoff-two.md"),
+        fixture_sample("good-001", "good", "Kubernetes pods drain cleanly here.",
+                       path="knowledge/youtube/CH/pods-drain.md"),
+    ]
+    text = sc.render(pair, _fixture_raws(tmp_path, pair, "accept"))
+    assert "single example" not in text
+
+
+def test_the_shipped_report_makes_no_single_example_claim():
+    """Reads the landed artifact, not a fixture: the shipped corpus's thinnest class
+    has 2 examples, so the report may not assert a class of one."""
+    assert "Classes with a single example" not in (HERE / "report.md").read_text()
+
+
+def test_every_bad_row_carries_class_text_and_a_reconstructible_git_object():
+    """Clause 1 is per bad sample, and the git object must be derivable from the
+    row's own commit and path rather than merely shaped like one."""
+    for s in load_shipped_corpus():
+        if s["label"] != "bad":
+            continue
+        assert s["defect_classes"], s["id"]
+        assert s["pre_repair_text"].strip(), s["id"]
+        assert s["recovered_from"] == (
+            f'git show {s["repair_commit"]}^:{s["vault_path"]}'), s["id"]
