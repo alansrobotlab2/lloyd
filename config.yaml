@@ -1234,6 +1234,13 @@ workers:
       # human reads it and its value was measured there.
       inner_voice: false
       channels: [ai-engineer, discover-ai]
+      # Items this source files (tag `youtube-eval`) are loop output, like a
+      # `spawned-by-*` item (Alan, 2026-09-14): held out of single-item
+      # triage, closed by the self-spawn expiry, merged at write time into
+      # an open item that already covers them, counted on the scorecard's
+      # self-spawned gauge. 125 were filed in the week to 09-14 and 101 were
+      # still open, bounded by nothing. false: they read as a human's items.
+      loop_spawned: true
     deep-research:
       enabled: true
       interval_seconds: 3600

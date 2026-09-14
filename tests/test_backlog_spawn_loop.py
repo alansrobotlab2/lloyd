@@ -550,7 +550,61 @@ def test_quarantine_still_keys_on_exactly_the_four_loop_tags():
     assert B.SPAWN_TAGS == {"spawned-by-triage", "spawned-by-autocode",
                             "spawned-by-autoimplement", "spawned-by-selfmod"}
     assert B.REVIEW_SPAWN_TAGS == {REVIEW_TAG}
-    assert B.LOOP_SPAWN_TAGS == B.SPAWN_TAGS | B.REVIEW_SPAWN_TAGS
+    assert B.EVAL_SPAWN_TAGS == {EVAL_TAG}
+    assert B.QUARANTINE_TAGS == B.SPAWN_TAGS | B.EVAL_SPAWN_TAGS
+    assert B.LOOP_SPAWN_TAGS == B.SPAWN_TAGS | B.REVIEW_SPAWN_TAGS | B.EVAL_SPAWN_TAGS
+    assert REVIEW_TAG not in B.quarantine_tags()
+
+
+# ===========================================================================
+# youtube-eval items are loop output (Alan, 2026-09-14)
+# ===========================================================================
+
+EVAL_TAG = "youtube-eval"
+
+
+def _eval_switch(monkeypatch, on: bool):
+    from app import config as CFG
+    monkeypatch.setitem(CFG.CONFIG, "workers",
+                        {"sources": {"youtube-digest": {"loop_spawned": on},
+                                     "autocode": {"expire_spawns_after_days": 7}}})
+
+
+def test_an_eval_item_is_quarantined_expired_and_counted(isolated, monkeypatch):
+    """125 filed in a week, 101 still open, and none carried a `spawned-by-*`
+    tag — so none was quarantined, expired or counted on the gauge."""
+    from scripts.automod import scorecard as SC
+    _eval_switch(monkeypatch, True)
+    spawned_item(isolated, 500, days_old=1, tag=EVAL_TAG)
+    spawned_item(isolated, 501, days_old=8, tag=EVAL_TAG)
+    assert B.select_candidate(S.LEDGER_PATH) is None, "held out of single triage"
+    assert B.triage_pool(S.LEDGER_PATH) == ([], 2)
+    gauge = SC._self_spawned_gauge([], isolated, now=datetime.now(timezone.utc).timestamp())
+    assert gauge["count"] == 2 and gauge["over_bound"] == 1
+    out = B.expire_stale_spawns(S.LEDGER_PATH)
+    assert [r["item_id"] for r in out] == [501]
+    assert S.read_events(path=S.LEDGER_PATH)[-1]["spawned_by"] == EVAL_TAG
+
+
+def test_an_eval_item_written_with_string_tags_is_still_recognised(isolated, monkeypatch):
+    """The digest has written `tags` as a string that looks like a list."""
+    from scripts.automod import scorecard as SC
+    _eval_switch(monkeypatch, True)
+    p = spawned_item(isolated, 500, days_old=8, tag=EVAL_TAG)
+    p.write_text(p.read_text().replace("tags:\n- backlog\n- youtube-eval\n",
+                                       "tags: '[youtube-eval, ai-engineer]'\n", 1))
+    assert "'[youtube-eval" in p.read_text()
+    gauge = SC._self_spawned_gauge([], isolated, now=datetime.now(timezone.utc).timestamp())
+    assert gauge["count"] == 1
+    assert [r["item_id"] for r in B.expire_stale_spawns(S.LEDGER_PATH)] == [500]
+
+
+def test_the_eval_switch_off_puts_eval_items_back_to_a_humans(isolated, monkeypatch):
+    _eval_switch(monkeypatch, False)
+    spawned_item(isolated, 501, days_old=30, tag=EVAL_TAG)
+    assert B.select_candidate(S.LEDGER_PATH).id == 501
+    assert B.expire_stale_spawns(S.LEDGER_PATH) == []
+    assert EVAL_TAG not in B.loop_spawn_tags() and EVAL_TAG not in B.quarantine_tags()
 
 
 def test_the_two_predicates_answer_differently_for_a_review_finding(isolated):

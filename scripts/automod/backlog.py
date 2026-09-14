@@ -69,19 +69,57 @@ SPAWN_TAGS = frozenset({"spawned-by-triage", "spawned-by-autocode",
 # names rather than widening one.
 REVIEW_SPAWN_TAGS = frozenset({"spawned-by-review"})
 
+# The YouTube channel digest (`workers/sources/youtube_digest.py`) files its
+# evaluations tagged `youtube-eval` and no `spawned-by-*` tag, so until
+# 2026-09-14 they read as a human's items: never quarantined, never expired,
+# never merged at write time. A one-day backfill filed 125 in the week to
+# 09-14 and 101 were still open. Alan's ruling that day: they are loop output.
+# Quarantined as well as expired — a confirmed eval item becomes
+# `confirmed-held`, which expiry exempts, so bounding only expiry would leave
+# the pass free to confirm them into a pile nothing drains. Kill switch
+# `workers.sources.youtube-digest.loop_spawned` (see `eval_items_loop_spawned`).
+EVAL_SPAWN_TAGS = frozenset({"youtube-eval"})
+
 # Three readers, three different sets, and they disagree on purpose:
 #
 #   merge at write time   `spawned-by-` prefix   (agent_mcp/backlog.py)
-#   quarantine            SPAWN_TAGS             (is_quarantined, below)
+#                         + `youtube-eval`
+#   quarantine            QUARANTINE_TAGS        (is_quarantined, below)
 #   expiry and the gauge  LOOP_SPAWN_TAGS        (this union)
 #
 # Quarantine asks "can this item answer the staleness question?" — an item
-# triage filed from a check it just ran cannot, by construction. A review
+# triage filed from a check it just ran cannot, by construction, and neither
+# can an evaluation written against today's profile of the system. A review
 # finding can: it describes the tree as of one commit a month ago, and single
 # triage is exactly the pass that should decide whether it still holds. Expiry
 # asks the other question — "did anything ever pick this up?" — and the answer
-# is no for both, so the bound applies to both.
-LOOP_SPAWN_TAGS = SPAWN_TAGS | REVIEW_SPAWN_TAGS
+# is no for all three, so the bound applies to all three. Both unions are the
+# shape with the eval switch on; readers go through `quarantine_tags()` and
+# `loop_spawn_tags()`, which honour it.
+LOOP_SPAWN_TAGS = SPAWN_TAGS | REVIEW_SPAWN_TAGS | EVAL_SPAWN_TAGS
+QUARANTINE_TAGS = SPAWN_TAGS | EVAL_SPAWN_TAGS
+
+
+def eval_items_loop_spawned() -> bool:
+    """`workers.sources.youtube-digest.loop_spawned`, default on. Lazy, and
+    fail-open to the ruling, so the automod CLI does not need a config."""
+    try:
+        from app.config import CONFIG
+        cfg = (((CONFIG or {}).get("workers") or {}).get("sources") or {}).get("youtube-digest") or {}
+        return bool(cfg.get("loop_spawned", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def quarantine_tags() -> frozenset[str]:
+    """The tags that hold an item out of single-item triage, right now."""
+    return SPAWN_TAGS | (EVAL_SPAWN_TAGS if eval_items_loop_spawned() else frozenset())
+
+
+def loop_spawn_tags() -> frozenset[str]:
+    """The tags expiry bounds and the scorecard gauge counts, right now."""
+    return (SPAWN_TAGS | REVIEW_SPAWN_TAGS
+            | (EVAL_SPAWN_TAGS if eval_items_loop_spawned() else frozenset()))
 
 # How long a self-filed draft may sit untouched before `expire_stale_spawns`
 # closes it. The constant is the fallback; the live value is
@@ -2099,21 +2137,25 @@ def group_triaged_ids(ledger: Path) -> set[int]:
 
 
 def is_self_spawned(item: Item) -> bool:
-    """Did the triage/implement loop write this item? The quarantine test.
+    """Did the triage/implement loop — or the eval digest — write this item?
+    The quarantine test.
 
     Deliberately narrower than `is_loop_spawned`: see `LOOP_SPAWN_TAGS`.
     """
-    return any(t in SPAWN_TAGS for t in item.tags)
+    tags = quarantine_tags()
+    return any(t in tags for t in item.tags)
 
 
 def is_loop_spawned(item: Item) -> bool:
-    """Did any unattended pass write this item — triage, implement or review?
+    """Did any unattended pass write this item — triage, implement, review or
+    the eval digest?
 
     The bound-the-board test. Everything under it is subject to expiry and
     shows on the scorecard's open self-spawned gauge, whether or not it is
     held out of the triage pool.
     """
-    return any(t in LOOP_SPAWN_TAGS for t in item.tags)
+    tags = loop_spawn_tags()
+    return any(t in tags for t in item.tags)
 
 
 # A self-filed item that nothing picked up. Closed, not deleted: the file
@@ -2254,7 +2296,7 @@ def expire_stale_spawns(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
                f"or picked up; reopen by setting status back to draft")
         if not _apply_status(item.path, "done", why, add_tags=(EXPIRED_TAG,)):
             continue
-        spawned_by = next((t for t in item.tags if t in LOOP_SPAWN_TAGS), "")
+        spawned_by = next((t for t in item.tags if t in loop_spawn_tags()), "")
         S.append_event({"event": "backlog_expired", "item_id": item.id,
                         "age_days": item.age_days, "name": item.name[:200],
                         "spawned_by": spawned_by}, path=ledger)

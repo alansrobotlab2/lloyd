@@ -75,9 +75,11 @@ def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -
     """
     # Stdlib-only modules, imported lazily so the CLI stays light: the tag
     # set and the bound live in one place and are not restated here.
-    from scripts.automod.backlog import (EXPIRY_EXEMPT_TAGS, LOOP_SPAWN_TAGS,
+    from app.backlog_tags import normalize_tags
+    from scripts.automod.backlog import (EXPIRY_EXEMPT_TAGS, loop_spawn_tags,
                                          spawn_expiry_days)
     bound_days = spawn_expiry_days()
+    spawn_tags = loop_spawn_tags()
     judged: set[int] = set()
     for e in all_events:
         if e.get("item_id") is None:
@@ -95,11 +97,10 @@ def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -
             if not m:
                 continue
             fm = _frontmatter(path)
-            tags = fm.get("tags") or []
-            if isinstance(tags, str):
-                tags = [tags]
-            tags = {str(t) for t in tags}
-            if not (tags & LOOP_SPAWN_TAGS):
+            # The one coercion every tag reader shares: the eval digest has
+            # written `tags` as a string that looks like a list.
+            tags = set(normalize_tags(fm.get("tags")))
+            if not (tags & spawn_tags):
                 continue
             if fm.get("status") not in ("draft", "up_next", "in_progress"):
                 continue

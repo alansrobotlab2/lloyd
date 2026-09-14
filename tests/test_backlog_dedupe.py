@@ -113,6 +113,24 @@ def test_a_human_write_is_never_merged_only_advised(board, monkeypatch):
     assert len(list(board.glob("*.md"))) == 2
 
 
+@pytest.mark.parametrize("switch", [True, False])
+def test_a_youtube_eval_write_merges_like_a_spawn_unless_switched_off(board, monkeypatch, switch):
+    """The digest files `youtube-eval` and no `spawned-by-*` tag, so a re-run
+    of one video's evaluation filed it again as a human's item would be:
+    advised, never merged. Loop output since 2026-09-14."""
+    from app import config as CFG
+    monkeypatch.setitem(CFG.CONFIG, "workers",
+                        {"sources": {"youtube-digest": {"loop_spawned": switch}}})
+    write(board, 10, *EXISTING)
+    _vec(monkeypatch, [{"id": 10, "score": 0.95}])
+    out = _write({"name": SAME[0], "description": SAME[1], "board": "lloyd",
+                  "tags": ["youtube-eval", "ai-engineer"]})
+    if switch:
+        assert out.get("merged_into") == 10 and len(list(board.glob("*.md"))) == 1
+    else:
+        assert out["created"] is True and "merged_into" not in out
+
+
 def test_force_bypasses_the_merge(board, monkeypatch):
     write(board, 10, *EXISTING)
     _vec(monkeypatch, [{"id": 10, "score": 0.95}])

@@ -393,6 +393,23 @@ def _handle_write(args: dict) -> str:
 # every item triage or an implement round files; a human's write carries none
 # and is only ever advised, never merged.
 _SPAWN_TAG_PREFIX = "spawned-by-"
+# Loop writers that carry no `spawned-by-*` tag. The YouTube digest files its
+# evaluations tagged `youtube-eval`, and since 2026-09-14 those are loop output
+# (`scripts/automod/backlog.py::EVAL_SPAWN_TAGS`, which the aggregator does not
+# import): a re-run of one video's eval merges like a re-run of a triage.
+# Kill switch `workers.sources.youtube-digest.loop_spawned`.
+_LOOP_WRITE_TAGS = frozenset({"youtube-eval"})
+
+
+def _loop_write_tags() -> frozenset[str]:
+    try:
+        from app.config import CONFIG
+        cfg = (((CONFIG or {}).get("workers") or {}).get("sources") or {}).get("youtube-digest") or {}
+        return _LOOP_WRITE_TAGS if bool(cfg.get("loop_spawned", True)) else frozenset()
+    except Exception:  # noqa: BLE001 — fail open to the ruling
+        return _LOOP_WRITE_TAGS
+
+
 # Writes that must never be folded into an existing item however similar they
 # read: an umbrella's description names the members it consolidates (so it
 # matches every one of them), and a blocker is the one item an implement
@@ -411,7 +428,8 @@ def _dedupe(args: dict) -> tuple[list[dict], str | None]:
         similar = SIM.similar_items(str(args.get("name") or ""),
                                     str(args.get("description") or ""),
                                     args.get("board"), backlog_dir=BACKLOG_DIR, cfg=cfg)
-        spawn_write = any(str(t).startswith(_SPAWN_TAG_PREFIX) for t in tags)
+        spawn_write = (any(str(t).startswith(_SPAWN_TAG_PREFIX) for t in tags)
+                       or bool(_loop_write_tags() & set(tags)))
         mergeable = (spawn_write and not bool(args.get("force")) and cfg.get("merge", True)
                      and not (_NEVER_MERGE_TAGS & set(tags)))
         target = SIM.merge_target(similar, cfg=cfg) if mergeable else None
