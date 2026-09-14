@@ -1293,9 +1293,10 @@ NIGHTLY_AGENT = "all"   # skills/trajectory-skill-mining/SKILL.md:46
 
 def miner_row(key, cls, tool="Graphex493"):
     """One corroborated failure per session, shared across sessions so the
-    pattern qualifies at `--threshold 2`."""
-    return {
-        "session_key": key, "agent_id": "lloyd", "session_class": cls,
+    pattern qualifies at `--threshold 2`. `cls=None` writes a row with no emitted
+    class at all, which is what the corpus on disk carries for its first weeks."""
+    row = {
+        "session_key": key, "agent_id": "lloyd",
         "timestamp": "2026-09-12T10:10:10Z",
         "tool_count": 1, "error_count": 1, "has_errors": True,
         "tools": [{"name": tool, "is_error": True, "error_source": "protocol",
@@ -1306,6 +1307,9 @@ def miner_row(key, cls, tool="Graphex493"):
                          "params_summary": {"command": "pytest tests/"}}],
         "signals": [],
     }
+    if cls is not None:
+        row["session_class"] = cls      # None = no emitted field at all
+    return row
 
 
 def run_miner(corpus, out_dir, extra_args=()):
@@ -1422,3 +1426,27 @@ def test_no_live_corpus_row_is_interactive_on_a_machine_platform():
     assert rows > 0, "no corpus rows to check, so the assertion below is vacuous"
     assert not violations, (
         f"corpus rows labelled interactive over a machine platform: {violations[:5]}")
+
+
+def test_a_row_the_store_cannot_answer_is_dropped_as_uncoded_and_says_so(
+        tmp_path):
+    """Provenance of the last fallback, across the real command.
+
+    A row with no emitted `session_class` whose session JSON is not in the store is
+    dropped as `uncoded` — absence never reads as human-initiated work — and the run
+    names the class it dropped rather than just the total, so a shrinking candidate
+    set can be attributed to the rows that have no class rather than to the
+    exclusion swallowing real work.
+    """
+    corpus = write_traj_corpus(tmp_path / "corpus", [])
+    rows = [miner_row("i1", "interactive"), miner_row("i2", "interactive"),
+            miner_row("nostoreentry493", None)]  # no stored session matches this key
+    (corpus / CORPUS_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    out = tmp_path / "cands"
+    proc = run_miner(corpus, out)
+    assert proc.returncode == 0, proc.stderr
+    report = proc.stdout + proc.stderr
+    assert "Machine-class sessions dropped: 1" in report, report
+    assert "dropped uncoded: 1" in report, report
+    assert re.search(r"^sessions: 2$", graphex_candidate(out), re.MULTILINE)
