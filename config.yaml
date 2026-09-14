@@ -42,7 +42,14 @@ inner_voice:
   model: primary
   observer:
     max_tokens: 400
-    timeout_seconds: 5
+    # The two synchronous terminal calls (assistant_message, result). 5 sat on
+    # the measured p95 (5,070 ms) and dropped 5% of the chat/steward terminal
+    # judgments 09-05..09-14; of late-but-healthy answers, 88% land by 8 s and
+    # only 3 points more by 10 s. Only assistant_message delays the chat's
+    # `done` frame, by at most +3 s on the few percent that would have been
+    # dropped. Not a wall-clock bound: httpx applies it per connect/read phase.
+    # Alan's ruling on #458, needs-human sweep 2026-09-14.
+    timeout_seconds: 8
     intervention_budget: 3
     primary_text_window_chars: 4000
     # vLLM scheduling priority. LOWER is higher priority and the primary
