@@ -83,12 +83,16 @@ sudo pacman -S --needed \
   base-devel git curl rsync jq \
   nodejs npm \
   inotify-tools gettext iproute2 openssl \
-  ffmpeg \
+  ffmpeg bubblewrap \
   cuda gcc15
 ```
 
 Why these specific ones:
 
+- **`bubblewrap`** — bench and eval sessions run their Bash inside a read-only
+  `bwrap` sandbox (`agent_mcp/_tool_sandbox.py`). Without it those sessions get
+  **no** Bash, and the bench runner refuses to start: it fails closed, never
+  open. See `architecture/vault-protection.md`.
 - **`inotify-tools`** — `agent-services/scripts/qmd-watcher.sh` calls
   `inotifywait` to reindex the vault on `.md` changes.
 - **`gettext`** — `start-livekit-server.sh` uses `envsubst` to render
@@ -676,6 +680,14 @@ ob sync-setup --vault "<vault-name>" --path ~/obsidian   # + E2E encryption pass
 > supports one sync client per device; running desktop Sync and Headless Sync on
 > the same vault causes data conflicts.
 
+`agent-obsidian-sync` will not start until the guardian has measured the vault.
+`start-obsidian-sync.sh` runs `vaultwatch.py sync-gate` and refuses while the
+vault tripwire is set or the tree is below its last healthy file count
+(`architecture/vault-protection.md` §2.4). On a fresh box, stage the guardian
+(Part 11) before starting sync. **Never point sync at a remote vault that holds
+an incident's deletions.** Every `ob` mode downloads remote changes, so it will
+delete the restored local files. Create a new remote vault instead.
+
 Restore the vault's `.git` from backup — it has **no remote**, and the autonomy
 daemon commits to it continuously. Vault edits must land on `main`; the daemon
 checks out `main` and will revert feature-branch work sitting on disk.
@@ -951,6 +963,19 @@ lsup reread && lsup update
 Environment is set **per-program in the conf file**, not inherited from your
 shell — supervisord runs with a minimal environment. If a service can't find a
 binary, the fix is almost always its `environment=...PATH=...` line.
+
+### Vault snapshots (not optional)
+
+```bash
+systemctl --user enable --now lloyd-vault-backup.timer   # vault → git, every 15 minutes
+```
+
+This commits the whole vault (never its own `.git`) to
+`~/.local/state/lloyd-vault-backup/vault.git`. It refuses to record a
+shrunken or tripped vault. Restore with `scripts/backup/restore-vault.sh <rev>`,
+which writes into a side directory only. The vault was deleted twice in
+September 2026 together with its own `.git`, so this repository is the copy a
+wipe cannot reach: back it up off-box with the rest of Part 0.
 
 ### Optional timers
 

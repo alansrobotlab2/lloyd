@@ -48,6 +48,7 @@ import notify as notify_mod  # noqa: E402
 import policy            # noqa: E402
 import probes            # noqa: E402
 import rollback as rb    # noqa: E402
+import vaultwatch        # noqa: E402
 from supervisor import SupervisorClient, SupervisordUnreachable  # noqa: E402
 
 
@@ -107,6 +108,7 @@ class Guardian:
         )
         self._alert_seen: dict[str, float] = {}
         self.cursor = logtail.LogCursor(self.gdir / "logcursors.json")
+        self.vault = vaultwatch.VaultWatch(policy.VAULT_ROOT, self.gdir)
 
         self.tick_n = 0
         self._tick_events: list[dict] = []
@@ -600,6 +602,109 @@ class Guardian:
         except Exception as exc:
             log(f"notifier failed (continuing): {exc}")
 
+    # ── vault tripwire ─────────────────────────────────────────────────
+    def check_vault(self) -> None:
+        """Trip on a mass deletion of the vault: stop sync, pause workers,
+        halt promotions, keep evidence, alert. Never raises into the tick."""
+        try:
+            why, snap = self.vault.tick()
+        except Exception as exc:  # noqa: BLE001
+            log(f"vaultwatch failed (continuing): {exc}")
+            return
+        if not why:
+            return
+        log(f"VAULT TRIPWIRE: {why}")
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        # The marker goes down FIRST: supervisord autorestarts a program that
+        # dies, and `start-obsidian-sync.sh` refuses while the marker exists —
+        # so even a sync that comes back before the stop below is gated.
+        actions: dict = {"evidence": None}
+        try:
+            self.vault.trip(why, snap, actions)
+        except OSError as exc:
+            log(f"could not write vault marker: {exc}")
+        actions["sync"] = self._stop_sync()
+        actions["workers"] = self._pause_workers()
+        try:
+            self.state.set_halted(f"vault tripwire: {why}")
+            actions["promotions"] = "halted"
+        except Exception as exc:  # noqa: BLE001
+            actions["promotions"] = f"halt failed: {exc}"
+        actions["evidence"] = self._vault_evidence(stamp)
+        try:
+            marker = self.vault.trip(why, snap, actions)
+        except OSError:
+            marker = self.vault.marker
+        before = self.vault.history[-1].total if self.vault.history else "?"
+        after = snap.total if snap else "missing"
+        gstate.append_event(self.state.ledger, {"event": "vault_tripwire", "reason": why,
+                                                "files_before": before, "files_after": after,
+                                                "actions": actions})
+        self.alert(
+            "critical", "Vault mass deletion — sync stopped",
+            f"{why}\n\nFiles: {before} → {after}.\n"
+            f"Obsidian Sync: {actions['sync']}\nWorker pool: {actions['workers']}\n"
+            f"Promotions: {actions['promotions']}\nEvidence (process list at the "
+            f"moment it tripped): {actions['evidence']}\n\n"
+            "Restore from a snapshot into a side directory with "
+            "`~/lloyd/scripts/backup/restore-vault.sh` (never in place), check it, "
+            "swap it in, then clear the tripwire with\n"
+            f"  /usr/bin/python3 {Path(vaultwatch.__file__).resolve()} clear\n"
+            f"Sync will not start until then. Marker: {marker}")
+
+    def _stop_sync(self) -> str:
+        try:
+            ok, detail = self.sup.stop(policy.OBSIDIAN_SYNC_PROGRAM, wait=False)
+            if ok:
+                return "stopped via supervisord"
+            outcome = f"supervisord stop failed ({detail})"
+        except Exception as exc:  # noqa: BLE001 — supervisord may be the thing that is down
+            outcome = f"supervisord unreachable ({exc})"
+        proc = subprocess.run(["pkill", "-f", f"sync --path {policy.VAULT_ROOT}"],
+                              capture_output=True, timeout=10, check=False)
+        return f"{outcome}; pkill rc={proc.returncode}"
+
+    def _pause_workers(self) -> str:
+        import urllib.request
+        req = urllib.request.Request(policy.WORKERS_PAUSE_URL, method="POST",
+                                     data=b'{"paused": true}',
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return f"paused (HTTP {resp.status})"
+        except Exception as exc:  # noqa: BLE001
+            return f"pause failed ({exc})"
+
+    def _vault_evidence(self, stamp: str) -> str | None:
+        """The process table at the moment of the trip. On 2026-09-10 the
+        culprit had exited and left nothing; a listing taken within one tick
+        names what was running."""
+        out = self.gdir / "vault-incidents" / stamp
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            ps = subprocess.run(["ps", "-eo", "pid,ppid,etimes,args", "--sort=-etimes"],
+                                capture_output=True, text=True, timeout=10, check=False)
+            (out / "ps.txt").write_text(ps.stdout, encoding="utf-8")
+            cwds = []
+            for pid in os.listdir("/proc"):
+                if not pid.isdigit():
+                    continue
+                try:
+                    cwd = os.readlink(f"/proc/{pid}/cwd")
+                except OSError:
+                    continue
+                if cwd.startswith(policy.VAULT_ROOT):
+                    try:
+                        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
+                    except OSError:
+                        cmd = b""
+                    cwds.append(f"{pid}\t{cwd}\t{cmd.decode(errors='replace')[:300]}")
+            (out / "cwd-in-vault.txt").write_text("\n".join(cwds) + "\n", encoding="utf-8")
+            return str(out)
+        except Exception as exc:  # noqa: BLE001
+            log(f"vault evidence capture failed: {exc}")
+            return None
+
     # ── settle ─────────────────────────────────────────────────────────
     def maybe_settle(self, current: dict) -> None:
         """Advance LKG once a promotion survives its full observation window."""
@@ -672,6 +777,10 @@ class Guardian:
         # Before any early return below. Every `return` in this method that
         # skips this would re-create the staleness bug it exists to prevent.
         self.drain_logs()
+        # Same placement rule, for a stronger reason: a vault wipe must be
+        # caught while paused, while BROKEN, with supervisord unreachable and
+        # with nothing under observation — every state the returns below mean.
+        self.check_vault()
 
         if snap["supervisord"] == "unreachable":
             self.sup_down_streak += 1

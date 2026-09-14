@@ -79,6 +79,22 @@ def run(g, verbose: bool = True) -> bool:
         return True, str(g.gdir)
     checks.append(("state dir writable + fsyncable", writable))
 
+    def vault_tripwire():
+        # Judged on synthetic snapshots first, so a staged copy that can no
+        # longer recognise a wipe is declined even on a healthy vault.
+        import vaultwatch as vw
+        base = vw.Snapshot(ts=0.0, total=5000, top={"backlog": 1000}, inode=1)
+        wiped = vw.Snapshot(ts=5.0, total=12, top={}, inode=1)
+        if not vw.evaluate([base], wiped):
+            return False, "a 99% drop did not trip"
+        if vw.evaluate([base], vw.Snapshot(ts=5.0, total=4990, top={"backlog": 995}, inode=1)):
+            return False, "ordinary churn tripped"
+        snap = vw.measure(g.vault.root)
+        if snap is None:
+            return False, f"cannot read {g.vault.root}"
+        return True, f"{snap.total} files, tripped={bool(g.vault.tripped())}"
+    checks.append(("vault tripwire judges and measures", vault_tripwire))
+
     def endpoints():
         import probes
         import policy

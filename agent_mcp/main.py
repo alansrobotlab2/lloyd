@@ -54,6 +54,7 @@ from agent_mcp import (
     _subagent_registry,
     _task_registry,
     _tool_effects,
+    _tool_sandbox,
     _tsc_runner,
     annotations as tool_annotations,
     ambient,
@@ -86,6 +87,7 @@ from agent_mcp import (
 # #544: the effect-scope contextvar the harness loop reads at dispatch. Bound
 # here around each dispatch so a `Task` subagent's nested loop inherits it.
 from app.harness import policy as harness_policy
+from app.harness.safety import check_bash_command
 
 logger = logging.getLogger("lloyd-mcp")
 
@@ -450,6 +452,36 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
     if isinstance(arguments, dict) and "_session_id" in arguments:
         arguments = {k: v for k, v in arguments.items() if k != "_session_id"}
 
+    # Refusals that do not depend on who installed which hook. Both sit above
+    # the effect ledger's claim, for the reason given there: a call that was
+    # never allowed to run must never be recorded as an `unknown` effect.
+    #
+    # 1. A bench or eval session may observe this machine and never change it
+    #    (`_tool_sandbox`). The vault was deleted twice, on 2026-09-10 and
+    #    2026-09-12, by a bench trial doing what its prompt said.
+    sandboxed = _tool_sandbox.is_sandboxed_session(sid)
+    if sandboxed:
+        # Off the loop: the first call probes bwrap with a subprocess.
+        why = await asyncio.to_thread(_tool_sandbox.refusal, name, arguments)
+        if why:
+            logger.warning("tool_sandbox: refused %s for read-only session %s: %s",
+                           name, sid, why)
+            return _refused_call(name, f"read-only session: {why}")
+    # 2. The destructive-command check, for every session. The harness hook
+    #    runs the same function, but only where a caller installed it; this is
+    #    where the command actually executes, so nothing reaches a shell
+    #    without passing it.
+    if name == "Bash" and isinstance(arguments, dict):
+        cwd = arguments.get("cwd")
+        match = check_bash_command(arguments.get("command") or "",
+                                   cwd if isinstance(cwd, str) and cwd else None,
+                                   at_dispatch=True)
+        if match:
+            label, excerpt = match
+            logger.warning("safety: refused Bash for session %s: %s — %r",
+                           sid, label, (arguments.get("command") or "")[:500])
+            return _refused_call(name, f"harness safety: blocked {label!r} on {excerpt!r}")
+
     parent_model = meta.get(META_MODEL, "") if isinstance(meta, dict) else ""
     parent_base_url = meta.get(META_BASE_URL, "") if isinstance(meta, dict) else ""
     call_summary = meta.get(META_SUMMARY, "") if isinstance(meta, dict) else ""
@@ -484,6 +516,7 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
     # new task id, and an identical write from parent and child is the same
     # effect.
     etok = harness_policy.current_effect_scope.set(effect_scope)
+    sbtok = _tool_sandbox.current_sandboxed.set(sandboxed)
     try:
         # #544 — exactly-once EFFECT, not exactly-once scheduling. The retry
         # that makes this necessary is the pool's: a job cancelled at
@@ -530,6 +563,20 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
         builtin_task.current_parent_model.reset(mtok)
         builtin_task.current_parent_base_url.reset(btok)
         harness_policy.current_effect_scope.reset(etok)
+        _tool_sandbox.current_sandboxed.reset(sbtok)
+
+
+def _refused_call(name: str, reason: str) -> CallToolResult:
+    """A call refused before dispatch. Worded like the harness's own hook
+    deny ("Tool call denied: …") so a bench trace files it under
+    `denied_calls` — the model tried, and the attempt is the measurement."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps({
+            "error": f"Tool call denied: {reason}",
+            "tool": name,
+        }))],
+        isError=True,
+    )
 
 
 async def on_call_tool(ctx, params) -> CallToolResult:
@@ -636,6 +683,9 @@ async def state(request):
         "tsc": _tsc_runner.stats(),
         "changes": _change_ledger.stats(),
         "tools": len(_dispatch),
+        # Read by the bench runner before it starts a trial: a runner that
+        # cannot see the sandbox enforced refuses to run.
+        "tool_sandbox": await asyncio.to_thread(_tool_sandbox.status),
     })
 
 

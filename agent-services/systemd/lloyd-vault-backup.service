@@ -1,0 +1,10 @@
+[Unit]
+Description=Lloyd vault snapshot (git, outside the vault)
+Documentation=file:///home/alansrobotlab/lloyd/scripts/backup/backup-vault.sh
+
+[Service]
+Type=oneshot
+# Below every interactive and agent workload: a snapshot is never urgent.
+Nice=15
+IOSchedulingClass=idle
+ExecStart=/home/alansrobotlab/lloyd/scripts/backup/backup-vault.sh

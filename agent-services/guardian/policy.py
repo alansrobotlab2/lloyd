@@ -152,6 +152,13 @@ DATA_DROP_FRACTION = 0.05
 KG_DB = "/home/alansrobotlab/lloyd/_pipeline/vault-derived/kg.sqlite"
 VAULT_ROOT = "/home/alansrobotlab/obsidian"
 
+# ── Vault tripwire (every tick, not only while observing) ──────────────────
+# `vaultwatch.py` owns the thresholds; these name what the guardian acts on.
+# Sync is stopped first because it is the one writer that turns a local wipe
+# into a remote one — it did exactly that on 2026-09-10 and 2026-09-12.
+OBSIDIAN_SYNC_PROGRAM = "agent-obsidian-sync"
+WORKERS_PAUSE_URL = "http://127.0.0.1:8080/api/workers/pause"
+
 # ── Paths ──────────────────────────────────────────────────────────────────
 import os as _os
 from pathlib import Path as _Path

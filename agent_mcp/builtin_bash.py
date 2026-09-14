@@ -34,7 +34,7 @@ from typing import Any
 
 from mcp.types import Tool
 
-from agent_mcp import _task_registry
+from agent_mcp import _task_registry, _tool_sandbox
 from agent_mcp._shared import get_bound_session, text_result
 
 logger = logging.getLogger("lloyd-builtin-bash")
@@ -144,7 +144,11 @@ async def _bash(args: dict[str, Any]) -> str:
     if err:
         return err
 
+    sandboxed = _tool_sandbox.current_sandboxed.get()
     if args.get("run_in_background"):
+        if sandboxed:  # `main.call_tool` refuses this first; never rely on it
+            _bash_failed.set(True)
+            return json.dumps({"error": "background Bash is not available in a read-only session"})
         return await _spawn_background(command, _background_label(args), cwd)
 
     try:
@@ -153,13 +157,30 @@ async def _bash(args: dict[str, Any]) -> str:
         # group. That lets us SIGTERM/SIGKILL the whole tree on cancel
         # or timeout via os.killpg. Without this, killing only the shell
         # leaves grandchildren (e.g. valgrind under `timeout`) running.
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=cwd,
-            start_new_session=True,
-        )
+        if sandboxed:
+            # A bench or eval session: the command runs in a read-only
+            # bubblewrap sandbox (see `_tool_sandbox`). Checked again here,
+            # not only in `call_tool`, so the one path that executes a
+            # command cannot run a sandboxed session's command bare.
+            ok, sb_err = await asyncio.to_thread(_tool_sandbox.sandbox_available)
+            if not ok:
+                _bash_failed.set(True)
+                return json.dumps({"error": f"read-only sandbox unavailable ({sb_err}); "
+                                            "not running unsandboxed"})
+            proc = await asyncio.create_subprocess_exec(
+                *_tool_sandbox.bwrap_argv(command, cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
+            )
+        else:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=cwd,
+                start_new_session=True,
+            )
     except Exception as exc:
         return json.dumps({"error": f"failed to spawn shell: {exc}"})
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=Snapshot the Lloyd vault every 15 minutes
+
+[Timer]
+# 15 minutes bounds what a wipe can take with it. On 2026-09-12 the vault was
+# erased five minutes after the only snapshot anyone had, which the deleting
+# process wrote itself.
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

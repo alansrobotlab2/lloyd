@@ -33,6 +33,7 @@ turns out to describe something gone or never built is moved to
 | [[harness]] | `run_query`: events, the position-0 rule, preserved thinking, tool pool, summaries, thinking trace, finalizer, subagents |
 | [[tools]] | the lloyd-mcp aggregator, the module and tool inventory, annotations |
 | [[editing-safeguards]] | read-before-edit gates, edit diagnostics and blast radius, the change and effect ledgers, the code graph |
+| [[vault-protection]] | the 09-10/09-12 vault wipes and the four layers after them: the bench/eval tool sandbox, the wholesale-delete check, the guardian's vault tripwire and sync gate, 15-minute snapshots |
 | [[inner-voice]] | the observer that watches the primary stream and steers it with five soft levers |
 | [[subliminal]] | pre-call context retrieval: skills, facts, vault docs, sessions, backlog |
 | [[ambient-context-injection]] | how background producers surface context into the active chat |

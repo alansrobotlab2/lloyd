@@ -104,21 +104,49 @@ _HARD_DENY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
-def check_bash_command(command: str) -> tuple[str, str] | None:
+# Labels the aggregator does not enforce at dispatch. `\bsudo\b` matches the
+# word inside grep/echo text, and the paths that never installed this hook
+# (autonomy.run_task, run_prompt_on_primary) ran seven such commands harmlessly
+# before 2026-09-14 — while sudo itself needs a password on this host, so the
+# rule protects nothing there. The hook keeps it for the turns that had it.
+_HOOK_ONLY_LABELS = frozenset({"sudo"})
+
+
+def check_bash_command(command: str, cwd: str | None = None, *,
+                       at_dispatch: bool = False) -> tuple[str, str] | None:
     """Return (label, excerpt) if `command` matches a hard-deny pattern,
     else None.
 
-    Pure function — testable in isolation.
+    Two checks, one definition. The regex table above catches the
+    catastrophic-anywhere shapes; `protected_paths` parses the command and
+    refuses a delete, move or `git clean` that takes out the vault, the lloyd
+    tree or $HOME wholesale — the spellings the regex table let through on
+    2026-09-10 and 2026-09-12. `cwd` is where the command starts; `None`
+    means the aggregator's own directory.
+
+    This is the only definition: the harness PreToolUse hook calls it, and so
+    does the aggregator's `call_tool` for every Bash dispatch (`at_dispatch`),
+    whatever hooks the caller installed (`agent_mcp/main.py`). Until then the
+    autonomy and direct worker paths installed no safety hook at all.
     """
     if not command or not isinstance(command, str):
         return None
     for pattern, label in _HARD_DENY_PATTERNS:
+        if at_dispatch and label in _HOOK_ONLY_LABELS:
+            continue
         m = pattern.search(command)
         if m:
             excerpt = m.group(0)
             if len(excerpt) > 80:
                 excerpt = excerpt[:80] + "..."
             return (label, excerpt)
+    from app.harness.protected_paths import check_protected_delete
+    why = check_protected_delete(command, cwd)
+    if why:
+        excerpt = command.strip().splitlines()[0]
+        if len(excerpt) > 80:
+            excerpt = excerpt[:80] + "..."
+        return (f"destructive operation on {why}", excerpt)
     return None
 
 
@@ -140,9 +168,11 @@ async def _safety_pretool_cb(
         return {}
     tool_input = input_data.get("tool_input") or {}
     command = ""
+    cwd = None
     if isinstance(tool_input, dict):
         command = tool_input.get("command") or ""
-    match = check_bash_command(command)
+        cwd = tool_input.get("cwd") or None
+    match = check_bash_command(command, cwd if isinstance(cwd, str) else None)
     if match is None:
         return {}
     label, excerpt = match

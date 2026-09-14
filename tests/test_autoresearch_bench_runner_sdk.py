@@ -47,8 +47,21 @@ from scripts.autoresearch.bench_runner_sdk import (
     ledger_row_for,
     run_bench_sdk,
 )
+from scripts.autoresearch import bench_runner_sdk as _runner
 from scripts.autoresearch.common import split_tasks_by_harness
 from scripts.autoresearch.run_round import build_parser
+
+_REAL_REQUIRE = _runner.require_tool_sandbox
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_confirmed(monkeypatch):
+    """Trials here run against fake pools, not the aggregator, so the
+    preflight that asks the aggregator is stubbed. The refusal itself is
+    pinned by test_a_trial_refuses_to_run_without_an_enforced_sandbox."""
+    async def _ok(*_a, **_kw):
+        return None
+    monkeypatch.setattr(_runner, "require_tool_sandbox", _ok)
 
 
 # ---------------------------------------------------------------------------
@@ -319,26 +332,57 @@ def test_a_direct_trace_reports_no_disclosure_regime(monkeypatch):
     assert row["tool_search_enabled"] is None
 
 
-def test_trials_do_not_write_session_files(monkeypatch):
-    """Session quarantine: the SDK path persists nothing, so no trial session
-    can appear under the live SESSIONS_DIR."""
-    from app.paths import SESSIONS_DIR
+def test_every_trial_is_recorded_as_a_sandboxed_session(monkeypatch):
+    """This test used to assert the opposite — "the SDK path persists nothing"
+    — and that property is why the two vault wipes left no record of a single
+    command. A trial is now a background session whose transcript names every
+    tool call with its arguments, under an id the aggregator sandboxes."""
+    import app.sessions_io as sio
+    from agent_mcp._tool_sandbox import is_sandboxed_session
 
     _patch_off_vault(monkeypatch)
     _patch_harness(monkeypatch,
-                   _FakePool("lloyd-mcp", [_mcp_tool("Read")]),
-                   _StreamScript([("all clear", [])]))
-    before = {p.name for p in SESSIONS_DIR.glob("*.json")}
-    # A delta, not an empty-set assertion: on the live tree this directory is
-    # production, and a `bench_*.tool-results` spill left by an earlier run
-    # (2026-09-09) failed this test for every full-suite run on 2026-09-11
-    # without any trial having written a thing.
-    before_bench = {p.name for p in SESSIONS_DIR.glob("bench_*")}
+                   _FakePool("lloyd-mcp", [_mcp_tool("Bash")]),
+                   _StreamScript([("", [{"id": "c1", "name": "Bash",
+                                         "arguments": {"command": "ls ~/obsidian"}}]),
+                                  ("I won't delete anything.", [])]))
     tr = asyncio.run(run_bench_sdk(None, [("V", Path("/no"))], [_task()], model="primary",
-                                  hooks_factory=lambda: HookRegistry()))[0]
-    assert tr["session_id"].startswith("bench_")
-    assert {p.name for p in SESSIONS_DIR.glob("*.json")} == before
-    assert {p.name for p in SESSIONS_DIR.glob("bench_*")} == before_bench
+                                   hooks_factory=lambda: HookRegistry()))[0]
+    sid = tr["session_id"]
+    assert is_sandboxed_session(sid), sid
+    assert tr["trial_id"].startswith("bench_")
+    data = json.loads((sio.SESSIONS_DIR / f"{sid}.json").read_text())
+    assert data["platform"] == "worker" and not sio.is_user_session(data)
+    calls = [tc for m in data["messages"] for tc in (m.get("tool_calls") or [])]
+    assert any("ls ~/obsidian" in json.dumps(tc) for tc in calls), calls
+
+
+def test_a_trial_refuses_to_run_without_an_enforced_sandbox(monkeypatch):
+    """Fail closed: an aggregator that cannot promise read-only execution —
+    older than the sandbox, or with no working bwrap — gets no trial at all."""
+    import httpx
+
+    monkeypatch.setattr(_runner, "require_tool_sandbox", _REAL_REQUIRE)
+    monkeypatch.setattr(_runner, "_sandbox_verified", False)
+    ran: list = []
+
+    async def _never(*_a, **_kw):
+        ran.append(1)
+        yield {"type": "result", "stop_reason": "stop"}
+
+    monkeypatch.setattr("app.harness.run_query", _never)
+    _patch_off_vault(monkeypatch)
+    real_client = httpx.AsyncClient
+    for state in ({"tools": 3},                                        # predates the sandbox
+                  {"tool_sandbox": {"enforced": True, "bwrap": False,
+                                    "background_slugs": ["bench"]}}):  # no working bwrap
+        transport = httpx.MockTransport(lambda req, s=state: httpx.Response(200, json=s))
+        monkeypatch.setattr(httpx, "AsyncClient",
+                            lambda *a, t=transport, **kw: real_client(transport=t))
+        with pytest.raises(_runner.ToolSandboxUnavailable):
+            asyncio.run(run_bench_sdk(None, [("V", Path("/no"))], [_task()],
+                                      model="primary", hooks_factory=lambda: HookRegistry()))
+    assert ran == [], "a trial reached the model without a sandbox"
 
 
 # ---------------------------------------------------------------------------

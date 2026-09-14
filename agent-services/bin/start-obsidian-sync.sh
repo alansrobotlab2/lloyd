@@ -41,5 +41,27 @@ if ! "$OB" sync-list-local </dev/null 2>/dev/null | grep -q "$VAULT_PATH"; then
   exit 1
 fi
 
+# Never start over a tripped or gutted vault. `ob sync` is bidirectional and
+# pushes local deletions as remote ones: on 2026-09-10 and 2026-09-12 it turned
+# two local wipes into two cloud wipes. The guardian's tripwire stops this
+# program when the vault drops (agent-services/guardian/vaultwatch.py); this
+# gate is what keeps supervisord's autorestart — or a hand `start` — from
+# bringing it straight back. The pinned guardian copy is preferred, the repo
+# copy is the fallback, and neither existing refuses rather than syncing blind.
+VAULTWATCH=""
+for cand in ${LLOYD_VAULTWATCH:+"$LLOYD_VAULTWATCH"} \
+            "$HOME/.local/state/lloyd-guardian/bin/vaultwatch.py" \
+            /home/alansrobotlab/lloyd/agent-services/guardian/vaultwatch.py; do
+  if [[ -f "$cand" ]]; then VAULTWATCH="$cand"; break; fi
+done
+if [[ -z "$VAULTWATCH" ]]; then
+  echo "[start-obsidian-sync] ERROR: vaultwatch.py not found — refusing to sync without the vault gate" >&2
+  exit 1
+fi
+if ! /usr/bin/python3 "$VAULTWATCH" sync-gate; then
+  echo "[start-obsidian-sync] refusing to start (see above)" >&2
+  exit 1
+fi
+
 echo "[start-obsidian-sync] $(date -Is) launching continuous sync for ${VAULT_PATH}"
 exec "${OB}" sync --path "${VAULT_PATH}" --continuous
