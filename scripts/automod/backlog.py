@@ -2428,25 +2428,28 @@ def blocked_item_of(item: Item, targets: dict[int, int] | None = None) -> int | 
 
 def live_blockers(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
                   items: list[Item] | None = None,
-                  everything: list[Item] | None = None) -> dict[int, int | None]:
+                  backlog_dir: Path | None = None) -> dict[int, int | None]:
     """`{blocker_id: blocked_id}` for open `blocker` items whose blocked item is
     still open. A blocker whose target cannot be named, or names no item on
     disk, counts as live: triage is the pass that should find that out, and
     a blocker judged once is out of expiry's reach anyway.
 
-    `everything` is a caller's own full read of the board (the dashboard reads
-    a vault resolved at call time); without it each target is looked up by id.
+    Targets are looked up by id on every board — a blocker's target need not
+    share its board, and a board-filtered read would call a closed target
+    missing, and so live. `backlog_dir` is for a caller that resolves the
+    vault at call time (the dashboard).
     """
-    known = {i.id: i.status for i in everything} if everything is not None else None
+    root = backlog_dir or BACKLOG_DIR
 
     def status_of(iid: int) -> str | None:
-        if known is not None:
-            return known.get(iid)
-        target = item_by_id(iid)
-        return target.status if target is not None else None
+        for path in sorted(root.glob(f"{int(iid)}-*.md")):
+            target = load_item(path)
+            if target is not None:
+                return target.status
+        return None
 
-    candidates = [i for i in (items if items is not None else open_items(boards))
-                  if BLOCKER_TAG in i.tags and i.status in OPEN_STATUSES]
+    candidates = [i for i in (items if items is not None else open_items(boards, backlog_dir=backlog_dir))
+                  if BLOCKER_TAG in i.tags and i.status in OPEN_STATUSES and not is_grouped(i)]
     if not candidates:
         return {}
     targets = blocker_targets(ledger)
@@ -2461,8 +2464,12 @@ def live_blockers(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS,
 def blocker_liveness(item: Item, targets: dict[int, int], status_of) -> tuple[bool, int | None]:
     """`(live, blocked_id)` for one item — the single rule `live_blockers` and
     the scorecard's over-bound gauge both apply. `status_of(id)` returns the
-    blocked item's status, or None when there is no such item."""
-    if BLOCKER_TAG not in item.tags or item.status not in OPEN_STATUSES:
+    blocked item's status, or None when there is no such item.
+
+    A member folded under an umbrella is not live: its fate is the umbrella's,
+    single triage never reaches it, and counting it would keep
+    `board_health`'s untriaged blockers from ever draining."""
+    if BLOCKER_TAG not in item.tags or item.status not in OPEN_STATUSES or is_grouped(item):
         return False, None
     blocked = blocked_item_of(item, targets)
     if blocked is None:
@@ -2658,12 +2665,14 @@ def select_confirmed(ledger: Path,
     # A FIRST re-offer whose branch still holds the work belongs in the same
     # tier, for the same reason: it is a fix cycle, not an hour.
     near |= first_reoffer_with_a_branch(ledger, outcomes)
-    # Then a live blocker: landing it un-defers a clause of an item some round
-    # already carried most of the way.
+    # Within each tier, a live blocker first: landing it un-defers a clause of
+    # an item some round already carried most of the way. Inside the tiers,
+    # not above them — a sent-back blocker ahead of fresh confirmations would
+    # be re-picked every round until its cap, the monopoly they exist to stop.
     live = live_blockers(ledger, boards, items=[i for i, _ in ready])
     return sorted(ready, key=lambda pair: (pair[0].id not in near,
-                                           pair[0].id not in live,
                                            pair[0].id in outcomes,
+                                           pair[0].id not in live,
                                            pair[0].created or "9999", pair[0].id))[0]
 
 
@@ -2846,7 +2855,8 @@ def release_held_confirmations(ledger: Path, boards: tuple[str, ...] | None = DE
     # the pool already holds, not more inventory for it.
     live = live_blockers(ledger, boards, items=[open_by_id[i] for i in waiting])
     for iid in [i for i in waiting if i in live]:
-        _release(iid, f"a live blocker of #{live[iid]}; blockers are never held", move=True)
+        of = f"#{live[iid]}" if live[iid] is not None else "an unnamed item"
+        _release(iid, f"a live blocker of {of}; blockers are never held", move=True)
     waiting = [i for i in waiting if i not in live]
     if not waiting:
         return out
@@ -3533,7 +3543,7 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
     items = [i for i in everything if i.status in OPEN_STATUSES]
     seen = triaged_ids(ledger)
     released = released_ids(ledger)
-    live = live_blockers(ledger, boards, items=items, everything=everything)
+    live = live_blockers(ledger, boards, items=items, backlog_dir=backlog_dir)
     held = held_confirmations(ledger)
     outcomes = implement_outcomes(ledger)
     attempted = {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}

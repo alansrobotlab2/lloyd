@@ -366,6 +366,13 @@ def _origin_block(candidate, ledger) -> str:
             f'{parent_attr}>\n' + "\n".join(lines) + "\n</origin>")
 
 
+def _live_blocker_waiting() -> bool:
+    """Is a live blocker among the untriaged candidates right now?"""
+    from scripts.automod import backlog as B, state as S
+    candidates, _held = B.triage_pool(S.LEDGER_PATH)
+    return bool(B.live_blockers(S.LEDGER_PATH, items=candidates))
+
+
 def _retriage_line(ev: dict) -> str:
     """The refusal a re-triaged item carries into its second triage: which
     round, what the review found, and what the grader said per clause."""
@@ -756,7 +763,9 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # closed. A full pool now holds a `confirmed` verdict in `draft` (see
     # `B.held_confirmations`); only with holding switched off does it pause.
     gate = await asyncio.to_thread(B.implement_pool_full, S.LEDGER_PATH, floor=floor)
-    if gate["full"] and not hold_on:
+    # A live blocker is never held back by the gate, holding or not: the pause
+    # below would otherwise leave it untriaged (select_candidate takes it first).
+    if gate["full"] and not hold_on and not await asyncio.to_thread(_live_blocker_waiting):
         return {"status": "skipped",
                 "summary": (f"single-item triage paused: {gate['ready']} ready in up_next ≥ bound "
                             f"{gate['bound']} ({gate['landed_items_7d']} items landed in 7 d, "

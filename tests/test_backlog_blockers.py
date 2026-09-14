@@ -103,14 +103,30 @@ def test_a_blocker_is_live_only_while_its_target_is_open(isolated):
     assert B.live_blockers(S.LEDGER_PATH) == {500: 42, 502: None, 503: 9999}
 
 
-def test_a_full_board_read_answers_the_same_as_lookups_by_id(isolated):
-    write_item(isolated, 42, status="up_next")
-    write_item(isolated, 43, status="done")
+def test_a_target_on_another_board_is_looked_up_not_presumed_missing(isolated, tmp_path, monkeypatch):
+    """A board-filtered read calls a closed target on another board missing,
+    and missing means live — the dashboard said live while the loop expired it."""
+    write_item(isolated, 42, status="done", board="alfie")
+    write_item(isolated, 43, status="up_next", board="alfie")
     blocker(isolated, 500, 42)
     blocker(isolated, 501, 43)
-    everything = B.all_items()
-    assert (B.live_blockers(S.LEDGER_PATH, everything=everything)
-            == B.live_blockers(S.LEDGER_PATH) == {500: 42})
+    assert B.live_blockers(S.LEDGER_PATH) == {501: 43}
+    assert B.board_health(S.LEDGER_PATH)["live_blockers"]["open"] == 1
+    # The dashboard hands its own vault path; the lookup follows it.
+    moved = tmp_path / "elsewhere"
+    isolated.rename(moved)
+    monkeypatch.setattr(B, "BACKLOG_DIR", tmp_path / "nowhere")
+    assert B.live_blockers(S.LEDGER_PATH, backlog_dir=moved) == {501: 43}
+    assert B.board_health(S.LEDGER_PATH, backlog_dir=moved)["live_blockers"]["open"] == 1
+
+
+def test_a_blocker_folded_under_an_umbrella_is_not_live(isolated):
+    """Its fate is the umbrella's and single triage never reaches it, so
+    counting it would keep `untriaged` from ever draining (#896 under #980)."""
+    write_item(isolated, 42, status="draft")
+    B.update_frontmatter(blocker(isolated, 500, 42), {"group": 980}, add_tags=("grouped",))
+    assert B.live_blockers(S.LEDGER_PATH) == {}
+    assert B.board_health(S.LEDGER_PATH)["live_blockers"] == {"open": 0, "untriaged": 0}
 
 
 # ===========================================================================
@@ -231,6 +247,21 @@ def test_a_confirmed_live_blocker_enters_a_full_pool(isolated, monkeypatch):
     assert B.held_confirmations(S.LEDGER_PATH) == {}
 
 
+def test_with_holding_off_a_full_pool_still_triages_a_live_blocker(isolated, monkeypatch):
+    """The kill switch pauses single triage on a full pool — but not for the
+    one item the gate never holds."""
+    _ready(isolated, 40)
+    write_item(isolated, 7, days_old=300)
+    payload = {"group_triage": False, "implement_pool_floor": 40, "hold_confirmations": False}
+    turn = _stub_confirmed(monkeypatch)
+    assert asyncio.run(M.execute(_QItem(payload)))["status"] == "skipped"
+    assert turn.calls == []
+    blocker(isolated, 500, 1000)
+    out = asyncio.run(M.execute(_QItem(payload)))
+    assert out["item_id"] == 500 and out["held"] is False
+    assert B.item_by_id(500).status == "up_next"
+
+
 def test_the_same_verdict_on_an_ordinary_item_is_still_held(isolated, monkeypatch):
     """The gate itself is untouched."""
     _ready(isolated, 40)
@@ -246,11 +277,21 @@ def test_a_blocker_held_before_this_rule_is_released_without_room(isolated):
     for iid, path in ((500, blocker(isolated, 500, 42)), (7, write_item(isolated, 7))):
         B.record_verdict(B.load_item(path), "confirmed", "real", acceptance="it passes", hold=True)
         _ev(event="backlog_triage", item_id=iid, verdict="confirmed", acceptance="it passes", held=True)
-    out = B.release_held_confirmations(S.LEDGER_PATH, floor=3)       # full: 6 ready >= 3
+    out = B.release_held_confirmations(S.LEDGER_PATH, floor=3)       # full: 5 ready >= 3
     assert [(r["item_id"], r["moved"]) for r in out] == [(500, True)]
     assert "live blocker of #42" in out[0]["reason"]
     assert B.item_by_id(500).status == "up_next"
     assert set(B.held_confirmations(S.LEDGER_PATH)) == {7}, "an ordinary item still waits"
+
+
+def test_an_unnamed_held_blocker_is_released_with_a_readable_reason(isolated):
+    _ready(isolated, 5)
+    path = blocker(isolated, 500, None)
+    B.record_verdict(B.load_item(path), "confirmed", "real", acceptance="it passes", hold=True)
+    _ev(event="backlog_triage", item_id=500, verdict="confirmed", acceptance="it passes", held=True)
+    out = B.release_held_confirmations(S.LEDGER_PATH, floor=3)
+    assert out[0]["item_id"] == 500 and "an unnamed item" in out[0]["reason"]
+    assert "None" not in out[0]["reason"]
 
 
 # ===========================================================================
@@ -264,6 +305,26 @@ def test_select_confirmed_takes_a_live_blocker_before_an_older_confirmation(isol
     _ev(event="backlog_triage", item_id=500, verdict="confirmed", acceptance="it passes")
     item, _ev_row = B.select_confirmed(S.LEDGER_PATH)
     assert item.id == 500
+
+
+def test_a_sent_back_live_blocker_does_not_jump_fresh_confirmations(isolated):
+    """Blocker-first applies inside the fresh/re-offer tiers, not above them:
+    above them a re-offered blocker is re-picked every round until its cap."""
+    _ready(isolated, 1, start=1000)                      # fresh ordinary confirmation
+    write_item(isolated, 42, status="draft")
+    blocker(isolated, 500, 42, status="up_next", days_old=0)
+    _ev(event="backlog_triage", item_id=500, verdict="confirmed", acceptance="it passes")
+    _ev(event="backlog_implement", item_id=500, phase="started")
+    _ev(event="backlog_implement", item_id=500, phase="finished", stop_reason="max_turns",
+        num_turns=90, text="partial work")
+    assert B.implement_outcomes(S.LEDGER_PATH)[500][0] == "incomplete"
+    item, _ev_row = B.select_confirmed(S.LEDGER_PATH)
+    assert item.id == 1000
+    # Among re-offers, the blocker still goes first.
+    _ev(event="backlog_implement", item_id=1000, phase="started")
+    _ev(event="backlog_implement", item_id=1000, phase="finished", stop_reason="max_turns",
+        num_turns=90, text="partial work")
+    assert B.select_confirmed(S.LEDGER_PATH)[0].id == 500
 
 
 def test_a_blocker_of_a_closed_item_takes_its_ordinary_place(isolated):

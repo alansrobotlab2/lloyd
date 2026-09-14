@@ -540,10 +540,13 @@ quarantined with no path to a contract and then expired, orphaning the clause.
 That day 13 of the 101 quarantined drafts were blockers, four of them in front
 of items already in `up_next`. `backlog.live_blockers` is the one definition:
 an open blocker whose blocked item (its own "Blocks #N", else the implement row
-whose `spawned` names it) is still open, or cannot be named. A live blocker is
-not quarantined, goes first in `select_candidate`, is never held by the depth
-gate (`release_held_confirmations` frees one held before the rule), sorts right
-after the near-landing tier in `select_confirmed`, and is never expired — nor
+whose `spawned` names it, looked up on every board) is still open, or cannot be
+named — and that is not folded under an umbrella, whose fate it shares. A live
+blocker is not quarantined, goes first in `select_candidate`, is never held by
+the depth gate (`release_held_confirmations` frees one held before the rule,
+and with holding off a full pool still triages it), sorts first *within* its
+tier in `select_confirmed` — never above the fresh/re-offer split, or a
+sent-back blocker is re-picked every round until its cap — and is never expired — nor
 counted in the scorecard's `over_bound`, which applies the same
 `blocker_liveness`, or the gauge would report the sweep working as broken. When
 the blocked item closes it is an ordinary self-spawn again — quarantined and

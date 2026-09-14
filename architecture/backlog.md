@@ -232,17 +232,19 @@ tags `spawned-by-autocode` + `blocker`) and nothing read that tag but
 write-time dedupe, so a blocker was quarantined — no triage, no contract, never
 `up_next` — and then expired, orphaning the clause. On 2026-09-14, 13 of 101
 quarantined drafts were blockers. `live_blockers(ledger)` returns
-`{blocker_id: blocked_id}` for open blockers whose blocked item is open or
-cannot be named; the target is the item's own "Blocks #N" (title, then first
-body line), else the `backlog_implement` row whose `spawned` names it. A live
-blocker:
+`{blocker_id: blocked_id}` for open, un-grouped blockers whose blocked item is
+open or cannot be named; the target is the item's own "Blocks #N" (title, then
+first body line), else the `backlog_implement` row whose `spawned` names it,
+looked up by id on every board (a board-filtered read would call a closed
+target missing, and so live). A member folded under an umbrella is never live.
+A live blocker:
 
 | Reader | Effect |
 |---|---|
 | `is_quarantined(live=…)` / `triage_pool` | not quarantined |
 | `select_candidate` | ahead of the oldest item |
-| autotriage's hold, `release_held_confirmations` | never held; one held before the rule is released without room |
-| `select_confirmed` | after the near-landing tier, before other confirmations |
+| autotriage's hold, `release_held_confirmations` | never held; one held before the rule is released without room; with `hold_confirmations` off a full pool still triages it |
+| `select_confirmed` | first within its tier (near-landing, fresh, re-offer) — never above the fresh/re-offer split |
 | `expire_stale_spawns`, scorecard `over_bound` | skipped (both through `blocker_liveness`) |
 | autotriage `<origin>` | "a BLOCKER of #N (status)" |
 | `board_health` | `live_blockers: {open, untriaged}` |
