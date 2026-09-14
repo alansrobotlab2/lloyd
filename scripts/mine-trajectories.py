@@ -9,6 +9,7 @@ Output: ~/obsidian/skills/candidates/candidate-{pattern-slug}-{YYYYMMDD}.md
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -23,6 +24,72 @@ from typing import Any
 
 TRAJECTORY_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
 OUTPUT_DIR = Path.home() / "lloyd" / "_pipeline" / "skills" / "candidates"
+SESSION_STORE_DIR = Path.home() / "lloyd" / "sessions"
+
+# ── Session class (#493) ─────────────────────────────────────────────────────
+#
+# The gate qualifies a pattern on *distinct sessions*, so the loop's own traffic
+# inflates it: machine share of the corpus measured on the stored `platform` field
+# is 938 of 1083 sessions (86.6%) across 2026-09-02→12, monotone per day, and
+# 10,611 of 11,813 `Sessions Affected` bullets in the 2026-09-12 candidates are
+# machine sessions. Only `interactive` work — a Mission Control turn the inner
+# voice did not take — is human-initiated.
+#
+# The class is written by `extract-trajectories.py` and is one string: these two
+# scripts are separate processes, so
+# `tests/test_trajectory_extraction.py` pins that they agree on it.
+INTERACTIVE_CLASS = "interactive"
+UNCODED_CLASS = "uncoded"   # no emitted class and no session JSON to join to
+
+
+def _extractor_module():
+    """The sibling extractor module, for its session classifier.
+
+    Loaded by path (hyphenated filename, and `scripts/` is not a package) the same
+    way `_verdicts_module()` loads its sibling. One classifier, not two: the
+    meaning of `interactive` is clause 2 of #493 and cannot drift between the
+    writer and the reader of the corpus.
+    """
+    global _EXTRACTOR_MOD
+    if _EXTRACTOR_MOD is None:
+        path = Path(__file__).resolve().parent / "extract-trajectories.py"
+        spec = importlib.util.spec_from_file_location("extract_trajectories", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _EXTRACTOR_MOD = module
+    return _EXTRACTOR_MOD
+
+
+_EXTRACTOR_MOD: Any = None
+
+
+def join_session_class(traj: dict, cache: dict) -> str:
+    """Class of a corpus row that carries no `session_class`.
+
+    Every row written before the field existed lacks it, and the mining window is
+    7 days while extraction is incremental — so the legacy rows are never rewritten
+    and an exclusion that only understood the new field would blank the corpus for
+    a week and emit nothing (the failure #493 clause 6 forbids). The class is
+    therefore joined in from the session store on `session_key`, which is the
+    corpus↔store join the acceptance check is written on. A row with no session
+    file behind it is `uncoded`: dropped under the exclusion and reported, never
+    assumed human.
+    """
+    key = traj.get("session_key") or ""
+    if key in cache:
+        return cache[key]
+    resolved = UNCODED_CLASS
+    if key and "/" not in key and ".." not in key:
+        path = SESSION_STORE_DIR / f"{key}.json"
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, json.JSONDecodeError):
+                data = None
+            if isinstance(data, dict):
+                resolved = _extractor_module().classify_session(data)
+    cache[key] = resolved
+    return resolved
 
 
 def set_trajectory_dir(path: Path) -> None:
@@ -377,15 +444,30 @@ def is_corroborated_error(step: dict) -> bool:
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 
-def load_trajectories(days: int = 7, agent_filter: str = "worker") -> list[dict]:
-    """Load trajectory JSONL files with optional filters."""
+def load_trajectories(days: int = 7, agent_filter: str = "worker",
+                      exclude_machine: bool = True,
+                      class_counts: dict | None = None) -> list[dict]:
+    """Load trajectory JSONL files with optional filters.
+
+    `exclude_machine` (default True) keeps only `interactive` sessions — the
+    frequency gate counts distinct sessions, so the loop's own cadence otherwise
+    qualifies its own patterns (#493). `class_counts`, when given a dict, is filled
+    with `{"kept": {class: n}, "dropped": {class: n}}` so the caller can report what
+    the exclusion removed; the exclusion is never silent.
+    """
     trajectories = []
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
-    
+    class_cache: dict[str, str] = {}
+
     if not TRAJECTORY_DIR.exists():
         print(f"Warning: Trajectory directory not found: {TRAJECTORY_DIR}")
         return trajectories
-    
+
+    def tally(bucket: str, cls: str) -> None:
+        if class_counts is not None:
+            class_counts.setdefault(bucket, {})
+            class_counts[bucket][cls] = class_counts[bucket].get(cls, 0) + 1
+
     for jsonl_file in sorted(TRAJECTORY_DIR.glob("*.jsonl")):
         # Skip non-date files
         if not re.match(r'^\d{4}-\d{2}-\d{2}\.jsonl$', jsonl_file.name):
@@ -408,6 +490,28 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker") -> list[dict]
                         continue
                     try:
                         traj = json.loads(line)
+                        # Session-class exclusion (#493). `agent_id` cannot do
+                        # this work: the extractor derives it from the filename
+                        # and 0 of the live session files carry its one prefix, so
+                        # all 1014 rows of the last 7 days are `agent_id: "lloyd"`
+                        # and `--agent worker` selects nothing (#494).
+                        if exclude_machine:
+                            cls = traj.get("session_class")
+                            if cls is None:
+                                cls = join_session_class(traj, class_cache)
+                                # Stamped, so the class the exclusion filtered on is
+                                # the class `print_stats` reports. Without this a row
+                                # admitted because the store says it is interactive
+                                # prints as `uncoded`, and the histogram contradicts
+                                # the count above it.
+                                traj["session_class"] = cls
+                            if cls == INTERACTIVE_CLASS:
+                                tally("kept", cls)
+                            else:
+                                tally("dropped", cls)
+                                continue
+                        else:
+                            tally("kept", traj.get("session_class") or UNCODED_CLASS)
                         # Apply agent filter
                         # agent_id values from extract-trajectories.py:
                         #   "autonomy" → worker/autonomy sessions
@@ -1128,23 +1232,32 @@ python3 ~/lloyd/scripts/mine-trajectories.py --days 7 --output-dir ~/custom/outp
 
 # ── Statistics ───────────────────────────────────────────────────────────────
 
-def print_stats(trajectories: list[dict]) -> None:
-    """Print summary statistics from trajectory data."""
-    if not trajectories:
+def print_stats(trajectories: list[dict],
+                class_counts: dict | None = None) -> None:
+    """Print summary statistics from trajectory data.
+
+    `class_counts` is the tally `load_trajectories` fills. It is printed because a
+    run that dropped 1,373 of 1,397 sessions has to say so (#493): a candidate set
+    that shrank without an explanation looks exactly like a pipeline that stopped
+    working.
+    """
+    if not trajectories and not class_counts:
         print("No trajectories found.")
         return
-    
+
     total_tools = 0
     total_errors = 0
     agent_counts = defaultdict(int)
     error_type_counts = defaultdict(int)
     tool_name_counts = defaultdict(int)
-    
+    session_class_counts = defaultdict(int)
+
     for traj in trajectories:
         total_tools += traj.get("tool_count", 0)
         total_errors += traj.get("error_count", 0)
         agent_counts[traj.get("agent_id", "unknown")] += 1
-        
+        session_class_counts[traj.get("session_class") or UNCODED_CLASS] += 1
+
         for et in traj.get("error_tools", []):
             error_type_counts[et.get("error_type", "unknown")] += 1
         
@@ -1163,6 +1276,21 @@ def print_stats(trajectories: list[dict]) -> None:
     print("By agent:")
     for agent, count in sorted(agent_counts.items(), key=lambda x: -x[1]):
         print(f"  {agent:<20} {count}")
+    # The class histogram is the one that matters, not the agent one: every corpus
+    # row carries `agent_id: lloyd`, so a single-valued agent histogram is the
+    # symptom #493 was filed on. Both sides of the exclusion are printed, because a
+    # candidate set that shrank without an explanation looks exactly like a pipeline
+    # that stopped working.
+    print()
+    print("By session class:")
+    for cls, count in sorted(session_class_counts.items(), key=lambda x: -x[1]):
+        print(f"  {cls:<20} {count}")
+    if class_counts and class_counts.get("dropped"):
+        print()
+        print("By session class dropped by the exclusion:")
+        for cls, count in sorted(class_counts["dropped"].items(),
+                                 key=lambda x: -x[1]):
+            print(f"  {cls:<20} {count}")
     print()
     print("Top tools:")
     for name, count in sorted(tool_name_counts.items(), key=lambda x: -x[1])[:10]:
@@ -1200,19 +1328,41 @@ def main() -> None:
         "--output-dir", type=str, default=None,
         help="Override output directory (default: ~/obsidian/skills/candidates/)"
     )
-    
+    parser.add_argument(
+        "--trajectory-dir", type=str, default=None,
+        help="Override the trajectory JSONL directory "
+             "(default: ~/lloyd/_pipeline/trajectories)"
+    )
+    parser.add_argument(
+        "--include-machine", action="store_true",
+        help="Mine every session class, including worker/autonomy/smoke/"
+             "inner-voice/browser traffic. Off by default: the gate qualifies on "
+             "distinct sessions, so loop cadence otherwise qualifies the loop's own "
+             "patterns (#493)."
+    )
+
     args = parser.parse_args()
-    
+
     output_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+    if args.trajectory_dir:
+        set_trajectory_dir(Path(args.trajectory_dir))
+
     # Load trajectories
     print(f"Loading trajectories from last {args.days} days...", file=sys.stderr)
-    trajectories = load_trajectories(days=args.days, agent_filter=args.agent)
+    class_counts: dict = {}
+    trajectories = load_trajectories(days=args.days, agent_filter=args.agent,
+                                     exclude_machine=not args.include_machine,
+                                     class_counts=class_counts)
     print(f"  Loaded {len(trajectories)} trajectory(ies)", file=sys.stderr)
-    
+    dropped = sum(class_counts.get("dropped", {}).values())
+    print(f"  Machine-class sessions dropped: {dropped}", file=sys.stderr)
+    for cls, count in sorted(class_counts.get("dropped", {}).items(),
+                             key=lambda x: -x[1]):
+        print(f"    dropped {cls}: {count}", file=sys.stderr)
+
     if args.stats:
-        print_stats(trajectories)
+        print_stats(trajectories, class_counts=class_counts)
         return
     
     # Mine patterns

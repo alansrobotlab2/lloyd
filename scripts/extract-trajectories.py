@@ -33,6 +33,39 @@ LLOYD_SESSIONS = Path.home() / "lloyd" / "sessions"
 OUTPUT_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
 WATERMARK_PATH = OUTPUT_DIR / ".watermark.json"
 
+# ── Session class (#493) ─────────────────────────────────────────────────────
+#
+# The frequency gate qualifies a pattern on *distinct sessions*, so a corpus that
+# is mostly the loop's own traffic ranks the loop. Machine share of the corpus,
+# measured on the `platform` field in ~/lloyd/sessions/*.json joined onto
+# _pipeline/trajectories/*.jsonl: 09-02 0/6, 09-08 97/110, 09-09 338/348,
+# 09-11 305/314, 09-12 15/15 — 938 of 1083 (86.6%) across the window, and
+# 10,611 of 11,813 `Sessions Affected` bullets in the 2026-09-12 candidates.
+#
+# The classifier that should have caught this keyed on the filename
+# (`path.stem.startswith("autonomy_")`) and 0 of 1331 live session files match it,
+# because the loop renamed itself around 09-09 (`youtubed_*`, `autocode_*`,
+# `autotriage_*`, `benchmine_*`). Every row came out `agent_id: "lloyd"` — 1014 of
+# 1014 rows in the last 7 days — so class was unknowable downstream.
+#
+# Class is therefore read from fields every session JSON already carries.
+INTERACTIVE_CLASS = "interactive"   # the only class that is human-initiated work
+
+# platform -> class. `browser` is its own class rather than folding into
+# `inner-voice`: #493's open scope question is whether browser-platform and
+# inner-voice turns belong in the interactive pool at all, and that call has to be
+# movable in one line of SESSION_CLASS without re-extracting the corpus. Collapsing
+# two platforms into one class would destroy the signal the decision needs.
+SESSION_CLASS = {
+    "mission-control": INTERACTIVE_CLASS,
+    "worker": "worker",
+    "autonomy": "autonomy",
+    "browser": "browser",
+    "e2e-harness": "smoke",
+}
+UNKNOWN_CLASS = "unknown"           # no `platform` field at all
+INNER_VOICE_CLASS = "inner-voice"   # a mission-control turn the observer took
+
 # ── Sensitive data patterns ───────────────────────────────────────────────────
 
 SENSITIVE_PATTERNS = [
@@ -284,6 +317,25 @@ def result_summary(content, is_error: bool) -> str:
 SIGNAL_RE = re.compile(r"SIGNAL:([A-Z_]+)")
 
 
+# ── Session classification ───────────────────────────────────────────────────
+
+def classify_session(data: dict) -> str:
+    """Class of the session from the session JSON's own fields.
+
+    Takes the parsed object, not a path: the filename is exactly what must not be
+    an input (#493 clauses 1-2). A session is human-initiated work only when the
+    backend recorded it as a Mission Control turn that the inner voice did not
+    take — `platform == "mission-control"` and `inner_voice` falsy. Everything
+    else is loop traffic: worker runs, autonomy tasks, e2e-harness smokes, and the
+    inner-voice and browser turns that ride the human-facing platforms.
+    """
+    platform = data.get("platform")
+    cls = SESSION_CLASS.get(platform) if platform is not None else None
+    if cls == INTERACTIVE_CLASS and data.get("inner_voice"):
+        return INNER_VOICE_CLASS
+    return cls or UNKNOWN_CLASS
+
+
 # ── Session parsing ──────────────────────────────────────────────────────────
 
 def parse_session(path: Path) -> dict | None:
@@ -306,8 +358,12 @@ def parse_session(path: Path) -> dict | None:
     session_ts = data.get("session_start", "") or data.get("created_at", "")
     messages = data.get("messages", [])
 
-    # Detect agent_id from source path
+    # `agent_id` is the legacy field: derived from the filename, and wrong for
+    # every session in the live store (#493). It survives only for historical
+    # corpus rows and for anyone still filtering on it; `session_class` below is
+    # what decides whether a session is human-initiated work.
     agent_id = "autonomy" if path.stem.startswith("autonomy_") else "lloyd"
+    session_class = classify_session(data)
 
     # Build call_id → tool_call map from assistant messages
     call_map: dict[str, dict] = {}
@@ -448,6 +504,11 @@ def parse_session(path: Path) -> dict | None:
     return {
         "session_key": session_id,
         "agent_id": agent_id,
+        "session_class": session_class,
+        # Which loop ran it, when the backend recorded one: `autotriage`,
+        # `autocode`, `autonomy-task:68`… What makes a dropped session
+        # attributable instead of an anonymous count.
+        "session_source": data.get("source"),
         "timestamp": session_ts,
         "tool_count": len(tools),
         "error_count": error_count,
@@ -601,6 +662,7 @@ def print_stats() -> None:
     total_tools = 0
     total_errors = 0
     agent_counts: dict[str, int] = {}
+    session_class_counts: dict[str, int] = {}
     error_type_counts: dict[str, int] = {}
     error_source_counts: dict[str, int] = {}
     tool_name_counts: dict[str, int] = {}
@@ -623,6 +685,10 @@ def print_stats() -> None:
 
                 agent = traj.get("agent_id", "unknown")
                 agent_counts[agent] = agent_counts.get(agent, 0) + 1
+                # `uncoded` is what a pre-#493 row reads as: no emitted class. It
+                # is reported, never folded into `interactive`.
+                sclass = traj.get("session_class") or "uncoded"
+                session_class_counts[sclass] = session_class_counts.get(sclass, 0) + 1
 
                 for et in traj.get("error_tools", []):
                     etype = et.get("error_type", "unknown")
@@ -656,6 +722,14 @@ def print_stats() -> None:
     print("By agent:")
     for agent, count in sorted(agent_counts.items(), key=lambda x: -x[1]):
         print(f"  {agent:<20} {count}")
+    # Printed alongside the agent tally, not instead of it. The agent histogram is
+    # the one that has read as a single value on this machine for the corpus's whole
+    # life (`agent_id` comes from the filename); the class histogram is the one that
+    # can show the loop's share of the corpus, which is what #493 is about.
+    print()
+    print("By session class:")
+    for sclass, count in sorted(session_class_counts.items(), key=lambda x: -x[1]):
+        print(f"  {sclass:<20} {count}")
     print()
     print("Top tools:")
     for name, count in sorted(tool_name_counts.items(), key=lambda x: -x[1])[:15]:

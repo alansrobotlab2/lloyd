@@ -24,6 +24,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -1021,3 +1023,402 @@ def test_the_regenerated_window_flags_only_persisted_flag_failures():
         f"2026-09-05 flagged steps per session are {found}, expected {expected} "
         "— the extractor is not deriving them from `stats.is_error`")
     assert sum(len(e.get("error_tools") or []) for e in _entries(path)) == 6
+
+
+# ── session class: the frequency gate must not rank the loop (#493) ──────────
+#
+# The gate qualifies a pattern on *distinct sessions*, so a corpus that is mostly
+# the loop's own traffic ranks the loop. Measured 2026-09-12: 938 of 1083 corpus
+# sessions across 09-02→09-12 were machine sessions (86.6%, monotone per day),
+# and 10,611 of 11,813 `Sessions Affected` bullets in that day's candidates were
+# machine sessions — `candidate-automod-gate-logic-20260912.md` and
+# `candidate-bash-logic-20260912.md` are 10/10 loop traffic.
+#
+# The classifier that was supposed to see this keyed on the filename
+# (`path.stem.startswith("autonomy_")`), and 0 of the live session files match it
+# — the loop renamed itself to `youtubed_*` / `autocode_*` / `autotriage_*` /
+# `benchmine_*` around 09-09 — so every row was `agent_id: "lloyd"` and the class
+# was unknowable downstream. The class now comes from fields every session JSON
+# already carries: `platform`, `source`, `inner_voice`.
+#
+# These fixtures are the part a live-data test cannot prove: two session files
+# with the SAME filename stem, one human and one machine. Anything that reads the
+# name gives the same answer for both.
+
+CLASS_STEM = "20260912_101010_autocode_beef"   # loop-shaped, used for both classes
+
+# (platform, inner_voice, expected class). `interactive` appears exactly once, on
+# the clause-2 condition; every other row is a class that is NOT human-initiated
+# work. `browser` stays its own class rather than folding into `inner-voice` even
+# though all 50 browser sessions in the store carry `inner_voice: true`, because
+# #493's open scope question is precisely whether browser/inner-voice turns join
+# the interactive pool — that decision has to be movable in one line here without
+# re-extracting the corpus, and collapsing two platforms into one class would
+# destroy the signal it needs.
+SESSION_CLASS_TABLE = [
+    ("mission-control", False, "interactive"),
+    ("mission-control", True, "inner-voice"),
+    ("browser", True, "browser"),
+    ("browser", False, "browser"),
+    ("worker", False, "worker"),
+    ("worker", True, "worker"),
+    ("autonomy", False, "autonomy"),
+    ("autonomy", True, "autonomy"),
+    ("e2e-harness", False, "smoke"),
+    (None, False, "unknown"),
+]
+
+
+def write_class_session(dir_, stem, platform, inner_voice=False, source=None):
+    """Write a session JSON with the fields the classifier reads.
+
+    One corroborated `Bash` failure, so `parse_session` returns a row rather than
+    None for a tool-less session.
+    """
+    d = Path(dir_)
+    d.mkdir(parents=True, exist_ok=True)
+    body = {
+        "session_id": stem,
+        "session_start": "2026-09-12T10:10:10Z",
+        "inner_voice": inner_voice,
+        "messages": [
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_0", "function": {
+                    "name": "Bash",
+                    "arguments": json.dumps({"command": "pytest tests/"})}}]},
+            {"role": "tool", "tool_call_id": "call_0",
+             "content": [{"type": "text", "text": "boom: no such file"}],
+             "stats": {"result_chars": 18, "is_error": True}},
+        ],
+    }
+    if platform is not None:
+        body["platform"] = platform
+    if source is not None:
+        body["source"] = source
+    path = d / f"{stem}.json"
+    path.write_text(json.dumps(body), encoding="utf-8")
+    return path
+
+
+# ── clause 1: the class cannot come from the filename ────────────────────────
+
+def test_a_worker_session_is_not_interactive_under_a_loop_shaped_stem(tmp_path):
+    """Same stem, two classes — the discriminating case for `path.stem`."""
+    worker = et.parse_session(write_class_session(
+        tmp_path / "a", CLASS_STEM, "worker", source="autocode"))
+    human = et.parse_session(write_class_session(
+        tmp_path / "b", CLASS_STEM, "mission-control"))
+    assert worker["session_class"] == "worker"
+    assert human["session_class"] == "interactive"
+    # `agent_id` is still derived from the stem and is identical for both, so the
+    # class below it provably was not.
+    assert worker["agent_id"] == human["agent_id"] == "lloyd"
+
+
+def test_an_autonomy_prefixed_stem_does_not_make_a_session_non_interactive(tmp_path):
+    """The old rule's own positive case, reversed: the filename says autonomy,
+    the session JSON says a human drove it from Mission Control."""
+    traj = et.parse_session(write_class_session(
+        tmp_path, "autonomy_task68", "mission-control"))
+    assert traj["session_class"] == "interactive"
+    assert traj["agent_id"] == "autonomy"   # legacy field keeps its old meaning
+
+
+def test_classify_session_needs_no_filename_at_all():
+    """The classifier's input is the parsed JSON, so there is no path to read."""
+    assert et.classify_session({"platform": "worker"}) == "worker"
+    assert et.classify_session({}) == "unknown"
+
+
+# ── clause 2: interactive == mission-control and not inner_voice ─────────────
+
+@pytest.mark.parametrize("platform,inner_voice,expected", SESSION_CLASS_TABLE)
+def test_the_class_comes_from_platform_and_inner_voice(platform, inner_voice, expected):
+    assert et.classify_session(
+        {"platform": platform, "inner_voice": inner_voice}) == expected
+
+
+def test_interactive_is_exactly_mission_control_without_inner_voice():
+    """One line, both directions of clause 2: nothing else is interactive, and
+    that combination always is."""
+    interactive = {(p, iv) for (p, iv, cls) in SESSION_CLASS_TABLE
+                   if cls == et.INTERACTIVE_CLASS}
+    assert interactive == {("mission-control", False)}
+
+
+def test_the_classified_session_records_its_source_producer(tmp_path):
+    """`source` names the loop that ran the session (`autotriage`, `autocode`,
+    `autonomy-task:68`), which is what makes a dropped session attributable."""
+    traj = et.parse_session(write_class_session(
+        tmp_path, CLASS_STEM, "worker", source="autotriage"))
+    assert traj["session_source"] == "autotriage"
+
+
+# ── clause 3: the exclusion is one flag over one corpus ──────────────────────
+
+MACHINE_ROWS = [("i1", "interactive"), ("i2", "interactive"),
+                ("w1", "worker"), ("w2", "worker"), ("a1", "autonomy"),
+                ("b1", "browser"), ("v1", "inner-voice")]
+
+CORPUS_BUCKET = "2026-09-12.jsonl"
+
+
+def write_traj_corpus(dir_, classed_rows):
+    """Write a trajectory bucket the way the extractor writes one."""
+    d = Path(dir_)
+    d.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps({"session_key": key, "agent_id": "lloyd",
+                         "session_class": cls,
+                         "timestamp": "2026-09-12T10:10:10Z",
+                         "tool_count": 0, "error_count": 0,
+                         "has_errors": False, "tools": [], "error_tools": [],
+                         "signals": []})
+             for key, cls in classed_rows]
+    (d / CORPUS_BUCKET).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return d
+
+
+def test_load_trajectories_keeps_only_interactive_rows_when_the_exclusion_is_on(
+        tmp_path, monkeypatch):
+    corpus = write_traj_corpus(tmp_path / "corpus", MACHINE_ROWS)
+    monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
+    kept = mt.load_trajectories(days=9999, agent_filter="all")
+    assert [t["session_key"] for t in kept] == ["i1", "i2"]
+
+
+def test_load_trajectories_returns_every_row_when_the_exclusion_is_off(
+        tmp_path, monkeypatch):
+    """Same corpus, one flag — the exclusion is a switch, not a new corpus."""
+    corpus = write_traj_corpus(tmp_path / "corpus", MACHINE_ROWS)
+    monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
+    kept = mt.load_trajectories(days=9999, agent_filter="all",
+                                exclude_machine=False)
+    assert [t["session_key"] for t in kept] == [k for k, _ in MACHINE_ROWS]
+
+
+def test_the_exclusion_counts_what_it_dropped_by_class(tmp_path, monkeypatch):
+    corpus = write_traj_corpus(tmp_path / "corpus", MACHINE_ROWS)
+    monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
+    counts: dict = {}
+    mt.load_trajectories(days=9999, agent_filter="all", class_counts=counts)
+    assert counts["dropped"] == {"worker": 2, "autonomy": 1, "browser": 1,
+                                 "inner-voice": 1}
+    assert counts["kept"] == {"interactive": 2}
+
+
+def test_a_row_with_no_session_class_is_not_treated_as_interactive(
+        tmp_path, monkeypatch):
+    """The corpus on disk predates the field, so absence must not read as
+    human-initiated work — and it must be attributable, not silent."""
+    corpus = write_traj_corpus(tmp_path / "corpus", [("old1", None)])
+    monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
+    counts: dict = {}
+    kept = mt.load_trajectories(days=9999, agent_filter="all", class_counts=counts)
+    assert kept == []
+    assert counts["dropped"] == {"uncoded": 1}
+
+
+def test_the_extractor_writes_the_class_the_miner_reads(tmp_path, monkeypatch):
+    """The seam is the JSONL line: the two scripts are separate processes that
+    never import each other, so `session_class` surviving the write is the whole
+    contract between them."""
+    traj = et.parse_session(write_class_session(
+        tmp_path / "sessions", CLASS_STEM, "worker", source="autocode"))
+    et.append_trajectories([traj])
+    buckets = list(et.OUTPUT_DIR.glob("*.jsonl"))
+    assert len(buckets) == 1, "the extractor wrote no bucket to read back"
+    assert json.loads(buckets[0].read_text().strip())["session_class"] == "worker"
+    monkeypatch.setattr(mt, "TRAJECTORY_DIR", et.OUTPUT_DIR)
+    assert mt.load_trajectories(days=9999, agent_filter="all") == []
+    kept = mt.load_trajectories(days=9999, agent_filter="all",
+                                exclude_machine=False)
+    assert [t["session_key"] for t in kept] == [CLASS_STEM]
+
+
+def test_the_miner_and_the_extractor_name_the_interactive_class_alike():
+    """The miner compares a string, so the two modules must agree on it."""
+    assert mt.INTERACTIVE_CLASS == et.INTERACTIVE_CLASS == "interactive"
+
+
+# ── clause 5: the class histogram is no longer a single value ────────────────
+
+def histogram(out, header):
+    """Class names listed under `header`, up to the block's blank line.
+
+    Empty list when the header is absent — an exclusion section that did not
+    happen must read as zero rows, not as an error.
+    """
+    if f"{header}\n" not in out:
+        return []
+    block = out.split(f"{header}\n", 1)[1]
+    return re.findall(r"^  (\S+) +\d+$", block.split("\n\n")[0], re.MULTILINE)
+
+
+def test_miner_stats_reports_more_than_one_session_class(tmp_path, monkeypatch,
+                                                         capsys):
+    corpus = write_traj_corpus(tmp_path / "corpus", MACHINE_ROWS)
+    monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
+    counts: dict = {}
+    rows = mt.load_trajectories(days=9999, agent_filter="all",
+                                exclude_machine=False, class_counts=counts)
+    mt.print_stats(rows, class_counts=counts)
+    out = capsys.readouterr().out
+    assert "By session class:" in out, out
+    listed = histogram(out, "By session class:")
+    assert set(listed) >= {"interactive", "worker", "autonomy", "browser",
+                           "inner-voice"}, listed
+    assert len(listed) > 1, listed
+    assert histogram(out, "By session class dropped by the exclusion:") == [], (
+        "nothing was excluded, so the run must not claim an exclusion count")
+
+
+def test_extractor_stats_reports_more_than_one_session_class(tmp_path, capsys):
+    et.append_trajectories([
+        et.parse_session(write_class_session(tmp_path, "human_one",
+                                             "mission-control")),
+        et.parse_session(write_class_session(tmp_path, CLASS_STEM, "worker",
+                                             source="autocode")),
+    ])
+    et.print_stats()
+    out = capsys.readouterr().out
+    assert "By session class:" in out, out
+    assert set(histogram(out, "By session class:")) >= {"interactive", "worker"}, out
+
+
+# ── clauses 4 + 6: the command the nightly actually runs ────────────────────
+
+MINER_PATH = _ROOT / "scripts" / "mine-trajectories.py"
+NIGHTLY_AGENT = "all"   # skills/trajectory-skill-mining/SKILL.md:46
+
+
+def miner_row(key, cls, tool="Graphex493"):
+    """One corroborated failure per session, shared across sessions so the
+    pattern qualifies at `--threshold 2`."""
+    return {
+        "session_key": key, "agent_id": "lloyd", "session_class": cls,
+        "timestamp": "2026-09-12T10:10:10Z",
+        "tool_count": 1, "error_count": 1, "has_errors": True,
+        "tools": [{"name": tool, "is_error": True, "error_source": "protocol",
+                   "sequence": 0, "params_summary": {"command": "pytest tests/"},
+                   "result_summary": "boom: no such file"}],
+        "error_tools": [{"name": tool, "sequence": 0, "error_type": "not_found",
+                         "error_source": "protocol",
+                         "params_summary": {"command": "pytest tests/"}}],
+        "signals": [],
+    }
+
+
+def run_miner(corpus, out_dir, extra_args=()):
+    cmd = [sys.executable, str(MINER_PATH), "--trajectory-dir", str(corpus),
+           "--agent", NIGHTLY_AGENT, "--days", "9999", "--threshold", "2",
+           "--output-dir", str(out_dir), *extra_args]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+
+
+def graphex_candidate(out_dir):
+    files = [p for p in Path(out_dir).glob("*.md") if "graphex493" in p.name]
+    assert len(files) == 1, [p.name for p in Path(out_dir).glob("*.md")]
+    return files[0].read_text(encoding="utf-8")
+
+
+def test_the_nightly_mining_run_excludes_machine_sessions_by_default(tmp_path):
+    """Two interactive sessions and three machine sessions carry the SAME
+    failure. The candidate must report 2 sessions, not 5 — the loop's cadence is
+    the thing that used to push patterns over the threshold."""
+    corpus = write_traj_corpus(tmp_path / "corpus", [])
+    rows = ([miner_row("i1", "interactive"), miner_row("i2", "interactive"),
+             miner_row("w1", "worker"), miner_row("w2", "worker"),
+             miner_row("a1", "autonomy")])
+    (corpus / CORPUS_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    out = tmp_path / "cands"
+    proc = run_miner(corpus, out)
+    assert proc.returncode == 0, proc.stderr
+    report = proc.stdout + proc.stderr
+    assert "Machine-class sessions dropped: 3" in report, report
+    fm = graphex_candidate(out)
+    assert re.search(r"^sessions: 2$", fm, re.MULTILINE), fm
+    assert re.search(r"^occurrences: 2$", fm, re.MULTILINE), fm
+    assert "- i1" in fm and "- i2" in fm and "- w1" not in fm
+
+
+def test_excluding_machine_sessions_does_not_stop_the_gate_emitting_candidates(
+        tmp_path):
+    """Purpose preserved: dropping 3 of 5 sessions must still write the
+    candidate the 2 remaining independent sessions justify."""
+    corpus = write_traj_corpus(tmp_path / "corpus", [])
+    rows = [miner_row("i1", "interactive"), miner_row("i2", "interactive")]
+    (corpus / CORPUS_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    out = tmp_path / "cands"
+    proc = run_miner(corpus, out)
+    assert proc.returncode == 0, proc.stderr
+    assert "Machine-class sessions dropped: 0" in (proc.stdout + proc.stderr)
+    assert re.search(r"^sessions: 2$", graphex_candidate(out), re.MULTILINE)
+
+
+def test_the_exclusion_can_be_turned_off_for_a_full_corpus_view(tmp_path):
+    corpus = write_traj_corpus(tmp_path / "corpus", [])
+    rows = ([miner_row("i1", "interactive"), miner_row("i2", "interactive"),
+             miner_row("w1", "worker"), miner_row("w2", "worker"),
+             miner_row("a1", "autonomy")])
+    (corpus / CORPUS_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    out = tmp_path / "cands"
+    proc = run_miner(corpus, out, extra_args=("--include-machine",))
+    assert proc.returncode == 0, proc.stderr
+    report = proc.stdout + proc.stderr
+    assert "Machine-class sessions dropped: 0" in report, report
+    assert re.search(r"^sessions: 5$", graphex_candidate(out), re.MULTILINE)
+
+
+# ── live-data guard: the classifier over the real corpus ────────────────────
+#
+# Same shape as the #392 guards above: the unit pins prove the CODE cannot label
+# loop traffic as human work, this one proves the corpus on this machine is not
+# labelled that way. It is the acceptance check for #493 as written — join
+# `_pipeline/trajectories/*.jsonl` onto the session store and look for a row whose
+# effective class is `interactive` while its session's `platform` is a machine
+# platform — and it is the only test here that can see a regression introduced by
+# re-extracting with a broken classifier.
+
+# Resolved against the real data root, not the checkout: `_pipeline/` and
+# `sessions/` are gitignored, so a worktree copy of this file would skip forever
+# and the clause it pins would never be graded. Read-only against both.
+LIVE_CORPUS = Path.home() / "lloyd" / "_pipeline" / "trajectories"
+LIVE_STORE = Path.home() / "lloyd" / "sessions"
+MACHINE_PLATFORMS = {"worker", "autonomy", "e2e-harness"}
+
+
+def test_no_live_corpus_row_is_interactive_on_a_machine_platform():
+    """Read-only. Measured at the fix: 1,411 corpus rows classify as 1,012 worker
+    / 237 autonomy / 79 inner-voice / 54 browser / 26 interactive / 3 smoke, and 0
+    rows violate the rule. Before it, all 1,411 were `agent_id: lloyd` and the
+    class was unknowable, which is how 938 of 1,083 loop sessions reached the
+    frequency gate as if they were Alan."""
+    if not LIVE_CORPUS.is_dir() or not LIVE_STORE.is_dir():
+        pytest.skip("corpus or session store absent on this machine")
+    cache: dict = {}
+    violations: list[str] = []
+    rows = 0
+    for bucket in sorted(LIVE_CORPUS.glob("*.jsonl")):
+        for line in bucket.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rows += 1
+            cls = row.get("session_class") or mt.join_session_class(row, cache)
+            session_path = LIVE_STORE / f"{row.get('session_key')}.json"
+            if not session_path.is_file():
+                continue
+            platform = json.loads(
+                session_path.read_text(encoding="utf-8", errors="replace")
+            ).get("platform")
+            if cls == mt.INTERACTIVE_CLASS and platform in MACHINE_PLATFORMS:
+                violations.append(f"{bucket.name}:{row.get('session_key')}={platform}")
+    assert rows > 0, "no corpus rows to check, so the assertion below is vacuous"
+    assert not violations, (
+        f"corpus rows labelled interactive over a machine platform: {violations[:5]}")
