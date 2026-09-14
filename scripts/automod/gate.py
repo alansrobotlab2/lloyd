@@ -1063,8 +1063,15 @@ class Gate:
         # re-offered round's first review otherwise judges `same_as_prior`
         # blind to the refusal that sent the item back. Attempts are still
         # counted on `prior` alone.
+        # Since the item's last re-triage, though: that wrote a new contract,
+        # and its clause 2 is not the clause 2 an earlier review refused.
+        try:
+            since = _B.retriage_marks(S.LEDGER_PATH).get(int(self.item_id), float("-inf"))
+        except Exception:  # noqa: BLE001 — history is context, not the verdict
+            since = float("-inf")
         item_history = [e for e in reviews if e.get("ok")
-                        and str(e.get("item_id") or "") == str(self.item_id)][-3:]
+                        and str(e.get("item_id") or "") == str(self.item_id)
+                        and float(e.get("ts") or 0) > since][-3:]
         refused_by_head: dict[str, dict] = {}
         graded_refusals: list[dict] = []
         graded_total = 0

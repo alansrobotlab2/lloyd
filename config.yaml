@@ -1111,6 +1111,16 @@ workers:
       # members close with it. Off: members stay folded until a human
       # unfolds the umbrella.
       close_members_on_settle: true
+      # One automatic second life (2026-09-14). An item whose one implement
+      # attempt is spent goes back through TRIAGE once — tag `re-triage`,
+      # needs-human dropped, the refused round's findings and per-clause
+      # verdicts in its <origin> — for a contract a round can meet, or a
+      # retirement. Its earlier triage and implement rows stop counting, so
+      # the attempt count starts over. The second spend is a human's, as
+      # before. ~35 items a week went to needs-human, and 42 of the 67 a
+      # person had reopened later landed. Never umbrellas (unfolded instead)
+      # or landings. false: a spent item parks needs-human at once.
+      retriage_spent: true
     # Nightly clustering of the open backlog (scripts/automod/cluster.py):
     # qmd's stored vectors + shared file paths + parent links, an optional
     # pair-judge on the secondary for the ambiguous edges, written to

@@ -667,3 +667,32 @@ def test_a_review_write_is_merged_into_an_item_that_already_covers_it(isolated, 
 
     forced = json.loads(BL._handle_write({**args, "force": True}))
     assert forced.get("merged_into") is None and forced.get("task_id") != 10
+
+
+# ===========================================================================
+# A re-triaged item's second triage is told what was refused
+# ===========================================================================
+
+def test_the_origin_block_carries_the_refusal_of_a_retriaged_item(isolated):
+    """Re-triage exists to write a contract a round can meet. A triage that
+    is not shown which clauses the grader refused writes the same twelve."""
+    write_item(isolated, 910, days_old=20)
+    S.append_event({"event": "backlog_retriage", "item_id": 910, "round_id": "SM_REFUSED",
+                    "outcome_detail": "review disagreement: clause 2 came back unmet on two reviews",
+                    "findings": "clause 2 names a nightly job no pre-landing test can run",
+                    "clauses": [{"clause": 1, "verdict": "met", "note": ""},
+                                {"clause": 2, "verdict": "unmet", "note": "needs the nightly run"}],
+                    "unmet_twice": [2]}, path=S.LEDGER_PATH)
+    text = M.render_prompt(B.item_by_id(910), ledger=S.LEDGER_PATH)
+    origin = text.split("<origin", 1)[1].split("</origin>", 1)[0]
+    assert "RE-TRIAGED" in origin and "SM_REFUSED" in origin
+    assert "no pre-landing test can run" in origin
+    assert "clause 1 met; clause 2 unmet: needs the nightly run" in origin
+    assert "drop them: clause(s) 2" in origin
+    assert "A re-triaged item" in text and "write a NEW contract" in text
+
+
+def test_an_item_never_retriaged_has_no_refusal_line(isolated):
+    write_item(isolated, 911, days_old=20)
+    assert "RE-TRIAGED" not in M.render_prompt(B.item_by_id(911), ledger=S.LEDGER_PATH).split(
+        "</origin>", 1)[0]

@@ -960,6 +960,21 @@ def test_the_grader_sees_an_earlier_rounds_review_but_attempts_count_this_round_
     assert data["review_attempt"] == 1 and "1/2" in detail
 
 
+def test_the_grader_is_not_shown_reviews_of_the_contract_before_a_retriage(monkeypatch, tmp_path):
+    """Re-triage writes a new contract. A review of the old one numbered its
+    clauses differently, so showing it invites a `same_as_prior` on a clause
+    that is not the same clause."""
+    grade = _grader(UNMET)
+    old = {"event": "review", "round_id": "SM_OLD", "item_id": 7, "ok": True, "blocking": True,
+           "attempt": 2, "head": "o" * 40, "findings": "clause 2 unmet", "ts": 1000.0,
+           "clauses": [{"clause": 2, "verdict": "unmet"}]}
+    new = {**old, "round_id": "SM_NEW", "ts": 3000.0, "findings": "clause 1 partial"}
+    S.append_event({"event": "backlog_retriage", "item_id": 7, "ts": 2000.0}, path=S.LEDGER_PATH)
+    _arm(monkeypatch, tmp_path, grade=grade, head="c" * 40, prior=[old, new])
+    _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert [e["round_id"] for e in grade.calls[0]["prior_reviews"]] == ["SM_NEW"]
+
+
 def test_an_identical_diff_that_already_passed_is_reused(monkeypatch, tmp_path):
     """The patch-id reuse branch read `attempt` before assigning it, so the
     first rebase re-gate after a pass would have raised UnboundLocalError. It

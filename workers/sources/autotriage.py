@@ -257,6 +257,16 @@ pulling opposite ways.
 clause.** Name what that gate exists to catch and the test that shows it still \
 catches it. Relaxing a check is the change most likely to pass every rung and \
 be wrong, because the thing it stops catching leaves no trace.
+- **A re-triaged item** — `<origin>` says so, and names the round that was \
+refused, the review's findings and the grader's verdict per clause — was \
+confirmed once and its round could not meet the contract. Judge the premise \
+again from scratch. If it is still `confirmed`, write a NEW contract: drop \
+every clause the grader found `unmet` or `unsatisfiable` on two reviews (its \
+substance goes under `## Findings` on this item, or under HUMAN_CLAUSES when \
+only a person can settle it), keep at most {max_clauses}, and never restate \
+a clause the refusal shows no round can meet. If what survives is not worth a \
+round, retire it (`stale`) and say why. This item gets no third automatic \
+chance: a second refused attempt goes to a human.
 
 Finish with exactly this block and nothing after it:
 
@@ -328,12 +338,36 @@ def _origin_block(candidate, ledger) -> str:
     sections = B.findings_sections(candidate.body)
     if sections:
         lines.append(f"{sections} Findings section(s) already on this item")
+    retriage = B.last_retriage(ledger, candidate.id)
+    if retriage:
+        lines.append(_retriage_line(retriage))
     parent_attr = ""
     if parent_id:
         parent = B.item_by_id(parent_id)
         parent_attr = f' parent="#{parent_id} ({parent.status if parent else "not found"})"'
     return (f'<origin tags="{",".join(candidate.tags)}" created="{(candidate.created or "")[:10]}"'
             f'{parent_attr}>\n' + "\n".join(lines) + "\n</origin>")
+
+
+def _retriage_line(ev: dict) -> str:
+    """The refusal a re-triaged item carries into its second triage: which
+    round, what the review found, and what the grader said per clause."""
+    rid = ev.get("round_id") or "no round"
+    parts = [f"RE-TRIAGED on {_when(ev.get('ts'))}: its implement attempt was spent ({rid})"]
+    if ev.get("outcome_detail"):
+        parts.append(f"outcome: {str(ev['outcome_detail'])[:300]}")
+    if ev.get("findings"):
+        parts.append(f"the review's findings: {str(ev['findings'])[:800]}")
+    per_clause = "; ".join(
+        f"clause {c.get('clause')} {c.get('verdict')}"
+        + (f": {str(c.get('note'))[:160]}" if c.get("note") and c.get("verdict") != "met" else "")
+        for c in (ev.get("clauses") or []) if isinstance(c, dict))
+    if per_clause:
+        parts.append(f"the grader per clause: {per_clause}")
+    if ev.get("unmet_twice"):
+        parts.append("graded unmet or unsatisfiable on two reviews, so drop them: clause(s) "
+                     + ", ".join(str(n) for n in ev["unmet_twice"]))
+    return " — ".join(parts)
 
 
 def _single_max_clauses() -> int:

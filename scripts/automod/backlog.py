@@ -1086,25 +1086,58 @@ def split_claimed(claimed, *, id_floor: int, self_id: int) -> tuple[list[int], l
     return spawned, merged
 
 
+# ── One automatic second life ───────────────────────────────────────────────
+#
+# A spent attempt parked the item `draft` + `needs-human` and a person swept
+# the pile by hand: ~35 items a week, and 42 of the 67 that were reopened
+# later landed. The mark is a `backlog_retriage` row. Every reader of an
+# item's triage or implement history ignores rows at or before its latest
+# mark, so a re-triaged item is untriaged and unattempted again — it goes
+# back through triage, gets a new contract (or retires), and has a fresh
+# attempt count. `RETRIAGE_CAP` bounds it: the second spend is a human's, as
+# it always was. See `retriage_spent_items`.
+RETRIAGE_TAG = "re-triage"
+RETRIAGE_CAP = 1
+
+
+def retriage_marks(ledger: Path) -> dict[int, float]:
+    """`{item_id: ts}` of each item's latest `backlog_retriage` row."""
+    marks: dict[int, float] = {}
+    for d in _ledger_events(ledger, "backlog_retriage"):
+        i = int(d["item_id"])
+        marks[i] = max(marks.get(i, 0.0), float(d.get("ts") or 0))
+    return marks
+
+
+def _after_mark(d: dict, marks: dict[int, float]) -> bool:
+    """Whether a row counts: no mark for its item, or written after it."""
+    m = marks.get(int(d["item_id"]))
+    return m is None or float(d.get("ts") or 0) > m
+
+
 def triaged_ids(ledger: Path) -> dict[int, str]:
     """{item_id: verdict} for items with a TERMINAL verdict.
 
     `incomplete` is deliberately not one: an item whose triage ran out of
-    budget is not triaged, it is waiting for a bigger budget.
+    budget is not triaged, it is waiting for a bigger budget. Rows before a
+    re-triage mark do not count.
     """
+    marks = retriage_marks(ledger)
     seen: dict[int, str] = {}
     for d in _ledger_events(ledger, "backlog_triage"):
         verdict = d.get("verdict", "")
-        if verdict in VERDICTS:
+        if verdict in VERDICTS and _after_mark(d, marks):
             seen[int(d["item_id"])] = verdict
     return seen
 
 
 def incomplete_counts(ledger: Path) -> dict[int, int]:
-    """How many times each item's triage has run out of budget."""
+    """How many times each item's triage has run out of budget, since its
+    last re-triage mark."""
+    marks = retriage_marks(ledger)
     counts: dict[int, int] = {}
     for d in _ledger_events(ledger, "backlog_triage"):
-        if d.get("verdict") == INCOMPLETE:
+        if d.get("verdict") == INCOMPLETE and _after_mark(d, marks):
             i = int(d["item_id"])
             counts[i] = counts.get(i, 0) + 1
     return counts
@@ -1112,10 +1145,12 @@ def incomplete_counts(ledger: Path) -> dict[int, int]:
 
 def confirmed_verdicts(ledger: Path) -> dict[int, dict]:
     """{item_id: latest `confirmed` triage event}. The event carries the
-    ACCEPTANCE the implementer is held to."""
+    ACCEPTANCE the implementer is held to. A confirmation before a re-triage
+    mark is a contract the item has already failed once; it does not count."""
+    marks = retriage_marks(ledger)
     out: dict[int, dict] = {}
     for d in _ledger_events(ledger, "backlog_triage"):
-        if d.get("verdict") == "confirmed":
+        if d.get("verdict") == "confirmed" and _after_mark(d, marks):
             out[int(d["item_id"])] = d
     return out
 
@@ -1207,12 +1242,15 @@ def review_unsound_rounds(ledger: Path) -> dict[str, dict]:
 
 def review_events_for_item(ledger: Path, item_id: int) -> list[dict]:
     """Every `review` event for rounds this item's implement turns opened,
-    oldest first."""
+    oldest first — since its last re-triage mark, whose new contract numbers
+    its clauses afresh (a clause 2 refused before it is a different clause)."""
+    mark = retriage_marks(ledger).get(int(item_id), float("-inf"))
     rids = {str(d.get("round_id") or "") for d in _ledger_events(ledger, "backlog_implement")
-            if int(d["item_id"]) == int(item_id) and d.get("round_id")}
+            if int(d["item_id"]) == int(item_id) and d.get("round_id")
+            and float(d.get("ts") or 0) > mark}
     rids.discard("")
     rows = [d for d in _ledger_events(ledger, "review", require_item=False)
-            if str(d.get("round_id") or "") in rids]
+            if str(d.get("round_id") or "") in rids and float(d.get("ts") or 0) > mark]
     rows.sort(key=lambda d: float(d.get("ts") or 0))
     return rows
 
@@ -1296,13 +1334,25 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
     `implemented_ids` because the reason is worth putting in front of the
     next round: a re-offer whose branch still exists, or whose work was
     reverted, is not a fresh start.
+
+    History restarts twice. Rows at or before a re-triage mark are ignored,
+    so a re-triaged item is not in this table until it is attempted again.
+    And a human `reopen_item` resets the attempt count: it used to reset only
+    the latest row, so an item reopened after four external blocks read
+    `n = 5` on its first new round and every cap below was already spent.
     """
+    marks = retriage_marks(ledger)
     latest: dict[int, dict] = {}
     attempts: dict[int, int] = {}
     for d in _ledger_events(ledger, "backlog_implement"):
+        if not _after_mark(d, marks):
+            continue
         iid = int(d["item_id"])
         latest[iid] = d
-        if str(d.get("phase") or "") in ("finished", "infra_failed"):
+        phase = str(d.get("phase") or "")
+        if phase == "reopened":
+            attempts[iid] = 0
+        elif phase in ("finished", "infra_failed"):
             attempts[iid] = attempts.get(iid, 0) + 1
 
     blocked = externally_blocked_rounds(ledger)
@@ -2224,8 +2274,9 @@ def group_keep_note(ledger: Path, item_id: int) -> dict | None:
 
 
 def released_ids(ledger: Path) -> set[int]:
-    """Self-filed items the pass may triage after all."""
-    return expired_ids(ledger) | group_kept_ids(ledger)
+    """Self-filed items the pass may triage after all: expired and reopened,
+    judged `keep` by a group triage, or re-triaged after a spent attempt."""
+    return expired_ids(ledger) | group_kept_ids(ledger) | set(retriage_marks(ledger))
 
 
 def is_quarantined(item: Item, *, released: frozenset[int] | set[int] = frozenset()) -> bool:
@@ -2512,10 +2563,7 @@ def held_confirmations(ledger: Path) -> dict[int, float]:
     """`{item_id: ts}` of confirmations still waiting for room, oldest first
     by `ts`. Held means the item's latest `confirmed` verdict carries
     `held: true` and no `backlog_confirm_released` row has followed it."""
-    latest: dict[int, dict] = {}
-    for d in _ledger_events(ledger, "backlog_triage"):
-        if d.get("verdict") == "confirmed":
-            latest[int(d["item_id"])] = d
+    latest = confirmed_verdicts(ledger)
     released: dict[int, float] = {}
     for d in _ledger_events(ledger, "backlog_confirm_released"):
         released[int(d["item_id"])] = float(d.get("ts") or 0)
@@ -2685,9 +2733,10 @@ def last_review_all_met(ledger: Path) -> set[int]:
     change away from a pass. Read off the review events by item, newest
     graded row per item.
     """
+    marks = retriage_marks(ledger)
     latest: dict[int, dict] = {}
     for d in _ledger_events(ledger, "review"):
-        if d.get("ok") and d.get("clauses"):
+        if d.get("ok") and d.get("clauses") and _after_mark(d, marks):
             latest[int(d["item_id"])] = d
     return {iid for iid, d in latest.items()
             if all(c.get("verdict") == "met" for c in d["clauses"])}
@@ -3050,6 +3099,122 @@ def unfold_spent_umbrellas(ledger: Path, boards: tuple[str, ...] | None = DEFAUL
                         "released": res["released"], "reason": reason[:400],
                         "auto": True}, path=ledger)
         out.append({"umbrella_id": item.id, "released": res["released"], "reason": reason})
+    return out
+
+
+def retriage_counts(ledger: Path) -> dict[int, int]:
+    """How many times each item has been sent back through triage."""
+    counts: dict[int, int] = {}
+    for d in _ledger_events(ledger, "backlog_retriage"):
+        i = int(d["item_id"])
+        counts[i] = counts.get(i, 0) + 1
+    return counts
+
+
+def last_retriage(ledger: Path, item_id: int) -> dict | None:
+    """The item's latest `backlog_retriage` row — what its second triage is
+    told about the attempt that was refused — or None."""
+    found = None
+    for d in _ledger_events(ledger, "backlog_retriage"):
+        if int(d["item_id"]) == int(item_id):
+            found = d
+    return found
+
+
+def _refusal_for_retriage(ledger: Path, item_id: int, round_id: str, detail: str) -> dict:
+    """What triage should be told about the attempt that was spent: the
+    grader's findings, its last per-clause verdicts, and the clauses it found
+    unmet or unsatisfiable on two reviews. Read before the mark is written,
+    while these reviews still count."""
+    graded = [e for e in review_events_for_item(ledger, item_id) if e.get("ok") and e.get("clauses")]
+    last = graded[-1] if graded else {}
+    findings = str(last.get("findings") or "")
+    if not findings and round_id:
+        gate = _last_gate_per_round(ledger).get(round_id) or {}
+        findings = str(gate.get("review_findings") or gate.get("review_summary")
+                       or gate.get("detail") or "")
+    flagged: dict[int, int] = {}
+    for ev in graded:
+        for c in ev.get("clauses") or []:
+            if isinstance(c, dict) and c.get("verdict") in ("unmet", "unsatisfiable"):
+                n = int(c.get("clause") or 0)
+                if n:
+                    flagged[n] = flagged.get(n, 0) + 1
+    return {"findings": (findings or detail)[:800],
+            "clauses": [{"clause": c.get("clause"), "verdict": c.get("verdict"),
+                         "note": str(c.get("note") or "")[:200]}
+                        for c in (last.get("clauses") or []) if isinstance(c, dict)],
+            "unmet_twice": sorted(n for n, k in flagged.items() if k >= 2)}
+
+
+def retriage_spent_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                         enabled: bool = True) -> list[dict]:
+    """Send a spent item back through triage once, with its refusal attached.
+
+    Its one unattended attempt used to end the loop's interest in it: `draft`,
+    `needs-human`, and a person sweeping the pile. ~35 items a week went
+    there, and of the 67 a human had reopened by 2026-09-14, 42 later landed
+    — a second offer lands most of them. The second offer goes through
+    TRIAGE rather than straight back to a round, because what failed was
+    usually the contract (twelve clauses, one of them unmeetable), and triage
+    is the pass that writes contracts. It sees the refused round's findings
+    and per-clause verdicts in `<origin>`.
+
+    Eligible: implement outcome `spent`, not in flight, never re-triaged
+    (`RETRIAGE_CAP`), not an umbrella or a member (`unfold_spent_umbrellas`
+    owns those), and never a landing — a promoted round, or the landed marker,
+    is the settle sweep's or a person's (a landed `met` item owing human
+    clauses among them). The item moves to `draft` tagged `re-triage`, drops
+    `needs-human` and `review-disagreement`, and a `backlog_retriage` row is
+    the mark every history reader starts from. The second spend parks it for
+    a human, as before.
+    """
+    if not enabled:
+        return []
+    from scripts.automod import state as S
+    outcomes = implement_outcomes(ledger)
+    counts = retriage_counts(ledger)
+    marks = retriage_marks(ledger)
+    rows = [d for d in _ledger_events(ledger, "backlog_implement") if _after_mark(d, marks)]
+    latest: dict[int, dict] = {}
+    last_round: dict[int, str] = {}
+    for d in rows:
+        latest[int(d["item_id"])] = d
+        if d.get("round_id"):
+            last_round[int(d["item_id"])] = str(d["round_id"])
+    reverted = {str(d.get("commit") or "") for d in
+                _ledger_events(ledger, "rollback_succeeded", require_item=False)}
+    live_promoted = {str(d.get("round_id") or "") for d in
+                     _ledger_events(ledger, "promoted", require_item=False)
+                     if str(d.get("commit") or "") not in reverted}
+    landed_items = {int(d["item_id"]) for d in rows
+                    if d.get("round_id") and str(d["round_id"]) in live_promoted}
+    out: list[dict] = []
+    for item in open_items(boards):
+        verdict, detail = outcomes.get(item.id, ("", ""))
+        if verdict != "spent" or counts.get(item.id, 0) >= RETRIAGE_CAP:
+            continue
+        if is_umbrella(item) or is_grouped(item):
+            continue
+        if str((latest.get(item.id) or {}).get("phase") or "") == "started":
+            continue
+        if item.id in landed_items:
+            continue
+        fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+        if fm.get(LANDED_MARKER) or any(fm.get(m) for m in _LEGACY_LANDED_MARKERS):
+            continue
+        rid = last_round.get(item.id, "")
+        refusal = _refusal_for_retriage(ledger, item.id, rid, detail)
+        why = ("its implement attempt was spent" + (f" in round {rid}" if rid else "")
+               + "; sent back through triage once, with the refusal, for a contract a round "
+                 "can meet or a retirement")
+        tag_item(item.id, add=(RETRIAGE_TAG,), remove=(NEEDS_HUMAN_TAG, "review-disagreement"))
+        if item.status != TRIAGE_POOL_STATUS:
+            set_status(item.id, TRIAGE_POOL_STATUS, why)
+        note_item(item.id, why)
+        S.append_event({"event": "backlog_retriage", "item_id": item.id, "round_id": rid,
+                        "outcome_detail": detail[:600], **refusal}, path=ledger)
+        out.append({"item_id": item.id, "round_id": rid, "reason": why})
     return out
 
 

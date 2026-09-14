@@ -587,6 +587,14 @@ def _housekeeping(src_cfg: dict) -> None:
     except Exception as exc:
         logger.warning("unfold_spent_umbrellas failed: %s", exc)
     try:
+        # One automatic second life, through triage, before the reconcile
+        # would park the item for a human. See `B.retriage_spent_items`.
+        for r in B.retriage_spent_items(S.LEDGER_PATH,
+                                        enabled=bool(src_cfg.get("retriage_spent", True))):
+            logger.info("backlog #%s sent back through triage: %s", r["item_id"], r["reason"])
+    except Exception as exc:
+        logger.warning("retriage_spent_items failed: %s", exc)
+    try:
         # Status is the pipeline's state machine and the ledger is its source
         # of truth: every poll, anything the two disagree on moves. This is
         # also what migrated the board on 2026-09-09.
@@ -617,6 +625,18 @@ def _housekeeping(src_cfg: dict) -> None:
             logger.info("backlog #%s expired after %s d untouched", r["item_id"], r["age_days"])
     except Exception as exc:
         logger.warning("expire_stale_spawns failed: %s", exc)
+
+
+def _retriage_still_owed(item_id: int) -> bool:
+    """Whether the next housekeeping pass will re-triage this item: the switch
+    is on and it has not had its one re-triage."""
+    from scripts.automod import backlog as B, state as S
+    try:
+        if not bool(_source_cfg(NAME).get("retriage_spent", True)):
+            return False
+        return B.retriage_counts(S.LEDGER_PATH).get(int(item_id), 0) < B.RETRIAGE_CAP
+    except Exception:  # noqa: BLE001 — when unsure, tell the human
+        return False
 
 
 def _source_cfg(name: str) -> dict:
@@ -861,12 +881,19 @@ async def _run_and_record(item, candidate, triage, budget, started,
         B.tag_item(candidate.id, add=("review-disagreement",))
         S.append_event({"event": "review_escalated", "item_id": candidate.id,
                         "round_id": round_id, "reason": detail[:400]})
-        try:
-            from scripts.automod.promote import announce
-            announce(f"#{candidate.id} needs you",
-                     f"review sent it back twice on the same clause: {detail[:160]}")
-        except Exception as exc:  # noqa: BLE001 — an announcement never fails a round
-            logger.warning("announce failed: %s", exc)
+        if _retriage_still_owed(candidate.id):
+            # Housekeeping sends it back through triage with this refusal
+            # attached; nobody is needed yet, and a toast saying otherwise
+            # is one a person learns to ignore.
+            logger.info("#%s: review disagreement; re-triage is still owed, not announcing",
+                        candidate.id)
+        else:
+            try:
+                from scripts.automod.promote import announce
+                announce(f"#{candidate.id} needs you",
+                         f"review sent it back twice on the same clause: {detail[:160]}")
+            except Exception as exc:  # noqa: BLE001 — an announcement never fails a round
+                logger.warning("announce failed: %s", exc)
     claimed = B.parse_spawned_line(run.get("text") or "")
     spawned, merged = B.split_claimed(claimed, id_floor=id_floor, self_id=candidate.id)
     # Findings are counted off the item file, not the report.

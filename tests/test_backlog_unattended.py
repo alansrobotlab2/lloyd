@@ -942,6 +942,129 @@ def test_a_human_reopen_still_wins_over_the_cap(isolated):
     assert 367 not in B.implemented_ids(S.LEDGER_PATH)
 
 
+def test_a_human_reopen_starts_the_attempt_count_over(isolated):
+    """`reopen_item` reset only the latest row: the reopened item's first new
+    round read `n = 6`, and every re-offer cap was already spent by the
+    history the reopen was meant to forgive."""
+    write_item(isolated, 368)
+    _confirm(368)
+    for n in range(B.EXTERNAL_RETRY_CAP + 2):
+        _blocked_round(368, f"SM_R{n}")
+    B.reopen_item(368, "the red tree is fixed", ledger=S.LEDGER_PATH)
+    _blocked_round(368, "SM_AFTER")
+    assert B.implement_outcomes(S.LEDGER_PATH)[368][0] == "external", "one external block after a reopen"
+
+
+# ===========================================================================
+# One automatic second life: a spent item goes back through triage once
+# ===========================================================================
+
+def _spent_after_review(item_id, round_id="SM_SP", *, tags=None):
+    """A confirmed item whose one attempt the review rung refused twice on
+    clause 2 — the review-disagreement spend."""
+    _confirm(item_id)
+    if tags:
+        B.tag_item(item_id, add=tuple(tags))
+    S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    for head in ("a" * 40, "b" * 40):
+        S.append_event({"event": "review", "round_id": round_id, "item_id": item_id, "ok": True,
+                        "blocking": True, "head": head, "findings": "clause 2 has no test across the seam",
+                        "clauses": [{"clause": 1, "verdict": "met"},
+                                    {"clause": 2, "verdict": "unmet", "note": "no seam test"}]},
+                       path=S.LEDGER_PATH)
+    S.append_event({"event": "gate", "round_id": round_id, "rung": "review", "ok": False,
+                    "review_retry": True, "review_findings": "clause 2 has no test across the seam"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "finished",
+                    "round_id": round_id, "stop_reason": "stop", "num_turns": 60}, path=S.LEDGER_PATH)
+
+
+def test_a_first_spend_is_sent_back_through_triage_with_its_refusal(isolated):
+    p = write_item(isolated, 900, name="Seam thing")
+    _spent_after_review(900, tags=(B.NEEDS_HUMAN_TAG, "review-disagreement", "spawned-by-triage"))
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[900]
+    assert verdict == "spent" and detail.startswith("review disagreement")
+    out = B.retriage_spent_items(S.LEDGER_PATH)
+    assert [r["item_id"] for r in out] == [900]
+    fm = yaml.safe_load(p.read_text().split("---")[1])
+    assert fm["status"] == "draft" and B.RETRIAGE_TAG in fm["tags"]
+    assert B.NEEDS_HUMAN_TAG not in fm["tags"] and "review-disagreement" not in fm["tags"]
+    ev = S.read_events(path=S.LEDGER_PATH)[-1]
+    assert ev["event"] == "backlog_retriage" and ev["round_id"] == "SM_SP"
+    assert "no test across the seam" in ev["findings"]
+    assert ev["clauses"][1] == {"clause": 2, "verdict": "unmet", "note": "no seam test"}
+    assert ev["unmet_twice"] == [2]
+
+
+def test_a_retriaged_item_is_untriaged_and_unattempted_again(isolated):
+    write_item(isolated, 901)
+    _spent_after_review(901, tags=("spawned-by-triage",))
+    B.retriage_spent_items(S.LEDGER_PATH)
+    assert 901 not in B.triaged_ids(S.LEDGER_PATH)
+    assert 901 not in B.confirmed_verdicts(S.LEDGER_PATH)
+    assert 901 not in B.implement_outcomes(S.LEDGER_PATH), "the attempt count starts over"
+    assert B.review_events_for_item(S.LEDGER_PATH, 901) == [], "the old contract's reviews"
+    assert B.select_candidate(S.LEDGER_PATH).id == 901, "released from quarantine into the pool"
+    moved = B.reconcile_statuses(S.LEDGER_PATH)
+    assert all(m["item_id"] != 901 for m in moved), "the reconciler does not park it again"
+    fm = yaml.safe_load(next(isolated.glob("901-*.md")).read_text().split("---")[1])
+    assert fm["status"] == "draft" and B.NEEDS_HUMAN_TAG not in fm["tags"]
+    # The second triage confirms a new contract; the item is implementable again.
+    _confirm(901, acceptance="the smaller contract")
+    item, ev = B.select_confirmed(S.LEDGER_PATH)
+    assert item.id == 901 and ev["acceptance"] == "the smaller contract"
+
+
+def test_the_second_spend_is_a_humans(isolated):
+    write_item(isolated, 902)
+    _spent_after_review(902)
+    B.retriage_spent_items(S.LEDGER_PATH)
+    _spent_after_review(902, round_id="SM_SP2")
+    assert B.implement_outcomes(S.LEDGER_PATH)[902][0] == "spent"
+    assert B.retriage_spent_items(S.LEDGER_PATH) == [], "RETRIAGE_CAP is one"
+    want = B.desired_statuses(S.LEDGER_PATH)[902]
+    assert want[0] == "draft" and want[2] is True, "parked needs-human, as before"
+
+
+def test_landings_umbrellas_and_rounds_in_flight_are_never_retriaged(isolated):
+    # A landed `met` item still owing human clauses: spent, and a person's.
+    write_item(isolated, 903)
+    _landed(903, "SM_L903", "c" * 40, outcome={"landed": True, "acceptance": "met"})
+    # An umbrella: `unfold_spent_umbrellas` owns it.
+    write_item(isolated, 904)
+    _spent_after_review(904, round_id="SM_U")
+    B.update_frontmatter(next(isolated.glob("904-*.md")), {"members": [1, 2]}, add_tags=("umbrella",))
+    # A turn in flight reads `spent` too.
+    write_item(isolated, 905)
+    _confirm(905)
+    S.append_event({"event": "backlog_implement", "item_id": 905, "phase": "started"}, path=S.LEDGER_PATH)
+    outcomes = B.implement_outcomes(S.LEDGER_PATH)
+    assert all(outcomes[i][0] == "spent" for i in (903, 904, 905))
+    assert B.retriage_spent_items(S.LEDGER_PATH) == []
+
+
+def test_retriage_can_be_switched_off_and_housekeeping_reads_the_switch(isolated, monkeypatch):
+    write_item(isolated, 906)
+    _spent_after_review(906)
+    assert B.retriage_spent_items(S.LEDGER_PATH, enabled=False) == []
+    seen = {}
+    _housekeeping_counter(monkeypatch)
+    monkeypatch.setattr(B, "retriage_spent_items", lambda ledger, **kw: seen.update(kw) or [])
+    monkeypatch.setattr(B, "release_held_confirmations", lambda *a, **k: [])
+    I._housekeeping({"retriage_spent": False})
+    assert seen == {"enabled": False}
+
+
+def test_a_review_disagreement_is_not_announced_while_retriage_is_owed(isolated, monkeypatch):
+    monkeypatch.setattr(I, "_source_cfg", lambda name: {})
+    assert I._retriage_still_owed(907) is True
+    S.append_event({"event": "backlog_retriage", "item_id": 907}, path=S.LEDGER_PATH)
+    assert I._retriage_still_owed(907) is False, "the second disagreement needs a person"
+    monkeypatch.setattr(I, "_source_cfg", lambda name: {"retriage_spent": False})
+    assert I._retriage_still_owed(908) is False
+
+
 # ===========================================================================
 # The other four ways a round ends without a verdict
 #
