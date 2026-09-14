@@ -897,6 +897,20 @@ matter; the real prompt/skill/task loaders for `skills/**`, `lloyd/**`,
 acceptance with `human-only:` and is skipped, not attempted.
 `architecture/automod.md` §3.2.
 
+**A vault item closes on its vault review, and is told not to open a round.**
+#575's fix landed at 21:25Z on 2026-09-14 and was graded all five clauses
+`met`; the item was re-offered twice anyway, because the contract and prompt
+read as a code round (each clause "— tests/<file>.py", `automod_start`, a
+test per clause), the turn cut one for a test file and died at 151
+iterations, `settled_landings` could not see a vault landing beside a
+`round_id`, and a budget death has no outcome. A `vault` clause now names the
+vault path that shows it; its prompt carries `VAULT_SURFACE_RULES`;
+`vault_land` records the grader's `review_clauses`; `vault_review_outcome`
+fills a missing outcome only when the turn's newest vault landing was graded
+all `met`; and `execute` sweeps at the end of a vault-landing turn, before the
+reconcile that used to hand the item to the next round two minutes later.
+§3.2b; `tests/test_vault_surface_churn.py`.
+
 ### arch-review: the docs are reviewed the way the code is
 
 `architecture/` was hand-curated on 2026-09-11 and nothing kept it honest

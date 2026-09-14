@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import time
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -405,7 +406,9 @@ TRIAGE_VERDICT_SCHEMA: dict = {
                                "description": ("For `confirmed`: the same contract split into "
                                                "separately checkable clauses, each one thing a "
                                                "test can pin and ending with the test file that "
-                                               "pins it (`— tests/<file>.py`), in order. The "
+                                               "pins it (`— tests/<file>.py`; for a `vault` "
+                                               "surface the vault path that shows it, never a "
+                                               "test), in order. The "
                                                "implementer reports "
                                                "per clause and the review rung grades per "
                                                "clause. Empty otherwise.")},
@@ -1429,14 +1432,26 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
     history = implement_history(ledger)
     latest: dict[int, dict] = {}
     attempts: dict[int, int] = {}
+    # Budget deaths counted on their own. The incomplete rule used to read the
+    # shared attempt count as `n <= 1 + INCOMPLETE_RETRY_CAP`, which re-offered
+    # a second budget death as well — three rounds for "it comes back once".
+    # #575 died at 151 iterations, was re-offered, and its second round was
+    # heading for the same wall on the same test file. Counting incompletes
+    # alone keeps "once" true without spending it on an unrelated earlier
+    # verdict (an external block, say).
+    incompletes: dict[int, int] = {}
     for iid, rows in history.items():
         for d in rows:
             latest[iid] = d
             phase = str(d.get("phase") or "")
             if phase == "reopened":
                 attempts[iid] = 0
+                incompletes[iid] = 0
             elif phase in ("finished", "infra_failed"):
                 attempts[iid] = attempts.get(iid, 0) + 1
+                if (phase == "finished"
+                        and str(d.get("stop_reason") or "") in INCOMPLETE_STOP_REASONS):
+                    incompletes[iid] = incompletes.get(iid, 0) + 1
 
     blocked = externally_blocked_rounds(ledger)
     reverted = rolled_back_rounds(ledger)
@@ -1483,7 +1498,7 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
                 out[iid] = ("infra", f"the turn never reported completion{': ' + errs if errs else ''}")
                 continue
         if (phase == "finished" and str(ev.get("stop_reason") or "") in INCOMPLETE_STOP_REASONS
-                and n <= 1 + INCOMPLETE_RETRY_CAP):
+                and incompletes.get(iid, 0) <= INCOMPLETE_RETRY_CAP):
             out[iid] = ("incomplete",
                         f"the turn ran out of {'clock' if ev.get('stop_reason') == 'turn_timeout' else 'iterations'} "
                         f"before reaching a verdict"
@@ -1664,31 +1679,145 @@ def settled_landings(ledger: Path) -> list[dict]:
     watched the window and did not revert. A vault round counts on its own
     `vault_land`: it is validated and committed in one step and has no window
     to survive. A reverted promotion is not a landing.
+
+    **A `vault` item's landing counts even when its turn also opened a code
+    round.** The implement prompt told every surface to `automod_start` and
+    pin each clause with a test, so 8 of the first 15 vault turns cut a round
+    beside their vault commits — and a finished row with a `round_id` was
+    read only as a code landing. #575's fix landed at 21:25Z; its tests-only
+    round never promoted, so the landed fix was invisible here and the item
+    was re-offered. Such a landing counts only on the vault review's own
+    verdict (`vault_review_outcome`). While a promotion of the round exists
+    and has not settled, nothing counts yet; once it settles, the code landing
+    is the one recorded. A landing still waiting for idle has no `promoted`
+    row, so the vault landing is recorded first and the later promotion is
+    not processed again — which is right for a `vault` contract, whose
+    clauses the vault review graded against the vault, not the round.
+
+    **The vault review's verdict stands in for a missing outcome** on a
+    `vault` item, whichever landing is recorded. A turn that dies at
+    `max_turns` or its wall clock gets no finalizer, so its outcome is None
+    and the landing used to wait for a human. When the newest vault landing's
+    review graded every clause `met`, that is a second reader's verdict on
+    the whole contract and it is used. An outcome the turn did report is never
+    overridden, and a landing beside a round closes on a reported `met` only
+    when that review agrees.
     """
     settled = {str(d.get("commit") or ""): d
                for d in _ledger_events(ledger, "settled", require_item=False)}
     settled.pop("", None)
     reverted = {str(d.get("commit") or "") for d in
                 _ledger_events(ledger, "rollback_succeeded", require_item=False)}
+    promoted_any = {str(d.get("round_id") or "")
+                    for d in _ledger_events(ledger, "promoted", require_item=False)}
     promoted = {str(d.get("round_id") or ""): d
                 for d in _ledger_events(ledger, "promoted", require_item=False)
                 if str(d.get("commit") or "") in settled and d.get("round_id")}
+    # Built once, on the first row that needs them: a whole-ledger read per
+    # row is ~0.08 s each on a 4.4 MB ledger, and this runs at turn end.
+    memo: dict[str, object] = {}
+
+    def surface_of(d: dict) -> str:
+        if d.get("surface"):
+            return str(d["surface"])
+        if "confirmed" not in memo:
+            memo["confirmed"] = confirmed_verdicts(ledger)
+        return str((memo["confirmed"].get(int(d["item_id"])) or {}).get("surface") or "")
+
+    def graded_for(d: dict, vault: list[str]) -> dict | None:
+        if not vault or surface_of(d) != "vault":
+            return None
+        if "lands" not in memo:
+            memo["lands"] = {str(e.get("commit") or ""): e for e in
+                             _ledger_events(ledger, "vault_land", require_item=False)
+                             if e.get("ok")}
+            memo["vault_reverted"] = {str(e.get("reverted") or "") for e in
+                                      _ledger_events(ledger, "vault_revert", require_item=False)}
+        return vault_review_outcome(ledger, vault, lands=memo["lands"],
+                                    reverted=memo["vault_reverted"])
+
     out: list[dict] = []
     for d in _ledger_events(ledger, "backlog_implement"):
         if d.get("phase") != "finished":
             continue
         rid = str(d.get("round_id") or "")
         vault = [str(c) for c in (d.get("vault_commits") or []) if c]
+        outcome = d.get("outcome")
+        reported = outcome.get("acceptance") if isinstance(outcome, dict) else None
         if rid in promoted and promoted[rid]["commit"] not in reverted:
             p = promoted[rid]
             out.append({"item_id": int(d["item_id"]), "round_id": rid, "commit": p["commit"],
                         "settled_at": settled[p["commit"]].get("created_at"),
-                        "outcome": d.get("outcome"), "vault": False})
-        elif vault and not rid:
+                        "outcome": outcome if reported else (graded_for(d, vault) or outcome),
+                        "vault": False})
+            continue
+        if not vault:
+            continue
+        if not rid:
             out.append({"item_id": int(d["item_id"]), "round_id": "", "commit": vault[-1],
                         "settled_at": d.get("created_at"),
-                        "outcome": d.get("outcome"), "vault": True})
+                        "outcome": outcome if reported else (graded_for(d, vault) or outcome),
+                        "vault": True})
+            continue
+        if rid in promoted_any or reported not in (None, "", "met"):
+            continue
+        graded = graded_for(d, vault)
+        if graded is None:
+            continue
+        out.append({"item_id": int(d["item_id"]), "round_id": "", "commit": vault[-1],
+                    "settled_at": d.get("created_at"),
+                    "outcome": outcome if reported else graded, "vault": True})
     return out
+
+
+def vault_review_outcome(ledger: Path, vault_commits: list[str], *,
+                         lands: dict | None = None, reverted: set | None = None) -> dict | None:
+    """A `met` outcome built from the vault review of a turn's landings, or None.
+
+    Reads the NEWEST of `vault_commits` only. Its `vault_land` event must carry
+    the grader's `review_clauses` — one row per clause of the contract as it
+    stood at grading (`review.grade_vault`) — and every row must be `met`:
+    `partial`, `not_met`, `post_landing`, `ungraded` or a gap all answer None,
+    which leaves the landing exactly where it stood. So does a newest landing
+    the grader did not pass (skipped during a drain, say): an earlier review's
+    verdict describes a tree a later ungraded commit may have changed. None too
+    when any of the commits was reverted. Landings recorded before
+    `review_clauses` existed carry none and answer None.
+
+    `lands` / `reverted` are the `vault_land` map and reverted-sha set, passed
+    by a caller that already built them.
+    """
+    commits = [str(c) for c in vault_commits if c]
+    if not commits:
+        return None
+    if reverted is None:
+        reverted = {str(d.get("reverted") or "")
+                    for d in _ledger_events(ledger, "vault_revert", require_item=False)}
+    if reverted & set(commits):
+        return None
+    if lands is None:
+        lands = {str(d.get("commit") or ""): d
+                 for d in _ledger_events(ledger, "vault_land", require_item=False) if d.get("ok")}
+    sha = commits[-1]
+    ev = lands.get(sha) or {}
+    graded = ev.get("review_clauses")
+    if ev.get("review") != "pass" or not graded:
+        return None
+    verdicts: dict[int, str] = {}
+    for c in graded:
+        try:
+            verdicts[int(c["clause"])] = str(c["verdict"])
+        except (KeyError, TypeError, ValueError):
+            return None
+    n = len(verdicts)
+    if set(verdicts) != set(range(1, n + 1)) or any(v != "met" for v in verdicts.values()):
+        return None
+    return {"acceptance": "met", "landed": True, "source": "vault_review",
+            "deferred_to": [], "spawned": [],
+            "clause_outcomes": [{"clause": i, "outcome": "met", "deferred_to": [],
+                                 "evidence": f"vault review of {sha[:8]}"}
+                                for i in sorted(verdicts)],
+            "summary": f"the vault review of {sha[:8]} graded all {n} clause(s) met"}
 
 
 def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
@@ -1725,6 +1854,9 @@ def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
     return item.path
 
 
+_CLOSE_SWEEP_LOCK = threading.Lock()
+
+
 def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
                         enabled: bool = True, close_members: bool = True) -> list[dict]:
     """The sweep: note every settled landing on its item, close the ones whose
@@ -1739,6 +1871,16 @@ def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
     """
     if not enabled:
         return []
+    # One sweep at a time. Housekeeping runs it in a worker thread and
+    # `autocode.execute` runs it at the end of a vault-landing turn; the
+    # landed-marker check and the write are not atomic, so two overlapping
+    # sweeps could both record the same landing.
+    with _CLOSE_SWEEP_LOCK:
+        return _close_settled_items(ledger, boards, close_members=close_members)
+
+
+def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
+                         close_members: bool) -> list[dict]:
     from scripts.automod import state as S
     by_id = {i.id: i for i in open_items(boards)}
     done: list[dict] = []
@@ -1774,7 +1916,9 @@ def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
                    + "; ".join(human))
         elif acc == "met":
             close = True
-            why = "the round reported the acceptance check met" + (
+            why = ("the vault review graded every acceptance clause met; the turn ended "
+                   "without reporting an outcome" if outcome.get("source") == "vault_review"
+                   else "the round reported the acceptance check met") + (
                 f" — {outcome['summary']}" if outcome.get("summary") else "")
         elif acc == "deferred":
             ids = ", ".join(f"#{i}" for i in outcome.get("deferred_to") or []) or "an unnamed follow-up"
@@ -1795,6 +1939,7 @@ def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
                         "round_id": landing["round_id"], "commit": landing["commit"],
                         "vault": landing["vault"], "closed": close,
                         "acceptance": acc, "reason": why[:300],
+                        "acceptance_source": outcome.get("source") or "round",
                         "human_clauses": human}, path=ledger)
         done.append({"item_id": item.id, "closed": close, "acceptance": acc})
         # An umbrella that closed `met` closes the members it consolidated.

@@ -1269,7 +1269,7 @@ def test_each_re_offer_is_capped(isolated):
     persists — `select_confirmed` takes the oldest ready item."""
     write_item(isolated, 397)
     _confirm(397)
-    for n in range(1 + B.INCOMPLETE_RETRY_CAP):
+    for n in range(B.INCOMPLETE_RETRY_CAP):
         _blocked_round(397, f"SM_INC{n}", external=False, stop_reason="turn_timeout")
         assert 397 not in B.implemented_ids(S.LEDGER_PATH), f"attempt {n + 1} is free"
     _blocked_round(397, "SM_INC_LAST", external=False, stop_reason="turn_timeout")

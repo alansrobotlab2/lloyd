@@ -325,7 +325,9 @@ failure puts the round's paths back (tracked ones to HEAD, new ones deleted),
 because on a live tree "nothing lands" has to mean "nothing stays". Success
 commits exactly those paths on the vault's `main` (the same branch guard as
 `scripts/util/vault-commit.sh`) and records a `vault_land` ledger event with
-the sha; `automod_vault_revert` is a plain `git revert`, also recorded. Both
+the sha — and, when the vault review passed, its per-clause verdicts as
+`review_clauses` (§3.2b); `automod_vault_revert` is a plain `git revert`,
+also recorded. Both
 tools sit behind the Inner Voice gate like `automod_start`, and both are
 denied to session-less worker turns. `not_code` is now reserved for
 `external` — hardware, robots, third-party services — and vault items get
@@ -471,6 +473,54 @@ that `met` on an unverified acceptance is the one claim the loop cannot
 recover from. Items confirmed before clauses existed carry prose only; every
 reader (`acceptance_clauses_of`) treats that prose as one clause rather than
 refusing the whole current pool.
+
+**A vault item has a second judge, and it is used when the round has none.**
+#575 (2026-09-14) landed its fix through `automod_vault_land` at 21:25Z; the
+vault review graded all five clauses `met`, and so did three code reviews
+after it. The item was re-offered twice and a third round was stopped by
+hand, because four things combined:
+
+- The contract and the prompt both read as a code round for every surface.
+  Triage ended every clause "— tests/<file>.py", and the implement prompt
+  said `automod_start`, a test pinning each clause, the gate — so the vault
+  turn cut a round for a test file about a script `~/lloyd` does not own, and
+  8 of the first 15 vault turns had done the same. A `vault` clause now ends
+  with the vault path that shows it, and a `vault` item's prompt carries
+  `VAULT_SURFACE_RULES`: a vault change is not a round, the vault review asks
+  for no test in `~/lloyd`, and a pinning test is a finding.
+- `settled_landings` read a finished row with a `round_id` only as a code
+  landing, so a vault landing beside a round that never promoted was
+  invisible. It counts now for a `vault` surface. A promotion of the round
+  that has not settled holds it; once settled, the code landing is recorded.
+  A landing still waiting for idle has no `promoted` row yet, so the vault
+  landing is recorded first and the later promotion is not processed again —
+  right for a `vault` contract, which the review graded against the vault.
+- A turn dead at `max_turns` gets no finalizer, so the landing had no
+  outcome. The vault grader's per-clause verdicts now ride on the
+  `vault_land` event (`review_clauses`, one row per contract clause,
+  recorded only on a `pass`), and `vault_review_outcome` builds a `met`
+  outcome from the **newest** of the turn's vault landings when every row is
+  `met` — `partial`, `not_met`, `post_landing`, a gap, a newest landing the
+  grader did not pass (a 503 during a drain) or a reverted commit all answer
+  nothing. It fills a missing outcome only, on a `vault` surface only, on
+  every path (no round, a round, a settled promotion); an outcome the turn
+  reported is never overridden, and a landing beside a round closes on a
+  reported `met` only when the review agrees. `item_landed` carries
+  `acceptance_source: vault_review | round`. The wall-clock exit
+  (`TurnTimeout`) now records `vault_commits` and `surface` too, or the same
+  landing was invisible by that door.
+- The sweep ran only in housekeeping, once per `interval_seconds`, while
+  `REPOLL_ON_COMPLETE` asks for the next round at once: the turn-end reconcile
+  put #575 back in `up_next` at 22:06:38Z and the next round took it at
+  22:08:44Z. `execute` now sweeps at turn end, before the reconcile —
+  only after a turn that made a vault landing, because the sweep walks the
+  board on the event loop (~2.3 s measured) and a code landing has the
+  guardian's window to wait out anyway. It is synchronous like the reconcile
+  beside it, and `close_settled_items` takes a module lock, because
+  housekeeping sweeps in a worker thread at the same time.
+
+Landings recorded before `review_clauses` existed carry none, so none of
+them changes. `tests/test_vault_surface_churn.py` pins all of it.
 
 ### 3.2c Bounding the board: the loop must close more than it opens
 
@@ -1342,7 +1392,14 @@ everything behind it.
   promote. Triage has recorded budget exhaustion this way since #229 ("the
   item comes back once"); implement never got the rule. #446 is why: it
   committed 757 lines at 06:43:36 and was killed at 06:43:50, with 32 of its
-  100 iterations unspent.
+  100 iterations unspent. **Once means once, counted on budget deaths
+  alone** (since 2026-09-14): the rule used to read the shared attempt count
+  as `n <= 1 + INCOMPLETE_RETRY_CAP`, which re-offered a second budget death
+  as well, while counting every attempt would spend it on an unrelated
+  earlier verdict. A second budget death is `spent`, which
+  `retriage_spent_items` (§3.2d) sends back through triage once rather than
+  running the same contract a third time. On that day's ledger it moved one
+  item: #577, dead at its budget on 09-11 and 09-13.
 - **`infra`** — the turn never reported completion. `run_prompt_in_session`
   returns `stop_reason=None` when the stream closes without a `done` frame.
   #392 was recorded as its item's one attempt *one second* after starting, on

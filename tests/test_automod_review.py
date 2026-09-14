@@ -635,7 +635,8 @@ def test_the_implement_prompt_names_the_clauses_the_seams_and_the_item_id():
                            triaged_ago="today", surface="code", check="c", evidence="e",
                            acceptance="a", clauses="    1. a\n    2. b", spawn_cap=I.SPAWN_CAP,
                            max_turns=I.DEFAULT_MAX_TURNS,
-                           round_label="item9", reoffer="", members="", human_clauses="")
+                           round_label="item9", reoffer="", members="", human_clauses="",
+                           surface_rules="")
     assert "    1. a\n    2. b" in text
     # "Seams." and the review-rung procedure moved to the vault skill
     # `automod-change-own-code` (cut 4); the prompt names the skill instead.
@@ -802,8 +803,9 @@ def test_the_vault_grader_only_judges_a_vault_items_clauses(isolated, monkeypatc
                     "surface": "code", "acceptance": "a", "acceptance_clauses": ["a"]},
                    path=S.LEDGER_PATH)
     monkeypatch.setattr(RV, "run_grader", lambda **kw: pytest.fail("grader must not run"))
-    kind, why = RV.grade_vault(item_id=570, paths=["skills/x/SKILL.md"], diff="+x", vault=isolated)
-    assert kind == "skipped" and "surface is code" in why
+    kind, why, clauses = RV.grade_vault(item_id=570, paths=["skills/x/SKILL.md"], diff="+x",
+                                        vault=isolated)
+    assert kind == "skipped" and "surface is code" in why and clauses == []
     S.append_event({"event": "backlog_triage", "item_id": 570, "verdict": "confirmed",
                     "surface": "vault", "acceptance": "a", "acceptance_clauses": ["a"]},
                    path=S.LEDGER_PATH)

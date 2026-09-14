@@ -262,21 +262,29 @@ GRADER = None
 VAULT_REVIEW_MAX = 2
 
 
-def _vault_review(norm: list[str], item_id: int) -> tuple[str, str]:
-    """`(kind, findings)` from the grader over the staged diff. Never raises;
-    an unusable grader is `("skipped", why)` and the landing proceeds — a
-    vault edit is already validated through the real loaders, and a grader
-    outage must not hold every skill edit hostage."""
+def _vault_review(norm: list[str], item_id: int) -> tuple[str, str, list[dict]]:
+    """`(kind, findings, clauses)` from the grader over the staged diff. Never
+    raises; an unusable grader is `("skipped", why, [])` and the landing
+    proceeds — a vault edit is already validated through the real loaders,
+    and a grader outage must not hold every skill edit hostage.
+
+    `clauses` is the grader's per-clause verdicts (`review.grade_vault`). A
+    grader answering the older two-element shape reads as none graded."""
     if GRADER is None:
-        return "skipped", "no grader configured"
+        return "skipped", "no grader configured", []
     try:
         diff = _git("diff", "HEAD", "--", *norm).stdout
         for p in norm:
             if _git("cat-file", "-e", f"HEAD:{p}").returncode != 0 and (VAULT / p).exists():
                 diff += f"\n+++ new file {p}\n" + (VAULT / p).read_text(encoding="utf-8", errors="replace")
-        return GRADER(item_id=item_id, paths=norm, diff=diff)
+        res = tuple(GRADER(item_id=item_id, paths=norm, diff=diff))
+        graded = res[2] if len(res) > 2 else []
+        clauses = [{"clause": int(c["clause"]), "verdict": str(c["verdict"])}
+                   for c in (graded or []) if isinstance(c, dict)
+                   and str(c.get("clause", "")).isdigit() and c.get("verdict")]
+        return str(res[0]), str(res[1]), clauses
     except Exception as exc:  # noqa: BLE001 — the grader never fails a landing on its own
-        return "skipped", f"{type(exc).__name__}: {str(exc)[:200]}"
+        return "skipped", f"{type(exc).__name__}: {str(exc)[:200]}", []
 
 
 def _vault_review_attempts(item_id: int) -> int:
@@ -312,8 +320,9 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
                               + "; ".join(errors[:5]))
 
     review = "skipped"
+    clauses: list[dict] = []
     if item_id is not None:
-        kind, findings = _vault_review(norm, int(item_id))
+        kind, findings, clauses = _vault_review(norm, int(item_id))
         review = kind
         if kind in ("retry", "unsound"):
             attempts = _vault_review_attempts(int(item_id)) + 1
@@ -335,7 +344,8 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
                 + ("; the edits were reverted" if undone else "; the edits are still in place — fix and land again"))
         if kind != "skipped":
             S.append_event({"event": "vault_review", "item_id": item_id, "paths": norm,
-                            "kind": kind, "blocking": False, "findings": findings[:600]})
+                            "kind": kind, "blocking": False, "findings": findings[:600],
+                            "clauses": clauses})
 
     _ensure_main()
     add = _git("add", "-A", "--", *norm)
@@ -348,9 +358,13 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
         _git("reset", "-q", "--", *norm)
         raise VaultRoundError(f"git commit failed: {(commit.stdout + commit.stderr).strip()[:300]}")
     sha = _git("rev-parse", "HEAD").stdout.strip()
+    # `review_clauses` is what `backlog.vault_review_outcome` reads: on a
+    # landing that passed review it is the grader's verdict on the whole
+    # contract, and the one verdict left when the turn dies at its budget.
     S.append_event({"event": "vault_land", "ok": True, "item_id": item_id, "commit": sha,
                     "paths": norm, "validated": buckets["validated"],
-                    "review": review, "message": message.strip()[:200]})
+                    "review": review, "review_clauses": clauses if review == "pass" else [],
+                    "message": message.strip()[:200]})
     return {"ok": True, "commit": sha, "paths": norm, "validated": buckets["validated"],
             "review": review}
 

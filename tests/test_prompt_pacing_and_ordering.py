@@ -28,7 +28,7 @@ def _prompt(**over):
               triaged_ago="today", surface="code", check="c", evidence="e",
               acceptance="a", clauses="    1. a", spawn_cap=I.SPAWN_CAP,
               max_turns=I.DEFAULT_MAX_TURNS, reoffer="", members="",
-              human_clauses="")
+              human_clauses="", surface_rules="")
     kw.update(over)
     return I.PROMPT.format(**kw)
 

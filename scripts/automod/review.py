@@ -664,9 +664,17 @@ asked to restate the review as one JSON object.
 def grade_vault(*, item_id: int, paths: list[str], diff: str,
                 vault: Path | None = None, backend: str | None = None,
                 sessions_dir: Path | None = None, timeout: float = REVIEW_TIMEOUT_S,
-                model: str = "primary") -> tuple[str, str]:
-    """`(kind, findings)` for a vault round's staged edit — the
-    `vault_round.GRADER` contract. `skipped` when the grader cannot run."""
+                model: str = "primary") -> tuple[str, str, list[dict]]:
+    """`(kind, findings, clauses)` for a vault round's staged edit — the
+    `vault_round.GRADER` contract. `skipped` when the grader cannot run.
+
+    `clauses` is `[{clause, verdict}]` after `parse_review`'s downgrades, one
+    per clause the grader judged, and `[]` whenever it did not grade. It rides
+    onto the `vault_land` event because it is the only verdict a vault item's
+    landing has when the implement turn dies at its budget: #575 landed its
+    fix at 21:25Z, every review graded all five clauses met, and the item was
+    re-offered for a test file because nothing read those verdicts.
+    """
     from scripts.automod import backlog as B, state as S, vault_round as VR
     vault = Path(vault or VR.VAULT)
     # Only a `vault` item's clauses can be satisfied by vault paths. #551 was a
@@ -677,21 +685,26 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     # through the real loaders.
     surface = str((B.confirmed_verdicts(S.LEDGER_PATH).get(int(item_id)) or {}).get("surface") or "")
     if surface and surface != "vault":
-        return "skipped", f"surface is {surface}: the clauses are graded at the code gate"
+        return "skipped", f"surface is {surface}: the clauses are graded at the code gate", []
     contract = item_contract(int(item_id))
     if not contract["clauses"]:
-        return "skipped", f"item #{item_id} has no acceptance clauses"
+        return "skipped", f"item #{item_id} has no acceptance clauses", []
     prompt = build_vault_prompt(contract=contract, paths=paths, diff=diff, vault=vault)
     res = run_grader(prompt=prompt, item_id=int(item_id), round_id="vault",
                      backend=backend, sessions_dir=sessions_dir, timeout=timeout, model=model)
     if not res["ok"]:
-        return "skipped", f"grader did not answer: {res.get('error')}"
+        return "skipped", f"grader did not answer: {res.get('error')}", []
     parsed = parse_review(res["structured"], worktree=vault, changed_tests=[],
                           n_clauses=len(contract["clauses"]), require_tests=False)
     if parsed is None:
-        return "skipped", "grader returned an unusable object"
+        return "skipped", "grader returned an unusable object", []
     kind, findings = decide(parsed, [])
-    return kind, findings
+    graded = {c["clause"]: c["verdict"] for c in parsed["clauses"]}
+    # One row per clause of the contract as it stood when graded, so a reader
+    # needs no second lookup of a contract that may have changed since; a
+    # clause the grader never reached is `ungraded`, which is not `met`.
+    return kind, findings, [{"clause": i, "verdict": graded.get(i, "ungraded")}
+                            for i in range(1, len(contract["clauses"]) + 1)]
 
 
 # How long `run_grader` will wait out a backend that is not answering yet.

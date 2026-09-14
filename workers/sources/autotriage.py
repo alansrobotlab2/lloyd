@@ -97,7 +97,8 @@ then the claim, the current state with file paths and line numbers, the check \
 that shows it, and the acceptance clauses — at most {max_clauses}, each one \
 thing a single test can pin, each ending with the test file that pins it \
 (`— tests/test_<area>.py`, an existing file or the one the round should \
-create). The tool returns the id; that is UMBRELLA. Do not \
+create; for a `vault` umbrella, the vault path that shows it instead, never a \
+test). The tool returns the id; that is UMBRELLA. Do not \
 file an umbrella for a single item: one `fold` is a `keep`.
 5. **File at most {spawn_cap} further item**, only for a finding none of these \
 covers (tag `spawned-by-triage`). If the tool answers `merged_into: N`, list N.
@@ -292,7 +293,10 @@ not "add a ledger"). **End each clause with the test file that pins it** \
 (`— tests/<file>.py`: an existing file whose area it is, or the new file the \
 round should create). The grader downgrades a `met` it cannot tie to a test \
 node to `partial`, and naming the file removes the round's guesswork about \
-where that node belongs. **At most {max_clauses} clauses**: every clause is graded \
+where that node belongs. A `vault` surface is the exception: its review reads \
+the vault and wants no test, so end each clause with the vault path that shows \
+it (`— skills/<name>/SKILL.md`) — a test file named there sends the round to \
+write one. **At most {max_clauses} clauses**: every clause is graded \
 on its own and one unmet clause refuses the round, so six pass together less \
 than half the time and twelve one time in five. If the work needs more, \
 confirm the part one small change can finish and append the rest to this item \

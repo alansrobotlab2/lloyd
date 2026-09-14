@@ -118,7 +118,7 @@ As separately checkable clauses — the gate's review rung grades each one, and 
 your finalizer reports each one:
 
 {clauses}
-{human_clauses}
+{human_clauses}{surface_rules}
 The round is done when every clause has become true and a test pins each. If \
 you cannot make them true with one small, well-tested change, do not land a \
 larger one — abort the round, say why, and the item goes back to a human. \
@@ -189,6 +189,40 @@ Report what you did, quoting the gate line rather than saying "it passed", \
 and end with one line `SPAWNED: <ids of blocker items you filed or were merged \
 into, or the word none>`. Work autonomously; do not ask for confirmation.
 """
+
+
+# Rendered into `{surface_rules}` for a `vault` item only; a code item's
+# prompt is byte-for-byte what it was. The template reads as a code round —
+# `automod_start`, a test pinning each clause, the gate — and a vault item
+# followed it: 8 of the first 15 vault turns cut a code round beside their
+# vault commits. #575 landed its fix at 21:25Z (vault review: all five clauses
+# met), then spent two rounds and ~300 iterations gating a test file for a
+# script `~/lloyd` does not own, re-offered when the first died at its budget.
+# The vault review already grades without tests (`require_tests=False`); this
+# says so to the implementer. Kept out of PROMPT because the template is held
+# under 5.5k chars (`test_the_template_stays_bounded`).
+VAULT_SURFACE_RULES = """
+**This is a `vault` item, and a vault change is not a round.** Edit the paths \
+the clauses name under `~/obsidian`, check each clause by reading or running \
+the result, then `automod_vault_land(paths, message, item_id={item_id})`. Do \
+not call `automod_start`, and do not open a code round to add tests: the vault \
+review grades the landed files by reading and running them and asks for no \
+test in `~/lloyd`. Where the text below speaks of `automod_start`, a test \
+pinning each clause, the gate or a promotion settling, read \
+`automod_vault_land` and its review instead. A pinning test you think the \
+change deserves is a finding on this item, not part of this turn. When the \
+vault review passes with every clause met, stop and report `met` — and if the \
+turn ends before it reports, that review's verdict is what closes the item. \
+If a clause truly needs code in `~/lloyd`, land the vault half, file that code \
+as the blocker described below, and report the clause `deferred` to it.
+"""
+
+
+def _surface_rules(surface: str, item_id: int) -> str:
+    """The surface-specific block for the implement prompt; empty but for vault."""
+    if str(surface or "").strip().lower() != "vault":
+        return ""
+    return VAULT_SURFACE_RULES.format(item_id=item_id)
 
 
 ABANDON_GRACE_SECONDS = 20 * 60
@@ -739,10 +773,46 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         # drain — hands the item back to the ledger's verdict. Without this the
         # early returns left an item `in_progress` that nothing would ever
         # pick up again, which is the old failure wearing a new status.
+        #
+        # The settle sweep first. It otherwise runs only in housekeeping, once
+        # per `interval_seconds`, while `REPOLL_ON_COMPLETE` asks for the next
+        # round at once — so a vault landing this turn made (which needs no
+        # window) was reconciled back into `up_next` and re-picked before
+        # anything closed it. #575: round one ended 22:06:27Z, its item was
+        # `up_next` at :38 and in a second round at 22:08:44.
+        #
+        # Only after a turn that made a vault landing: the sweep walks the
+        # whole board (~2.3 s measured, on the event loop), and a code landing
+        # has the guardian's window to wait out, which housekeeping covers.
+        # Synchronous like the reconcile beside it, so a cancelled `execute`
+        # cannot run the two concurrently over the same item files.
+        try:
+            if _vault_landed_since(candidate.id, started):
+                cfg = _source_cfg(NAME)
+                for r in B.close_settled_items(
+                        S.LEDGER_PATH, enabled=bool(cfg.get("close_on_settle", True)),
+                        close_members=bool(cfg.get("close_members_on_settle", True))):
+                    logger.info("backlog #%s landed: %s (acceptance=%s)", r["item_id"],
+                                "closed" if r["closed"] else "noted, left open", r["acceptance"])
+        except Exception as exc:
+            logger.warning("close_settled_items after #%s failed: %s", candidate.id, exc)
         try:
             B.reconcile_statuses(S.LEDGER_PATH)
         except Exception as exc:
             logger.warning("reconcile_statuses after #%s failed: %s", candidate.id, exc)
+
+
+def _vault_commits_since(events: list[dict], item_id: int, since_ts: float) -> list[str]:
+    """Shas of this item's successful `vault_land`s at or after `since_ts`."""
+    return [e.get("commit") for e in events
+            if e.get("event") == "vault_land" and e.get("ok")
+            and e.get("item_id") == item_id and float(e.get("ts") or 0) >= since_ts]
+
+
+def _vault_landed_since(item_id: int, since_ts: float) -> bool:
+    """Whether a `vault_land` for this item succeeded at or after `since_ts`."""
+    from scripts.automod import state as S
+    return bool(_vault_commits_since(S.read_events(limit=500), item_id, since_ts))
 
 
 async def _reap_at_turn_end(session_id: str | None) -> None:
@@ -803,6 +873,7 @@ async def _run_and_record(item, candidate, triage, budget, started,
             B.acceptance_clauses_of(triage), 1)) or "    (the contract above is one clause)",
         human_clauses=_human_clauses_block(
             B.human_clauses_for_item(getattr(candidate, "path", None), triage)),
+        surface_rules=_surface_rules(triage.get("surface") or "code", candidate.id),
         spawn_cap=SPAWN_CAP,
         members=_members_block(candidate),
         # A re-offer is not a fresh start. The previous round's branch may
@@ -841,9 +912,15 @@ async def _run_and_record(item, candidate, triage, budget, started,
         # can still find and close a round this turn opened. In-band, so the
         # queue does not retry: the `started` event above already means one
         # attempt per item, and a retry would only re-discover that.
+        # `vault_commits` and `surface` as on the normal path: a vault item
+        # that landed a passing fix and then hit the wall clock is otherwise
+        # invisible to `settled_landings` — #575's churn by another exit.
+        timeout_events = S.read_events(limit=200)
         S.append_event({"event": "backlog_implement", "item_id": candidate.id,
                         "phase": "finished", "reason": str(exc),
-                        "round_id": _round_opened_since(S.read_events(limit=200), started),
+                        "round_id": _round_opened_since(timeout_events, started),
+                        "vault_commits": _vault_commits_since(timeout_events, candidate.id, started),
+                        "surface": triage.get("surface") or "code",
                         "stop_reason": "turn_timeout"})
         logger.warning("backlog #%s: %s", candidate.id, exc)
         await _reap_at_turn_end(None)
@@ -871,10 +948,7 @@ async def _run_and_record(item, candidate, triage, budget, started,
                        candidate.id, run["session_id"])
         return {"status": "failed", "item_id": candidate.id,
                 "summary": f"#{candidate.id}: turn never completed — not counted as an attempt"}
-    vault_commits = [e.get("commit") for e in events
-                     if e.get("event") == "vault_land" and e.get("ok")
-                     and e.get("item_id") == candidate.id
-                     and float(e.get("ts") or 0) >= started]
+    vault_commits = _vault_commits_since(events, candidate.id, started)
     outcome = B.parse_outcome(run.get("structured")) if want_outcome else None
     outcome_error = str(run.get("structured_error") or "")
     # A path the round needed and the loop may never write. Recorded on the
