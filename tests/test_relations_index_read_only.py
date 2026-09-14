@@ -324,6 +324,15 @@ def test_no_write_target_falls_under_the_vault_or_the_live_index(generator, vaul
 
 # --- clause 5: the nightly path ---------------------------------------------
 
+# The four names `nightly_extraction.py` resolves off its own directory rather
+# than as a package: `from content_hasher import …` at :25,
+# `from fact_extractor import …` at :22/:41, `from relations_index import …` at
+# :42, `from profile_generator import …` at :43. A `sys.modules` hit under any of
+# them is used *before* `sys.path` is consulted, so injecting a path is not enough
+# to decide which file the nightly binds — the cache has to be cleared first.
+SIBLING_IMPORTS = ("content_hasher", "fact_extractor", "relations_index", "profile_generator")
+
+
 @pytest.fixture
 def nightly_module():
     """`nightly_extraction.py` actually imported, for the clause-5 seam.
@@ -332,31 +341,55 @@ def nightly_module():
     `RelationsIndexGenerator` with a bare `from relations_index import …` at :42,
     which resolves only because running it as a script puts its own directory on
     `sys.path`. `importlib` does not do that for a file loaded by path, so this
-    fixture injects the directory first and reproduces the shipped resolution.
-    (:40 also inserts `~/obsidian/agents/memory/scripts/next-gen-memory`, a
-    directory deleted from the vault on 2026-09-03 — so nothing else can win the
-    name today, and the origin assertion in the test says so rather than
-    trusting it.)
+    fixture injects the directory first — and then evicts the four sibling names
+    from `sys.modules`, because a cache hit under one of those names wins over the
+    injected path and would bind a module from some other checkout.
 
-    Teardown puts `sys.path` and `sys.modules` back as found: `relations_index`,
-    `fact_extractor` and `profile_generator` land in `sys.modules` under those
-    unqualified names, and leaving them would hand a later test a module loaded
-    from this directory under a name it might otherwise resolve elsewhere.
+    The eviction is what the first version of this fixture lacked, and it made
+    the test below order-dependent: alone it passed (9 passed, 0.7 s), in a full
+    `pytest tests/` it went red. The other half is
+    `tests/test_extraction_single_instance.py:29`, which hardcodes
+    `/home/alansrobotlab/lloyd/scripts/memory/next-gen-memory` and whose `ne`
+    fixture (:48-54) imports `nightly_extraction` from that absolute path — so by
+    the time this file runs, `sys.modules["relations_index"]` is already bound to
+    the *live* checkout. Under `automod_gate`, which runs pytest from a worktree,
+    the nightly then imported that module and the origin assert failed naming both
+    paths. Reproduce the red without a gate, in one command:
+    `pytest tests/test_extraction_single_instance.py tests/test_relations_index_read_only.py`.
+
+    Teardown restores `sys.path` to the list it found and each sibling name to
+    whatever was cached before (or to absent, if nothing was), so a later test
+    still gets exactly the module it would have got had this fixture never run.
+    Anything else the exec pulled off the injected directory goes with it. The
+    nightly's own :39 insert of
+    `~/obsidian/agents/memory/scripts/next-gen-memory` — deleted from the vault on
+    2026-09-03 — lands *ahead* of this fixture's entry, which is the second reason
+    eviction rather than insertion carries this: if that directory ever comes back
+    with these modules in it, the origin assert is what says so.
     """
     injected = str(NIGHTLY.parent)
+    injected_dir = Path(injected).resolve()
     before_path = list(sys.path)
-    before_modules = set(sys.modules)
+    before_names = set(sys.modules)
+    cached = {name: sys.modules[name] for name in SIBLING_IMPORTS if name in sys.modules}
+    for name in SIBLING_IMPORTS:
+        sys.modules.pop(name, None)
     sys.path.insert(0, injected)
     spec = importlib.util.spec_from_file_location("nightly_extraction_under_test", NIGHTLY)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     yield mod
-    # Only the modules that came off the path this test injected. A plain
-    # set-difference would also evict stdlib modules the exec happened to pull
-    # in first, which is churn this test has no business causing.
-    for name in set(sys.modules) - before_modules:
+    # Only the modules that came off the injected directory. A plain
+    # set-difference would also evict stdlib modules the exec happened to pull in
+    # first, which is churn this test has no business causing.
+    for name in set(sys.modules) - before_names:
         loaded = getattr(sys.modules[name], "__file__", None)
-        if loaded and injected in str(Path(loaded).resolve().parents):
+        if loaded and Path(loaded).resolve().parent == injected_dir:
+            sys.modules.pop(name, None)
+    for name in SIBLING_IMPORTS:
+        if name in cached:
+            sys.modules[name] = cached[name]
+        else:
             sys.modules.pop(name, None)
     sys.path[:] = before_path
 
