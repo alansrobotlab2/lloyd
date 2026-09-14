@@ -1395,10 +1395,11 @@ MACHINE_PLATFORMS = {"worker", "autonomy", "e2e-harness"}
 
 
 def test_no_live_corpus_row_is_interactive_on_a_machine_platform():
-    """Read-only. Measured at the fix: 1,411 corpus rows classify as 1,012 worker
-    / 237 autonomy / 79 inner-voice / 54 browser / 26 interactive / 3 smoke, and 0
-    rows violate the rule. Before it, all 1,411 were `agent_id: lloyd` and the
-    class was unknowable, which is how 938 of 1,083 loop sessions reached the
+    """Read-only. Measured over all 20 corpus buckets on 2026-09-14: 1,411 rows
+    classify as 1,012 worker / 237 autonomy / 79 inner-voice / 54 browser / 26
+    interactive / 3 smoke, and 0 rows violate the rule. Before the change all
+    1,411 carried `agent_id: lloyd` and no class at all, which is how 938 of 1,083
+    loop sessions (the 2026-09-02→12 window measured at triage) reached the
     frequency gate as if they were Alan."""
     if not LIVE_CORPUS.is_dir() or not LIVE_STORE.is_dir():
         pytest.skip("corpus or session store absent on this machine")

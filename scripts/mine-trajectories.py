@@ -495,8 +495,9 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker",
                         # Session-class exclusion (#493). `agent_id` cannot do
                         # this work: the extractor derives it from the filename
                         # and 0 of the live session files carry its one prefix, so
-                        # all 1014 rows of the last 7 days are `agent_id: "lloyd"`
-                        # and `--agent worker` selects nothing (#494).
+                        # every row reads `agent_id: "lloyd"` — 1,306 of 1,306 in
+                        # the seven newest buckets, measured 2026-09-14 — and
+                        # `--agent worker` selects nothing (#494).
                         if exclude_machine:
                             cls = traj.get("session_class")
                             if cls is None:

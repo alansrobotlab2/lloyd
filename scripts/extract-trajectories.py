@@ -43,10 +43,14 @@ WATERMARK_PATH = OUTPUT_DIR / ".watermark.json"
 # 10,611 of 11,813 `Sessions Affected` bullets in the 2026-09-12 candidates.
 #
 # The classifier that should have caught this keyed on the filename
-# (`path.stem.startswith("autonomy_")`) and 0 of 1331 live session files match it,
+# (`path.stem.startswith("autonomy_")`) and no live session file matches it: 0 of
+# the 1,686 files in `~/lloyd/sessions/` on 2026-09-14 (0 of 1,331 at triage),
 # because the loop renamed itself around 09-09 (`youtubed_*`, `autocode_*`,
-# `autotriage_*`, `benchmine_*`). Every row came out `agent_id: "lloyd"` — 1014 of
-# 1014 rows in the last 7 days — so class was unknowable downstream.
+# `autotriage_*`, `benchmine_*`). Every row came out `agent_id: "lloyd"` — 1,306 of
+# 1,306 rows across the seven newest buckets on 2026-09-14 (1,014 of 1,014 at
+# triage) — so class was unknowable downstream. Re-classifying the whole corpus
+# through the fields below, measured the same day: 1,385 of 1,411 rows (98.2%) are
+# machine sessions and 26 are interactive.
 #
 # Class is therefore read from fields every session JSON already carries.
 INTERACTIVE_CLASS = "interactive"   # the only class that is human-initiated work
