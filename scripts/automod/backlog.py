@@ -2375,7 +2375,104 @@ def released_ids(ledger: Path) -> set[int]:
     return expired_ids(ledger) | group_kept_ids(ledger) | set(retriage_marks(ledger))
 
 
-def is_quarantined(item: Item, *, released: frozenset[int] | set[int] = frozenset()) -> bool:
+# ── Blockers ────────────────────────────────────────────────────────────────
+#
+# The one item an implement round may still file: a finding that stops one of
+# its clauses from becoming true, tagged `spawned-by-autocode` + `blocker`,
+# first line "Blocks #N", written as a handoff a fresh session can execute
+# alone. The round defers the clause to it. Until 2026-09-14 the only reader
+# of the tag was write-time dedupe, so a blocker was an ordinary self-spawn:
+# quarantined, so no triage ever gave it a contract, so it never reached
+# `up_next` — and then expired at seven days, orphaning the clause that waited
+# on it. On that day 13 of the 101 quarantined drafts were blockers, four of
+# them in front of items already in the implement pool.
+#
+# A blocker is *live* while the item it blocks is open. A live blocker is
+# triaged (first), never held behind the depth gate, taken early by autocode
+# and never expired. Once the blocked item closes it is an ordinary self-spawn
+# again — quarantined and bound by expiry — rather than closed: the finding
+# may be real without the item that surfaced it (#987, a bench that gave a
+# destructive prompt live Bash, was filed as a blocker of a retrieval item).
+BLOCKER_TAG = "blocker"
+_BLOCKS_RE = re.compile(r"^\W*blocks\s+#(\d+)", re.IGNORECASE)
+
+
+def blocker_targets(ledger: Path | None = None, *, events: list[dict] | None = None) -> dict[int, int]:
+    """`{blocker_id: blocked_item_id}` off implement rows' `spawned` — the ids
+    an implement round filed, which by its prompt are blockers only. Latest
+    row wins. `events` is a caller's own read of the ledger (the scorecard)."""
+    rows = ([e for e in events if e.get("event") == "backlog_implement" and e.get("item_id") is not None]
+            if events is not None else _ledger_events(ledger, "backlog_implement"))
+    out: dict[int, int] = {}
+    for d in rows:
+        for s in d.get("spawned") or []:
+            try:
+                out[int(s)] = int(d["item_id"])
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def blocked_item_of(item: Item, targets: dict[int, int] | None = None) -> int | None:
+    """The id a blocker blocks: its own "Blocks #N" (title, then first body
+    line — what the prompt asks for), else the round that filed it. None when
+    neither says."""
+    first = next((l for l in item.body.splitlines()
+                  if l.strip() and not l.startswith("# ")), "")
+    for text in (item.name, first):
+        m = _BLOCKS_RE.match(text or "")
+        if m:
+            return int(m.group(1))
+    return (targets or {}).get(item.id)
+
+
+def live_blockers(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                  items: list[Item] | None = None,
+                  everything: list[Item] | None = None) -> dict[int, int | None]:
+    """`{blocker_id: blocked_id}` for open `blocker` items whose blocked item is
+    still open. A blocker whose target cannot be named, or names no item on
+    disk, counts as live: triage is the pass that should find that out, and
+    a blocker judged once is out of expiry's reach anyway.
+
+    `everything` is a caller's own full read of the board (the dashboard reads
+    a vault resolved at call time); without it each target is looked up by id.
+    """
+    known = {i.id: i.status for i in everything} if everything is not None else None
+
+    def status_of(iid: int) -> str | None:
+        if known is not None:
+            return known.get(iid)
+        target = item_by_id(iid)
+        return target.status if target is not None else None
+
+    candidates = [i for i in (items if items is not None else open_items(boards))
+                  if BLOCKER_TAG in i.tags and i.status in OPEN_STATUSES]
+    if not candidates:
+        return {}
+    targets = blocker_targets(ledger)
+    out: dict[int, int | None] = {}
+    for item in candidates:
+        live, blocked = blocker_liveness(item, targets, status_of)
+        if live:
+            out[item.id] = blocked
+    return out
+
+
+def blocker_liveness(item: Item, targets: dict[int, int], status_of) -> tuple[bool, int | None]:
+    """`(live, blocked_id)` for one item — the single rule `live_blockers` and
+    the scorecard's over-bound gauge both apply. `status_of(id)` returns the
+    blocked item's status, or None when there is no such item."""
+    if BLOCKER_TAG not in item.tags or item.status not in OPEN_STATUSES:
+        return False, None
+    blocked = blocked_item_of(item, targets)
+    if blocked is None:
+        return True, None
+    status = status_of(blocked)
+    return (status is None or status in OPEN_STATUSES), blocked
+
+
+def is_quarantined(item: Item, *, released: frozenset[int] | set[int] = frozenset(),
+                   live: frozenset[int] | set[int] | dict = frozenset()) -> bool:
     """A self-filed item is not a single-item triage candidate.
 
     Triage asks one question: does this old claim still describe the system?
@@ -2403,8 +2500,13 @@ def is_quarantined(item: Item, *, released: frozenset[int] | set[int] = frozense
     not staleness), a group triage that judges the item `keep`, expiry
     (`expire_stale_spawns`), and a human reopening an expired item. Those are
     `released`.
+
+    A live blocker (`live`, from `live_blockers`) is not quarantined either:
+    the edge this gate cuts is triage feeding itself, and a blocker is capped
+    at one per implement round and gates work already in the pool.
     """
-    return is_self_spawned(item) and int(item.id) not in released
+    return (is_self_spawned(item) and int(item.id) not in released
+            and int(item.id) not in live)
 
 
 def triage_pool(ledger: Path,
@@ -2420,13 +2522,15 @@ def triage_pool(ledger: Path,
     """
     seen = triaged_ids(ledger)
     released = released_ids(ledger)
+    items = open_items(boards)
+    live = live_blockers(ledger, boards, items=items)
     # `draft` only: that is where an item waits to be judged. `up_next` is the
     # implement pool and `in_progress` is a round in flight; an untriaged item
     # in either is a dead state the reconciler moves back here.
-    untriaged = [i for i in open_items(boards)
+    untriaged = [i for i in items
                  if i.id not in seen and i.status == TRIAGE_POOL_STATUS
                  and not is_grouped(i)]
-    fresh = [i for i in untriaged if not is_quarantined(i, released=released)]
+    fresh = [i for i in untriaged if not is_quarantined(i, released=released, live=live)]
     return fresh, len(untriaged) - len(fresh)
 
 
@@ -2450,11 +2554,14 @@ def expire_stale_spawns(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
     seen = triaged_ids(ledger)
     judged = set(seen) | expired_ids(ledger) | group_kept_ids(ledger)
     judged |= {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}
+    items = open_items(boards)
+    # A clause is deferred to a live blocker; closing it orphans the clause.
+    live = live_blockers(ledger, boards, items=items)
     out: list[dict] = []
-    for item in open_items(boards):
+    for item in items:
         if not is_loop_spawned(item) or item.status != TRIAGE_POOL_STATUS:
             continue
-        if item.id in judged or (set(item.tags) & EXPIRY_EXEMPT_TAGS):
+        if item.id in judged or item.id in live or (set(item.tags) & EXPIRY_EXEMPT_TAGS):
             continue
         if item.age_days < int(max_age_days):
             continue
@@ -2505,11 +2612,15 @@ def select_candidate(ledger: Path,
     which reads as healthy right up to the moment there is nothing else left.
     On 2026-09-08 that moment was three hours away: 6 of the 112 untriaged
     open items predated the loop.
+
+    A live blocker goes ahead of the oldest: it is not a stale claim but the
+    precondition of a clause some round already deferred.
     """
     candidates, _held = triage_pool(ledger, boards)
     if not candidates:
         return None
-    return sorted(candidates, key=lambda i: (i.created or "9999", i.id))[0]
+    live = live_blockers(ledger, boards, items=candidates)
+    return sorted(candidates, key=lambda i: (i.id not in live, i.created or "9999", i.id))[0]
 
 
 def select_confirmed(ledger: Path,
@@ -2547,7 +2658,11 @@ def select_confirmed(ledger: Path,
     # A FIRST re-offer whose branch still holds the work belongs in the same
     # tier, for the same reason: it is a fix cycle, not an hour.
     near |= first_reoffer_with_a_branch(ledger, outcomes)
+    # Then a live blocker: landing it un-defers a clause of an item some round
+    # already carried most of the way.
+    live = live_blockers(ledger, boards, items=[i for i, _ in ready])
     return sorted(ready, key=lambda pair: (pair[0].id not in near,
+                                           pair[0].id not in live,
                                            pair[0].id in outcomes,
                                            pair[0].created or "9999", pair[0].id))[0]
 
@@ -2726,6 +2841,14 @@ def release_held_confirmations(ledger: Path, boards: tuple[str, ...] | None = DE
             continue
         waiting.append(iid)
     if hand_moves_only or not waiting:
+        return out
+    # A live blocker does not wait for room: it is the precondition of work
+    # the pool already holds, not more inventory for it.
+    live = live_blockers(ledger, boards, items=[open_by_id[i] for i in waiting])
+    for iid in [i for i in waiting if i in live]:
+        _release(iid, f"a live blocker of #{live[iid]}; blockers are never held", move=True)
+    waiting = [i for i in waiting if i not in live]
+    if not waiting:
         return out
     if enabled:
         gate = implement_pool_full(ledger, boards, floor=floor, now=now)
@@ -3410,6 +3533,7 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
     items = [i for i in everything if i.status in OPEN_STATUSES]
     seen = triaged_ids(ledger)
     released = released_ids(ledger)
+    live = live_blockers(ledger, boards, items=items, everything=everything)
     held = held_confirmations(ledger)
     outcomes = implement_outcomes(ledger)
     attempted = {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}
@@ -3431,7 +3555,7 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
             draft["held"] += 1
         elif i.id in seen:
             draft["triaged"] += 1
-        elif is_quarantined(i, released=released):
+        elif is_quarantined(i, released=released, live=live):
             draft["quarantined"] += 1
         else:
             draft["pool"] += 1
@@ -3451,6 +3575,10 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
         "up_next": up_next,
         "flow": board_flow(boards, items=everything, now=now),
         "self_spawned_open": sum(1 for i in items if is_loop_spawned(i)),
+        # Open blockers whose blocked item is still open, and how many of
+        # those no triage has judged yet — the second should drain to 0.
+        "live_blockers": {"open": len(live),
+                          "untriaged": sum(1 for b in live if b not in seen)},
         "landed_items_7d": pool["landed_items_7d"],
         "implement_pool": {"ready": len(ready), "bound": pool["bound"], "floor": pool["floor"]},
     }

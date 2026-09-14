@@ -348,6 +348,16 @@ def _origin_block(candidate, ledger) -> str:
     retriage = B.last_retriage(ledger, candidate.id)
     if retriage:
         lines.append(_retriage_line(retriage))
+    if B.BLOCKER_TAG in candidate.tags:
+        blocked = B.blocked_item_of(candidate, B.blocker_targets(ledger))
+        target = B.item_by_id(blocked) if blocked is not None else None
+        if blocked is None:
+            lines.append("a BLOCKER, naming no item it blocks: judge whether it still stops anything")
+        else:
+            lines.append(f"a BLOCKER of #{blocked} ({target.status if target else 'not found'}): an "
+                         f"implement round deferred a clause of #{blocked} to this item. Judge it as a "
+                         f"handoff — is the obstacle still real on today's tree? A confirmed blocker "
+                         f"skips the depth gate and is taken early")
     parent_attr = ""
     if parent_id:
         parent = B.item_by_id(parent_id)
@@ -873,7 +883,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     hold = False
     if hold_on and parsed["verdict"] == "confirmed" and not B.is_human_only(parsed["acceptance"]):
         gate = await asyncio.to_thread(B.implement_pool_full, S.LEDGER_PATH, floor=floor)
-        hold = bool(gate["full"])
+        # A live blocker is never held: it is the precondition of a clause a
+        # round already deferred, not more inventory for a full pool.
+        live = await asyncio.to_thread(B.live_blockers, S.LEDGER_PATH, items=[candidate])
+        hold = bool(gate["full"]) and candidate.id not in live
     B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
                      check=parsed["check"], close=close, spawned=spawned, merged=merged,
                      acceptance=parsed["acceptance"],

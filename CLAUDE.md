@@ -533,6 +533,26 @@ switch the pass off rather than bound it. Kill switch
 `workers.sources.autocode.expire_spawns`; the scorecard's row 4 carries the
 open self-spawned count and `over_bound`, which should read 0.
 
+**A live blocker is the exception to both** (2026-09-14). The one item an
+implement round may file — tag `blocker`, "Blocks #N", the handoff a deferred
+clause waits on — was read by nothing but write-time dedupe, so it sat
+quarantined with no path to a contract and then expired, orphaning the clause.
+That day 13 of the 101 quarantined drafts were blockers, four of them in front
+of items already in `up_next`. `backlog.live_blockers` is the one definition:
+an open blocker whose blocked item (its own "Blocks #N", else the implement row
+whose `spawned` names it) is still open, or cannot be named. A live blocker is
+not quarantined, goes first in `select_candidate`, is never held by the depth
+gate (`release_held_confirmations` frees one held before the rule), sorts right
+after the near-landing tier in `select_confirmed`, and is never expired — nor
+counted in the scorecard's `over_bound`, which applies the same
+`blocker_liveness`, or the gauge would report the sweep working as broken. When
+the blocked item closes it is an ordinary self-spawn again — quarantined and
+expirable, **not closed**, because the finding can stand on its own (#987, a
+bench with live Bash, was filed as a blocker of a retrieval item). Triage's
+`<origin>` names the blocked item and its status; `board_health` carries
+`live_blockers {open, untriaged}`, and `untriaged` should drain to 0.
+`tests/test_backlog_blockers.py` pins it.
+
 An exhausted queue therefore has two meanings, and `triage_pool` returns the
 held count so the skip summary can say which one it is. "Every open backlog
 item has been triaged" was true, and misleading, on a board of 122 where 106

@@ -200,7 +200,7 @@ behind a fifteen-line helper. `tests/test_backlog_tags_shape.py` pins it.
 | `spawned-by-triage` / `spawned-by-autocode` | This loop filed this item. Two earlier spellings — `spawned-by-autoimplement`, `spawned-by-selfmod` — are still **read** (`SPAWN_TAGS`), because quarantine that stopped recognising an old tag would re-admit every item carrying it to the triage pool at once. Write the newest. |
 | `umbrella` | A consolidation item that carries `members`. Never merged by write-time dedupe. |
 | `grouped` | Folded into an umbrella; out of both pools until that umbrella lands. |
-| `blocker` | The one finding an implement round may still file as its own item. Never merged. |
+| `blocker` | The one finding an implement round may still file as its own item. Never merged. While the item it blocks is open it is *live*: triaged first, never quarantined, held or expired (see **Blockers** below). |
 | `needs-human` | A spent attempt, or a landing whose `human_clauses` are outstanding. `draft` is 456 items deep, so the tag is what makes a decision findable. It comes off when a reopen moves the item back into a pool. |
 | `expired` | Closed by `expire_stale_spawns`. A human setting the status back to `draft` reopens it. |
 
@@ -219,12 +219,37 @@ days, and by 2026-09-11 that was 291 items due to re-enter triage in October,
 each spawning ~2 more. The exits now are the ones that do not re-enter the
 queue they came out of (`released_ids`): **expiry**, and a group triage `keep`.
 `expire_stale_spawns` closes a self-filed `draft` that nothing triaged,
-implemented, clustered or tagged in `spawn_expiry_days()` (14 from config since
-2026-09-13, falling back to `SPAWN_EXPIRY_DAYS` = 30) — `done`,
+implemented, clustered or tagged in `spawn_expiry_days()` (7 from config since
+2026-09-14, 14 the day before, falling back to `SPAWN_EXPIRY_DAYS` = 30) — `done`,
 tagged `expired`, text kept — and never an item carrying `EXPIRY_EXEMPT_TAGS`
-(`grouped`, `umbrella`, `needs-human`, `expired`). The gate keys on the spawn
+(`grouped`, `umbrella`, `needs-human`, `expired`, `confirmed-held`) or a live
+blocker. The gate keys on the spawn
 tags and **not** on `draft`, which is the status of most of a stale backlog: a
 rule that expired drafts would switch the board off rather than bound it.
+
+**Blockers.** An implement round defers a clause to a blocker ("Blocks #N",
+tags `spawned-by-autocode` + `blocker`) and nothing read that tag but
+write-time dedupe, so a blocker was quarantined — no triage, no contract, never
+`up_next` — and then expired, orphaning the clause. On 2026-09-14, 13 of 101
+quarantined drafts were blockers. `live_blockers(ledger)` returns
+`{blocker_id: blocked_id}` for open blockers whose blocked item is open or
+cannot be named; the target is the item's own "Blocks #N" (title, then first
+body line), else the `backlog_implement` row whose `spawned` names it. A live
+blocker:
+
+| Reader | Effect |
+|---|---|
+| `is_quarantined(live=…)` / `triage_pool` | not quarantined |
+| `select_candidate` | ahead of the oldest item |
+| autotriage's hold, `release_held_confirmations` | never held; one held before the rule is released without room |
+| `select_confirmed` | after the near-landing tier, before other confirmations |
+| `expire_stale_spawns`, scorecard `over_bound` | skipped (both through `blocker_liveness`) |
+| autotriage `<origin>` | "a BLOCKER of #N (status)" |
+| `board_health` | `live_blockers: {open, untriaged}` |
+
+Once the blocked item closes the blocker is an ordinary self-spawn again,
+quarantined and expirable — deliberately not closed, since the finding can be
+real without the item that surfaced it. `tests/test_backlog_blockers.py`.
 
 `triage_pool` returns the held count alongside the candidates, so a pass with
 nothing to do can say *which* nothing it means. "Every open backlog item has

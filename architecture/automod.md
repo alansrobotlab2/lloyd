@@ -280,7 +280,11 @@ Two more were found by the first unattended run itself (#229, 2026-09-07:
   clustering pass and a group triage `keep` (§3.2c), expiry, and a human
   reopen. The gate keys on those tags and **not** on `draft`, which is the
   status of most of a stale backlog — a rule that skipped drafts would switch
-  the pass off rather than bound it.
+  the pass off rather than bound it. A **live blocker** — an open `blocker`
+  whose blocked item is still open (`backlog.live_blockers`) — is exempt from
+  quarantine, the depth-gate hold and expiry, and is taken first by triage
+  and early by autocode; until 2026-09-14 it was quarantined and then expired,
+  orphaning the clause deferred to it. `architecture/backlog.md` has the table.
 
   An exhausted queue therefore has two meanings. `backlog.triage_pool` returns
   the held count beside the candidates so the skip summary can say which one:

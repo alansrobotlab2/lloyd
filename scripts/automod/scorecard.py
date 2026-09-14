@@ -76,10 +76,17 @@ def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -
     # Stdlib-only modules, imported lazily so the CLI stays light: the tag
     # set and the bound live in one place and are not restated here.
     from app.backlog_tags import normalize_tags
-    from scripts.automod.backlog import (EXPIRY_EXEMPT_TAGS, loop_spawn_tags,
+    from scripts.automod.backlog import (BLOCKER_TAG, EXPIRY_EXEMPT_TAGS, blocker_liveness,
+                                         blocker_targets, load_item, loop_spawn_tags,
                                          spawn_expiry_days)
     bound_days = spawn_expiry_days()
     spawn_tags = loop_spawn_tags()
+    targets: dict[int, int] | None = None
+
+    def _status_in_dir(iid: int) -> str | None:
+        for p in backlog_dir.glob(f"{int(iid)}-*.md"):
+            return str(_frontmatter(p).get("status", "draft"))
+        return None
     judged: set[int] = set()
     for e in all_events:
         if e.get("item_id") is None:
@@ -116,6 +123,13 @@ def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -
             oldest = max(oldest, age)
             if (fm.get("status") == "draft" and int(m.group(1)) not in judged
                     and not (tags & EXPIRY_EXEMPT_TAGS) and age >= bound_days):
+                if BLOCKER_TAG in tags:
+                    # Expiry skips a live blocker, so the gauge must too.
+                    item = load_item(path)
+                    if targets is None:
+                        targets = blocker_targets(events=all_events)
+                    if item is not None and blocker_liveness(item, targets, _status_in_dir)[0]:
+                        continue
                 over += 1
     return {"count": count, "oldest_days": round(oldest, 1),
             "bound_days": bound_days, "over_bound": over}
