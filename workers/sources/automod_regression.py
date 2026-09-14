@@ -103,7 +103,6 @@ ARMED_METRICS = ("entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg
 REPORT_ONLY = ("latency_ms_avg", "n_queries")
 
 # What the armed set can and cannot see, MEASURED rather than assumed.
-# What the armed set can and cannot see, MEASURED rather than assumed.
 #
 # Measured 2026-09-06 against an empty LLOYD_FACTS_ROOT/LLOYD_KG_DB: with the
 # graph deleted entirely, mrr_doc (0.468), ndcg10 (0.563), doc_hit_rate (0.90)
@@ -130,9 +129,14 @@ REPORT_ONLY = ("latency_ms_avg", "n_queries")
 # healthy because it was never looking. Edge quality has no armed metric and is
 # a stated limit in architecture/automod.md §13, not a covered case.
 #
-# `test_automod_doc_claims` pins the split. Re-arming a doc-side metric means
-# first making the doc corpus part of the pairing — pointing both arms at a
-# pinned qmd index instead of the live daemon.
+# `test_automod_doc_claims` pins the split. The four metrics outside this
+# subset are armed too, and the pin is what makes that honest: `PinnedCorpus`
+# (`scripts/automod/evalpin.py`) freezes the qmd index and fixes one shared
+# `LLOYD_CODE_ROOT`, so both arms score the same documents against the same
+# code, and `execute` refuses to compare without it. A drop on any of the four
+# past 3σ is a rollback reason, not corpus noise. This tuple therefore names
+# which armed metrics read the FACT layer — not a smaller armed set, and not
+# the whole armed set.
 FACT_LAYER_METRICS = ("entity_hit_rate", "entity_recall_avg",
                       "fact_entity_recall_avg")
 # A floor, not a measurement: the eval contributes zero variance, so this only

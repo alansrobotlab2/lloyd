@@ -532,7 +532,7 @@ triaged, implemented, clustered or tagged in `spawn_expiry_days()` —
 `done`, tagged `expired`, text kept. The bound is
 `workers.sources.autocode.expire_spawns_after_days`, 14 since 2026-09-13,
 failing open to `SPAWN_EXPIRY_DAYS` (30; `SPAWN_TRIAGE_MIN_AGE_DAYS` is its
-old alias). At a hardcoded 30 it had never fired — the oldest self-spawn was
+old alias). At a hardcoded 30 it had never triggered — the oldest self-spawn was
 six days old — while 400 self-spawned items sat open, and `over_bound 0`
 read healthy throughout. Expiry, autotriage's skip summary and the scorecard
 gauge all read the one function, or `over_bound` would be measured against
@@ -1051,7 +1051,7 @@ refusals on their own grader output named the causes, heaviest first:
    item so the open round can re-amend it in one call; the rung also filters
    to the round's own, so the cap holds even if that write fails. The same
    pass found the patch-id reuse branch reading `attempt` before assigning
-   it — it had never fired.
+   it — that branch had never run.
 4. **Seams blocked on every attempt.** `seams_block` was never consulted
    under `grader` (decisive in 4 of 21 refusals), and an advisory seam on a
    pass was discarded although the prompt promised the grader it would be
@@ -1660,7 +1660,13 @@ the corpus, and each arm was searching its own source. Pinning qmd alone did
 not fix the false positive: the arms still differed by exactly -0.0060, and
 the query `lloyd-vllm-rel` returned six different files per arm. With both
 halves pinned the arms agree to 0.0000 on all seven metrics, and four repeat
-runs move 0.0000, so all seven are armed again. The pin is a precondition:
+runs move 0.0000.
+
+**All seven are armed:** `entity_hit_rate`, `entity_recall_avg`,
+`fact_entity_recall_avg`, `ndcg10`, `mrr_doc`, `doc_hit_rate`,
+`doc_recall_avg`. Both the count and the names are pinned:
+`tests/test_automod_doc_claims.py` fails if the doc states a set different
+from `ARMED_METRICS`. The pin is a precondition:
 `execute` refuses rather than falling back to the live daemon, which would be
 the old broken comparison wearing the new name.
 
@@ -1677,12 +1683,13 @@ leg). An earlier revision of this section claimed it was CPU-only; that came
 from piping `nvidia-smi --query-compute-apps` through `head`, which cut qmd off
 at entry fourteen of nineteen.
 
-**Only three metrics were armed for a while, and that number came from being wrong.** The
-original seven were chosen because five consecutive runs gave stdev 0.0000 for
-all of them — a real measurement of the wrong thing. It describes repeatability
-inside one short window; the paired A/B runs its arms *minutes* apart, and it
-cancels drift only in what `LLOYD_FACTS_ROOT` and `LLOYD_KG_DB` redirect. The
-document leg comes from neither: it queries the qmd daemon at an absolute
+**The armed set was cut down once, and the size it was cut to came from being
+wrong.** The original set was chosen because five consecutive runs gave stdev
+0.0000 for all of them — a real measurement of the wrong thing. It describes
+repeatability inside one short window; the paired A/B runs its arms *minutes*
+apart, and it cancels drift only in what `LLOYD_FACTS_ROOT` and `LLOYD_KG_DB`
+redirect. The document leg came from neither, and before the pin it came from
+no pin either: the live qmd daemon at an absolute
 `http://localhost:8181/query`, over a vault being written continuously by
 nightly jobs and session capture.
 
@@ -1691,12 +1698,21 @@ an inject string — incapable of touching retrieval — it reported `ndcg10`
 0.5680 → 0.5620 and `mrr_doc` 0.4740 → 0.4680, both "beyond 3σ", and asked for
 a rollback. Three back-to-back runs of identical code and data then gave
 0.0000 spread on every entity metric and **0.0250 on `doc_recall_avg`**, eight
-times its own tolerance. The doc side is not stable across the window this
-check spans; the fact side is. The doc-side four are now reported and never
-fire.
+times its own tolerance. The document leg, unlike the fact side, was not stable
+across the window this check spans — so the four document metrics were pulled
+out of the armed set, which left every graph-to-document change unfalsifiable.
 
-**And the armed three are named for what they actually read.** Two degradation
-drills against copies of the live store:
+That conclusion was right about the symptom and wrong about the cause: the leg
+was unstable because each arm measured a *different* corpus, not because
+document retrieval cannot be measured. Pinning both halves (above) made the
+four repeatable, and they are armed again — `evaluate` loops `ARMED_METRICS`
+and appends a rollback reason for any drop past `SIGMA_MULTIPLIER × σ`, so a
+`doc_recall_avg` delta is now the line that stops a promotion, not noise to be
+ignored. The limit that survives is `latency_ms_avg`: still report-only, still
+never compared.
+
+**And the three fact-layer metrics are named for what they actually read.**
+Two degradation drills against copies of the live store:
 
 | Degradation | Armed metrics | Doc metrics |
 |---|---|---|
@@ -1971,8 +1987,9 @@ from `denied.json` first).
   worse", not "is retrieval good".
 - **Graph EDGE quality is not checked by anything.** Expiring 70% of the
   active edge set moved no metric the eval produces, armed or reported. The
-  armed three read the fact tree and fact index. Covering edges needs a metric
-  that traverses them, and there isn't one.
+  three fact-layer metrics read the fact tree and fact index, and the armed
+  document metrics read the pinned document corpus, not the edges. Covering
+  edges needs a metric that traverses them, and there isn't one.
 - **The pinned corpus is a snapshot of a moving vault.** Both arms see the
   same documents, which is what makes them comparable, but two comparisons run
   a week apart are not comparable to each other. The check answers "did this

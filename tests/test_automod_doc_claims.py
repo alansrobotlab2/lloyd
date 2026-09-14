@@ -6,11 +6,18 @@ worse than no doc: it is the thing someone reads at 3am while deciding whether
 the watchdog can be trusted.
 
 Only claims where being wrong would mislead an operator are pinned here — not
-prose.
+prose. The one class of prose that IS load-bearing: a sentence that disarms a
+metric the code has armed. #505 found `architecture/automod.md` stating the
+document metrics were "reported and never fire" for a week after
+`08e998a` armed all seven, 31 lines below the sentence that said they were
+armed, and an arch-review pass graded the file `current` on top of it. A
+reader who believes that sentence skips the gate on a document-ranking change,
+or discounts a real 3σ rollback signal as noise.
 """
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -22,6 +29,31 @@ sys.path.insert(0, str(ROOT / "agent-services" / "guardian"))
 import policy  # noqa: E402
 
 DOC = ROOT / "architecture" / "automod.md"
+REGRESSION_SRC = ROOT / "workers" / "sources" / "automod_regression.py"
+
+# The doc's canonical statement of the armed set, written so a test can read
+# the number and the names out of it: "**All seven are armed:** `a`, `b`, ...".
+ARMED_STATEMENT_RE = re.compile(
+    r"\*\*All ([a-z]+) are armed:\*\*\s+((?:`[a-z0-9_]+`,?\s*)+)")
+
+NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+# Sentences that tell the reader the document metrics cannot fire. Each one
+# was true while the corpus moved between arms and is false under the pin.
+DISARMING_PHRASES = ("reported and never fire",
+                     "doc-side four are now reported",
+                     "Re-arming a doc-side metric")
+
+
+def _flat(path: Path) -> str:
+    """File text with every run of whitespace collapsed to one space.
+
+    The doc wraps at ~80 columns, so "…reported and never\nfire." is one
+    sentence split across two lines. Matching raw text would let exactly the
+    violation this guards reproduce itself with a newline in the middle.
+    """
+    return " ".join(path.read_text(encoding="utf-8").split())
 
 
 def test_the_doc_exists():
@@ -140,6 +172,83 @@ def test_the_pin_is_a_precondition_not_an_optimisation():
     wearing the fixed one's name."""
     src = (ROOT / "workers" / "sources" / "automod_regression.py").read_text()
     assert "PinError" in src and "pinned corpus unavailable" in src
+
+
+def test_the_doc_states_the_armed_set_the_code_has():
+    """§8.1: the doc must state the armed set the code actually holds.
+
+    The armed set went seven → three → seven and the doc kept the middle
+    value: `architecture/automod.md` said "the armed three" in two places
+    while `ARMED_METRICS` had carried seven since `08e998a`. Pinning the
+    number and every name is the only way a count in prose stays a fact.
+    """
+    from workers.sources import automod_regression as R
+    match = ARMED_STATEMENT_RE.search(_flat(DOC))
+    assert match, ('the doc must state the armed set as '
+                   '"**All N are armed:**" followed by the metric names')
+    stated_count = NUMBER_WORDS[match.group(1).lower()]
+    assert stated_count == len(R.ARMED_METRICS), (
+        f"the doc says {match.group(1)} armed, the code has "
+        f"{len(R.ARMED_METRICS)}")
+    named = re.findall(r"`([a-z0-9_]+)`", match.group(2))
+    assert len(named) == len(R.ARMED_METRICS), (
+        f"the doc names {len(named)} metrics, the code arms "
+        f"{len(R.ARMED_METRICS)}")
+    assert set(named) == set(R.ARMED_METRICS)
+
+
+def test_the_doc_never_disarms_a_metric_the_code_has_armed():
+    """§8.1: "reported and never fire" was false for a week and survived review.
+
+    `evaluate` loops `ARMED_METRICS` and appends a rollback reason for any
+    drop past `SIGMA_MULTIPLIER × σ`, and `execute` refuses to run without the
+    pin (`PinError` → "pinned corpus unavailable"). So a document metric is
+    the line that stops a promotion. A doc saying otherwise is not stale
+    prose, it is an instruction to skip the gate.
+    """
+    from workers.sources import automod_regression as R
+    assert "mrr_doc" in R.ARMED_METRICS, (
+        "this test guards prose that is only false while the document "
+        "metrics are armed; if they are genuinely disarmed, rewrite it")
+    flat = _flat(DOC)
+    for phrase in DISARMING_PHRASES:
+        assert " ".join(phrase.split()) not in flat, (
+            f"architecture/automod.md tells the reader {phrase!r} while the "
+            "code has that metric armed")
+
+
+def test_the_regression_module_comment_never_disarms_an_armed_metric():
+    """§8.1: the same false sentence sat above `FACT_LAYER_METRICS` itself.
+
+    `9a6861c` wrote "Re-arming a doc-side metric means first making the doc
+    corpus part of the pairing"; `08e998a` shipped that pairing eleven hours
+    later and left the sentence standing. The comment beside the tuple is the
+    place a reader looks when they doubt the armed set.
+    """
+    from workers.sources import automod_regression as R
+    assert "mrr_doc" in R.ARMED_METRICS
+    flat = _flat(REGRESSION_SRC)
+    for phrase in DISARMING_PHRASES:
+        assert " ".join(phrase.split()) not in flat, (
+            f"workers/sources/automod_regression.py says {phrase!r} while "
+            "the code has that metric armed")
+
+
+def test_the_doc_still_states_the_limits_that_survive_the_pin():
+    """§8.1/§13: pinning the corpus fixed one limit and left two standing.
+
+    `latency_ms_avg` still moves ~1.7s between a cold and warm embedding
+    cache, and expiring 70% of the active edge set still moves nothing — so
+    edge quality has no armed metric. Rewriting the disarmed-metric prose
+    must not quietly drop either one.
+    """
+    from workers.sources import automod_regression as R
+    assert "latency_ms_avg" not in R.ARMED_METRICS
+    assert "latency_ms_avg" in R.REPORT_ONLY
+    flat = _flat(DOC)
+    assert "it is never compared" in flat, "the latency limit left the doc"
+    assert "Edge quality has no armed metric" in flat, "the edge limit left the doc"
+    assert "Graph EDGE quality is not checked by anything" in flat
 
 
 def test_the_grep_corpus_is_pinnable():
