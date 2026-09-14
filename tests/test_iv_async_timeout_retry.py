@@ -25,10 +25,12 @@ clause by clause (the ids are #458's acceptance clauses):
 Engine seams: the POST seam is stubbed at
 `_post_chat_completion_with_tools` (the one module-level function that
 touches httpx on this path); the probe seam is stubbed at `_probe_engine`
-everywhere except the clause-5 test, which crosses the real probe against
-`httpx.MockTransport` so the 1 s budget is exercised through the same
-client stack production uses. Nothing here opens a socket or writes the
-real usage.db.
+everywhere except the clause-5 test, which binds a silent loopback socket
+and lets httpx's real per-request read timeout fire against it —
+httpx.MockTransport ignores the per-request `timeout` argument entirely,
+so it cannot exercise the 1 s budget. The only socket ever opened is to
+127.0.0.1 on an ephemeral port that nothing but this test's own listener
+owns. Nothing here writes the real usage.db.
 
 Run: .venvs/lloyd/bin/python -m pytest tests/test_iv_async_timeout_retry.py -q
 """
@@ -37,8 +39,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import sqlite3
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -103,8 +107,13 @@ class _Stub:
     async def probe(self, base_url, timeout_seconds):
         self.probes += 1
         self.probe_timeouts.append(timeout_seconds)
-        idx = min(self.probes - 1, len(self.probe_results) - 1)
-        return self.probe_results[idx]
+        if self.probes > len(self.probe_results):
+            raise AssertionError(
+                f"probe call {self.probes} beyond the "
+                f"{len(self.probe_results)}-call script — an unscripted "
+                "probe must not silently reuse the last verdict"
+            )
+        return self.probe_results[self.probes - 1]
 
 
 def _install(monkeypatch, stub: _Stub):
@@ -159,6 +168,10 @@ def test_async_timeout_then_successful_retry_yields_a_verdict_not_a_noop(monkeyp
     assert d.content == "wake up"
     assert d.reason == "primary stalled"
     assert d.input_tokens == 9770 and d.output_tokens == 42
+    # Pre-flight exactly once (the retry answered, so there was no drop to
+    # classify afterwards) — and at the probe budget, not the judgment's.
+    assert stub.probes == 1
+    assert stub.probe_timeouts == [CFG["probe_timeout_seconds"]]
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +185,9 @@ def test_async_call_that_times_out_twice_records_one_drop_and_two_attempts(monke
         monkeypatch,
         _Stub(
             post_behaviours=[httpx.ReadTimeout("a"), httpx.ReadTimeout("b")],
-            probe_results=[_HEALTHY],
+            # pre-flight + post-drop classification; a third probe would
+            # mean a third attempt or a mislabelled drop
+            probe_results=[_HEALTHY, _HEALTHY],
         ),
     )
     d = asyncio.run(
@@ -238,6 +253,100 @@ def test_sync_terminal_call_returns_on_first_deadline_and_never_probes(monkeypat
         f"no retry: {d.error!r}"
     )
     assert d.action == "noop"
+
+
+# ---------------------------------------------------------------------------
+# Clause 3, dispatch level — the flags the call SITES pass. The unit-level
+# tests pin what _call_observer does with the flag; only this test pins
+# that install_observer's own handlers set it correctly.
+# ---------------------------------------------------------------------------
+
+
+def test_observer_dispatch_marks_terminal_sync_and_off_path_async(monkeypatch):
+    """The two terminal handlers must reach `_call_observer` with
+    async_call False; the tool_result handler, with it True.
+
+    Dropping `and not is_terminal` at the terminal assistant_message site,
+    or flipping `async_call` at any site, would put the probe and a full
+    second attempt (about +13 s) on the primary's critical path — or take
+    the retry off the off-critical-path calls — with every unit test green.
+
+    Drives the real `install_observer` hooks over three events: a
+    non-terminal tool_result, a terminal assistant_message (no
+    tool_calls), and `result`. Only `_call_observer` itself is replaced,
+    and it records the flags instead of phoning the engine.
+    """
+    from app.harness.hooks import HookRegistry
+
+    calls: list[dict] = []
+
+    async def recording_call(**kwargs):
+        calls.append(kwargs)
+        return obs_mod.ObserverDecision(action="noop", reason="recorded")
+
+    async def no_goal_card(*a, **kw):
+        return None
+
+    monkeypatch.setattr(obs_mod, "_call_observer", recording_call)
+    monkeypatch.setattr(obs_mod, "extract_goal_card", no_goal_card)
+    monkeypatch.setattr(
+        obs_mod, "record_inner_voice_observation", lambda **kw: len(calls),
+    )
+    cfg = obs_mod._observer_cfg()
+    # sample_every=1 so the tool_result reaches the LLM instead of being
+    # sampled out — sampling is a different guard with its own tests.
+    # fast_path_enabled=False so the terminal assistant_message is judged
+    # by the LLM rather than short-circuited by the fast path.
+    cfg.update({"async_nonterminal": True, "tool_result_sample_every": 1,
+                "fast_path_enabled": False})
+    monkeypatch.setattr(obs_mod, "_observer_cfg", lambda: dict(cfg))
+
+    async def scenario():
+        hooks = HookRegistry()
+        state = obs_mod.install_observer(
+            hooks=hooks, session_id="dispatch-458", turn_id="dispatch_turn",
+            user_request="pin the async_call flags",
+            chat_messages_handle=[], cancel_event=asyncio.Event(),
+            primary_model="stub-model",
+        )
+        await hooks.fire_on_event(
+            {"type": "tool_result", "name": "Bash", "content": "ok",
+             "is_error": False},
+        )
+        await hooks.fire_on_event(
+            {"type": "assistant_message", "text": "All clauses verified.",
+             "tool_calls": [], "iteration": 1},
+        )
+        await hooks.fire_on_event(
+            {"type": "result", "stop_reason": "end_turn",
+             "response_text": "done"},
+        )
+        obs_mod.close_observer(state)
+
+    asyncio.run(scenario())
+
+    by_site: dict[str, list] = {}
+    for c in calls:
+        by_site.setdefault(
+            "async" if c.get("async_call") else "sync", [],
+        ).append(c)
+
+    # The off-critical-path tool_result judgment: async flag True AND the
+    # 12 s deadline — the flag and the budget travel together.
+    assert by_site.get("async"), f"tool_result never judged as async: {calls}"
+    for c in by_site["async"]:
+        assert c["timeout_override"] == CFG["async_timeout_seconds"]
+    # Both synchronous terminal calls (terminal assistant_message +
+    # result): async_call False and NO timeout override, i.e. the tight
+    # 5 s `timeout_seconds` still decides, with no probe or retry able to
+    # attach.
+    assert len(by_site.get("sync", [])) == 2, (
+        f"expected exactly the two terminal calls to run sync, got "
+        f"{by_site.get('sync')}"
+    )
+    for c in by_site["sync"]:
+        assert c.get("timeout_override") is None, c
+        assert c.get("async_call") in (False, None), c
 
 
 # ---------------------------------------------------------------------------
@@ -317,13 +426,14 @@ def test_the_two_stubbed_conditions_produce_different_discriminators(monkeypatch
 
 
 def test_discriminator_is_readable_from_the_observations_table(tmp_path, monkeypatch):
-    """`_persist` writes the discriminator into the `error` column, so
-    `scripts/iv_grade.py`-style queries can separate the two conditions —
-    into a scratch db; the real usage.db is never opened.
+    """The drop path's tagged error reaches the `error` COLUMN, unchanged.
 
-    This crosses the persistence seam: an `error` value that only lived on
-    ObserverDecision would satisfy the unit tests above and still leave the
-    production store as blind as it was.
+    Drives the real `_call_observer` (both attempts timed out against the
+    stub, post-drop probe live → `call_slow`) and persists its decision
+    through `_persist` into a scratch db; the real usage.db is never
+    opened. A tag that only lived on the in-memory ObserverDecision would
+    pass every unit test above and still leave the production store as
+    blind as it was — `scripts/iv_grade.py` reads rows, not objects.
     """
     db = tmp_path / "usage-test-458.db"
     monkeypatch.setattr(usage_store, "DB_PATH", db)
@@ -335,6 +445,20 @@ def test_discriminator_is_readable_from_the_observations_table(tmp_path, monkeyp
         obs_mod, "record_inner_voice_observation",
         usage_store.record_inner_voice_observation,
     )
+    stub = _install(
+        monkeypatch,
+        _Stub(
+            post_behaviours=[httpx.ReadTimeout("a"), httpx.ReadTimeout("b")],
+            probe_results=[_HEALTHY, _HEALTHY],
+        ),
+    )
+    decision = asyncio.run(
+        obs_mod._call_observer(
+            user_prompt="event", cfg=dict(CFG),
+            timeout_override=ASYNC_TIMEOUT, async_call=True,
+        )
+    )
+    assert stub.posts == 2 and "call_slow" in (decision.error or "")
     state = types.SimpleNamespace(
         sequence=0,
         session_id="test-458",
@@ -343,18 +467,15 @@ def test_discriminator_is_readable_from_the_observations_table(tmp_path, monkeyp
         observer_model="stub-model",
         primary_model="stub-model",
     )
-    dropped = obs_mod.ObserverDecision(
-        action="noop", reason="timeout after 12.0s (call_slow)",
-        latency_ms=24512, error="timeout after 12.0s (call_slow)",
-    )
-    asyncio.run(obs_mod._persist(state, dropped, "tool_result", related_tool="Bash"))
+    asyncio.run(obs_mod._persist(state, decision, "tool_result", related_tool="Bash"))
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT action, error, latency_ms FROM inner_voice_observations"
+        "SELECT action, error FROM inner_voice_observations"
     ).fetchall()
     assert len(rows) == 1
-    assert rows[0]["error"] == "timeout after 12.0s (call_slow)"
+    assert rows[0]["action"] == "noop"
+    assert rows[0]["error"] == decision.error
     assert "call_slow" in rows[0]["error"]
 
 
@@ -372,25 +493,29 @@ def test_probe_budget_default_is_1s():
 
 
 def test_unresponsive_engine_is_abandoned_within_2s_of_wall_clock(monkeypatch):
-    """Clause 5, across the real httpx stack: the engine's HTTP layer says
-    nothing for 0.9 s and then dies — the probe's budget, not the POST's,
-    is what decides, and the abandoned row records <= 2,000 ms.
+    """Clause 5, over real TCP with httpx's own read timeout doing the
+    deciding: a socket that accepts connections and never replies.
 
-    The 12 s judgment deadline (12,000 ms) must never be reached, and no
-    engine POST may ever be queued. `latency_ms` is the recorded field the
-    clause names.
+    Deliberately NOT httpx.MockTransport — measured on httpx 0.28.1,
+    MockTransport ignores the per-request `timeout` argument outright (a
+    handler sleeping 5 s under a 1 s budget returned its response after
+    5,005 ms), so a handler that raises ReadTimeout "itself" would prove
+    the abandonment path but never the budget. A silent listening socket
+    exercises the real pool: the handshake completes in the kernel
+    backlog, nothing answers, and httpx's read timeout fires at ~1,000 ms.
+
+    The 12 s judgment deadline (12,000 ms) must never be reached and no
+    engine POST may ever be queued; `latency_ms` and wall clock are both
+    capped at the clause's 2,000 ms.
     """
-    async def silent_then_timeout(request):
-        await asyncio.sleep(0.9)  # sits inside the 1.0 s probe budget
-        raise httpx.ReadTimeout("engine silent")
-
-    client = httpx.AsyncClient(
-        transport=httpx.MockTransport(silent_then_timeout), timeout=None,
-    )
-    monkeypatch.setattr(obs_mod, "_client", lambda: client)
+    silent = socket.socket()
+    silent.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    silent.bind(("127.0.0.1", 0))  # ephemeral port, never listened past backlog
+    silent.listen(1)               # connects succeed; no response ever follows
+    port = silent.getsockname()[1]
     monkeypatch.setattr(
         obs_mod, "_resolve_endpoint",
-        lambda alias=None: ("http://engine.test:9999", "stub-model"),
+        lambda alias=None: (f"http://127.0.0.1:{port}", "stub-model"),
     )
     monkeypatch.setattr(
         obs_mod, "_post_chat_completion_with_tools", _no_post_at_all(),
@@ -403,12 +528,22 @@ def test_unresponsive_engine_is_abandoned_within_2s_of_wall_clock(monkeypatch):
                 timeout_override=ASYNC_TIMEOUT, async_call=True,
             )
         finally:
-            await client.aclose()
+            await obs_mod.aclose_clients()
 
-    d = asyncio.run(run())
+    try:
+        t0 = time.perf_counter()
+        d = asyncio.run(run())
+        wall_ms = (time.perf_counter() - t0) * 1000
+    finally:
+        silent.close()
+
     assert d.error is not None and "engine_unresponsive" in d.error, d.error
+    # The probe's own budget must be what fired — read off the row, not a
+    # coincidence of the 2 s cap.
+    assert "no response in 1.0s" in d.error, d.error
     assert d.latency_ms <= 2000, (
         f"abandoned after {d.latency_ms} ms; the clause caps the drop at "
         "2,000 ms, not the 12,000 ms judgment deadline"
     )
+    assert wall_ms <= 2000, f"wall clock {wall_ms:.0f} ms exceeds the 2,000 ms cap"
     assert d.action == "noop"
