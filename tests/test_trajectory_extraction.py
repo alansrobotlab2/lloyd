@@ -1050,7 +1050,8 @@ CLASS_STEM = "20260912_101010_autocode_beef"   # loop-shaped, used for both clas
 # (platform, inner_voice, expected class). `interactive` appears exactly once, on
 # the clause-2 condition; every other row is a class that is NOT human-initiated
 # work. `browser` stays its own class rather than folding into `inner-voice` even
-# though all 50 browser sessions in the store carry `inner_voice: true`, because
+# though all 50 browser sessions in the store carry `inner_voice: true` (measured
+# 2026-09-14), because
 # #493's open scope question is precisely whether browser/inner-voice turns join
 # the interactive pool — that decision has to be movable in one line here without
 # re-extracting the corpus, and collapsing two platforms into one class would
@@ -1139,10 +1140,23 @@ def test_the_class_comes_from_platform_and_inner_voice(platform, inner_voice, ex
 
 
 def test_interactive_is_exactly_mission_control_without_inner_voice():
-    """One line, both directions of clause 2: nothing else is interactive, and
-    that combination always is."""
-    interactive = {(p, iv) for (p, iv, cls) in SESSION_CLASS_TABLE
-                   if cls == et.INTERACTIVE_CLASS}
+    """Clause 2 in both directions, derived from the classifier and nothing else:
+    every platform the backend records (plus one it does not) crossed with every
+    truthiness outcome of `inner_voice`, and exactly one pair is interactive.
+
+    Not read out of SESSION_CLASS_TABLE — that table is hand-written, so comparing
+    it against a literal set would pass with a classifier that called every session
+    interactive. A classifier that dropped the `inner_voice` condition would fail
+    here, and would fail the live-store oracle below for the same reason.
+    """
+    platforms = ["mission-control", "worker", "autonomy", "browser",
+                 "e2e-harness", "slack", None]
+    inner_voice_values = [True, False, 1, 0, "", None, "true"]
+    interactive = {(p, bool(iv))
+                   for p in platforms for iv in inner_voice_values
+                   if et.classify_session({"platform": p,
+                                           "inner_voice": iv})
+                   == et.INTERACTIVE_CLASS}
     assert interactive == {("mission-control", False)}
 
 
@@ -1209,13 +1223,101 @@ def test_the_exclusion_counts_what_it_dropped_by_class(tmp_path, monkeypatch):
 def test_a_row_with_no_session_class_is_not_treated_as_interactive(
         tmp_path, monkeypatch):
     """The corpus on disk predates the field, so absence must not read as
-    human-initiated work — and it must be attributable, not silent."""
+    human-initiated work — and it must be attributable, not silent.
+
+    The store is redirected to an empty directory: this row's last defence is that
+    nothing behind it answers, which is only the case on a machine with no session
+    file named `old1.json`.
+    """
     corpus = write_traj_corpus(tmp_path / "corpus", [("old1", None)])
     monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
+    empty_store = tmp_path / "emptystore"
+    empty_store.mkdir()
+    monkeypatch.setattr(mt, "SESSION_STORE_DIR", empty_store)
     counts: dict = {}
     kept = mt.load_trajectories(days=9999, agent_filter="all", class_counts=counts)
     assert kept == []
     assert counts["dropped"] == {"uncoded": 1}
+
+
+# ── the corpus↔store join: which side wins ──────────────────────────────────
+#
+# Every live corpus row was written without `session_class` (0 of 1,411 carry it as
+# at 2026-09-14), so the join is not a fallback for old data — it is the path the
+# nightly runs on today, and the only thing standing between the exclusion and a
+# blank corpus. These tests redirect `mt.SESSION_STORE_DIR`, because the branch
+# that decides whether a legacy row is human work needs a store it can be told
+# about.
+
+def isolated_store(tmp_path, monkeypatch):
+    store = tmp_path / "store"
+    store.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(mt, "SESSION_STORE_DIR", store)
+    return store
+
+
+def test_a_class_less_row_is_rescued_as_interactive_by_the_store(
+        tmp_path, monkeypatch):
+    """The positive branch of the join: a legacy row with no emitted class is kept
+    when the session JSON behind it says a human drove it from Mission Control.
+    Without it the exclusion would blank the 7-day window — every live row is
+    class-less — and emit nothing, which is clause 6's forbidden outcome."""
+    store = isolated_store(tmp_path, monkeypatch)
+    write_class_session(store, "20260910_090000_human_aaaa", "mission-control")
+    corpus = write_traj_corpus(tmp_path / "corpus", [("20260910_090000_human_aaaa", None)])
+    monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
+    counts: dict = {}
+    kept = mt.load_trajectories(days=9999, agent_filter="all", class_counts=counts)
+    assert [t["session_key"] for t in kept] == ["20260910_090000_human_aaaa"]
+    assert kept[0]["session_class"] == "interactive"
+    assert counts == {"kept": {"interactive": 1}}
+
+
+def test_a_class_less_row_is_dropped_when_the_store_says_worker(
+        tmp_path, monkeypatch):
+    """The same join, other direction: the loop's own row is dropped by what the
+    session JSON says, not by the name on the file — the fixture's stem is the
+    loop-shaped `2026*_autocode_*` name the old filename rule never matched."""
+    store = isolated_store(tmp_path, monkeypatch)
+    write_class_session(store, CLASS_STEM, "worker", source="autocode")
+    corpus = write_traj_corpus(tmp_path / "corpus", [(CLASS_STEM, None)])
+    monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
+    counts: dict = {}
+    kept = mt.load_trajectories(days=9999, agent_filter="all", class_counts=counts)
+    assert kept == []
+    assert counts["dropped"] == {"worker": 1}
+
+
+def test_the_store_outvotes_an_interactive_stamp_on_a_machine_session(
+        tmp_path, monkeypatch):
+    """A row stamped `interactive` by an older extractor must not survive as human
+    work when the session JSON behind it says `platform: worker` — that row is
+    precisely the one #493 exists to exclude, so the corpus is treated as a derived
+    cache and the store is authoritative."""
+    store = isolated_store(tmp_path, monkeypatch)
+    write_class_session(store, CLASS_STEM, "worker", source="autotriage")
+    corpus = write_traj_corpus(tmp_path / "corpus", [(CLASS_STEM, "interactive")])
+    monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
+    counts: dict = {}
+    kept = mt.load_trajectories(days=9999, agent_filter="all", class_counts=counts)
+    assert kept == []
+    assert counts["dropped"] == {"worker": 1}
+
+
+def test_the_store_outvotes_a_machine_stamp_on_a_human_session(
+        tmp_path, monkeypatch):
+    """The exclusion is not a ratchet that only ever shrinks the pool: a row the
+    extractor mis-stamped `autonomy` is restored to interactive by the store, so
+    real work is not silently lost to a stale field."""
+    store = isolated_store(tmp_path, monkeypatch)
+    write_class_session(store, "20260911_090000_human_bbbb", "mission-control")
+    corpus = write_traj_corpus(
+        tmp_path / "corpus", [("20260911_090000_human_bbbb", "autonomy")])
+    monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
+    counts: dict = {}
+    kept = mt.load_trajectories(days=9999, agent_filter="all", class_counts=counts)
+    assert [t["session_key"] for t in kept] == ["20260911_090000_human_bbbb"]
+    assert kept[0]["session_class"] == "interactive"
 
 
 def test_the_extractor_writes_the_class_the_miner_reads(tmp_path, monkeypatch):
@@ -1395,17 +1497,36 @@ MACHINE_PLATFORMS = {"worker", "autonomy", "e2e-harness"}
 
 
 def test_no_live_corpus_row_is_interactive_on_a_machine_platform():
-    """Read-only. Measured over all 20 corpus buckets on 2026-09-14: 1,411 rows
-    classify as 1,012 worker / 237 autonomy / 79 inner-voice / 54 browser / 26
-    interactive / 3 smoke, and 0 rows violate the rule. Before the change all
-    1,411 carried `agent_id: lloyd` and no class at all, which is how 938 of 1,083
-    loop sessions (the 2026-09-02→12 window measured at triage) reached the
-    frequency gate as if they were Alan."""
-    if not LIVE_CORPUS.is_dir() or not LIVE_STORE.is_dir():
-        pytest.skip("corpus or session store absent on this machine")
+    """Read-only. The acceptance check for #493 as written: join the corpus onto the
+    session store and require zero rows whose effective class is `interactive` while
+    the session's own `platform` is a machine platform.
+
+    Measured over all 20 corpus buckets on 2026-09-14: 1,411 rows classify as 1,012
+    worker / 237 autonomy / 79 inner-voice / 54 browser / 26 interactive / 3 smoke,
+    and 0 rows violate the rule. Before the change all 1,411 carried `agent_id:
+    lloyd` and no class at all, which is how 938 of 1,083 loop sessions (the
+    2026-09-02→12 window measured at triage) reached the frequency gate as if they
+    were Alan.
+
+    Checked on two independent notions of the class, because one of them is
+    vacuous today: `mt.effective_session_class` is store-authoritative, so on its
+    own it could only ever fail through a broken classifier, while the row's
+    *emitted* `session_class` is the extractor's own claim and is what a bad
+    re-extraction would corrupt — no live row carries it yet (0 of 1,411 as at
+    2026-09-14), so that half starts empty and earns its keep after the next
+    extraction run. `machine_rows` is asserted non-zero so neither half can pass on
+    an empty store.
+    """
+    # No skip here, unlike the pre-existing guards in this file: these two are the
+    # only tests that read the real corpus, so a skip would mean the acceptance
+    # check was never graded and nothing downstream could tell.
+    assert LIVE_CORPUS.is_dir(), f"live corpus absent: {LIVE_CORPUS}"
+    assert LIVE_STORE.is_dir(), f"session store absent: {LIVE_STORE}"
     cache: dict = {}
     violations: list[str] = []
+    emitted_violations: list[str] = []
     rows = 0
+    machine_rows = 0
     for bucket in sorted(LIVE_CORPUS.glob("*.jsonl")):
         for line in bucket.read_text(encoding="utf-8", errors="replace").splitlines():
             if not line.strip():
@@ -1415,18 +1536,69 @@ def test_no_live_corpus_row_is_interactive_on_a_machine_platform():
             except json.JSONDecodeError:
                 continue
             rows += 1
-            cls = row.get("session_class") or mt.join_session_class(row, cache)
             session_path = LIVE_STORE / f"{row.get('session_key')}.json"
             if not session_path.is_file():
                 continue
             platform = json.loads(
                 session_path.read_text(encoding="utf-8", errors="replace")
             ).get("platform")
-            if cls == mt.INTERACTIVE_CLASS and platform in MACHINE_PLATFORMS:
+            machine = platform in MACHINE_PLATFORMS
+            machine_rows += machine
+            if mt.effective_session_class(row, cache) == mt.INTERACTIVE_CLASS and machine:
                 violations.append(f"{bucket.name}:{row.get('session_key')}={platform}")
+            if row.get("session_class") == mt.INTERACTIVE_CLASS and machine:
+                emitted_violations.append(
+                    f"{bucket.name}:{row.get('session_key')}={platform}")
     assert rows > 0, "no corpus rows to check, so the assertion below is vacuous"
+    assert machine_rows > 0, (
+        "no corpus row joined to a machine-platform session, so the join itself is "
+        "untested here and the zero below proves nothing")
     assert not violations, (
         f"corpus rows labelled interactive over a machine platform: {violations[:5]}")
+    assert not emitted_violations, (
+        "the extractor wrote `session_class: interactive` onto a machine-platform "
+        f"session: {emitted_violations[:5]}")
+
+
+def test_the_classifier_agrees_with_the_stored_fields_over_every_live_session():
+    """Read-only oracle over the real session store: for every session JSON on this
+    machine, the classifier's answer must equal clause 2 stated directly —
+    `platform == "mission-control"` and `inner_voice` falsy.
+
+    This is the check that survives the corpus being re-extracted: it is computed
+    from the stored session files themselves, not from anything the extractor
+    already wrote, so a classifier mutation trips it even while every corpus row is
+    class-less — verified by mutating the classifier to ignore `inner_voice`, which
+    flags 89 of the 1,688 files on this machine. Measured over those 1,688 files on
+    2026-09-14: 44 classify interactive, and the `inner_voice` flag is what
+    separates them from the rest — 89 of the 133 `mission-control` sessions are
+    inner-voice turns, as are all 50 `browser` ones. `platform` alone would call 133
+    interactive and fail here.
+    """
+    assert LIVE_STORE.is_dir(), f"session store absent: {LIVE_STORE}"
+    files = sorted(LIVE_STORE.glob("*.json"))
+    assert len(files) > 500, f"only {len(files)} session files, so this is vacuous"
+    violations: list[str] = []
+    interactive = 0
+    for path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        expected = et.INTERACTIVE_CLASS if (
+            data.get("platform") == "mission-control" and not data.get("inner_voice")
+        ) else "not-interactive"
+        got = et.classify_session(data)
+        if (got == et.INTERACTIVE_CLASS) != (expected == et.INTERACTIVE_CLASS):
+            violations.append(f"{path.name}: platform={data.get('platform')!r} "
+                              f"inner_voice={data.get('inner_voice')!r} -> {got}")
+        interactive += got == et.INTERACTIVE_CLASS
+    assert not violations, f"classifier disagrees with clause 2: {violations[:5]}"
+    assert 0 < interactive < len(files), (
+        f"interactive={interactive} of {len(files)}: a store with none or all "
+        "interactive means the oracle above cannot discriminate either direction")
 
 
 def test_a_row_the_store_cannot_answer_is_dropped_as_uncoded_and_says_so(

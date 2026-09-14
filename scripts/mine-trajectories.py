@@ -415,22 +415,29 @@ def _extractor_module():
 _EXTRACTOR_MOD: Any = None
 
 
-def join_session_class(traj: dict, cache: dict) -> str:
-    """Class of a corpus row that carries no `session_class`.
+def effective_session_class(traj: dict, cache: dict) -> str:
+    """Class the exclusion filters on, joined from the session store.
 
-    Every row written before the field existed lacks it, and the mining window is
-    7 days while extraction is incremental — so the legacy rows are never rewritten
-    and an exclusion that only understood the new field would blank the corpus for
-    a week and emit nothing (the failure #493 clause 6 forbids). The class is
-    therefore joined in from the session store on `session_key`, which is the
-    corpus↔store join the acceptance check is written on. A row with no session
-    file behind it is `uncoded`: dropped under the exclusion and reported, never
-    assumed human.
+    The store wins over the row's own `session_class` whenever it has the session:
+    the corpus is a derived cache written by `extract-trajectories.py`, so an
+    emitted class can only disagree with the store when the classifier changed —
+    and then the store's answer is the current one. Trusting a stale `interactive`
+    on a session whose JSON says `platform: worker` would reintroduce exactly the
+    row #493 is about, so a mis-stamped row is re-classified, not believed.
+
+    Every row written before the field existed lacks it (all 1,411 live rows as at
+    2026-09-14), and the mining window is 7 days while extraction is incremental —
+    so the legacy rows are never rewritten and an exclusion that only understood
+    the new field would blank the corpus for a week and emit nothing (the failure
+    clause 6 forbids). Hence the join on `session_key`, which is the
+    corpus↔store join the acceptance check is written on. A row with neither an
+    emitted class nor a session file behind it is `uncoded`: dropped under the
+    exclusion and reported, never assumed human.
     """
     key = traj.get("session_key") or ""
     if key in cache:
         return cache[key]
-    resolved = UNCODED_CLASS
+    resolved = None
     if key and "/" not in key and ".." not in key:
         path = SESSION_STORE_DIR / f"{key}.json"
         if path.is_file():
@@ -440,6 +447,10 @@ def join_session_class(traj: dict, cache: dict) -> str:
                 data = None
             if isinstance(data, dict):
                 resolved = _extractor_module().classify_session(data)
+    if resolved is None:
+        # No session JSON: the emitted class is all that is left, and absence of
+        # both is `uncoded`.
+        resolved = traj.get("session_class") or UNCODED_CLASS
     cache[key] = resolved
     return resolved
 
@@ -499,15 +510,14 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker",
                         # the seven newest buckets, measured 2026-09-14 — and
                         # `--agent worker` selects nothing (#494).
                         if exclude_machine:
-                            cls = traj.get("session_class")
-                            if cls is None:
-                                cls = join_session_class(traj, class_cache)
-                                # Stamped, so the class the exclusion filtered on is
-                                # the class `print_stats` reports. Without this a row
-                                # admitted because the store says it is interactive
-                                # prints as `uncoded`, and the histogram contradicts
-                                # the count above it.
-                                traj["session_class"] = cls
+                            cls = effective_session_class(traj, class_cache)
+                            # Stamped with the class the exclusion actually filtered
+                            # on, so `print_stats` cannot contradict the tally above
+                            # it: a row admitted because the store says it is
+                            # interactive would otherwise print as `uncoded`, and a
+                            # row re-classified from the store would print as its
+                            # stale emitted value.
+                            traj["session_class"] = cls
                             if cls == INTERACTIVE_CLASS:
                                 tally("kept", cls)
                             else:
