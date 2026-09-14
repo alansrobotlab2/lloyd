@@ -344,7 +344,9 @@ def test_no_active_skill_prescribes_a_non_canonical_knowledge_type():
 # only the discriminator case below can prove the widening. Verified widening is
 # free: the same scan over every active skill yields no new offenders.
 _INLINE_TYPE_ASSIGNMENT = re.compile(r"(?<![\w_])type:\s*[\"'`]?([A-Za-z0-9_ -]+)[\"'`]?")
-_WRITING_SKILLS = ("deep-research", "medium-research", "quick-research", "ingest")
+# `ingest` left this list when it was archived to skills/.archived/ on
+# 2026-09-13 (#432): the loader skips dot-directories, so it instructs nobody.
+_WRITING_SKILLS = ("deep-research", "medium-research", "quick-research")
 
 
 def test_every_inline_type_instruction_names_a_canonical_value():

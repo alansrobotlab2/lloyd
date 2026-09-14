@@ -529,7 +529,9 @@ def test_the_checkout_holds_no_reference_to_the_dead_retrieval_symbols():
     somewhere else in the tree."""
     hits = []
     for path in ROOT.rglob("*.py"):
-        if ".venvs" in path.parts:
+        # `is_file`: the live tree's fact layer holds an entity directory named
+        # `Router.py` (_pipeline/vault-derived/facts/), which rglob matches.
+        if ".venvs" in path.parts or not path.is_file():
             continue
         text = path.read_text(errors="ignore")
         for literal in UNWIRED_LITERALS:
