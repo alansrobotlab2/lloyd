@@ -46,6 +46,7 @@ What it captures, and why each matters:
 | `~/lloyd/_pipeline/vault-derived/facts/` | 282 MB | The fact layer, 61,392 markdown files. Re-extractable, but that is ~5 GPU-hours. |
 | `~/lloyd/_pipeline/memory-graph/` | small | Merge plans, apply reports, semantic verdicts, `graph-baseline.json`. This is the evidence that makes a bad merge revertable. |
 | `~/lloyd/qmd/` — branch `lloyd` | small (the branch; `node_modules` reinstalls) | **The qmd fork the daemon runs** ([Part 6](#part-6--qmd-vault-search)). The clone is gitignored by this repo and its `lloyd` branch exists only on this disk until pushed: `git -C ~/lloyd/qmd push -u origin lloyd` (origin = `alansrobotlab2/qmd`). Its `WORKLOG.md`/`GAMEPLAN.md` are force-added to that branch, so the push carries them. |
+| `~/lloyd/_pipeline/research/` — `ledger.jsonl`, `rounds/`, `snapshots/` | ~19 MB | **Autoresearch history.** Gitignored and single-copy: the ledger and round reports are the only record of past promotions (the May 2026 threshold data is already gone, #430), and `snapshots/` is what a promotion is restored from. `variants/` regenerates and is skipped. |
 | `~/lloyd/sessions/` | 725 MB | Conversation history. Gitignored. Optional but not recoverable. |
 | `~/backups/backup_*.tar.gz` (latest + `.sha256`) | varies | The daily archive itself. |
 

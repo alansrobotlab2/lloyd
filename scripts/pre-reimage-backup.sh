@@ -93,6 +93,13 @@ fi
 # ── Voice profiles (speaker identification) ──
 copy "voice profiles"          "$REPO/voice_profiles/"                            "lloyd/voice_profiles/"
 
+# ── Autoresearch history: gitignored and single-copy (#430). The ledger and
+#    round reports are the only record of past promotions, and snapshots/ is
+#    the rollback target a promotion restores from. Variants are regenerable.
+copy "autoresearch ledger"     "$REPO/_pipeline/research/ledger.jsonl"            "lloyd/_pipeline/research/ledger.jsonl"
+copy "autoresearch rounds"     "$REPO/_pipeline/research/rounds/"                 "lloyd/_pipeline/research/rounds/"
+copy "autoresearch snapshots"  "$REPO/_pipeline/research/snapshots/"              "lloyd/_pipeline/research/snapshots/"
+
 # ── Conversation history ──
 if [[ "$INCLUDE_SESSIONS" == "1" ]]; then
     copy "sessions"            "$REPO/sessions/"                                  "lloyd/sessions/"

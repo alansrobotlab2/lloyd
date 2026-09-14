@@ -158,6 +158,10 @@ autoresearch:
   ledger_path: ~/lloyd/_pipeline/research/ledger.jsonl
   max_variants_per_round: 7
   promotion:
+    # Kept at 0.5 on 2026-09-13 (Alan, #428): the first measurement found 0/65
+    # promoted rounds dropped past the ledger's own noise floor (0.1289), which
+    # is #352's "<20% keep" band. knowledge/evaluation/
+    # autoresearch-promotion-fp-rate-at-threshold-0p5.md has the derivation.
     min_bench_win_fraction: 0.5
     min_composite_delta: 0.05
     require_safety_pass: true
@@ -903,6 +907,10 @@ workers:
     # #506 closes the rest — `variant.json` written with `json.dump`, and the
     # snapshot directory wired up as a real rollback target. Flip `enabled` to
     # re-arm; nothing else needs changing.
+    #
+    # 2026-09-13 (Alan): #506 is done, but do NOT re-arm yet — since fe40af3
+    # `run_round` never benches a variant (#876), so every round is baseline-
+    # only and can promote nothing. Re-arm once #876 lands.
     autoresearch:
       enabled: false
       interval_seconds: 3600
