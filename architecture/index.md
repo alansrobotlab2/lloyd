@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, index]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-09-14
 ---
 
 # Lloyd — architecture index
@@ -55,8 +55,8 @@ turns out to describe something gone or never built is moved to
 | [[workers-jobs]] | one entry per worker source: what wakes it, what it writes, and what it is actually doing |
 | [[background-runs]] | every background run is recorded; Inner Voice observation is opt-in; the Background tab |
 | [[autonomy]] | the scheduled-task mechanism: the five due-gates, failure backoff, the deadline anchor, run records, fleet health |
-| [[autonomy-jobs]] | what each of the 32 scheduled jobs is *for* — the reflection chain, trace2skill, the graph chain, vault hygiene, inbound signal |
-| [[automod]] | self-modification: worktree, nine-rung gate, review rung, promoter, guardian rollback, triage/implement, clustering, group triage |
+| [[autonomy-jobs]] | what each scheduled job is *for* — the reflection chain, trace2skill, the graph chain, vault hygiene, inbound signal |
+| [[automod]] | self-modification: worktree, the gate ladder, review rung, promoter, guardian rollback, triage/implement, clustering, group triage |
 | [[backlog]] | the markdown kanban at `~/obsidian/backlog/` and its tools |
 | [[arch-review]] | the pass that keeps these docs honest: a picklist of docs and functional groups, one session each, the doc edits itself |
 
@@ -101,6 +101,23 @@ model-resolution rules belong beside the loop that resolves them.
 
 `groundskeeper`, `morning-briefing`, `nightly-reflection` and
 `nightly-skills-management` went into [[autonomy-jobs]]. They were four docs
-about eight of the fleet's 32 scheduled jobs, which left 24 with no description
-anywhere — over-documenting a quarter of the fleet and ignoring the rest. One
-doc per *job family* replaces them, and [[autonomy]] keeps the mechanism.
+about a handful of the fleet's scheduled jobs, which left most of it with no
+description anywhere — over-documenting a quarter of the fleet and ignoring the
+rest. One doc per *job family* replaces them, and [[autonomy]] keeps the
+mechanism.
+
+## Review log
+
+- **2026-09-14 — `stale`.** The counts had rotted in the three days since the
+  curation: the fleet is 33 tasks, not 32, and the gate ladder is ten rungs, not
+  nine (`prompt_surface` joined on 2026-09-12). Both numbers now come from their
+  owners — the Covers rows say "each scheduled job" and "the gate ladder" and
+  name no integer, because a hand-typed count here is a third definition of a
+  set `GET /api/autonomy/tasks` and `gate.py`'s ladder list already own. The
+  22-document list, the `.archive/` claims (gitignored, untracked, 11 retired +
+  6 absorbed) and the GPU allocation table all still check out; the two rosters
+  this page advertises are short by one member each — filed as #919 (rung
+  ladder, in `automod.md`), #1015 (`board-steward`, in `workers-jobs.md`) and
+  #1102 (#86, in `autonomy-jobs.md`). Nothing checks this page's own listing
+  against the directory it describes, and six sibling docs carry no `status:`
+  the convention recognises — #1103, #1104.
