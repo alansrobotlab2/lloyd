@@ -130,6 +130,77 @@ async def test_sandboxed_bash_reads_but_cannot_delete(dispatch):
         shutil.rmtree(victim, ignore_errors=True)
 
 
+def _proc_net_unix(tmp_path, paths) -> str:
+    """A `/proc/net/unix` in the kernel's column layout, listing `paths`."""
+    src = tmp_path / "unix"
+    rows = ["Num       RefCount Protocol Flags    Type St Inode Path"]
+    rows += [f"0000000000000000: 00000002 00000000 00010000 0001 01 {i + 100} {p}"
+             for i, p in enumerate(paths)]
+    src.write_text("\n".join(rows) + "\n")
+    return str(src)
+
+
+def test_only_sockets_this_user_could_reach_are_covered(tmp_path):
+    """An unreachable socket cannot be connected to from inside the sandbox
+    either, and trying to cover it is what broke the build (a libvirt VM's
+    monitor socket under a directory this user cannot enter, 2026-09-14)."""
+    import os
+    import socket
+    base = Path.home() / ".cache" / f"lloyd-sock-{uuid.uuid4().hex[:8]}"
+    (base / "open").mkdir(parents=True)
+    (base / "shut").mkdir()
+    socks = []
+    try:
+        paths = {}
+        for name in ("open", "shut"):
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            paths[name] = str(base / name / "s.sock")
+            s.bind(paths[name])
+            s.listen(1)
+            socks.append(s)
+        os.chmod(base / "shut", 0)
+        if os.access(paths["shut"], os.W_OK):
+            pytest.skip("running with privileges that ignore directory modes")
+        gone = str(base / "gone.sock")
+        listed = S._host_socket_paths(_proc_net_unix(
+            tmp_path, [paths["open"], paths["shut"], gone, "/tmp/x.sock", paths["open"]]))
+        assert listed == [paths["open"]]
+    finally:
+        for s in socks:
+            s.close()
+        os.chmod(base / "shut", 0o700)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.mark.skipif(S.bwrap_path() is None, reason="bubblewrap not installed")
+def test_an_unreachable_socket_does_not_break_the_build(tmp_path, monkeypatch):
+    """The failure itself, end to end: with an unenterable socket path listed,
+    the real bwrap still builds and the write probe is still refused."""
+    import os
+    base = Path.home() / ".cache" / f"lloyd-sock-{uuid.uuid4().hex[:8]}"
+    (base / "shut" / "deep").mkdir(parents=True)
+    try:
+        os.chmod(base / "shut", 0)
+        if os.access(base / "shut" / "deep", os.X_OK):
+            pytest.skip("running with privileges that ignore directory modes")
+        source = _proc_net_unix(tmp_path, [str(base / "shut" / "deep" / "monitor.sock")])
+        real = S._host_socket_paths
+        monkeypatch.setattr(S, "_host_socket_paths", lambda: real(source))
+        monkeypatch.setitem(S._probe, "ok", None)
+        ok, err = S.sandbox_available()
+        assert ok, err
+        # Counterfactual: covering it anyway is the 2026-09-14 failure.
+        monkeypatch.setattr(S, "_host_socket_paths",
+                            lambda: [str(base / "shut" / "deep" / "monitor.sock")])
+        monkeypatch.setitem(S._probe, "ok", None)
+        ok, err = S.sandbox_available()
+        assert not ok and "bwrap exited" in err, err
+    finally:
+        os.chmod(base / "shut", 0o700)
+        shutil.rmtree(base, ignore_errors=True)
+        S._probe.update(ok=None, at=0.0, error="")
+
+
 async def test_no_sandbox_means_no_bash(dispatch, monkeypatch):
     monkeypatch.setattr(S, "bwrap_path", lambda: None)
     monkeypatch.setitem(S._probe, "ok", None)

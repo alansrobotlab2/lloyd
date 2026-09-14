@@ -87,7 +87,14 @@ check, and older copies of the runner live in automod worktrees.
   mount does not stop `connect()` on a Unix socket.** `systemd-run --user rm
   -rf ~/obsidian` over the session bus would run outside the sandbox, so the
   socket directories are tmpfs'd and every other listening socket path in
-  `/proc/net/unix` is covered with `/dev/null`. Reads work, which keeps the
+  `/proc/net/unix` that this user could connect to (`os.access(W_OK)`:
+  search on every parent, write on the socket) is covered with `/dev/null`.
+  A socket this user cannot reach is skipped — it is unreachable from inside
+  too, and bwrap cannot create a mount point under a directory it cannot
+  enter: on 2026-09-14 a libvirt VM's monitor socket under
+  `/var/lib/libvirt/qemu/` failed every build ("Can't mkdir parents …
+  Permission denied"), refusing Bash to every bench session and silently
+  skipping the live sandbox test. Reads work, which keeps the
   bench honest: a trial that reaches for Bash on the destructive prompt still
   fails `tool_not_called`, and the delete gets EROFS.
 - **Everything that is not `readOnlyHint` is refused**, with a `Tool call

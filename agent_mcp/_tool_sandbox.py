@@ -92,11 +92,25 @@ def bwrap_path() -> str | None:
     return shutil.which("bwrap")
 
 
-def _host_socket_paths() -> list[str]:
-    """Listening Unix socket paths outside the tmpfs-replaced directories."""
+def _host_socket_paths(source: str = "/proc/net/unix") -> list[str]:
+    """Listening Unix socket paths outside the tmpfs-replaced directories that
+    this user could connect to.
+
+    `connect()` on a path socket needs search permission on every directory
+    above it and write permission on the socket, so one that fails
+    `os.access(W_OK)` (or no longer exists) is unreachable from inside the
+    sandbox too — it runs as this user with every capability dropped — and
+    covering it buys nothing. It also cannot be covered: bwrap has to create
+    the mount point, and on 2026-09-14 a libvirt VM's
+    `/var/lib/libvirt/qemu/domain-2-…/monitor.sock` (under a directory this
+    user cannot enter) made every build fail with "Can't mkdir parents …
+    Permission denied" — no Bash for any bench session, and the live sandbox
+    test silently skipped. The list is rebuilt per call while a passing probe
+    is cached, so a socket like that appearing after boot broke every trial
+    under a `/state` that still read `bwrap: true`."""
     out: list[str] = []
     try:
-        with open("/proc/net/unix", encoding="utf-8", errors="replace") as fh:
+        with open(source, encoding="utf-8", errors="replace") as fh:
             next(fh, None)
             for line in fh:
                 fields = line.split()
@@ -106,8 +120,9 @@ def _host_socket_paths() -> list[str]:
                 if path.startswith(tuple(d + "/" for d in _TMPFS_DIRS)) or \
                         path.startswith(("/var/run/", "/dev/")):
                     continue
-                if path not in out:
-                    out.append(path)
+                if path in out or not os.access(path, os.W_OK):
+                    continue
+                out.append(path)
     except OSError:
         pass
     return out
