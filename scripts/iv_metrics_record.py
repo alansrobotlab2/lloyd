@@ -51,8 +51,8 @@ status is the agent's turn, which exits 0 whether or not the series breached. Wh
 closes that seam is not this script — it is the printed verdict line, which on a breach
 contains the literal text `exit code 2`, which is what `_detect_silent_failures`
 (`autonomy.py:26-33`, regex at `:29`) scans a run's final prose for. Quote the line and the run is
-flagged; that is the only automated surface, and `alert: true` in the task frontmatter
-is what carries it to a human. See `EXIT_BREACH` for why the number is in the prose.
+flagged; that is the only automated surface, and the task's `description`, which is what
+`_build_task_prompt` injects, is what tells the agent to quote the line. See `EXIT_BREACH` for why the number is in the prose.
 """
 
 from __future__ import annotations
@@ -382,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
         # which is 0 either way. The alert is the prose `_verdict` printed above —
         # it carries the literal text "exit code 2", which `_detect_silent_failures`
         # (`autonomy.py:26-33`, regex at `:29`) matches out of the run's summary — and the task's
-        # `alert: true` carries that flag to a human. Pinned by
+        # the run's report body is where a person sees it. Pinned by
         # tests/test_iv_metrics_series.py::a_breach_verdict_trips_the_runner_detector.
         print(verdict, file=sys.stderr)
     return EXIT_BREACH if breach else 0
