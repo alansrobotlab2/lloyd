@@ -722,7 +722,10 @@ automod:
   # Ships OFF: the plan turns it on after the turn-end reaper and the
   # land.running marker (a round waiting to land must not be reaped while it
   # waits) have run in production for 2-3 days.
-  chamber: false
+  # ON 2026-09-15 (Alan): one day of both in production, the three reaper
+  # calls in the log were all correct, and the observation windows were
+  # costing ~2 h/day of round time against a 156-item confirmed queue.
+  chamber: true
   # A round may only be opened from a turn with Inner Voice attached. Two
   # reasons: the observer watches the one activity that rewrites production,
   # and an IV session is the only kind the Inner Voice tab lists, so this is
@@ -971,8 +974,30 @@ workers:
       # (backlog.dedupe) and a group run closes several at once, so the
       # cadence is bounded by the work, not by its own output. Two pool
       # slots and the KV gate arbitrate against an in-flight autocode round.
-      interval_seconds: 900
+      # 900 -> 300 (Alan, 2026-09-15) for the sweep: a batch takes ~5 min,
+      # so 300 s is back-to-back while the board is being read. Put it back
+      # to 900 once `round sweep-status` reads unswept 0.
+      interval_seconds: 300
       max_inflight: 1
+      # The sweep (2026-09-15, Alan's "switch gears"): while any open item
+      # is unread, a run takes `sweep_batch` items in one turn instead of a
+      # cluster or a single item, quarantine lifted, and either retires each
+      # (stale / already_done / duplicate_of) or ranks it (worth × size on
+      # the item, tag `swept`; a `low` draft is also `parked`: out of every
+      # pool, never expired, promoted by removing the tag). Every pool then
+      # orders on the rank (backlog.rank_key). Autocode yields to it
+      # (`yield_to_sweep` below), so the board of ~560 is read in a day
+      # rather than in the gaps between rounds. Group and single triage
+      # resume by themselves once `round sweep-status` reads unswept 0.
+      # Off: never runs, nothing yields.
+      sweep: true
+      sweep_batch: 8
+      sweep_max_turns: 60
+      # Off (2026-09-15): 56 umbrellas of 8-12 clauses sat in up_next landing
+      # 1 in 5, and `round unfold-oversized` sent their members back to be
+      # ranked. A group triage still closes duplicates and retires the stale;
+      # it folds nothing until the implement pool is under its bound again.
+      form_umbrellas: false
       # Group mode: when clusters.json (the nightly backlog-cluster source)
       # holds a cluster with >= group_min_items untriaged members, this run
       # takes the cluster instead of one item and consolidates it — closes
@@ -1087,6 +1112,12 @@ workers:
       enabled: true
       interval_seconds: 900
       retry_seconds: 60
+      # No round starts while autotriage's sweep still has open items to
+      # read (backlog.sweep_pending > 0); the poll is declined and retried in
+      # retry_seconds. Rounds resume on their own when the sweep is done or
+      # switched off. Off: rounds and the sweep share the engine as before,
+      # with the round hold keeping the sweep to the gaps.
+      yield_to_sweep: true
       max_inflight: 1
       max_duration_seconds: 3600
       # 150, not 100 — the code's own default and its reason
@@ -1123,7 +1154,13 @@ workers:
       # was 733 created against 209 closed, and 79 quarantined drafts sat
       # waiting on a bound that had not yet come due. Closed items keep their
       # text and reopen by setting status back to draft.
-      expire_spawns_after_days: 7
+      # 7 -> 30 (Alan, 2026-09-15): expiry was the ONLY exit for a quarantined
+      # draft, so it closed items nothing had read — 27 were due within 24 h
+      # and 29 of the 82 quarantined were youtube-eval ideas. The sweep
+      # (autotriage.sweep) now reads every item once and ranks it; a swept
+      # item is expiry-exempt, so this bound only reaches what the sweep has
+      # not yet seen.
+      expire_spawns_after_days: 30
       # When an umbrella (a group-triage consolidation) lands `met`, its
       # members close with it. Off: members stay folded until a human
       # unfolds the umbrella.

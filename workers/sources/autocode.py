@@ -692,6 +692,20 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
         _last_decline["why"] = why
         return DECLINED
     _last_decline["why"] = ""
+    # The gear change (2026-09-15): while autotriage's sweep still has open
+    # items to read, no round starts. The round hold would otherwise keep the
+    # sweep to the gaps between rounds — a third of the wall clock — and a
+    # day of no landings buys every item on the board a reading and a rank.
+    # Rounds resume by themselves when `sweep_pending` reaches 0. Ships off
+    # like the sweep itself; config.yaml turns both on for the sprint.
+    if bool(src_cfg.get("yield_to_sweep", False)):
+        pending = await asyncio.to_thread(B.sweep_pending, S.LEDGER_PATH)
+        if pending:
+            why = f"yielding to the backlog sweep ({pending} item(s) unread)"
+            (logger.info if why != _last_decline["why"] else logger.debug)(
+                "autocode: not queueing — %s", why)
+            _last_decline["why"] = why
+            return DECLINED
     # A round row still queued or running coalesces any enqueue below. Asked
     # first, because `select_confirmed` walks the whole board (~2 s) and a
     # decline is retried every `retry_seconds`.

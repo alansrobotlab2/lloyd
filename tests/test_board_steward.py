@@ -295,7 +295,7 @@ def test_board_health_partitions_the_board(board):
     h = B.board_health(S.LEDGER_PATH)
     assert h["open"] == {"draft": 6, "up_next": 3}
     assert h["draft"] == {"pool": 2, "quarantined": 1, "grouped": 1, "needs_human": 1,
-                          "held": 0, "triaged": 1, "total": 6}
+                          "held": 0, "parked": 0, "triaged": 1, "total": 6}
     assert h["draft"]["total"] == sum(v for k, v in h["draft"].items() if k != "total")
     assert h["up_next"] == {"total": 3, "umbrellas": 1, "singles": 2, "never_attempted": 2,
                             "ready": 2, "unready": 1}

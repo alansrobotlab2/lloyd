@@ -894,6 +894,99 @@ would become `confirmed-held`, which expiry exempts. The scorecard gauge now
 coerces tags through `normalize_tags`, since the digest has written them as a
 string.
 
+### 3.2e The sweep: switching gears to read the whole board once
+
+**The measurement (2026-09-15, 7 d of `promotions.jsonl` and `workers.db`).**
+Triage was not the slow part: 50–66 single runs a day at 216 s each, 73%
+`confirmed`. Implement was: 178 rounds ended, 57 promoted (32%), the first
+review refusing 74%, 88 h of 168 h idle between implement turns, ~10.6
+distinct items landed a day (5 of them vault). Confirmations therefore
+arrived ~3× faster than landings — 156 confirmed items queued (87 ready, 69
+held), 64 of 88 `up_next` never attempted — and the board could not be
+"caught up" by implementing. Two structures made it worse: 56 of the 88
+`up_next` were umbrellas, every one with 8–12 clauses from before
+`group_max_items` fell to 4, landing 5 of 27 rounds against 52 of 151 for
+singles, with 158 members folded under them; and 82 quarantined drafts had
+never been read by anything, because quarantine's only exits were
+clustering (exhausted), a group `keep`, a human, and expiry — 27 were due to
+close unread within 24 h, 29 of the 82 were `youtube-eval` ideas. Expiry,
+the bound §3.2c added, had become the mechanism by which the board lost
+sight of work.
+
+**The shape.** "Caught up" means every item read and ranked by a reader,
+within days, and the loop then working the best items first while the long
+tail waits in the open. Four moves, each with a switch:
+
+- *Sweep mode* (`workers.sources.autotriage.sweep`, ships off). While
+  `backlog.sweep_pool` is non-empty, `autotriage.execute` takes
+  `sweep_batch` (8) items in one turn before it considers a cluster or a
+  single item. The pool is every open `draft` or `up_next` item not yet
+  swept or parked, not grouped, not an umbrella, not `needs-human` or
+  `expired`, and not in a batch abandoned twice — quarantine does **not**
+  apply, since reading a self-filed item once is the point; never-judged
+  items first, then oldest. `SWEEP_PROMPT` asks one question per item —
+  is it dead? — answered from the text or one cheap check, and otherwise
+  `keep` with `worth` (high / medium / low, the rubric in the prompt) and
+  `size` (small / medium / large). The turn runs under `SWEEP_DISALLOWED`
+  (no `Edit`, `Write`, `backlog_write_task`, `vault_write`, `Task`, the
+  automod and autonomy tools), so it is read-only by construction rather
+  than by instruction, and it files and appends nothing. `parse_sweep_verdict`
+  reads the finalizer's `SWEEP_SCHEMA` object or the `SWEEP_VERDICTS:` block;
+  an unlisted member is **not** filled in as `keep` — it stays unswept and is
+  offered again, because a rank the turn never wrote is not a rank.
+  `record_sweep_verdicts` writes retirements through `record_verdict` with an
+  ordinary `backlog_triage` row (`sweep_batch` on it), so `triaged_ids`, the
+  status pipeline and the scorecard see a normal close; `duplicate_of` may
+  name any open item on the board, resolved by `_resolve_duplicates` with
+  the open external targets treated as members, and a closed, parked or
+  missing target makes it a `keep`. A `keep` writes `worth`/`size` and the
+  `swept` tag; a `low` draft is also `parked`. A `low` confirmed item is only
+  ranked — the implement order sorts it last — because parking a
+  confirmation would fight the reconciler. The summary row is `backlog_sweep`
+  (`batch_id`, `judged`, `ranked`, counts). A batch that reaches no verdict
+  block is `incomplete` once — the same batch is re-selected, its items
+  being still unswept — and `abandoned` the second time (`item_ids` on the
+  row, read by `sweep_abandoned_ids`), after which those items are left to
+  the ordinary passes.
+- *Parked replaces expiry as the exit.* `parked` is out of `triage_pool`,
+  `select_candidate` and `select_cluster`, counted as its own `draft`
+  bucket in `board_health` and on the dashboard, and in `EXPIRY_EXEMPT_TAGS`
+  with `swept`. A person promotes it by removing the tag. Expiry
+  (`expire_spawns_after_days`) went 7 → 30 the same day and reaches only
+  what the sweep has not read.
+- *The rank orders every pool.* `Item` carries `worth`, `size` and
+  `clause_count` from front matter; `rank_key` is (worth, size) with
+  unranked between medium and low. `select_candidate` sorts by live
+  blocker, rank, age; `select_confirmed` by near tier, rank, clause count,
+  then the existing keys; `release_held_confirmations` fills room best
+  first. Swept ids are in `released_ids`, so a swept self-spawn enters
+  single triage. The single prompt's `<origin>` says the sweep's rank so
+  the contract fits the size.
+- *Autocode yields* (`workers.sources.autocode.yield_to_sweep`, ships off;
+  config turns it on for the sprint): `enqueue_if_due` returns `DECLINED`
+  while `sweep_pending` > 0, so the sweep runs back to back rather than in
+  the gaps the round hold leaves it (a third of the wall clock). A day of
+  no landings buys the whole board a reading; rounds resume on their own
+  when the pool empties or the sweep is switched off.
+- *Umbrellas.* `form_umbrellas: false` on autotriage appends
+  `NO_UMBRELLA_RULE` to the group prompt and records a `fold` as `keep`
+  with no umbrella confirmed, so group triage still closes duplicates and
+  retires the stale while the pool is over its bound.
+  `unfold_oversized_umbrellas` (`round unfold-oversized`, `--min-clauses 8`,
+  `--dry-run`) unfolds every never-attempted open umbrella with at least
+  that many clauses and closes it `done` tagged `unfolded`; a member's
+  `folded` row is not a verdict, so it goes back to `draft` untriaged where
+  the sweep reads it, and it does not re-cluster (`group_triaged_ids`). An
+  attempted, landing or landed umbrella is not touched.
+
+`round sweep-status` reports `board_health.sweep` (`unswept`, `swept`,
+`parked`, `worth`), worth × size over the open items and the last batches.
+Sprint settings to undo when `unswept` reads 0: `autotriage.interval_seconds`
+300 → 900; `form_umbrellas` back on once `implement_pool.ready` is under
+`bound`. `tests/test_backlog_sweep.py` pins the pool, the parser, the
+recorder, the rank ordering in all three pools, the yield, the umbrella
+switch and the unfold.
+
 ### 3.3 For humans (this repo's development)
 
 `/home/alansrobotlab/lloyd` is production. Non-trivial work belongs in the

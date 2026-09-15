@@ -822,6 +822,9 @@ def test_a_landing_owns_its_marker_and_a_dry_run_leaves_it_alone(monkeypatch, tm
     monkeypatch.setattr(R.S, "Lock", lambda owner="": type("L", (), {
         "acquire": lambda self: self, "release": lambda self: None})())
     monkeypatch.setattr(S, "require_enabled", lambda *a, **k: None)
+    # With `automod.chamber` on in config.yaml, `land` first waits for the
+    # LIVE state dir's observed promotion to settle — not this test's business.
+    monkeypatch.setattr(R.P, "wait_for_settle", lambda **k: None)
     (tmp_path / "SM_L").mkdir()
     (tmp_path / "SM_L" / "gate.json").write_text(json.dumps({"ok": True, "base": "b" * 40}))
     R.land("SM_L")

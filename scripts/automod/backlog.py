@@ -840,6 +840,14 @@ class Item:
     parent: int | None = None
     group: int | None = None
     members: list[int] = field(default_factory=list)
+    # The sweep's rank (`record_sweep_verdicts`): `worth` in WORTH_LEVELS,
+    # `size` in SIZE_LEVELS, both "" until a sweep has read the item. Read by
+    # `rank_key`, which orders every pool. `clause_count` is the contract on
+    # disk, so the implement order can prefer a small one without re-reading
+    # the file.
+    worth: str = ""
+    size: str = ""
+    clause_count: int = 0
 
     @property
     def age_days(self) -> int:
@@ -887,7 +895,15 @@ def load_item(path: Path) -> Item | None:
         parent=_int_or_none(fm.get("parent")),
         group=_int_or_none(fm.get("group")),
         members=_ints(fm.get("members")),
+        worth=_level(fm.get("worth"), WORTH_LEVELS),
+        size=_level(fm.get("size"), SIZE_LEVELS),
+        clause_count=len(fm["acceptance_clauses"]) if isinstance(fm.get("acceptance_clauses"), list) else 0,
     )
+
+
+def _level(v, levels: tuple[str, ...]) -> str:
+    s = str(v or "").strip().lower()
+    return s if s in levels else ""
 
 
 def _int_or_none(v) -> int | None:
@@ -2147,6 +2163,40 @@ NEEDS_HUMAN_TAG = "needs-human"
 # `held_confirmations`.
 HELD_TAG = "confirmed-held"
 
+# ── The sweep's rank ────────────────────────────────────────────────────────
+#
+# A sweep (`select_sweep_batch` / `record_sweep_verdicts`, driven by
+# autotriage's sweep mode) reads a batch of items in one turn and either
+# retires each one or ranks it: `worth` (how much the system gains) and
+# `size` (what a round would cost). The rank is written to front matter and
+# tagged `swept`; a `low` draft is also tagged `parked`. Parked is the
+# replacement for expiry as the exit for an item nobody asked for: still
+# open, visible, out of every pool, never expired, and a person promotes it
+# by removing the tag. `rank_key` orders the triage pool, the implement pool
+# and the held-confirmation release, so the loop works the best item it
+# knows about rather than the oldest.
+SWEPT_TAG = "swept"
+PARKED_TAG = "parked"
+WORTH_LEVELS = ("high", "medium", "low")
+SIZE_LEVELS = ("small", "medium", "large")
+# Unranked sorts between medium and low: the sweep has not read it yet, and
+# an item the sweep called medium was judged worth more than a guess.
+_WORTH_ORDER = {"high": 0, "medium": 1, "": 2, "low": 3}
+_SIZE_ORDER = {"small": 0, "medium": 1, "": 1, "large": 2}
+
+
+def rank_key(item: Item) -> tuple[int, int]:
+    """Sort key: worth first, then size. Lower is better."""
+    return (_WORTH_ORDER.get(item.worth, 2), _SIZE_ORDER.get(item.size, 1))
+
+
+def is_swept(item: Item) -> bool:
+    return SWEPT_TAG in item.tags
+
+
+def is_parked(item: Item) -> bool:
+    return PARKED_TAG in item.tags
+
 
 def set_status(item_id: int, status: str, why: str, *,
                add_tags: tuple[str, ...] = (), remove_tags: tuple[str, ...] = ()) -> bool:
@@ -2477,8 +2527,10 @@ def is_loop_spawned(item: Item) -> bool:
 EXPIRED_TAG = "expired"
 # Never expired: a member's fate is its umbrella's, an umbrella is confirmed
 # work, a `needs-human` item is waiting on a decision, and an expired item
-# has already been judged once.
-EXPIRY_EXEMPT_TAGS = frozenset({"grouped", "umbrella", NEEDS_HUMAN_TAG, EXPIRED_TAG, HELD_TAG})
+# has already been judged once. A swept or parked item has been read and
+# ranked by the sweep, which is the exit expiry used to be.
+EXPIRY_EXEMPT_TAGS = frozenset({"grouped", "umbrella", NEEDS_HUMAN_TAG, EXPIRED_TAG, HELD_TAG,
+                                SWEPT_TAG, PARKED_TAG})
 
 
 def expired_ids(ledger: Path) -> set[int]:
@@ -2514,10 +2566,26 @@ def group_keep_note(ledger: Path, item_id: int) -> dict | None:
     return found
 
 
+def swept_ids(ledger: Path) -> set[int]:
+    """Every id a sweep judged, whatever the verdict (`backlog_sweep` rows)."""
+    out: set[int] = set()
+    for d in _ledger_events(ledger, "backlog_sweep", require_item=False):
+        judged = d.get("judged") or {}
+        if isinstance(judged, dict):
+            for k in judged:
+                try:
+                    out.add(int(k))
+                except (TypeError, ValueError):
+                    continue
+    return out
+
+
 def released_ids(ledger: Path) -> set[int]:
     """Self-filed items the pass may triage after all: expired and reopened,
-    judged `keep` by a group triage, or re-triaged after a spent attempt."""
-    return expired_ids(ledger) | group_kept_ids(ledger) | set(retriage_marks(ledger))
+    judged `keep` by a group triage, ranked by a sweep, or re-triaged after a
+    spent attempt."""
+    return (expired_ids(ledger) | group_kept_ids(ledger) | swept_ids(ledger)
+            | set(retriage_marks(ledger)))
 
 
 # ── Blockers ────────────────────────────────────────────────────────────────
@@ -2679,9 +2747,11 @@ def triage_pool(ledger: Path,
     # `draft` only: that is where an item waits to be judged. `up_next` is the
     # implement pool and `in_progress` is a round in flight; an untriaged item
     # in either is a dead state the reconciler moves back here.
+    # A parked item was read by a sweep and judged not worth a round: out of
+    # every pool until a person removes the tag.
     untriaged = [i for i in items
                  if i.id not in seen and i.status == TRIAGE_POOL_STATUS
-                 and not is_grouped(i)]
+                 and not is_grouped(i) and not is_parked(i)]
     fresh = [i for i in untriaged if not is_quarantined(i, released=released, live=live)]
     return fresh, len(untriaged) - len(fresh)
 
@@ -2767,12 +2837,19 @@ def select_candidate(ledger: Path,
 
     A live blocker goes ahead of the oldest: it is not a stale claim but the
     precondition of a clause some round already deferred.
+
+    Since the sweep (2026-09-15), a ranked item goes ahead of an unranked one
+    and a `high` ahead of a `medium`: the sweep has read the whole board
+    once, so oldest-first is no longer the only signal, and a single triage
+    spends a 90-turn session writing a contract — that session belongs to
+    the item most worth landing. Age still orders items of one rank.
     """
     candidates, _held = triage_pool(ledger, boards)
     if not candidates:
         return None
     live = live_blockers(ledger, boards, items=candidates)
-    return sorted(candidates, key=lambda i: (i.id not in live, i.created or "9999", i.id))[0]
+    return sorted(candidates, key=lambda i: (i.id not in live, rank_key(i),
+                                             i.created or "9999", i.id))[0]
 
 
 def select_confirmed(ledger: Path,
@@ -2815,7 +2892,14 @@ def select_confirmed(ledger: Path,
     # not above them — a sent-back blocker ahead of fresh confirmations would
     # be re-picked every round until its cap, the monopoly they exist to stop.
     live = live_blockers(ledger, boards, items=[i for i, _ in ready])
+    # Then the sweep's rank (2026-09-15): a `high`/`small` item before an
+    # unranked one before a `low`/`large` one, and within a rank the shorter
+    # contract first — a 12-clause umbrella lands one time in five, a
+    # 4-clause single one in three. The near tier stays above it: one fix
+    # cycle is cheaper than any fresh round whatever its rank.
     return sorted(ready, key=lambda pair: (pair[0].id not in near,
+                                           rank_key(pair[0]),
+                                           pair[0].clause_count or len(acceptance_clauses_of(pair[1])),
                                            pair[0].id in outcomes,
                                            pair[0].id not in live,
                                            pair[0].created or "9999", pair[0].id))[0]
@@ -3005,6 +3089,9 @@ def release_held_confirmations(ledger: Path, boards: tuple[str, ...] | None = DE
     waiting = [i for i in waiting if i not in live]
     if not waiting:
         return out
+    # Best first, then oldest: room in the pool goes to the confirmation the
+    # sweep ranked highest, not to whichever arrived first.
+    waiting.sort(key=lambda i: (rank_key(open_by_id[i]), held[i]))
     if enabled:
         gate = implement_pool_full(ledger, boards, floor=floor, now=now)
         room = gate["bound"] - gate["ready"]
@@ -3259,7 +3346,7 @@ def select_cluster(ledger: Path, clusters: dict, *, min_size: int = 3, max_size:
     judged = group_triaged_ids(ledger)
     by_id = {i.id: i for i in open_items(boards)
              if i.status == TRIAGE_POOL_STATUS and i.id not in seen
-             and not is_grouped(i) and not is_umbrella(i)
+             and not is_grouped(i) and not is_umbrella(i) and not is_parked(i)
              and NEEDS_HUMAN_TAG not in i.tags and EXPIRED_TAG not in i.tags}
     last_group: dict[str, str] = {}
     for d in _ledger_events(ledger, "backlog_group_triage", require_item=False):
@@ -3698,7 +3785,7 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
         open_counts[i.status] = open_counts.get(i.status, 0) + 1
 
     draft = {"pool": 0, "quarantined": 0, "grouped": 0, "needs_human": 0, "held": 0,
-             "triaged": 0}
+             "parked": 0, "triaged": 0}
     for i in items:
         if i.status != TRIAGE_POOL_STATUS:
             continue
@@ -3708,6 +3795,8 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
             draft["needs_human"] += 1
         elif i.id in held:
             draft["held"] += 1
+        elif is_parked(i):
+            draft["parked"] += 1
         elif i.id in seen:
             draft["triaged"] += 1
         elif is_quarantined(i, released=released, live=live):
@@ -3715,6 +3804,16 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
         else:
             draft["pool"] += 1
     draft["total"] = sum(draft.values())
+
+    # The sweep's coverage: how much of the open board it has read and how
+    # it ranked what lives. `unswept` should drain to 0 while a sweep is on.
+    sweepable = sweep_pool(ledger, boards, items=items)
+    worth = {w: 0 for w in WORTH_LEVELS}
+    for i in items:
+        if i.worth in worth:
+            worth[i.worth] += 1
+    sweep = {"unswept": len(sweepable), "swept": sum(1 for i in items if is_swept(i)),
+             "parked": sum(1 for i in items if is_parked(i)), "worth": worth}
 
     up = [i for i in items if i.status == IMPLEMENT_POOL_STATUS]
     ready = ready_confirmed(ledger, boards, items=up, outcomes=outcomes)
@@ -3736,4 +3835,232 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
                           "untriaged": sum(1 for b in live if b not in seen)},
         "landed_items_7d": pool["landed_items_7d"],
         "implement_pool": {"ready": len(ready), "bound": pool["bound"], "floor": pool["floor"]},
+        "sweep": sweep,
     }
+
+
+# ── The sweep: every open item read once, retired or ranked ─────────────────
+#
+# Single triage judges one item per 90-turn session and confirms 73% of what
+# it reads; the implement loop lands about ten items a day. On 2026-09-15 that
+# left 156 confirmed items queued, 82 quarantined drafts nothing had ever read
+# (27 of them due to expire unread within a day), 158 members folded under
+# umbrellas that land one time in five, and a board of 560. The sweep is the
+# gear change: a batch of `sweep_batch` items per turn, quarantine lifted,
+# nothing filed and nothing appended, each item either retired (`stale`,
+# `already_done`, `duplicate_of`) or kept with a rank. The rank is what the
+# rest of the loop then orders on (`rank_key`), and `parked` (a `low` draft)
+# is the exit that replaced expiry: read by someone, still open, out of the
+# pools, never closed for being old.
+
+SWEEP_VERDICTS = ("keep", "duplicate_of") + tuple(sorted(RETIRING))
+SWEEP_SCHEMA: dict = {
+    "type": "object",
+    "title": "backlog_sweep_verdict",
+    "properties": {
+        "items": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "item_id": {"type": "integer"},
+                "verdict": {"type": "string", "enum": list(SWEEP_VERDICTS)},
+                "duplicate_of": {"type": "integer",
+                                 "description": "The surviving open item's id; 0 unless verdict is duplicate_of."},
+                "worth": {"type": "string", "enum": list(WORTH_LEVELS)},
+                "size": {"type": "string", "enum": list(SIZE_LEVELS)},
+                "evidence": {"type": "string",
+                             "description": "One sentence: the path, commit or check that decides it."},
+            },
+            "required": ["item_id", "verdict", "duplicate_of", "worth", "size", "evidence"],
+            "additionalProperties": False,
+        }, "description": "One entry per item in the batch, every item listed."},
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
+SWEEP_POOL_STATUSES = (TRIAGE_POOL_STATUS, IMPLEMENT_POOL_STATUS)
+
+
+def sweep_enabled() -> bool:
+    """`workers.sources.autotriage.sweep`, default off. Lazy and fail-closed:
+    with no config there is no sweep, and nothing yields to one."""
+    try:
+        from app.config import CONFIG
+        cfg = (((CONFIG or {}).get("workers") or {}).get("sources") or {}).get("autotriage") or {}
+        return bool(cfg.get("sweep", False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def sweep_abandoned_ids(ledger: Path) -> set[int]:
+    """Items in a batch that ran out of budget twice. Left unswept for the
+    ordinary passes rather than retried forever."""
+    out: set[int] = set()
+    for d in _ledger_events(ledger, "backlog_sweep", require_item=False):
+        if d.get("verdict") == "abandoned":
+            out |= {int(i) for i in (d.get("item_ids") or [])}
+    return out
+
+
+def sweep_pool(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+               items: list[Item] | None = None) -> list[Item]:
+    """Open items the sweep has not read, never-judged first, then oldest.
+
+    Quarantine does not apply — reading a self-filed item once is the whole
+    point. `draft` and `up_next` both: a confirmed item is ranked so the
+    implement order can prefer it, and can still be retired if its premise
+    has gone. Out: grouped members (their umbrella is the unit), umbrellas
+    (confirmed work with a contract), `needs-human`, `expired`, anything
+    already swept or parked, and a batch that ran out of budget twice.
+    """
+    done = swept_ids(ledger) | sweep_abandoned_ids(ledger)
+    seen = triaged_ids(ledger)
+    pool = [i for i in (items if items is not None else open_items(boards))
+            if i.status in SWEEP_POOL_STATUSES and i.id not in done
+            and not is_swept(i) and not is_parked(i)
+            and not is_grouped(i) and not is_umbrella(i)
+            and NEEDS_HUMAN_TAG not in i.tags and EXPIRED_TAG not in i.tags]
+    return sorted(pool, key=lambda i: (i.id in seen, i.created or "9999", i.id))
+
+
+def select_sweep_batch(ledger: Path, n: int,
+                       boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> list[Item]:
+    return sweep_pool(ledger, boards)[:max(1, int(n))]
+
+
+def sweep_pending(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> int:
+    """How many items a sweep still has to read; 0 when the sweep is off.
+    Autocode yields to a positive answer (`yield_to_sweep`)."""
+    if not sweep_enabled():
+        return 0
+    return len(sweep_pool(ledger, boards))
+
+
+def sweep_batch_id(item_ids) -> str:
+    import hashlib
+    ids = sorted(int(i) for i in item_ids)
+    return "sw-" + hashlib.sha1(",".join(map(str, ids)).encode()).hexdigest()[:10]
+
+
+def sweep_incomplete_attempts(ledger: Path, batch_id: str) -> int:
+    return sum(1 for d in _ledger_events(ledger, "backlog_sweep", require_item=False)
+               if d.get("batch_id") == batch_id and d.get("verdict") == INCOMPLETE)
+
+
+def record_sweep_verdicts(batch_id: str, members: list[Item], verdicts: dict[int, dict], *,
+                          session_id: str = "", extra: dict | None = None,
+                          ledger: Path | None = None) -> dict:
+    """Write a sweep's verdicts onto the items and the ledger.
+
+    Retiring verdicts go through `record_verdict` and get a `backlog_triage`
+    row, so the status pipeline, the scorecard and `triaged_ids` see an
+    ordinary close. `duplicate_of` may point at any OPEN item, in the batch
+    or not; a target that is closed, missing, or itself retired here becomes
+    `keep`. A `keep` writes `worth`/`size` and the `swept` tag; a `low`
+    draft is `parked` too. Only judged ids are recorded — an item the turn
+    did not list stays unswept and is offered again.
+    """
+    from scripts.automod import state as S
+    ledger = ledger or LEDGER_DEFAULT()
+    by_id = {m.id: m for m in members}
+    member_ids = set(by_id)
+    verdicts = {int(i): dict(v) for i, v in verdicts.items() if int(i) in member_ids}
+    # A target outside the batch counts as a member for chain resolution
+    # when it is open on disk; anything else `_resolve_duplicates` turns
+    # into a keep.
+    external = set()
+    for i, v in verdicts.items():
+        if v.get("verdict") != "duplicate_of":
+            continue
+        t = int(v.get("duplicate_of") or 0)
+        if t and t not in member_ids:
+            target = item_by_id(t)
+            if target is not None and target.status in OPEN_STATUSES and not is_parked(target):
+                external.add(t)
+    verdicts = _resolve_duplicates(verdicts, member_ids | external)
+    counts = {"retired": 0, "duplicates": 0, "kept": 0, "parked": 0}
+    judged: dict[str, str] = {}
+    ranked: dict[str, str] = {}
+    for i, v in verdicts.items():
+        item = by_id[i]
+        verdict = str(v.get("verdict") or "keep")
+        evidence = " ".join(str(v.get("evidence") or "").split())[:600]
+        worth = _level(v.get("worth"), WORTH_LEVELS)
+        size = _level(v.get("size"), SIZE_LEVELS)
+        judged[str(i)] = verdict
+        if verdict == "duplicate_of":
+            t = int(v["duplicate_of"])
+            record_verdict(item, "stale", f"duplicate of #{t}: {evidence}", close=True)
+            update_frontmatter(item.path, {"duplicate_of": t})
+            S.append_event({"event": "backlog_triage", "item_id": i, "verdict": "stale",
+                            "closed": True, "duplicate_of": t, "sweep_batch": batch_id,
+                            "evidence": evidence[:1000], "session_id": session_id,
+                            "spawned": [], "auto": True}, path=ledger)
+            counts["duplicates"] += 1
+        elif verdict in RETIRING:
+            record_verdict(item, verdict, evidence, close=True)
+            S.append_event({"event": "backlog_triage", "item_id": i, "verdict": verdict,
+                            "closed": True, "sweep_batch": batch_id,
+                            "evidence": evidence[:1000], "session_id": session_id,
+                            "spawned": [], "auto": True}, path=ledger)
+            counts["retired"] += 1
+        else:
+            park = worth == "low" and item.status == TRIAGE_POOL_STATUS
+            tags = (SWEPT_TAG,) + ((PARKED_TAG,) if park else ())
+            update_frontmatter(item.path, {"worth": worth or None, "size": size or None},
+                               activity=(f"swept ({batch_id}): worth={worth or '?'} "
+                                         f"size={size or '?'}" + (" — parked: out of every pool "
+                                         "until a person removes the tag" if park else "")
+                                         + (f" — {evidence}" if evidence else ""))[:700],
+                               add_tags=tags)
+            ranked[str(i)] = f"{worth or '?'}/{size or '?'}"
+            counts["kept"] += 1
+            counts["parked"] += int(park)
+    summary = {"event": "backlog_sweep", "batch_id": batch_id,
+               "item_ids": sorted(member_ids), "judged": judged, "ranked": ranked, **counts,
+               "session_id": session_id, **(extra or {})}
+    S.append_event(summary, path=ledger)
+    return {**counts, "judged": judged, "ranked": ranked}
+
+
+def unfold_oversized_umbrellas(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                               min_clauses: int = 8, dry_run: bool = False) -> list[dict]:
+    """Unfold every never-attempted open umbrella whose contract carries at
+    least `min_clauses` clauses, and close it `done` tagged `unfolded`.
+
+    56 umbrellas sat in `up_next` on 2026-09-15, every one with 8–12
+    clauses from the days before `group_max_items` fell to 4, and that shape
+    landed 5 of 27 rounds against 52 of 151 for singles. Their 158 members
+    were folded out of every pool. A member goes back to `draft` untriaged
+    (its `folded` row is not a verdict), where the sweep reads and ranks it;
+    it does not re-cluster (`group_triaged_ids`). An umbrella a round has
+    already attempted, or that is landing or landed, is not touched — that
+    is `unfold_spent_umbrellas`' or a person's call.
+    """
+    from scripts.automod import state as S
+    history = implement_history(ledger)
+    unfinished = items_with_unfinished_rounds(ledger, history=history)
+    confirmed = confirmed_verdicts(ledger)
+    out: list[dict] = []
+    for item in open_items(boards):
+        if not is_umbrella(item) or item.id in history or item.id in unfinished:
+            continue
+        fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+        if fm.get(LANDED_MARKER) or any(fm.get(m) for m in _LEGACY_LANDED_MARKERS):
+            continue
+        n = len(acceptance_clauses_of(confirmed.get(item.id), fm))
+        if n < int(min_clauses):
+            continue
+        reason = (f"oversized: {n} clauses against a cap of {MAX_CLAUSES} and never attempted; "
+                  f"members released to be swept and ranked on their own")
+        row = {"umbrella_id": item.id, "clauses": n, "members": list(item.members), "reason": reason}
+        if dry_run:
+            out.append(row)
+            continue
+        res = unfold_umbrella(item.id, reason, ledger=ledger)
+        set_status(item.id, "done", f"unfolded: {reason}",
+                   add_tags=(UNFOLDED_TAG,), remove_tags=(NEEDS_HUMAN_TAG, HELD_TAG))
+        S.append_event({"event": "backlog_umbrella_unfolded", "item_id": item.id,
+                        "released": res["released"], "reason": reason[:400],
+                        "oversized": True, "clauses": n, "auto": True}, path=ledger)
+        out.append({**row, "released": res["released"]})
+    return out

@@ -975,7 +975,7 @@ function BacklogHealthLines({ health }: { health: BacklogHealth }) {
     <div className="mt-2 space-y-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
       {d && (
         <div>
-          draft {d.total} · folded {d.grouped} · quarantined {d.quarantined} · needs-human {d.needs_human} · held {d.held ?? 0} · triaged {d.triaged} · triageable {d.pool}
+          draft {d.total} · folded {d.grouped} · quarantined {d.quarantined} · needs-human {d.needs_human} · held {d.held ?? 0} · parked {d.parked ?? 0} · triaged {d.triaged} · triageable {d.pool}
         </div>
       )}
       {u && (

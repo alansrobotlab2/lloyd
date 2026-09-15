@@ -941,6 +941,59 @@ all `met`; and `execute` sweeps at the end of a vault-landing turn, before the
 reconcile that used to hand the item to the next round two minutes later.
 §3.2b; `tests/test_vault_surface_churn.py`.
 
+### The sweep: every open item read once, retired or ranked
+
+On 2026-09-15 the board held 560 open items and the loop was shaped so that
+triage fed implement about three times faster than it could land: single
+triage confirmed 73% of what it read (50–66 runs a day at 216 s each),
+landings were ~10.6 distinct items a day, 156 confirmed items were queued
+(87 ready, 69 held), 56 of the 88 `up_next` were umbrellas of 8–12 clauses
+landing 5 of 27 rounds against 52 of 151 for singles, with 158 members
+folded under them, and 82 quarantined drafts had never been read by
+anything — expiry was their only exit, 27 were due to close unread within a
+day and 29 were `youtube-eval` ideas. Alan's call: switch gears, read
+everything, lose nothing. `architecture/automod.md` §3.2e is the long
+version.
+
+- **Sweep mode** (`workers.sources.autotriage.sweep`, ships off). While
+  `backlog.sweep_pool` is non-empty an autotriage run takes `sweep_batch`
+  (8) items in one turn instead of a cluster or a single item — quarantine
+  lifted, `draft` and `up_next` both, never-judged first — and either
+  retires each (`stale`, `already_done`, `duplicate_of` any open item) or
+  ranks it: `worth` (high/medium/low) and `size` (small/medium/large) in
+  front matter, tag `swept`. A `low` **draft** is also `parked`: still
+  open, out of every pool, never expired, promoted by removing the tag. A
+  `low` confirmed item is only ranked; the implement order sorts it last.
+  The turn is read-only by construction (`SWEEP_DISALLOWED`: no Edit,
+  Write, `backlog_write_task`, vault or automod tools) and files nothing.
+  An unlisted member stays unswept; a batch with no verdict block is
+  `incomplete` once and `abandoned` the second time, its items left to the
+  ordinary passes. `parse_sweep_verdict`, `record_sweep_verdicts`,
+  `SWEEP_SCHEMA`; the summary row is `backlog_sweep`, retirements are
+  ordinary `backlog_triage` rows tagged `sweep_batch`.
+- **The rank orders every pool** (`backlog.rank_key`: worth, then size;
+  unranked sorts between medium and low). `select_candidate` takes the
+  best-ranked untriaged draft (age breaks ties), `select_confirmed` sorts
+  by rank then clause count after the near tier, and
+  `release_held_confirmations` fills room best first. Swept ids are
+  `released` from quarantine; `swept` and `parked` are expiry-exempt.
+- **Autocode yields** (`workers.sources.autocode.yield_to_sweep`, ships
+  off, on in config for the sprint): no round starts while `sweep_pending`
+  > 0. The round hold would otherwise keep the sweep to the gaps between
+  rounds. Rounds resume on their own when the pool is empty or the sweep
+  is switched off.
+- **Umbrellas are off for now** (`autotriage.form_umbrellas: false`): a
+  group triage still closes duplicates and retires the stale, but a `fold`
+  is recorded `keep` and no umbrella is confirmed. `round unfold-oversized
+  [--min-clauses 8] [--dry-run]` unfolded the 56 never-attempted 8–12-clause
+  umbrellas; their members went back to `draft` for the sweep to rank.
+- **Expiry is 30 d**, not 7, and reaches only what the sweep has not read.
+  `round sweep-status` says how far it has got (`unswept` should reach 0);
+  `board_health.sweep` and the dashboard's `parked` count carry the same.
+  Sprint settings to undo afterwards: `autotriage.interval_seconds` 300 →
+  900, and `form_umbrellas` back on once the implement pool is under its
+  bound. `tests/test_backlog_sweep.py` pins all of it.
+
 ### arch-review: the docs are reviewed the way the code is
 
 `architecture/` was hand-curated on 2026-09-11 and nothing kept it honest

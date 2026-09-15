@@ -26,6 +26,7 @@ import time
 from typing import Any
 
 from workers.queue import WorkQueue, QueueItem
+from workers.sources._common import WORKER_AUTOMOD_BAN
 
 logger = logging.getLogger("lloyd-workers.autotriage")
 
@@ -64,6 +65,77 @@ DEFAULT_GROUP_MIN_ITEMS = 2
 DEFAULT_GROUP_MAX_ITEMS = 4
 DEFAULT_GROUP_MAX_TURNS = 120
 PER_ITEM_MIN_CHARS = 2500
+
+# Sweep mode (2026-09-15): a batch of items per turn, quarantine lifted,
+# nothing filed, each item retired or ranked. Takes precedence over group
+# and single triage while `backlog.sweep_pool` is non-empty, and autocode
+# yields to it (`yield_to_sweep`). Ships off: `workers.sources.autotriage.sweep`.
+DEFAULT_SWEEP_BATCH = 8
+DEFAULT_SWEEP_MAX_TURNS = 60
+# Read-only by construction, not by instruction: a sweep may not write the
+# board, the tree or the vault, and may not open a round.
+SWEEP_DISALLOWED: tuple[str, ...] = (
+    *WORKER_AUTOMOD_BAN,
+    "Edit", "Write", "Task", "backlog_write_task", "vault_write",
+    "autonomy_write_task", "autonomy_delete_task", "autonomy_run_task",
+    "research_propose", "research_next", "research_complete",
+)
+
+SWEEP_PROMPT = """\
+You are SWEEPING {n} items from Lloyd's own backlog in one pass. The board holds \
+hundreds of open items and the loop lands about ten a day, so most of these will \
+wait weeks whatever you decide. Your job is to decide, cheaply, which are dead \
+and how the rest should be ordered — not to fix anything, not to write a \
+contract, and not to file or append anything.
+
+<batch id="{batch_id}">
+{items}
+</batch>
+
+For each item, in this order:
+
+1. **Is it dead?** Read the item. If you can see from its text, or with ONE \
+cheap check (a Grep, a Read of the file it names, a `git log -S`), that its \
+premise no longer describes the system, the verdict is `stale`; if a commit \
+already fixed it, `already_done` — name the commit. If another OPEN item, in \
+this batch or elsewhere on the board, is the same finding, `duplicate_of #<id>` \
+with the better handoff as the survivor (a survivor must itself be open and \
+kept). Spend at most a few tool calls per item. If it would take a real \
+investigation to know, it is not dead: keep it.
+2. **If it lives, rank it** — `keep`, with two labels:
+   - worth: `high` = a bug, a safety or data-integrity hole, or a measured \
+correctness or throughput problem in the loop, the harness, the vault \
+protection or the workers; or something Alan asked for by name. `medium` = a \
+real improvement with evidence it is needed, not urgent. `low` = a nice-to-have, \
+a speculative idea, a talk's suggestion with no evidence it fits this system, \
+cosmetic, or about a subsystem that has since been retired. Low is NOT closed: \
+it is parked, visible, and a person can promote it.
+   - size: `small` = one or two files and one test; a round lands it in an \
+hour. `medium` = a few files, a day of a person's work. `large` = cross-cutting, \
+a new subsystem, or needs a design decision first.
+
+Rules: you are read-only. Do not edit, write or commit anything, do not call \
+backlog_write_task, do not append findings, do not start an automod round. A \
+wrong `stale` or `duplicate_of` deletes a real finding, so cite what decides it; \
+when unsure, `keep` and rank. `keep` for all {n} is a legitimate answer. Every \
+item must be listed exactly once, with worth and size on every line, retiring \
+verdicts included.
+
+Finish with exactly this block and nothing after it:
+
+SWEEP_VERDICTS:
+#<id>: <stale | already_done | duplicate_of #<id> | keep> worth=<high|medium|low> size=<small|medium|large> — <one line of evidence>
+(one line per item; every item listed)
+"""
+
+# Appended to GROUP_PROMPT when `form_umbrellas` is off: the cluster is
+# still judged for duplicates and staleness, but nothing is consolidated.
+NO_UMBRELLA_RULE = """
+
+UMBRELLAS ARE OFF for this run. `fold` is not available: judge every item \
+`duplicate_of`, `stale`, `already_done` or `keep`, file no umbrella, and \
+write `UMBRELLA: none`. Items that would have been folded are `keep`.
+"""
 
 GROUP_PROMPT = """\
 You are triaging {n} items from Lloyd's own backlog TOGETHER. A nightly pass \
@@ -346,6 +418,9 @@ def _origin_block(candidate, ledger) -> str:
     if prior:
         lines.append("earlier triages of this item filed or appended to: "
                      + " ".join(f"#{i}" for i in prior))
+    if candidate.worth or candidate.size:
+        lines.append(f"a sweep read it and ranked it worth={candidate.worth or '?'} "
+                     f"size={candidate.size or '?'}; your contract should fit that size")
     sections = B.findings_sections(candidate.body)
     if sections:
         lines.append(f"{sections} Findings section(s) already on this item")
@@ -676,6 +751,70 @@ def parse_group_verdict(text: str, structured: dict | None, member_ids: list[int
             "unjudged": unjudged, "source": source}
 
 
+_SWEEP_LINE = re.compile(
+    r"^\W*#?(\d+)\s*(?:->|=>|[:→—–-])+\s*(duplicate[ _]of|dup(?:licate)?|stale|already[ _]done|keep)\b"
+    r"\s*(?:#?(\d+))?(?P<rest>.*)$", re.I)
+_SWEEP_WORTH = re.compile(r"\bworth\s*[=:]\s*(high|medium|low)\b", re.I)
+_SWEEP_SIZE = re.compile(r"\bsize\s*[=:]\s*(small|medium|large)\b", re.I)
+
+
+def parse_sweep_verdict(text: str, structured: dict | None, member_ids: list[int]) -> dict | None:
+    """`{items: {id: {verdict, duplicate_of, worth, size, evidence}}, unjudged, source}`
+    from the finalizer's object, else from the last SWEEP_VERDICTS block.
+
+    Unknown ids are dropped. An unjudged member is NOT filled in as `keep`:
+    it stays unswept and is offered to the next batch, because a rank the
+    turn never wrote is not a rank.
+    """
+    from scripts.automod.backlog import SIZE_LEVELS, SWEEP_VERDICTS, WORTH_LEVELS
+    members = {int(i) for i in member_ids}
+    items: dict[int, dict] = {}
+    source = "none"
+    if isinstance(structured, dict) and isinstance(structured.get("items"), list):
+        for raw in structured["items"]:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                iid = int(raw.get("item_id"))
+            except (TypeError, ValueError):
+                continue
+            v = str(raw.get("verdict") or "").strip().lower()
+            if iid not in members or v not in SWEEP_VERDICTS:
+                continue
+            w = str(raw.get("worth") or "").strip().lower()
+            s = str(raw.get("size") or "").strip().lower()
+            items[iid] = {"verdict": v, "duplicate_of": int(raw.get("duplicate_of") or 0),
+                          "worth": w if w in WORTH_LEVELS else "",
+                          "size": s if s in SIZE_LEVELS else "",
+                          "evidence": " ".join(str(raw.get("evidence") or "").split())[:600]}
+        if items:
+            source = "structured"
+    if not items:
+        tail = (text or "")[-16000:]
+        idx = tail.rfind("SWEEP_VERDICTS:")
+        if idx < 0:
+            return None
+        for line in tail[idx + len("SWEEP_VERDICTS:"):].splitlines():
+            lm = _SWEEP_LINE.match(line)
+            if not lm:
+                continue
+            iid = int(lm.group(1))
+            if iid not in members:
+                continue
+            rest = lm.group("rest") or ""
+            wm, sm = _SWEEP_WORTH.search(rest), _SWEEP_SIZE.search(rest)
+            evidence = _SWEEP_SIZE.sub("", _SWEEP_WORTH.sub("", rest)).strip(" \t—–-:")
+            items[iid] = {"verdict": _norm_group_verdict(lm.group(2)),
+                          "duplicate_of": int(lm.group(3) or 0),
+                          "worth": wm.group(1).lower() if wm else "",
+                          "size": sm.group(1).lower() if sm else "",
+                          "evidence": " ".join(evidence.split())[:600]}
+        if not items:
+            return None
+        source = "regex"
+    return {"items": items, "unjudged": sorted(members - set(items)), "source": source}
+
+
 def _render_cluster(members, per_item_chars: int) -> str:
     parts = []
     for m in members:
@@ -704,7 +843,14 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
                  "group_triage": bool(src_cfg.get("group_triage", True)),
                  "group_min_items": int(src_cfg.get("group_min_items", DEFAULT_GROUP_MIN_ITEMS)),
                  "group_max_items": int(src_cfg.get("group_max_items", DEFAULT_GROUP_MAX_ITEMS)),
-                 "group_max_turns": int(src_cfg.get("group_max_turns", DEFAULT_GROUP_MAX_TURNS))},
+                 "group_max_turns": int(src_cfg.get("group_max_turns", DEFAULT_GROUP_MAX_TURNS)),
+                 # Off: a group triage still closes duplicates and retires
+                 # the stale, but folds nothing and files no umbrella.
+                 "form_umbrellas": bool(src_cfg.get("form_umbrellas", True)),
+                 # Sweep mode, carried like the budgets. Off: never runs.
+                 "sweep": bool(src_cfg.get("sweep", False)),
+                 "sweep_batch": int(src_cfg.get("sweep_batch", DEFAULT_SWEEP_BATCH)),
+                 "sweep_max_turns": int(src_cfg.get("sweep_max_turns", DEFAULT_SWEEP_MAX_TURNS))},
         priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
         dedup_key=DEDUP_KEY,
     )
@@ -744,6 +890,16 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                         [r["item_id"] for r in released])
     except Exception as exc:  # noqa: BLE001 — a release that fails costs a poll, not the run
         logger.warning("release_held_confirmations failed: %s", exc)
+
+    if bool(payload.get("sweep", False)):
+        # The sweep goes first: while any open item is unread, reading eight
+        # of them beats confirming one. Group and single triage resume on
+        # their own once the pool is empty.
+        batch = await asyncio.to_thread(B.select_sweep_batch, S.LEDGER_PATH,
+                                        int(payload.get("sweep_batch") or DEFAULT_SWEEP_BATCH))
+        if batch:
+            return await _execute_sweep(item, batch)
+        logger.info("sweep: every open item has been read; falling through to group/single triage")
 
     if bool(payload.get("group_triage", True)):
         from scripts.automod import cluster as CL
@@ -979,6 +1135,9 @@ async def _execute_group(item: QueueItem, cluster: dict, members: list) -> dict[
         parent=f"#{cluster['parent']}" if cluster.get("parent") else "none",
         items=_render_cluster(members, per_item), max_clauses=B.MAX_CLAUSES,
         spawn_cap=GROUP_SPAWN_CAP)
+    form_umbrellas = bool(payload.get("form_umbrellas", True))
+    if not form_umbrellas:
+        prompt += NO_UMBRELLA_RULE
     id_floor = B.max_item_id()
     try:
         run = await run_prompt_in_session(
@@ -1014,6 +1173,14 @@ async def _execute_group(item: QueueItem, cluster: dict, members: list) -> dict[
         return {"status": "skipped" if outcome == B.INCOMPLETE else "success",
                 "summary": f"group triage {cid}: no verdict ({stop_reason}); {outcome}"}
 
+    if not form_umbrellas:
+        # A fold the model wrote anyway is a keep, and an umbrella it filed
+        # anyway is not confirmed (it stays an ordinary self-spawned draft).
+        for v in parsed["items"].values():
+            if v.get("verdict") == "fold":
+                v["verdict"] = "keep"
+                v["evidence"] = (v.get("evidence") or "") + " (umbrellas are off; kept)"
+        parsed["umbrella"] = {**parsed["umbrella"], "item_id": 0}
     spawned, merged = B.split_claimed(parsed["spawned"], id_floor=id_floor, self_id=0)
     umbrella = None
     uid = int(parsed["umbrella"].get("item_id") or 0)
@@ -1046,3 +1213,76 @@ async def _execute_group(item: QueueItem, cluster: dict, members: list) -> dict[
     logger.info(summary)
     return {"status": "success", "cluster_id": cid, "session_id": session_id, "summary": summary,
             **{k: result[k] for k in ("duplicates", "retired", "folded", "kept", "umbrella_id")}}
+
+
+async def _execute_sweep(item: QueueItem, members: list) -> dict[str, Any]:
+    """One turn over a batch: each item retired or ranked, nothing filed."""
+    from scripts.automod import backlog as B
+    from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
+
+    payload = item.payload or {}
+    budget = int(payload.get("sweep_max_turns") or DEFAULT_SWEEP_MAX_TURNS)
+    body_chars = int(payload.get("body_chars") or DEFAULT_BODY_CHARS)
+    want_structured = bool(payload.get("structured_verdict", True))
+    member_ids = [m.id for m in members]
+    batch_id = B.sweep_batch_id(member_ids)
+    per_item = max(PER_ITEM_MIN_CHARS, body_chars // max(1, len(members)))
+    logger.info("sweep %s: %d items %s (budget %d)", batch_id, len(members), member_ids, budget)
+
+    prompt = SWEEP_PROMPT.format(n=len(members), batch_id=batch_id,
+                                 items=_render_cluster(members, per_item))
+    try:
+        run = await run_prompt_in_session(
+            prompt, title=f"backlog sweep {batch_id}: {len(members)} items",
+            source=NAME, max_turns=budget, priority=1,
+            extra_disallowed=list(SWEEP_DISALLOWED),
+            final_schema=B.SWEEP_SCHEMA if want_structured else None,
+            final_schema_prompt=(
+                "Restate the SWEEP_VERDICTS block above as a single JSON object matching "
+                "the schema: one entry per item with its verdict, duplicate_of (0 unless "
+                "duplicate_of), worth, size and evidence. A transcription, not a re-decision."))
+    except DrainActive as exc:
+        return {"status": "skipped", "summary": f"landing in progress: {exc}"}
+    except TurnTimeout as exc:
+        return _sweep_out_of_budget(batch_id, member_ids, budget, session_id="",
+                                    stop_reason="turn_timeout", detail=str(exc))
+
+    session_id = run["session_id"]
+    stop_reason = run.get("stop_reason")
+    structured = run.get("structured") if want_structured else None
+    parsed = parse_sweep_verdict(run.get("text") or "", structured, member_ids)
+    if not parsed:
+        return _sweep_out_of_budget(batch_id, member_ids, budget, session_id=session_id,
+                                    stop_reason=str(stop_reason), num_turns=run.get("num_turns"))
+    result = B.record_sweep_verdicts(batch_id, members, parsed["items"], session_id=session_id,
+                                     extra={"verdict_source": parsed["source"],
+                                            "structured_error": str(run.get("structured_error") or ""),
+                                            "stop_reason": stop_reason,
+                                            "num_turns": run.get("num_turns"), "budget": budget,
+                                            "unjudged": parsed["unjudged"]})
+    summary = (f"sweep {batch_id}: {result['retired']} retired, {result['duplicates']} duplicate(s) "
+               f"closed, {result['kept']} ranked ({result['parked']} parked)"
+               + (f", {len(parsed['unjudged'])} unjudged" if parsed["unjudged"] else ""))
+    logger.info(summary)
+    return {"status": "success", "batch_id": batch_id, "session_id": session_id, "summary": summary,
+            **{k: result[k] for k in ("retired", "duplicates", "kept", "parked")}}
+
+
+def _sweep_out_of_budget(batch_id: str, member_ids: list[int], budget: int, *, session_id: str,
+                         stop_reason: str, detail: str = "", num_turns=None) -> dict[str, Any]:
+    """A batch that reached no verdict block: `incomplete` once (the same
+    batch is offered again, since its items are still unswept), `abandoned`
+    the second time — its items are then left to the ordinary passes rather
+    than retried forever. Nothing is written on the items either way."""
+    from scripts.automod import backlog as B, state as S
+    attempts = B.sweep_incomplete_attempts(S.LEDGER_PATH, batch_id) + 1
+    outcome = B.INCOMPLETE if attempts < B.MAX_INCOMPLETE_ATTEMPTS else "abandoned"
+    S.append_event({"event": "backlog_sweep", "batch_id": batch_id, "item_ids": member_ids,
+                    "verdict": outcome, "attempt": attempts, "judged": {}, "ranked": {},
+                    "session_id": session_id, "stop_reason": stop_reason,
+                    "num_turns": num_turns, "budget": budget, "detail": detail[:300]},
+                   path=S.LEDGER_PATH)
+    logger.warning("sweep %s: no parseable verdict block (%s); %s", batch_id, stop_reason, outcome)
+    return {"status": "skipped" if outcome == B.INCOMPLETE else "success",
+            "batch_id": batch_id,
+            "summary": f"sweep {batch_id}: no verdict ({stop_reason}); {outcome}"}

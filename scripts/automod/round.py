@@ -483,6 +483,13 @@ def main(argv=None) -> int:
                                    "--write --threshold --no-judge --json …)")
     sub.add_parser("board-pass", help="run autocode's board passes once, now, with board "
                                       "health before and after (the reaper excepted)")
+    uo = sub.add_parser("unfold-oversized", help="unfold never-attempted umbrellas whose contract "
+                                                 "has at least --min-clauses clauses; members go "
+                                                 "back to draft for the sweep to rank")
+    uo.add_argument("--min-clauses", type=int, default=8)
+    uo.add_argument("--dry-run", action="store_true")
+    sub.add_parser("sweep-status", help="how far the backlog sweep has got: unread, ranked, "
+                                        "parked, and the last batches")
     # `cluster` hands everything after it to cluster.py's parser. REMAINDER
     # on a subparser does not swallow `--flags`, so the unknowns are collected
     # here instead of refused.
@@ -523,7 +530,34 @@ def main(argv=None) -> int:
         return CL.main(extra)
     elif args.cmd == "board-pass":
         print(json.dumps(board_pass(), indent=2, default=str))
+    elif args.cmd == "unfold-oversized":
+        from scripts.automod import backlog as B
+        print(json.dumps(B.unfold_oversized_umbrellas(S.LEDGER_PATH, min_clauses=args.min_clauses,
+                                                      dry_run=args.dry_run),
+                         indent=2, default=str))
+    elif args.cmd == "sweep-status":
+        print(json.dumps(sweep_status(), indent=2, default=str))
     return 0
+
+
+def sweep_status() -> dict:
+    """Where the sweep stands: the board's `sweep` block, worth × size over
+    the open items, and the last five batches."""
+    from scripts.automod import backlog as B
+    health = B.board_health(S.LEDGER_PATH)
+    items = B.open_items()
+    grid: dict[str, int] = {}
+    for i in items:
+        if i.worth or i.size:
+            key = f"{i.worth or '?'}/{i.size or '?'}"
+            grid[key] = grid.get(key, 0) + 1
+    rows = [d for d in B._ledger_events(S.LEDGER_PATH, "backlog_sweep", require_item=False)]
+    recent = [{k: d.get(k) for k in ("batch_id", "verdict", "retired", "duplicates", "kept",
+                                    "parked", "unjudged", "num_turns", "created_at")}
+              for d in rows[-5:]]
+    return {"enabled": B.sweep_enabled(), "sweep": health["sweep"], "draft": health["draft"],
+            "up_next": health["up_next"], "worth_by_size": dict(sorted(grid.items())),
+            "batches": len(rows), "recent": recent}
 
 
 if __name__ == "__main__":
