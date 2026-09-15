@@ -431,6 +431,94 @@ harness:
     enabled: true
     retention_days: 7
     max_total_mb: 256
+  # ── mutation ceiling (#584) ─────────────────────────────────────────────
+  # The quantity axis. Every other guard is a per-call boolean: may this
+  # session touch this path (#582), may it act under this grant (#534), has this
+  # exact effect already happened (#544), is this turn over its total tool-call
+  # budget (#436). None of them can see "how many of these has this session
+  # already done", and that is the axis the 2026-08-22 loss ran on: one nightly
+  # stage truncated `entity-aliases.json`, deleted `_relationships.json` and
+  # `memory-graph/`, and rebuilt `facts/` wholesale. Every call individually
+  # legal, nothing capped the bulk mid-run, and `_pipeline/` is gitignored so
+  # none of it came back. Enforced in `agent_mcp/main.py call_tool`, the one
+  # choke point all 152 tools cross, and the bucket key is the session id the
+  # harness put in `_meta` — never a model-supplied field, so no argument to any
+  # tool selects a bucket or raises a ceiling.
+  #
+  # THE NUMBERS BELOW ARE NOT CALIBRATED. They are a starting point chosen for
+  # their ORDERING (interactive tight; `_pipeline` tighter than the vault for
+  # deletes; a batch source far looser than a person for writes). Calibrating
+  them is a human decision, made from one night of real batch jobs: look at
+  # `GET /api/workers/runs` (`mutations_json` per run) and the `sources` array of
+  # `agent_mcp._mutation_budget.status()`, and raise the ceiling of any source
+  # that tripped. A tripping source is one whose LEGITIMATE work exceeded its
+  # budget, and this gate cannot tell that apart from a runaway — which is
+  # exactly why the decision is a person's and not this file's.
+  mutation_budget:
+    enabled: true
+    # A fixed 3600-second window (not a sliding drip), so a refill is "next
+    # hour" and a test can drive a clock across it. `retention_seconds` prunes.
+    window_seconds: 3600
+    # Trip wire: one session carrying most of an hour's traffic on one
+    # class+scope, at this fraction of that bucket's ceiling, writes a row to
+    # `mutation_alerts`. Alert only, never blocks. Below 1.0 deliberately: at
+    # 1.0 the ceiling has already stopped the bucket, so a threshold at or above
+    # it is an alert that can never fire — a check whose denominator is always
+    # zero. Ceiling-relative rather than a rolling historical baseline because a
+    # baseline needs N hours of prior rows to average and abstains until then,
+    # and an alert that abstains is indistinguishable from an alert that is off.
+    tripwire_ratio: 0.9
+    retention_seconds: 604800
+    ceilings:
+      # `ceilings[<run-source>][<op-class>][<target-scope>]`, every level falling
+      # back to `"*"`. Run-source comes from the session id's producer slug
+      # (`2026…_scheduledtask_ab12` → `scheduled-task`) or the worker run scope
+      # (`item:autotriage:39` → `autotriage`), so an interactive turn and a
+      # worker run can never share a bucket. `_default` is the table for a worker
+      # source with no entry of its own; dropping it would let a source whose
+      # name is absent here fall through to the interactive table.
+      #
+      # Op-class is the EFFECT (`fs_delete` covers `email_delete_folder` and
+      # `fact_invalidate` as well as a `Bash rm`), not the tool name — 152 tools
+      # against 9 classes is a table a person can actually read and sign off.
+      # Target-scope is `vault` / `lloyd` / `_pipeline` / `none` / `mixed` /
+      # `other`. A tool added tomorrow is classified `other` and charged against
+      # that number, so "unclassified" never means "uncapped" — the mistake a
+      # declared-annotations table makes the day someone forgets to annotate. A
+      # class a NAMED source does not list denies rather than falling through:
+      # a typo in this file must read as "nothing may run", never as "everything
+      # may run".
+      interactive:
+        fs_write:   {vault: 120, lloyd: 120, _pipeline: 30, "*": 120}
+        # The vault is the unrecoverable substrate and `_pipeline` is where
+        # 08-22 happened; `~/lloyd` is git-tracked, so a repo delete is
+        # recoverable and gets the loosest of the three.
+        fs_delete:  {vault: 10, lloyd: 30, _pipeline: 5, "*": 10}
+        send:       {"*": 15}
+        destroy:    {"*": 15}
+        record_write: {"*": 40}
+        kg_write:   {"*": 120}
+        spawn:      {"*": 40}
+        shell:      {"*": 300}
+        other:      {"*": 1000}
+      # A nightly consolidation or vault-maintenance pass legitimately rewrites
+      # hundreds of notes. If a nightly trips this, raise THIS source's number;
+      # do not tighten the job to fit the number.
+      scheduled-task:
+        fs_write:   {vault: 1500, "*": 600}
+        fs_delete:  {"*": 200}
+        kg_write:   {"*": 5000}
+      "*":
+        fs_write:   {vault: 1500, lloyd: 600, _pipeline: 1500, "*": 600}
+        fs_delete:  {vault: 200, lloyd: 200, _pipeline: 500, "*": 200}
+        send:       {"*": 150}
+        destroy:    {"*": 200}
+        record_write: {"*": 400}
+        kg_write:   {"*": 5000}
+        spawn:      {"*": 100}
+        shell:      {"*": 3000}
+        other:      {"*": 5000}
+
   # #544 effect ledger (agent_mcp/_tool_effects.py): a worker item that is
   # cancelled at its budget and requeued re-runs its whole turn, so every
   # side-effecting tool call the first attempt landed would land again. One

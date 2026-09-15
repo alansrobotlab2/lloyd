@@ -454,6 +454,24 @@ class WorkerPool:
             gate.update(engaged=False, engaged_since=None, held_sources=[])
         return held
 
+    def _mutations_json(self, item: QueueItem) -> str:
+        """This run's capped calls per op-class, as `runs.mutations_json`.
+
+        Read from the aggregator's ledger over the run scope the pool binds into
+        every tool call (`effect_scope_for` → `item:<source>:<id>`), so the
+        numbers are counts of dispatches, not of anything the turn claimed about
+        itself — a run that reported a tidy summary and made 400 vault writes
+        still shows 400 here. `""` when the ledger is unreadable: an absent
+        column is honest, a `{}` would assert the run mutated nothing.
+        """
+        try:
+            from agent_mcp._mutation_budget import run_mutations
+            counts = run_mutations(effect_scope_for(item))
+            return json.dumps(counts) if counts else ""
+        except Exception:  # noqa: BLE001 — the ledger is never worth failing a run
+            logger.exception("could not read the run's mutation counters")
+            return ""
+
     def _carry_gaps(self, item: QueueItem, task_id: Optional[str],
                     bundle: dict) -> None:
         """Store one task's unverified claims for its next run's prompt (#525).
@@ -637,6 +655,7 @@ class WorkerPool:
                         meta_json=json.dumps(norm["meta"], default=str),
                         claims_json=(json.dumps(bundle, default=str)
                                      if bundle is not None else ""),
+                        mutations_json=self._mutations_json(item),
                     )
                 )
                 await asyncio.to_thread(self.queue.mark_completed, item.id)

@@ -87,7 +87,8 @@ CREATE TABLE IF NOT EXISTS runs (
   duration_seconds  REAL,
   summary           TEXT,
   artifact_path     TEXT,
-  response_json     TEXT
+  response_json     TEXT,
+  mutations_json    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_source_time
   ON runs(source, completed_at DESC);
@@ -204,6 +205,13 @@ class WorkQueue:
             # `runs_without_bundle` rather than as a clean sheet.
             if "claims_json" not in run_cols:
                 conn.execute("ALTER TABLE runs ADD COLUMN claims_json TEXT")
+            # Additive migration (#584): how many capped calls this run made,
+            # per op-class. `meta_json` is what the turn reported about itself;
+            # this is what the dispatch path counted, written by the aggregator
+            # and unreadable by narration. A bulk-mutation run looks different
+            # from a normal one here before it looks different anywhere.
+            if "mutations_json" not in run_cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN mutations_json TEXT")
             conn.commit()
         logger.info("workers.db initialized at %s", self.db_path)
 
@@ -492,20 +500,22 @@ class WorkQueue:
         task_id: Optional[str] = None,
         meta_json: str = "",
         claims_json: str = "",
+        mutations_json: str = "",
     ) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
                 """INSERT INTO runs (run_id, queue_id, source, task_id, status,
                                      started_at, completed_at, duration_seconds,
                                      summary, artifact_path, response_json, meta_json,
-                                     claims_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                     claims_json, mutations_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     run_id, queue_id, source, task_id, status,
                     started_at, completed_at, float(duration_seconds),
                     summary[:500], artifact_path, response_json[:50000],
                     meta_json[:20000] if meta_json else None,
                     claims_json[:20000] if claims_json else None,
+                    mutations_json[:20000] if mutations_json else None,
                 ),
             )
             conn.commit()

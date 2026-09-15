@@ -51,6 +51,7 @@ from starlette.routing import Route
 
 from agent_mcp import (
     _change_ledger,
+    _mutation_budget,
     _subagent_registry,
     _task_registry,
     _tool_effects,
@@ -490,6 +491,39 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
     effect_scope = (meta.get(META_EFFECT_SCOPE, "") if isinstance(meta, dict) else "")
     if not isinstance(effect_scope, str):
         effect_scope = ""
+
+    # 3. #584 — the quantity axis. Every guard above this line is a per-call
+    #    boolean (is this session read-only, is this command catastrophic);
+    #    none of them can see "how many of these has this session already
+    #    done", which is the axis the 2026-08-22 `facts/` wipe and Anthropic's
+    #    ~200-workload delete both ran on. Off the loop like the sandbox check:
+    #    the counter is SQLite and this is the hot path of every write in the
+    #    fleet.
+    #
+    #    Deliberately above the effect ledger's claim, for the reason that
+    #    ordering already governs below: a call that was never allowed to run
+    #    must never be recorded as an `unknown` effect, or a ceiling denial
+    #    would poison the very next legitimate retry of the same arguments.
+    #
+    #    `bound` is whether `sid` came from `_meta`. It has to be passed because
+    #    `_bound_session_id` still honours the legacy `_session_id` *argument* —
+    #    harmless for attribution, fatal for a ceiling: an id the model types can
+    #    mint unlimited fresh budgets, or be shaped like a nightly job to buy the
+    #    batch table. `_mutation_budget.UNBOUND` explains what an unbound call is
+    #    charged to instead, and `bound=False` makes it evaluated as `interactive`
+    #    — the tightest table. Note the argument is already stripped at :453, so
+    #    what reaches the handler never carries it either way.
+    bound = bool(isinstance(meta, dict) and meta.get(META_SESSION_ID))
+    budget = await _mutation_budget.guard(
+        name, arguments, session_id=sid, effect_scope=effect_scope,
+        bound=bound)
+    if not budget.allowed:
+        logger.warning("mutation budget: denied %s for session %s "
+                       "(class %s, scope %s, source %s): %d/%d in %ds",
+                       name, sid, budget.op_class, budget.target_scope,
+                       budget.source, budget.used, budget.ceiling,
+                       budget.window_seconds)
+        return _refused_call(name, budget.reason)
 
     token = _task_registry.current_session_id.set(sid)
     stok = _task_registry.current_call_summary.set(
