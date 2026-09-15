@@ -10,8 +10,8 @@ the vault's only off-box copy could stop moving entirely while the script printe
 Two things make this awkward to test, and both are load-bearing:
 
 * **The evidence cannot be a log grep.** The sync log carries no timestamps, prints
-  `Fully synced` on every idle cycle, and both files are capped at 10 MB with one
-  backup — so `test_the_verdict_never_comes_from_the_logs` plants a log that looks
+  `Fully synced` on every idle cycle, and both files rotate at 10 MB with 10
+  backups — so `test_the_verdict_never_comes_from_the_logs` plants a log that looks
   perfectly healthy and requires the verdict to be unaffected.
 * **The green state is an observed round trip**, which in production means a
   transient pull-only sync device on a paid Obsidian account (a human decision). So
@@ -37,7 +37,10 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = Path.home() / "obsidian" / "skills" / "system-health-check" / "system_health_check.py"
+# The script lives in the vault, which is a live shared tree with no branch; a
+# candidate copy is tested before it is written there by pointing this at it.
+SCRIPT = Path(os.environ.get("LLOYD_SHC_SCRIPT") or
+              Path.home() / "obsidian" / "skills" / "system-health-check" / "system_health_check.py")
 SKILL = SCRIPT.parent / "SKILL.md"
 
 DEGRADED_EXIT = 3
@@ -96,8 +99,91 @@ FAKE_OB = textwrap.dedent(
     spec = json.loads(os.environ["FAKE_OB_SPEC"])
     entry = spec.get(command, {"rc": 0, "out": ""})
 
+    # Which config and whether a token each call ran with: the property clause 1
+    # rests on is in the environment, not the arguments.
+    envlog = os.environ.get("FAKE_OB_ENVLOG")
+    if envlog:
+        with open(envlog, "a") as handle:
+            handle.write(json.dumps({"args": args, "xdg": os.environ.get("XDG_CONFIG_HOME", ""),
+                                     "token": bool(os.environ.get("OBSIDIAN_AUTH_TOKEN"))}) + "\\n")
+
     def opt(name):
         return args[args.index(name) + 1] if name in args else None
+
+    # Registry mode models the shipped client's storage (#1141): one directory per
+    # VAULT ID under $XDG_CONFIG_HOME/obsidian-headless/sync/, and `sync-unlink`
+    # deleting by the vault id of whatever path it is given (cli.js `Rr(t.vaultId)`).
+    if spec.get("_registry"):
+        live_root = Path(os.environ["FAKE_LIVE_CONFIG"]) / "obsidian-headless" / "sync"
+        own_root = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") \\
+            / "obsidian-headless" / "sync"
+        read_root = live_root if spec.get("_ignore_xdg") else own_root
+        write_root = live_root if (spec.get("_ignore_xdg") or spec.get("_ignore_xdg_writes")) \\
+            else own_root
+
+        def registrations(root):
+            found = {}
+            if root.is_dir():
+                for entry in sorted(root.iterdir()):
+                    cfg = entry / "config.json"
+                    if cfg.is_file():
+                        found[entry.name] = json.loads(cfg.read_text())
+            return found
+
+        here = str(Path(opt("--path") or ".").resolve())
+        token_file = own_root.parent / "auth_token"
+        has_token = bool(os.environ.get("OBSIDIAN_AUTH_TOKEN")) or token_file.is_file()
+        if command in ("sync-setup", "sync") and not has_token:
+            sys.stderr.write('No account logged in. Run "ob login" first.\\n')
+            sys.exit(2)
+        if command in ("sync-config", "sync") and here not in [
+                c["vaultPath"] for c in registrations(write_root).values()]:
+            sys.stderr.write(f"No sync configuration found for {here}\\n")
+            sys.exit(3)
+        if command == "sync-status" and spec.get("_status_fail_after"):
+            counter = Path(os.environ["FAKE_OB_LOG"] + ".status-count")
+            n = int(counter.read_text()) + 1 if counter.exists() else 1
+            counter.write_text(str(n))
+            if n > spec["_status_fail_after"]:
+                sys.stderr.write("Status check failed: Error: socket hang up\\n")
+                sys.exit(1)
+        if command == "sync-list-local":
+            regs = registrations(read_root)
+            if not regs:
+                print("No vaults configured.")
+            else:
+                print("Configured vaults:")
+                for vid, cfg in regs.items():
+                    print(f"  {vid}\\n    Path: {cfg['vaultPath']}")
+            sys.exit(0)
+        if command == "sync-setup":
+            if spec.get("_e2e"):
+                print("Fetching vault info...")
+                sys.stderr.write("Password not provided.\\n")
+                sys.exit(2)
+            if spec.get("_setup_refused"):
+                print("Fetching vault info...\\nSetting up...")
+                sys.stderr.write("Failed to validate password. Error: Vault limit exceeded.\\n")
+                sys.exit(2)
+            vid = opt("--vault")
+            (write_root / vid).mkdir(parents=True, exist_ok=True)
+            (write_root / vid / "config.json").write_text(
+                json.dumps({"vaultId": vid, "vaultPath": here}))
+            print("Setting up...")
+            sys.exit(0)
+        if command == "sync-unlink":
+            for vid, cfg in registrations(write_root).items():
+                if cfg["vaultPath"] == here:
+                    shutil.rmtree(write_root / vid)
+            sys.exit(0)
+        if command == "sync-status":
+            for vid, cfg in registrations(live_root if spec.get("_ignore_xdg_writes")
+                                          else read_root).items():
+                if cfg["vaultPath"] == here:
+                    sys.stdout.write(spec["sync-status"]["out"].format(vault_id=vid, vault=here))
+                    sys.exit(0)
+            sys.stderr.write(f"No sync configuration found for {here}\\n")
+            sys.exit(3)
 
     if command == "sync" and spec.get("_replicate"):
         # Model the live client uploading, then the server handing the file to this
@@ -146,11 +232,33 @@ def rig(tmp_path):
             self.fake.chmod(0o755)
             self.calls = base / "ob-calls.log"
             self.calls.touch()
+            # The "live" ob config for this rig: never the real ~/.config.
+            self.live_config = base / "live-config"
+            self.registry = self.live_config / "obsidian-headless" / "sync"
+            self.registry.mkdir(parents=True)
+            (self.live_config / "obsidian-headless" / "auth_token").write_text("fake-token\n")
+            self.state_file = base / "state" / "last_sync_success.json"
+
+        def plant_live_registration(self, vault_id=None):
+            vid = vault_id or self.linked_id
+            (self.registry / vid).mkdir(parents=True, exist_ok=True)
+            (self.registry / vid / "config.json").write_text(
+                json.dumps({"vaultId": vid, "vaultPath": str(self.vault.resolve())}))
+            return self.registry / vid
+
+        def live_ids(self):
+            return sorted(p.name for p in self.registry.iterdir() if (p / "config.json").is_file())
 
         def spec(self, *, linked=True, session="ok", replicate=False,
-                 vault_id=None, status_logged_out=False, e2ee_missing=False):
+                 vault_id=None, status_logged_out=False, e2ee_missing=False,
+                 registry=False, e2e=False, ignore_xdg=False, ignore_xdg_writes=False,
+                 setup_refused=False, status_fail_after=0):
             spec: dict = {"_vault_id": vault_id or self.linked_id,
-                          "_replicate": bool(replicate)}
+                          "_replicate": bool(replicate), "_registry": bool(registry),
+                          "_e2e": bool(e2e), "_ignore_xdg": bool(ignore_xdg),
+                          "_ignore_xdg_writes": bool(ignore_xdg_writes),
+                          "_setup_refused": bool(setup_refused),
+                          "_status_fail_after": int(status_fail_after)}
             if linked:
                 body = SYNC_STATUS_LINKED
                 if e2ee_missing:
@@ -184,12 +292,25 @@ def rig(tmp_path):
                 "LLOYD_HEALTH_VAULT_PATH": str(vault or self.vault),
                 "FAKE_OB_SPEC": json.dumps(spec),
                 "FAKE_OB_LOG": str(self.calls),
+                "FAKE_OB_ENVLOG": str(self.calls) + ".env",
                 "FAKE_VAULT_DIR": str(self.vault),
                 "FAKE_SERVER_DIR": str(self.server),
+                "FAKE_LIVE_CONFIG": str(self.live_config),
+                "XDG_CONFIG_HOME": str(self.live_config),
+                "LLOYD_VAULT_SYNC_STATE_FILE": str(self.state_file),
                 "LLOYD_OB_TIMEOUT": "15",
             })
             env.pop("LLOYD_VAULT_SYNC_ROUND_TRIP", None)
+            env.pop("OBSIDIAN_AUTH_TOKEN", None)
             return env
+
+        def ob(self, *args, spec, config_home=None):
+            """Run the fake client directly, as the probe would."""
+            env = self.env(spec)
+            if config_home is not None:
+                env["XDG_CONFIG_HOME"] = str(config_home)
+            return subprocess.run([str(self.fake), *args], capture_output=True, text=True,
+                                  env=env, timeout=60)
 
         def run(self, *extra, spec=None, round_trip=False, fmt="json", vault=None):
             payload = spec if spec is not None else self.spec()
@@ -207,6 +328,11 @@ def rig(tmp_path):
                 f"{proc.stdout[-1500:]}{proc.stderr[-1500:]}"
             )
             return json.loads(proc.stdout), proc
+
+        def logged_env(self):
+            path = Path(str(self.calls) + ".env")
+            return [json.loads(line) for line in path.read_text().splitlines()
+                    if line.strip()] if path.exists() else []
 
         def logged(self):
             return [json.loads(line) for line in
@@ -380,7 +506,10 @@ def test_the_script_reads_no_log_file_and_no_sync_status_timestamp():
     assert "agent-obsidian-sync.err" not in source
     assert ".log" not in source.replace(".login", "")
     assert "st_mtime" not in source and "getmtime" not in source
-    assert "last_sync" not in source and "lastSync" not in source
+    # #1141 added a last-sync record, and its only source is a dedicated state file
+    # written by an observed round trip — never a log, never `ob sync-status`.
+    assert shc.LAST_SYNC_STATE_DEFAULT.endswith(".json")
+    assert "agent-services" not in shc.LAST_SYNC_STATE_DEFAULT
     assert not any(line.lstrip().startswith("#") is False and "open(" in line
                    and "log" in line.lower() for line in source.splitlines())
 
@@ -554,3 +683,208 @@ def test_text_and_json_report_the_same_verdict_for_the_same_inputs(rig):
         word = "HEALTHY" if payload["overall_status"] == "healthy" else "DEGRADED"
         assert f"=== Overall: {word} ===" in text_proc.stdout, (label, text_proc.stdout)
         assert text_proc.returncode == json_proc.returncode, label
+
+
+# ================================================================ #1141
+# The probe deleted the live sync registration twice on 2026-09-14 (12:03 and
+# 14:15 PDT, from a chat): `ob` keeps registrations per vault id and
+# `sync-unlink` deletes by vault id, so a scratch client sharing the live config
+# took the live registration with it. The fake below models exactly that storage.
+
+# --------------------------------------------------------------- clause 1
+def test_the_stub_deletes_by_vault_id_the_way_the_shipped_client_does(rig, tmp_path):
+    """The counterfactual, so clause 1 cannot pass against a stub too kind to
+    reproduce the incident: a scratch client in the SHARED config, set up and
+    unlinked exactly as the old probe did, deletes the live registration."""
+    spec = rig.spec(registry=True)
+    rig.plant_live_registration()
+    scratch = tmp_path / "old-probe-scratch"
+    scratch.mkdir()
+    assert rig.ob("sync-setup", "--vault", rig.linked_id, "--path", str(scratch),
+                  spec=spec).returncode == 0
+    assert rig.ob("sync-unlink", "--path", str(scratch), spec=spec).returncode == 0
+    assert rig.live_ids() == [], "the stub failed to model the vault-id deletion"
+
+
+def test_a_round_trip_leaves_the_live_registration_resolving(rig):
+    rig.plant_live_registration()
+    spec = rig.spec(registry=True, replicate=True)
+    payload, proc = rig.json("--component", "vault_sync", spec=spec, round_trip=True)
+    block = payload["vault_sync"]
+    assert block["state"] == "synced", block
+    assert block["live_registration"] == "intact", block
+    assert rig.live_ids() == [rig.linked_id], "the live registration was deleted"
+    status = rig.ob("sync-status", "--path", str(rig.vault), spec=spec)
+    assert status.returncode == 0 and rig.linked_id in status.stdout, status
+    # Every scratch call ran in its own config, with the token handed over in the
+    # environment; the live config saw only reads.
+    calls = rig.logged_env()
+    scratch = [c for c in calls if c["args"][:1] in (["sync-setup"], ["sync-config"],
+                                                       ["sync"], ["sync-unlink"])]
+    assert {c["args"][0] for c in scratch} == {"sync-setup", "sync-config", "sync", "sync-unlink"}
+    for c in scratch:
+        assert c["xdg"] and c["xdg"] != str(rig.live_config), c
+        assert Path(c["xdg"]).name.startswith(shc.SCRATCH_PREFIX), c
+        assert c["token"] is True, c
+    checks = [c for c in calls if c["args"][:1] == ["sync-list-local"]]
+    assert len(checks) == 1 and checks[0]["xdg"] == scratch[0]["xdg"], checks
+    live = [c for c in calls if c["xdg"] == str(rig.live_config)]
+    assert live and {c["args"][0] for c in live} <= {"sync-status", "sync-list-remote"}, live
+
+
+def test_a_client_that_ignores_the_isolated_config_is_refused_before_setup(rig):
+    rig.plant_live_registration()
+    spec = rig.spec(registry=True, replicate=True, ignore_xdg=True)
+    payload, proc = rig.json("--component", "vault_sync", spec=spec, round_trip=True)
+    block = payload["vault_sync"]
+    assert block["state"] == "sync-probe-failed" and block["reason"] == "scratch-not-isolated", block
+    called = [a[0] for a in rig.logged()]
+    assert "sync-setup" not in called and "sync-unlink" not in called, called
+    assert rig.live_ids() == [rig.linked_id]
+    assert proc.returncode == DEGRADED_EXIT
+
+
+def test_a_lost_live_registration_is_reported_whatever_the_probe_concluded(rig):
+    """A client that honours the isolation check but writes to the live config
+    anyway: the post-probe re-read is the only thing that can notice."""
+    rig.plant_live_registration()
+    spec = rig.spec(registry=True, replicate=True, ignore_xdg_writes=True)
+    payload, proc = rig.json("--component", "vault_sync", spec=spec, round_trip=True)
+    block = payload["vault_sync"]
+    assert block["state"] == "sync-failed" and block["reason"] == "live-registration-lost", block
+    assert block["live_registration"] == "lost", block
+    assert "ob sync-setup" in block["detail"], block
+    assert proc.returncode == DEGRADED_EXIT
+
+
+def test_no_account_token_means_no_scratch_client(rig):
+    (rig.live_config / "obsidian-headless" / "auth_token").unlink()
+    rig.plant_live_registration()
+    payload, _ = rig.json("--component", "vault_sync", spec=rig.spec(registry=True),
+                          round_trip=True)
+    block = payload["vault_sync"]
+    assert block["state"] == "not-logged-in" and block["reason"] == "no-token-for-scratch-client", block
+    assert "sync-setup" not in [a[0] for a in rig.logged()]
+
+
+def test_both_scratch_directories_are_removed(rig):
+    import tempfile
+    before = set(Path(tempfile.gettempdir()).glob(shc.SCRATCH_PREFIX + "*"))
+    rig.plant_live_registration()
+    rig.json("--component", "vault_sync", spec=rig.spec(registry=True, replicate=True),
+             round_trip=True)
+    after = set(Path(tempfile.gettempdir()).glob(shc.SCRATCH_PREFIX + "*"))
+    assert after - before == set(), sorted(after - before)
+
+
+# --------------------------------------------------------------- clause 2
+def test_an_e2e_vault_is_unprovable_not_a_sync_failure(rig):
+    """`ob sync-setup` on an end-to-end-encrypted vault prompts for the password;
+    with stdin closed it exits 2 "Password not provided." That is a property of
+    the vault, and the check has to say so rather than call sync broken."""
+    rig.plant_live_registration()
+    payload, proc = rig.json("--component", "vault_sync",
+                             spec=rig.spec(registry=True, e2e=True), round_trip=True)
+    block = payload["vault_sync"]
+    assert block["state"] == "unprovable-e2e", block
+    assert block["kind"] == "unproven", block
+    assert block["state"] not in shc.VAULT_SYNC_CANNOT_SYNC
+    assert block["healthy"] is False
+    assert payload["overall_status"] == "degraded" and proc.returncode == DEGRADED_EXIT
+    assert rig.live_ids() == [rig.linked_id]
+
+
+# --------------------------------------------------------------- clause 3
+def test_a_planted_record_puts_its_timestamp_in_the_json(rig):
+    rig.state_file.parent.mkdir(parents=True)
+    rig.state_file.write_text(json.dumps({"at": "2026-09-01T10:00:00-07:00",
+                                          "observed_by": "planted", "vault_id": rig.linked_id}))
+    payload, _ = rig.json("--component", "vault_sync")
+    last = payload["vault_sync"]["last_observed_sync"]
+    assert last["status"] == "recorded" and last["at"] == "2026-09-01T10:00:00-07:00", last
+    assert last["path"] == str(rig.state_file)
+    assert last["healthy"] is False, "a record is history, never a verdict"
+
+
+@pytest.mark.parametrize("shape", ["absent", "corrupt", "no-timestamp", "not-utf8"])
+def test_no_usable_record_is_a_named_non_green_value(rig, shape):
+    if shape != "absent":
+        rig.state_file.parent.mkdir(parents=True)
+        if shape == "not-utf8":
+            rig.state_file.write_bytes(b"\xff\xfe{\x00")
+        else:
+            rig.state_file.write_text("{not json" if shape == "corrupt" else json.dumps({"x": 1}))
+    payload, _ = rig.json("--component", "vault_sync")
+    last = payload["vault_sync"]["last_observed_sync"]
+    assert last["status"] == ("none-recorded" if shape == "absent" else "unreadable"), last
+    assert last["healthy"] is False, last
+    assert payload["vault_sync"]["healthy"] is False
+
+
+def test_an_observed_round_trip_writes_the_record_and_a_failed_one_does_not(rig):
+    rig.plant_live_registration()
+    rig.json("--component", "vault_sync", spec=rig.spec(registry=True, replicate=False),
+             round_trip=True)
+    assert not rig.state_file.exists(), "a failed round trip wrote a success record"
+    rig.json("--component", "vault_sync", spec=rig.spec(registry=True, replicate=True),
+             round_trip=True)
+    record = json.loads(rig.state_file.read_text())
+    assert record["vault_id"] == rig.linked_id and record["at"], record
+    payload, _ = rig.json("--component", "vault_sync")
+    assert payload["vault_sync"]["last_observed_sync"]["at"] == record["at"]
+
+
+def test_a_record_from_another_vault_is_not_reported_as_this_one(rig):
+    rig.state_file.parent.mkdir(parents=True)
+    rig.state_file.write_text(json.dumps({"at": "2026-09-01T10:00:00-07:00",
+                                          "vault_id": "c73df6a0-old-vault"}))
+    payload, _ = rig.json("--component", "vault_sync")
+    last = payload["vault_sync"]["last_observed_sync"]
+    assert last["status"] == "recorded-other-vault", last
+    assert last["healthy"] is False
+
+
+def test_a_refused_setup_on_a_managed_vault_is_a_sync_failure_not_unprovable(rig):
+    """cli.js prints "Failed to validate password." for ANY refused /vault/access
+    call — a network error, a quota refusal — so only the unanswered prompt
+    ("Password not provided.") means the vault is end-to-end encrypted."""
+    rig.plant_live_registration()
+    payload, _ = rig.json("--component", "vault_sync",
+                          spec=rig.spec(registry=True, setup_refused=True), round_trip=True)
+    block = payload["vault_sync"]
+    assert block["state"] == "sync-failed" and block["reason"] == "setup-failed", block
+
+
+def test_an_unreadable_live_registration_after_a_green_trip_is_not_green(rig):
+    rig.plant_live_registration()
+    payload, proc = rig.json("--component", "vault_sync",
+                             spec=rig.spec(registry=True, replicate=True, status_fail_after=1),
+                             round_trip=True)
+    block = payload["vault_sync"]
+    assert block["state"] != "synced" and block["reason"] == "live-registration-unverified", block
+    assert block["live_registration"] == "unverified", block
+    assert block["probe_verdict"]["state"] == "synced", block
+    assert proc.returncode == DEGRADED_EXIT
+
+
+def test_a_temp_dir_that_cannot_be_made_still_takes_the_sentinel_out(rig, monkeypatch):
+    """The sentinel is written into the live vault before the scratch directories
+    exist; a full /tmp must not leave it there for the live client to upload."""
+    import tempfile
+    rig.plant_live_registration()
+    for key, value in rig.env(rig.spec(registry=True)).items():
+        monkeypatch.setenv(key, value)
+    before = set(Path(tempfile.gettempdir()).glob(shc.SCRATCH_PREFIX + "*"))
+    real, calls = shc.tempfile.mkdtemp, {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError(28, "No space left on device")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(shc.tempfile, "mkdtemp", flaky)
+    with pytest.raises(OSError):
+        shc._vault_sync_round_trip(str(rig.fake), rig.linked_id, str(rig.vault.resolve()), 20)
+    assert list((rig.vault / "lloyd").glob("healthcheck-vault-sync-*.md")) == []
+    assert set(Path(tempfile.gettempdir()).glob(shc.SCRATCH_PREFIX + "*")) == before
+    assert rig.live_ids() == [rig.linked_id]

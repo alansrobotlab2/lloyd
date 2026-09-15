@@ -44,6 +44,8 @@ tools never touch, is read through `git ls-files` in a subprocess by
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -64,7 +66,10 @@ POINTER_REL = f"{REF_DIR}/source-blob-location.md"
 POINTER = VAULT / POINTER_REL
 OUT_OF_VAULT_BLOB = Path.home() / "vault-external" / BLOB_REL
 SOURCE_NOTE = VAULT / "projects/lloyd/voice/voice-source-dave-cullen.md"
-KNOWLEDGE_NOTE = VAULT / "knowledge/software/obsidian-headless-sync-quota-silent-failure.md"
+KNOWLEDGE_NOTE = Path(os.environ.get("LLOYD_SYNC_NOTE") or
+                      VAULT / "knowledge/software/obsidian-headless-sync-quota-silent-failure.md")
+SYNC_PROGRAM_CONF = (Path(__file__).resolve().parent.parent
+                     / "agent-services" / "supervisor" / "conf.d" / "agent-obsidian-sync.conf")
 
 #: The reference set the voice clone actually loads. The move had to touch none of it, so
 #: each is pinned by size *and* content hash — a size-only check would not notice a file
@@ -300,3 +305,65 @@ def test_the_move_reached_the_vault_git_index():
         f"{POINTER_REL} is not committed, so Obsidian Sync would never carry the provenance")
     assert ls_files("knowledge/software/obsidian-headless-sync-quota-silent-failure.md"), \
         "the knowledge note is not committed, so the two refusals stay on this box"
+
+
+# ------------------------------------------------------------------ #1141 clause 5
+# "Each of the note's Diagnostic one-liners names its evidence source and the
+#  rotation bound that limits it." A log count of 0 is also what a rotated window
+#  reads, which is exactly how #539 first inferred a true fact from fence-blind
+#  evidence. The bound is read from the supervisor program's own conf, so the note
+#  cannot keep a number the conf has moved away from.
+
+def _rotation_bound() -> str:
+    conf = SYNC_PROGRAM_CONF.read_text(encoding="utf-8")
+    sizes = set(re.findall(r"^std(?:out|err)_logfile_maxbytes\s*=\s*(\S+)", conf, re.M))
+    assert len(sizes) == 1, f"stdout and stderr rotate differently: {sizes}"
+    backups = set(re.findall(r"^std(?:out|err)_logfile_backups\s*=\s*(\d+)", conf, re.M))
+    assert len(backups) <= 1, backups
+    # supervisord's documented default when the program sets none.
+    return f"{sizes.pop()} per file, {backups.pop() if backups else '10'} backups"
+
+
+def _one_liners() -> list[tuple[list[str], str]]:
+    text = KNOWLEDGE_NOTE.read_text(encoding="utf-8")
+    section = text[text.index("## Diagnostic one-liners"):]
+    block = section[section.index("```bash") + len("```bash"):]
+    block = block[:block.index("```")]
+    pairs, comments = [], []
+    for raw in block.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            comments.append(line)
+        else:
+            pairs.append((comments, line))
+            comments = []
+    return pairs
+
+
+def test_every_diagnostic_one_liner_names_its_evidence_and_rotation_bound():
+    bound = _rotation_bound()
+    pairs = _one_liners()
+    assert len(pairs) >= 8, pairs
+    for comments, command in pairs:
+        evidence = [c for c in comments if c.startswith("# evidence:")]
+        assert len(evidence) == 1, f"{command!r} names no evidence source: {comments}"
+        source, sep, rotation = evidence[0].partition(" · rotation: ")
+        assert sep and source.strip() != "# evidence:", evidence[0]
+        logs = [name for name in ("agent-obsidian-sync.log", "agent-obsidian-sync.err")
+                if name in command]
+        if logs:
+            for name in logs:
+                assert name in source, f"{command!r} reads {name} but cites {source!r}"
+            assert rotation.startswith(bound), (
+                f"{command!r} reads a rotated log; its bound must be the conf's "
+                f"{bound!r}, got {rotation!r}")
+        else:
+            assert rotation.startswith("none"), (command, rotation)
+
+
+def test_the_non_rotating_last_sync_record_is_one_of_the_one_liners():
+    commands = [c for _, c in _one_liners()]
+    assert any("--component vault_sync" in c and "last_observed_sync" in c for c in commands)
+    assert not any("last_observed_sync" in c and ".log" in c for c in commands)
