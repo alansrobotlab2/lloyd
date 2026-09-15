@@ -162,6 +162,22 @@ the first time and 793 the second, at a peak RSS of 230.3 GiB. Everything
 came back on its own and the arm under test was lost. That is why the
 guardian is a separate unit ([[vllm]] §8 has the cadence rule).
 
+It happened a third time on 2026-09-15 at 04:48:34Z (796 processes, 174.6 GiB,
+no restart in progress), and nothing could say what had grown. The unit is
+the one killed whoever causes the pressure: oomd watches `app.slice`
+(`/usr/lib/systemd/user/app.slice.d/10-oomd.conf`), past 50% full pressure for
+20 s (`/etc/systemd/oomd.conf.d/10-omarchy.conf`), and kills the descendant
+reclaiming most — and the desktop's browser, editor and VMs share that slice.
+So the guardian records evidence: `agent-services/guardian/memwatch.py` reads
+the unit's, the slice's and the host's `memory.pressure` every tick, and once
+any reaches 15% full avg10 writes a snapshot at most every 15 s to
+`~/.local/state/lloyd-guardian/mem-pressure/` (newest 120) — the three
+readings, `/proc/meminfo`, the unit's `memory.stat`, and the top 30 processes
+by RSS with their anon/shmem split and cgroup. The 95 GiB n-gram table is
+shmem that no process's RSS shows, which is why the cgroup and meminfo
+figures ride along. `memwatch.py latest` prints the newest. A quiet tick
+costs ~0.1 ms; a snapshot ~45 ms and 14 KB.
+
 | Program | Port | What | Start script |
 |---|---|---|---|
 | `lloyd-mc:lloyd-backend` | 8080 | FastAPI + SSE, the worker pool, the autonomy scheduler | `server.py` |

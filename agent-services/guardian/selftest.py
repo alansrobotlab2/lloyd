@@ -95,6 +95,20 @@ def run(g, verbose: bool = True) -> bool:
         return True, f"{snap.total} files, tripped={bool(g.vault.tripped())}"
     checks.append(("vault tripwire judges and measures", vault_tripwire))
 
+    def memory_pressure():
+        # The parse on a fixed sample, then the host's PSI file: a kernel
+        # without it leaves the recorder blind, which is worth failing on.
+        import memwatch as mw
+        p = mw.parse_pressure("some avg10=1.50 avg60=0.20 avg300=0.00 total=9\n"
+                              "full avg10=41.00 avg60=3.00 avg300=0.10 total=7\n")
+        if (p.get("full") or {}).get("avg10") != 41.0:
+            return False, f"pressure parse wrong: {p}"
+        host = mw.read_pressure(g.mem.host)
+        if host is None:
+            return False, f"cannot read {g.mem.host}"
+        return True, f"host full avg10={(host.get('full') or {}).get('avg10')}"
+    checks.append(("memory-pressure recorder reads PSI", memory_pressure))
+
     def endpoints():
         import probes
         import policy

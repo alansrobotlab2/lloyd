@@ -49,6 +49,7 @@ import policy            # noqa: E402
 import probes            # noqa: E402
 import rollback as rb    # noqa: E402
 import vaultwatch        # noqa: E402
+import memwatch          # noqa: E402
 from supervisor import SupervisorClient, SupervisordUnreachable  # noqa: E402
 
 
@@ -109,6 +110,7 @@ class Guardian:
         self._alert_seen: dict[str, float] = {}
         self.cursor = logtail.LogCursor(self.gdir / "logcursors.json")
         self.vault = vaultwatch.VaultWatch(policy.VAULT_ROOT, self.gdir)
+        self.mem = memwatch.MemWatch(self.gdir, memwatch.unit_cgroup(policy.SUPERVISORD_UNIT))
 
         self.tick_n = 0
         self._tick_events: list[dict] = []
@@ -602,6 +604,19 @@ class Guardian:
         except Exception as exc:
             log(f"notifier failed (continuing): {exc}")
 
+    # ── memory-pressure evidence ───────────────────────────────────────
+    def check_memory(self) -> None:
+        """Record who holds the memory while pressure builds toward an oomd
+        kill of the stack (`memwatch.py`). Evidence only: it acts on nothing
+        and never raises into the tick."""
+        try:
+            path = self.mem.tick()
+        except Exception as exc:  # noqa: BLE001
+            log(f"memwatch failed (continuing): {exc}")
+            return
+        if path:
+            log(f"memory pressure snapshot: {path}")
+
     # ── vault tripwire ─────────────────────────────────────────────────
     def check_vault(self) -> None:
         """Trip on a mass deletion of the vault: stop sync, pause workers,
@@ -781,6 +796,9 @@ class Guardian:
         # caught while paused, while BROKEN, with supervisord unreachable and
         # with nothing under observation — every state the returns below mean.
         self.check_vault()
+        # And again: pressure building while supervisord is unreachable or the
+        # stack is BROKEN is the moment the evidence is for.
+        self.check_memory()
 
         if snap["supervisord"] == "unreachable":
             self.sup_down_streak += 1

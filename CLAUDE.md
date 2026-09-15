@@ -77,6 +77,15 @@ Wait for `MemAvailable` to come back above ~150 GiB between boots;
 120 GiB. Note the blast radius is the *unit*, so the guardian (a separate
 systemd unit, deliberately) survives it.
 
+A third kill on 2026-09-15 04:48Z came with no restart in progress and left
+no trace of what grew — oomd judges `app.slice`, which the desktop shares, and
+takes the unit because it reclaims most. The guardian now records the build-up
+(`memwatch.py`): past 15% full pressure on the unit, the slice or the host it
+snapshots meminfo, the unit's `memory.stat` and the top processes by RSS with
+their cgroup into `~/.local/state/lloyd-guardian/mem-pressure/`. After a kill,
+`/usr/bin/python3 ~/.local/state/lloyd-guardian/bin/memwatch.py latest` first.
+`architecture/infrastructure.md` has the rest.
+
 ## The vault is protected at the tool layer
 
 `architecture/vault-protection.md` is the long version and the incident record.
