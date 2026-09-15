@@ -176,6 +176,9 @@ def test_a_vault_round_whose_contract_demands_a_sha_can_reach_a_commit(vault, it
     assert out["landing_clauses"] == [{"clause": 2, "verdict": "met", "commit": sha}]
     ev = _events("vault_land")[-1]
     assert ev["landing_clauses"] == out["landing_clauses"]
+    # A land the reviewer passed carries no skip reason: `review: pass` beside a
+    # reason naming a reviewer that was never consulted would be a false field.
+    assert out["review_reason"] is None and ev["review_reason"] is None
     assert [c["clause"] for c in ev["review_clauses"]] == [1, 2]
     assert ev["review_clauses"][1]["commit"] == sha
     # The consumer that closes a vault item on its review: with clause 2 graded
@@ -195,10 +198,77 @@ def test_a_landing_clause_is_the_only_clause_graded_after_the_commit(vault, item
                            "~/lloyd changes.",
                            "No field list names `board_id` (0 occurrences across 37 real keys)."])
     assert V._landing_clause_indices(43) == [2]
-    monkeypatch.setattr(V, "GRADER", lambda **kw: ("pass", "all content clauses met"))
+    # The reviewer grades 1 and 3, marks 2 `post_landing` for the caller, and says
+    # nothing that would refuse the round; `land()` then fills 2 in from the sha.
+    monkeypatch.setattr(V, "GRADER", lambda **kw: (
+        "pass", "all content clauses met",
+        [{"clause": 1, "verdict": "met"}, {"clause": 2, "verdict": "post_landing",
+          "subject": "landing"}, {"clause": 3, "verdict": "met"}]))
     (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo retry rule\n")
     out = V.land(["skills/foo/SKILL.md"], "skill: foo (#43)", item_id=43)
     assert out["landing_clauses"] == [{"clause": 2, "verdict": "met", "commit": out["commit"]}]
+    # Clauses 1 and 3 stay the reviewer's: the exclusion must not widen until it
+    # swallows the whole contract. Clause 2's `post_landing` placeholder is gone,
+    # replaced by the verdict the sha carries.
+    recorded = _events("vault_land")[-1]["review_clauses"]
+    assert [(c["clause"], c["verdict"]) for c in recorded] == [(1, "met"), (2, "met"), (3, "met")]
+    assert "commit" not in recorded[0] and recorded[1]["commit"] == out["commit"]
+    # A land the reviewer passed is not explained by a reviewer that was never
+    # consulted: the reason field is a skip's, and a passing land has none.
+    assert out["review_reason"] is None
+    assert _events("vault_land")[-1]["review_reason"] is None
+
+
+def test_a_landing_clause_is_graded_unmet_when_a_named_path_missed_the_commit(vault, items, monkeypatch):
+    """The after-the-fact verdict is derived from the commit's own file list, not
+    asserted. Here the round named two paths and only one was changed, so the sha
+    does not contain the other and the clause that names both is false — recorded
+    as false rather than as a pass that `git show` contradicts."""
+    (vault / "skills" / "foo" / "SECOND.md").write_text("---\nname: second\n---\n# second\n")
+    git(vault, "add", "-A", "--", "skills/foo/SECOND.md")
+    git(vault, "commit", "-q", "-m", "second file exists and will not change")
+    write_item(items, 44, ["The change lands through automod_vault_land naming exactly "
+                           "skills/foo/SKILL.md and skills/foo/SECOND.md"])
+    monkeypatch.setattr(V, "GRADER", lambda **kw: ("pass", "content met"))
+    (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo retry rule\n")
+    out = V.land(["skills/foo/SKILL.md", "skills/foo/SECOND.md"], "skill: foo (#44)", item_id=44)
+    row = out["landing_clauses"][0]
+    assert row["verdict"] == "unmet" and row["commit"] == out["commit"]
+    assert "skills/foo/SECOND.md" in row["note"]
+    assert _events("vault_land")[-1]["landing_clauses"] == out["landing_clauses"]
+
+
+async def test_the_landing_fields_survive_the_mcp_tool_boundary(vault, items, monkeypatch):
+    """The one process boundary this change crosses.
+
+    `agent_mcp/automod.py` is the ONLY caller that wires a grader — it sets
+    `VR.GRADER = RV.grade_vault` itself and hands the agent `json.dumps(out)` —
+    so it is where `landing_clauses` and `review_reason` are either kept or
+    dropped on the floor. A test on the in-process `land()` return value cannot
+    see that. Only the network seam is replaced, so the handler runs the real
+    `grade_vault` over the real contract. The IV gate is stubbed: it reads
+    session state, and what is under test here is the payload, not who may call.
+    """
+    import json
+
+    import agent_mcp.automod as AM
+    import scripts.automod.review as RV
+    monkeypatch.setattr(AM, "_inner_voice_gate", lambda action: None)
+    write_item(items, 45, ["the skill names the retry rule",
+                           "The change lands through automod_vault_land as one "
+                           "revertable sha on vault main"])
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: {"ok": True, "structured": GRADER_SAYS_CONTENT_MET_LANDING_UNMET})
+    (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo retry rule\n")
+    payload = json.loads((await AM.call_tool("automod_vault_land", {
+        "paths": ["skills/foo/SKILL.md"], "message": "skill: foo names the retry rule (#45)",
+        "item_id": 45})).content[0].text)
+    # The reviewer said clause 2 was unmet because no sha existed; the handler
+    # still reports a pass, and clause 2's real verdict comes back from the commit.
+    assert payload["review"] == "pass" and payload["commit"]
+    assert payload["landing_clauses"] == [{"clause": 2, "verdict": "met",
+                                           "commit": payload["commit"]}]
+    assert payload["review_reason"] is None
 
 
 def test_a_skipped_vault_review_records_which_abstention_it_was(vault, items, monkeypatch):

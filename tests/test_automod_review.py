@@ -890,7 +890,14 @@ def test_the_vault_prompt_tells_the_reviewer_the_commit_is_pending(isolated):
 def test_a_landing_clause_cannot_refuse_a_round_a_content_clause_still_can(isolated, monkeypatch):
     """The exclusion must not weaken the guard for anything else: clause 1 is a
     content clause the grader says is unmet, so the round still comes back —
-    with the landing clause advisory, and marked so the caller can grade it."""
+    with the landing clause advisory, and marked so the caller can grade it.
+
+    Runs under the autouse `_table_policy` fixture, which is the STRICTER of the
+    two policies for this clause: a plain `unmet` refuses under `table`, while
+    under the shipped `grader` policy it is advisory and only a REPEATED unmet
+    refuses. So the retry asserted here is the table half; what is policy-free is
+    the landing clause's side, because `grade_vault` rewrites that verdict to
+    `post_landing` before either policy sees it."""
     write_item(isolated, 573, clauses=["the skill names the retry rule", LANDING_CLAUSE_972])
     monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": True, "structured": {
         "premise": "sound", "summary": "s", "test_honesty": [], "seams_unverified": [],

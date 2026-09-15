@@ -354,13 +354,19 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
                               + "; ".join(errors[:5]))
 
     review = "skipped"
+    # Always says WHICH abstention it was, and is None when nothing was abstained:
+    # an item-bound land that the reviewer passed must not arrive explained by a
+    # reviewer who was never consulted. #955's whole point is that a skip reason
+    # has to be true, and a wrong one is worse than an absent one.
+    review_reason: str | None = None
     # A land with no item never reaches the second reader at all — there is no
     # contract to grade — which is a different fact from "a grader was asked and
     # could not answer". `scripts/autoresearch/promote.py` and this module's CLI
     # land here, and until #955 both shared the single word `skipped` with a
     # grader outage.
-    review_reason = ("no item bound: the second reader has no contract to grade, "
-                     "so it was not consulted (module CLI, autoresearch promote)")
+    if item_id is None:
+        review_reason = ("no item bound: the second reader has no contract to grade, "
+                         "so it was not consulted (module CLI, autoresearch promote)")
     clauses: list[dict] = []
     landing: set[int] = set()
     if item_id is not None:
@@ -414,9 +420,20 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
     # A clause about the landing is graded here, from the sha, and nowhere else:
     # `land()` reviews before it commits, so no diff can satisfy such a clause at
     # grading time and #425/#502 each died on attempt 2 for exactly that. The
-    # verdict is `met` because the commit it names now exists, and it names the
-    # sha so the claim is checkable rather than asserted.
-    landing_rows = [{"clause": i, "verdict": "met", "commit": sha} for i in sorted(landing)]
+    # verdict is DERIVED, not asserted: the commit's own file list is compared
+    # against the paths the clause names, so a landing that silently dropped one
+    # of them — a path identical to HEAD, a path someone else had staged away —
+    # comes back `unmet`. "Always met" would be the same unevidenceable claim the
+    # reviewer was refused for making.
+    committed = {line.strip() for line in
+                 _git("show", "--name-only", "--format=", sha).stdout.splitlines()}
+    missing = sorted(set(norm) - committed)
+    landing_verdict = "met" if not missing else "unmet"
+    landing_note = (f"named paths not in this commit: {', '.join(missing[:5])}"
+                    if missing else "")
+    landing_rows = [{"clause": i, "verdict": landing_verdict, "commit": sha,
+                     **({"note": landing_note} if missing else {})}
+                    for i in sorted(landing)]
     # `review_clauses` is what `backlog.vault_review_outcome` reads: on a
     # landing that passed review it is the grader's verdict on the whole
     # contract, and the one verdict left when the turn dies at its budget. The
