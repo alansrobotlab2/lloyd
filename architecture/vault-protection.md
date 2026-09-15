@@ -260,6 +260,22 @@ runs or configures something, and treats any other heredoc body as data. Replaye
 over the 29,687 Bash commands in `sessions/` on 2026-09-14 it refuses exactly the
 two incident calls. `tests/test_sync_registration_guard.py`.
 
+The probe itself no longer shares the live config (#1141, vault `9398043e`): its
+scratch client runs under its own `XDG_CONFIG_HOME` with the token in
+`OBSIDIAN_AUTH_TOKEN`, isolation is checked before setup, and the live
+registration is re-read afterwards. On this end-to-end-encrypted vault an
+isolated run ends at `unprovable-e2e`.
+
+**Re-linking** is `agent-services/bin/obsidian-sync-relink.sh`, a person's step
+because `ob sync-setup` asks for the E2E password. Two modes:
+`<new-remote-name>` when the remote holds an incident's deletions (a fresh remote,
+upload-only first pass), and `--existing <remote-vault-id>` when only this
+device's registration was lost — the 14:15 case — and the remote is sound. The
+existing mode refuses the retired ids, runs its first pass **pull-only** so it
+cannot change the remote, and starts continuous sync only if a content manifest
+of the local vault is identical before and after; it pauses the worker pool for
+that pass so Lloyd's own writes do not read as downloads.
+
 ## 3. What is still not covered
 
 - A process that is **not** a bench or eval session and deletes the vault by a
