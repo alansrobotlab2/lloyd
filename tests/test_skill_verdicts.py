@@ -327,3 +327,147 @@ def test_missing_ledger_is_an_empty_answer_not_an_error(tmp_path, capsys):
     assert sv.main(["check", "--candidates", str(cands),
                     "--store", str(tmp_path / "nope.jsonl")]) == 0
     assert "skipped_by_verdict: 0" in capsys.readouterr().out
+
+
+# ── #1131 clause 4: widening a sequence key must orphan no ledger row ────────
+#
+# #1131 disambiguates a sequence key whose slug reaches `slugify`'s 50-character
+# cap. The one way that repair becomes a new defect is by changing a key the
+# verdict ledger already adjudicated: the ledger and the corpus join on the key
+# string and nothing else, so a widened key reads as a brand-new pattern and a
+# recorded rejection silently stops binding. #515's ledger half is the cautionary
+# case — widening a key with no migration left 21 coarse rows unreachable. The
+# disambiguator is therefore scoped to the cap, and the two tests below are both
+# halves of that scoping: the real ledger, whose `seq-*` rows must still resolve
+# through the miner's own join, and one written candidate that carries a widened
+# key read back by the ledger's own reader.
+
+LIVE_LEDGER = Path.home() / "lloyd" / "_pipeline" / "skills" / "reviews" / "verdicts.jsonl"
+
+# Measured 2026-09-15 on the ledger above: 53 seq-* rows under 28 distinct keys,
+# every one of them under 48 characters, so none of them is touched by a
+# cap-scoped disambiguator. The minimums below are the item's filing figures
+# (43 rows / 23 keys), which the append-only ledger can only exceed — they exist
+# so the loop below can never degenerate into checking zero keys.
+MIN_UNDERCAP_SEQ_ROWS = 43
+MIN_UNDERCAP_SEQ_KEYS = 23
+SLUG_CAP = 50
+
+
+def seq_slug_of(key: str) -> str:
+    """The slug part of a `seq-{n}-{slug}` key, the piece the cap applies to."""
+    return key[len("seq-"):].partition("-")[2]
+
+
+def seq_pattern_for_key(key: str) -> dict:
+    """The sequence pattern `candidate_pattern_key` derives `key` from.
+
+    A stored seq key is `seq-{n}-{slug}` and a slug is already lowercase
+    alphanumerics plus hyphens, so feeding the slug back in as the n-gram string
+    re-derives that key — and only re-derives it if the key rule is still
+    identity below the cap, which is the whole of clause 4.
+    """
+    ngram_size, _, slug = key[len("seq-"):].partition("-")
+    return {"type": "sequence", "ngram_size": int(ngram_size),
+            "sequence_str": slug, "sequence": tuple(slug.split("-")),
+            "sessions": {"s1", "s2"}, "has_error_recovery": False,
+            "first_seen": "2026-09-01", "last_seen": "2026-09-14",
+            "examples": [], "total_calls": 0}
+
+
+def copy_live_ledger(tmp_path) -> Path:
+    """A tmp copy of the live ledger. The rule this file runs under is that it
+    never reads the nightly's state through a path it could write, so the real
+    rows are copied in: the assertion stays read-only and the data stays real."""
+    dest = tmp_path / "reviews" / "verdicts.jsonl"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(LIVE_LEDGER.read_text(encoding="utf-8"), encoding="utf-8")
+    return dest
+
+
+@pytest.mark.skipif(not LIVE_LEDGER.exists(), reason="no verdict ledger here")
+def test_every_stored_sequence_verdict_still_resolves_after_the_widening(tmp_path):
+    """No `seq-*` row in the real ledger may stop binding because of #1131.
+
+    For each stored key whose slug is under the cap: the pattern it came from
+    re-derives that exact key — an unscoped disambiguator breaks here, which is the
+    point — and the miner's join (`verdict_for`) reaches the row that
+    `terminal_verdict` reaches by key. Measured today every stored seq-* key is
+    under the cap, so this loop is all of them. A key whose slug reached the cap
+    could only have been minted after this change, and its original `sequence_str`
+    is not recoverable from the row, so it is out of scope here by construction
+    rather than by choice.
+    """
+    store = copy_live_ledger(tmp_path)
+    rows = [json.loads(l) for l in store.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+    seq_keys = sorted({r["pattern_key"] for r in rows
+                       if (r.get("pattern_key") or "").startswith("seq-")})
+    under_cap = [k for k in seq_keys if len(seq_slug_of(k)) < SLUG_CAP]
+    under_cap_rows = [r for r in rows
+                      if (r.get("pattern_key") or "").startswith("seq-")
+                      and len(seq_slug_of(r["pattern_key"])) < SLUG_CAP]
+    assert len(under_cap_rows) >= MIN_UNDERCAP_SEQ_ROWS, (
+        f"only {len(under_cap_rows)} under-cap seq-* rows: the ledger this test guards "
+        "against orphaning no longer holds the rows it held at filing, so the loop "
+        "below would be checking almost nothing")
+    assert len(under_cap) >= MIN_UNDERCAP_SEQ_KEYS, (
+        f"only {len(under_cap)} under-cap seq-* keys, so the loop below proves nothing")
+
+    table = sv.load_verdicts(store)
+    for key in under_cap:
+        pattern = seq_pattern_for_key(key)
+        assert mt.candidate_pattern_key(pattern) == key, (
+            f"{key}: the key rule changed below the cap, so this ledger row is now "
+            "unreachable and its recorded verdict silently stops binding")
+        row = table.get(key)
+        assert row is not None, f"{key} missing from the loaded ledger"
+        occ = int(row.get("occurrences_at_decision") or 0)
+        pattern["total_calls"] = occ
+        joined = mt.verdict_for(pattern, store=store)
+        if sv.is_terminal(row):
+            assert sv.terminal_verdict(key, store=store, occurrences=occ) is not None
+            assert joined is not None, f"{key}: the miner's join missed a terminal row"
+            assert joined["verdict"] == row["verdict"]
+        else:
+            assert joined is None, f"{key}: a non-terminal row now blocks a candidate"
+
+
+def test_a_widened_sequence_key_survives_the_candidate_round_trip(tmp_path, store):
+    """The other half of the join: a candidate written with a disambiguated key is
+    read back at that key by `read_candidate`, so a verdict recorded against the
+    long key binds the next night's file for the same n-gram."""
+    long_seq = {
+        "type": "sequence", "ngram_size": 5,
+        "sequence_str": ("backlog_write_task → bash:fs → automod_gate_wait "
+                         "→ automod_land → backlog_tasks"),
+        "sequence": ("backlog_write_task", "bash:fs", "automod_gate_wait",
+                     "automod_land", "backlog_tasks"),
+        "sessions": {"s1", "s2"}, "has_error_recovery": False,
+        "first_seen": "2026-09-14", "last_seen": "2026-09-15",
+        "examples": [], "total_calls": 6,
+    }
+    key = mt.candidate_pattern_key(long_seq)
+    assert len(key) > SLUG_CAP, "the fixture must carry a key past the slug cap"
+
+    cands = tmp_path / "candidates"
+    path = Path(mt.write_candidate_file(long_seq, cands, verdict_store=store))
+    assert sv.read_candidate(path)[:2] == (key, "pending_review")
+
+    sv.record_verdict(store, key, "reviewed_no_skill",
+                      reason="covered by an installed skill",
+                      evidence_cmd="grep -n 'seq-5' _pipeline/skills/candidates/*.md")
+    row = mt.verdict_for(long_seq, store=store)
+    assert row is not None and row["verdict"] == "reviewed_no_skill"
+
+    # The next night's file — same n-gram, now written with the verdict already on
+    # it — carries the long key in its frontmatter and a superseded status, so the
+    # loop cannot re-propose it.
+    status, front, _verdict = mt.status_block(long_seq, store=store)
+    assert status == "superseded_by_verdict"
+    assert "verdict: reviewed_no_skill" in front
+
+    second = Path(mt.write_candidate_file(long_seq, cands, verdict_store=store))
+    body = second.read_text(encoding="utf-8")
+    assert f"pattern: {key}" in body
+    assert f"status: {status}" in body.split("---", 2)[1]

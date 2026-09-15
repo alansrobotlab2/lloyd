@@ -941,6 +941,228 @@ def test_a_day_of_emission_carries_neither_defect(tmp_path):
     assert not [k for k in keys if k.endswith("_signature")]
 
 
+# ── a sequence's file must be injective on its key (backlog #1131) ───────────
+#
+# `candidate_pattern_key()` ran the n-gram through `slugify`, which cuts at 50
+# characters, and `write_candidate_file()` then cut the finished key at the same
+# 50 for the filename. Two distinct n-grams sharing their first 50 slug
+# characters therefore got one filename and one `pattern:` value; the second
+# write silently replaced the first, and which one survived was dict iteration
+# order. Measured on the live 7-day corpus on 2026-09-15: 1674 mined sequence
+# patterns returned 1674 paths, 1671 of them distinct, 1671 files on disk — three
+# names carrying two patterns each — and reversing the input list flipped the
+# `pattern:` field inside `candidate-seq-3-backlog-write-task-bash-fs-…`. The run
+# also printed 1234 `Written:` lines over 1169 files, because the same duplicated
+# list feeds the summary and INDEX.md.
+
+ALIASED_HEAD = ("automod_gate_wait", "backlog_write_task")
+ALIASED_TAILS = ("automod_land", "automod_abort")
+
+
+def aliased_traj(session_key):
+    """One session carrying both trigrams whose keys alias.
+
+    The shared prefix `seq-3-automod-gate-wait-backlog-write-task-automod` is
+    exactly 50 slug characters, so `… -> automod_land` and `… -> automod_abort`
+    were cut to the same string and became one file.
+    """
+    names = [ALIASED_HEAD[0], ALIASED_HEAD[1], ALIASED_TAILS[0],
+             ALIASED_HEAD[0], ALIASED_HEAD[1], ALIASED_TAILS[1]]
+    return {
+        "session_key": session_key,
+        "timestamp": "2026-09-15T10:10:10Z",
+        "tool_count": len(names), "error_count": 0, "has_errors": False,
+        "tools": [{"name": n, "is_error": False, "sequence": i,
+                   "params_summary": {}, "result_summary": "ok"}
+                  for i, n in enumerate(names)],
+        "error_tools": [], "signals": [], "session_class": "interactive",
+    }
+
+
+def aliased_pair():
+    """The two aliased sequence patterns, mined through the real miner."""
+    rows = [aliased_traj("alias-a"), aliased_traj("alias-b")]
+    pair = [p for p in mt.mine_sequence_patterns(rows, threshold=2)
+            if tuple(p["sequence"][:2]) == ALIASED_HEAD
+            and p["sequence"][-1] in ALIASED_TAILS]
+    assert len(pair) == 2, "the fixture must mine both aliased n-grams"
+    return pair
+
+
+def pattern_field_of(path: Path) -> str:
+    return re.search(r"^pattern: (.+)$", path.read_text(encoding="utf-8"),
+                     re.MULTILINE).group(1)
+
+
+def test_two_ngrams_that_alias_under_the_cap_keep_distinct_keys():
+    """Clause 2 at the key level, through the miner rather than a hand-built
+    dict: `slugify` had already folded both n-grams onto
+    `seq-3-automod-gate-wait-backlog-write-task-automod`."""
+    a, b = aliased_pair()
+    assert a["sequence_str"] != b["sequence_str"]
+    assert mt.candidate_pattern_key(a) != mt.candidate_pattern_key(b)
+
+
+def test_two_ngrams_that_alias_under_the_cap_get_one_file_each(tmp_path):
+    """Clause 1 for the mechanism: two patterns, two files, two distinct
+    `pattern:` fields — where pre-fix it was one file holding whichever n-gram
+    the dict happened to yield last."""
+    written = mt.emit_candidates(aliased_pair(), tmp_path)
+    assert len(written) == 2, [p.name for p in written]
+    assert len(set(written)) == 2, "the returned list named one path twice"
+
+    fields = {pattern_field_of(p) for p in written}
+    assert fields == {mt.candidate_pattern_key(p) for p in aliased_pair()}
+    assert len(fields) == 2
+    assert len(list(tmp_path.glob("candidate-seq-*.md"))) == 2
+
+
+def test_reversing_the_pattern_list_writes_the_same_bytes(tmp_path):
+    """Clause 3: the surviving evidence must not be decided by iteration order.
+    Every file from the forward emission exists from the reversed one and is
+    byte-identical to it — a name-only fix would pass the first assertion and
+    leave the last writer winning inside the file."""
+    pair = aliased_pair()
+    forward, backward = tmp_path / "fwd", tmp_path / "rev"
+    f_written = mt.emit_candidates(pair, forward)
+    r_written = mt.emit_candidates(list(reversed(pair)), backward)
+
+    assert sorted(p.name for p in f_written) == sorted(p.name for p in r_written)
+    by_name = {p.name: p for p in r_written}
+    for path in f_written:
+        assert path.read_bytes() == by_name[path.name].read_bytes(), path.name
+
+
+def test_a_key_longer_than_the_cap_is_slugged_by_the_same_rule(tmp_path):
+    """The filename and the key must go through one cap rule. Sluging an already
+    disambiguated key with plain `slugify` re-cut it at 50 and put the hash —
+    bytes 51 onward — exactly where the cut lands, re-merging the pair. Two
+    5-grams differing only in their final tool are the case the item names: pre-fix
+    both returned `seq-5-backlog-write-task-bash-fs-automod-gate-wait-autom`."""
+    head = "backlog_write_task → bash:fs → automod_gate_wait → automod_land"
+    five_a = {"type": "sequence", "ngram_size": 5, "sessions": {"s1", "s2"},
+              "sequence": tuple(head.split(" → ")) + ("backlog_tasks",),
+              "sequence_str": f"{head} → backlog_tasks",
+              "has_error_recovery": False, "first_seen": "2026-09-14",
+              "last_seen": "2026-09-15", "examples": []}
+    five_b = {**five_a,
+              "sequence": tuple(head.split(" → ")) + ("research_stats",),
+              "sequence_str": f"{head} → research_stats"}
+
+    key_a, key_b = (mt.candidate_pattern_key(p) for p in (five_a, five_b))
+    assert key_a != key_b
+    assert key_a.startswith("seq-5-backlog-write-task-bash-fs-automod-gate-wait-autom-")
+    assert key_a != key_a[:50], "the key itself must survive past the slug cap"
+
+    written = mt.emit_candidates([five_a, five_b], tmp_path)
+    assert len(written) == 2, [p.name for p in written]
+    assert len({p.name for p in written}) == 2, "two keys, one filename"
+    assert {pattern_field_of(p) for p in written} == {key_a, key_b}
+
+
+def test_a_key_under_the_cap_is_unchanged_by_the_disambiguator():
+    """The widening is scoped to the cap, and this is the unit half of that
+    scoping: a short n-gram keeps the byte-identical key the verdict ledger
+    already stores (the ledger half is pinned in `test_skill_verdicts.py`)."""
+    short = {"type": "sequence", "ngram_size": 2,
+             "sessions": {"s1", "s2"},
+             "sequence": ("bash:fs", "backlog_write_task"),
+             "sequence_str": "bash:fs → backlog_write_task",
+             "has_error_recovery": False, "first_seen": "2026-09-01",
+             "last_seen": "2026-09-09", "examples": []}
+    key = mt.candidate_pattern_key(short)
+    assert key == "seq-2-bash-fs-backlog-write-task"
+    assert mt.slug_for(key) == mt.slugify(key), "no hash suffix below the cap"
+
+
+def test_the_nightly_run_reports_one_line_per_file_it_wrote(tmp_path):
+    """Clause 5, over the command the nightly actually runs. `Written:` lines and
+    INDEX.md's candidate count are counts of files, so they must equal the files
+    on disk; pre-fix the same list carried one entry per write attempt — 1234
+    lines over 1169 files. `Suppressed as non-skill candidates` came out of the
+    same arithmetic — `len(all_patterns) - len(written)` — and agreed with the gate
+    on 2026-09-15 (1482 - 1234 = 248, and 248 patterns refused by `is_emittable`)
+    only because the old list held one entry per write attempt; it was never a
+    measurement of the gate, and once the list counts files the subtraction starts
+    reporting an aliased pattern as suppressed."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    rows = [aliased_traj(f"alias-{i}") for i in (1, 2, 3)]
+    # A refused-by-gate success pattern: `_signature` keys are counted as mined
+    # and never emitted, which is what the Suppressed line is for.
+    for i in (1, 2, 3):
+        rows.append({
+            "session_key": f"succ-{i}", "session_class": "interactive",
+            "timestamp": "2026-09-15T10:10:10Z",
+            "tool_count": 1, "error_count": 0, "has_errors": False,
+            "tools": [{"name": "Read", "is_error": False, "sequence": 0,
+                       "params_summary": {"file_path": "/x", "limit": 100},
+                       "result_summary": "ok"}],
+            "error_tools": [], "signals": []})
+    # Two error variants of one (tool, error_type): distinct mined patterns, one
+    # candidate file (#515's coarse key, unlanded). The report must count the
+    # file once.
+    for i in (1, 2, 3):
+        rows.append(error_traj(f"err-{i}", "Bash", "not_found", "protocol",
+                               params={"command": "pytest tests/"}))
+        rows.append(error_traj(f"err-{i}", "Bash", "not_found", "protocol",
+                               params={"path": "/missing"}))
+    (corpus / CORPUS_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    out = tmp_path / "cands"
+    proc = run_miner(corpus, out, extra_args=("--include-machine",))
+    assert proc.returncode == 0, proc.stderr
+    report = proc.stdout + proc.stderr
+
+    written_lines = [l for l in report.splitlines()
+                     if l.strip().startswith("Written:")]
+    files_on_disk = list(out.glob("candidate-*.md"))
+    assert len(written_lines) == len(files_on_disk), (
+        f"{len(written_lines)} Written: lines for {len(files_on_disk)} files")
+
+    index = (out / "INDEX.md").read_text(encoding="utf-8")
+    index_total = int(re.search(r"\*\*Total candidates:\*\* (\d+)", index).group(1))
+    assert index_total == len(files_on_disk), index_total
+
+    seq_files = [p for p in files_on_disk if p.name.startswith("candidate-seq-")]
+    assert len(seq_files) == len(set(p.name for p in seq_files))
+
+    mined = (mt.mine_error_patterns(rows, threshold=2)
+             + mt.mine_success_patterns(rows, threshold=2)
+             + mt.mine_sequence_patterns(rows, threshold=max(3, 2)))
+    refused = [p for p in mined if not mt.is_emittable(p)]
+    assert refused, "the corpus must contain a pattern the gate refuses"
+    suppressed = int(re.search(
+        r"Suppressed as non-skill candidates: (\d+)", report).group(1))
+    assert suppressed == len(refused), (suppressed, len(refused))
+
+
+def test_the_live_corpus_emits_one_file_per_sequence_pattern(tmp_path):
+    """The acceptance check itself, over the corpus the nightly reads: 7 days,
+    every class, threshold 2. 1674 mined sequence patterns -> 1674 distinct paths
+    -> 1674 files, where the 2026-09-15 baseline was 1671 files and the three
+    aliased names carried two patterns each."""
+    # `LIVE_CORPUS` is defined further down this file, against the real data root
+    # rather than the checkout — `_pipeline/` is gitignored, so a worktree-relative
+    # path would skip forever and clause 1 would never be graded. Read-only.
+    if not LIVE_CORPUS.exists():
+        pytest.skip("no trajectories dir on this machine")
+    rows = mt.load_trajectories(days=7, agent_filter="all", exclude_machine=False)
+    seqs = mt.mine_sequence_patterns(rows, threshold=2)
+    assert seqs, "no sequence patterns mined, so the assertions below are vacuous"
+
+    target = tmp_path / "candidates"
+    paths = mt.emit_candidates(seqs, target)
+    seq_paths = [p for p in paths if p.name.startswith("candidate-seq-")]
+    seq_files = list(target.glob("candidate-seq-*.md"))
+
+    assert len(seq_paths) == len(set(seq_paths)), "a path appeared twice"
+    assert len(seq_files) == len(seqs) == len(seq_paths)
+    fields = [pattern_field_of(p) for p in seq_files]
+    assert len(set(fields)) == len(fields), "two files share a pattern: field"
+
+
 # ── live-data guard: the sweep must not survive in regenerated data ──────────
 #
 # #392: the extractor used to derive `has_errors` / `error_tools` by regexing a

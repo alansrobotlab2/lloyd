@@ -245,19 +245,58 @@ def is_emittable(pattern: dict) -> bool:
 
 
 def emit_candidates(patterns: list[dict], output_dir: Path) -> list[Path]:
-    """Write every emittable pattern; return the files written.
+    """Write every emittable pattern; return one entry per file written.
 
     The filter lives here and in `write_candidate_file`, not in the three
     miners: the pattern tables are still complete telemetry (`--stats` and a
     re-ranked corpus need to see what the extractor is producing), but nothing
     in the non-skill class reaches skill authoring.
+
+    The list is de-duplicated because it is a list of *files*, and `main()`
+    prints one `Written:` line per entry and hands the same list to
+    `write_index()`. Before this, a run reporting 1234 candidates left 1169
+    files on disk — one entry per write attempt, not per file (#1131, clause 5).
+    Deduplicating here is also why `main()` can no longer derive its suppression
+    count as `len(all_patterns) - len(written)`: that subtraction was correct only
+    while `written` held one entry per emittable *pattern*, and it now counts
+    files, so the gate gets counted directly instead.
+
+    De-duplicating the list does not fix the other half of the mismatch. Several
+    mined *error* patterns still share one coarse `tool/error_type` key and so
+    still share one file — 72 collapsing onto 16 keys at filing — and the last
+    writer there still wins. #515 owns deciding what that adjudication unit
+    should be; this only stops the run from *reporting* a file it did not
+    create. The assertion below is sequence-scoped for the same reason: a
+    sequence's key is the n-gram itself, so its patterns genuinely are distinct
+    and every one of them is owed a file of its own.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    written = []
+    written: list[Path] = []
+    seen: set[Path] = set()
     for pattern in patterns:
         path = write_candidate_file(pattern, output_dir)
-        if path:
-            written.append(Path(path))
+        if not path:
+            continue
+        path = Path(path)
+        if path in seen:
+            continue
+        seen.add(path)
+        written.append(path)
+    # One sequence pattern = one n-gram = one key, and `mine_sequence_patterns`
+    # returns each n-gram once, so comparing distinct keys to sequence files is
+    # the whole of clause 1: a 50-character slug that folds two n-grams onto one
+    # name makes these two numbers disagree here, in the function that writes
+    # them, instead of in somebody's eyeball of a nightly log.
+    sequence_keys = {
+        candidate_pattern_key(p) for p in patterns
+        if p.get("type") == "sequence" and is_emittable(p)
+    }
+    sequence_paths = [p for p in written if p.name.startswith("candidate-seq-")]
+    assert len(sequence_paths) == len(sequence_keys), (
+        f"{len(sequence_keys)} distinct sequence pattern keys wrote "
+        f"{len(sequence_paths)} candidate-seq-*.md files: a sequence candidate "
+        "path is still being written twice (#1131)"
+    )
     return written
 
 
@@ -267,7 +306,50 @@ def slugify(text: str) -> str:
     text = re.sub(r'[^a-z0-9]+', '-', text)  # Replace everything non-alphanumeric with -
     text = re.sub(r'-+', '-', text)
     text = text.strip('-')
-    return text[:50]  # Limit length
+    return text[:SLUG_CAP]  # Limit length
+
+
+# The 50-character cut above is lossy, and it sat on the path of both the sequence
+# *key* and the sequence *filename*: `candidate_pattern_key()` slugified the n-gram
+# before building `seq-{n}-{slug}`, and `write_candidate_file()` slugified that key
+# again for the name. Two distinct n-grams whose first 50 slug characters agree —
+# `… -> backlog_write_task` vs `… -> backlog_write_task:ERR`, or two 5-grams
+# differing only in the final tool — therefore shared one filename and one
+# `pattern:` field, the second write silently replaced the first, and which n-gram
+# survived was dict iteration order (measured 2026-09-15: 1674 mined sequence
+# patterns -> 1671 files). #1131.
+SLUG_CAP = 50
+
+
+def slug_disambiguator(pre_slug_text: str) -> str:
+    """8 hex chars of sha256 over the exact text `slugify` truncated.
+
+    The import is function-local on purpose: a module-level one would shift the
+    pre-existing `normalize_tool_name` redefinition finding at line 313, whose
+    message quotes line 106, and the gate's normaliser strips only the
+    `path:line:col:` prefix — so a moved *message* number reads as a new finding
+    and fails the static rung on a change that introduced nothing.
+    """
+    import hashlib
+
+    return hashlib.sha256(pre_slug_text.encode("utf-8")).hexdigest()[:8]
+
+
+def slug_for(text: str) -> str:
+    """`slugify(text)`, made injective on `text` when the cap actually bit.
+
+    The suffix is added *only* when the slug reached `SLUG_CAP`. That scoping is
+    the whole point: the key derived from this is also the verdict-ledger join,
+    and every `seq-*` row already in `_pipeline/skills/reviews/verdicts.jsonl`
+    carries a slug shorter than the cap (43 rows / 23 distinct keys at filing,
+    longest 47 characters), so nothing existing changes meaning and no verdict is
+    orphaned. An unscoped widening is the #515 failure — widening a key with no
+    migration left 21 coarse rows unreachable.
+    """
+    slug = slugify(text)
+    if len(slug) >= SLUG_CAP:
+        return f"{slug}-{slug_disambiguator(text)}"
+    return slug
 
 
 # ── Tool name normalization (for sequence mining) ────────────────────────────
@@ -923,13 +1005,27 @@ def candidate_pattern_key(pattern: dict) -> str:
     already been decided?". The ledger and the corpus join on this string and nothing
     else, so it is derived in exactly one place. Error patterns key on
     `(tool, error_type)` — `Bash/timeout`, `Edit/not_found` — which is the shape the
-    seven rejected 09-06 candidates actually carry.
+    seven rejected 09-06 candidates actually carry. A sequence keys on the n-gram
+    itself through `slug_for`, so a long n-gram carries a disambiguator instead of
+    being silently cut at 50 slug characters — the two shapes that shared key
+    `seq-5-backlog-write-task-bash-fs-automod-gate-wait-autom` were different
+    patterns joined onto one ledger row (#1131).
     """
     if pattern["type"] == "error":
         return f"{pattern['tool_name']}/{pattern['error_type']}"
     if pattern["type"] == "sequence":
-        return f"seq-{pattern['ngram_size']}-{slugify(pattern['sequence_str'])}"
+        return sequence_pattern_key(pattern["ngram_size"], pattern["sequence_str"])
     return f"{pattern['tool_name']}/{pattern['params_signature']}"
+
+
+def sequence_pattern_key(ngram_size: int, sequence_str: str) -> str:
+    """The key for one mined n-gram: `seq-{n}-{slug}`, disambiguator included.
+
+    Split out from `candidate_pattern_key` so the cap rule lives in exactly one
+    place and a caller that has the n-gram but no pattern dict — a test, or a
+    ledger lookup assembled from a `sequence_str` — can derive the same string.
+    """
+    return f"seq-{ngram_size}-{slug_for(sequence_str)}"
 
 
 def verdict_for(pattern: dict, store: str | Path | None = None) -> dict | None:
@@ -1004,7 +1100,14 @@ def write_candidate_file(pattern: dict, output_dir: Path, verdict_store: str | P
     pattern_slug = candidate_pattern_key(pattern)
     status_value, verdict_fm, _verdict = status_block(pattern, store=verdict_store)
 
-    slug = slugify(pattern_slug)
+    # `slug_for`, not `slugify`: the key of a sequence that hit the cap is longer
+    # than the cap itself, so a plain `slugify` here re-cut it at 50 and put the
+    # two 5-grams back onto one filename — the disambiguator arriving at byte 51
+    # onward, exactly where the cut lands. Sluging the key through the same
+    # cap-scoped rule appends a hash of the *key*, which is injective on the
+    # pattern; the two mechanisms together are what make one pattern own one
+    # file (#1131, clause 1).
+    slug = slug_for(pattern_slug)
     today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
     filename = f"candidate-{slug}-{today}.md"
     filepath = output_dir / filename
@@ -1402,7 +1505,15 @@ def main() -> None:
     all_patterns = error_patterns + success_patterns + sequence_patterns
     written = emit_candidates(all_patterns, output_dir)
     candidate_files = [os.path.basename(p) for p in written]
-    suppressed = len(all_patterns) - len(written)
+    # Counted from the gate, not subtracted from `written`. The arithmetic form
+    # was `len(all_patterns) - len(written)`, and while `written` held one entry
+    # per write attempt that subtraction did land on the gate's number (measured
+    # 2026-09-15: 1482 patterns, 1234 attempts, 248 reported, 248 refused by
+    # `is_emittable`) — right by coincidence of shape, never by measuring the
+    # gate. Deduplicating `written` is what breaks it: an aliased pattern would
+    # then be reported as suppressed when the gate never refused it. Counting
+    # `is_emittable` directly reports the thing the line claims (#1131, clause 5).
+    suppressed = sum(1 for p in all_patterns if not is_emittable(p))
 
     # Keys the verdict ledger blocked. Reported, never silent: the number plus one
     # reason line per key is what turns "zero proposed" from an unexplained gap into a
