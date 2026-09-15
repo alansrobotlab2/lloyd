@@ -873,7 +873,18 @@ def apply_merges(
         possible_prefixes = [p for p in possible_prefixes if not (p in seen_pfx or seen_pfx.add(p))]
 
         new_prefix = canonical + "-"
-        touched: list[Path] = []
+        touched: list[Path] = []    # where each file is NOW, re-read by the index
+        # Where each file USED TO BE. `facts_idx` keys rows on `file_path`, so a
+        # move that only re-reads the destination leaves the source row live
+        # (`expired_at IS NULL AND invalid_at IS NULL`) pointing at a path that
+        # no longer exists — and it still carries the variant's name, so every
+        # live-row coverage/fragmentation query keeps counting an entity that has
+        # genuinely been merged away (#996: 1,095 live rows across the 115 SAFE
+        # merges that have a variant dir on disk). The index is derived from the
+        # markdown, so retiring a row here costs nothing that a reindex of the
+        # restored file cannot put back — which is exactly what
+        # `revert-suffix-merges.py` does on a revert.
+        retired: list[Path] = []
         for f in list(vdir.iterdir()):
             if not f.is_file():
                 continue
@@ -893,6 +904,7 @@ def apply_merges(
                 shutil.move(str(f), str(dest))
             retag_fact_file(dest, variant, canonical)
             touched.append(dest)
+            retired.append(f)
             moved += 1
         # Move nested subdirs (writer pattern: <variant>/<variant>-experiment.md).
         # The file loop above skips non-files, so without this a non-empty
@@ -914,15 +926,22 @@ def apply_merges(
                         inner.unlink()
                     else:
                         shutil.move(str(inner), str(dest_file))
+                    retag_fact_file(dest_file, variant, canonical)
                     touched.append(dest_file)
+                    retired.append(inner)
                 try:
                     d.rmdir()
                 except OSError:
                     pass
                 moved += 1
             else:
+                src_mds = sorted(d.glob("*.md"))        # their paths BEFORE the move
                 shutil.move(str(d), str(dest))
-                touched.extend(dest.glob("*.md"))
+                dest_mds = sorted(dest.glob("*.md"))
+                for p in dest_mds:                      # the file loop's retag, here too
+                    retag_fact_file(p, variant, canonical)
+                touched.extend(dest_mds)
+                retired.extend(src_mds)
                 moved += 1
         # Remove variant dir if empty
         removed = False
@@ -931,10 +950,16 @@ def apply_merges(
             removed = True
         except OSError:
             pass
-        # The index follows the files: without this the merged facts would
-        # still be indexed under the variant until the next full reindex.
+        # The index follows the files — in both directions. `touched` re-reads
+        # each destination so the merged facts are counted under the canonical;
+        # `retired` names each path this merge just moved away, and `reindex`
+        # drops a path's rows before checking the file exists, so a source that
+        # is gone has its rows retired rather than left live under the variant
+        # (#996). Without the second half the variant keeps counting forever:
+        # nothing else ever re-reads a path it did not itself name, and no
+        # scheduled job does a full reindex.
         try:
-            st.facts_idx.reindex(touched, root=facts_root)
+            st.facts_idx.reindex([*touched, *retired], root=facts_root)
             st.entities.remove(variant) if removed else None
         except Exception as exc:  # index is derived; never fail a merge on it
             print(f"    [warn] index update for {variant!r} failed: {exc}")

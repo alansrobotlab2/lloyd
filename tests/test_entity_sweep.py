@@ -198,6 +198,110 @@ def test_apply_writes_aliases_and_stamps_the_ledger(tmp_path):
     assert amb and "semantic gate" in amb[0]["decision"]
 
 
+# ── the facts_idx rows a merge leaves behind (#996) ─────────────────────────
+#
+# `apply_merges` moves the variant's fact files into the canonical dir and then
+# reindexes the paths it touched. The index is derived from the markdown, so the
+# one thing that must follow a move is the row that named the path BEFORE the
+# move: while it stays live (`expired_at IS NULL AND invalid_at IS NULL`) any
+# coverage/fragmentation query that filters on live rows still counts a variant
+# that has genuinely been merged away.
+
+def _applied_index(tmp_path):
+    """The `_tree` harness, indexed BEFORE the merge, with one nested variant
+    subdir, run through one `--no-gate --apply`.
+
+    Two things the plain harness lacks and this needs:
+
+    * an index that predates the apply — nothing in the sweep indexes first, and
+      on the live store the indexer has already run, so the rows the merge has
+      to retire are already there;
+    * `<variant>/<sub>/<file>.md` — the nested variant dir the merge moves at its
+      nested-subdir loop. A full reindex walks one level per entity dir, so this
+      file is indexed by path instead, which is how such a row reaches the live
+      index at all (an incremental writer indexes the paths it is named).
+
+    Returns (root, db, live rows before the apply, live Intel rows before it).
+    """
+    root, db = _tree(tmp_path)
+    nested = root / "vllm" / "experiments"
+    nested.mkdir(parents=True)
+    fm = {"type": "facts", "entity": "vllm", "category": "experiment",
+          "facts": [{"entity": "vllm", "fact": "vllm scanned a run.",
+                     "confidence": 0.9, "category": "experiment"}]}
+    (nested / "scan.md").write_text(
+        f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# vllm - experiment\n")
+    st = KGStore(db)
+    st.facts_idx.reindex(root=root)                            # before any sweep runs
+    st.facts_idx.update_file(nested / "scan.md", root=root)    # as a writer would
+    before, intel_before = _live_rows(st), _intel_rows(st)
+    st.close()
+    out = tmp_path / "out"; out.mkdir()
+    r = _run(root, db, out, "--apply")
+    assert r.returncode == 0, r.stdout + r.stderr
+    return root, db, before, intel_before
+
+
+def _live_rows(st):
+    """(entity, file_path) for every live facts_idx row."""
+    return {(r["entity"], r["file_path"]) for r in st.conn.execute(
+        "SELECT entity, file_path FROM facts_idx "
+        "WHERE expired_at IS NULL AND invalid_at IS NULL")}
+
+
+def test_apply_leaves_no_live_index_row_pointing_at_a_deleted_path(tmp_path):  # clause 1
+    root, db, _, _ = _applied_index(tmp_path)
+    st = KGStore(db)
+    orphans = sorted((r["entity"], r["file_path"]) for r in st.conn.execute(
+        "SELECT entity, file_path FROM facts_idx "
+        "WHERE expired_at IS NULL AND invalid_at IS NULL")
+        if not (root / r["file_path"]).exists())
+    st.close()
+    assert orphans == []
+
+
+def test_apply_retires_the_variant_but_keeps_the_facts_counted(tmp_path):  # clause 2
+    root, db, _, _ = _applied_index(tmp_path)
+    st = KGStore(db)
+    rows = _live_rows(st)
+    st.close()
+    assert sum(1 for e, _ in rows if e == "vLLM") >= 1          # retirement, not emptying
+    assert sum(1 for e, _ in rows if e == "vllm") == 0
+
+
+def _intel_rows(st):
+    """Full live row tuples for the two entity dirs the plan never merged
+    ('Intel' and 'Intel Pipeline'), so a fix that over-reaches past the paths
+    this merge moved — retiring by entity name, or wiping the table — fails
+    here on content and not just on presence."""
+    return sorted(tuple(r) for r in st.conn.execute(
+        "SELECT entity, file_path, category, fact FROM facts_idx "
+        "WHERE expired_at IS NULL AND invalid_at IS NULL "
+        "AND file_path LIKE 'Intel%'").fetchall())
+
+
+def test_apply_does_not_touch_the_rows_of_an_unmerged_entity(tmp_path):  # clause 3
+    root, db, before, intel_before = _applied_index(tmp_path)
+    assert ("Intel Pipeline", "Intel Pipeline/Intel Pipeline-state.md") in before
+    st = KGStore(db)
+    intel_after = _intel_rows(st)
+    st.close()
+    assert len(intel_before) == 2, intel_before                  # both live going in
+    assert intel_after == intel_before                           # entity AND file_path unchanged
+
+
+def test_apply_retires_nested_variant_subdir_rows_without_keeping_the_variant(tmp_path):  # clause 4
+    root, db, before, _ = _applied_index(tmp_path)
+    assert ("vllm", "vllm/experiments/scan.md") in before         # the row the loop must retire
+    st = KGStore(db)
+    rows = _live_rows(st)
+    st.close()
+    assert ("vllm", "vllm/experiments/scan.md") not in rows
+    assert ("vLLM", "vLLM/experiments/scan.md") in rows           # moved, and renamed in the index
+    assert (root / "vLLM/experiments/scan.md").exists()
+    assert not [p for e, p in rows if e == "vllm"]
+
+
 def test_apply_rewrites_edges_and_records_revertable_pairs(tmp_path):
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
     r = _run(root, db, out, "--apply")
