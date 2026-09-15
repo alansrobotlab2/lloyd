@@ -962,12 +962,16 @@ tail waits in the open. Four moves, each with a switch:
   first. Swept ids are in `released_ids`, so a swept self-spawn enters
   single triage. The single prompt's `<origin>` says the sweep's rank so
   the contract fits the size.
-- *Autocode yields* (`workers.sources.autocode.yield_to_sweep`, ships off;
-  config turns it on for the sprint): `enqueue_if_due` returns `DECLINED`
-  while `sweep_pending` > 0, so the sweep runs back to back rather than in
-  the gaps the round hold leaves it (a third of the wall clock). A day of
-  no landings buys the whole board a reading; rounds resume on their own
-  when the pool empties or the sweep is switched off.
+- *Autocode can yield* (`workers.sources.autocode.yield_to_sweep`, ships
+  off): `enqueue_if_due` returns `DECLINED` while `sweep_pending` > 0, so
+  the sweep runs back to back rather than in the gaps the round hold
+  leaves it. It ran on for the sweep's first three batches (22:24–22:50Z)
+  and was switched off on Alan's rule that an autocoder round runs 100% of
+  the time. `autotriage` is exempt from the round hold instead
+  (`workers.round_hold.exempt`): a sweep batch is ~40k tokens beside a
+  round's ~150k on the 692k FP8 pool, and the KV gate still holds it over
+  60% median KV. Measured before the change, 88% of the previous 24 h had
+  an implement turn in flight, across 21 gaps with the largest 22 min.
 - *Umbrellas.* `form_umbrellas: false` on autotriage appends
   `NO_UMBRELLA_RULE` to the group prompt and records a `fold` as `keep`
   with no umbrella confirmed, so group triage still closes duplicates and

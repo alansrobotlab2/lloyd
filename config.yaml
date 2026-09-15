@@ -880,9 +880,15 @@ workers:
   #
   # `scheduled-task` is exempt: those are short and time-sensitive, and a
   # user-visible schedule slipping by an hour is its own failure.
+  # `autotriage` is exempt since 2026-09-15 (Alan: an autocoder round runs
+  # 100% of the time, no downtime). The hold used to keep triage to the gaps
+  # between rounds; with no gaps it would never run. The 09-11 evictions were
+  # measured on the BF16 cache; the FP8 pool is 1.74x that, a sweep batch is
+  # ~40k tokens beside a round's ~150k, and the KV gate above still holds a
+  # long-lived triage while the engine's median KV is over 60%.
   round_hold:
     enabled: true
-    exempt: [scheduled-task]
+    exempt: [scheduled-task, autotriage]
   sources:
     # Cut 3 of senses-not-supervision: one steward turn instead of the
     # backlog state machine (`desired_statuses`, `reconcile_statuses`,
@@ -1112,12 +1118,13 @@ workers:
       enabled: true
       interval_seconds: 900
       retry_seconds: 60
-      # No round starts while autotriage's sweep still has open items to
+      # On: no round starts while autotriage's sweep still has open items to
       # read (backlog.sweep_pending > 0); the poll is declined and retried in
-      # retry_seconds. Rounds resume on their own when the sweep is done or
-      # switched off. Off: rounds and the sweep share the engine as before,
-      # with the round hold keeping the sweep to the gaps.
-      yield_to_sweep: true
+      # retry_seconds. OFF since 2026-09-15 22:50Z, three batches in (Alan: an
+      # autocoder round runs 100% of the time). The sweep shares the engine
+      # with rounds instead — see round_hold.exempt above — and reads the
+      # board in ~5 h either way.
+      yield_to_sweep: false
       max_inflight: 1
       max_duration_seconds: 3600
       # 150, not 100 — the code's own default and its reason

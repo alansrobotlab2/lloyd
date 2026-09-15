@@ -977,11 +977,13 @@ version.
   by rank then clause count after the near tier, and
   `release_held_confirmations` fills room best first. Swept ids are
   `released` from quarantine; `swept` and `parked` are expiry-exempt.
-- **Autocode yields** (`workers.sources.autocode.yield_to_sweep`, ships
-  off, on in config for the sprint): no round starts while `sweep_pending`
-  > 0. The round hold would otherwise keep the sweep to the gaps between
-  rounds. Rounds resume on their own when the pool is empty or the sweep
-  is switched off.
+- **Autocode can yield** (`workers.sources.autocode.yield_to_sweep`, ships
+  off): no round starts while `sweep_pending` > 0. It ran that way for the
+  sweep's first three batches and was switched off the same evening on
+  Alan's rule that **an autocoder round runs 100% of the time, no
+  downtime**. Instead `autotriage` is exempt from the round hold
+  (`workers.round_hold.exempt`), so the sweep shares the engine with a
+  round rather than waiting for a gap that no longer exists.
 - **Umbrellas are off for now** (`autotriage.form_umbrellas: false`): a
   group triage still closes duplicates and retires the stale, but a `fold`
   is recorded `keep` and no umbrella is confirmed. `round unfold-oversized
