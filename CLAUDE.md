@@ -148,6 +148,19 @@ have installed a hook:
    last count. `scripts/backup/restore-vault.sh` restores into a side directory
    only.
 
+**The sync registration is guarded the same way** (2026-09-14). `ob` keeps a
+vault's whole registration in `~/.config/obsidian-headless/sync/<vaultId>/`,
+and `ob sync-unlink` deletes it by vault id whatever path it is handed; re-linking
+takes Alan's E2E password. Lloyd deleted it twice that day from one Mission
+Control chat by running `system_health_check.py --vault-sync-round-trip`,
+whose scratch client unlinks on the way out. `app/harness/sync_registration.py`,
+the third check in `safety.check_bash_command` (so hook and dispatch both),
+refuses `ob` outside its read-only subcommands, the round-trip flag or env
+var, and writes under `~/.config/obsidian-headless`. Replayed over 29,687 Bash
+commands in `sessions/`, it refuses exactly the two incident calls. The running
+client syncs from memory after such a delete, so the damage shows only at the
+next restart of `agent-obsidian-sync`.
+
 **Never `mv`-swap the vault with sync running,** and never re-link sync to a
 remote that holds an incident's deletions. Every `ob` mode downloads remote
 changes. The swap order is in `restore-vault.sh`'s header.

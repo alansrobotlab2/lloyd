@@ -225,6 +225,41 @@ directory through a throwaway index. It refuses the live vault path. The swap
 stays a human step, and its order (sync stays stopped, swap, `clear`, then
 decide what the cloud copy should be) is in the script header.
 
+### 2.6 No tool call may change the sync registration
+
+The vault's off-box copy depends on one directory,
+`~/.config/obsidian-headless/sync/<vaultId>/` (`config.json`, `state.db`, the
+stored E2E key). `ob sync-unlink` removes it **by vault id**, whatever `--path`
+it is handed (`cli.js`: `Rr(t.vaultId)`), and re-creating it takes Alan's
+end-to-end password.
+
+On 2026-09-14 Lloyd deleted it twice from one Mission Control chat
+(`20260914_190323_iv2eca`, 12:03 and 14:15 PDT), each time by running the health
+check's end-to-end leg, `system_health_check.py --vault-sync-round-trip`. The
+probe links a scratch client to the live vault id and unlinks it in a `finally`;
+its guard refused `~/obsidian` as the scratch *path*, which is not the property
+that matters. The live client kept syncing from memory, so nothing looked wrong
+— the loss would have surfaced at the next restart of `agent-obsidian-sync`,
+when `start-obsidian-sync.sh` finds no registration and exits 1.
+
+`app/harness/sync_registration.py` is the third check in
+`safety.check_bash_command`, so both the harness hook and `main.call_tool`
+enforce it for every session. It refuses:
+
+| Shape | Examples |
+|---|---|
+| `ob` outside its read-only subcommands | `sync-setup`, `sync-unlink`, `sync`, `logout`, `login --…`, `sync-create-remote`, `publish-*`, `sync-config` with a change option |
+| the end-to-end leg | `--vault-sync-round-trip`, `LLOYD_VAULT_SYNC_ROUND_TRIP=1` (assignment, `export`, `env`, interpreter `environ`) |
+| a write under `~/.config/obsidian-headless` | `rm`, `mv`, `cp` into it, `find -delete`, `sed -i`, `sqlite3` without `-readonly`, a redirect |
+
+It allows reading all of it: `ob sync-status`, `sync-list-*`, bare `ob login`,
+`sync-config --path` alone, `--help`, and `grep`/`cat`/`ls`/`sqlite3 -readonly`
+on the code and the directory. It follows `bash -c`, wrappers and `timeout`,
+checks interpreter one-liners and interpreter heredocs line by line where a line
+runs or configures something, and treats any other heredoc body as data. Replayed
+over the 29,687 Bash commands in `sessions/` on 2026-09-14 it refuses exactly the
+two incident calls. `tests/test_sync_registration_guard.py`.
+
 ## 3. What is still not covered
 
 - A process that is **not** a bench or eval session and deletes the vault by a

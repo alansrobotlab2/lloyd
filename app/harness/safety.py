@@ -117,12 +117,14 @@ def check_bash_command(command: str, cwd: str | None = None, *,
     """Return (label, excerpt) if `command` matches a hard-deny pattern,
     else None.
 
-    Two checks, one definition. The regex table above catches the
+    Three checks, one definition. The regex table above catches the
     catastrophic-anywhere shapes; `protected_paths` parses the command and
     refuses a delete, move or `git clean` that takes out the vault, the lloyd
     tree or $HOME wholesale — the spellings the regex table let through on
-    2026-09-10 and 2026-09-12. `cwd` is where the command starts; `None`
-    means the aggregator's own directory.
+    2026-09-10 and 2026-09-12; `sync_registration` refuses anything that
+    changes the Obsidian Sync registration, which Lloyd deleted twice on
+    2026-09-14. `cwd` is where the command starts; `None` means the
+    aggregator's own directory.
 
     This is the only definition: the harness PreToolUse hook calls it, and so
     does the aggregator's `call_tool` for every Bash dispatch (`at_dispatch`),
@@ -147,6 +149,13 @@ def check_bash_command(command: str, cwd: str | None = None, *,
         if len(excerpt) > 80:
             excerpt = excerpt[:80] + "..."
         return (f"destructive operation on {why}", excerpt)
+    from app.harness.sync_registration import check_sync_registration
+    why = check_sync_registration(command, cwd)
+    if why:
+        excerpt = command.strip().splitlines()[0]
+        if len(excerpt) > 80:
+            excerpt = excerpt[:80] + "..."
+        return (f"Obsidian Sync registration: {why}", excerpt)
     return None
 
 
