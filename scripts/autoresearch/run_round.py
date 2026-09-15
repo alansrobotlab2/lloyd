@@ -75,6 +75,48 @@ def post_promotion_check(
     return lines, row, comparison
 
 
+def materialize_variants(
+    cfg: AutoresearchConfig,
+    variants: list[dict[str, Any]],
+    baseline_pair: tuple[str, Path],
+) -> tuple[list[tuple[str, Path]], int]:
+    """Build the `(variant_id, overlay_dir)` list that a round actually benches.
+
+    Returns `(variant_pairs, dropped)`. `variant_pairs` starts at the baseline —
+    which `run()` needs the id of afterwards, so the caller passes the pair in
+    rather than this function materializing it twice — and grows by one entry per
+    variant `materialize` accepts. That list is the left operand of the
+    (variant × task) matrix, so an entry missing here is a variant that is never
+    scored, never compared to baseline, and never produces a decision row.
+
+    #876: `fe40af3` (#446, 2026-09-09 13:08) reworked this loop and deleted the
+    `variant_pairs.append` line without restoring it, so every round since has
+    benched the baseline alone: the evaluation loop skips the baseline, so
+    `decisions` stayed empty and the `event: "decision"` append wrote zero rows.
+    The missing append is the whole defect; keep it pinned
+    (`tests/test_autoresearch_variant_pairs.py`).
+
+    #446's drop-whole semantics are unchanged: the parser bounds an edit's shape,
+    and only here can an anchor be checked against the text it claims to quote.
+    Zero or two matches raises `AnchorApplyError`, counts that variant in
+    `dropped`, writes nothing, and the round goes on with the variants that did
+    apply — no fuzzy match, no partial write.
+    """
+    variant_pairs: list[tuple[str, Path]] = [baseline_pair]
+    dropped = 0
+    for v in variants:
+        try:
+            overlay = materialize(cfg, v)
+        except AnchorApplyError as exc:
+            logger.warning("dropping variant %s: %s", v.get("variant_id"), exc)
+            dropped += 1
+            continue
+        variant_pairs.append((v["variant_id"], overlay))
+    if dropped:
+        logger.warning("dropped %d of %d variants at anchored-edit apply", dropped, len(variants))
+    return variant_pairs, dropped
+
+
 async def _run_trials(
     cfg: AutoresearchConfig,
     variant_pairs: list[tuple[str, Any]],
@@ -176,22 +218,11 @@ async def run(
     if not variants:
         logger.warning("hypothesis generator produced 0 variants — nothing to evaluate this round")
 
-    # Materialize baseline + each variant as overlay dirs
+    # Materialize baseline + each variant as overlay dirs. The returned pair list
+    # is what `_run_trials` benches, so every variant that survives the anchored
+    # edit has to be in it — #876.
     baseline_id, baseline_dir = materialize_baseline(cfg)
-    variant_pairs: list[tuple[str, Path]] = [(baseline_id, baseline_dir)]
-    dropped = 0
-    for v in variants:
-        try:
-            overlay = materialize(cfg, v)
-        except AnchorApplyError as exc:
-            # #446: the parser bounds an edit's shape; only here can an anchor be
-            # checked against the text it claims to quote. Zero or two matches
-            # drops the variant whole — no fuzzy match, no partial write — and
-            # the round goes on with the variants that did apply.
-            logger.warning("dropping variant %s: %s", v.get("variant_id"), exc)
-            dropped += 1
-    if dropped:
-        logger.warning("dropped %d of %d variants at anchored-edit apply", dropped, len(variants))
+    variant_pairs, dropped = materialize_variants(cfg, variants, (baseline_id, baseline_dir))
 
     # Fan out (variant × task), split by harness routing (#353)
     logger.info("running %d variants × %d tasks = %d trials (harness=%s)",
@@ -333,6 +364,7 @@ async def run(
         "summary_file": str(summary_file),
         "spec_file": str(spec_path),
         "variants_proposed": len(variants),
+        "variants_dropped": dropped,
         "tasks_run": len(tasks),
         "baseline_mean": baseline_summary.get("mean_composite", 0.0),
         "decisions": decisions,

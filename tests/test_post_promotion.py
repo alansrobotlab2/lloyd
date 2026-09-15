@@ -632,26 +632,39 @@ def test_run_round_records_and_surfaces_on_the_live_path(world, monkeypatch):
 
     assert fp.baseline_means(cfg.paths.rounds_dir)[result["round_id"]] == pytest.approx(
         0.4364, abs=1e-4)
-    # The only delta on record is the real round's PROMOTE line; this report has no
-    # PROMOTE line (see below) and must not have invented one out of the section.
+    # Two PROMOTE lines now: the real round's, and this round's own — written
+    # because the winner actually reached the report this time (#876). The sweep
+    # must read both and invent no third out of the post-promotion section.
     assert fp.recorded_deltas(cfg.paths.rounds_dir) == {
-        ("R_20260908_165252", PROMOTED): 0.1781}
+        ("R_20260908_165252", PROMOTED): 0.1781,
+        (result["round_id"], "V_new"): 0.2636,
+    }
 
-    # `promote` is NOT reached, and not for want of a stub: run_round's variant
-    # loop never appends the materialized overlay to `variant_pairs`
-    # (scripts/autoresearch/run_round.py:183-192), so the pair list holds only the
-    # baseline, the winner loop skips it, and no round can promote. Filed as a
-    # blocker on this item; the landed-promotion case is pinned here instead, one
-    # frame closer, at the single function `run()` calls.
-    assert promoted == []
-    assert result["promoted"] is None
+    # #876. This assertion used to read `assert promoted == []` with a comment
+    # explaining that `run()`'s variant loop never appended the materialized
+    # overlay, so the pair list held only the baseline, the winner loop skipped
+    # it, and no round could promote. That was the defect, not the contract: the
+    # append is restored in `run_round.materialize_variants`, so the winning
+    # variant reaches `promote`, and everything downstream of a promotion — the
+    # report's "## Promoted" block, the `decision` row, the promotion fields of
+    # the round-summary row — has to be populated on the live path.
+    assert promoted == ["V_new"]
+    assert result["promoted"]["variant_id"] == "V_new"
+    assert "## Promoted" in report
+    assert f"- variant: `{result['promoted']['variant_id']}`" in report
+    decisions = [r for r in rows_of(cfg.paths.ledger_path) if r.get("event") == "decision"]
+    assert [(r["variant_id"], r["should_promote"], r["promoted"]) for r in decisions] == [
+        ("V_new", True, True)]
+
     row = [r for r in rows_of(cfg.paths.ledger_path)
            if r.get("event") == post_promotion.ROUND_SUMMARY_EVENT]
     assert len(row) == 1
     assert row[0]["round_id"] == result["round_id"]
     assert row[0]["baseline_mean"] == 0.4364
     assert row[0]["noise_floor"] == DEFAULT_NOISE_FLOOR
-    assert row[0]["promoted_variant_id"] is None
+    assert row[0]["promoted_variant_id"] == "V_new"
+    assert row[0]["promoted_variant_mean"] == 0.7
+    assert row[0]["snapshot_dir"] == SNAPSHOT_DIR
     assert result["post_promotion"]["prior_round_id"] == "R_20260908_165252"
     assert result["post_promotion"]["decline"] == pytest.approx(0.1781, abs=1e-4)
 
@@ -661,13 +674,14 @@ def test_a_later_round_reads_the_report_the_round_actually_wrote(world, monkeypa
 
     `run()` writes `rounds/<rid>.md` in one process and a later round's
     `last_promotion` parses it in another. This feeds back the file the round
-    really produced: it must not be mistaken for a promotion, the section this
-    round appended must not confuse the parser, and the promotion that *is* on
-    record in the same directory must still be the one a later round acts on.
-    (A promotion-bearing report is exercised on run()'s own historical output in
-    `test_a_real_round_report_reads_back_as_a_promotion_record`, and that fixture
-    is held to the writer's current format by
-    `test_the_fixture_and_the_writer_agree_about_one_round`.)
+    really produced: the promotion it landed has to read back with the variant,
+    the mean and the snapshot it actually recorded, and the post-promotion
+    section — which names an *older* promotion two paragraphs up — must not be
+    mistaken for this round's own record.
+
+    Before #876 landed this test asserted the opposite (`…from_report(written) is
+    None`) because the round could not reach `promote` at all: the report it wrote
+    recorded nothing, whatever the gate had decided.
     """
     cfg = world
     cfg.paths.bench_dir.mkdir(parents=True, exist_ok=True)
@@ -704,19 +718,28 @@ def test_a_later_round_reads_the_report_the_round_actually_wrote(world, monkeypa
     written = cfg.paths.rounds_dir / f"{result['round_id']}.md"
     assert "## Post-promotion check" in written.read_text(encoding="utf-8")
 
-    # A later round reading this directory: this round promoted nothing, so the
-    # promotion on record is still the one it was comparing against.
+    # A later round reading this directory. It sees two promotions: the real
+    # round's, and this one's — which now exists, because the winner reaches
+    # `promote` (#876). The record it reads back has to be this round's own bytes,
+    # not the older promotion the post-promotion section names two paragraphs up.
     later_ledger = cfg.paths.research_root / "later.jsonl"
     later_ledger.touch()
-    assert post_promotion.promotion_record_from_report(written) is None
+    record = post_promotion.promotion_record_from_report(written)
+    assert record["round_id"] == result["round_id"]
+    assert record["promoted_variant_id"] == "V_new"
+    assert record["promoted_variant_mean"] == pytest.approx(0.7, abs=1e-4)
+    assert record["snapshot_dir"] == SNAPSHOT_DIR
     prior = post_promotion.last_promotion(later_ledger, cfg.paths.rounds_dir)
-    assert prior["round_id"] == "R_20260908_165252"
-    assert prior["promoted_variant_id"] == PROMOTED
+    assert prior["round_id"] == result["round_id"]
+    assert prior["promoted_variant_id"] == "V_new"
+    # The older promotion is still on record behind it, not overwritten.
+    assert [r["round_id"] for r in post_promotion.promotion_records(later_ledger, cfg.paths.rounds_dir)] == [
+        "R_20260908_165252", result["round_id"]]
     # And that later round's own baseline, further down, is named as a decline
-    # attributed to the promotion the earlier round surfaced.
+    # attributed to the promotion the earlier round landed.
     text = "\n".join(post_promotion.report_section(
         post_promotion.compare(0.4000, prior, DEFAULT_NOISE_FLOOR)))
-    assert "BASELINE DECLINE PAST NOISE FLOOR" in text and PROMOTED in text
+    assert "BASELINE DECLINE PAST NOISE FLOOR" in text and "V_new" in text
 
 
 def test_the_mcp_ledger_query_handler_returns_the_new_row(world, monkeypatch):
