@@ -110,10 +110,18 @@ def _frontend_alive(url: str = FRONTEND_URL, budget: float = 30.0) -> tuple[bool
 
 
 def _get(url: str, timeout: float = 5.0):
+    """`(status, body)`. The status is reported whenever the server answered,
+    JSON body or not: vLLM's `/health` is a bare 200 with an empty body, and
+    reading that as `(None, None)` kept the primary's restart leg waiting on
+    an engine that had been serving for minutes (2026-09-15)."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(urllib.request.Request(url), timeout=timeout) as r:
-            return r.status, json.loads(r.read().decode("utf-8", "replace"))
+            raw = r.read().decode("utf-8", "replace")
+            try:
+                return r.status, json.loads(raw) if raw.strip() else None
+            except ValueError:
+                return r.status, None
     except urllib.error.HTTPError as e:
         try:
             return e.code, json.loads(e.read().decode("utf-8", "replace"))

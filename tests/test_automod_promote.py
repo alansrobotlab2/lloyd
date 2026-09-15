@@ -555,6 +555,28 @@ def test_wait_health_refreshes_the_lease_only_on_a_long_budget(monkeypatch):
     assert P._wait_health("http://x", 300.0) is False and len(log) >= 3
 
 
+def test_get_reports_the_status_of_an_empty_or_non_json_answer(monkeypatch):
+    """vLLM's /health is a bare 200 with no body. The first primary restart
+    through the promoter sat on a serving engine for its whole budget because
+    the probe read that as no answer."""
+    import io
+
+    class _Resp(io.BytesIO):
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    class _Opener:
+        def __init__(self, body): self.body = body
+        def open(self, req, timeout=5.0): return _Resp(self.body)
+    monkeypatch.setattr(P.urllib.request, "build_opener", lambda *a: _Opener(b""))
+    assert P._get("http://x/health") == (200, None)
+    monkeypatch.setattr(P.urllib.request, "build_opener", lambda *a: _Opener(b"OK"))
+    assert P._get("http://x/health") == (200, None)
+    monkeypatch.setattr(P.urllib.request, "build_opener", lambda *a: _Opener(b'{"ok": true}'))
+    assert P._get("http://x/health") == (200, {"ok": True})
+
+
 # ---------------------------------------------------------------------------
 # The toast says what landed, never which round did it
 # ---------------------------------------------------------------------------
