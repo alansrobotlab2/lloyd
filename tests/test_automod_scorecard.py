@@ -382,4 +382,44 @@ def test_row_13_renders_for_a_row_recorded_before_it_existed():
                           "median_gate_seconds": None},
            "rollbacks": {"count": 0, "triggers": [], "true_positives": None}}
     assert "| 13 | board net flow | — |" in SC.render(old)
+    assert "| 14 | autocode duty cycle | — |" in SC.render(old)
+
+
+def test_row_14_measures_turn_coverage_and_names_what_each_gap_waited_on(tmp_path, repo):
+    """Alan's rule: an autocoder round runs 100% of the time. The row says
+    how close the loop is and which kind of gap costs the most."""
+    H = 1 / 24
+    ledger = _ledger(tmp_path, [
+        # turn A: 23 h ago for 2 h, then promoted; 30 min of landing gap
+        _ev("backlog_implement", 23 * H, item_id=1, phase="started", round_id="SM_A"),
+        _ev("backlog_implement", 21 * H, item_id=1, phase="finished", round_id="SM_A"),
+        _ev("promoted", 20.9 * H, round_id="SM_A", commit="a" * 40),
+        # turn B: 20.5 h ago for 4 h, aborted; 6 min gap
+        _ev("backlog_implement", 20.5 * H, item_id=2, phase="started", round_id="SM_B"),
+        _ev("backlog_implement", 16.5 * H, item_id=2, phase="finished", round_id="SM_B"),
+        _ev("round_aborted", 16.45 * H, round_id="SM_B", reason="x"),
+        # turn C: 16.4 h ago, still open at NOW
+        _ev("backlog_implement", 16.4 * H, item_id=3, phase="started", round_id="SM_C"),
+        # a turn a landing drain refused: started+skipped, 30 s, no gap of its own
+        _ev("backlog_implement", 16.39 * H, item_id=4, phase="started"),
+        _ev("backlog_implement", 16.38 * H, item_id=4, phase="skipped"),
+    ])
+    row = SC.compute(since_days=1, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    d = row["duty_cycle"]
+    assert d["turns"] == 3 and d["gaps"] == 2
+    assert d["idle_minutes"] == {"abort": 6.0, "landing": 30.0} and d["gap_counts"] == {"abort": 1, "landing": 1}
+    assert d["largest_gap_minutes"] == 30.0
+    # busy: 2 h + 4 h + 16.4 h of 24 h, less the hour before turn A
+    assert abs(d["busy_hours"] - 22.4) < 0.05 and d["window_hours"] == 24.0
+    assert abs(d["rate"] - 22.4 / 24) < 0.01
+    text = SC.render(row)
+    assert "| 14 | autocode duty cycle | 93% |" in text
+    assert "2 gaps: abort 6 min (1), landing 30 min (1); largest 30 min" in text
+
+
+def test_row_14_is_unmeasured_with_no_turn_in_the_window(tmp_path, repo):
+    ledger = _ledger(tmp_path, [_ev("promoted", 1, round_id="SM_A", commit="a" * 40)])
+    row = SC.compute(since_days=1, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    assert row["duty_cycle"]["rate"] is None and row["duty_cycle"]["turns"] == 0
+    assert "| 14 | autocode duty cycle | — |" in SC.render(row)
 

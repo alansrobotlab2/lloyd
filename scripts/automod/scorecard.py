@@ -204,6 +204,63 @@ def _commit_diff(repo: Path, sha: str) -> str:
 
 # ── the row ──────────────────────────────────────────────────────────────
 
+def _duty_cycle(ev: list[dict], since: float, now: float) -> dict[str, Any]:
+    """Row 14: how much of the window had an autocode implement turn in
+    flight, and what the idle gaps were waiting on.
+
+    Alan's rule (2026-09-15): an autocoder round runs 100% of the time. A
+    turn is `backlog_implement` `started` until its `finished`,
+    `infra_failed` or `skipped` row (an open one runs to `now`). A gap of at
+    least a minute between turns is classified by what sits in it: a
+    `promoted` row is a landing (the restart and, before the chamber, the
+    observation window), a `round_aborted` row is an abort's finalizer and
+    the retry, a `restart` row is a human restart, anything else `other`.
+    `rate` is None with no turn in the window: unmeasured, not perfect.
+    """
+    spans: list[tuple[float, float]] = []
+    open_at: dict[int, float] = {}
+    for e in ev:
+        if e.get("event") != "backlog_implement":
+            continue
+        iid = int(e.get("item_id") or 0)
+        ph = str(e.get("phase") or "")
+        if ph == "started":
+            open_at[iid] = _ts(e)
+        elif ph in ("finished", "infra_failed", "skipped") and iid in open_at:
+            spans.append((open_at.pop(iid), _ts(e)))
+    spans.extend((t, now) for t in open_at.values())
+    spans = sorted((max(a, since), min(b, now)) for a, b in spans if b > since and a < now)
+    merged: list[list[float]] = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    window = max(1.0, now - since)
+    busy = sum(b - a for a, b in merged)
+    idle: dict[str, float] = {}
+    gaps: dict[str, int] = {}
+    largest = 0.0
+    markers = [e for e in ev if e.get("event") in ("promoted", "round_aborted", "restart")]
+    for i in range(len(merged) - 1):
+        end, nxt = merged[i][1], merged[i + 1][0]
+        gap = nxt - end
+        if gap < 60:
+            continue
+        kinds = {str(e["event"]) for e in markers if end - 60 <= _ts(e) <= nxt + 5}
+        cls = ("landing" if "promoted" in kinds else "abort" if "round_aborted" in kinds
+               else "restart" if "restart" in kinds else "other")
+        idle[cls] = idle.get(cls, 0.0) + gap
+        gaps[cls] = gaps.get(cls, 0) + 1
+        largest = max(largest, gap)
+    return {"rate": (busy / window) if merged else None,
+            "busy_hours": round(busy / 3600, 1), "window_hours": round(window / 3600, 1),
+            "turns": len(merged), "gaps": sum(gaps.values()),
+            "idle_minutes": {k: round(v / 60, 1) for k, v in sorted(idle.items())},
+            "gap_counts": dict(sorted(gaps.items())),
+            "largest_gap_minutes": round(largest / 60, 1)}
+
+
 def compute(*, since_days: float = 7.0, ledger: Path | None = None,
             backlog_dir: Path | None = None, repo: Path | None = None,
             now: float | None = None) -> dict[str, Any]:
@@ -439,12 +496,15 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
     except Exception:
         flow = {}
 
+    # ── 14 autocode duty cycle ──────────────────────────────────────────
+    duty = _duty_cycle(ev, since, now)
+
     return {"computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
             "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
             "human_touch": human, "test_honesty": honesty, "bookkeeping": bookkeeping,
             "verdict_plumbing": plumbing, "throughput": throughput, "rollbacks": rollbacks,
-            "arch_review": arch_review, "flow": flow}
+            "arch_review": arch_review, "flow": flow, "duty_cycle": duty}
 
 
 # ── output ───────────────────────────────────────────────────────────────
@@ -492,6 +552,15 @@ def render(row: dict) -> str:
         f"24 h: {day.get('created', 0)} created, {day.get('closed', 0)} closed; "
         f"7 d: {week.get('created', 0)} created, {week.get('closed', 0)} closed, "
         f"net {week.get('net', 0):+d}; triage appended {s.get('triage_findings_appended', 0)} findings |")
+    d = row.get("duty_cycle") or {}
+    idle = d.get("idle_minutes") or {}
+    counts = d.get("gap_counts") or {}
+    by_class = ", ".join(f"{k} {idle[k]:g} min ({counts.get(k, 0)})" for k in idle) or "none"
+    lines.append(
+        f"| 14 | autocode duty cycle | {_pct(d.get('rate'))} | "
+        f"{d.get('busy_hours', 0)} h of {d.get('window_hours', 0)} h with an implement turn in flight, "
+        f"{d.get('turns', 0)} turns; {d.get('gaps', 0)} gaps: {by_class}; "
+        f"largest {d.get('largest_gap_minutes', 0):g} min |")
     return "\n".join(lines)
 
 
