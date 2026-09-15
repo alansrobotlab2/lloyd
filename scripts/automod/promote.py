@@ -28,7 +28,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from app.supervisor_client import restart_process, stop_process
+from app.supervisor_client import process_info, restart_process, start_process, stop_process
 from scripts.automod import state as S, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -54,6 +54,25 @@ SUPERVISORD_CONF = LIVE_ROOT / "agent-services" / "supervisor" / "supervisord.co
 
 BACKEND = "http://127.0.0.1:8080"
 MCP_HEALTH = "http://127.0.0.1:8500/health"
+# The primary engine, restartable through `round restart --only
+# agent-llm-primary` since 2026-09-15 so a KV or venv change goes through the
+# same lease, pool pause and drain as a backend restart. Three things make
+# its leg different from the two above, all measured on this box:
+#   - the boot takes 240-265 s warm and 775 s after a venv change (the
+#     program's startsecs is 900), so the lease is refreshed while waiting;
+#   - `supervisorctl stop` returns before the kernel has reclaimed the
+#     95.37 GiB host-RAM n-gram table, and a second boot started too soon
+#     put two of them on a 251 GiB box — systemd-oomd then killed the whole
+#     supervisord unit (2026-09-08, twice). The leg waits for MemAvailable
+#     to pass PRIMARY_RAM_FLOOR_GIB and refuses to boot below the abort line;
+#   - its `environment=` lives in the program's conf, so the leg runs
+#     `reread` + `update` before starting, or an edited KV budget is ignored.
+PRIMARY_PROGRAM = "agent-llm-primary"
+PRIMARY_HEALTH = "http://127.0.0.1:8096/health"
+PRIMARY_HEALTH_BUDGET = 1200.0
+PRIMARY_RAM_FLOOR_GIB = 150
+PRIMARY_RAM_ABORT_GIB = 120
+PRIMARY_RAM_WAIT_SECONDS = 300.0
 # Vite dev server, serving the live tree over HTTPS with a private cert. Not
 # restarted by a landing: HMR picks the fast-forward up on its own.
 FRONTEND_URL = "https://127.0.0.1:5173/"
@@ -817,7 +836,9 @@ def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
         raise PromoteError(
             f"{str(observed.get('commit'))[:8]} is under observation "
             f"({observed.get('state')}) — let it settle, or pass force=True")
-    health_for = {"lloyd-mcp": MCP_HEALTH, "lloyd-backend": f"{BACKEND}/health"}
+    health_for = {"lloyd-mcp": MCP_HEALTH, "lloyd-backend": f"{BACKEND}/health",
+                  PRIMARY_PROGRAM: PRIMARY_HEALTH}
+    budget_for = {PRIMARY_PROGRAM: PRIMARY_HEALTH_BUDGET}
     unknown = [p for p in programs if p not in health_for]
     if unknown:
         raise PromoteError(f"no health probe for {unknown}; restart those by hand")
@@ -832,10 +853,13 @@ def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
     try:
         for program in programs:
             S.set_pause(RESTART_LEASE)   # refreshed per leg, as the promoter does
-            ok, msg = restart_process(program)
+            if program == PRIMARY_PROGRAM:
+                ok, msg = _restart_primary()
+            else:
+                ok, msg = restart_process(program)
             if not ok:
                 raise PromoteError(f"restart {program} failed: {msg}")
-            if not _wait_health(health_for[program], 90.0):
+            if not _wait_health(health_for[program], budget_for.get(program, 90.0)):
                 raise PromoteError(f"{program} never became healthy after restart")
             done.append(program)
         S.append_event({"event": "restart", "programs": list(done), "by": "human",
@@ -849,13 +873,74 @@ def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
 
 
 def _wait_health(url: str, budget: float) -> bool:
+    """Poll `url` until it answers 200 or `budget` runs out. A budget longer
+    than the lease (the primary's boot) refreshes the lease on the way, so
+    the guardian does not wake up to a stopped engine halfway through."""
     deadline = time.time() + budget
+    refreshed = time.time()
     while time.time() < deadline:
         status, _ = _get(url, 3.0)
         if status == 200:
             return True
+        if budget > RESTART_LEASE and time.time() - refreshed > RESTART_LEASE / 2:
+            S.set_pause(RESTART_LEASE)
+            refreshed = time.time()
         time.sleep(1.0)
     return False
+
+
+def _host_ram_available_gib() -> int:
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1048576
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def _wait_host_ram(floor_gib: int, budget: float) -> int:
+    """Wait for the stopped engine's host-RAM table to be reclaimed. Returns
+    the last reading, whatever it was; the caller decides the abort line."""
+    deadline = time.time() + budget
+    avail = _host_ram_available_gib()
+    while avail < floor_gib and time.time() < deadline:
+        S.set_pause(RESTART_LEASE)
+        time.sleep(5.0)
+        avail = _host_ram_available_gib()
+    return avail
+
+
+def _restart_primary() -> tuple[bool, str]:
+    """Stop the engine, wait for its host-RAM table to go, pick up any conf
+    change, start it. Health is the caller's wait (`PRIMARY_HEALTH_BUDGET`)."""
+    ok, msg = stop_process(PRIMARY_PROGRAM, wait=False)
+    if not ok:
+        return False, f"stop failed: {msg}"
+    deadline = time.time() + 120.0   # stopwaitsecs is 90
+    while time.time() < deadline:
+        try:
+            state = process_info(PRIMARY_PROGRAM).get("statename", "").upper()
+        except Exception:
+            break
+        if state in ("STOPPED", "EXITED", "FATAL"):
+            break
+        time.sleep(2.0)
+    avail = _wait_host_ram(PRIMARY_RAM_FLOOR_GIB, PRIMARY_RAM_WAIT_SECONDS)
+    if avail < PRIMARY_RAM_ABORT_GIB:
+        return False, (f"only {avail} GiB host RAM available after the stop; a 170 GiB load "
+                       f"would risk the oomd kill of 2026-09-08 — the engine is left stopped, "
+                       f"start it by hand once MemAvailable is over {PRIMARY_RAM_FLOOR_GIB} GiB")
+    if SUPERVISORCTL.exists():
+        for verb in (["reread"], ["update", PRIMARY_PROGRAM]):
+            r = _run([SUPERVISORCTL, "-c", SUPERVISORD_CONF, *verb], timeout=120)
+            if r.returncode != 0:
+                return False, f"supervisorctl {' '.join(verb)} failed: {(r.stderr or r.stdout)[:200]}"
+    S.set_pause(RESTART_LEASE)
+    ok, msg = start_process(PRIMARY_PROGRAM, wait=False)
+    if not ok:
+        return False, f"start failed: {msg}"
+    return True, f"started after {avail} GiB host RAM free"
 
 
 def _rollback_inline(live: Path, target: str) -> dict:
