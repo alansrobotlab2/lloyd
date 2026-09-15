@@ -46,6 +46,10 @@ def pool(monkeypatch):
                      "held_sources": []}
     # The KV gate is a separate question; keep it out of these assertions.
     monkeypatch.setattr(P, "kv_gate_config", lambda: {"enabled": False})
+    # The exempt list is pinned, not read from config.yaml: on 2026-09-15
+    # `autotriage` joined it there and two of these tests went red on main.
+    monkeypatch.setattr(P, "round_hold_config",
+                        lambda: {"enabled": True, "exempt": ["scheduled-task"]})
     return p
 
 

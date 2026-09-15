@@ -506,6 +506,55 @@ def test_restart_only_one_program(monkeypatch):
         P.restart_stack(("lloyd-frontend",))
 
 
+def test_restart_primary_takes_its_own_leg_with_the_long_health_budget(monkeypatch):
+    """The engine boots in 240-775 s, holds a 95 GiB host table that must be
+    reclaimed before the next boot, and reads its KV budget from the conf —
+    so its leg is not `restart_process` and its health wait is not 90 s."""
+    log = _restart_harness(monkeypatch)
+    monkeypatch.setattr(P, "_restart_primary", lambda: log.append(("primary",)) or (True, "started"))
+    monkeypatch.setattr(P, "_wait_health", lambda url, budget: log.append(("health", url, budget)) or True)
+    out = P.restart_stack(("agent-llm-primary",))
+    assert ("primary",) in log and ("restart", "agent-llm-primary") not in log
+    assert ("health", P.PRIMARY_HEALTH, P.PRIMARY_HEALTH_BUDGET) in log
+    assert out["restarted"] == ["agent-llm-primary"]
+
+
+def test_restart_primary_waits_for_host_ram_rereads_the_conf_and_refuses_below_the_abort_line(monkeypatch):
+    log: list = []
+    monkeypatch.setattr(P, "stop_process", lambda name, wait=False: log.append(("stop", name)) or (True, "stopped"))
+    monkeypatch.setattr(P, "process_info", lambda name: {"statename": "STOPPED"})
+    monkeypatch.setattr(P, "start_process", lambda name, wait=False: log.append(("start", name)) or (True, "started"))
+    monkeypatch.setattr(P.S, "set_pause", lambda secs, cap=1800.0: log.append(("pause",)) or secs)
+    monkeypatch.setattr(P, "_run", lambda argv, timeout=120: log.append(("sup", [str(a) for a in argv[3:]]))
+                        or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(P.SUPERVISORCTL.__class__, "exists", lambda self: True)
+    readings = iter([90, 130, 160])
+    monkeypatch.setattr(P, "_host_ram_available_gib", lambda: next(readings))
+    monkeypatch.setattr(P.time, "sleep", lambda s: None)
+    ok, msg = P._restart_primary()
+    assert ok and "160 GiB" in msg
+    assert [e for e in log if e[0] == "sup"] == [("sup", ["reread"]), ("sup", ["update", "agent-llm-primary"])]
+    assert log.index(("stop", "agent-llm-primary")) < log.index(("sup", ["reread"])) < log.index(("start", "agent-llm-primary"))
+    assert ("pause",) in log, "the lease is refreshed while the table is reclaimed"
+    # Below the abort line the engine stays stopped and nothing is started.
+    log.clear()
+    monkeypatch.setattr(P, "_host_ram_available_gib", lambda: 100)
+    monkeypatch.setattr(P, "PRIMARY_RAM_WAIT_SECONDS", 0.0)
+    ok, msg = P._restart_primary()
+    assert not ok and "100 GiB" in msg and ("start", "agent-llm-primary") not in log
+
+
+def test_wait_health_refreshes_the_lease_only_on_a_long_budget(monkeypatch):
+    log: list = []
+    clock = {"t": 0.0}
+    monkeypatch.setattr(P.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(P.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + 30.0))
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (503, None))
+    monkeypatch.setattr(P.S, "set_pause", lambda secs, cap=1800.0: log.append(secs) or secs)
+    assert P._wait_health("http://x", 90.0) is False and log == []
+    assert P._wait_health("http://x", 300.0) is False and len(log) >= 3
+
+
 # ---------------------------------------------------------------------------
 # The toast says what landed, never which round did it
 # ---------------------------------------------------------------------------

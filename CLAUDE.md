@@ -47,6 +47,15 @@ connection errors then land in someone's observation window. It refuses
 while a promotion is under observation (`--force` overrides) and records a
 `restart` event on the ledger with the reason.
 
+**The primary engine goes through it too** (`--only agent-llm-primary`,
+since 2026-09-15). Its leg stops the engine, waits for `MemAvailable` to
+pass 150 GiB (the 95 GiB host-RAM n-gram table, see below; refuses to boot
+under 120 GiB and leaves the engine stopped), runs `supervisorctl reread`
+and `update` so an edited `environment=` in `agent-llm-primary.conf` is
+picked up, starts it, and waits up to 20 minutes for `/health` while
+refreshing the lease. Every turn in flight dies with the engine and is
+re-offered as `infra`, so do it once, with the reason on the ledger.
+
 supervisorctl is still the tool for everything else (the frontend, the
 engines, status), and is what the command above wraps:
 
