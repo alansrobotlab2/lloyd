@@ -9,15 +9,19 @@ Commit `fe40af3` ("autoresearch: variants are anchored edits, not file echoes",
 `variant_pairs` then held the baseline alone from that point to
 `_run_trials`, and the evaluation loop right after it skips the baseline — so
 `decisions` was always empty, `evaluate_promotion` never ran, `promote` was
-unreachable, and the `event: "decision"` append wrote zero rows. The live ledger
-agrees: all 2,217 decision rows carry a real `V_*` id, and the newest is round
-`R_20260908_181458`, the last round that ran before the commit.
+unreachable, and the `event: "decision"` append wrote zero rows. Backlog #876's
+triage measured the live ledger on 2026-09-13: all 2,217 `event: "decision"`
+rows carry a real `V_*` id and the newest belongs to round `R_20260908_181458`,
+the last round that ran before that commit. Those are its numbers, not this
+file's — `_pipeline/` is gitignored, so nothing here re-measures them.
 
-Nothing caught it because every existing test drove the reader or the writer
-directly. These two drive the loop that decides *what gets benched*: one the
-function itself, one all the way through `run()` down to the trial matrix handed
-to the bench runner and the decision rows the round appends to its own ledger —
-the file `autoresearch_ledger_query` reads from a different process.
+Nothing caught the defect because every existing test drove the reader or the
+writer directly. The four tests here drive what the old ones never touched: two
+on `materialize_variants` itself, one all the way through `run()` down to the
+trial matrix handed to the bench runner and the decision rows the round appends
+to its ledger — the file `autoresearch_ledger_query` reads from a different
+process — and one on the round's write set, which is what keeps clause 3's
+re-arming out of code.
 """
 from __future__ import annotations
 
@@ -169,9 +173,8 @@ def test_a_round_with_no_variants_still_benches_the_baseline_alone(cfg, canonica
 
 # ── clause 1 + the acceptance, through the real run() ────────────────────────
 
-def test_a_round_benches_every_survivor_and_writes_a_decision_row_for_each(
-        cfg, canonical, monkeypatch, caplog):
-    """Drives `run()` end to end with only the model calls stubbed: no trial
+def drive_round(cfg, monkeypatch, caplog):
+    """Drive `run()` end to end with only the model calls stubbed: no trial
     reaches vLLM, no file leaves the vault. Everything between — the materialize
     loop, the harness split, the judge aggregation, the promotion gate, the report
     and the ledger append — is the code a live round runs.
@@ -181,6 +184,9 @@ def test_a_round_benches_every_survivor_and_writes_a_decision_row_for_each(
     `promote` (writes the canonical prompt files). `judge_trace` is a model call
     too; `aggregate_variant`, `evaluate_promotion` and `post_promotion_check` are
     not stubbed, so the decision each row reports is the real gate's verdict.
+
+    Proposes 2 well-formed + 2 unanchorable variants, so a round that works
+    reaches `promote` with `V_a`. Returns `(result, calls)`.
     """
     calls: dict[str, Any] = {}
 
@@ -200,7 +206,14 @@ def test_a_round_benches_every_survivor_and_writes_a_decision_row_for_each(
 
     monkeypatch.setattr(run_round, "load_config", lambda: cfg)
     monkeypatch.setattr(run_round, "propose_variants", lambda *a, **kw: two_well_formed_and_two_unanchorable())
-    monkeypatch.setattr(run_round, "materialize_baseline", lambda c: (BASELINE_ID, c.paths.variants_dir))
+    def fake_materialize_baseline(c):
+        """The real one returns a fresh subdirectory of the variants dir, so the
+        baseline overlay must not be that dir itself."""
+        overlay = c.paths.variants_dir / BASELINE_ID
+        overlay.mkdir(parents=True, exist_ok=True)
+        return BASELINE_ID, overlay
+
+    monkeypatch.setattr(run_round, "materialize_baseline", fake_materialize_baseline)
     monkeypatch.setattr(run_round, "run_bench", fake_run_bench)
     monkeypatch.setattr(run_round, "run_bench_sdk", lambda *a, **kw: (_ for _ in ()).throw(AssertionError(
         "harness=direct must not route a task to the agent-loop runner")))
@@ -213,6 +226,14 @@ def test_a_round_benches_every_survivor_and_writes_a_decision_row_for_each(
 
     with caplog.at_level(logging.INFO, logger="autoresearch.run_round"):
         result = asyncio.run(run_round.run())
+    return result, calls
+
+
+def test_a_round_benches_every_survivor_and_writes_a_decision_row_for_each(
+        cfg, canonical, monkeypatch, caplog):
+    """The round a live producer would run: 2 promotable/hold survivors benched,
+    the 2 unanchorable ones dropped, one decision row each."""
+    result, calls = drive_round(cfg, monkeypatch, caplog)
 
     # What the round handed the bench runner: 1 baseline + 2 survivors × 2 tasks.
     # Pre-fix this is 1 variant and 2 trials, which is the cost half of the bug —
@@ -247,3 +268,59 @@ def test_a_round_benches_every_survivor_and_writes_a_decision_row_for_each(
     assert "`V_a`: PROMOTE" in report and "`V_b`: HOLD" in report
     from scripts.autoresearch import promotion_fp_rate as fp
     assert fp.recorded_deltas(cfg.paths.rounds_dir) == {(result["round_id"], "V_a"): 0.4}
+
+
+# ── clause 3: re-arming is not this code's to take ───────────────────────────
+
+#: The gate a person flips after #876 lands (`workers.sources.autoresearch.enabled`
+#: in `config.yaml`). `config.yaml` is on the self-modification loop's never-touch
+#: list, so a round that could rewrite it could arm itself — one round per
+#: `interval_seconds` against the single primary vLLM slot, with nobody deciding.
+def test_a_round_writes_nothing_to_config_yaml(cfg, canonical, monkeypatch, caplog, tmp_path):
+    """Clause 3, as behaviour rather than as a diff stat.
+
+    The live-path test above drives a round that *promotes*, which is the strongest
+    temptation for a future change to reach for the config: the round that just
+    landed a winner is also the round that would want to arm its own producer. So
+    drive that same round with `common.CONFIG_PATH` pointed at a copy of a config
+    whose autoresearch source is switched off, and require the round to leave that
+    file byte-for-byte alone.
+
+    The static half is what catches the variant this run could not: a round that
+    flips the flag through a path the test never pointed at. Every reference to
+    `CONFIG_PATH` in the package must be the definition or a read.
+    """
+    from scripts.autoresearch import common
+
+    config_copy = tmp_path / "config.yaml"
+    config_copy.write_text(
+        "workers:\n"
+        "  sources:\n"
+        "    autoresearch:\n"
+        "      enabled: false\n"
+        "      interval_seconds: 3600\n",
+        encoding="utf-8",
+    )
+    before = config_copy.read_bytes()
+    monkeypatch.setattr(common, "CONFIG_PATH", config_copy)
+
+    drive_round(cfg, monkeypatch, caplog)
+
+    assert config_copy.read_bytes() == before, (
+        "the round wrote its own config: `workers.sources.autoresearch.enabled` is "
+        "a person's call (backlog #876 clause 3)"
+    )
+    assert b"enabled: false" in config_copy.read_bytes()
+
+    offenders = []
+    for module in sorted((Path(common.__file__).parent).glob("*.py")):
+        for lineno, line in enumerate(module.read_text(encoding="utf-8").splitlines(), 1):
+            if "CONFIG_PATH" not in line:
+                continue
+            if "CONFIG_PATH =" in line or ".read_text(" in line:
+                continue
+            offenders.append(f"{module.name}:{lineno}: {line.strip()}")
+    assert offenders == [], (
+        "a write path to config.yaml appeared in scripts/autoresearch; the loop may "
+        f"never write that file. New references: {offenders}"
+    )
