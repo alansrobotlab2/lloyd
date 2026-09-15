@@ -742,11 +742,19 @@ def _vault_events(kind):
     return [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == kind]
 
 
-def test_a_vault_land_with_no_grader_records_the_skip(vault):
+def test_a_vault_land_with_no_grader_records_why_it_was_not_reviewed(vault):
+    """Was `assert _vault_events("vault_review") == []`: an abstention left no
+    review event at all, and the landing said only `skipped`. #955's merged
+    finding is that 34 of 54 item-bound landings looked like that — a grader
+    outage, a surface mismatch and an unconsulted reviewer indistinguishable. An
+    abstention still never blocks; it now says which of the six it was."""
     (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo v2\n")
     out = V.land(["skills/foo/SKILL.md"], "skill: foo v2", item_id=9)
     assert out["review"] == "skipped" and _vault_events("vault_land")[-1]["review"] == "skipped"
-    assert _vault_events("vault_review") == []
+    assert _vault_events("vault_land")[-1]["review_reason"] == out["review_reason"]
+    ev = _vault_events("vault_review")[-1]
+    assert ev["blocking"] is False and ev["kind"] == "skipped"
+    assert "no grader configured" in ev["review_reason"]
 
 
 def test_a_vault_review_refusal_leaves_the_edit_then_reverts_on_the_second(vault, monkeypatch):
@@ -815,6 +823,127 @@ def test_the_vault_grader_only_judges_a_vault_items_clauses(isolated, monkeypatc
                      "evidence_line": 1, "test_node_id": "", "how_verified": "read", "note": ""}]}})
     (isolated / "skills" / "x").mkdir(parents=True); (isolated / "skills" / "x" / "SKILL.md").write_text("x")
     assert RV.grade_vault(item_id=570, paths=["skills/x/SKILL.md"], diff="+x", vault=isolated)[0] == "pass"
+
+
+# ── #955: the landing clause cannot be graded before the commit ─────────────
+
+# #972 clause 11 and #993 clause 10, verbatim from their front matter. The two
+# rounds with a recorded death are #425 (refused twice, clause 6 both times, work
+# reverted at attempt 2) and #502 (attempt 1, clause 6, "no revertable sha").
+# Triage listed nine open items carrying such a clause; four name the artefact.
+LANDING_CLAUSE_972 = ("The change lands via automod_vault_land as one revertable sha "
+                      "on vault main, commit message naming #972")
+LANDING_CLAUSE_993 = ("The change touches only vault paths — no file under ~/lloyd "
+                      "modified — and lands through automod_vault_land as a revertable sha.")
+# And a clause that only mentions the landing in passing, plus one whose author
+# already said which half the reviewer is to grade (#463 clause 4's shape).
+CONTENT_CLAUSES = ["the skill names the retry rule",
+                   "No field list names `board_id` (0 occurrences across 37 real keys).",
+                   "The commit message names the item, and the change was reviewed before commit."]
+
+
+def _vault_contract(clauses):
+    return {"id": 1, "title": "t", "body": "b", "clauses": list(clauses), "members": [],
+            "path": "", "amendments": [], "human_clauses": []}
+
+
+def test_a_landing_clause_is_the_only_kind_of_clause_the_vault_grader_recognises():
+    """Narrow on purpose: a false positive takes a gradeable clause out of the
+    reviewer's hands, which is worse than the artifact it fixes."""
+    graded = RV.landing_clause_indices(CONTENT_CLAUSES + [LANDING_CLAUSE_972, LANDING_CLAUSE_993])
+    assert graded == [4, 5]
+    # An author-drawn line stays with the reviewer (#463 clause 4, amended by hand).
+    claimed = ("Pre-landing, graded by this review: both files are modified in the "
+               "working tree on branch main. Post-landing, the sha.")
+    assert RV.landing_clause_indices([claimed]) == []
+    # The other spellings the triage listed on #955.
+    assert RV.landing_clause_indices(["The change is submitted through "
+                                      "`automod_vault_land` as one call naming exactly the "
+                                      "six SKILL.md paths"]) == [1]
+    assert RV.landing_clause_indices(["The change lands through automod_vault_land "
+                                      "naming exactly the touched paths"]) == [1]
+    assert RV.landing_clause_indices([]) == [] and RV.landing_clause_indices(None) == []
+
+
+def test_the_vault_prompt_tells_the_reviewer_the_commit_is_pending(isolated):
+    """#425 attempt 1: "Nothing landed … No new sha" — the reviewer ran `git log`
+    in the vault and refused a round for the state it was standing in. The prompt
+    has to say the commit is the CONSEQUENCE of a pass."""
+    p = RV.build_vault_prompt(contract=_vault_contract(["content", LANDING_CLAUSE_972]),
+                              paths=["skills/x/SKILL.md"], diff="+x", vault=isolated,
+                              landing_clauses=[2])
+    assert "The commit does not exist while you grade." in p
+    assert ("on a pass the caller commits exactly these paths on the vault's `main` "
+            "as one revertable sha") in p
+    assert "Clauses 2 have the landing itself as their subject" in p
+    assert "Never refuse a round because no sha exists yet" in p
+    assert "never report `git log` as evidence that the change did not land" in p
+    assert "The caller records their verdict from the commit it creates" in p
+    # The ordering is stated for every vault round; the per-clause note only where
+    # a clause actually needs it.
+    plain = RV.build_vault_prompt(contract=_vault_contract(["content only"]),
+                                 paths=["a.md"], diff="+x", vault=isolated)
+    assert "The commit does not exist while you grade." in plain
+    assert "have the landing itself as their subject" not in plain
+
+
+def test_a_landing_clause_cannot_refuse_a_round_a_content_clause_still_can(isolated, monkeypatch):
+    """The exclusion must not weaken the guard for anything else: clause 1 is a
+    content clause the grader says is unmet, so the round still comes back —
+    with the landing clause advisory, and marked so the caller can grade it."""
+    write_item(isolated, 573, clauses=["the skill names the retry rule", LANDING_CLAUSE_972])
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": True, "structured": {
+        "premise": "sound", "summary": "s", "test_honesty": [], "seams_unverified": [],
+        "clauses": [{"clause": 1, "verdict": "unmet", "evidence_path": "", "evidence_line": 0,
+                     "test_node_id": "", "how_verified": "read", "note": "no retry rule"},
+                    {"clause": 2, "verdict": "unmet", "evidence_path": "", "evidence_line": 0,
+                     "test_node_id": "", "how_verified": "read", "note": "no sha yet"}]}})
+    kind, why, rows = RV.grade_vault(item_id=573, paths=["skills/x/SKILL.md"], diff="+x",
+                                     vault=isolated)
+    assert kind == "retry"
+    assert "clause 1 unmet" in why, "an ordinary content clause still refuses"
+    assert "clause 2 unmet" not in why, "the landing clause refused it — the #955 artifact"
+    assert "observable only after landing" in why
+    assert rows[1] == {"clause": 2, "verdict": "post_landing", "subject": "landing"}
+    assert rows[0]["verdict"] == "unmet"
+
+
+def test_a_passing_vault_review_returns_the_landing_clause_for_the_caller_to_close(isolated, monkeypatch):
+    """All the content clauses met and the landing clause not gradable: that is a
+    pass, and the row the caller rewrites is marked rather than silently `met`."""
+    write_item(isolated, 574, clauses=["the skill names the retry rule", LANDING_CLAUSE_993])
+    (isolated / "skills" / "y").mkdir(parents=True)
+    (isolated / "skills" / "y" / "SKILL.md").write_text("---\nname: y\n---\n# y\n")
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": True, "structured": {
+        "premise": "sound", "summary": "s", "test_honesty": [], "seams_unverified": [],
+        "clauses": [{"clause": 1, "verdict": "met", "evidence_path": "skills/y/SKILL.md",
+                     "evidence_line": 1, "test_node_id": "", "how_verified": "read",
+                     "note": "named"},
+                    {"clause": 2, "verdict": "unmet", "evidence_path": "", "evidence_line": 0,
+                     "test_node_id": "", "how_verified": "read", "note": "no commit"}]}})
+    kind, why, rows = RV.grade_vault(item_id=574, paths=["skills/y/SKILL.md"], diff="+x",
+                                     vault=isolated)
+    assert kind == "pass", why
+    assert rows[1] == {"clause": 2, "verdict": "post_landing", "subject": "landing"}
+    assert rows[0]["verdict"] == "met"
+
+
+def test_the_vault_grader_names_the_way_it_abstains(isolated, monkeypatch):
+    """Six causes, six wordings. #955's merged finding: 34 of 54 item-bound
+    successful landings recorded one unlabelled `skipped`, so a refusal a later
+    attempt ignored was indistinguishable from a grader outage."""
+    write_item(isolated, 575, clauses=["a"])
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: {"ok": False, "error": "backend 503 after 420s"})
+    assert RV.grade_vault(item_id=575, paths=["a.md"], diff="+x", vault=isolated)[1] == (
+        "grader did not answer: backend 503 after 420s")
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: {"ok": True, "structured": {"premise": "sideways"}})
+    assert RV.grade_vault(item_id=575, paths=["a.md"], diff="+x", vault=isolated)[1] == (
+        "grader returned an unusable object")
+    write_item(isolated, 576)
+    assert RV.grade_vault(item_id=576, paths=["a.md"], diff="+x", vault=isolated)[1] == (
+        "item #576 has no acceptance clauses")
 
 
 def test_evidence_paths_are_normalized_before_they_are_judged(wt, tmp_path):

@@ -628,13 +628,87 @@ def grade(*, round_id: str, worktree: Path, base: str, contract: dict,
                       model=model, max_turns=max_turns)
 
 
-def build_vault_prompt(*, contract: dict, paths: list[str], diff: str, vault: Path) -> str:
+# A clause whose subject is the landing itself. #955: `land()` grades BEFORE it
+# commits, so a clause demanding "lands through `automod_vault_land` as one
+# revertable sha" is unsatisfiable at the moment it is graded — the sha it asks
+# for is the consequence of a pass. #425 was refused twice on it alone (clause 1
+# satisfied both times) and its work was reverted at attempt 2; #502 burned
+# attempt 1 the same way. Triage on 2026-09-15 listed nine open items carrying
+# such a clause; re-reading all nine, four name the landing artefact outright
+# (#425 cl 6, #478 cl 6, #972 cl 11, #993 cl 10) — that is what this matches.
+#
+# Deliberately narrow, in the same spirit as `backlog.POST_LANDING_RX`: a false
+# positive moves a gradeable clause out of the reviewer's hands, which is worse
+# than a false negative. These shapes all name the landing artefact — the tool,
+# the sha, the branch — rather than mentioning a commit in passing.
+LANDING_CLAUSE_RX = re.compile(
+    r"(?:"
+    r"automod_vault_land"
+    r"|revert(?:able|ible) sha"
+    r"|revert(?:able|ible) unit"
+    r"|no repo commit"
+    r"|lands? (?:on|to|into) (?:the )?vault ['`]?main"
+    r"|lands? (?:as|in) one (?:revert(?:able|ible)|single)[^\n]{0,20}sha"
+    r")",
+    re.IGNORECASE)
+# ...unless the clause says for itself which part the reviewer is to grade now.
+# #463's clause 4 was amended by hand into "Pre-landing, graded by this review:
+# … Post-landing, graded by the round finalizer": an author who has already
+# drawn the line does not want the clause taken away from the reviewer.
+LANDING_DISCLAIMED_RX = re.compile(r"graded by this review|pre[- ]landing", re.IGNORECASE)
+
+
+def landing_clause_indices(clauses) -> list[int]:
+    """1-based indices of clauses whose subject is the landing itself.
+
+    These are what `grade_vault` refuses to grade as a diff defect and
+    `vault_round.land()` grades afterwards, from the sha it actually created.
+    """
+    out: list[int] = []
+    for i, c in enumerate(clauses or [], 1):
+        text = str(c or "")
+        if LANDING_CLAUSE_RX.search(text) and not LANDING_DISCLAIMED_RX.search(text):
+            out.append(i)
+    return out
+
+
+def build_vault_prompt(*, contract: dict, paths: list[str], diff: str, vault: Path,
+                       landing_clauses: list[int] | None = None) -> str:
     clauses = "\n".join(f"{i}. {c}" for i, c in enumerate(contract["clauses"], 1))
+    landing = list(landing_clauses or [])
+    landing_note = ""
+    if landing:
+        idx = ", ".join(str(i) for i in landing)
+        landing_note = (
+            f"\nClauses {idx} have the landing itself as their subject (they name "
+            f"`automod_vault_land`, a revertable sha, or vault `main`). Do not grade "
+            f"them as a defect of the text: answer `post_landing` with `evidence_path` "
+            f"pointing at one of the changed files the landing would commit. The caller "
+            f"records their verdict from the commit it creates, and a `retry` that names "
+            f"only one of these clauses is thrown away.\n")
     return f"""\
 You are reviewing an edit another session made to the Obsidian vault at `{vault}` \
 — prompt material, skills, scheduled tasks — against the backlog item it claims \
 to implement. You have NOT seen that session's report. Read the files at their \
 absolute paths under `{vault}`; there is no code and no test suite here.
+
+The tree is uncommitted and the ordering matters: you grade the working tree, and \
+on a pass the caller commits exactly these paths on the vault's `main` as one \
+revertable sha. The commit does not exist while you grade. Never refuse a round \
+because no sha exists yet, and never report `git log` as evidence that the change \
+did not land — #425 and #502 were each refused twice for exactly that, with their \
+content clauses graded satisfied both times.
+
+<ordering>
+You are grading an UNCOMMITTED working tree. `git -C {vault} status` will show the \
+paths dirty and `git -C {vault} log` will show no commit for them — that is the \
+expected state, not a finding. On a PASS the caller commits exactly the paths \
+listed below on the vault's `main` as one revertable sha and records it in the \
+ledger; on a refusal nothing is committed and the edits are reverted. The commit \
+is therefore the consequence of your verdict and cannot be evidence for or against \
+it. Never refuse a round because a sha does not exist yet, and never treat the \
+absence of a commit as an unmet clause.
+</ordering>
 
 <item id="{contract['id']}">
 # {contract['title']}
@@ -647,7 +721,7 @@ absolute paths under `{vault}`; there is no code and no test suite here.
 </acceptance_clauses>
 
 Paths changed: {', '.join(paths)}.
-
+{landing_note}
 <diff>
 {diff[:DIFF_CAP_CHARS]}
 </diff>
@@ -674,6 +748,12 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     landing has when the implement turn dies at its budget: #575 landed its
     fix at 21:25Z, every review graded all five clauses met, and the item was
     re-offered for a test file because nothing read those verdicts.
+
+    A clause about the landing itself is returned as `post_landing` whatever the
+    grader said, marked `subject: landing`; `vault_round.land()` replaces that
+    with its verdict from the sha. Every `skipped` return carries a distinct
+    reason string, which `land()` writes to the ledger — #955's merged finding
+    was that six different abstentions all arrived as one unlabelled word.
     """
     from scripts.automod import backlog as B, state as S, vault_round as VR
     vault = Path(vault or VR.VAULT)
@@ -685,11 +765,14 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     # through the real loaders.
     surface = str((B.confirmed_verdicts(S.LEDGER_PATH).get(int(item_id)) or {}).get("surface") or "")
     if surface and surface != "vault":
-        return "skipped", f"surface is {surface}: the clauses are graded at the code gate", []
+        return ("skipped",
+                f"surface is {surface}, not vault: the clauses are graded at the code gate", [])
     contract = item_contract(int(item_id))
     if not contract["clauses"]:
         return "skipped", f"item #{item_id} has no acceptance clauses", []
-    prompt = build_vault_prompt(contract=contract, paths=paths, diff=diff, vault=vault)
+    landing = landing_clause_indices(contract["clauses"])
+    prompt = build_vault_prompt(contract=contract, paths=paths, diff=diff, vault=vault,
+                                landing_clauses=landing)
     res = run_grader(prompt=prompt, item_id=int(item_id), round_id="vault",
                      backend=backend, sessions_dir=sessions_dir, timeout=timeout, model=model)
     if not res["ok"]:
@@ -698,12 +781,24 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
                           n_clauses=len(contract["clauses"]), require_tests=False)
     if parsed is None:
         return "skipped", "grader returned an unusable object", []
+    # A landing clause is graded by the caller from the sha, never here — in
+    # either direction. The grader cannot have verified it (the commit is what a
+    # pass produces), so `met` would be a claim about input it never had, and
+    # `unmet` refuses a round whose only defect is the ordering. #955 is the
+    # latter; a `met` here would be the former, the same class.
+    for c in parsed["clauses"]:
+        if c["clause"] in landing and c["verdict"] != "post_landing":
+            c["downgraded"] = [f"graded by the landing, not by this review: {c['verdict']}"]
+            c["verdict"] = "post_landing"
     kind, findings = decide(parsed, [])
     graded = {c["clause"]: c["verdict"] for c in parsed["clauses"]}
     # One row per clause of the contract as it stood when graded, so a reader
     # needs no second lookup of a contract that may have changed since; a
-    # clause the grader never reached is `ungraded`, which is not `met`.
-    return kind, findings, [{"clause": i, "verdict": graded.get(i, "ungraded")}
+    # clause the grader never reached is `ungraded`, which is not `met`. A
+    # landing clause is marked `subject: landing` so `vault_round.land()` knows
+    # which verdicts to overwrite with the one it derives from the sha.
+    return kind, findings, [{"clause": i, "verdict": graded.get(i, "ungraded"),
+                             **({"subject": "landing"} if i in landing else {})}
                             for i in range(1, len(contract["clauses"]) + 1)]
 
 

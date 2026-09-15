@@ -268,10 +268,26 @@ def _vault_review(norm: list[str], item_id: int) -> tuple[str, str, list[dict]]:
     proceeds — a vault edit is already validated through the real loaders,
     and a grader outage must not hold every skill edit hostage.
 
+    On a `skipped` the `findings` slot is the REASON, and every cause has its
+    own wording: no grader wired, the grader raising, the grader not answering,
+    an unusable object, the surface not being `vault`, the item having no
+    clauses. `land()` writes it to the ledger. Before #955 the exception label
+    was a bare `RuntimeError: engine gone`, which read as engine noise rather
+    than the reviewer being absent, and the abstentions all collapsed to one
+    word.
+
     `clauses` is the grader's per-clause verdicts (`review.grade_vault`). A
-    grader answering the older two-element shape reads as none graded."""
+    grader answering the older two-element shape reads as none graded; a row
+    marked `subject: landing` says the clause is about the commit this landing
+    is about to produce, which is `land()`'s to grade."""
     if GRADER is None:
-        return "skipped", "no grader configured", []
+        # "not consulted", spelled so it cannot be read as a grader that failed.
+        # The module CLI and `scripts/autoresearch/promote.py` are the callers
+        # this is: neither wires a grader, so every one of their landings is
+        # reviewed by nobody (#955's merged finding: one bare word covered both).
+        return ("skipped",
+                "no grader configured: this caller never wires one "
+                "(module CLI or autoresearch promote — the reviewer was not consulted)", [])
     try:
         diff = _git("diff", "HEAD", "--", *norm).stdout
         for p in norm:
@@ -279,12 +295,30 @@ def _vault_review(norm: list[str], item_id: int) -> tuple[str, str, list[dict]]:
                 diff += f"\n+++ new file {p}\n" + (VAULT / p).read_text(encoding="utf-8", errors="replace")
         res = tuple(GRADER(item_id=item_id, paths=norm, diff=diff))
         graded = res[2] if len(res) > 2 else []
-        clauses = [{"clause": int(c["clause"]), "verdict": str(c["verdict"])}
+        clauses = [{"clause": int(c["clause"]), "verdict": str(c["verdict"]),
+                    **({"subject": str(c["subject"])} if c.get("subject") else {})}
                    for c in (graded or []) if isinstance(c, dict)
                    and str(c.get("clause", "")).isdigit() and c.get("verdict")]
         return str(res[0]), str(res[1]), clauses
     except Exception as exc:  # noqa: BLE001 — the grader never fails a landing on its own
-        return "skipped", f"{type(exc).__name__}: {str(exc)[:200]}", []
+        return ("skipped", f"grader raised {type(exc).__name__}: {str(exc)[:200]}", [])
+
+
+def _landing_clause_indices(item_id: int) -> list[int]:
+    """Which of this item's acceptance clauses have the landing as their subject.
+
+    The grader marks the same clauses on its own rows (`subject: landing`); this
+    is the belt to that brace, and it is the only one that exists on the skipped
+    path where no rows come back to be marked. A contract that cannot be read
+    grades nothing, so the whole call is swallowed: a missing backlog file is
+    never a reason to stop a landing. The rule itself is one function,
+    `review.landing_clause_indices`, shared by both callers.
+    """
+    try:
+        from scripts.automod import review as RV
+        return RV.landing_clause_indices(RV.item_contract(int(item_id))["clauses"])
+    except Exception:  # noqa: BLE001 — no contract, no landing clauses
+        return []
 
 
 def _vault_review_attempts(item_id: int) -> int:
@@ -320,10 +354,25 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
                               + "; ".join(errors[:5]))
 
     review = "skipped"
+    # A land with no item never reaches the second reader at all — there is no
+    # contract to grade — which is a different fact from "a grader was asked and
+    # could not answer". `scripts/autoresearch/promote.py` and this module's CLI
+    # land here, and until #955 both shared the single word `skipped` with a
+    # grader outage.
+    review_reason = ("no item bound: the second reader has no contract to grade, "
+                     "so it was not consulted (module CLI, autoresearch promote)")
     clauses: list[dict] = []
+    landing: set[int] = set()
     if item_id is not None:
         kind, findings, clauses = _vault_review(norm, int(item_id))
         review = kind
+        # The grader marks the clauses it refused to grade because they are about
+        # this commit; the contract read is the belt to that brace, for the
+        # skipped path where no rows come back to be marked.
+        landing = {int(c["clause"]) for c in clauses if c.get("subject") == "landing"}
+        landing |= set(_landing_clause_indices(int(item_id)))
+        if kind == "skipped":
+            review_reason = findings
         if kind in ("retry", "unsound"):
             attempts = _vault_review_attempts(int(item_id)) + 1
             final = kind == "unsound" or attempts >= VAULT_REVIEW_MAX
@@ -342,10 +391,14 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
                 ("review: premise unsound — " if kind == "unsound" else
                  f"review sent it back ({attempts}/{VAULT_REVIEW_MAX}): ") + findings[:800]
                 + ("; the edits were reverted" if undone else "; the edits are still in place — fix and land again"))
-        if kind != "skipped":
-            S.append_event({"event": "vault_review", "item_id": item_id, "paths": norm,
-                            "kind": kind, "blocking": False, "findings": findings[:600],
-                            "clauses": clauses})
+        # Every non-blocking outcome is recorded, an abstention included: before
+        # #955 the reason for a skip was discarded here and the only trace was
+        # the bare word `skipped` on the landing, which could not distinguish
+        # "not consulted" from "the grader 503'd".
+        S.append_event({"event": "vault_review", "item_id": item_id, "paths": norm,
+                        "kind": kind, "blocking": False, "findings": findings[:600],
+                        "review_reason": findings[:600] if kind == "skipped" else "",
+                        "clauses": clauses})
 
     _ensure_main()
     add = _git("add", "-A", "--", *norm)
@@ -358,15 +411,31 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
         _git("reset", "-q", "--", *norm)
         raise VaultRoundError(f"git commit failed: {(commit.stdout + commit.stderr).strip()[:300]}")
     sha = _git("rev-parse", "HEAD").stdout.strip()
+    # A clause about the landing is graded here, from the sha, and nowhere else:
+    # `land()` reviews before it commits, so no diff can satisfy such a clause at
+    # grading time and #425/#502 each died on attempt 2 for exactly that. The
+    # verdict is `met` because the commit it names now exists, and it names the
+    # sha so the claim is checkable rather than asserted.
+    landing_rows = [{"clause": i, "verdict": "met", "commit": sha} for i in sorted(landing)]
     # `review_clauses` is what `backlog.vault_review_outcome` reads: on a
     # landing that passed review it is the grader's verdict on the whole
-    # contract, and the one verdict left when the turn dies at its budget.
+    # contract, and the one verdict left when the turn dies at its budget. The
+    # landing rows replace the reviewer's placeholder verdicts, so a contract
+    # whose last clause is the landing can close on a passing review.
+    review_clauses = clauses if review == "pass" else []
+    if review_clauses and landing_rows:
+        graded_indices = {int(r["clause"]) for r in landing_rows}
+        review_clauses = ([r for r in review_clauses
+                           if int(r.get("clause") or 0) not in graded_indices] + landing_rows)
+        review_clauses.sort(key=lambda r: int(r.get("clause") or 0))
     S.append_event({"event": "vault_land", "ok": True, "item_id": item_id, "commit": sha,
                     "paths": norm, "validated": buckets["validated"],
-                    "review": review, "review_clauses": clauses if review == "pass" else [],
+                    "review": review, "review_reason": review_reason,
+                    "review_clauses": review_clauses, "landing_clauses": landing_rows,
                     "message": message.strip()[:200]})
     return {"ok": True, "commit": sha, "paths": norm, "validated": buckets["validated"],
-            "review": review}
+            "review": review, "review_reason": review_reason,
+            "landing_clauses": landing_rows}
 
 
 def revert_many(shas: list[str], reason: str = "rollback") -> dict:
