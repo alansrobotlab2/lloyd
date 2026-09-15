@@ -1145,10 +1145,12 @@ def test_the_live_corpus_emits_one_file_per_sequence_pattern(tmp_path):
     aliased names carried two patterns each."""
     # `LIVE_CORPUS` is defined further down this file, against the real data root
     # rather than the checkout — `_pipeline/` is gitignored, so a worktree-relative
-    # path would skip forever and clause 1 would never be graded. Read-only.
-    if not LIVE_CORPUS.exists():
-        pytest.skip("no trajectories dir on this machine")
+    # path reads as absent forever. Asserted, never skipped: clause 1 *is* a count
+    # over this corpus, and a check that can pass by not finding the data is not a
+    # check. Read-only; the emitted files go into `tmp_path`.
+    assert LIVE_CORPUS.is_dir(), f"live corpus absent: {LIVE_CORPUS}"
     rows = mt.load_trajectories(days=7, agent_filter="all", exclude_machine=False)
+    assert rows, f"live corpus at {LIVE_CORPUS} loaded no rows"
     seqs = mt.mine_sequence_patterns(rows, threshold=2)
     assert seqs, "no sequence patterns mined, so the assertions below are vacuous"
 

@@ -385,19 +385,25 @@ def copy_live_ledger(tmp_path) -> Path:
     return dest
 
 
-@pytest.mark.skipif(not LIVE_LEDGER.exists(), reason="no verdict ledger here")
 def test_every_stored_sequence_verdict_still_resolves_after_the_widening(tmp_path):
     """No `seq-*` row in the real ledger may stop binding because of #1131.
 
     For each stored key whose slug is under the cap: the pattern it came from
     re-derives that exact key — an unscoped disambiguator breaks here, which is the
     point — and the miner's join (`verdict_for`) reaches the row that
-    `terminal_verdict` reaches by key. Measured today every stored seq-* key is
+    `terminal_verdict` reaches by key. Measured 2026-09-15 every stored seq-* key is
     under the cap, so this loop is all of them. A key whose slug reached the cap
     could only have been minted after this change, and its original `sequence_str`
     is not recoverable from the row, so it is out of scope here by construction
     rather than by choice.
+
+    The ledger is asserted, never skipped: a guard against orphaning existing rows
+    that can pass by not finding the ledger is not that guard. `_pipeline/` is
+    gitignored, so this reads the machine's real append-only ledger rather than a
+    committed fixture — the same convention as `LIVE_CORPUS` in
+    `test_trajectory_extraction.py`.
     """
+    assert LIVE_LEDGER.is_file(), f"verdict ledger absent: {LIVE_LEDGER}"
     store = copy_live_ledger(tmp_path)
     rows = [json.loads(l) for l in store.read_text(encoding="utf-8").splitlines()
             if l.strip()]
