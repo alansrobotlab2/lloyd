@@ -383,7 +383,15 @@ error-shaped lines.
   a turn that called `automod_land` ends at once while the promoter waits up
   to fifteen minutes for idle, and the old grace was silently what kept the
   reaper off it. Never on `infra_failed`, where the backend may still be
-  running the turn.
+  running the turn. **A turn killed with the backend writes no terminal row
+  at all**, and a bare `started` is what a live turn looks like, so the
+  reaper never saw its round: an OOM kill of the unit at 2026-09-15 04:48Z
+  held the loop closed for 13.5 h. `settle_orphaned_turns` runs once per
+  backend process at the first poll — a `started` row older than the process
+  becomes `infra_failed` (`backend_restarted`, re-offered, not spent) with
+  the round it opened, bounded by the boot so the next item's live round is
+  never blamed — and the reaper closes it. It does nothing outside the
+  backend. `architecture/automod.md` §3.2.
 - **The idle gate drains first, then waits.** `wait_idle` used to arm the
   drain only *after* three quiet polls — the one moment it is no longer
   needed. Against a worker pool that starts a research job every few minutes

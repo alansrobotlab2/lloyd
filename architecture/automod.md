@@ -374,6 +374,23 @@ that and a lost round, in order:
    round whose detached gate (`gate.running`) or landing (`land.running`) is
    still alive — protections the twenty minutes used to provide by accident.
 
+The reaper reads terminal rows (`finished`, `infra_failed`), and a turn killed
+*with the backend* writes neither: its item's last row is `started`, which is
+exactly what a live turn looks like. On 2026-09-15 systemd-oomd took the whole
+unit down at 04:48:34Z two minutes into #1131's round; supervisord had
+everything back in half a minute, and every autocode poll declined "a round is
+already open" for thirteen and a half hours. `settle_orphaned_turns` closes
+that gap once per backend process, at the first poll after boot: a turn runs
+inside the backend, so a `started` row older than the process cannot still be
+running, and it is written `infra_failed` (`stop_reason: backend_restarted`) —
+an `infra` re-offer, not a spent attempt — naming the round it opened, which
+the reaper then closes under its usual guards. The round is the last
+`round_start` between that row and the boot whose `run_spec.yaml` does not bind
+another item; `_round_opened_since` has no upper bound, and after a restart
+its answer can be the next item's live round. Outside the backend (no pool in
+the process) the pass does nothing, since from a CLI every live turn started
+before the process did.
+
 **Human-only.** Some paths the loop may never touch remain: `config.yaml`,
 `data/**`, `.env*`, `pytest.ini`, `.gitignore`, and the frontend's build
 inputs. A triage whose fix needs one records `confirmed` with an acceptance

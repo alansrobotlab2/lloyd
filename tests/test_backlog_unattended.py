@@ -2120,6 +2120,149 @@ def test_the_reaper_reaps_nothing_when_it_cannot_tell_which_sessions_are_busy(is
     assert I.reap_abandoned_rounds(now=_t.time() + 1) == [] and aborted == []
 
 
+# ===========================================================================
+# A turn the backend restarted under
+#
+# 2026-09-15 04:48:34Z: systemd-oomd killed the whole unit two minutes into
+# #1131's round. Everything came back in half a minute; the turn did not, and
+# it had written `started` and nothing after — which is what a live turn
+# looks like. The reaper reads only terminal rows, so the round stayed open
+# and every autocode poll declined for thirteen and a half hours.
+# ===========================================================================
+
+def _started(item, ts):
+    S.append_event({"event": "backlog_implement", "item_id": item, "phase": "started", "ts": ts},
+                   path=S.LEDGER_PATH)
+
+
+def _round_start(rid, ts, tmp_path, *, item=None):
+    S.append_event({"event": "round_start", "round_id": rid, "ts": ts}, path=S.LEDGER_PATH)
+    spec = {"code": {"base_commit": "abc"}}
+    if item is not None:
+        spec["item"] = {"id": item}
+    d = tmp_path / "rounds" / rid
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "run_spec.yaml").write_text(yaml.safe_dump(spec), encoding="utf-8")
+
+
+def test_a_turn_the_backend_restarted_under_is_settled_and_its_round_reaped(isolated, monkeypatch, tmp_path):
+    import time as _t
+    write_item(isolated, 1131, status="in_progress")
+    _confirm(1131)
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False)
+    now = _t.time()
+    _started(1131, now - 150)
+    _round_start("SM_OOM", now - 134, tmp_path, item=1131)
+    boot = now - 100
+
+    # Before: indistinguishable from a live turn, and invisible to the reaper.
+    assert 1131 in B.items_with_unfinished_rounds(S.LEDGER_PATH)
+    assert I.reap_abandoned_rounds() == [] and aborted == []
+
+    out = I.settle_orphaned_turns(boot_ts=boot)
+    assert [(r["item_id"], r["phase"], r["round_id"]) for r in out] == [(1131, "infra_failed", "SM_OOM")]
+    assert B.implement_outcomes(S.LEDGER_PATH)[1131][0] == "infra", "a crash is not the item's attempt"
+    assert "backend restarted" in next(isolated.glob("1131-*.md")).read_text()
+
+    reaped = I.reap_abandoned_rounds()
+    assert [r["round_id"] for r in reaped] == ["SM_OOM"] and aborted == ["SM_OOM"]
+    assert B.select_confirmed(S.LEDGER_PATH)[0].id == 1131, "offered again"
+    assert I.settle_orphaned_turns(boot_ts=boot) == [], "settled once, not on every pass"
+
+
+def test_a_turn_started_after_the_boot_is_this_process_s_own(isolated, monkeypatch, tmp_path):
+    import time as _t
+    write_item(isolated, 2)
+    _reaper_env(monkeypatch, tmp_path, observed=False)
+    now = _t.time()
+    _started(2, now - 5)
+    assert I.settle_orphaned_turns(boot_ts=now - 60) == []
+    # ...and a turn from before the boot that DID finish is not an orphan.
+    write_item(isolated, 3)
+    _started(3, now - 300)
+    _finished("SM_DONE", item=3)
+    assert I.settle_orphaned_turns(boot_ts=now - 60) == []
+
+
+def test_the_next_items_live_round_is_never_blamed_on_a_dead_turn(isolated, monkeypatch, tmp_path):
+    """`_round_opened_since` takes the last round at or after a time. After a
+    restart that is the next item's live round, and the reaper would abort it."""
+    import time as _t
+    for i in (2, 3):
+        write_item(isolated, i)
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False)
+    now = _t.time()
+    boot = now - 100
+    _started(2, now - 200)
+    # In the dead turn's window, but bound to another item: not its round.
+    _round_start("SM_HUMAN", now - 190, tmp_path, item=77)
+    # After the boot: item 3's live round, and a human's round that binds no
+    # item — only the boot bound keeps that one from the dead turn.
+    _started(3, now - 50)
+    _round_start("SM_LIVE", now - 40, tmp_path, item=3)
+    _round_start("SM_AFTER", now - 30, tmp_path)
+
+    out = I.settle_orphaned_turns(boot_ts=boot)
+    assert [(r["item_id"], r["round_id"]) for r in out] == [(2, None)]
+    assert I.reap_abandoned_rounds() == [] and aborted == []
+    assert 3 in B.items_with_unfinished_rounds(S.LEDGER_PATH), "item 3 is untouched"
+
+
+def test_outside_the_backend_nothing_is_settled(isolated, monkeypatch, tmp_path):
+    """From a CLI every live turn started before the process did."""
+    import time as _t
+    import workers.pool as P
+    write_item(isolated, 2)
+    _started(2, _t.time() - 10_000)
+    monkeypatch.setattr(P, "get_pool", lambda: None)
+    assert I._backend_boot_ts() is None
+    assert I.settle_orphaned_turns() == []
+
+
+def test_the_backend_boot_is_the_process_not_the_pool(monkeypatch):
+    """The enable route stops and restarts the pool in place, and a turn
+    whose client went away keeps running in the backend."""
+    import psutil
+    import workers.pool as P
+    monkeypatch.setattr(P, "get_pool", lambda: object())
+    assert I._backend_boot_ts() == pytest.approx(psutil.Process().create_time())
+
+
+def test_orphans_are_settled_at_the_first_poll_after_a_boot_and_only_then(isolated, monkeypatch, tmp_path):
+    from workers.queue import WorkQueue
+    q = WorkQueue(tmp_path / "workers.db")
+    calls = _housekeeping_counter(monkeypatch)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (False, "a round is already open (1 worktree(s))"))
+    monkeypatch.setitem(I._boot_settled, "done", False)
+    settled = []
+    monkeypatch.setattr(I, "settle_orphaned_turns",
+                        lambda: settled.append(1) or [{"round_id": "SM_OOM"}])
+    cfg = {"interval_seconds": 900}
+    asyncio.run(I.enqueue_if_due(q, cfg))   # housekeeping is due too: two reaps
+    asyncio.run(I.enqueue_if_due(q, cfg))
+    assert settled == [1], "once per process"
+    assert calls["reap"] == 2, "the boot pass reaps what it settled, at once"
+
+
+def test_a_failed_boot_pass_is_retried(isolated, monkeypatch, tmp_path):
+    from workers.queue import WorkQueue
+    q = WorkQueue(tmp_path / "workers.db")
+    _housekeeping_counter(monkeypatch)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (False, "busy"))
+    monkeypatch.setitem(I._boot_settled, "done", False)
+    tries = []
+
+    def flaky():
+        tries.append(1)
+        if len(tries) == 1:
+            raise OSError("ledger unreadable")
+        return []
+    monkeypatch.setattr(I, "settle_orphaned_turns", flaky)
+    for _ in range(3):
+        asyncio.run(I.enqueue_if_due(q, {"interval_seconds": 900}))
+    assert len(tries) == 2
+
+
 def test_a_zombie_marker_process_is_dead(tmp_path):
     """The detached land child is never waited on by lloyd-mcp; dead, it is a
     zombie `kill(pid, 0)` still answers, and its marker read as live."""

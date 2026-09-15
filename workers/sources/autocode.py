@@ -452,6 +452,120 @@ def reap_abandoned_rounds(now: float | None = None, *,
     return reaped
 
 
+def _backend_boot_ts() -> float | None:
+    """When this backend process started — or None anywhere else.
+
+    Only the backend runs the pool and the turns it starts, so only here does
+    "started before this process" mean "died with its predecessor". From a
+    CLI the same test is true of every live turn. The process, not the pool:
+    `POST /api/workers/enable` stops and restarts the pool in place, while the
+    chat path keeps a turn running after its client goes away.
+    """
+    from workers.pool import get_pool
+    if get_pool() is None:
+        return None
+    try:
+        import psutil
+        return float(psutil.Process().create_time())
+    except Exception:  # noqa: BLE001 — an unknown boot settles nothing
+        return None
+
+
+def _orphan_round(starts: list[dict], item_id: int, since_ts: float, boot_ts: float) -> str | None:
+    """The round a dead turn opened: the last `round_start` between its
+    `started` row and the boot, unless that round's spec binds another item.
+
+    Bounded above by the boot on purpose. `_round_opened_since` takes the last
+    round at or after a time, which after a restart can be the NEXT item's
+    live round — and handing that id to the reaper aborts it.
+    """
+    from scripts.automod import state as S
+    import yaml
+    for ev in reversed(starts):
+        ts = float(ev.get("ts") or 0)
+        if not (since_ts <= ts < boot_ts) or not ev.get("round_id"):
+            continue
+        rid = str(ev["round_id"])
+        try:
+            spec = yaml.safe_load((S.ROUNDS_DIR / rid / "run_spec.yaml").read_text()) or {}
+            bound = (spec.get("item") or {}).get("id")
+        except (OSError, ValueError, yaml.YAMLError):
+            bound = None
+        if bound is not None and int(bound) != int(item_id):
+            continue
+        return rid
+    return None
+
+
+def settle_orphaned_turns(boot_ts: float | None = None) -> list[dict]:
+    """Write the terminal row a turn killed with the backend never wrote.
+
+    `execute` records `started`, then `finished` or `infra_failed` when the
+    turn returns. A process that dies in between writes neither, and a
+    `started` row with nothing after it is exactly what a live turn looks
+    like: `items_with_unfinished_rounds` calls the item mid-round, and
+    `reap_abandoned_rounds`, which reads only terminal rows, never sees its
+    round. On 2026-09-15 systemd-oomd killed the whole unit at 04:48:34Z two
+    minutes into #1131's round; supervisord had everything back in half a
+    minute, and every autocode poll declined "a round is already open" for
+    the next thirteen and a half hours.
+
+    A turn runs inside the backend process, so one whose `started` row
+    predates this process's boot cannot still be running. Its row is
+    `infra_failed` — `implement_outcomes` re-offers that, capped, because a
+    crash is not a judgment on the item — carrying the round it opened, which
+    the reaper then closes under its usual guards (a detached gate or landing
+    survives a backend restart, and still protects the round). Rows written
+    after the boot are this process's own and are never touched.
+    """
+    from scripts.automod import backlog as B, state as S
+    boot = _backend_boot_ts() if boot_ts is None else boot_ts
+    if not boot:
+        return []
+    orphans = [(iid, rows[-1]) for iid, rows in B.implement_history(S.LEDGER_PATH).items()
+               if str(rows[-1].get("phase") or "") == "started"
+               and 0 < float(rows[-1].get("ts") or 0) < boot]
+    if not orphans:
+        return []
+    starts = [e for e in S.read_events(limit=10**9) if e.get("event") == "round_start"]
+
+    def stamp(t: float) -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+    settled: list[dict] = []
+    for iid, row in orphans:
+        ts = float(row["ts"])
+        rid = _orphan_round(starts, iid, ts, boot)
+        why = (f"the backend restarted at {stamp(boot)} under a turn started {stamp(ts)}; "
+               f"no terminal row was written")
+        rec = {"event": "backlog_implement", "item_id": iid, "phase": "infra_failed",
+               "session_id": None, "round_id": rid, "num_turns": None,
+               "stop_reason": "backend_restarted", "errors": [why]}
+        S.append_event(rec)
+        B.note_item(iid, f"implement turn lost: {why}; not counted as an attempt"
+                         + (f" (round {rid})" if rid else ""))
+        logger.warning("backlog #%s: %s (round %s)", iid, why, rid)
+        settled.append(rec)
+    return settled
+
+
+# Once per process. Every row older than the boot is settled by the first pass
+# that succeeds, and rows written afterwards are never this pass's business.
+_boot_settled = {"done": False}
+
+
+def _settle_boot_orphans() -> None:
+    """`settle_orphaned_turns`, then the reaper for the rounds it named — at
+    the first poll after a boot rather than at housekeeping's next 900 s tick."""
+    try:
+        if settle_orphaned_turns():
+            for r in reap_abandoned_rounds():
+                logger.info("reaped round %s after a backend restart: %s",
+                            r["round_id"], r["reason"])
+        _boot_settled["done"] = True
+    except Exception as exc:  # noqa: BLE001 — retried at the next poll
+        logger.warning("settle_orphaned_turns failed: %s", exc)
+
+
 def _loop_is_free() -> tuple[bool, str]:
     """Every gate the loop itself enforces, checked here first so a queued
     item does not spend a full agent turn discovering it cannot proceed."""
@@ -564,6 +678,8 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
     # Both board walks off the event loop: each reads every item file and the
     # ledger several times (~2 s for `select_confirmed` alone), and this loop
     # serves every HTTP request and streams every chat turn.
+    if not _boot_settled["done"]:
+        await asyncio.to_thread(_settle_boot_orphans)
     if _housekeeping_due(queue, src_cfg):
         await asyncio.to_thread(_housekeeping, src_cfg)
         queue.wm_set(NAME, HOUSEKEEPING_KEY, datetime.now(timezone.utc).isoformat())
