@@ -413,7 +413,9 @@ _DEFAULTS: dict[str, Any] = {
     "retention_seconds": 7 * 86400,
     "ceilings": {
         "interactive": {
-            "fs_write": {"vault": 120, "lloyd": 120, "_pipeline": 30, "*": 120},
+            # A vault note has no git history; a repo file does, so the repo
+            # write is the recoverable one and gets the looser number.
+            "fs_write": {"vault": 120, "lloyd": 400, "_pipeline": 30, "*": 120},
             # The vault is the unrecoverable substrate and `_pipeline` is where
             # 08-22 happened; `~/lloyd` is git-tracked, so a repo delete is
             # recoverable and gets the loosest of the three.
