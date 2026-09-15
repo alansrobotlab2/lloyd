@@ -471,8 +471,10 @@ def main(argv=None) -> int:
     # uses so the guardian is blind for exactly the restart.
     r = sub.add_parser("restart", help="pause the pool, drain, restart mcp+backend under the guardian lease")
     r.add_argument("--reason", default="", help="recorded on the ledger")
-    r.add_argument("--only", action="append", choices=["lloyd-mcp", "lloyd-backend"],
-                   help="restart only this program (repeatable); default both, mcp first")
+    r.add_argument("--only", action="append",
+                   choices=["lloyd-mcp", "lloyd-backend", P.PRIMARY_PROGRAM],
+                   help="restart only this program (repeatable); default both, mcp first. "
+                        "agent-llm-primary takes its own leg: host-RAM wait, reread, long boot")
     r.add_argument("--force", action="store_true", help="even while a promotion is under observation")
     sc = sub.add_parser("scorecard", help="how the unattended loop is doing, from the ledger")
     sc.add_argument("--since", default="7d")
