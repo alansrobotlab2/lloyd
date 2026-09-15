@@ -6,9 +6,17 @@ is re-made by hand. Run #57 on 2026-09-01: "the miner regenerated both files as
 `pending_review`, silently wiping the previous review — that's the real process bug
 here."
 
-Nothing here touches `~/lloyd/_pipeline` or the vault: every assertion runs against a
-tmp ledger and a tmp candidates dir, so a nightly job rewriting the live corpus cannot
-fail this file for somebody else's change.
+Every assertion *writes* to a tmp ledger and a tmp candidates dir, never to
+production state — with one read:
+`test_every_stored_sequence_verdict_still_resolves_after_the_widening`
+(#1131 clause 4) reads the real append-only ledger
+`~/lloyd/_pipeline/skills/reviews/verdicts.jsonl`, copies it into tmp before doing
+anything, and asserts against the rows the nightly has actually recorded. A committed
+fixture cannot say that a live rejection still binds. The cost of that read is stated
+plainly: a nightly that appends a `seq-*` row can now fail this file, and that is the
+point — it fails exactly when the miner's key rule stops agreeing with the ledger.
+Everywhere else, a nightly rewriting the live corpus cannot fail this file for
+somebody else's change.
 """
 
 from __future__ import annotations
@@ -355,7 +363,11 @@ SLUG_CAP = 50
 
 
 def seq_slug_of(key: str) -> str:
-    """The slug part of a `seq-{n}-{slug}` key, the piece the cap applies to."""
+    """The n-gram part of a `seq-{n}-{slug}` key.
+
+    Not what the cap is measured on — that is the whole key, prefix included — but
+    it is the field that distinguishes a legacy truncated key (slug exactly
+    `SLUG_CAP`) from one this change disambiguated (slug longer than it)."""
     return key[len("seq-"):].partition("-")[2]
 
 
@@ -388,14 +400,21 @@ def copy_live_ledger(tmp_path) -> Path:
 def test_every_stored_sequence_verdict_still_resolves_after_the_widening(tmp_path):
     """No `seq-*` row in the real ledger may stop binding because of #1131.
 
-    For each stored key whose slug is under the cap: the pattern it came from
-    re-derives that exact key — an unscoped disambiguator breaks here, which is the
-    point — and the miner's join (`verdict_for`) reaches the row that
-    `terminal_verdict` reaches by key. Measured 2026-09-15 every stored seq-* key is
-    under the cap, so this loop is all of them. A key whose slug reached the cap
-    could only have been minted after this change, and its original `sequence_str`
-    is not recoverable from the row, so it is out of scope here by construction
-    rather than by choice.
+    For each stored key under the cap: the pattern it came from re-derives that
+    exact key — an unscoped disambiguator breaks here, which is the point — and the
+    miner's join (`verdict_for`) reaches the row that `terminal_verdict` reaches by
+    key. "Under the cap" is measured on the whole key, because that is what the rule
+    measures: `seq-3-` spends 6 of the 50 characters. Measured 2026-09-15 every one
+    of the 53 seq-* rows / 28 distinct keys is under it (longest key 47 characters),
+    so the loop below is every row the ledger holds.
+
+    A stored key *at or past* the cap is out of this loop's reach for a mechanical
+    reason: the row stores the key, not the n-gram, so `seq_pattern_for_key` cannot
+    rebuild the input it was derived from. Two shapes get there and only one is a
+    defect — a legacy key whose slug was cut to exactly `SLUG_CAP`, versus a key this
+    change disambiguated (50 slug characters plus `-` plus 8 hex). The legacy shape is
+    asserted away rather than filtered in silence, because it is precisely the class a
+    widened key would orphan without this loop ever noticing.
 
     The ledger is asserted, never skipped: a guard against orphaning existing rows
     that can pass by not finding the ledger is not that guard. `_pipeline/` is
@@ -409,10 +428,25 @@ def test_every_stored_sequence_verdict_still_resolves_after_the_widening(tmp_pat
             if l.strip()]
     seq_keys = sorted({r["pattern_key"] for r in rows
                        if (r.get("pattern_key") or "").startswith("seq-")})
-    under_cap = [k for k in seq_keys if len(seq_slug_of(k)) < SLUG_CAP]
+    # The rule measures the cap on the whole key, so that is the line between the
+    # keys this loop can re-derive and the ones it cannot: at or past 50 characters
+    # the key carries a suffix this function cannot undo, because the row stores the
+    # key and not the n-gram it was cut from.
+    rederivable = [k for k in seq_keys if len(k) < SLUG_CAP]
+    # Of the keys past the cap, one shape is a defect and one is expected: a slug cut
+    # to exactly SLUG_CAP is the legacy truncation's signature — the class a widened
+    # key would silently strand — while a longer slug is a disambiguator this change
+    # minted and could not have orphaned. Asserted, never filtered quietly.
+    legacy_cut = [k for k in seq_keys if len(seq_slug_of(k)) == SLUG_CAP]
+    assert not legacy_cut, (
+        f"{len(legacy_cut)} stored seq-* key(s) carry a slug cut to exactly the cap "
+        f"({legacy_cut[:3]}): legacy truncated keys, whose original n-gram cannot be "
+        "re-derived here, so a widened key would orphan them and they need a "
+        "migration rather than a filter")
+    under_cap = rederivable
     under_cap_rows = [r for r in rows
                       if (r.get("pattern_key") or "").startswith("seq-")
-                      and len(seq_slug_of(r["pattern_key"])) < SLUG_CAP]
+                      and len(r["pattern_key"]) < SLUG_CAP]
     assert len(under_cap_rows) >= MIN_UNDERCAP_SEQ_ROWS, (
         f"only {len(under_cap_rows)} under-cap seq-* rows: the ledger this test guards "
         "against orphaning no longer holds the rows it held at filing, so the loop "

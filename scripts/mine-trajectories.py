@@ -340,11 +340,11 @@ def slug_for(text: str) -> str:
 
     The suffix is added *only* when the slug reached `SLUG_CAP`. That scoping is
     the whole point: the key derived from this is also the verdict-ledger join,
-    and every `seq-*` row already in `_pipeline/skills/reviews/verdicts.jsonl`
-    carries a slug shorter than the cap (43 rows / 23 distinct keys at filing,
-    longest 47 characters), so nothing existing changes meaning and no verdict is
-    orphaned. An unscoped widening is the #515 failure — widening a key with no
-    migration left 21 coarse rows unreachable.
+    and every `seq-*` row already in `_pipeline/skills/reviews/verdicts.jsonl` is
+    under the cap (53 rows / 28 distinct keys on 2026-09-15, longest 47 characters),
+    so nothing existing changes meaning and no verdict is orphaned — below the cap
+    this is exactly `slugify`. An unscoped widening is the #515 failure: widening a
+    key with no migration left 21 coarse rows unreachable.
     """
     slug = slugify(text)
     if len(slug) >= SLUG_CAP:
@@ -1021,11 +1021,22 @@ def candidate_pattern_key(pattern: dict) -> str:
 def sequence_pattern_key(ngram_size: int, sequence_str: str) -> str:
     """The key for one mined n-gram: `seq-{n}-{slug}`, disambiguator included.
 
-    Split out from `candidate_pattern_key` so the cap rule lives in exactly one
-    place and a caller that has the n-gram but no pattern dict — a test, or a
-    ledger lookup assembled from a `sequence_str` — can derive the same string.
+    `slug_for` sees the **whole** key text, so the cap is measured on the key and
+    not on the n-gram string. That is the only measurement that means anything
+    downstream: the key is what `write_candidate_file` slugs for the filename and
+    what the verdict ledger stores, and `seq-3-` already costs 6 characters — an
+    n-gram whose own slug is 49 characters is 5 bytes past the cut once the prefix
+    is on it, so a cap measured on the n-gram alone would keep minting
+    under-the-cap-looking keys that the filename step then truncated. One string,
+    one cap, one rule at both levels.
+
+    Split out from `candidate_pattern_key` so the rule lives in exactly one place
+    and a caller that has the n-gram but no pattern dict — a test, or a ledger
+    lookup assembled from a `sequence_str` — can derive the same string. Below the
+    cap the function is the identity `seq-{n}-{slugify(sequence_str)}`, which is
+    what keeps every `seq-*` row already in the ledger reachable (#1131 clause 4).
     """
-    return f"seq-{ngram_size}-{slug_for(sequence_str)}"
+    return slug_for(f"seq-{ngram_size}-{sequence_str}")
 
 
 def verdict_for(pattern: dict, store: str | Path | None = None) -> dict | None:

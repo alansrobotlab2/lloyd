@@ -960,11 +960,15 @@ ALIASED_TAILS = ("automod_land", "automod_abort")
 
 
 def aliased_traj(session_key):
-    """One session carrying both trigrams whose keys alias.
+    """One session carrying both trigrams whose *filenames* aliased.
 
-    The shared prefix `seq-3-automod-gate-wait-backlog-write-task-automod` is
-    exactly 50 slug characters, so `… -> automod_land` and `… -> automod_abort`
-    were cut to the same string and became one file.
+    Their keys under the filing rule were 55 and 56 characters — `…-automod-land`
+    and `…-automod-abort`, distinct — and the alias came from the filename re-slug:
+    `write_candidate_file` cut the finished key at 50 characters, and the first 50
+    of both are `seq-3-automod-gate-wait-backlog-write-task-automod`, so the pair
+    wrote one file. The n-grams' own slugs are 49 and 50 characters, which is why
+    the cap has to be measured on the whole key: prepending `seq-3-` costs 6, so
+    even the 49-character one is past the cut as a key.
     """
     names = [ALIASED_HEAD[0], ALIASED_HEAD[1], ALIASED_TAILS[0],
              ALIASED_HEAD[0], ALIASED_HEAD[1], ALIASED_TAILS[1]]
@@ -980,7 +984,11 @@ def aliased_traj(session_key):
 
 
 def aliased_pair():
-    """The two aliased sequence patterns, mined through the real miner."""
+    """The two sequence patterns whose *filename* aliased, mined through the real
+    miner. Their keys were already distinct at filing — asserted by
+    `test_the_aliased_pair_shares_one_plain_slug_but_not_one_candidate_name`; the
+    pair whose keys aliased is the 5-gram fixture in
+    `test_two_ngrams_differing_only_past_the_cap_get_distinct_keys`."""
     rows = [aliased_traj("alias-a"), aliased_traj("alias-b")]
     pair = [p for p in mt.mine_sequence_patterns(rows, threshold=2)
             if tuple(p["sequence"][:2]) == ALIASED_HEAD
@@ -994,13 +1002,42 @@ def pattern_field_of(path: Path) -> str:
                      re.MULTILINE).group(1)
 
 
-def test_two_ngrams_that_alias_under_the_cap_keep_distinct_keys():
-    """Clause 2 at the key level, through the miner rather than a hand-built
-    dict: `slugify` had already folded both n-grams onto
-    `seq-3-automod-gate-wait-backlog-write-task-automod`."""
-    a, b = aliased_pair()
-    assert a["sequence_str"] != b["sequence_str"]
-    assert mt.candidate_pattern_key(a) != mt.candidate_pattern_key(b)
+def test_the_aliased_pair_shares_one_plain_slug_but_not_one_candidate_name():
+    """Clause 1's mechanism and clause 2's prefix rule, through the miner rather
+    than a hand-built dict.
+
+    Measured at filing, these two n-grams already had *distinct keys* —
+    `seq-3-…-automod-land` (55 characters) and `seq-3-…-automod-abort` (56) — and
+    what aliased was the *filename*: `write_candidate_file` ran the finished key
+    through `slugify`, whose 50-character cut left both on
+    `seq-3-automod-gate-wait-backlog-write-task-automod`, so they wrote one file.
+    The pair that aliased one level deeper, at the key itself, is the 5-gram fixture
+    in `test_two_ngrams_differing_only_past_the_cap_get_distinct_keys`.
+
+    Three things have to hold at once here, and each fails under a different
+    wrong fix:
+      * the plain `slugify` of the two keys is still the same 50 characters — the
+        cut is unchanged and this pair still straddles it (raising `SLUG_CAP`
+        breaks this line);
+      * `slug_for` no longer agrees with it, so the two keys get two filenames
+        (reverting the filename site to plain `slugify` breaks this line);
+      * the key *with* the suffix is the one from the 49-character n-gram slug too.
+        `… → automod_land`'s n-gram slug is 49 characters — under the cap as
+        measured on the n-gram alone, and still cut, once `seq-3-` is prepended.
+        Measuring the cap on the whole key is what disambiguates it (measuring on
+        the n-gram string breaks this line).
+    """
+    cut = "seq-3-automod-gate-wait-backlog-write-task-automod"
+    key_a, key_b = (mt.candidate_pattern_key(p) for p in aliased_pair())
+    assert key_a != key_b, "two n-grams share one pattern key"
+    assert mt.slugify(key_a) == mt.slugify(key_b) == cut, (
+        "the pair no longer straddles the 50-character cut, so it pins nothing")
+    assert mt.slug_for(key_a) != mt.slug_for(key_b), "one filename for two keys"
+    suffix = re.compile(rf"^{re.escape(cut)}-[0-9a-f]{{8}}$")
+    assert all(suffix.match(k) for k in (key_a, key_b)), (
+        f"{key_a} / {key_b}: a key whose n-gram slug is 49 characters ("
+        "`automod_land`, one byte under the cap on its own) must still be "
+        "disambiguated, because `seq-3-` spends 6 of the 50")
 
 
 def test_two_ngrams_that_alias_under_the_cap_get_one_file_each(tmp_path):
@@ -1033,12 +1070,19 @@ def test_reversing_the_pattern_list_writes_the_same_bytes(tmp_path):
         assert path.read_bytes() == by_name[path.name].read_bytes(), path.name
 
 
-def test_a_key_longer_than_the_cap_is_slugged_by_the_same_rule(tmp_path):
-    """The filename and the key must go through one cap rule. Sluging an already
-    disambiguated key with plain `slugify` re-cut it at 50 and put the hash —
-    bytes 51 onward — exactly where the cut lands, re-merging the pair. Two
-    5-grams differing only in their final tool are the case the item names: pre-fix
-    both returned `seq-5-backlog-write-task-bash-fs-automod-gate-wait-autom`."""
+def test_two_ngrams_differing_only_past_the_cap_get_distinct_keys(tmp_path):
+    """Clause 2's key-level case: two 5-grams whose n-grams share their first 50
+    slug characters and differ only in the final tool. Pre-fix both returned
+    `seq-5-backlog-write-task-bash-fs-automod-gate-wait-autom` — one key, so one
+    `pattern:` field and one verdict-ledger row for two different loops, and a
+    filename-only hash could not separate them because their keys were equal.
+
+    The cut is on the whole key, so the shared prefix the two keys keep is the
+    50-character `seq-5-backlog-write-task-bash-fs-automod-gate-wait`, six
+    characters shorter than the shared n-gram slug: the `seq-5-` prefix spends
+    part of the cap, which is the only measurement that agrees with what
+    `write_candidate_file` and the ledger actually consume.
+    """
     head = "backlog_write_task → bash:fs → automod_gate_wait → automod_land"
     five_a = {"type": "sequence", "ngram_size": 5, "sessions": {"s1", "s2"},
               "sequence": tuple(head.split(" → ")) + ("backlog_tasks",),
@@ -1049,21 +1093,53 @@ def test_a_key_longer_than_the_cap_is_slugged_by_the_same_rule(tmp_path):
               "sequence": tuple(head.split(" → ")) + ("research_stats",),
               "sequence_str": f"{head} → research_stats"}
 
+    shared = "seq-5-backlog-write-task-bash-fs-automod-gate-wait"
+    assert len(shared) == mt.SLUG_CAP, "the fixture no longer straddles the cap"
     key_a, key_b = (mt.candidate_pattern_key(p) for p in (five_a, five_b))
-    assert key_a != key_b
-    assert key_a.startswith("seq-5-backlog-write-task-bash-fs-automod-gate-wait-autom-")
-    assert key_a != key_a[:50], "the key itself must survive past the slug cap"
+    assert key_a != key_b, "two n-grams share one pattern key"
+    assert (key_a[:mt.SLUG_CAP], key_b[:mt.SLUG_CAP]) == (shared, shared)
+    assert key_a != key_a[:mt.SLUG_CAP], "the key itself must survive past the cap"
 
     written = mt.emit_candidates([five_a, five_b], tmp_path)
     assert len(written) == 2, [p.name for p in written]
     assert len({p.name for p in written}) == 2, "two keys, one filename"
     assert {pattern_field_of(p) for p in written} == {key_a, key_b}
 
+    # Re-emitting the same pair over the same directory must still be two files: a
+    # night that wrote one then the other is how the alias used to hide.
+    mt.emit_candidates([five_a, five_b], tmp_path)
+    assert len(list(tmp_path.glob("candidate-seq-*.md"))) == 2
+
 
 def test_a_key_under_the_cap_is_unchanged_by_the_disambiguator():
     """The widening is scoped to the cap, and this is the unit half of that
-    scoping: a short n-gram keeps the byte-identical key the verdict ledger
-    already stores (the ledger half is pinned in `test_skill_verdicts.py`)."""
+    scoping: below the cap the key rule is the byte-identical identity
+    `seq-{n}-{slugify(sequence_str)}`, which is the only reason the rows the verdict
+    ledger already stores still mean what they meant (the ledger half is pinned in
+    `test_skill_verdicts.py::test_every_stored_sequence_verdict_still_resolves…`).
+
+    Asserted as the identity over a spread of shapes rather than on one example:
+    the claim is about every key under the cap, and a single n-gram cannot show a
+    rule that only misbehaves on, say, an uppercase or punctuation-heavy name.
+    """
+    shapes = ["bash:fs → backlog_write_task",
+              "Bash → Read → Write",
+              "mcp:vault → bash:cmd:date → grep",
+              "a → b → c → d → e",
+              "weird!!name → x"]
+    checked = 0
+    for seq in shapes:
+        n = seq.count(" → ") + 1
+        old = f"seq-{n}-{mt.slugify(seq)}"
+        if len(mt.slugify(old)) < mt.SLUG_CAP:
+            checked += 1
+            assert mt.sequence_pattern_key(n, seq) == old, (
+                f"an under-cap key changed meaning: {old!r} -> "
+                f"{mt.sequence_pattern_key(n, seq)!r}")
+    assert checked >= 3, (
+        f"only {checked} of {len(shapes)} shapes are under the cap, so the identity "
+        "above is checking almost nothing")
+
     short = {"type": "sequence", "ngram_size": 2,
              "sessions": {"s1", "s2"},
              "sequence": ("bash:fs", "backlog_write_task"),
@@ -1125,17 +1201,28 @@ def test_the_nightly_run_reports_one_line_per_file_it_wrote(tmp_path):
     index_total = int(re.search(r"\*\*Total candidates:\*\* (\d+)", index).group(1))
     assert index_total == len(files_on_disk), index_total
 
-    seq_files = [p for p in files_on_disk if p.name.startswith("candidate-seq-")]
-    assert len(seq_files) == len(set(p.name for p in seq_files))
-
     mined = (mt.mine_error_patterns(rows, threshold=2)
              + mt.mine_success_patterns(rows, threshold=2)
+             # The rule `main()` applies, not the CLI's flag: sequences mine at
+             # `max(3, threshold)`, so anything else compares two different sets.
              + mt.mine_sequence_patterns(rows, threshold=max(3, 2)))
     refused = [p for p in mined if not mt.is_emittable(p)]
     assert refused, "the corpus must contain a pattern the gate refuses"
     suppressed = int(re.search(
         r"Suppressed as non-skill candidates: (\d+)", report).group(1))
     assert suppressed == len(refused), (suppressed, len(refused))
+
+    # Sequence files counted against the patterns that earned them. Comparing a
+    # glob with its own filenames cannot fail, so the denominator is the mined key
+    # set: on this corpus the base rule wrote ONE file for the two aliased
+    # n-grams, which fails the equality below.
+    seq_keys = {mt.candidate_pattern_key(p) for p in mined
+                if p["type"] == "sequence" and mt.is_emittable(p)}
+    assert seq_keys, "the fixture mined no sequence pattern, so this proves nothing"
+    seq_files = [p for p in files_on_disk if p.name.startswith("candidate-seq-")]
+    assert len(seq_files) == len(seq_keys), (
+        f"{len(seq_files)} candidate-seq files for {len(seq_keys)} distinct sequence "
+        "keys: an n-gram is still sharing a file with another")
 
 
 def test_the_live_corpus_emits_one_file_per_sequence_pattern(tmp_path):
