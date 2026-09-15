@@ -323,7 +323,13 @@ def test_reask_resends_the_identical_tools_list(monkeypatch, tmp_path):
         return out(patch={"steps_done": 2}, done=True), "", {"input_tokens": 700}
     monkeypatch.setattr(RS, "run_finalizer", reask)
 
-    q = FakeQuery([seg(structured=out(patch={"steps_done": "nope"}))])
+    # The segment carries a visible reply because #867 made one a precondition
+    # of `done` being honoured: `if res.done` here is the harness accepting the
+    # patch, and a run with nothing to write no longer gets that far (see
+    # `test_a_done_with_no_reply_...` below). This test's own subject — the
+    # re-ask's byte-identical tools array — is unchanged.
+    q = FakeQuery([seg(events=[am("THE NOTE BODY")],
+                       structured=out(patch={"steps_done": "nope"}))])
 
     def query_with_tools(messages, options):
         # The loop's job in production: write the array it actually sent into
@@ -348,11 +354,16 @@ def test_reask_resends_the_identical_tools_list(monkeypatch, tmp_path):
 
 def test_applied_patch_and_discarded_reasoning_are_traced(monkeypatch, tmp_path, no_engine):
     """Reasoning leaves context but not the record (#525's evidence shape)."""
+    # Each segment carries a visible reply: since #867 a `done` with no reply is
+    # refused and the step repeats, which would add a third `patch_applied` row
+    # and make this count measure the refusal loop instead of the trace.
     q = FakeQuery([
-        seg(structured=out(reasoning="the transcript mentions a GPU crash",
+        seg(events=[am("step one notes")],
+            structured=out(reasoning="the transcript mentions a GPU crash",
                            patch={"steps_done": 1, "findings": ["GPU crash"]},
                            action="continue")),
-        seg(structured=out(reasoning="enough", patch={"steps_done": 2}, done=True)),
+        seg(events=[am("the finished note")],
+            structured=out(reasoning="enough", patch={"steps_done": 2}, done=True)),
     ])
     monkeypatch.setattr(app.harness, "run_query", q)
     _run(monkeypatch, make_state(run_dir=tmp_path), tmp_path)
@@ -366,12 +377,14 @@ def test_applied_patch_and_discarded_reasoning_are_traced(monkeypatch, tmp_path,
 def test_cumulative_prompt_tokens_and_prefill_are_reported(monkeypatch, tmp_path, no_engine):
     """The acceptance's go/no-go number is cumulative prompt tokens plus total
     prefill seconds per run — so the driver has to report both."""
+    # Both segments reply: a `done` with no visible reply is refused since #867,
+    # which would run a third step and inflate the very totals this pins.
     q = FakeQuery([
-        seg(events=[am(usage={"input_tokens": 2000, "output_tokens": 10,
-                              "cache_read": 1500})],
+        seg(events=[am("reading", usage={"input_tokens": 2000, "output_tokens": 10,
+                                         "cache_read": 1500})],
             structured=out(patch={"steps_done": 1})),
-        seg(events=[am(usage={"input_tokens": 2100, "output_tokens": 10,
-                              "cache_read": 1600})],
+        seg(events=[am("the note", usage={"input_tokens": 2100, "output_tokens": 10,
+                                          "cache_read": 1600})],
             structured=out(patch={"steps_done": 2}, done=True)),
     ])
     monkeypatch.setattr(app.harness, "run_query", q)
@@ -400,6 +413,136 @@ def test_state_is_saved_per_step_and_survives_a_failing_later_step(monkeypatch, 
     saved = json.loads((tmp_path / "run_state.json").read_text())
     assert saved["values"]["steps_done"] == 1
     assert saved["values"]["goal"] == "half done"
+
+
+# ---------------------------------------------------------------------------
+# #867 — `done` needs a deliverable
+#
+# Three shapes of the same hole, all reproduced on live `main` before this was
+# written, each with its own assertion below:
+#   * a clean `stop_reason="stop"` segment that answers `done=true` and says
+#     nothing ends the run with a zero-character reply at attempt 1;
+#   * a segment that exhausts `iterations_per_step` has no assistant text by
+#     construction (its in-band finalizer is skipped on purpose), so its re-ask
+#     answering `done=true` ends the run the same way — at any ceiling value;
+#   * `result.text` was assigned from the last segment, so a note written at
+#     step 1 and followed by a silent ending step was thrown away.
+# `session_distill` then had `turn.text == ""` to write a note from, while the
+# run record said the model had stopped cleanly.
+# ---------------------------------------------------------------------------
+
+
+def test_a_done_with_no_reply_is_refused_and_the_run_continues(
+        monkeypatch, tmp_path, no_engine):
+    """The rule `PATCH_PROMPT` already stated, now enforced by the harness.
+
+    One valid envelope, `done=true`, no assistant text, `stop_reason="stop"` —
+    nothing about it is malformed, which is why this needed no engine and no
+    ceiling to reproduce. The run must not report completion, and the model has
+    to be told what is missing rather than left to repeat itself.
+    """
+    q = FakeQuery([seg(structured=out(patch={"steps_done": 1}, action="stop",
+                                      done=True))])
+    monkeypatch.setattr(app.harness, "run_query", q)
+
+    res = _run(monkeypatch, make_state(run_dir=tmp_path), tmp_path, max_steps=3)
+
+    assert res.done is False, "a done with no deliverable was honoured"
+    assert not res.text.strip()
+    assert res.done_refusals == 3, "every step's done was refused"
+    assert len(res.steps) == 3, "the run continued instead of ending"
+    # The refusal is said out loud, not just counted: a withheld `done` with no
+    # instruction gets the same `done` back.
+    assert "Write the deliverable" in RS.NO_DELIVERABLE_OBSERVATION
+    assert "harness refused" in json.dumps([c.messages for c in q.calls[1:]]), \
+        "the refusal never reached the model"
+    kinds = [l["kind"] for l in _trace_lines(tmp_path)]
+    assert kinds.count("done_refused") == 3, "the refusals are on the record"
+
+
+def test_a_done_with_a_reply_still_ends_the_run(monkeypatch, tmp_path, no_engine):
+    """The gate is on the deliverable, not on `done` in general.
+
+    Without this pairing the fix could be satisfied by simply never honouring
+    `done`, which would turn every successful state-carried run into a
+    `max_steps` failure.
+    """
+    q = FakeQuery([
+        seg(events=[am("## Struggles\n- nothing")],
+            structured=out(patch={"steps_done": 1}, action="stop", done=True)),
+    ])
+    monkeypatch.setattr(app.harness, "run_query", q)
+
+    res = _run(monkeypatch, make_state(run_dir=tmp_path), tmp_path, max_steps=4)
+
+    assert res.done is True
+    assert res.done_refusals == 0
+    assert len(q.calls) == 1, "a delivering done must end the run at once"
+    assert res.text == "## Struggles\n- nothing"
+
+
+@pytest.mark.parametrize("iterations_per_step", [1, 2, 4])
+def test_a_ceiling_segment_whose_reask_says_done_delivers_nothing_and_is_refused(
+        monkeypatch, tmp_path, iterations_per_step):
+    """The shipped failure, at every ceiling value rather than the one observed.
+
+    A segment that burns its whole iteration budget on tool calls ends
+    `stop_reason="max_turns"` with its in-band finalizer skipped by design, so
+    the assistant text is empty and the patch can only come from the re-ask. In
+    round SM_20260911_170801's replay that re-ask answered `done=true` after ONE
+    step of a 500,934-byte session — and the run returned a zero-character
+    reply while reporting `stop_reason=stop`.
+    """
+    async def reask(**kw):
+        return out(patch={"steps_done": 1}, action="stop", done=True), "", \
+            {"input_tokens": 700}
+    monkeypatch.setattr(RS, "run_finalizer", reask)
+
+    events = []
+    for _ in range(iterations_per_step):
+        events.append({"type": "assistant_message", "text": "", "tool_calls":
+                       [{"id": "c1", "name": "Read", "input": {}}],
+                       "usage": {"input_tokens": 900, "output_tokens": 40,
+                                 "cache_read": 0},
+                       "iteration": 1, "finish_reason": "tool_calls"})
+        events.append(tool_result("a chunk of the session file"))
+    q = FakeQuery([seg(events=events, structured=None, stop="max_turns")])
+    monkeypatch.setattr(app.harness, "run_query", q)
+
+    res = _run(monkeypatch, make_state(run_dir=tmp_path), tmp_path,
+               max_steps=3, iterations_per_step=iterations_per_step)
+
+    assert not (res.done and not res.text.strip()), \
+        "the run reported completion with an empty deliverable"
+    assert res.done is False
+    assert res.done_refusals == 3
+    assert all(s.attempts == 2 for s in res.steps), \
+        "the ceiling segment's missing patch went through the re-ask"
+
+
+def test_the_deliverable_is_the_last_nonempty_text_of_the_run_not_of_the_last_step(
+        monkeypatch, tmp_path, no_engine):
+    """A note written at step 1 survives a silent ending step.
+
+    `result.text = segment["text"]` made the last segment the whole answer, so
+    the run in this test — note at step 1, `done=true` with no text at step 2 —
+    returned `text=''` and lost a deliverable that had existed for a full step.
+    """
+    q = FakeQuery([
+        seg(events=[am("## Struggles\n- the real note body\n\n## Confidence\n"
+                       "0.8: fine")],
+            structured=out(patch={"steps_done": 1})),
+        seg(events=[am("")],
+            structured=out(patch={"steps_done": 2}, action="stop", done=True)),
+    ])
+    monkeypatch.setattr(app.harness, "run_query", q)
+
+    res = _run(monkeypatch, make_state(run_dir=tmp_path), tmp_path)
+
+    assert res.done is True, "the deliverable existed, so the done is real"
+    assert res.text == ("## Struggles\n- the real note body\n\n"
+                        "## Confidence\n0.8: fine")
+    assert res.done_refusals == 0, "the carried note already satisfied the gate"
 
 
 # ---------------------------------------------------------------------------

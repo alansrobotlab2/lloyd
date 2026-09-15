@@ -436,10 +436,22 @@ async def run_prompt_with_run_state(
     )
     return TurnResult(
         text=result.text,
-        # "stop" only when the model declared the deliverable complete. A run
-        # that ran out of steps reports the sentinel the transcript path already
-        # uses for the same condition, so callers keep one vocabulary.
-        stop_reason="stop" if result.done else "max_turns",
+        # "stop" only when the model declared the deliverable complete AND there
+        # is a deliverable. A run that ran out of steps reports the sentinel the
+        # transcript path already uses for the same condition, so callers keep
+        # one vocabulary.
+        #
+        # The text test is not redundant with the driver's own gate (#867),
+        # which refuses a `done` that arrived with no reply. It is the caller-
+        # side half of the same rule: `stop_reason` is what a source writes into
+        # its own run record, and "stop" beside `empty response … nothing
+        # written` reads as the model finishing cleanly. Both halves are
+        # pinned — `tests/test_run_state.py` for the driver,
+        # `test_a_state_turn_that_wrote_nothing_does_not_report_a_clean_stop`
+        # for this mapping — because the two are a policy shared across a module
+        # boundary, and a shared policy enforced on one side only is how the
+        # driver's half becomes a comment.
+        stop_reason="stop" if (result.done and result.text.strip()) else "max_turns",
         num_turns=result.num_turns,
         usage={
             # Not `input_tokens`: there that key is the PEAK single prompt, and
@@ -454,6 +466,10 @@ async def run_prompt_with_run_state(
             "steps": len(result.steps),
             "iterations": result.iterations,
             "state_rejections": state.rejections,
+            # Steps that declared `done` and were refused for having no reply
+            # (#867). Beside `state_rejections` it says whether a run that never
+            # finished was exploring or was repeatedly declaring itself finished.
+            "done_refusals": result.done_refusals,
         },
         run_state=result,
     )

@@ -90,6 +90,60 @@ async def test_an_empty_turn_writes_nothing_and_is_recorded_as_failed(
     assert result["meta"]["empty_response"] is True
 
 
+async def test_a_state_turn_that_wrote_nothing_does_not_report_a_clean_stop(
+        monkeypatch, tmp_path):
+    """`stop_reason="stop"` in a failure record is a claim about the model.
+
+    #867: the state driver could report `done=True` with a zero-character reply,
+    and `run_prompt_with_run_state` translated that straight into `"stop"`. The
+    driver no longer honours a `done` with no deliverable, but this mapping is
+    the other half of that rule and is the one a source's own run record is
+    written from — so it is pinned here too, against a result built by hand
+    rather than through the driver, exactly because the two live in different
+    modules and a policy enforced on one side of a module boundary drifts.
+    """
+    from app.harness.run_state import RunStateResult
+
+    async def fake_turn(**kw):
+        return RunStateResult(state=kw["state"], done=True, text="",
+                              done_refusals=0)
+    monkeypatch.setattr(C, "run_state_turn", fake_turn)
+
+    st = C.RunState(job="session-distill",
+                    schema={"title": "s", "type": "object", "properties": {},
+                            "additionalProperties": False},
+                    max_state_chars=2000, run_dir=tmp_path)
+    turn = await C.run_prompt_with_run_state(
+        "distill it", job="session-distill", state=st, run_dir=tmp_path)
+
+    assert turn.stop_reason != "stop", \
+        "a run that wrote nothing reported that the model finished cleanly"
+    assert turn.stop_reason == "max_turns"
+    assert not turn.ok
+    assert "nothing written" in turn.failure_summary()
+
+
+async def test_a_state_turn_with_a_deliverable_still_reports_a_clean_stop(
+        monkeypatch, tmp_path):
+    """The guard must not cost a finished run its stop reason."""
+    from app.harness.run_state import RunStateResult
+
+    async def fake_turn(**kw):
+        return RunStateResult(state=kw["state"], done=True,
+                              text="## Confidence\n0.8: fine")
+    monkeypatch.setattr(C, "run_state_turn", fake_turn)
+
+    st = C.RunState(job="session-distill",
+                    schema={"title": "s", "type": "object", "properties": {},
+                            "additionalProperties": False},
+                    max_state_chars=2000, run_dir=tmp_path)
+    turn = await C.run_prompt_with_run_state(
+        "distill it", job="session-distill", state=st, run_dir=tmp_path)
+
+    assert turn.stop_reason == "stop"
+    assert turn.ok
+
+
 async def _async(value):
     return value
 

@@ -123,7 +123,9 @@ invent nothing about the session itself. Sessions are never entities.
 You are working through a long file in steps. Record in the state what you have
 read so far (`read_progress`) and what remains (`next_action`) so the next step
 can continue without re-reading. The deliverable is your visible reply on the
-step where you set done=true.
+step where you set done=true — emit the five sections as text on that step, not
+only in the state. A done=true that arrives with no visible reply is refused by
+the harness and the run continues (#867).
 """
 
 

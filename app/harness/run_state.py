@@ -94,7 +94,22 @@ PATCH_PROMPT = (
     "set it to null to delete it, and never restate a key you did not "
     "actually re-check against the observation. `action` is what you are doing "
     "next. Set `done` true only when the deliverable the skill asks for is "
-    "complete, and then make your visible reply that deliverable."
+    "complete, and then make your visible reply that deliverable. A `done` "
+    "that arrives with no visible reply is refused by the harness and the run "
+    "continues, so on the step where you set `done` true, emit the deliverable "
+    "as text as well as the patch."
+)
+
+#: What the harness says back when a step declared `done` and delivered nothing
+#: (#867). Named as a constant rather than written inline because it is the
+#: enforcement half of the rule and the model has to be able to act on it: with
+#: no instruction, a refused `done` is simply re-declared on the next step and
+#: the withheld steps buy nothing.
+NO_DELIVERABLE_OBSERVATION = (
+    "Your previous step set `done` true but produced no visible reply, so the "
+    "run had nothing to write and the harness refused the `done`. The state "
+    "carries everything you have already read. Write the deliverable the skill "
+    "asks for NOW, as your visible reply, in this step."
 )
 
 REPAIR_PROMPT_TEMPLATE = (
@@ -435,8 +450,23 @@ class StepRecord:
 class RunStateResult:
     state: RunState
     steps: list[StepRecord] = field(default_factory=list)
+    #: The run's deliverable: the last **non-empty** assistant text of the whole
+    #: run, not of the final segment (#867). A note written at step 1 and then
+    #: followed by a step that ends the run silently is still the note — the
+    #: old assignment to the last segment threw it away and left
+    #: `session_distill` with `turn.text == ""` to write a file from.
     text: str = ""
+    #: `done` as the harness **honoured** it, which is stricter than `done` as
+    #: the model declared it (that per-step declaration is on each
+    #: `StepRecord.done`). True only when a step declared it *and* the run has a
+    #: deliverable to show for it: `done=True` and whitespace-only `text` cannot
+    #: co-exist here, and `tests/test_run_state.py` pins that they do not.
     done: bool = False
+    #: How many steps declared `done` and were refused for having no deliverable
+    #: (#867). Non-zero is the difference between "ran out of steps" and "the
+    #: model kept declaring itself finished while writing nothing", and a caller
+    #: reading only `stop_reason` cannot tell those two apart without it.
+    done_refusals: int = 0
     prompt_tokens: int = 0
     cached_tokens: int = 0
     finalizer_prompt_tokens: int = 0
@@ -544,6 +574,16 @@ async def run_state_turn(
     on purpose (a turn that ran out of budget has no verdict to restate) — so
     a missing patch lands in the same refuse → one retry → loud failure path
     as an invalid one, rather than silently ending the run early.
+
+    **`done` needs a deliverable (#867).** A step's declaration of `done` ends
+    the run only once `result.text` is non-empty — the note has to exist, either
+    in that segment or in an earlier one that this field carried forward. A
+    declaration with nothing to show for it is refused: counted in
+    `result.done_refusals`, written to the trace as `done_refused`, and answered
+    with an instruction to write the deliverable now, so the run continues.
+    `result.done` and whitespace-only `result.text` therefore cannot co-exist,
+    and a run that never delivers ends at `max_steps` with `done=False` — which
+    its caller reports as a failure rather than as a clean stop.
     """
     from app.harness import run_query  # late: patchable, and avoids an edge at import
 
@@ -628,8 +668,13 @@ async def run_state_turn(
         result.cached_tokens += segment["cached_tokens"]
         result.finalizer_prompt_tokens += segment["finalizer_prompt_tokens"]
         result.iterations += segment["iterations"]
-        result.text = segment["text"]
-        result.done = record.done
+        # #867: the deliverable is CARRIED across steps, not reassigned from the
+        # last segment. A segment that ends at its iteration ceiling has no
+        # assistant text at all — its in-band finalizer is skipped by design —
+        # so `result.text = segment["text"]` threw away a note the run had
+        # already written and handed `session_distill` an empty body.
+        if segment["text"].strip():
+            result.text = segment["text"]
 
         if state.trace is not None:
             # The reasoning block is written here and never sent again.
@@ -645,6 +690,33 @@ async def run_state_turn(
                 state_file=str(saved) if saved else "",
             )
 
+        # #867: `done` is honoured only when the run has a deliverable. The
+        # declaration alone was never enough — `PATCH_PROMPT` already says "make
+        # your visible reply that deliverable", and nothing enforced it, so a
+        # model could end a 500 KB session at step 1 with a zero-character reply
+        # and have the run report `stop_reason=stop`. Ceiling segments reach here
+        # with no assistant text by construction (their in-band finalizer is
+        # skipped), which is why the gate is on the reply and not on
+        # `stop_reason`: gating only the ceiling path would leave a clean
+        # `stop_reason="stop"` with no text still ending the run empty.
+        if record.done and not result.text.strip():
+            result.done_refusals += 1
+            if state.trace is not None:
+                state.trace.write(
+                    "done_refused", job=job, step=step,
+                    reason="done=true with no visible reply — the run has no "
+                           "deliverable to write, so the done is refused",
+                    declared_action=record.action,
+                    state_chars=record.state_chars,
+                    prompt_tokens=segment["prompt_tokens"],
+                    iterations=segment["iterations"])
+            # Say it to the model as well: the state already carries everything
+            # it read, so the one thing outstanding is the reply. A refusal with
+            # no instruction just gets the same `done` back next step.
+            observation = NO_DELIVERABLE_OBSERVATION
+            continue
+
+        result.done = record.done
         if record.done:
             break
         observation = segment["observation"]
