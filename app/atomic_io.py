@@ -147,20 +147,47 @@ def atomic_write_text(
         os.replace(tmp, path)
 
 
+def _target_key(path: Path) -> str:
+    """Hex hash of the resolved target path: the identity a temp name needs.
+
+    Keyed on realpath like ``lock_file_for``, so ``memory_add``'s
+    ``MEMORIES_ROOT / name``, ``vault_write``'s vault-relative path and
+    ``Write``'s absolute path all agree on which file a temp belongs to.
+    """
+    text = str(path)
+    try:
+        text = str(path.resolve(strict=False))
+    except OSError:
+        pass
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _tmp_path(path: Path, tmp_dir: Path | str | None) -> Path:
-    name = f"{path.name}.{os.getpid()}.tmp"
+    """The temp a writer will ``os.replace`` into ``path``.
+
+    The shared scratch dir is one directory for the whole tree, so the name has
+    to identify the target, not merely name it. With a bare
+    ``<basename>.<pid>.tmp`` two processes writing different same-named files —
+    the real ``lloyd/MEMORY.md`` and a test's scratch copy of it, say — produce
+    the same name in the same directory: the later write wins and the earlier
+    writer's content vanishes from the scratch dir *and* never reaches its own
+    target, because its ``os.replace`` moves the other writer's bytes instead.
+    That is the lost update this module exists to prevent, arriving through the
+    temp name. Resolved-target hash + pid fixes it: two processes can never
+    collide, while the two threads of one process writing one path still share
+    one name, which is what a lock-free reader is allowed to race with.
+
+    A caller that passes its own ``tmp_dir`` has opted into a directory keyed by
+    *its* target (``scratch_dir_for``), so there a basename-only name is already
+    collision-free — and keeping it there preserves a ``tmp_dir`` that predates
+    this change without orphaning its files under a name nothing collects.
+    """
     if tmp_dir is None:
-        return path.with_name(name)
-    tmp_dir = Path(tmp_dir)
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    _sweep_scratch(tmp_dir)
-    return tmp_dir / name
-
-
-# How old a leftover temp has to be before a writer collects it. Well past any
-# write that is still in flight, short enough that one crash does not leave a
-# permanent file.
-SCRATCH_MAX_AGE_S = 3600.0
+        return path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    base = Path(tmp_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    _sweep_scratch(base)
+    return base / f"{path.name}.{_target_key(path)[:12]}.{os.getpid()}.tmp"
 
 
 def _sweep_scratch(tmp_dir: Path) -> None:
