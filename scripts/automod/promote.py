@@ -70,9 +70,17 @@ MCP_HEALTH = "http://127.0.0.1:8500/health"
 PRIMARY_PROGRAM = "agent-llm-primary"
 PRIMARY_HEALTH = "http://127.0.0.1:8096/health"
 PRIMARY_HEALTH_BUDGET = 1200.0
-PRIMARY_RAM_FLOOR_GIB = 150
-PRIMARY_RAM_ABORT_GIB = 120
-PRIMARY_RAM_WAIT_SECONDS = 300.0
+# 150/120 on the first cut, and the first real use (2026-09-15 23:47Z) got
+# through them and still lost the unit: a 16 GiB qemu VM had joined the
+# desktop, MemAvailable read 57 GiB with the engine up, the stop freed the
+# table to just past the floor, and the boot's own transient took the box
+# to pressure — systemd-oomd killed agent-supervisord.service at 23:52:46Z
+# and every program under it came back on autorestart (memwatch snapshot
+# 20260915_235555). The floor is now what a boot actually needs on top of
+# whatever else the desktop holds, and the abort line is the old floor.
+PRIMARY_RAM_FLOOR_GIB = 180
+PRIMARY_RAM_ABORT_GIB = 150
+PRIMARY_RAM_WAIT_SECONDS = 600.0
 # Vite dev server, serving the live tree over HTTPS with a private cert. Not
 # restarted by a landing: HMR picks the fast-forward up on its own.
 FRONTEND_URL = "https://127.0.0.1:5173/"

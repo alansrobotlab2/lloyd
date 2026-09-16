@@ -528,11 +528,11 @@ def test_restart_primary_waits_for_host_ram_rereads_the_conf_and_refuses_below_t
     monkeypatch.setattr(P, "_run", lambda argv, timeout=120: log.append(("sup", [str(a) for a in argv[3:]]))
                         or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
     monkeypatch.setattr(P.SUPERVISORCTL.__class__, "exists", lambda self: True)
-    readings = iter([90, 130, 160])
+    readings = iter([90, 130, 190])
     monkeypatch.setattr(P, "_host_ram_available_gib", lambda: next(readings))
     monkeypatch.setattr(P.time, "sleep", lambda s: None)
     ok, msg = P._restart_primary()
-    assert ok and "160 GiB" in msg
+    assert ok and "190 GiB" in msg
     assert [e for e in log if e[0] == "sup"] == [("sup", ["reread"]), ("sup", ["update", "agent-llm-primary"])]
     assert log.index(("stop", "agent-llm-primary")) < log.index(("sup", ["reread"])) < log.index(("start", "agent-llm-primary"))
     assert ("pause",) in log, "the lease is refreshed while the table is reclaimed"
