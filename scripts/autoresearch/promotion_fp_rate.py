@@ -125,9 +125,37 @@ def _rows(ledger_path: Path):
                 continue
 
 
-def decision_rows(ledger_path: Path) -> list[dict]:
-    """``event == "decision"`` ledger rows — the gate's verdicts."""
-    return [r for r in _rows(ledger_path) if r.get("event") == "decision"]
+def in_window(round_id: object, cutoff: str | None) -> bool:
+    """True when ``round_id`` is inside the window the measurement declares.
+
+    The window is ``round_id <= cutoff`` — the same lexicographic comparison the
+    baseline-mean sequence already uses to cut itself off. A missing or empty round id
+    belongs to no round, so it is in no window and is counted by nothing. A ``None``
+    cutoff means no window was declared and nothing is excluded.
+
+    This is what makes the counts reproducible. The live ledger and the round reports
+    grow every time the worker runs, so a count taken over the whole store is a fact
+    about *when* the measurement ran, not about the window it froze (#1193: pinned in a
+    test, such a count went red on its own schedule, reproduced at base because it reads
+    an absolute path, and the gate read that as an external blocker and refused every
+    promotion).
+    """
+    if cutoff is None:
+        return True
+    return bool(round_id) and str(round_id) <= cutoff
+
+
+def decision_rows(ledger_path: Path, data_cutoff: str | None = None) -> list[dict]:
+    """``event == "decision"`` ledger rows — the gate's verdicts.
+
+    With no ``data_cutoff`` this is every decision row the file holds; with one it is the
+    rows of the rounds inside the window, which is what the published figures count.
+    """
+    return [
+        r
+        for r in _rows(ledger_path)
+        if r.get("event") == "decision" and in_window(r.get("round_id"), data_cutoff)
+    ]
 
 
 def rounds_by_predicate(rows: list[dict], predicate) -> dict[str, list[str]]:
@@ -286,8 +314,14 @@ def measure(
     alpha: float = 0.05,
     alt_floors: dict[str, float] | None = None,
 ) -> dict:
-    """Recompute the whole measurement. Every number in the #428 note is one of these."""
-    decisions = decision_rows(ledger_path)
+    """Recompute the whole measurement. Every number in the #428 note is one of these.
+
+    ``data_cutoff`` scopes the measurement, not just the floor's sequence: decision rows
+    and the round-report cross-check are counted over ``round_id <= data_cutoff`` only,
+    so re-measuring the frozen window after the worker appends more rounds reproduces
+    every published figure instead of drifting (see ``in_window``).
+    """
+    decisions = decision_rows(ledger_path, data_cutoff)
     promoted = rounds_by_predicate(decisions, lambda r: bool(r.get("promoted")))
     unlanded_passes = rounds_by_predicate(
         decisions, lambda r: bool(r.get("should_promote")) and not r.get("promoted")
@@ -300,9 +334,12 @@ def measure(
     # rounds, so reading them instead would silently drop three rounds from the window.
     bm_all = baseline_means_from_ledger(table)
     reported = baseline_means(rounds_dir)
-    compared = sorted(set(bm_all) & set(reported))
-    report_deltas = [abs(bm_all[rid] - reported[rid]) for rid in compared]
     cutoff = data_cutoff or max(bm_all)
+    # Both sides of the cross-check are whole-store counts too, so both are cut at the
+    # window: `rounds_compared` is a property of the frozen window, not of however many
+    # reports exist today, and a new round report must not be able to move it.
+    compared = sorted(rid for rid in (set(bm_all) & set(reported)) if in_window(rid, cutoff))
+    report_deltas = [abs(bm_all[rid] - reported[rid]) for rid in compared]
 
     rounds = [rid for rid in sorted(bm_all) if rid <= cutoff]
     collapsed = {rid for rid in rounds if bm_all[rid] <= 0.0}
@@ -416,17 +453,26 @@ def measure(
         "data_cutoff_round": cutoff,
         "window_rounds": window,
         "alpha": alpha,
-        "ledger_rows": sum(1 for line in ledger_path.open() if line.strip()),
+        # Every count below is a count of the window, never of the file: the live stores
+        # grow on every round the worker runs, so a whole-file count is a fact about when
+        # the measurement ran (#1193).
+        "ledger_rows": sum(1 for r in _rows(ledger_path) if in_window(r.get("round_id"), cutoff)),
         "decision_rows": len(decisions),
         "should_promote_rows": sum(1 for r in decisions if r.get("should_promote")),
-        "per_task_score_rows": len(rows),
-        "distinct_task_ids": len({r["task_id"] for r in rows}),
+        "per_task_score_rows": sum(
+            1 for r in rows if in_window(r.get("round_id"), cutoff)
+        ),
+        "distinct_task_ids": len(
+            {r["task_id"] for r in rows if in_window(r.get("round_id"), cutoff)}
+        ),
         "rounds_with_baseline_mean_in_window": len(rounds),
         "report_crosscheck": {
             "source_of_record": "ledger.jsonl BASELINE_* per-task composite_score rows",
             "compared_against": "rounds/R_*.md '- baseline mean composite:' lines",
             "rounds_compared": len(compared),
-            "rounds_with_ledger_baseline_but_no_report": len(set(bm_all) - set(reported)),
+            "rounds_with_ledger_baseline_but_no_report": sum(
+                1 for rid in set(bm_all) - set(reported) if in_window(rid, cutoff)
+            ),
             "max_abs_delta": round(max(report_deltas), 6) if report_deltas else None,
             "tolerance": 1e-3,
             "mismatches": sum(1 for d in report_deltas if d > 1e-3),

@@ -26,7 +26,15 @@ Isolation
 Everything above the live section works on ``tmp_path`` fixtures and touches no
 live store. The live section reads ``_pipeline/research/`` read-only, anchored to a
 declared cutoff round so rounds that accrue after the promotion loop is re-armed
-(#506) cannot change the numbers. No test in this file carries the ``live_vault``
+(#506) cannot change the numbers. The anchor is only real because ``measure`` cuts
+*every* counted quantity at it — which it did not: three nodes here pinned counts taken
+over the whole live file, the worker appended a round six minutes after the last
+promotion landed, and because the store is reached through an absolute path a base
+worktree reproduced the red, the gate classified every promotion as externally blocked
+and refused it (#1193). Nothing in this file asserts a whole-file count any more; the
+invariant is pinned by ``test_appending_a_later_round_cannot_move_the_published_derivation``
+and, on synthetic data, by
+``test_window_scoping_is_what_keeps_the_published_derivation_stable``. No test in this file carries the ``live_vault``
 marker — including the two that open the published note: reading it is the
 repo-to-vault seam this file exists to guard, so it runs on the graded gate pass
 (see ``test_note_fields_are_reproduced_by_a_fresh_derivation`` for the argument).
@@ -418,6 +426,91 @@ def test_rounds_after_the_cutoff_cannot_rewrite_the_measurement(world):
     assert later["rounds_with_baseline_mean_in_window"] > before["rounds_with_baseline_mean_in_window"]
 
 
+def test_appending_a_later_round_changes_no_counted_field_at_the_declared_cutoff(world):
+    """#1193 — a count pinned over a whole live file is a time bomb; a window count is not.
+
+    Three nodes in this file used to assert ``decision_rows == 2217`` and
+    ``report_crosscheck_rounds == 351`` read over the *whole* ``_pipeline/research`` store.
+    Those numbers were the window's figures by accident — the store happened to hold
+    nothing past the cutoff — and one autoresearch round appending 4 decision rows and one
+    report turned both red. Because the store is reached by absolute path the gate's base
+    worktree reproduced the red, classified every promotion as externally blocked, and
+    refused it. So the regression is not "the number was wrong", it is "the count must not
+    be able to move": re-measuring at the same cutoff, after a later round has landed in
+    both stores, must reproduce the whole result.
+    """
+    base = measure_world(world)
+    appended = "R_20260301_000000"
+
+    # A real later round: decision rows, a ledger baseline, and a round report carrying
+    # that baseline mean — the two things that used to move the pinned counts.
+    with world["ledger"].open("a") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "round_id": appended,
+                    "variant_id": "BASELINE_V",
+                    "task_id": "bench_002_output_shape",
+                    "composite_score": 0.40,
+                }
+            )
+            + "\n"
+        )
+        for record in (
+            {
+                "round_id": appended,
+                "event": "decision",
+                "variant_id": "BASELINE_V",
+                "should_promote": False,
+                "promoted": False,
+                "reason": "insufficient_delta",
+            },
+            {
+                "round_id": appended,
+                "event": "decision",
+                "variant_id": "V_late",
+                "should_promote": True,
+                "promoted": True,
+                "reason": "promote",
+            },
+        ):
+            fh.write(json.dumps(record) + "\n")
+    # write_round names the file after the round id verbatim, so the stem and the ledger's
+    # round_id match — the two stores intersect on it, which is what the cross-check counts.
+    write_round(world["rounds"], appended, 0.40, {"V_late": (0.47, 0.07)})
+
+    after = measure_world(world)
+    assert after == base, "a round appended past the cutoff moved a published field"
+    assert after["decision_rows"] == base["decision_rows"]
+    assert after["report_crosscheck"]["rounds_compared"] == base["report_crosscheck"]["rounds_compared"]
+    # Positive control: the stores really did grow and the reader sees it — the appended
+    # round is excluded by the window, not by blindness. Un-windowed, it is counted; a
+    # whole-file count is exactly the quantity this file must never assert.
+    assert len(pfr.decision_rows(world["ledger"])) > len(
+        pfr.decision_rows(world["ledger"], base["data_cutoff_round"])
+    )
+    assert len(pfr.baseline_means(world["rounds"])) > after["report_crosscheck"]["rounds_compared"]
+    grown = measure_world(world, data_cutoff=appended)
+    assert grown["decision_rows"] > after["decision_rows"]
+
+
+@pytest.mark.parametrize(
+    "round_id,in_window",
+    [
+        ("R_20260908_181458", True),  # the cutoff round itself is inside the window
+        ("R_20260908_165252", True),
+        ("R_20260916_174109", False),  # the round that broke the pins
+        ("R_99991231_000000", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_in_window_is_lexicographic_and_excludes_rows_with_no_round(round_id, in_window):
+    """The scope rule, asserted directly, including the two edges the ledger can grow."""
+    assert pfr.in_window(round_id, "R_20260908_181458") is in_window
+    assert pfr.in_window(round_id, None) is True  # no declared window excludes nothing
+
+
 # ── reporting helpers ────────────────────────────────────────────────────────
 
 
@@ -552,6 +645,11 @@ LIVE_RESEARCH = Path.home() / "lloyd" / "_pipeline" / "research"
 LIVE_LEDGER = LIVE_RESEARCH / "ledger.jsonl"
 LIVE_ROUNDS = LIVE_RESEARCH / "rounds"
 
+#: The declared right edge of the published window, and the note's
+#: ``data_cutoff_round``. Every live figure below is counted over
+#: ``round_id <= WINDOW_CUTOFF`` — the store may grow past it freely.
+WINDOW_CUTOFF = "R_20260908_181458"
+
 NOTE_PATH = (
     Path.home()
     / "obsidian"
@@ -572,7 +670,7 @@ NOISE_FLOOR_SOURCE = (
 )
 
 
-def live_measure():
+def live_measure(*, ledger_path: Path = LIVE_LEDGER, rounds_dir: Path = LIVE_ROUNDS):
     """The published derivation, over the frozen window.
 
     ``one_sigma_null`` is *derived*, not typed: the first pass measures the null
@@ -580,12 +678,14 @@ def live_measure():
     floor, so the test and the note's reproduce command
     (``--alt-floor "one_sigma_null=0.0649"``) can never drift from the store.
     The window is frozen by cutoff, so the double pass is deterministic and
-    costs about a second.
+    costs about a second. ``ledger_path``/``rounds_dir`` exist so a test can point
+    the same recipe at a store with a later round bolted on
+    (``test_appending_a_later_round_cannot_move_the_published_derivation``).
     """
     kwargs = dict(
-        ledger_path=LIVE_LEDGER,
-        rounds_dir=LIVE_ROUNDS,
-        data_cutoff="R_20260908_181458",
+        ledger_path=ledger_path,
+        rounds_dir=rounds_dir,
+        data_cutoff=WINDOW_CUTOFF,
         window=3,
         alpha=0.05,
     )
