@@ -317,7 +317,15 @@ export interface SkillsData {
 export interface BacklogTask {
   id: number
   name: string
-  description: string
+  /** The head of the item's body, capped at 300 characters. Every **list** row
+   *  carries this and nothing else of the body — 1,122 whole bodies was 8.3 MB
+   *  of a 9.2 MB response for the two lines a card renders (item #1199). */
+  description_snippet: string
+  /** The **complete** body, and only ever on `GET /api/backlog/task/{id}`.
+   *  Optional because a list row does not have it: a value here means this
+   *  object came from the detail route, which is the only acceptable editing
+   *  source — `task-update` replaces the whole body with what it is sent. */
+  description?: string
   priority: string
   status: string
   blocked: boolean
@@ -1034,6 +1042,18 @@ export const api = {
   backlogTasks(params?: Record<string, string>): Promise<BacklogTask[]> {
     const qs = params ? '?' + new URLSearchParams(params).toString() : ''
     return fetch(`${API_BASE}/backlog/tasks${qs}`).then(r => r.json()).then(d => Array.isArray(d) ? d : [])
+  },
+
+  // One item with its **complete** body. The list route ships a 300-character
+  // snippet (`description_snippet`) because 1,122 rows carrying whole bodies was
+  // 9 MB of a 9.2 MB response for two rendered lines; the body is here instead.
+  // This is the modal's only acceptable source for `description` — see
+  // TaskModal, which refuses to post a description it did not read from here.
+  backlogTask(id: number): Promise<BacklogTask> {
+    return fetch(`${API_BASE}/backlog/task/${id}`).then(r => {
+      if (!r.ok) throw new Error(`task ${id} fetch failed: ${r.status}`)
+      return r.json()
+    })
   },
 
   // These three threw away the response. `fetch` does not reject on 4xx, so a

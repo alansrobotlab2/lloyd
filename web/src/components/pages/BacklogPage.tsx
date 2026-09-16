@@ -65,7 +65,15 @@ function TaskModal({
 }) {
   const isCreate = !task;
   const [name, setName] = useState(task?.name || "");
-  const [description, setDescription] = useState(task?.description || "");
+  // The row's `description` is a 300-character snippet (`description_snippet` on
+  // the wire, aliased to `description` for now). Seeding the editor from it and
+  // posting it back would overwrite the item: `task-update` replaces the *whole*
+  // body with whatever `description` it is sent, and bodies here run to a median
+  // of 4,607 bytes. So the editor's text arrives from `GET /api/backlog/task/{id}`
+  // below, and `bodyReady` says whether it has. Until then the textarea holds the
+  // snippet as a placeholder and Save is disabled — see handleSave.
+  const [description, setDescription] = useState(task?.description_snippet || "");
+  const [bodyReady, setBodyReady] = useState(isCreate);
   const [status, setStatus] = useState(task?.status || "draft");
   // `low` is the board default (2026-09-16): the unattended loop sorts on
   // this field, so a new item starts where it cannot jump the queue.
@@ -76,6 +84,29 @@ function TaskModal({
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const backdropRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (isCreate || !task) return;
+    let alive = true;
+    setBodyReady(false);
+    api
+      .backlogTask(task.id)
+      .then((full) => {
+        if (!alive) return;
+        setDescription(full.description);
+        setBodyReady(true);
+      })
+      .catch((err) => {
+        // Stay un-ready: the alternative is editing against the snippet, which
+        // is the data loss. The error is shown, and Save stays disabled, so the
+        // user can close and retry rather than save over an unseen body.
+        console.error("Full item fetch failed:", err);
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [task?.id, isCreate]);
 
   // A Select whose value matches no option renders a blank trigger, so an
   // out-of-list board is carried in as its own option rather than showing the
@@ -98,7 +129,16 @@ function TaskModal({
         if (board) data.board = board;
         await onCreate(data);
       } else {
-        const updates: Record<string, any> = { name, description, status, priority, blocked };
+        const updates: Record<string, any> = { name, status, priority, blocked };
+        // Only a body that came from the detail route may be posted, and once it
+        // has, posting it is exactly what the user is editing. `force_body_replace`
+        // is the server's guard (item #1199): a shorter `description` is otherwise
+        // ignored, because a snippet-shaped one is indistinguishable from a
+        // truncated body by length alone.
+        if (bodyReady) {
+          updates.description = description;
+          updates.force_body_replace = true;
+        }
         // Only on a real change: the parent reads `"board" in updates` as the
         // signal that this save moved the task and the whole board has to be
         // refetched, and an ordinary title edit should not pay for that.
@@ -185,11 +225,12 @@ function TaskModal({
           {/* Description */}
           <div className="flex-1 min-h-0 flex flex-col">
             <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
-              Description
+              Description{!bodyReady && !isCreate && " — loading full text…"}
             </label>
             <Textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
+              readOnly={!bodyReady}
               className="w-full flex-1 resize-none"
             />
           </div>
@@ -300,7 +341,7 @@ function TaskModal({
           )}
           <div className="flex-1" />
           <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
-          <Button size="sm" onClick={handleSave} disabled={saving || !name.trim()}>
+          <Button size="sm" onClick={handleSave} disabled={saving || !name.trim() || !bodyReady}>
             {isCreate ? <Plus className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
             {saving ? (isCreate ? "Creating..." : "Saving...") : (isCreate ? "Create" : "Save")}
           </Button>
@@ -354,9 +395,9 @@ function TaskCard({
             <div className="text-xs font-medium text-foreground leading-snug">
               {task.name}
             </div>
-            {task.description && (
+            {task.description_snippet && (
               <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2">
-                {task.description}
+                {task.description_snippet}
               </p>
             )}
           </div>
@@ -519,6 +560,13 @@ export default function BacklogPage() {
   const [editingTask, setEditingTask] = useState<BacklogTask | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  // The query the server was last asked about, debounced from the box. Search is
+  // a `?q=` on the list route rather than a scan of what is already in memory,
+  // because the row carries a 300-character snippet and mid-body text is no
+  // longer in memory to scan (item #1199). Debounced so typing does not fetch
+  // per keystroke, and one server search over a cached corpus is cheaper than
+  // the 8.3 MB `toLowerCase().includes()` sweep this replaces.
+  const [searchParam, setSearchParam] = useState("");
   // The board list as `loadData` last saw it, so a refetch can tell which
   // board the active id *used* to name before the ids renumbered.
   const boardsRef = useRef<BacklogBoard[]>([]);
@@ -567,7 +615,10 @@ export default function BacklogPage() {
       const previousName = boardsRef.current.find((b) => b.id === activeBoard)?.name;
       const [boardsData, tasksData] = await Promise.all([
         api.backlogBoards(),
-        api.backlogTasks(activeBoard ? { board_id: String(activeBoard) } : undefined),
+        api.backlogTasks({
+          ...(activeBoard ? { board_id: String(activeBoard) } : {}),
+          ...(searchParam ? { q: searchParam } : {}),
+        }),
       ]);
       boardsRef.current = boardsData;
       setBoards(boardsData);
@@ -593,7 +644,12 @@ export default function BacklogPage() {
     } finally {
       setLoading(false);
     }
-  }, [activeBoard]);
+  }, [activeBoard, searchParam]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setSearchParam(searchQuery.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   useEffect(() => {
     loadData();
@@ -684,11 +740,11 @@ export default function BacklogPage() {
   const filteredTasks = (activeBoard
     ? tasks.filter((t) => t.board_id === activeBoard)
     : tasks
-  ).filter((t) => {
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase();
-    return t.name.toLowerCase().includes(q) ||
-           (t.description && t.description.toLowerCase().includes(q));
+  ).filter(() => {
+    // No text predicate here any more: `?q=` did the matching server-side, over
+    // the whole body. Re-filtering the returned rows against a *snippet* would
+    // throw away exactly the mid-body matches the server went and found.
+    return true;
   });
 
   const tasksByStatus = STATUSES.reduce(

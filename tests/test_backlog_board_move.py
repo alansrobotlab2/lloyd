@@ -65,16 +65,19 @@ def board_dir(tmp_path, monkeypatch):
 
 # ── The listing carries the name the modal edits ─────────────────────────────
 
-@pytest.mark.asyncio
-async def test_listing_carries_the_board_name_beside_the_id(board_dir):
+def test_listing_carries_the_board_name_beside_the_id(board_dir):
     """The modal seeds its select from `task.board`, so it has to be there.
 
     Reverse-mapping the positional id through the board list would reintroduce
     exactly the drift the name exists to avoid.
+
+    Sync, and calls the handler without `await`: the list route became a plain
+    `def` so FastAPI runs it in the threadpool instead of on the event loop
+    (item #1199 cause 2), which is pinned in tests/test_backlog_route_offload.py.
     """
     _write(board_dir, 1, board="lloyd")
     _write(board_dir, 2, board="alan")
-    tasks = {t["id"]: t for t in json.loads(bytes((await BR.backlog_tasks()).body))}
+    tasks = {t["id"]: t for t in json.loads(bytes(BR.backlog_tasks().body))}
     assert tasks[1]["board"] == "lloyd"
     assert tasks[2]["board"] == "alan"
     # sorted(["alan", "lloyd"]) -> alan=1, lloyd=2

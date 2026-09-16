@@ -102,13 +102,12 @@ def boards(tmp_path, monkeypatch):
     return d
 
 
-@pytest.mark.asyncio
-async def test_http_listing_hands_the_frontend_a_list(boards):
+def test_http_listing_hands_the_frontend_a_list(boards):
     """The reported crash: the board must render with a malformed row on it."""
     _write(boards, 1, f"tags: '{BAD_SCALAR}'")
     _write(boards, 2, "tags:\n- clean")
     _write(boards, 3, "tags:")  # `tags:` with no value parses to None
-    resp = await BR.backlog_tasks()
+    resp = BR.backlog_tasks()
     tasks = {t["id"]: t for t in json.loads(bytes(resp.body))}
     assert tasks[1]["tags"] == WANT
     assert tasks[2]["tags"] == ["clean"]
@@ -204,19 +203,17 @@ BROKEN_FM = (
 )
 
 
-@pytest.mark.asyncio
-async def test_a_yaml_broken_file_is_listed_not_dropped(boards):
+def test_a_yaml_broken_file_is_listed_not_dropped(boards):
     (boards / "7-broken.md").write_text(BROKEN_FM, encoding="utf-8")
-    tasks = json.loads(bytes((await BR.backlog_tasks()).body))
+    tasks = json.loads(bytes(BR.backlog_tasks().body))
     assert [t["id"] for t in tasks] == [7]
     assert tasks[0]["status"] == "up_next"
     assert tasks[0]["tags"] == ["youtube-eval", "inference"]
 
 
-@pytest.mark.asyncio
-async def test_a_yaml_broken_file_is_counted_on_its_board(boards):
+def test_a_yaml_broken_file_is_counted_on_its_board(boards):
     (boards / "7-broken.md").write_text(BROKEN_FM, encoding="utf-8")
-    boards_out = json.loads(bytes((await BR.backlog_boards()).body))
+    boards_out = json.loads(bytes(BR.backlog_boards().body))
     assert [(b["name"], b["tasks_count"]) for b in boards_out] == [("lloyd", 1)]
 
 
@@ -264,7 +261,7 @@ def test_no_task_on_the_live_board_has_a_scalar_tags_field():
     for f in sorted(root.glob("*.md")):
         if not BR._BACKLOG_PATTERN.match(f.name):
             continue
-        fm, _ = BR._backlog_parse_fm(f.read_text(encoding="utf-8"))
+        fm, _ = BR._backlog_parse_fm(f)  # takes the path: it reads *and* parses
         tags = fm.get("tags")
         if tags is not None and not isinstance(tags, list):
             offenders.append((f.name, repr(tags)[:60]))

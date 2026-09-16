@@ -408,8 +408,9 @@ that a merge never loses text.
 | Route | Purpose |
 |---|---|
 | `GET /api/backlog/boards` | Board list with counts, icons and colours for the board tabs. |
-| `GET /api/backlog/tasks` | Rows for the board, optionally filtered by `board_id`/`status`. Each row carries the item's **whole body** as `description` — unfiltered, 956 rows is 6 MB in 2.2 s, and `BacklogPage` polls it every 15 s (#1021). |
-| `POST /api/backlog/task-update` | Move, rename, retag, re-board. |
+| `GET /api/backlog/tasks` | Rows for the board, optionally filtered by `board_id`/`status`/`q`. Each row carries `description_snippet` — the first 300 characters of the body — and **no `description`**; whole bodies were 91 % of a 9.2 MB response for the two lines a card renders (#1021, #1199). |
+| `GET /api/backlog/task/{id}` | One item with `description` = its **complete** body. The only editing source: `task-update` replaces the whole body with whatever `description` it is sent, so a row is not one. |
+| `POST /api/backlog/task-update` | Move, rename, retag, re-board. A `description` **shorter than the body on disk is ignored** (still 200) unless `force_body_replace` is set — the guard that makes the snippet safe to ship. |
 | `POST /api/backlog/task-create` | The UI's create — and the guardian's. |
 | `POST /api/backlog/task-delete` | Unlink the file. The only destructive path. |
 
@@ -500,10 +501,13 @@ so the dashboard caches it for 60 s apart from the 10 s vault scan, and a
 failure costs `health` only — it becomes `null` and `by_status` is unchanged.
 `all_items`/`open_items` take `backlog_dir` for readers like this one that
 resolve the vault at call time: `BACKLOG_DIR` is bound at import.
-It is TTL-cached for 10 s — the board is 960+ markdown files, and the sibling
-route `GET /api/backlog/tasks` is *not* cached, so it walks and parses the whole
-directory twice per call (`_backlog_board_map`) while `DashboardPage` polls every
-2 s and `BacklogPage` every 15 s.
+It is TTL-cached for 10 s — the board is 1,100+ markdown files. The sibling
+routes `GET /api/backlog/tasks` and `GET /api/backlog/boards` do not use that TTL:
+they share `_backlog_scan()`, a per-file cache keyed on `(mtime_ns, size)` whose
+entries outlive a request, so a cold call is one parse pass and a warm call
+parses nothing. The TTL in `backlog_overview` is doing a different job — it
+bounds how often the *dashboard*'s several passes over the ledger and the
+relation keys run.
 
 **Front matter is bounded by its closing `---`, not by a byte count.**
 `_frontmatter` reads in 4 KB chunks up to a 64 KB ceiling and stops at a
@@ -558,6 +562,17 @@ in #220 and in the vault's 2026-03 daily notes.
 
 ## Review log
 
+- 2026-09-16 — **the list route's payload changed shape.** `GET /api/backlog/tasks`
+  ships `description_snippet` (≤300 chars) and drops `description`; `description`
+  as a whole body moved to `GET /api/backlog/task/{id}`, and `?q=` searches the
+  cached bodies so the row's truncation is invisible to the user. Both list
+  handlers are plain `def`, so FastAPI runs the corpus scan in the threadpool
+  instead of holding the event loop for 3.5 s of YAML (a root `/health` measured
+  0.9 ms idle against 3.574 s during a cold load), and `task-update` refuses a
+  `description` shorter than the body without `force_body_replace`. The per-file
+  `(mtime_ns, size)` cache replaced "not cached, parses twice per call". Pinned in
+  `tests/test_backlog_route_{payload,body_roundtrip,offload,cache}.py` (#1199).
+  The 2026-09-13 census below predates all of it.
 - 2026-09-13 — **stale.** Structure and guards verified accurate; refreshed the
   census (960 tasks, 456/68/0/432, relation keys 317/140/53, nine `_yaml_broken`
   items, legacy log newest #365), recorded that `GET /api/backlog/tasks` returns
