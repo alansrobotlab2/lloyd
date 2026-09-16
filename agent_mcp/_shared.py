@@ -99,6 +99,9 @@ class ErrorCode:
     NO_MATCH = "NO_MATCH"                  # Substring not found in target
     INTERNAL = "INTERNAL"                  # Caught exception during handler
     UNKNOWN_TOOL = "UNKNOWN_TOOL"          # Dispatcher could not route name
+    LOCK_TIMEOUT = "LOCK_TIMEOUT"          # Another writer held the commit lock
+                                           # past the wait; retry, do not
+                                           # assume the write happened.
 
 
 def _err(message: str, code: str = ErrorCode.INTERNAL, **extra: Any) -> dict:

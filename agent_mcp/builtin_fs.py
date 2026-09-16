@@ -24,6 +24,7 @@ from pathlib import Path
 from mcp.types import Tool
 
 from agent_mcp._shared import get_bound_session, text_result
+from app.atomic_io import commit_lock, write_text_durable
 
 logger = logging.getLogger("lloyd-builtin-fs")
 
@@ -314,6 +315,21 @@ def _read(args: dict, session_id: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 
+def _write_target(mut: "_Mutation", p: Path) -> Path:
+    """Where an atomic replace of `p` actually has to land.
+
+    `os.replace` renames over a *name*, so given a symlink it swaps the link
+    itself for a regular file and orphans whatever it pointed at. The
+    truncate-in-place write this replaced followed the link instead, and for a
+    dangling link that meant the write created the link's target
+    (`test_write_through_a_dangling_symlink_is_a_create`). Renaming onto the
+    resolved path keeps both behaviours: the link stays a link, and a dangling
+    one still materialises its target. `mut.real` is that resolution, computed
+    once before the lock was taken.
+    """
+    return Path(mut.real) if os.path.islink(mut.path) else p
+
+
 def _write(args: dict, mut: _Mutation | None = None) -> str:
     mut = mut if mut is not None else _Mutation(kind="write")
     file_path = _expand(args.get("file_path", ""))
@@ -333,24 +349,39 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
     if refusal is not None:
         return refusal
 
-    if mut.existed:
-        try:
-            mut.pre_bytes = p.read_bytes()
-        except OSError:
-            mut.pre_bytes = None
-
-    _ledger_begin(mut, op="write" if mut.existed else "create")
-
+    # Pre-image read, ledger snapshot and the replace are one critical section.
+    # Read outside the lock and this is the lost update the item is about: the
+    # nightly knowledge-write job edits MEMORY.md through this lane while a chat
+    # turn's memory_add appends to it, and whichever read second overwrites the
+    # other. `p.write_text` also opened O_TRUNC, so a `memory_read` in that
+    # window returned an empty file — every writer in the repo shares one commit
+    # path here for both reasons. The gate above stays outside: it is a refusal,
+    # not part of the commit, and holding the lock across it would put policy
+    # latency inside everyone else's wait.
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-    except OSError as exc:
-        return json.dumps({"error": f"failed to write {file_path}: {exc}"})
+        with commit_lock(mut.real):
+            if mut.existed:
+                try:
+                    mut.pre_bytes = p.read_bytes()
+                except OSError:
+                    mut.pre_bytes = None
 
-    mut.post_text = content
-    mut.post_stat = _stat_key(mut.real)
-    mut.ok = True
-    _ledger_commit(mut)
+            _ledger_begin(mut, op="write" if mut.existed else "create")
+
+            try:
+                dest = _write_target(mut, p)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                write_text_durable(dest, content)
+            except OSError as exc:
+                return json.dumps({"error": f"failed to write {file_path}: {exc}"})
+
+            mut.post_text = content
+            mut.post_stat = _stat_key(mut.real)
+            mut.ok = True
+            _ledger_commit(mut)
+    except TimeoutError as exc:
+        return json.dumps({"error": f"failed to write {file_path}: {exc}",
+                           "code": "LOCK_TIMEOUT"})
     return f"File written: {file_path} ({len(content)} chars)"
 
 
@@ -384,49 +415,61 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
     if refusal is not None:
         return refusal
 
+    # Same critical section as `_write`: read, apply, replace, under one lock on
+    # the resolved path. This is the lane the nightly knowledge-write job runs on
+    # ("Use `Edit` for targeted changes"), so an Edit of lloyd/MEMORY.md used to
+    # race a chat turn's memory_add on the same file — 4 writers x 25 appends lost
+    # 82 of 100 at base. The old_string check below is inside the lock for the same
+    # reason the read is: matching against bytes this lane does not hold is what
+    # turns "the edit applied" into "the edit reverted someone else".
     try:
-        pre_bytes = p.read_bytes()
-    except OSError as exc:
-        return json.dumps({"error": f"failed to read {file_path}: {exc}"})
-    try:
-        original = pre_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        # Previously this escaped `read_text` as a bare UnicodeDecodeError and
-        # left the aggregator, arriving at the model as an MCP exception with
-        # no path in it. A binary file is a normal mistake and deserves a
-        # normal error.
-        return json.dumps({"error": (
-            f"Edit refused: {file_path} is not valid UTF-8 text; Edit only "
-            f"handles text files."
-        )})
+        with commit_lock(mut.real):
+            try:
+                pre_bytes = p.read_bytes()
+            except OSError as exc:
+                return json.dumps({"error": f"failed to read {file_path}: {exc}"})
+            try:
+                original = pre_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                # Previously this escaped `read_text` as a bare UnicodeDecodeError and
+                # left the aggregator, arriving at the model as an MCP exception with
+                # no path in it. A binary file is a normal mistake and deserves a
+                # normal error.
+                return json.dumps({"error": (
+                    f"Edit refused: {file_path} is not valid UTF-8 text; Edit only "
+                    f"handles text files."
+                )})
 
-    count = original.count(old_string)
-    if count == 0:
-        return json.dumps({"error": "old_string not found in file (must match exactly)"})
-    if count > 1 and not replace_all:
-        return json.dumps({
-            "error": f"old_string occurs {count} times — pass replace_all=True or expand the old_string for uniqueness"
-        })
+            count = original.count(old_string)
+            if count == 0:
+                return json.dumps({"error": "old_string not found in file (must match exactly)"})
+            if count > 1 and not replace_all:
+                return json.dumps({
+                    "error": f"old_string occurs {count} times — pass replace_all=True or expand the old_string for uniqueness"
+                })
 
-    if replace_all:
-        updated = original.replace(old_string, new_string)
-        replaced = count
-    else:
-        updated = original.replace(old_string, new_string, 1)
-        replaced = 1
+            if replace_all:
+                updated = original.replace(old_string, new_string)
+                replaced = count
+            else:
+                updated = original.replace(old_string, new_string, 1)
+                replaced = 1
 
-    mut.pre_bytes = pre_bytes
-    _ledger_begin(mut, op="edit")
+            mut.pre_bytes = pre_bytes
+            _ledger_begin(mut, op="edit")
 
-    try:
-        p.write_text(updated, encoding="utf-8")
-    except OSError as exc:
-        return json.dumps({"error": f"failed to write {file_path}: {exc}"})
+            try:
+                write_text_durable(_write_target(mut, p), updated)
+            except OSError as exc:
+                return json.dumps({"error": f"failed to write {file_path}: {exc}"})
 
-    mut.post_text = updated
-    mut.post_stat = _stat_key(mut.real)
-    mut.ok = True
-    _ledger_commit(mut)
+            mut.post_text = updated
+            mut.post_stat = _stat_key(mut.real)
+            mut.ok = True
+            _ledger_commit(mut)
+    except TimeoutError as exc:
+        return json.dumps({"error": f"failed to edit {file_path}: {exc}",
+                           "code": "LOCK_TIMEOUT"})
     return f"Edited {file_path} ({replaced} replacement{'s' if replaced != 1 else ''})"
 
 

@@ -46,6 +46,7 @@ _INJECTION_PATTERNS = [
     re.compile(r"\x00|​|‌|‍|⁠|﻿", re.I),
 ]
 
+from app.atomic_io import commit_lock, write_text_durable
 from app.paths import SESSIONS_DIR  # anchored to LLOYD_HOME, not $HOME/lloyd
 from app.sessions_io import is_user_session
 _SESSION_INDEX_TTL = 120       # cache session index for 2 min
@@ -85,10 +86,18 @@ def _memory_add(params: dict) -> dict:
         return _err(injection_msg, ErrorCode.INJECTION)
     MEMORIES_ROOT.mkdir(parents=True, exist_ok=True)
     filepath = MEMORIES_ROOT / file
-    existing = filepath.read_text(encoding="utf-8") if filepath.exists() else ""
-    if existing and not existing.endswith("\n"):
-        existing += "\n"
-    filepath.write_text(existing + entry + "\n", encoding="utf-8")
+    try:
+        # The read belongs inside the lock. Locking only the write turns a lost
+        # update into a slightly later lost update, and MEMORY.md/USER.md have
+        # three lanes writing them — the memory tools, Write/Edit (what the
+        # nightly knowledge-write job uses), and vault_write.
+        with commit_lock(filepath):
+            existing = filepath.read_text(encoding="utf-8") if filepath.exists() else ""
+            if existing and not existing.endswith("\n"):
+                existing += "\n"
+            write_text_durable(filepath, existing + entry + "\n")
+    except TimeoutError as exc:
+        return _err(str(exc), ErrorCode.LOCK_TIMEOUT)
     return {"success": True, "file": file}
 
 
@@ -104,12 +113,16 @@ def _memory_replace(params: dict) -> dict:
     if injection_msg:
         return _err(injection_msg, ErrorCode.INJECTION)
     filepath = MEMORIES_ROOT / file
-    if not filepath.exists():
-        return _err(f"{file} does not exist", ErrorCode.NOT_FOUND)
-    content = filepath.read_text(encoding="utf-8")
-    if old_text not in content:
-        return _err("old_text not found in file", ErrorCode.NO_MATCH, matched=False)
-    filepath.write_text(content.replace(old_text, new_text, 1), encoding="utf-8")
+    try:
+        with commit_lock(filepath):
+            if not filepath.exists():
+                return _err(f"{file} does not exist", ErrorCode.NOT_FOUND)
+            content = filepath.read_text(encoding="utf-8")
+            if old_text not in content:
+                return _err("old_text not found in file", ErrorCode.NO_MATCH, matched=False)
+            write_text_durable(filepath, content.replace(old_text, new_text, 1))
+    except TimeoutError as exc:
+        return _err(str(exc), ErrorCode.LOCK_TIMEOUT)
     return {"success": True, "file": file}
 
 
@@ -121,14 +134,18 @@ def _memory_remove(params: dict) -> dict:
     if not entry:
         return _err("entry is required", ErrorCode.MISSING_PARAM)
     filepath = MEMORIES_ROOT / file
-    if not filepath.exists():
-        return _err(f"{file} does not exist", ErrorCode.NOT_FOUND)
-    content = filepath.read_text(encoding="utf-8")
-    if entry not in content:
-        return _err("entry not found in file", ErrorCode.NO_MATCH, matched=False)
-    updated = content.replace(entry, "", 1)
-    updated = re.sub(r"\n{3,}", "\n\n", updated)
-    filepath.write_text(updated, encoding="utf-8")
+    try:
+        with commit_lock(filepath):
+            if not filepath.exists():
+                return _err(f"{file} does not exist", ErrorCode.NOT_FOUND)
+            content = filepath.read_text(encoding="utf-8")
+            if entry not in content:
+                return _err("entry not found in file", ErrorCode.NO_MATCH, matched=False)
+            updated = content.replace(entry, "", 1)
+            updated = re.sub(r"\n{3,}", "\n\n", updated)
+            write_text_durable(filepath, updated)
+    except TimeoutError as exc:
+        return _err(str(exc), ErrorCode.LOCK_TIMEOUT)
     return {"success": True, "file": file}
 
 

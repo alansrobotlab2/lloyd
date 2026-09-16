@@ -32,6 +32,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from app.atomic_io import commit_lock, write_text_durable
 from app.config import service_url
 from mcp.types import Tool
 
@@ -959,7 +960,17 @@ def _vault_write(params: dict) -> dict:
         if not target.resolve().is_relative_to(VAULT.resolve()):
             return _err("path escapes vault root", ErrorCode.PATH_ESCAPE)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        # Same lock key the memory tools and Write/Edit take: `vault_write` with
+        # path `lloyd/MEMORY.md` is the same state as `memory_add`, spelled a
+        # third way, and a whole-file overwrite here used to drop whatever the
+        # other lane had appended. The lock is off-tree (`lock_file_for`) — a
+        # sibling `<name>.lock` here would be a new file in the vault, and
+        # `lloyd/.research-queue.lock` is that precedent, tracked in git.
+        try:
+            with commit_lock(target):
+                write_text_durable(target, content)
+        except TimeoutError as exc:
+            return _err(str(exc), ErrorCode.LOCK_TIMEOUT, path=path)
         byte_count = len(content.encode("utf-8"))
         _audit_write(path, byte_count)
         result = {"success": True, "path": path, "bytes": byte_count}
