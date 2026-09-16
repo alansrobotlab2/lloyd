@@ -690,7 +690,15 @@ def promote(round_id: str, worktree: Path, base: str, *,
     ok, why = wait_idle()
     if not ok:
         S.clear_current()
-        raise PromoteError(why)
+        # A landing that never got the backend idle is the infrastructure's
+        # failure, not the round's, and it has to be SAID on the ledger: a
+        # bare PromoteError here left the finished implement row claiming
+        # `landed: true` with no promotion behind it, `implement_outcomes`
+        # read that as a spent attempt, and on 2026-09-16 nine gate-passed
+        # rounds were parked, re-triaged and re-implemented from scratch
+        # while their commits sat on kept branches. As a `land_failed` with
+        # `external_blocker`, the item keeps its attempt and its branch.
+        _land_failed(round_id, why, external=True, waited_idle=True)
     set_drain(True, DRAIN_TTL)
     merged = False
     try:

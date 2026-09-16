@@ -152,6 +152,26 @@ def test_dry_run_touches_nothing(monkeypatch, tmp_path):
     assert S.read_current() is None, "a dry run must not write a promotion record"
 
 
+def test_a_landing_that_never_gets_the_backend_idle_is_a_land_failed_the_item_keeps(monkeypatch, tmp_path):
+    """The give-up used to raise bare. The finished implement row then stood
+    alone claiming `landed: true`, `implement_outcomes` read it as spent, and
+    on 2026-09-16 nine gate-passed rounds were parked, re-triaged and started
+    again from scratch with their commits on kept branches."""
+    monkeypatch.setattr(P.W, "head", lambda wt: "b" * 40)
+    monkeypatch.setattr(P.W, "dirty_paths", lambda repo, limit=None: [])
+    monkeypatch.setattr(P.W, "changed_paths", lambda wt, base: ["app/x.py"])
+    monkeypatch.setattr(P.S, "changed_tree_hash", lambda *a, **k: "t" * 40)
+    _live_at(monkeypatch, "a" * 40)
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (200, {"boot_id": "boot-1"}))
+    monkeypatch.setattr(P, "wait_idle", lambda *a, **k: (False, "backend never went idle within 900s (last: harness_runs=1)"))
+    with pytest.raises(P.PromoteError, match="never went idle"):
+        P.promote("SM_X", tmp_path, "a" * 40)
+    assert S.read_current() is None, "no promotion record is left behind"
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "land_failed"]
+    assert ev and ev[-1]["round_id"] == "SM_X" and ev[-1]["external_blocker"] is True
+    assert ev[-1]["waited_idle"] is True and "never went idle" in ev[-1]["detail"]
+
+
 # ---------------------------------------------------------------------------
 # Idle gate
 # ---------------------------------------------------------------------------
