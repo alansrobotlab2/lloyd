@@ -2214,6 +2214,7 @@ python -m scripts.automod.round status              # state + ledger + guardian
 python -m scripts.automod.round bless               # record HEAD as last-known-good
 python -m scripts.automod.round recover             # clear BROKEN/halted, start the stack
 python -m scripts.automod.round restart --reason "…"  # pause, drain, restart mcp+backend under the lease
+python -m scripts.automod.round restart --only agent-llm-primary --reason "…"  # the engine too, since 2026-09-15
 python -m scripts.automod.round scorecard --since 7d  # is the loop earning its keep? (--record appends)
 python -m scripts.automod.round cluster --write      # regroup the open board by hand (§3.2c; flags pass through)
 python -m scripts.automod.review_tools calibrate    # the review grader against known verdicts (§4.5)
@@ -2239,9 +2240,32 @@ leaves the box down.
 a unit edited in the repo and never installed is a change that looks landed
 and does nothing.
 
+`restart --only agent-llm-primary` (2026-09-15) gives the engine the same
+lease, pool pause and drain as the two Lloyd programs, then a leg of its
+own in `promote._restart_primary`: stop, wait for the process to reach a
+stopped state, wait for `MemAvailable` to pass `PRIMARY_RAM_FLOOR_GIB`
+(180) for up to ten minutes, refuse under `PRIMARY_RAM_ABORT_GIB` (150) and
+leave the engine stopped, `supervisorctl reread` + `update` so an edited
+`environment=` in `agent-llm-primary.conf` is read, start, and a
+20-minute health wait that refreshes the lease. Two lessons from its first
+use, both pinned in `tests/test_automod_promote.py`: vLLM's `/health` is a
+bare 200 with no body, and `_get` read that as no answer, so the leg sat on
+a serving engine for its whole budget; and the first floor (150/120) was
+the old desktop's number — a 16 GiB qemu VM had joined the desktop,
+`MemAvailable` read 57 GiB with the engine up, and the boot's own transient
+got the unit oomd-killed at 23:52:46Z ([[infrastructure]] has the kill).
+The engine booted from the new conf on autorestart, at 844,969 FP8 tokens
+for `KV_CACHE_MEMORY_BYTES` 14.0 GiB, and everything else on the box
+bounced once.
+
 `scorecard` (`scripts/automod/scorecard.py`) is the loop's report card, read
-off the ledger, the backlog's front matter and a week of `git log` — twelve
-rows (row 12, `arch review`, landed 2026-09-11), each null rather than 0% when
+off the ledger, the backlog's front matter and a week of `git log` — fourteen
+rows (row 12, `arch review`, landed 2026-09-11; row 13, board net flow,
+09-13; row 14, `autocode duty cycle`, 09-15: how much of the window had an
+implement turn in flight and what each idle gap was waiting on — landing,
+abort, restart — for Alan's rule that a round runs 100% of the time; 88%
+over the 24 h before the row existed, 97 min of it across six landings),
+each null rather than 0% when
 it has no denominator: acceptance hit
 rate, the audit delta between the author's and the grader's `met` clauses,
 review refusals (and how many were fixed in turn, re-offered, escalated),

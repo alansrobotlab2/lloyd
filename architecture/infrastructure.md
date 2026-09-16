@@ -162,6 +162,17 @@ the first time and 793 the second, at a peak RSS of 230.3 GiB. Everything
 came back on its own and the arm under test was lost. That is why the
 guardian is a separate unit ([[vllm]] §8 has the cadence rule).
 
+A fourth kill, 2026-09-15 23:52:46Z, came from a *single* boot that went
+through a memory floor: the first `round restart --only agent-llm-primary`
+waited for `MemAvailable` to pass 150 GiB after the stop and started the
+engine, and the boot's own transient took the slice to pressure. The
+difference from the earlier kills was the desktop: a 16 GiB
+`qemu-system-x86_64` VM (`macos-tahoe`) was running, so the box read only
+57 GiB available with the engine up. The unit restarted on its own 30 s
+later, every program bounced once, and the engine booted from the new
+conf. The leg's floor is 180 GiB now, with a hard refusal under 150 —
+memwatch snapshot `20260915_235555`.
+
 It happened a third time on 2026-09-15 at 04:48:34Z (796 processes, 174.6 GiB,
 no restart in progress), and nothing could say what had grown. The unit is
 the one killed whoever causes the pressure: oomd watches `app.slice`
@@ -197,8 +208,10 @@ The process group is `lloyd-mc`; address the three as
 requires the qualified form, and `app/supervisor_client.py` derives the group
 from supervisord's own `group` field rather than hardcoding it.
 
-**Restart the backend or the aggregator through `python -m
-scripts.automod.round restart`** (`--only <program>` for one leg), which
+**Restart the backend, the aggregator or the primary engine through
+`python -m scripts.automod.round restart`** (`--only <program>` for one leg;
+`agent-llm-primary` since 2026-09-15, with a host-RAM wait, a conf reread
+and a 20-minute boot wait of its own — [[automod]] §12), which
 takes the guardian's pause lease, pauses the worker pool, drains the backend
 and waits for it to go idle, restarts `lloyd-mcp` then `lloyd-backend` with a
 health wait per leg, and releases all three. A bare `supervisorctl restart`

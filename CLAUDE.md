@@ -84,7 +84,13 @@ config being tested rather than the restart cadence.
 Wait for `MemAvailable` to come back above ~150 GiB between boots;
 `agent-services/bin/flash-next-run-arm.sh` does this and refuses to start below
 120 GiB. Note the blast radius is the *unit*, so the guardian (a separate
-systemd unit, deliberately) survives it.
+systemd unit, deliberately) survives it. **Those numbers assume the old
+desktop.** On 2026-09-15 a 16 GiB qemu VM was running beside the browser
+and the editor, `MemAvailable` read 57 GiB with the engine up, and a single
+boot through the 150 GiB floor still got the unit killed at 23:52Z.
+`round restart --only agent-llm-primary` is the way to restart it now
+(waits for 180 GiB, refuses under 150, rereads the conf, 20-minute boot
+wait under the lease); check what the desktop holds before any boot.
 
 A third kill on 2026-09-15 04:48Z came with no restart in progress and left
 no trace of what grew — oomd judges `app.slice`, which the desktop shares, and
@@ -2261,7 +2267,8 @@ The 09-09 "5 tok/s" chat was cold re-prefills. An agent loop re-submits its
 whole 100-200k context every iteration, and when that prefix had been
 evicted between iterations the engine prefilled it again, one 8,192-token
 chunk per step, while every other request got one token per step. The FP8 KV
-cutover (2026-09-10: a 692,263-token pool, 3200-token pages) is what fixed
+cutover (2026-09-10: a 692,263-token pool, 3200-token pages; 844,969 since
+2026-09-15 at 14.0 GiB in the program's conf) is what fixed
 it. Four things keep it fixed, and none of them touches the engine:
 
 - **The fix is pinned and asserted.** `agent-llm-primary.conf`'s

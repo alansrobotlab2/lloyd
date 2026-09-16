@@ -418,7 +418,8 @@ testing, but wait for `MemAvailable` all the same.
 
 What FP8 KV buys and costs on this card is in the start script's
 `KV_CACHE_DTYPE` comment and in the `fp8-kv-trial-2026-09-10` memory note:
-×1.74 KV pool (692k tokens at 11.5 GiB), a 239k-token prefill in 26 s instead
+×1.74 KV pool (692k tokens at 11.5 GiB; 845k at the 14.0 GiB
+`agent-llm-primary.conf` sets since 2026-09-15), a 239k-token prefill in 26 s instead
 of 128–149 s, quality on the BF16 noise floor, against a drafter that reads
 the same e4m3 cache and accepts fewer tokens per step — decode 0–17% slower by
 text type (JSON unchanged, prose and thinking the worst), ~7% over a

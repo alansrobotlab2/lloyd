@@ -224,7 +224,7 @@ Booted 2026-09-10 (`e35ab2b`). Live `vllm:cache_config_info`:
 | label | value |
 |---|---|
 | `cache_dtype` | `fp8` |
-| `kv_cache_size_tokens` | **692,263** (BF16 held 398,175 — ×1.74) |
+| `kv_cache_size_tokens` | **692,263** (BF16 held 398,175 — ×1.74); **844,969** since 2026-09-15 at `KV_CACHE_MEMORY_BYTES` 14.0 GiB in the program's conf (3.22× at 262k; GPU 1 has nothing else resident and read 5.9 GiB free at the 4096 chunk, so 14.0 leaves ~3.3 GiB) |
 | `block_size` / `mamba_block_size` | **3200** (BF16 used 1600) |
 | `kv_cache_memory_bytes` | 12,348,030,976 (11.5 GiB, pinned explicitly) |
 | `kv_cache_max_concurrency` | 2.64 — the pool holds ~2.6 full-length contexts |
@@ -316,7 +316,8 @@ Three things about it are worth not rediscovering:
   here is far short of 262k. That is why it stays opt-in.
 
 Capacity, if it is ever turned on: ~398k tokens in BF16, ~692k with FP8 at the
-11.5 GiB pool above. YaRN×2 with FP8 has been booted to 480k. Past 692k needs
+11.5 GiB pool above, ~845k at the 14.0 GiB the conf carries since 2026-09-15.
+YaRN×2 with FP8 has been booted to 480k. Past that needs
 more card — 2× RTX PRO 6000 at TP=2 measured a 3.12M-token pool upstream;
 1M on one card is impossible.
 
