@@ -133,6 +133,26 @@ def normalize_punct(name: str) -> str:
     return "".join(tokens(name))
 
 
+# Punctuation that separates or decorates a name without changing what it
+# names: spaces, hyphens, dots, brackets, quotes, an ellipsis.
+SEPARATOR_CHARS = frozenset(" \t-_./\\()[]{},:;'\"`\u2019\u2018\u201c\u201d\u2026")
+
+
+def symbol_residue(name: str) -> str:
+    """The characters of a name that are neither ASCII alphanumerics nor
+    separators — `++`, `#`, `@`, `^`, `+`, `τ²`.
+
+    The PUNCT tier reads every non-alphanumeric as noise, and on 2026-09-16
+    its first automatic apply merged `C` and `C#` into `C++`, `pass^k` into
+    `pass@k`, `τ²-bench` into `Bench` and `BrowseComp+` into `BrowseComp`:
+    names whose meaning lives in the symbol the tier discards. Two names
+    with different residues are different names whatever their letters say,
+    and no mechanical tier may merge them; they go to hand review.
+    """
+    return "".join(sorted(ch for ch in name.lower()
+                          if not re.fullmatch(r"[a-z0-9]", ch) and ch not in SEPARATOR_CHARS))
+
+
 def safe_suffix_forms(name: str) -> list[str]:
     """Return all forms reachable by stripping ALL consecutive safe suffix tokens
     from the end of the name.
@@ -165,6 +185,14 @@ def classify_pair(a: str, b: str) -> tuple[str, str]:
         return ("IDENTICAL", "identical")
     if normalize_case(a) == normalize_case(b):
         return ("CASE", "case-only difference")
+    if symbol_residue(a) != symbol_residue(b) and (
+            normalize_full(a) == normalize_full(b)
+            or set(safe_suffix_forms(a)) & set(safe_suffix_forms(b))):
+        # Same letters, different symbols: C / C++ / C#. Never mechanical, and
+        # not for the semantic gate either — a judge shown two one-line
+        # definitions of "C" and "C++" is a coin toss on a merge that moves
+        # every fact. Always a person.
+        return ("SUFFIX_AMBIGUOUS", "same letters, different symbols (C / C++ / C#) — always hand-review")
     if normalize_punct(a) == normalize_punct(b):
         return ("PUNCT", "punctuation/separator difference")
     a_forms = set(safe_suffix_forms(a))
@@ -370,11 +398,13 @@ def build_plan(edges: list[dict], existing_dirs: set[str],
     # underscore) but are NOT case-only. Process them before suffix clustering so
     # they don't get absorbed into suffix-ambiguous groups.
     remaining_after_case = [e for e in entities if e not in case_clustered]
-    clusters_by_punct: dict[str, list[str]] = collections.defaultdict(list)
+    clusters_by_punct: dict[tuple[str, str], list[str]] = collections.defaultdict(list)
     for ent in remaining_after_case:
+        # Keyed on the symbol residue too, so `C`, `C++` and `C#` never share
+        # a punct cluster (see symbol_residue).
         key = normalize_punct(ent)
         if key:
-            clusters_by_punct[key].append(ent)
+            clusters_by_punct[(key, symbol_residue(ent))].append(ent)
 
     punct_only_clusters: list[list[str]] = []
     for variants in clusters_by_punct.values():
@@ -384,6 +414,7 @@ def build_plan(edges: list[dict], existing_dirs: set[str],
         # (normalize_punct matches but normalize_case does not).
         is_punct_only = all(
             normalize_punct(a) == normalize_punct(b)
+            and symbol_residue(a) == symbol_residue(b)
             and normalize_case(a) != normalize_case(b)
             for i, a in enumerate(variants)
             for b in variants[i + 1 :]
@@ -456,6 +487,7 @@ def build_plan(edges: list[dict], existing_dirs: set[str],
             # in build_plan to avoid absorption into suffix-ambiguous clusters.
             is_punct_only = all(
                 normalize_punct(a) == normalize_punct(b)
+                and symbol_residue(a) == symbol_residue(b)
                 and normalize_case(a) != normalize_case(b)
                 for i, a in enumerate(variants)
                 for b in variants[i + 1 :]

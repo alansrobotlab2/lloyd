@@ -684,3 +684,34 @@ def test_an_apply_leaves_voice_loop_voice_pipeline_and_voice_separate(tmp_path):
             kg_store.reset()
     finally:
         st.close()
+
+
+# ── symbols are meaning, not punctuation ─────────────────────────────────────
+
+def test_symbol_bearing_names_are_never_a_mechanical_merge():
+    """The first automatic CASE/PUNCT apply (2026-09-16) merged `C` and `C#`
+    into `C++`, `pass^k` into `pass@k`, `τ²-bench` into `Bench` and
+    `BrowseComp+` into `BrowseComp`. A name whose symbols differ is a
+    different name; it goes to hand review, never through the semantic gate."""
+    for a, b in [("C", "C++"), ("C#", "C++"), ("C# SDK", "C++ SDK"), ("pass^k", "pass@k"),
+                 ("τ²-bench", "Bench"), ("BrowseComp+", "BrowseComp"), ("Office Q&A", "Office QA")]:
+        tier, why = ers.classify_pair(a, b)
+        assert tier == "SUFFIX_AMBIGUOUS" and "symbols" in why, (a, b, tier)
+    # Separators still merge mechanically.
+    for a, b in [("SWE-Bench", "SweBench"), ("Pierluca D'Oro", "Pierluca Doro"),
+                 ("Amodio et al. (2007)", "Amodio et al. 2007"), ("Brando...", "Brando"),
+                 ("Context forking", "Context Forking")]:
+        assert ers.classify_pair(a, b)[0] in ("PUNCT", "CASE"), (a, b)
+    assert ers.symbol_residue("C++") == "++" and ers.symbol_residue("τ²-bench") == "²τ"
+    assert ers.symbol_residue("Amodio et al. (2007)") == ""
+
+
+def test_build_plan_keeps_c_cpp_and_csharp_apart():
+    dirs = {"C", "C++", "C#", "pass^k", "pass@k", "Context forking", "Context Forking"}
+    plan = ers.build_plan(_edges([("C++", "Alan"), ("pass@k", "Alan")]), dirs, gate=None)
+    safe_variants = {v for c in plan["safe_merges"] for v, _deg in c["variants"]}
+    assert not ({"C", "C#", "C++", "pass^k", "pass@k"} & safe_variants), plan["safe_merges"]
+    assert {"Context forking", "Context Forking"} <= safe_variants
+    reviewed = {c["canonical"]: {v for v, _deg in c["variants"]} for c in plan["ambiguous"]}
+    assert reviewed["C++"] == {"C", "C++", "C#"} and reviewed["pass@k"] == {"pass^k", "pass@k"}
+    assert all(c["tier"] == "SUFFIX_AMBIGUOUS" for c in plan["ambiguous"])
