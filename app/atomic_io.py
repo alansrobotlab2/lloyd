@@ -190,6 +190,12 @@ def _tmp_path(path: Path, tmp_dir: Path | str | None) -> Path:
     return base / f"{path.name}.{_target_key(path)[:12]}.{os.getpid()}.tmp"
 
 
+# How old a leftover temp has to be before a writer collects it. Well past any
+# write that is still in flight, short enough that one crash does not leave a
+# permanent file.
+SCRATCH_MAX_AGE_S = 3600.0
+
+
 def _sweep_scratch(tmp_dir: Path) -> None:
     """Delete leftover temps a crashed writer left behind.
 
@@ -265,7 +271,7 @@ def locked_file(path: Path | str, *, timeout: float = DEFAULT_LOCK_WAIT):
 
 
 @contextlib.contextmanager
-def commit_lock(path: Path | str, *, timeout: float = DEFAULT_LOCK_WAIT):
+def commit_lock(path: Path | str, *, timeout: float | None = None):
     """Serialize the read-modify-write of one shared file, off-tree.
 
     The critical section is the commit only — read the current bytes, apply the
@@ -273,11 +279,19 @@ def commit_lock(path: Path | str, *, timeout: float = DEFAULT_LOCK_WAIT):
     outside the lock stay concurrent, which is the point: fan-out sub-agents and
     parallel sessions keep working, they just cannot both commit.
 
+    `timeout=None` means "the lane's current wait", resolved here rather than
+    bound as a default value: a signature that reads
+    `timeout: float = DEFAULT_LOCK_WAIT` evaluates the constant once, at def
+    time, and every later call — and every `monkeypatch.setattr(atomic_io,
+    "DEFAULT_LOCK_WAIT", ...)` — gets the value the module had at import. The
+    constant is the seam callers have, so it has to be read at call time.
+
     Raises `TimeoutError` after `timeout` rather than queueing: see
     `DEFAULT_LOCK_WAIT`.
     """
+    wait = DEFAULT_LOCK_WAIT if timeout is None else timeout
     lock_path = lock_file_for(path)
-    fd = _flock_exclusive(lock_path, timeout)
+    fd = _flock_exclusive(lock_path, wait)
     try:
         yield lock_path
     finally:
