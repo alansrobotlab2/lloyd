@@ -115,6 +115,76 @@ def _classify_cached(turn: uptake.Turn, cache: dict[str, Any]) -> Any:
     return cache[tid]
 
 
+#: How many labeled turns a replay must re-ask before "no mismatch" means
+#: something. Fewer and the sentence reads as "we happened to look at the six
+#: turns that agree".
+REPLAY_MIN_CHECKED = 6
+
+
+def verify_replay(transport: Any = None, *,
+                  min_checked: int = REPLAY_MIN_CHECKED) -> dict[str, Any]:
+    """Re-ask a sample of labeled turns and compare against the committed `engine_raw`.
+
+    `test_recorded_engine_replies_reproduce_the_measured_precision` proves the
+    recorded matrix reproduces *itself*, which says nothing about whether the
+    engine still answers that way. The engine runs temperature 0 on a pinned slot,
+    so a mismatch here is the model or the prompt having moved — which is exactly
+    when a committed precision figure stops being re-quotable and the artifact
+    needs saying so, not quietly re-reading as current.
+
+    This lives in the probe and not in the test suite. A reproducibility check
+    that asks the live model is a property of the measurement run, which is awake
+    by definition there; inside the suite it turns a hermetic replay claim into a
+    dependency on which GGUF happens to be loaded, and a round that caught the
+    slot asleep could not tell a moved model from an offline box. `transport` is
+    injectable so the *comparison* is still pinned by a test that never POSTs.
+
+    A sample that cannot be re-asked is reported as `measured: False`, never as a
+    pass: zero re-asks and zero mismatches are the same two numbers, and the
+    second one is what a green row is built on.
+    """
+    labels = uptake.load_labels()
+    index = _corpus_index()
+    checked = 0
+    mismatched: list[dict[str, Any]] = []
+    unanswered: list[str] = []
+    for item in labels:
+        raw = item.get("engine_raw")
+        turn = index.get(item["turn_id"])
+        if raw is None or turn is None:
+            continue
+        if checked >= min_checked:
+            break
+        verdict, fresh = uptake.classify_dispute_raw(
+            turn.prev_assistant, turn.user_text, transport=transport)
+        want = uptake._parse_verdict(raw)
+        if verdict is None:
+            unanswered.append(item["turn_id"])
+        elif verdict != want:
+            mismatched.append({"turn_id": item["turn_id"],
+                               "recorded": raw, "now": fresh})
+        checked += 1
+    measured = checked >= min_checked
+    return {
+        "measured": measured,
+        "checked": checked,
+        "min_checked": min_checked,
+        "mismatched": mismatched,
+        "unanswered": unanswered,
+        # `ok` is the only field a reader should act on: measured AND no
+        # disagreement AND nothing left unanswered. A replay over an engine that
+        # refused half the sample is not a confirmation.
+        "ok": bool(measured and not mismatched and not unanswered),
+        "note": (
+            f"{checked} labeled turns re-asked against their committed engine_raw, "
+            f"{len(mismatched)} moved, {len(unanswered)} unanswered"
+            if measured else
+            f"only {checked} of {min_checked} labeled turns could be re-asked, so the "
+            "committed engine_raw replies are UNVERIFIED against the current engine"
+        ),
+    }
+
+
 def _repo_relative(path: str | Path) -> str:
     """Paths inside the checkout are emitted relative to it.
 
@@ -370,6 +440,17 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     if report["passed"]:
+        replay = verify_replay()
+        classifier_block["replay"] = replay
+        print(f"replay(committed engine_raw re-asked):  measured={replay['measured']} "
+              f"checked={replay['checked']} moved={len(replay['mismatched'])} "
+              f"unanswered={len(replay['unanswered'])} ok={replay['ok']}")
+        if not replay["ok"]:
+            # Loud, but not a stop: this run has just measured precision against
+            # the engine it has now, so the NEW number is valid. What a mismatch
+            # invalidates is the figure in the previously committed artifact, and
+            # the reader has to be told that from the artifact that replaces it.
+            print(f"WARNING: {replay['note']}", file=sys.stderr)
         gate = uptake.retrieval_gate()
         classifier_block["retrieval_gate"] = {
             k: gate[k] for k in ("nights", "latest", "hardcoded_gate",

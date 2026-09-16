@@ -6,20 +6,32 @@ followed, or disputed afterward. So these tests are all about the measurement
 existing, being computed from real logged evidence rather than assertion, and
 being honest about the half it cannot compute.
 
-One test here needs the secondary LLM to be answering and two read the live
-`~/obsidian` vault; neither is under a round's control. The vault readers carry
-the tree's existing `live_vault` mark, which the automod gate excludes. The
-engine reader carries no mark — it is the acceptance measurement for #552, so it
-should run on the gate. With the engine awake the floors must clear; with it down
-the test **fails**, naming the engine, unless `UPTAKE_ALLOW_SILENT_ENGINE=1` records
-that the box is offline on purpose (then it skips, visibly, instead of passing). It
-used to assert whichever branch it landed in and record nothing about which, so an
-asleep model and a passing grader were indistinguishable in the report. The
-fail-closed behaviour of a silent engine is pinned hermetically by the
-stand-in-transport tests, so refusing to grade the live measurement against an
-absent model costs no coverage. Nothing else in this file skips, xfails, or asserts
-`True`; the loopback HTTP seam is crossed by a test that runs whether or not a model
-is loaded, and the precision claim is replayable from recorded replies.
+**Exactly one test POSTs to the secondary engine**: the step-2 acceptance
+measurement, `test_live_engine_scores_the_corpus_and_reports_every_way_precision_was_measured`.
+It carries no mark on purpose — it is the number the item is accepted on, so it
+runs on the gate, and if the engine is asleep it **fails, naming the engine**.
+There is no skip and no opt-out: an earlier version asserted whichever branch it
+landed in and recorded nothing about which, so an asleep model and a passing
+grader were indistinguishable in the report. The fail-closed behaviour of a
+silent engine is pinned hermetically by the stand-in-transport tests, so
+refusing to grade the live measurement against an absent model costs no coverage.
+
+Everything else here reaches the engine only through an injected transport or a
+replayed fixture, including the two probe-exit tests: `_replay_engine` answers
+`classify_dispute` *and* `classify_dispute_raw` with the replies recorded on the
+measurement date, so the zero-shot pass and the replay verifier run without a
+model anywhere. That is also why the "do the committed replies still hold"
+check is a probe step (`uptake_probe.verify_replay`, recorded in every emitted
+table as `classifier.replay`) and not a test: asking a live model whether it
+still agrees with its own recorded answer is a property of the measurement run,
+and inside the suite it would make a hermetic replay claim depend on which GGUF
+happens to be loaded. Two further tests read the live `~/obsidian` vault and
+carry the tree's existing `live_vault` mark, which the automod gate excludes.
+Other tests read live session and baseline *data*; none of those is the engine.
+
+Nothing in this file skips, xfails, or asserts `True`; the loopback HTTP seam is
+crossed by a test that runs whether or not a model is loaded, and the precision
+claim is replayable from recorded replies.
 """
 
 from __future__ import annotations
@@ -742,6 +754,13 @@ def _replay_engine(monkeypatch) -> dict:
     prefixes, 2 shared across classes), so a text-keyed stand-in could not be
     declared exactly. Only the engine is stubbed — `main()`'s screen, cache, join
     and write path all run.
+
+    BOTH entry points are stubbed. `classify_dispute_raw` is what the zero-shot
+    pass and `verify_replay` call, so with only the verdict-shaped one patched
+    these two probe steps POSTed to the live slot from inside the "replayed" run:
+    the exit-contract tests then failed on a sleeping engine while claiming to be
+    a replay, and the replay verifier's result was a property of whatever model
+    was loaded rather than of the fixture.
     """
     import scripts.uptake_probe as probe
 
@@ -768,19 +787,49 @@ def _replay_engine(monkeypatch) -> dict:
         recorded += 1
     assert recorded == len(labels), f"{recorded}/{len(labels)} labels carry a reply"
 
-    def fake(prev_assistant, user_text, *, transport=None):
-        return uptake._parse_verdict(by_pair.get((prev_assistant, user_text), "NOT"))
+    calls = {"verdict": 0, "raw": 0}
+
+    def _reply(prev_assistant, user_text):
+        return by_pair.get((prev_assistant, user_text), "NOT")
+
+    def fake(prev_assistant, user_text, *, transport=None, examples=True):
+        calls["verdict"] += 1
+        return uptake._parse_verdict(_reply(prev_assistant, user_text))
+
+    def fake_raw(prev_assistant, user_text, *, transport=None, examples=True):
+        calls["raw"] += 1
+        raw = _reply(prev_assistant, user_text)
+        return uptake._parse_verdict(raw), raw
 
     monkeypatch.setattr(uptake, "classify_dispute", fake)
+    monkeypatch.setattr(uptake, "classify_dispute_raw", fake_raw)
+    monkeypatch.setitem(_REPLAY_CALLS, "counters", calls)
     return json.loads((REPO / "eval" / "uptake" / "labels"
                        / "hand-2026-09-11.json").read_text())["engine_replay"]
 
 
+#: How many times the last `_replay_engine` stand-in was reached through each
+#: entry point. A module-level handoff because `main()` is what calls the probe's
+#: internals; the emit test reads it to prove the zero-shot pass and the replay
+#: verifier ran THROUGH the fixture rather than past it to a live socket.
+_REPLAY_CALLS: dict[str, dict[str, int]] = {}
+
+
 def _always_not_engine(monkeypatch) -> None:
-    """The always-NOT shape the item's own stop condition exists to catch."""
-    def fake(prev_assistant, user_text, *, transport=None):
+    """The always-NOT shape the item's own stop condition exists to catch.
+
+    Both entry points again: the stop test reaches `classify_dispute_raw` through
+    the zero-shot pass, and leaving that unpatched would have it asking the live
+    slot what a fixture that never POSTs is supposed to have decided.
+    """
+    def fake(prev_assistant, user_text, *, transport=None, examples=True):
         return False
+
+    def fake_raw(prev_assistant, user_text, *, transport=None, examples=True):
+        return False, "NOT"
+
     monkeypatch.setattr(uptake, "classify_dispute", fake)
+    monkeypatch.setattr(uptake, "classify_dispute_raw", fake_raw)
 
 
 def test_probe_stops_below_the_precision_floor_and_writes_no_uptake_table(tmp_path, monkeypatch):
@@ -834,6 +883,20 @@ def test_probe_writes_a_dated_table_when_the_floor_clears(tmp_path, monkeypatch)
     corpus = j["corpus"]
     assert corpus["verdict_keyed_on"] == "turn_id", corpus
     assert corpus["disputes"] <= corpus["classified_turns"], corpus
+
+    # Nothing in this run may reach a socket. The fixture has to have served the
+    # zero-shot pass and the replay verifier as well as the in-sample pass, so the
+    # emitted numbers are the recorded ones and not whatever the loaded model said
+    # today. If a future probe step calls the engine directly, `raw` stays 0 and
+    # this fails: that is the difference between a replay and a live ask wearing
+    # the word "replay".
+    counters = _REPLAY_CALLS["counters"]
+    assert counters["raw"] > 0, counters
+    assert cls["zero_shot"]["measured"] is True, cls
+    rep = cls["replay"]
+    assert rep["measured"] is True and rep["ok"] is True, rep
+    assert rep["checked"] >= probe.REPLAY_MIN_CHECKED, rep
+    assert rep["mismatched"] == [] and rep["unanswered"] == [], rep
 
 
 def test_coverage_states_the_reach_of_the_note_half(tmp_path):
@@ -1175,16 +1238,6 @@ def test_validate_labels_fails_on_a_fabricated_or_stale_label(tmp_path, monkeypa
                                   index)["ok"] is True
 
 
-#: Set this only when the secondary engine is deliberately down (an offline bench,
-#: a machine being moved). Until it is set again, a silent engine FAILS this test
-#: rather than passing it. The previous version asserted whichever branch it
-#: happened to land in and recorded nothing about which one that was, so a gate run
-#: that caught :8091 asleep reported a pass on a measurement that had not happened.
-#: The fail-closed semantics of a silent engine are still pinned — hermetically, by
-#: `_oracle_classifier` driving the same pipeline with a stand-in transport.
-ALLOW_SILENT_ENGINE = "UPTAKE_ALLOW_SILENT_ENGINE"
-
-
 def test_live_engine_scores_the_corpus_and_reports_every_way_precision_was_measured():
     """Step 2's stop condition against the real secondary engine.
 
@@ -1204,21 +1257,17 @@ def test_live_engine_scores_the_corpus_and_reports_every_way_precision_was_measu
     """
     import scripts.uptake_probe as probe
 
-    awake = uptake.classify_dispute("Built it, works now.", "it 404s on me") is not None
-    if not awake:
-        # The previous version asserted whichever branch it happened to land in and
-        # recorded nothing about which, so a gate run that caught :8091 asleep
-        # reported a pass on a measurement that had not happened. Down is now loud
-        # by default; the opt-out exists for a box that is genuinely offline and
-        # makes the omission visible as a skip rather than a pass.
-        if os.environ.get(ALLOW_SILENT_ENGINE) == "1":
-            pytest.skip(f"{ALLOW_SILENT_ENGINE}=1: {uptake.secondary_endpoint()} is "
-                        "deliberately down, so the uptake measurement did not run")
+    # No skip, and no environment opt-out. An earlier shape asserted whichever
+    # branch it landed in and recorded nothing about which, so a gate run that
+    # caught :8091 asleep reported a pass on a measurement that had not happened;
+    # the escape hatch added to fix that turned a missing measurement into a
+    # green-skipped one, which is the same claim with a log line attached. The
+    # fail-closed behaviour of a silent engine is pinned hermetically by the
+    # stand-in-transport tests above, so failing here costs no coverage.
+    if uptake.classify_dispute("Built it, works now.", "it 404s on me") is None:
         pytest.fail(f"secondary engine at {uptake.secondary_endpoint()} is not answering. "
-                    "Step 2's acceptance measurement cannot be claimed without it. "
-                    f"Start it, or set {ALLOW_SILENT_ENGINE}=1 if this box is offline "
-                    "on purpose — the fail-closed behaviour of a silent engine is "
-                    "pinned hermetically by the stand-in-transport tests above.")
+                    "Step 2's acceptance measurement cannot be claimed without it: "
+                    "start the secondary slot before gating this.")
 
     result = probe.run_classifier_eval()
     m = result["metrics"]
@@ -1249,38 +1298,97 @@ def test_live_engine_scores_the_corpus_and_reports_every_way_precision_was_measu
                                       ("metrics", "holdout", "zero_shot", "pipeline")}
 
 
-def test_recorded_engine_replies_still_reproduce_on_the_live_engine():
-    """Closes the loop the recorded matrix could not: the fixture reproduces itself,
-    which proves nothing about whether the engine still says that.
+def test_replay_verifier_reports_a_moved_model_instead_of_a_clean_bill():
+    """The check the committed matrix cannot make: the fixture reproducing itself
+    says nothing about whether the engine still answers that way.
 
-    Re-asks a sample of labeled turns with the deployed prompt and requires the
-    answer to match the committed `engine_raw`. The engine is temperature 0 on a
-    pinned slot, so a mismatch is the model or the prompt having moved — which is
-    exactly when a committed precision figure stops being re-quotable.
+    That check lives in the probe (`verify_replay`) and is recorded in every
+    emitted table as `classifier.replay`, not in a test that POSTs. A test that
+    asked the live slot turned the suite's replay claim into a dependency on
+    whichever GGUF was loaded, and a round that caught the engine asleep had to
+    either fail for a reason outside its diff or skip — which is how "the
+    committed matrix still holds" quietly stops being checked. Here the transport
+    is injected, so all four outcomes are pinned and none of them needs a model:
+    agreement, a flipped verdict, a refused request, and a sample too small to
+    say anything.
     """
-    # No skip here either. A reproducibility check that skips when the engine is
-    # asleep is how "the committed matrix still holds" quietly stops being checked.
-    if uptake.classify_dispute("Built it, works now.", "it 404s on me") is None:
-        pytest.fail(f"secondary engine at {uptake.secondary_endpoint()} is not "
-                    "answering, so the committed engine_raw replies cannot be "
-                    "re-asked. The recorded matrix is unverified against the model "
-                    "until it does.")
+    import scripts.uptake_probe as probe
+
     labels = uptake.load_labels()
+    assert len(labels) >= probe.REPLAY_MIN_CHECKED, labels
+    # The committed corpus must actually be re-askable: every label carries its
+    # reply and resolves to a turn, or the verifier would be sampling air.
+    assert all(i.get("engine_raw") is not None for i in labels)
+
+    # Drive it through the transport seam with a per-turn reply table, so each
+    # labeled turn gets back its own recorded answer rather than one canned string
+    # that would flatter every row except the first.
     index = {t.turn_id: t for t in uptake.human_turns(days=900)}
-    checked = 0
+    pairs = {}
     for item in labels:
-        raw = item.get("engine_raw")
         turn = index.get(item["turn_id"])
-        if raw is None or turn is None:
-            continue
-        verdict, fresh = uptake.classify_dispute_raw(turn.prev_assistant,
-                                                     turn.user_text)
-        assert verdict == uptake._parse_verdict(raw), (
-            f"{item['turn_id']}: recorded {raw!r}, engine now answers {fresh!r}")
-        checked += 1
-        if checked >= 6:
-            break
-    assert checked >= 6, f"only {checked} labeled turns resolvable to re-ask"
+        if turn is not None:
+            pairs[(turn.prev_assistant, turn.user_text)] = item["engine_raw"]
+    assert pairs, "no labeled turn resolved, so the verifier had nothing to check"
+
+    # A re-ask the fixture cannot answer would be reported as "no answer" by the
+    # production transport contract — `classify_dispute_raw` swallows any transport
+    # exception into `None` on purpose — so an unmatched turn is collected and
+    # asserted here rather than raised inside the stand-in, where it would surface
+    # as an unanswered row instead of the bug it is.
+    unmatched: list[str] = []
+
+    def by_exchange(payload):
+        user = payload["messages"][1]["content"]
+        for (prev, utext), raw in pairs.items():
+            if utext[:40] in user:
+                return {"choices": [{"message": {"content": raw}}]}
+        unmatched.append(user[:60])
+        return {"choices": [{"message": {"content": "NOT"}}]}
+
+    out = probe.verify_replay(transport=by_exchange)
+    assert unmatched == [], f"verifier re-asked {len(unmatched)} turns outside the corpus"
+    assert out["measured"] is True, out
+    assert out["checked"] >= probe.REPLAY_MIN_CHECKED, out
+    assert out["ok"] is True and out["mismatched"] == [], out
+    assert out["unanswered"] == [], out
+
+    # A model that flipped one sampled verdict is a FAILING bill, named by turn id
+    # and quoting both answers — the reader has to be able to open it.
+    flipped = {"n": 0}
+
+    def one_flips(payload):
+        out = by_exchange(payload)
+        flipped["n"] += 1
+        if flipped["n"] == 1:
+            recorded = out["choices"][0]["message"]["content"]
+            out["choices"][0]["message"]["content"] = (
+                "NOT a dispute" if uptake._parse_verdict(recorded) else "DISPUTE")
+        return out
+
+    out = probe.verify_replay(transport=one_flips)
+    assert out["ok"] is False, out
+    assert len(out["mismatched"]) == 1, out
+    bad = out["mismatched"][0]
+    assert bad["turn_id"] in index and bad["recorded"] and bad["now"], bad
+
+    # An engine that refuses the sample is `unanswered`, not a clean bill: zero
+    # mismatches is what a green row is built on, so it must not be reachable by
+    # asking nothing.
+    def dead(payload):
+        raise OSError("connection refused")
+
+    out = probe.verify_replay(transport=dead)
+    assert out["ok"] is False and out["mismatched"] == [], out
+    assert len(out["unanswered"]) == out["checked"] >= probe.REPLAY_MIN_CHECKED, out
+    assert "UNVERIFIED" not in out["note"], out   # measured, just unanswered
+    assert "unanswered" in out["note"], out
+
+    # A sample below the floor cannot claim the matrix holds, and says so in the
+    # note rather than reporting an empty mismatch list as agreement.
+    out = probe.verify_replay(transport=by_exchange, min_checked=len(labels) + 5)
+    assert out["measured"] is False and out["ok"] is False, out
+    assert "UNVERIFIED" in out["note"], out
 
 
 @pytest.mark.live_vault
