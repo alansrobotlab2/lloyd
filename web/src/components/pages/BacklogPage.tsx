@@ -93,6 +93,14 @@ function TaskModal({
       .backlogTask(task.id)
       .then((full) => {
         if (!alive) return;
+        // A body that is not a string means this response did not come from the
+        // detail route. Editing from it would seed the box with `undefined`, and
+        // posting that with `force_body_replace` would empty the item — so
+        // nothing becomes ready and the error says why.
+        if (typeof full.description !== "string") {
+          setError(`task ${task.id} returned no body; refusing to edit from a row`);
+          return;
+        }
         setDescription(full.description);
         setBodyReady(true);
       })
