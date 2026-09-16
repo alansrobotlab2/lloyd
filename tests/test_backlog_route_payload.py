@@ -175,3 +175,49 @@ def test_query_matches_names_and_tags_too(backlog_dir):
 def test_query_with_no_match_returns_an_empty_list(backlog_dir):
     write_item(backlog_dir, 1, body="plain body")
     assert rows_of(BR.backlog_tasks(q="nothinglikesthis")) == []
+
+
+# ── The live board ───────────────────────────────────────────────────────────
+# The clause this pins is a byte budget on the *real* corpus: 9,202,414 B before
+# #1199, and the acceptance line is under 1 MB. A tmp_path fixture can prove the
+# shape of a row; only the board itself can prove the total, because the total is
+# what 1,137 rows add up to. Marked `live_vault`, so the gate's `-m "not
+# live_vault"` skips it — it is run and cited separately (see the round report),
+# and `scripts/maintenance/backlog_route_probe.py` prints the same number.
+
+
+@pytest.mark.live_vault
+def test_the_live_board_ships_under_a_megabyte_of_rows():
+    root = Path.home() / "obsidian" / "backlog"
+    if not root.exists():
+        pytest.skip("no vault")
+    body_bytes = BR.backlog_tasks().body
+    rows = json.loads(bytes(body_bytes))
+    assert len(rows) > 1000, f"only {len(rows)} rows: not the corpus this measures"
+    assert len(body_bytes) < 1_000_000, (
+        f"{len(body_bytes):,} B for {len(rows)} rows: the list route is carrying "
+        "bodies again (was 9,202,414 B before #1199)"
+    )
+    assert all("description" not in r for r in rows), (
+        "a live row still carries `description`, which is the whole body's name"
+    )
+    assert all(len(r["description_snippet"]) <= BR.DESC_SNIPPET_CHARS + 1 for r in rows)
+
+
+@pytest.mark.live_vault
+def test_the_live_detail_route_returns_a_body_the_list_refused_to_send():
+    """One real item, both routes: the row's snippet and the detail's full body."""
+    root = Path.home() / "obsidian" / "backlog"
+    if not root.exists():
+        pytest.skip("no vault")
+    rows = json.loads(bytes(BR.backlog_tasks().body))
+    row = max(rows, key=lambda r: len(r["description_snippet"]))
+    detail = json.loads(bytes(BR.backlog_task_detail(row["id"]).body))
+    assert len(detail["description"]) > len(row["description_snippet"]), (
+        f"item {row['id']}: detail is no bigger than the snippet"
+    )
+    # The row's snippet is the body's head plus the marker `_snippet` adds when it
+    # had to cut, so the card preview is literally the first thing in the body.
+    assert row["description_snippet"] == (
+        detail["description"][:BR.DESC_SNIPPET_CHARS].rstrip() + "…"
+    )
