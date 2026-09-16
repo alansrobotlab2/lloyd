@@ -566,10 +566,31 @@ def test_a_daemon_that_hangs_up_mid_response_never_answers_with_nothing(monkeypa
     def hang_up_after_reading():
         try:
             conn, _ = server.accept()
-            conn.recv(65536)
-            conn.close()                    # no status line, ever
+        except OSError:
+            return
+        try:
+            # Drain the request before hanging up — `recv` once is not enough.
+            # One recv returns as soon as the first segment arrives, and a close
+            # that leaves unread bytes pending makes the kernel send RST instead of
+            # FIN. urllib then dies on its own *send* with ConnectionResetError
+            # rather than reading EOF and raising RemoteDisconnected. Both are
+            # OSError, so `_qmd_daemon_search` took the same outage arm either way
+            # and production behaviour is identical — but this test asserts the
+            # class name in the message, so which of the two arrived decided it.
+            # Measured at base `fe21c64e`: 1 of 5 single-node runs failed, and it
+            # refused the SM_20260916_042752 suite rung while the gate's base probe
+            # of the same file passed on the first try. The race is the test's.
+            conn.settimeout(0.2)
+            while True:
+                try:
+                    if not conn.recv(65536):
+                        break
+                except OSError:  # socket.timeout == TimeoutError == OSError
+                    break
         except OSError:
             pass
+        finally:
+            conn.close()                    # no status line, ever
 
     hook = threading.Thread(target=hang_up_after_reading, daemon=True)
     hook.start()
