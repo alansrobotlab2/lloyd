@@ -183,3 +183,41 @@ async def test_run_query_refuses_a_toolless_turn(monkeypatch):
             RunOptions(model="primary", base_url="http://127.0.0.1:8096"),
         ):
             pass
+
+
+@pytest.mark.asyncio
+async def test_a_turn_whose_pool_never_opens_does_not_leak_the_run_counter(monkeypatch):
+    """`harness_runs` is what the promoter's idle wait reads. The counter was
+    incremented before `_build_pool`, so a pool that raised leaked one count
+    for the life of the process: on 2026-09-16 the backend read
+    `harness_runs=1` over nothing for nine hours and nine gate-passed rounds
+    failed to land with "backend never went idle within 900s"."""
+    from app.harness import loop as loop_mod
+    from app.harness.options import RunOptions
+
+    async def failing_build_pool(options):
+        raise ToolDiscoveryError("aggregator restarting")
+
+    monkeypatch.setattr(loop_mod, "_build_pool", failing_build_pool, raising=True)
+    before = loop_mod.active_run_count()
+    with pytest.raises(ToolDiscoveryError):
+        async for _ in loop_mod.run_query(
+            [{"role": "user", "content": "x"}],
+            RunOptions(model="primary", base_url="http://127.0.0.1:8096"),
+        ):
+            pass
+    assert loop_mod.active_run_count() == before, "a turn that never ran must not count as running"
+
+    class _EmptyPool:
+        discovered: list = []
+
+    async def empty_build_pool(options):
+        return _EmptyPool()
+    monkeypatch.setattr(loop_mod, "_build_pool", empty_build_pool, raising=True)
+    with pytest.raises(ToolDiscoveryError):
+        async for _ in loop_mod.run_query(
+            [{"role": "user", "content": "x"}],
+            RunOptions(model="primary", base_url="http://127.0.0.1:8096"),
+        ):
+            pass
+    assert loop_mod.active_run_count() == before, "the toolless refusal inside the try releases it too"

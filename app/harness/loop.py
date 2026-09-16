@@ -111,7 +111,6 @@ async def run_query(
     event with `stop_reason="cancelled"`.
     """
     started_at = time.perf_counter()
-    _run_started()
 
     # Prepend system prompt as a system message so vLLM sees it. We do
     # this here so callers don't have to worry about it; if they already
@@ -140,7 +139,17 @@ async def run_query(
     # Pool is process-shared (see mcp_pool.get_or_open_pool); do NOT
     # aclose() it here — lifecycle.shutdown_cleanup tears down all
     # pools at FastAPI shutdown.
+    #
+    # The run counter goes up HERE, immediately inside the try whose
+    # `finally` brings it down, and not at the top of the function. It used
+    # to be incremented before `_build_pool`, so a pool that failed to open
+    # raised past the try and leaked one count for the life of the process
+    # — and `harness_runs` is what the promoter's idle wait reads. On
+    # 2026-09-16 one such leak after the 05:02Z landing held the counter at
+    # 1 over an idle backend, and nine gate-passed rounds in a row failed to
+    # land with "backend never went idle within 900s" until the next restart.
     try:
+        _run_started()
         catalog = build_tool_list(list(pool.discovered), set(options.disallowed_tools))
         # Every advertised tool grows one extra string parameter the model
         # fills in with a phrase describing what the call is doing, which
