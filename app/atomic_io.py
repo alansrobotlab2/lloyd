@@ -153,7 +153,37 @@ def _tmp_path(path: Path, tmp_dir: Path | str | None) -> Path:
         return path.with_name(name)
     tmp_dir = Path(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
+    _sweep_scratch(tmp_dir)
     return tmp_dir / name
+
+
+# How old a leftover temp has to be before a writer collects it. Well past any
+# write that is still in flight, short enough that one crash does not leave a
+# permanent file.
+SCRATCH_MAX_AGE_S = 3600.0
+
+
+def _sweep_scratch(tmp_dir: Path) -> None:
+    """Delete leftover temps a crashed writer left behind.
+
+    The dir holds only this lane's own temps, and each is named
+    `<target>.<pid>.tmp` — one per pid, so a crash leaves one file and the next
+    crash leaves another, forever, while every `ls` of the directory and every
+    disk-size probe counts them. Age-gated rather than pid-gated: a pid is reused
+    and a writer alive 30 seconds ago is not a leftover. Best-effort — a sweep
+    that cannot unlink must not fail the commit it was helping.
+    """
+    import time as _t
+    cutoff = _t.time() - SCRATCH_MAX_AGE_S
+    try:
+        for stray in tmp_dir.glob("*.tmp"):
+            try:
+                if stray.stat().st_mtime < cutoff:
+                    stray.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def _flock_exclusive(lock_path: Path, timeout: float):

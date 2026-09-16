@@ -526,6 +526,32 @@ def test_the_three_lanes_take_the_same_lock_for_one_file(tmp_path, monkeypatch):
     )
 
 
+def test_a_stale_temp_in_the_scratch_dir_is_collected(tmp_path, monkeypatch):
+    """The off-tree dir must not become a permanent graveyard.
+
+    One pid's temp is exactly one filename, so every writer that dies between
+    the temp write and the rename leaves a file behind and nothing removes it —
+    the directory grows forever and every disk probe counts it. Age-gated, not
+    pid-gated: pids get reused, and a temp written seconds ago belongs to a
+    write that is still in flight.
+    """
+    scratch = tmp_path / "locks" / "tmp"
+    scratch.mkdir(parents=True)
+    monkeypatch.setattr(atomic_io, "SCRATCH_DIR", scratch)
+
+    stale = scratch / f"old.{os.getpid() + 777}.tmp"
+    stale.write_text("half a file", encoding="utf-8")
+    expired = time.time() - atomic_io.SCRATCH_MAX_AGE_S - 10
+    os.utime(stale, (expired, expired))
+    live = scratch / f"live.{os.getpid() + 778}.tmp"
+    live.write_text("in flight", encoding="utf-8")
+
+    atomic_io._tmp_path(tmp_path / "note.md", scratch)
+
+    assert not stale.exists(), "a stale leftover temp was never collected"
+    assert live.exists(), "the sweep deleted a temp that could still be in flight"
+
+
 # ── clause 5: no bare write_text survives in the six commit sites ────────────
 
 SITES = [
