@@ -46,7 +46,7 @@ not here; it is the architecture ``pytest.ini`` already states for the identity
 surface ("Enforcement lives at the writers … this mark is the reporting copy"),
 and ``reflection_archive`` exists so this rule can follow it. The unmarked tests
 here — every mutation that proves the rule can fail, the writer wiring, and the
-git-ignore pin — run on every rung.
+untracked-reports pin — run on every rung.
 
 What each clause is pinned by
 -----------------------------
@@ -68,9 +68,28 @@ What each clause is pinned by
    ``test_no_skill_builds_an_archive_name_from_a_generated_field``.
 4. *No gitignored file under ``~/lloyd`` is touched* → the diff is this file, one
    module and one validator hunk, all tracked paths, and
-   ``test_pipeline_stays_gitignored_so_retention_is_copies_not_tracking`` fails if
-   ``_pipeline/`` ever stops being ignored — which is the other route #436 names
-   and deliberately does not take (it is Alan's decision, not a side effect).
+   ``test_retention_is_dated_copies_not_reports_tracked_in_the_repo`` fails if a
+   generated report ever enters the index — the change that would mean retention
+   was achieved by tracking ``_pipeline/`` instead of by dated copies. It asserts
+   that and nothing more: whether ``_pipeline/`` is still *ignored* is repo state
+   this item does not own and preflight will not let a round edit, and pinning it
+   here made every later round that touches a comment in this file answer for
+   somebody else's decision (review finding, round ``SM_20260912_163822``).
+   ``_pipeline/`` staying ignored is what makes an unarchived overwrite
+   unrecoverable — stated throughout, and pinned as a loop boundary by
+   ``tests/test_automod_doc_claims.py``'s ``.gitignore`` denied-path row, not by
+   this file. Relocating the reports into the vault is #436's other route and is
+   Alan's decision, not a side effect.
+
+Two more assertions hold up claims that are not clauses.
+``test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree`` crosses the one
+process boundary the rule's single exemption sits on — ``vault_write`` rejecting a
+``~/lloyd/`` target is why a skill prescribing that call cannot destroy a report, and
+until round ``SM_20260912_163822`` that rested on a note in ``lloyd/MEMORY.md``, which
+is not a test. ``test_the_section_2e_guard_fails_on_every_way_it_could_be_satisfied_wrongly``
+breaks the §2e text as landed, three ways, and shows the per-file guard names the broken
+file each time while the two section-wide greps the previous round used stay silent —
+that is the review's finding about clause 1 turned into an assertion.
 
 How writers are recognised, and why the carve-outs are honest
 -------------------------------------------------------------
@@ -272,23 +291,19 @@ def test_knowledge_write_section_2e_archives_both_pattern_files(skills):
     body = skills["nightly-reflection-knowledge-write"]
     section = body.split("### 2e.", 1)
     assert len(section) == 2, "nightly-reflection-knowledge-write lost its §2e"
-    section = section[1].split("\n### ", 1)[0]
+    section = "### 2e." + section[1].split("\n### ", 1)[0]
+    # One predicate per file, from the same function the mutation test breaks —
+    # `section_2e_problems`, not `archive_problems`. The section covers two files,
+    # so a text-wide search lets one file's Read/cp block discharge the other's:
+    # clause 1 says "for each of", and the previous round's evidence for it was
+    # refused precisely because deleting one file's `cp` and retargeting its `Read`
+    # left both of its assertions green. See
+    # `test_the_section_2e_guard_fails_on_every_way_it_could_be_satisfied_wrongly`.
     for stem in ("tool-patterns-latest", "conversation-patterns-latest"):
-        assert f"_pipeline/reflection/{stem}.md" in section, (
-            f"§2e no longer writes {stem}.md"
-        )
-        assert not archive_problems(section, stem), (
+        assert f"_pipeline/reflection/{stem}.md" in section, f"§2e no longer writes {stem}.md"
+        assert not section_2e_problems(section, stem), (
             f"§2e must Read and dated-copy {stem}.md before overwriting it: "
-            f"{archive_problems(section, stem)}"
-        )
-        # Per file, not per section: clause 1 says "for each of", and one Read
-        # anywhere in §2e would satisfy a section-wide search while leaving the
-        # other pattern file's overwrite unread.
-        assert re.search(
-            r"(?<![A-Za-z_])\bRead\s*\(\s*[\"'`][^\"'`]*" + re.escape(stem) + r"\.md", section
-        ), (
-            f"§2e must Read {stem}.md itself: Write refuses a file it has not read "
-            "in the session, so the instruction has to name this file"
+            f"{section_2e_problems(section, stem)}"
         )
 
 
@@ -353,24 +368,102 @@ def test_no_skill_builds_an_archive_name_from_a_generated_field(skills):
 
 
 # --- Clause 4 ------------------------------------------------------------------
-def test_pipeline_stays_gitignored_so_retention_is_copies_not_tracking():
-    """Clause 4: retention is achieved by dated copies (or, later, by a vault
-    relocation Alan decides), not by un-ignoring `_pipeline/` and committing
-    generated reports into the repo. If someone un-ignores it, the choice has
-    changed and this pin — plus #436's open question for Alan — has to be
-    re-decided, not silently implemented from a test."""
-    probe = "_pipeline/reflection/signals-latest.md"
-    # No skip here: this asserts repo state the round does control, and a run that
-    # cannot ask git is a failure worth seeing, not a green line.
+def test_retention_is_dated_copies_not_reports_tracked_in_the_repo():
+    """Clause 4: retention is achieved by dated copies (or, later, by #436's option
+    2 — relocating the canonical reports into the vault), never by committing
+    generated reports into `~/lloyd`.
+
+    Scoped to the exclusion the clause actually states — the reports are not
+    *tracked* — and deliberately not to the repo-wide ignore rule, which is the
+    finding this round answers: an unmarked assertion that `_pipeline/` is still
+    ignored made a file this item does not own, and which preflight refuses to
+    let any round edit anyway, a precondition of every future round that touches a
+    comment in this file. That is a second, unrelated use of the same mark the
+    module docstring above argues against. `git ls-files _pipeline` asks only what
+    #436 decided, and it fails on exactly the one change that would contradict the
+    clause: reports added to the index.
+
+    `.gitignore:25` `/_pipeline/` is still what makes an unarchived overwrite
+    unrecoverable — that is stated in the archive rule and in this file's opening,
+    where it is the *reason* for the change, and pinned as a loop boundary by
+    `tests/test_automod_doc_claims.py::test_path_policy_matches_the_doc[.gitignore-denied]`
+    rather than by an assertion about the working tree.
+
+    No skip: this reads the index of the repo the test lives in, and a run that
+    cannot ask git is a failure worth seeing, not a green line.
+    """
     proc = subprocess.run(
-        ["git", "-C", str(ROOT), "check-ignore", "-q", probe],
+        ["git", "-C", str(ROOT), "ls-files", "_pipeline"],
         capture_output=True,
+        text=True,
         timeout=30,
     )
-    assert proc.returncode == 0, (
-        f"`{probe}` is no longer gitignored. #436 keeps the nightly reports out of "
-        "the repo and archives them as dated copies; committing generated reports "
-        "into ~/lloyd is Alan's decision, not a side effect of this test file."
+    assert proc.returncode == 0, f"`git ls-files _pipeline` failed: {proc.stderr.strip()}"
+    assert proc.stdout.splitlines() == [], (
+        f"generated reflection reports are tracked in the repo: "
+        f"{proc.stdout.splitlines()[:3]}. #436 keeps retention in dated copies — "
+        "putting _pipeline/ under version control is a decision recorded on the "
+        "item, not a side effect of a test file."
+    )
+
+
+# --- The seam the one exemption rests on ---------------------------------------
+def test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree(tmp_path, monkeypatch):
+    """The process boundary this rule's single exemption sits on.
+
+    `scripts/reflection_archive.py` refuses to land a skill that overwrites a
+    reflection report without a dated copy, with one exempt tier: a write
+    prescribed through `vault_write`. The reason is a claim about a *different
+    process* — the MCP server resolves that call against `~/obsidian` and rejects a
+    `~/lloyd/` target — and until now nothing pinned it (review finding, round
+    SM_20260912_163822: the exemption rested on a note in `lloyd/MEMORY.md`, and a
+    memory file is not a test). If that resolver ever starts accepting a `~/lloyd/`
+    path, the exempt tier stops being a no-op and silently re-opens the loss this
+    item is about, so the refusal is asserted against the real handler.
+
+    Three shapes, because the skills write the path three ways and the guard's
+    three branches are separate code: a `~/`-prefixed home path, an absolute path
+    outside the vault, and a `..` traversal that reaches the same file. All three
+    must say `PATH_ESCAPE`, for a read as well as a write — the skills' read lists
+    name the same paths.
+
+    Then the positive control, which is what makes the six refusations above mean
+    anything: with `VAULT` pointed at a scratch tree, the same handler really does
+    write a file that is inside the vault. Without it, a handler broken to fail
+    every call would satisfy the exemption for the wrong reason forever."""
+    from agent_mcp import vault as vault_tool
+
+    targets = (
+        "~/lloyd/_pipeline/reflection/signals-latest.md",
+        "/home/alansrobotlab/lloyd/_pipeline/reflection/signals-latest.md",
+        "../../../home/alansrobotlab/lloyd/_pipeline/reflection/signals-latest.md",
+    )
+    for target in targets:
+        for handler in (vault_tool._vault_write, vault_tool._vault_read):
+            result = handler(
+                {"path": target, "content": "# would destroy the report\n"}
+            )
+            assert result.get("code") == "PATH_ESCAPE", (
+                f"{handler.__name__}({target!r}) returned {result!r}. The "
+                "`vault-write` exemption in scripts/reflection_archive.py is only "
+                "honest while a `~/lloyd/` target is refused here"
+            )
+
+    monkeypatch.setattr(vault_tool, "VAULT", tmp_path)
+    monkeypatch.setattr(vault_tool, "_audit_write", lambda *a, **k: None)
+    written = vault_tool._vault_write(
+        {"path": "reflection-archive-probe.md", "content": "inside the vault\n"}
+    )
+    assert written.get("success") is True, (
+        f"the handler no longer writes a path inside the vault, so the six "
+        f"refusations above prove nothing: {written!r}"
+    )
+    assert (tmp_path / "reflection-archive-probe.md").read_text(
+        encoding="utf-8"
+    ) == "inside the vault\n"
+    assert not (tmp_path / "lloyd").exists(), (
+        "the refused `~/` target still created a stray tree inside the vault, so "
+        "the guard passes while the write half-happens"
     )
 
 
@@ -492,6 +585,220 @@ def test_the_writer_and_the_test_share_one_definition():
         "reflection_archive_errors is defined but validate() no longer calls it — "
         "the lander would compute nothing and land everything"
     )
+
+
+_P = "/home/alansrobotlab/lloyd/_pipeline/reflection/"
+
+#: §2e of `nightly-reflection-knowledge-write`, transcribed from the live vault
+#: (heading at line 151, landed by vault commit 56e71846 and annotated by
+#: f686c824). Transcribed rather than re-worded because the mutations below are
+#: mutations of the text the run actually reads, and the guard has to be shown to
+#: reject *that* wording, not a paraphrase of it.
+_REAL_2E_ARCHIVE_TOOL = (
+    f'Read("{_P}tool-patterns-latest.md")\n'
+    f'Bash("test -f {_P}tool-patterns-latest.md && \\\n'
+    "STAMP=$(date -u +%Y-%m-%d-%H%M) && \\\n"
+    f"cp {_P}tool-patterns-latest.md \\\n"
+    f'{_P}tool-patterns-latest-$STAMP.md")\n'
+)
+_REAL_2E_ARCHIVE_CONV = (
+    f'Read("{_P}conversation-patterns-latest.md")\n'
+    f'Bash("test -f {_P}conversation-patterns-latest.md && \\\n'
+    "STAMP=$(date -u +%Y-%m-%d-%H%M) && \\\n"
+    f"cp {_P}conversation-patterns-latest.md \\\n"
+    f'{_P}conversation-patterns-latest-$STAMP.md")\n'
+)
+_REAL_2E_WRITE_TOOL = (
+    f"- `Write(file_path=\"{_P}tool-patterns-latest.md\", content=…)` — source: "
+    "`## Tool Patterns — Failures` and `## Tool Patterns — Successes` sections\n"
+)
+_REAL_2E_WRITE_CONV = (
+    f"- `Write(file_path=\"{_P}conversation-patterns-latest.md\", content=…)` — "
+    "source: `## Conversation Patterns` section\n"
+)
+_REAL_2E_RULES = (
+    "\nFour rules that are not stylistic:\n"
+    "\n- **`STAMP` is `date -u +%Y-%m-%d-%H%M` evaluated by the shell**, never "
+    "typed by hand and never read out of a field inside the previous report.\n"
+    "- **`Read` before `Write`.** `Write` refuses to overwrite a file it has not "
+    "read in the current session, and both files exist from the previous cycle.\n"
+    "- **A missing source is checked, not ignored.** `test -f` gates the `cp`.\n"
+)
+
+
+def _section_2e(archive: str, writes: str) -> str:
+    """Assemble §2e the way the live vault writes it: archive fence, then writes."""
+    return (
+        "### 2e. Pattern Output Files\n"
+        "\n"
+        "Both pattern files are overwritten **in place**, `_pipeline/` is gitignored.\n"
+        "Archive first, one `Read` + one `cp` per file:\n"
+        "\n"
+        "```\n"
+        + archive
+        + "\n```\n"
+        "\n"
+        "Then write the new content from the artifact:\n"
+        + writes
+        + _REAL_2E_RULES
+    )
+
+
+_REAL_2E = _section_2e(_REAL_2E_ARCHIVE_TOOL + _REAL_2E_ARCHIVE_CONV,
+                       _REAL_2E_WRITE_TOOL + _REAL_2E_WRITE_CONV)
+
+#: Two `Write` calls, one `cp` instruction. That is all §2e contains, so dropping
+#: either pattern file's archive block from the fence leaves every string a
+#: section-wide search looks for still present.
+_ARCHIVE_FENCE = _REAL_2E_ARCHIVE_TOOL + _REAL_2E_ARCHIVE_CONV
+
+#: The mutations the review rung performed on the real §2e, plus the one it did not
+#: need to: each breaks a distinct obligation of clause 1 while §2e still names both
+#: files and still contains the string `Read(`. Key is what broke, value is
+#: (mutated section, the file whose clause is now unmet).
+_REAL_2E_MUTATIONS = {
+    # "For each of the two pattern files" — conversation-patterns loses its copy
+    # step; the tool-patterns block above it still satisfies any search that is not
+    # per file, and archive_problems asked per stem on the whole section catches it
+    # only because the stem is paired with the text.
+    "conversation-patterns loses its cp block": (
+        _section_2e(_REAL_2E_ARCHIVE_TOOL, _REAL_2E_WRITE_TOOL + _REAL_2E_WRITE_CONV),
+        "conversation-patterns-latest",
+    ),
+    # "the existing file is Read" — the Read is retargeted at the other governed
+    # report. `Read(` is still in the section and both paths are still named, so
+    # only a Read paired with *this* stem fails.
+    "tool-patterns's Read retargeted at the other report": (
+        _section_2e(
+            _REAL_2E_ARCHIVE_TOOL.replace(
+                f'Read("{_P}tool-patterns-latest.md")',
+                f'Read("{_P}conversation-patterns-latest.md")',
+            )
+            + _REAL_2E_ARCHIVE_CONV,
+            _REAL_2E_WRITE_TOOL + _REAL_2E_WRITE_CONV,
+        ),
+        "tool-patterns-latest",
+    ),
+    # "before the overwrite write" — the copy block for conversation-patterns moves
+    # below the Write call that replaces it, so it archives the new content and the
+    # previous cycle is still lost. A section-wide min-index comparison over all
+    # copies and all writes passes this: tool-patterns' copy is still first.
+    "conversation-patterns's copy moved below its Write": (
+        "### 2e. Pattern Output Files\n"
+        "\n"
+        "Both pattern files are overwritten **in place**, `_pipeline/` is gitignored.\n"
+        "\n"
+        "```\n"
+        + _REAL_2E_ARCHIVE_TOOL
+        + "\n```\n"
+        "\n"
+        "Then write the new content from the artifact:\n"
+        + _REAL_2E_WRITE_TOOL
+        + _REAL_2E_WRITE_CONV
+        + "\n"
+        "```\n"
+        + _REAL_2E_ARCHIVE_CONV
+        + "```\n"
+        + _REAL_2E_RULES,
+        "conversation-patterns-latest",
+    ),
+}
+
+
+def section_2e_problems(body: str, stem: str) -> list[str]:
+    """Every obligation clause 1 places on §2e, for one named file.
+
+    Shared by the live-vault assertion and its mutations, so the mutation test
+    proves the same predicates that gate the clause and not a copy of them.
+
+    `archive_problems` alone is not enough here, and the gap is exactly the one the
+    review found. It answers "does the text it is handed archive `<stem>`", and its
+    ordering checks compare the *minimum* copy index against the *minimum* write
+    index across the whole text — so in a section that covers two files, a block
+    belonging to file A discharges file B's obligation for free, and A's healthy
+    copy masks B's late one. Pairing the stem with its own Read, and comparing its
+    own copy against its own `Write`, is what makes "for each of" mean something.
+    """
+    problems = archive_problems(body, stem)
+    if not re.search(
+        r"(?<![A-Za-z_])\bRead\s*\(\s*[\"'`][^\"'`]*" + re.escape(stem) + r"\.md", body
+    ):
+        problems = problems + [
+            f"§2e never Reads {stem}.md itself: Write refuses a file it has not read "
+            "in the session, so the instruction has to name this file"
+        ]
+    copy_at = [
+        i for i, ln in enumerate(ra.logical_lines(body))
+        if ra.COPY.search(ln) and ra.archive_dest(stem).search(ln)
+    ]
+    write_at = [
+        i for i, ln in enumerate(ra.logical_lines(body))
+        if re.search(r"(?<![A-Za-z_])\bWrite\s*\(.*" + re.escape(stem) + r"\.md", ln)
+    ]
+    if copy_at and write_at and min(copy_at) > min(write_at):
+        problems = problems + [
+            f"{stem}'s dated copy appears below the Write that overwrites it, so it "
+            "archives the new report and the previous cycle is still lost"
+        ]
+    return problems
+
+
+#: The two greps the prior round's evidence for clause 1 actually used, lifted out
+#: so its finding can be restated as an assertion instead of argued in prose.
+_LOOSE_PATH = re.compile(r"_pipeline/reflection/[a-z-]+-latest\.md")
+_LOOSE_READ = re.compile(r"(?<![A-Za-z_])\bRead\s*\(")
+
+
+def test_the_section_2e_guard_fails_on_every_way_it_could_be_satisfied_wrongly():
+    """The guard clause 1 rests on, proved by breaking §2e three ways.
+
+    Round SM_20260912_163822 was refused on clause 1 (review_retry) because its
+    evidence was two section-wide greps — the file named somewhere in the section,
+    and the string `Read(` somewhere in the section — and the grader broke the
+    clause while both still passed: it deleted the `cp` for one pattern file and
+    retargeted its `Read` at the other. So this test does not assert that a guard
+    reports a problem. It takes the §2e text as landed in the vault, applies the
+    review's own mutations to it, and asserts three things per mutation: the
+    per-file guard names *the file that was broken*, a guard written the way the
+    previous round wrote it stays silent, and the unmutated section is clean (so
+    none of this is vacuous).
+    """
+    for stem in ("tool-patterns-latest", "conversation-patterns-latest"):
+        assert section_2e_problems(_REAL_2E, stem) == [], (
+            f"the §2e as landed in the vault was reported as broken for {stem}: "
+            f"{section_2e_problems(_REAL_2E, stem)} — every mutation below would be "
+            "vacuous"
+        )
+
+    for label, (section, victim) in _REAL_2E_MUTATIONS.items():
+        assert section_2e_problems(section, victim), (
+            f"§2e mutated ({label}) and the guard for {victim} stayed silent"
+        )
+        # It must name the file it is refusing, or the next reader cannot act.
+        assert victim in " ".join(section_2e_problems(section, victim)), (
+            f"§2e mutated ({label}) but the refusal for {victim} did not name it: "
+            f"{section_2e_problems(section, victim)}"
+        )
+        # The sibling file, untouched by this mutation, must still be clean — the
+        # guard is per file, so it cannot answer a broken clause by complaining
+        # about the wrong one.
+        sibling = (
+            "conversation-patterns-latest" if victim == "tool-patterns-latest"
+            else "tool-patterns-latest"
+        )
+        assert section_2e_problems(section, sibling) == [], (
+            f"§2e mutated ({label}) reported {sibling} as broken, which the mutation "
+            f"did not touch: {section_2e_problems(section, sibling)}"
+        )
+        # The previous round's two greps, run on the broken section: both still
+        # true, which is the review's finding restated as a fact about this tree
+        # rather than argued. If this assertion ever fails, the loose form has
+        # become able to catch the case and the pairing above is no longer the only
+        # thing standing between a mutation and a green suite.
+        assert _LOOSE_PATH.search(section) and _LOOSE_READ.search(section), (
+            f"{label}: the loose greps would now fail too, so this mutation no longer "
+            "demonstrates the gap the pairing above closes"
+        )
 
 
 # --- Non-vacuity: the pin must be able to fail ---------------------------------
