@@ -13,20 +13,30 @@ Everything here goes through subprocess rather than importing the module:
 `app.paths` reads LLOYD_FACTS_ROOT / LLOYD_KG_DB at IMPORT time, so an
 in-process test would have to win a race with the import, and the CLI contract
 (exit code, message, flag) is the thing that actually protects the operator.
+
+The interpreter is resolved, never assumed. `.venvs/` is gitignored
+(.gitignore:3), so a `git worktree` — including the automod round worktree the
+gate runs the suite in — has no venv of its own. The module-level skip that used
+to key off `ROOT/.venvs` existing therefore removed every test in this file from
+exactly the tree where a regression here would have been caught before it
+landed, and the run still reported green (#498 clause 4). Use the tree's own venv
+when it has one; otherwise the interpreter already running pytest, which
+provably has the dependencies: the rest of this suite imports `agent_mcp` out of
+this tree in-process. `SCRIPT`, `cwd` and the `LLOYD_*` env overrides still point
+every subprocess at THIS tree, so only the interpreter is borrowed, never the
+code under test.
 """
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parent.parent
-PY = ROOT / ".venvs" / "lloyd" / "bin" / "python"
+_VENV = ROOT / ".venvs" / "lloyd" / "bin" / "python"
+PY = _VENV if _VENV.exists() else Path(sys.executable)
 SCRIPT = ROOT / "eval" / "run_eval.py"
 BASELINES = ROOT / "eval" / "baselines"
-
-pytestmark = pytest.mark.skipif(not PY.exists(), reason="lloyd venv not present")
 
 
 def _queries_file(tmp_path: Path) -> Path:
@@ -179,12 +189,34 @@ def test_unreadable_store_is_its_own_failure_and_ignores_the_flag(tmp_path):
         assert not list(BASELINES.glob("pytest-bad-store-*.json"))
 
 
-def test_a_healthy_run_record_carries_its_corpus():
-    """Guards the *shape* against the live store without re-running the eval.
+CORPUS_KEYS = {"facts_root", "kg_db", "entity_dirs", "edges_total",
+               "edges_active", "aliases", "entities", "facts"}
 
-    Baselines written before this change have no `corpus` key, so anything
-    reading that directory must read defensively — this asserts on the newest
-    record that has one, and skips when none does."""
+
+def _assert_corpus_shape(rec: dict) -> None:
+    """The one assertion pair this file's shape test exists for, shared by both
+    of its arms so the fallback arm cannot be a weaker test than the historical
+    one."""
+    assert CORPUS_KEYS <= set(rec["corpus"]), sorted(CORPUS_KEYS - set(rec["corpus"]))
+    assert isinstance(rec["corpus_ok"], bool)
+
+
+def test_a_healthy_run_record_carries_its_corpus(tmp_path):
+    """Guards the *shape* of a run record: a reader that trusts `corpus` needs
+    the keys to be there, and every baseline written before commit 60f7139 (the
+    commit that added this file) has no `corpus` key at all — so anything reading
+    that directory must read defensively.
+
+    Arm 1 (the live checkout): assert on the newest historical record that has a
+    `corpus` block, which costs no eval run.
+
+    Arm 2 (a fresh tree): `eval/baselines/` is gitignored (.gitignore:92), so in
+    a round worktree the directory does not exist and there is no history to
+    read. There the same `_assert_corpus_shape` runs against a record this test
+    writes itself, via the same empty-corpus CLI path the test above uses. A
+    skip is not an alternative: skipping in a worktree is exactly how #498
+    clause 4's blind spot worked — the suite stayed green in the one tree where
+    the gate would have acted on a failure."""
     recs = sorted(BASELINES.glob("*.json"), key=lambda p: p.stat().st_mtime,
                   reverse=True)
     for path in recs:
@@ -194,8 +226,16 @@ def test_a_healthy_run_record_carries_its_corpus():
             continue
         if not isinstance(rec, dict) or "corpus" not in rec:
             continue
-        assert {"facts_root", "kg_db", "entity_dirs", "edges_total",
-                "edges_active", "aliases", "entities", "facts"} <= set(rec["corpus"])
-        assert isinstance(rec["corpus_ok"], bool)
+        _assert_corpus_shape(rec)
         return
-    pytest.skip("no run record with corpus provenance recorded yet")
+
+    label = "pytest-shape-fallback"
+    _cleanup(label)
+    try:
+        proc = _run(tmp_path, "--label", label, "--allow-empty-corpus")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = list(BASELINES.glob(f"{label}-*.json"))
+        assert len(written) == 1, written
+        _assert_corpus_shape(json.loads(written[0].read_text()))
+    finally:
+        _cleanup(label)

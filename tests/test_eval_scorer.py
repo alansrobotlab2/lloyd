@@ -160,7 +160,10 @@ def test_argparse_defaults_and_the_signature_default_cannot_disagree():
     from agent_mcp import vault
     parser = ev.build_parser()
     params = inspect.signature(ev.run_eval).parameters
-    # Two of the four dest names differ from the parameter names.
+    # One of the four argparse dests differs from the parameter it sets —
+    # `--alpha` lands on dest `alpha` while the parameter is `rerank_alpha`. The
+    # other three share their name, and getting this mapping wrong is how a
+    # mirror test silently compares a knob to itself.
     dests = {"graph_rerank": "graph_rerank", "rerank_alpha": "alpha",
              "graph_top_k": "graph_top_k", "graph_hops": "graph_hops"}
     for knob, dest in dests.items():
