@@ -715,14 +715,22 @@ def test_unpatched_debug_dir_is_the_live_pipeline_dir():
 #
 # `_apply_anchored_edits` refuses an anchor that does not match the canonical
 # text exactly once, and the only text the model is given is what this prompt
-# shows. MEMORY.md used to arrive as `_read(MEMORY_PATH, tail=4000)` against a
-# 25,869-char file — 15.5 % of it anchorable — while `_propose_one` seeded half
-# of every round's variants to that file. The tail existed to keep the RESPONSE
-# small; the response has been bounded by MAX_EDITS/MAX_ANCHOR_CHARS/
-# MAX_REPLACEMENT_CHARS since #446, so it only ever cost reach.
+# shows. MEMORY.md used to arrive as `_read(MEMORY_PATH, tail=4000)` — its newest
+# 4,000 chars and nothing else, out of a live file several times that long — while
+# `_propose_one` seeded half of every round's variants to that file. The tail
+# existed to keep the RESPONSE small; the response has been bounded by
+# MAX_EDITS/MAX_ANCHOR_CHARS/MAX_REPLACEMENT_CHARS since #446, so the tail only
+# ever cost reach.
 
 #: The pre-fix window, spelled out so a reader can see the size being replaced.
 OLD_TAIL_CHARS = 4_000
+
+#: Tokens of context on the smallest engine the generator may be pointed at: the
+#: primary vLLM serve, `agent-services/bin/start-27b-nvfp4-sakamakismile-mtp-tuned.sh`
+#: `--max-model-len 131072` (its un-tuned sibling runs 262144). `_call_local_llm`
+#: POSTs to the configured `base_url`, so a round shares this window with
+#: interactive traffic and up to `max_variants_per_round` parallel seeds.
+SMALLEST_ENGINE_CONTEXT = 131_072
 
 
 @pytest.fixture
@@ -747,8 +755,10 @@ def tall_memory_with_a_leading_sentinel(tmp_path, monkeypatch):
 
 def test_the_memory_prompt_shows_the_file_in_full_not_a_tail(
         tall_memory_with_a_leading_sentinel, tmp_path):
-    """Clause 1. A sentinel in the first 1,000 chars of a >4,000-char MEMORY.md
-    reaches the rendered prompt, and the section stops calling the text a tail.
+    """Clause 1. A sentinel in the first 1,000 chars of a MEMORY.md 5.8x the old
+    window (23,278 fixture chars vs the 4,000 shown; the live vault file was
+    33,704 when this round's acceptance probe ran) reaches the rendered prompt,
+    and the section stops calling the text a tail.
 
     Against the pre-fix read this fails twice over: the sentinel sits outside the
     last 4,000 chars, and the heading literally says `tail`.
@@ -824,10 +834,13 @@ def test_an_anchor_copied_out_of_the_rendered_prompt_survives_the_parser(
     assert err is None, f"an anchor quoted from the prompt is in contract: {err}"
     assert len(v["edits"]) == 1
     assert v["edits"][0]["anchor"] == copied
-    # What the round costs, measured rather than asserted elsewhere: a one-edit
-    # response is a constant whatever the file it edits, which is #446's whole
-    # argument, while the prompt carrying the surface is now ~27 KB longer.
-    assert len(raw) < 1_024, "a one-edit response is a constant whatever the file size"
+    # The rendered prompt is what grew, and this threshold is what says so: the
+    # same fixture rendered ~9,000 chars pre-fix, when the block was the last
+    # 4,000 of a 23,278-char file. #446's claim that the RESPONSE stays a
+    # constant whatever the file size is pinned where it is actually a source
+    # claim — in test_the_bounded_response_contract_holds_while_the_shown_surface_grows
+    # below, off the payload and the three edit bounds — not here, where a
+    # response-size assertion could only ever be a property of this test body.
     assert len(prompt) > 11_000, "the prompt got the whole surface, not a summary of it"
 
 
@@ -861,7 +874,20 @@ def test_the_bounded_response_contract_holds_while_the_shown_surface_grows(
     small = hg._build_single_variant_prompt(_cfg(tmp_path), ["prompts"],
                                             target_file_hint="MEMORY.md")
     assert len(big) > len(small), "the prompt carries the growth"
-    # ...and the growth is affordable: the prompt plus a worst-case response still
-    # sits inside the smallest engine context on this box (131,072 tokens), at
-    # ~4 chars/token.
-    assert (len(big) + hg.CEILING_CHARS) / 4 < 131_072
+
+    # The growth has to stay affordable, measured not narrated. At ~4 chars per
+    # token, a whole-surface prompt plus a worst-case legal response costs
+    # (len(big) + CEILING_CHARS) / 4 tokens against SMALLEST_ENGINE_CONTEXT — the
+    # smallest `--max-model-len` any engine on this box runs with — so this fails
+    # on the source the day CEILING_CHARS rises, a second surface is shown whole,
+    # or MEMORY.md grows past the headroom. The fixture is deliberately a few times
+    # the live file's length, so the headroom it leaves is the number that matters,
+    # not the fixture's own size.
+    headroom = SMALLEST_ENGINE_CONTEXT - (len(big) + hg.CEILING_CHARS) / 4
+    assert headroom > 100_000, (
+        f"the shown surface is within {(len(big) + hg.CEILING_CHARS) / 4:.0f} tokens "
+        f"of the {SMALLEST_ENGINE_CONTEXT}-token engine context; raising "
+        "MAX_* or showing another surface whole has eaten the headroom this round "
+        "bought, and the item's fallback (a size-triggered section outline) is now "
+        "the live problem rather than a future one"
+    )

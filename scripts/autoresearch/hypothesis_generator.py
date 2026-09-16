@@ -17,8 +17,9 @@ post-mortem rather than silently lost.
 
 An anchor can only quote text the model was actually shown, so BOTH editable
 surfaces go into the prompt in full (#680). MEMORY.md used to arrive as its last
-4,000 chars against a ~26 KB file, which left the older 85 % of it unanchorable
-while `_propose_one` aimed half of every round's seeds at exactly that file.
+4,000 chars, which against the 33,704-char file measured when #680 landed left
+the older ~88 % of it unanchorable — while `_propose_one` aimed half of every
+round's seeds at exactly that file.
 
 Why the contract is anchored edits and not file contents (#446): a variant used
 to be required to return a whole prompt surface verbatim, so a legal response
@@ -286,12 +287,13 @@ def _build_single_variant_prompt(
     soul = _read(SOUL_PATH)
     # #680: shown in full, like SOUL.md. An anchor has to be copied verbatim from
     # the text this prompt shows (`variant_sandbox._apply_anchored_edits` refuses
-    # anything else), and a 4,000-char tail of a ~26 KB MEMORY.md left 85 % of
-    # that file unanchorable — while `_propose_one` aims half of every round's
-    # seeds at it. The tail existed to bound the RESPONSE, and the response is
-    # bounded instead by MAX_EDITS/MAX_ANCHOR_CHARS/MAX_REPLACEMENT_CHARS, so what
-    # is shown now costs input tokens only (~6.7k of a 131k+ context at the live
-    # size) and buys back the whole surface.
+    # anything else), and a 4,000-char tail of the 33,704-char MEMORY.md measured
+    # when #680 landed left ~88 % of that file unanchorable — while `_propose_one`
+    # aims half of every round's seeds at it. The tail existed to bound the
+    # RESPONSE, and the response is bounded instead by
+    # MAX_EDITS/MAX_ANCHOR_CHARS/MAX_REPLACEMENT_CHARS, so what is shown now costs
+    # input tokens only: the whole rendered prompt measured 47,228 chars (~11.8k
+    # tokens) against the live vault, of a 131,072-token engine context.
     memory = _read(MEMORY_PATH)
     user = _read(USER_PATH, tail=2000)
     corrections = _read(CORRECTIONS_PATH, tail=2000)

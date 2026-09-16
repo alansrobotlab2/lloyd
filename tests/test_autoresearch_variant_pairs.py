@@ -418,3 +418,44 @@ def test_the_round_report_names_the_surface_of_its_drops_without_the_log(
     report = (cfg.paths.rounds_dir / f"{result['round_id']}.md").read_text(encoding="utf-8")
     assert "- variants dropped by surface: MEMORY.md: 2, SOUL.md: 0" in report
     assert "dropped 2 of 3 variants at anchored-edit apply (MEMORY.md: 2, SOUL.md: 0)" in caplog.text
+
+
+def test_the_queue_record_carries_the_per_surface_counts_to_another_process(monkeypatch):
+    """The seam from `run()`'s result into the queue row that the queue-health
+    sweep reads in a different process.
+
+    `workers/sources/autoresearch.py::execute` `json.dumps(result, default=str)`s
+    the round result into the record's `response` and truncates it at 50,000
+    chars. Clause 3's mapping is only useful if it survives that trip, and
+    `default=str` would silently flatten a non-dict drop container (a
+    `collections.Counter`, say, serialises fine but a tuple-keyed map would not)
+    into something a reader cannot compare. This runs the real `execute` over a
+    stubbed `run_round.run` returning the real result shape, then decodes the
+    record the way a reader does.
+    """
+    from workers.queue import QueueItem
+    from workers.sources import autoresearch as ar_source
+    from scripts.autoresearch import run_round as rr_module
+
+    round_result = {
+        "round_id": "R_20260916_000000", "winner": None, "decisions": [],
+        "variants_dropped": 2, "variants_dropped_by_surface": {"MEMORY.md": 2, "SOUL.md": 0},
+    }
+
+    async def fake_run(**_kwargs):
+        return round_result
+
+    item = QueueItem(id=1, source="autoresearch", kind="round", priority=60,
+                     payload={}, dedup_key="autoresearch:round", state="claimed",
+                     attempts=1, enqueued_at="", claimed_at="", claimed_by="t",
+                     completed_at=None, error=None)
+
+    # `execute` imports `run` lazily inside its body (to keep claude_agent_sdk out
+    # of boot), so the patch has to be on the module attribute it re-reads there.
+    rr_module.run = fake_run
+    out = asyncio.run(ar_source.execute(item))
+
+    record = json.loads(out["response"])
+    assert record["variants_dropped_by_surface"] == {"MEMORY.md": 2, "SOUL.md": 0}, (
+        "a reader in another process must see the same mapping the report prints")
+    assert record["variants_dropped"] == 2

@@ -646,22 +646,30 @@ def test_round_id_shape():
 # `_apply_anchored_edits` matches against the canonical file, which it reads in
 # full — the region that was unreachable for a MEMORY-targeted variant was
 # created upstream, in `hypothesis_generator._build_single_variant_prompt`, which
-# showed only `_read(MEMORY_PATH, tail=4000)` of a 25,869-char file. The model
-# could only copy an anchor from what it was shown, so a variant quoting an older
-# note never existed by the time it got here; the ones that did arrive were the
-# ones quoting the newest 15.5 %. This pins the apply side of the seam so the
-# whole path is covered: an anchor from the oldest 4,000 chars materialises.
+# showed only `_read(MEMORY_PATH, tail=4000)` — 4,000 chars of a live file
+# measured at 33,704 when this round's acceptance probe ran, the newest ~12 %. The
+# model could only copy an anchor from what it was shown, so a variant quoting an
+# older note never existed by the time it got here; the ones that did arrive were
+# the ones quoting that newest slice. This pins the apply side of the seam so the
+# whole path is covered: an anchor from the oldest 4,000 chars materialises. It
+# would pass on the pre-fix tree as well, because the apply side always read
+# canonical whole — it is the regression guard at the far end of the seam, and the
+# test that discriminates the fix is
+# `test_the_memory_prompt_shows_the_file_in_full_not_a_tail` in
+# tests/test_autoresearch_hypothesis.py.
 
-#: The window the generator used to show (`hypothesis_generator.py:282`, pre-#680).
+#: The window the generator used to show (`hypothesis_generator.py`, pre-#680).
 OLD_SHOWN_TAIL_CHARS = 4_000
 
 
 @pytest.fixture
 def tall_canonical_memory(tmp_path, monkeypatch):
-    """A canonical MEMORY.md past 22,000 chars — the live file measured 25,869 at
-    triage and grows note by note — with a
-    unique note at the top: the position that was unanchorable, since the tail
-    read began ~18,400 chars into a file this size."""
+    """A canonical MEMORY.md of 23,939 chars — the same order as the live file —
+    whose first note line is unique. That line sits at char 9, and on a file this
+    size the old tail read began at char 19,939, so it was exactly the position
+    that could not be anchored. The 700 filler lines below it repeat and are only
+    load-bearing as ballast past the window; the anchor this file's test quotes is
+    the unique first note."""
     root = tmp_path / "vault_tall"
     root.mkdir()
     memory = root / "MEMORY.md"
@@ -697,7 +705,10 @@ def test_an_anchor_quoting_the_oldest_4000_chars_of_memory_md_materialises(cfg, 
         "and is absent from the 4,000 chars the generator used to show, so an "
         "anchor here could only have been invented"
     )
-    assert len(text) > 3 * OLD_SHOWN_TAIL_CHARS, "the file is long enough for the window to bite"
+    # The fixture's own size is load-bearing, so it is asserted rather than
+    # described: below 5 windows the file is short enough that a tail read still
+    # reaches far back, and this test would stop exercising an unreachable region.
+    assert len(text) > 5 * OLD_SHOWN_TAIL_CHARS, "the file is long enough for the window to bite"
 
     out = vs.materialize(cfg, {
         "variant_id": "V_oldest_region", "target_surface": "prompts",
