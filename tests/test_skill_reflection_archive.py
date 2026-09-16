@@ -430,8 +430,31 @@ def test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree(tmp_path, mo
     Then the positive control, which is what makes the six refusations above mean
     anything: with `VAULT` pointed at a scratch tree, the same handler really does
     write a file that is inside the vault. Without it, a handler broken to fail
-    every call would satisfy the exemption for the wrong reason forever."""
+    every call would satisfy the exemption for the wrong reason forever.
+
+    `VAULT` is pointed at the scratch tree and `_audit_write` stubbed before *any*
+    call, the refusals included. Both are about the red run, not the green one, and
+    this file is unmarked so a gate rung runs it. If the guard ever stops refusing, an
+    unpatched `VAULT` means the write half-happens into the live vault: a regressed
+    `~/lloyd/…` target resolves under it as a literal `~/obsidian/~/lloyd/…` tree,
+    which is the stray-root incident `_normalize_vault_path` documents, and this test
+    would create one per rung. And the hook's target is `AUDIT_LOG_FILE`, derived from
+    the real vault at import rather than from the patched `VAULT`, so an unstubbed hook
+    would append the control write to the real `~/obsidian/memory/audit/writes.jsonl`.
+
+    The root identity is asserted unpatched, before the patch: the exemption is a
+    claim about where the writer resolves paths, and "outside the vault" only implies
+    "cannot reach ~/lloyd" while the writer's root really is ~/obsidian."""
     from agent_mcp import vault as vault_tool
+
+    assert Path(vault_tool.VAULT).expanduser().resolve() == (Path.home() / "obsidian").resolve(), (
+        f"the vault writer's root is {vault_tool.VAULT!r}, not the vault: the "
+        "`vault-write` exemption claims a `~/lloyd/` target is outside everything "
+        "this handler can write to, and that is false the moment its root moves"
+    )
+
+    monkeypatch.setattr(vault_tool, "VAULT", tmp_path)
+    monkeypatch.setattr(vault_tool, "_audit_write", lambda *a, **k: None)
 
     targets = (
         "~/lloyd/_pipeline/reflection/signals-latest.md",
@@ -443,14 +466,22 @@ def test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree(tmp_path, mo
             result = handler(
                 {"path": target, "content": "# would destroy the report\n"}
             )
+            # Checked before the code, because the two are not exclusive:
+            # `Path(VAULT) / "~/lloyd/…"` is how the 2026-07 incident wrote — `~`
+            # becomes a real directory *inside* the vault root — so a guard that
+            # both refuses and half-writes is exactly what a code-only check misses.
+            # In the loop rather than after the control write, because on a
+            # regression the code assertion below would abort the test first.
+            assert not (tmp_path / "~").exists(), (
+                f"{handler.__name__}({target!r}) created a stray `~` directory inside "
+                "the vault root while refusing it, so the exemption's premise — the "
+                "write does not happen — is false even where the code says it is"
+            )
             assert result.get("code") == "PATH_ESCAPE", (
                 f"{handler.__name__}({target!r}) returned {result!r}. The "
                 "`vault-write` exemption in scripts/reflection_archive.py is only "
                 "honest while a `~/lloyd/` target is refused here"
             )
-
-    monkeypatch.setattr(vault_tool, "VAULT", tmp_path)
-    monkeypatch.setattr(vault_tool, "_audit_write", lambda *a, **k: None)
     written = vault_tool._vault_write(
         {"path": "reflection-archive-probe.md", "content": "inside the vault\n"}
     )
@@ -461,9 +492,12 @@ def test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree(tmp_path, mo
     assert (tmp_path / "reflection-archive-probe.md").read_text(
         encoding="utf-8"
     ) == "inside the vault\n"
-    assert not (tmp_path / "lloyd").exists(), (
-        "the refused `~/` target still created a stray tree inside the vault, so "
-        "the guard passes while the write half-happens"
+    # And the scratch root holds exactly the control file: the same half-write check
+    # the loop makes per call, re-run here over the whole tree so a target that
+    # landed somewhere else inside the vault — not just under `~` — is visible too.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["reflection-archive-probe.md"], (
+        "a refused target left something behind in the vault root besides the control "
+        f"write: {sorted(str(p.relative_to(tmp_path)) for p in tmp_path.iterdir())}"
     )
 
 
@@ -590,10 +624,15 @@ def test_the_writer_and_the_test_share_one_definition():
 _P = "/home/alansrobotlab/lloyd/_pipeline/reflection/"
 
 #: §2e of `nightly-reflection-knowledge-write`, transcribed from the live vault
-#: (heading at line 151, landed by vault commit 56e71846 and annotated by
-#: f686c824). Transcribed rather than re-worded because the mutations below are
-#: mutations of the text the run actually reads, and the guard has to be shown to
-#: reject *that* wording, not a paraphrase of it.
+#: (heading at line 151; the copy blocks landed in vault commit 56e71846, whose
+#: prose has since been reworded around them). Transcribed rather than re-worded
+#: because the mutations below are mutations of the shape the run actually reads, and
+#: the guard has to be shown to reject that shape, not a paraphrase of it.
+#:
+#: The transcription is checked against the vault by the live-vault test for this
+#: section, not from here: this fixture only has to be shaped like §2e, and
+#: `test_knowledge_write_section_2e_archives_both_pattern_files` is what fails when
+#: the real section stops looking like this.
 _REAL_2E_ARCHIVE_TOOL = (
     f'Read("{_P}tool-patterns-latest.md")\n'
     f'Bash("test -f {_P}tool-patterns-latest.md && \\\n'
