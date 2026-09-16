@@ -998,9 +998,13 @@ workers:
       # cadence is bounded by the work, not by its own output. Two pool
       # slots and the KV gate arbitrate against an in-flight autocode round.
       # 900 -> 300 (Alan, 2026-09-15) for the sweep: a batch takes ~5 min,
-      # so 300 s is back-to-back while the board is being read. Put it back
-      # to 900 once `round sweep-status` reads unswept 0.
-      interval_seconds: 300
+      # so 300 s is back-to-back while the board is being read. Back to 900
+      # on 2026-09-16 14:35Z: the sweep read the whole board (67 batches,
+      # 423 ranked) and at 300 s single triage ran back to back, confirming
+      # into a pool the loop cannot drain (39 held) while sharing the engine
+      # with rounds. New items still get swept: the sweep takes precedence
+      # whenever the pool is non-empty, at whatever cadence this is.
+      interval_seconds: 900
       max_inflight: 1
       # The sweep (2026-09-15, Alan's "switch gears"): while any open item
       # is unread, a run takes `sweep_batch` items in one turn instead of a
