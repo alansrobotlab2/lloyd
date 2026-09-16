@@ -49,6 +49,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -486,6 +487,96 @@ def test_memory_add_and_builtin_edit_on_one_path_lose_neither_side(tmp_path):
         f"memory_add clobbered {len(lost_edits)}/{PER_WRITER} Edits "
         f"(first: PLACEHOLDER-fs-{lost_edits[0]:03d} still present)"
     )
+
+
+def test_a_write_and_concurrent_memory_adds_leave_only_a_serial_order(tmp_path, monkeypatch):
+    """A `Write` (whole-file overwrite) against `memory_add` on the same path.
+
+    Clause 2 names `_write` as well as `_edit`, and the Edit tests cannot stand in
+    for it. `Edit` patches a placeholder, so a lost Edit reads back as
+    `PLACEHOLDER` still sitting in the file. `Write` replaces the whole file, so a
+    lost Write reads back as nothing at all: the file is simply the body it was
+    meant to replace, and the call still answered `File written`. That is the
+    failure with no signal anywhere, so it gets its own test.
+
+    Placement is the production placement, the same one the thread-lane test
+    builds: `Write` on a worker thread (`builtin_fs` dispatches it with
+    `asyncio.to_thread`) while `memory_add` runs inline in the event loop
+    (`session.py` awaits the handler directly, no `to_thread` anywhere in the
+    file). Each round seeds the old body, then races one `Write` of a fresh body
+    against three `memory_add`s.
+
+    The invariant is the narrow one that always holds and never over-claims. A
+    `Write` that answers `File written` has committed, so its body heads the
+    file — whatever else the round did. Which appends are on top of it is not
+    determined: an append ordered before the Write is legitimately overwritten
+    (that is what a whole-file overwrite means, and `memory_add` cannot claim
+    otherwise), an append ordered after it re-reads inside the lock and is
+    present. So the tail is a subset of the entries, and the head is the new
+    body. Old body and new body differ on the first line and nowhere else, so the
+    first line alone decides the round.
+
+    What must never appear, and does at base, is `Write` answering `File written`
+    while its bytes are in no version of the file: an append reads the old body
+    before the Write's rename, then commits after it and restores the old body
+    under its own entry. Measured at base on this exact shape (a no-op lock plus a
+    bare `write_text`, which is what `main` does), three trials of 20 rounds: the
+    new body headed the file in 0, 2 and 2 rounds; the old body headed it with the
+    Write gone and a success reply in 3, 6 and 8; the remaining 10-15 per trial
+    headed it with a torn prefix — an entry line, or a body missing its first
+    bytes. In every trial at least 18 of the 20 rounds ended in a shape no serial
+    order of these commits can produce.
+    """
+    target = tmp_path / "MEMORY.md"
+    # `memory_add` resolves its path as `MEMORIES_ROOT / file`, so the root has to
+    # be the directory holding `target` or the two writers would touch different
+    # files and the test would pass by avoiding the race entirely.
+    monkeypatch.setattr(SESSION, "MEMORIES_ROOT", tmp_path)
+    pad = "\n".join(f"- seed {n}: filler text that stands for a real memory entry."
+                    for n in range(60))
+    old_body = "# MEMORY\n- the body Write is about to replace\n" + pad
+    entries = [f"mu-w0-s{i:03d}" for i in range(3)]
+
+    def new_body(i: int) -> str:
+        return f"# MEMORY rewritten by Write round {i}\n" + pad[:600]
+
+    async def _round(i: int) -> dict:
+        target.write_text(old_body, encoding="utf-8")
+        loop = asyncio.get_running_loop()
+        new = new_body(i)
+        with ThreadPoolExecutor(max_workers=4) as threads:
+            # The Write is issued first and the appends follow it in the loop, so
+            # the serial order the lane must produce is fixed: new body, then all
+            # three entries. `Write` on the executor is where `builtin_fs` puts
+            # it; the appends are inline, which is where `session.py` puts them.
+            writer = loop.run_in_executor(
+                threads, FS._write, {"file_path": str(target), "content": new})
+            adds = [SESSION._memory_add({"file": "MEMORY.md", "entry": e})
+                    for e in entries]
+            wrote = await writer
+        return {"new": new, "adds": adds, "wrote": wrote}
+
+    for i in range(20):
+        res = asyncio.run(_round(i))
+        assert res["wrote"].startswith("File written"), f"round {i}: {res['wrote']!r}"
+        assert all(a.get("success") for a in res["adds"]), f"round {i}: {res['adds']}"
+        text = target.read_text(encoding="utf-8")
+        new = res["new"]
+        # `Write` stores `content` verbatim and this body has no trailing
+        # newline, so the file is `new` exactly when nothing followed it, and
+        # `new` + "\n" + entries when an append committed after it.
+        head_ok = text == new or text.startswith(new + "\n")
+        tail = text[len(new):].strip("\n").splitlines() if head_ok else []
+        first = text.splitlines()[0] if text else "(empty file)"
+        assert head_ok and set(tail) <= set(entries), (
+            f"round {i}: `Write` answered `File written` and the file is not the "
+            f"new body with a subset of the entries on top of it. {len(text)} "
+            f"bytes heading {first!r}, tail {tail}; the new body is {len(new)} "
+            f"bytes and the old one {len(old_body)}. Heading the old body means an "
+            "append re-committed the state it read before the Write's rename, so "
+            "the Write is in no version of the file; anything else is a torn file."
+        )
+    assert not list(tmp_path.glob("*.lock")), list(tmp_path.glob("*.lock"))
 
 
 # ── clause 3a: a reader never sees an empty or torn file ────────────────────
