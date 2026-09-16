@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -770,7 +771,14 @@ def promote(round_id: str, worktree: Path, base: str, *,
                 raise PromoteError(f"{program} never became healthy after restart")
 
         # ── prove the RUNNING code changed ─────────────────────────────
-        _, body = _get(f"{BACKEND}/health")
+        # Polled, not probed once: on 2026-09-16 16:31Z a single `_get`
+        # right after the health wait came back with no body, the check
+        # read `commit None`, and a landing that had merged, restarted and
+        # booted the new code was rolled back as `promote_failed` — the
+        # loop's every rollback has been a false positive, and this was one
+        # more. A body that names a commit is the answer; the wrong commit
+        # is a real failure; no answer within the budget is reported as such.
+        body = _wait_for_commit(f"{BACKEND}/health", VERIFY_COMMIT_BUDGET)
         actual = (body or {}).get("commit")
         if actual != head:
             raise PromoteError(f"backend reports commit {actual}, expected {head} "
@@ -820,11 +828,21 @@ def promote(round_id: str, worktree: Path, base: str, *,
         try:
             evidence = _rollback_inline(live, live_head)
             S.append_event({"event": "rollback_succeeded", "trigger": "promote_failed",
-                            "commit": head, "restored": live_head,
+                            "commit": head, "restored": live_head, "round_id": round_id,
                             "stash": evidence.get("patch"), "tag": evidence.get("tag")})
         except Exception as exc:
             S.append_event({"event": "rollback_failed", "trigger": "promote_failed",
-                            "commit": head, "error": str(exc)[:400]})
+                            "commit": head, "round_id": round_id, "error": str(exc)[:400]})
+        # Say it on the ledger as the landing's failure, not the round's:
+        # the round passed every rung and the tree was put back. Without
+        # this row the finished implement row's `landed: true` stood alone
+        # and `implement_outcomes` read the attempt as spent (the 2026-09-16
+        # 16:31Z rollback of #658). `rolled_back_rounds` cannot help here —
+        # it joins through a `promoted` row that a pre-observation failure
+        # never writes.
+        S.append_event({"event": "land_failed", "round_id": round_id, "ok": False,
+                        "external_blocker": True, "rolled_back": True,
+                        "detail": f"landing rolled back after the merge: {sys.exc_info()[1]}"[:500]})
         S.clear_current()
         raise
     finally:
@@ -922,6 +940,25 @@ def _wait_health(url: str, budget: float) -> bool:
             refreshed = time.time()
         time.sleep(1.0)
     return False
+
+
+VERIFY_COMMIT_BUDGET = 60.0
+
+
+def _wait_for_commit(url: str, budget: float) -> dict | None:
+    """Poll `url` until it answers with a JSON body that names a `commit`,
+    or `budget` runs out (then the last body, which may be None). A 200
+    with no body, a refused connection while the process is replaced, and
+    a `starting` 503 are all "not yet", never "no"."""
+    deadline = time.time() + budget
+    body = None
+    while True:
+        status, body = _get(url, 5.0)
+        if isinstance(body, dict) and body.get("commit"):
+            return body
+        if time.time() >= deadline:
+            return body if isinstance(body, dict) else None
+        time.sleep(1.0)
 
 
 def _host_ram_available_gib() -> int:

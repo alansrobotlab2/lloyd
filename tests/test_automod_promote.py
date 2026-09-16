@@ -597,6 +597,25 @@ def test_get_reports_the_status_of_an_empty_or_non_json_answer(monkeypatch):
     assert P._get("http://x/health") == (200, {"ok": True})
 
 
+def test_the_commit_check_polls_through_no_answer_and_starting_to_the_commit(monkeypatch):
+    """One `_get` with no body rolled back a good landing on 2026-09-16 16:31Z."""
+    answers = iter([(None, None), (200, None), (503, {"status": "starting", "commit": "c" * 40}),
+                    (200, {"status": "ok", "commit": "c" * 40})])
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: next(answers))
+    monkeypatch.setattr(P.time, "sleep", lambda s: None)
+    body = P._wait_for_commit("http://x/health", 30.0)
+    assert body["commit"] == "c" * 40, "the first body naming a commit answers, starting or not"
+    # A body that names a commit answers at once, even while `starting`.
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (503, {"status": "starting", "commit": "d" * 40}))
+    assert P._wait_for_commit("http://x/health", 30.0)["commit"] == "d" * 40
+    # No commit within the budget: the last body, so the caller can say what it saw.
+    clock = {"t": 0.0}
+    monkeypatch.setattr(P.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(P.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + 10.0))
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (200, None))
+    assert P._wait_for_commit("http://x/health", 30.0) is None
+
+
 def test_restart_skip_idle_pauses_the_pool_and_restarts_over_whatever_runs(monkeypatch):
     """When the idle wait itself is what is broken — a leaked harness_runs
     count on 2026-09-16 — the restart that would clear it must not wait on it."""
