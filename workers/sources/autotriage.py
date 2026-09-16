@@ -418,6 +418,8 @@ def _origin_block(candidate, ledger) -> str:
     if prior:
         lines.append("earlier triages of this item filed or appended to: "
                      + " ".join(f"#{i}" for i in prior))
+    lines.append(f"priority: {candidate.priority} (set on the item; high runs before medium before low "
+                 "in every pool)")
     if candidate.worth or candidate.size:
         lines.append(f"a sweep read it and ranked it worth={candidate.worth or '?'} "
                      f"size={candidate.size or '?'}; your contract should fit that size")
@@ -891,7 +893,16 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — a release that fails costs a poll, not the run
         logger.warning("release_held_confirmations failed: %s", exc)
 
-    if bool(payload.get("sweep", False)):
+    # A `high` draft is picked up next (2026-09-16, Alan's ask): ahead of a
+    # sweep batch, ahead of any cluster, ahead of the depth gate's pause, and
+    # its confirmation is never held. The tag is a person saying "this one
+    # now"; every other rule here is about the pile.
+    urgent = await asyncio.to_thread(B.select_urgent, S.LEDGER_PATH)
+    if urgent is not None:
+        logger.info("backlog #%d is priority high: triaging it before the sweep and the clusters",
+                    urgent.id)
+
+    if urgent is None and bool(payload.get("sweep", False)):
         # The sweep goes first: while any open item is unread, reading eight
         # of them beats confirming one. Group and single triage resume on
         # their own once the pool is empty.
@@ -901,15 +912,26 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             return await _execute_sweep(item, batch)
         logger.info("sweep: every open item has been read; falling through to group/single triage")
 
-    if bool(payload.get("group_triage", True)):
+    group_pick = None
+    if urgent is None and bool(payload.get("group_triage", True)):
         from scripts.automod import cluster as CL
         pick = B.select_cluster(S.LEDGER_PATH, CL.load_clusters(),
                                 min_size=int(payload.get("group_min_items") or DEFAULT_GROUP_MIN_ITEMS),
                                 max_size=int(payload.get("group_max_items") or DEFAULT_GROUP_MAX_ITEMS))
         if pick is not None:
             # A qualifying cluster wins over the single pool: consolidation
-            # is finite, the single pool is not.
-            return await _execute_group(item, pick[0], pick[1])
+            # is finite, the single pool is not — unless the single pool's
+            # best candidate outranks every member on the human's
+            # `priority` (2026-09-16). The tag is honoured across the two
+            # pools, not only inside each; a `high` draft does not wait a
+            # day of nightly clusters. The cluster is kept as the fallback
+            # for the case the depth gate pauses single triage below.
+            single = await asyncio.to_thread(B.select_candidate, S.LEDGER_PATH)
+            if single is None or not B.priority_beats(single, pick[1]):
+                return await _execute_group(item, pick[0], pick[1])
+            group_pick = pick
+            logger.info("single #%d (priority %s) outranks cluster %s; taking it first",
+                        single.id, single.priority, pick[0].get("id"))
 
     # The depth gate. Triage confirmed 59 items on 2026-09-12 against a drain
     # of ~6 a day, and nothing read the depth: 78 of 89 up_next items had
@@ -925,7 +947,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     gate = await asyncio.to_thread(B.implement_pool_full, S.LEDGER_PATH, floor=floor)
     # A live blocker is never held back by the gate, holding or not: the pause
     # below would otherwise leave it untriaged (select_candidate takes it first).
-    if gate["full"] and not hold_on and not await asyncio.to_thread(_live_blocker_waiting):
+    if gate["full"] and not hold_on and urgent is None \
+            and not await asyncio.to_thread(_live_blocker_waiting):
+        if group_pick is not None:
+            return await _execute_group(item, group_pick[0], group_pick[1])
         return {"status": "skipped",
                 "summary": (f"single-item triage paused: {gate['ready']} ready in up_next ≥ bound "
                             f"{gate['bound']} ({gate['landed_items_7d']} items landed in 7 d, "
@@ -1053,9 +1078,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     if hold_on and parsed["verdict"] == "confirmed" and not B.is_human_only(parsed["acceptance"]):
         gate = await asyncio.to_thread(B.implement_pool_full, S.LEDGER_PATH, floor=floor)
         # A live blocker is never held: it is the precondition of a clause a
-        # round already deferred, not more inventory for a full pool.
+        # round already deferred, not more inventory for a full pool. Nor is
+        # a `high` item: held, it would wait for the pool to drain under its
+        # bound, which on 2026-09-16 was 73 ready against a bound of 73 —
+        # "picked up next" would have meant never.
         live = await asyncio.to_thread(B.live_blockers, S.LEDGER_PATH, items=[candidate])
-        hold = bool(gate["full"]) and candidate.id not in live
+        hold = bool(gate["full"]) and candidate.id not in live and not B.is_high(candidate)
     B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
                      check=parsed["check"], close=close, spawned=spawned, merged=merged,
                      acceptance=parsed["acceptance"],

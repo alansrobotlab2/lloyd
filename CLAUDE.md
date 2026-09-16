@@ -994,11 +994,22 @@ version.
   ordinary passes. `parse_sweep_verdict`, `record_sweep_verdicts`,
   `SWEEP_SCHEMA`; the summary row is `backlog_sweep`, retirements are
   ordinary `backlog_triage` rows tagged `sweep_batch`.
-- **The rank orders every pool** (`backlog.rank_key`: worth, then size;
-  unranked sorts between medium and low). `select_candidate` takes the
-  best-ranked untriaged draft (age breaks ties), `select_confirmed` sorts
-  by rank then clause count after the near tier, and
-  `release_held_confirmations` fills room best first. Swept ids are
+- **The human's priority orders every pool, then the rank** (2026-09-16,
+  `backlog.priority_key` over `rank_key`: worth, then size; unranked sorts
+  between medium and low). `select_candidate` takes the highest-priority,
+  then best-ranked untriaged draft (age breaks ties), `select_confirmed`
+  sorts by priority, then near tier, rank and clause count,
+  `release_held_confirmations` fills room best first, and a single
+  candidate that outranks every member of the cluster group triage would
+  take goes first. Both writers default `low`; `none`, absent and unknown
+  read as `low`; `round priority-backfill` writes it onto files with none.
+  **A `high` item is picked up next**: triage takes it before a sweep
+  batch, a cluster or a live blocker, never holds its confirmation for the
+  depth gate, and the next round takes it first (`is_high`,
+  `select_urgent`); within `high` the newest goes first (`recency_key`),
+  because 87 legacy highs were open the day this landed.
+  `round priority-backfill --reset-open` writes `low` onto every open item
+  so the tier starts empty; human-only. Swept ids are
   `released` from quarantine; `swept` and `parked` are expiry-exempt.
 - **Autocode can yield** (`workers.sources.autocode.yield_to_sweep`, ships
   off): no round starts while `sweep_pending` > 0. It ran that way for the

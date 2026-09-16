@@ -58,10 +58,14 @@ def test_oldest_untriaged_is_selected_first(backlog_dir, tmp_path):
     assert B.select_candidate(tmp_path / "none.jsonl").id == 11
 
 
-def test_priority_does_not_override_age(backlog_dir, tmp_path):
+def test_priority_overrides_age(backlog_dir, tmp_path):
+    # Inverted on 2026-09-16. Oldest-first was the rule while the board was a
+    # stale pile nobody had read; after the sweep read all of it, Alan's rule
+    # is that the human's `priority` tag is honoured in every pool. Age still
+    # breaks ties within one priority (`tests/test_backlog_priority.py`).
     write_item(backlog_dir, 20, days_old=10, priority="high")
     write_item(backlog_dir, 21, days_old=300, priority="low")
-    assert B.select_candidate(tmp_path / "none.jsonl").id == 21
+    assert B.select_candidate(tmp_path / "none.jsonl").id == 20
 
 
 def test_an_already_triaged_item_is_not_reselected(backlog_dir, tmp_path):
@@ -573,3 +577,66 @@ def test_autocode_housekeeping_releases_with_triages_floor(monkeypatch, tmp_path
     monkeypatch.setattr(B, "expire_stale_spawns", lambda *a, **k: [])
     A._housekeeping({})
     assert seen == {"floor": 7, "enabled": False}
+
+
+# ── a high item is picked up next (2026-09-16) ──────────────────────────────
+#
+# Alan: "I want to be able to submit a high priority backlog item and have it
+# be picked up next." The tag has to beat every rule about the pile: the
+# sweep batch, the cluster, the depth gate's pause and its hold.
+
+def test_a_high_draft_is_confirmed_straight_into_up_next_over_a_full_pool(backlog_dir, ledger, monkeypatch):
+    _ready(backlog_dir, ledger, 40)
+    write_item(backlog_dir, 7, days_old=300)                     # medium, older
+    write_item(backlog_dir, 8, days_old=1, priority="high", name="Urgent thing")
+    turn = _stub_turn(monkeypatch, verdict="confirmed", acceptance="it passes")
+    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
+    assert out["status"] == "success" and out["item_id"] == 8 and out["held"] is False
+    assert len(turn.calls) == 1 and 'priority="high"' in turn.calls[0]
+    status, tags = _status(backlog_dir, 8)
+    assert status == "up_next" and B.HELD_TAG not in tags
+    assert B.held_confirmations(ledger) == {}
+    picked, _ = B.select_confirmed(ledger)
+    assert picked.id == 8, "and the next round takes it ahead of the 40 already ready"
+
+
+def test_a_high_draft_runs_before_a_sweep_batch_and_before_a_cluster(backlog_dir, ledger, monkeypatch):
+    from scripts.automod import cluster as CL
+    monkeypatch.setattr(B, "sweep_enabled", lambda: True)
+    for i in (1, 2, 3):
+        write_item(backlog_dir, i, days_old=200, name=f"Low {i}", priority="low")
+    write_item(backlog_dir, 8, days_old=1, priority="high", name="Urgent thing")
+    monkeypatch.setattr(CL, "load_clusters", lambda *a, **k: {"clusters": [
+        {"id": "c1", "item_ids": [1, 2, 3], "duplicates": []}]})
+    ran = {}
+
+    async def fake_sweep(item, members):
+        ran["sweep"] = [m.id for m in members]
+        return {"status": "ok", "summary": "sweep"}
+
+    async def fake_group(item, cluster, members):
+        ran["group"] = [m.id for m in members]
+        return {"status": "ok", "summary": "group"}
+    monkeypatch.setattr(M, "_execute_sweep", fake_sweep)
+    monkeypatch.setattr(M, "_execute_group", fake_group)
+    turn = _stub_turn(monkeypatch, verdict="confirmed", acceptance="it passes")
+    payload = {"group_triage": True, "sweep": True, "sweep_batch": 8, "implement_pool_floor": 40,
+               "group_min_items": 2, "group_max_items": 4}
+    out = asyncio.run(M.execute(_QItem(payload)))
+    assert out["status"] == "success" and out["item_id"] == 8 and not ran, \
+        "the high draft went first; neither the sweep nor the cluster ran"
+    assert [i.id for i in B.sweep_pool(ledger)] == [1, 2, 3], "the sweep never reads a high item"
+    # With the high one confirmed, the sweep resumes as before.
+    out = asyncio.run(M.execute(_QItem(payload)))
+    assert out["summary"] == "sweep" and ran["sweep"] == [1, 2, 3]
+    assert len(turn.calls) == 1
+
+
+def test_a_high_draft_is_triaged_even_when_holding_is_off_and_the_pool_is_full(backlog_dir, ledger, monkeypatch):
+    _ready(backlog_dir, ledger, 40)
+    write_item(backlog_dir, 8, days_old=1, priority="high", name="Urgent thing")
+    turn = _stub_turn(monkeypatch, verdict="confirmed", acceptance="it passes")
+    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40,
+                                        "hold_confirmations": False})))
+    assert out["status"] == "success" and out["item_id"] == 8 and len(turn.calls) == 1
+    assert _status(backlog_dir, 8)[0] == "up_next"

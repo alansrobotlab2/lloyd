@@ -23,6 +23,10 @@ _BOARD_ICONS = ["📋", "📋", "📋", "📋", "📋"]
 
 
 _FALLBACK_FIELDS = ("board", "status", "priority", "tags", "blocked", "assigned", "position")
+# `low` since 2026-09-16, matching `agent_mcp/backlog.py::DEFAULT_PRIORITY`:
+# the loop's pools honour this field, and a create that named no priority
+# used to be stamped `none`, which nothing could sort.
+_DEFAULT_PRIORITY = "low"
 
 
 def _backlog_parse_fm(content: str) -> tuple:
@@ -171,7 +175,7 @@ async def backlog_tasks(board_id: str = "", status: str = ""):
                 "name": name,
                 "description": description,
                 "status": fm.get("status", "draft"),
-                "priority": fm.get("priority", "none"),
+                "priority": fm.get("priority", _DEFAULT_PRIORITY),
                 "blocked": fm.get("blocked", False),
                 "tags": normalize_tags(fm.get("tags")),
                 "completed": fm.get("status") == "done",
@@ -303,7 +307,7 @@ async def backlog_task_create(request: Request):
         "type": "backlog",
         "segment": "backlog",
         "status": create_status,
-        "priority": data.get("priority", "none"),
+        "priority": data.get("priority") or _DEFAULT_PRIORITY,
         "board": board_name,
         "blocked": False,
         "assigned": False,

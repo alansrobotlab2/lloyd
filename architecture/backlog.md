@@ -142,7 +142,7 @@ actually on disk:
 |---|---|---|
 | `status` | enum | `draft` \| `up_next` \| `in_progress` \| `done`. See above. |
 | `board` | string | The board's **name** is its identity. `lloyd` is Lloyd's own. |
-| `priority` | enum | `none` \| `low` \| `medium` \| `high`. MCP creates default `medium`, the HTTP route defaults `none`. |
+| `priority` | enum | `low` \| `medium` \| `high`. Both writers default `low` since 2026-09-16, and the loop's every pool sorts on it ahead of the sweep's rank (`scripts/automod/backlog.py::priority_key`); `none`, absent or unknown reads as `low`; `high` means "next": triage takes it before anything else and never holds it, the next round takes it first, and within `high` the newest wins. `round priority-backfill` writes `low` onto files that have none. Before that day MCP stamped `medium` and the HTTP route `none`, and nothing read either. |
 | `tags` | list | Coerced through `app/backlog_tags.py::normalize_tags` — see below. |
 | `blocked` / `assigned` | bool | Free-text filters on `backlog_tasks`; no machine acts on them. |
 | `created` / `updated` | ISO datetime | `updated` is stamped by every writer. |

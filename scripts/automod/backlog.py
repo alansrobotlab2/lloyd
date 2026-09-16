@@ -904,7 +904,8 @@ def load_item(path: Path) -> Item | None:
             break
     return Item(
         path=path, id=int(m.group(1)), name=name or path.stem,
-        status=str(fm.get("status", "draft")), priority=str(fm.get("priority", "medium")),
+        status=str(fm.get("status", "draft")),
+        priority=_level(fm.get("priority"), PRIORITY_LEVELS) or DEFAULT_PRIORITY,
         created=str(fm.get("created", "")), body=body,
         board=str(fm.get("board", "") or ""),
         tags=normalize_tags(fm.get("tags")),
@@ -2200,6 +2201,103 @@ SIZE_LEVELS = ("small", "medium", "large")
 _WORTH_ORDER = {"high": 0, "medium": 1, "": 2, "low": 3}
 _SIZE_ORDER = {"small": 0, "medium": 1, "": 1, "large": 2}
 
+# ── The human's priority ────────────────────────────────────────────────────
+#
+# `priority` in front matter is the one field on an item a person sets to
+# say how much they want it, and until 2026-09-16 no pool read it: the MCP
+# writer stamped `medium` on everything it filed, the HTTP route stamped
+# `none`, and the loop ordered on the sweep's `worth`. Alan's rule: the pace
+# is tolerable if the tag is honoured, so `priority_key` sorts ahead of
+# `rank_key` in every pool — triage, sweep, implement, the held release —
+# and a single candidate that outranks every member of the cluster group
+# triage would take goes first (`priority_beats`). The default is `low`, on
+# both writers and on read: a value nobody chose must not outrank one
+# somebody did. `none`, an absent key or an unknown word all read as `low`;
+# `backfill_priority` writes the word onto the files that had none.
+PRIORITY_LEVELS = ("high", "medium", "low")
+DEFAULT_PRIORITY = "low"
+_PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def priority_key(item: Item) -> int:
+    """Sort key: high before medium before low. Anything else is low."""
+    return _PRIORITY_ORDER.get(str(item.priority or "").strip().lower(),
+                               _PRIORITY_ORDER[DEFAULT_PRIORITY])
+
+
+def is_high(item: Item) -> bool:
+    """A `high` item is the one a person asked for next: it goes ahead of a
+    sweep batch, a cluster and a live blocker in triage, its confirmation is
+    never held by the depth gate, and it is first in the implement order."""
+    return priority_key(item) == _PRIORITY_ORDER["high"]
+
+
+def _created_ts(item: Item) -> float | None:
+    try:
+        c = datetime.fromisoformat(str(item.created).replace("Z", "+00:00"))
+        if c.tzinfo is None:
+            c = c.replace(tzinfo=timezone.utc)
+        return c.timestamp()
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def recency_key(item: Item) -> tuple[float, int]:
+    """Age as a sort key: oldest first — except within `high`, where the
+    NEWEST goes first. A high item is a person asking for it next, and the
+    board carried 87 open highs on 2026-09-16 (17 ready, 9 held), most of
+    them months old; oldest-first would have put the one just raised
+    behind all of them. An unknown `created` sorts last either way."""
+    ts = _created_ts(item)
+    if is_high(item):
+        return (float("inf") if ts is None else -ts, item.id)
+    return (float("inf") if ts is None else ts, item.id)
+
+
+def priority_beats(item: Item, others) -> bool:
+    """True when `item` is strictly higher priority than every one of
+    `others` — the single-pool candidate against a cluster's members."""
+    others = list(others)
+    return bool(others) and priority_key(item) < min(priority_key(o) for o in others)
+
+
+def backfill_priority(boards: tuple[str, ...] | None = None, *,
+                      default: str = DEFAULT_PRIORITY, dry_run: bool = False,
+                      reset_open: bool = False,
+                      backlog_dir: Path | None = None) -> list[dict]:
+    """Write `default` onto every item — any board, any status — whose
+    `priority` is absent, `none`, or not one of `PRIORITY_LEVELS`.
+
+    `reset_open` is the stronger reading of "default low for existing
+    items": every OPEN item is written `default` whatever it carries, so the
+    high tier starts empty and a person raises what they want next. Never
+    run by anything but a human's `round priority-backfill --reset-open`;
+    the value it overwrites is kept in the activity line.
+
+    One activity line per file so the change is on the item's own record. A
+    file whose YAML does not parse is reported `skipped`, never rewritten
+    (`update_frontmatter` refuses it). Returns one row per item touched or
+    skipped; `dry_run` reports without writing.
+    """
+    out: list[dict] = []
+    for item in all_items(boards, backlog_dir=backlog_dir):
+        fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+        raw = fm.get("priority")
+        valid = _level(raw, PRIORITY_LEVELS)
+        if valid and not (reset_open and item.status in OPEN_STATUSES and valid != default):
+            continue
+        row = {"item_id": item.id, "status": item.status, "was": raw, "now": default}
+        if dry_run:
+            out.append({**row, "written": False})
+            continue
+        why = (f"it was {raw!r} and no pool read that" if not valid
+               else f"reset from {raw!r} by hand so the high tier starts empty")
+        ok = update_frontmatter(
+            item.path, {"priority": default},
+            activity=f"automod: priority set to {default} — the board default since 2026-09-16; {why}")
+        out.append({**row, "written": ok, **({} if ok else {"skipped": "frontmatter did not parse"})})
+    return out
+
 
 def rank_key(item: Item) -> tuple[int, int, int]:
     """Sort key: worth first, then size, then defects before proposals. Lower
@@ -2893,13 +2991,29 @@ def select_candidate(ledger: Path,
     once, so oldest-first is no longer the only signal, and a single triage
     spends a 90-turn session writing a contract — that session belongs to
     the item most worth landing. Age still orders items of one rank.
+
+    Since 2026-09-16 the human's `priority` sorts above the sweep's rank: a
+    `high` item unread by any sweep goes before a `low` one the sweep called
+    worth `high`. A `high` item goes before a live blocker too — it is the
+    one a person asked for next; the blocker still goes before everything
+    medium or low, being a dependency rather than a preference.
     """
     candidates, _held = triage_pool(ledger, boards)
     if not candidates:
         return None
     live = live_blockers(ledger, boards, items=candidates)
-    return sorted(candidates, key=lambda i: (i.id not in live, rank_key(i),
-                                             i.created or "9999", i.id))[0]
+    # Within `high` the sweep's rank does not apply and the newest goes
+    # first (`recency_key`): the tag is the ranking.
+    return sorted(candidates, key=lambda i: (not is_high(i), i.id not in live, priority_key(i),
+                                             rank_key(i) if not is_high(i) else (0, 0, 0),
+                                             recency_key(i)))[0]
+
+
+def select_urgent(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS) -> Item | None:
+    """The `high` draft single triage takes before a sweep batch or a
+    cluster, or None. `select_candidate`'s pick when that pick is high."""
+    pick = select_candidate(ledger, boards)
+    return pick if pick is not None and is_high(pick) else None
 
 
 def select_confirmed(ledger: Path,
@@ -2947,12 +3061,23 @@ def select_confirmed(ledger: Path,
     # contract first — a 12-clause umbrella lands one time in five, a
     # 4-clause single one in three. The near tier stays above it: one fix
     # cycle is cheaper than any fresh round whatever its rank.
-    return sorted(ready, key=lambda pair: (pair[0].id not in near,
-                                           rank_key(pair[0]),
-                                           pair[0].clause_count or len(acceptance_clauses_of(pair[1])),
-                                           pair[0].id in outcomes,
-                                           pair[0].id not in live,
-                                           pair[0].created or "9999", pair[0].id))[0]
+    # The human's `priority` sits above all of that (2026-09-16): a fresh
+    # `high` runs before a `low` that is one fix cycle from landing, because
+    # the tag is the one thing on the board a person set on purpose. Within
+    # medium and low the tiers above still hold; within `high` the sweep's
+    # rank and the contract length do not apply and the newest goes first
+    # (`recency_key`) — the near tier and fresh-before-re-offer still do.
+    def _key(pair):
+        item, ev = pair
+        high = is_high(item)
+        return (priority_key(item),
+                item.id not in near,
+                rank_key(item) if not high else (0, 0, 0),
+                (item.clause_count or len(acceptance_clauses_of(ev))) if not high else 0,
+                item.id in outcomes,
+                item.id not in live,
+                recency_key(item))
+    return sorted(ready, key=_key)[0]
 
 
 def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
@@ -3131,17 +3256,23 @@ def release_held_confirmations(ledger: Path, boards: tuple[str, ...] | None = DE
     if hand_moves_only or not waiting:
         return out
     # A live blocker does not wait for room: it is the precondition of work
-    # the pool already holds, not more inventory for it.
+    # the pool already holds, not more inventory for it. Nor does a `high`
+    # item (2026-09-16): a person raising a held item to high is asking for
+    # it next, and the next pass moves it.
     live = live_blockers(ledger, boards, items=[open_by_id[i] for i in waiting])
     for iid in [i for i in waiting if i in live]:
         of = f"#{live[iid]}" if live[iid] is not None else "an unnamed item"
         _release(iid, f"a live blocker of {of}; blockers are never held", move=True)
     waiting = [i for i in waiting if i not in live]
+    for iid in [i for i in waiting if is_high(open_by_id[i])]:
+        _release(iid, "priority high: never held by the depth gate", move=True)
+    waiting = [i for i in waiting if not is_high(open_by_id[i])]
     if not waiting:
         return out
     # Best first, then oldest: room in the pool goes to the confirmation the
-    # sweep ranked highest, not to whichever arrived first.
-    waiting.sort(key=lambda i: (rank_key(open_by_id[i]), held[i]))
+    # human prioritised highest, then to the one the sweep ranked highest,
+    # not to whichever arrived first.
+    waiting.sort(key=lambda i: (priority_key(open_by_id[i]), rank_key(open_by_id[i]), held[i]))
     if enabled:
         gate = implement_pool_full(ledger, boards, floor=floor, now=now)
         room = gate["bound"] - gate["ready"]
@@ -3390,7 +3521,9 @@ def select_cluster(ledger: Path, clusters: dict, *, min_size: int = 3, max_size:
     triage already judged are dropped (a cluster of `keep`s is never
     retaken); a cluster whose last group event was not `incomplete` is
     skipped. The survivors are trimmed to `max_size` keeping the `duplicates`
-    pairs together, then oldest first. Largest surviving cluster wins.
+    pairs together, then highest priority, then oldest. The cluster whose
+    best member carries the highest `priority` wins; the largest among
+    equals (2026-09-16 — it was largest-first alone before).
     """
     seen = triaged_ids(ledger)
     judged = group_triaged_ids(ledger)
@@ -3402,6 +3535,7 @@ def select_cluster(ledger: Path, clusters: dict, *, min_size: int = 3, max_size:
     for d in _ledger_events(ledger, "backlog_group_triage", require_item=False):
         last_group[str(d.get("cluster_id") or "")] = str(d.get("verdict") or d.get("outcome") or "done")
     best: tuple[dict, list[Item]] | None = None
+    best_score: tuple[int, int] = (0, 0)
     for c in (clusters or {}).get("clusters") or []:
         cid = str(c.get("id") or "")
         if cid in last_group and last_group[cid] != INCOMPLETE:
@@ -3415,11 +3549,12 @@ def select_cluster(ledger: Path, clusters: dict, *, min_size: int = 3, max_size:
                 if int(i) in ids and int(i) not in dup_ids:
                     dup_ids.append(int(i))
         rest = sorted((i for i in ids if i not in dup_ids),
-                      key=lambda i: (by_id[i].created or "9999", i))
+                      key=lambda i: (priority_key(by_id[i]), by_id[i].created or "9999", i))
         chosen = (dup_ids + rest)[:int(max_size)]
         members = [by_id[i] for i in sorted(chosen)]
-        if best is None or len(members) > len(best[1]):
-            best = (c, members)
+        score = (-min(priority_key(m) for m in members), len(members))
+        if best is None or score > best_score:
+            best, best_score = (c, members), score
     return best
 
 
@@ -3953,7 +4088,9 @@ def sweep_abandoned_ids(ledger: Path) -> set[int]:
 
 def sweep_pool(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
                items: list[Item] | None = None) -> list[Item]:
-    """Open items the sweep has not read, never-judged first, then oldest.
+    """Open items the sweep has not read, never-judged first, then by the
+    human's priority, then oldest. A `high` item is not the sweep's to read:
+    single triage takes it next, whatever else is unread.
 
     Quarantine does not apply — reading a self-filed item once is the whole
     point. `draft` and `up_next` both: a confirmed item is ranked so the
@@ -3966,10 +4103,10 @@ def sweep_pool(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
     seen = triaged_ids(ledger)
     pool = [i for i in (items if items is not None else open_items(boards))
             if i.status in SWEEP_POOL_STATUSES and i.id not in done
-            and not is_swept(i) and not is_parked(i)
+            and not is_swept(i) and not is_parked(i) and not is_high(i)
             and not is_grouped(i) and not is_umbrella(i)
             and NEEDS_HUMAN_TAG not in i.tags and EXPIRED_TAG not in i.tags]
-    return sorted(pool, key=lambda i: (i.id in seen, i.created or "9999", i.id))
+    return sorted(pool, key=lambda i: (i.id in seen, priority_key(i), i.created or "9999", i.id))
 
 
 def select_sweep_batch(ledger: Path, n: int,

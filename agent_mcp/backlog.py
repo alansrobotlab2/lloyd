@@ -136,7 +136,8 @@ async def list_tools():
                 "description": {"type": "string", "description": "Task description. On create, becomes the body. On update, combined with existing body per description_mode."},
                 "description_mode": {"type": "string", "enum": ["append", "replace", "prepend"], "description": "How description is applied on update. Default: 'append'. Use 'replace' to overwrite the body (title heading is preserved)."},
                 "status": {"type": "string", "description": "Task status"},
-                "priority": {"type": "string", "description": "Task priority"},
+                "priority": {"type": "string", "enum": ["high", "medium", "low"],
+                             "description": "Task priority. Default low; the unattended loop takes high before medium before low in every pool, so set it only when the item really should jump the queue"},
                 "board": {"type": "string", "description": "Board name (required for new tasks)"},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "Replaces the task's tag list wholesale"},
                 "blocked": {"type": "boolean", "description": "Mark the task as blocked on something external"},
@@ -220,7 +221,7 @@ def _handle_tasks(args: dict) -> str:
                 "id": tid, "title": title,
                 "status": frontmatter.get("status", "todo"),
                 "board": frontmatter.get("board", "default"),
-                "priority": frontmatter.get("priority", "medium"),
+                "priority": frontmatter.get("priority", DEFAULT_PRIORITY),
                 "tags": normalize_tags(frontmatter.get("tags")),
                 "blocked": frontmatter.get("blocked", False),
                 "assigned": frontmatter.get("assigned", False),
@@ -298,7 +299,7 @@ def _handle_write(args: dict) -> str:
         # them verbatim, and only new tasks get them — updating a legacy file
         # still does not backfill a type it never had.
         task = {"id": task_id, "filename": f"{task_id}-{slug}.md", "created": now,
-                "status": "draft", "priority": "medium", "blocked": False,
+                "status": "draft", "priority": DEFAULT_PRIORITY, "blocked": False,
                 "assigned": False, "position": task_id * 1000,
                 "type": "backlog", "segment": "backlog"}
 
@@ -392,6 +393,13 @@ def _handle_write(args: dict) -> str:
 # Tags that mark a write as the loop's own. `backlog_write_task` puts one on
 # every item triage or an implement round files; a human's write carries none
 # and is only ever advised, never merged.
+# The priority a writer stamps when the caller names none. `low` since
+# 2026-09-16: the loop's pools sort on this field ahead of the sweep's rank
+# (`scripts/automod/backlog.py::priority_key`), so a default that outranked a
+# chosen value would hand the queue to whoever forgot to set it. The HTTP
+# route (`app/routers/backlog.py`) and the loader agree.
+DEFAULT_PRIORITY = "low"
+
 _SPAWN_TAG_PREFIX = "spawned-by-"
 # Loop writers that carry no `spawned-by-*` tag. The YouTube digest files its
 # evaluations tagged `youtube-eval`, and since 2026-09-14 those are loop output

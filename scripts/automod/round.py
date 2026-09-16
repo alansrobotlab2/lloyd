@@ -495,6 +495,13 @@ def main(argv=None) -> int:
     uo.add_argument("--dry-run", action="store_true")
     sub.add_parser("sweep-status", help="how far the backlog sweep has got: unread, ranked, "
                                         "parked, and the last batches")
+    pb = sub.add_parser("priority-backfill", help="write the default priority (low) onto every "
+                                                  "backlog item, any board or status, whose "
+                                                  "priority is absent, `none` or unknown")
+    pb.add_argument("--dry-run", action="store_true")
+    pb.add_argument("--reset-open", action="store_true",
+                    help="also write low onto every OPEN item whatever it carries, so the "
+                         "high tier starts empty; the old value is kept in the activity log")
     # `cluster` hands everything after it to cluster.py's parser. REMAINDER
     # on a subparser does not swallow `--flags`, so the unknowns are collected
     # here instead of refused.
@@ -543,6 +550,15 @@ def main(argv=None) -> int:
                          indent=2, default=str))
     elif args.cmd == "sweep-status":
         print(json.dumps(sweep_status(), indent=2, default=str))
+    elif args.cmd == "priority-backfill":
+        from scripts.automod import backlog as B
+        rows = B.backfill_priority(None, dry_run=args.dry_run, reset_open=args.reset_open)
+        if not args.dry_run and rows:
+            S.append_event({"event": "priority_backfill", "by": "human", "reset_open": args.reset_open,
+                            "written": [r["item_id"] for r in rows if r.get("written")],
+                            "skipped": [r["item_id"] for r in rows if not r.get("written")]})
+        print(json.dumps({"dry_run": args.dry_run, "count": len(rows), "items": rows},
+                         indent=2, default=str))
     return 0
 
 

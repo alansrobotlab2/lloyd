@@ -963,12 +963,41 @@ tail waits in the open. Four moves, each with a switch:
   with `swept`. A person promotes it by removing the tag. Expiry
   (`expire_spawns_after_days`) went 7 → 30 the same day and reaches only
   what the sweep has not read.
-- *The rank orders every pool.* `Item` carries `worth`, `size` and
-  `clause_count` from front matter; `rank_key` is (worth, size) with
-  unranked between medium and low. `select_candidate` sorts by live
-  blocker, rank, age; `select_confirmed` by near tier, rank, clause count,
-  then the existing keys; `release_held_confirmations` fills room best
-  first. Swept ids are in `released_ids`, so a swept self-spawn enters
+- *The rank orders every pool — under the human's priority.* `Item` carries
+  `worth`, `size` and `clause_count` from front matter; `rank_key` is
+  (worth, size) with unranked between medium and low. Since 2026-09-16
+  `priority_key` (the item's `priority`: high, medium, low; anything else
+  low) sorts ahead of it everywhere, on Alan's rule that the pace is
+  tolerable if the tag is honoured. `select_candidate` sorts by live
+  blocker, priority, rank, age; `select_confirmed` by priority, near tier,
+  rank, clause count, then the existing keys; `release_held_confirmations`
+  fills room by priority then rank; `sweep_pool` by never-judged, priority,
+  age; `select_cluster` takes the cluster whose best member has the highest
+  priority, largest among equals, and keeps high members through the trim.
+  Across the two triage pools, a single candidate that outranks every member
+  of the cluster group triage would take runs first (`priority_beats`, in
+  `autotriage.execute`; the cluster is the fallback if the depth gate pauses
+  single triage). The default on both writers is `low`, so a value nobody
+  chose never outranks one somebody did; `round priority-backfill` wrote it
+  onto the files that had none.
+- *A `high` item is picked up next* (`is_high`, `select_urgent`). Alan's
+  ask: submit a high item and have it taken next. In triage it goes ahead
+  of a sweep batch (`sweep_pool` never lists it), ahead of any cluster,
+  ahead of a live blocker, and past the depth gate's pause with holding
+  off; its confirmation is never `held` (on 2026-09-16 the pool read 73
+  ready against a bound of 73, so a held high would have waited for
+  never), and `release_held_confirmations` moves a held item a person
+  raises to high without waiting for room. In the implement pool it is
+  first by `priority_key`, and **within `high` the newest goes first**
+  (`recency_key`), the sweep's rank and the contract length not applying:
+  the board carried 87 open highs that day, 17 ready, most months old, and
+  oldest-first would have queued the one just raised behind all of them.
+  The near tier still precedes it (a high one fix cycle from landing).
+  Latency is one autotriage interval to the contract, then the next round.
+  `round priority-backfill --reset-open` is the stronger reading of
+  "default low for existing items": every open item written `low`, the old
+  value in its activity line, so the high tier starts empty; human-only. `tests/test_autotriage.py` ("picked up
+  next") and `tests/test_backlog_priority.py` pin it. Swept ids are in `released_ids`, so a swept self-spawn enters
   single triage. The single prompt's `<origin>` says the sweep's rank so
   the contract fits the size.
 - *Autocode can yield* (`workers.sources.autocode.yield_to_sweep`, ships

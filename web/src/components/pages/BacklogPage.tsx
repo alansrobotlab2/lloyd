@@ -67,7 +67,9 @@ function TaskModal({
   const [name, setName] = useState(task?.name || "");
   const [description, setDescription] = useState(task?.description || "");
   const [status, setStatus] = useState(task?.status || "draft");
-  const [priority, setPriority] = useState(task?.priority || "none");
+  // `low` is the board default (2026-09-16): the unattended loop sorts on
+  // this field, so a new item starts where it cannot jump the queue.
+  const [priority, setPriority] = useState(task?.priority || "low");
   const [board, setBoard] = useState(task?.board || defaultBoard || "");
   const [blocked, setBlocked] = useState(task?.blocked || false);
   const [saving, setSaving] = useState(false);
