@@ -1293,6 +1293,99 @@ def test_an_edit_on_a_worker_thread_and_a_memory_add_in_the_loop_lose_neither(
     )
 
 
+
+# ── 5c — the seam the model actually calls ───────────────────────────────────
+#
+# Everything above drives `_memory_add`, `_edit` and `_vault_write` directly.
+# That is the right level for a unit claim and the wrong level for the shipped
+# one: the tool the model invokes is `call_tool(name, arguments)`, and the
+# inline-vs-thread property the whole lane rests on lives in *that* dispatch,
+# not in the handlers. A test that never crosses it would still pass if
+# `call_tool` moved the memory handlers onto a thread pool, or dropped the
+# `await` on the filesystem dispatcher — the two ways the race actually comes
+# back. These go through the MCP-facing entry points and nothing below them.
+
+
+async def _mcp_raced_rounds(root: Path, rounds: int) -> tuple[int, int]:
+    """N rounds of `SESSION.call_tool("memory_add")` raced with the Edit tool.
+
+    Both halves go through the tool-level dispatchers the MCP server calls —
+    `SESSION.call_tool` awaited inline, exactly as `session.py:349` runs it, and
+    `FS.call_tool`, which does the `asyncio.to_thread` hop itself at :816.
+    Driving `_memory_add` and `_edit` directly, which every other test here
+    does, would still pass if a dispatcher moved the memory handler onto a worker
+    thread where it interleaves with itself: the inline-vs-thread property lives
+    in the dispatchers, not in the handlers. Returns (kept_edits, kept_adds).
+
+    `Edit` and not `Write`, on purpose. `Write` is a whole-file overwrite, so a
+    round that builds its content from a snapshot taken *before* the append has
+    to lose the append — that is what the tool means, and the per-session
+    compare-and-swap in `builtin_fs.py:215` is what catches it in production, not
+    the lock. `Edit` reads the current bytes inside the critical section and
+    applies a change to them, so it is the shape where both sides can be kept
+    and losing either is a real bug.
+    """
+    target = _race_file(root, rounds)
+    kept_edits = kept_adds = 0
+    for n in range(1, rounds + 1):
+        # Launched together, not awaited one after another: awaiting the first
+        # would serialize the pair by construction and pass regardless of the
+        # lock, which is the false pass this seam exists to catch.
+        edits, appends = await asyncio.gather(
+            FS.call_tool("Edit", {"file_path": str(target),
+                                  "old_string": f"PLACEHOLDER-{n - 1:03d}",
+                                  "new_string": f"mcpw-{n - 1:03d} " + "w" * ENTRY_CHARS}),
+            SESSION.call_tool("memory_add",
+                              {"file": "MEMORY.md",
+                               "entry": f"- mcpa-{n - 1:03d} " + "a" * ENTRY_CHARS}))
+        assert '"error"' not in str(edits), f"the Edit tool refused round {n}: {str(edits)[:200]}"
+        assert '"error"' not in str(appends), f"memory_add refused round {n}: {str(appends)[:200]}"
+        text = target.read_text(encoding="utf-8")
+        kept_edits += 1 if f"mcpw-{n - 1:03d} " in text else 0
+        kept_adds += 1 if f"- mcpa-{n - 1:03d} " in text else 0
+    return kept_edits, kept_adds
+
+
+async def test_the_mcp_tool_dispatch_keeps_both_writer_lanes_racing(tmp_path):
+    """`SESSION.call_tool("memory_add")` against the Edit tool: neither side lost.
+
+    The seam the model actually crosses. Everything else in this file calls the
+    handlers (`_memory_add`, `_edit`, `_vault_write`) directly, which is the
+    right level for a unit claim and the wrong one for the shipped one: the race
+    the lane exists for is between `session.py:349`'s inline call and
+    `builtin_fs.py:816`'s `asyncio.to_thread`, and both of those sit above the
+    handlers. If either dispatcher changed — the memory handler moved to a thread
+    pool where it can interleave with itself, or the filesystem hop dropped —
+    only a test that issues tool calls would notice, so this is the one that
+    pins the claim `agent_mcp/_shared.py` makes about the two lanes.
+    """
+    SESSION.MEMORIES_ROOT = tmp_path
+    _assert_off_tree(tmp_path, what="the raced memory root")
+    kept_edits, kept_adds = await _mcp_raced_rounds(tmp_path, _RACE_ROUNDS)
+    assert kept_edits == _RACE_ROUNDS, (
+        f"the Edit tool lost {_RACE_ROUNDS - kept_edits} of {_RACE_ROUNDS} edits "
+        "against a concurrent memory_add on the MCP dispatch")
+    assert kept_adds == _RACE_ROUNDS, (
+        f"memory_add lost {_RACE_ROUNDS - kept_adds} of {_RACE_ROUNDS} appends "
+        "against a concurrent Edit on the MCP dispatch")
+
+
+def test_the_memory_and_vault_tool_dispatchers_are_the_raced_ones():
+    """`call_tool` must reach the locked handlers, not a shadow copy of them.
+
+    Guards the test above against its own most likely false pass: if
+    `SESSION.call_tool`'s handler table pointed at a `_memory_add` that was not
+    the locked one, the race test would still be exercising a writer — just not
+    the one that shipped.
+    """
+    assert SESSION.call_tool is not None
+    import inspect
+    src = inspect.getsource(SESSION)
+    assert '"memory_add": _memory_add' in src, "call_tool's memory table changed shape"
+    src_v = inspect.getsource(VAULT)
+    assert '"vault_write": _vault_write' in src_v, "call_tool's vault table changed shape"
+
+
 def test_the_same_race_without_the_lock_loses_updates(monkeypatch, tmp_path, off_tree):
     """The pair above is a regression test, not a restatement of the fix.
 
