@@ -755,11 +755,16 @@ def test_the_memory_prompt_shows_the_file_in_full_not_a_tail(
     """
     memory, sentinel = tall_memory_with_a_leading_sentinel
     memory_text = memory.read_text(encoding="utf-8")
-    assert len(memory_text[:1_000]) == 1_000
-    assert memory_text.index(sentinel) < 1_000, "the sentinel is in the oldest 1,000 chars"
+    # The premise as data, not as fixture decoration: this text is inside the
+    # window the generator used to show and outside it, so the prompt assertions
+    # below are the only thing that can tell the two reads apart.
+    assert sentinel not in memory_text[-OLD_TAIL_CHARS:], (
+        "the sentinel must be in the region the pre-fix `tail=4000` read dropped; "
+        "if this ever flips, this test stops testing anything"
+    )
 
     assert hg._read(memory) == memory_text, "the no-tail read returns the whole file"
-    assert len(memory_text) > OLD_TAIL_CHARS
+    assert hg._read(memory, tail=OLD_TAIL_CHARS) == memory_text[-OLD_TAIL_CHARS:]
 
     prompt = hg._build_single_variant_prompt(_cfg(tmp_path), ["prompts"],
                                              target_file_hint="MEMORY.md")
@@ -773,29 +778,57 @@ def test_the_memory_prompt_shows_the_file_in_full_not_a_tail(
     assert "## Current USER.md tail" in prompt
 
 
-def test_a_memory_anchor_from_the_oldest_region_survives_the_prompt_and_the_parser(
-        tall_memory_with_a_leading_sentinel, tmp_path):
-    """The prompt-side half of the same defect, at the size a live round sees.
+def _memory_section(prompt: str) -> str:
+    """The text of the prompt's MEMORY.md block — the only thing a model may copy.
 
-    The span is legal at live scale (one edit, far under the bounds), so nothing
-    about the bounded contract explains it away — the only thing that made it
-    unusable was not being shown.
+    Spelled out as a slice rather than `assert span in prompt` because the
+    response is told to quote from THIS block: a span that merely appears
+    somewhere in the prompt (in an instruction, in USER.md's excerpt) would not
+    be copyable in the way the anchor rule means.
     """
-    memory, sentinel = tall_memory_with_a_leading_sentinel
-    memory_text = memory.read_text(encoding="utf-8")
-    oldest = memory_text[:OLD_TAIL_CHARS // 4]
-    assert sentinel in oldest
+    heading = "## Current MEMORY.md (long-term notes, shown in full)\n"
+    start = prompt.index(heading) + len(heading)
+    end = prompt.index("\n## ", start)
+    return prompt[start:end]
+
+
+def test_an_anchor_copied_out_of_the_rendered_prompt_survives_the_parser(
+        tall_memory_with_a_leading_sentinel, tmp_path):
+    """The seam, run as one chain: render the prompt, copy the oldest span out of
+    the rendered text, hand that copy to the parser.
+
+    The copy is what makes this the real mechanism rather than a re-assertion of
+    the fixture. A model's anchor is a `str` sliced out of the prompt string, so
+    the anchor here comes from `prompt[...]` and must survive parsing byte for
+    byte. Under the pre-fix `tail=4000` read this fails: the block is the last
+    4,000 chars, its first line is one of the middle filler notes, and the
+    sentinel — the first line of the file, absent from the last 4,000 — never
+    appears in the prompt at all.
+    """
+    prompt = hg._build_single_variant_prompt(_cfg(tmp_path), ["prompts"],
+                                             target_file_hint="MEMORY.md")
+    block = _memory_section(prompt)
+    copied = next(line for line in block.splitlines() if "SENTINEL-680" in line)
+    assert copied == tall_memory_with_a_leading_sentinel[1], (
+        "what the model sees and what it would copy are byte-identical"
+    )
 
     raw = json.dumps({
         "description": "tighten the leading rule",
         "hypothesis": "the oldest note is the one that still causes preamble",
         "target_surface": "prompts",
-        "edits": [{"path": "MEMORY.md", "anchor": sentinel,
+        "edits": [{"path": "MEMORY.md", "anchor": copied,
                    "replacement": "Prefer a scoped change over a rewrite."}],
     })
     v, err = hg._parse_single_variant(raw)
-    assert err is None and len(v["edits"]) == 1
+    assert err is None, f"an anchor quoted from the prompt is in contract: {err}"
+    assert len(v["edits"]) == 1
+    assert v["edits"][0]["anchor"] == copied
+    # What the round costs, measured rather than asserted elsewhere: a one-edit
+    # response is a constant whatever the file it edits, which is #446's whole
+    # argument, while the prompt carrying the surface is now ~27 KB longer.
     assert len(raw) < 1_024, "a one-edit response is a constant whatever the file size"
+    assert len(prompt) > 11_000, "the prompt got the whole surface, not a summary of it"
 
 
 def test_the_bounded_response_contract_holds_while_the_shown_surface_grows(
