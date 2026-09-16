@@ -133,18 +133,22 @@ def rows_of(path: Path) -> list[dict[str, Any]]:
 # ── clause 1: the materialize loop, on its own ───────────────────────────────
 
 def test_the_bench_list_grows_by_one_per_variant_that_survives_the_anchored_edit(cfg, canonical):
-    """`materialize_variants` returns `(variant_pairs, dropped)`; the pair list is
-    the left operand of the (variant × task) matrix, so a variant that is absent
-    from it is a variant no trial ever runs.
+    """`materialize_variants` returns `(variant_pairs, dropped_by_surface)`; the
+    pair list is the left operand of the (variant × task) matrix, so a variant
+    that is absent from it is a variant no trial ever runs.
 
     Against main, where the append line is missing, this fails on the first
     assertion: the list comes back as the single baseline entry it has been since
     `fe40af3`.
     """
     variants = two_well_formed_and_two_unanchorable()
-    pairs, dropped = run_round.materialize_variants(cfg, variants, (BASELINE_ID, cfg.paths.variants_dir))
+    pairs, drops = run_round.materialize_variants(cfg, variants, (BASELINE_ID, cfg.paths.variants_dir))
+    dropped = sum(drops.values())
 
     assert dropped == 2, "both unanchorable variants are counted as dropped"
+    # #680: the two failures both aimed at SOUL.md, and the count says so — with
+    # MEMORY.md present at zero because a variant proposed it and survived.
+    assert drops == {"SOUL.md": 2, "MEMORY.md": 0}
     assert [vid for vid, _ in pairs] == [BASELINE_ID, "V_a", "V_b"]
     assert len(pairs) == 1 + len(variants) - dropped == 3
 
@@ -166,14 +170,18 @@ def test_the_bench_list_grows_by_one_per_variant_that_survives_the_anchored_edit
 def test_a_round_with_no_variants_still_benches_the_baseline_alone(cfg, canonical):
     """Zero proposals is not an error: the pair list is the baseline and nothing
     else, which is the only state in which today's rounds have been running."""
-    pairs, dropped = run_round.materialize_variants(cfg, [], (BASELINE_ID, cfg.paths.variants_dir))
+    pairs, drops = run_round.materialize_variants(cfg, [], (BASELINE_ID, cfg.paths.variants_dir))
     assert pairs == [(BASELINE_ID, cfg.paths.variants_dir)]
-    assert dropped == 0
+    assert drops == {}, (
+        "nothing proposed, so no surface is even named: the empty mapping is what "
+        "tells a reader this round had no MEMORY variants to drop, as opposed to "
+        "MEMORY variants that all applied (#680)"
+    )
 
 
 # ── clause 1 + the acceptance, through the real run() ────────────────────────
 
-def drive_round(cfg, monkeypatch, caplog):
+def drive_round(cfg, monkeypatch, caplog, variants_factory=two_well_formed_and_two_unanchorable):
     """Drive `run()` end to end with only the model calls stubbed: no trial
     reaches vLLM, no file leaves the vault. Everything between — the materialize
     loop, the harness split, the judge aggregation, the promotion gate, the report
@@ -185,8 +193,11 @@ def drive_round(cfg, monkeypatch, caplog):
     too; `aggregate_variant`, `evaluate_promotion` and `post_promotion_check` are
     not stubbed, so the decision each row reports is the real gate's verdict.
 
-    Proposes 2 well-formed + 2 unanchorable variants, so a round that works
-    reaches `promote` with `V_a`. Returns `(result, calls)`.
+    Proposes 2 well-formed + 2 unanchorable variants by default, so a round that
+    works reaches `promote` with `V_a`. `variants_factory` overrides the proposal
+    list for a round that needs a different drop shape (#680). Any survivor must
+    be named in COMPOSITE, since `judge_trace` looks its score up by id.
+    Returns `(result, calls)`.
     """
     calls: dict[str, Any] = {}
 
@@ -205,7 +216,7 @@ def drive_round(cfg, monkeypatch, caplog):
                 "applied_files": ["SOUL.md"], "experiment_fact": None, "dry_run": False}
 
     monkeypatch.setattr(run_round, "load_config", lambda: cfg)
-    monkeypatch.setattr(run_round, "propose_variants", lambda *a, **kw: two_well_formed_and_two_unanchorable())
+    monkeypatch.setattr(run_round, "propose_variants", lambda *a, **kw: variants_factory())
     def fake_materialize_baseline(c):
         """The real one returns a fresh subdirectory of the variants dir, so the
         baseline overlay must not be that dir itself."""
@@ -324,3 +335,86 @@ def test_a_round_writes_nothing_to_config_yaml(cfg, canonical, monkeypatch, capl
         "a write path to config.yaml appeared in scripts/autoresearch; the loop may "
         f"never write that file. New references: {offenders}"
     )
+
+
+# ── #680 clause 3: a drop names the surface it fell on ───────────────────────
+#
+# #680's premise is that MEMORY-targeted variants were dropped at a rate no one
+# could see, because `variants_dropped` was one number for every surface at
+# once. The count below is the observable half of that fix: it is seeded with
+# every surface a round PROPOSED, so "MEMORY.md: 0" means its variants applied
+# and an absent key means none were ever tried — the two shapes the aggregate
+# could not tell apart.
+
+@pytest.fixture
+def memory_can_fail_to_anchor(tmp_path, monkeypatch):
+    """A vault where MEMORY.md can produce both failure shapes — an anchor that
+    matches zero times and one that matches twice — while SOUL.md's one variant
+    applies. That is the asymmetry #680 is about, and the smallest fixture that
+    makes a drop attributable to a named surface."""
+    root = tmp_path / "vault680"
+    root.mkdir()
+    soul = root / "SOUL.md"
+    soul.write_text("# SOUL\nNever open with an apology.\n", encoding="utf-8")
+    memory = root / "MEMORY.md"
+    memory.write_text(
+        "# MEMORY\n"
+        "A single unique note.\n"
+        "Duplicated note.\n"
+        "Duplicated note.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(vs, "_canonical_prompt_paths", lambda: {
+        "SOUL.md": soul, "MEMORY.md": memory,
+    })
+    return {"SOUL.md": soul, "MEMORY.md": memory}
+
+
+def two_memory_drops_and_one_soul_survivor() -> list[dict[str, Any]]:
+    """1 SOUL variant that applies, 2 MEMORY variants that cannot: one anchor
+    exists nowhere in the file, one appears twice."""
+    return [
+        anchored("V_a", "Never open with an apology.", "Open with the answer."),
+        anchored("V_m_zero", "A calendar note that is not in the file.", path="MEMORY.md"),
+        anchored("V_m_two", "Duplicated note.", "A clearer note.", path="MEMORY.md"),
+    ]
+
+
+def test_a_drop_is_counted_against_the_surface_the_variant_aimed_at(cfg, memory_can_fail_to_anchor):
+    """2 MEMORY drops and 0 SOUL drops report `MEMORY.md: 2, SOUL.md: 0`.
+
+    A pre-fix `materialize_variants` hands back the bare int 2, which is exactly
+    the reading #680 says is unusable: it cannot say whether the failures were
+    MEMORY's or SOUL's, so "MEMORY.md should not be the only surface that ever
+    fails to apply" could not be checked against any round.
+    """
+    pairs, drops = run_round.materialize_variants(
+        cfg, two_memory_drops_and_one_soul_survivor(), (BASELINE_ID, cfg.paths.variants_dir))
+
+    assert drops == {"MEMORY.md": 2, "SOUL.md": 0}
+    assert sum(drops.values()) == 2
+    assert [vid for vid, _ in pairs] == [BASELINE_ID, "V_a"]
+    # The survivor's overlay is the applied MEMORY text — proof the MEMORY edits
+    # were attempted against that file and are the ones that failed.
+    assert (cfg.paths.variants_dir / "V_a" / "SOUL.md").read_text(encoding="utf-8") == (
+        "# SOUL\nOpen with the answer.\n")
+
+
+def test_the_round_report_names_the_surface_of_its_drops_without_the_log(
+        cfg, memory_can_fail_to_anchor, monkeypatch, caplog):
+    """The same mapping reaches the round report's bytes.
+
+    The report is the artifact a person or a sweep reads (`promotion_fp_rate`
+    parses this very file); the log line is not kept per round. A reader must be
+    able to see `MEMORY.md: 2, SOUL.md: 0` without opening a log, which is what
+    clause 3 asks for.
+    """
+    result, _calls = drive_round(
+        cfg, monkeypatch, caplog, variants_factory=two_memory_drops_and_one_soul_survivor)
+
+    assert result["variants_dropped"] == 2, "the aggregate is still there"
+    assert result["variants_dropped_by_surface"] == {"MEMORY.md": 2, "SOUL.md": 0}
+
+    report = (cfg.paths.rounds_dir / f"{result['round_id']}.md").read_text(encoding="utf-8")
+    assert "- variants dropped by surface: MEMORY.md: 2, SOUL.md: 0" in report
+    assert "dropped 2 of 3 variants at anchored-edit apply (MEMORY.md: 2, SOUL.md: 0)" in caplog.text

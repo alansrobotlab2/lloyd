@@ -75,14 +75,48 @@ def post_promotion_check(
     return lines, row, comparison
 
 
+def variant_surfaces(variant: dict[str, Any]) -> list[str]:
+    """The prompt surface(s) a variant's proposal claims to edit.
+
+    #680: a drop has to be attributable, and the only record of which surface a
+    variant aimed at is its own edit list — the `AnchorApplyError` text names a
+    path only for the edits that got as far as the canonical read, and a variant
+    refused for spanning two surfaces names none. So the attribution reads the
+    proposal, not the exception: the edit paths, falling back to
+    `overlay_files` for a hand-built variant, falling back to a literal
+    `"unknown"` rather than guessing a surface it was never told.
+
+    A list, not a str, because the multi-surface rejection is exactly the case
+    where one drop is attributable to more than one surface.
+    """
+    paths: list[str] = []
+    for edit in variant.get("edits") or []:
+        if isinstance(edit, dict):
+            path = str(edit.get("path", ""))
+            if path and path not in paths:
+                paths.append(path)
+    if not paths:
+        paths = [str(p) for p in (variant.get("overlay_files") or {}) if p]
+    return paths or ["unknown"]
+
+
 def materialize_variants(
     cfg: AutoresearchConfig,
     variants: list[dict[str, Any]],
     baseline_pair: tuple[str, Path],
-) -> tuple[list[tuple[str, Path]], int]:
+) -> tuple[list[tuple[str, Path]], dict[str, int]]:
     """Build the `(variant_id, overlay_dir)` list that a round actually benches.
 
-    Returns `(variant_pairs, dropped)`. `variant_pairs` starts at the baseline —
+    Returns `(variant_pairs, dropped_by_surface)`. #680 widened the second value
+    from a bare int: every surface a proposed variant aimed at is seeded at 0
+    and incremented on a drop, so a round that dropped 2 MEMORY variants and 0
+    SOUL variants reports `{MEMORY.md: 2, SOUL.md: 0}` rather than `2`. The
+    zeros are the point — an aggregate count cannot tell "the surface that is
+    hard to anchor into" apart from "a surface nobody proposed", which is the
+    distinction the fix has to be measured against. `sum(dropped_by_surface
+    .values())` is the old aggregate.
+
+    `variant_pairs` starts at the baseline —
     which `run()` needs the id of afterwards, so the caller passes the pair in
     rather than this function materializing it twice — and grows by one entry per
     variant `materialize` accepts. That list is the left operand of the
@@ -98,23 +132,41 @@ def materialize_variants(
 
     #446's drop-whole semantics are unchanged: the parser bounds an edit's shape,
     and only here can an anchor be checked against the text it claims to quote.
-    Zero or two matches raises `AnchorApplyError`, counts that variant in
-    `dropped`, writes nothing, and the round goes on with the variants that did
+    Zero or two matches raises `AnchorApplyError`, counts that variant against
+    its surface, writes nothing, and the round goes on with the variants that did
     apply — no fuzzy match, no partial write.
     """
     variant_pairs: list[tuple[str, Path]] = [baseline_pair]
-    dropped = 0
+    dropped_by_surface: dict[str, int] = {}
     for v in variants:
+        surfaces = variant_surfaces(v)
+        for surface in surfaces:
+            dropped_by_surface.setdefault(surface, 0)
         try:
             overlay = materialize(cfg, v)
         except AnchorApplyError as exc:
             logger.warning("dropping variant %s: %s", v.get("variant_id"), exc)
-            dropped += 1
+            for surface in surfaces:
+                dropped_by_surface[surface] += 1
             continue
         variant_pairs.append((v["variant_id"], overlay))
+    dropped = sum(dropped_by_surface.values())
     if dropped:
-        logger.warning("dropped %d of %d variants at anchored-edit apply", dropped, len(variants))
-    return variant_pairs, dropped
+        logger.warning(
+            "dropped %d of %d variants at anchored-edit apply (%s)",
+            dropped, len(variants), _surface_drop_text(dropped_by_surface),
+        )
+    return variant_pairs, dropped_by_surface
+
+
+def _surface_drop_text(dropped_by_surface: dict[str, int]) -> str:
+    """`{MEMORY.md: 2, SOUL.md: 0}` → `MEMORY.md: 2, SOUL.md: 0`.
+
+    One formatter shared by the log line and the round report, so the two cannot
+    describe a round differently. Sorted so the text is stable for a test and for
+    a diff across rounds.
+    """
+    return ", ".join(f"{surface}: {count}" for surface, count in sorted(dropped_by_surface.items()))
 
 
 async def _run_trials(
@@ -222,7 +274,8 @@ async def run(
     # is what `_run_trials` benches, so every variant that survives the anchored
     # edit has to be in it — #876.
     baseline_id, baseline_dir = materialize_baseline(cfg)
-    variant_pairs, dropped = materialize_variants(cfg, variants, (baseline_id, baseline_dir))
+    variant_pairs, dropped_by_surface = materialize_variants(cfg, variants, (baseline_id, baseline_dir))
+    dropped = sum(dropped_by_surface.values())
 
     # Fan out (variant × task), split by harness routing (#353)
     logger.info("running %d variants × %d tasks = %d trials (harness=%s)",
@@ -324,6 +377,11 @@ async def run(
         f"- tasks on the harness runner: {len(sdk_task_ids)}"
         + (f" ({', '.join(sdk_task_ids)})" if sdk_task_ids else ""),
         f"- variants proposed: {len(variants)}",
+        # #680: the aggregate said "2 dropped", which cannot distinguish "the
+        # model invented spans" from "half this round's variants aimed at a file
+        # it was only shown 4,000 chars of". Every proposed surface is listed,
+        # zeros included, so a round that produced no MEMORY variants says so.
+        f"- variants dropped by surface: {_surface_drop_text(dropped_by_surface) or '(none proposed)'}",
         f"- baseline mean composite: {baseline_summary.get('mean_composite', 0.0):.4f}",
         "",
         "## Variant summaries",
@@ -365,6 +423,7 @@ async def run(
         "spec_file": str(spec_path),
         "variants_proposed": len(variants),
         "variants_dropped": dropped,
+        "variants_dropped_by_surface": dict(dropped_by_surface),
         "tasks_run": len(tasks),
         "baseline_mean": baseline_summary.get("mean_composite", 0.0),
         "decisions": decisions,

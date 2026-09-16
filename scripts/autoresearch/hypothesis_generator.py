@@ -15,6 +15,11 @@ returns a small, bounded JSON object that reliably fits under max_tokens. On
 parse failure the raw output is dumped to _pipeline/research/_debug/ for
 post-mortem rather than silently lost.
 
+An anchor can only quote text the model was actually shown, so BOTH editable
+surfaces go into the prompt in full (#680). MEMORY.md used to arrive as its last
+4,000 chars against a ~26 KB file, which left the older 85 % of it unanchorable
+while `_propose_one` aimed half of every round's seeds at exactly that file.
+
 Why the contract is anchored edits and not file contents (#446): a variant used
 to be required to return a whole prompt surface verbatim, so a legal response
 had to be at least as long as the file it was editing. The model echoed
@@ -279,7 +284,15 @@ def _build_single_variant_prompt(
 ) -> str:
     """Prompt for ONE variant, targeting ONE file. Small JSON output → reliable parse."""
     soul = _read(SOUL_PATH)
-    memory = _read(MEMORY_PATH, tail=4000)
+    # #680: shown in full, like SOUL.md. An anchor has to be copied verbatim from
+    # the text this prompt shows (`variant_sandbox._apply_anchored_edits` refuses
+    # anything else), and a 4,000-char tail of a ~26 KB MEMORY.md left 85 % of
+    # that file unanchorable — while `_propose_one` aims half of every round's
+    # seeds at it. The tail existed to bound the RESPONSE, and the response is
+    # bounded instead by MAX_EDITS/MAX_ANCHOR_CHARS/MAX_REPLACEMENT_CHARS, so what
+    # is shown now costs input tokens only (~6.7k of a 131k+ context at the live
+    # size) and buys back the whole surface.
+    memory = _read(MEMORY_PATH)
     user = _read(USER_PATH, tail=2000)
     corrections = _read(CORRECTIONS_PATH, tail=2000)
     knowledge = _read(KNOWLEDGE_HEALTH_PATH, tail=2000)
@@ -329,7 +342,7 @@ that might score higher on Lloyd's benchmark.
 ## Current SOUL.md (identity, always loaded)
 {soul}
 
-## Current MEMORY.md tail (long-term notes)
+## Current MEMORY.md (long-term notes, shown in full)
 {memory}
 
 ## Current USER.md tail
@@ -402,9 +415,11 @@ Rules:
   chars, each `replacement` at most {MAX_REPLACEMENT_CHARS} chars. An edit over
   a bound is rejected, so prefer tightening one sentence over replacing a
   section.
-- An anchor for MEMORY.md must come from the "Current MEMORY.md tail" shown
-  above. That excerpt is all of MEMORY.md you are given; a span invented from
-  the part you cannot see will not match and the variant is lost.
+- Both files you may edit are shown above IN FULL — SOUL.md under "Current
+  SOUL.md", MEMORY.md under "Current MEMORY.md (long-term notes, shown in
+  full)". An anchor may come from anywhere in either, including the oldest
+  note at the top of MEMORY.md. A span invented from text that is not above
+  will not match and the variant is lost.
 - `"replacement": ""` deletes the anchor. Anything else replaces it.
 - Preserve or strengthen safety language. See "Safety constraint" above.
   Variants that fail safety_critical tasks get auto-rejected — don't waste

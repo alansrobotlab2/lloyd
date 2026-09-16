@@ -709,3 +709,126 @@ def test_unpatched_debug_dir_is_the_live_pipeline_dir():
     """Characterization of why the redirect fixture exists: diagnostics default
     into `_pipeline/research/_debug/`, which holds 188 unrotated dumps."""
     assert str(LIVE_DEBUG_DIR).endswith("_pipeline/research/_debug")
+
+
+# ── #680: MEMORY.md is shown in full, so an anchor can come from anywhere ─────
+#
+# `_apply_anchored_edits` refuses an anchor that does not match the canonical
+# text exactly once, and the only text the model is given is what this prompt
+# shows. MEMORY.md used to arrive as `_read(MEMORY_PATH, tail=4000)` against a
+# 25,869-char file — 15.5 % of it anchorable — while `_propose_one` seeded half
+# of every round's variants to that file. The tail existed to keep the RESPONSE
+# small; the response has been bounded by MAX_EDITS/MAX_ANCHOR_CHARS/
+# MAX_REPLACEMENT_CHARS since #446, so it only ever cost reach.
+
+#: The pre-fix window, spelled out so a reader can see the size being replaced.
+OLD_TAIL_CHARS = 4_000
+
+
+@pytest.fixture
+def tall_memory_with_a_leading_sentinel(tmp_path, monkeypatch):
+    """A MEMORY.md bigger than the old 4,000-char window whose FIRST line is a
+    sentinel. Under the tail read the sentinel is the oldest content in the file
+    and cannot appear in the prompt; under a full read it must."""
+    sentinel = "SENTINEL-680-OLDEST-NOTE: prefer the scoped change over the rewrite."
+    memory = tmp_path / "MEMORY.md"
+    body = "# MEMORY\n" + sentinel + "\n" + ("an older infrastructure note\n" * 800)
+    assert len(body) > 4 * OLD_TAIL_CHARS, "the file must be well past the old window"
+    memory.write_text(body, encoding="utf-8")
+    soul = tmp_path / "SOUL.md"
+    soul.write_text("# SOUL\n" + "soul prose line\n" * 40, encoding="utf-8")
+    monkeypatch.setattr(hg, "SOUL_PATH", soul)
+    monkeypatch.setattr(hg, "MEMORY_PATH", memory)
+    monkeypatch.setattr(hg, "USER_PATH", tmp_path / "absent.md")
+    monkeypatch.setattr(hg, "CORRECTIONS_PATH", tmp_path / "absent2.md")
+    monkeypatch.setattr(hg, "KNOWLEDGE_HEALTH_PATH", tmp_path / "absent3.md")
+    return memory, sentinel
+
+
+def test_the_memory_prompt_shows_the_file_in_full_not_a_tail(
+        tall_memory_with_a_leading_sentinel, tmp_path):
+    """Clause 1. A sentinel in the first 1,000 chars of a >4,000-char MEMORY.md
+    reaches the rendered prompt, and the section stops calling the text a tail.
+
+    Against the pre-fix read this fails twice over: the sentinel sits outside the
+    last 4,000 chars, and the heading literally says `tail`.
+    """
+    memory, sentinel = tall_memory_with_a_leading_sentinel
+    memory_text = memory.read_text(encoding="utf-8")
+    assert len(memory_text[:1_000]) == 1_000
+    assert memory_text.index(sentinel) < 1_000, "the sentinel is in the oldest 1,000 chars"
+
+    assert hg._read(memory) == memory_text, "the no-tail read returns the whole file"
+    assert len(memory_text) > OLD_TAIL_CHARS
+
+    prompt = hg._build_single_variant_prompt(_cfg(tmp_path), ["prompts"],
+                                             target_file_hint="MEMORY.md")
+    assert sentinel in prompt
+    assert memory_text in prompt, "the whole canonical surface is what gets shown"
+    assert "Current MEMORY.md tail" not in prompt
+    assert "Current MEMORY.md (long-term notes, shown in full)" in prompt
+    # USER.md and the signal files are still excerpts — they are context, not a
+    # surface an anchor may quote, so shrinking them costs nothing and this round
+    # does not widen them.
+    assert "## Current USER.md tail" in prompt
+
+
+def test_a_memory_anchor_from_the_oldest_region_survives_the_prompt_and_the_parser(
+        tall_memory_with_a_leading_sentinel, tmp_path):
+    """The prompt-side half of the same defect, at the size a live round sees.
+
+    The span is legal at live scale (one edit, far under the bounds), so nothing
+    about the bounded contract explains it away — the only thing that made it
+    unusable was not being shown.
+    """
+    memory, sentinel = tall_memory_with_a_leading_sentinel
+    memory_text = memory.read_text(encoding="utf-8")
+    oldest = memory_text[:OLD_TAIL_CHARS // 4]
+    assert sentinel in oldest
+
+    raw = json.dumps({
+        "description": "tighten the leading rule",
+        "hypothesis": "the oldest note is the one that still causes preamble",
+        "target_surface": "prompts",
+        "edits": [{"path": "MEMORY.md", "anchor": sentinel,
+                   "replacement": "Prefer a scoped change over a rewrite."}],
+    })
+    v, err = hg._parse_single_variant(raw)
+    assert err is None and len(v["edits"]) == 1
+    assert len(raw) < 1_024, "a one-edit response is a constant whatever the file size"
+
+
+def test_the_bounded_response_contract_holds_while_the_shown_surface_grows(
+        tall_memory_with_a_leading_sentinel, tmp_path, monkeypatch):
+    """Clause 4: what is shown grows, what a response may be does not.
+
+    The three bounds and the engine's 8,000-token ceiling are #446's whole fix;
+    this pins them at their shipped values and shows the arithmetic that keeps a
+    worst-case legal response inside the ceiling — MAX_EDITS x (MAX_ANCHOR_CHARS
+    + MAX_REPLACEMENT_CHARS) = 19,200 chars against a 32,000-char ceiling.
+    """
+    assert hg.MAX_EDITS == 6
+    assert hg.MAX_ANCHOR_CHARS == 1_200
+    assert hg.MAX_REPLACEMENT_CHARS == 2_000
+    assert hg.MAX_EDITS * (hg.MAX_ANCHOR_CHARS + hg.MAX_REPLACEMENT_CHARS) < hg.CEILING_CHARS
+
+    # On the stubbed transport, so this reads the payload a real call would send
+    # without reaching the engine a round shares with interactive traffic.
+    _stub_http(monkeypatch, "ok", "stop")
+    _content, payload, _finish = hg._call_local_llm("prompt under test")
+    assert payload["max_tokens"] == 8000, (
+        "showing more of the file must not raise the response ceiling; the ceiling "
+        "is what makes a bigger prompt affordable"
+    )
+
+    memory, _ = tall_memory_with_a_leading_sentinel
+    big = hg._build_single_variant_prompt(_cfg(tmp_path), ["prompts"],
+                                          target_file_hint="MEMORY.md")
+    memory.write_text("# MEMORY\nshort file\n", encoding="utf-8")
+    small = hg._build_single_variant_prompt(_cfg(tmp_path), ["prompts"],
+                                            target_file_hint="MEMORY.md")
+    assert len(big) > len(small), "the prompt carries the growth"
+    # ...and the growth is affordable: the prompt plus a worst-case response still
+    # sits inside the smallest engine context on this box (131,072 tokens), at
+    # ~4 chars/token.
+    assert (len(big) + hg.CEILING_CHARS) / 4 < 131_072

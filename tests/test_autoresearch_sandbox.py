@@ -639,3 +639,77 @@ def test_variant_id_prefix_is_configurable():
 def test_round_id_shape():
     rid = common.round_id()
     assert rid.startswith("R_") and len(rid.split("_")) == 3 and rid[2:10].isdigit()
+
+
+# ── #680: an anchor from the oldest region of a long MEMORY.md applies ────────
+#
+# `_apply_anchored_edits` matches against the canonical file, which it reads in
+# full — the region that was unreachable for a MEMORY-targeted variant was
+# created upstream, in `hypothesis_generator._build_single_variant_prompt`, which
+# showed only `_read(MEMORY_PATH, tail=4000)` of a 25,869-char file. The model
+# could only copy an anchor from what it was shown, so a variant quoting an older
+# note never existed by the time it got here; the ones that did arrive were the
+# ones quoting the newest 15.5 %. This pins the apply side of the seam so the
+# whole path is covered: an anchor from the oldest 4,000 chars materialises.
+
+#: The window the generator used to show (`hypothesis_generator.py:282`, pre-#680).
+OLD_SHOWN_TAIL_CHARS = 4_000
+
+
+@pytest.fixture
+def tall_canonical_memory(tmp_path, monkeypatch):
+    """A canonical MEMORY.md past 22,000 chars — the live file measured 25,869 at
+    triage and grows note by note — with a
+    unique note at the top: the position that was unanchorable, since the tail
+    read began ~18,400 chars into a file this size."""
+    root = tmp_path / "vault_tall"
+    root.mkdir()
+    memory = root / "MEMORY.md"
+    memory.write_text(
+        "# MEMORY\n"
+        "OLDEST REGION NOTE: a root cause names its mechanism and its proof.\n"
+        + "an older infrastructure note line\n" * 700
+        + "NEWEST REGION NOTE: verify a state change by reading it back.\n",
+        encoding="utf-8",
+    )
+    soul = root / "SOUL.md"
+    soul.write_text("# SOUL\nBe direct.\n", encoding="utf-8")
+    monkeypatch.setattr(vs, "_canonical_prompt_paths", lambda: {
+        "SOUL.md": soul, "MEMORY.md": memory,
+    })
+    return memory
+
+
+def test_an_anchor_quoting_the_oldest_4000_chars_of_memory_md_materialises(cfg, tall_canonical_memory):
+    """Clause 2: `materialize` writes an overlay containing the replacement rather
+    than raising `AnchorApplyError: anchor matched 0 time(s)`.
+
+    The middle assertion is the premise, stated as data: this anchor is absent
+    from the last 4,000 chars, so under the old prompt the model was never shown
+    text it could have copied here. The apply side was always able to match it —
+    which is why the fix belongs upstream, and why dropping a variant that quoted
+    an older note was throwing away a workable edit.
+    """
+    text = tall_canonical_memory.read_text(encoding="utf-8")
+    anchor = "OLDEST REGION NOTE: a root cause names its mechanism and its proof."
+    assert anchor in text[:OLD_SHOWN_TAIL_CHARS + 200], "the anchor is in the oldest region"
+    assert anchor not in text[-OLD_SHOWN_TAIL_CHARS:], (
+        "and is absent from the 4,000 chars the generator used to show, so an "
+        "anchor here could only have been invented"
+    )
+    assert len(text) > 3 * OLD_SHOWN_TAIL_CHARS, "the file is long enough for the window to bite"
+
+    out = vs.materialize(cfg, {
+        "variant_id": "V_oldest_region", "target_surface": "prompts",
+        "edits": [{"path": "MEMORY.md", "anchor": anchor,
+                   "replacement": "OLDEST REGION NOTE: name the mechanism and the command."}],
+    })
+    overlay = (out / "MEMORY.md").read_text(encoding="utf-8")
+    assert "name the mechanism and the command." in overlay
+    assert anchor not in overlay
+    # The rest of the long file comes through untouched — the edit is a patch, not
+    # a rewrite, however big the surface is.
+    assert "NEWEST REGION NOTE: verify a state change by reading it back.\n" in overlay
+    assert overlay.count("an older infrastructure note line\n") == 700
+    # The canonical vault file is not the thing that changed.
+    assert anchor in tall_canonical_memory.read_text(encoding="utf-8")
