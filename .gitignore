@@ -23,11 +23,6 @@ __pycache__/
 /pipeline-runs/
 /autonomy-runs/
 /_pipeline/
-# `app.atomic_io.commit_lock` keys one lock per realpath here. Unanchored is
-# wrong on purpose: the dir is created wherever the running code lives, so a
-# worktree that runs a memory writer gets its own — and an unignored stray there
-# would dirty the tree and abort the round that made it.
-.locks/
 
 # Databases (SQLite + WAL/SHM), anywhere in tree
 *.db
