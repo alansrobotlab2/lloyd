@@ -597,6 +597,18 @@ def test_get_reports_the_status_of_an_empty_or_non_json_answer(monkeypatch):
     assert P._get("http://x/health") == (200, {"ok": True})
 
 
+def test_restart_skip_idle_pauses_the_pool_and_restarts_over_whatever_runs(monkeypatch):
+    """When the idle wait itself is what is broken — a leaked harness_runs
+    count on 2026-09-16 — the restart that would clear it must not wait on it."""
+    log = _restart_harness(monkeypatch, idle=(False, "backend never went idle within 900s"))
+    monkeypatch.setattr(P, "pool_paused", lambda: False)
+    monkeypatch.setattr(P, "set_pool_paused", lambda on: log.append(("pause_pool", on)) or True)
+    out = P.restart_stack(("lloyd-backend",), skip_idle=True)
+    assert ("wait_idle",) not in log and ("pause_pool", True) in log
+    assert out["restarted"] == ["lloyd-backend"] and out["idle"] == "idle wait skipped"
+    assert log[-3:] == [("drain", False), ("release_pool",), ("clear_pause",)]
+
+
 # ---------------------------------------------------------------------------
 # The toast says what landed, never which round did it
 # ---------------------------------------------------------------------------

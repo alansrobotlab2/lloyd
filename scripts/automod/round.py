@@ -476,6 +476,9 @@ def main(argv=None) -> int:
                    help="restart only this program (repeatable); default both, mcp first. "
                         "agent-llm-primary takes its own leg: host-RAM wait, reread, long boot")
     r.add_argument("--force", action="store_true", help="even while a promotion is under observation")
+    r.add_argument("--skip-idle", action="store_true",
+                   help="emergency: pause the pool but do not wait for idle; every turn in flight "
+                        "dies and is re-offered (for when the idle wait itself is broken)")
     sc = sub.add_parser("scorecard", help="how the unattended loop is doing, from the ledger")
     sc.add_argument("--since", default="7d")
     sc.add_argument("--json", action="store_true")
@@ -519,7 +522,8 @@ def main(argv=None) -> int:
         print(json.dumps(recover(), indent=2, default=str))
     elif args.cmd == "restart":
         programs = tuple(args.only) if args.only else ("lloyd-mcp", "lloyd-backend")
-        print(json.dumps(P.restart_stack(programs, reason=args.reason, force=args.force),
+        print(json.dumps(P.restart_stack(programs, reason=args.reason, force=args.force,
+                                         skip_idle=args.skip_idle),
                          indent=2, default=str))
     elif args.cmd == "scorecard":
         from scripts.automod import scorecard as SC

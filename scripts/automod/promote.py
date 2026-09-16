@@ -835,7 +835,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
 
 def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
                   reason: str = "", max_wait: float = IDLE_MAX_WAIT,
-                  force: bool = False) -> dict:
+                  force: bool = False, skip_idle: bool = False) -> dict:
     """Restart the live services the way the promoter does, for a human.
 
     A `supervisorctl restart` by hand is indistinguishable from a crash to the
@@ -868,7 +868,18 @@ def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
         raise PromoteError(f"no health probe for {unknown}; restart those by hand")
 
     S.set_pause(RESTART_LEASE)   # the guardian must not read this as a crash
-    ok, why = wait_idle(max_wait)   # pauses the pool, arms the drain, waits for quiet
+    if skip_idle:
+        # The emergency form: pause the pool so nothing new starts, and
+        # restart over whatever is in flight — every turn dies and is
+        # re-offered. For the case where the idle wait itself is what is
+        # broken: on 2026-09-16 a leaked `harness_runs` count held the
+        # backend "busy" for nine hours, and the restart that would have
+        # cleared the leak waited on the leak.
+        if pool_paused() is False:
+            set_pool_paused(True)
+        ok, why = True, "idle wait skipped"
+    else:
+        ok, why = wait_idle(max_wait)   # pauses the pool, arms the drain, waits for quiet
     if not ok:
         S.clear_pause()          # wait_idle already released the pool and the drain
         raise PromoteError(why)
