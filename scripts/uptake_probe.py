@@ -33,7 +33,7 @@ if str(REPO) not in sys.path:
 from app import uptake  # noqa: E402
 
 
-def build_corpus(days: int = 30) -> list[uptake.Turn]:
+def collect_turns(days: int = 30) -> list[uptake.Turn]:
     return uptake.human_turns(days=days)
 
 
@@ -345,7 +345,7 @@ def run_classifier_eval(cache: dict[str, Any] | None = None, *,
 
 def run(days: int, cache: dict[str, Any]) -> tuple[dict[str, Any], list[uptake.Turn]]:
     """Classify the window's candidates and join them to the entries in force."""
-    turns = build_corpus(days=days)
+    turns = collect_turns(days=days)
     candidates = uptake.candidate_disputes(turns)
     # Verdicts are keyed on `turn_id`, never on `ordinal`. `Turn.ordinal` restarts
     # at 1 in every session — the live 30-day window is 220 turns over 132
