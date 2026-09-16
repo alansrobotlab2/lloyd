@@ -395,6 +395,19 @@ def test_no_lock_artefact_appears_beside_a_target_or_under_the_vault(tmp_path, m
     assert resolved.is_relative_to(LLOYD_HOME.resolve()), (
         f"the lock directory {resolved} does not resolve under {LLOYD_HOME}"
     )
+    # The stronger property: running a writer must not dirty the checkout that
+    # runs it. Asked of git, in the repo the locks would land in, not asserted of
+    # a path pattern — a `.gitignore` rule is exactly the thing that goes missing.
+    import subprocess
+    probe = subprocess.run(
+        ["git", "-C", str(LLOYD_HOME), "check-ignore", "-q", "--",
+         str(resolved.relative_to(LLOYD_HOME))],
+        capture_output=True, text=True, check=False)
+    assert probe.returncode == 0, (
+        f"{resolved.relative_to(LLOYD_HOME)} is not git-ignored, so every run of "
+        "a memory writer leaves an untracked path in the checkout "
+        "(git check-ignore said nothing)"
+    )
     assert not list(vault.rglob("*.tmp")), (
         f"a half-written temp was left inside the vault: {list(vault.rglob('*.tmp'))}"
     )

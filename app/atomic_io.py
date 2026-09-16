@@ -30,7 +30,7 @@ import os
 import time
 from pathlib import Path
 
-from app.paths import LLOYD_HOME
+from app.paths import LOGS_DIR
 
 # Wait, don't queue forever: a chat turn that blocks on a stuck nightly writer
 # has to come back with an error the model can act on, not hang. Callers that
@@ -43,7 +43,13 @@ DEFAULT_LOCK_WAIT = 30.0
 # `git status`, in Obsidian's file tree, and in whatever walks the vault, and
 # that one is tracked in git. Content-addressed by realpath, so one file has
 # one lock no matter which lane spells its path differently.
-LOCK_DIR = Path(os.environ.get("LLOYD_LOCK_DIR") or (LLOYD_HOME / ".locks"))
+#
+# Under `logs/` because that directory is already this repo's ignored runtime
+# state (`/logs/`): a lock dir anywhere else in a checkout shows up as an
+# untracked path and dirties the tree of whoever runs a memory writer — including
+# an automod worktree, where a dirty tree aborts the round. Still under the repo
+# root, which is what the vault-cleanliness clause needs.
+LOCK_DIR = Path(os.environ.get("LLOYD_LOCK_DIR") or (LOGS_DIR / "locks"))
 
 # Half-written temps go to the same off-tree directory, for the same reason:
 # `os.replace` needs a *rename*, and a temp is a file that exists until the
