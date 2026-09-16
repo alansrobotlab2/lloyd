@@ -73,7 +73,15 @@ def main() -> int:
     else:
         mode = "APPLY" if rec["apply"] else "DRY RUN"
         near_dupes = sum(e.get("near_duplicates", 0) for e in rec["per_entity"])
-        print(f"[{mode}] signals={rec['signals']} entities scanned={len(rec['entities'])}"
+        # `of N` is the point (#699): a bare `planned=0` was read as a claim
+        # about the knowledge graph when it is a claim about the slice this run
+        # scanned. None = drift was not consulted, so there is no pool to name;
+        # print the count rather than a fraction over a total nobody measured.
+        total = rec.get("drift_candidates_total")
+        scanned = (f"entities scanned={len(rec['entities'])} of {total} drift candidates"
+                   if total is not None else
+                   f"entities scanned={len(rec['entities'])}")
+        print(f"[{mode}] signals={rec['signals']} {scanned}"
               f" actions planned={rec['actions_planned']} taken={rec['actions_taken']}"
               f" near-duplicate pairs reported-not-deleted={near_dupes}")
         print(f"[facts] active {rec['before_active']} -> {rec['after_active']}"

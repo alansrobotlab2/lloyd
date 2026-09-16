@@ -141,13 +141,14 @@ def read_correction_signals(limit: int = 25) -> list[dict]:
     return out
 
 
-def read_drift_signals(days: int = DRIFT_WINDOW_DAYS, limit: int = 50) -> list[dict]:
-    """Entities with a fact file written inside `days`.
+def _drift_candidates(days: int = DRIFT_WINDOW_DAYS) -> list[dict]:
+    """Every entity with a fact file written inside `days`, newest write first.
 
-    This is the only automatic quality signal the store itself emits: a fact
-    written this week is a claim about a world that has moved since. It is not
-    a verdict either — it selects *where to look*, and the contradiction
-    pairing plus the `created_at` ordering decides whether anything is stale.
+    This is the whole ranked candidate pool, untruncated, and it exists as a
+    function of its own so a run can name the denominator it selected from:
+    `read_drift_signals` returns a `limit`-sized prefix of this list, and
+    #699's complaint was that nothing in the record said what the prefix was a
+    prefix *of*.
 
     Fact-file mtimes, not `facts_idx.created_at`: the index records when a
     fact was *written into the graph*, and the whole tree was rebuilt on
@@ -155,13 +156,21 @@ def read_drift_signals(days: int = DRIFT_WINDOW_DAYS, limit: int = 50) -> list[d
     would be wrong too — they only move when a file is added or removed, and
     the nightly extractor rewrites in place. The tree walk is 0.4 s over
     23,625 entity dirs on the live box.
+
+    Order is newest write first, ties broken by name so the ranking is
+    reproducible across runs. Sorting by name and truncating — which is what
+    this did until #699 — made the nightly `--limit 40` the ASCII-earliest 40 of
+    the drifted pool (1,594 entities measured 2026-09-15), the same 40 on three
+    consecutive nights (records 20260912-210116, 20260913-210013 and
+    20260914-210026 are set-identical), and that drift slice shared 0 of 38
+    entities with the 38 most-recently-written ones.
     """
     cutoff = datetime.datetime.now().timestamp() - days * 86400
     try:
         entries = list(FACTS_ROOT.iterdir())
     except OSError:
         return []
-    out: list[dict] = []
+    ranked: list[tuple[float, str]] = []
     for child in entries:
         try:
             if not child.is_dir() or child.name.startswith((".", "_")):
@@ -171,26 +180,51 @@ def read_drift_signals(days: int = DRIFT_WINDOW_DAYS, limit: int = 50) -> list[d
                 continue
         except OSError:
             continue
-        out.append({"entity": child.name, "source": "drift",
-                    "evidence": f"fact file written {datetime.datetime.fromtimestamp(newest):%Y-%m-%d %H:%M}"})
-    out.sort(key=lambda s: s["entity"])
-    return out[:limit]
+        ranked.append((newest, child.name))
+    ranked.sort(key=lambda pair: (-pair[0], pair[1]))
+    return [{"entity": name, "source": "drift",
+             "evidence": f"fact file written {datetime.datetime.fromtimestamp(newest):%Y-%m-%d %H:%M}"}
+            for newest, name in ranked]
 
 
-def collect_signals(sources=("corrections", "drift"), days: int = DRIFT_WINDOW_DAYS,
-                    limit: int = 40) -> list[dict]:
-    """Union of the enabled sources, deduped by entity, corrections first.
+def read_drift_signals(days: int = DRIFT_WINDOW_DAYS, limit: int = 50) -> list[dict]:
+    """The `limit` entities whose fact files were written most recently.
 
-    Corrections outrank drift because a user saying "that was wrong" is a
-    better reason to look than a file being new.
+    This is the only automatic quality signal the store itself emits: a fact
+    written this week is a claim about a world that has moved since. It is not
+    a verdict either — it selects *where to look*, and the contradiction
+    pairing plus the `created_at` ordering decides whether anything is stale.
+
+    Ranked newest-first because the point of the signal is recency: the
+    entities a writer touched today are the ones whose newest claim is most
+    likely already stale, and an alphabetical slice could not see them (see
+    `_drift_candidates`). Callers that report coverage need the size of the
+    pool this slice came from: use `_drift_candidates(days)` for that, or read
+    `drift_candidates_total` off a run record.
+    """
+    return _drift_candidates(days)[:limit]
+
+
+def _collect_signals(sources=("corrections", "drift"), days: int = DRIFT_WINDOW_DAYS,
+                     limit: int = 40) -> tuple[list[dict], dict]:
+    """`collect_signals` plus what it selected from.
+
+    The tally is read off the same tree walk that produced the slice, so the
+    denominator cannot disagree with the entities the run actually scanned.
+    `drift_candidates_total` is None when drift was not consulted at all — a
+    run over `--sources corrections` did not measure a drift population, and 0
+    would be a number it never measured.
     """
     wanted = set(sources)
     out: list[dict] = []
     seen: set[str] = set()
+    drift_candidates_total: int | None = None
     if "corrections" in wanted:
         out.extend(read_correction_signals(limit=limit))
     if "drift" in wanted:
-        out.extend(read_drift_signals(days=days, limit=limit))
+        candidates = _drift_candidates(days)
+        drift_candidates_total = len(candidates)
+        out.extend(candidates[:limit])
     deduped = []
     for sig in out:
         if sig["entity"] in seen:
@@ -199,7 +233,18 @@ def collect_signals(sources=("corrections", "drift"), days: int = DRIFT_WINDOW_D
         deduped.append(sig)
         if len(deduped) >= limit:
             break
-    return deduped
+    return deduped, {"drift_candidates_total": drift_candidates_total}
+
+
+def collect_signals(sources=("corrections", "drift"), days: int = DRIFT_WINDOW_DAYS,
+                    limit: int = 40) -> list[dict]:
+    """Union of the enabled sources, deduped by entity, corrections first.
+
+    Corrections outrank drift because a user saying "that was wrong" is a
+    better reason to look than a file being new — and drift is ranked
+    newest-write-first within its own block (see `read_drift_signals`).
+    """
+    return _collect_signals(sources=sources, days=days, limit=limit)[0]
 
 
 # ── the plan ─────────────────────────────────────────────────────────────────
@@ -437,8 +482,9 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
     if entities:
         signals = [{"entity": e, "source": "explicit", "evidence": "named by caller"}
                    for e in entities]
+        tally = {"drift_candidates_total": None}
     else:
-        signals = collect_signals(sources=sources, days=days, limit=limit)
+        signals, tally = _collect_signals(sources=sources, days=days, limit=limit)
 
     planned = taken = 0
     per_entity: list[dict] = []
@@ -502,6 +548,12 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         "sources": list(sources) if not entities else ["explicit"],
         "days": days,
         "signals": len(signals),
+        # The size of the pool `signals` was selected from (#699). Without it a
+        # record's `actions_planned: 0` reads as a verdict on the tree when it
+        # is a verdict on a slice; with it, scanned-over-total is computable
+        # from this JSON alone. None = drift was not consulted (explicit
+        # entities, or `--sources corrections`).
+        "drift_candidates_total": tally["drift_candidates_total"],
         "entities": [s["entity"] for s in signals],
         "actions_planned": planned,
         "actions_taken": taken,
@@ -522,8 +574,9 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
             record_obj["record_error"] = str(exc)
 
     logger.info(
-        "improve(%s): signals=%d planned=%d taken=%d active_facts %d -> %d%s",
-        "apply" if apply else "dry-run", len(signals), planned, taken, before, after,
+        "improve(%s): signals=%d drift_candidates=%s planned=%d taken=%d active_facts %d -> %d%s",
+        "apply" if apply else "dry-run", len(signals), tally["drift_candidates_total"],
+        planned, taken, before, after,
         "" if record_obj.get("fact_entity_recall") is None
         else f" fact_entity_recall={record_obj['fact_entity_recall']}")
     return record_obj

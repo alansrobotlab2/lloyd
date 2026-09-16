@@ -1,6 +1,9 @@
 """Backlog #376 — the `improve` feedback loop and the unified memory surface.
 
-Two things are pinned here, and both were absent before this change:
+Three things are pinned here. The first two were absent when #376 landed; the
+third (#699) is pinned in section 1b below: the drift slice must be the newest
+writes rather than the alphabetically-first ones, and every run must state the
+pool it selected from.
 
 1. **An `improve`-equivalent.** A consumer that reads a *real* feedback
    signal, treats the existing contradiction detector as *evidence* rather
@@ -21,6 +24,7 @@ Two things are pinned here, and both were absent before this change:
 Run: .venvs/lloyd/bin/python -m pytest tests/test_memory_improvement.py
 """
 import asyncio
+import importlib.util
 import json
 import sys
 from datetime import datetime, timedelta, timezone
@@ -151,6 +155,174 @@ def test_collect_signals_dedupes_by_entity(world):
         "## TTS regression\n**Correction:** TTS broke again.\n", encoding="utf-8")
     signals = fi.collect_signals(sources=("corrections", "drift"))
     assert sum(1 for s in signals if s["entity"] == "TTS") == 1
+
+
+# ── 1b. #699: the drift slice must be the newest writes, and its size stated ──
+#
+# Nightly `--limit 40` took the ASCII-earliest 40 of the drifted pool — 1,594
+# entities with a fact file written in the last 3 days, measured 2026-09-15 —
+# so the pass never looked at today's writes: the records for 09-12, 09-13 and
+# 09-14 hold the identical 40 entities with `actions_planned=0`, and that slice
+# shared 0 of 38 entities with the 38 most-recently-written ones. Two defects,
+# both pinned below: the ranking, and a report that gave no denominator for its
+# zero. The overlap number itself moves with the nightly pool — re-measured
+# against live `main` on 2026-09-16 it was 2 of 38 over 1,552 candidates, and
+# 0 of 38 over 1,269 the morning of the same day — so what these tests pin is
+# the ranking, not a number. Post-fix, the same live check on 2026-09-16 reads
+# 38 of 38 over that same 1,552.
+
+
+def _aged(facts_root, entity, days=0, hours=0):
+    """Backdate one entity's fact file so its drift mtime is explicit.
+
+    Fails when `entity` matches no fact file. A helper that silently no-ops on a
+    missed target leaves that entity freshly written, so a fixture meaning "this
+    one is 30 days old" quietly becomes "this one is new" and the test it feeds
+    keeps passing while pinning nothing — the review rung of this item's first
+    round found the helper doing exactly that, and clause 5 is the guard.
+    """
+    import os
+    stamp = (datetime.now() - timedelta(days=days, hours=hours)).timestamp()
+    paths = list((facts_root / entity).glob("*.md"))
+    assert paths, (
+        f"_aged({entity!r}) matched no *.md under {facts_root}, so the intended "
+        f"backdating never happened and that entity is still freshly written")
+    for path in paths:
+        os.utime(path, (stamp, stamp))
+
+
+def _five_drifted(facts_root, st):
+    """Five entities that all drifted, aged 6 hours apart: E0's last write is 24 h
+    ago, E1's 18 h, E2's 12 h, E3's 6 h, and E4's is now. Returned in the
+    newest-first order the fixed ranking must produce."""
+    for name in ("E0", "E1", "E2", "E3", "E4"):
+        _write_facts(facts_root, name, "state",
+                     [{"fact": f"{name} is running on the box.", "created_at": _days_ago(2)}])
+    _reindex(st, facts_root)
+    for i, name in enumerate(("E0", "E1", "E2", "E3", "E4")):
+        _aged(facts_root, name, hours=(4 - i) * 6)
+    return ["E4", "E3", "E2", "E1", "E0"]
+
+
+def test_drift_limit_takes_the_newest_write_not_the_alphabetical_head(world):
+    """#699 clause 1: two entities whose fact files have different mtimes and
+    `limit=1` must return the *newer* one — even though the older one sorts
+    first by name, which is precisely the slice the nightly pass selected."""
+    facts_root, st, _ = world
+    for name in ("ALPHA_STALE", "ZEBRA_FRESH"):
+        _write_facts(facts_root, name, "state",
+                     [{"fact": f"{name} is running on the box.", "created_at": _days_ago(2)}])
+    _reindex(st, facts_root)
+    _aged(facts_root, "ALPHA_STALE", days=2)   # ASCII-earliest, written 2 days ago
+    _aged(facts_root, "ZEBRA_FRESH", hours=1)  # ASCII-latest, written an hour ago
+
+    found = fi.read_drift_signals(days=3, limit=1)
+    assert [s["entity"] for s in found] == ["ZEBRA_FRESH"], found
+    assert found[0]["source"] == "drift"
+
+
+def test_drift_signals_are_ranked_newest_first_as_a_list(world):
+    """The ranking holds for the whole returned slice, not just the survivor of
+    a limit of 1: five entities written 6 hours apart come back newest-first,
+    and each `evidence` stamp agrees with the order it was ranked on."""
+    facts_root, st, _ = world
+    expected = _five_drifted(facts_root, st)
+
+    found = fi.read_drift_signals(days=3, limit=5)
+    assert [s["entity"] for s in found] == expected, found
+    stamps = [s["evidence"] for s in found]
+    assert stamps == sorted(stamps, reverse=True), stamps
+    # The slice a truncated run takes is a prefix of the full ranking, so the
+    # `limit=38` set is the 38 newest of the whole candidate pool by construction.
+    full = fi.read_drift_signals(days=3, limit=10 ** 9)
+    assert full[:3] == found[:3], (full[:3], found[:3])
+
+
+def test_run_record_names_the_denominator_it_selected_from(world):
+    """#699 clause 2: `actions planned=0` was a statement about 40 entities read
+    as a statement about the tree. The record must carry the candidate total the
+    run selected from, distinct from `signals`, so the scanned fraction is
+    computable from the JSON a run already writes."""
+    facts_root, st, _ = world
+    expected = _five_drifted(facts_root, st)
+
+    rec = fi.run_improvement(sources=("drift",), days=3, limit=2)
+    assert rec["drift_candidates_total"] == 5, rec["drift_candidates_total"]
+    assert rec["signals"] == 2, rec["signals"]
+    assert rec["entities"] == expected[:2], rec["entities"]
+    # The zero the item complained about, now readable as a zero over 2 of 5.
+    assert rec["actions_planned"] == 0
+    assert rec["signals"] < rec["drift_candidates_total"]
+
+    saved = json.loads(Path(rec["record_path"]).read_text(encoding="utf-8"))
+    assert saved["drift_candidates_total"] == 5, saved.keys()
+    assert saved["drift_candidates_total"] != saved["signals"]
+
+    # Explicit entities consult no drift population, so there is no denominator
+    # to print — 0 would be a number the run never measured.
+    named = fi.run_improvement(entities=["E4"], record=False)
+    assert named["drift_candidates_total"] is None, named["drift_candidates_total"]
+
+
+def test_cli_summary_reports_scanned_over_total(world, capsys, monkeypatch):
+    """#699 clause 3: the stdout line is what a worker quotes in its report, so
+    it carries the denominator too — `scanned=2 of 5`, not a bare `scanned=2`."""
+    facts_root, st, _ = world
+    _five_drifted(facts_root, st)
+    spec = importlib.util.spec_from_file_location("fact_improvement_cli", _SCRIPT_PATH)
+    cli = importlib.util.module_from_spec(spec)
+    sys.modules["fact_improvement_cli"] = cli
+    spec.loader.exec_module(cli)
+
+    monkeypatch.setattr(sys, "argv", ["fact-improvement.py", "--sources", "drift", "--limit", "2"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    assert "entities scanned=2 of 5 drift candidates" in out, out
+
+
+def test_improve_tool_reports_the_denominator_over_the_mcp_seam(world):
+    """The record crosses a process boundary here: `improve` serializes it over
+    MCP. Nothing whitelists its keys, so pin that the new field survives the
+    `call_tool` dispatch instead of assuming serialization is transparent."""
+    facts_root, st, _ = world
+    _five_drifted(facts_root, st)
+
+    result = asyncio.run(memory_ops.call_tool("improve", {"sources": ["drift"], "limit": 2}))
+    payload = json.loads(result.content[0].text)
+    assert payload["drift_candidates_total"] == 5, sorted(payload)
+    assert payload["signals"] == 2, payload["signals"]
+
+
+def test_corrections_outrank_drift_when_every_drift_write_is_newer(world):
+    """#699 clause 4: re-ranking drift by recency must not promote drift over a
+    correction. `TTS` was contested by the user and its last write is 30 days
+    old, so every drift mtime in the tree is newer — and it still comes first,
+    followed by the newest drift, not the alphabetically-first one."""
+    facts_root, st, vault_root = world
+    _write_facts(facts_root, "TTS", "state",
+                 [{"fact": "TTS built-in voices return 500 errors.", "created_at": _days_ago(30)}])
+    for name in ("AAA", "BBB"):
+        _write_facts(facts_root, name, "state",
+                     [{"fact": f"{name} is running on the box.", "created_at": _days_ago(1)}])
+    _reindex(st, facts_root)
+    _aged(facts_root, "TTS", days=30)
+    _aged(facts_root, "AAA", days=1)
+    _aged(facts_root, "BBB", hours=1)
+    (vault_root / "memory" / "corrections.md").write_text(
+        "## 2026-09-14 09:00 PDT — TTS regression\n"
+        "**Correction:** TTS broke again.\n", encoding="utf-8")
+
+    # The docstring's premise — every drift mtime is newer than TTS's — is a
+    # measured claim, not a fixture intention: if the 30-day backdating above had
+    # missed its target, TTS would still be in the drift pool and the ordering
+    # below would pass for the wrong reason (dedupe keeps corrections first).
+    drift_pool = {s["entity"] for s in fi.read_drift_signals(days=3, limit=10 ** 9)}
+    assert "TTS" not in drift_pool, sorted(drift_pool)
+    assert {"AAA", "BBB"} <= drift_pool, sorted(drift_pool)
+
+    signals = fi.collect_signals(sources=("corrections", "drift"), days=3, limit=2)
+    assert [(s["entity"], s["source"]) for s in signals] == [
+        ("TTS", "corrections"), ("BBB", "drift")], signals
 
 
 # ── 2. the loop: evidence + reason, dry-run by default ───────────────────────
