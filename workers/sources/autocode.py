@@ -165,20 +165,21 @@ is answered from the ledger without a review, so a gate you have not committed
 for is a wasted one. If a `<context>` or `<budget>` anchor fires, it is not
 advice — commit, gate, and land or abort with what you have.
 
-**Your outcome closes the item — or leaves it open.** When this turn ends you \
-will be asked to restate the result as one JSON object: whether the change \
-landed, and **per clause** whether it is now `met`, `not_met`, or `deferred`, \
-with the test node id or file:line that shows it. The overall acceptance is \
-derived from the clauses. Once the promotion settles, an item whose clauses all \
-said `met` is closed automatically. `deferred` leaves it open and names the ids \
-it waits on — the honest answer when the check needs traffic, a nightly run, or \
-another item to close first; file that item and name it. **A deferral that \
-names no id is recorded as `not_met`.** `not_met` leaves it open and the item \
-is offered once more for exactly those clauses. `unnecessary` means the work \
-is not needed after all — the premise no longer holds, or the acceptance is \
-already true — and closes the item without a landing. A closed item is never \
-re-triaged, so `met` (or `unnecessary`) on a clause you did not actually \
-verify is the one claim this loop cannot recover from.
+**Your outcome closes the item — or leaves it open.** The item is a proposal, \
+not a promise: find out whether it improves Lloyd, and land it only if it does. \
+When this turn ends you restate the result as one JSON object: whether the \
+change landed, and **per clause** `met`, `not_met` or `deferred`, with the test \
+node id or file:line; the overall acceptance is derived from the clauses. Once \
+the promotion settles, an all-`met` item is closed automatically. `deferred` \
+leaves it open and names the ids it waits on. A deferral that names no id is \
+recorded as `not_met`. `not_met` re-offers it once for those clauses. Two verdicts close \
+it with no landing: `unnecessary` means the work is not needed after all — the \
+premise no longer holds, or the acceptance is already true; `rejected` means \
+you built or measured it and the evidence says it does not improve things (an \
+eval no better, cost above the gain) — put the measurement in `summary`. A rejection with evidence is a good outcome; a \
+landing that improves nothing is the failure. A closed item is never \
+re-triaged, so `met`, `unnecessary` or `rejected` on evidence you did not \
+actually gather is the one claim this loop cannot recover from.
 
 If your change needed a path the loop may never write — anything the gate's \
 scope check denies — leave it out, land the rest, and report it under \
@@ -1094,22 +1095,36 @@ async def _run_and_record(item, candidate, triage, budget, started,
         except Exception as exc:  # noqa: BLE001 — a note is not the round
             logger.warning("#%s: could not record human_paths: %s",
                            candidate.id, exc)
-    if outcome and outcome["acceptance"] == "unnecessary":
-        # "Determined not to be necessary" is a verdict with no landing to wait
-        # for: the premise no longer holds, or the acceptance is already true.
-        # Closed here rather than by the settle sweep, which only sees landings.
+    if outcome and outcome["acceptance"] in B.ITEM_VERDICT_OUTCOMES:
+        # A verdict on the item with no landing to wait for. `unnecessary`:
+        # the premise no longer holds, or the acceptance is already true.
+        # `rejected`: the round built or measured it and the evidence says it
+        # does not improve things — Alan's rule (2026-09-16) that every item
+        # is a proposal and a negative result is a clean close, not a spent
+        # attempt. Closed here rather than by the settle sweep, which only
+        # sees landings.
+        verdict = outcome["acceptance"]
         if getattr(candidate, "members", None):
-            # A wrong `unnecessary` on six findings is the one claim the loop
+            # A wrong verdict on six findings is the one claim the loop
             # should not make alone: the umbrella closes, the members stay
             # folded and a human decides (unfold_umbrella releases them).
             B.note_item(candidate.id,
-                        f"closed as unnecessary with members {candidate.members} still folded; "
+                        f"closed as {verdict} with members {candidate.members} still folded; "
                         f"a human decides whether to release them (unfold_umbrella)")
             B.tag_item(candidate.id, add=(B.NEEDS_HUMAN_TAG,))
+        why = ("the round found the work unnecessary" if verdict == "unnecessary"
+               else "the round tried it and rejected it on the evidence")
+        if verdict == "rejected":
+            # Findable on the board: a rejected proposal is a result worth
+            # reading, and the tag is how a later triage of the same idea
+            # sees that it was already tried. Tagged BEFORE the close:
+            # `tag_item` reaches items through `open_items`, and a done item
+            # is not open.
+            B.tag_item(candidate.id, add=(B.REJECTED_TAG,))
         B.set_status(candidate.id, "done",
-                     "the round found the work unnecessary" + (f": {outcome['summary']}" if outcome.get("summary") else ""))
+                     why + (f": {outcome['summary']}" if outcome.get("summary") else ""))
         S.append_event({"event": "item_closed", "item_id": candidate.id, "by": "autocode",
-                        "acceptance": "unnecessary", "reason": outcome.get("summary", "")[:300]})
+                        "acceptance": verdict, "reason": outcome.get("summary", "")[:300]})
     # The review rung's word, onto the item. A refusal is on the gate event,
     # which outlives the round dir; what goes on the item is the part a
     # human reads — the grader's findings, the branch, and when the grader

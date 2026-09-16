@@ -419,8 +419,13 @@ def clusterable_items(ledger: Path, boards: tuple[str, ...] | None = B.DEFAULT_B
     Group-judged ids are excluded here, not only in `select_cluster`, since a
     pass now re-runs when the last one is used up: left in, they re-form the
     same clusters around themselves, `select_cluster` drops them below the
-    minimum, and the fresh items peeled into those groups are never offered."""
-    seen = set(B.triaged_ids(ledger)) | B.group_triaged_ids(ledger)
+    minimum, and the fresh items peeled into those groups are never offered.
+
+    Only a group run that could have folded counts (`binding_only`): the
+    sweep's umbrellas-off runs recorded every would-be fold as `keep`, and
+    by 2026-09-16 that had struck 286 of the 404 open drafts from this pass
+    for good, while its last run found two pairs."""
+    seen = set(B.triaged_ids(ledger)) | B.group_triaged_ids(ledger, binding_only=True)
     skip_tags = {"umbrella", B.NEEDS_HUMAN_TAG, B.EXPIRED_TAG}
     return [i for i in B.open_items(boards)
             if i.status == B.TRIAGE_POOL_STATUS and i.id not in seen

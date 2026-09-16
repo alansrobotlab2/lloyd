@@ -450,3 +450,18 @@ def test_board_health_counts_parked_and_the_sweeps_coverage(isolated):
     assert h["draft"]["parked"] == 1 and h["draft"]["pool"] == 2
     assert h["sweep"] == {"unswept": 1, "swept": 2, "parked": 1,
                           "worth": {"high": 1, "medium": 0, "low": 1}}
+
+
+def test_rank_key_puts_a_proposal_after_a_defect_of_the_same_rank():
+    """Within one worth/size a YouTube-digest proposal sorts after a defect.
+    Proposal rounds landed 2 of 29 in the week to 2026-09-16 against 30 of 96
+    for defects, and equal rank had handed half of `up_next` to them."""
+    def it(i, tags):
+        return B.Item(path=Path("x"), id=i, name="n", status="draft", priority="m", created="",
+                      body="", worth="high", size="small", tags=tuple(tags))
+    order = sorted([it(1, ("backlog", "youtube-eval", B.SWEPT_TAG)), it(2, ("backlog", B.SWEPT_TAG))],
+                   key=B.rank_key)
+    assert [i.id for i in order] == [2, 1]
+    # Rank still beats the proposal tie-break: a high proposal before a medium defect.
+    hi_prop = it(3, ("backlog", "youtube-eval")); mid_bug = it(4, ("backlog",)); mid_bug.worth = "medium"
+    assert sorted([mid_bug, hi_prop], key=B.rank_key)[0].id == 3

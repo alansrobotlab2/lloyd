@@ -1851,8 +1851,47 @@ def test_an_abandoned_round_returns_the_item_to_the_pool(isolated, monkeypatch):
 
 def test_the_outcome_schema_includes_unnecessary_and_the_prompt_explains_it():
     from workers.sources.autocode import PROMPT
+    flat = " ".join(PROMPT.split())
     assert "unnecessary" in B.IMPLEMENT_OUTCOME_SCHEMA["properties"]["acceptance"]["enum"]
-    assert "`unnecessary` means the work is not needed after all" in " ".join(PROMPT.split())
+    assert "`unnecessary` means the work is not needed after all" in flat
+    # Alan's rule (2026-09-16): an item is a proposal; a negative result is a
+    # clean close, and the prompt says so in those terms.
+    assert "rejected" in B.IMPLEMENT_OUTCOME_SCHEMA["properties"]["acceptance"]["enum"]
+    assert "`rejected` means you built or measured it and the evidence says it does not improve things" in flat
+    assert "The item is a proposal, not a promise" in flat
+
+
+def test_a_rejected_outcome_closes_the_item_tagged_and_keeps_its_clauses(isolated, monkeypatch):
+    """Built it, measured it, no gain: the item closes `done` tagged
+    `rejected` with the measurement on it, spends no attempt and is never
+    re-triaged or parked for a human. Clause outcomes ride along as stated —
+    the verdict is on the item, so a `met` clause does not turn it into a
+    landing."""
+    from workers.sources import autocode as I
+    write_item(isolated, 726); _confirm(726)
+    async def fake(prompt, **kw):
+        return {"text": "eval no better\n\nSPAWNED: none\n", "session_id": "s726",
+                "stop_reason": "stop", "num_turns": 9, "errors": [],
+                "structured": {"acceptance": "rejected", "landed": False, "deferred_to": [],
+                               "clause_outcomes": [{"clause": 1, "outcome": "met",
+                                                    "evidence": "tests/test_x.py::t", "deferred_to": []}],
+                               "summary": "MRR 0.500 -> 0.497 over 3 runs; within noise, not adopted",
+                               "spawned": []}, "structured_error": ""}
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, ""))
+    asyncio.run(I.execute(_Item({"structured_outcome": True})))
+    p = next(isolated.glob("726-*.md"))
+    fm = B._split_frontmatter(p.read_text())[0]
+    assert fm["status"] == "done" and B.REJECTED_TAG in fm["tags"]
+    assert B.NEEDS_HUMAN_TAG not in fm["tags"]
+    assert any("rejected it on the evidence" in l and "MRR 0.500" in l for l in fm["activity_log"])
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_closed"][-1]
+    assert ev["item_id"] == 726 and ev["acceptance"] == "rejected" and "within noise" in ev["reason"]
+    fin = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "backlog_implement" and e.get("phase") == "finished"][-1]
+    assert fin["outcome"]["acceptance"] == "rejected", "a met clause does not override the item verdict"
+    assert B.retriage_spent_items(S.LEDGER_PATH, None) == [], "closed: nothing to send back through triage"
+    assert 726 not in B.desired_statuses(S.LEDGER_PATH, None), "done is terminal; the reconciler leaves it"
 
 
 

@@ -201,12 +201,23 @@ MAX_INCOMPLETE_ATTEMPTS = 2
 # it is not a verdict, it is the record of a turn that ran out of budget, and
 # the finalizer never runs on such a turn anyway.
 # What an implement round says about the acceptance check when its turn ends.
-# `met` closes the item once the promotion settles; the other two leave it
-# open and say why. Built from this tuple, not restated, for the reason the
-# triage schema is: one list, or a new value lands in the grammar and not in
-# the validator.
-ACCEPTANCE_OUTCOMES = ("met", "not_met", "deferred", "unnecessary")
-# Per clause. No `unnecessary`: that is a verdict on the item, not on a clause.
+# `met` closes the item once the promotion settles; `not_met` and `deferred`
+# leave it open and say why; `unnecessary` and `rejected` close it with no
+# landing. Built from this tuple, not restated, for the reason the triage
+# schema is: one list, or a new value lands in the grammar and not in the
+# validator.
+#
+# `rejected` (2026-09-16, Alan's rule): every backlog item is a proposal for
+# research and eval, and deployment happens only when the measurement says it
+# improves things. Before this the loop had no honest exit for "built it,
+# measured it, no gain" — a round either forced a landing or spent its
+# attempts as `not_met`, was re-triaged, and finally parked for a human. A
+# rejection with evidence closes the item cleanly; the loop is judged on items
+# *resolved*, not items landed.
+ACCEPTANCE_OUTCOMES = ("met", "not_met", "deferred", "unnecessary", "rejected")
+# Verdicts on the ITEM, kept as stated whatever the clauses say.
+ITEM_VERDICT_OUTCOMES = ("unnecessary", "rejected")
+# Per clause. No `unnecessary`/`rejected`: those are verdicts on the item.
 CLAUSE_OUTCOMES = ("met", "not_met", "deferred")
 
 IMPLEMENT_OUTCOME_SCHEMA: dict = {
@@ -223,8 +234,13 @@ IMPLEMENT_OUTCOME_SCHEMA: dict = {
                                        "something else happens — name it in deferred_to. "
                                        "unnecessary: the work is not needed after all (the "
                                        "premise no longer holds, or it is already true) and "
-                                       "the item should close without a landing. When "
-                                       "clause_outcomes is non-empty this is derived from it.")},
+                                       "the item should close without a landing. rejected: "
+                                       "you built or measured it and the evidence says it does "
+                                       "not improve things (an eval no better, cost above the "
+                                       "gain, a design that does not fit) — the item closes as "
+                                       "tried-and-rejected; put the measurement in summary. "
+                                       "When clause_outcomes is non-empty and this is neither "
+                                       "unnecessary nor rejected, it is derived from them.")},
         "clause_outcomes": {"type": "array", "items": {
             "type": "object",
             "properties": {
@@ -314,7 +330,7 @@ def parse_outcome(structured) -> dict | None:
     for c in clauses:
         deferred_to += [i for i in c["deferred_to"] if i not in deferred_to]
 
-    if acceptance != "unnecessary" and clauses:
+    if acceptance not in ITEM_VERDICT_OUTCOMES and clauses:
         outcomes = {c["outcome"] for c in clauses}
         if "not_met" in outcomes:
             acceptance = "not_met"
@@ -2185,9 +2201,19 @@ _WORTH_ORDER = {"high": 0, "medium": 1, "": 2, "low": 3}
 _SIZE_ORDER = {"small": 0, "medium": 1, "": 1, "large": 2}
 
 
-def rank_key(item: Item) -> tuple[int, int]:
-    """Sort key: worth first, then size. Lower is better."""
-    return (_WORTH_ORDER.get(item.worth, 2), _SIZE_ORDER.get(item.size, 1))
+def rank_key(item: Item) -> tuple[int, int, int]:
+    """Sort key: worth first, then size, then defects before proposals. Lower
+    is better.
+
+    The third element (2026-09-16): within one worth/size a research proposal
+    filed by the YouTube digest sorts after a defect. Measured over the week
+    to 2026-09-16, proposal rounds landed 2 of 29 against 30 of 96 for
+    defects, and 38 of the 74 `up_next` items were proposals — so an equal
+    rank was handing half the implement pool to the shape that resolves
+    slowest. A proposal still runs; it runs after the bug beside it.
+    """
+    return (_WORTH_ORDER.get(item.worth, 2), _SIZE_ORDER.get(item.size, 1),
+            1 if any(t in EVAL_SPAWN_TAGS for t in item.tags) else 0)
 
 
 def is_swept(item: Item) -> bool:
@@ -2485,10 +2511,31 @@ def is_grouped(item: Item) -> bool:
     return item.group is not None
 
 
-def group_triaged_ids(ledger: Path) -> set[int]:
-    """Every id a group triage judged, whatever the verdict."""
+# When `form_umbrellas` was switched off for the backlog sweep (config commit
+# 52958ff). A group triage run with umbrellas off records every would-be fold
+# as `keep`, and a `keep` is what `clusterable_items` reads as "the sameness
+# question was answered" — so the sweep's runs silently removed their items
+# from clustering for good. Rows carry `form_umbrellas` since 2026-09-16; a
+# row from before that carries nothing, and this stamp says which of those
+# ran with folding off.
+UMBRELLAS_OFF_SINCE = "2026-09-15T21:39:07"
+
+
+def group_triaged_ids(ledger: Path, *, binding_only: bool = False) -> set[int]:
+    """Every id a group triage judged, whatever the verdict.
+
+    `binding_only` drops the runs that could not have folded anything —
+    recorded with `form_umbrellas: false`, or undated-by-flag and after
+    `UMBRELLAS_OFF_SINCE` — so the clusterer may offer those items again once
+    umbrellas are back on. Every other reader wants the full set.
+    """
     out: set[int] = set()
     for d in _ledger_events(ledger, "backlog_group_triage", require_item=False):
+        if binding_only:
+            flag = d.get("form_umbrellas")
+            stamp = str(d.get("created_at") or d.get("ts") or "")
+            if flag is False or (flag is None and stamp[:19] >= UMBRELLAS_OFF_SINCE):
+                continue
         judged = d.get("judged") or {}
         if isinstance(judged, dict):
             for k in judged:
@@ -2525,6 +2572,9 @@ def is_loop_spawned(item: Item) -> bool:
 # stays on disk with the tag, and a human setting its status back to `draft`
 # reopens it (the reconciler strips the tag and releases it into the pool).
 EXPIRED_TAG = "expired"
+# A closed proposal the loop tried and found wanting (`rejected` outcome).
+# On the item so a later triage of the same idea can see it was measured.
+REJECTED_TAG = "rejected"
 # Never expired: a member's fate is its umbrella's, an umbrella is confirmed
 # work, a `needs-human` item is waiting on a decision, and an expired item
 # has already been judged once. A swept or parked item has been read and

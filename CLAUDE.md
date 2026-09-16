@@ -615,7 +615,7 @@ ever set `in_progress`, and #353 landed while still `draft`. Now
 `draft` (triaged, not for the loop). `autocode` reads **`up_next`** only,
 sets `in_progress` the moment its turn starts, and the item ends `done`
 (landed and settled with the acceptance `met`, or the round's outcome said
-`unnecessary`) or back in `up_next` (external, incomplete, infra, rolled
+`unnecessary` or `rejected`) or back in `up_next` (external, incomplete, infra, rolled
 back, reopened) — or back to `draft`, tagged `needs-human`, when its one
 attempt is spent, because `up_next` means implement will take it and it will
 not until a human reopens it; the tag comes off when a reopen moves it back.
@@ -672,7 +672,15 @@ before this) is noted and left for a human. The asymmetry is deliberate: a
 closed item is never re-triaged, so the prompt tells the model that `met` on
 an acceptance it did not verify is the one claim the loop cannot recover
 from, and `deferred` with an id is the honest answer for a check that needs
-traffic or a nightly run (#520 → #618). Kill switches:
+traffic or a nightly run (#520 → #618). **`rejected` is the fifth outcome**
+(2026-09-16), and it is Alan's rule for the whole board: every backlog item is
+a proposal for research and eval, deployed only when the measurement says it
+improves things. A round that built or measured the idea and found no gain
+closes the item `done`, tagged `rejected`, with the measurement on it — no
+re-triage, no `needs-human`. Before this a negative result had no exit: the
+round either forced a landing or spent its attempts as `not_met`. Row 9 of
+the scorecard counts rejections beside landings; the loop is judged on items
+resolved, not shipped. Kill switches:
 `workers.sources.autocode.close_on_settle` and `structured_outcome`
 (carried in the queue payload like the budgets).
 
@@ -856,7 +864,7 @@ review contract appends the members as context under its own clauses. When
 it settles `met`, `close_settled_items` closes every still-open member with
 "landed via umbrella #u" and an `item_closed {by: umbrella}` event
 (`close_members_on_settle`); `not_met`, `deferred` and no-outcome leave
-them folded, and `unnecessary` closes the umbrella but tags it
+them folded, and `unnecessary` or `rejected` closes the umbrella but tags it
 `needs-human` with the members still folded — a wrong `unnecessary` on six
 findings is the one claim the loop should not make alone.
 `backlog.unfold_umbrella(id, reason)` is the human escape hatch, and since
@@ -999,11 +1007,22 @@ version.
   downtime**. Instead `autotriage` is exempt from the round hold
   (`workers.round_hold.exempt`), so the sweep shares the engine with a
   round rather than waiting for a gap that no longer exists.
-- **Umbrellas are off for now** (`autotriage.form_umbrellas: false`): a
-  group triage still closes duplicates and retires the stale, but a `fold`
-  is recorded `keep` and no umbrella is confirmed. `round unfold-oversized
-  [--min-clauses 8] [--dry-run]` unfolded the 56 never-attempted 8–12-clause
-  umbrellas; their members went back to `draft` for the sweep to rank.
+- **Umbrellas were off for the sweep and are back on** (2026-09-16,
+  `autotriage.form_umbrellas`). Off, a group triage still closed duplicates
+  and retired the stale, but a `fold` was recorded `keep` and no umbrella
+  was confirmed. `round unfold-oversized [--min-clauses 8] [--dry-run]`
+  unfolded the 56 never-attempted 8–12-clause umbrellas; their members went
+  back to `draft` for the sweep to rank. Measured after the sweep (rounds
+  since 09-11, hours from `round_start` to landing or abort): singles landed
+  30 of 96 rounds and closed 0.51 items per round-hour; umbrellas landed 5
+  of 21 and closed **1.47** per round-hour (the umbrella plus 2–3 members
+  each, rounds no longer); YouTube-digest proposals landed 2 of 29, 0.13.
+  Landing rate per round is the wrong gauge for a grouping change — count
+  items resolved per round-hour. Two things had to change with the flag: a
+  `keep` recorded while folding was off is not a sameness verdict
+  (`group_triaged_ids(binding_only=True)`, `UMBRELLAS_OFF_SINCE`), or the
+  sweep's runs would have struck 286 of 404 open drafts from clustering for
+  good; and the summary row now carries `form_umbrellas`.
 - **Expiry is 30 d**, not 7, and reaches only what the sweep has not read.
   `round sweep-status` says how far it has got (`unswept` should reach 0);
   `board_health.sweep` and the dashboard's `parked` count carry the same.

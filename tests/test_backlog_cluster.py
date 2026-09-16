@@ -387,5 +387,30 @@ def test_items_a_group_triage_already_judged_are_not_clustered_again(isolated):
     for i in (1, 2, 3):
         write_item(isolated, i)
     S.append_event({"event": "backlog_group_triage", "cluster_id": "c-x",
-                    "judged": {"1": "keep"}}, path=S.LEDGER_PATH)
+                    "judged": {"1": "keep"}, "form_umbrellas": True}, path=S.LEDGER_PATH)
     assert [i.id for i in _items()] == [2, 3]
+
+
+# ── a run that could not fold binds nothing ────────────────────────────────
+
+def test_group_runs_with_umbrellas_off_do_not_remove_items_from_clustering(isolated):
+    """While `form_umbrellas` was off for the sweep, every would-be fold was
+    recorded `keep`, and a keep is what the clusterer reads as "judged
+    distinct" — so the sweep silently struck its items from clustering for
+    good. A row that says `form_umbrellas: false`, or an unflagged row from
+    the window the flag was off, binds nothing; every other reader of the
+    ids still sees the full set."""
+    for i in (1, 2, 3, 4):
+        write_item(isolated, i)
+    S.append_event({"event": "backlog_group_triage", "cluster_id": "c-on", "item_ids": [1],
+                    "judged": {"1": "keep"}, "form_umbrellas": True}, path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_group_triage", "cluster_id": "c-off", "item_ids": [2],
+                    "judged": {"2": "keep"}, "form_umbrellas": False}, path=S.LEDGER_PATH)
+    # Unflagged rows: one from before the flag went off, one from after.
+    S.append_event({"event": "backlog_group_triage", "cluster_id": "c-old", "item_ids": [3],
+                    "judged": {"3": "keep"}, "created_at": "2026-09-12T10:00:00Z"}, path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_group_triage", "cluster_id": "c-sweep", "item_ids": [4],
+                    "judged": {"4": "keep"}, "created_at": "2026-09-16T03:00:00Z"}, path=S.LEDGER_PATH)
+    assert B.group_triaged_ids(S.LEDGER_PATH) == {1, 2, 3, 4}
+    assert B.group_triaged_ids(S.LEDGER_PATH, binding_only=True) == {1, 3}
+    assert sorted(i.id for i in _items()) == [2, 4]

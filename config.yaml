@@ -888,7 +888,10 @@ workers:
   # long-lived triage while the engine's median KV is over 60%.
   round_hold:
     enabled: true
-    exempt: [scheduled-task, autotriage]
+    # autoresearch is exempt (2026-09-16) because a round is in flight nearly
+    # 100% of the time and a held source never runs; its 4 h interval bounds
+    # what it takes from the engine.
+    exempt: [scheduled-task, autotriage, autoresearch]
   # Poison sweep — periodic triage of the dead-letter pile. Runs from the
   # pool's scheduler loop (not a work source: a source that repairs the queue
   # would be starved by a backed-up queue) and is deterministic (no model:
@@ -954,9 +957,14 @@ workers:
     # 2026-09-13 (Alan): #506 is done, but do NOT re-arm yet — since fe40af3
     # `run_round` never benches a variant (#876), so every round is baseline-
     # only and can promote nothing. Re-arm once #876 lands.
+    # 2026-09-16: #876 landed 09-15 (every variant is benched again) and
+    # Alan pre-approved the re-arm on 09-13. Every 4 h, not hourly: a round
+    # runs ~100% of the time now and autoresearch is exempt from the round
+    # hold (below), so this is the share of the primary it may take beside
+    # a round — at most 30 min in 4 h.
     autoresearch:
-      enabled: false
-      interval_seconds: 3600
+      enabled: true
+      interval_seconds: 14400
       max_inflight: 1
       max_duration_seconds: 1800
     # Behavioural-regression check for a landed self-modification. Off until
@@ -1020,11 +1028,13 @@ workers:
       sweep: true
       sweep_batch: 8
       sweep_max_turns: 60
-      # Off (2026-09-15): 56 umbrellas of 8-12 clauses sat in up_next landing
-      # 1 in 5, and `round unfold-oversized` sent their members back to be
-      # ranked. A group triage still closes duplicates and retires the stale;
-      # it folds nothing until the implement pool is under its bound again.
-      form_umbrellas: false
+      # Off 2026-09-15 for the sweep (56 umbrellas of 8-12 clauses sat in
+      # up_next landing 1 in 5; `round unfold-oversized` sent their members
+      # back to be ranked). On again 2026-09-16: measured after the sweep,
+      # umbrellas closed 1.47 items per round-hour against 0.51 for singles,
+      # in rounds no longer. group_max_items 4 and MAX_CLAUSES 6 keep them
+      # the shape that landed.
+      form_umbrellas: true
       # Group mode: when clusters.json (the nightly backlog-cluster source)
       # holds a cluster with >= group_min_items untriaged members, this run
       # takes the cluster instead of one item and consolidates it — closes

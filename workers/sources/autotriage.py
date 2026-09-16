@@ -1205,7 +1205,10 @@ async def _execute_group(item: QueueItem, cluster: dict, members: list) -> dict[
                                            "structured_error": str(run.get("structured_error") or ""),
                                            "stop_reason": stop_reason,
                                            "num_turns": run.get("num_turns"), "budget": budget,
-                                           "unjudged": parsed["unjudged"]})
+                                           "unjudged": parsed["unjudged"],
+                                           # A run that could not fold binds nothing
+                                           # for the clusterer (`group_triaged_ids`).
+                                           "form_umbrellas": form_umbrellas})
     summary = (f"group triage {cid}: {result['duplicates']} duplicate(s) closed, "
                f"{result['retired']} retired, {result['folded']} folded"
                + (f" into #{result['umbrella_id']}" if result.get("umbrella_id") else "")

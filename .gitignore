@@ -38,6 +38,9 @@ __pycache__/
 !web/tsconfig.json
 !web/tsconfig.node.json
 !web/components.json
+# …and the uptake probe's dated tables (#552): the one durable record of
+# whether durable memory entries were honoured, committed by the nightly job.
+!eval/uptake/*.json
 # …and the review-rung calibration cases, which are fixtures, not state.
 # `git add -A` silently skipped them on the branch that introduced them.
 !eval/review_calibration/*.json

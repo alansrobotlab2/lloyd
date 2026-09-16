@@ -413,8 +413,17 @@ tell you where anything was, and nine landed items sat as `up_next`.
 draft ──autotriage: confirmed──▶ up_next ──autocode: round opens──▶ in_progress
   │                                 ▲                                        │
   └──autotriage: already_done/stale─┼──── attempt ended without a verdict ◀──┤
-                          done ◀────┘◀────────── landed & met, or unnecessary ┘
+                          done ◀────┘◀── landed & met, or unnecessary / rejected ┘
 ```
+
+`rejected` (2026-09-16) is Alan's rule that every backlog item is a
+**proposal for research and eval**, deployed only when the measurement says
+it improves things. A round that built or measured the idea and found no
+gain closes the item `done`, tagged `rejected`, with the measurement in its
+activity log — no re-triage, no `needs-human`. Before this the loop had no
+honest exit for a negative result: a round either forced a landing or spent
+its attempts as `not_met`. The scorecard's row 9 counts rejections beside
+landings, because the loop is judged on items *resolved*, not shipped.
 
 `autotriage` reads `draft` only; `autocode` reads `up_next` only. Every
 other transition is derived, not scattered: `backlog.desired_statuses`
@@ -460,7 +469,7 @@ visible only as an open count that never went down.
 
 An implement turn now ends the way a triage turn does: one more completion
 under a grammar (`IMPLEMENT_OUTCOME_SCHEMA`) restating the result as
-`{landed, acceptance: met|not_met|deferred|unnecessary, clause_outcomes:
+`{landed, acceptance: met|not_met|deferred|unnecessary|rejected, clause_outcomes:
 [{clause, outcome, evidence, deferred_to}], deferred_to, summary, spawned}`,
 recorded on the `finished` event as `outcome`, with `outcome_error` beside it
 so a finalizer that quietly stopped working does not look like one that is
