@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -318,6 +319,68 @@ async def _discover() -> list[Tool]:
     return tools
 
 
+# ── Bulk-id count bound (#614) ──────────────────────────────────────────────
+#
+# One call to `email_delete` or `email_update` carries an array of message ids
+# and nothing bounded how many: the extension declares `messageIds` with no
+# `maxItems` and its handler checks only non-empty, the harness grant gate
+# never fires on an attended turn (`_authority_scope_for` returns "" for a user
+# session, and `check_grants` allows interactive scope outright), and a
+# predicate-less grant authorizes any array size. Meta's named failure is
+# precisely this: an email agent deleted 200 messages after its owner told it
+# to stop, having been prompted in advance to confirm destructive actions.
+#
+# This is the only landable seam. The extension is gitignored
+# (`agent-services/.gitignore:72`), so a `maxItems` in its schema cannot come
+# through a round, and `call_tool` is the one choke point every mail tool
+# crosses — so the refusal happens before the call is forwarded and therefore
+# before any grant decision, for every scope.
+#
+# Lifting it is `LLOYD_MAIL_ID_CAP`, read at call time: no code edit, no
+# config.yaml change, no restart for a human who means to do bulk mail work.
+MAIL_ID_ARRAY_CAP = 50
+MAIL_ID_CAP_ENV = "LLOYD_MAIL_ID_CAP"
+
+# Lloyd tool name -> the argument carrying an id array. Tools that take no id
+# array (`email_empty_trash`, `email_empty_junk`, `email_delete_folder`,
+# `contacts_delete`, `calendar_delete_event`) cannot be count-bounded here and
+# are deliberately absent: their exposure is the grant gate's tier-3 problem,
+# not this one.
+_ID_ARRAY_ARGS = {"email_delete": "messageIds", "email_update": "messageIds"}
+
+
+def _id_array_cap() -> int:
+    """The cap for this call: the constant, or a positive env override.
+
+    An override that is empty, non-numeric or non-positive falls back to the
+    constant — a malformed override must never read as "no bound".
+    """
+    raw = (os.environ.get(MAIL_ID_CAP_ENV) or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return MAIL_ID_ARRAY_CAP
+    return value if value > 0 else MAIL_ID_ARRAY_CAP
+
+
+def _id_array_refusal(lloyd_name: str, arguments: dict) -> str | None:
+    """Refusal text when this call carries more ids than the cap, else None."""
+    field = _ID_ARRAY_ARGS.get(lloyd_name)
+    if field is None:
+        return None
+    ids = arguments.get(field)
+    if not isinstance(ids, list):
+        return None  # a singular messageId, or the field absent: nothing to bound
+    cap = _id_array_cap()
+    if len(ids) <= cap:
+        return None
+    return (
+        f"refusing {len(ids)} {field} for {lloyd_name}: the per-call cap is "
+        f"{cap}. Pass at most {cap} ids per call, or set "
+        f"{MAIL_ID_CAP_ENV}=<n> for deliberate bulk work."
+    )
+
+
 async def call_tool(name: str, arguments: dict) -> CallToolResult:
     bridge_name = REVERSE_MAP.get(name)
     if bridge_name is None:
@@ -325,6 +388,11 @@ async def call_tool(name: str, arguments: dict) -> CallToolResult:
             bridge_name = name[3:]
         else:
             return text_result(json.dumps({"error": f"Unknown tool: {name}"}), is_error=True)
+
+    refusal = _id_array_refusal(_lloyd_name(bridge_name), arguments or {})
+    if refusal is not None:
+        logger.warning("thunderbird: %s — call not forwarded", refusal)
+        return text_result(json.dumps({"error": refusal}), is_error=True)
 
     try:
         pool = await _get_pool()
