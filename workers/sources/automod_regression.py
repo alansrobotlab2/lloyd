@@ -526,11 +526,16 @@ def _execute_blocking() -> dict[str, Any]:
             S.append_event({"event": "regression_skipped", "reason": msg})
             return _skipped(msg)
 
-    # Provenance, not a gate. A floor taken against an older question set
-    # cannot make the comparison wrong, only its record misleading. Say so
-    # rather than silently carrying it. (The floor is no longer 0.0: since
-    # the wider document pool the reranked order of single queries moves
-    # between runs of identical code — see `measure_noise`.)
+    # Provenance, not a gate. Under a pinned corpus every armed metric is
+    # deterministic (re-measured 2026-09-17: five trials agree to 0.0000), so
+    # the measured stdev is 0.0 and the tolerance falls back to the MIN_SIGMA
+    # floor either way — a floor taken against an older question set cannot
+    # make the comparison wrong, only its record misleading. Say so rather
+    # than silently carrying it. What is NOT deterministic is whether the
+    # daemon answers every query, and that is refused above as a
+    # non-measurement rather than budgeted for here: one dropped answer is
+    # -0.05 doc_hit_rate, and a floor wide enough to absorb it would also
+    # absorb a real regression of one query.
     stale_floor = (noise.get("queries_fingerprint") or "") != queries_fingerprint()
 
     regressed, reasons, detail = evaluate(current["overall"], baseline["overall"], noise)
