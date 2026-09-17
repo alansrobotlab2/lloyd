@@ -22,6 +22,7 @@ the list (`DESC_SNIPPET_CHARS`) with the full text behind
 
 import logging
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -63,6 +64,30 @@ DESC_SNIPPET_CHARS = 300
 # touches a file re-parses that one file and nothing else — which is also why
 # this cache needs no invalidation hook to stay honest.
 _FM_CACHE: dict[str, tuple[int, int, dict, str]] = {}
+
+# Every touch of `_FM_CACHE` that *changes* it takes this lock, and nothing held
+# by it may parse or read a file. Both list handlers are plain `def`, so FastAPI
+# runs each request in its own threadpool worker: two `/tasks` calls in flight
+# mutate this one dict from two threads. A bare `dict.pop` is atomic under CPython
+# and a lookup racing an insert costs one redundant parse, so the hazard was never
+# the ordinary case — it is `_prune_fm_cache`, which walks the cache to pick its
+# victims and then deletes them: a concurrent insert landing between the walk and
+# the delete is a `RuntimeError: dictionary changed size during iteration`, i.e. a
+# 500 on the board, raised only when a create, a nightly write and the 15-second
+# poll happen to overlap. The lock is held for lookup, insert, and prune only —
+# never across `_backlog_parse_fm` — at 1.78 s over 1,137 files that is ~1.6 ms a
+# file, and holding the lock across it would put every concurrent board request
+# back-to-back behind one cold parse, which is the thing this cache removed.
+#
+# The lock guards the mapping, not the values: two threads that parse the same file
+# build two equivalent dicts and one wins, and the loser's dict is garbage. That is
+# only sound while nothing mutates a cached `fm` in place after handing it out — true
+# today because the readers (`_row_from`, `_board_index`) only read, and because the
+# one route that stamps `updated:`/`board`/`status` re-parses the file
+# (`_backlog_parse_fm` direct, never the cache) since it is about to rewrite it. A
+# future caller that edits a cached dict in place would corrupt every other reader,
+# in this process and in every warm row that shares it.
+_FM_CACHE_LOCK = threading.Lock()
 
 _FALLBACK_FIELDS = ("board", "status", "priority", "tags", "blocked", "assigned", "position")
 # `low` since 2026-09-16, matching `agent_mcp/backlog.py::DEFAULT_PRIORITY`:
@@ -106,14 +131,21 @@ def _backlog_parse_fm(path: Path) -> tuple:
 
 
 def _backlog_cached_fm(path: Path) -> tuple:
-    """`_backlog_parse_fm` behind the stat-validated cache."""
+    """`_backlog_parse_fm` behind the stat-validated cache.
+
+    The parse runs *outside* the lock, so two cold requests parse concurrently in
+    their own threads rather than queueing; only the lookup and the insert are
+    serialised.
+    """
     key = str(path)
-    entry = _FM_CACHE.get(key)
+    with _FM_CACHE_LOCK:
+        entry = _FM_CACHE.get(key)
     stat = path.stat()
     if entry is not None and entry[0] == stat.st_mtime_ns and entry[1] == stat.st_size:
         return entry[2], entry[3]
     fm, body = _backlog_parse_fm(path)
-    _FM_CACHE[key] = (stat.st_mtime_ns, stat.st_size, fm, body)
+    with _FM_CACHE_LOCK:
+        _FM_CACHE[key] = (stat.st_mtime_ns, stat.st_size, fm, body)
     return fm, body
 
 
@@ -142,18 +174,47 @@ def _backlog_scan() -> list:
     return found
 
 
+def _fm_cache_invalidate(filepath: Path) -> None:
+    """Forget one file after a write made its cached copy wrong.
+
+    Drops the entry rather than trusting a same-second `mtime_ns` to differ from
+    the one now on file, so a save costs one re-parse instead of a rescan.
+    """
+    with _FM_CACHE_LOCK:
+        _FM_CACHE.pop(str(filepath), None)
+
+
 def _prune_fm_cache(found: list) -> None:
     """Drop cache entries for files that no longer exist.
 
     Runs after a full scan and is cheap when nothing changed: one length
     comparison. Without it the cache grew on every delete and a deleted item's
     body stayed resident forever.
+
+    The whole body runs inside `_FM_CACHE_LOCK`, and that is the fix rather than a
+    formality. The shipped shape iterated the live mapping to pick its victims and
+    popped them after, while another threadpool worker on a concurrent request
+    inserted into the same dict — the GIL does not save an iteration that another
+    thread is resizing, so this raised `RuntimeError: dictionary changed size during
+    iteration` out of `_backlog_scan` and into a 500 on the board. It fires only when
+    a create, a nightly write and the page's 15-second poll overlap, which is exactly
+    why it survived review. `tests/test_backlog_route_cache.py` hammers both shapes
+    with the lock held by the writers, which is the production invariant that
+    `_fm_cache_invalidate`, the insert in `_backlog_cached_fm` and this function all
+    keep — pinned in the same file by a test that watches the lock itself.
+
+    The guard inside the lock is a length comparison only, so a delete and a create
+    landing in the same window (`len(_FM_CACHE) == len(found)`) skips the sweep and
+    leaves one dead entry cached. That is untidy, not wrong: the entry is keyed on a
+    path that no longer exists, so nothing can look it up, and the next scan without
+    a compensating create evicts it.
     """
-    if len(_FM_CACHE) <= len(found):
-        return
-    live = {str(f) for f, _, _ in found}
-    for key in [k for k in _FM_CACHE if k not in live]:
-        _FM_CACHE.pop(key, None)
+    with _FM_CACHE_LOCK:
+        if len(_FM_CACHE) <= len(found):
+            return
+        live = {str(f) for f, _, _ in found}
+        for key in [k for k in _FM_CACHE if k not in live]:
+            _FM_CACHE.pop(key, None)
 
 
 def _board_index() -> tuple:
@@ -180,22 +241,24 @@ def _write_task_file(filepath: Path, fm: dict, body: str) -> None:
     clean = {k: (v.isoformat() if isinstance(v, datetime) else v)
              for k, v in fm.items() if v is not None}
     fm_yaml = yaml.dump(clean, default_flow_style=False, allow_unicode=True, sort_keys=False)
-    # Deliberately the byte-for-byte shape this route has always written, because
-    # two of its consequences are not this item's to change: `yaml.dump` re-quotes
-    # and re-wraps a hand-written frontmatter block, and `_backlog_parse_fm` hands
-    # back a `.strip()`ed body, so a save ends the file without the trailing newline
-    # that 764 of the 1,139 board files currently have. Both are why the clause
-    # "a priority-only update leaves the file byte-identical apart from priority:
-    # /updated:" is true of the **body and the other frontmatter lines** and not of
-    # the last byte of a hand-written file — which `tests/test_backlog_body_
-    # roundtrip.py::test_a_priority_only_update_survives_frontmatter_the_writer_
-    # would_reflow` states as a test. Fixing the re-flow means preserving the block's
-    # original text through a write; that is a write-path change, not a payload fix.
+    # Deliberately the byte-for-byte shape this route has always written. Two of its
+    # consequences are pre-existing and were ruled out of scope when clause 3 was
+    # amended on 2026-09-17 (see the `activity` log on item #1199): `yaml.dump`
+    # re-quotes and re-wraps a hand-written frontmatter block — `created:` comes back
+    # quoted on the 266 of 1,129 board files that store it unquoted (counted on the
+    # live board 2026-09-17, `grep -c '^created: [0-9]'`) — and `_backlog_parse_fm`
+    # hands back a `.strip()`ed body, so the file loses its trailing newline (800 of
+    # 1,141 files had one, same count). The clause as
+    # graded is therefore "a priority-only update changes **no body text**", not
+    # "byte-identical apart from priority:/updated:" — the latter was true only of
+    # files the route itself wrote. Closing the re-flow means preserving the block's
+    # original text through a write: a write-path change, recorded as a finding on
+    # #1199, not a payload fix. What must never move is the body, which
+    # `tests/test_backlog_body_roundtrip.py::
+    # test_a_priority_only_update_survives_frontmatter_the_writer_would_reflow` pins
+    # for a non-canonical block.
     filepath.write_text(f"---\n{fm_yaml}---\n\n{body}")
-    # This write just made the cached copy wrong; drop the entry rather than
-    # trust a same-second `mtime_ns` to differ from the one now on file. The
-    # other entries are untouched, so a save costs one re-parse, not a rescan.
-    _FM_CACHE.pop(str(filepath), None)
+    _fm_cache_invalidate(filepath)
 
 
 def _backlog_find_file(task_id: int) -> Path | None:

@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -226,6 +228,223 @@ def test_the_scan_hands_each_path_to_the_row_builder_exactly_once_per_pass(corpu
     assert all(BR._BACKLOG_PATTERN.match(path.name) for path, _fm, _b in out), (
         "the scan yielded a file the item-id pattern rejects"
     )
+
+
+# ── the cache under concurrent threadpool requests ───────────────────────────
+#
+# Both list handlers are plain `def`, so FastAPI runs each request in its own
+# threadpool worker and every worker mutates the one module-global `_FM_CACHE`. The
+# review rung named the hazard on 2026-09-17: `_backlog_cached_fm` inserted while
+# `_prune_fm_cache` iterated the same dict. The symptom is not a stale row — it is
+# `RuntimeError: dictionary changed size during iteration` escaping `_backlog_scan`
+# into a 500 on the board, raised only when a create, a nightly write and the page's
+# 15-second poll overlap. Three tests, covering the three things that have to be
+# true: the mutation sites hold the lock (mechanism), the lock really excludes
+# (instrument), and the prune under a real hammer raises nowhere while a replica of
+# the shipped shape raises under the identical hammer (symptom, with its positive
+# control).
+
+
+class _RecordingLock:
+    """A lock stand-in that counts acquisitions.
+
+    It does not exclude — the stress test below uses the production lock — it exists
+    so a test can ask "did this mutation happen between acquire and release?", which
+    is the property being claimed, rather than whether two threads happened to
+    interleave on this run of the machine.
+    """
+
+    def __init__(self):
+        self.acquisitions = 0
+
+    def __enter__(self):
+        self.acquisitions += 1
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def test_every_cache_mutation_happens_inside_the_lock(tmp_path, monkeypatch):
+    """The finding, stated as the property that fixes it.
+
+    Each mutation site is driven through its own production entry point — a scan (the
+    insert in `_backlog_cached_fm` plus the sweep in `_prune_fm_cache`), a save and a
+    delete (both through `_fm_cache_invalidate`) — and the assertion is that the
+    instrumented lock's counter *moved* while that call ran. A mutation that skipped
+    the lock leaves the counter where it was, which is the failure being prevented,
+    not a number that has to be exceeded.
+    """
+    d = tmp_path / "backlog"
+    d.mkdir()
+    for i in (1, 2):
+        write_item(d, i, board="lloyd")
+    monkeypatch.setattr(BR, "_BACKLOG_DIR", d)
+    monkeypatch.setattr(BR, "_FM_CACHE", {})
+    rec = _RecordingLock()
+    monkeypatch.setattr(BR, "_FM_CACHE_LOCK", rec)
+
+    before = rec.acquisitions
+    BR.backlog_tasks()                       # cold scan: two inserts + a sweep
+    assert rec.acquisitions > before, "a scan touched the cache without the lock"
+
+    path = d / "1-item-1.md"
+    assert str(path) in BR._FM_CACHE, "prerequisite: both entries cached"
+    before = rec.acquisitions
+    BR._fm_cache_invalidate(path)
+    assert rec.acquisitions > before, "_fm_cache_invalidate popped without the lock"
+    assert str(path) not in BR._FM_CACHE, "the invalidate did not drop the entry"
+
+    (d / "2-item-2.md").unlink()
+    (d / "1-item-1.md").write_text(         # a second write makes the file grow again
+        (d / "1-item-1.md").read_text(encoding="utf-8") + "\nmore\n", encoding="utf-8")
+    before = rec.acquisitions
+    BR.backlog_tasks()
+    assert rec.acquisitions > before, "the post-write rescan touched the cache without the lock"
+
+
+def test_the_cache_lock_actually_excludes():
+    """`_FM_CACHE_LOCK` must be a real lock, or the test above pins a ceremony.
+
+    The instrumented lock never blocks, so "ran inside the lock" is only worth
+    something if the production object excludes a second holder. It must also not be
+    re-entrant: the mutation sites are three statements each, and a re-entrant lock
+    would let a nested call believe it was exclusive when it was not.
+    """
+    assert isinstance(BR._FM_CACHE_LOCK, type(threading.Lock())), (
+        f"_FM_CACHE_LOCK is a {type(BR._FM_CACHE_LOCK).__name__}, not a threading.Lock"
+    )
+    assert BR._FM_CACHE_LOCK.acquire(blocking=False), "could not take an idle lock"
+    try:
+        assert not BR._FM_CACHE_LOCK.acquire(blocking=False), (
+            "_FM_CACHE_LOCK is re-entrant or shared: a nested mutation would not be "
+            "excluded, so holding it would not make the prune safe"
+        )
+    finally:
+        BR._FM_CACHE_LOCK.release()
+
+
+def _legacy_prune(cache: dict, found: list) -> None:
+    """The prune this route shipped before #1199's review, kept as the control.
+
+    Iterate the live mapping to pick victims, pop them after, hold nothing. If the
+    hammer below cannot make *this* raise, it is too narrow to certify the production
+    prune, and a green second half would be reporting a race it never had a chance to
+    see.
+    """
+    if len(cache) <= len(found):
+        return
+    live = {str(f) for f, _, _ in found}
+    for key in [k for k in cache if k not in live]:
+        cache.pop(key, None)
+
+
+def _hammer(cache: dict, lock, prune, seeds: list, *, writers: int = 4,
+            trials: int = 3, prunes_per_trial: int = 20) -> list:
+    """Run `prune` while `writers` insert into the same mapping. Returns escapes.
+
+    The writers take `lock`, because that is the production invariant: every mutator
+    of `_FM_CACHE` holds it (`_backlog_cached_fm`'s insert, `_fm_cache_invalidate`,
+    this sweep). The legacy prune does not know the lock exists, which is precisely
+    the difference the fix is. `sys.setswitchinterval` is dropped so the GIL hands
+    over inside the comprehension; at the default 5 ms the window closes and the test
+    passes for the wrong reason.
+    """
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    errors: list[BaseException] = []
+    stop = threading.Event()
+
+    def writer(tid: int) -> None:
+        i = 0
+        while not stop.is_set():
+            with lock:
+                cache[f"/tmp/board/{tid}-{i}.md"] = (0, 0, {}, "")
+            i += 1
+            if i % 3 == 0:
+                with lock:
+                    cache.pop(f"/tmp/board/{tid}-{i - 2}.md", None)
+
+    try:
+        for _ in range(trials):
+            cache.clear()
+            for s in seeds:
+                cache[s] = (0, 0, {}, "")
+            stop.clear()
+            threads = [threading.Thread(target=writer, args=(t,)) for t in range(writers)]
+            for t in threads:
+                t.start()
+            try:
+                # Each sweep drops the newest 50+k seeds from the live set, which is
+                # what a delete looks like to the prune: cache longer than the disk.
+                for k in range(prunes_per_trial):
+                    prune([(Path(p), {}, "") for p in seeds[: len(seeds) - 50 - k]])
+            except BaseException as exc:  # noqa: BLE001 - escapes are the measurement
+                errors.append(exc)
+            stop.set()
+            for t in threads:
+                t.join(10)
+    finally:
+        sys.setswitchinterval(previous)
+    return errors
+
+
+def test_the_shipped_prune_shape_reproduces_the_race_and_the_fixed_one_does_not():
+    """The symptom, on both sides of the fix, under one identical hammer.
+
+    1,200 cached entries with 4 inserting writer threads, 3 trials x 20 sweeps.
+    Measured on 2026-09-17: the legacy shape raised `dictionary changed size during
+    iteration` on every sweep it had to do (60 of 60), the production
+    `_prune_fm_cache` raised nothing. The first assertion is a positive control on
+    the instrument, not on the code — if it ever fails, widen the hammer before
+    trusting the second assertion at all.
+    """
+    seeds = [f"/tmp/board/seed-{n}.md" for n in range(1200)]
+    cache: dict = {}
+
+    control = _hammer(cache, threading.Lock(),
+                      lambda found: _legacy_prune(cache, found), seeds)
+    assert control, (
+        "the legacy prune did NOT raise under this stress, so the hammer cannot "
+        "certify the fix — widen it (more entries, more writers) before reading the "
+        "second half as a pass"
+    )
+    assert any("dictionary changed size" in str(e) for e in control), [str(e) for e in control[:2]]
+
+    production = _hammer(
+        cache, BR._FM_CACHE_LOCK,
+        lambda found: BR._prune_fm_cache(found), seeds)
+    assert not production, [str(e) for e in production[:3]]
+
+
+def test_the_still_shipped_prune_is_the_one_under_test(tmp_path, monkeypatch):
+    """The hammer calls `_prune_fm_cache`, so this pins what *it* must keep doing.
+
+    Sweeping in place while holding the lock is the fix; the alternative reading of
+    "don't iterate a shared dict" is to rebuild the global onto a new dict, which
+    would leave every other holder of the old object reading a stale mapping and would
+    make the hammer above measure a dict nothing else can see. So: after a real
+    delete, the eviction has to be visible through `BR._FM_CACHE` itself, and the
+    object identity has to be the one the module was imported with.
+    """
+    d = tmp_path / "backlog"
+    d.mkdir()
+    for i in (1, 2, 3):
+        write_item(d, i, board="lloyd")
+    monkeypatch.setattr(BR, "_BACKLOG_DIR", d)
+    live_cache: dict = {}
+    monkeypatch.setattr(BR, "_FM_CACHE", live_cache)
+
+    BR.backlog_tasks()
+    assert len(live_cache) == 3, "prerequisite: three entries cached"
+    gone = d / "2-item-2.md"
+    gone.unlink()
+    BR.backlog_tasks()
+    assert BR._FM_CACHE is live_cache, (
+        "_prune_fm_cache rebound the global instead of sweeping it in place"
+    )
+    assert str(gone) not in live_cache, sorted(live_cache)
+    assert len(live_cache) == 2, sorted(live_cache)
 
 
 def test_task_update_reads_the_file_fresh_not_from_the_cache(corpus):

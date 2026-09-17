@@ -166,9 +166,9 @@ async def test_priority_only_update_changes_only_priority_and_updated(
     backlog_dir, size
 ):
     # Ends without trailing whitespace on purpose: `_backlog_parse_fm` returns
-    # `parts[2].strip()`, so a body ending in a space would lose it and the
-    # clause's "byte-identical" would be about that old normalisation instead of
-    # about the body. Vault bodies end with a newline after prose.
+    # `parts[2].strip()`, so a body ending in a space would lose it and this check
+    # would be about that pre-existing normalisation instead of about the body.
+    # Vault bodies end with a newline after prose.
     unit = "payload that must survive a priority click."
     body = "## Handoff\n\n" + " ".join([unit] * (size // len(unit) + 1))
     path = write_item(backlog_dir, 21, body=body)
@@ -193,15 +193,19 @@ async def test_priority_only_update_changes_only_priority_and_updated(
 async def test_a_priority_only_update_survives_frontmatter_the_writer_would_reflow(
     backlog_dir,
 ):
-    """How far the byte-identity clause actually reaches, stated as a test.
+    """The half of the clause that survives its amendment: the body never moves.
 
     `_write_task_file` re-dumps the whole frontmatter block with `yaml.dump`, so a
     file whose block is not already in that canonical shape changes more than
     `priority:`/`updated:` when it is saved: a hand-written `'board': lloyd`
     becomes `board: lloyd`, and a value past the 80-column wrap is folded onto
-    continuation lines. On the live board that is 57 of 60 items, and it is
-    pre-existing route behaviour, not something #1199 introduced or could fix
-    without rewriting the write path — which is out of this item's scope.
+    continuation lines. Measured on the live board 2026-09-17, 266 of the 1,129
+    files carrying a `created:` key store it unquoted (`grep -lE '^created: [0-9]'
+    | wc -l` in `~/obsidian/backlog`) and each re-quotes on the next save. Alan
+    dropped the byte-identity half of clause 3 on 2026-09-17 for exactly this
+    reason (item #1199 `activity`): it is pre-existing route behaviour, and fixing
+    it means preserving the block's original text through a write — a write-path
+    change, recorded as a finding on #1199, not a payload fix.
 
     So the guarantee that must never break, and the one this test pins for *any*
     frontmatter shape, is that the **body** is untouched. The line-level identity

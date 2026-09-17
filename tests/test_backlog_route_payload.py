@@ -72,9 +72,19 @@ def rows_of(resp) -> list[dict]:
 # ── clause 1: snippet on the list, whole body on the detail route ────────────
 
 def test_list_row_carries_a_snippet_and_not_the_body(backlog_dir):
-    body = "HANDOFF. " + ("filler text that the board never renders. " * 400)
+    # `TAIL_MARKER` sits at the end of a body far longer than the cap. Both halves
+    # of the clause are then answerable from route output alone: the detail route
+    # proves the text exists in the item, and the list's payload proves the list
+    # withheld it. Nothing here measures the fixture — the previous shape of this
+    # check asserted `len(body) > 10 * DESC_SNIPPET_CHARS` about the string the test
+    # itself built, which could only fail by editing the literal above it (the
+    # review rung's advisory on 2026-09-17: "asserts fixture shape rather than route
+    # behaviour").
+    TAIL_MARKER = "<<TEXT-THE-LIST-MUST-NEVER-SHIP>>"
+    body = "HANDOFF. " + ("filler text that the board never renders. " * 400) + TAIL_MARKER
     write_item(backlog_dir, 7, body=body)
 
+    payload = bytes(BR.backlog_tasks().body)
     rows = rows_of(BR.backlog_tasks())
     assert len(rows) == 1, "fixture expected exactly one item"
     row = rows[0]
@@ -84,13 +94,13 @@ def test_list_row_carries_a_snippet_and_not_the_body(backlog_dir):
     assert len(snippet) >= 200, f"snippet was only {len(snippet)} chars"
     assert len(snippet) <= BR.DESC_SNIPPET_CHARS + 1, "snippet longer than the cap"
     assert body.startswith(snippet.rstrip("…")), "snippet is not the head of the body"
-    # Positive control, not the clause: the body here is 18 KB, so if the route
-    # ever returns it whole this row's payload is an order of magnitude too big.
-    # The assertion that carries the clause is the `description`-key one below
-    # plus the byte budgets in `test_payload_matches_the_live_corpus_shape`.
-    assert len(body) > 10 * BR.DESC_SNIPPET_CHARS, (
-        "fixture too small to detect a full body: it must be several times the cap"
-    )
+    # The text exists in the item, per the route that owns it...
+    detail = json.loads(bytes(BR.backlog_task_detail(7).body))
+    assert TAIL_MARKER in detail["description"]
+    # ...and the list withheld it. This is the assertion that dies the day the route
+    # ships bodies again, which is exactly what "no full body" forbids.
+    assert TAIL_MARKER.encode() not in payload
+    assert TAIL_MARKER not in snippet
     # And the row carries no `description` key at all: that name belongs to the
     # whole body, which lives on `/api/backlog/task/{id}`. An alias here is what
     # lets a caller post a snippet where a body was expected — `task-update`
@@ -172,17 +182,22 @@ MID = "UNAMBIGUOUSMIDBODYNEEDLE"
 
 
 def test_query_matches_text_past_where_the_snippet_ends(backlog_dir):
+    """Clause 2, verbatim: "a row whose snippet cannot contain it is still returned".
+
+    Both halves are read off the response, so no assertion here is about the fixture:
+    the hit proves the match, and `MID not in description_snippet` on that same row
+    proves the match could not have come from anything the list sent. A route that
+    searched snippets would return nothing and fail on the hit; a route that widened
+    the snippet to the body would fail on the second.
+    """
     write_item(backlog_dir, 1, body="# nope\n" + ("pad " * 1_500) + MID + (" pad " * 1_500))
     write_item(backlog_dir, 2, body="Nothing to do with the needle here.")
-    long_body = next(backlog_dir.glob("1-*.md")).read_text()
-    assert len(long_body) > 10_000, "fixture must exceed the snippet cap by miles"
-    assert long_body.index(MID) > BR.DESC_SNIPPET_CHARS, (
-        "the needle sits inside the snippet, so this test would prove nothing"
-    )
 
     hits = rows_of(BR.backlog_tasks(q=MID))
     assert [r["id"] for r in hits] == [1]
-    # The row that matched still ships only the snippet, not the body it matched in.
+    # The row that matched still ships only the snippet — and the snippet provably
+    # does not contain the term it matched on.
+    assert MID not in hits[0]["description_snippet"]
     assert len(hits[0]["description_snippet"]) <= BR.DESC_SNIPPET_CHARS + 1
 
 
