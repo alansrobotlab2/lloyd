@@ -231,10 +231,31 @@ def is_emittable(pattern: dict) -> bool:
     nothing currently produces, so success candidates are suppressed wholesale
     until a producer for that class exists.
 
-    Error and sequence patterns are untouched: they key on (tool, error_type)
-    and on the tool n-gram, and losing those would mean losing failures.
+    An `error` pattern is untouched: it keys on (tool, error_type) and is built
+    without a `has_error_recovery` key at all, so the sequence rule below cannot
+    reach it.
+
+    A `sequence` pattern survives only when it is flagged
+    `has_error_recovery: true` — the n-gram contains an `:ERR` step followed by a
+    non-error step. That flag is what makes a repeated n-gram a lesson rather
+    than a call order: `seq-2-calendar-events-email-recent` appears in 157
+    sessions with 6 of 6 steps succeeding and its top worker class at 100 % of
+    them, and `seq-2-write-read` in 209 sessions at 94 % — one pipeline's
+    ordinary order, which the `sessions >= 3` gate counts as a shared lesson.
+    Measured 2026-09-16, 672 of the 780 actionable candidate keys were
+    `has_error_recovery: false` and 108 carried a real recovery; at the
+    runbook's 5 patterns a night, adjudicating that pool by hand was ~156 nights
+    to reach "no skill here" for every one of them. A sequence that reaches here
+    with no flag at all stays emittable, so a hand-built or legacy pattern is
+    not suppressed by absence.
     """
     if pattern.get("type") != "success":
+        # `is False`, not falsy: an `error` pattern dict carries no
+        # `has_error_recovery` key, and a falsy test would suppress all 116 of
+        # them along with the sequences (#1181).
+        if (pattern.get("type") == "sequence"
+                and pattern.get("has_error_recovery") is False):
+            return False
         return True
     sig = (pattern.get("params_signature") or "").strip()
     if not sig or sig == "generic":

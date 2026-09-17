@@ -63,6 +63,14 @@ def error_pattern(tool="Bash", error_type="timeout", calls=13):
 
 
 def sequence_pattern(sequence=("bash_fs", "read")):
+    """A sequence pattern that reaches a candidate file at all.
+
+    `has_error_recovery` is True because since #1181 `write_candidate_file`
+    refuses a sequence flagged False, and every test in this file that uses this
+    fixture writes a file to inspect its `status:` — with the flag False the
+    writer returns None and each of those assertions dies on `Path(None)` rather
+    than testing the verdict plumbing they name. The flag's own gate is pinned in
+    `test_trajectory_extraction.py::test_a_sequence_with_no_recovery_in_it_is_not_emittable`."""
     return {
         "type": "sequence",
         "ngram_size": len(sequence),
@@ -70,7 +78,7 @@ def sequence_pattern(sequence=("bash_fs", "read")):
         "sessions": {"s1", "s2"},
         "first_seen": "2026-09-02",
         "last_seen": "2026-09-09",
-        "has_error_recovery": False,
+        "has_error_recovery": True,
         "examples": [{
             "session_key": "s1",
             "date": "2026-09-09",
@@ -380,9 +388,13 @@ def seq_pattern_for_key(key: str) -> dict:
     identity below the cap, which is the whole of clause 4.
     """
     ngram_size, _, slug = key[len("seq-"):].partition("-")
+    # The flag is True so the pattern this builds reaches a file: since #1181 a
+    # False-flagged sequence is refused by `write_candidate_file`, and the tests
+    # here write the file to read its `pattern:`/`status:` back. The flag plays no
+    # part in deriving the key.
     return {"type": "sequence", "ngram_size": int(ngram_size),
             "sequence_str": slug, "sequence": tuple(slug.split("-")),
-            "sessions": {"s1", "s2"}, "has_error_recovery": False,
+            "sessions": {"s1", "s2"}, "has_error_recovery": True,
             "first_seen": "2026-09-01", "last_seen": "2026-09-14",
             "examples": [], "total_calls": 0}
 
@@ -483,7 +495,11 @@ def test_a_widened_sequence_key_survives_the_candidate_round_trip(tmp_path, stor
                          "→ automod_land → backlog_tasks"),
         "sequence": ("backlog_write_task", "bash:fs", "automod_gate_wait",
                      "automod_land", "backlog_tasks"),
-        "sessions": {"s1", "s2"}, "has_error_recovery": False,
+        # True for the same reason as `sequence_pattern` above: this test writes
+        # the candidate and reads its front matter back, and since #1181 the
+        # writer refuses a sequence flagged False. The flag plays no part in
+        # deriving or widening the key, which is what this test is about.
+        "sessions": {"s1", "s2"}, "has_error_recovery": True,
         "first_seen": "2026-09-14", "last_seen": "2026-09-15",
         "examples": [], "total_calls": 6,
     }

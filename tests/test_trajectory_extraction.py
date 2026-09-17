@@ -891,10 +891,132 @@ def test_the_emission_gate_leaves_room_for_a_value_shape_key():
         success_pattern("read_limit_on_files_over_2000_lines")) is True
 
 
-def test_error_and_sequence_candidates_are_unaffected():
+def mined_error_pattern():
+    """One `type: error` pattern exactly as `mine_error_patterns` builds it, so
+    the key set the emission gate sees is the miner's, not a hand-written one."""
+    traj = [error_traj(f"s{i}", "Bash", "not_found", "protocol") for i in (1, 2)]
+    patterns = mt.mine_error_patterns(traj, threshold=2)
+    assert len(patterns) == 1, "the fixture must mine exactly one error pattern"
+    return patterns[0]
+
+
+def recovering_traj(session_key):
+    """One session whose Bash step fails and is followed by successful steps.
+
+    The flag the emission gate reads is derived from the steps, not declared, so a
+    test that needs a sequence to *reach* a file needs this shape — `aliased_traj`
+    carries no failing step at all and mines nothing the gate admits.
+
+    Mined at threshold 2 across three copies this shape yields both sequence
+    kinds the gate now separates: the 2-gram `bash:fs:ERR → read` and the
+    3-gram `read → bash:fs:ERR → read` carry an `:ERR` step followed by a
+    non-error step and are flagged `has_error_recovery: true`, while `bash:fs →
+    read`, `read → bash:fs:ERR` and `bash:fs → read → bash:fs:ERR` end on or
+    before the failure and are flagged false. `error_tools` is empty on purpose:
+    error mining has its own fixture (`error_traj`) and adding a row here would
+    add an error pattern these assertions do not need.
+    """
+    return {
+        "session_key": session_key,
+        "timestamp": "2026-09-16T18:00:00Z",
+        "tool_count": 4,
+        "error_count": 1,
+        "has_errors": True,
+        "tools": [
+            {"name": "Bash", "is_error": False, "sequence": 0,
+             "params_summary": {"command": "mkdir -p /tmp/rec"}, "result_summary": "ok"},
+            {"name": "Read", "is_error": False, "sequence": 1,
+             "params_summary": {"file_path": "/tmp/rec/a"}, "result_summary": "ok"},
+            {"name": "Bash", "is_error": True, "sequence": 2,
+             "params_summary": {"command": "mkdir -p /tmp/rec"},
+             "result_summary": "boom: read-only"},
+            {"name": "Read", "is_error": False, "sequence": 3,
+             "params_summary": {"file_path": "/tmp/rec/b"}, "result_summary": "ok"},
+        ],
+        "error_tools": [],
+        "signals": [],
+    }
+
+
+def test_a_sequence_with_no_recovery_in_it_is_not_emittable():
+    """Clause 1 (#1181). A sequence's `has_error_recovery` is derived from its own
+    n-gram, so a pattern flagged false contains no failure at all — the item's
+    falsifier keys were `seq-2-calendar-events-email-recent` (157 sessions, 6 of
+    6 steps OK) and `seq-2-write-read` (209 sessions, 6 of 6 OK), which the old
+    exemption defended as "losing those would mean losing failures". 672 of the
+    780 actionable candidate keys on 2026-09-16 read false in their own front
+    matter; at the runbook's 5 patterns a night that is ~156 nights of hand
+    adjudication to reach "no skill here" on every one of them."""
+    assert mt.is_emittable({"type": "sequence", "ngram_size": 3,
+                            "has_error_recovery": False}) is False
+    assert mt.is_emittable({"type": "sequence", "ngram_size": 3,
+                            "has_error_recovery": True}) is True
+    # Absent is not False: a pattern that reaches the gate with no flag stays
+    # emittable, which is what keeps an `error` dict (clause 3) and a hand-built
+    # or legacy sequence dict from being suppressed by absence.
+    assert mt.is_emittable({"type": "sequence", "ngram_size": 3}) is True
+
+
+def test_a_mined_error_pattern_is_still_emittable():
+    """Clause 3 (#1181). `mine_error_patterns` builds its dicts from tool_name,
+    error_type, params_signature, sessions, examples, dates, total_calls,
+    first_seen and last_seen — never `has_error_recovery` — so the gate tests the
+    flag with `is False`. A falsy test would have suppressed the error table
+    alongside the sequences it was meant to, and the table is the one thing the
+    miner exists to find."""
+    pattern = mined_error_pattern()
+    assert pattern["type"] == "error"
+    assert "has_error_recovery" not in pattern, "the miner added the flag; the falsy trap is live"
+    assert mt.is_emittable(pattern) is True
     assert mt.is_emittable(
         {"type": "error", "tool_name": "Bash", "error_type": "not_found"}) is True
-    assert mt.is_emittable({"type": "sequence", "ngram_size": 3}) is True
+
+
+def test_a_mining_call_writes_only_the_recovering_sequence(tmp_path):
+    """Clause 2 (#1181), through the miner rather than a hand-built dict.
+
+    Three things hold at once, and each fails under a different half-fix:
+      * `write_candidate_file` refuses a false-flagged sequence on its own, so a
+        caller that skips `emit_candidates` cannot re-open the hole;
+      * `emit_candidates` writes exactly one file per recovering key mined in the
+        same call — filtering the returned list without filtering `sequence_keys`
+        (or the reverse) trips the one-key-one-file assertion inside it (#1131);
+      * an `error` pattern mined alongside them still gets its file.
+    """
+    rows = [recovering_traj(f"rec-{i}") for i in (1, 2, 3)]
+    seqs = mt.mine_sequence_patterns(rows, threshold=2)
+    refusing = [p for p in seqs if p["has_error_recovery"] is False]
+    recovering = [p for p in seqs if p["has_error_recovery"] is True]
+    assert refusing and recovering, "the fixture must mine both kinds of sequence"
+
+    nowhere = tmp_path / "must-stay-empty"
+    for pattern in refusing:
+        assert mt.write_candidate_file(pattern, nowhere) is None, (
+            f"{mt.candidate_pattern_key(pattern)}: writer opened the hole again")
+    assert not nowhere.exists() or list(nowhere.iterdir()) == []
+
+    out = tmp_path / "cands"
+    written = mt.emit_candidates(seqs + [mined_error_pattern()], out)
+    seq_paths = [p for p in written if p.name.startswith("candidate-seq-")]
+    seq_files = sorted(p.name for p in out.glob("candidate-seq-*.md"))
+
+    assert len(seq_files) == len(recovering) == len(seq_paths), (
+        f"{len(seq_files)} files for {len(recovering)} recovering keys")
+    assert {pattern_field_of(p) for p in seq_paths} == {
+        mt.candidate_pattern_key(p) for p in recovering}
+    assert len([p for p in written if not p.name.startswith("candidate-seq-")]) == 1, (
+        "the error pattern mined alongside them lost its file")
+
+
+def test_the_emission_gate_docstring_names_the_flag_that_survives():
+    """Clause 4 (#1181). The parenthetical that justified the exemption is the
+    reason a later reader would widen the gate back open, and a docstring is read
+    far more often than it is written — so the corrected claim is pinned as text,
+    the same way the #561 guard pins a function name it resolves."""
+    doc = mt.is_emittable.__doc__ or ""
+    assert "losing those would mean losing failures" not in doc
+    assert "has_error_recovery: true" in doc, (
+        "the docstring must say the surviving sequences are the ones flagged true")
 
 
 def test_write_candidate_file_writes_nothing_for_the_key_set_class(tmp_path):
@@ -997,6 +1119,21 @@ def aliased_pair():
     return pair
 
 
+def recovering(patterns: list[dict]) -> list[dict]:
+    """The same patterns with the emission gate's one input set to `True`.
+
+    The cap/filename tests below pin *which file a pattern is written to*, and
+    since #1181 a sequence reaches a file at all only when it is flagged
+    `has_error_recovery: true`. Left as the miner flags them — these fixtures
+    carry no failing step, so they are flagged `False` — the writer refuses them
+    and every `len(written) == 2` under this helper passes on an empty list,
+    which is a test that can no longer fail. Setting the flag is the smallest
+    change that keeps those assertions live; the flag's own behaviour is pinned
+    by `test_a_sequence_with_no_recovery_in_it_is_not_emittable` and
+    `test_emit_candidates_writes_no_file_for_a_non_recovery_sequence`."""
+    return [{**p, "has_error_recovery": True} for p in patterns]
+
+
 def pattern_field_of(path: Path) -> str:
     return re.search(r"^pattern: (.+)$", path.read_text(encoding="utf-8"),
                      re.MULTILINE).group(1)
@@ -1044,7 +1181,7 @@ def test_two_ngrams_that_alias_under_the_cap_get_one_file_each(tmp_path):
     """Clause 1 for the mechanism: two patterns, two files, two distinct
     `pattern:` fields — where pre-fix it was one file holding whichever n-gram
     the dict happened to yield last."""
-    written = mt.emit_candidates(aliased_pair(), tmp_path)
+    written = mt.emit_candidates(recovering(aliased_pair()), tmp_path)
     assert len(written) == 2, [p.name for p in written]
     assert len(set(written)) == 2, "the returned list named one path twice"
 
@@ -1059,7 +1196,7 @@ def test_reversing_the_pattern_list_writes_the_same_bytes(tmp_path):
     Every file from the forward emission exists from the reversed one and is
     byte-identical to it — a name-only fix would pass the first assertion and
     leave the last writer winning inside the file."""
-    pair = aliased_pair()
+    pair = recovering(aliased_pair())
     forward, backward = tmp_path / "fwd", tmp_path / "rev"
     f_written = mt.emit_candidates(pair, forward)
     r_written = mt.emit_candidates(list(reversed(pair)), backward)
@@ -1100,7 +1237,7 @@ def test_two_ngrams_differing_only_past_the_cap_get_distinct_keys(tmp_path):
     assert (key_a[:mt.SLUG_CAP], key_b[:mt.SLUG_CAP]) == (shared, shared)
     assert key_a != key_a[:mt.SLUG_CAP], "the key itself must survive past the cap"
 
-    written = mt.emit_candidates([five_a, five_b], tmp_path)
+    written = mt.emit_candidates(recovering([five_a, five_b]), tmp_path)
     assert len(written) == 2, [p.name for p in written]
     assert len({p.name for p in written}) == 2, "two keys, one filename"
     assert {pattern_field_of(p) for p in written} == {key_a, key_b}
@@ -1164,6 +1301,14 @@ def test_the_nightly_run_reports_one_line_per_file_it_wrote(tmp_path):
     corpus = tmp_path / "corpus"
     corpus.mkdir()
     rows = [aliased_traj(f"alias-{i}") for i in (1, 2, 3)]
+    # The pair that reaches a file is a *recovering* pair. Since #1181 an
+    # n-gram with no failing step in it is refused by the emission gate, so
+    # `aliased_traj` alone — 6 successful steps, nothing to recover from — mines
+    # only suppressed patterns, and `main()` would report zero sequence files
+    # while still honouring the arithmetic this test pins. The aliased pair stays
+    # in the fixture for the Suppressed count; `recovering_traj` supplies the
+    # patterns that actually reach a file.
+    rows += [recovering_traj(f"rec-{i}") for i in (1, 2, 3)]
     # A refused-by-gate success pattern: `_signature` keys are counted as mined
     # and never emitted, which is what the Suppressed line is for.
     for i in (1, 2, 3):
@@ -1227,9 +1372,15 @@ def test_the_nightly_run_reports_one_line_per_file_it_wrote(tmp_path):
 
 def test_the_live_corpus_emits_one_file_per_sequence_pattern(tmp_path):
     """The acceptance check itself, over the corpus the nightly reads: 7 days,
-    every class, threshold 2. 1674 mined sequence patterns -> 1674 distinct paths
-    -> 1674 files, where the 2026-09-15 baseline was 1671 files and the three
-    aliased names carried two patterns each."""
+    every class, threshold 2.
+
+    #1131's invariant is that one n-gram owns one file; #1181 narrowed *which*
+    n-grams are admitted, so the denominator here is the mined sequences that
+    clear the emission gate, and the refused ones are asserted to write nothing
+    at all — otherwise "one file per admitted key" would also be satisfied by a
+    rule that admitted nothing. Measured 2026-09-17 over this window: 1718 mined
+    sequence patterns, 317 flagged `has_error_recovery: true`, 1401 refused, and
+    317 files."""
     # `LIVE_CORPUS` is defined further down this file, against the real data root
     # rather than the checkout — `_pipeline/` is gitignored, so a worktree-relative
     # path reads as absent forever. Asserted, never skipped: clause 1 *is* a count
@@ -1240,6 +1391,11 @@ def test_the_live_corpus_emits_one_file_per_sequence_pattern(tmp_path):
     assert rows, f"live corpus at {LIVE_CORPUS} loaded no rows"
     seqs = mt.mine_sequence_patterns(rows, threshold=2)
     assert seqs, "no sequence patterns mined, so the assertions below are vacuous"
+    admitted = [p for p in seqs if mt.is_emittable(p)]
+    refused = [p for p in seqs if not mt.is_emittable(p)]
+    assert admitted and refused, (
+        f"the live window must hold both kinds — {len(admitted)} admitted, "
+        f"{len(refused)} refused — or this test compares one empty set with another")
 
     target = tmp_path / "candidates"
     paths = mt.emit_candidates(seqs, target)
@@ -1247,9 +1403,20 @@ def test_the_live_corpus_emits_one_file_per_sequence_pattern(tmp_path):
     seq_files = list(target.glob("candidate-seq-*.md"))
 
     assert len(seq_paths) == len(set(seq_paths)), "a path appeared twice"
-    assert len(seq_files) == len(seqs) == len(seq_paths)
+    assert len(seq_files) == len(admitted) == len(seq_paths), (
+        f"{len(seq_files)} files for {len(admitted)} admitted patterns")
     fields = [pattern_field_of(p) for p in seq_files]
     assert len(set(fields)) == len(fields), "two files share a pattern: field"
+
+    # The refused half, stated over the corpus rather than over a fixture: a key
+    # the gate refused must not appear as a `pattern:` field in any file that run
+    # wrote. A rule that admitted every sequence and a rule that admitted none
+    # both keep the equality above plausible; this is what separates them.
+    refused_keys = {mt.candidate_pattern_key(p) for p in refused}
+    assert refused_keys, "the corpus mined no refused sequence pattern"
+    assert not (refused_keys & set(fields)), (
+        f"{sorted(refused_keys & set(fields))[:3]}: a sequence with no failing "
+        "step in it still reached a candidate file")
 
 
 # ── live-data guard: the sweep must not survive in regenerated data ──────────
