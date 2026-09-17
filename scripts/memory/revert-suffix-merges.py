@@ -7,8 +7,11 @@ suffix pairs against an empty graph — `Intel Pipeline System` into `Intel`,
 tier, and it puts the variant's facts back in the variant's own directory.
 
 What it inverts, per (variant → canonical) in the report:
-  * a fact file whose facts all belong to the variant is moved back whole and
-    its filename prefix restored;
+  * a fact file whose facts ALL belong to the variant is moved back whole and
+    its filename prefix restored. "Belong" compares the surface exactly (case
+    -insensitive at most), never through `normalize_punct` — which collapses
+    `C++`/`C#`/`C` to one name and would have the revert of one variant carry
+    off the canonical's own facts and the other variant's with it;
   * a fact file the sweep MERGED is split by each fact's own `entity:` tag —
     the variant's facts go to `<variant>/<variant>-<category>.md`, the rest
     stay, and an emptied canonical file is removed;
@@ -84,13 +87,25 @@ def _read(path: Path) -> tuple[dict, str]:
 
 
 def _same(a: str, b: str) -> bool:
-    s = kg_hygiene.sweep()
-    return s.normalize_punct(a) == s.normalize_punct(b)
+    """Surface identity — exact, case-insensitively at most.
+
+    Deliberately NOT `kg_hygiene.normalize_punct`, which drops every
+    non-alphanumeric character: the sweep *selects* a merge candidate pair by
+    that equality, so comparing through it makes `C++` and `C` (or `RTX` and
+    `RT-X`) the same name for every tier that ever produces a merge. A revert
+    of one variant then sees the canonical's own facts — and another variant's
+    — as its own and walks them out of the canonical. A CASE merge really does
+    merge `Polaris` into `PolaRiS`, hence casefold rather than `==`."""
+    return (a or "").strip().casefold() == (b or "").strip().casefold()
 
 
 def _belongs(fact: dict, top: str, variant: str) -> bool:
     """A fact is the variant's if it is tagged with the variant, or was retagged
-    to the canonical by a merge that recorded `merged_from: <variant>`."""
+    to the canonical by a merge that recorded `merged_from: <variant>`.
+
+    `merged_from` names ONE variant, so a file holding another variant's merged
+    facts is not this variant's file: those facts stay with the canonical until
+    their own revert pass picks them up."""
     return _same(str(fact.get("entity") or top), variant) or _same(str(fact.get("merged_from") or ""), variant)
 
 
@@ -130,8 +145,13 @@ def plan_revert(report: dict, tiers: set[str], root: Path) -> list[dict]:
                 continue
             mine = [x for x in facts if _belongs(x, top, variant)]
             if not mine:
-                continue
-            if len(mine) == len(facts) and (not top or _same(top, variant) or all(x.get("merged_from") for x in mine)):
+                continue    # none of this variant's facts: the file is not this revert's business
+            if len(mine) == len(facts):
+                # EVERY fact here is this variant's, so the file was the variant's
+                # before the merge and the whole thing goes back. Anything looser —
+                # "the dir is named like the variant", "every fact carries some
+                # merged_from" — also matches a file mixing this variant with the
+                # canonical's own facts, and moves those out too.
                 entry["files"].append({"file": f.name, "action": "move_whole", "facts": len(mine)})
             else:
                 entry["files"].append({"file": f.name, "action": "split",

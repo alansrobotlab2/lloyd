@@ -21,8 +21,12 @@ def _write(path: Path, fm: dict, body: str = ""):
 
 
 def _facts(entity, cat, items):
-    return {"type": "facts", "entity": entity, "category": cat,
-            "facts": [{"entity": e, "fact": t, "confidence": 0.9, "category": cat} for e, t in items]}
+    """`items` are `(fact_tag, text)`, or `(fact_tag, text, extra_frontmatter)`
+    for a fact a merge retagged — `{"merged_from": <variant>}`."""
+    facts = []
+    for e, t, *extra in items:
+        facts.append({"entity": e, "fact": t, "confidence": 0.9, "category": cat, **(extra[0] if extra else {})})
+    return {"type": "facts", "entity": entity, "category": cat, "facts": facts}
 
 
 @pytest.fixture
@@ -166,3 +170,141 @@ def test_revert_recognises_facts_retagged_by_a_merge(world):
     assert back["facts"][0]["entity"] == V and "merged_from" not in back["facts"][0]
     kept = yaml.safe_load((root / C / "Intel-preference.md").read_text().split("---")[1])
     assert [f["fact"] for f in kept["facts"]] == ["Intel's own preference"]
+
+
+# --- a canonical that absorbed TWO variants -----------------------------------
+# The sweep picks merge candidates by `normalize_punct` equality, so `C`, `C#`
+# and `C++` are one family and one apply can fold both variants into `C++`.
+# Membership in a revert has to compare the surface itself: normalize them and
+# every fact in the canonical looks like the variant being reverted.
+
+AMBIGUOUS = {"SUFFIX_AMBIGUOUS"}          # classify_pair("C", "C++")[0]
+
+
+@pytest.fixture
+def two_variants(tmp_path):
+    """`C` and `C#` both merged into `C++`, as the 2026-09-16 apply left them."""
+    root = tmp_path / "facts"
+    C, CS, CPP = "C", "C#", "C++"
+    _write(root / CPP / f"{CPP}-relationship.md", _facts(CPP, "relationship", [
+        (CPP, "C one", {"merged_from": C}),                   # C's fact, retagged by the merge
+        (CPP, "Cs is the preview of C++", {"merged_from": CS}),  # C#'s fact
+        (CPP, "C++ added move semantics in C++11", {}),       # C++'s own
+        (CPP, "C++ modules shipped in C++20", {}),            # C++'s own
+    ]))
+    _write(root / CPP / f"{CPP}-state.md", _facts(CPP, "state", [
+        (CPP, "Cs is standardised in C++26", {"merged_from": CS}),   # only C#'s fact
+    ]))
+    _write(root / CPP / f"{CPP}-overview.md", {"type": "overview", "entity": CPP, "category": "overview",
+                                              "definition": "C++ is a systems language."}, "# Summary\n")
+    st = KGStore(tmp_path / "kg.sqlite")
+    st.entities.register(CPP)
+    st.aliases.set(C, CPP, kind="punct", origin="sweep")
+    st.aliases.set(CS, CPP, kind="punct", origin="sweep")
+    report = {"variant_to_canonical": {C: CPP, CS: CPP},
+              "ledger": {"timestamp": "2026-09-16T05:40:12+00:00"}}
+    yield root, st, report, C, CS, CPP
+    st.close()
+
+
+def _one_pair(report, variant):
+    """The report as one revert pass sees it: just this variant's merge."""
+    return {"variant_to_canonical": {variant: report["variant_to_canonical"][variant]},
+            "ledger": report["ledger"]}
+
+
+def _fm(path):
+    return yaml.safe_load(path.read_text(encoding="utf-8").split("---")[1])
+
+
+def test_reverting_one_variant_splits_the_shared_canonical_file(two_variants):
+    """Clause 1: `C++-relationship.md` mixes three entities, so it must be
+    `split`, and `C` gets back exactly the one fact tagged `merged_from: C`."""
+    root, st, report, C, CS, CPP = two_variants
+    ops = rv.plan_revert(_one_pair(report, C), AMBIGUOUS, root)
+    assert [o["variant"] for o in ops] == [C]
+    assert ops[0]["files"] == [{"file": f"{CPP}-relationship.md",
+                                "action": "split", "facts": 1, "remaining": 3}]
+    rv.execute(ops, root, st, apply=True)
+    back = _fm(root / C / f"{C}-relationship.md")
+    assert [f["fact"] for f in back["facts"]] == ["C one"]
+    assert back["facts"][0]["entity"] == C and "merged_from" not in back["facts"][0]
+
+
+def test_the_revert_leaves_the_canonical_its_own_and_the_other_variant_facts(two_variants):
+    """Clause 2: reverting `C` must not touch `C++`'s own facts, must leave C#'s
+    fact still tagged `merged_from: C#`, and must not move `C++-state.md`, which
+    holds none of C's facts at all."""
+    root, st, report, C, CS, CPP = two_variants
+    ops = rv.plan_revert(_one_pair(report, C), AMBIGUOUS, root)
+    assert [f["file"] for f in ops[0]["files"]] == [f"{CPP}-relationship.md"]   # state/overview unplanned
+    rv.execute(ops, root, st, apply=True)
+    kept = _fm(root / CPP / f"{CPP}-relationship.md")
+    assert kept["entity"] == CPP
+    assert [(f["fact"], f.get("merged_from")) for f in kept["facts"]] == [
+        ("Cs is the preview of C++", CS), ("C++ added move semantics in C++11", None),
+        ("C++ modules shipped in C++20", None)]
+    state = _fm(root / CPP / f"{CPP}-state.md")                    # untouched, still in C++/
+    assert [f.get("merged_from") for f in state["facts"]] == [CS]
+    assert (root / CPP / f"{CPP}-overview.md").exists()            # C++ keeps its own overview
+    assert not (root / C / f"{C}-state.md").exists()
+
+
+def test_the_second_revert_pass_returns_the_other_variant(two_variants):
+    """Clause 3: after C's pass, reverting `C#` on the same tree moves both of
+    C#'s facts out and leaves `C++` with only its own two."""
+    root, st, report, C, CS, CPP = two_variants
+    rv.execute(rv.plan_revert(_one_pair(report, C), AMBIGUOUS, root), root, st, apply=True)
+    ops = rv.plan_revert(_one_pair(report, CS), AMBIGUOUS, root)
+    assert {f["file"]: f["action"] for f in ops[0]["files"]} == {
+        f"{CPP}-relationship.md": "split", f"{CPP}-state.md": "move_whole"}
+    rv.execute(ops, root, st, apply=True)
+    assert sorted(f["fact"] for f in _fm(root / CS / f"{CS}-relationship.md")["facts"]) == \
+        ["Cs is the preview of C++"]
+    assert [f["fact"] for f in _fm(root / CS / f"{CS}-state.md")["facts"]] == ["Cs is standardised in C++26"]
+    left = _fm(root / CPP / f"{CPP}-relationship.md")
+    assert [f["fact"] for f in left["facts"]] == ["C++ added move semantics in C++11",
+                                                  "C++ modules shipped in C++20"]
+    assert all(f["entity"] == CPP for f in left["facts"])
+    assert not (root / CPP / f"{CPP}-state.md").exists()           # emptied by the whole-file move
+    assert {str(p.relative_to(root)) for p in root.rglob("*.md")} == {
+        "C#/C#-relationship.md", "C#/C#-state.md", "C/C-relationship.md",
+        "C++/C++-overview.md", "C++/C++-relationship.md"}
+
+
+def test_a_canonical_file_with_none_of_the_variant_facts_is_not_planned(tmp_path):
+    """Clause 4: `RT-X` normalizes equal to `RTX`, but every fact in
+    `RTX/RTX-state.md` is tagged RTX and none was merged from RT-X, so the
+    revert has nothing to take and must leave the file where it is."""
+    root = tmp_path / "facts"
+    _write(root / "RTX" / "RTX-state.md", _facts("RTX", "state", [
+        ("RTX", "RTX renders a 3DGS scene at 60 fps on the 3090."),
+        ("RTX", "The RTX PRO 6000 is the Blackwell card."),
+        ("RTX", "RTX needs driver 570 or newer for the 50-series."),
+    ]))
+    st = KGStore(tmp_path / "kg.sqlite")
+    st.entities.register("RTX")
+    st.aliases.set("RT-X", "RTX", kind="punct", origin="sweep")
+    ops = rv.plan_revert({"variant_to_canonical": {"RT-X": "RTX"}}, {"PUNCT"}, root)
+    assert [o["files"] for o in ops] == [[]]
+    rv.execute(ops, root, st, apply=True)
+    fm = _fm(root / "RTX" / "RTX-state.md")
+    assert fm["entity"] == "RTX" and len(fm["facts"]) == 3
+    assert all(f["entity"] == "RTX" for f in fm["facts"])
+    assert not (root / "RT-X" / "RT-X-state.md").exists()
+    assert not (root / "RT-X").exists()
+    st.close()
+
+
+def test_membership_compares_the_surface_exactly_not_normalized(two_variants):
+    """Clause 5: `normalize_punct` drops every non-alphanumeric, so it calls
+    `C++` and `C` the same name — which is how a revert of `C` moved `C++`'s
+    whole file and un-aliased `C#` on the way past it."""
+    assert rv._belongs({"entity": "C++", "fact": "x"}, "C++", "C") is False
+    assert rv._belongs({"entity": "PolaRiS", "fact": "x", "merged_from": "Polaris"}, "PolaRiS", "Polaris") is True
+    assert rv._same("C++", "C") is False and rv._same("PolaRiS", "Polaris") is True
+    root, st, report, C, CS, CPP = two_variants
+    res = rv.execute(rv.plan_revert(_one_pair(report, C), AMBIGUOUS, root), root, st, apply=True)
+    assert res["alias_ops"] == [{"remove": C, "was": CPP}, {"add": C}]
+    assert st.aliases.resolve("c") is None
+    assert st.aliases.resolve("c#") == CPP                          # C# is still routed to C++
