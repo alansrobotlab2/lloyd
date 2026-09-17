@@ -13,6 +13,7 @@ The fix separates the channels: drain cancels go to `cancelled (drain)`,
 classifier so the accounting, not the LLM, is what is under test.
 """
 import importlib.util
+import json
 import re
 import sys
 import time
@@ -227,3 +228,98 @@ def test_endpoint_down_path_still_reports_failures(
     assert fail >= mod.CONSECUTIVE_FAILURE_LIMIT
     assert "[stopped] endpoint" in stdout
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# #1206 — the resume-order partition must not disturb this accounting. The
+# candidates now reach the pool never-judged first, judged after, so a drain
+# that used to land inside the unjudged work now lands after it: skipped, ok
+# and cancelled are all filled by the same run, which is what makes "the four
+# channels still add up" a claim about the reordered runner rather than about
+# the old one (which could not produce this shape at all). See tests/test_classify_v4_batch_order.py for the ordering
+# itself; this is the accounting half of that change.
+# ---------------------------------------------------------------------------
+
+def _setup_mixed(mod, monkeypatch, tmp_path, judged, drain_on=None):
+    """11 `mentions` pairs (ids ascending) and a real resume filter.
+
+    Unlike `_setup`, this drives the real `_prepare_candidate` against a
+    stubbed `_build_context_and_hash` and a stubbed resume map, so
+    skipped-vs-reclassified is decided by hash comparison exactly as in
+    production — and `--no-resume` is deliberately absent, since the resume
+    map is the thing under test. `_load_existing_records` is stubbed because
+    the real one globs `~/lloyd/_pipeline/memory-graph/classified-v4*.jsonl`,
+    i.e. live production data.
+
+    Concurrency 1 keeps execution order equal to submission order, so the
+    drain point is exact. `drain_on` names a source whose classification raises
+    the drain signal, standing in for the SIGTERM a `timeout 1400` sends at the
+    end of task #74's cycle."""
+    edges = [{"id": 100 + i, "source": f"src{i}", "target": f"tgt{i}",
+              "type": "mentions", "provenance": "EXTRACTED"}
+             for i in range(11)]
+    store = types.SimpleNamespace(edges=types.SimpleNamespace(
+        all=lambda: list(edges)))
+    monkeypatch.setattr(mod, "_v4", types.SimpleNamespace(
+        _kg_store=lambda: store, VOCABULARY=mod._v4.VOCABULARY))
+    monkeypatch.setattr(mod, "_load_existing_records", lambda: dict(judged))
+
+    monkeypatch.setattr(mod, "_build_context_and_hash",
+                        lambda edge, max_ctx: (f"ctx-{edge['source']}",
+                                               f"hash-{edge['source']}"))
+
+    def fake_classify(src, tgt, context, endpoint, model, timeout,
+                      skip_direction_check=False):
+        if drain_on is not None and src == drain_on:
+            # Same seam the drain tests above use: stand in for "SIGTERM
+            # arrived" and hold the single worker busy, so the sweep that
+            # cancels what is still pending has something left to cancel.
+            mod._stop.set()
+            time.sleep(0.2)
+        return {"type": "uses", "confidence": 0.9, "reason": "test"}
+
+    monkeypatch.setattr(mod, "classify_edge_v4", fake_classify)
+    out = tmp_path / "classified-v4-mixed.jsonl"
+    monkeypatch.setattr(sys, "argv", [
+        "classify-v4-batch.py", "--concurrency", "1", "--output", str(out)])
+    return out
+
+
+def test_mixed_judged_and_unjudged_run_still_balances_all_four_lanes(
+        mod, monkeypatch, tmp_path, capsys):
+    """#1206 acceptance 5: ok + failed + skipped + cancelled == candidate count
+    for a set that is part judged (unchanged hash), part judged (churned hash)
+    and part never-judged — and an unchanged-hash pair writes nothing.
+
+    Submission order after the partition is src4..src9 (the six never-judged
+    pairs), then src0, src1, src2 (up-to-date), src3 (churned) and src10
+    (up-to-date). The drain fires inside src3's classification, so src10 is
+    still pending and the run ends with three of the four lanes non-zero and
+    every candidate accounted for: 7 ok, 0 failed, 3 skipped, 1 cancelled =
+    11 candidates."""
+    judged = {("src0", "tgt0"): "hash-src0",
+              ("src1", "tgt1"): "hash-src1",
+              ("src2", "tgt2"): "hash-src2",
+              ("src3", "tgt3"): "stale-hash",
+              ("src10", "tgt10"): "hash-src10"}
+    out = _setup_mixed(mod, monkeypatch, tmp_path, judged, drain_on="src3")
+    rc = mod.main()
+    stdout = capsys.readouterr().out
+
+    ok, fail, skipped, cancelled = _counts(stdout)
+    total = 11
+    assert ok + fail + skipped + cancelled == total, (
+        f"the four lanes do not add up to the candidate count:\n{stdout}")
+    assert (ok, fail, skipped, cancelled) == (7, 0, 3, 1), (
+        "expected the six never-judged pairs plus the one churned pair as ok, "
+        f"the three up-to-date pairs as skipped and src10 cancelled:\n{stdout}")
+    # A clean drain writes nothing but real classifications: the three
+    # unchanged-hash pairs and the cancelled pair contribute no lines.
+    written = [json.loads(line)["source"]
+               for line in out.read_text().splitlines() if line.strip()]
+    assert len(written) == ok == 7, f"writes and `ok` disagree: {written}"
+    assert "src0" not in written and "src1" not in written
+    assert "src2" not in written and "src10" not in written, (
+        "an unchanged-hash pair wrote a record")
+    assert "src3" in written, "the churned pair was not re-classified"
+    assert rc == 0, f"a clean drain with re-classification must exit 0: {rc}"

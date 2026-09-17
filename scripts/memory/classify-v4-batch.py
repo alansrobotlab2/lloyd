@@ -141,6 +141,42 @@ def _classify_one(
     return edge, result, context_hash, (time.perf_counter() - t0) * 1000
 
 
+def _partition_by_resume(
+    candidates: list[dict],
+    prior: dict[tuple[str, str], str | None],
+) -> tuple[list[dict], list[dict]]:
+    """Split candidates into (never-judged, already-judged), id order in each.
+
+    `edges.all()` is `SELECT * … ORDER BY id` and the pool is FIFO, so
+    submitting the filtered list as-is makes every cycle re-walk the same
+    leading block of pairs it has already judged before it reaches any new
+    work — and deciding "already judged" is not free: `_prepare_candidate`
+    pays `_build_context_and_hash` (the fact-tree walk and SHA1 #808 measures
+    as the single-core bottleneck) *before* the dict lookup that discards the
+    result. Task #74's run of 2026-09-17 spent 6,559 of its 7,516-candidate
+    window on cache-hit skips inside 1,400 s, and the judged half is the
+    *expensive* half (186 ms mean against 98 ms for a fresh pair — the prefix
+    is the oldest, richest-context entities), so a cycle's yield was bounded
+    by the few hundred unjudged pairs still inside that window while ~26,000
+    never-judged edges sat untouched behind it.
+
+    Membership in `prior` is the only free partition key: telling a
+    hash-changed pair from a hash-unchanged one costs the very hash this
+    defers, so the second group keeps the skip-vs-reclassify decision inside
+    `_prepare_candidate` and reclassification on fact churn survives the
+    reorder — it simply runs after fresh judgments are drained. Stable within
+    each group, so an unjudged tail never overtakes an unjudged head.
+    """
+    fresh: list[dict] = []
+    already_judged: list[dict] = []
+    for edge in candidates:
+        if (edge["source"], edge["target"]) in prior:
+            already_judged.append(edge)
+        else:
+            fresh.append(edge)
+    return fresh, already_judged
+
+
 def _prepare_candidate(
     edge: dict,
     prior: dict[tuple[str, str], str | None],
@@ -278,6 +314,15 @@ def main() -> int:
     if args.sample:
         candidates = candidates[: args.sample]
         print(f"[info] capped to {len(candidates)} (--sample)")
+
+    # Submission order, decided once here rather than per worker. `--sample`
+    # slices the id-ordered list above — that knob documents a slice of the
+    # candidate set, so the reorder happens after it, not before.
+    fresh, already_judged = _partition_by_resume(candidates, prior)
+    candidates = fresh + already_judged
+    print(f"[info] {len(fresh)} never-judged pairs queued ahead of "
+          f"{len(already_judged)} already-judged ones (hash-churn "
+          "re-classification still runs on the second group)")
 
     if not candidates:
         print("[info] nothing to do.")
