@@ -106,3 +106,18 @@ def test_lint_findings_imports_nothing_from_the_app_package():
         if line.startswith(("import ", "from ")):
             assert not line.startswith(("import app", "from app",
                                         "import scripts", "from scripts")), line
+
+
+def test_a_position_inside_the_message_is_not_part_of_the_findings_identity():
+    """#1217. pyflakes writes "redefinition of unused '_local' from line 445".
+    With the finding's own line:col stripped and that one kept, a three-line
+    edit above a pre-existing redefinition made all eight in one file read as
+    new, and refused a round whose review had passed."""
+    from app import lint_findings as L
+    before = "tests/t.py:594:1: redefinition of unused '_local' from line 445\n"
+    after = "tests/t.py:597:1: redefinition of unused '_local' from line 448\n"
+    assert L.parse_pyflakes(before) == L.parse_pyflakes(after)
+    assert L.normalize_pyflakes_line(before) == "tests/t.py: redefinition of unused '_local' from line N"
+    # …and a different name is still a different finding.
+    other = "tests/t.py:597:1: redefinition of unused '_session' from line 448\n"
+    assert L.parse_pyflakes(other) != L.parse_pyflakes(after)

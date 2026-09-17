@@ -33,6 +33,15 @@ PYFLAKES_LINE_RE = re.compile(r"^(.*?):\d+:\d+:\s*(.*)$")
 TSC_LINE_RE = re.compile(r"^(.*?)\(\d+,\d+\):\s*(error TS\d+:.*)$")
 
 
+# pyflakes puts a second position INSIDE some messages: "redefinition of
+# unused '_local' from line 445". Stripping the finding's own `line:col` and
+# keeping that one leaves the finding keyed on a line number after all, so a
+# three-line edit above a pre-existing redefinition reported all eight in
+# `tests/test_dashboard_sections.py` as new and refused a round that had
+# passed review (#1210, SM_20260917_174742; Lloyd's own #1217).
+_PYFLAKES_INNER_POSITION_RE = re.compile(r"\bfrom line \d+\b")
+
+
 def normalize_pyflakes_line(line: str) -> str | None:
     """One pyflakes output line as a comparable finding, or None if blank.
 
@@ -45,7 +54,7 @@ def normalize_pyflakes_line(line: str) -> str | None:
         return None
     m = PYFLAKES_LINE_RE.match(s)
     if m:
-        return f"{m.group(1)}: {m.group(2)}"
+        return f"{m.group(1)}: {_PYFLAKES_INNER_POSITION_RE.sub('from line N', m.group(2))}"
     return s
 
 
