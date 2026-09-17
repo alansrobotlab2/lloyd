@@ -2332,3 +2332,97 @@ def test_a_string_tags_field_survives_the_writers(isolated):
     B.update_frontmatter(p, {"parent": 1}, remove_tags=("ai-engineer",))
     fm = yaml.safe_load(p.read_text().split("---")[1])
     assert fm["tags"] == ["youtube-eval", B.RETRIAGE_TAG] and fm["status"] == "up_next"
+
+
+# ===========================================================================
+# An orphan round: opened by a tool, named by no implement row (2026-09-17)
+# ===========================================================================
+
+def _orphan_round(rid, ts, tmp_path, *, item=None, opened_by="tool", session="s1"):
+    row = {"event": "round_start", "round_id": rid, "ts": ts, "opened_by": opened_by}
+    if session:
+        row["session_id"] = session
+    if item is not None:
+        row["item_id"] = item
+    S.append_event(row, path=S.LEDGER_PATH)
+    d = tmp_path / "rounds" / rid
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "run_spec.yaml").write_text(yaml.safe_dump({"code": {"base_commit": "abc"}}), encoding="utf-8")
+
+
+def test_the_reaper_closes_a_tool_opened_round_no_implement_row_names(isolated, monkeypatch, tmp_path):
+    """SM_20260917_003459: a person typed `continue` into the autocode session
+    after its round was reaped; the turn opened a new round and died. No
+    implement row named it, so nothing could close it and `_loop_is_free`
+    read the loop as busy until a human aborted it."""
+    import time as _t
+    write_item(isolated, 1199, status="in_progress")
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False)
+    _finished("SM_PREV", session="s1", item=1199)
+    now = _t.time() + 1
+    _orphan_round("SM_ORPHAN", now - I.ORPHAN_ROUND_MIN_AGE_SECONDS - 5, tmp_path, item=1199)
+    # SM_PREV is reaped by the first pass (its own row), SM_ORPHAN by the second.
+    out = I.reap_abandoned_rounds(now=now)
+    assert sorted(aborted) == ["SM_ORPHAN", "SM_PREV"]
+    rec = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "round_abandoned" and e["round_id"] == "SM_ORPHAN"][0]
+    assert rec["item_id"] == 1199 and "orphan" in rec["reason"] and rec["branch"] == "automod/SM_ORPHAN"
+    assert B.item_by_id(1199).status == "up_next"
+    assert I.reap_abandoned_rounds(now=now) == [], "reaped once"
+    assert {r["round_id"] for r in out} == {"SM_ORPHAN", "SM_PREV"}
+
+
+def test_an_orphan_is_left_while_young_busy_or_a_persons(isolated, monkeypatch, tmp_path):
+    import time as _t
+    write_item(isolated, 1199)
+    now = _t.time()
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False, busy=("s-busy",))
+    _orphan_round("SM_YOUNG", now - 30, tmp_path, item=1199)                              # opener just returned
+    _orphan_round("SM_BUSY", now - 7200, tmp_path, item=1199, session="s-busy")            # turn still running
+    _orphan_round("SM_CLI", now - 7200, tmp_path, item=1199, opened_by="cli", session="")  # a person's round
+    S.append_event({"event": "round_start", "round_id": "SM_LEGACY", "ts": now - 7200,
+                    "item_id": 1199}, path=S.LEDGER_PATH)                                  # no opened_by at all
+    assert I.reap_abandoned_rounds(now=now) == [] and aborted == []
+    # A round some implement row names is the first pass's business, not this one's.
+    _orphan_round("SM_NAMED", now - 7200, tmp_path, item=1199)
+    S.append_event({"event": "backlog_implement", "item_id": 1199, "phase": "started",
+                    "round_id": "SM_NAMED", "session_id": "s1"}, path=S.LEDGER_PATH)
+    assert I.reap_abandoned_rounds(now=now) == [] and aborted == []
+
+
+def test_a_tool_opened_round_records_who_opened_it(monkeypatch, tmp_path):
+    """`R.start` stamps `opened_by` and the session on the ledger row, and the
+    MCP tool passes `tool` plus the calling session; the CLI passes nothing
+    and reads `cli`."""
+    import inspect
+    from scripts.automod import round as R
+    sig = inspect.signature(R.start)
+    assert sig.parameters["opened_by"].default == "cli" and "session_id" in sig.parameters
+    src = inspect.getsource(R.start)
+    assert '"opened_by": opened_by' in src and '"session_id": session_id' in src
+    from agent_mcp import automod as A
+    asrc = inspect.getsource(A)
+    assert 'opened_by="tool"' in asrc and "current_session_id.get" in asrc
+
+
+# ===========================================================================
+# The prompts carry the two rules #1199 taught (2026-09-17)
+# ===========================================================================
+
+def test_the_implement_prompt_says_abort_on_a_late_refusal_and_never_restart():
+    p = I.PROMPT.format(**{k: "x" for k in _format_keys(I.PROMPT)})
+    assert "A review refusal with under 25 iterations left is an abort" in p
+    assert "`automod_abort` (branch kept" in p
+    assert "Never restart an engine or a service from a round" in p
+    assert len(I.PROMPT) < 5_500, "the template's bound (tests/test_prompt_pacing_and_ordering.py)"
+
+
+def test_the_triage_prompt_forbids_pinning_an_invariant_the_tree_does_not_hold():
+    assert "A clause pins the change, never an invariant the tree does not already hold." in M.PROMPT
+    assert "byte-identical" in M.PROMPT and "#1199" in M.PROMPT
+
+
+def _format_keys(template: str) -> set[str]:
+    import string
+    return {f for _, f, _, _ in string.Formatter().parse(template) if f}
+

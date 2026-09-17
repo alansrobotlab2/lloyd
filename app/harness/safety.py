@@ -113,11 +113,16 @@ _HOOK_ONLY_LABELS = frozenset({"sudo"})
 
 
 def check_bash_command(command: str, cwd: str | None = None, *,
-                       at_dispatch: bool = False) -> tuple[str, str] | None:
+                       at_dispatch: bool = False, session_id: str | None = None,
+                       parent_of=None) -> tuple[str, str] | None:
     """Return (label, excerpt) if `command` matches a hard-deny pattern,
     else None.
 
-    Three checks, one definition. The regex table above catches the
+    Four checks, one definition. The fourth, `service_control`, needs the
+    session: a background session (worker, autonomy, bench — by id shape,
+    a `task:*` subagent by its parent through `parent_of`) may not restart
+    or stop an engine or a service; a chat session may. Callers that do not
+    know the session pass none and that check is skipped. The regex table above catches the
     catastrophic-anywhere shapes; `protected_paths` parses the command and
     refuses a delete, move or `git clean` that takes out the vault, the lloyd
     tree or $HOME wholesale — the spellings the regex table let through on
@@ -156,6 +161,13 @@ def check_bash_command(command: str, cwd: str | None = None, *,
         if len(excerpt) > 80:
             excerpt = excerpt[:80] + "..."
         return (f"Obsidian Sync registration: {why}", excerpt)
+    from app.harness.service_control import check_service_control
+    why = check_service_control(command, session_id, parent_of=parent_of)
+    if why:
+        excerpt = command.strip().splitlines()[0]
+        if len(excerpt) > 80:
+            excerpt = excerpt[:80] + "..."
+        return (f"service control: {why}", excerpt)
     return None
 
 
@@ -181,7 +193,8 @@ async def _safety_pretool_cb(
     if isinstance(tool_input, dict):
         command = tool_input.get("command") or ""
         cwd = tool_input.get("cwd") or None
-    match = check_bash_command(command, cwd if isinstance(cwd, str) else None)
+    match = check_bash_command(command, cwd if isinstance(cwd, str) else None,
+                               session_id=str(input_data.get("session_id") or "") or None)
     if match is None:
         return {}
     label, excerpt = match

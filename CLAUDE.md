@@ -416,6 +416,38 @@ error-shaped lines.
   the round it opened, bounded by the boot so the next item's live round is
   never blamed — and the reaper closes it. It does nothing outside the
   backend. `architecture/automod.md` §3.2.
+- **A worker turn may not restart or stop an engine or a service**
+  (`app/harness/service_control.py`, the fourth check in
+  `safety.check_bash_command`, so hook and dispatch both). On 2026-09-17 an
+  autocode turn, continued by hand after its round was reaped, ran
+  `round restart --only agent-llm-primary` from Bash to fix a grader that
+  had returned empty output: five minutes of no primary, every turn in
+  flight killed including its own, and the round it had just reopened left
+  with no owner. Refused for background sessions only (four-part id, or a
+  `task:*` child of one) and only for state-changing verbs: `supervisorctl
+  status`, `systemctl status` and `round status` stay allowed; a chat
+  session is never refused, since a person restarting the stack from
+  Mission Control is the intended operator. Parsed like `protected_paths`
+  (`grep 'supervisorctl restart' CLAUDE.md` is an argument to grep) and
+  read inside `bash -c` / `python -c` one-liners.
+  `tests/test_service_control_guard.py` pins the incident command.
+- **A round no implement row names is an orphan, and the reaper closes it.**
+  That same continued turn opened SM_20260917_003459 after its `finished`
+  row was written; the reaper keys on implement rows, so nothing could close
+  it and `_loop_is_free` read the loop as busy until a human aborted it.
+  `round_start` now carries `opened_by` (`tool` from `automod_start` with
+  the calling session, `cli` from the command line) and the reaper's second
+  pass aborts a tool-opened round that no implement row names once its
+  opener session is quiet and it is `ORPHAN_ROUND_MIN_AGE_SECONDS` (10 min)
+  old. A person's CLI round, or a row with no `opened_by`, is never touched.
+- **A review refusal near the budget is an abort, not a fix.** #1199 spent
+  two rounds of 151 iterations editing after a late refusal and calling
+  `automod_land` on a refused gate. The implement prompt now says: fewer
+  than 25 iterations left when the review sends it back → `automod_abort`,
+  branch kept, the re-offer resumes with the findings. And triage may not
+  write a clause pinning an invariant the tree does not already hold (its
+  clause 3 demanded byte-identical files from a writer that round-trips
+  YAML); a "no regression" clause is worded against today's behaviour.
 - **The idle gate drains first, then waits.** `wait_idle` used to arm the
   drain only *after* three quiet polls — the one moment it is no longer
   needed. Against a worker pool that starts a research job every few minutes

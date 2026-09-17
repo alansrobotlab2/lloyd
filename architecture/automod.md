@@ -996,10 +996,23 @@ tail waits in the open. Four moves, each with a switch:
   Latency is one autotriage interval to the contract, then the next round.
   `round priority-backfill --reset-open` is the stronger reading of
   "default low for existing items": every open item written `low`, the old
-  value in its activity line, so the high tier starts empty; human-only. `tests/test_autotriage.py` ("picked up
-  next") and `tests/test_backlog_priority.py` pin it. Swept ids are in `released_ids`, so a swept self-spawn enters
-  single triage. The single prompt's `<origin>` says the sweep's rank so
-  the contract fits the size.
+  value in its activity line, so the high tier starts empty; human-only.
+  `tests/test_autotriage.py` ("picked up next") and
+  `tests/test_backlog_priority.py` pin it.
+- *Swept ids are in `released_ids`*, so a swept self-spawn enters single
+  triage. The single prompt's `<origin>` says the sweep's rank so the
+  contract fits the size.
+- *2026-09-17, what #1199's three rounds taught.* (1) A worker turn may
+  not restart or stop an engine or a service: `app/harness/service_control.py`
+  is the fourth check in `safety.check_bash_command`, keyed on the session
+  id like `_tool_sandbox`, parsed like `protected_paths`, read-only verbs
+  allowed, chat sessions never refused. (2) A tool-opened round no implement
+  row names is an orphan: `round_start` carries `opened_by` and `session_id`,
+  and `reap_abandoned_rounds` has a second pass that aborts one whose opener
+  is quiet after `ORPHAN_ROUND_MIN_AGE_SECONDS`. (3) The implement prompt:
+  a review refusal with fewer than 25 iterations left is `automod_abort`,
+  never an edit or a `land`. (4) The triage prompt: a clause pins the
+  change, never an invariant the tree does not already hold.
 - *Autocode can yield* (`workers.sources.autocode.yield_to_sweep`, ships
   off): `enqueue_if_due` returns `DECLINED` while `sweep_pending` > 0, so
   the sweep runs back to back rather than in the gaps the round hold

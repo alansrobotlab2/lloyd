@@ -583,8 +583,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             except (TypeError, ValueError):
                 return text_result(_err(f"item_id must be an integer, got {item_id!r}"))
             from_branch = str(arguments.get("from_branch") or "").strip() or None
+            from agent_mcp import _task_registry
             return text_result(json.dumps(
-                R.start(goal, item_id=item_id, from_branch=from_branch), indent=2))
+                R.start(goal, item_id=item_id, from_branch=from_branch, opened_by="tool",
+                        session_id=str(_task_registry.current_session_id.get("") or "")),
+                indent=2))
 
         if name == "automod_gate":
             rid = arguments.get("round_id") or ""

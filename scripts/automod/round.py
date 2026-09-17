@@ -26,7 +26,8 @@ def _round_id() -> str:
 
 
 def start(goal: str, *, base: str | None = None, force: bool = False,
-          item_id: int | None = None, from_branch: str | None = None) -> dict:
+          item_id: int | None = None, from_branch: str | None = None,
+          opened_by: str = "cli", session_id: str = "") -> dict:
     """Open a round: take the lock, cut a worktree, write the run spec.
 
     `item_id` binds the round to the backlog item it implements; the gate's
@@ -110,8 +111,12 @@ def start(goal: str, *, base: str | None = None, force: bool = False,
         (out / "run_spec.yaml").write_text(
             yaml.safe_dump(run_spec, sort_keys=False), encoding="utf-8")
 
+        # `opened_by` / `session_id` (2026-09-17): the reaper closes a round a
+        # tool opened whose session has gone quiet and that no implement row
+        # names; a round a person opened from the CLI is theirs to close.
         S.append_event({"event": "round_start", "round_id": rid, "base": base,
                         "goal": goal[:500], "worktree": str(wt),
+                        "opened_by": opened_by, **({"session_id": session_id} if session_id else {}),
                         **({"item_id": int(item_id)} if item_id else {}),
                         **resumed,
                         **({"live_dirty_paths": dirty[:20]} if dirty else {})})

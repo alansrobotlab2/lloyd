@@ -328,6 +328,14 @@ and a clause requiring a floor that only a different `n` reaches, so no diff \
 could satisfy both and the round could only be refused. A trade-off is ONE \
 clause with the number in it ("the floor is 12,000 tokens"), not two clauses \
 pulling opposite ways.
+- **A clause pins the change, never an invariant the tree does not already \
+hold.** Before writing a "no regression" or "unchanged" clause, check what the \
+code does today and word the clause against that. #1199 asked for a smaller \
+list payload; its contract said a priority-only save "leaves the file \
+byte-identical", which the writer had never done (it round-trips YAML), and two \
+rounds spent 300 iterations building raw-frontmatter preservation nobody asked \
+for. "A priority-only update changes no body text" was the clause. If the item \
+does not ask for the stronger property, do not require it.
 - **When an item weakens a gate, a threshold or a check, add a purpose \
 clause.** Name what that gate exists to catch and the test that shows it still \
 catches it. Relaxing a check is the change most likely to pass every rung and \

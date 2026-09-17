@@ -93,9 +93,9 @@ Backlog item #{item_id} on your own board was triaged {triaged_ago} and \
 **confirmed**: the premise still holds and there is real work here. Implement \
 it through the self-modification loop, following the skill \
 `automod-change-own-code` exactly — it holds the procedure for a `code`, \
-`frontend`, `vault` or `mixed` surface, what each gate rung means, how the \
-`review` rung behaves, and what to do when an existing test fails. Read it \
-before you start; this message is the contract, not the procedure.
+`frontend`, `vault` or `mixed` surface, each gate rung, the `review` rung, and \
+what to do when an existing test fails. Read it first; this message is the \
+contract, not the procedure.
 
 <item id="{item_id}" status="{status}" priority="{priority}">
 # {name}
@@ -138,9 +138,9 @@ test: each goes **onto this item**, once, as a section: \
 `backlog_write_task(task_id={item_id}, description_mode="append", \
 description="## Findings (round <round id>)\\n\\n- <what is wrong, where \
 (file:line), how to verify>", activity="findings appended by round <round id>")`. \
-One bullet per finding. Do not fold them into this change, and do not leave \
-them only in your report: the report is read once; the item is read until it \
-is done. One change per round is what makes a rollback mean something.
+One bullet per finding; do not leave them only in your report: it is read \
+once, the item until it is done. One change per round is what makes a \
+rollback mean something.
 
 **The one thing that becomes a new item is a blocker**: a finding that stops \
 one of this round's clauses from becoming true. File it with \
@@ -156,21 +156,23 @@ line counts, git shas and grep results in it are current: read them, do not
 re-derive them. Re-measure exactly one thing — the acceptance check, which you
 must confirm fails before you start and passes when you finish.
 
-**Pacing.** You have {max_turns} iterations and a wall clock, and a turn that
-runs out of either ends with nothing landed. Triage already did the reading,
-so: `automod_start` by iteration 6 or minute 8; the failing test written by
-iteration 25; the first `automod_gate` by minute 30. After minute 40 start
-nothing you cannot gate. Commit before every gate. Re-gating the same commit
-is answered from the ledger without a review, so a gate you have not committed
-for is a wasted one. If a `<context>` or `<budget>` anchor fires, it is not
-advice — commit, gate, and land or abort with what you have.
+**Pacing.** You have {max_turns} iterations and a wall clock; running out of
+either lands nothing. Triage read for you: `automod_start` by iteration 6
+or minute 8; the failing test by iteration 25; the first `automod_gate` by
+minute 30; after minute 40 start nothing you cannot gate. Commit before every
+gate: re-gating the same commit is answered from the ledger without a review.
+If a `<context>` or `<budget>` anchor fires, it is not advice — commit, gate,
+and land or abort. A review refusal with under 25 iterations left is an abort:
+`automod_abort` (branch kept; the re-offer resumes with the findings), never an
+edit, a re-gate or a `land`. Never restart an engine or a service from a round
+— refused at dispatch; note it on the item.
 
 **Your outcome closes the item — or leaves it open.** The item is a proposal, \
 not a promise: find out whether it improves Lloyd, and land it only if it does. \
 When this turn ends you restate the result as one JSON object: whether the \
 change landed, and **per clause** `met`, `not_met` or `deferred`, with the test \
-node id or file:line; the overall acceptance is derived from the clauses. Once \
-the promotion settles, an all-`met` item is closed automatically. `deferred` \
+node id or file:line. Once the promotion settles, an all-`met` item is closed \
+automatically. `deferred` \
 leaves it open and names the ids it waits on. A deferral that names no id is \
 recorded as `not_met`. `not_met` re-offers it once for those clauses. Two verdicts close \
 it with no landing: `unnecessary` means the work is not needed after all — the \
@@ -396,8 +398,18 @@ def reap_abandoned_rounds(now: float | None = None, *,
     landing is in flight (`S.land_in_progress` — waiting for idle, or
     re-gating after `main` moved) is never reaped. The branch is kept — it is
     the only record of what was attempted — and the item is told where it is.
+
+    A second pass (2026-09-17) closes an **orphan**: a round a tool opened
+    (`opened_by: tool` on its `round_start`) that no implement row names.
+    SM_20260917_003459 was opened by a turn that had already written its
+    `finished` row — a person typed `continue` into the autocode session
+    after the reaper removed its worktree — so nothing above could key on
+    it, `_loop_is_free` read it as open, and the loop stood still until a
+    human aborted it. Reaped once its opener session is quiet and it is at
+    least `ORPHAN_ROUND_MIN_AGE_SECONDS` old; a CLI round (`opened_by: cli`,
+    or no key at all) is a person's and never touched.
     """
-    from scripts.automod import backlog as B, round as R, state as S, worktree as W
+    from scripts.automod import state as S, worktree as W
     now = now or time.time()
     grace = _abandon_grace_seconds()
     events = S.read_events(limit=500)
@@ -419,16 +431,18 @@ def reap_abandoned_rounds(now: float | None = None, *,
     busy.discard(finished_session)
     current = S.read_current() or {}
     reaped: list[dict] = []
+
+    def _reapable(rid: str) -> bool:
+        if rid in closed or current.get("round_id") == rid:
+            return False
+        if not W.worktree_path(rid).exists():
+            return False
+        return not (S.gate_in_progress(rid) or S.land_in_progress(rid))
+
     for e in finished:
         rid = e["round_id"]
-        if rid in closed or current.get("round_id") == rid:
-            continue
         age = now - float(e.get("ts") or 0)
-        if age < grace or e.get("session_id") in busy:
-            continue
-        if not W.worktree_path(rid).exists():
-            continue
-        if S.gate_in_progress(rid) or S.land_in_progress(rid):
+        if age < grace or e.get("session_id") in busy or not _reapable(rid):
             continue
         review = _review_note(events, rid)
         why = (f"implement turn ended ({e.get('stop_reason')}) and the round "
@@ -439,18 +453,47 @@ def reap_abandoned_rounds(now: float | None = None, *,
         if review is not None:
             why = (f"the review rung sent the round back and the turn ended without "
                    f"abort or re-gate; {why}")
-        R.abort(rid, reason=why)
-        rec = {"event": "round_abandoned", "round_id": rid, "item_id": e.get("item_id"),
-               "branch": f"automod/{rid}", "reason": why}
-        S.append_event(rec)
-        if e.get("item_id") is not None:
-            B.note_item(int(e["item_id"]),
-                        f"automod round {rid} abandoned: {rec['reason']}. Its work is on "
-                        f"branch `automod/{rid}` in ~/lloyd.")
-            B.set_status(int(e["item_id"]), "up_next", "its round was abandoned; back in the pool")
-        logger.warning("reaped abandoned round %s (%s)", rid, rec["reason"])
-        reaped.append(rec)
+        _reap_round(rid, e.get("item_id"), why, reaped)
+    # Orphans: opened by a tool, named by no implement row, opener quiet.
+    named = {e.get("round_id") for e in events
+             if e.get("event") == "backlog_implement" and e.get("round_id")}
+    for e in events:
+        if e.get("event") != "round_start" or e.get("opened_by") != "tool":
+            continue
+        rid = str(e.get("round_id") or "")
+        if not rid or rid in named or rid in closed:
+            continue
+        age = now - float(e.get("ts") or 0)
+        if age < ORPHAN_ROUND_MIN_AGE_SECONDS or e.get("session_id") in busy or not _reapable(rid):
+            continue
+        closed.add(rid)
+        why = (f"opened by a tool from session {e.get('session_id') or '?'} {int(age // 60)} min "
+               f"ago, no implement turn names it, and nothing is running in that session — "
+               f"an orphan the loop would otherwise read as open forever")
+        _reap_round(rid, e.get("item_id"), why, reaped)
     return reaped
+
+
+# How old a tool-opened round with no implement row must be before the reaper
+# treats it as an orphan. The opener's turn is normally still running (its
+# session is busy, so the age never matters); the floor is for the seconds
+# between `automod_start` returning and the turn's next tool call.
+ORPHAN_ROUND_MIN_AGE_SECONDS = 600
+
+
+def _reap_round(rid: str, item_id, why: str, reaped: list[dict]) -> None:
+    from scripts.automod import backlog as B, round as R, state as S
+    R.abort(rid, reason=why)
+    rec = {"event": "round_abandoned", "round_id": rid, "item_id": item_id,
+           "branch": f"automod/{rid}", "reason": why}
+    S.append_event(rec)
+    if item_id is not None:
+        B.note_item(int(item_id),
+                    f"automod round {rid} abandoned: {rec['reason']}. Its work is on "
+                    f"branch `automod/{rid}` in ~/lloyd.")
+        B.set_status(int(item_id), "up_next", "its round was abandoned; back in the pool")
+    logger.warning("reaped abandoned round %s (%s)", rid, rec["reason"])
+    reaped.append(rec)
 
 
 def _backend_boot_ts() -> float | None:
