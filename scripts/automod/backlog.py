@@ -58,7 +58,7 @@ from app.backlog_status import (
     canonical_status,
     is_off_vocabulary,
 )
-from app.backlog_tags import normalize_tags
+from app.backlog_tags import is_spawn_tag, normalize_tags
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 
@@ -94,12 +94,13 @@ REVIEW_SPAWN_TAGS = frozenset({"spawned-by-review"})
 # `workers.sources.youtube-digest.loop_spawned` (see `eval_items_loop_spawned`).
 EVAL_SPAWN_TAGS = frozenset({"youtube-eval"})
 
-# Three readers, three different sets, and they disagree on purpose:
+# Three readers, three different rules, and they disagree on purpose:
 #
 #   merge at write time   `spawned-by-` prefix   (agent_mcp/backlog.py)
 #                         + `youtube-eval`
 #   quarantine            QUARANTINE_TAGS        (is_quarantined, below)
 #   expiry and the gauge  LOOP_SPAWN_TAGS        (this union)
+#                         + the `spawned-by-` prefix
 #
 # Quarantine asks "can this item answer the staleness question?" — an item
 # triage filed from a check it just ran cannot, by construction, and neither
@@ -110,6 +111,18 @@ EVAL_SPAWN_TAGS = frozenset({"youtube-eval"})
 # is no for all three, so the bound applies to all three. Both unions are the
 # shape with the eval switch on; readers go through `quarantine_tags()` and
 # `loop_spawn_tags()`, which honour it.
+#
+# The prefix belongs to the expiry/gauge rule and not to quarantine, and the
+# asymmetry is the point: `backlog_write_task` stamps `spawned-by-<whatever the
+# session was>`, so the exact set here was only ever the subset of mints someone
+# thought of in advance. Measured through the production loader on 2026-09-17,
+# 43 of 412 open loop-tagged items were rejected by the enumeration — 23
+# distinct minters — and the scorecard gauge read 369 against a true 412, a 10 %
+# undercount of the loop's own output. #1160 was among them, which is why every
+# triage of it was told "a human's item, or a writer outside the loop".
+# Quarantine stays exact on purpose: widening it would hold out of single-item
+# triage every `spawned-by-review` item whose comment says it should be
+# re-checked, and would re-admit nothing the enumeration had already held.
 LOOP_SPAWN_TAGS = SPAWN_TAGS | REVIEW_SPAWN_TAGS | EVAL_SPAWN_TAGS
 QUARANTINE_TAGS = SPAWN_TAGS | EVAL_SPAWN_TAGS
 
@@ -131,9 +144,39 @@ def quarantine_tags() -> frozenset[str]:
 
 
 def loop_spawn_tags() -> frozenset[str]:
-    """The tags expiry bounds and the scorecard gauge counts, right now."""
+    """The *enumerated* tags expiry bounds and the scorecard gauge counts, right
+    now — the exact half of the rule. A mint named after its own session is loop
+    output too, so nothing asks this directly: go through `loop_spawn_tag()`,
+    which adds the `spawned-by-` prefix this returns alongside.
+    """
     return (SPAWN_TAGS | REVIEW_SPAWN_TAGS
             | (EVAL_SPAWN_TAGS if eval_items_loop_spawned() else frozenset()))
+
+
+def loop_spawn_tag(tags) -> str:
+    """Which tag says a loop session wrote this item — or "" if none does.
+
+    The one test for "is this the board's own output?", used by expiry, by the
+    scorecard's open self-spawned gauge, and by `board_health`. It answers in
+    two ways, because the board is written two ways: an exact hit on the
+    enumerated set (which is also how the `youtube-eval` kill switch
+    `workers.sources.youtube-digest.loop_spawned` takes effect), or the
+    `spawned-by-` prefix that `backlog_write_task` actually stamps — the same
+    test the writer applies when it decides a create may be merged into an
+    existing item (`app.backlog_tags.is_spawn_tag`). Before that second half
+    existed, a mint named after its own session (`spawned-by-task-24`,
+    `spawned-by-data-pipeline`, 23 distinct ones on the board on 2026-09-17) was
+    merged at write as loop output and read as a human's item ever after, so it
+    was neither bounded by expiry nor counted by the gauge (#1160).
+
+    Returns the tag rather than a bool so the expiry ledger row can name which
+    minter produced the item it closed.
+    """
+    spawn_tags = loop_spawn_tags()
+    for tag in tags:
+        if tag in spawn_tags or is_spawn_tag(tag):
+            return tag
+    return ""
 
 # How long a self-filed draft may sit untouched before `expire_stale_spawns`
 # closes it. The constant is the fallback; the live value is
@@ -2811,9 +2854,12 @@ def is_loop_spawned(item: Item) -> bool:
     The bound-the-board test. Everything under it is subject to expiry and
     shows on the scorecard's open self-spawned gauge, whether or not it is
     held out of the triage pool.
+
+    Delegates to `loop_spawn_tag`, which recognises the `spawned-by-` prefix the
+    mint really uses and not only the enumerated names; see the asymmetry note
+    on `LOOP_SPAWN_TAGS`.
     """
-    tags = loop_spawn_tags()
-    return any(t in tags for t in item.tags)
+    return bool(loop_spawn_tag(item.tags))
 
 
 # A self-filed item that nothing picked up. Closed, not deleted: the file
@@ -3126,7 +3172,7 @@ def expire_stale_spawns(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
                f"or picked up; reopen by setting status back to draft")
         if not _apply_status(item.path, "done", why, add_tags=(EXPIRED_TAG,)):
             continue
-        spawned_by = next((t for t in item.tags if t in loop_spawn_tags()), "")
+        spawned_by = loop_spawn_tag(item.tags)
         S.append_event({"event": "backlog_expired", "item_id": item.id,
                         "age_days": item.age_days, "name": item.name[:200],
                         "spawned_by": spawned_by}, path=ledger)

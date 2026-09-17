@@ -642,6 +642,110 @@ def test_the_open_gauge_counts_review_findings(isolated, tmp_path):
     assert gauge["count"] == 2
 
 
+# ===========================================================================
+# The mint is a prefix, so the expiry/gauge test is a prefix
+# ===========================================================================
+#
+# `backlog_write_task` stamps `spawned-by-<whatever the session was>`, and the
+# write-time dedupe has always asked for the PREFIX. The expiry/gauge side asked
+# for six exact names instead, so 43 of the 412 open loop-tagged items on the
+# board on 2026-09-17 — from 23 distinct minters — were loop output at the
+# moment they were written and a human's item to every reader afterwards: never
+# bounded by expiry, never counted by the gauge, and presented to triage as
+# "a human's item, or a writer outside the loop"
+# (`workers/sources/autotriage.py`, the fall-through in the origin block). The
+# item that documents it, #1160, carries `spawned-by-autonomy-task-40` and was
+# itself in that 43. See `LOOP_SPAWN_TAGS` for why quarantine stays exact.
+
+PREFIX_ONLY = "spawned-by-anything-42"
+
+
+def test_a_mint_nobody_enumerated_still_counts_as_loop_output(isolated):
+    """Clause 1. A tag the reader never heard of is still the writer's own
+    stamp: the prefix is what makes it loop output, not the name after it."""
+    write_item(isolated, 600, days_old=0, tags=(PREFIX_ONLY,))
+    item = next(i for i in B.open_items(None) if i.id == 600)
+    assert B.is_loop_spawned(item), "expiry bounds it and the gauge counts it"
+    assert B.loop_spawn_tag(item.tags) == PREFIX_ONLY, \
+        "and the reader can name which minter produced it"
+
+
+def test_a_forgotten_mint_expires_on_the_same_bound_and_names_its_minter(isolated):
+    """Clause 2. The bound's whole purpose is to close what nothing picked up;
+    an item the enumeration missed sits open past it forever, so this is the
+    hole's actual cost — 44 open items on 2026-09-16 and 43 on 2026-09-17,
+    measured through the production loader, none of them reachable by the pass
+    whose entire job is to close them. The ledger row has to name the minter, or
+    the next triage asks the same question this one did."""
+    write_item(isolated, 601, days_old=B.spawn_expiry_days() + 1, tags=(PREFIX_ONLY,))
+    out = B.expire_stale_spawns(S.LEDGER_PATH)
+    assert [d["item_id"] for d in out] == [601]
+    ev = [json.loads(l) for l in S.LEDGER_PATH.read_text().splitlines() if l.strip()]
+    assert ev[-1]["event"] == "backlog_expired"
+    assert ev[-1]["spawned_by"] == PREFIX_ONLY, \
+        "an empty `spawned_by` would say 'a human closed this'"
+    assert not B.open_items(None), "closed, with the text kept on disk"
+
+
+def test_a_forgotten_mint_freshly_filed_is_not_expired(isolated):
+    """The prefix admits 43 more items to the bound; it must not admit any of
+    them before their time, since expiry is the ONLY automatic exit a draft
+    that the sweep has not ranked can reach."""
+    write_item(isolated, 602, days_old=1, tags=(PREFIX_ONLY,))
+    assert B.expire_stale_spawns(S.LEDGER_PATH) == []
+
+
+def test_the_quarantine_still_rejects_both_a_forgotten_mint_and_a_review(isolated):
+    """Clause 3. The asymmetry, from the other side: recognition for expiry must
+    not become recognition for quarantine. A prefix-tagged draft is not triage
+    material (it was written from a check that had just been run, so "is this
+    still true?" is a re-run of that check) — but neither was it before, and
+    widening the quarantine would additionally hold out of single triage every
+    `spawned-by-review` finding, which is the one shape that DOES answer the
+    staleness question. So this asserts no change in either direction.
+
+    `test_without_the_quarantine_the_same_run_grows_the_queue` is the
+    counterfactual for the quarantine half: it empties `SPAWN_TAGS` and shows
+    the queue growing, which only works while quarantine keys on the set.
+    """
+    for iid, tag in ((603, PREFIX_ONLY), (604, REVIEW_TAG)):
+        write_item(isolated, iid, days_old=0, tags=(tag,))
+        item = next(i for i in B.open_items(None) if i.id == iid)
+        assert B.is_loop_spawned(item), "both are loop output to expiry"
+        assert not B.is_self_spawned(item), "neither is held out of the triage pool"
+    fresh, held = B.triage_pool(S.LEDGER_PATH)
+    assert sorted(i.id for i in fresh) == [603, 604] and held == 0
+    assert not any(t.startswith("spawned-by-") and t not in B.SPAWN_TAGS
+                   for t in B.quarantine_tags()), "quarantine_tags is still an exact set"
+
+
+def test_the_eval_switch_off_still_leaves_the_prefix_recognised(isolated, monkeypatch):
+    """Clause 5. The kill switch exists to put YouTube evals back to being a
+    human's items; it must not become a switch for the prefix too, or turning it
+    off silently un-bounds the 43 forgotten mints as a side effect. Two
+    mechanisms, one of which the switch governs."""
+    _eval_switch(monkeypatch, False)
+    write_item(isolated, 605, days_old=0, tags=(EVAL_TAG,))
+    write_item(isolated, 606, days_old=0, tags=(PREFIX_ONLY,))
+    eval_item = next(i for i in B.open_items(None) if i.id == 605)
+    prefix_item = next(i for i in B.open_items(None) if i.id == 606)
+    assert not B.is_loop_spawned(eval_item), "the kill switch keeps catching what it caught"
+    assert B.is_loop_spawned(prefix_item), "and catches nothing else differently"
+
+
+def test_the_shared_prefix_is_the_one_the_writer_stamps():
+    """The boundary this whole item turned on: two processes, one string. The
+    MCP server that merges a create asks `startswith(_SPAWN_TAG_PREFIX)`; the
+    loop that expires the same file asks `startswith(SPAWN_TAG_PREFIX)`. They
+    were two literals until #1160, which is exactly how the mint outgrew the
+    reader without either side looking wrong on its own."""
+    from agent_mcp import backlog as BL
+    from app.backlog_tags import SPAWN_TAG_PREFIX, is_spawn_tag
+    assert BL._SPAWN_TAG_PREFIX == SPAWN_TAG_PREFIX == "spawned-by-"
+    assert is_spawn_tag(PREFIX_ONLY) and not is_spawn_tag("backlog")
+    assert not is_spawn_tag("youtube-eval"), "the eval tag has no prefix: it is enumerated"
+
+
 def test_a_review_write_is_merged_into_an_item_that_already_covers_it(isolated, tmp_path, monkeypatch):
     """The write-time dedupe keys on the `spawned-by-` PREFIX, so it caught
     this tag before the tag existed — pinned because the prefix is the only

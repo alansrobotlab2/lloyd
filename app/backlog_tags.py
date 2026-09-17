@@ -15,6 +15,28 @@ from __future__ import annotations
 
 from typing import Any
 
+# The tag every loop session prefixes its own filings with, and the one place
+# that string is written down. Two processes read it and neither used to know
+# about the other: the writer (`agent_mcp/backlog.py`, the MCP server) asks
+# "is this the loop's own output?" to decide whether a create may be merged
+# into an item already on the board, and the reader (`scripts/automod/backlog.py`,
+# the triage/implement loop) asks the same question of expiry and of the
+# scorecard's open self-spawned gauge. The writer matched a PREFIX, the reader
+# enumerated six exact names, so a mint named after whatever the session
+# happened to be — `spawned-by-data-pipeline`, `spawned-by-task-24` — was loop
+# output at write time and a human's item to every reader afterwards (#1160).
+SPAWN_TAG_PREFIX = "spawned-by-"
+
+
+def is_spawn_tag(tag: Any) -> bool:
+    """Does this tag mark an item as something a loop session filed for itself?
+
+    Takes `Any` because front matter is written by models: the caller has
+    already been through `normalize_tags`, but a reader that has not must not
+    raise on a non-string.
+    """
+    return str(tag).startswith(SPAWN_TAG_PREFIX)
+
 
 def normalize_tags(value: Any) -> list[str]:
     """Coerce a frontmatter `tags` field to a list of strings.

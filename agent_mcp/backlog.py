@@ -18,7 +18,7 @@ from mcp.types import Tool
 from agent_mcp._shared import parse_frontmatter_text, text_result
 from agent_mcp import backlog_similar as SIM
 from app.backlog_status import PIPELINE_STATUSES
-from app.backlog_tags import normalize_tags
+from app.backlog_tags import SPAWN_TAG_PREFIX, normalize_tags
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 VALID_STATUSES = frozenset(PIPELINE_STATUSES)
@@ -400,7 +400,13 @@ def _handle_write(args: dict) -> str:
 # route (`app/routers/backlog.py`) and the loader agree.
 DEFAULT_PRIORITY = "low"
 
-_SPAWN_TAG_PREFIX = "spawned-by-"
+# The one definition, in the module both processes can import: the MCP server
+# that stamps and merges these tags here, and the triage/implement loop that
+# expires and counts them in `scripts/automod/backlog.py`. It used to be a
+# literal on each side, which is how the writer came to treat
+# `spawned-by-data-pipeline` as loop output while expiry read the same item as a
+# human's (#1160).
+_SPAWN_TAG_PREFIX = SPAWN_TAG_PREFIX
 # Loop writers that carry no `spawned-by-*` tag. The YouTube digest files its
 # evaluations tagged `youtube-eval`, and since 2026-09-14 those are loop output
 # (`scripts/automod/backlog.py::EVAL_SPAWN_TAGS`, which the aggregator does not

@@ -242,6 +242,38 @@ def test_merges_appends_expiries_and_the_open_self_spawned_gauge(tmp_path, repo)
     assert "merged 1+2, appended 3, expired 1" in text and "over bound 1" in text
 
 
+def test_the_open_gauge_counts_a_mint_named_after_its_own_session(tmp_path):
+    """The gauge asked its own question of the tag set instead of going through
+    the loop's one predicate, so it saw only the enumerated mints. Measured on
+    the live board on 2026-09-17: 412 open items carried a `spawned-by-*` tag and
+    the gauge reported 369, because 43 of them named the session that filed them
+    (`spawned-by-task-24`, `spawned-by-data-pipeline`) rather than one of the
+    six names somebody thought of in advance. The row is the loop's measure of
+    its own inflow, so a 10 % undercount there reads as inflow the loop is not
+    producing (#1160).
+
+    Enumerated and un-enumerated mints must land in the same number: the gauge
+    bounds the board, and it cannot bound what it does not count.
+    """
+    board = tmp_path / "backlog"
+    board.mkdir()
+
+    def item(iid, *, days=2, tags):
+        created = datetime.fromtimestamp(NOW - days * DAY, tz=timezone.utc).isoformat()
+        (board / f"{iid}-x.md").write_text(
+            "---\n" + yaml.dump({"status": "draft", "created": created, "tags": list(tags),
+                                  "board": "lloyd"}) + "---\n\n# x\n")
+
+    item(60, tags=("spawned-by-triage",))                # enumerated: counted before this fix
+    item(61, tags=("spawned-by-review",))                # enumerated, and NOT quarantined
+    item(62, tags=("spawned-by-anything-42",))           # the hole: counted only via the prefix
+    item(63, tags=("spawned-by-data-pipeline",))         # a real minter, 6 open items on 09-17
+    item(64, tags=("backlog",))                          # a human's draft: still not loop output
+    gauge = SC._self_spawned_gauge([], board, now=NOW)
+    assert gauge["count"] == 4, "the four loop filings, the human draft excluded"
+    assert gauge["bound_days"] == spawn_expiry_days()
+
+
 def test_the_grouping_section_adds_up_a_realistic_week(tmp_path, repo):
     ledger = _ledger(tmp_path, [
         _ev("backlog_cluster", 6, clusters=12, items=71),

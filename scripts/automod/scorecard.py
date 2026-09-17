@@ -148,13 +148,17 @@ def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -
     All-time events, not the window: an item triaged last month is judged.
     """
     # Stdlib-only modules, imported lazily so the CLI stays light: the tag
-    # set and the bound live in one place and are not restated here.
+    # rule and the bound live in one place and are not restated here.
+    # `loop_spawn_tag`, never `loop_spawn_tags` — the gauge used to do its own
+    # `tags & loop_spawn_tags()` here, which is a second copy of the test and so
+    # a second chance to get it wrong: it saw the enumerated mints and missed
+    # every `spawned-by-<session>` tag, under-counting the loop's own open
+    # output by 10 % (43 items of 412, measured 2026-09-17, #1160).
     from app.backlog_tags import normalize_tags
     from scripts.automod.backlog import (BLOCKER_TAG, EXPIRY_EXEMPT_TAGS, blocker_liveness,
-                                         blocker_targets, load_item, loop_spawn_tags,
+                                         blocker_targets, load_item, loop_spawn_tag,
                                          spawn_expiry_days)
     bound_days = spawn_expiry_days()
-    spawn_tags = loop_spawn_tags()
     targets: dict[int, int] | None = None
 
     def _status_in_dir(iid: int) -> str | None:
@@ -181,7 +185,7 @@ def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -
             # The one coercion every tag reader shares: the eval digest has
             # written `tags` as a string that looks like a list.
             tags = set(normalize_tags(fm.get("tags")))
-            if not (tags & spawn_tags):
+            if not loop_spawn_tag(tags):
                 continue
             if fm.get("status") not in ("draft", "up_next", "in_progress"):
                 continue
