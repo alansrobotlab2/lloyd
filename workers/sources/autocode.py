@@ -312,13 +312,21 @@ def _reoffer_memory(prior, findings_appended: int) -> str:
 
 def _human_clauses_block(clauses) -> str:
     """Conditions a person will satisfy after the code lands. Rendered so the
-    round knows they exist and knows they are not its to do — or to fake."""
+    round knows they exist and knows they are not its to do — or to fake.
+
+    Reporting them is load-bearing (#1210): `close_settled_items` routes its
+    whole branch on `acc == "met" and human`, so a met landing with an empty
+    list here takes the untagged path — closes and loses the tag, and the
+    person owes something the board says nothing about. Reporting them closes
+    the item carrying `needs-human`; not reporting them closes it anyway, so
+    the clause cannot say 'stay open'."""
     clauses = [str(c) for c in (clauses or []) if str(c).strip()]
     if not clauses:
         return ""
     rows = "\n".join(f"    - {c}" for c in clauses)
     return (f"\nA person will do these after you land — they are not yours to do, "
-            f"and not yours to simulate; the item stays open for them:\n\n{rows}\n")
+            f"and not yours to simulate; report them and the item closes "
+            f"carrying `needs-human` for them:\n\n{rows}\n")
 
 
 def _reoffer_verdict(reason: str, clause_verdicts=()) -> str:

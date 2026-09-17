@@ -156,10 +156,11 @@ change — a review refusal twice, `spent` — goes back to `draft` with the tag
 - **`in_progress` means a round is running on it right now, and nothing \
 else** (Alan's ruling, 2026-09-13). A landing that settled and left the item \
 open is not running. `item_landed` with `closed=false`: acceptance `met` with \
-a person still owed a check → `draft` + `needs-human`; `not_met` → `up_next` \
-(offered once more for exactly those clauses) unless its attempt is `spent`, \
-then `draft` + `needs-human`; `deferred` to other items → `draft`, no tag; no \
-recorded outcome → `draft` + `needs-human`. A promotion still under \
+a person still owed a check → `done` carrying `needs-human` — it is CLOSED, so \
+move it nowhere; `not_met` → `up_next` (offered once more for exactly those \
+clauses) unless its attempt is `spent`, then `draft` + `needs-human`; \
+`deferred` to other items → `draft`, no tag; no recorded outcome → `draft` + \
+`needs-human`. A promotion still under \
 observation (promoted, not yet settled) is the one landed state that stays \
 `in_progress` — the round is not over until the guardian says so.
 - `spent` is spent. An item whose one attempt was consumed by a verdict on \
@@ -326,8 +327,12 @@ def _item_line(i: Any) -> str:
 
 
 def _health_lines(h: dict | None) -> str:
-    """`backlog.board_health` as the eight lines the steward reads. The board
-    below is at most eighty items of ~560; these are the counts it cannot see."""
+    """`backlog.board_health` as the nine lines the steward reads. The board
+    below is at most eighty items of ~560; these are the counts it cannot see.
+
+    The ninth (#1210): closed items carrying `needs-human`. A landed `met` item
+    now closes with that tag, so without this line the steward would watch
+    `draft.needs_human` fall and conclude nobody owes anything."""
     if not h:
         return "(unavailable)"
     d, u, f = h.get("draft") or {}, h.get("up_next") or {}, h.get("flow") or {}
@@ -337,6 +342,7 @@ def _health_lines(h: dict | None) -> str:
         return f"{w.get('created', 0)} created, {w.get('closed', 0)} closed, net {w.get('net', 0):+d}"
     return "\n".join([
         "open: " + ", ".join(f"{k} {v}" for k, v in sorted((h.get("open") or {}).items())),
+        f"closed items carrying needs-human: {h.get('closed_needs_human', 0)}",
         (f"draft {d.get('total', 0)}: {d.get('pool', 0)} triageable, {d.get('quarantined', 0)} "
          f"quarantined self-spawns, {d.get('grouped', 0)} folded under an umbrella, "
          f"{d.get('needs_human', 0)} needs-human, {d.get('held', 0)} confirmed and held for "

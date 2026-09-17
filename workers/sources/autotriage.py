@@ -338,8 +338,8 @@ instead of spending a round finding out.
 items audited by Alan, a sign-off, a scope decision, a number that needs a week \
 of real traffic: put it under HUMAN_CLAUSES, never under ACCEPTANCE_CLAUSES. \
 The implementer is not asked to fake it, the reviewer does not grade it, and \
-the item stays open tagged `needs-human` after the code lands until a person \
-does it. #578 spent its round on a clause asking for ten human-audited items. \
+after the code lands the item closes carrying `needs-human`, which is how a \
+person finds what they owe. #578 spent its round on a clause asking for ten human-audited items. \
 The same rule for **a check that can only run after landing** — a day of \
 traffic, a nightly run, a script over live data: the pre-landing mechanism \
 and its test go in ACCEPTANCE_CLAUSES, the post-landing check goes in \

@@ -392,3 +392,34 @@ def test_the_steward_is_told_a_held_confirmation_stays_draft_and_sees_its_releas
     ledger = tmp_path / "l.jsonl"
     ledger.write_text(json.dumps({"event": "backlog_confirm_released", "ts": 10, "item_id": 1}) + "\n")
     assert [e["event"] for e in W.events_since(ledger, since_ts=0)] == ["backlog_confirm_released"]
+
+
+# ── #1210: closed items a person still owes, and the steward's rule for them ──
+
+def test_board_health_counts_closed_items_a_person_still_owes(board):
+    """#1210 clause 4. `draft.needs_human` was the only number on the board that
+    spoke for 'a person owes this', and it could only see drafts — so the moment
+    a landed-met item closes carrying the tag, every count the steward reads
+    stops showing it. `closed_needs_human` is the closed-side half of that
+    bucket, and it does not leak into the open counts."""
+    _ten_item_board(board)                              # item 4: draft + needs-human
+    _write(board, 11, "done", tags=("backlog", "needs-human"))
+    _write(board, 12, "done")
+    h = B.board_health(S.LEDGER_PATH)
+    assert h["closed_needs_human"] == 1, "only the closed item carrying the tag"
+    assert h["draft"]["needs_human"] == 1, "the draft-side bucket is unchanged"
+    assert h["open"] == {"draft": 6, "up_next": 3}, "a closed item is not open work"
+
+
+def test_the_steward_is_told_a_met_landing_closes_carrying_needs_human(board):
+    """#1210 clause 5. The prompt told the steward that a `met` landing with a
+    person owed a check belongs in `draft` + `needs-human` — the rule #1210
+    removed, and the one the steward's agreement is scored against. It now says
+    `done` carrying `needs-human`, and `done` is still not a status it can set:
+    the closer is the sweep, not the judgment."""
+    prompt = W.build_prompt(events=[], items=[], n_open=0, since_ts=0.0, health=None)
+    assert "acceptance `met` with a person still owed a check → `draft` + `needs-human`" not in prompt
+    assert "`met` with a person still owed a check → `done` carrying `needs-human`" in prompt
+    assert "done" not in W.STEWARD_STATUSES
+    assert W.parse_steward({"moves": [{"item_id": 4, "status": "done", "tags_add": [],
+                                       "tags_remove": [], "note": "x"}]})["moves"] == []

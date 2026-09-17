@@ -52,6 +52,7 @@ except ImportError:  # pragma: no cover
 
 from app.backlog_status import (
     CLOSED_ALIASES,
+    CLOSED_STATUSES,
     OPEN_STATUSES,
     PIPELINE_STATUSES,
     canonical_status,
@@ -284,9 +285,9 @@ IMPLEMENT_OUTCOME_SCHEMA: dict = {
             "additionalProperties": False,
         }, "description": ("Paths this change needed but the loop may never write "
                            "(denied or outside the writable set). Leaving one out and "
-                           "landing the rest is correct; hiding it is not. The item "
-                           "stays open and tagged needs-human until a person applies "
-                           "them. Empty when there are none.")},
+                           "landing the rest is correct; hiding it is not. A `met` "
+                           "landing still closes, and the item carries needs-human so "
+                           "the path is not lost (#1210). Empty when there are none.")},
     },
     "required": ["landed", "acceptance", "clause_outcomes", "deferred_to", "summary", "spawned"],
     "additionalProperties": False,
@@ -2022,11 +2023,16 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
             human.append(f"confirm clause {idx} now that the change is live")
         tags: tuple[str, ...] = ()
         if acc == "met" and human:
-            # The loop's half is done; the item is not. Left open, tagged,
-            # and the note names what a person still owes it.
-            close, tags = False, (NEEDS_HUMAN_TAG,)
-            why = ("the round reported every acceptance clause met; still waiting on a person for: "
-                   + "; ".join(human))
+            # #1210: the loop's half is done, so the item closes. It used to be
+            # left open in `draft` carrying `needs-human`, and `draft` is the
+            # pool single-item triage reads — six landed items sat in it on
+            # 2026-09-17, #1199 among them. `done` carrying the tag states both
+            # halves in one place: the code is live, and a person still owes a
+            # check. It stamps `completed`, because `close_landed` stamps it for
+            # every close and a close is a close whatever its reason.
+            close, tags = True, (NEEDS_HUMAN_TAG,)
+            why = ("the round reported every acceptance clause met, so the item closes; a person "
+                   "still owes: " + "; ".join(human))
         elif acc == "met":
             close = True
             why = ("the vault review graded every acceptance clause met; the turn ended "
@@ -2160,8 +2166,10 @@ def record_human_paths(item_id: int, human_paths: list[dict],
                        round_id: str = "") -> list[str]:
     """Record paths a round needed and the loop may never write.
 
-    The item stays open and tagged `needs-human` — `close_settled_items`
-    treats these exactly like a human clause. Returns the paths recorded.
+    `close_settled_items` treats these exactly like a human clause, which since
+    #1210 means: a `met` landing closes and the item carries `needs-human` with
+    the path named in its activity log. The debt is what survives the closure,
+    not an open row in the triage pool. Returns the paths recorded.
     """
     if not human_paths:
         return []
@@ -2543,8 +2551,23 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
             ev = landed_outcome.get(iid, {})
             acc = ev.get("acceptance")
             if acc == "met":
-                out[iid] = ("draft", "landed with every clause met; the code is live and a person "
-                                     "still owes it: " + (ev.get("reason") or "")[:160], True)
+                # #1210: a `met` landing is CLOSED. This branch proposed
+                # `draft` + needs-human, and that is the `status_moved` row
+                # which wrote #1199 back to `draft` 43 seconds after its own
+                # `item_landed`. An item the sweep closed is off the board and
+                # never reaches `open_items`, so arriving here means a met
+                # landing sits in `draft` — the state the old rule wrote — and
+                # the move is to close it, naming the landing commit so a reader
+                # can tell that a landing decided this and not a triage.
+                # The commit goes LAST, and the sweep reason is budgeted around
+                # it: `reconcile_statuses` stores this string through
+                # `[:200]`, so a fixed 160-char reason plus a 40-hex sha
+                # (275 chars) loses exactly the part that names who decided.
+                head = "landed with every clause met; closed, a person still owes it: "
+                sha = str(fm.get(LANDED_MARKER) or "")
+                tail = f" (landed as {sha})" if sha else ""
+                room = max(0, 200 - len(head) - len(tail))
+                out[iid] = ("done", head + (ev.get("reason") or "")[:room] + tail, True)
             elif acc == "deferred":
                 # The landing's reason already names the ids it waits on.
                 out[iid] = ("draft", "landed; not running, waiting on other items — "
@@ -4151,10 +4174,19 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
                "never_attempted": sum(1 for i in up if i.id not in attempted),
                "ready": len(ready), "unready": len(up) - len(ready)}
 
+    # #1210: `draft.needs_human` was the only figure on the board speaking for
+    # "a person owes this", and it could only see drafts. A landed-met item now
+    # closes carrying the tag, so the closed side needs its own count — without
+    # it the steward sees the needs-human number fall while the work a person
+    # owes has not moved at all.
+    closed_needs_human = sum(1 for i in everything
+                             if i.status in CLOSED_STATUSES and NEEDS_HUMAN_TAG in i.tags)
+
     pool = implement_pool_bound(ledger, floor=floor, now=now)
     return {
         "open": open_counts,
         "draft": draft,
+        "closed_needs_human": closed_needs_human,
         "up_next": up_next,
         "flow": board_flow(boards, items=everything, now=now),
         "self_spawned_open": sum(1 for i in items if is_loop_spawned(i)),

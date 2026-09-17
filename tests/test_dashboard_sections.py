@@ -61,9 +61,9 @@ def _task(vault, name, **fm):
     return path
 
 
-def _backlog_item(vault, n, name, status, board="lloyd"):
+def _backlog_item(vault, n, name, status, board="lloyd", tags=()):
     path = vault / "obsidian" / "backlog" / f"{n}-{name}.md"
-    path.write_text(f"---\nname: {name}\nstatus: {status}\nboard: {board}\n---\n\n# {name}\n")
+    path.write_text(f"---\nname: {name}\nstatus: {status}\nboard: {board}\ntags: {list(tags)}\n---\n\n# {name}\n")
     return path
 
 
@@ -721,6 +721,33 @@ def test_the_backlog_section_carries_board_health_beside_the_raw_counts(vault):
     h = out["health"]
     assert h["draft"]["pool"] == 1 and h["draft"]["total"] == 1
     assert h["up_next"]["total"] == 1 and h["up_next"]["ready"] == 0
+    assert h["closed_needs_human"] == 0, "nothing here was landed, so nothing is owed"
+
+
+def test_a_closed_owed_check_survives_only_in_closed_needs_human(vault):
+    """#1210 clause 4. Closing a landed `met` item takes it out of every
+    open-side figure `_backlog()` builds — `open_total`, `by_status`'s open
+    rows, `boards[*].open`, `recent_open`, `umbrellas`, `grouped` — so the
+    number a person's owed checks are counted by has to be a payload field, not
+    a key the section happens not to read. This asserts the whole set: the item
+    is in `closed_needs_human` and in NO other field of the real payload."""
+    _backlog_item(vault, 1, "open-draft", "draft")
+    _backlog_item(vault, 2, "landed-and-owed", "done", tags=("backlog", "needs-human"))
+
+    out = dash._backlog()
+    h = out["health"]
+    assert h is not None, "the health sub-object is what the surviving count rides"
+    assert h["closed_needs_human"] == 1
+
+    # Every other figure in the section treats a closed item as finished work.
+    assert out["open_total"] == 1
+    assert out["by_status"] == {"draft": 1, "done": 1}
+    assert out["by_board"] == [{"board": "lloyd", "open": 1, "total": 2}], \
+        "the closed item adds to total but not to open"
+    assert [r["name"] for r in out["recent_open"]] == ["open-draft"], \
+        "the closed item is not in the recent-open list"
+    assert out["umbrellas"] == 0 and out["grouped"] == 0
+    assert "done" not in h, "board_health keeps no closed-side bucket but this one"
 
 
 def test_a_failing_board_health_costs_the_sub_object_only(vault, monkeypatch):

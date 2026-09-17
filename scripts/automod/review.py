@@ -519,8 +519,9 @@ against live data — is `post_landing`, not `partial` and not `unsatisfiable`. 
 Use it when the mechanism IS in the diff and looks right, and point \
 evidence_path at that mechanism; a `post_landing` with nothing to point at is \
 recorded as `partial`. It does not refuse the round: the change lands, the \
-clause is marked on the item, and the item stays open and tagged for a person \
-to confirm. Reserve `unsatisfiable` for a clause no diff could EVER satisfy \
+clause is marked on the item, and the item closes carrying `needs-human` so a \
+person can find what they owe (#1210 — it used to be parked in `draft`, which \
+is the pool single-item triage reads). Reserve `unsatisfiable` for a clause no diff could EVER satisfy \
 because it contradicts something — that is a defect in the contract, and its \
 remedy is an amendment, not a landing. #859 was refused twice on exactly the \
 post-landing shape and parked, with the mechanism complete on both commits.
@@ -1441,8 +1442,8 @@ def decide(parsed: dict, prechecks: list[dict],
             # and the claim itself waits for a human after the landing.
             advisory.append(
                 f"clause {c['clause']} observable only after landing: "
-                f"{c['note'] or '(no note)'} — the item stays open and tagged "
-                f"needs-human until someone confirms it")
+                f"{c['note'] or '(no note)'} — the item closes carrying the "
+                f"needs-human tag until someone confirms it")
         elif c["verdict"] != "met":
             tag = f" (downgraded: {'; '.join(c['downgraded'])})" if c.get("downgraded") else ""
             lines.append(f"clause {c['clause']} {c['verdict']}{tag}: {c['note'] or '(no note)'}")

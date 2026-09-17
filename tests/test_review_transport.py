@@ -562,7 +562,12 @@ def test_record_verdict_writes_human_clauses_beside_the_contract(isolated):
     assert B.human_clauses_for_item(None, {"human_clauses": ["x"]}) == ["x"]
 
 
-def test_a_met_landing_with_human_clauses_stays_open_and_tagged(isolated):
+def test_a_met_landing_with_human_clauses_closes_and_keeps_the_tag(isolated):
+    """#1210 rewrote this test's expectation: it asserted the landing stayed
+    OPEN (`closed: False`, `status != "done"`) and tagged, and staying open
+    meant `draft` — the pool single-item triage reads. The loop's half of a
+    `met` landing is done, so it closes; what survives the closure is the tag
+    and the named debt, which is what this test has always been about."""
     path = write_item(isolated, 611, status="in_progress", clauses=["a"], human=["Alan audits"])
     S.append_event({"event": "backlog_implement", "item_id": 611, "phase": "finished",
                     "round_id": "SM_h", "stop_reason": "stop", "num_turns": 5,
@@ -571,12 +576,14 @@ def test_a_met_landing_with_human_clauses_stays_open_and_tagged(isolated):
     S.append_event({"event": "promoted", "round_id": "SM_h", "commit": "d" * 40}, path=S.LEDGER_PATH)
     S.append_event({"event": "settled", "commit": "d" * 40}, path=S.LEDGER_PATH)
     done = B.close_settled_items(S.LEDGER_PATH)
-    assert done == [{"item_id": 611, "closed": False, "acceptance": "met"}]
+    assert done == [{"item_id": 611, "closed": True, "acceptance": "met"}]
     fm = _fm(path)
-    assert fm["status"] != "done" and B.NEEDS_HUMAN_TAG in fm["tags"]
-    assert "still waiting on a person for: Alan audits" in path.read_text()
+    assert fm["status"] == "done" and fm.get("completed"), "closed, with completed stamped"
+    assert B.NEEDS_HUMAN_TAG in fm["tags"], "the debt a person owes rides the closure"
+    assert "a person still owes: Alan audits" in path.read_text()
     assert fm[B.LANDED_MARKER] == "d" * 40
-    # …and without human clauses the same landing closes, as before
+    # …and without human clauses the same landing closes too, untagged: the tag
+    # is now the only thing that distinguishes the two
     path2 = write_item(isolated, 612, status="in_progress", clauses=["a"])
     S.append_event({"event": "backlog_implement", "item_id": 612, "phase": "finished",
                     "round_id": "SM_i", "stop_reason": "stop", "num_turns": 5,
@@ -586,6 +593,7 @@ def test_a_met_landing_with_human_clauses_stays_open_and_tagged(isolated):
     S.append_event({"event": "settled", "commit": "e" * 40}, path=S.LEDGER_PATH)
     assert [d for d in B.close_settled_items(S.LEDGER_PATH) if d["item_id"] == 612][0]["closed"]
     assert _fm(path2)["status"] == "done"
+    assert B.NEEDS_HUMAN_TAG not in _fm(path2)["tags"], "nothing owed, so no tag"
 
 
 def test_the_implement_prompt_renders_human_clauses_as_not_yours():

@@ -1533,6 +1533,9 @@ def test_in_progress_means_a_round_is_running_and_nothing_else(isolated):
     other items, or on another attempt — and each has a status that says so.
     The one landed state that stays `in_progress` is a promotion still under
     observation, because the round is not over until the guardian says so.
+
+    Its `met`-with-a-human-clause row was rewritten 2026-09-17 by #1210: that
+    landing is now CLOSED carrying `needs-human` instead of parked in `draft`.
     """
     p640 = write_item(isolated, 640)
     for i in (641, 642, 643):
@@ -1549,8 +1552,12 @@ def test_in_progress_means_a_round_is_running_and_nothing_else(isolated):
     _landed(643, "SM_643", "a643a643a643", outcome=None)
     B.close_settled_items(S.LEDGER_PATH)
     want = B.desired_statuses(S.LEDGER_PATH, None)
-    # met, a person owed a check: draft + needs-human
-    assert want[640][0] == "draft" and want[640][2] is True and "person" in want[640][1]
+    # met, a person owed a check: CLOSED, carrying needs-human (#1210). It was
+    # `draft` + needs-human here, which is the pool triage reads. The sweep
+    # closed it, so it is off the board and not a move this pass proposes.
+    assert 640 not in want, "a closed item is not a status the pass moves"
+    assert _fm(p640)["status"] == "done" and _fm(p640).get("completed")
+    assert "needs-human" in _fm(p640)["tags"], "the owed check survives the close"
     # not_met, attempt still owed: offered once more (the existing `partial`
     # re-offer path says "offered again"; the new branch only speaks when
     # that attempt is spent, and then it says draft + needs-human)
@@ -2458,3 +2465,107 @@ def test_an_item_whose_landing_is_mid_drain_stays_in_progress(isolated, monkeypa
     S.append_event({"event": "promoted", "round_id": "SM_LAND", "commit": "d" * 40}, path=S.LEDGER_PATH)
     status, why, *rest = B.desired_statuses(S.LEDGER_PATH)[1199]
     assert status == "in_progress" and "observation" in why
+
+
+# ── #1210: a landed-`met` item closes; `draft` stops meaning "finished" ───
+
+SHA40 = "cc652cc652cc" + "0" * 28
+
+MET_OUTCOME = {"acceptance": "met", "landed": True, "deferred_to": [],
+               "summary": "shipped", "spawned": [], "clause_outcomes": []}
+
+
+def test_a_landed_met_item_closes_and_carries_the_needs_human_tag(isolated):
+    """#1210 clause 1. The sweep closed a met landing only when nobody owed a
+    check, so a met landing with a human clause fell to `draft` + `needs-human`
+    — the pool single-item triage reads. Six landed items sat there on
+    2026-09-17, #1199 among them. Now it closes, stamps `completed` like any
+    other close, and keeps the tag so a person can still find what they owe."""
+    p = write_item(isolated, 650)
+    B.update_frontmatter(p, {"human_clauses": ["Alan confirms the dashboard shows it"]})
+    _landed(650, "SM_650", "aa650aa650aa", outcome=MET_OUTCOME)
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert out == [{"item_id": 650, "closed": True, "acceptance": "met"}]
+    fm = _fm(p)
+    assert fm["status"] == "done", "closed, not parked in the triage pool"
+    assert fm.get("completed"), "a close stamps completed, as every other close does"
+    assert B.NEEDS_HUMAN_TAG in fm["tags"], "the check a person owes survives the closure"
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_landed"][-1]
+    assert ev["closed"] is True and ev["human_clauses"], "the ledger names what is owed"
+
+
+def test_the_reconciler_never_moves_a_landed_met_item_back_to_draft(isolated):
+    """#1210 clause 2. The reconcile pass emitted ('draft', 'landed with every
+    clause met; the code is live and a person still owes it: …') for a landed-met
+    item — that is the row that wrote #1199 back to `draft` 43 seconds after its
+    own `item_landed`. A `met` landing now appears in the pass's output only as
+    `done`, and only for an item that reached `draft` by some other route."""
+    p = write_item(isolated, 651)
+    B.update_frontmatter(p, {"human_clauses": ["Alan confirms it"]})
+    _landed(651, "SM_651", "bb651bb651bb", outcome=MET_OUTCOME)
+    B.close_settled_items(S.LEDGER_PATH)
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert 651 not in want, "an item the sweep closed is not a move the pass proposes"
+    assert B.item_by_id(651).status == "done"
+
+
+def test_a_landed_met_item_found_in_draft_is_closed_naming_its_commit(isolated):
+    """#1210 clause 2, the carry for the items already sitting there. The six
+    landed-met drafts on the live board were written by the old rule, so the
+    pass cannot simply abstain — it closes them, and the ledger reason names the
+    landing commit so a reader can tell who decided.
+
+    The sha is 40 hex, because that is what the ledger stores: a short one fits
+    the `[:200]` the `status_moved` row applies, and a real one only fits if the
+    reason text is budgeted around it."""
+    p = write_item(isolated, 652)
+    # A long owed-check text is what makes this a budget test: the sweep stores
+    # its own reason at [:300] and the pass stores the move at [:200], so an
+    # unbudgeted reason pushes the sha past the cut.
+    B.update_frontmatter(p, {"human_clauses": [
+        "Alan confirms the lloyd backlog page renders in under two seconds with the new "
+        "memoization, that the board steward still cannot set `done`, and that the six "
+        "items this rule parked in draft closed with their owed checks named"]})
+    _landed(652, "SM_652", SHA40, outcome=MET_OUTCOME)
+    B.close_settled_items(S.LEDGER_PATH)
+    B.update_frontmatter(p, {"status": "draft"})          # the legacy parked state
+    B.reconcile_statuses(S.LEDGER_PATH, None)
+    fm = _fm(p)
+    assert fm["status"] == "done" and fm.get("completed")
+    assert B.NEEDS_HUMAN_TAG in fm["tags"]
+    moved = [e for e in S.read_events(path=S.LEDGER_PATH)
+             if e.get("event") == "status_moved" and e.get("item_id") == 652]
+    assert moved and moved[-1]["to"] == "done"
+    assert SHA40 in moved[-1]["reason"], (
+        f"the row must name the landing commit through the [:200] the pass applies: "
+        f"{moved[-1]['reason']!r}")
+    assert not [e for e in moved if e.get("to") == "draft"], "no move to draft at all"
+
+
+def test_a_landed_not_met_or_deferred_item_keeps_its_own_destination(isolated):
+    """#1210 clause 3. The change is confined to the `met` landing: `not_met` is
+    still offered once more for exactly those clauses and `deferred` still parks
+    in `draft` with no tag, naming the ids it waits on.
+
+    The `not_met` item's one unattended attempt is spent, so `up_next` here
+    means `desired_statuses` really did route on acceptance: its not_met branch
+    consults `spent_review` only when the acceptance is empty, so a spent
+    attempt must not push it to draft."""
+    write_item(isolated, 653)
+    write_item(isolated, 654)
+    _spent_after_review(653)
+    _landed(653, "SM_653", "dd653dd653dd", outcome={
+        "acceptance": "not_met", "landed": True, "deferred_to": [], "summary": "",
+        "spawned": [], "clause_outcomes": [
+            {"clause": 1, "outcome": "not_met", "evidence": "", "deferred_to": []}]})
+    _landed(654, "SM_654", "dd654dd654dd", outcome={
+        "acceptance": "deferred", "landed": True, "deferred_to": [999], "summary": "",
+        "spawned": [], "clause_outcomes": []})
+    B.close_settled_items(S.LEDGER_PATH)
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[653][0] == "up_next", "not_met is offered again, not closed"
+    assert want[654][0] == "draft" and len(want[654]) == 2 and "#999" in want[654][1]
+    B.reconcile_statuses(S.LEDGER_PATH, None)
+    assert B.item_by_id(653).status == "up_next", "not_met is re-offered, never closed"
+    assert B.item_by_id(654).status == "draft", "deferred stays parked in draft"
+    assert B.NEEDS_HUMAN_TAG not in _fm(isolated / "654-a-thing.md")["tags"]
