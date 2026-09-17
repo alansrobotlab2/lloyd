@@ -1784,3 +1784,15 @@ def test_a_worktree_with_no_sessions_falls_back_instead_of_reporting_a_clean_tab
     # And the fallback is not decorative: reading turns through it yields a corpus,
     # not the zero that the worktree path would have given.
     assert len(U.human_turns(days=900)) > 0, resolved
+
+
+def test_a_worktree_holding_only_the_gates_canary_session_is_not_a_transcript_store(tmp_path):
+    """#1213, 2026-09-17: `canary_smoke` leaves `sessions/canary_*.json` in the
+    round's worktree, and the next full-suite run there took that one turn for
+    the corpus instead of falling back to the live store."""
+    (tmp_path / "sessions").mkdir()
+    assert uptake._has_sessions(tmp_path) is False
+    (tmp_path / "sessions" / "canary_1789667418_68bba5.json").write_text("{}")
+    assert uptake._has_sessions(tmp_path) is False, "the gate's own smoke turn is not a corpus"
+    (tmp_path / "sessions" / "20260917_101500_ab12cd.json").write_text("{}")
+    assert uptake._has_sessions(tmp_path) is True

@@ -206,9 +206,19 @@ def _has_sessions(base: Path) -> bool:
     created empty beside the code. An automod worktree grows an empty
     `sessions/` this way, and treating it as the corpus would produce a
     flawless uptake table over zero turns — the exact kind of pass that reads
-    as health."""
+    as health.
+
+    Nor is one holding only the gate's own canary sessions. `canary_smoke`
+    runs a real turn from the worktree and leaves `sessions/canary_<ts>_<hex>
+    .json` there, so the FIRST gate of a round fell back to the live store and
+    passed, and any later full-suite run in the same worktree read a corpus of
+    one canary turn: "0/46 labels carry a reply", four `tests/test_uptake.py`
+    failures "new in this round". Review re-gates run a partial suite and never
+    met it; a landing's chase after `main` moved runs the whole suite, and on
+    2026-09-17 that refused #1213 after nine green rungs and a 5-of-5 review.
+    """
     d = base / "sessions"
-    return d.is_dir() and next(d.glob("*.json"), None) is not None
+    return d.is_dir() and any(not p.name.startswith("canary_") for p in d.glob("*.json"))
 
 
 def lloyd_root() -> Path:
