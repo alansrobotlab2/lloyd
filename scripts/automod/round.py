@@ -61,7 +61,10 @@ def start(goal: str, *, base: str | None = None, force: bool = False,
             ["git", "-C", str(LIVE_ROOT), "rev-parse", "HEAD"],
             capture_output=True, text=True).stdout.strip()
 
-        W.prune_orphans(LIVE_ROOT)
+        # Prune only: `start` never used the list, and `list_registered` now
+        # raises on a failed read, which must not be able to refuse a round
+        # opening over a listing.
+        W.prune(LIVE_ROOT)
         resumed: dict = {}
         if from_branch and from_branch != f"automod/{rid}" and W.branch_exists(LIVE_ROOT, from_branch):
             wt = W.create_from_branch(rid, from_branch, repo=LIVE_ROOT)
@@ -327,9 +330,23 @@ def status() -> dict:
         "pause_remaining_s": round(S.pause_remaining(), 1),
         "rollback_request": S.read_rollback_request(),
         "unit_drift": _unit_drift(),
-        "worktrees": W.prune_orphans(LIVE_ROOT),
+        **_status_worktrees(),
         "recent": S.read_events(limit=15),
     }
+
+
+def _status_worktrees() -> dict:
+    """`status()`'s worktree listing, with a failed read made visible.
+
+    `prune_orphans` raises rather than answering `[]` when
+    `git worktree list` fails (see `worktree.list_registered`) — a status
+    report must not turn that into "no rounds are open". Reporting the failure
+    is also what keeps this display consistent with the loop, which declines on
+    the same read."""
+    try:
+        return {"worktrees": W.prune_orphans(LIVE_ROOT)}
+    except W.WorktreeListUnavailable as exc:
+        return {"worktrees": [], "worktrees_error": str(exc)}
 
 
 def _served_code_is_head(running: str, head: str) -> tuple[bool, list[str]]:

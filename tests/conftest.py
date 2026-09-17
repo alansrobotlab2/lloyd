@@ -80,6 +80,25 @@ def _promoter_cannot_reach_the_live_backend(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_automod_lock(tmp_path, monkeypatch):
+    """No test reads the machine's automod lock to decide anything.
+
+    `autocode._loop_is_free` asks whether a landing holds that lock before it
+    will call anything free, so read unpatched, every `(True, "free")` the
+    suite asserts would depend on whether a real landing happened to be in
+    flight while the test ran — and on this box one usually is. Same shape of
+    hazard as the fixture above (a live process's state reaching into a test's
+    verdict), different mechanism and different file.
+
+    It redirects rather than stubs: the lock file still exists and `S.Lock`
+    still takes a real `flock` on it, so lock behaviour is tested on the real
+    class, only not on production's file. A test that wants to *be* the holder
+    constructs `S.Lock(its_own_path)`."""
+    from scripts.automod import state as S
+    monkeypatch.setattr(S, "LOCK_PATH", tmp_path / "lloyd-automod" / "lock")
+
+
+@pytest.fixture(autouse=True)
 def _writes_enabled_in_tests(monkeypatch):
     """Fact writes are on unless a test says otherwise."""
     try:

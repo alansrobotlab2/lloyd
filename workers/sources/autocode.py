@@ -666,6 +666,24 @@ def _loop_is_free(depth: int | None = None) -> tuple[bool, str]:
                        f"observation ({current.get('state')})")
     if S.read_rollback_request():
         return False, "a rollback request is pending"
+    # A landing holds the automod lock across its whole promotion — the
+    # under-lock re-gate (449 s on 2026-09-17, of which the tests rung was
+    # 408 s) and then `wait_idle` — and `automod_start` refuses on that same
+    # lock file. Neither of the two reads below can see that hold:
+    # `current.json` is only written as `landing` once the promoter is running
+    # inside the lock, and the registered-worktree read goes quiet at exactly
+    # the moment a landing is rewriting the tree — and a *failed* one comes
+    # back empty, which is the same answer as "nothing is open" (see
+    # `worktree.list_registered`). So this read comes first and comes from the
+    # same file the refusal is read from: a round that starts inside the window
+    # can neither open, and its own turn is the one `wait_idle` then waits out
+    # on a budget longer than the turn's ceiling (`idle_hard_max_wait_s` 4500
+    # vs `max_duration_seconds` 3600) — #1210's turn sat 8m35s from dispatch to
+    # `round_start` while the landing burned the same window.
+    lock = S.landing_lock()
+    if lock:
+        return False, (f"round {str(lock.get('owner'))[len('land-'):]} holds the automod lock "
+                       f"since {lock.get('since')} (pid {lock.get('pid')})")
     # Only worktrees the loop itself owns count as an open round: the round
     # worktrees and the review/calibration checkouts, all under
     # `~/lloyd-work`. `git worktree list` also reports anything a model or a
@@ -673,7 +691,13 @@ def _loop_is_free(depth: int | None = None) -> tuple[bool, str]:
     # `/tmp/wt484` was left behind and blocked every implement poll for
     # eleven hours ("a round is already open (1 worktree(s))") with nothing
     # in flight. A stray registration is logged, never counted or removed.
-    owned, stray = _loop_worktrees(W.prune_orphans(LIVE_ROOT))
+    # A read that fails is not an empty list: it declines, because both the
+    # depth guard and the landing guard are satisfied by zero.
+    try:
+        paths = W.prune_orphans(LIVE_ROOT)
+    except W.WorktreeListUnavailable as exc:
+        return False, f"cannot list round worktrees: {exc}"
+    owned, stray = _loop_worktrees(paths)
     if stray:
         logger.info("autocode: ignoring %d worktree(s) outside %s: %s",
                     len(stray), _LOOP_WORKTREE_ROOT, ", ".join(stray[:3]))

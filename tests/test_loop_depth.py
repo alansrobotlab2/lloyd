@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ import yaml
 
 from scripts.automod import backlog as B, gate as G, promote as P, review as RV, round as R
 from scripts.automod import state as S
+from scripts.automod import worktree as W
 from workers.sources import autocode as I
 from workers.sources import autotriage as M
 
@@ -264,13 +266,23 @@ def test_depth_comes_from_max_inflight_and_defaults_to_one():
         "a slot beyond the long-lived turns, or a scheduled task queues behind them"
 
 
-def _free_loop(monkeypatch, worktrees):
+def _no_interlocks(monkeypatch):
+    """The guards that are not the subject: automod switched on, nothing
+    halted or broken, no rollback pending. A test about one read must not be
+    answering about the other four."""
     monkeypatch.setattr(S, "is_enabled", lambda repo=None: True)
     monkeypatch.setattr(S, "is_halted", lambda: False)
     monkeypatch.setattr(S, "is_broken", lambda: False)
-    monkeypatch.setattr(S, "read_current", lambda: None)
     monkeypatch.setattr(S, "read_rollback_request", lambda: None)
-    from scripts.automod import worktree as W
+
+
+def _free_loop(monkeypatch, worktrees):
+    """Everything free but the thing under test. The automod lock needs no
+    patch here: conftest's `_isolate_automod_lock` points it at a scratch file
+    for every test, which is what keeps a real landing on this machine from
+    answering 'not free' inside an assertion about something else."""
+    _no_interlocks(monkeypatch)
+    monkeypatch.setattr(S, "read_current", lambda: None)
     monkeypatch.setattr(W, "prune_orphans", lambda repo: list(worktrees))
 
 
@@ -471,6 +483,138 @@ def test_a_round_that_passed_its_gate_holds_the_other_slot(monkeypatch, tmp_path
     assert free is False and "SM_A passed its gate" in why
     monkeypatch.setattr(S, "gate_in_progress", lambda rid: {"pid": 1})
     assert I._loop_is_free(2)[0] is True, "re-gating after an edit: the old pass no longer speaks"
+
+
+# ── the landing lock: the one landing read that may not fail open (#1218) ──
+
+def _bare_repo(tmp_path: Path, name: str = "repo") -> Path:
+    """A real git repo whose only registered worktree is itself. Point
+    `autocode.LIVE_ROOT` at it and the registered-worktree read runs for real
+    and comes back with nothing the loop owns — the state the machine was in
+    during the incident, produced rather than stubbed."""
+    repo = tmp_path / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    return repo
+
+
+def _real_landing_holder(tmp_path: Path, owner: str = "land-SM_LANDING"):
+    """A **second process** taking the automod lock the way `round.land` does:
+    `state.Lock(...).acquire()`, so the bytes the gate reads are written by the
+    class under test across a process boundary, not typed by the reader.
+
+    Returns the child and its lock file. Spins until the payload names the
+    child's pid, so the test never races the holder; the child then sits in
+    `sleep` until killed, which is the shape of a landing holding the lock
+    across a re-gate.
+    """
+    path = tmp_path / "lock"
+    src = ("import sys, time\n"
+           "sys.path.insert(0, sys.argv[3])\n"
+           "from pathlib import Path\n"
+           "from scripts.automod import state as S\n"
+           "S.Lock(Path(sys.argv[1]), owner=sys.argv[2]).acquire()\n"
+           "time.sleep(60)\n")
+    child = subprocess.Popen([sys.executable, "-c", src, str(path), owner, str(ROOT)],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        for _ in range(200):
+            if (S.read_lock_payload(path) or {}).get("pid") == child.pid:
+                return child, path
+            if child.poll() is not None:
+                raise AssertionError(
+                    f"the lock holder exited instead of holding: {child.stdout.read()!r}")
+            time.sleep(0.05)
+    except Exception:
+        child.kill(); child.wait(); raise
+    child.kill(); child.wait()
+    raise AssertionError(f"the child never took the lock at {path}")
+
+
+def _no_state_and_no_owned_round(monkeypatch, tmp_path):
+    """Both of the reads that failed during the incident, made genuinely
+    empty: no `current.json` on disk at all, and a real registered-worktree
+    read that names no round the loop owns."""
+    monkeypatch.setattr(S, "CURRENT_PATH", tmp_path / "absent-current.json")
+    monkeypatch.setattr(I, "LIVE_ROOT", _bare_repo(tmp_path))
+
+
+def test_a_live_landing_lock_holds_the_loop_with_no_state_file_and_no_worktrees(monkeypatch,
+                                                                                tmp_path):
+    """2026-09-17 18:21:38Z: `round.land` took the automod lock, and 27 seconds
+    later the implement loop dispatched #1210 anyway. `current.json` was still
+    absent — the promoter writes it `landing` only after the re-gate — and the
+    registered-worktree read owned no round. The turn that let start was then
+    the turn that landing's `wait_idle` had to wait out, on a budget
+    (`idle_hard_max_wait_s`, 4500 s) longer than the turn's own ceiling
+    (`max_duration_seconds`, 3600 s): the round could neither open nor finish,
+    and #1210 waited 8m35s to reach `round_start`."""
+    _no_interlocks(monkeypatch)
+    child, path = _real_landing_holder(tmp_path)
+    try:
+        assert child.poll() is None, "the holder is alive: a landing is in flight"
+        monkeypatch.setattr(S, "LOCK_PATH", path)     # the landing's own lock file
+        _no_state_and_no_owned_round(monkeypatch, tmp_path)
+        free, why = I._loop_is_free(2)
+        assert free is False, (
+            f"a land- lock held for real by live pid {child.pid} still freed the loop: {why}")
+        assert "SM_LANDING" in why, why
+        assert str(child.pid) in why, why
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_landing_lock_whose_pid_is_gone_does_not_hold_the_loop(monkeypatch, tmp_path):
+    """The opposite case over one variable: same payload, pid no longer alive.
+    `acquire` writes the payload and `release` never clears it, so after a
+    landing is killed the bytes stay naming a pid that is gone while the flock
+    itself went with the process — a dead pid is a leftover, not a landing.
+    Parking the loop on one would strand the board until a human deleted a
+    file."""
+    _no_interlocks(monkeypatch)
+    child, path = _real_landing_holder(tmp_path)
+    dead_pid = child.pid
+    child.kill()
+    child.wait()                                     # reaped: nothing of it is left
+    assert S.pid_alive(dead_pid) is False
+    assert (S.read_lock_payload(path) or {}).get("pid") == dead_pid, (
+        "the payload outlived its holder, as it does after a killed landing")
+    monkeypatch.setattr(S, "LOCK_PATH", path)
+    _no_state_and_no_owned_round(monkeypatch, tmp_path)
+    assert I._loop_is_free(2) == (True, "free")
+
+
+def test_a_failed_worktree_list_read_is_not_read_as_no_rounds_open(monkeypatch):
+    """`worktree.git()` runs with `check=False`, so a failed
+    `git worktree list --porcelain` returns exit 128 with empty stdout, and
+    `prune_orphans` handed back `[]` — measured on 2026-09-17 against a path
+    that is not a repo. `_loop_is_free` consumed that as "no round is open",
+    which switched off the depth guard and the landing guard in the same
+    breath. An unreadable list is not a list of nothing: the loop must not be
+    freed on it. `LIVE_ROOT` points at a real path git cannot operate on, so
+    the failing read is git's own, not a stand-in for it."""
+    _no_interlocks(monkeypatch)
+    probe = subprocess.run(["git", "-C", "/etc/hostname", "worktree", "list", "--porcelain"],
+                           capture_output=True, text=True)
+    assert probe.returncode == 128 and probe.stdout == "", (
+        "the probe stopped failing the way the bug needs it to fail")
+    monkeypatch.setattr(I, "LIVE_ROOT", Path("/etc/hostname"))
+    free, why = I._loop_is_free(2)
+    assert free is False, "a failed `git worktree list` read as a free loop"
+    assert "cannot list round worktrees" in why, why
+
+
+def test_listing_worktrees_raises_rather_than_answering_empty(tmp_path):
+    """The seam one level down: `git()` is `check=False`, so the only thing
+    between a failed read and an empty list is this raise. Real git both ways —
+    a path that is not a repo raises, a repo that exists still reads."""
+    with pytest.raises(W.WorktreeListUnavailable):
+        W.list_registered(Path("/etc/hostname"))
+    with pytest.raises(W.WorktreeListUnavailable):
+        W.prune_orphans(Path("/etc/hostname"))
+    repo = _bare_repo(tmp_path, name="good-repo")
+    assert W.prune_orphans(repo) == [str(repo)], "a good read still reads"
 
 
 def test_preflight_does_not_call_the_other_gates_canary_a_stale_one(tmp_path, monkeypatch):

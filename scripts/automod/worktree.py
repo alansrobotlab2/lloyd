@@ -213,10 +213,41 @@ def remove(round_id: str, *, keep_branch: bool = False, repo: Path | None = None
         shutil.rmtree(rd, ignore_errors=True)
 
 
+def prune(repo: Path | None = None) -> None:
+    """Drop registrations whose directories are gone, without reading the list."""
+    git(repo or LIVE_ROOT, "worktree", "prune")
+
+
+class WorktreeListUnavailable(RuntimeError):
+    """`git worktree list` could not be read, so its emptiness means nothing."""
+
+
+def list_registered(repo: Path | None = None) -> list[str]:
+    """Every registered worktree path. Raises rather than returning `[]` on a
+    failed read.
+
+    `git()` runs with `check=False`, so the failure mode of the old inline
+    read was an empty stdout and an empty list — indistinguishable from "this
+    repo has no worktrees". Measured on 2026-09-17: `prune_orphans` against a
+    directory that is not a repo returned `[]` with no exception, exit 128.
+    Both callers of that list are guards, and an empty list satisfies both of
+    them: the implement loop's depth check passes at zero, and a landing check
+    iterated over zero rounds finds no landing. A read that cannot be taken is
+    a different answer from a read that came back empty, and it has to be
+    sayable — hence the raise.
+    """
+    repo = repo or LIVE_ROOT
+    r = git(repo, "worktree", "list", "--porcelain")
+    if r.returncode != 0:
+        raise WorktreeListUnavailable(
+            f"git -C {repo} worktree list failed rc={r.returncode}: "
+            f"{(r.stderr or '').strip()[:200]}")
+    return [line.split(" ", 1)[1] for line in r.stdout.splitlines()
+            if line.startswith("worktree ")]
+
+
 def prune_orphans(repo: Path | None = None) -> list[str]:
     """Drop worktree registrations whose directories are gone."""
     repo = repo or LIVE_ROOT
     git(repo, "worktree", "prune")
-    r = git(repo, "worktree", "list", "--porcelain")
-    return [line.split(" ", 1)[1] for line in r.stdout.splitlines()
-            if line.startswith("worktree ")]
+    return list_registered(repo)

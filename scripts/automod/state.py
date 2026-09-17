@@ -856,3 +856,47 @@ class Lock:
 
     def __exit__(self, *exc) -> None:
         self.release()
+
+
+def read_lock_payload(path: Path | None = None) -> dict | None:
+    """Who `Lock.acquire` last wrote into the lock file, or None.
+
+    The payload outlives the lock: `acquire` rewrites it and `release` never
+    clears it, so a holder that died leaves its `{pid, owner, since}` behind
+    for a human to read. Treat it as a claim, never as a hold — the hold is
+    the `flock`, which the kernel dropped the moment the holder exited. What
+    makes it useful anyway is that a *live* pid naming itself the owner is
+    evidence no other read gives: see `landing_lock`.
+    """
+    try:
+        raw = (path or LOCK_PATH).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        rec = json.loads(raw)
+    except ValueError:
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def landing_lock(path: Path | None = None) -> dict | None:
+    """The payload while a landing's pid claims to hold the automod lock.
+
+    `round.land` takes the lock (`round.py`) before the promoter writes
+    `current.json` as `landing`, and holds it across the under-lock re-gate
+    and `wait_idle` — measured 449 s on 2026-09-17, tests rung 408 s of it.
+    Through that whole window the two reads the implement loop had —
+    `read_current()` and `git worktree list` — both said nothing was landing,
+    and the round it dispatched at 18:22:05Z could not open while its own
+    turn was the one `wait_idle` was waiting out. This read is taken from the
+    same file `automod_start` refuses on, so it cannot disagree with the
+    refusal.
+
+    Deliberately weaker than a hold, and that is the point: a dead pid means
+    a killed landing, not a landing. Only `land-*` owners count — a
+    `round-start` or `gate-*` holder does not have an idle wait to starve.
+    """
+    rec = read_lock_payload(path)
+    if not rec or not str(rec.get("owner") or "").startswith("land-"):
+        return None
+    return rec if pid_alive(rec.get("pid") or 0) else None
