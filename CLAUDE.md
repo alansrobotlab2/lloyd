@@ -1023,9 +1023,23 @@ version.
   wrong. The review rung, the long one, overlaps freely.
 - **A landing's idle wait is now the other round's turn**, so it has two
   phases. `promote.wait_for_rounds` waits, with nothing paused or drained,
-  until no `autocode` job is in the pool: `current.json` already reads
-  `landing`, which holds every new round back, and triage and scheduled
-  tasks keep running. Then `wait_idle` as before.
+  until no `autocode` job is in the pool; triage and scheduled tasks keep
+  running. Then the lock, then `wait_idle` as before. **The first phase runs
+  in `round.land` BEFORE the automod lock, never inside `promote`.**
+  `round start` takes the same lock, and the first concurrent landing held
+  it while waiting for a turn that then got `LockHeld` from `automod_start`:
+  #1204's landing sat 15 minutes on #1210's turn, which gave up having done
+  nothing (Lloyd's own #1215). What keeps a NEW round from starting during
+  the wait is `autocode._rounds_about_to_land` — a passed `gate.json` or a
+  live land marker on an open round — because `current.json` does not read
+  `landing` until the promoter is running; #1204's gate passed at 17:03:34
+  and the free slot was claimed at 17:03:53.
+- **Rounds get 250 iterations, and are told so.** 26 of 176 finished turns
+  in the week died at `max_turns`; #1210 spent 151 in 23 minutes of steady
+  9-second steps with 37 minutes of clock left and no gate run. The wall
+  clock is the bound that means something (`agent.max_turns_ceiling_worker`
+  300). The pacing block had been formatted with the code default rather
+  than the payload's budget.
 - **A turn is credited with its own round.** `_round_opened_since` took the
   latest `round_start` since the turn began; with two turns that is the other
   one's, and a `finished` row naming it hands the reaper a live round. It

@@ -259,6 +259,13 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
             raise RuntimeError(f"gate did not pass (failed: {failed})")
 
         wt = W.worktree_path(round_id)
+        if not dry_run:
+            # Outside the lock, or the turn being waited for cannot open its
+            # round (see `P.wait_for_rounds`). An external failure: the item
+            # keeps its attempt and its branch.
+            ok, why = P.wait_for_rounds(P._idle_budget(None)[1])
+            if not ok:
+                P._land_failed(round_id, why, external=True, waited_rounds=True)
         lock = _land_lock(round_id, dry_run=dry_run)
         try:
             result = P.promote(round_id, wt, report["base"],

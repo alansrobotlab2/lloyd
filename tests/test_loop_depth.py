@@ -196,8 +196,14 @@ def test_a_landing_waits_for_the_other_rounds_turn_without_pausing_anything(monk
 def test_the_landing_config_is_read_and_promote_waits_for_rounds_before_the_drain():
     cfg = S.landing_cfg(ROOT)
     assert float(cfg["idle_hard_max_wait_s"]) >= 3600 + 600, "above the longest worker max_duration"
-    src = (ROOT / "scripts/automod/promote.py").read_text()
-    assert src.index("wait_for_rounds(_idle_budget(None)[1])") < src.index("ok, why = wait_idle()\n")
+    # The wait for the other round's turn happens in `round.land`, BEFORE the
+    # automod lock: under it, the turn being waited for gets `LockHeld` from
+    # `automod_start` and the two block each other (#1215, the first
+    # concurrent landing).
+    land = (ROOT / "scripts/automod/round.py").read_text()
+    assert land.index("P.wait_for_rounds(") < land.index("lock = _land_lock(round_id")
+    assert "wait_for_rounds(" not in (ROOT / "scripts/automod/promote.py").read_text().split(
+        "def promote(")[1], "never inside promote, which runs under the lock"
 
 
 # ── an external landing failure keeps its own count ────────────────────────

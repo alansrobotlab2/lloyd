@@ -227,6 +227,16 @@ def wait_for_rounds(ceiling: float, *, source: str = "autocode",
     round, and everything else may keep running until the real drain begins.
     Unknown (backend cannot say) returns at once: the drain that follows is
     the wait that matters, and it is the one with the full rules.
+
+    **Never under the automod lock.** `round start` takes the same lock, so a
+    turn that has not yet opened its round cannot while a landing holds it —
+    and a landing that holds it while waiting for that turn waits on a turn
+    it is itself blocking. The first concurrent landing did exactly that
+    (2026-09-17, #1204 over #1210's turn, Lloyd's own #1215): the turn got
+    `LockHeld` from `automod_start`, gave up after 14 minutes with nothing
+    done, and only then did the landing proceed. `round.land` calls this
+    before `_land_lock`; its land marker is what keeps a NEW round from
+    starting meanwhile (`autocode._rounds_about_to_land`).
     """
     deadline = time.time() + ceiling
     while time.time() < deadline:
@@ -778,11 +788,9 @@ def promote(round_id: str, worktree: Path, base: str, *,
     S.write_verified(S.CURRENT_PATH, current)   # raises unless it round-trips
 
     # ── idle gate + drain ──────────────────────────────────────────────
-    # Another round's turn first, with nothing paused (see `wait_for_rounds`);
-    # `current.json` reads `landing` from here, so no new round starts.
-    ok, why = wait_for_rounds(_idle_budget(None)[1])
-    if ok:
-        ok, why = wait_idle()
+    # The other round's turn was waited out by `round.land` BEFORE it took the
+    # automod lock (`wait_for_rounds`): under the lock that wait deadlocks.
+    ok, why = wait_idle()
     if not ok:
         S.clear_current()
         # A landing that never got the backend idle is the infrastructure's

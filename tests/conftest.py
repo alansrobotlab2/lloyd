@@ -62,6 +62,24 @@ def _no_desktop_or_journal_alerts_in_tests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _promoter_cannot_reach_the_live_backend(monkeypatch):
+    """No test asks the RUNNING backend whether a round is in flight.
+
+    `round.land` waits for the other round's turn by reading the live pool
+    (`promote.wait_for_rounds`), up to 75 minutes. A test that reaches it
+    unpatched is then a test whose duration depends on what production is
+    doing — it hung the first time it ran beside a real round (2026-09-17).
+    The discard port refuses at once, which reads as "pool state unreadable"
+    and returns. A test about the promoter's HTTP patches `_get`, as before.
+    """
+    try:
+        from scripts.automod import promote
+        monkeypatch.setattr(promote, "BACKEND", "http://127.0.0.1:9")
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
 def _writes_enabled_in_tests(monkeypatch):
     """Fact writes are on unless a test says otherwise."""
     try:
