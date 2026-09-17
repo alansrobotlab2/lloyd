@@ -161,10 +161,13 @@ def append_event(entry: dict, path: Path | None = None) -> None:
 # ── the decoded ledger, once per change instead of once per caller ─────────
 #
 # Why this exists: one cold `GET /api/dashboard` called `Path.read_text` on the
-# ledger **57 times** and `json.loads` 318,670 times over a 6,317,811-byte file
-# (board census 2026-09-16: 4,808 lines; measured by
-# `tests/test_backlog_ledger_cache.py`, which asserts the counter is now at most
-# 1 per cycle against that 57-read baseline). `backlog._ledger_events` decoded
+# ledger **55 times** and `json.loads` 318,670 times over a 6,286,192-byte file
+# / 4,808 lines (triage, 2026-09-16, at the 1,142-item board census; re-measured
+# at 05:58Z on 2026-09-17 over 6,351,723 bytes: 57 reads and 333,222 decodes —
+# both counts rise with the board and the ledger, which is why the test asserts a
+# ceiling and not these figures). Measured by
+# `tests/test_backlog_ledger_cache.py`, which now asserts at most 1 read per
+# cycle against that 55-read baseline. `backlog._ledger_events` decoded
 # the file from scratch on every call, and `board_health` plus
 # `scorecard.compute` ask it ~55 questions per cycle — triage verdicts, gate
 # findings, review records, spawn events, verdicts, sweep verdicts, grouping,
