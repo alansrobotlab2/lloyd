@@ -236,6 +236,39 @@ def _land_lock(round_id: str, *, dry_run: bool = False) -> "S.Lock":
         return lock
 
 
+class LandingKilled(RuntimeError):
+    """The landing process was signalled before it promoted anything."""
+
+
+def _die_loudly_on_signal(round_id: str) -> None:
+    """SIGTERM/SIGHUP while a landing WAITS becomes an external `land_failed`.
+
+    Python's default SIGTERM ends the process with no `finally`: the land
+    marker stayed behind naming a dead pid, nothing reached the ledger, and
+    `implement_outcomes` read a gate-passed round with no promotion as
+    `spent` (#1179, 2026-09-17, killed by `timeout 120` around a foreground
+    `round land`). Raised as an exception instead, so `land`'s `finally`
+    clears the marker and the ledger says what happened. Only while nothing
+    has merged: once `promote` is past the fast-forward its own rollback
+    path owns the failure, and this handler is restored to the default there
+    by the process simply not being in a wait.
+    """
+    import signal
+
+    def _handler(signum, _frame):
+        S.append_event({"event": "land_failed", "round_id": round_id, "ok": False,
+                        "external_blocker": True, "killed_by_signal": int(signum),
+                        "detail": (f"the landing process was killed by signal {int(signum)} before it "
+                                   f"promoted anything — a foreground `round land` under a Bash "
+                                   f"timeout does this; use automod_land")})
+        raise LandingKilled(f"landing of {round_id} killed by signal {int(signum)}")
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):   # not the main thread: nothing to install
+            return
+
+
 def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
     """Promote a round whose gate passed. Refuses otherwise.
 
@@ -250,6 +283,7 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
             raise RuntimeError(f"a landing is already running for {round_id} (pid "
                                f"{live['pid']}, started {live.get('started_iso')})")
         S.write_land_marker(round_id, pid=os.getpid(), by="round.land")
+        _die_loudly_on_signal(round_id)
     try:
         if not (force or dry_run):
             S.require_enabled("land a round", LIVE_ROOT)

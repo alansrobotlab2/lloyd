@@ -1078,6 +1078,34 @@ Three things that cost #1199 and #1204 the night of 2026-09-17, fixed with it:
   `_external_budget_left` caps a `land_failed` on the item's external landing
   failures instead; a red tree is still capped on attempts.
 
+### A landing killed from outside is not a verdict
+
+On 2026-09-17 #1179's turn ran `timeout 120 … -m scripts.automod.round land
+SM_…` in the foreground of its own Bash instead of calling `automod_land`. A
+landing waits for the backend to go idle and that turn was what kept it busy,
+so `timeout` sent SIGTERM at 120 s. Python's default SIGTERM skips `finally`:
+the land marker named a dead pid, nothing reached the ledger, the reaper
+closed the round one second after the turn ended, and a change with nine green
+rungs and a kept branch read as `spent`. Three layers, because each alone
+leaves the next incident open:
+
+- **The Bash guard refuses it** (`service_control`, background sessions
+  only): `round land` in any spelling, `--dry-run` excepted, with a message
+  that names `automod_land` and says to end the turn. A person's CLI landing
+  is untouched. The old allow-list had `round gate && round land` in it.
+- **A signalled landing says so.** `round._die_loudly_on_signal` turns
+  SIGTERM/SIGHUP into `LandingKilled`, after writing an external `land_failed`
+  with `killed_by_signal`; `land`'s `finally` then clears the marker.
+- **Gate passed, nothing landed, nothing recorded → `external`.**
+  `backlog.gate_passed_unlanded_rounds`: the round's last gate event is an ok
+  `drill` (the ladder's last rung), with no promotion and no `land_failed`.
+  Capped on its own count. The re-offer tells the round to resume the branch,
+  gate, and call `automod_land`. Replayed over the live ledger it changes two
+  verdicts, #1179 and an already-closed #1190.
+
+`tests/test_landing_killed.py` pins all three, the second with a real child
+process and a real SIGTERM.
+
 ### One commit on main per landing
 
 Until 2026-09-17 the promoter fast-forwarded a round's whole working history

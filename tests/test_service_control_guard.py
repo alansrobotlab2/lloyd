@@ -41,7 +41,10 @@ ALLOWED = [
     "systemctl --user status lloyd-guardian",
     "systemctl --user list-units | grep lloyd",
     "python -m scripts.automod.round status",
-    "python -m scripts.automod.round gate SM_1 && python -m scripts.automod.round land SM_1",
+    # `round land` moved to tests/test_landing_killed.py (2026-09-17): a
+    # foreground landing waits on the turn that ran it and dies at the Bash
+    # timeout. The gate alone stays allowed.
+    "python -m scripts.automod.round gate SM_1",
     "pkill -f my_probe_script.py",
     "curl -s localhost:8096/health",
     "grep -n 'supervisorctl restart' CLAUDE.md",

@@ -32,6 +32,14 @@ _SUPERVISOR_VERBS = frozenset({"restart", "stop", "start", "signal", "shutdown",
 _SYSTEMCTL_VERBS = frozenset({"restart", "stop", "start", "kill", "reload", "reload-or-restart",
                               "try-restart", "daemon-reload", "isolate", "reset-failed"})
 _ROUND_VERBS = frozenset({"restart", "recover"})
+# `round land` in the foreground of a worker turn. Not a service verb, and
+# refused for a different reason: the landing waits for the backend to go
+# idle, and the turn that ran it IS what keeps it busy, under a Bash timeout
+# that then kills it. On 2026-09-17 #1179's turn ran `timeout 120 … round
+# land`; the promoter died at 120 s waiting for that very turn, the reaper
+# closed a round with nine green rungs, and the item read as `spent`.
+# `automod_land` spawns it detached and the turn ends.
+_ROUND_LAND_VERB = "land"
 _ENGINE_PROCESS_WORDS = ("vllm", "llama-server", "llama_server", "uvicorn", "server.py",
                          "supervisord", "lloyd-mcp", "agent_mcp")
 _LAUNCHERS = frozenset({"flash-next-run-arm.sh", "start-qwen38-flash-next.sh"})
@@ -74,6 +82,8 @@ def _segment_label(argv: list[str], depth: int) -> str | None:
             a == "scripts.automod.round" or a.endswith("/round.py") for a in rest)
         if is_round:
             verb = next((a for a in rest if a in _ROUND_VERBS), None)
+            if verb is None and _ROUND_LAND_VERB in rest and "--dry-run" not in rest:
+                verb = _ROUND_LAND_VERB
             return f"round {verb}" if verb else None
         return None
     if base in ("pkill", "killall"):
@@ -147,6 +157,11 @@ def check_service_control(command: str, session_id: str | None, *,
     label = find_service_control(command)
     if not label:
         return None
+    if label == f"round {_ROUND_LAND_VERB}":
+        return (f"round land from background session {session_id}: a landing run in the "
+                f"foreground of your own turn waits for that turn to end and is killed by "
+                f"the Bash timeout first. Call the `automod_land` tool — it spawns the "
+                f"landing detached — and END YOUR TURN")
     return (f"{label} from background session {session_id}: a worker turn may not restart "
             f"or stop an engine or a service (it kills every turn in flight, its own "
             f"included); report the need on the item and leave the restart to a person "

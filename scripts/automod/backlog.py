@@ -1389,6 +1389,25 @@ def _last_gate_per_round(ledger: Path) -> dict[str, dict]:
     return last
 
 
+def gate_passed_unlanded_rounds(ledger: Path) -> set[str]:
+    """Rounds whose last gate run passed every rung and that were never
+    promoted and never recorded a `land_failed`: the landing did not happen,
+    which is not a judgment on the change.
+
+    Every way a landing can FAIL writes a `land_failed` row. What writes
+    nothing is a landing that never ran or was killed outright — #1179's was
+    ended by `timeout 120` around a foreground `round land`, the reaper
+    closed the round a second after the turn, and the item read as `spent`
+    with nine green rungs and a kept branch. `drill` is the ladder's last
+    rung, so an ok `drill` as the round's last gate event is a full pass.
+    """
+    promoted = {str(d.get("round_id") or "") for d in
+                _ledger_events(ledger, "promoted", require_item=False)}
+    return {rid for rid, ev in _last_gate_per_round(ledger).items()
+            if ev.get("event") == "gate" and ev.get("ok") and str(ev.get("rung")) == "drill"
+            and rid not in promoted}
+
+
 def externally_blocked_rounds(ledger: Path) -> set[str]:
     """Rounds whose final gate attempt failed on a condition they did not cause.
 
@@ -1568,6 +1587,13 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
                     incompletes[iid] = incompletes.get(iid, 0) + 1
 
     blocked = externally_blocked_rounds(ledger)
+    unlanded = gate_passed_unlanded_rounds(ledger)
+    # Capped on its own count, like an external landing failure: how many of
+    # this item's rounds ended that way, not how many attempts it has used.
+    unlanded_counts: dict[int, int] = {}
+    for d in _ledger_events(ledger, "backlog_implement"):
+        if d.get("phase") == "finished" and str(d.get("round_id") or "") in unlanded:
+            unlanded_counts[int(d["item_id"])] = unlanded_counts.get(int(d["item_id"]), 0) + 1
     reverted = rolled_back_rounds(ledger)
     review_retry = review_retry_rounds(ledger)
     promoted_ev = {str(d.get("round_id") or ""): d for d in
@@ -1636,6 +1662,13 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
                             f"or its tests short — {findings}; its work is on branch "
                             f"`automod/{rid}` (pass it as from_branch)")
                 continue
+        if rid and rid in unlanded and unlanded_counts.get(iid, 0) <= EXTERNAL_RETRY_CAP:
+            out[iid] = ("external",
+                        f"round {rid} passed every gate rung and its landing never completed "
+                        f"(no promotion, no land_failed); the change is gated — resume branch "
+                        f"`automod/{rid}` (pass it as from_branch), gate, and call automod_land, "
+                        f"never `round land` from Bash")
+            continue
         if rid and rid in blocked and _external_budget_left(ledger, iid, rid, n):
             g = _last_gate_per_round(ledger).get(rid) or {}
             out[iid] = ("external",
