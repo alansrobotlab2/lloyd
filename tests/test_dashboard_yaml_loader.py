@@ -422,9 +422,10 @@ def test_each_reader_returns_the_same_dict_under_either_loader(tmp_path):
 def test_a_fresh_interpreter_binds_the_loader_and_reload_keeps_dispatching(tmp_path, monkeypatch):
     """A genuinely new interpreter does the binding proof; reload is checked behaviourally.
 
-    Flagged in review (`SM_20260917_055508`: "test_reload_does_not_lose_the_-
-    loader_binding still asserts hasattr after importlib.reload, which its own
-    docstring admits cannot detect a deleted import block"). That admission was
+    Flagged in review (`SM_20260917_055508`: the old
+    `test_reload_does_not_lose_the_loader_binding` "still asserts hasattr after
+    importlib.reload, which its own docstring admits cannot detect a deleted
+    import block"). That admission was
     the whole problem, not a caveat: `importlib.reload` re-executes the module
     body into the *existing* namespace, so `_YamlLoader` stays bound to the old
     object even if the `try: from yaml import CSafeLoader` block is deleted from
