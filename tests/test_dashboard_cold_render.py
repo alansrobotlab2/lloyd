@@ -60,8 +60,8 @@ async def _cold_cycle() -> dict:
 async def test_one_cold_dashboard_cycle_beats_the_budget(monkeypatch):
     # No `skipif` on the board directory: with one, a vault root that exists and
     # a board that has been emptied or moved skips silently and the budget reads
-    # as not-run. `board_files_or_stop` fails on that state and skips only when
-    # the whole vault is absent. See tests/board_presence.py.
+    # as not-run. `board_files_or_stop` fails on every state that leaves it
+    # nothing to walk — moved board, emptied board, no vault. See tests/board_presence.py.
     files = board_files_or_stop(what="cold-cycle budget", numeric_names=True)
     ledger = timed_ledger_or_stop(monkeypatch, what="cold-cycle budget")
     print(f"board: {len(files)} item files; ledger {ledger}: "
@@ -104,32 +104,52 @@ async def test_one_cold_dashboard_cycle_beats_the_budget(monkeypatch):
     )
 
 
-async def test_the_warm_cycle_is_not_what_the_cold_test_measures(monkeypatch):
+async def test_the_warm_cycle_is_an_order_of_magnitude_cheaper_than_cold(monkeypatch):
     """The cold bound is only meaningful against a much cheaper warm baseline.
 
-    Measured on this branch at the 1,142-file board: cold 1.69 s, warm 0.073 s —
-    a 23x ratio. The assertion below asks for 10x, which is the margin that says
-    the caches are doing their job; #1204 section 5 measured the *old* warm path
-    (a 2 s poll against `_VAULT_SCAN_TTL_S = 10.0`) and got every fifth request
-    paying a ~2 s walk, i.e. a warm cycle that was 1x, not 10x, the cold one.
+    Advisory finding on round `SM_20260917_055508`: "Docstring states a 10x
+    warm/cold ratio contract but the code asserts only the absolute
+    'warm < 1.0'; at the measured cold 1.69 s a 0.9 s warm cycle (1.9x) would
+    pass while the stated contract is violated." Correct, and the fix is to
+    measure both here rather than assert a number the neighbouring sentence
+    never checks. Cold and warm are timed back to back in this one test, on the
+    same board and the same ledger, so the ratio is a measured pair and not a
+    pair of numbers from two runs.
 
-    The 10x here is not a direct restatement of that 2 s/10 s pairing — it cannot
-    be, because TTL-vs-poll is a schedule property and this is a wall-clock
-    measurement. What it does pin is the failure that pairing produced: a section
-    recomputing on a poll whose TTL has not expired. If warm and cold ever read
-    the same, the cache is dead and the cold test above has been timing the
-    cache-miss path forever without saying so.
+    Measured on this branch at the 1,141-file board: cold 1.69 s, warm 0.073 s —
+    a 23x ratio. The assert asks for 10x, the margin that says the caches are
+    doing their job. #1204 section 5 measured the *old* warm path (a 2 s poll
+    against `_VAULT_SCAN_TTL_S = 10.0`) and got every fifth request paying a ~2 s
+    walk — a warm cycle at 1x the cold one, which is exactly what this fires on.
+
+    The 10x is not a restatement of that 2 s/10 s pairing; it cannot be, since
+    TTL-vs-poll is a schedule property and this is a wall-clock measurement. What
+    it pins is the failure that pairing produced: a section recomputing on a poll
+    whose TTL has not expired. If warm and cold ever read alike, the cache is
+    dead and the cold test above has been timing the cache-miss path forever
+    without saying so. The absolute `warm < 1.0` stays as the second half — it
+    catches a machine where *both* cycles are slow, which a ratio cannot see.
     """
     files = board_files_or_stop(what="warm-vs-cold comparison", numeric_names=True)
     timed_ledger_or_stop(monkeypatch, what="warm-vs-cold comparison")
+    cold_started = time.perf_counter()
     await _cold_cycle()
+    cold = time.perf_counter() - cold_started
     started = time.perf_counter()
     await _cold_cycle()
     warm = time.perf_counter() - started
-    print(f"warm cycle: {warm:.3f}s over the same {len(files)} item files")
+    ratio = cold / warm if warm > 0 else float("inf")
+    print(f"cold {cold:.3f}s → warm {warm:.3f}s over the same {len(files)} item "
+          f"files: {ratio:.1f}x")
+    assert ratio >= 10, (
+        f"the warm cycle took {warm:.3f}s against a cold cycle of {cold:.3f}s — "
+        f"{ratio:.1f}x, under the 10x this clause states. Baseline on this branch: "
+        f"cold 1.69 s, warm 0.073 s, 23x. A warm cycle costs milliseconds of dict "
+        f"lookups, so a warm cycle anywhere near the cold one means a section is "
+        f"recomputing on every poll regardless of TTL — the 2 s spike in #1204 "
+        f"section 5, and it also means the cold test above has been timing the "
+        f"cache-miss path while reading as a bound.")
     assert warm < 1.0, (
-        f"the second cycle, with every section cache warm, took {warm:.2f}s. A "
-        f"warm cycle costs milliseconds of dict lookups; anything near a second "
-        f"means a section is recomputing on every poll regardless of TTL, which "
-        f"is the 2 s spike in #1204 section 5."
-    )
+        f"the second cycle, with every section cache warm, took {warm:.2f}s. The "
+        f"ratio above can be satisfied by a machine where cold and warm are both "
+        f"slow; this is the absolute half of the same claim.")

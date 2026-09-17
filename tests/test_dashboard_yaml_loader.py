@@ -53,10 +53,42 @@ _FM_END_RE = re.compile(r"^---[ \t]*$", re.M)
 # *reader* under both loaders, which is the 3x-multiplied one.
 SAMPLE = 120
 
+#: The loader pair, resolved once. `None` means this box's PyYAML was built
+#: without the C extension, which is a state the tests that need two distinct
+#: loaders **fail** on rather than skip — see `tests/board_presence.py` for why
+#: a skip whose condition is a property of the box is still a skip that hides an
+#: unpinned clause.
+HAVE_LIBYAML = getattr(yaml, "_yaml", None) is not None
+
 
 def _board_files() -> list[Path]:
     """Every item file on the live board, in a stable order."""
     return sorted(BOARD_DIR.glob("*.md")) if BOARD_DIR.is_dir() else []
+
+
+def _sample_longest(files: list[Path], n: int) -> list[Path]:
+    """The `n` files whose front matter is *largest*, longest-first.
+
+    Name order is the wrong sample and a previous cut used it: `sorted()` on the
+    board is oldest-first, so `files[:120]` was 120 of the smallest, earliest
+    items and never touched the tail. The tail is where the two scanners can
+    disagree — the longest front matter on the board is 28,692 bytes (triage
+    census; median 1,202, p90 4,841, the growth being `activity_log`
+    accumulation), and multi-line literals, deep nesting and huge block scalars
+    all live in those files. Divergence is likeliest exactly where this sample
+    used to be empty.
+
+    Ties break on name so the set is reproducible run to run.
+    """
+    sized = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue  # the whole-board sweep reports unreadable files; this is a sample
+        sized.append((len(_fm_text(text)), path.name, path))
+    sized.sort(key=lambda row: (-row[0], row[1]))
+    return [path for _, _, path in sized[:n]]
 
 
 def _readers():
@@ -112,11 +144,10 @@ def _one_real_item(tmp_path: Path) -> Path:
     authored would let clause 1's proof report "the reader parsed through the
     C loader" while parsing bytes nobody on the board wrote — the exact
     shape-mismatch failure the rest of this file exists to close. So when the
-    board yields no file with front matter, `board_files_or_stop` decides:
-    **fail** if the vault root is there (an emptied or moved board is the state
-    this test is supposed to notice), **skip** naming the path if the vault is
-    absent entirely, in which case clause 1 is stated as unpinned rather than
-    proven on an invented file.
+    board has no file to offer — moved, emptied, or no vault at all —
+    `board_files_or_stop` **fails** naming the path, and clause 1 is reported
+    unpinned rather than proven on an invented file or filed as `skipped`. The
+    no-vault case fails too; see the table in `tests/board_presence.py`.
     """
     board_files_or_stop(what="per-reader loader proof")
     for path in _board_files():
@@ -163,17 +194,30 @@ def test_each_named_reader_parses_through_its_module_loader_attribute(tmp_path, 
             f"cost #1204 is about.")
 
 
-@pytest.mark.skipif(getattr(yaml, "_yaml", None) is None,
-                    reason="libyaml is not importable on this box, so CSafeLoader "
-                           "legitimately is not the loader — the fallback test below "
-                           "covers that case")
 def test_all_three_modules_select_the_c_loader_when_libyaml_is_present():
     """The fallback branch must not be silently swallowing the C loader here.
 
     Without this, a typo that always took the `except ImportError` arm would
     leave every other test in this file green (they patch whatever loader the
     module holds) while the box kept parsing on the slow one.
+
+    This used to carry a `@pytest.mark.skipif` for a box with no libyaml and was
+    flagged for it (`SM_20260917_055508`: "test honesty
+    tests/test_dashboard_yaml_loader.py:166: a new skip marker"). The marker is
+    gone: this box HAS libyaml — `python3 -c
+    "import yaml; print(getattr(yaml,'_yaml',None) is not None)"` → True, PyYAML
+    6.0.3 (item #1204 section 3) — so the marker could only ever fire as a
+    misstatement, and the one thing it was for, a fallback arm that swallows the
+    C loader, is the thing a `skipped` line hides. A box genuinely built without
+    the C extension now gets a red line naming `_yaml` instead of a green run
+    that certified nothing.
     """
+    assert HAVE_LIBYAML, (
+        "this box's PyYAML has no C extension (`yaml._yaml` is None), so "
+        "CSafeLoader legitimately is not selectable and the choice this clause "
+        "certifies was never made here. The clause 'the three readers parse with "
+        "CSafeLoader when libyaml is importable' is NOT pinned by this run; the "
+        "fallback test below still proves the SafeLoader arm.")
     for label, _call, module in _readers():
         assert module._YamlLoader is yaml.CSafeLoader, (
             f"{label}: _YamlLoader is {module._YamlLoader.__name__}, not "
@@ -237,11 +281,15 @@ def test_both_loaders_agree_on_every_front_matter_on_the_board():
     comes up empty — the flag's point. The skip was wrong because the board is
     *this item's own tree*: with the vault root present and the board missing or
     emptied, something has happened to the corpus the clause certifies, and
-    `skipped` is where that goes hidden. The helper fails on that state and
-    skips only when the vault root itself is absent (a machine with no vault).
-    `test_a_moved_or_emptied_board_fails_instead_of_skipping` pins all three
+    `skipped` is where that goes hidden. The helper now FAILS on every state that
+    leaves it nothing to parse — moved board, emptied board, no vault at all.
+    `test_no_board_state_skips_and_every_one_names_the_lost_clause` pins all three
     outcomes on synthetic directories.
     """
+    assert HAVE_LIBYAML, (
+        "this box's PyYAML has no C extension (`yaml._yaml` is None), so there is "
+        "one loader here, not two, and 'provably identical under both loaders' is "
+        "a comparison this box cannot make. The clause is NOT pinned by this run.")
     files = board_files_or_stop(what="loader-equivalence sweep")
     print(f"board dir: {BOARD_DIR}  files walked: {len(files)}")
 
@@ -282,29 +330,73 @@ def test_both_loaders_agree_on_every_front_matter_on_the_board():
     )
 
 
-@pytest.mark.skipif(getattr(yaml, "_yaml", None) is None,
-                    reason="no libyaml on this box: both arms would be SafeLoader "
-                           "and the comparison could not fail")
-def test_each_reader_returns_the_same_dict_under_either_loader(tmp_path):
+def test_each_reader_returns_the_same_dict_on_the_longest_front_matters(tmp_path):
     """Per-reader equivalence, including each reader's own slicing.
 
     The three readers slice the block differently — `dashboard` reads in
     4 KiB chunks to a 64 KiB bound, `scorecard` slices `text[3:3 + m.start()]`,
     `backlog` splits on `---\\n` — so an equivalence claim about the loader
-    alone does not cover them. A sample of the board (in name order, so the
-    set is stable) is run through each reader twice.
+    alone does not cover them. Each is run twice over a sample of the board.
+
+    The sample is the **SAMPLE longest front matters on the board**, not the
+    first SAMPLE by name, and that is the fix for a review finding
+    (`SM_20260917_055508`: "still samples files[:120] in name order — the
+    oldest items — skipping the long-tail front matters (max 28,692 bytes per
+    the item) where loader divergence is likeliest"). Name order on this board
+    is chronological, so `files[:120]` was 120 small, early files: the tail is
+    where a scanner can disagree, because that is where block scalars, deep
+    nesting and multi-line literals live. The board's own p90 and max are
+    printed and asserted to be inside the sample, so the claim cannot rot with
+    the board — the assertion is relative to today's distribution, not to a
+    number written down.
+
+    No `skipif` here either: same reason as
+    `test_all_three_modules_select_the_c_loader_when_libyaml_is_present`.
     """
-    files = _board_files()
-    assert files, f"{BOARD_DIR} matched nothing; the sample below is empty"
-    sample = files[:SAMPLE]
-    assert len(sample) > 0
+    assert HAVE_LIBYAML, (
+        "this box's PyYAML has no C extension (`yaml._yaml` is None), so both "
+        "arms would be SafeLoader and the comparison could not fail. The clause "
+        "'parse output is provably identical under both loaders' is NOT pinned "
+        "by this run.")
+    files = board_files_or_stop(what="per-reader equivalence sample")
+    sizes: list[tuple[int, str, Path]] = []
+    unreadable: list[str] = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:  # unreadable is a finding, not a skip
+            unreadable.append(f"{path.name}: {exc}")
+            continue
+        sizes.append((len(_fm_text(text)), path.name, path))
+    assert not unreadable, f"unreadable board items: {unreadable[:3]}"
+    assert sizes, f"{BOARD_DIR} yielded no readable item; the sample is empty"
+
+    ordered = sorted(sizes, key=lambda row: (-row[0], row[1]))
+    sample = ordered[:SAMPLE]
+    assert sample, "sample is empty"
+    sample_sizes = [n for n, _, _ in sample]
+    board_sizes = sorted(n for n, _, _ in sizes)
+    p90 = board_sizes[min(len(board_sizes) - 1, int(0.9 * (len(board_sizes) - 1)))]
+    over_p90 = sum(1 for n in sample_sizes if n >= p90)
+    print(f"board items measured: {len(sizes)} | front matter bytes: "
+          f"max {board_sizes[-1]}, p90 {p90}, median {board_sizes[len(board_sizes) // 2]}")
+    print(f"sample: {len(sample)} files, front matter {sample_sizes[-1]}–{sample_sizes[0]} "
+          f"bytes, {over_p90} of them at or above the board p90")
+
+    assert sample_sizes[0] == board_sizes[-1], (
+        f"the longest front matter on the board is {board_sizes[-1]} bytes but the "
+        f"sample's largest is {sample_sizes[0]} — the tail this test exists to "
+        f"cover is not in it")
+    assert over_p90 > 0, (
+        f"none of the {len(sample)} sampled items reaches the board's p90 front-"
+        f"matter size ({p90} bytes), so the comparison ran on the short end only")
+
     for label, call, module in _readers():
         differs = []
-        for path in sample:
-            c_loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+        for _, _, path in sample:
             monkey_c, monkey_py = module._YamlLoader, yaml.SafeLoader
             try:
-                module._YamlLoader = c_loader
+                module._YamlLoader = yaml.CSafeLoader
                 under_c = call(path)
                 module._YamlLoader = monkey_py
                 under_py = call(path)
@@ -318,32 +410,74 @@ def test_each_reader_returns_the_same_dict_under_either_loader(tmp_path):
         )
 
 
-def test_reload_does_not_lose_the_loader_binding():
-    """`importlib.reload` of each reader module still leaves `_YamlLoader` bound.
+def test_a_fresh_interpreter_binds_the_loader_and_reload_keeps_dispatching(tmp_path, monkeypatch):
+    """A genuinely new interpreter does the binding proof; reload is checked behaviourally.
 
-    What this does **not** prove, stated here so nobody cites it for that: it
-    is not a fresh-interpreter import. `importlib.reload` re-executes the module
-    body in the *existing* namespace, so a name that survived the first import
-    would still be there even if the `try: from yaml import CSafeLoader` block
-    were deleted from the source — the old object is simply rebound to the same
-    slot. A previous cut of this test monkeypatched a fake `yaml` into
-    `sys.modules` before the reload and read the result as "a fresh import still
-    binds the loader"; that read was wrong for the same reason.
+    Flagged in review (`SM_20260917_055508`: "test_reload_does_not_lose_the_-
+    loader_binding still asserts hasattr after importlib.reload, which its own
+    docstring admits cannot detect a deleted import block"). That admission was
+    the whole problem, not a caveat: `importlib.reload` re-executes the module
+    body into the *existing* namespace, so `_YamlLoader` stays bound to the old
+    object even if the `try: from yaml import CSafeLoader` block is deleted from
+    the source, and `hasattr` reports a pass on a module that has lost the
+    binding. An earlier cut went further and monkeypatched a fake `yaml` into
+    `sys.modules` before the reload, reading that as a fresh import — same flaw,
+    louder.
 
-    The load-bearing proof of a real fresh import is
-    `test_the_pure_python_fallback_is_selected_when_libyaml_is_absent`, which
-    runs `subprocess.run([sys.executable, "-c", ...])` in a genuinely new
-    interpreter and asserts which class each module bound. This test is the
-    cheaper reload-durability check, and that is the whole of its claim.
+    So the binding proof moved to a subprocess: a new interpreter imports all
+    three modules from disk and prints the class each one bound. Delete the
+    import block and this goes red with an `AttributeError`. What survives of the
+    reload check is behavioural: after re-executing each module body, the reader
+    must still *dispatch* through its `_YamlLoader`, counted exactly the way
+    clause 1's proof counts it — which `hasattr` could not fake.
     """
-    for module in (dash, SC, B):
+    # `CSafeLoader.__module__` is `yaml.cyaml`, not `yaml` — the shim that
+    # re-exports it lives in `yaml/__init__.py`, the class does not. Printing both
+    # halves and asserting them separately is the honest form: a single glued
+    # string comparison failed the first time this ran, against a binding that was
+    # correct.
+    code = (
+        "from app.routers import dashboard as dash\n"
+        "from scripts.automod import backlog as B, scorecard as SC\n"
+        "for m in (dash, B, SC):\n"
+        "    L = m._YamlLoader\n"
+        "    print(m.__name__, L.__name__, L.__module__)\n"
+    )
+    env = {**os.environ, "LLOYD_AUTOMOD_STATE": str(
+        Path.home() / ".local" / "state" / "lloyd-automod")}
+    proc = subprocess.run([sys.executable, "-c", code], cwd=str(Path.cwd()),
+                          capture_output=True, text=True, timeout=180, env=env)
+    assert proc.returncode == 0, (
+        f"a fresh import of the three reader modules failed, which is what a "
+        f"deleted or now-raising loader-import block looks like: "
+        f"{proc.stderr[-800:]}")
+    bound = {line.split()[0]: line.split()[1:]
+             for line in proc.stdout.strip().splitlines() if line.strip()}
+    want = "CSafeLoader" if HAVE_LIBYAML else "SafeLoader"
+    for name in ("app.routers.dashboard", "scripts.automod.backlog",
+                 "scripts.automod.scorecard"):
+        got = bound.get(name) or ["<unbound>"]
+        assert got[0] == want, (
+            f"a fresh interpreter bound {name}._YamlLoader to {got[0]!r} (from "
+            f"{got[-1]}), expected {want!r} "
+            f"({'libyaml is importable on this box' if HAVE_LIBYAML else 'no C extension here'})")
+        assert got[-1].startswith("yaml"), (
+            f"{name}._YamlLoader came from {got[-1]}, not a yaml module — the "
+            f"binding under test is not PyYAML's loader")
+
+    sample = _one_real_item(tmp_path)
+    for label, call, module in _readers():
         reloaded = importlib.reload(module)
-        assert hasattr(reloaded, "_YamlLoader"), (
-            f"{module.__name__} lost its `_YamlLoader` binding across "
-            f"importlib.reload. Reload re-executes the module body, so this "
-            f"fires only when the import block itself now raises — which on a "
-            f"box with libyaml present means the block is broken, not that a "
-            f"fallback was taken.")
+        recorder = _recording_loader(reloaded._YamlLoader)
+        monkeypatch.setattr(reloaded, "_YamlLoader", recorder)
+        before = recorder.seen
+        produced = call(sample)
+        assert produced and recorder.seen > before, (
+            f"{label}: after importlib.reload the reader no longer dispatches "
+            f"through `_YamlLoader` (recorder built {recorder.seen - before} "
+            f"loaders), so the reload either lost the binding or the call site "
+            f"stopped using it — the thing the deleted `hasattr` assert could not "
+            f"see, because reload leaves the old object in the slot either way.")
     dash._cache.clear()
 
 
@@ -354,20 +488,25 @@ def test_reload_does_not_lose_the_loader_binding():
 # what you expected, so each of the helper's three outcomes is driven here
 # against synthetic directories — including the one that must NOT be a skip.
 
-def test_a_moved_or_emptied_board_fails_instead_of_skipping(tmp_path, monkeypatch):
-    """The flagged state, pinned instead of left to the next reader.
+def test_no_board_state_skips_and_every_one_names_the_lost_clause(tmp_path, monkeypatch):
+    """All three non-measurable states fail, and each says which clause died.
 
-    Two shapes where a skip would hide the thing this item is about: the board
-    directory is gone while the vault root is there, and the board exists but
-    holds no item file. Both are a broken *corpus*, which is what a denominator
-    guard exists to report. The third shape — no vault directory at all — is a
-    property of the machine, and only that one skips.
+    The three shapes: the board directory is gone while the vault root is there;
+    the board exists but holds no item file; and — the one round
+    `SM_20260917_055508` flagged at `tests/board_presence.py:94` — no vault
+    directory at all. The first two are a broken *corpus*, which is what a
+    denominator guard exists to report. The third used to be argued as "a
+    property of the box", and the flag is why that argument is gone: the vault
+    root is `LLOYD_OBSIDIAN_VAULT`-overridable, so a skip keyed on it is a skip
+    any test can walk into with one `monkeypatch.setenv`, and what it hides is
+    the only measurement of the number this item is about.
+
+    `pytest.raises(pytest.fail.Exception)`, not `AssertionError`: the helper
+    stops the run with `pytest.fail`, which raises `Failed` — a sibling of
+    `Skipped`, not of `AssertionError`. Asserting the wrong exception type here
+    would fail this test while the helper behaved correctly, which is the same
+    class of mistake the helper exists to prevent.
     """
-    # `pytest.raises(pytest.fail.Exception)`, not `AssertionError`: the helper
-    # stops the run with `pytest.fail`, which raises `Failed` — a sibling of
-    # `Skipped`, not of `AssertionError`. Asserting the wrong exception type here
-    # would fail this test while the helper was behaving correctly, which is the
-    # same class of mistake the helper exists to prevent.
     vault = tmp_path / "vault"
     vault.mkdir()
     monkeypatch.setenv(VAULT_ROOT_ENV, str(vault))
@@ -375,22 +514,41 @@ def test_a_moved_or_emptied_board_fails_instead_of_skipping(tmp_path, monkeypatc
 
     with pytest.raises(pytest.fail.Exception) as moved:
         board_files_or_stop(what="moved-board proof", board=absent_board)
-    assert "is the board this item measures" in str(moved.value), str(moved.value)
+    assert "does not exist" in str(moved.value), str(moved.value)
     assert "moved-board proof" in str(moved.value), str(moved.value)
+    assert "NOT pinned by this run" in str(moved.value), str(moved.value)
 
     emptied = vault / "backlog"
     emptied.mkdir()
     with pytest.raises(pytest.fail.Exception) as empty:
         board_files_or_stop(what="emptied-board proof", board=emptied)
-    assert "exactly the state the emptied-board proof exists to notice" \
-        in str(empty.value), str(empty.value)
+    assert "holds 0 entries" in str(empty.value), str(empty.value)
+    assert "NOT pinned by this run" in str(empty.value), str(empty.value)
 
     monkeypatch.setenv(VAULT_ROOT_ENV, str(tmp_path / "no-such-vault"))
-    with pytest.raises(pytest.skip.Exception) as skipped:
+    with pytest.raises(pytest.fail.Exception) as novault:
         board_files_or_stop(what="no-vault proof", board=absent_board)
-    # The phrase the helper must carry: a skip is not a pass of the clause. It
-    # is the sentence that makes `skipped` honest in the report.
-    assert "NOT pinned by this run" in str(skipped.value), str(skipped.value)
+    assert "is absent" in str(novault.value), str(novault.value)
+    assert "NOT pinned by this run" in str(novault.value), str(novault.value)
+
+    # The flag was about skips, so the strongest form of the assertion: no state
+    # may raise `Skipped` at all. Checked before `Failed` is caught, because
+    # `Failed` and `Skipped` are siblings — an `except pytest.fail.Exception`
+    # would not catch a regression to skipping, it would let it escape and read
+    # as a green skip on this very test.
+    monkeypatch.setenv(VAULT_ROOT_ENV, str(tmp_path / "no-such-vault"))
+    for board in (absent_board, emptied):
+        try:
+            board_files_or_stop(what="skip-hunting", board=board)
+        except pytest.skip.Exception:
+            pytest.fail("board_files_or_stop SKIPPED, which is the state round "
+                        "SM_20260917_055508 was refused for (tests/"
+                        "board_presence.py:94)")
+        except pytest.fail.Exception:
+            continue
+        else:
+            pytest.fail(f"board_files_or_stop returned files for {board}, which "
+                        f"holds none — the empty-walk bug clause 4 names")
 
 
 def test_the_helper_counts_the_real_board_and_the_numeric_subset(tmp_path, monkeypatch):

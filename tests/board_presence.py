@@ -1,31 +1,43 @@
 """#1204: what a board-walking test does when the board is not there.
 
-Two states, and collapsing them is the defect. A test that times one cold
-`/api/dashboard` cycle over the real board is only a measurement when the board
-is under it; the two ways to get that wrong are:
+Three states, one policy. A test that times one cold `/api/dashboard` cycle over
+the real board is only a measurement when the board is under it; the two ways to
+get that wrong are:
 
 * **passing on an empty walk** — the glob matched nothing, the loop body ran
   zero times, the stopwatch reads 0.02 s and the clause is reported as met; or
-* **skipping on a wiped board** — the board directory is *this item's own tree*
-  (`~/obsidian/backlog`, 1,142 files at the 2026-09-16 census), so if the vault
-  root is there and the board is not, something has happened to the tree the
-  measurement is about. Reporting that as `skipped` hides it; a gate run on such
-  a tree would otherwise show two green-not-run timings and a clause nobody
-  checked.
+* **reporting a missing corpus as `skipped`** — the board directory is *this
+  item's own tree* (`~/obsidian/backlog`, 1,142 files at the 2026-09-16
+  census), so if it is gone or emptied something has happened to the thing the
+  measurement is about, and `skipped` is where that goes hidden.
 
-So the rule the helpers below implement is three-way, and the distinction is
-the vault root:
+So the helpers below **fail** on every non-measurable state, including a
+machine with no vault at all. That is deliberate, and it answers two review
+findings on this item:
 
-| the tree | result |
+| round | finding |
 |---|---|
-| board dir has item files | return them, measure |
-| vault root exists, board empty or missing | **fail** — a moved or emptied board |
-| vault root itself absent | **skip**, naming the path — a machine with no vault at all |
+| `SM_20260917_043852` | `test_dashboard_cold_render.py:62`: a new skip marker |
+| `SM_20260917_055508` | `tests/board_presence.py:94`: a new pytest.skip |
 
-The middle row is the one a plain `skipif` gets wrong, and
-`test_board_presence.py` (in `tests/test_dashboard_cold_render.py`) pins it by
-calling the helper against three synthetic directories and asserting which
-pytest exception each one raises.
+The second one was an earlier cut of this file skipping when the vault root was
+absent, on the argument that an absent vault is a property of the box rather
+than of the change under test. That argument does not survive the trigger: the
+vault root is `LLOYD_OBSIDIAN_VAULT`-overridable, so a skip whose condition a
+test can set with `monkeypatch.setenv` is a skip any test can walk into — and
+the report it then writes is "not run" for the only measurement of the number
+this item is about. The clause is either pinned or it is not, and this file
+says so by failing.
+
+Clause 4 of #1204 asked for "skips when the board directory is absent, never
+passes on a zero-file board". Failing in that state satisfies the second half
+strictly and supersedes the first at the review rung's insistence: on this box
+`~/obsidian` exists, so nothing is lost, and a box without the vault gets a red
+line naming the path instead of a green one that measured nothing.
+
+`test_no_board_state_skips_and_every_one_names_the_lost_clause` in
+`tests/test_dashboard_yaml_loader.py` pins every row by calling the helper
+against synthetic directories and asserting which pytest exception each raises.
 """
 
 from __future__ import annotations
@@ -37,11 +49,11 @@ import pytest
 
 #: Set this to point the helper at another vault root. Named for the same
 #: reason `scripts.automod.state.STATE_DIR` honours `LLOYD_AUTOMOD_STATE`: a
-#: test that wants the no-vault branch must be able to say so rather than reach
-#: into this module's globals. Read per call, not frozen at import — an override
-#: that a caller's `monkeypatch.setenv` could not move would let a test set the
-#: variable, be ignored, and read its own result as verifying the no-vault
-#: branch while it was in fact checking the live board.
+#: test that wants the missing-vault branch must be able to say so rather than
+#: reach into this module's globals. Read per call, not frozen at import — an
+#: override that a caller's `monkeypatch.setenv` could not move would let a test
+#: set the variable, be ignored, and read its own result as verifying the
+#: no-vault branch while it was in fact checking the live board.
 VAULT_ROOT_ENV = "LLOYD_OBSIDIAN_VAULT"
 
 
@@ -74,7 +86,7 @@ def board_files_or_stop(
     board: Path | None = None,
     numeric_names: bool = False,
 ) -> list[Path]:
-    """The board's item files, or a pytest stop that tells the truth.
+    """The board's item files, or a failure that tells the truth.
 
     `what` names the measurement in the failure text ("cold cycle", "loader
     equivalence"), because the reader needs to know which claim was lost, not
@@ -83,6 +95,9 @@ def board_files_or_stop(
     `numeric_names` matches the board's own convention (`1204-slug.md`): the
     dashboard's scan counts those, and a test timing that scan must count the
     same way the scan does.
+
+    Never returns an empty list, and never skips: the caller either gets bytes to
+    measure or a red line saying which clause is unpinned and why.
     """
     board = BOARD_DIR if board is None else board
     files = _item_files(board, numeric_names)
@@ -90,23 +105,23 @@ def board_files_or_stop(
         return files
 
     vault = vault_root()
-    if not vault.is_dir():
-        pytest.skip(
-            f"{vault} does not exist on this machine, so the {what} has "
-            f"nothing real to measure. Skipped rather than failed: an absent "
-            f"vault is a property of the box, not of the change under test. "
-            f"The clause {what} pins is therefore NOT pinned by this run."
-        )
-
     listed = len(list(board.iterdir())) if board.is_dir() else 0
+    where = (
+        f"{board} exists and holds {listed} entries, none of them matching "
+        f"'*.md'{' starting with a digit' if numeric_names else ''}"
+        if board.is_dir()
+        else f"{board} does not exist"
+    )
+    reason = (
+        f"{vault} is absent" if not vault.is_dir()
+        else f"{vault} exists, so this tree is expected to have items on it"
+    )
     pytest.fail(
-        f"{board} is the board this item measures and {vault} exists, so "
-        f"this tree is expected to have items on it — it matched "
-        f"{len(_item_files(board, numeric_names))} of {listed} entries under "
-        f"'*.md'{' starting with a digit' if numeric_names else ''}. Failing "
-        f"instead of skipping: a board that is missing or emptied is exactly "
-        f"the state the {what} exists to notice, and `skipped` is how it would "
-        f"read as nobody's problem."
+        f"The {what} cannot run: {where}, and {reason}. Failing rather than "
+        f"skipping — the board is the corpus this measurement certifies, so a "
+        f"missing or emptied one is the finding it exists to report, and "
+        f"`skipped` would file it as nobody's problem. The clause {what} pins "
+        f"is NOT pinned by this run."
     )
 
 
@@ -125,6 +140,10 @@ def timed_ledger_or_stop(monkeypatch, *, what: str) -> Path:
     cycle is pointed at the real file — read-only, and the dashboard only reads
     it. Returns the path the cycle will actually read, for the caller to print
     its byte count beside the timing.
+
+    With neither present it **fails**, for the reason in this module's
+    docstring: a cycle that decoded no ledger does not pin the read-once-per-
+    cycle clause, and reporting that as `skipped` is how it would land as green.
     """
     from scripts.automod import state as S
 
@@ -135,8 +154,10 @@ def timed_ledger_or_stop(monkeypatch, *, what: str) -> Path:
     if live.is_file() and live.stat().st_size > 0:
         monkeypatch.setattr(S, "LEDGER_PATH", live)
         return live
-    pytest.skip(
-        f"no non-empty ledger at {current} or {live}, so the {what} cannot "
-        f"constrain the ledger decode path — the clause about reading the "
-        f"ledger once per cycle is NOT pinned by this run"
+    pytest.fail(
+        f"The {what} cannot constrain the ledger path: no non-empty ledger at "
+        f"{current} or {live}, so the cycle would decode zero bytes. Failing "
+        f"rather than skipping: the clause that the promotions ledger is read "
+        "once per cycle, not 55x, is NOT pinned by this run on a box that "
+        f"has no ledger to read."
     )
