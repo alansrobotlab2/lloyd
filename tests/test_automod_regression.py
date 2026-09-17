@@ -286,3 +286,96 @@ def test_the_recorded_noise_floor_is_what_the_code_expects():
         assert entry["stdev"] < 0.01, (
             f"{metric} measured stdev {entry['stdev']}; it is armed with a "
             f"near-zero tolerance and would fire on noise")
+
+
+# ---------------------------------------------------------------------------
+# a query the daemon did not answer is not a score
+# ---------------------------------------------------------------------------
+
+def _record(qid, n_docs, error=None):
+    return {"id": qid, "result_summary": {"n_docs": n_docs}, "error": error}
+
+
+def test_doc_coverage_names_the_unanswered_queries():
+    """An errored query is already counted by `errors`; a record from before
+    `result_summary` existed reports nothing, so an old baseline cannot refuse."""
+    cov = R._doc_coverage([_record("a", 20), _record("b", 0),
+                           _record("c", 0, error="boom"), {"id": "legacy"}])
+    assert cov["n_records"] == 4
+    assert cov["empty_doc_queries"] == ["b"]
+
+
+def test_a_partial_empty_arm_is_not_a_measurement():
+    arm = {"n_records": 20, "empty_doc_queries": ["backlog-363"]}
+    assert R.unanswered_doc_queries(arm) == ["backlog-363"]
+
+
+def test_an_arm_with_every_query_empty_is_a_score():
+    """The one shape a change under test can produce: retrieval itself broke."""
+    assert R.unanswered_doc_queries({"n_records": 3, "empty_doc_queries": ["a", "b", "c"]}) == []
+    assert R.unanswered_doc_queries({"n_records": 3, "empty_doc_queries": []}) == []
+    assert R.unanswered_doc_queries({}) == []
+
+
+def test_load_run_carries_doc_coverage(tmp_path):
+    blob = {"summary": {"overall": base()}, "corpus_ok": True,
+            "records": [_record("a", 5), _record("b", 0)]}
+    (tmp_path / "automod-check-x.json").write_text(json.dumps(blob))
+    run = R._load_run(tmp_path, "automod-check")
+    assert run["n_records"] == 2 and run["empty_doc_queries"] == ["b"]
+
+
+def _arm(n_records, empty, **over):
+    return {"overall": base(**over), "corpus_ok": True, "corpus": {},
+            "n_records": n_records, "empty_doc_queries": empty}
+
+
+async def test_an_arm_the_daemon_did_not_answer_cannot_evaluate(monkeypatch, tmp_path):
+    """2026-09-17 05:34Z: one query of twenty came back with zero documents and
+    no error, the eval scored it 0, and a change to a memory-maintenance
+    script was reverted for a -0.05 `doc_hit_rate`."""
+    import scripts.automod.state as S
+    captured = {}
+    noise = tmp_path / "noise.json"
+    noise.write_text(json.dumps(ZERO_NOISE))
+    monkeypatch.setattr(R, "NOISE_PATH", noise)
+    monkeypatch.setattr(S, "read_current", lambda: _observing())
+    monkeypatch.setattr(S, "read_events", lambda **k: [])
+    monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
+    monkeypatch.setattr(S, "request_rollback", lambda **kw: captured.update(kw) or kw)
+    _pin_ok(monkeypatch)
+    arms = iter([_arm(20, []), _arm(20, ["backlog-363"], doc_hit_rate=0.55)])
+    monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(arms))
+    out = await R.execute(_Item())
+    assert "did not answer" in out["skipped"] and "backlog-363" in out["skipped"]
+    assert not captured, "a non-measurement must never request a rollback"
+
+
+async def test_a_retriever_that_answers_nothing_is_still_a_regression(monkeypatch, tmp_path):
+    import scripts.automod.state as S
+    captured = {}
+    noise = tmp_path / "noise.json"
+    noise.write_text(json.dumps(ZERO_NOISE))
+    monkeypatch.setattr(R, "NOISE_PATH", noise)
+    monkeypatch.setattr(S, "read_current", lambda: _observing())
+    monkeypatch.setattr(S, "read_events", lambda **k: [])
+    monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
+    monkeypatch.setattr(S, "write_eval_last", lambda payload: None)
+    monkeypatch.setattr(S, "request_rollback", lambda **kw: captured.update(kw) or kw)
+    _pin_ok(monkeypatch)
+    arms = iter([_arm(3, []), _arm(3, ["a", "b", "c"], doc_hit_rate=0.0, mrr_doc=0.0)])
+    monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(arms))
+    out = await R.execute(_Item())
+    assert out["regressed"] is True and captured["trigger"] == "regression"
+
+
+def test_measure_noise_drops_a_trial_the_daemon_did_not_answer(monkeypatch, tmp_path):
+    """A flake inside the floor would widen every tolerance by the flake."""
+    monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _FakePin())
+    monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "noise.json")
+    runs = iter([_arm(2, []), _arm(2, ["q1"], doc_hit_rate=0.3), _arm(2, [])])
+    monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(runs))
+    noise = R.measure_noise(3)
+    assert noise["metrics"]["doc_hit_rate"]["n"] == 2
+    assert noise["metrics"]["doc_hit_rate"]["stdev"] == 0.0
+    assert noise["dropped_trials"] == ["trial 1: q1"]

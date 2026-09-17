@@ -173,9 +173,45 @@ def _load_run(baselines: Path, label: str) -> dict | None:
         blob = json.loads(runs[-1].read_text())
         return {"overall": blob["summary"]["overall"],
                 "corpus_ok": blob.get("corpus_ok"),
-                "corpus": blob.get("corpus") or {}}
+                "corpus": blob.get("corpus") or {},
+                **_doc_coverage(blob.get("records") or [])}
     except (OSError, ValueError, KeyError):
         return None
+
+
+def _doc_coverage(records: list) -> dict:
+    """Which queries the document leg answered with NOTHING, and how many ran.
+
+    On 2026-09-17 05:34Z the pinned qmd daemon returned zero documents for
+    one query of twenty (`backlog-363`, no error recorded) while the fact leg
+    resolved it fine; the same code answered it with twenty documents four
+    hours later. One empty query is exactly -0.05 `doc_hit_rate`, and it drags
+    ndcg, mrr and recall with it — a 16σ "regression" that reverted a change
+    to a memory-maintenance script. A query the daemon did not answer is a
+    measurement that did not happen, not a score of zero. Records older than
+    `result_summary` report nothing here, so a stale baseline cannot refuse.
+    """
+    empty = [str(r.get("id") or r.get("query"))
+             for r in records
+             if isinstance(r.get("result_summary"), dict)
+             and r["result_summary"].get("n_docs") == 0
+             and not r.get("error")]
+    return {"n_records": len(records), "empty_doc_queries": empty}
+
+
+def unanswered_doc_queries(arm: dict) -> list[str]:
+    """The queries that make `arm` a non-measurement, or [] if it is one.
+
+    A strict subset of the questions coming back with no documents is the
+    daemon dropping requests. ALL of them coming back empty is the retriever
+    itself, which is the one shape a code change under test can produce, and
+    that stays a score (of zero, which `evaluate` will refuse).
+    """
+    empty = list(arm.get("empty_doc_queries") or [])
+    total = int(arm.get("n_records") or 0)
+    if empty and len(empty) < total:
+        return empty
+    return []
 
 
 @contextmanager
@@ -252,6 +288,7 @@ def measure_noise(trials: int = 5) -> dict:
     """
     import tempfile as _tf
     samples: dict[str, list[float]] = {}
+    dropped: list[str] = []
     work = Path(_tf.mkdtemp(prefix="automod-noise-pin-"))
     try:
         with PinnedCorpus(work) as pin:
@@ -261,11 +298,17 @@ def measure_noise(trials: int = 5) -> dict:
                 overall = (run or {}).get("overall")
                 if not overall:
                     continue
+                # A trial the daemon did not fully answer is not a sample of
+                # the eval's noise, exactly as `execute` refuses to score it.
+                unanswered = unanswered_doc_queries(run)
+                if unanswered:
+                    dropped.append(f"trial {i}: {', '.join(unanswered)}")
+                    continue
                 _accumulate(samples, overall)
             pin.discard()
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    return _summarise_noise(samples, trials)
+    return _summarise_noise(samples, trials, dropped=dropped)
 
 
 def _accumulate(samples: dict, overall: dict) -> None:
@@ -288,10 +331,11 @@ def queries_fingerprint() -> str:
         return ""
 
 
-def _summarise_noise(samples: dict, trials: int) -> dict:
+def _summarise_noise(samples: dict, trials: int, *, dropped: list[str] | None = None) -> dict:
     noise = {
         "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "trials": trials,
+        "dropped_trials": list(dropped or []),
         "queries_fingerprint": queries_fingerprint(),
         "pinned": True,
         "metrics": {
@@ -473,12 +517,20 @@ def _execute_blocking() -> dict[str, Any]:
             logger.error(msg)
             S.append_event({"event": "regression_skipped", "reason": msg})
             return _skipped(msg)
+        unanswered = unanswered_doc_queries(blob)
+        if unanswered:
+            msg = (f"{arm} arm got zero documents for {len(unanswered)} of "
+                   f"{blob.get('n_records')} queries ({', '.join(unanswered)}) — "
+                   "the pinned daemon did not answer, cannot evaluate")
+            logger.error(msg)
+            S.append_event({"event": "regression_skipped", "reason": msg})
+            return _skipped(msg)
 
-    # Provenance, not a gate. Under a pinned corpus every armed metric is
-    # deterministic, so the measured stdev is 0.0 and the tolerance falls back
-    # to the MIN_SIGMA floor either way — a floor taken against an older
-    # question set cannot make the comparison wrong, only its record
-    # misleading. Say so rather than silently carrying it.
+    # Provenance, not a gate. A floor taken against an older question set
+    # cannot make the comparison wrong, only its record misleading. Say so
+    # rather than silently carrying it. (The floor is no longer 0.0: since
+    # the wider document pool the reranked order of single queries moves
+    # between runs of identical code — see `measure_noise`.)
     stale_floor = (noise.get("queries_fingerprint") or "") != queries_fingerprint()
 
     regressed, reasons, detail = evaluate(current["overall"], baseline["overall"], noise)

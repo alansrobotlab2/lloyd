@@ -952,13 +952,17 @@ def count_kg_rows(db_path: str) -> int | None:
 
 
 def count_vault_files(root: str) -> int | None:
-    base = Path(root)
-    if not base.is_dir():
-        return None
-    try:
-        return sum(1 for p in base.rglob("*") if p.is_file())
-    except OSError:
-        return None
+    """Note files under the vault, counted the way the vault tripwire counts.
+
+    `.git/**` is excluded (`vaultwatch.SKIP_DIRS`): git packs loose objects by
+    the hundred, and a plain `rglob` read two such repacks as data loss —
+    2026-09-09 22:01 (#537) and 2026-09-17 08:59 (#1206, 6075 → 5667 with the
+    note count unchanged at 5622). `scripts/automod/promote.py` loads this
+    same module for the pre-promotion count, so the two sides of the
+    comparison share one definition.
+    """
+    snap = vaultwatch.measure(root)
+    return None if snap is None else snap.total
 
 
 def build_parser() -> argparse.ArgumentParser:

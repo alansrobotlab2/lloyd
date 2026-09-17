@@ -1948,7 +1948,7 @@ autonomous agent running half-reverted code.
 |---|---|---|
 | crash / won't boot | ~2 min | supervisord state + `/health` |
 | error-rate spike | ~15 min | `logs/server.err` by byte offset |
-| data damage | ~15 min | KG row count, vault file count |
+| data damage | ~15 min | KG row count, vault note count (`vaultwatch.measure`, `.git/**` excluded) |
 | behavioural regression | nightly | paired `eval/run_eval.py` |
 
 **Errors come from `server.err`, not `server.log`.** `server.py`'s

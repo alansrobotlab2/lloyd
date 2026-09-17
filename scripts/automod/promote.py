@@ -264,14 +264,33 @@ def count_kg_rows() -> int | None:
         return None
 
 
-def count_vault_files() -> int | None:
-    root = Path.home() / "obsidian"
+def count_vault_files(root: Path | None = None) -> int | None:
+    """The pre-promotion vault count the guardian will compare against.
+
+    Counted by the guardian's own `vaultwatch.measure`, loaded from the file,
+    so `.git/**` is excluded on both sides of the comparison. A private
+    `rglob` here counted git's loose objects, and a repack during the
+    observation window then read as a 6.7% loss of notes (2026-09-17, #1206).
+    """
+    root = root or (Path.home() / "obsidian")
     if not root.is_dir():
         return None
     try:
-        return sum(1 for p in root.rglob("*") if p.is_file())
-    except OSError:
+        snap = _guardian_vaultwatch().measure(str(root))
+    except Exception:
         return None
+    return None if snap is None else snap.total
+
+
+def _guardian_vaultwatch():
+    import importlib.util
+    path = LIVE_ROOT / "agent-services" / "guardian" / "vaultwatch.py"
+    spec_ = importlib.util.spec_from_file_location("_g_vaultwatch", path)
+    mod = importlib.util.module_from_spec(spec_)
+    # `@dataclass` resolves its postponed annotations through sys.modules.
+    sys.modules[spec_.name] = mod
+    spec_.loader.exec_module(mod)
+    return mod
 
 
 def _run(argv: list, timeout: float = 60.0) -> subprocess.CompletedProcess:
