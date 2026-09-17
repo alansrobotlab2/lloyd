@@ -27,6 +27,7 @@ Two things this pins that inspecting a module attribute would not:
 from __future__ import annotations
 
 import importlib
+import os
 import re
 import subprocess
 import sys
@@ -36,6 +37,7 @@ import pytest
 import yaml
 
 from app.routers import dashboard as dash
+from board_presence import VAULT_ROOT_ENV, board_files_or_stop
 from scripts.automod import backlog as B
 from scripts.automod import scorecard as SC
 
@@ -104,21 +106,31 @@ def _one_real_item(tmp_path: Path) -> Path:
     """A copy of a real board item, in a path the test owns.
 
     A copy, not the live file, because the readers are read-only here but the
-    board is somebody else's working tree. Falls back to a written fixture when
-    the board is absent, so the proof runs either way — a skipped proof is how
-    #1199's matcher found an unenforced rule.
+    board is somebody else's working tree.
+
+    There is deliberately no written-down fallback. A four-field fixture that I
+    authored would let clause 1's proof report "the reader parsed through the
+    C loader" while parsing bytes nobody on the board wrote — the exact
+    shape-mismatch failure the rest of this file exists to close. So when the
+    board yields no file with front matter, `board_files_or_stop` decides:
+    **fail** if the vault root is there (an emptied or moved board is the state
+    this test is supposed to notice), **skip** naming the path if the vault is
+    absent entirely, in which case clause 1 is stated as unpinned rather than
+    proven on an invented file.
     """
+    board_files_or_stop(what="per-reader loader proof")
     for path in _board_files():
         text = path.read_text(encoding="utf-8", errors="replace")
         if _fm_text(text).strip():
             out = tmp_path / "999999-loader-proof.md"
             out.write_text(text, encoding="utf-8")
             return out
-    out = tmp_path / "999999-loader-proof.md"
-    out.write_text("---\nname: loader proof\nstatus: up_next\npriority: high\n"
-                   "tags: [spawned-by-triage, blocker]\n---\n\n# loader proof\n\nbody\n",
-                   encoding="utf-8")
-    return out
+    pytest.fail(
+        f"{BOARD_DIR} has {len(_board_files())} files and not one of them has a "
+        f"parseable front-matter block, so there is no real byte to prove the "
+        f"loader on. Failing rather than writing my own fixture: a file I "
+        f"invented proves the reader can parse a file I invented."
+    )
 
 
 # ── clause 1: which loader produced the dict ─────────────────────────────
@@ -185,8 +197,23 @@ def test_the_pure_python_fallback_is_selected_when_libyaml_is_absent():
         "print(dash._YamlLoader.__name__, B._YamlLoader.__name__,"
         " SC._YamlLoader.__name__)\n"
     )
+    # Pin the automod state dir to the REAL one. The automod gate's tests rung
+    # runs pytest with `LLOYD_AUTOMOD_STATE` pointed at the round's scratch dir
+    # (`scripts/automod/gate.py:384`), which has no `promotions.jsonl` in it. This
+    # subprocess inherits that variable; `scripts.automod.state` resolves
+    # `LEDGER_PATH` from it at import, and `backlog` and `scorecard` hand it out as
+    # the default (`B.LEDGER_DEFAULT()`, `SC.compute(ledger=None)`). Left inherited,
+    # those two readers would resolve the ledger to a file that does not exist,
+    # `read_events` would return `[]`, `total` would be 0, and the "a real file was
+    # parsed, not a written fixture" assert below would fail for a reason that has
+    # nothing to do with the loader. `dashboard._automod` reads `S.LEDGER_PATH`
+    # fresh at each call (`app/routers/dashboard.py:721`), so pinning is exactly the
+    # path the endpoint takes: the subprocess then parses the same ledger the
+    # dashboard does.
+    env = {**os.environ, "LLOYD_AUTOMOD_STATE": str(
+        Path.home() / ".local" / "state" / "lloyd-automod")}
     proc = subprocess.run([sys.executable, "-c", code], cwd=str(Path.cwd()),
-                          capture_output=True, text=True, timeout=180)
+                          capture_output=True, text=True, timeout=180, env=env)
     assert proc.returncode == 0, f"fallback probe failed: {proc.stderr[-800:]}"
     got = proc.stdout.strip().split()[-3:]
     assert got == ["SafeLoader", "SafeLoader", "SafeLoader"], (
@@ -205,16 +232,18 @@ def test_both_loaders_agree_on_every_front_matter_on_the_board():
     would make the loop body run zero times and the test report a clean board.
     Baseline at triage (2026-09-16): 1,142 files, 1,140 front matters, 0
     mismatches.
+
+    Board presence is `board_files_or_stop`, not a `pytest.skip` when the glob
+    comes up empty — the flag's point. The skip was wrong because the board is
+    *this item's own tree*: with the vault root present and the board missing or
+    emptied, something has happened to the corpus the clause certifies, and
+    `skipped` is where that goes hidden. The helper fails on that state and
+    skips only when the vault root itself is absent (a machine with no vault).
+    `test_a_moved_or_emptied_board_fails_instead_of_skipping` pins all three
+    outcomes on synthetic directories.
     """
-    files = _board_files()
+    files = board_files_or_stop(what="loader-equivalence sweep")
     print(f"board dir: {BOARD_DIR}  files walked: {len(files)}")
-    assert BOARD_DIR.is_dir(), (
-        f"board directory {BOARD_DIR} is absent — this test cannot certify "
-        f"loader equivalence over an empty corpus")
-    assert files, (
-        f"{BOARD_DIR} exists but the *.md glob matched nothing, so the "
-        f"comparison below would pass on zero work. A broken glob is not a "
-        f"clean board.")
 
     mismatched: list[str] = []
     parsed = 0
@@ -289,10 +318,105 @@ def test_each_reader_returns_the_same_dict_under_either_loader(tmp_path):
         )
 
 
-def test_module_import_freshly_still_binds_the_loader(tmp_path):
-    """Reloading must not lose the loader binding (a module-level name the
-    readers close over at call time, not at import of the caller)."""
+def test_reload_does_not_lose_the_loader_binding():
+    """`importlib.reload` of each reader module still leaves `_YamlLoader` bound.
+
+    What this does **not** prove, stated here so nobody cites it for that: it
+    is not a fresh-interpreter import. `importlib.reload` re-executes the module
+    body in the *existing* namespace, so a name that survived the first import
+    would still be there even if the `try: from yaml import CSafeLoader` block
+    were deleted from the source — the old object is simply rebound to the same
+    slot. A previous cut of this test monkeypatched a fake `yaml` into
+    `sys.modules` before the reload and read the result as "a fresh import still
+    binds the loader"; that read was wrong for the same reason.
+
+    The load-bearing proof of a real fresh import is
+    `test_the_pure_python_fallback_is_selected_when_libyaml_is_absent`, which
+    runs `subprocess.run([sys.executable, "-c", ...])` in a genuinely new
+    interpreter and asserts which class each module bound. This test is the
+    cheaper reload-durability check, and that is the whole of its claim.
+    """
     for module in (dash, SC, B):
         reloaded = importlib.reload(module)
-        assert hasattr(reloaded, "_YamlLoader"), f"{module.__name__} lost _YamlLoader"
+        assert hasattr(reloaded, "_YamlLoader"), (
+            f"{module.__name__} lost its `_YamlLoader` binding across "
+            f"importlib.reload. Reload re-executes the module body, so this "
+            f"fires only when the import block itself now raises — which on a "
+            f"box with libyaml present means the block is broken, not that a "
+            f"fallback was taken.")
     dash._cache.clear()
+
+
+# ── the presence helper itself ────────────────────────────────────────────
+#
+# Clause 2's denominator guard and its skip policy both live in
+# `tests/board_presence.py`. A guard nobody has tested is a guard that reports
+# what you expected, so each of the helper's three outcomes is driven here
+# against synthetic directories — including the one that must NOT be a skip.
+
+def test_a_moved_or_emptied_board_fails_instead_of_skipping(tmp_path, monkeypatch):
+    """The flagged state, pinned instead of left to the next reader.
+
+    Two shapes where a skip would hide the thing this item is about: the board
+    directory is gone while the vault root is there, and the board exists but
+    holds no item file. Both are a broken *corpus*, which is what a denominator
+    guard exists to report. The third shape — no vault directory at all — is a
+    property of the machine, and only that one skips.
+    """
+    # `pytest.raises(pytest.fail.Exception)`, not `AssertionError`: the helper
+    # stops the run with `pytest.fail`, which raises `Failed` — a sibling of
+    # `Skipped`, not of `AssertionError`. Asserting the wrong exception type here
+    # would fail this test while the helper was behaving correctly, which is the
+    # same class of mistake the helper exists to prevent.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv(VAULT_ROOT_ENV, str(vault))
+    absent_board = vault / "backlog"  # deliberately never created
+
+    with pytest.raises(pytest.fail.Exception) as moved:
+        board_files_or_stop(what="moved-board proof", board=absent_board)
+    assert "is the board this item measures" in str(moved.value), str(moved.value)
+    assert "moved-board proof" in str(moved.value), str(moved.value)
+
+    emptied = vault / "backlog"
+    emptied.mkdir()
+    with pytest.raises(pytest.fail.Exception) as empty:
+        board_files_or_stop(what="emptied-board proof", board=emptied)
+    assert "exactly the state the emptied-board proof exists to notice" \
+        in str(empty.value), str(empty.value)
+
+    monkeypatch.setenv(VAULT_ROOT_ENV, str(tmp_path / "no-such-vault"))
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        board_files_or_stop(what="no-vault proof", board=absent_board)
+    # The phrase the helper must carry: a skip is not a pass of the clause. It
+    # is the sentence that makes `skipped` honest in the report.
+    assert "NOT pinned by this run" in str(skipped.value), str(skipped.value)
+
+
+def test_the_helper_counts_the_real_board_and_the_numeric_subset(tmp_path, monkeypatch):
+    """`numeric_names` is the difference between 1,143 and 1,142, so it is tested.
+
+    The cold-cycle test counts only `NN-*.md`; the equivalence sweep counts every
+    `.md`, because a README with front matter is a front matter the readers will
+    parse. Both are ~1,14x, so a swapped flag would not show up as a wrong order
+    of magnitude — it would show up as this item's own denominator drifting by one
+    and nobody knowing which one was the contract.
+    """
+    vault = tmp_path / "vault"
+    board = vault / "backlog"
+    board.mkdir(parents=True)
+    (board / "11.md").write_text("---\nstatus: done\n---\n\nbody\n", encoding="utf-8")
+    (board / "999.md").write_text("---\nstatus: done\n---\n\nbody\n", encoding="utf-8")
+    (board / "1204-dashboard.md").write_text("---\nstatus: done\n---\n\nbody\n", encoding="utf-8")
+    (board / "README.md").write_text("---\ntype: note\n---\n\nnotes\n", encoding="utf-8")
+    monkeypatch.setenv(VAULT_ROOT_ENV, str(vault))
+
+    all_files = board_files_or_stop(what="counting proof", board=board)
+    numbered = board_files_or_stop(what="counting proof", board=board,
+                                  numeric_names=True)
+    assert [p.name for p in all_files] == [
+        "11.md", "1204-dashboard.md", "999.md", "README.md"]
+    assert [p.name for p in numbered] == ["11.md", "1204-dashboard.md", "999.md"], (
+        "numeric_names is the first-token-is-a-digit rule: `11.md` is the 11th "
+        "item and `999.md` the 999th (the board passes 999, and the old "
+        "three-digit regex would have dropped it). README.md is not an item.")

@@ -33,9 +33,8 @@ from pathlib import Path
 import pytest
 
 from app.routers import dashboard as dash
+from board_presence import board_files_or_stop, timed_ledger_or_stop
 from scripts.automod import backlog as B
-
-BOARD_DIR = Path.home() / "obsidian" / "backlog"
 
 #: Triage baseline (2026-09-16): 15.22 s cold over 1,142 files. The loader swap
 #: alone measured 5.00 s, which is why the bound is 6.0 and not 1.0 — see the
@@ -59,16 +58,18 @@ async def _cold_cycle() -> dict:
     return json.loads(response.body.decode("utf-8"))
 
 
-@pytest.mark.skipif(not BOARD_DIR.is_dir(),
-                    reason=f"no board at {BOARD_DIR}: this test measures the real "
-                           f"board and a stand-in would measure nothing")
-async def test_one_cold_dashboard_cycle_beats_the_budget():
-    files = [p for p in BOARD_DIR.glob("*.md") if p.name[:1].isdigit()]
-    print(f"board {BOARD_DIR}: {len(files)} item files")
-    assert files, (
-        f"{BOARD_DIR} exists but matched no NN-*.md item files, so the cycle "
-        f"below would walk nothing and time nothing. Zero files is not a fast "
-        f"board, it is no board."
+async def test_one_cold_dashboard_cycle_beats_the_budget(monkeypatch):
+    # No `skipif` on the board directory: with one, a vault root that exists and
+    # a board that has been emptied or moved skips silently and the budget reads
+    # as not-run. `board_files_or_stop` fails on that state and skips only when
+    # the whole vault is absent. See tests/board_presence.py.
+    files = board_files_or_stop(what="cold-cycle budget", numeric_names=True)
+    ledger = timed_ledger_or_stop(monkeypatch, what="cold-cycle budget")
+    print(f"board: {len(files)} item files; ledger {ledger}: "
+          f"{ledger.stat().st_size} bytes")
+    assert ledger.stat().st_size > 0, (
+        f"{ledger} is empty, so this cycle decoded no ledger at all and the "
+        f"budget does not constrain the ledger re-decode path"
     )
 
     started = time.perf_counter()
@@ -104,21 +105,19 @@ async def test_one_cold_dashboard_cycle_beats_the_budget():
     )
 
 
-@pytest.mark.skipif(not BOARD_DIR.is_dir(),
-                    reason=f"no board at {BOARD_DIR}")
-async def test_the_warm_cycle_is_not_what_the_cold_test_measures():
+async def test_the_warm_cycle_is_not_what_the_cold_test_measures(monkeypatch):
     """The cold bound is only meaningful against a warm baseline ~100x cheaper.
 
     If warm and cold ever read the same, the cache is dead and the cold test
     above has been timing the cache-miss path forever without saying so.
     """
-    files = [p for p in BOARD_DIR.glob("*.md") if p.name[:1].isdigit()]
-    assert files, f"{BOARD_DIR} matched no item files"
+    files = board_files_or_stop(what="warm-vs-cold comparison", numeric_names=True)
+    timed_ledger_or_stop(monkeypatch, what="warm-vs-cold comparison")
     await _cold_cycle()
     started = time.perf_counter()
     await _cold_cycle()
     warm = time.perf_counter() - started
-    print(f"warm cycle: {warm:.3f}s")
+    print(f"warm cycle: {warm:.3f}s over the same {len(files)} item files")
     assert warm < 1.0, (
         f"the second cycle, with every section cache warm, took {warm:.2f}s. A "
         f"warm cycle costs milliseconds of dict lookups; anything near a second "
