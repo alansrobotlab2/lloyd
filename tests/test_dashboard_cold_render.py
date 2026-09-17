@@ -28,11 +28,11 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 
 import pytest
 
 from app.routers import dashboard as dash
+import board_presence
 from board_presence import board_files_or_stop, timed_ledger_or_stop
 from scripts.automod import backlog as B
 
@@ -107,34 +107,46 @@ async def test_one_cold_dashboard_cycle_beats_the_budget(monkeypatch):
 
 
 def test_a_repointed_ledger_says_so(tmp_path, monkeypatch):
-    """The `repointed` half of `timed_ledger_or_stop`, exercised, not just written.
+    """The `repointed` half of `timed_ledger_or_stop`, exercised on every box.
 
-    Added because the advisory ("the test proves only the read shape, not the
-    measured cost") is only answerable if the loud path can be shown to be loud.
-    On a box whose state dir HAS a ledger the helper returns `repointed=False`
-    and the reason string is never read, so a field that exists for the
-    empty-state-dir case would ship unexercised. Here the configured path is
-    pointed at a file that does not exist, which is that case.
+    Added because the round-SM_20260917_064456 advisory ("the ledger test repoints
+    `S.LEDGER_PATH` at the live 6.3 MB file, so the test proves only the read
+    shape, not the measured cost") is only answerable if the loud path is shown to
+    be loud. On a box whose state dir already holds a ledger the helper returns
+    `repointed=False` and the reason string is never read.
+
+    Both sides are exercised here rather than hoped for: the substituted ledger is
+    a file this test writes, and the configured path is a file that does not
+    exist. No `if this box has a ledger` guard — a conditional green exit is as
+    dishonest as a skip, and the round's whole block was about tests that could
+    report a thing they did not do.
     """
     from scripts.automod import state as S
 
-    live = Path.home() / ".local" / "state" / "lloyd-automod" / "promotions.jsonl"
-    if not (live.is_file() and live.stat().st_size > 0):
-        # Nothing to repoint TO, so the branch is unreachable on this box. The two
-        # tests below still fail loudly if their own ledger is unreadable; this one
-        # is about the message a caller prints, not about a measurement.
-        print(f"no live ledger at {live}; repoint branch unreachable here")
-        return
-    monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "no-such-ledger.jsonl")
+    configured = tmp_path / "state-dir" / "promotions.jsonl"      # absent
+    stand_in = tmp_path / "promotions.jsonl"                      # the "live" one
+    stand_in.write_text(json.dumps({"event": "land", "ok": True}) + "\n",
+                        encoding="utf-8")
+    monkeypatch.setattr(S, "LEDGER_PATH", configured)
+    monkeypatch.setattr(board_presence, "live_ledger", lambda: stand_in)
+
     src = timed_ledger_or_stop(monkeypatch, what="repoint-branch check")
     assert src.repointed, (
-        f"the helper returned repointed=False while its configured path "
-        f"({tmp_path / 'no-such-ledger.jsonl'}) does not exist and {live} does — "
-        f"it substituted a ledger and reported it as the configured one")
-    assert src.path == live, f"expected the live ledger, got {src.path}"
+        f"returned repointed=False while the configured path ({configured}) does "
+        f"not exist and the live one ({stand_in}) does: the helper substituted a "
+        f"ledger and reported it as the configured one")
+    assert src.path == stand_in, f"expected the stand-in live ledger, got {src.path}"
     assert "REPOINTED" in src.why and "LLOYD_AUTOMOD_STATE" in src.why, (
-        f"the reason a caller prints must name the substitution: {src.why!r}")
-    print(f"repoint branch: {src.why[:110]}…")
+        f"the reason a caller prints must name the substitution it made: "
+        f"{src.why!r}")
+
+    # And the other arm, same box: a configured ledger that exists is used as-is
+    # and must NOT be reported as a substitution.
+    monkeypatch.setattr(S, "LEDGER_PATH", stand_in)
+    same = timed_ledger_or_stop(monkeypatch, what="non-repoint arm")
+    assert not same.repointed and same.path == stand_in, (
+        f"the helper called a configured ledger a substitution: {same}")
+    print(f"repoint arm: {src.why[:100]}… | non-repoint arm: {same.why}")
 
 
 async def test_the_warm_cycle_is_an_order_of_magnitude_cheaper_than_cold(monkeypatch):

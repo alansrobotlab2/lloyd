@@ -126,6 +126,19 @@ def board_files_or_stop(
     )
 
 
+def live_ledger() -> Path:
+    """The real promotions ledger, behind a function rather than inlined.
+
+    A seam, not decoration: `timed_ledger_or_stop`'s repoint branch is about a
+    ledger living at a *fixed home path*, so without one the only way to exercise
+    that branch was to hope this box had a ledger — which turns the test that
+    checks the loud path into a test with a conditional green exit. With it,
+    `test_a_repointed_ledger_says_so` supplies a ledger of its own and the branch
+    runs on every box.
+    """
+    return Path.home() / ".local" / "state" / "lloyd-automod" / "promotions.jsonl"
+
+
 class LedgerSource(NamedTuple):
     """What `timed_ledger_or_stop` settled on, so no caller can time a corpus it
     did not choose. `repointed` answers the review question directly: the ledger
@@ -167,7 +180,7 @@ def timed_ledger_or_stop(monkeypatch, *, what: str) -> LedgerSource:
     """
     from scripts.automod import state as S
 
-    live = Path.home() / ".local" / "state" / "lloyd-automod" / "promotions.jsonl"
+    live = live_ledger()
     current = S.LEDGER_PATH
     if current.is_file() and current.stat().st_size > 0:
         return LedgerSource(current, False, f"the configured state dir ({current})")
