@@ -105,10 +105,20 @@ async def test_one_cold_dashboard_cycle_beats_the_budget(monkeypatch):
 
 
 async def test_the_warm_cycle_is_not_what_the_cold_test_measures(monkeypatch):
-    """The cold bound is only meaningful against a warm baseline ~100x cheaper.
+    """The cold bound is only meaningful against a much cheaper warm baseline.
 
-    If warm and cold ever read the same, the cache is dead and the cold test
-    above has been timing the cache-miss path forever without saying so.
+    Measured on this branch at the 1,142-file board: cold 1.69 s, warm 0.073 s —
+    a 23x ratio. The assertion below asks for 10x, which is the margin that says
+    the caches are doing their job; #1204 section 5 measured the *old* warm path
+    (a 2 s poll against `_VAULT_SCAN_TTL_S = 10.0`) and got every fifth request
+    paying a ~2 s walk, i.e. a warm cycle that was 1x, not 10x, the cold one.
+
+    The 10x here is not a direct restatement of that 2 s/10 s pairing — it cannot
+    be, because TTL-vs-poll is a schedule property and this is a wall-clock
+    measurement. What it does pin is the failure that pairing produced: a section
+    recomputing on a poll whose TTL has not expired. If warm and cold ever read
+    the same, the cache is dead and the cold test above has been timing the
+    cache-miss path forever without saying so.
     """
     files = board_files_or_stop(what="warm-vs-cold comparison", numeric_names=True)
     timed_ledger_or_stop(monkeypatch, what="warm-vs-cold comparison")
