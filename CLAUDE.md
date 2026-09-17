@@ -1269,6 +1269,28 @@ work belongs in the `~/lloyd-sandbox` clone (remotes: `origin` = GitHub,
 exception — it cuts worktrees from live `main` and lands offline, because a PR
 step in an auto-landing loop is either ceremony or a contradiction.
 
+**A hand merge onto live `main` is followed by a restart, and is never
+refused** (Alan, 2026-09-17, #1218's second clause). `git merge --ff-only`
+moves the tree, not the process: the backend and the aggregator keep serving
+the commit they booted on until something restarts them. On 2026-09-17 a hand
+fast-forward at 17:49Z left `/health.commit` at `88a3d89e` for 80 minutes while
+`main` carried the fix for the landing deadlock the loop was then sitting in,
+and #1218 was filed against a bug that was already fixed on disk. The rule:
+
+- One branch, squashed to ONE commit, fast-forwarded (`fetch` +
+  `merge --ff-only`, see the memory note on `pull.rebase`).
+- If the merge touches anything the backend or the aggregator imports, follow
+  it with `round restart` (`--only lloyd-backend` when `agent_mcp/` is
+  untouched) — or let the next landing's restart pick it up, and SAY which.
+  What runs fresh per invocation needs neither: `scripts/automod/gate.py`,
+  `promote.py`, `round.py`, the test suite, docs.
+- Afterwards `/health.commit` must equal `git rev-parse HEAD` (or differ only
+  by docs). That equality is the check; a merge that "should be live" is not.
+- It is a rule for people and for Claude Code, not a refusal in code: every
+  loop fix on 2026-09-17 reached production as a hand merge, several of them
+  to unblock the landing path itself, and a guard that refused merges outside
+  that path would have refused its own repair.
+
 
 ## Architecture
 
