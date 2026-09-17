@@ -530,6 +530,32 @@ def vault_commits_for(round_id: str) -> list[str]:
 # exactly like one that landed. It also spent the item. `land_failed` is the
 # verdict event for that case; `external` says the cause was the tree, not the
 # diff, and the item keeps its attempt.
+def squash_enabled() -> bool:
+    """`automod.landing.squash`, default on. Off: every commit of the round's
+    branch is fast-forwarded onto `main`, as before 2026-09-17."""
+    return bool(S.landing_cfg(LIVE_ROOT).get("squash", True))
+
+
+def squash_message(round_id: str, title: str, worktree: Path, base: str) -> str:
+    """The one commit's message: the round's title, then what it was made of.
+
+    The child subjects are kept in the body because they are the only
+    narrative of how the round got there once the branch is gone; the shas
+    are reachable under `refs/automod/rounds/<round>`.
+    """
+    log = W.git(worktree, "log", "--reverse", "--format=%h %s", f"{base}..HEAD")
+    children = [ln for ln in (log.stdout or "").splitlines() if ln.strip()]
+    trailers = W.git(worktree, "log", "--format=%(trailers:key=Co-Authored-By,unfold)", f"{base}..HEAD")
+    coauthors = list(dict.fromkeys(ln.strip() for ln in (trailers.stdout or "").splitlines() if ln.strip()))
+    subject = " ".join((title or "").split())[:140] or (children[-1].split(" ", 1)[-1] if children else round_id)
+    body = [subject, "", f"Round {round_id}, squashed at landing from {len(children)} commit(s)",
+            f"(kept at refs/automod/rounds/{round_id}):", ""]
+    body += [f"  {c}" for c in children]
+    if coauthors:
+        body += [""] + coauthors
+    return "\n".join(body) + "\n"
+
+
 def _land_failed(round_id: str, why: str, *, external: bool, **extra) -> None:
     S.append_event({"event": "land_failed", "round_id": round_id, "ok": False,
                     "external_blocker": bool(external), "detail": why[:500], **extra})
@@ -831,6 +857,23 @@ def promote(round_id: str, worktree: Path, base: str, *,
                             "gate": gate_report.get("rungs")})
             result.update({"commit": head, "parent": live_head, "changed_paths": changed})
             S.write_verified(S.CURRENT_PATH, current)
+
+        # ── one commit per landing ─────────────────────────────────────
+        # After the last gate, before the fast-forward, and only ever to a
+        # commit whose tree is the gated one (`W.squash_onto` proves it). The
+        # record is rewritten BEFORE the merge: `current.json` is what the
+        # guardian rolls back by, and `/health.commit` is checked against it.
+        if squash_enabled():
+            squashed, note = W.squash_onto(
+                Path(worktree), live_head,
+                squash_message(round_id, title, Path(worktree), live_head),
+                keep_ref=f"refs/automod/rounds/{round_id}")
+            if squashed:
+                result["squashed_from"] = current["squashed_from"] = head
+                head = squashed
+                current["commit"] = result["commit"] = head
+                S.write_verified(S.CURRENT_PATH, current)
+            result["squash"] = note
 
         # ── land ───────────────────────────────────────────────────────
         S.set_pause(RESTART_LEASE)   # the guardian must not read our own restart as a crash

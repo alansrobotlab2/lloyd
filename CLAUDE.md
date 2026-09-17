@@ -1078,6 +1078,36 @@ Three things that cost #1199 and #1204 the night of 2026-09-17, fixed with it:
   `_external_budget_left` caps a `land_failed` on the item's external landing
   failures instead; a red tree is still capped on attempts.
 
+### One commit on main per landing
+
+Until 2026-09-17 the promoter fast-forwarded a round's whole working history
+onto `main` — #1204 put eight commits there, most of them `test(#1204): …`
+fix-ups answering a review — and hand work from `~/lloyd-sandbox` arrived the
+same way. Alan's rule: work on a branch, squash when it is promoted.
+
+- **The loop** (`automod.landing.squash`, default on): `promote` calls
+  `W.squash_onto` after the LAST gate and before `merge --ff-only`. It is
+  `reset --soft <live HEAD>` plus one commit, and it is only kept when the new
+  commit's tree equals the gated HEAD's — otherwise the branch is reset back
+  and the round lands as it was gated. What was tested is what lands, byte
+  for byte; only its history differs. A one-commit round is left alone, a
+  branch not on top of live is left for the fast-forward to refuse, and
+  uncommitted edits in the worktree stop it (a soft reset would sweep them in).
+- **The record is rewritten before the merge.** `current.json`'s `commit` is
+  what the guardian rolls back by and what `/health.commit` is verified
+  against, so it must name the squashed sha; `squashed_from` carries the
+  gated one. The review's ledger reuse is keyed on patch-id, which a squash
+  does not change.
+- **The working history is kept** at `refs/automod/rounds/<round>` — outside
+  `refs/heads`, so it shows in no branch list and gc never takes it — and the
+  child subjects ride in the squashed commit's body, with the round id and
+  deduplicated `Co-Authored-By` trailers. The subject is the round's title.
+- **Hand work**: one branch per change in the sandbox, squashed to one commit
+  before the `merge --ff-only` command is handed over.
+
+`tests/test_landing_squash.py` pins it, including a squash sabotaged into a
+different tree restoring the branch.
+
 ### The sweep: every open item read once, retired or ranked
 
 On 2026-09-15 the board held 560 open items and the loop was shaped so that

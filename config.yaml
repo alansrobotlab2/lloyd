@@ -809,6 +809,12 @@ automod:
     # that day; before it these keys were read by nothing.
     idle_max_wait_s: 900
     idle_hard_max_wait_s: 4500
+    # One commit on main per landing (Alan, 2026-09-17). The promoter squashes
+    # the round's branch after the last gate and before the fast-forward, to
+    # a commit whose tree is proved identical to the gated one; the working
+    # history stays under refs/automod/rounds/<round>. false: every commit
+    # of the branch lands, as before.
+    squash: true
     idle_quiet_polls: 3
     drain_ttl_s: 180
     liveness_window_s: 120

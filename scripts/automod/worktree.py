@@ -83,6 +83,52 @@ def head(worktree: Path) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def squash_onto(worktree: Path, base: str, message: str, *,
+                keep_ref: str = "") -> tuple[str | None, str]:
+    """Collapse `base..HEAD` of the worktree's branch into ONE commit on `base`.
+
+    `(new_sha, detail)`; `new_sha` is None when nothing was changed, and the
+    branch is then exactly as it was. The promoter calls this after the last
+    gate and before the fast-forward, so `main` gets one commit per landing
+    instead of the round's working history (#1204 put eight on it). Three
+    things make that safe to do after the gate rather than before it:
+
+    - **The tree is proved identical.** The new commit's tree is compared with
+      the gated HEAD's; any difference resets the branch back and returns None.
+      What was tested is what lands, byte for byte — only its history differs.
+    - **Only a linear branch on top of `base`.** Anything else could not have
+      fast-forwarded either, and is left for that refusal to report.
+    - **The working history is kept**, under `keep_ref` (a ref outside
+      `refs/heads`, so it never shows in a branch list and gc never takes it).
+
+    A single-commit branch is left alone: there is nothing to squash, and
+    rewriting it would change a sha the gate recorded for no gain.
+    """
+    old = head(worktree)
+    if not old:
+        return None, "no HEAD"
+    if git(worktree, "merge-base", "--is-ancestor", base, old).returncode != 0:
+        return None, f"{base[:8]} is not an ancestor of the branch"
+    count = git(worktree, "rev-list", "--count", f"{base}..{old}")
+    if count.returncode != 0 or int(count.stdout.strip() or 0) < 2:
+        return None, "one commit or none: nothing to squash"
+    if git(worktree, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+        return None, "worktree has uncommitted changes"
+    old_tree = git(worktree, "rev-parse", f"{old}^{{tree}}").stdout.strip()
+    if git(worktree, "reset", "--soft", base).returncode != 0:
+        return None, "reset --soft failed"
+    commit = git(worktree, "commit", "-q", "--no-verify", "-m", message)
+    new = head(worktree)
+    new_tree = git(worktree, "rev-parse", "HEAD^{tree}").stdout.strip() if new else ""
+    if commit.returncode != 0 or not new or new == base or new_tree != old_tree:
+        git(worktree, "reset", "--hard", old)
+        return None, (f"squash did not reproduce the gated tree "
+                      f"({(commit.stderr or '').strip()[:160]}); branch restored")
+    if keep_ref:
+        git(worktree, "update-ref", keep_ref, old)
+    return new, f"squashed {count.stdout.strip()} commits ({old[:8]} → {new[:8]}), same tree"
+
+
 def is_clean(repo: Path) -> bool:
     r = git(repo, "status", "--porcelain")
     return r.returncode == 0 and not r.stdout.strip()
