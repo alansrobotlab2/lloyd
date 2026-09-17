@@ -1087,7 +1087,7 @@ async def _run_and_record(item, candidate, triage, budget, started,
         name=candidate.name, body=candidate.body[:12_000],
         # The budget the model actually has, so the pacing block is about
         # this turn rather than about a number nobody passed in.
-        max_turns=DEFAULT_MAX_TURNS,
+        max_turns=budget,
         triaged_ago=_age_phrase(triage.get("ts")),
         surface=triage.get("surface") or "code",
         check=triage.get("check") or "(none recorded)",

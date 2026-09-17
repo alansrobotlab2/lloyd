@@ -175,7 +175,8 @@ def test_a_user_turn_keeps_the_old_ceiling():
 
 
 def test_the_worker_ceiling_still_bounds():
-    assert _turn_budget({"max_turns": 9_999}, platform="worker") == 200
+    """The config value: 300 since 2026-09-17, when autocode went to 250."""
+    assert _turn_budget({"max_turns": 9_999}, platform="worker") == 300
 
 
 def test_no_request_gets_the_default_on_every_platform():

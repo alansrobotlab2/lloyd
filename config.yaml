@@ -11,7 +11,8 @@ agent:
   # 150, was clamped to 120 with nothing logged anywhere, and died at the
   # cap before it could re-gate a change it had already fixed. Applies to
   # `sessions_io.NON_USER_PLATFORMS` (autonomy, worker) only.
-  max_turns_ceiling_worker: 200
+  # 200 -> 300 (2026-09-17) with autocode's max_turns 150 -> 250: see there.
+  max_turns_ceiling_worker: 300
   permission_mode: bypassPermissions
 # Authoritative switch for the secondary LLM slot (:8091, Qwen3.6-35B-A3B
 # UD-Q3_K_XL on GPU 2's RTX 3090). server.py reconciles the supervisord process
@@ -1188,7 +1189,15 @@ workers:
       # (workers/sources/autocode.py DEFAULT_MAX_TURNS): a round called
       # automod_land at 91/100, #278 died at 101 with a gated change
       # unlanded, and the review rung now adds a fix-and-regate cycle.
-      max_turns: 150
+      # 150 -> 250 (2026-09-17): iterations, not the clock, were what ended
+      # rounds. 26 of 176 finished turns in the week died at max_turns, and
+      # #1210 spent all 151 in 23 minutes of steady work (160 small tool
+      # calls, ~9 s each, 19 edits, 23 pytest runs) with 37 minutes of its
+      # 3600 s left and no gate run — the prompt's own pacing asks for the
+      # first gate "by minute 30". `max_duration_seconds` is the bound that
+      # means something; this one now sits past it for a turn of small steps.
+      # Under agent.max_turns_ceiling_worker (300), or it is clamped.
+      max_turns: 250
       # On: this source rewrites production. See `autotriage.inner_voice`.
       # OFF for unattended turns since 2026-09-12 (plan: senses-not-supervision,
       # cut 1). Measured effect on rounds was negative: #874 abandoned at
