@@ -44,9 +44,18 @@ FRONTEND = Path(__file__).resolve().parent.parent / "web" / "src" / "components"
 STALE = ("300+", "~2 s on the live board")
 
 # A claim about *quantity of the thing the dashboard walks*, stated with a
-# unit; or any stated duration. `\d+\+? +markdown|files|items|rows|bytes` and
-# `~?\d+(\.\d+)? (s|ms|seconds)`.
-QUANTITY = re.compile(r"\d[\d,]*\+?\s+(markdown|files|items|rows|front matters|bytes)", re.I)
+# unit; or any stated duration. `~?\d+(\.\d+)? (s|ms|seconds)` for the second
+# half. The first half allows up to two modifier words between the number and
+# its unit, which is not generosity — it is the file's own idiom: the comment
+# this item was filed about reads "the backlog is 300+ markdown files", and a
+# variant phrasing the review rung named explicitly, "the board is 300+ item
+# files", has a bare singular noun (`item`) standing between the count and the
+# plural unit. A unit alternation glued to `\s+` matched neither, so a
+# reintroduced claim in exactly that phrasing passed the structural rule
+# unflagged. `test_the_quantity_rule_fires_on_…` now pins all three spellings.
+QUANTITY = re.compile(
+    r"\d[\d,]*\+?\s+(?:[a-z]+\.?[a-z]*\s+){0,2}"
+    r"(markdown|files|items|rows|front matters|bytes)", re.I)
 DURATION = re.compile(r"~?\s*\d[\d,]*(?:\.\d+)?\s*(s|ms|seconds)\b", re.I)
 SUBJECT = re.compile(r"\b(backlog|board|ledger)\b", re.I)
 
@@ -146,6 +155,73 @@ def test_every_board_or_ledger_quantity_claim_in_a_comment_carries_evidence(sour
         "the rule above asserted over an empty set. A denominator of zero is "
         "not a passing check."
     )
+
+
+def test_the_quantity_rule_fires_on_the_board_claims_it_was_filed_for():
+    """The rule must catch the phrasings this item was filed about.
+
+    Advisory finding on round `SM_20260917_055508`: "QUANTITY's unit alternation
+    cannot match the file's own idiom — 'the board is 300+ item files' does not
+    match because 'items' needs the plural and the words are reversed — so a
+    reintroduced bare board-size claim in that phrasing passes the structural
+    rule unflagged". A structural rule that never fires on the artifact that
+    motivated it is a rule asserted over an empty set, and
+    `test_every_board_or_ledger_quantity_claim_in_a_comment_carries_evidence`
+    cannot see that: it counts what it flags in the real file, so a rule that
+    matches nothing fails on `flagged >= 1` at worst and reports nothing at
+    better. These are synthetic comment blocks, run through the same
+    `_comment_blocks` → SUBJECT → QUANTITY/DURATION → EVIDENCE pipeline, so a
+    regression in the pattern goes red here and not on the next board claim.
+
+    Every block is a claim with no date and no re-measuring command, which is
+    the shape that must be flagged. The last block is the same claim WITH its
+    evidence, and must not be flagged — a rule that flags everything passes for
+    free and would have this file deleted.
+    """
+    must_flag = {
+        # The literal comment at app/routers/dashboard.py:56 that #1204 was
+        # filed to remove, as it was written across two comment lines.
+        "original 300+ markdown files": (
+            "# Sections that walk the vault are cached: the backlog is 300+ markdown\n"
+            "# files and its status counts do not change between 2-second polls."),
+        # The reviewer's counter-example verbatim: singular `item`, unit after it.
+        "300+ item files": (
+            "# Cached because the board is 300+ item files and the counts do not move."),
+        # The other half of clause 5: a stated latency with no evidence.
+        "original ~2 s": (
+            "# item and the ledger (~2 s on the live board), so it sits on the\n"
+            "# scorecard's minute rather than the vault scan's ten seconds."),
+        # A plural-unit spelling with the number detached by a comma-group.
+        "1,500 front matters": (
+            "# The ledger is cheap here; the board is 1,500 front matters."),
+    }
+    flagged = {}
+    for label, block in must_flag.items():
+        blocks = _comment_blocks(block)
+        assert len(blocks) == 1, f"{label}: block splitter returned {len(blocks)}"
+        text = blocks[0][1]
+        assert SUBJECT.search(text), f"{label}: no subject match — {text[:80]}"
+        quantity = bool(QUANTITY.search(text))
+        duration = bool(DURATION.search(text))
+        assert quantity or duration, (
+            f"{label}: neither QUANTITY nor DURATION matched the very claim this "
+            f"rule exists to catch — {text[:90]!r}. The pattern is the bug, not the "
+            f"comment.")
+        assert not EVIDENCE.search(text), (
+            f"{label}: the block carries evidence it should not, so the negative "
+            f"control below proves nothing about this one")
+        flagged[label] = True
+
+    # The negative control: the same claim, with its date and its command, must
+    # pass. This is the shape the fix's replacement comments actually use.
+    allowed = _comment_blocks(
+        "# Cached because the board is 1,500 item files — 1,141 measured\n"
+        "# 2026-09-17, re-measured by `pytest tests/test_dashboard_cold_render.py`."
+    )[0][1]
+    assert QUANTITY.search(allowed), "the allowed sample stopped being a quantity claim"
+    assert EVIDENCE.search(allowed), (
+        "the sample the rule must accept no longer carries evidence, so the rule "
+        "above would pass by flagging everything")
 
 
 def test_the_ttl_comments_name_both_numbers_they_reconcile(source: str):
