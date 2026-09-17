@@ -558,6 +558,38 @@ function KanbanColumn({
   );
 }
 
+/** How many days of finished items the board shows by default (item #1213).
+ *
+ * Alan's ruling, 2026-09-17. A legibility number, not a performance one: #1199
+ * already cut the payload from 9.2 MB to ~920 KB by moving bodies off the list
+ * route. What it could not touch was the row *count* — 679 of 1,152 rows
+ * (59 % of the payload) are `status: done`, and the Done column had no window
+ * at all, so every item ever closed was one scroll away from forever. Seven
+ * days keeps roughly 400 of those 679 visible; the window is where to look if
+ * Done still reads as crowded.
+ */
+const DONE_WINDOW_DAYS = 7;
+
+/** The `done_since` value for *this* request: today − DONE_WINDOW_DAYS.
+ *
+ * Called inside `loadData`, never hoisted to mount or module scope. The page
+ * refetches on a 15-second interval that is not gated on tab visibility, so a
+ * page left open across midnight would otherwise keep asking for the same
+ * seven days forever — the window would freeze on the day the tab was opened
+ * and quietly show an ageing set until someone reloaded.
+ *
+ * Local date parts, deliberately: `toISOString()` is UTC, and this box is
+ * UTC−7, so slicing it would name a day up to seven hours out of step with the
+ * calendar the person reading the board is looking at.
+ */
+function doneSinceDate(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - DONE_WINDOW_DAYS);
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${month}-${day}`;
+}
+
 // ── Main Page ───────────────────────────────────────────────────────────
 
 export default function BacklogPage() {
@@ -575,6 +607,16 @@ export default function BacklogPage() {
   // per keystroke, and one server search over a cached corpus is cheaper than
   // the 8.3 MB `toLowerCase().includes()` sweep this replaces.
   const [searchParam, setSearchParam] = useState("");
+  // The 'include all done' checkbox: ticked, the request drops `done_since` and
+  // the Done column goes back to every item ever closed. Default unticked —
+  // i.e. the window is on — because the window is the default Alan asked for and
+  // a first paint showing 679 done rows is the thing being fixed (item #1213).
+  const [includeAllDone, setIncludeAllDone] = useState(false);
+  // Whether this frame's request should carry `done_since`: the two omissions —
+  // the checkbox, and an active search — named once, so the request and the
+  // checkbox's disabled state cannot drift into disagreeing about what "windowed"
+  // means.
+  const windowActive = !includeAllDone && !searchParam;
   // The board list as `loadData` last saw it, so a refetch can tell which
   // board the active id *used* to name before the ids renumbered.
   const boardsRef = useRef<BacklogBoard[]>([]);
@@ -603,7 +645,29 @@ export default function BacklogPage() {
       setEditingTask(task);
       return;
     }
-    setActiveBoard(asNum);
+    // Not in the payload. Either it names a board, or it names an item the
+    // window did not load — and the second case is new with #1213: the agent's
+    // `mc_navigate(tab=backlog, focus_id=<id>)` used to resolve against every
+    // row that exists, so an item closed more than 7 days ago would now fall
+    // through and be read as a board id. Board first (an id that *is* a board
+    // must stay a board switch), then ask the detail route, which takes an id
+    // and knows nothing about windows. Only a failed fetch is a board id.
+    if (boardsRef.current.some((b) => b.id === asNum)) {
+      setActiveBoard(asNum);
+      return;
+    }
+    let stale = false;
+    api
+      .backlogTask(asNum)
+      .then((loaded) => {
+        if (!stale) setEditingTask(loaded);
+      })
+      .catch(() => {
+        if (!stale) setActiveBoard(asNum);
+      });
+    return () => {
+      stale = true;
+    };
   }, [pendingFocus, tasks]);
 
   // Apply agent-issued close_modal for the backlog tab.
@@ -621,11 +685,19 @@ export default function BacklogPage() {
     try {
       // The board the user is standing on, by name, taken before the refetch.
       const previousName = boardsRef.current.find((b) => b.id === activeBoard)?.name;
+      // `done_since` is computed here, in the request, for two reasons. It has
+      // to move with the calendar (see `doneSinceDate`), and the two omissions
+      // below are only expressible at the place the query is assembled: the
+      // checkbox drops the parameter outright, and a search drops it too, so a
+      // query for an item closed last month can still come back — the server
+      // matches `?q=` against whole bodies, and cutting the row by date first
+      // would make old done items permanently unfindable.
       const [boardsData, tasksData] = await Promise.all([
         api.backlogBoards(),
         api.backlogTasks({
           ...(activeBoard ? { board_id: String(activeBoard) } : {}),
           ...(searchParam ? { q: searchParam } : {}),
+          ...(windowActive ? { done_since: doneSinceDate() } : {}),
         }),
       ]);
       boardsRef.current = boardsData;
@@ -652,7 +724,7 @@ export default function BacklogPage() {
     } finally {
       setLoading(false);
     }
-  }, [activeBoard, searchParam]);
+  }, [activeBoard, searchParam, includeAllDone]);
 
   useEffect(() => {
     const timer = setTimeout(() => setSearchParam(searchQuery.trim()), 250);
@@ -787,6 +859,30 @@ export default function BacklogPage() {
             </button>
           ))}
         </div>
+
+        {/* The done window (item #1213). Unticked, the request carries
+            `done_since` = today − DONE_WINDOW_DAYS: 679 of 1,152 rows were
+            `status: done` at filing and the Done column held every item ever
+            closed. Ticking it drops the parameter, and since the server only
+            ever cuts done rows, ticking can only add rows back.
+
+            Disabled during a search rather than silently inert: a search
+            already omits `done_since` — see `loadData` — so that a query for an
+            item closed last month can still match, and a control that looks
+            live here while changing nothing is worse than no control. */}
+        <label
+          className="flex items-center gap-1.5 text-xs text-muted-foreground select-none cursor-pointer whitespace-nowrap"
+          title={`Done column shows the last ${DONE_WINDOW_DAYS} days. Ticking this asks the server for every closed item.`}
+        >
+          <input
+            type="checkbox"
+            checked={includeAllDone}
+            disabled={!!searchParam}
+            onChange={(e) => setIncludeAllDone(e.target.checked)}
+            className="w-3.5 h-3.5 accent-primary disabled:opacity-40"
+          />
+          include all done
+        </label>
 
         {/* Search input */}
         <div className="ml-auto relative">

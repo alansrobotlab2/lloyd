@@ -23,7 +23,7 @@ the list (`DESC_SNIPPET_CHARS`) with the full text behind
 import logging
 import re
 import threading
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
@@ -44,6 +44,12 @@ _VALID_STATUSES = frozenset(PIPELINE_STATUSES)
 _BACKLOG_PATTERN = re.compile(r"^(\d+)[-_].*\.md$")
 _BOARD_COLORS = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7"]
 _BOARD_ICONS = ["📋", "📋", "📋", "📋", "📋"]
+
+# The exact shape `?done_since=` accepts. A regex rather than a bare `strptime`
+# because `strptime("%Y-%m-%d")` also swallows `2026-9-1`, and the front end's
+# own value comes from `toISOString().slice(0, 10)`, which is always padded: the
+# contract is the padded form, and everything else is treated as absent.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # The list row's `description` is a preview, not the item. `TaskCard` renders it
 # through `line-clamp-2` — two visible lines — and bodies were 8,409,812 of the
@@ -395,12 +401,94 @@ def backlog_task_detail(task_id: int):
     return JSONResponse(row)
 
 
+# ── the done window (item #1213) ─────────────────────────────────────────────
+#
+# The Done column is the largest thing the board renders: 679 of 1,152 rows and
+# 59 % of the payload, measured live 2026-09-17. This is a legibility window, not
+# a performance lever — #1199 already fixed the cost of producing those rows (the
+# payload went 9.2 MB → 920 KB), and a 7-day window only removes about a quarter
+# of it. What it buys is a Done column a person can read.
+
+
+def _done_since_date(raw: str) -> date | None:
+    """The `?done_since=` cut-off, or None meaning *do not filter at all*.
+
+    A value that is not exactly `YYYY-MM-DD` is answered exactly as if the
+    parameter had been absent, and that is the whole of this parameter's error
+    handling. `BacklogPage.tsx` refetches every 15 seconds on an interval nothing
+    gates on tab visibility, so a 400 or a 500 aimed at one bad date would take
+    the board down for as long as the bad value sat in the URL. There is no
+    malformed request here, only an unfiltered one.
+    """
+    text = (raw or "").strip()
+    if not _ISO_DATE_RE.match(text):
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:                      # right shape, non-existent day: 2026-02-30
+        return None
+
+
+def _fm_date(value: object) -> datetime | None:
+    """A front-matter value as a datetime, or None when it is not one.
+
+    Parse-based rather than key-presence-based, and that distinction is the
+    clause. Of the 679 done items on the lloyd board, 23 carry the literal string
+    `None` under `completed:` and 218 have no `completed:` key at all (measured
+    2026-09-17: `grep -h '^completed:' ~/obsidian/backlog/*.md | sort | uniq -c`
+    → `23 completed: None`). `"completed" in fm` would call those first 23 dated
+    on a value that is a date in name only and hide them from the window;
+    anything that does not parse falls through to the next source instead.
+    """
+    if isinstance(value, datetime):         # `updated: 2026-09-16T04:00:00+00:00`
+        return value
+    if isinstance(value, date):             # bare `completed: 2026-09-10` → date, not datetime
+        return datetime(value.year, value.month, value.day)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.strip())
+        except ValueError:                  # the literal 'None', '', 'TBD', anything
+            return None
+    return None
+
+
+def _done_date(path: Path, fm: dict) -> datetime | None:
+    """When a done item was done: `completed:`, else `updated:`/`updated_at:`, else mtime.
+
+    The precedence is load-bearing at both ends. `completed:` first because a
+    reclosed item's `updated:` is its last touch, not its last completion; the
+    fallbacks next because 241 of 679 done rows (36 %) have no usable
+    `completed:`, and 107 of those were updated inside the last 7 days — without
+    a fallback the window would hide work closed this week.
+
+    The third rung reads `stat()` directly rather than the row's `updated_at`,
+    which is itself filled from `st_mtime` when `updated:` is absent: collapsed
+    into one string there is no way to tell "a writer said when" from "somebody
+    touched the file", and every activity-log append bumps the mtime. Here the
+    two are distinguishable, which is what lets the docstring above say which
+    one each row was judged by.
+    """
+    for key in ("completed", "updated", "updated_at"):
+        parsed = _fm_date(fm.get(key))
+        if parsed is not None:
+            return parsed
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:                         # vanished between the scan and here
+        return None
+
+
 @router.get("/api/backlog/tasks")
-def backlog_tasks(board_id: str = "", status: str = "", q: str = ""):
+def backlog_tasks(board_id: str = "", status: str = "", q: str = "",
+                  done_since: str = ""):
     if not _BACKLOG_DIR.exists():
         return JSONResponse([])
     board_map, _counts = _board_index()
     id_to_name = {v: k for k, v in board_map.items()}
+    # Resolved once per request, before the scan: the front end computes the
+    # date it asks for, so the server never has to guess a "today" of its own —
+    # and on a box whose local zone is not UTC those two todays disagree.
+    cutoff = _done_since_date(done_since)
     filter_board = ""
     if board_id:
         try:
@@ -420,6 +508,17 @@ def backlog_tasks(board_id: str = "", status: str = "", q: str = ""):
                 continue
             if status and fm.get("status") != status:
                 continue
+            if cutoff is not None and fm.get("status") == "done":
+                # Done rows only, and only when their date is *provably* before
+                # the cut-off. A row with no readable date anywhere is kept: it
+                # has not been shown to fall before anything, and a window that
+                # hides an item for a reason other than its age is the bug this
+                # exists to avoid, not a rounding error. Comparison is by
+                # calendar date in the value's own zone — the parameter carries
+                # no time and no zone, so a sub-day offset cannot move a row.
+                judged = _done_date(f, fm)
+                if judged is not None and judged.date() < cutoff:
+                    continue
             row = _row_from(f, fm, body, board_map)
             if needle:
                 haystack = "\n".join(
