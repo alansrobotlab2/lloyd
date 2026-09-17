@@ -814,3 +814,38 @@ def test_the_retest_judges_the_change_on_top_of_what_landed(tmp_path, monkeypatc
     assert not data.get("external_blocker"), "passes at the new base; the round broke it"
     assert data["new_failures"] == ["tests/test_v.py::test_v_is_one"]
     git(live, "worktree", "remove", "--force", str(wt))
+
+
+# ── vitest in the frontend rung (2026-09-17) ────────────────────────────────
+
+def test_frontend_rung_fails_when_the_unit_tests_fail(live_repo, tmp_path, monkeypatch):
+    """`web/` had no test runner until #1199 needed one: a frontend clause had
+    no node a gate could grade. A failing vitest run now fails the rung."""
+    g, _ = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/x.tsx"], head={}, base={})
+    monkeypatch.setattr(G, "_vitest_run", lambda web, timeout=600: (False, "1 failed | 5 passed"))
+    ok, reason, _ = g.rung_frontend()
+    assert not ok and "vitest failed" in reason and "1 failed" in reason
+    monkeypatch.setattr(G, "_vitest_run", lambda web, timeout=600: (True, ""))
+    ok, reason, data = g.rung_frontend()
+    assert ok and "vitest ok" in reason and data["vitest"] is True
+
+
+def test_a_box_without_vitest_installed_skips_and_says_so(live_repo, tmp_path, monkeypatch):
+    """`node_modules` is untracked. A tree that gained vitest in package.json
+    before anyone ran `npm install` must not fail every frontend round — and
+    must not read as tested either."""
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/x.tsx"], head={}, base={})
+    ok, reason, data = g.rung_frontend()
+    assert ok and "vitest SKIPPED (no web/vitest.config.ts)" in reason and data["vitest"] is None
+    (wt / "web" / "vitest.config.ts").write_text("export default {}\n")
+    ok, reason, data = g.rung_frontend()
+    assert ok and "vitest is not installed" in reason and "npm install" in data["vitest_skipped"]
+
+
+def test_the_web_tree_declares_the_runner_the_rung_looks_for():
+    import json as _json
+    web = Path(__file__).resolve().parent.parent / "web"
+    pkg = _json.loads((web / "package.json").read_text())
+    assert "vitest" in pkg["devDependencies"] and pkg["scripts"]["test"] == "vitest run"
+    assert (web / "vitest.config.ts").exists()
+    assert list((web / "src").rglob("*.test.ts")), "a runner with nothing to run passes nothing"

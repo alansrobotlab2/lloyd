@@ -131,6 +131,28 @@ def _vite_build(web: Path, out_dir: Path, timeout: float = 600) -> tuple[bool, s
     return r.returncode == 0, text[-900:]
 
 
+def _vitest_run(web: Path, timeout: float = 600) -> tuple[bool | None, str]:
+    """`(ok, tail)` for the frontend unit tests; `ok` is None when they cannot run.
+
+    Until 2026-09-17 `web/` had no test runner at all, so a frontend clause
+    had no node a gate could grade (#1199's mount cascade and polling
+    interval). `vitest.config.ts` plus the binary means the tests exist and
+    can run; either one missing is a skip that SAYS so, never a pass that
+    looks like one — `node_modules` is untracked, and a box where nobody has
+    run `npm install` since vitest was added must not fail every frontend
+    round for it.
+    """
+    web = web.resolve()
+    vitest = web / "node_modules" / ".bin" / "vitest"
+    if not (web / "vitest.config.ts").exists():
+        return None, "no web/vitest.config.ts"
+    if not vitest.exists():
+        return None, "vitest is not installed — run npm install in ~/lloyd/web"
+    r = _run([str(vitest), "run", "--reporter=dot"], cwd=web, env=_node_env(), timeout=timeout)
+    text = (r.stdout + r.stderr).strip()
+    return r.returncode == 0, text[-900:]
+
+
 def engine_reachable(root: Path, timeout: float = 4.0) -> tuple[bool, str]:
     """Is the default model's endpoint answering? Decides whether `skip_smoke` holds.
 
@@ -853,9 +875,14 @@ class Gate:
             shutil.rmtree(out_dir, ignore_errors=True)
         if not ok:
             return False, f"vite build failed: {tail}", {}
+        tested, vt_tail = _vitest_run(web)
+        if tested is False:
+            return False, f"vitest failed: {vt_tail}", {"changed_web": changed_web}
+        unit = "vitest ok" if tested else f"vitest SKIPPED ({vt_tail})"
         return True, (f"tsc: no new errors ({sum(head.values())} pre-existing); "
-                      f"vite build ok; {len(changed_web)} frontend file(s)"), {
-                          "changed_web": changed_web}
+                      f"vite build ok; {unit}; {len(changed_web)} frontend file(s)"), {
+                          "changed_web": changed_web, "vitest": tested,
+                          **({} if tested else {"vitest_skipped": vt_tail})}
 
     # Files whose edit changes what the model is *told*, rather than what the
     # code does. A behavioural regression here passes every other rung: the

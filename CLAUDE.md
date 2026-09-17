@@ -1502,6 +1502,23 @@ or moves on.
 
 `/state.tsc` shows the last run and what is pending.
 
+### Frontend unit tests: vitest, run by the gate
+
+`web/` had no test runner until 2026-09-17, so a frontend clause had no node
+a gate could grade — #1199's mount cascade and its unconditional 15 s poll
+were held open as a human clause for exactly that reason, and `package.json`
+is a build input the loop may not land. Alan's call: add one. `npm test` is
+`vitest run`; tests sit beside what they test as `src/**/*.test.ts(x)`;
+`web/vitest.config.ts` is deliberately not `vite.config.ts`, which reads TLS
+certs and loads the Monaco/Tailwind plugins at import. The gate's `frontend`
+rung runs it after `vite build` and a failure fails the rung. No config or no
+binary is a skip that says so (`vitest SKIPPED (…)`, `vitest: None` on the
+event), never a pass: `node_modules` is untracked, and a tree that gained the
+dependency before anyone ran `npm install` in `~/lloyd/web` must neither fail
+every frontend round nor read as tested. A triage clause on the `frontend`
+surface can now name a `web/src/**.test.ts` file the way a code clause names
+`tests/<file>.py`.
+
 ### The per-turn change ledger
 
 `~/lloyd` is production: a saved file is a deploy. The self-modification loop
