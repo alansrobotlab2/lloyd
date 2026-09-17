@@ -59,12 +59,22 @@ QUANTITY = re.compile(
 DURATION = re.compile(r"~?\s*\d[\d,]*(?:\.\d+)?\s*(s|ms|seconds)\b", re.I)
 SUBJECT = re.compile(r"\b(backlog|board|ledger)\b", re.I)
 
-# What makes a stated number auditable later. A backticked span counts only if
-# it has two spaces in it, i.e. it is a command and not an identifier: bare
-# `` `board_health` `` and `` `up_next` `` are names, not evidence, and an
-# earlier draft of this rule let the ~2 s comment through on them.
+# What makes a stated number auditable later. Two things count: a date, which
+# decays visibly, or a backticked span with two spaces in it, i.e. a command and
+# not an identifier — bare `` `board_health` `` and `` `up_next` `` are names,
+# and an earlier draft let the ~2 s comment through on them.
+#
+# The word "measured" by itself used to be on this list, and the review rung
+# removed the excuse (`SM_20260917_064456`: "EVIDENCE accepts a bare 'measured'
+# without a date or command"). It was the weakest possible thing on the list:
+# "measured on the live board" is the exact sentence this item exists to kill —
+# it is a claim of provenance with nothing behind it, and it is exactly what a
+# future session writes when it inherits a number it did not take. A number now
+# needs a date, or the command that re-takes it. `
+# test_the_quantity_rule_fires_on_the_board_claims_it_was_filed_for` pins that
+# bare "measured" no longer satisfies the rule, alongside the flag/no-flag cases.
 EVIDENCE = re.compile(
-    r"(\bmeasured\b|\bre-?measure|20\d\d-\d\d-\d\d|`[^`\n]*\s[^`\n]*\s[^`\n]*`)", re.I)
+    r"(20\d\d-\d\d-\d\d|`[^`\n]*\s[^`\n]*\s[^`\n]*`)", re.I)
 
 
 def _comment_blocks(text: str) -> list[tuple[int, str]]:
@@ -173,10 +183,16 @@ def test_the_quantity_rule_fires_on_the_board_claims_it_was_filed_for():
     `_comment_blocks` → SUBJECT → QUANTITY/DURATION → EVIDENCE pipeline, so a
     regression in the pattern goes red here and not on the next board claim.
 
-    Every block is a claim with no date and no re-measuring command, which is
-    the shape that must be flagged. The last block is the same claim WITH its
-    evidence, and must not be flagged — a rule that flags everything passes for
-    free and would have this file deleted.
+    Advisory finding on the following round, `SM_20260917_064456`: "EVIDENCE
+    accepts a bare 'measured' without a date or command". `_BARE_MEASURED` below
+    is that case pinned — a latency claim whose only evidence is the WORD
+    `measured`, which must NOT be accepted as evidenced. It is the weakest thing
+    the old pattern accepted and the exact sentence this item exists to delete.
+
+    So: five blocks must flag (a claim with no date and no re-measuring command),
+    three must not (the same claim with a date, with a command, and one with no
+    number at all). A rule that flags everything passes for free and would have
+    this file deleted, so the negatives are as load-bearing as the positives.
     """
     must_flag = {
         # The literal comment at app/routers/dashboard.py:56 that #1204 was
@@ -194,6 +210,13 @@ def test_the_quantity_rule_fires_on_the_board_claims_it_was_filed_for():
         # A plural-unit spelling with the number detached by a comma-group.
         "1,500 front matters": (
             "# The ledger is cheap here; the board is 1,500 front matters."),
+        # Round SM_20260917_064456's advisory: the word `measured` was itself on
+        # the EVIDENCE list, so a claim whose only backing is that word passed.
+        # This is the sentence #1204 exists to delete — a claim of provenance
+        # with nothing under it.
+        "bare 'measured', no date, no command": (
+            "# the ledger is ~2 s on the live board, measured on the current\n"
+            "# tree, because the board is 1,142 item files."),
     }
     flagged = {}
     for label, block in must_flag.items():
@@ -212,16 +235,40 @@ def test_the_quantity_rule_fires_on_the_board_claims_it_was_filed_for():
             f"control below proves nothing about this one")
         flagged[label] = True
 
-    # The negative control: the same claim, with its date and its command, must
-    # pass. This is the shape the fix's replacement comments actually use.
-    allowed = _comment_blocks(
-        "# Cached because the board is 1,500 item files — 1,141 measured\n"
-        "# 2026-09-17, re-measured by `pytest tests/test_dashboard_cold_render.py`."
-    )[0][1]
-    assert QUANTITY.search(allowed), "the allowed sample stopped being a quantity claim"
-    assert EVIDENCE.search(allowed), (
-        "the sample the rule must accept no longer carries evidence, so the rule "
-        "above would pass by flagging everything")
+    # The negatives. Three separate ones, because one sample holding BOTH a date
+    # and a command cannot tell you which half of EVIDENCE is load-bearing — and
+    # it was the command half that stayed and the bare-word half that the review
+    # rung cut.
+    negatives = {
+        # Date only, no command: the shape the live file's own comments use at
+        # :32 and :69 after this item's fix.
+        "date only": (
+            "# Cached because the board is 1,500 item files, measured 2026-09-17."),
+        # Command only, no date: decays by being re-run rather than by the clock.
+        "command only": (
+            "# the board is 1,142 item files; re-measure with\n"
+            "# `pytest tests/test_dashboard_cold_render.py -q -s`."),
+    }
+    for label, text in negatives.items():
+        block = _comment_blocks(text)[0][1]
+        assert QUANTITY.search(block) or DURATION.search(block), (
+            f"negative {label!r} is no longer a quantity/latency claim, so it "
+            f"proves nothing about acceptance")
+        assert EVIDENCE.search(block), (
+            f"negative {label!r}: the rule no longer accepts a {label}, so it "
+            f"would flag every comment the fix wrote — a rule that flags "
+            f"everything passes for free")
+
+    # And a block that is about the board but states no number: out of scope, and
+    # must not flag. Without this the negatives only prove that evidenced claims
+    # pass, never that the scope gate has a floor.
+    out_of_scope = _comment_blocks(
+        "# Sections that walk the board are cached; see the scorecard TTL\n"
+        "# above for why the poll interval is what it is.")[0][1]
+    assert SUBJECT.search(out_of_scope), "the out-of-scope sample lost its subject"
+    assert not (QUANTITY.search(out_of_scope) or DURATION.search(out_of_scope)), (
+        "the out-of-scope sample now carries a quantity or duration, so the "
+        "negative below tests the wrong thing")
 
 
 def test_the_ttl_comments_name_both_numbers_they_reconcile(source: str):

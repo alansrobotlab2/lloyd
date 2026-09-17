@@ -58,16 +58,17 @@ async def _cold_cycle() -> dict:
 
 
 async def test_one_cold_dashboard_cycle_beats_the_budget(monkeypatch):
-    # No `skipif` on the board directory: with one, a vault root that exists and
-    # a board that has been emptied or moved skips silently and the budget reads
-    # as not-run. `board_files_or_stop` fails on every state that leaves it
-    # nothing to walk — moved board, emptied board, no vault. See tests/board_presence.py.
+    # No conditional-skip marker on the board directory, and none anywhere on
+    # this path: with one, a vault root that exists and a board that has been
+    # emptied or moved reads as not-run. `board_files_or_stop` fails on every
+    # state that leaves it nothing to walk — moved board, emptied board, no
+    # vault. See tests/board_presence.py.
     files = board_files_or_stop(what="cold-cycle budget", numeric_names=True)
     ledger = timed_ledger_or_stop(monkeypatch, what="cold-cycle budget")
-    print(f"board: {len(files)} item files; ledger {ledger}: "
-          f"{ledger.stat().st_size} bytes")
-    assert ledger.stat().st_size > 0, (
-        f"{ledger} is empty, so this cycle decoded no ledger at all and the "
+    print(f"board: {len(files)} item files; ledger {ledger.path}: "
+          f"{ledger.path.stat().st_size:,} bytes | {ledger.why}")
+    assert ledger.path.stat().st_size > 0, (
+        f"{ledger.path} is empty, so this cycle decoded no ledger at all and the "
         f"budget does not constrain the ledger re-decode path"
     )
 
@@ -131,7 +132,9 @@ async def test_the_warm_cycle_is_an_order_of_magnitude_cheaper_than_cold(monkeyp
     catches a machine where *both* cycles are slow, which a ratio cannot see.
     """
     files = board_files_or_stop(what="warm-vs-cold comparison", numeric_names=True)
-    timed_ledger_or_stop(monkeypatch, what="warm-vs-cold comparison")
+    led = timed_ledger_or_stop(monkeypatch, what="warm-vs-cold comparison")
+    print(f"ledger for this pair: {led.path} ({led.path.stat().st_size:,} bytes) "
+          f"| {led.why}")
     cold_started = time.perf_counter()
     await _cold_cycle()
     cold = time.perf_counter() - cold_started

@@ -37,58 +37,41 @@ import pytest
 import yaml
 
 from app.routers import dashboard as dash
+import board_presence
 from board_presence import VAULT_ROOT_ENV, board_files_or_stop
 from scripts.automod import backlog as B
 from scripts.automod import scorecard as SC
 
-BOARD_DIR = Path.home() / "obsidian" / "backlog"
+def _board_dir() -> Path:
+    """The live board, resolved per call rather than frozen at import.
+
+    `tests.board_presence.vault_root()` re-reads `LLOYD_OBSIDIAN_VAULT` on every
+    call, and a module constant computed once here would quietly not move when
+    the pin test in this file sets that variable — the "set the variable, be
+    ignored, and read the result as verifying the branch" failure that helper's
+    own docstring warns about. Same reason the helper takes `board=` instead of
+    only consulting a constant.
+    """
+    return board_presence.vault_root() / "backlog"
+
 
 # The closing delimiter, anchored, same rule as `dashboard._frontmatter`: an
 # unanchored `---` split also fires on a `---` in prose and truncates the block
 # at the wrong place.
 _FM_END_RE = re.compile(r"^---[ \t]*$", re.M)
 
-# Files walked by the per-reader equivalence pass. Every file on the board gets
-# the direct both-loaders comparison below; this sample additionally runs each
-# *reader* under both loaders, which is the 3x-multiplied one.
-SAMPLE = 120
-
-#: The loader pair, resolved once. `None` means this box's PyYAML was built
-#: without the C extension, which is a state the tests that need two distinct
-#: loaders **fail** on rather than skip — see `tests/board_presence.py` for why
-#: a skip whose condition is a property of the box is still a skip that hides an
-#: unpinned clause.
+#: This box's PyYAML has the libyaml C extension when `yaml._yaml` is not None.
+#: A missing extension is a state the tests that need two distinct loaders
+#: **fail** on rather than skip — see `tests/board_presence.py` for why a skip
+#: whose condition is a property of the box is still a skip that hides the one
+#: clause this item measures.
 HAVE_LIBYAML = getattr(yaml, "_yaml", None) is not None
 
 
 def _board_files() -> list[Path]:
     """Every item file on the live board, in a stable order."""
-    return sorted(BOARD_DIR.glob("*.md")) if BOARD_DIR.is_dir() else []
-
-
-def _sample_longest(files: list[Path], n: int) -> list[Path]:
-    """The `n` files whose front matter is *largest*, longest-first.
-
-    Name order is the wrong sample and a previous cut used it: `sorted()` on the
-    board is oldest-first, so `files[:120]` was 120 of the smallest, earliest
-    items and never touched the tail. The tail is where the two scanners can
-    disagree — the longest front matter on the board is 28,692 bytes (triage
-    census; median 1,202, p90 4,841, the growth being `activity_log`
-    accumulation), and multi-line literals, deep nesting and huge block scalars
-    all live in those files. Divergence is likeliest exactly where this sample
-    used to be empty.
-
-    Ties break on name so the set is reproducible run to run.
-    """
-    sized = []
-    for path in files:
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue  # the whole-board sweep reports unreadable files; this is a sample
-        sized.append((len(_fm_text(text)), path.name, path))
-    sized.sort(key=lambda row: (-row[0], row[1]))
-    return [path for _, _, path in sized[:n]]
+    d = _board_dir()
+    return sorted(d.glob("*.md")) if d.is_dir() else []
 
 
 def _readers():
@@ -157,7 +140,7 @@ def _one_real_item(tmp_path: Path) -> Path:
             out.write_text(text, encoding="utf-8")
             return out
     pytest.fail(
-        f"{BOARD_DIR} has {len(_board_files())} files and not one of them has a "
+        f"{_board_dir()} has {len(_board_files())} files and not one of them has a "
         f"parseable front-matter block, so there is no real byte to prove the "
         f"loader on. Failing rather than writing my own fixture: a file I "
         f"invented proves the reader can parse a file I invented."
@@ -201,10 +184,12 @@ def test_all_three_modules_select_the_c_loader_when_libyaml_is_present():
     leave every other test in this file green (they patch whatever loader the
     module holds) while the box kept parsing on the slow one.
 
-    This used to carry a `@pytest.mark.skipif` for a box with no libyaml and was
-    flagged for it (`SM_20260917_055508`: "test honesty
-    tests/test_dashboard_yaml_loader.py:166: a new skip marker"). The marker is
-    gone: this box HAS libyaml — `python3 -c
+    This used to carry a conditional-skip MARKER on the same condition, and was
+    flagged for it twice: `SM_20260917_055508` at "test honesty
+    tests/test_dashboard_yaml_loader.py:166: a new skip marker", and again this
+    round at :204 — where what tripped the detector was this docstring QUOTING the
+    marker it described, because that detector is textual. So the marker is gone
+    and the word for it is spelled without the decorator sigil here. This box HAS libyaml — `python3 -c
     "import yaml; print(getattr(yaml,'_yaml',None) is not None)"` → True, PyYAML
     6.0.3 (item #1204 section 3) — so the marker could only ever fire as a
     misstatement, and the one thing it was for, a fallback arm that swallows the
@@ -277,7 +262,7 @@ def test_both_loaders_agree_on_every_front_matter_on_the_board():
     Baseline at triage (2026-09-16): 1,142 files, 1,140 front matters, 0
     mismatches.
 
-    Board presence is `board_files_or_stop`, not a `pytest.skip` when the glob
+    Board presence is `board_files_or_stop`, not a skip call when the glob
     comes up empty — the flag's point. The skip was wrong because the board is
     *this item's own tree*: with the vault root present and the board missing or
     emptied, something has happened to the corpus the clause certifies, and
@@ -291,7 +276,7 @@ def test_both_loaders_agree_on_every_front_matter_on_the_board():
         "one loader here, not two, and 'provably identical under both loaders' is "
         "a comparison this box cannot make. The clause is NOT pinned by this run.")
     files = board_files_or_stop(what="loader-equivalence sweep")
-    print(f"board dir: {BOARD_DIR}  files walked: {len(files)}")
+    print(f"board dir: {_board_dir()}  files walked: {len(files)}")
 
     mismatched: list[str] = []
     parsed = 0
@@ -322,7 +307,7 @@ def test_both_loaders_agree_on_every_front_matter_on_the_board():
             mismatched.append(f"{path.name}: differs on {keys}")
 
     print(f"front matters compared under both loaders: {parsed}")
-    assert parsed > 0, f"no file under {BOARD_DIR} carried a parseable front matter"
+    assert parsed > 0, f"no file under {_board_dir()} carried a parseable front matter"
     assert not mismatched, (
         f"{len(mismatched)} of {parsed} front matters parse differently under "
         f"the two loaders — the swap would change what the board steward's "
@@ -330,84 +315,108 @@ def test_both_loaders_agree_on_every_front_matter_on_the_board():
     )
 
 
-def test_each_reader_returns_the_same_dict_on_the_longest_front_matters(tmp_path):
-    """Per-reader equivalence, including each reader's own slicing.
+def test_each_reader_returns_the_same_dict_under_either_loader(tmp_path):
+    """Per-reader equivalence over EVERY file on the board, including each reader's own slicing.
 
-    The three readers slice the block differently — `dashboard` reads in
-    4 KiB chunks to a 64 KiB bound, `scorecard` slices `text[3:3 + m.start()]`,
-    `backlog` splits on `---\\n` — so an equivalence claim about the loader
-    alone does not cover them. Each is run twice over a sample of the board.
+    The three readers slice the block differently — `dashboard` reads in 4 KiB
+    chunks to a 64 KiB bound, `scorecard` slices `text[3:3 + m.start()]`,
+    `backlog` splits on `---\\n` — so an equivalence claim about the loader alone
+    does not cover them: the loader can be identical and the slicing still differ.
 
-    The sample is the **SAMPLE longest front matters on the board**, not the
-    first SAMPLE by name, and that is the fix for a review finding
-    (`SM_20260917_055508`: "still samples files[:120] in name order — the
-    oldest items — skipping the long-tail front matters (max 28,692 bytes per
-    the item) where loader divergence is likeliest"). Name order on this board
-    is chronological, so `files[:120]` was 120 small, early files: the tail is
-    where a scanner can disagree, because that is where block scalars, deep
-    nesting and multi-line literals live. The board's own p90 and max are
-    printed and asserted to be inside the sample, so the claim cannot rot with
-    the board — the assertion is relative to today's distribution, not to a
-    number written down.
+    Two review findings land here, from opposite ends. `SM_20260917_055508`:
+    "still samples files[:120] in name order — the oldest items — skipping the
+    long-tail front matters (max 28,692 bytes per the item) where loader
+    divergence is likeliest." Name order on this board is chronological, so that
+    sample was 120 small early files, and the tail is exactly where block
+    scalars, deep nesting and multi-line literals live. Then `SM_20260917_064456`:
+    "Per-reader equivalence is asserted only on a top-N size sample rather than
+    the whole board, so reader-specific slicing is unexercised on the other
+    ~1,023 files." Both say the same thing — a sample, chosen however, is not a
+    claim about the board. So there is no sample any more: all ~1,14x item files
+    go through all three readers under both loaders, the whole-board sweep's cost
+    tripled, which is what makes clause 2's word "provably" cover the corpus
+    rather than a tenth of it.
 
-    No `skipif` here either: same reason as
-    `test_all_three_modules_select_the_c_loader_when_libyaml_is_present`.
+    The board's front-matter size distribution is printed alongside it — max,
+    p90, median — because the item's filed census (max 28,692, p90 4,841, median
+    1,202) is a measurement with a decay date and this is the run that restates it.
     """
     assert HAVE_LIBYAML, (
         "this box's PyYAML has no C extension (`yaml._yaml` is None), so both "
         "arms would be SafeLoader and the comparison could not fail. The clause "
         "'parse output is provably identical under both loaders' is NOT pinned "
         "by this run.")
-    files = board_files_or_stop(what="per-reader equivalence sample")
-    sizes: list[tuple[int, str, Path]] = []
+    files = board_files_or_stop(what="per-reader equivalence sweep")
+    sizes: list[int] = []
     unreadable: list[str] = []
     for path in files:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:  # unreadable is a finding, not a skip
+        except OSError as exc:  # unreadable is a finding, never a silent drop
             unreadable.append(f"{path.name}: {exc}")
             continue
-        sizes.append((len(_fm_text(text)), path.name, path))
+        sizes.append(len(_fm_text(text)))
     assert not unreadable, f"unreadable board items: {unreadable[:3]}"
-    assert sizes, f"{BOARD_DIR} yielded no readable item; the sample is empty"
+    assert sizes, f"{_board_dir()} yielded no readable item; there is nothing to compare"
+    ordered = sorted(sizes)
+    p90 = ordered[min(len(ordered) - 1, int(0.9 * (len(ordered) - 1)))]
+    print(f"board items walked per reader: {len(sizes)} | front matter bytes: "
+          f"max {ordered[-1]}, p90 {p90}, median {ordered[len(ordered) // 2]} "
+          f"(item #1204's filed census: max 28,692, p90 4,841, median 1,202)")
+    assert ordered[-1] > ordered[len(ordered) // 2], (
+        f"the largest front matter ({ordered[-1]} B) is no bigger than the median "
+        f"({ordered[len(ordered) // 2]} B): a board with no tail means either the "
+        f"items stopped accumulating `activity_log` or this walk is reading the "
+        f"wrong files")
 
-    ordered = sorted(sizes, key=lambda row: (-row[0], row[1]))
-    sample = ordered[:SAMPLE]
-    assert sample, "sample is empty"
-    sample_sizes = [n for n, _, _ in sample]
-    board_sizes = sorted(n for n, _, _ in sizes)
-    p90 = board_sizes[min(len(board_sizes) - 1, int(0.9 * (len(board_sizes) - 1)))]
-    over_p90 = sum(1 for n in sample_sizes if n >= p90)
-    print(f"board items measured: {len(sizes)} | front matter bytes: "
-          f"max {board_sizes[-1]}, p90 {p90}, median {board_sizes[len(board_sizes) // 2]}")
-    print(f"sample: {len(sample)} files, front matter {sample_sizes[-1]}–{sample_sizes[0]} "
-          f"bytes, {over_p90} of them at or above the board p90")
-
-    assert sample_sizes[0] == board_sizes[-1], (
-        f"the longest front matter on the board is {board_sizes[-1]} bytes but the "
-        f"sample's largest is {sample_sizes[0]} — the tail this test exists to "
-        f"cover is not in it")
-    assert over_p90 > 0, (
-        f"none of the {len(sample)} sampled items reaches the board's p90 front-"
-        f"matter size ({p90} bytes), so the comparison ran on the short end only")
-
+    c_loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    assert c_loader is not yaml.SafeLoader, (
+        "CSafeLoader resolved to SafeLoader on a box that reports libyaml "
+        "present, so the two arms below are one class and this test would be "
+        "comparing a loader with itself")
     for label, call, module in _readers():
-        differs = []
-        for _, _, path in sample:
-            monkey_c, monkey_py = module._YamlLoader, yaml.SafeLoader
-            try:
-                module._YamlLoader = yaml.CSafeLoader
-                under_c = call(path)
-                module._YamlLoader = monkey_py
-                under_py = call(path)
-            finally:
-                module._YamlLoader = monkey_c
-            if under_c != under_py:
-                differs.append(path.name)
+        original = module._YamlLoader
+        differs: list[str] = []
+        empty = 0
+        compared = 0
+        try:
+            for path in files:
+                try:
+                    module._YamlLoader = c_loader
+                    under_c = call(path)
+                    module._YamlLoader = yaml.SafeLoader
+                    under_py = call(path)
+                finally:
+                    module._YamlLoader = original
+                compared += 1
+                if under_c != under_py:
+                    differs.append(path.name)
+                if not under_c:
+                    empty += 1
+        finally:
+            module._YamlLoader = original
+        # The word "every" in this test's name is the claim, so the walk width is
+        # asserted rather than printed: an earlier cut reported `len(files)` from
+        # the print while a truncated loop walked 120, which is the sampled
+        # version of this test wearing the whole-board version's message.
+        assert compared == len(files), (
+            f"{label}: compared {compared} of {len(files)} board items, so this is "
+            f"a SAMPLE and the sentence 'identical under both loaders' does not "
+            f"cover the other {len(files) - compared} files — the exact defect "
+            f"rounds SM_20260917_055508 and SM_20260917_064456 were both refused for")
         assert not differs, (
-            f"{label}: {len(differs)} of {len(sample)} sampled items parse "
+            f"{label}: {len(differs)} of {compared} board items parse "
             f"differently under the two loaders, first {differs[:5]}"
         )
+        # An all-{} result satisfies "no differences" while proving nothing,
+        # exactly as an empty glob would — so the empties are counted too.
+        assert empty < compared, (
+            f"{label}: returned an empty dict for all {compared} files, so the "
+            f"comparison compared nothing"
+        )
+        print(f"{label}: {compared}/{len(files)} items identical under both "
+              f"loaders ({empty} with no front matter to read)")
+
 
 
 def test_a_fresh_interpreter_binds_the_loader_and_reload_keeps_dispatching(tmp_path, monkeypatch):

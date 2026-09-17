@@ -18,7 +18,7 @@ findings on this item:
 | round | finding |
 |---|---|
 | `SM_20260917_043852` | `test_dashboard_cold_render.py:62`: a new skip marker |
-| `SM_20260917_055508` | `tests/board_presence.py:94`: a new pytest.skip |
+| `SM_20260917_055508` | `tests/board_presence.py:94`: a new skip call |
 
 The second one was an earlier cut of this file skipping when the vault root was
 absent, on the argument that an absent vault is a property of the box rather
@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -125,8 +126,18 @@ def board_files_or_stop(
     )
 
 
-def timed_ledger_or_stop(monkeypatch, *, what: str) -> Path:
-    """Make the cycle decode a ledger that has bytes in it, and return it.
+class LedgerSource(NamedTuple):
+    """What `timed_ledger_or_stop` settled on, so no caller can time a corpus it
+    did not choose. `repointed` answers the review question directly: the ledger
+    the cycle read is not the one the process was configured for, and a test that
+    prints only a duration cannot be read as certifying the 6.3 MB baseline."""
+    path: Path
+    repointed: bool
+    why: str
+
+
+def timed_ledger_or_stop(monkeypatch, *, what: str) -> LedgerSource:
+    """Make the cycle decode a ledger that has bytes in it, and report which one.
 
     The gate runs a round with `LLOYD_AUTOMOD_STATE` pointed at an empty state
     dir (`tests/conftest.py`), so `S.LEDGER_PATH` resolves to a file that does
@@ -136,10 +147,19 @@ def timed_ledger_or_stop(monkeypatch, *, what: str) -> Path:
     cost was 55 `read_text` calls and 318,670 `json.loads` over
     6,286,192 bytes (triage, 2026-09-16).
 
-    So when the state dir has no ledger but the real one exists, the timed
-    cycle is pointed at the real file — read-only, and the dashboard only reads
-    it. Returns the path the cycle will actually read, for the caller to print
-    its byte count beside the timing.
+    So when the state dir has no ledger but the real one exists, the timed cycle
+    is pointed at the real file — read-only, and the dashboard only reads it.
+
+    That substitution used to be silent, and the review rung named it
+    (`SM_20260917_064456`: "the ledger test repoints `S.LEDGER_PATH` at the live
+    6.3 MB file, so the read-once claim holds on the corpus but the test proves
+    only the read shape, not the measured cost"). It is loud now: the return
+    value carries `repointed` and the reason, and every caller prints it in the
+    same line as its timing, so a green duration is always readable next to the
+    corpus that produced it — including "this was the live ledger" or "this was a
+    4-line fixture, so the byte-scale half of the baseline was not re-measured".
+    A repoint is still not the 6,286,192-byte measurement; the point is that the
+    report says which of the two it is.
 
     With neither present it **fails**, for the reason in this module's
     docstring: a cycle that decoded no ledger does not pin the read-once-per-
@@ -150,10 +170,15 @@ def timed_ledger_or_stop(monkeypatch, *, what: str) -> Path:
     live = Path.home() / ".local" / "state" / "lloyd-automod" / "promotions.jsonl"
     current = S.LEDGER_PATH
     if current.is_file() and current.stat().st_size > 0:
-        return current
+        return LedgerSource(current, False, f"the configured state dir ({current})")
     if live.is_file() and live.stat().st_size > 0:
         monkeypatch.setattr(S, "LEDGER_PATH", live)
-        return live
+        return LedgerSource(
+            live, True,
+            f"REPOINTED: {current} (LLOYD_AUTOMOD_STATE) has no ledger, so the "
+            f"cycle reads the live one instead — the timing below is of the real "
+            f"{live.stat().st_size:,}-byte file, not of the state dir the "
+            f"dashboard is configured with")
     pytest.fail(
         f"The {what} cannot constrain the ledger path: no non-empty ledger at "
         f"{current} or {live}, so the cycle would decode zero bytes. Failing "
