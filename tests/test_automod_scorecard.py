@@ -423,3 +423,195 @@ def test_row_14_is_unmeasured_with_no_turn_in_the_window(tmp_path, repo):
     assert row["duty_cycle"]["rate"] is None and row["duty_cycle"]["turns"] == 0
     assert "| 14 | autocode duty cycle | — |" in SC.render(row)
 
+
+
+# ── row 15: human overrides (#1179) ──────────────────────────────────────
+#
+# Alan interrupted a running implement round on 2026-09-15 at 22:13:54Z to
+# prioritise the backlog sweep, and the loop honoured it: `backlog_retriage`
+# plus eight `backlog_confirm_released` rows follow inside the next 60 s. The
+# sentence that moved the queue survived only as a `reason` string on line
+# 4523 of `promotions.jsonl`. At triage (2026-09-17 04:20Z) the 09-15 daily
+# note had 0 hits for the round id across its 44 lines, and
+# `scorecard --since 2w --json | grep -c SM_20260915_220118` read 0 over
+# 5,798 events. Row 15 is the section that stops that being true.
+#
+# These tests write through `state.append_event` — the writer the loop uses —
+# because the gap is as much the write path's as the reader's. Window
+# membership is `ts` alone, which is why the rows below pin a fixture `ts` and
+# keep the real `created_at` string for the report to carry verbatim.
+
+_DIRECTIVE = ("Alan 2026-09-15: clear the loop so the backlog sweep runs; "
+              "#535 is re-offered")
+_DIRECTIVE_ROUND = "SM_20260915_220118"
+# The fixture clock is `NOW`, not the real one, so the directive sits two days
+# back — inside a 7-day window, which is where the live row sits in a 2-week
+# report. Its `created_at` is the real row's stamp, verbatim: the section's whole
+# job is to carry that stamp, and window membership never consults it.
+_DIRECTIVE_TS = NOW - 2 * DAY
+_DIRECTIVE_CREATED = "2026-09-15T22:13:54Z"
+
+
+def _stamp(ts: float) -> str:
+    """The stamp `state.append_event` would have written for `ts`."""
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _appended(tmp_path, entries):
+    """A ledger written by `scripts.automod.state.append_event`, not by hand."""
+    from scripts.automod import state as S
+    p = tmp_path / "promotions.jsonl"
+    for e in entries:
+        S.append_event(e, path=p)
+    return p
+
+
+def _directive(ts: float = _DIRECTIVE_TS, created_at: str = _DIRECTIVE_CREATED, **extra):
+    """The 09-15 abort row as the ledger holds it. `ts` moves it in or out of a window."""
+    return {"event": "round_aborted", "ts": ts, "created_at": created_at,
+            "round_id": _DIRECTIVE_ROUND, "reason": _DIRECTIVE, **extra}
+
+
+def test_an_override_written_through_the_loop_s_writer_lands_in_the_report(tmp_path, repo):
+    """#1179 clause 1: the directive survives compute() with its round id,
+    timestamp, event type and reason whole — and the machine-shaped release
+    rows that followed it do not, because they name nobody."""
+    ledger = _appended(tmp_path, [
+        _directive(),
+        {"event": "backlog_confirm_released", "ts": _DIRECTIVE_TS + 23, "item_id": 535,
+         "reason": "the implement pool has room (37 ready < bound 75)"},
+    ])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    ov = row["overrides"]
+    assert ov["count"] == 1, "a release reason that names no one is not an override"
+    hit = ov["rows"][0]
+    assert hit["round_id"] == "SM_20260915_220118"
+    assert hit["event"] == "round_aborted"
+    assert hit["created_at"] == _DIRECTIVE_CREATED
+    assert hit["field"] == "reason" and hit["person"] == "Alan"
+    assert hit["text"] == _DIRECTIVE, "verbatim — a paraphrase is not a record"
+    blob = json.dumps(ov)
+    assert "SM_20260915_220118" in blob and "clear the loop so the backlog sweep runs" in blob
+
+
+def test_an_abort_that_names_nobody_in_the_person_list_is_not_listed(tmp_path, repo):
+    """#1179 clause 2: the detector is the person list and not the presence of
+    a reason, so a loop-shaped reason, a bare abort and a name nobody in the
+    report knows are all excluded, and `count` is the rows the section holds."""
+    ledger = _appended(tmp_path, [
+        {"event": "round_aborted", "ts": NOW - DAY, "round_id": "SM_GATE",
+         "reason": "gate refused twice on the tests rung"},
+        {"event": "round_aborted", "ts": NOW - 1.2 * DAY, "round_id": "SM_BARE"},
+        {"event": "round_aborted", "ts": NOW - 1.5 * DAY, "round_id": "SM_OTHER",
+         "reason": "Priya 2027-01-14: stop this round, it is the wrong item"},
+        _directive(),
+    ])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    ov = row["overrides"]
+    assert [r["round_id"] for r in ov["rows"]] == ["SM_20260915_220118"]
+    assert ov["count"] == len(ov["rows"]), "the count is the rows, never a bigger claim"
+    assert ov["found"] == 1 == ov["count"]
+    assert ov["by_event"] == {"round_aborted": 1}
+
+
+def test_a_directive_carried_in_note_rather_than_reason_is_surfaced_too(tmp_path, repo):
+    """#1179 clause 3: 26 of the 88 person-named strings on the live ledger sit
+    in `note` on decision events (`backlog_hand_fold`, `status_moved`), so
+    scanning `reason` alone would have caught the 09-15 abort and missed every
+    board override. One row per event even when both fields carry the name."""
+    ledger = _appended(tmp_path, [
+        {"event": "backlog_hand_fold", "ts": NOW - DAY, "item_id": 1202,
+         "note": "Alan 2027-01-14: fold #1202 into #1180, keep #1180's clauses"},
+        {"event": "item_closed", "ts": NOW - 2 * DAY, "item_id": 1199,
+         "reason": _DIRECTIVE, "note": "Alan 2026-09-15: the same directive, quoted again"},
+        _directive(),
+    ])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    ov = row["overrides"]
+    assert ov["count"] == 3 == len(ov["rows"]), "the event carrying both fields counts once"
+    assert ov["fields"] == {"reason": 2, "note": 1}
+    fold = [r for r in ov["rows"] if r["event"] == "backlog_hand_fold"][0]
+    assert fold["field"] == "note" and fold["item_id"] == 1202 and fold["round_id"] is None
+    assert "fold #1202 into #1180" in json.dumps(ov)
+
+
+def test_a_window_with_no_override_reports_zero_rather_than_a_fabricated_row(tmp_path, repo):
+    """#1179 clause 4: the section is there with a count of 0 and no rows when
+    the window holds nothing override-shaped, and an override that fell out of
+    the window is genuinely absent — widening the window brings it back."""
+    empty = _appended(tmp_path, [{"event": "round_aborted", "ts": NOW - DAY,
+                                  "round_id": "SM_GATE",
+                                  "reason": "gate refused twice on the tests rung"}])
+    row = SC.compute(since_days=7, ledger=empty, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    ov = row["overrides"]
+    assert ov["count"] == 0 and ov["rows"] == [] and ov["found"] == 0
+    assert ov["by_event"] == {} and ov["fields"] == {"reason": 0, "note": 0}
+    assert ov["cap"] == SC.OVERRIDE_ROW_CAP
+    assert "| 15 | human overrides | 0 |" in SC.render(row)
+
+    aged_ts = NOW - 30 * DAY
+    directive = _appended(tmp_path / "old", [_directive(ts=aged_ts, created_at=_stamp(aged_ts))])
+    out = SC.compute(since_days=7, ledger=directive, backlog_dir=tmp_path / "none",
+                     repo=repo, now=NOW)
+    assert out["overrides"]["count"] == 0, "30 days old against a 7-day window: not in it"
+    widened = SC.compute(since_days=45, ledger=directive, backlog_dir=tmp_path / "none",
+                         repo=repo, now=NOW)
+    assert widened["overrides"]["count"] == 1, "the same row at 45 days: back"
+
+
+def test_row_15_names_the_count_and_the_newest_override_and_survives_old_rows(tmp_path, repo):
+    """#1179 clause 5: the CLI's text report carries the count and the newest
+    override's round id, and a `scorecard.jsonl` row recorded before this
+    section existed still renders — `record` appends forever and old rows are
+    read back forever."""
+    ledger = _appended(tmp_path, [
+        _directive(),
+        {"event": "item_closed", "ts": NOW - 3 * DAY, "created_at": "2027-01-12T08:00:00Z",
+         "item_id": 1199, "reason": "Alan 2027-01-12: close this, the fix is live"},
+    ])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    line = next(ln for ln in SC.render(row).splitlines() if "human overrides" in ln)
+    assert "| 15 | human overrides | 2 |" in line
+    assert "SM_20260915_220118" in line, "the line names the NEWEST override, not the oldest"
+    assert "clear the loop so the backlog sweep runs" in line
+    assert "#1199" in line, "an override with no round id is named by its item"
+    legacy = {k: v for k, v in row.items() if k != "overrides"}
+    assert "| 15 | human overrides | — |" in SC.render(legacy)
+
+
+def test_two_overrides_in_the_same_second_order_by_append_not_by_decode(tmp_path, repo):
+    """One loop pass stamps several events with the same `ts`, so `newest` needs a
+    tie-break. `sorted` is stable, so reversing the rows first makes the
+    last-written row the newest — the order the ledger itself has them in."""
+    same = NOW - 0.5 * DAY
+    tied = _appended(tmp_path, [
+        _directive(ts=same, created_at=_stamp(same)),
+        {"event": "item_closed", "ts": same, "created_at": _stamp(same),
+         "item_id": 1202, "reason": "Alan 2027-01-15: close #1202, the round landed it"},
+    ])
+    row = SC.compute(since_days=7, ledger=tied, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    ov = row["overrides"]
+    assert ov["count"] == 2
+    assert ov["rows"][0]["item_id"] == 1202, "appended last, so listed first"
+    assert ov["rows"][1]["round_id"] == _DIRECTIVE_ROUND
+    assert ov["rows"][0]["created_at"] == ov["rows"][1]["created_at"], "genuinely tied"
+
+
+def test_the_tallies_count_the_listed_rows_when_the_cap_bites(tmp_path, repo, monkeypatch):
+    """The section claims `count`, `by_event` and `fields` describe the rows it
+    holds and `found` describes the window. A careless tally written over the found
+    rows breaks that only when the cap bites, so that is the case pinned here —
+    with the cap lowered rather than 121 events generated."""
+    monkeypatch.setattr(SC, "OVERRIDE_ROW_CAP", 2)
+    ledger = _appended(tmp_path, [
+        _directive(),
+        {"event": "item_closed", "ts": NOW - DAY, "item_id": 1202,
+         "reason": "Alan 2027-01-14: close #1202 as duplicate of #1180"},
+        {"event": "backlog_hand_fold", "ts": NOW - 1.4 * DAY, "item_id": 1199,
+         "note": "Alan 2027-01-14: fold the #1199 finding under the round's clauses"},
+    ])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    ov = row["overrides"]
+    assert ov["found"] == 3 and ov["count"] == 2 == len(ov["rows"]) and ov["cap"] == 2
+    assert sum(ov["by_event"].values()) == ov["count"] == sum(ov["fields"].values()), (
+        "the tallies follow the cap, so the count is the rows and found is the window")

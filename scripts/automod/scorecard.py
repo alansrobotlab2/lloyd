@@ -30,6 +30,9 @@ The metrics, each defined where it is computed:
  10  rollbacks               count (precision is a human judgment; recorded null)
  11  grouping                clusters formed, group triages and what they judged
  12  arch review             units reviewed, docs edited vs rejected, what was filed
+ 13  board net flow          items created minus items closed, 24 h and 7 d
+ 14  autocode duty cycle     share of the window with an implement turn in flight
+ 15  human overrides         decision events that name the person who made them
 """
 
 from __future__ import annotations
@@ -61,6 +64,64 @@ LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 HUMAN_TOUCH_DAYS = 7
 AUTOMOD_AUTHOR = "lloyd"
 _HONESTY_RE = re.compile(r"^\+.*(\bor\s+True\b|^\+\s*assert\s+True\b)", re.M)
+
+# ── who counts as a person, and where their words live ────────────────────
+#
+# There is no canonical person-name source in the checkout to import: `grep -rn
+# "Alan" --include=*.py --include=*.yaml` outside `tests/`, `architecture/` and
+# `_pipeline/` returns comments only (`app/uptake.py:7`,
+# `scripts/automod/backlog.py:77,210`, `agent-services/livekit_worker.py:445`).
+# `config.yaml` is not the place either — it is human-only for the loop, which is
+# one of the gate's standing denials — so the list lives beside the one reader
+# that uses it. `people/alan/` is the vault's own record of the name; adding a
+# second human means adding them here and nowhere else.
+PERSON_NAMES = ("Alan",)
+# The ledger fields a decision is recorded in. Over 6,283 rows (2026-09-17
+# 21:14Z), 87 events name a person in `reason` (62) or `note` (26); the rest of
+# the census (`response_tail` 16, `evidence` 15, `summary` 14,
+# `next_pick_reason` 13, `acceptance` 7, `name` 5, `goal` 3) carries prose that
+# quotes a person while describing something else — an `evidence` block reciting
+# a directive is not itself a decision, and listing it would double-count the
+# decision it quotes.
+OVERRIDE_FIELDS = ("reason", "note")
+# Cap on the rows the section carries, not on what it counted: `count` is what is
+# listed, `found` is what the window held. It is a runaway guard, not a budget: a
+# 14-day window held 87 person-named events on 2026-09-17 (measured through
+# `compute`, not counted by hand), which is ~6 a day, so 120 rows is ~4 weeks of
+# overrides — no window anyone reports on is truncated, and `--since all` over a
+# 6,283-row ledger cannot fill a response unboundedly. That the cap is not biting
+# at 2 weeks is itself worth stating, because a cap set below the window's real
+# volume would silently drop an override from the listing while the premise of this
+# section is that an override in the window is listed. The cost of carrying the
+# sentences verbatim is size, and it is measured: the row without this section is
+# 2,736 bytes over the live ledger, with it 33,436 — inside a `/api/dashboard`
+# response that was 19,727 bytes, whose `automod` section was 2,827 of them, and
+# which `_automod()` caches for 60 s (`app/routers/dashboard.py:712`). Rows are
+# newest-first and `found` is reported beside `count`, so if the cap ever does
+# bite, the report says so in its own numbers.
+OVERRIDE_ROW_CAP = 120
+# Longest verbatim quote the text report prints. The JSON carries the whole
+# string; the longest override text on the live ledger is 649 chars and a table
+# row is not where a paragraph belongs.
+OVERRIDE_RENDER_CHARS = 160
+# How many overrides the text report names by reference after the newest one. The
+# newest gets its sentence; the rest of a 87-row window would not fit a line.
+OVERRIDE_REFS_SHOWN = 5
+
+
+def _person_named(value: object) -> str | None:
+    """The first person named in `value`, or None.
+
+    Whole-word and case-sensitive: `memory/alan/2026-06-20.md` is the one ledger
+    string that matches `alan` without being a person, and a path is not an
+    override.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    for name in PERSON_NAMES:
+        if re.search(rf"\b{re.escape(name)}\b", value):
+            return name
+    return None
 
 
 # ── inputs ───────────────────────────────────────────────────────────────
@@ -280,6 +341,65 @@ def _duty_cycle(ev: list[dict], since: float, now: float) -> dict[str, Any]:
             "idle_minutes": {k: round(v / 60, 1) for k, v in sorted(idle.items())},
             "gap_counts": dict(sorted(gaps.items())),
             "largest_gap_minutes": round(largest / 60, 1)}
+
+
+def _iso_of(event: dict) -> str:
+    """The event's own stamp, or the one its `ts` would have been written with.
+
+    `state.append_event` always sets `created_at` beside `ts`
+    (`scripts/automod/state.py:149-158`), so the derived form is only the
+    fallback that keeps a copied or hand-written row from surfacing with a blank
+    time.
+    """
+    stamp = event.get("created_at")
+    if isinstance(stamp, str) and stamp:
+        return stamp
+    return datetime.fromtimestamp(_ts(event), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _overrides(events: list[dict]) -> dict[str, Any]:
+    """Row 15: the decisions a person made that changed what the loop worked on.
+
+    The behaviour this reports on is already correct and is not touched here. On
+    2026-09-15 at 22:13:54Z Alan interrupted a running implement round to
+    prioritise the backlog sweep; ten `backlog_retriage` and
+    `backlog_confirm_released` events followed inside 60 s and the round went
+    back to the pool. What was missing was the record. The sentence that moved
+    the queue survived only as a `reason` string on line 4523 of a 5 MB
+    `promotions.jsonl`: the 09-15 daily note has no line mentioning it, and
+    `--since 2w --json` did not carry it either (both re-measured at triage,
+    2026-09-17 04:20Z). So the machine honoured the priority while the reason
+    for the change stayed invisible to every surface a human or a later run
+    reads — including the run that inherits the queue and has to explain a round
+    that is missing.
+
+    One row per event, newest first, carrying the text verbatim: the quoted words
+    are the artifact, and a paraphrase of them is a second claim to audit.
+    """
+    found = 0
+    rows: list[dict[str, Any]] = []
+    # `reversed` first, then a stable reverse sort on `ts`: two events sharing a
+    # timestamp — routine inside one loop pass, which stamps `ts` per event — come
+    # out in append order, so "newest" is the row the ledger wrote last rather
+    # than whichever the decode happened to see first.
+    for e in sorted(reversed(events), key=_ts, reverse=True):
+        for field in OVERRIDE_FIELDS:
+            person = _person_named(e.get(field))
+            if person is None:
+                continue
+            found += 1
+            if len(rows) < OVERRIDE_ROW_CAP:
+                rows.append({"created_at": _iso_of(e), "event": e.get("event"),
+                             "round_id": e.get("round_id"), "item_id": e.get("item_id"),
+                             "person": person, "field": field, "text": e[field]})
+            break  # one decision per event: two fields naming is still one act
+    by_event: dict[str, int] = {}
+    fields: dict[str, int] = {f: 0 for f in OVERRIDE_FIELDS}
+    for r in rows:
+        by_event[str(r["event"])] = by_event.get(str(r["event"]), 0) + 1
+        fields[str(r["field"])] += 1
+    return {"count": len(rows), "found": found, "cap": OVERRIDE_ROW_CAP,
+            "by_event": dict(sorted(by_event.items())), "fields": fields, "rows": rows}
 
 
 def compute(*, since_days: float = 7.0, ledger: Path | None = None,
@@ -525,12 +645,16 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
     # ── 14 autocode duty cycle ──────────────────────────────────────────
     duty = _duty_cycle(ev, since, now)
 
+    # ── 15 human overrides ──────────────────────────────────────────────
+    overrides = _overrides(ev)
+
     return {"computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
             "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
             "human_touch": human, "test_honesty": honesty, "bookkeeping": bookkeeping,
             "verdict_plumbing": plumbing, "throughput": throughput, "rollbacks": rollbacks,
-            "arch_review": arch_review, "flow": flow, "duty_cycle": duty}
+            "arch_review": arch_review, "flow": flow, "duty_cycle": duty,
+            "overrides": overrides}
 
 
 # ── output ───────────────────────────────────────────────────────────────
@@ -587,7 +711,58 @@ def render(row: dict) -> str:
         f"{d.get('busy_hours', 0)} h of {d.get('window_hours', 0)} h with an implement turn in flight, "
         f"{d.get('turns', 0)} turns; {d.get('gaps', 0)} gaps: {by_class}; "
         f"largest {d.get('largest_gap_minutes', 0):g} min |")
+    lines.append(_render_overrides(row))
     return "\n".join(lines)
+
+
+def _override_ref(event_row: dict) -> str:
+    """How one override names itself: its round id, else `#<item id>`.
+
+    An item id carries the `#` the board writes it with, so `#1199` on a report
+    line is never mistakable for a round id — which matters because most
+    overrides are board decisions with no round at all.
+    """
+    rid = event_row.get("round_id")
+    if rid:
+        return str(rid)
+    iid = event_row.get("item_id")
+    return f"#{iid}" if iid is not None else "no round or item"
+
+
+def _render_overrides(row: dict) -> str:
+    """Table row 15. `—` in the count means the row predates this section.
+
+    The count is column 3; the detail names the newest override by reference with
+    its timestamp, event type and quoted sentence, then names the rest by
+    reference alone. The point of the line is that a reader can ask a week later
+    what was overridden, when, and in whose words.
+
+    Two render touches, neither of which the JSON beside this row carries: a `|`
+    is escaped so one override cannot break the markdown table (1 of the 87
+    person-named rows on the live ledger has one), and a quote past
+    `OVERRIDE_RENDER_CHARS` is cut with an ellipsis — the longest live override
+    text is 649 characters and a table row is not where a paragraph belongs.
+    `overrides.rows[].text` stays verbatim; this only shortens the picture of it.
+    """
+    ov = row.get("overrides")
+    if ov is None:
+        return "| 15 | human overrides | — | section not recorded for this row |"
+    count = ov.get("count")
+    rows = ov.get("rows") or []
+    if not count:
+        return f"| 15 | human overrides | {count} | no person-named decision event in the window |"
+    newest = rows[0]
+    quote = str(newest.get("text") or "").replace("|", "\\|")
+    if len(quote) > OVERRIDE_RENDER_CHARS:
+        quote = quote[:OVERRIDE_RENDER_CHARS].rstrip() + "…"
+    tail = ""
+    others = ", ".join(_override_ref(r) for r in rows[1:OVERRIDE_REFS_SHOWN])
+    if others:
+        tail += f"; also {others}"
+    if (ov.get("found") or 0) > count:
+        tail += f"; {ov['found']} found, {count} listed"
+    return (f"| 15 | human overrides | {count} | newest {_override_ref(newest)} "
+            f"({newest.get('created_at')} {newest.get('event')}): \"{quote}\"{tail} |")
 
 
 def scorecard_path() -> Path:
