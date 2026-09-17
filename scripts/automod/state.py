@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -155,6 +156,124 @@ def append_event(entry: dict, path: Path | None = None) -> None:
         f.write(line)
         f.flush()
         os.fsync(f.fileno())
+
+
+# ── the decoded ledger, once per change instead of once per caller ─────────
+#
+# Why this exists: one cold `GET /api/dashboard` called `Path.read_text` on the
+# ledger **57 times** and `json.loads` 318,670 times over a 6,317,811-byte file
+# (board census 2026-09-16: 4,808 lines; measured by
+# `tests/test_backlog_ledger_cache.py`, which asserts the counter is now at most
+# 1 per cycle against that 57-read baseline). `backlog._ledger_events` decoded
+# the file from scratch on every call, and `board_health` plus
+# `scorecard.compute` ask it ~55 questions per cycle — triage verdicts, gate
+# findings, review records, spawn events, verdicts, sweep verdicts, grouping,
+# arch reviews. 3.79 s of a 15.2 s cold cycle was re-decoding the same bytes.
+#
+# Invalidation is a stat, not a TTL: a cached copy is served only while
+# (mtime_ns, size, inode) all match the file, so `append_event` — which grows
+# the size — is visible to the next call with no cooperation from the writer.
+# An inode change covers an out-of-place rewrite (compaction), which the
+# (mtime, size) pair alone could miss if it landed in the same nanosecond.
+#
+# Rows are shared, not copied: a copy per call would be most of the cost back
+# again. Nothing downstream writes into a row — the readers build their own
+# dicts and sets off them — and `graph_affected` over the 58 `_ledger_events`
+# call sites found no mutation. A future caller that wants to annotate a row
+# must copy it first.
+_ROWS_CACHE_MAX_BYTES = 64 * 1024 * 1024  # ~500 MB decoded; past this, re-decode
+_rows_lock = threading.Lock()
+_rows_cache: dict[str, tuple[tuple[int, int, int], list[dict]]] = {}
+# path -> times this process read it off disk. Instrument, not bookkeeping: it is
+# what `tests/test_backlog_ledger_cache.py` measures instead of a wall-clock
+# number it cannot reproduce on a tmp_path fixture. Bumped only where the file is
+# actually read — a cache hit costs nothing and does not move it.
+_rows_reads: dict[str, int] = {}
+
+
+def ledger_rows(path: Path | None = None) -> list[dict]:
+    """Every event in the ledger, decoded at most once per change to the file.
+
+    Returns the shared row objects — read-only, see the note above. A missing or
+    unreadable ledger is `[]`, and a malformed line is skipped rather than
+    raising: this is a read-side accelerator for a file the loop appends to
+    under lock, so it must never be the reason a panel or a scorecard dies.
+    """
+    target = path or LEDGER_PATH
+    key = str(target)
+    with _rows_lock:
+        cached = _rows_cache.get(key)
+    try:
+        st = target.stat()
+    except OSError:
+        return []  # no file: not a read, so nothing to decode and nothing to count
+    version = (st.st_mtime_ns, st.st_size, st.st_ino)
+    if cached is not None and cached[0] == version:
+        return cached[1]
+    # Past here the file comes off disk, and the counter moves — see
+    # `ledger_read_count` for why the count is of reads and not of calls.
+    if st.st_size > _ROWS_CACHE_MAX_BYTES:
+        # Decode without caching: holding a rotated-out ledger in RAM is worse
+        # than re-decoding it, and the ceiling is a round 64 MiB against the
+        # 6,317,811 bytes measured on 2026-09-17.
+        with _rows_lock:
+            _rows_reads[key] = _rows_reads.get(key, 0) + 1
+        return _decode_ledger(target)
+    rows = _decode_ledger(target)
+    with _rows_lock:
+        _rows_reads[key] = _rows_reads.get(key, 0) + 1
+        _rows_cache[key] = (version, rows)
+        # A ledger that has been unlinked (a rotation, a test teardown) has no
+        # version to match, so its rows would sit here holding their ~4 bytes of
+        # dict per row forever. Forget those; the live path can never read two
+        # same-named files at once.
+        for stale in [k for k in _rows_cache if k != key and not Path(k).exists()]:
+            _rows_cache.pop(stale, None)
+    return rows
+
+
+def _decode_ledger(target: Path) -> list[dict]:
+    out: list[dict] = []
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            out.append(row)
+    return out
+
+
+def ledger_read_count(path: Path | None = None) -> int:
+    """How many times this process has read that file off disk and decoded it.
+
+    The instrument `tests/test_backlog_ledger_cache.py` measures, and it counts
+    *reads*, not requests. The distinction is the clause: `ledger_rows` is asked
+    ~55 times per cold dashboard cycle by design, which costs nothing; what
+    #1204 requires is that the file comes off disk once. A counter on the calls
+    could never reach 1, and a test written against one would have to be
+    satisfied by something other than what it claims to check.
+
+    Baseline, measured 2026-09-17 04:44Z before the change: **57 reads and
+    331,569 `json.loads` in one cold `_backlog()` + `_automod()`** over the live
+    6,317,811-byte ledger (the item's own numbers at filing: 55 calls, 3.79 s
+    cumulative, 318,670 loads, 6,286,192 bytes). Post-fix that cycle is 1.
+    """
+    with _rows_lock:
+        return _rows_reads.get(str(path or LEDGER_PATH), 0)
+
+
+def ledger_rows_reset() -> None:
+    """Forget the decoded ledger and every read count. For tests."""
+    with _rows_lock:
+        _rows_cache.clear()
+        _rows_reads.clear()
 
 
 def read_events(path: Path | None = None, limit: int = 100) -> list[dict]:

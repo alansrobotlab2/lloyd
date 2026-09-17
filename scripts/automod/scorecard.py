@@ -44,6 +44,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+# `app/kg_store.py:48` shape, for the reason in `app/routers/dashboard.py`:
+# `compute` parses the front matter of every board file twice per call
+# (`_self_spawned_gauge` and the stranded-landings loop), and on those files
+# libyaml is 15.1x the pure-Python scanner `yaml.safe_load` is pinned to. The
+# `import yaml` used to sit inside `_frontmatter`, which is why the swap has to
+# be at the call site — see `tests/test_dashboard_yaml_loader.py`.
+try:  # ~15x faster than the pure-Python loader; all input is our own files
+    from yaml import CSafeLoader as _YamlLoader  # type: ignore
+except ImportError:  # pragma: no cover
+    from yaml import SafeLoader as _YamlLoader  # type: ignore
+
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 HUMAN_TOUCH_DAYS = 7
 AUTOMOD_AUTHOR = "lloyd"
@@ -53,18 +66,18 @@ _HONESTY_RE = re.compile(r"^\+.*(\bor\s+True\b|^\+\s*assert\s+True\b)", re.M)
 # ── inputs ───────────────────────────────────────────────────────────────
 
 def _events(ledger: Path) -> list[dict]:
-    out: list[dict] = []
-    try:
-        for line in ledger.read_text(encoding="utf-8", errors="replace").splitlines():
-            if not line.strip():
-                continue
-            try:
-                out.append(json.loads(line))
-            except ValueError:
-                continue
-    except OSError:
-        pass
-    return out
+    """Every ledger row in the window's reach, from the shared decode.
+
+    `scripts.automod.state.ledger_rows` reads and decodes the file at most once
+    per change to it, so `compute` arriving here — and `backlog._ledger_events`
+    arriving at the same rows from the other side — costs one read between them
+    instead of one each. Same contract as before for this caller: a missing or
+    unreadable ledger is `[]`, a malformed line is skipped. Rows are shared
+    read-only objects; the metrics below build their own lists off them.
+    """
+    from scripts.automod import state as S
+
+    return S.ledger_rows(ledger)
 
 
 def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -> dict:
@@ -136,8 +149,16 @@ def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -
 
 
 def _frontmatter(path: Path) -> dict:
+    """First YAML block of a markdown file, or {} if there isn't one.
+
+    Parses through `_YamlLoader` (libyaml's `CSafeLoader` where available), not
+    `yaml.safe_load` — see the import above. The `import yaml` that used to sit
+    inside this function is the trap: a reader that "fixed" the loader by
+    editing the module attribute would have left this line on the pure-Python
+    scanner, and every check that only inspects an attribute would agree that
+    it was fixed.
+    """
     try:
-        import yaml
         text = path.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return {}
@@ -147,7 +168,7 @@ def _frontmatter(path: Path) -> dict:
     if not m:
         return {}
     try:
-        fm = yaml.safe_load(text[3:3 + m.start()])
+        fm = yaml.load(text[3:3 + m.start()], Loader=_YamlLoader)
     except Exception:
         return {}
     return fm if isinstance(fm, dict) else {}

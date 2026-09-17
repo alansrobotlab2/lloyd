@@ -21,12 +21,27 @@ import re
 import time
 from typing import Any
 
+import yaml
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from app import host_metrics, sessions_io, vllm_metrics
 from app.sessions_io import is_background_session_name, is_user_session
 from app.backlog_status import CLOSED_STATUSES
+
+# One cold cycle parses the front matter of every file on the backlog board
+# (1,141 item files at the board census of 2026-09-16), and on exactly those
+# files libyaml is 15.1x the pure-Python scanner: 1,109 front matters in 0.10 s
+# against 1.56 s. `yaml.safe_load` is hard-wired to the pure-Python
+# `SafeLoader`, so the C scanner has to be passed explicitly at each call
+# site. Same shape as `app/kg_store.py:48`. The swap is certified
+# behaviour-preserving over the whole board by
+# `tests/test_dashboard_yaml_loader.py`, because these dicts feed the board
+# steward's prompt and the dispatch loop's ordering decisions.
+try:  # ~15x faster than the pure-Python loader; all input is our own files
+    from yaml import CSafeLoader as _YamlLoader  # type: ignore
+except ImportError:  # pragma: no cover
+    from yaml import SafeLoader as _YamlLoader  # type: ignore
 
 logger = logging.getLogger("lloyd-server")
 
@@ -53,10 +68,20 @@ async def _to_thread(fn, *args) -> Any:
     return await asyncio.to_thread(fn, *args)
 
 
-# Sections that walk the vault are cached: the backlog is 300+ markdown
-# files and its status counts do not change between 2-second polls.
-# Live sections (engines, host, running turns) are never cached — they
-# are the whole point of the page.
+# Sections that walk the vault are cached; live sections (engines, host,
+# running turns) are never cached — they are the whole point of the page.
+#
+# The TTL and the frontend's poll are a pairing and are named together on
+# purpose. `DashboardPage.tsx` polls at `POLL_MS` = 2000 ms; this is 10 s; so
+# every fifth poll pays a board walk and the other four are served from
+# `_cache`. What one of those walks costs is the number that decides whether
+# the pairing is bearable, and it has moved more than the board since this
+# comment was written — 14.19 s cold measured 2026-09-17 04:44Z at 1,141 item
+# files, 1.52 s after the loader and ledger-cache work landed the same day,
+# re-measured by `tests/test_dashboard_cold_render.py`. Raising the TTL trades
+# that hitch for stale counts on the panel whose whole job is to look live, so
+# it stays at 10 s until recommendation B (one shared walk, off the read path)
+# makes the walk cost nothing.
 _VAULT_SCAN_TTL_S = 10.0
 _cache: dict[str, tuple[float, Any]] = {}
 
@@ -92,9 +117,17 @@ def _frontmatter(path, limit: int = 65536) -> dict:
     `in_progress`. A board that loses whatever is most active is worse than
     no board. Anything past `limit` with no closing `---` is malformed
     rather than large, and still yields {}.
-    """
-    import yaml
 
+    The parse goes through `_YamlLoader`, bound at import to libyaml's
+    `CSafeLoader` where libyaml is importable and to `SafeLoader` where it is
+    not. It is `yaml.load(..., Loader=_YamlLoader)` and not `yaml.safe_load`
+    deliberately: `safe_load` names `SafeLoader` in its own signature, so
+    editing the module attribute would leave this call site on the 15x slower
+    scanner while every test that only reads the attribute still passed. Same
+    reasoning at `scripts/automod/scorecard.py` and
+    `scripts/automod/backlog.py`; `tests/test_dashboard_yaml_loader.py` proves
+    the loader by construction count rather than by attribute.
+    """
     try:
         with open(path, encoding="utf-8") as f:
             head = f.read(_FM_CHUNK)
@@ -115,7 +148,7 @@ def _frontmatter(path, limit: int = 65536) -> dict:
     if opening < 0 or opening > m.start():
         return {}
     try:
-        fm = yaml.safe_load(head[opening + 1:m.start()])
+        fm = yaml.load(head[opening + 1:m.start()], Loader=_YamlLoader)
     except Exception:
         return {}
     # A block that parses to a list or a bare string is not front matter;
@@ -669,9 +702,13 @@ def _backlog() -> dict[str, Any]:
     out = _cached("backlog", _VAULT_SCAN_TTL_S, _scan)
     # What the raw counts hide — folded members, quarantined self-spawns, the
     # ready share of `up_next`, the day's net flow. `board_health` reads every
-    # item and the ledger (~2 s on the live board), so it sits on the
-    # scorecard's minute rather than the vault scan's ten seconds, and a
-    # failure costs this sub-object only: `by_status` stays the raw count.
+    # item file and the ledger, so it sits on the scorecard's minute rather
+    # than the vault scan's ten seconds; a failure costs this sub-object only:
+    # `by_status` stays the raw count. The cost, so nobody has to rediscover
+    # it: 0.40 s measured standalone 2026-09-17 over 1,141 item files with the
+    # ledger already decoded — 5.63 s before #1204's loader and ledger-cache
+    # work, against the "~2 s" this comment used to claim. Re-measure it with
+    # the timing in `tests/test_dashboard_cold_render.py`.
     return {**out, "health": _cached("backlog_health", _SCORECARD_TTL_S,
                                      lambda: _backlog_health(backlog_dir))}
 
@@ -690,8 +727,16 @@ def _backlog_health(backlog_dir) -> dict[str, Any] | None:
 _BACKLOG_CLOSED = CLOSED_STATUSES
 
 
-# The scorecard reads the whole ledger, the backlog and a week of git log.
-# Its numbers move per round, not per poll: a minute is already generous.
+# The scorecard reads the whole ledger, every board file and a week of git
+# log. Pairing against the frontend's `POLL_MS` = 2000 ms is deliberate: at 60 s
+# one poll in thirty pays the pass, and its numbers move per round, not per
+# poll, so a minute is already generous. What the pass costs moves far more
+# than this comment: 6.66 s cold measured 2026-09-17 04:44Z at 1,141 item
+# files, 0.89 s after #1204's loader and ledger-cache work, re-measured by
+# `tests/test_dashboard_cold_render.py`. 60 s is also the TTL `board_health`
+# shares, which is why the two stale claims this round removed could both
+# survive in the same file: nothing here was ever re-measured against the
+# board it described.
 _SCORECARD_TTL_S = 60.0
 
 

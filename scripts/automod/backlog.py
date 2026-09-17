@@ -38,6 +38,18 @@ from pathlib import Path
 
 import yaml
 
+# `app/kg_store.py:48` shape; the reason and the 15.1x measurement are written
+# out at `app/routers/dashboard.py`. `_split_frontmatter` is the hot one of the
+# three readers: `all_items`, `load_item` and every save path funnel through it,
+# and `board_health` walks the whole board with it. `yaml.safe_load` names the
+# pure-Python `SafeLoader` in its own signature, so the swap has to happen at
+# the call site — `tests/test_dashboard_yaml_loader.py` proves it by counting
+# loader constructions, not by reading this attribute.
+try:  # ~15x faster than the pure-Python loader; all input is our own files
+    from yaml import CSafeLoader as _YamlLoader  # type: ignore
+except ImportError:  # pragma: no cover
+    from yaml import SafeLoader as _YamlLoader  # type: ignore
+
 from app.backlog_status import (
     CLOSED_ALIASES,
     OPEN_STATUSES,
@@ -877,13 +889,22 @@ class Item:
 
 
 def _split_frontmatter(text: str) -> tuple[dict, str]:
+    """Split a markdown file into (front matter, body).
+
+    Parses through `_YamlLoader` — libyaml's `CSafeLoader` where libyaml is
+    importable, `SafeLoader` where it is not (see the import at the top of the
+    file). `yaml.YAMLError` still catches both: the C scanner raises
+    subclasses of it too, which `test_malformed_front_matter_behaves_the_same`
+    pins, because a loader swap that turned a malformed item into an
+    exception instead of an empty dict would take the whole board walk down.
+    """
     if not text.startswith("---"):
         return {}, text
     parts = text.split("---\n", 2)
     if len(parts) < 3:
         return {}, text
     try:
-        fm = yaml.safe_load(parts[1]) or {}
+        fm = yaml.load(parts[1], Loader=_YamlLoader) or {}
     except yaml.YAMLError:
         fm = {}
     return (fm if isinstance(fm, dict) else {}), parts[2]
@@ -1001,28 +1022,65 @@ def open_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
     return [i for i in all_items(boards, backlog_dir=backlog_dir) if i.status in OPEN_STATUSES]
 
 
+def _ledger_rows(ledger: Path) -> list[dict]:
+    """Every row of the promotions ledger, decoded at most once per change.
+
+    Delegates to `scripts.automod.state.ledger_rows`, which caches the decoded
+    file against its (mtime_ns, size, inode). The reason: one cold
+    `_backlog()` + `_automod()` read the file **57 times** and ran
+    `json.loads` 331,569 times over a 6,317,811-byte ledger (measured
+    2026-09-17 04:44Z; the item's filed numbers at triage were 55 calls,
+    3.79 s cumulative and 318,670 loads over 6,286,192 bytes — the same
+    defect, a 45 KB younger file). `board_health`, `board_flow` and
+    `scorecard.compute` ask ~55 filtered questions per cycle (triage verdicts,
+    gate findings, review records, spawn events, sweep verdicts, grouping), and
+    each question used to decode all 4,808 lines again. Post-fix that cycle is
+    1 read; `tests/test_backlog_ledger_cache.py` asserts it.
+
+    The rows are shared read-only objects: filter and copy, do not mutate.
+    """
+    from scripts.automod import state as S
+
+    return S.ledger_rows(Path(ledger))
+
+
+def _ledger_read_count(ledger: Path) -> int:
+    """Times this process asked the ledger for its rows. The instrument
+    `tests/test_backlog_ledger_cache.py` measures; see `state.ledger_read_count`.
+    """
+    from scripts.automod import state as S
+
+    return S.ledger_read_count(Path(ledger))
+
+
+def _ledger_cache_clear() -> None:
+    """Forget the decoded ledger and the read counters. For tests, and for a
+    ledger replaced out-of-band by something that did not go through
+    `state.append_event`."""
+    from scripts.automod import state as S
+
+    S.ledger_rows_reset()
+
+
 def _ledger_events(ledger: Path, event: str, *, require_item: bool = True) -> list[dict]:
     """Rows of one event type. `require_item=False` for the event types that
     are about a round rather than an item — `gate` carries a `round_id` and no
-    `item_id`, and the default filter drops it silently."""
+    `item_id`, and the default filter drops it silently.
+
+    Filters `_ledger_rows`, so the file is read and decoded at most once per
+    change no matter how many event types ask. The predicates are exactly the
+    ones this function applied when it decoded the file itself: a missing ledger
+    is `[]`, a malformed line is skipped, not raised. One deliberate hardening:
+    a line that parses as JSON but is not an object used to be returned and then
+    crash its caller on `.get`; it is now dropped by the shared decoder.
+    """
     out: list[dict] = []
-    if not ledger.exists():
-        return out
-    try:
-        for line in ledger.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                d = json.loads(line)
-            except ValueError:
-                continue
-            if d.get("event") != event:
-                continue
-            if require_item and d.get("item_id") is None:
-                continue
-            out.append(d)
-    except OSError:
-        pass
+    for d in _ledger_rows(ledger):
+        if d.get("event") != event:
+            continue
+        if require_item and d.get("item_id") is None:
+            continue
+        out.append(d)
     return out
 
 
@@ -4032,8 +4090,14 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
 
     `draft` is a partition, each item counted once, by precedence: grouped >
     needs-human > held > triaged > quarantined > pool. `held` is a confirmation
-    waiting for room in the implement pool (see `held_confirmations`). Reads
-    every item file and the ledger several times; never call it per item.
+    waiting for room in the implement pool (see `held_confirmations`).
+
+    Cost, so it is not re-derived: it walks every item file and asks the ledger
+    many filtered questions, all answered from one decode since #1204
+    (`scripts.automod.state.ledger_rows`). 5.63 s standalone measured
+    2026-09-17 over 1,141 item files before that work; 0.40 s after. Never call
+    it per item — the walk is per board, and the dashboard reaches it once a
+    minute at `_SCORECARD_TTL_S`.
     """
     now = time.time() if now is None else now
     everything = all_items(boards, backlog_dir=backlog_dir)
