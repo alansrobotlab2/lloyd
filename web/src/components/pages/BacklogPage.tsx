@@ -745,15 +745,13 @@ export default function BacklogPage() {
     setEditingTask(task);
   };
 
-  const filteredTasks = (activeBoard
+  // Board only. The text predicate that used to live here is gone: `?q=` matched
+  // server-side over the whole body, and re-filtering the returned rows against a
+  // 300-character snippet would discard exactly the mid-body matches the server
+  // just found (item #1199).
+  const filteredTasks = activeBoard
     ? tasks.filter((t) => t.board_id === activeBoard)
-    : tasks
-  ).filter(() => {
-    // No text predicate here any more: `?q=` did the matching server-side, over
-    // the whole body. Re-filtering the returned rows against a *snippet* would
-    // throw away exactly the mid-body matches the server went and found.
-    return true;
-  });
+    : tasks;
 
   const tasksByStatus = STATUSES.reduce(
     (acc, status) => {

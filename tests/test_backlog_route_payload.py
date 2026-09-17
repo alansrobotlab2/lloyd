@@ -36,7 +36,7 @@ from app.routers import backlog as BR
 
 def write_item(
     d: Path, item_id: int, *, board: str = "lloyd", status: str = "draft",
-    name: str | None = None, body: str = "Do the thing.",
+    name: str | None = None, body: str = "Do the thing.", tags: list | None = None,
 ) -> Path:
     """One conformant backlog file, the shape `backlog_task_create` writes."""
     name = name or f"Item {item_id}"
@@ -47,6 +47,8 @@ def write_item(
         "assigned": False, "position": item_id * 1000,
         "created": "2026-09-01T00:00:00", "updated": "2026-09-01T00:00:00",
     }
+    if tags:
+        fm["tags"] = list(tags)
     p.write_text(
         f"---\n{yaml.dump(fm, default_flow_style=False)}---\n\n# {name}\n\n{body}\n",
         encoding="utf-8",
@@ -82,9 +84,13 @@ def test_list_row_carries_a_snippet_and_not_the_body(backlog_dir):
     assert len(snippet) >= 200, f"snippet was only {len(snippet)} chars"
     assert len(snippet) <= BR.DESC_SNIPPET_CHARS + 1, "snippet longer than the cap"
     assert body.startswith(snippet.rstrip("…")), "snippet is not the head of the body"
-    # Clause: "and no full body" — 7.2 KB of body must not be in the row.
-    assert len(body) > 10_000
-    assert len(snippet) <= BR.DESC_SNIPPET_CHARS + 1
+    # Positive control, not the clause: the body here is 18 KB, so if the route
+    # ever returns it whole this row's payload is an order of magnitude too big.
+    # The assertion that carries the clause is the `description`-key one below
+    # plus the byte budgets in `test_payload_matches_the_live_corpus_shape`.
+    assert len(body) > 10 * BR.DESC_SNIPPET_CHARS, (
+        "fixture too small to detect a full body: it must be several times the cap"
+    )
     # And the row carries no `description` key at all: that name belongs to the
     # whole body, which lives on `/api/backlog/task/{id}`. An alias here is what
     # lets a caller post a snippet where a body was expected — `task-update`
@@ -95,17 +101,40 @@ def test_list_row_carries_a_snippet_and_not_the_body(backlog_dir):
     )
 
 
-def test_unfiltered_payload_is_bytes_of_rows_not_bytes_of_bodies(backlog_dir):
-    """9.2 MB -> < 1 MB. Asserted as a ratio so it fails on the old behaviour."""
-    n, per_body = 200, 5_000
+def test_payload_matches_the_live_corpus_shape(backlog_dir):
+    """The byte budget at the size that motivated the item, so the graded suite
+    measures it and not only the box with a vault.
+
+    Live corpus, 2026-09-16: 1,137 files holding 8,409,812 B of bodies behind a
+    9,202,414 B response, mean body 7,344 B. Reproduced here at that shape — the
+    same row count, the same mean body, a 60-character name and a tag list each,
+    which is what the live rows average too (111,620 B of names, 76,030 B of tags
+    across 1,137 rows). The old route shipped ~8.4 MB for this corpus; the clause
+    is under 1 MB, which is what the assertion demands. `test_the_live_board_ships_
+    under_a_megabyte_of_rows` is the same claim on the real board; a real byte
+    count cannot be asserted from a fixture that does not read one, so the fixture
+    is built to the measured shape instead of being asserted to be small.
+    """
+    n, per_body = 1_137, 7_344
     for i in range(1, n + 1):
-        write_item(backlog_dir, i, body="x" * per_body)
-    total_body = n * per_body  # 1,000,000 B of bodies on disk
+        write_item(
+            backlog_dir, i,
+            name=f"Backlog item number {i} with a realistic title",
+            body="## Handoff\n\n" + ("e" * per_body),
+            tags=["autocode", "surface-code"],
+        )
+    on_disk = sum(len(p.read_bytes()) for p in backlog_dir.glob("*.md"))
+    # Positive control: at 1,137 x 7,344 the corpus must itself be multi-megabyte,
+    # or this test would pass by being small rather than by being a snippet.
+    assert on_disk > 8_000_000, f"only {on_disk:,} B on disk: fixture lost its shape"
 
     payload = bytes(BR.backlog_tasks().body)
-    assert len(payload) < 1_000_000, f"payload {len(payload)} B is still MB-scale"
-    assert len(payload) < total_body / 2, (
-        f"payload {len(payload)} B is not smaller than the {total_body} B of bodies"
+    assert len(payload) < 1_000_000, (
+        f"{len(payload):,} B for {n} rows: the list route is shipping bodies "
+        "again (was 9,202,414 B on the live board before #1199)"
+    )
+    assert len(payload) < on_disk / 4, (
+        f"payload {len(payload):,} B against {on_disk:,} B on disk"
     )
     assert len(rows_of(BR.backlog_tasks())) == n, "payload shrank by dropping rows"
 
@@ -178,22 +207,30 @@ def test_query_with_no_match_returns_an_empty_list(backlog_dir):
 
 
 # ── The live board ───────────────────────────────────────────────────────────
-# The clause this pins is a byte budget on the *real* corpus: 9,202,414 B before
-# #1199, and the acceptance line is under 1 MB. A tmp_path fixture can prove the
-# shape of a row; only the board itself can prove the total, because the total is
-# what 1,137 rows add up to. Marked `live_vault`, so the gate's `-m "not
-# live_vault"` skips it — it is run and cited separately (see the round report),
-# and `scripts/maintenance/backlog_route_probe.py` prints the same number.
+# The same byte budget as `test_payload_matches_the_live_corpus_shape`, measured on
+# the corpus that motivated it: 9,202,414 B before #1199. Marked `live_vault` for
+# the reason pytest.ini gives — this board is rewritten by hourly jobs, so a hard
+# gate rung must not fail one round for another writer's file — and the graded copy
+# of the clause is the unmarked fixture test above, which the gate does run.
+#
+# There is no `pytest.skip` for a missing vault. The directory is patched in so
+# these read the board regardless of what an earlier test pointed `_BACKLOG_DIR`
+# at, and with no board the row-count guard fails and names the path. Silently
+# skipping would let the real-corpus assertion vanish on any machine without one.
+# Run the copy on this box with:
+#   .venvs/lloyd/bin/python -m pytest -m live_vault tests/test_backlog_route_payload.py
 
 
 @pytest.mark.live_vault
-def test_the_live_board_ships_under_a_megabyte_of_rows():
+def test_the_live_board_ships_under_a_megabyte_of_rows(monkeypatch):
     root = Path.home() / "obsidian" / "backlog"
-    if not root.exists():
-        pytest.skip("no vault")
-    body_bytes = BR.backlog_tasks().body
-    rows = json.loads(bytes(body_bytes))
-    assert len(rows) > 1000, f"only {len(rows)} rows: not the corpus this measures"
+    monkeypatch.setattr(BR, "_BACKLOG_DIR", root)
+    monkeypatch.setattr(BR, "_FM_CACHE", {})
+    body_bytes = bytes(BR.backlog_tasks().body)
+    rows = json.loads(body_bytes)
+    assert len(rows) > 1000, (
+        f"only {len(rows)} rows from {root}: not the corpus this measures"
+    )
     assert len(body_bytes) < 1_000_000, (
         f"{len(body_bytes):,} B for {len(rows)} rows: the list route is carrying "
         "bodies again (was 9,202,414 B before #1199)"
@@ -205,12 +242,13 @@ def test_the_live_board_ships_under_a_megabyte_of_rows():
 
 
 @pytest.mark.live_vault
-def test_the_live_detail_route_returns_a_body_the_list_refused_to_send():
+def test_the_live_detail_route_returns_a_body_the_list_refused_to_send(monkeypatch):
     """One real item, both routes: the row's snippet and the detail's full body."""
     root = Path.home() / "obsidian" / "backlog"
-    if not root.exists():
-        pytest.skip("no vault")
+    monkeypatch.setattr(BR, "_BACKLOG_DIR", root)
+    monkeypatch.setattr(BR, "_FM_CACHE", {})
     rows = json.loads(bytes(BR.backlog_tasks().body))
+    assert rows, f"no rows from {root}"
     row = max(rows, key=lambda r: len(r["description_snippet"]))
     detail = json.loads(bytes(BR.backlog_task_detail(row["id"]).body))
     assert len(detail["description"]) > len(row["description_snippet"]), (

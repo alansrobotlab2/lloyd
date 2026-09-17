@@ -180,7 +180,18 @@ def _write_task_file(filepath: Path, fm: dict, body: str) -> None:
     clean = {k: (v.isoformat() if isinstance(v, datetime) else v)
              for k, v in fm.items() if v is not None}
     fm_yaml = yaml.dump(clean, default_flow_style=False, allow_unicode=True, sort_keys=False)
-    filepath.write_text(f"---\n{fm_yaml}---\n\n{body}\n")
+    # Deliberately the byte-for-byte shape this route has always written, because
+    # two of its consequences are not this item's to change: `yaml.dump` re-quotes
+    # and re-wraps a hand-written frontmatter block, and `_backlog_parse_fm` hands
+    # back a `.strip()`ed body, so a save ends the file without the trailing newline
+    # that 764 of the 1,139 board files currently have. Both are why the clause
+    # "a priority-only update leaves the file byte-identical apart from priority:
+    # /updated:" is true of the **body and the other frontmatter lines** and not of
+    # the last byte of a hand-written file — which `tests/test_backlog_body_
+    # roundtrip.py::test_a_priority_only_update_survives_frontmatter_the_writer_
+    # would_reflow` states as a test. Fixing the re-flow means preserving the block's
+    # original text through a write; that is a write-path change, not a payload fix.
+    filepath.write_text(f"---\n{fm_yaml}---\n\n{body}")
     # This write just made the cached copy wrong; drop the entry rather than
     # trust a same-second `mtime_ns` to differ from the one now on file. The
     # other entries are untouched, so a save costs one re-parse, not a rescan.

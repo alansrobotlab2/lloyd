@@ -24,6 +24,7 @@ succeeds, so a priority change stays a priority change.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -189,6 +190,64 @@ async def test_priority_only_update_changes_only_priority_and_updated(
 
 
 @pytest.mark.asyncio
+async def test_a_priority_only_update_survives_frontmatter_the_writer_would_reflow(
+    backlog_dir,
+):
+    """How far the byte-identity clause actually reaches, stated as a test.
+
+    `_write_task_file` re-dumps the whole frontmatter block with `yaml.dump`, so a
+    file whose block is not already in that canonical shape changes more than
+    `priority:`/`updated:` when it is saved: a hand-written `'board': lloyd`
+    becomes `board: lloyd`, and a value past the 80-column wrap is folded onto
+    continuation lines. On the live board that is 57 of 60 items, and it is
+    pre-existing route behaviour, not something #1199 introduced or could fix
+    without rewriting the write path — which is out of this item's scope.
+
+    So the guarantee that must never break, and the one this test pins for *any*
+    frontmatter shape, is that the **body** is untouched. The line-level identity
+    above holds for files in the shape the route itself writes.
+    """
+    p = backlog_dir / "23-reflowed-item.md"
+    p.write_text(
+        "---\ntype: 'backlog'\nsegment: backlog\nstatus: 'draft'\npriority: medium\n"
+        "board: \"lloyd\"\nblocked: False\nassigned: False\nposition: 23000\n"
+        "title: A backlog item whose hand written summary of the change is long "
+        "enough that yaml dot dump will want to fold it onto a continuation line\n"
+        "updated: '2026-09-01T00:00:00'\n---\n\n"
+        "# Reflowed item\n\n## Handoff\n\n" + "keep every byte. " * 400 + "\n",
+        encoding="utf-8",
+    )
+    before = p.read_text(encoding="utf-8")
+    body_before = body_on_disk(p)
+    assert "'backlog'" in before, "fixture must start non-canonical or it proves nothing"
+
+    await BR.backlog_task_update(_Req({"id": 23, "priority": "high"}))
+
+    assert body_on_disk(p) == body_before, (
+        "a priority click changed the body of a file whose frontmatter the writer "
+        "also re-flowed — the body is the part that must never move"
+    )
+    after = p.read_text(encoding="utf-8")
+    # Positive control: the block really was re-dumped, so this is the scenario and
+    # not a canonical file passing by accident. `yaml.dump` drops quotes it does not
+    # need and lowercases Python bools.
+    assert "'backlog'" not in after and "board: lloyd" in after, (
+        "frontmatter came back un-re-quoted: the fixture is already canonical and "
+        "the scenario this test exists for is untested"
+    )
+    # The body's text survives exactly; the one thing that does not survive is the
+    # file's trailing whitespace, because `_backlog_parse_fm` hands the writer a
+    # `.strip()`ed body. That byte is the writer's pre-existing normalisation, and
+    # it is the whole of what a hand-written file's `git diff` can show besides the
+    # re-quoted frontmatter lines — so it is named here rather than glossed.
+    tail_of = lambda t: t.split("---", 2)[2].rstrip()
+    assert tail_of(after) == tail_of(before), (
+        "everything after the frontmatter moved apart from trailing whitespace"
+    )
+    assert "keep every byte." in after
+
+
+@pytest.mark.asyncio
 async def test_name_and_description_is_a_valid_full_rewrite_pair(backlog_dir):
     """Renaming through the modal keeps working (the heading path of the guard)."""
     path = write_item(backlog_dir, 22, body="## Notes\n\n" + "keep me. " * 500)
@@ -196,3 +255,41 @@ async def test_name_and_description_is_a_valid_full_rewrite_pair(backlog_dir):
     await BR.backlog_task_update(_Req({"id": 22, "name": "Renamed item"}))
     assert strip_frontmatter(path).lstrip().startswith("# Renamed item")
     assert "keep me." in path.read_text(encoding="utf-8")
+
+
+# ── the identity the modal depends on ────────────────────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [200, 120_000], ids=["short-body", "120KB-body"])
+async def test_the_detail_routes_description_is_a_fixed_point_of_the_write(
+    backlog_dir, size
+):
+    """`GET /api/backlog/task/{id}`'s `description`, posted straight back with
+    `force_body_replace`, must reproduce the same `description`.
+
+    This is the seam the editor's guard stands on: `TaskModal` reads the body from
+    the detail route, withholds `description` until it arrives, then posts it. If
+    the detail route's string and the write's string were not the same value, a
+    faithful read-edit-save would still lose bytes — the loss would just be
+    smaller than the snippet's and nobody would notice. 200 chars covers a body
+    under the snippet cap (so the modal is posting what the list would have shown
+    anyway); 120 KB covers the largest real body (118,494 B on the live board).
+    """
+    unit = "sentence that has to come back unchanged. "
+    body = "## Handoff\n\n" + " ".join([unit] * (size // len(unit) + 1))
+    write_item(backlog_dir, 31, body=body)
+
+    sent = BR.backlog_task_detail(31)
+    description = json.loads(bytes(sent.body))["description"]
+    assert description, "detail route returned an empty body to round-trip"
+
+    await BR.backlog_task_update(_Req({
+        "id": 31, "description": description, "force_body_replace": True,
+    }))
+
+    again = json.loads(bytes(BR.backlog_task_detail(31).body))["description"]
+    assert again == description, (
+        f"the write did not reproduce the read: {len(description)} B in, "
+        f"{len(again)} B out"
+    )
+    assert again == body.strip(), "the round-trip is not the body that was written"
