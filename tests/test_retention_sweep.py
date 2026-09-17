@@ -51,16 +51,40 @@ def _backdate(path: Path, days: float) -> None:
     os.utime(path, (ts, ts))
 
 
-def _write_session(dir: Path, name: str, last_active_days: float) -> Path:
+def _write_session(dir: Path, name: str, last_active_days: float,
+                   platform: str | None = None) -> Path:
     from datetime import datetime, timedelta
     ts = (datetime.now() - timedelta(days=last_active_days)).isoformat()
-    p = dir / f"{name}.json"
-    p.write_text(json.dumps({
+    doc = {
         "session_id": name,
         "last_active": ts,
         "messages": [{"role": "user", "content": "hi"}],
-    }, indent=2))
+    }
+    if platform:
+        doc["platform"] = platform
+    p = dir / f"{name}.json"
+    p.write_text(json.dumps(doc, indent=2))
     return p
+
+
+def _write_spill(dir: Path, session_id: str, *, newest_days: float,
+                 oldest_extra_days: float = 0.0, size: int = 1000) -> Path:
+    """Create `<session_id>.tool-results/` holding spilled results whose NEWEST file is
+    `newest_days` old, plus (optionally) an older one `oldest_extra_days` old.
+
+    Returns the directory. The caller backdates nothing afterwards: mtime is set on the
+    files only, which is the state the rung ages on — and the reason an `oldest_extra_days`
+    argument exists at all. Backdating the directory too would leave the rule under
+    `dir.stat().st_mtime` un-falsified.
+    """
+    d = dir / f"{session_id}.tool-results"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "toolu_newest.txt").write_text("n" * size)
+    _backdate(d / "toolu_newest.txt", newest_days)
+    if oldest_extra_days:
+        (d / "toolu_oldest.txt").write_text("o" * size)
+        _backdate(d / "toolu_oldest.txt", oldest_extra_days)
+    return d
 
 
 def test_old_task_logs_deleted_recent_kept(rs):
@@ -254,3 +278,244 @@ def test_dry_run_reports_the_transcript_store(rs, capsys, monkeypatch):
     assert f">{rs.TRANSCRIPT_MAX_AGE_DAYS}d" in lines[0], lines[0]
     assert "1 deleted" in lines[0] and "2 KiB freed" in lines[0], \
         f"the dry run must report the store's count and bytes like the others: {lines[0]!r}"
+
+
+# --------------------------------------------------------------------------------------
+# The seventh rung: ~/lloyd/sessions/*.tool-results (backlog #1174).
+#
+# The store is the harness's spill sidecar: `app/harness/tool_result_spill.py` writes
+# `<session_id>.tool-results/<tool_use_id>.{txt,json}` into the SAME directory rung 2
+# bounds with `glob("*.json")`, so 130.1 MiB of the 544.3 MiB store (measured 2026-09-16)
+# has been invisible to every age rule since the spill module landed. These cases run on
+# tmp_path via the `rs` fixture, which already redirects SESSIONS_DIR — the rung deletes
+# from that same root, so no new `*_DIR` had to be added to the fixture, and the fixture's
+# loop at the top of this file would have failed for one that was not.
+#
+# Every non-target below is backdated PAST the window. That is deliberate and is the same
+# discipline the transcript-scratch cases above follow: a younger control survives a rung
+# that has no guard at all, so `survives.exists()` alone checks nothing.
+# --------------------------------------------------------------------------------------
+
+
+def test_spill_dir_older_than_the_window_is_deleted_and_younger_is_not(rs):
+    """Clause 1: age is the NEWEST file inside the directory, against
+    SPILL_MAX_AGE_DAYS = 30, and only --apply removes anything."""
+    now = time.time()
+    assert rs.SPILL_MAX_AGE_DAYS == 30
+
+    # Over the window, every file in it: the delete case. 1000 + 512 B of it, so the
+    # byte total is checkable rather than merely non-zero.
+    gone = rs.SESSIONS_DIR / "over.tool-results"
+    gone.mkdir()
+    (gone / "toolu_a.txt").write_text("a" * 1000)
+    (gone / "toolu_b.json").write_text("b" * 512)
+    _backdate(gone / "toolu_a.txt", 45)
+    _backdate(gone / "toolu_b.json", 40)
+
+    # Under the window: must survive on its own merits, not on the guard's.
+    keep_fresh = _write_spill(rs.SESSIONS_DIR, "under", newest_days=10, size=700)
+
+    # The falsifier for "newest": a directory whose FIRST spill is over the window but
+    # which a session has written into since. Aged on the oldest file, or on the
+    # directory's own mtime (which is the age of the first file added to it), this one is
+    # deleted — and it is the read-back target of a session that is still running.
+    keep_mixed = _write_spill(rs.SESSIONS_DIR, "mixed", newest_days=5,
+                              oldest_extra_days=90, size=800)
+
+    n, freed = rs.sweep_session_spills(apply=False, now=now)
+    assert (n, freed) == (1, 1512), \
+        f"expected exactly the over-window dir and its exact bytes, got {(n, freed)}"
+    assert gone.exists(), "dry run must touch nothing"
+
+    n, freed = rs.sweep_session_spills(apply=True, now=now)
+    assert (n, freed) == (1, 1512)
+    assert not gone.exists(), "a dir whose newest spill is 45 d old must be reclaimed"
+    assert keep_fresh.exists(), "a spill dir inside the window must survive"
+    assert keep_mixed.exists(), (
+        "a spill dir with a fresh file in it must survive even though it also holds a "
+        "90-day-old spill — the rule is the NEWEST inner mtime")
+
+
+def test_spill_dir_with_no_transcript_is_still_swept(rs):
+    """Clause 2: the unjoinable id class. 372 of the 804 live spill dirs (61.4 MiB,
+    measured 2026-09-16) name an id that has no `sessions/<id>.json` at all — task
+    subagents, bench trials and the e2e harness spill under ids that never get a Lloyd
+    transcript. Any rule of the form "the json is gone, so delete the siblings" cannot
+    see them either, so the age rule must apply to them with nothing to join to.
+
+    The three ids below are the live shapes, taken verbatim from the directory listing in
+    the item: a task-subagent id, a bench trial id, an e2e id."""
+    now = time.time()
+    orphans = [
+        _write_spill(rs.SESSIONS_DIR, "4743eb87c1f04de5a3f6be1e12c3f2a1", newest_days=31),
+        _write_spill(rs.SESSIONS_DIR, "task:general-purpose:6ff2b13d", newest_days=40),
+        _write_spill(rs.SESSIONS_DIR, "bench_baseline_1789237343_bench_006_06f26c32",
+                     newest_days=60),
+    ]
+    for o in orphans:
+        assert not (rs.SESSIONS_DIR / f"{o.name[:-len(rs.SPILL_DIR_SUFFIX)]}.json").exists(), \
+            "the fixture must really be the unjoinable class, not a joinable one"
+    # A sibling json belonging to some OTHER session proves the rung is not sweeping the
+    # whole directory because it gave up on joining.
+    other = _write_session(rs.SESSIONS_DIR, "some-session", last_active_days=1)
+
+    n, freed = rs.sweep_session_spills(apply=False, now=now)
+    assert n == 3, f"all three orphan classes must be candidates, got {n}"
+    assert freed == 3 * 1000, f"one spill file's bytes per dir: {freed}"
+    assert all(o.exists() for o in orphans), "dry run must touch nothing"
+
+    n, freed = rs.sweep_session_spills(apply=True, now=now)
+    assert (n, freed) == (3, 3000)
+    for o in orphans:
+        assert not o.exists(), f"{o.name} is over the window and joinable to nothing"
+    assert other.exists(), "a transcript is not a spill dir; leave it alone"
+
+
+def test_spill_dir_of_a_session_still_in_window_survives(rs):
+    """Clause 3: the read-back guarantee. Spill exists precisely so the model can re-read
+    a large tool result from disk with `Read` (`tool_result_spill.py:10-14`), so a
+    directory that is over the sidecar window must NOT be taken while its own transcript
+    is still inside that transcript's archive window. 30 < 90, so a long-running
+    conversation reaches the spill window first and would otherwise lose the files its
+    own prompt is pointing at."""
+    now = time.time()
+    # A conversation 60 d into its 90 d archive window, spill dir older than the 30 d sidecar
+    # window: exactly the state a long-running chat reaches. This is the clause.
+    spare = _write_spill(rs.SESSIONS_DIR, "conv", newest_days=45)
+    _write_session(rs.SESSIONS_DIR, "conv", last_active_days=60)
+
+    # Past its own archive line the same session gets no protection: the transcript is
+    # about to leave the listings, so there is nothing left that can re-read the spill.
+    archived = _write_spill(rs.SESSIONS_DIR, "oldconv", newest_days=45)
+    _write_session(rs.SESSIONS_DIR, "oldconv", last_active_days=120)
+
+    # And the window followed is the SESSION's own: a background run is archived at 30 d, so
+    # a 40-day-old worker session is already past its line and its spill goes. Proves the
+    # guard consults `_archive_age_for`, not a hard-coded 90.
+    bg = _write_spill(rs.SESSIONS_DIR, "bgrun", newest_days=45)
+    _write_session(rs.SESSIONS_DIR, "bgrun", last_active_days=40, platform="worker")
+
+    n, freed = rs.sweep_session_spills(apply=False, now=now)
+    assert n == 2, f"expected the archived conversation and the archived background run, got {n}"
+    assert spare.exists() and archived.exists() and bg.exists()
+
+    rs.sweep_session_spills(apply=True, now=now)
+    assert spare.exists(), (
+        "the read-back target of a session still inside its archive window must survive: "
+        "the model's prompt points at this file by path")
+    assert not archived.exists(), "a session past its archive line keeps no read-back right"
+    assert not bg.exists(), (
+        "a background run archived at 40 d follows its own 30 d window, not the 90 d "
+        "conversation window")
+
+
+def test_spill_dir_pattern_is_pinned_to_the_real_writer(tmp_path, monkeypatch):
+    """Clause 4: the directory pattern must be pinned to `app.harness.tool_result_spill`,
+    not to a string the sweep invented.
+
+    This is the exact failure mode this script's own docstring records for run records —
+    "a bulk operation on 2026-08-22 reset every run record's mtime, which made this sweep
+    silently inert". A rung whose target drifts from the writer's reports `0 deleted` and
+    reads as bounded. So the assertion is against the writer's own function, and on a
+    module loaded with UNMODIFIED constants: patching SESSIONS_DIR into tmp_path and then
+    reading the pattern off the patched module would compare the fixture against itself.
+
+    No skip marker: a checkout that cannot import the writer has to fail here, because an
+    unpinnable pattern is the regression under test, not a reason to pass.
+    """
+    import fnmatch
+    import importlib.util
+
+    unpatched = importlib.util.spec_from_file_location(
+        "retention_sweep_unpatched", _SCRIPT)
+    mod = importlib.util.module_from_spec(unpatched)
+    unpatched.loader.exec_module(mod)  # module level only; nothing walks the filesystem
+
+    from app.harness.tool_result_spill import _spill_dir
+
+    sid = "20260917_040301_4743eb87"
+    written = _spill_dir(sid)
+
+    assert fnmatch.fnmatch(written.name, mod.SPILL_DIR_GLOB), (
+        f"the writer puts spills at {written.name!r} but the sweep sweeps "
+        f"{mod.SPILL_DIR_GLOB!r} — the rung is now silently inert")
+    assert written.parent.name == mod.SESSIONS_DIR.name, (
+        f"the writer spills into {written.parent} but the sweep walks "
+        f"{mod.SESSIONS_DIR} — the rung is now silently inert")
+    # The guard that spares an in-window session finds the transcript by stripping the
+    # suffix off the directory name; if that no longer returns the session id, the guard
+    # silently never matches and every live session's spill becomes a candidate.
+    assert written.name[: -len(mod.SPILL_DIR_SUFFIX)] == sid, (
+        "stripping SPILL_DIR_SUFFIX no longer recovers the session id, so the in-window "
+        "guard cannot match anything")
+    # And the boundary in the other direction: the change ledger's sidecar shares this
+    # directory and shares the `<id>.<suffix>` shape, and must never match.
+    assert not fnmatch.fnmatch(f"{sid}.changes", mod.SPILL_DIR_GLOB), \
+        "the ledger's *.changes pre-images must not fall inside the spill glob"
+    assert mod.SPILL_MAX_AGE_DAYS == 30
+
+
+def test_empty_spill_dir_is_reclaimed_by_the_directorys_own_age(rs):
+    """A spill dir with nothing in it has no inner mtime to age by, and holds nothing worth
+    keeping; the directory is the only signal. Untested, this branch is where an
+    '0 candidates' reading of a partly-drained store would hide."""
+    now = time.time()
+    empty = rs.SESSIONS_DIR / "emptied.tool-results"
+    empty.mkdir()
+    _backdate(empty, 45)
+    young_empty = rs.SESSIONS_DIR / "just-spilled.tool-results"
+    young_empty.mkdir()
+
+    assert rs.sweep_session_spills(apply=True, now=now) == (1, 0)
+    assert not empty.exists(), "an empty spill dir older than the window is dead weight"
+    assert young_empty.exists()
+
+
+def test_spill_store_is_reported_and_apply_removes_what_dry_run_counted(
+        rs, capsys, monkeypatch):
+    """Clause 5: `--apply` and dry-run print the same line with the same numbers, and the
+    dry run removes nothing — so a reported `0 deleted` can only mean "nothing over
+    window", never "no rule", which is how the old `run_*.md` glob sat inert over 3,350
+    records. Run through `main()`, because the operator approves `--apply` from the line
+    this call path prints, not from a re-implementation of it.
+
+    The `.changes` sibling is in here too: same parent, same `<id>.<suffix>` shape, and
+    owned by the change ledger's own `prune()` — a sweep that reached it would delete the
+    pre-images the ledger exists to protect."""
+    stale = _write_spill(rs.SESSIONS_DIR, "task:general-purpose:6ff2b13d", newest_days=45,
+                         size=2048)
+    fresh = _write_spill(rs.SESSIONS_DIR, "still-running", newest_days=2, size=4096)
+    changes = rs.SESSIONS_DIR / "some-session.changes"
+    changes.mkdir()
+    (changes / "turn-1").write_text("pre-image" * 200)
+    _backdate(changes / "turn-1", 45)
+    _backdate(changes, 45)
+
+    def spill_line() -> str:
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if "spill" in ln]
+        assert len(lines) == 1, f"expected exactly one spill line, got {lines}"
+        return lines[0]
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    dry = spill_line()
+    assert f">{rs.SPILL_MAX_AGE_DAYS}d" in dry, dry
+    assert "1 deleted" in dry and "2 KiB freed" in dry, \
+        f"the dry run must report the store's count and bytes like the other six: {dry!r}"
+    assert stale.exists(), "dry run must remove nothing"
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    applied = spill_line()
+    assert "1 deleted" in applied and "2 KiB freed" in applied, \
+        f"--apply must report the same counts the dry run promised: {applied!r}"
+    assert not stale.exists()
+    assert fresh.exists()
+    assert changes.exists() and (changes / "turn-1").exists(), \
+        "the change ledger's pre-images are its own to prune; the sweep must not reach them"
+
+    # And the line goes to 0 on a drained store — the number an operator sees on the run
+    # after this one, which is the difference between an inert rule and a finished one.
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    assert "0 deleted" in spill_line(), "a drained store must report 0, and mean it"

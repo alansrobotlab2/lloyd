@@ -23,9 +23,20 @@ the transcript scratch home from backlog #566:
    directory wrote into /tmp, where systemd-tmpfiles-clean.timer reaps
    them on a clock nobody in Lloyd controls.
 
+7. ~/lloyd/sessions/*.tool-results/ — the tool-result spill dirs the harness
+   writes BESIDE the transcripts (app/harness/tool_result_spill.py names them
+   `<session_id>.tool-results`, and rung 2's `*.json` glob cannot see them).
+   DELETE a directory whose NEWEST inner file is older than
+   SPILL_MAX_AGE_DAYS, unless the session that owns it is still inside its own
+   archive window — the point of spilling is that the model re-reads the file
+   via Read, so a still-open session's spill is not garbage.
+
 Age signal: sessions are aged by the `last_active` field in the JSON
 (mtime lies — any reprocessing touches the file); task logs and transcript
-scratch by mtime (a transcript is written once and only ever read back).
+scratch by mtime (a transcript is written once and only ever read back); a
+spill directory by the newest mtime inside it, because a spill dir is created
+on the session's first oversized tool result and then only ever has files
+added to it — its own mtime is the age of the OLDEST spill in it.
 
 Usage:
     retention-sweep.py            # dry run — report only
@@ -77,6 +88,24 @@ CANDIDATE_MAX_AGE_DAYS = 30
 # — every byte of it written by a session and none of it ever deleted. Deleting is safe at
 # all only because the video note carries transcript_path + transcript_md5.
 TRANSCRIPT_MAX_AGE_DAYS = 30
+# The sessions store's sidecar: one `<session_id>.tool-results/` directory per
+# session that ever spilled, written by app/harness/tool_result_spill.py next to the
+# transcript. Rung 2 globs `*.json`, so these were invisible to every age rule from the
+# day the spill module landed — the same silent-inertness shape `_run_record_age_seconds`
+# records for run records, caused here by the store changing shape under a fixed glob.
+# Measured 2026-09-16: 804 dirs / 5,617 files / 130.1 MiB = 23.9 % of the store, and 372
+# of the 804 dirs (61.4 MiB) name an id with no `sessions/<id>.json` at all — task
+# subagents, bench trials and the e2e harness spill under ids that never get a transcript,
+# so no rule that joins to a session can reach them and the window has to sit on the
+# directory itself. 30 d matches BACKGROUND_SESSION_ARCHIVE_AGE_DAYS: a background
+# transcript is out of the listings by then, so its spilled tool results are forensics on
+# a run nobody is reading any more. The name of the directory is derived from
+# SPILL_DIR_SUFFIX, and tests/test_retention_sweep.py pins that suffix against the writer's
+# own `_spill_dir()` — a spill root that moved or renamed must fail a test, not read as
+# "0 candidates, therefore bounded".
+SPILL_DIR_SUFFIX = ".tool-results"
+SPILL_DIR_GLOB = f"*{SPILL_DIR_SUFFIX}"
+SPILL_MAX_AGE_DAYS = 30
 # candidates still awaiting action are never pruned regardless of age
 CANDIDATE_KEEP_STATUSES = ("pending", "proposed", "flagged_for_authoring")
 _CANDIDATE_STATUS_RE = re.compile(r"^status:\s*(\S+)", re.MULTILINE)
@@ -365,6 +394,83 @@ def sweep_transcript_scratch(apply: bool, now: float) -> tuple[int, int]:
     return count, freed
 
 
+def _spill_contents(dir: Path) -> tuple[float | None, int]:
+    """(newest mtime, total bytes) over the plain files inside a spill dir.
+
+    One walk, because the byte total reported for a candidate has to be the bytes
+    the delete actually reclaims. Symlinks are skipped rather than followed: the
+    harness writes plain files here, so a link in a spill dir is not a spill, and
+    rmtree would take the link either way — counting its target's size would report
+    a reclaim the delete does not deliver.
+    """
+    newest: float | None = None
+    total = 0
+    for entry in dir.rglob("*"):
+        try:
+            if entry.is_symlink() or not entry.is_file():
+                continue
+            st = entry.stat()
+        except OSError:
+            continue
+        if newest is None or st.st_mtime > newest:
+            newest = st.st_mtime
+        total += st.st_size
+    return newest, total
+
+
+def sweep_session_spills(apply: bool, now: float) -> tuple[int, int]:
+    """Delete spill dirs whose newest inner file predates SPILL_MAX_AGE_DAYS.
+
+    Returns (count, bytes).
+
+    A directory is a candidate on the age of its NEWEST file, never the dir's own
+    mtime and never its oldest spill: taking a directory that a session is still
+    writing into would delete the newest results, which are the ones in use.
+
+    One thing spares a candidate: the session that owns it is still inside its own
+    archive window. Spill exists so the model can re-read a large tool result from
+    disk with `Read` (tool_result_spill.py:10-14), so the read-back target of a live
+    session must survive even when the directory has been on disk past the window —
+    which is exactly what a long-running conversation's spill dir looks like. Once
+    `sessions/<sid>.json` is itself past its archive line the session is about to
+    leave the listings anyway and its spill goes with it; when there is no transcript
+    at all (the task/bench/e2e id class) the age rule is the only thing that can
+    reach the directory, and it applies unconditionally — that is the class this
+    rung exists for.
+
+    `*.changes` is deliberately NOT swept even though it sits in the same directory
+    with the same shape: those directories are the change ledger's own pre-images,
+    which `_change_ledger.py`'s `prune()` ages on its own clock and a sweep would
+    destroy the very state the ledger keeps.
+    """
+    count = freed = 0
+    if not SESSIONS_DIR.exists():
+        return 0, 0
+    cutoff = now - SPILL_MAX_AGE_DAYS * 86400
+    for path in SESSIONS_DIR.glob(SPILL_DIR_GLOB):
+        try:
+            if path.is_symlink() or not path.is_dir():
+                continue
+            newest, size = _spill_contents(path)
+            if newest is None:
+                # An empty directory holds nothing to age by; the directory itself is
+                # the only signal, and an empty spill dir is worthless regardless.
+                newest = path.stat().st_mtime
+            if newest >= cutoff:
+                continue
+            session_json = SESSIONS_DIR / (path.name[: -len(SPILL_DIR_SUFFIX)] + ".json")
+            if (session_json.is_file()
+                    and _session_age_days(session_json, now) < _archive_age_for(session_json)):
+                continue
+            if apply:
+                shutil.rmtree(path)
+            count += 1
+            freed += size
+        except OSError as e:
+            print(f"  ! skip {path.name}: {e}", file=sys.stderr)
+    return count, freed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -379,6 +485,7 @@ def main() -> int:
     act_f, act_l = sweep_activity_logs(args.apply)
     cand_n, cand_b = sweep_candidates(args.apply, now)
     scr_n, scr_b = sweep_transcript_scratch(args.apply, now)
+    spill_n, spill_b = sweep_session_spills(args.apply, now)
 
     print(f"[retention-sweep] {mode}")
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
@@ -395,6 +502,11 @@ def main() -> int:
           f"{cand_n} deleted, {cand_b / 1024:.0f} KiB freed")
     print(f"  transcript scratch >{TRANSCRIPT_MAX_AGE_DAYS}d: "
           f"{scr_n} deleted, {scr_b / 1024:.0f} KiB freed")
+    # Same line in both modes, like the other six: the operator approves `--apply` from
+    # the dry run's numbers, so a dry run that differs in shape from an applied run is a
+    # line nobody can compare against the run they just approved.
+    print(f"  session spill dirs (*{SPILL_DIR_SUFFIX}) >{SPILL_MAX_AGE_DAYS}d: "
+          f"{spill_n} deleted, {spill_b / 1024:.0f} KiB freed")
     return 0
 
 
