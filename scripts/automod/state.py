@@ -175,6 +175,23 @@ def append_event(entry: dict, path: Path | None = None) -> None:
 # the size — is visible to the next call with no cooperation from the writer.
 # An inode change covers an out-of-place rewrite (compaction), which the
 # (mtime, size) pair alone could miss if it landed in the same nanosecond.
+# Invalidation has to be cross-*process* too, and it is: the writer is often a
+# different program (the gate, the guardian, `agent_mcp/automod.py`) appending
+# into the same file the backend reads, and a stat of the shared file sees that
+# with no IPC. `tests/test_backlog_ledger_cache.py` pins it with a real child
+# process, because a `sys.path`-shared in-process append cannot see a
+# same-nanosecond rewrite.
+#
+# One decode is admitted at a time, and the decode runs *holding* the lock.
+# That is the shape the dashboard forces: `get_dashboard` offloads `_backlog`
+# and `_automod` to separate `asyncio.to_thread` workers, so two threads ask
+# for these rows in the same instant, and the answer is the same rows. Check,
+# decode, store is not atomic on its own: the live ledger — 6,339,461 bytes,
+# 5,834 rows at 05:25Z on 2026-09-17, grown since the 04:44Z census above —
+# reads and decodes in 51 ms here, so a lock-free gap admits whoever loses the
+# race to decode it again. One read per cycle becomes two, and the clause this
+# serves is "at most once". The blocked caller loses nothing: it would have
+# spent those same 51 ms decoding, and the GIL serialises the two anyway.
 #
 # Rows are shared, not copied: a copy per call would be most of the cost back
 # again. Nothing downstream writes into a row — the readers build their own
@@ -201,27 +218,33 @@ def ledger_rows(path: Path | None = None) -> list[dict]:
     """
     target = path or LEDGER_PATH
     key = str(target)
-    with _rows_lock:
-        cached = _rows_cache.get(key)
     try:
         st = target.stat()
     except OSError:
         return []  # no file: not a read, so nothing to decode and nothing to count
     version = (st.st_mtime_ns, st.st_size, st.st_ino)
-    if cached is not None and cached[0] == version:
+    # Fast arm: the common case, and it never touches the disk. Re-checked
+    # inside the lock below, because `version` was read before the lock and a
+    # concurrent decode of a *newer* file may have landed in between.
+    if (cached := _rows_cache.get(key)) is not None and cached[0] == version:
         return cached[1]
-    # Past here the file comes off disk, and the counter moves — see
-    # `ledger_read_count` for why the count is of reads and not of calls.
-    if st.st_size > _ROWS_CACHE_MAX_BYTES:
-        # Decode without caching: holding a rotated-out ledger in RAM is worse
-        # than re-decoding it, and the ceiling is a round 64 MiB against the
-        # 6,317,811 bytes measured on 2026-09-17.
-        with _rows_lock:
-            _rows_reads[key] = _rows_reads.get(key, 0) + 1
-        return _decode_ledger(target)
-    rows = _decode_ledger(target)
     with _rows_lock:
+        cached = _rows_cache.get(key)
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        # Past here the file comes off disk, and the counter moves — see
+        # `ledger_read_count` for why the count is of reads and not of calls.
+        # The decode is under the lock: single-flight, see the note above.
+        rows = _decode_ledger(target)
         _rows_reads[key] = _rows_reads.get(key, 0) + 1
+        if st.st_size > _ROWS_CACHE_MAX_BYTES:
+            # Decode without caching: holding a rotated-out ledger in RAM is
+            # worse than re-decoding it, and the ceiling is a round 64 MiB
+            # against the 6,339,461 bytes measured on 2026-09-17. Past the
+            # ceiling the cost that matters is RAM, not the 51 ms, so a caller
+            # after this one decodes too — one read per caller, never one per
+            # question, which is the multiplication #1204 is about.
+            return rows
         _rows_cache[key] = (version, rows)
         # A ledger that has been unlinked (a rotation, a test teardown) has no
         # version to match, so its rows would sit here holding their ~4 bytes of

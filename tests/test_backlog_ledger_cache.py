@@ -13,11 +13,21 @@ The counter here is on `pathlib.Path.read_text` filtered to the ledger path,
 which is what the shared row cache in `scripts/automod/state.py` actually
 removes. Counting `json.loads` too, because a cache that read once but decoded
 per line would still cost the 3.8 s.
+
+The last two tests cross the two process boundaries this cache actually sits
+on, which no in-process fixture can reach: `get_dashboard` asks for these rows
+from `asyncio.to_thread` workers — different threads, same file, same instant —
+and the rows themselves are appended by *other programs* (the gate, the
+guardian, the MCP layer), so invalidation has to be a stat of a shared file and
+not a process-local flag.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -200,4 +210,113 @@ def test_scorecard_events_share_the_same_single_read(ledger):
         f"scorecard._events and backlog._ledger_events between them read the "
         f"ledger {B._ledger_read_count(ledger)} times — two readers, two "
         f"decodes, the 3.79 s back"
+    )
+
+
+# ── the boundaries this cache sits on ────────────────────────────────────
+
+def test_concurrent_readers_cause_exactly_one_decode(ledger):
+    """Threads arriving together decode once — the seam `get_dashboard` creates.
+
+    `app/routers/dashboard.py`'s `get_dashboard` offloads `_backlog` and
+    `_automod` through `_to_thread` (`asyncio.to_thread`), so two worker threads
+    reach `state.ledger_rows` in the same instant and want the same rows. A
+    check-then-decode-then-store is not atomic: the pre-fix shape read the
+    cache, released the lock, and decoded outside it, so both threads found
+    nothing cached and both spent the decode — and the clause this file pins is
+    "at most once per cycle", not "usually once".
+
+    The barrier releases all eight callers at once rather than letting them
+    start at eight different moments, so the test asks about the race instead of
+    about thread scheduling luck. The fixture is 2,000 rows, about 654 KB (its
+    byte size is printed by the first test in this file), which decodes in
+    single-digit milliseconds: long enough that a lock-free implementation has
+    all eight threads inside the window together, short enough that the
+    single-flight one costs one decode and a few blocked waits.
+    """
+    B._ledger_cache_clear()
+    n_threads = 8
+    gate = threading.Barrier(n_threads)
+    results: list[int] = []
+    results_lock = threading.Lock()
+
+    def worker():
+        gate.wait()
+        rows = S.ledger_rows(ledger)
+        with results_lock:
+            results.append(len(rows))
+
+    threads = [threading.Thread(target=worker, name=f"ledger-racer-{i}")
+               for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+        assert not t.is_alive(), "a ledger reader hung: single-flight deadlocked?"
+
+    reads = B._ledger_read_count(ledger)
+    print(f"{n_threads} concurrent readers -> {reads} ledger read(s), "
+          f"{len(set(results))} distinct row-count(s)")
+    assert len(results) == n_threads, "a racer died; the count below is not from all of them"
+    assert set(results) == {_ledger_line_count(ledger)}, (
+        f"the eight readers did not all get the full ledger: got counts "
+        f"{sorted(set(results))} for a file of "
+        f"{_ledger_line_count(ledger)} lines"
+    )
+    assert reads == 1, (
+        f"{n_threads} threads arriving together caused {reads} ledger reads. "
+        f"Baseline at triage was {BASELINE_CALLS} reads per cycle "
+        f"({BASELINE_LOADS} json.loads, 3.79 s); one is the clause. The decode "
+        f"has to happen while holding the lock that guards the cache "
+        f"(`scripts/automod/state.py`), otherwise the two `asyncio.to_thread` "
+        f"dashboard sections each decode the 6.3 MB file and the 3.8 s comes "
+        f"back on every cold poll."
+    )
+
+
+def test_a_write_from_another_process_invalidates_the_cache(ledger):
+    """A row appended by a different program must be visible to the next read.
+
+    The writer of this file is not the reader: the gate, the guardian and the
+    MCP layer all append to it from their own processes, while the backend that
+    serves `/api/dashboard` holds the cache. So invalidation cannot depend on
+    the writer cooperating with the cache — it has to be a stat of a file that
+    somebody else grew. The in-process append test above cannot prove this,
+    because there `append_event` and the cache share a module and could in
+    principle conspire; a subprocess that never imports our code cannot.
+
+    The child appends in the same shape `state.append_event` does — one JSON
+    object per line, close, exit — and imports nothing from this repo, which is
+    also why it needs no `PYTHONPATH`.
+    """
+    before = B._ledger_events(ledger, "backlog_sweep", require_item=False)
+    assert B._ledger_read_count(ledger) == 1, "fixture did not start from one read"
+    assert B._ledger_events(ledger, "backlog_sweep", require_item=False) == before
+    assert B._ledger_read_count(ledger) == 1, "the repeat read: nothing was invalidated"
+
+    child = (
+        "import json, sys\n"
+        "with open(sys.argv[1], 'a', encoding='utf-8') as f:\n"
+        "    f.write(json.dumps({'event': 'backlog_sweep', 'note':"
+        " 'written by another process'}) + '\\n')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", child, str(ledger)],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, f"child append failed: {proc.stderr[-500:]}"
+
+    after = B._ledger_events(ledger, "backlog_sweep", require_item=False)
+    reads = B._ledger_read_count(ledger)
+    print(f"cross-process append: rows {len(before)} -> {len(after)}, reads {reads}")
+    assert len(after) == len(before) + 1, (
+        f"a row written by another process was invisible to the cache: "
+        f"{len(before)} -> {len(after)} rows. The cache key is "
+        f"(mtime_ns, size, inode) precisely so a foreign append — the gate, the "
+        f"guardian, the MCP layer, all separate processes — is seen with no "
+        f"cooperation from the writer; a board that already moved would "
+        f"otherwise be reported as the live one."
+    )
+    assert reads == 2, (
+        f"after a foreign append the cycle took {reads} reads (expected exactly "
+        f"1 re-read, on top of the fixture's 1). Anything higher means the "
+        f"invalidation is not the stat but a full cache eviction."
     )
