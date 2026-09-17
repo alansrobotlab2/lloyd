@@ -446,3 +446,22 @@ def test_a_landing_queues_for_the_lock_and_rechecks_the_chamber_after_taking_it(
             R._land_lock("SM_C", dry_run=True)
     finally:
         held.release()
+
+
+def test_a_round_that_passed_its_gate_holds_the_other_slot(monkeypatch, tmp_path):
+    """#1204's gate passed at 17:03:34 and the free slot was claimed at
+    17:03:53, before `current.json` read `landing`: the landing then had a
+    whole fresh turn to wait out."""
+    import json as _json
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path)
+    wt = [str(I._LOOP_WORKTREE_ROOT / "SM_A" / "home" / "lloyd")]
+    _free_loop(monkeypatch, wt)
+    assert I._loop_is_free(2) == (True, "free"), "an open round that has not gated holds nothing"
+    (tmp_path / "SM_A").mkdir()
+    (tmp_path / "SM_A" / "gate.json").write_text(_json.dumps({"ok": False}))
+    assert I._loop_is_free(2)[0] is True, "a refused gate is a round still being worked on"
+    (tmp_path / "SM_A" / "gate.json").write_text(_json.dumps({"ok": True}))
+    free, why = I._loop_is_free(2)
+    assert free is False and "SM_A passed its gate" in why
+    monkeypatch.setattr(S, "gate_in_progress", lambda rid: {"pid": 1})
+    assert I._loop_is_free(2)[0] is True, "re-gating after an edit: the old pass no longer speaks"

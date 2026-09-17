@@ -32,6 +32,7 @@ did afterwards.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -671,7 +672,36 @@ def _loop_is_free(depth: int | None = None) -> tuple[bool, str]:
     if len(owned) >= depth:
         return False, (f"a round is already open ({len(owned)} worktree(s))" if depth == 1 else
                        f"{len(owned)} round(s) open, depth {depth}")
+    # A round that has passed its gate is about to land, and its landing
+    # waits out every autocode turn in flight (`promote.wait_for_rounds`).
+    # `current.json` only reads `landing` once the promoter is running; in
+    # between, a freed slot starts a fresh turn the landing must then sit
+    # behind for its whole length. On 2026-09-17 #1204's gate passed at
+    # 17:03:34 and the other slot was claimed at 17:03:53.
+    landing = _rounds_about_to_land(owned)
+    if landing:
+        return False, f"round {landing[0]} passed its gate and is landing"
     return True, "free"
+
+
+def _rounds_about_to_land(worktrees: list[str]) -> list[str]:
+    """Open loop rounds whose last gate passed, or whose landing is running."""
+    from scripts.automod import state as S
+    out: list[str] = []
+    for raw in worktrees:
+        rid = next((part for part in Path(raw).parts if part.startswith("SM_")), "")
+        if not rid:
+            continue
+        if S.land_in_progress(rid):
+            out.append(rid)
+            continue
+        try:
+            report = json.loads((S.ROUNDS_DIR / rid / "gate.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if report.get("ok") is True and not S.gate_in_progress(rid):
+            out.append(rid)
+    return out
 
 
 _LOOP_WORKTREE_ROOT = Path.home() / "lloyd-work"
