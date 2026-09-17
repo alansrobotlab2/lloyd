@@ -88,16 +88,45 @@ def _write_extracted_facts(facts: list[dict], session_id: str):
             logger.warning(f"Failed to write fact '{f['fact'][:40]}...': {e}")
 
 
-def _append_daily_note(session_id: str, summary: str):
-    """Append session summary to today's daily note (PST)."""
+def _auto_captured_heading(now: datetime) -> str:
+    """The `### Session HH:MM <ZONE> — Auto-captured` heading for one instant.
+
+    The zone word is the instant's own `%Z`, not a typed literal:
+    America/Los_Angeles prints `PDT` April–October and `PST` November–March,
+    and the `PDT` hardcoded here previously mislabelled every winter capture
+    for roughly four and a half months of the year (#601, umbrella #1189).
+    The heading shape is byte-identical to the old one — `### Session ` +
+    two-digit clock + space + three-letter zone + ` — Auto-captured` — which is
+    the `^### Session \\d{2}:\\d{2}` … `Auto-captured` shape daily notes are
+    grepped by; only the zone word's *source* changes, so summer headings are
+    byte-for-byte what they were and winter headings stop lying. Takes the
+    instant as an argument so a test can freeze a January one — with a live
+    `datetime.now` the wrong-label bug was only observable in winter.
+    """
+    return f"### Session {now.strftime('%H:%M %Z')} — Auto-captured"
+
+
+def _append_daily_note(session_id: str, summary: str,
+                       now: datetime | None = None):
+    """Append session summary to today's daily note (America/Los_Angeles).
+
+    `now` is the wall-clock reading to record; default `datetime.now(pst)`. The
+    parameter exists so a test can pin a winter instant — with a live
+    `datetime.now` the wrong-label bug could only be observed in winter — and so
+    the heading's time, its zone word, the note's LA-date filename and the
+    fresh-file `timestamp:` frontmatter all come from ONE reading. They
+    previously came from three separate `datetime.now` calls, which could
+    disagree (a `timestamp:` whose date is not the filename's) at midnight.
+    """
     from zoneinfo import ZoneInfo
 
     pst = ZoneInfo("America/Los_Angeles")
-    today = datetime.now(pst).strftime("%Y-%m-%d")
-    now_time = datetime.now(pst).strftime("%H:%M")
+    if now is None:
+        now = datetime.now(pst)
+    today = now.strftime("%Y-%m-%d")
     daily_path = Path.home() / "obsidian" / "memory" / f"{today}.md"
 
-    entry = f"\n---\n\n### Session {now_time} PDT — Auto-captured\n\n{summary}\n"
+    entry = f"\n---\n\n{_auto_captured_heading(now)}\n\n{summary}\n"
 
     if not daily_path.exists():
         # OKF requires a non-empty `type` (scripts/vault/validate_okf.py), and
@@ -112,7 +141,7 @@ def _append_daily_note(session_id: str, summary: str):
                 "segment": "memory",
                 "tags": ["memory", "daily-notes"],
                 "type": "note",
-                "timestamp": datetime.now(pst).strftime("%Y-%m-%dT%H:%M:%S"),
+                "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S"),
             },
             sort_keys=False,
             allow_unicode=True,

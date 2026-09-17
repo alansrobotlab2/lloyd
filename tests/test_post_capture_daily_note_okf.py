@@ -117,3 +117,93 @@ def test_existing_note_header_is_left_alone(memory_dir):
     assert "Manual." in text
     assert "Captured later." in text
     assert _frontmatter(note) == {"segment": "memory", "type": "note"}
+
+
+# --- Item #601 (umbrella #1189): the heading's zone word comes from the clock -----
+# Until now the suffix was the literal `PDT` in one f-string, so the whole winter
+# archive — first Sunday in November to second Sunday in March, when
+# America/Los_Angeles is PST (UTC−8) — mislabelled every auto-captured section.
+# A live `datetime.now` cannot show that in summer, so these pins freeze instants
+# and read the zone word off the same `strftime('%Z')` that produced the clock.
+# The frozen instants below are LA-local, exactly what `datetime.now(pst)`
+# returns: each carries its own fold, so `strftime('%Z')` answers for the zone
+# and nothing in the test supplies the expected abbreviation to the writer.
+
+_JANUARY = datetime(2026, 1, 15, 9, 5, tzinfo=ZoneInfo("America/Los_Angeles"))
+_AUGUST = datetime(2026, 8, 15, 9, 5, tzinfo=ZoneInfo("America/Los_Angeles"))
+
+
+def test_frozen_january_instant_heading_never_emits_PDT(memory_dir):
+    """The bug itself, frozen: a January 09:05 LA instant is PST, not PDT.
+
+    The reproduction command from #601 formatted a fixed winter date and got
+    `PST | ### Session 09:05 PDT — Auto-captured` — the label contradicting the
+    zone it came from. This asserts the contradiction is impossible: the
+    heading carries the instant's own `%Z`, so it can bear no zone token that
+    disagrees with its own clock reading.
+    """
+    assert _JANUARY.strftime("%Z") == "PST", (
+        "the frozen instant is not what it claims to be; the tz database must "
+        "still resolve January in America/Los_Angeles to PST"
+    )
+    post_capture._append_daily_note("sess-winter", "January body.", now=_JANUARY)
+    text = (memory_dir / "2026-01-15.md").read_text(encoding="utf-8")
+    assert "### Session 09:05 PST — Auto-captured" in text, (
+        f"the winter heading did not take the instant's own zone: {text!r}"
+    )
+    assert "PDT" not in text, (
+        f"a January capture still emitted the summer abbreviation: {text!r}"
+    )
+
+
+def test_frozen_august_instant_heading_keeps_the_summer_label(memory_dir):
+    """Summer output is unchanged, byte for byte, by the fix.
+
+    `PDT` is not banned from the heading — it is banned from being *typed*. A
+    mid-August LA instant must still print `PDT`, or this fix would have
+    traded one wrong season for the other.
+    """
+    assert _AUGUST.strftime("%Z") == "PDT"
+    post_capture._append_daily_note("sess-summer", "August body.", now=_AUGUST)
+    text = (memory_dir / "2026-08-15.md").read_text(encoding="utf-8")
+    assert "### Session 09:05 PDT — Auto-captured" in text
+
+
+def test_live_heading_shape_and_single_clock_reading(memory_dir):
+    """The two invariants the clause carries for the *live* path.
+
+    1. Shape: the heading still matches `^### Session \\d{2}:\\d{2} ` and ends
+       ` — Auto-captured` — the grep shape of every daily-note section (74 in
+       memory/2026-09-09.md at member #601's measurement) — and its zone word
+       equals `strftime('%Z')` of the reading that set the filename's date, so
+       the two can never disagree.
+    2. One clock: the LA-date filename and a brand-new file's `timestamp:`
+       frontmatter come from the same reading passed down as `now`. They
+       previously came from three separate `datetime.now` calls that could
+       straddle midnight; here both are derived from `live` below, so a
+       date disagreement between filename and timestamp fails this at the
+       straddle instead of silently misfiling the note.
+    """
+    live = datetime.now(ZoneInfo("America/Los_Angeles"))
+    post_capture._append_daily_note("sess-live", "Live-shaped body.")
+    note = memory_dir / f"{live.strftime('%Y-%m-%d')}.md"
+    assert note.exists(), "live-shaped capture did not create the LA-dated note"
+    text = note.read_text(encoding="utf-8")
+
+    heading = re.search(r"^### Session .*$", text, re.MULTILINE)
+    assert heading, f"no auto-captured heading in:\n{text[:400]}"
+    line = heading.group(0)
+    m = re.match(r"^### Session (\d{2}:\d{2}) (\S+) — Auto-captured$", line)
+    assert m, f"heading lost the daily-note section shape: {line!r}"
+    hhmm, zone = m.groups()
+    assert hhmm == live.strftime("%H:%M"), (
+        f"heading clock {hhmm} disagrees with the reading {live:%H:%M}"
+    )
+    assert zone == live.strftime("%Z"), (
+        f"heading zone {zone!r} disagrees with the instant's own zone "
+        f"{live.strftime('%Z')!r} — the zone word must be strftime('%Z'), "
+        "never a typed literal"
+    )
+    assert _frontmatter(note)["timestamp"].startswith(live.strftime("%Y-%m-%d")), (
+        "fresh-file timestamp and LA-date filename came from different readings"
+    )

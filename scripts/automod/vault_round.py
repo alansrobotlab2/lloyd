@@ -235,6 +235,39 @@ def reflection_archive_errors(paths: list[str]) -> list[str]:
     return errs
 
 
+def skill_timezone_errors(paths: list[str]) -> list[str]:
+    """#1189: a touched skill template must not hand-type PST/PDT beside a
+    displayed time.
+
+    Same shape and same scoping as `reflection_archive_errors` directly above,
+    for the same reason: skill prose is state no round under test controls, so
+    the invariant that must *stop* a bad template belongs at the writer, and
+    the live-vault scan in `tests/test_skill_timezone_literals.py` is the
+    reporting copy. The rule itself is `scripts/skill_timezone.py` — one
+    definition, shared by this call site and that test. The class this refuses
+    (a season's zone abbreviation typed into a template that the clock would
+    print differently for half the year) recurred five times (#601, #1079,
+    #1080, #1081, #1112) precisely because nothing on the landing path could
+    fail when a template re-typed one.
+    """
+    skills = sorted({
+        p for p in paths
+        if p.startswith("skills/") and p.endswith("/SKILL.md") and (VAULT / p).exists()
+    })
+    if not skills:
+        return []
+    try:
+        from scripts import skill_timezone
+    except ImportError as exc:  # pragma: no cover - repo is always importable
+        return [f"skill_timezone unavailable, cannot check clock literals: {exc}"]
+    errs: list[str] = []
+    for p in skills:
+        body = (VAULT / p).read_text(encoding="utf-8", errors="replace")
+        for e in skill_timezone.template_clock_violations(p.split("/")[1], body):
+            errs.append(f"{p}: skill clock literal: {e}")
+    return errs
+
+
 def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     """(errors, buckets). Empty errors means the change may land."""
     ok, why, buckets = check_scope(paths)
@@ -253,7 +286,8 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
                 if terr:
                     errors.append(f"{p}: {terr}")
     if not errors:
-        errors.extend(contract_errors(paths) + reflection_archive_errors(paths))
+        errors.extend(contract_errors(paths) + reflection_archive_errors(paths)
+                      + skill_timezone_errors(paths))
     if not errors and buckets["validated"]:
         errors.extend(loader_errors(buckets["validated"]))
     return errors, buckets

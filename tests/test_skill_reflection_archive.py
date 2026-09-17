@@ -1172,3 +1172,145 @@ def test_the_recorded_debt_is_measured_by_archive_presence(skills):
         assert any((Path.home() / "obsidian" / "backlog").glob("436-*.md")), (
             "the backlog item this file's scope is written against is gone"
         )
+
+
+# --- #1189 clause 4: the archive cp in the real `nightly-reflection-signals` text --
+# #436's guard, merged here from the aborted-round branches rather than rewritten.
+# What the branches actually held, re-measured 2026-09-17 rather than taken from
+# #1112's body: `git cat-file -t <sha>:tests/test_skill_reflection_archive.py` gives
+# a blob at `6620216` (828 lines), `9c09e9e` (738), `78a8037` (699) and `bb26ed4`
+# (585); `main`'s version is longer than all four (1174 lines), and the one node
+# name present there and absent here —
+# `test_pipeline_stays_gitignored_so_retention_is_copies_not_tracking` — was
+# *superseded*, not lost: `main` replaced its `git check-ignore` probe with the
+# stronger `git ls-files _pipeline` pin above. What no branch ever held is the
+# mutation clause 4 names — deleting the `signals-latest` archive `cp` from the
+# REAL skill text — so that is what lands here, built on this file's existing
+# transcription pattern (§2e's fixture states its own rule: transcribe the real
+# shape, prove it against the vault from a marked test).
+#
+# One correction to carry forward: the archive step is `nightly-reflection-signals`'
+# **Phase 0** — "## Phase 0: Claim the output file FIRST", live vault :35-38 — not
+# Phase 5 as #1080/#1189 describe it. Phase 5 is where the report body is written;
+# the claim→archive→overwrite triple that #436 protects is Phase 0, which is also
+# where clause 2's protected `date -u` `cp` lives. Same instruction, same guard;
+# the phase number in the item text is simply wrong.
+
+_SIGNALS_LIVE = "/home/alansrobotlab/lloyd/_pipeline/reflection/signals-latest.md"
+_REAL_SIGNALS_READ = f'Read("{_SIGNALS_LIVE}")   # MUST come first'
+_REAL_SIGNALS_ARCHIVE = (
+    'Bash("STAMP=$(date -u +%Y-%m-%d-%H%M) && \\\n'
+    f"     cp {_SIGNALS_LIVE} \\\n"
+    f"        {_SIGNALS_LIVE[:-3]}-$STAMP.md\")   # archive, new path"
+)
+_REAL_SIGNALS_WRITE = (
+    f'Write(file_path="{_SIGNALS_LIVE}",\n'
+    '      content="# Signal Report <today>\\n\\nstatus: in-progress\\n\\n(Investigating.)\\n")'
+)
+
+
+def _real_signals_phase0(with_archive: bool = True) -> str:
+    """Transcription of the live Phase 0: claim, archive, overwrite, in that order.
+
+    Copied byte-for-byte from `~/obsidian/skills/nightly-reflection-signals/SKILL.md`
+    including the backslash continuations, because the wrapping is what
+    `logical_lines` exists for — a fixture written on one line would prove the
+    guard against a shape the shipped skill does not have.
+    """
+    parts = [_REAL_SIGNALS_READ]
+    if with_archive:
+        parts.append(_REAL_SIGNALS_ARCHIVE)
+    parts.append(_REAL_SIGNALS_WRITE)
+    return ("## Phase 0: Claim the output file FIRST\n\n```\n"
+            + "\n".join(parts) + "\n```\n")
+
+
+def test_the_rule_fails_when_the_signals_archive_copy_is_deleted():
+    """#1189 clause 4: with the archive `cp` deleted from the signals skill's own
+    Phase 0 shape, the rule must refuse it and name the missing step; with it
+    present, `signals-latest` must be clean.
+
+    Unmarked, so every gate rung runs it, and it reads no vault — the transcription
+    is pinned to the shipped text by
+    ``test_the_live_signals_archive_step_is_the_one_this_mutation_deletes``, which is
+    how a fixture stays honest about what it claims to mutate.
+
+    Deletion is the failure #436 was filed for: a Phase 0 that keeps the `Read` and
+    the `Write` and loses the `cp` between them overwrites the live report with no
+    copy of the previous cycle, and `_pipeline/` is gitignored (`.gitignore:25`), so
+    nothing else can recover it. The expected message is asserted exactly, because
+    a looser assertion would pass on a rule that fired for the wrong reason.
+    """
+    body = _real_signals_phase0()
+    assert ra.archive_problems(body, "signals-latest") == [], (
+        "the transcription is not clean as written, so the deletion below proves "
+        f"nothing about the real step: {ra.archive_problems(body, 'signals-latest')}"
+    )
+    assert ra.utc_stamp(_REAL_SIGNALS_ARCHIVE), (
+        "the transcribed step no longer carries the `date -u` stamp, so the copy it "
+        "survives would be named from a local clock (#436 clause 2)"
+    )
+    problems = ra.archive_problems(_real_signals_phase0(with_archive=False),
+                                   "signals-latest")
+    assert problems == [
+        "no dated-copy archive step for signals-latest: no cp to "
+        "`signals-latest-<stamp>.md`"
+    ], (
+        f"deleting the archive cp changed the verdict: {problems}. The rule must "
+        "refuse exactly this shape — claim, overwrite, no copy — and no other"
+    )
+
+
+@pytest.mark.live_vault
+def test_the_live_signals_archive_step_is_the_one_this_mutation_deletes():
+    """The transcription drift guard, on the real skill text.
+
+    Three things at once, in the direction that matters: the Phase 0 instructions
+    appear verbatim in `~/obsidian/skills/nightly-reflection-signals/SKILL.md`; the
+    real body is clean under the rule; and deleting *its own* archive `cp` — located
+    by the rule's predicates (`COPY` + `archive_dest` over `logical_lines`), never by
+    a remembered line number — yields the same verdict as the transcription. So
+    clause 4's mutation is a mutation of the text that ships, and a rewrite of that
+    prose fails here naming the transcription to update instead of quietly narrowing
+    the guard to a fixture.
+
+    Marked ``live_vault`` for the reason this file's opening states: skill prose is
+    state no round under test controls, and the writer
+    (``scripts/automod/vault_round.py::reflection_archive_errors``) is where dropping
+    the `cp` is refused before the commit. The unmarked deletion test above is what
+    runs on the hard rung; this is the reporting copy that keeps it aimed at the real
+    text, which is what makes it more than the prose-plus-hand-grep arrangement that
+    let the class recur five times (#1189).
+    """
+    path = next(
+        (d / "nightly-reflection-signals" / "SKILL.md" for d in SKILLS_DIRS
+         if (d / "nightly-reflection-signals" / "SKILL.md").exists()),
+        None,
+    )
+    assert path is not None, f"nightly-reflection-signals/SKILL.md absent under {SKILLS_DIRS}"
+    body = path.read_text(encoding="utf-8", errors="replace")
+    for instruction in (_REAL_SIGNALS_READ, _REAL_SIGNALS_ARCHIVE, _REAL_SIGNALS_WRITE):
+        assert instruction in body, (
+            f"the real Phase 0 no longer contains {instruction!r} — the transcription "
+            "this file mutates has drifted from the shipped text; update "
+            "_REAL_SIGNALS_* with the new shape"
+        )
+    assert ra.archive_problems(body, "signals-latest") == [], (
+        f"the live signals skill lost its archive step: "
+        f"{ra.archive_problems(body, 'signals-latest')}"
+    )
+    lines = ra.logical_lines(body)
+    cp_idx = [
+        i for i, ln in enumerate(lines)
+        if ra.COPY.search(ln) and ra.archive_dest("signals-latest").search(ln)
+    ]
+    assert len(cp_idx) == 1, (
+        f"expected exactly one archive cp for signals-latest in the real Phase 0, "
+        f"found {len(cp_idx)} — the mutation target is ambiguous, so this guard needs "
+        "rewriting with whatever replaced it"
+    )
+    mutated = "\n".join(ln for i, ln in enumerate(lines) if i != cp_idx[0])
+    assert ra.archive_problems(mutated, "signals-latest") == [
+        "no dated-copy archive step for signals-latest: no cp to "
+        "`signals-latest-<stamp>.md`"
+    ], "deleting the real archive cp did not produce the guard's verdict"
