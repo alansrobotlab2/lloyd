@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -103,6 +104,37 @@ async def test_one_cold_dashboard_cycle_beats_the_budget(monkeypatch):
         f"(recommendation B) and re-decoding the ledger (recommendation, "
         f"tests/test_backlog_ledger_cache.py)."
     )
+
+
+def test_a_repointed_ledger_says_so(tmp_path, monkeypatch):
+    """The `repointed` half of `timed_ledger_or_stop`, exercised, not just written.
+
+    Added because the advisory ("the test proves only the read shape, not the
+    measured cost") is only answerable if the loud path can be shown to be loud.
+    On a box whose state dir HAS a ledger the helper returns `repointed=False`
+    and the reason string is never read, so a field that exists for the
+    empty-state-dir case would ship unexercised. Here the configured path is
+    pointed at a file that does not exist, which is that case.
+    """
+    from scripts.automod import state as S
+
+    live = Path.home() / ".local" / "state" / "lloyd-automod" / "promotions.jsonl"
+    if not (live.is_file() and live.stat().st_size > 0):
+        # Nothing to repoint TO, so the branch is unreachable on this box. The two
+        # tests below still fail loudly if their own ledger is unreadable; this one
+        # is about the message a caller prints, not about a measurement.
+        print(f"no live ledger at {live}; repoint branch unreachable here")
+        return
+    monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "no-such-ledger.jsonl")
+    src = timed_ledger_or_stop(monkeypatch, what="repoint-branch check")
+    assert src.repointed, (
+        f"the helper returned repointed=False while its configured path "
+        f"({tmp_path / 'no-such-ledger.jsonl'}) does not exist and {live} does — "
+        f"it substituted a ledger and reported it as the configured one")
+    assert src.path == live, f"expected the live ledger, got {src.path}"
+    assert "REPOINTED" in src.why and "LLOYD_AUTOMOD_STATE" in src.why, (
+        f"the reason a caller prints must name the substitution: {src.why!r}")
+    print(f"repoint branch: {src.why[:110]}…")
 
 
 async def test_the_warm_cycle_is_an_order_of_magnitude_cheaper_than_cold(monkeypatch):
