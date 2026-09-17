@@ -20,6 +20,7 @@ stale backlog into a pile of unnecessary changes.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 import time
@@ -38,6 +39,28 @@ LONG_LIVED = True
 # above the implement round (40): see autocode.DEFAULT_PRIORITY.
 DEFAULT_PRIORITY = 55
 DEDUP_KEY = "autotriage:triage"
+
+
+def triage_depth(src_cfg: dict | None = None) -> int:
+    """How many triage turns may run at once: `workers.sources.autotriage.
+    max_inflight`, the key the queue's claim cap already reads. 1 when absent."""
+    try:
+        return max(1, int((src_cfg or {}).get("max_inflight", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _slot_key(slot: int) -> str:
+    """Slot 0 keeps the bare key, so a row queued before slots existed still
+    coalesces against the first slot."""
+    return DEDUP_KEY if slot == 0 else f"{DEDUP_KEY}:{slot}"
+
+
+# Selection spans several awaits (each board walk runs off the event loop), so
+# two runs starting together would both reach the same pick before either
+# claimed it. Held from the top of `execute` until the run has claimed its
+# ids (`backlog.claim_for_triage`) or decided to take nothing.
+_SELECT_LOCK = asyncio.Lock()
 
 # How many NEW items one triage may file, and only when the item it read is
 # closing. A triage that keeps its item appends its findings to it instead —
@@ -836,39 +859,74 @@ def _render_cluster(members, per_item_chars: int) -> str:
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     # Budgets ride in the payload so `execute` sees the config that was live
     # when the item was queued, not whatever it is by the time it runs.
-    new_id = queue.enqueue(
-        source=NAME, kind="triage",
-        payload={"max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),
-                 "body_chars": int(src_cfg.get("body_chars", DEFAULT_BODY_CHARS)),
-                 "structured_verdict": bool(src_cfg.get("structured_verdict", True)),
-                 "spawn_cap": int(src_cfg.get("spawn_cap", SPAWN_CAP)),
-                 "implement_pool_floor": int(src_cfg.get("implement_pool_floor",
-                                                         DEFAULT_IMPLEMENT_POOL_FLOOR)),
-                 # Kill switch for holding: off, a full pool pauses single
-                 # triage outright (the 2026-09-13 behaviour) and anything
-                 # already held is released.
-                 "hold_confirmations": bool(src_cfg.get("hold_confirmations", True)),
-                 # Group mode, carried like the budgets. Off: this source runs
-                 # exactly as before and clusters.json is ignored.
-                 "group_triage": bool(src_cfg.get("group_triage", True)),
-                 "group_min_items": int(src_cfg.get("group_min_items", DEFAULT_GROUP_MIN_ITEMS)),
-                 "group_max_items": int(src_cfg.get("group_max_items", DEFAULT_GROUP_MAX_ITEMS)),
-                 "group_max_turns": int(src_cfg.get("group_max_turns", DEFAULT_GROUP_MAX_TURNS)),
-                 # Off: a group triage still closes duplicates and retires
-                 # the stale, but folds nothing and files no umbrella.
-                 "form_umbrellas": bool(src_cfg.get("form_umbrellas", True)),
-                 # Sweep mode, carried like the budgets. Off: never runs.
-                 "sweep": bool(src_cfg.get("sweep", False)),
-                 "sweep_batch": int(src_cfg.get("sweep_batch", DEFAULT_SWEEP_BATCH)),
-                 "sweep_max_turns": int(src_cfg.get("sweep_max_turns", DEFAULT_SWEEP_MAX_TURNS))},
-        priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
-        dedup_key=DEDUP_KEY,
-    )
-    if new_id is not None:
-        logger.info("Enqueued backlog triage id=%d", new_id)
+    payload = {"max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),
+               "body_chars": int(src_cfg.get("body_chars", DEFAULT_BODY_CHARS)),
+               "structured_verdict": bool(src_cfg.get("structured_verdict", True)),
+               "spawn_cap": int(src_cfg.get("spawn_cap", SPAWN_CAP)),
+               "implement_pool_floor": int(src_cfg.get("implement_pool_floor",
+                                                       DEFAULT_IMPLEMENT_POOL_FLOOR)),
+               # Kill switch for holding: off, a full pool pauses single
+               # triage outright (the 2026-09-13 behaviour) and anything
+               # already held is released.
+               "hold_confirmations": bool(src_cfg.get("hold_confirmations", True)),
+               # Group mode, carried like the budgets. Off: this source runs
+               # exactly as before and clusters.json is ignored.
+               "group_triage": bool(src_cfg.get("group_triage", True)),
+               "group_min_items": int(src_cfg.get("group_min_items", DEFAULT_GROUP_MIN_ITEMS)),
+               "group_max_items": int(src_cfg.get("group_max_items", DEFAULT_GROUP_MAX_ITEMS)),
+               "group_max_turns": int(src_cfg.get("group_max_turns", DEFAULT_GROUP_MAX_TURNS)),
+               # Off: a group triage still closes duplicates and retires
+               # the stale, but folds nothing and files no umbrella.
+               "form_umbrellas": bool(src_cfg.get("form_umbrellas", True)),
+               # Sweep mode, carried like the budgets. Off: never runs.
+               "sweep": bool(src_cfg.get("sweep", False)),
+               "sweep_batch": int(src_cfg.get("sweep_batch", DEFAULT_SWEEP_BATCH)),
+               "sweep_max_turns": int(src_cfg.get("sweep_max_turns", DEFAULT_SWEEP_MAX_TURNS))}
+    # One row per free slot per look (`triage_depth`): with depth 2 an idle
+    # source fills both at once rather than one per `interval_seconds`. A
+    # live row coalesces its slot's enqueue, exactly as the one key did.
+    for slot in range(triage_depth(src_cfg)):
+        new_id = queue.enqueue(
+            source=NAME, kind="triage", payload=dict(payload),
+            priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
+            dedup_key=_slot_key(slot),
+        )
+        if new_id is not None:
+            logger.info("Enqueued backlog triage id=%d", new_id)
 
 
-async def execute(item: QueueItem) -> dict[str, Any]:
+def _claiming(fn):
+    """Run `fn(item, claim)` holding the selection lock until it has claimed
+    what it will read, and release that claim however the run ends.
+
+    A decorator rather than a second function so `execute` stays the one the
+    pool calls AND the one whose source the tests read (`functools.wraps`)."""
+    @functools.wraps(fn)
+    async def run(item: QueueItem) -> dict[str, Any]:
+        from scripts.automod import backlog as B
+
+        token = f"autotriage:{getattr(item, 'id', None) or id(item)}"
+        await _SELECT_LOCK.acquire()
+        held = {"lock": True}
+
+        def claim(members) -> None:
+            ids = [getattr(m, "id", m) for m in members]
+            B.claim_for_triage(token, [i for i in ids if isinstance(i, int)])
+            if held["lock"]:
+                held["lock"] = False
+                _SELECT_LOCK.release()
+
+        try:
+            return await fn(item, claim)
+        finally:
+            if held["lock"]:
+                _SELECT_LOCK.release()
+            B.release_triage_claim(token)
+    return run
+
+
+@_claiming
+async def execute(item: QueueItem, claim) -> dict[str, Any]:
     """Triage one item in a real session, and never mistake running out of
     room for a conclusion.
 
@@ -917,6 +975,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         batch = await asyncio.to_thread(B.select_sweep_batch, S.LEDGER_PATH,
                                         int(payload.get("sweep_batch") or DEFAULT_SWEEP_BATCH))
         if batch:
+            claim(batch)
             return await _execute_sweep(item, batch)
         logger.info("sweep: every open item has been read; falling through to group/single triage")
 
@@ -936,6 +995,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             # for the case the depth gate pauses single triage below.
             single = await asyncio.to_thread(B.select_candidate, S.LEDGER_PATH)
             if single is None or not B.priority_beats(single, pick[1]):
+                claim(pick[1])
                 return await _execute_group(item, pick[0], pick[1])
             group_pick = pick
             logger.info("single #%d (priority %s) outranks cluster %s; taking it first",
@@ -958,6 +1018,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     if gate["full"] and not hold_on and urgent is None \
             and not await asyncio.to_thread(_live_blocker_waiting):
         if group_pick is not None:
+            claim(group_pick[1])
             return await _execute_group(item, group_pick[0], group_pick[1])
         return {"status": "skipped",
                 "summary": (f"single-item triage paused: {gate['ready']} ready in up_next ≥ bound "
@@ -976,6 +1037,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                        f"triaged one by one, and expire unclustered at "
                        f"{B.spawn_expiry_days()} days")
         return {"status": "skipped", "summary": summary}
+    claim([candidate])
     if held:
         logger.info("triage pool: %d candidate(s), %d self-filed item(s) quarantined",
                     len(candidates), held)

@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from scripts.automod import gate as G, promote as P, spec, state as S, worktree as W
@@ -192,6 +193,46 @@ def _recorded_base(branch: str) -> str | None:
     return base if ok else None
 
 
+# How long a landing queues behind another one: its idle wait at the hard
+# ceiling plus the observation window. Past that something is stuck, and a
+# `LockHeld` says so.
+LAND_LOCK_MAX_WAIT = 2 * 3600.0
+LAND_LOCK_POLL = 10.0
+
+
+def _land_lock(round_id: str, *, dry_run: bool = False) -> "S.Lock":
+    """The automod lock for a landing, queued for rather than refused.
+
+    With one round at a time a second landing could not exist. With two
+    (`workers.sources.autocode.max_inflight`) both can call `automod_land`
+    within seconds of each other, and the loser used to die on `LockHeld`
+    with a gate-passed round. It waits instead, and waits for the winner's
+    observation window too: the chamber check is repeated AFTER the lock is
+    taken, because the promotion this landing must not land on top of may
+    have been written while it was queued.
+    """
+    deadline = time.time() + LAND_LOCK_MAX_WAIT
+    while True:
+        observed = S.read_current() if not dry_run and S.chamber_enabled(LIVE_ROOT) else None
+        if observed and observed.get("state") == "observing":
+            # The chamber: this round ran while the last promotion was under
+            # observation. Wait for it here, outside the lock and before the
+            # pool is paused; `promote` still refuses if it never settled.
+            P.wait_for_settle(round_id=round_id, observed=observed)
+        try:
+            lock = S.Lock(owner=f"land-{round_id}").acquire()
+        except S.LockHeld:
+            if dry_run or time.time() >= deadline:
+                raise
+            time.sleep(LAND_LOCK_POLL)
+            continue
+        now = S.read_current() if not dry_run and S.chamber_enabled(LIVE_ROOT) else None
+        if now and now.get("state") == "observing" and time.time() < deadline:
+            lock.release()
+            continue
+        return lock
+
+
 def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
     """Promote a round whose gate passed. Refuses otherwise.
 
@@ -218,13 +259,7 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
             raise RuntimeError(f"gate did not pass (failed: {failed})")
 
         wt = W.worktree_path(round_id)
-        observed = S.read_current() if not dry_run and S.chamber_enabled(LIVE_ROOT) else None
-        if observed:
-            # The chamber: this round ran while the last promotion was under
-            # observation. Wait for it here, outside the lock and before the
-            # pool is paused; `promote` still refuses if it never settled.
-            P.wait_for_settle(round_id=round_id, observed=observed)
-        lock = S.Lock(owner=f"land-{round_id}").acquire()
+        lock = _land_lock(round_id, dry_run=dry_run)
         try:
             result = P.promote(round_id, wt, report["base"],
                                gate_report=report, dry_run=dry_run)

@@ -254,6 +254,44 @@ _HONESTY_PATTERNS: tuple[tuple[str, str, str], ...] = (
     (r"pytest\.mark\.xfail", "a new xfail marker", "blocking"),
 )
 
+# A skip with a condition in front of it is a judgment, not a fact. Over the
+# week to 2026-09-17, 27 of 134 review refusals had every clause graded `met`
+# and were refused by the skip patterns alone — a `live_vault` test that skips
+# when the vault is absent, a loader test that skips without libyaml — while
+# the grader, reading the same line, called it advisory. #1204 was refused
+# three times that way with five of five met, #1199 once, ~12 minutes of gate
+# each. Only an UNCONDITIONAL skip is a test that cannot fail; a conditional
+# one goes to the grader as advisory, who can still block it by severity.
+_SKIP_PROBLEMS = {"a new pytest.skip", "a new skip marker"}
+_CONDITION_OPENERS = ("if ", "elif ", "else:", "except", "try:", "with ")
+
+
+def _skip_is_conditional(lines: list[str], idx: int) -> bool:
+    """Is the skip on `lines[idx]` behind a condition?
+
+    `skipif(` carries its own. A `pytest.skip(` call is conditional when the
+    nearest shallower line opens a branch (`if`/`except`/…), and unconditional
+    when that line is the `def` itself or there is none (module level).
+    """
+    line = lines[idx]
+    if "skipif" in line:
+        return True
+    if "pytest.mark.skip" in line:
+        return False
+    indent = len(line) - len(line.lstrip())
+    for prev in reversed(lines[:idx]):
+        if not prev.strip():
+            continue
+        if len(prev) - len(prev.lstrip()) < indent:
+            return prev.lstrip().startswith(_CONDITION_OPENERS)
+    return False
+
+
+def _unconditional_skips(text: str, rx: "re.Pattern[str]") -> int:
+    lines = text.splitlines()
+    return sum(1 for i, ln in enumerate(lines)
+               if rx.search(ln) and not _skip_is_conditional(lines, i))
+
 # "test files changed but no test function was added" is a real observation
 # and a bad refusal. A round that tightens an existing test's assertions,
 # renames a fixture, or extends a parametrize list has pinned exactly what it
@@ -348,6 +386,10 @@ def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
             rx = re.compile(pat, re.M)
             n_post, n_pre = len(rx.findall(post)), len(rx.findall(pre))
             if n_post > n_pre:
+                if why in _SKIP_PROBLEMS and (_unconditional_skips(post, rx)
+                                              <= _unconditional_skips(pre, rx)):
+                    severity = "advisory"
+                    why += " (conditional; the grader judges the condition)"
                 # Name the first new occurrence's line.
                 line = 0
                 for i, ln in enumerate(post.splitlines(), 1):

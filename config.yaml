@@ -799,7 +799,15 @@ automod:
     # `review_tools redecide --since …` replays recorded reviews under either.
     policy: grader
   landing:
+    # How long the backend may stay busy with NOTHING of the pool's in flight
+    # (a chat turn, a leaked counter) before a landing gives up. While a
+    # paused pool's job is what it is waiting on the clock does not run —
+    # #1204 lost a gate-passed landing to a 37-minute scheduled task by 112 s
+    # (2026-09-17) — and `idle_hard_max_wait_s` bounds the whole wait,
+    # including the wait for another round's turn. Read by promote.py since
+    # that day; before it these keys were read by nothing.
     idle_max_wait_s: 900
+    idle_hard_max_wait_s: 4500
     idle_quiet_polls: 3
     drain_ttl_s: 180
     liveness_window_s: 120
@@ -852,7 +860,13 @@ workers:
   db_path: ~/lloyd/workers.db
   enabled: true
   max_attempts: 3
-  slots: 2
+  # 5, not 2 (2026-09-17): two autocode rounds and two autotriage turns may
+  # run at once (their `max_inflight` below), plus one slot so a scheduled
+  # task is never queued behind them. At 2, a finished round's next claim
+  # waited 8-30 min on three nights' worth of rows whenever a scheduled task
+  # and a triage held both slots. The engine, not the slot count, is the
+  # bound on long-lived turns: see kv_gate. Back to 3 with depth 1 and 1.
+  slots: 5
   # KV budget gate (workers/pool.py). A source that declares LONG_LIVED —
   # autocode, autotriage, deep-research: tens of iterations, each
   # re-submitting a 100-200k context — is not claimed while the primary's KV
@@ -1013,7 +1027,11 @@ workers:
       # with rounds. New items still get swept: the sweep takes precedence
       # whenever the pool is non-empty, at whatever cadence this is.
       interval_seconds: 900
-      max_inflight: 1
+      # Triage DEPTH: how many triage turns run at once. Each claims what it
+      # reads (`backlog.claim_for_triage`) so two turns never take the same
+      # item, cluster or sweep batch. 2 with autocode's (Alan, 2026-09-17);
+      # back to 1 when the board is caught up. Needs a backend restart.
+      max_inflight: 2
       # The sweep (2026-09-15, Alan's "switch gears"): while any open item
       # is unread, a run takes `sweep_batch` items in one turn instead of a
       # cluster or a single item, quarantine lifted, and either retires each
@@ -1156,7 +1174,15 @@ workers:
       # with rounds instead — see round_hold.exempt above — and reads the
       # board in ~5 h either way.
       yield_to_sweep: false
-      max_inflight: 1
+      # The loop's DEPTH: how many rounds may be open at once. One key sets
+      # the queue's claim cap, the number of queue rows offered, and how many
+      # worktrees `_loop_is_free` tolerates. Each round has its own worktree
+      # and branch; gates queue for the full test suite and the canary ports
+      # (`gate-tests.lock`, `gate-canary.lock`); landings stay one at a time
+      # under the automod lock, and a landing waits out the other round's
+      # turn before it pauses the pool. 2 while the board is being caught up
+      # (Alan, 2026-09-17); back to 1 afterwards. Needs a backend restart.
+      max_inflight: 2
       max_duration_seconds: 3600
       # 150, not 100 — the code's own default and its reason
       # (workers/sources/autocode.py DEFAULT_MAX_TURNS): a round called

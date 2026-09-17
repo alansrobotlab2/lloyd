@@ -54,6 +54,24 @@ LONG_LIVED = True
 # is the rarest and most valuable job in this pool; it goes first.
 DEFAULT_PRIORITY = 40
 DEDUP_KEY = "autocode:round"
+
+
+def round_depth(src_cfg: dict | None = None) -> int:
+    """How many rounds may be open at once: `workers.sources.autocode.
+    max_inflight`, the same key the queue's claim cap reads, so one number in
+    config.yaml sets both. 1 when absent or unreadable — the loop's shape
+    from its first day, and what to go back to once the board is caught up."""
+    cfg = src_cfg if src_cfg is not None else _source_cfg(NAME)
+    try:
+        return max(1, int(cfg.get("max_inflight", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _slot_key(slot: int) -> str:
+    """Slot 0 keeps the bare key, so a row queued before slots existed still
+    coalesces against the first slot across the restart that lands this."""
+    return DEDUP_KEY if slot == 0 else f"{DEDUP_KEY}:{slot}"
 # The pool back-dates this source's watermark when one of its runs ends
 # (`WorkerPool._repoll_on_complete`), so the next round is asked for at the
 # next scheduler pass rather than up to `interval_seconds` later.
@@ -610,9 +628,14 @@ def _settle_boot_orphans() -> None:
         logger.warning("settle_orphaned_turns failed: %s", exc)
 
 
-def _loop_is_free() -> tuple[bool, str]:
+def _loop_is_free(depth: int | None = None) -> tuple[bool, str]:
     """Every gate the loop itself enforces, checked here first so a queued
-    item does not spend a full agent turn discovering it cannot proceed."""
+    item does not spend a full agent turn discovering it cannot proceed.
+
+    `depth` rounds may be open at once (`round_depth`). Everything else is
+    unchanged by it: a `landing` promotion still holds every new round back,
+    which is also what lets a landing wait out the other round's turn."""
+    depth = round_depth() if depth is None else max(1, int(depth))
     from scripts.automod import state as S, worktree as W
 
     if not S.is_enabled(LIVE_ROOT):
@@ -645,8 +668,9 @@ def _loop_is_free() -> tuple[bool, str]:
     if stray:
         logger.info("autocode: ignoring %d worktree(s) outside %s: %s",
                     len(stray), _LOOP_WORKTREE_ROOT, ", ".join(stray[:3]))
-    if owned:
-        return False, f"a round is already open ({len(owned)} worktree(s))"
+    if len(owned) >= depth:
+        return False, (f"a round is already open ({len(owned)} worktree(s))" if depth == 1 else
+                       f"{len(owned)} round(s) open, depth {depth}")
     return True, "free"
 
 
@@ -753,7 +777,13 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
     # A round row still queued or running coalesces any enqueue below. Asked
     # first, because `select_confirmed` walks the whole board (~2 s) and a
     # decline is retried every `retry_seconds`.
-    if await asyncio.to_thread(queue.has_live, DEDUP_KEY):
+    depth = round_depth(src_cfg)
+    slot = None
+    for i in range(depth):
+        if not await asyncio.to_thread(queue.has_live, _slot_key(i)):
+            slot = i
+            break
+    if slot is None:
         logger.debug("autocode: not queueing — the previous round's row is still in flight")
         return DECLINED
     if await asyncio.to_thread(B.select_confirmed, S.LEDGER_PATH) is None:
@@ -765,7 +795,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
                  # under the config that was live when it was enqueued.
                  "structured_outcome": bool(src_cfg.get("structured_outcome", True))},
         priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
-        dedup_key=DEDUP_KEY,
+        dedup_key=_slot_key(slot),
     )
     if new_id is None:
         # Coalesced: the previous round's queue row is still `running`. The
@@ -777,8 +807,10 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
         # in `retry_seconds`.
         logger.debug("autocode: not queueing — the previous round's row is still in flight")
         return DECLINED
-    logger.info("Enqueued backlog implement id=%d", new_id)
-    return None
+    logger.info("Enqueued backlog implement id=%d (slot %d of %d)", new_id, slot + 1, depth)
+    # One row per look. With a slot still empty, the next look is a retry
+    # away rather than an interval — a decline in everything but name.
+    return DECLINED if slot + 1 < depth else None
 
 
 def _housekeeping(src_cfg: dict) -> None:
@@ -904,10 +936,28 @@ def _source_cfg(name: str) -> dict:
         return {}
 
 
-def _round_opened_since(events: list[dict], since_ts: float) -> str | None:
+def _round_opened_since(events: list[dict], since_ts: float, *,
+                        item_id: int | None = None,
+                        session_id: str | None = None) -> str | None:
+    """The round this turn opened: the latest `round_start` since it began.
+
+    By time alone that was exact while one round ran at a time. With two
+    (`max_inflight` > 1) the latest row may be the OTHER turn's, and a
+    `finished` row naming the wrong round hands the reaper a round that is
+    still being worked on. `round_start` has carried the opener's
+    `session_id` and the `item_id` since the orphan fix: a row that names
+    either one and names someone else is not ours. A row naming neither (a
+    ledger from before those fields) matches as it always did.
+    """
     for ev in reversed(events):
-        if ev.get("event") == "round_start" and float(ev.get("ts") or 0) >= since_ts:
-            return ev.get("round_id")
+        if ev.get("event") != "round_start" or float(ev.get("ts") or 0) < since_ts:
+            continue
+        theirs_s, theirs_i = ev.get("session_id"), ev.get("item_id")
+        if session_id and theirs_s and theirs_s != session_id:
+            continue
+        if item_id is not None and theirs_i is not None and int(theirs_i) != int(item_id):
+            continue
+        return ev.get("round_id")
     return None
 
 
@@ -1092,7 +1142,8 @@ async def _run_and_record(item, candidate, triage, budget, started,
         timeout_events = S.read_events(limit=200)
         S.append_event({"event": "backlog_implement", "item_id": candidate.id,
                         "phase": "finished", "reason": str(exc),
-                        "round_id": _round_opened_since(timeout_events, started),
+                        "round_id": _round_opened_since(timeout_events, started,
+                                                        item_id=candidate.id),
                         "vault_commits": _vault_commits_since(timeout_events, candidate.id, started),
                         "surface": triage.get("surface") or "code",
                         "stop_reason": "turn_timeout"})
@@ -1102,7 +1153,8 @@ async def _run_and_record(item, candidate, triage, budget, started,
                 "summary": f"#{candidate.id}: {exc}"}
 
     events = S.read_events(limit=200)
-    round_id = _round_opened_since(events, started)
+    round_id = _round_opened_since(events, started, item_id=candidate.id,
+                                   session_id=run.get("session_id"))
 
     # A turn that never reported completion is not an attempt. The stream
     # closes without a `done` frame when the backend is down or the connection

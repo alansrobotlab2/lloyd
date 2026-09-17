@@ -1343,6 +1343,28 @@ def externally_blocked_rounds(ledger: Path) -> set[str]:
             if not ev.get("ok") and ev.get("external_blocker")}
 
 
+def _external_budget_left(ledger: Path, item_id: int, round_id: str, attempts: int) -> bool:
+    """Whether an externally blocked round may still be re-offered.
+
+    A red tree is capped on the item's attempts, as it always was. A landing
+    that failed AFTER the gate passed is capped on its own count instead:
+    #1204 (2026-09-17) passed nine rungs on its fifth attempt — three earlier
+    ones refused by a skip-marker precheck, one lost to a backend restart —
+    and the promoter then gave up waiting for a 37-minute scheduled task. At
+    `attempts > EXTERNAL_RETRY_CAP` that read as `spent`, and a finished,
+    graded change went back to triage. Attempts other causes consumed say
+    nothing about whether the landing will work next time.
+    """
+    last = _last_gate_per_round(ledger).get(round_id) or {}
+    if last.get("event") != "land_failed":
+        return attempts <= EXTERNAL_RETRY_CAP
+    rounds = {str(d.get("round_id") or "") for d in _ledger_events(ledger, "backlog_implement")
+              if int(d.get("item_id") or 0) == int(item_id)}
+    failed = sum(1 for d in _ledger_events(ledger, "land_failed", require_item=False)
+                 if d.get("external_blocker") and str(d.get("round_id") or "") in rounds)
+    return failed <= EXTERNAL_RETRY_CAP
+
+
 def review_retry_rounds(ledger: Path) -> dict[str, dict]:
     """`{round_id: gate event}` for rounds whose last gate attempt was refused
     by the review rung with the premise judged sound — the implementation or
@@ -1555,7 +1577,7 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
                             f"or its tests short — {findings}; its work is on branch "
                             f"`automod/{rid}` (pass it as from_branch)")
                 continue
-        if rid and rid in blocked and n <= EXTERNAL_RETRY_CAP:
+        if rid and rid in blocked and _external_budget_left(ledger, iid, rid, n):
             g = _last_gate_per_round(ledger).get(rid) or {}
             out[iid] = ("external",
                         f"round {rid} was blocked at the `{g.get('rung')}` rung by a condition "
@@ -2891,6 +2913,38 @@ def is_quarantined(item: Item, *, released: frozenset[int] | set[int] = frozense
             and int(item.id) not in live)
 
 
+# ── triage claims: two triage turns at once ─────────────────────────────
+#
+# A triage turn takes minutes and writes nothing on its item until it ends, so
+# with `workers.sources.autotriage.max_inflight` > 1 the second run's
+# selection would pick exactly what the first is reading — the same single
+# item, the same cluster, the same sweep batch — and the board would get two
+# verdicts, or two umbrellas over one theme. Implement has `in_progress` for
+# this; triage has no status of its own, and inventing one would put a fifth
+# word into a vocabulary five lists agree on. The claim is in memory instead:
+# both runs live in the backend process, and a restart that loses the set
+# also kills the turns that held it.
+
+_TRIAGE_CLAIMS: dict[str, set[int]] = {}
+_TRIAGE_CLAIMS_LOCK = threading.Lock()
+
+
+def claim_for_triage(token: str, ids) -> None:
+    with _TRIAGE_CLAIMS_LOCK:
+        _TRIAGE_CLAIMS.setdefault(str(token), set()).update(int(i) for i in ids)
+
+
+def release_triage_claim(token: str) -> None:
+    with _TRIAGE_CLAIMS_LOCK:
+        _TRIAGE_CLAIMS.pop(str(token), None)
+
+
+def triage_claimed_ids() -> set[int]:
+    """Ids some triage turn in this process is reading right now."""
+    with _TRIAGE_CLAIMS_LOCK:
+        return set().union(*_TRIAGE_CLAIMS.values()) if _TRIAGE_CLAIMS else set()
+
+
 def triage_pool(ledger: Path,
                 boards: tuple[str, ...] | None = DEFAULT_BOARDS
                 ) -> tuple[list[Item], int]:
@@ -2911,8 +2965,10 @@ def triage_pool(ledger: Path,
     # in either is a dead state the reconciler moves back here.
     # A parked item was read by a sweep and judged not worth a round: out of
     # every pool until a person removes the tag.
+    claimed = triage_claimed_ids()
     untriaged = [i for i in items
-                 if i.id not in seen and i.status == TRIAGE_POOL_STATUS
+                 if i.id not in seen and i.id not in claimed
+                 and i.status == TRIAGE_POOL_STATUS
                  and not is_grouped(i) and not is_parked(i)]
     fresh = [i for i in untriaged if not is_quarantined(i, released=released, live=live)]
     return fresh, len(untriaged) - len(fresh)
@@ -3554,9 +3610,15 @@ def select_cluster(ledger: Path, clusters: dict, *, min_size: int = 3, max_size:
         last_group[str(d.get("cluster_id") or "")] = str(d.get("verdict") or d.get("outcome") or "done")
     best: tuple[dict, list[Item]] | None = None
     best_score: tuple[int, int] = (0, 0)
+    claimed = triage_claimed_ids()
     for c in (clusters or {}).get("clusters") or []:
         cid = str(c.get("id") or "")
         if cid in last_group and last_group[cid] != INCOMPLETE:
+            continue
+        # A cluster another triage turn is reading any member of is skipped
+        # whole: what is left of it would form a second group over the theme
+        # the first is about to file an umbrella for.
+        if claimed and any(int(i) in claimed for i in (c.get("item_ids") or [])):
             continue
         ids = [int(i) for i in (c.get("item_ids") or []) if int(i) in by_id and int(i) not in judged]
         if len(ids) < int(min_size):
@@ -4119,8 +4181,10 @@ def sweep_pool(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
     """
     done = swept_ids(ledger) | sweep_abandoned_ids(ledger)
     seen = triaged_ids(ledger)
+    claimed = triage_claimed_ids()
     pool = [i for i in (items if items is not None else open_items(boards))
             if i.status in SWEEP_POOL_STATUSES and i.id not in done
+            and i.id not in claimed
             and not is_swept(i) and not is_parked(i) and not is_high(i)
             and not is_grouped(i) and not is_umbrella(i)
             and NEEDS_HUMAN_TAG not in i.tags and EXPIRED_TAG not in i.tags]

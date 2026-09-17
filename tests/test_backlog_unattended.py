@@ -316,7 +316,7 @@ def test_every_gate_the_loop_enforces_stops_the_implementer(monkeypatch, block, 
     monkeypatch.setattr(S, "read_rollback_request", lambda: block.get("request"))
     monkeypatch.setattr(S, "chamber_enabled", lambda repo=None: block.get("chamber", False))
     monkeypatch.setattr(W, "prune_orphans", lambda repo=None: block.get("worktrees", ["/live"]))
-    free, reason = I._loop_is_free()
+    free, reason = I._loop_is_free(1)   # depth 1: config.yaml may say more
     assert free is False and why in reason
 
 
@@ -2074,7 +2074,7 @@ def test_a_stray_worktree_does_not_block_the_loop(monkeypatch):
     assert I._loop_is_free() == (True, "free")
     monkeypatch.setattr(W, "prune_orphans", lambda root: [
         str(I.LIVE_ROOT), str(I._LOOP_WORKTREE_ROOT / "SM_1" / "home" / "lloyd")])
-    ok, why = I._loop_is_free()
+    ok, why = I._loop_is_free(1)
     assert ok is False and "1 worktree" in why
 
 

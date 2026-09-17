@@ -63,6 +63,9 @@ ROLLBACK_REQUEST_PATH = STATE_DIR / "rollback_request.json"
 EVAL_LAST_PATH = STATE_DIR / "eval_last.json"
 LEDGER_PATH = STATE_DIR / "promotions.jsonl"
 LOCK_PATH = STATE_DIR / "lock"
+# Shared machine resources two gates cannot use at once (see `gate.Gate.run`).
+GATE_TESTS_LOCK_PATH = STATE_DIR / "gate-tests.lock"
+GATE_CANARY_LOCK_PATH = STATE_DIR / "gate-canary.lock"
 PAUSE_PATH = STATE_DIR / "pause"
 HALTED_PATH = STATE_DIR / "promotions-halted"
 BROKEN_PATH = STATE_DIR / "BROKEN"
@@ -619,6 +622,21 @@ def chamber_enabled(repo=None) -> bool:
     return bool((raw.get("automod") or {}).get("chamber", False))
 
 
+def landing_cfg(repo=None) -> dict:
+    """`automod.landing` straight from config.yaml, `{}` when unreadable.
+
+    Read raw like `is_enabled`: the promoter runs detached from the backend
+    and must not pull `app.config` in behind it."""
+    root = Path(repo) if repo else Path(__file__).resolve().parent.parent.parent
+    try:
+        import yaml
+        raw = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    cfg = (raw.get("automod") or {}).get("landing")
+    return dict(cfg) if isinstance(cfg, dict) else {}
+
+
 def require_enabled(action: str, repo=None) -> None:
     if not is_enabled(repo):
         raise AutomodDisabled(
@@ -667,6 +685,17 @@ class Lock:
         os.fsync(fd)
         self._fd = fd
         return self
+
+    def acquire_wait(self, max_wait: float, poll: float = 5.0) -> "Lock":
+        """`acquire`, queued for up to `max_wait` seconds; `LockHeld` after."""
+        deadline = time.time() + max_wait
+        while True:
+            try:
+                return self.acquire()
+            except LockHeld:
+                if time.time() >= deadline:
+                    raise
+                time.sleep(poll)
 
     def release(self) -> None:
         if self._fd is None:

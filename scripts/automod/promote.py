@@ -37,6 +37,10 @@ LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 IDLE_POLL_SECONDS = 2.0
 IDLE_QUIET_POLLS = 3
 IDLE_MAX_WAIT = 900.0
+# The ceiling on the whole wait, however it is extended. Above the longest
+# worker `max_duration_seconds` (3600): once the pool is paused nothing new
+# starts, so what is in flight is finite and waiting it out always ends.
+IDLE_HARD_MAX_WAIT = 4500.0
 DRAIN_TTL = 180.0
 DRAIN_REFRESH_SECONDS = 60.0   # re-arm well inside the TTL while waiting for idle
 # The observation window. Liveness is watched for ALL of it, not for some
@@ -185,7 +189,57 @@ def release_pool_pause() -> None:
         _POOL_PAUSED_BY_US = False
 
 
-def wait_idle(max_wait: float = IDLE_MAX_WAIT, *, drain: bool = True,
+def pool_in_flight() -> list[dict] | None:
+    """The worker jobs the pool is running now (`source`, `started_at`), or
+    None when the backend cannot say."""
+    status, body = _get(f"{BACKEND}/api/workers/status")
+    if status != 200 or not isinstance(body, dict):
+        return None
+    pool = body.get("pool") if isinstance(body.get("pool"), dict) else {}
+    jobs = pool.get("in_flight")
+    if not isinstance(jobs, dict):
+        return None
+    return [dict(v) for v in jobs.values() if isinstance(v, dict)]
+
+
+def _idle_budget(max_wait: float | None) -> tuple[float, float]:
+    """`(quiet budget, hard ceiling)` from `automod.landing`, arguments first."""
+    cfg = S.landing_cfg(LIVE_ROOT)
+
+    def _num(key: str, default: float) -> float:
+        try:
+            return float(cfg.get(key, default))
+        except (TypeError, ValueError):
+            return default
+    budget = float(max_wait) if max_wait is not None else _num("idle_max_wait_s", IDLE_MAX_WAIT)
+    return budget, max(budget, _num("idle_hard_max_wait_s", IDLE_HARD_MAX_WAIT))
+
+
+def wait_for_rounds(ceiling: float, *, source: str = "autocode",
+                    poll: float = 10.0) -> tuple[bool, str]:
+    """Wait, WITHOUT pausing or draining, until no `source` job is in flight.
+
+    With more than one round at a time (`workers.sources.autocode.max_inflight`)
+    a landing's idle wait is a wait for the OTHER round's turn — a median 24
+    minutes, up to an hour. Pausing the pool for that long would stall triage
+    and every scheduled task behind a turn that does not need them stopped:
+    `current.json` already reads `landing`, so `_loop_is_free` starts no new
+    round, and everything else may keep running until the real drain begins.
+    Unknown (backend cannot say) returns at once: the drain that follows is
+    the wait that matters, and it is the one with the full rules.
+    """
+    deadline = time.time() + ceiling
+    while time.time() < deadline:
+        jobs = pool_in_flight()
+        if jobs is None:
+            return True, "pool state unreadable; going straight to the drain"
+        if not any(j.get("source") == source for j in jobs):
+            return True, f"no {source} turn in flight"
+        time.sleep(poll)
+    return False, f"a {source} turn was still in flight after {ceiling:.0f}s"
+
+
+def wait_idle(max_wait: float | None = None, *, drain: bool = True,
               pause_pool: bool = True) -> tuple[bool, str]:
     """Drain, then require N consecutive quiet polls before touching anything.
 
@@ -212,15 +266,26 @@ def wait_idle(max_wait: float = IDLE_MAX_WAIT, *, drain: bool = True,
     dispatched worker job *fail* — each refusal counts an attempt, and three
     attempts poison the job — whereas a paused pool simply starts nothing and
     what is in flight finishes. Only a pause this promoter set is released.
+
+    **The budget does not burn while a worker job is what we are waiting on.**
+    With the pool paused nothing new starts, so a job in flight is a bounded
+    wait, and giving up on it throws away a gated round to save minutes. On
+    2026-09-17 #1204 passed all nine rungs and its landing gave up at 900 s
+    with `harness_runs=1` — scheduled task #74, which takes ~37 minutes every
+    night and finished 112 seconds later. `max_wait` now counts only the time
+    the POOL is empty and the backend is still busy (a chat turn, a leaked
+    counter); `automod.landing.idle_hard_max_wait_s` bounds the whole wait.
     """
     global _POOL_PAUSED_BY_US
+    max_wait, hard_max = _idle_budget(max_wait)
     if pause_pool and pool_paused() is False and set_pool_paused(True):
         _POOL_PAUSED_BY_US = True
-    deadline = time.time() + max_wait
+    started = time.time()
+    deadline = started + max_wait
     quiet = 0
     busiest = ""
     armed_at = 0.0
-    while time.time() < deadline:
+    while time.time() < min(deadline, started + hard_max):
         if drain and time.time() - armed_at >= DRAIN_REFRESH_SECONDS:
             set_drain(True, DRAIN_TTL)
             armed_at = time.time()
@@ -237,13 +302,19 @@ def wait_idle(max_wait: float = IDLE_MAX_WAIT, *, drain: bool = True,
                 quiet = 0  # a turn appearing resets the counter
                 busiest = (f"active={turns.get('active')} queued={turns.get('queued')} "
                            f"harness_runs={turns.get('harness_runs')}")
+                jobs = pool_in_flight() if pause_pool else None
+                if jobs:
+                    # A paused pool's job in flight is finite: wait it out.
+                    deadline = time.time() + max_wait
+                    busiest += " waiting on " + ", ".join(
+                        sorted({str(j.get("source")) for j in jobs}))
         else:
             quiet = 0
         time.sleep(IDLE_POLL_SECONDS)
     if drain:
         set_drain(False)
     release_pool_pause()
-    return False, (f"backend never went idle within {max_wait:.0f}s"
+    return False, (f"backend never went idle within {time.time() - started:.0f}s"
                    + (f" (last: {busiest})" if busiest else ""))
 
 
@@ -707,7 +778,11 @@ def promote(round_id: str, worktree: Path, base: str, *,
     S.write_verified(S.CURRENT_PATH, current)   # raises unless it round-trips
 
     # ── idle gate + drain ──────────────────────────────────────────────
-    ok, why = wait_idle()
+    # Another round's turn first, with nothing paused (see `wait_for_rounds`);
+    # `current.json` reads `landing` from here, so no new round starts.
+    ok, why = wait_for_rounds(_idle_budget(None)[1])
+    if ok:
+        ok, why = wait_idle()
     if not ok:
         S.clear_current()
         # A landing that never got the backend idle is the infrastructure's

@@ -996,6 +996,74 @@ all `met`; and `execute` sweeps at the end of a vault-landing turn, before the
 reconcile that used to hand the item to the next round two minutes later.
 §3.2b; `tests/test_vault_surface_churn.py`.
 
+### Depth: two rounds and two triage turns at once
+
+Until 2026-09-17 the loop was one round at a time by construction, and the
+week's numbers said where that went: 191 implement turns, a median 24 min
+each of which ~17 min was the gate, 68 h with no turn in flight, and a pool
+with nothing running 24% of the time. Alan's call: 2 and 2 while the board
+is caught up, 1 and 1 afterwards. `architecture/automod.md` §3.2f is the long
+version.
+
+- **Depth is `max_inflight`**, the key the queue's claim cap already read:
+  `workers.sources.autocode.max_inflight` and `…autotriage.max_inflight`.
+  One number sets the claim cap, the queue rows offered (slot keys
+  `autocode:round`, `autocode:round:1`; slot 0 keeps the bare key so a row
+  queued across the landing restart still coalesces), and how many owned
+  worktrees `_loop_is_free` tolerates. `workers.slots` must stay at least
+  rounds + triages + 1 or a scheduled task queues behind them
+  (`tests/test_loop_depth.py` pins it). A change needs a backend restart.
+- **What stays one at a time.** Landings, under the automod lock, which a
+  second landing now queues for (`round._land_lock`) instead of dying on
+  `LockHeld` with a gated round, re-checking the chamber AFTER it takes the
+  lock because the winner's promotion was written while it waited. The full
+  test suite and the canary ports (which the drill reuses), behind
+  `gate-tests.lock` and `gate-canary.lock` in the state dir — a port
+  collision would have spent a review attempt on a round that did nothing
+  wrong. The review rung, the long one, overlaps freely.
+- **A landing's idle wait is now the other round's turn**, so it has two
+  phases. `promote.wait_for_rounds` waits, with nothing paused or drained,
+  until no `autocode` job is in the pool: `current.json` already reads
+  `landing`, which holds every new round back, and triage and scheduled
+  tasks keep running. Then `wait_idle` as before.
+- **A turn is credited with its own round.** `_round_opened_since` took the
+  latest `round_start` since the turn began; with two turns that is the other
+  one's, and a `finished` row naming it hands the reaper a live round. It
+  matches on the row's `session_id` and `item_id` now.
+- **Triage claims what it reads.** A triage turn writes nothing on its item
+  until it ends, so a second run's selection would take the same item,
+  cluster or sweep batch. `backlog.claim_for_triage` is an in-memory set (both
+  runs live in the backend; a restart that loses it kills the turns too) that
+  `triage_pool`, `sweep_pool` and `select_cluster` honour — a cluster with any
+  claimed member is skipped whole, or what is left of it forms a second group
+  over the theme the first is filing an umbrella for. Selection spans several
+  awaits, so `_claiming` holds an `asyncio.Lock` from the top of `execute`
+  until the claim is made.
+
+Three things that cost #1199 and #1204 the night of 2026-09-17, fixed with it:
+
+- **A conditional skip is advisory.** 27 of the week's 134 review refusals
+  had every clause graded `met` and were refused by the `pytest.skip` /
+  skip-marker patterns alone — a `live_vault` test skipping without a vault,
+  a loader test skipping without libyaml — while the grader, reading the same
+  line, called it advisory. #1204 was refused three times that way at five of
+  five met. `skipif`, and a `pytest.skip(` whose nearest shallower line opens
+  a branch, go to the grader as advisory; a bare `@pytest.mark.skip` or a
+  skip as a test's first statement still blocks.
+- **The idle budget does not burn on a pool job.** #1204 then passed all nine
+  rungs and its landing gave up at 900 s with `harness_runs=1`: scheduled
+  task #74, ~37 min every night, finished 112 s later. With the pool paused
+  a job in flight is a bounded wait, so `automod.landing.idle_max_wait_s`
+  counts only time the pool is EMPTY and the backend still busy (a chat
+  turn, a leaked counter); `idle_hard_max_wait_s` (4500, above the longest
+  worker `max_duration_seconds`) bounds the whole wait. Those keys had been
+  in config.yaml and read by nothing.
+- **An external landing failure has its own count.** `external` was capped on
+  the item's attempts, which #1204's refusals had already used, so a finished,
+  graded change read as `spent` and went back to triage.
+  `_external_budget_left` caps a `land_failed` on the item's external landing
+  failures instead; a red tree is still capped on attempts.
+
 ### The sweep: every open item read once, retired or ranked
 
 On 2026-09-15 the board held 560 open items and the loop was shaped so that

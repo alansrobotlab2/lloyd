@@ -581,7 +581,18 @@ class Gate:
                 self.skip_smoke = False
                 self._smoke_skip_refused = why
 
+        # Two gates at once (`workers.sources.autocode.max_inflight` > 1, or a
+        # person's CLI round beside the loop's) share two things no worktree
+        # isolates: the canary's fixed ports, which the drill reuses, and the
+        # machine the full suite runs on — tests that bind loopback ports and
+        # a ~6 minute CPU-bound run that two copies would each stretch past
+        # the other's timeouts. Each is queued for, not refused: the wait is
+        # minutes, and a `port already in use` failure would spend a review
+        # attempt on a round that did nothing wrong. The review rung, the
+        # long one, overlaps freely.
+        ladder = [(n, self._serialized(n, f)) for n, f in ladder]
         self._canary: C.Canary | None = None
+        self._canary_lock: S.Lock | None = None
         try:
             for name, fn in ladder:
                 if not self._rung(name, fn):
@@ -594,7 +605,49 @@ class Gate:
                     self._canary.stop()
                 except Exception:
                     pass
+            if self._canary_lock is not None:
+                self._canary_lock.release()
+                self._canary_lock = None
         return self.report
+
+    # How long a rung queues for a resource another gate holds: a full suite
+    # is ~6 min and a canary + drill under two, so this is several of either.
+    SERIAL_MAX_WAIT = 2400.0
+
+    def _serialized(self, name: str, fn):
+        """`fn`, holding the machine resource the rung `name` needs.
+
+        `tests` holds its lock for the rung. `canary_boot` takes the canary
+        lock and KEEPS it — smoke and the drill use the same ports — until
+        `run`'s `finally` releases it. A reused rung never reaches here
+        (`_rung` answers it first), so a reuse never queues.
+        """
+        if name == "tests":
+            def _tests():
+                waited = time.time()
+                with_lock = S.Lock(S.GATE_TESTS_LOCK_PATH, owner=f"gate-{self.round_id}")
+                with_lock.acquire_wait(self.SERIAL_MAX_WAIT)
+                waited = time.time() - waited
+                try:
+                    ok, detail, data = fn()
+                finally:
+                    with_lock.release()
+                return ok, detail, {**(data or {}), "lock_wait_s": round(waited, 1)}
+            return _tests
+        if name in ("canary_boot", "canary_smoke", "drill"):
+            # All three, not only the boot: a reused `canary_boot` never runs
+            # its wrapper, and the drill binds the ports whoever booted.
+            def _ports():
+                waited = time.time()
+                if self._canary_lock is None:
+                    lock = S.Lock(S.GATE_CANARY_LOCK_PATH, owner=f"gate-{self.round_id}")
+                    lock.acquire_wait(self.SERIAL_MAX_WAIT)
+                    self._canary_lock = lock
+                waited = time.time() - waited
+                ok, detail, data = fn()
+                return ok, detail, {**(data or {}), "lock_wait_s": round(waited, 1)}
+            return _ports
+        return fn
 
     # ── rungs ──────────────────────────────────────────────────────────
     def rung_preflight(self):

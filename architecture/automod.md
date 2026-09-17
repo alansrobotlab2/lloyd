@@ -1045,6 +1045,35 @@ Sprint settings to undo when `unswept` reads 0: `autotriage.interval_seconds`
 recorder, the rank ordering in all three pools, the yield, the umbrella
 switch and the unfold.
 
+### 3.2f Depth: more than one round, more than one triage turn
+
+Added 2026-09-17. The measurements that prompted it, over the seven days
+before: 191 implement turns (median 24.3 min; two gate runs per round at
+~8.5 min of `tests` + `review` each), 66 landed, 68.2 h idle between turns,
+worker pool occupancy 0/1/2 jobs for 24% / 43% / 32% of the window at
+`slots: 2`. Review refused 134 of 206 graded attempts: 61 with an unmet
+clause, 27 with every clause met and only a skip-pattern precheck blocking.
+
+| what | where | rule |
+|---|---|---|
+| depth | `workers.sources.{autocode,autotriage}.max_inflight` | claim cap, slot keys, tolerated worktrees; 1 when absent |
+| slots | `workers.slots` | ≥ rounds + triages + 1 |
+| landings | `round._land_lock` | queued, one at a time; chamber re-checked after the lock |
+| suite, canary ports | `state.GATE_TESTS_LOCK_PATH`, `GATE_CANARY_LOCK_PATH` | queued per gate, `Gate.SERIAL_MAX_WAIT`; `review` overlaps |
+| landing vs the other turn | `promote.wait_for_rounds` then `wait_idle` | phase 1 pauses nothing; `landing` state holds new rounds |
+| idle budget | `automod.landing.idle_max_wait_s`, `idle_hard_max_wait_s` | budget burns only while the pool is empty |
+| turn → round | `autocode._round_opened_since` | by `session_id` / `item_id`, not by time alone |
+| triage selection | `backlog.claim_for_triage`, `autotriage._claiming` | in-memory claim under an `asyncio.Lock` |
+| skip precheck | `review._skip_is_conditional` | conditional → advisory; unconditional → blocking |
+| external landing failure | `backlog._external_budget_left` | capped on its own count |
+
+What a second round costs: the second landing waits for the first's
+observation window (the chamber), then rebases onto it and re-gates. So depth
+2 is a pipeline, not a doubling — the gain is the gate time and the idle time
+that now overlap another round's turn. Going back to 1 and 1 is two numbers
+in config.yaml (and `slots` back to 3) and a backend restart; nothing else
+changes shape. `tests/test_loop_depth.py` pins all of it.
+
 ### 3.3 For humans (this repo's development)
 
 `/home/alansrobotlab/lloyd` is production. Non-trivial work belongs in the
