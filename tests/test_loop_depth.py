@@ -471,3 +471,19 @@ def test_a_round_that_passed_its_gate_holds_the_other_slot(monkeypatch, tmp_path
     assert free is False and "SM_A passed its gate" in why
     monkeypatch.setattr(S, "gate_in_progress", lambda rid: {"pid": 1})
     assert I._loop_is_free(2)[0] is True, "re-gating after an edit: the old pass no longer speaks"
+
+
+def test_preflight_does_not_call_the_other_gates_canary_a_stale_one(tmp_path, monkeypatch):
+    """SM_20260917_184334 was refused at preflight, two seconds in, because the
+    other round's canary was up: the port check ran before anything queued
+    for the canary lock."""
+    monkeypatch.setattr(S, "GATE_CANARY_LOCK_PATH", tmp_path / "c.lock")
+    assert G._canary_lock_held() is False
+    other = S.Lock(S.GATE_CANARY_LOCK_PATH, owner="gate-SM_A").acquire()
+    try:
+        assert G._canary_lock_held() is True
+    finally:
+        other.release()
+    assert G._canary_lock_held() is False, "the probe itself must not leave the lock taken"
+    src = (ROOT / "scripts/automod/gate.py").read_text()
+    assert src.index("if not _canary_lock_held():") < src.index("is in use (stale canary?)")

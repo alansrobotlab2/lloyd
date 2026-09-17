@@ -122,6 +122,18 @@ def _tsc_findings(web: Path, timeout: float = 300) -> Counter:
     return _parse_tsc(r.stdout + r.stderr)
 
 
+def _canary_lock_held() -> bool:
+    """Whether another gate holds the canary ports right now. Probed by
+    taking and at once releasing the lock, which is what `flock` offers."""
+    try:
+        S.Lock(S.GATE_CANARY_LOCK_PATH, owner="preflight-probe").acquire().release()
+    except S.LockHeld:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _vite_build(web: Path, out_dir: Path, timeout: float = 600) -> tuple[bool, str]:
     web = web.resolve()
     vite = web / "node_modules" / ".bin" / "vite"
@@ -774,9 +786,15 @@ class Gate:
             data["item_id"] = self.item_id
             data["clauses"] = len(contract["clauses"])
 
-        for port in (C.cc.BACKEND_PORT, C.cc.MCP_PORT):
-            if not C.port_free(port):
-                return False, f"canary port {port} is in use (stale canary?)", data
+        # A busy port is a stale canary only when no gate holds the canary
+        # lock. With two rounds at once the usual reason is the OTHER gate's
+        # canary, which this gate queues for at `canary_boot`; failing here
+        # refused SM_20260917_184334 two seconds into its gate, the first
+        # time two gates overlapped at this rung.
+        if not _canary_lock_held():
+            for port in (C.cc.BACKEND_PORT, C.cc.MCP_PORT):
+                if not C.port_free(port):
+                    return False, f"canary port {port} is in use (stale canary?)", data
 
         detail = (f"{len(changed)} file(s) in scope"
                   + (f"; {len(buckets['protected'])} protected → drill required"
