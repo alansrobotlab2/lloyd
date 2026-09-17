@@ -38,11 +38,16 @@ from scripts.automod import backlog as B
 from scripts.automod import scorecard as SC
 from scripts.automod import state as S
 
-# Triage baseline, 2026-09-16, one cold cycle over the live board:
-# 55 read_text calls / 318,670 json.loads over 6,286,192 bytes / 3.79 s.
-BASELINE_CALLS = 55
-BASELINE_LOADS = 318_670
-BASELINE_BYTES = 6_286_192
+# Triage baseline, re-measured 2026-09-17, one cold cycle over the live board:
+# 57 read_text calls / 331,569 json.loads / 3.79 s cumulative over a
+# 6,462,191-byte ledger. Re-measure it with the counter in
+# `_count_ledger_reads` wrapped around a real `dash._backlog(); dash._automod()`
+# pair — the numbers move as the ledger grows (6,635,836 bytes on 2026-09-17
+# 09:40Z), so they are a census, not a constant, and they appear in the failure
+# messages only: no threshold here reads them.
+BASELINE_CALLS = 57
+BASELINE_LOADS = 331_569
+BASELINE_BYTES = 6_462_191
 
 
 @pytest.fixture(autouse=True)
@@ -132,11 +137,44 @@ def test_one_dashboard_cycle_reads_the_ledger_once(tmp_path, monkeypatch, ledger
     dash._cache.clear()
     B._ledger_cache_clear()
     before = (len(calls), len(loads))
-    dash._backlog()
-    dash._automod()
+    board_section = dash._backlog()
+    automod_section = dash._automod()
     reads, decoded = len(calls) - before[0], len(loads) - before[1]
 
     print(f"ledger reads={reads} json.loads={decoded} ledger_bytes={ledger.stat().st_size}")
+
+    # ── positive control, ahead of the ceilings ────────────────────────────
+    # `reads <= 1` is satisfied by `reads == 0`, and `reads == 0` is also the
+    # answer for a cycle that never reached the ledger at all: the repoint not
+    # landing, the counter matching a different path, a fixture board that came
+    # up empty. A ceiling with no floor is the vacuous-denominator defect this
+    # item is filed about, so the same test first proves the thing it is
+    # counting happened. Measured on this fixture: 1 read, 2,000 rows decoded,
+    # 150 board files with 93 open, `events` 2,000.
+    assert reads >= 1, (
+        "the cycle decoded the ledger 0 times, so `reads <= 1` below is "
+        "measuring nothing: either the section functions are not reading "
+        f"{ledger} (check the `S.LEDGER_PATH` repoint and the counter's path "
+        "identity in `_count_ledger_reads`) or both sections short-circuited "
+        "before reaching it. Triage baseline for a real cycle: "
+        f"{BASELINE_CALLS} reads."
+    )
+    assert board_section.get("total", 0) > 0, (
+        f"`_backlog()` parsed {board_section.get('total', 0)} board files, so "
+        "the board half of the cycle was inert and its ledger reads could "
+        "legitimately be zero. The fixture copies 150 real item files; "
+        f"`{board}` holding them is asserted above, so an empty count here is "
+        "the reader failing, not the board being empty."
+    )
+    assert automod_section.get("events", 0) > 0, (
+        f"`_automod()` reported {automod_section.get('events', 0)} ledger "
+        "events for a fixture whose newest row is stamped ~now, so its "
+        "ledger half was inert and `reads <= 1` would be an untested ceiling. "
+        "`scorecard.compute` drops rows older than `since_days` (7.0) — "
+        "fixture rows are stamped `time.time() - n * 60` and must stay inside "
+        "that window for this clause to measure a decoding cycle."
+    )
+
     assert reads <= 1, (
         f"one cold dashboard cycle decoded the ledger {reads} times; the "
         f"baseline at triage was {BASELINE_CALLS} read_text calls "
