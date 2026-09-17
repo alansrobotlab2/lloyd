@@ -989,10 +989,13 @@ tail waits in the open. Four moves, each with a switch:
   never), and `release_held_confirmations` moves a held item a person
   raises to high without waiting for room. In the implement pool it is
   first by `priority_key`, and **within `high` the newest goes first**
-  (`recency_key`), the sweep's rank and the contract length not applying:
-  the board carried 87 open highs that day, 17 ready, most months old, and
-  oldest-first would have queued the one just raised behind all of them.
-  The near tier still precedes it (a high one fix cycle from landing).
+  (`recency_key`), the sweep's rank, the contract length and
+  fresh-before-re-offer not applying: the board carried 87 open highs that
+  day, 17 ready, most months old, and oldest-first would have queued the one
+  just raised behind all of them — and on 2026-09-17 the fresh-first key
+  alone put that item, re-offered with its branch, 27th behind 26 untried
+  highs. Only the near tier precedes recency (a high one fix cycle from
+  landing).
   Latency is one autotriage interval to the contract, then the next round.
   `round priority-backfill --reset-open` is the stronger reading of
   "default low for existing items": every open item written `low`, the old

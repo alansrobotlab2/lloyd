@@ -3064,9 +3064,13 @@ def select_confirmed(ledger: Path,
     # The human's `priority` sits above all of that (2026-09-16): a fresh
     # `high` runs before a `low` that is one fix cycle from landing, because
     # the tag is the one thing on the board a person set on purpose. Within
-    # medium and low the tiers above still hold; within `high` the sweep's
-    # rank and the contract length do not apply and the newest goes first
-    # (`recency_key`) — the near tier and fresh-before-re-offer still do.
+    # medium and low the tiers above still hold; within `high` only the near
+    # tier precedes recency: the sweep's rank, the contract length and
+    # fresh-before-re-offer do not apply. The last one is deliberate
+    # (2026-09-17): with 26 never-attempted highs queued, it put the one
+    # item a person had just raised — re-offered with its branch — 27th.
+    # A high re-offer cannot monopolise the loop the way that key guards
+    # against elsewhere: its review-retry and incomplete caps bound it.
     def _key(pair):
         item, ev = pair
         high = is_high(item)
@@ -3074,7 +3078,7 @@ def select_confirmed(ledger: Path,
                 item.id not in near,
                 rank_key(item) if not high else (0, 0, 0),
                 (item.clause_count or len(acceptance_clauses_of(ev))) if not high else 0,
-                item.id in outcomes,
+                item.id in outcomes if not high else False,
                 item.id not in live,
                 recency_key(item))
     return sorted(ready, key=_key)[0]

@@ -198,6 +198,31 @@ def test_a_high_item_just_submitted_is_the_next_round_whatever_is_already_high(i
     assert B.recency_key(B.item_by_id(3)) < B.recency_key(_it("medium", created="2030-01-01T00:00:00+00:00", id=9))
 
 
+def test_a_re_offered_high_is_not_queued_behind_every_fresh_high(isolated):
+    """2026-09-17: #1199, re-offered with its branch after two rounds, sat 27th
+    behind 26 never-attempted highs. Within `high`, recency decides."""
+    def confirmed(i, *, priority, days_old, **fm):
+        write_item(isolated, i, status="up_next", days_old=days_old, priority=priority,
+                   acceptance_clauses=["a"], **fm)
+        _ev(event="backlog_triage", item_id=i, verdict="confirmed", acceptance="x",
+            acceptance_clauses=["a"])
+    for i in (1, 2, 3):
+        confirmed(i, priority="high", days_old=10 + i)                        # fresh, older
+    confirmed(9, priority="high", days_old=1)                                 # newest, re-offered
+    _ev(event="backlog_implement", item_id=9, round_id="SM_9", status="started", phase="started")
+    _ev(event="backlog_implement", item_id=9, round_id="SM_9", phase="finished",
+        stop_reason="max_turns", outcome=None)
+    _ev(event="round_abandoned", round_id="SM_9", item_id=9, branch="automod/SM_9")
+    out = B.implement_outcomes(S.LEDGER_PATH)
+    assert out.get(9), "the re-offer is recorded"
+    assert B.select_confirmed(S.LEDGER_PATH)[0].id == 9
+    # Medium keeps fresh-before-re-offer: the guard against a sent-back item
+    # monopolising the loop still holds outside the high tier.
+    for i in (1, 2, 3, 9):
+        B.update_frontmatter(_path(isolated, i), {"priority": "medium"})
+    assert B.select_confirmed(S.LEDGER_PATH)[0].id != 9
+
+
 def test_held_confirmations_are_released_by_priority_then_rank(isolated, monkeypatch):
     rows = {1: ("low", "high", "small", 40), 2: ("high", "", "", 30), 3: ("medium", "high", "small", 20),
             4: ("high", "low", "large", 50)}

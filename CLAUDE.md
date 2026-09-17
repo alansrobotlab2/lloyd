@@ -1038,8 +1038,10 @@ version.
   **A `high` item is picked up next**: triage takes it before a sweep
   batch, a cluster or a live blocker, never holds its confirmation for the
   depth gate, and the next round takes it first (`is_high`,
-  `select_urgent`); within `high` the newest goes first (`recency_key`),
-  because 87 legacy highs were open the day this landed.
+  `select_urgent`); within `high` the newest goes first (`recency_key`,
+  after the near tier only — not rank, not contract length, not
+  fresh-before-re-offer), because 87 legacy highs were open the day this
+  landed and a re-offered high sat 27th behind them the day after.
   `round priority-backfill --reset-open` writes `low` onto every open item
   so the tier starts empty; human-only. Swept ids are
   `released` from quarantine; `swept` and `parked` are expiry-exempt.
