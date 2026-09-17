@@ -296,6 +296,37 @@ AMBIENT_PREFETCH_CAP = 5       # max stored per session before oldest is dropped
 AMBIENT_PREFETCH_DRAIN_MAX = 3 # max injected into a single turn's <context>
 
 
+def ambient_clock_stamp(epoch_seconds: float | None) -> str:
+    """Render one measured instant as the wall clock the model is allowed to use.
+
+    #1197. The autotriage brief of 2026-09-16 wrote `Brief + Triage — 2026-09-17`
+    into its own header, asked the calendar for that invented day, got an empty
+    list back legitimately, and reported Ben's Birthday as `(no events)` — 58 of
+    147 dated headers named a day other than the run's own. The run had no clock
+    in its context, so it composed one in prose, and nothing strips a composed
+    date. Both ambient delivery paths now carry a measured one: this is the only
+    formatter either path uses — the `<ambient-signals>` drain in
+    `prefetch._format_context` and the `<ambient …>` envelope in
+    `app.routers.messages.build_ambient_turn`.
+
+    Box-local zone with its abbreviation, because that is the zone the user reads
+    a calendar in; `astimezone()` with no argument is the system zone, so this
+    tracks DST (`PST` in January, `PDT` in September) instead of a hard-coded
+    offset.
+
+    An unset instant — `0.0`, the dataclass default, meaning no producer ever
+    stamped it — returns "". No measurement, no stamp: rendering it would hand
+    the model a 1969 date as if it were evidence.
+    """
+    if not epoch_seconds:
+        return ""
+    try:
+        when = datetime.fromtimestamp(float(epoch_seconds)).astimezone()
+    except (TypeError, ValueError, OSError):
+        return ""
+    return when.strftime("%Y-%m-%d %H:%M %Z")
+
+
 def enqueue_ambient_prefetch(session_id: str, entry: AmbientPrefetchEntry) -> dict[str, Any]:
     """Push an ambient prefetch entry for `session_id`.
 

@@ -54,6 +54,7 @@ from app.sessions_io import (
     set_last_user_session,
     take_ambient_decision,
     enqueue_ambient_prefetch,
+    ambient_clock_stamp,
     set_turn_activity,
     tool_activity_detail,
     AmbientPrefetchEntry,
@@ -2065,12 +2066,33 @@ async def build_ambient_turn(
     # Envelope the raw producer text so the agent sees framing + knows it
     # can opt out. The session_id is pre-filled so the agent can just copy
     # it into the ambient_decide call. Urgent nudges get a stronger verb.
+    #
+    # One measured instant feeds both the envelope and the turn's queue
+    # position, so the clock the agent is shown is the clock the turn was
+    # enqueued at (#1197). The 2026-09-16 autotriage brief put `2026-09-17` in
+    # its own header, queried the calendar for that invented day, and reported
+    # Ben's Birthday as "(no events)" while finishing `status: success` — the
+    # run had no clock in its context, so it composed one in prose, and 58 of
+    # 147 headers named a day other than their run's. A producer's text is
+    # untrusted prose; the envelope is the server's measurement it gets checked
+    # against.
+    enqueued_at = datetime.now()
+    server_clock = ambient_clock_stamp(enqueued_at.timestamp())
     urge = "surface this now if the user should know" if priority == "urgent" \
            else "consider whether to mention this to the user"
+    clock_line = (
+        f'The server clock when this was queued was **{server_clock}** — that is a '
+        f'measured reading from this machine, not a date the producer wrote. Treat it '
+        f'as the current day: anything the signal above says about "today", a date, or '
+        f'a window has to agree with it or be reported as unverified (#1197).\n'
+        if server_clock else ''
+    )
     prefetched_text = (
-        f'<ambient priority="{priority}" source="{source}" session_id="{session_id}">\n'
+        f'<ambient priority="{priority}" source="{source}" session_id="{session_id}" '
+        f'server_clock="{server_clock}">\n'
         f'{text}\n'
         f'</ambient>\n\n'
+        f'{clock_line}'
         f'This is a background signal from `{source}`. You were not asked a question — '
         f'{urge}. If it is not worth interrupting them, call '
         f'`ambient_decide(session_id="{session_id}", surface=false, reasoning="...")` '
@@ -2094,7 +2116,7 @@ async def build_ambient_turn(
         turn_id=uuid.uuid4().hex[:12],
         source="ambient",
         payload=payload,
-        enqueued_at=datetime.now(),
+        enqueued_at=enqueued_at,
     )
 
 

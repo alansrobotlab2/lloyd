@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -694,3 +696,94 @@ def test_backlog_index_reparses_only_changed_files(tmp_path, monkeypatch):
 
     refs = prefetch._search_backlog_refs("what's left on #300 and 301?")
     assert len(refs) == 2 and "[Task #300]" in refs[0] and "[Task #301]" in refs[1]
+
+
+# ── #1197: ambient delivery arrives with a clock the server measured ──────────
+#
+# The autotriage brief injected at 10:32Z on 2026-09-16 printed
+# `Brief + Triage — 2026-09-17 02:53 PDT` and `📅 Today: (no events)` while
+# Ben's Birthday sat on the 16th. The run had no date anywhere in its context
+# — the scheduler's own stamp is in the run-record filename, not in the prompt —
+# so it invented one, queried the invented day, got [] back legitimately, and
+# finished `status: success`. A transcript pass over autonomy-task:68 sessions
+# found 58 of 147 dated brief headers naming a calendar day other than their own
+# run's. Nothing strips a model-invented date, so both ambient delivery paths
+# have to arrive carrying a measured one. Every test below uses a payload that
+# supplies no date at all, so any date in the delivered text can only be the
+# server's.
+
+_FIXED_ENQUEUED = datetime(2026, 3, 4, 5, 6, 7, tzinfo=timezone.utc)
+_LATER_ENQUEUED = datetime(2026, 3, 4, 9, 15, 0, tzinfo=timezone.utc)
+# Two fixed instants chosen so their LOCAL calendar days differ from each other
+# (2026-03-03 21:06 PST and 2026-03-04 01:15 PST), from the day this test runs,
+# and from their own UTC day (both the 4th). A renderer that read the wall clock
+# instead of `entry.enqueued_at`, or rendered UTC, cannot produce either string.
+
+
+def _stamp(dt: datetime) -> str:
+    """What the server owes the model: that instant, in the box's own zone."""
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+
+
+def test_ambient_signal_lines_carry_server_measured_clocks(quiet_workers, monkeypatch):
+    """Clause 1: every entry drained into `<ambient-signals>` shows a timestamp
+    the server computed from that entry's `enqueued_at`. Two entries, two
+    different local days — so the stamp is per entry, not one block-level
+    "now" — and the summaries are date-free, so the block's only dates are the
+    ones the queue supplied."""
+    from app.sessions_io import AmbientPrefetchEntry, enqueue_ambient_prefetch
+    monkeypatch.setattr(prefetch, "_search_vault", _fake_vault(hybrid_delay=0.0))
+    sid = "test-ambient-stamp"
+    summaries = ["Brief + Triage", "Digest is ready"]
+    assert all(not re.search(r"\d{4}-\d{2}-\d{2}", s) for s in summaries)
+    enqueue_ambient_prefetch(sid, AmbientPrefetchEntry(
+        source="autotriage", summary=summaries[0],
+        enqueued_at=_FIXED_ENQUEUED.timestamp()))
+    enqueue_ambient_prefetch(sid, AmbientPrefetchEntry(
+        source="research:digest", summary=summaries[1],
+        enqueued_at=_LATER_ENQUEUED.timestamp()))
+
+    out = prefetch.prefetch_context("ok", session_id=sid, plan_mode=False)
+
+    assert "<ambient-signals>" in out and "Brief + Triage" in out and "Digest is ready" in out
+    assert _stamp(_FIXED_ENQUEUED) in out, out
+    assert _stamp(_LATER_ENQUEUED) in out, out
+    assert _stamp(_FIXED_ENQUEUED)[:10] != _stamp(_LATER_ENQUEUED)[:10]
+
+
+def test_ambient_signal_line_omits_a_stamp_the_server_never_measured(quiet_workers, monkeypatch):
+    """An entry whose `enqueued_at` is the dataclass default (0.0 — no producer
+    ever stamped it) must not be handed a 1969 calendar date. No measurement,
+    no stamp; the line still carries the signal."""
+    from app.sessions_io import AmbientPrefetchEntry, enqueue_ambient_prefetch
+    monkeypatch.setattr(prefetch, "_search_vault", _fake_vault(hybrid_delay=0.0))
+    sid = "test-ambient-unstamped"
+    enqueue_ambient_prefetch(sid, AmbientPrefetchEntry(
+        source="cron:x", summary="job done", enqueued_at=0.0))
+
+    out = prefetch.prefetch_context("ok", session_id=sid, plan_mode=False)
+
+    assert "<ambient-signals>" in out and "job done" in out
+    assert "1969" not in out and "1970" not in out, out
+
+
+def test_ambient_envelope_carries_the_server_measured_clock(tmp_path, monkeypatch):
+    """Clause 2: the `<ambient …>` envelope built for a notable/urgent
+    injection carries a server-composed timestamp while the producer's summary
+    supplies no date. Pinned against `turn.enqueued_at` rather than a literal,
+    because the envelope and the turn must be stamped from one measured
+    instant — the same `datetime.now()` that ordered the queue."""
+    from app.routers import messages as M
+    monkeypatch.setattr(M, "SESSIONS_DIR", tmp_path)
+    sid = "amb-stamp"
+    (tmp_path / f"{sid}.json").write_text(json.dumps(
+        {"session_id": sid, "messages": [], "platform": "mission-control"}))
+
+    turn = asyncio.run(M.build_ambient_turn(
+        sid, "Digest is ready", dedup_key="digest", priority="notable",
+        source="research:digest", summary="Digest is ready"))
+
+    text = turn.payload["prefetched_text"]
+    assert text.startswith("<ambient ") and "Digest is ready" in text
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", turn.payload["text"])
+    assert _stamp(turn.enqueued_at) in text, text

@@ -32,6 +32,7 @@ from agent_mcp.facts import _extract_entities_from_query, _get_facts_sync
 from agent_mcp.session import _load_session_index, _score_session
 from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords
 from prompt_builder import PROMPT_BUDGET_CHARS
+from app.sessions_io import ambient_clock_stamp
 
 logger = logging.getLogger("lloyd.prefetch")
 
@@ -896,7 +897,18 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
     if ambient_entries:
         amb_lines = []
         for entry in ambient_entries:
+            # The stamp is the SERVER's reading of the instant this entry was
+            # enqueued, never a string the producer composed (#1197: the
+            # autotriage brief invented its own date, queried the calendar for
+            # that day, got [] back legitimately, and reported a birthday as
+            # "(no events)"). Absent means the entry carries no measurement, so
+            # there is nothing to show — no stamp is better than a fabricated
+            # one. The producer's summary may still contain a date it made up;
+            # this line is the reference a reader checks it against.
             line = f"- **[{entry.source}]** {entry.summary}"
+            stamp = ambient_clock_stamp(entry.enqueued_at)
+            if stamp:
+                line += f"\n  _server clock when queued: {stamp}_"
             if entry.content:
                 # Indent content so it's clearly nested under the summary
                 body = entry.content[:800]
