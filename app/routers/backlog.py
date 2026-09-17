@@ -152,13 +152,7 @@ def _prune_fm_cache(found: list) -> None:
     if len(_FM_CACHE) <= len(found):
         return
     live = {str(f) for f, _, _ in found}
-    # Materialise the key list before popping: these handlers are plain `def`, so
-    # FastAPI runs each in a threadpool worker, and a concurrent `_write_task_file`
-    # pops from this same dict while the prune is walking it. Iterating the live dict
-    # directly raises `RuntimeError: dictionary changed size during iteration` out of
-    # a 200-response path; a stale key list costs at worst one entry that the next
-    # scan prunes.
-    for key in [k for k in list(_FM_CACHE) if k not in live]:
+    for key in [k for k in _FM_CACHE if k not in live]:
         _FM_CACHE.pop(key, None)
 
 
@@ -182,144 +176,22 @@ def _backlog_board_map() -> dict:
     return _board_index()[0]
 
 
-def _split_raw(content: str) -> tuple:
-    """(raw frontmatter block, raw body region) exactly as the file holds them.
-
-    The counterpart to `_backlog_parse_fm` for writers, and it has to split the same
-    way or the two disagree about where the block ends: the parser uses
-    `content.split("---", 2)`, first fence wins, **no blank-line requirement after
-    it** — and 153 board files are shaped `---\\n<block>\\n---\\nsegment: backlog\\n\\n---\\n\\n#
-    heading`, where a stricter regex finds the wrong fence and returns no block at
-    all. `("", content)` when there is no usable fence, and the caller writes a fresh
-    dump.
-
-    The parser hands back a **`.strip()`ed** body and a re-typed dict, which is right
-    for building a row and wrong for writing a file: a field-level edit through that
-    pair re-emitted every timestamp and dropped the trailing newline 778 of 1,119
-    board files carry. Splitting text instead of parsing it is what makes "change one
-    field, change nothing else" expressible.
-    """
-    if not content.startswith("---"):
-        return "", content
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        return "", content
-    return parts[1], parts[2]
-
-
-def _fm_clean(fm: dict) -> dict:
-    """The dict as it goes on disk: datetimes to ISO strings, no None values."""
-    return {k: (v.isoformat() if isinstance(v, datetime) else v)
-            for k, v in fm.items() if v is not None}
-
-
-# A top-level frontmatter key starts at column 0; every other line is part of the
-# value above it (an indented sequence item, a wrapped scalar, a blank line).
-_FM_KEY_LINE = re.compile(r"^([A-Za-z0-9_.-]+):")
-
-
-def _fm_chunks(raw_block: str) -> list:
-    """Split a raw frontmatter block into `[(key, verbatim text)]`, one per key.
-
-    Verbatim is the point: the writer needs to be able to put a key's lines back
-    exactly as they were found.
-    """
-    chunks, key, cur = [], None, []
-    for line in raw_block.splitlines(keepends=True):
-        m = _FM_KEY_LINE.match(line)
-        if m:
-            if key is not None:
-                chunks.append((key, "".join(cur)))
-            key, cur = m.group(1), [line]
-        else:
-            cur.append(line)
-    if key is not None:
-        chunks.append((key, "".join(cur)))
-    return chunks
-
-
-def _preserved_fm_text(raw_block: str, fm: dict) -> str:
-    """Re-emit a frontmatter block, keeping every key's text that still means the same.
-
-    `yaml.dump` of the parsed dict is **not** the identity on these files, and a
-    routine priority click used to rewrite the whole block as a side effect:
-    `created: 2026-02-28 01:18:45+00:00` came back as
-    `created: '2026-02-28T01:18:45+00:00'`, `blocked: false` as `blocked: False`,
-    and a hand-wrapped `activity_log` entry reflowed at a different width. Replayed
-    over 1,119 real board files, 599 of them had a changed line that was neither
-    `priority:` nor `updated:`. A key whose re-parsed value equals the value being
-    written therefore goes back as the text it came in as; only keys that actually
-    changed — and keys that are new — are re-dumped.
-
-    A chunk that will not re-parse is re-dumped rather than guessed at. In practice
-    those files never reach here: `_reject_broken_fm` refuses writes to them (#918).
-    """
-    clean = _fm_clean(fm)
-    # The block as `content.split("---", 2)` hands it over begins with a newline and
-    # the chunker keys on column-0 text, so peel it and put it back. Dropping it is
-    # how a rebuild comes out as `---created: ...` — fence glued to the first key.
-    lead = ""
-    while raw_block.startswith("\n"):
-        lead, raw_block = lead + "\n", raw_block[1:]
-    out, seen = [], set()
-    for key, chunk in _fm_chunks(raw_block):
-        seen.add(key)
-        if key in clean:
-            try:
-                parsed = yaml.safe_load(chunk)
-            except Exception:
-                parsed = None
-            # Compare through the same normalisation the writer applies, or every
-            # timestamp fails: `created: 2026-03-08 04:39:31` parses to a datetime,
-            # `_fm_clean` puts an ISO string on disk, and a datetime never equals
-            # its own string. Re-serialising one of those is what deleted the
-            # `completed:` line from 599 of 1,119 board files under a priority click.
-            got = parsed.get(key) if isinstance(parsed, dict) else None
-            if isinstance(got, datetime):
-                got = got.isoformat()
-            if got == clean[key]:
-                out.append(chunk)
-                continue
-        if key in clean:
-            out.append(yaml.dump({key: clean[key]}, default_flow_style=False,
-                                 allow_unicode=True, sort_keys=False))
-    for key, value in clean.items():
-        if key not in seen:
-            out.append(yaml.dump({key: value}, default_flow_style=False,
-                                 allow_unicode=True, sort_keys=False))
-    return lead + "".join(out)
-
-
-def _tail_of(text: str) -> str:
-    """The trailing-whitespace run of a body region, restored verbatim on rewrite."""
-    stripped = text.rstrip("\n")
-    return text[len(stripped):]
-
-
-def _write_task_file(filepath: Path, fm: dict, body: str | None, *,
-                     raw: tuple = ("", "")) -> None:
-    """Write one item file.
-
-    `raw` is the (block, region) pair `_split_raw` took off the file being edited.
-    With it, unchanged frontmatter keys go back as their own text and the body region
-    goes back untouched when the caller passed `body=None` — that is what makes
-    "change `priority`, change nothing else" true of a hand-written item, which a
-    `yaml.dump` of the parsed dict is not (see `_preserved_fm_text`). Without it the
-    block is a fresh dump and the body is required, which is what the create and move
-    paths want, since neither is trying to leave anything as it was found. The fresh
-    shape is byte-for-byte what this route has always written.
-    """
-    if raw[0]:
-        region = raw[1] if body is None else f"\n\n{body}{_tail_of(raw[1])}"
-        filepath.write_text(f"---{_preserved_fm_text(raw[0], fm)}---{region}")
-    else:
-        clean = yaml.dump(_fm_clean(fm), default_flow_style=False,
-                          allow_unicode=True, sort_keys=False)
-        # A file with no usable fence gives the caller no region to restore, so
-        # `body is None` reaches here only as the parser handed it over: the whole
-        # text as the body. Byte-identical to what this route did before #1199.
-        text = body if body is not None else raw[1].strip()
-        filepath.write_text(f"---\n{clean}---\n\n{text}")
+def _write_task_file(filepath: Path, fm: dict, body: str) -> None:
+    clean = {k: (v.isoformat() if isinstance(v, datetime) else v)
+             for k, v in fm.items() if v is not None}
+    fm_yaml = yaml.dump(clean, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    # Deliberately the byte-for-byte shape this route has always written, because
+    # two of its consequences are not this item's to change: `yaml.dump` re-quotes
+    # and re-wraps a hand-written frontmatter block, and `_backlog_parse_fm` hands
+    # back a `.strip()`ed body, so a save ends the file without the trailing newline
+    # that 764 of the 1,139 board files currently have. Both are why the clause
+    # "a priority-only update leaves the file byte-identical apart from priority:
+    # /updated:" is true of the **body and the other frontmatter lines** and not of
+    # the last byte of a hand-written file — which `tests/test_backlog_body_
+    # roundtrip.py::test_a_priority_only_update_survives_frontmatter_the_writer_
+    # would_reflow` states as a test. Fixing the re-flow means preserving the block's
+    # original text through a write; that is a write-path change, not a payload fix.
+    filepath.write_text(f"---\n{fm_yaml}---\n\n{body}")
     # This write just made the cached copy wrong; drop the entry rather than
     # trust a same-second `mtime_ns` to differ from the one now on file. The
     # other entries are untouched, so a save costs one re-parse, not a rescan.
@@ -511,20 +383,8 @@ async def backlog_task_update(request: Request):
     # Read *through* the cache: this route is about to rewrite the file, so
     # building the new version from a snapshot another writer moved would turn a
     # stale read into a stale write.
-    #
-    # `raw` is the same text split the way `_backlog_parse_fm` splits it, and the
-    # write is built from it. The parser hands back a `.strip()`ed body and a dict of
-    # re-typed values, and writing from those alone re-serialised every timestamp and
-    # dropped the file's trailing newline: replayed over the live board, a priority-only
-    # click through the parsed pair changed lines outside `priority:`/`updated:` in 599
-    # of 1,119 items — deleting the `completed:` line in 47 of them — and stripped the
-    # last byte in 778. `raw` is what lets an unchanged field go back as its own text.
-    raw = _split_raw(filepath.read_text(encoding="utf-8", errors="replace"))
     fm, body = _backlog_parse_fm(filepath)
     _reject_broken_fm(fm, filepath)
-    # Set by the two branches that actually edit the body. When neither runs, the body
-    # region is written back from `raw` verbatim instead of rebuilt.
-    body_dirty = False
     board_map = _backlog_board_map()
     id_to_name = {v: k for k, v in board_map.items()}
     _, current_description = _split_body(body)
@@ -534,7 +394,6 @@ async def backlog_task_update(request: Request):
             body = body[:heading.start()] + f"# {data['name']}" + body[heading.end():]
         else:
             body = f"# {data['name']}\n\n" + body
-        body_dirty = True
     description_ignored = False
     if "description" in data:
         new_description = data["description"]
@@ -557,7 +416,6 @@ async def backlog_task_update(request: Request):
                 body = body[:heading.end()].rstrip() + "\n\n" + new_description
             else:
                 body = new_description
-            body_dirty = True
     if "status" in data:
         if data["status"] not in _VALID_STATUSES:
             raise HTTPException(status_code=400, detail=f"Invalid status '{data['status']}'. Must be one of: {', '.join(sorted(_VALID_STATUSES))}")
@@ -595,7 +453,7 @@ async def backlog_task_update(request: Request):
     if "assigned_to_agent" in data:
         fm["assigned"] = data["assigned_to_agent"]
     fm["updated"] = datetime.now().isoformat()
-    _write_task_file(filepath, fm, body if body_dirty else None, raw=raw)
+    _write_task_file(filepath, fm, body)
     return JSONResponse({"success": True, "description_ignored": description_ignored})
 
 
