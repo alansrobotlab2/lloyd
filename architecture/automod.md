@@ -2092,6 +2092,27 @@ and appends a rollback reason for any drop past `SIGMA_MULTIPLIER × σ`, so a
 ignored. The limit that survives is `latency_ms_avg`: still report-only, still
 never compared.
 
+**A query the daemon did not answer is not a score of zero.** On 2026-09-17
+05:34Z the check reverted #1194 — a change to `scripts/memory/revert-suffix-
+merges.py`, nothing on the retrieval path — for `doc_hit_rate` 1.00 → 0.95,
+`ndcg10` −0.022, `mrr_doc` −0.012, `doc_recall_avg` −0.025 and
+`fact_entity_recall_avg` −0.025, all "beyond 3σ = 0.003". Every one of those
+deltas is exactly one query: `backlog-363` came back from the pinned qmd
+daemon with **zero documents and no error** (its fact leg resolved fine), and
+0.4307/20, 0.25/20, 0.5/20 and 0.5/20 are the five numbers above. The same
+code answered it with twenty documents four hours later. The eval itself is
+still deterministic — re-measured that day, five pinned trials agree to
+0.0000 on all seven armed metrics — so the tolerance is not the fix; a floor
+wide enough to absorb one dropped answer (0.05) would absorb a real one-query
+regression too. Instead `_load_run` records which queries the document leg
+answered with nothing (`empty_doc_queries`, off `result_summary.n_docs`), and
+an arm with a *strict subset* of its queries unanswered is `regression_skipped`
+("did not answer, cannot evaluate"), never a score. Every query empty stays a
+score, because that is the one shape a change under test can produce: a
+retriever that returns nothing regresses to zero and is reverted.
+`measure_noise` drops such trials for the same reason.
+`tests/test_automod_regression.py` pins both halves.
+
 **And the three fact-layer metrics are named for what they actually read.**
 Two degradation drills against copies of the live store:
 
@@ -2373,7 +2394,18 @@ from `denied.json` first).
 - **The regression detector's noise floor is five runs on one machine on one
   day.** If it is noisier in practice it will fire spuriously.
   `test_the_recorded_noise_floor_is_what_the_code_expects` fails loudly if a
-  re-measurement disagrees, but this is the piece to trust least.
+  re-measurement disagrees, but this is the piece to trust least. Re-measured
+  2026-09-17 (five pinned trials, stdev 0.0000 on every armed metric); what
+  the floor cannot cover is the daemon dropping an answer, which §8.1 handles
+  as a non-measurement.
+- **The data-damage counter counts notes, not `.git`.** Both copies of
+  `count_vault_files` (promoter baseline, guardian live count) walked
+  `.git/**` until 2026-09-17, and a repack of ~400 loose objects during the
+  observation window read as "vault files dropped 6.7% (6075 → 5667)" with
+  the note count unchanged — twice (2026-09-09, #537; 2026-09-17, #1206), the
+  second tripping the two-rollbacks-in-6h halt. They now share
+  `vaultwatch.measure`; `tests/test_guardian_vault_count.py` replays the
+  repack.
 - **`/health` shares an event loop with agent work.** §9's fix widens the
   budget; it does not remove the coupling. A genuinely wedged event loop and a
   very busy one still look alike for two minutes.
