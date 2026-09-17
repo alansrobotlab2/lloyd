@@ -39,7 +39,10 @@ TSC_LINE_RE = re.compile(r"^(.*?)\(\d+,\d+\):\s*(error TS\d+:.*)$")
 # three-line edit above a pre-existing redefinition reported all eight in
 # `tests/test_dashboard_sections.py` as new and refused a round that had
 # passed review (#1210, SM_20260917_174742; Lloyd's own #1217).
-_PYFLAKES_INNER_POSITION_RE = re.compile(r"\bfrom line \d+\b")
+#
+# Two spellings (#734): "… from line 5" (redefinition, shadowed import) and
+# "… on line 1" (defined in enclosing scope … referenced before assignment).
+_PYFLAKES_INNER_POSITION_RE = re.compile(r"\b(from|on) line \d+\b")
 
 
 def normalize_pyflakes_line(line: str) -> str | None:
@@ -54,7 +57,7 @@ def normalize_pyflakes_line(line: str) -> str | None:
         return None
     m = PYFLAKES_LINE_RE.match(s)
     if m:
-        return f"{m.group(1)}: {_PYFLAKES_INNER_POSITION_RE.sub('from line N', m.group(2))}"
+        return f"{m.group(1)}: {_PYFLAKES_INNER_POSITION_RE.sub(r'\1 line N', m.group(2))}"
     return s
 
 

@@ -121,3 +121,59 @@ def test_a_position_inside_the_message_is_not_part_of_the_findings_identity():
     # …and a different name is still a different finding.
     other = "tests/t.py:597:1: redefinition of unused '_session' from line 448\n"
     assert L.parse_pyflakes(other) != L.parse_pyflakes(after)
+
+
+# ── #734's contract, clause by clause ───────────────────────────────────────
+
+def test_734_redefinitions_normalise_equal_across_a_line_shift():
+    from app import lint_findings as L
+    a = L.normalize_pyflakes_line("app/x.py:1:1: redefinition of unused 'x' from line 5")
+    b = L.normalize_pyflakes_line("app/x.py:12:1: redefinition of unused 'x' from line 16")
+    assert a == b
+
+
+def test_734_shadowed_import_and_enclosing_scope_messages_survive_a_line_shift():
+    from app import lint_findings as L
+    for before, after in [
+        ("app/x.py:2:5: import 'os' from line 1 shadowed by loop variable",
+         "app/x.py:9:5: import 'os' from line 8 shadowed by loop variable"),
+        ("app/x.py:3:11: local variable 'y' defined in enclosing scope on line 1 referenced before assignment",
+         "app/x.py:10:11: local variable 'y' defined in enclosing scope on line 8 referenced before assignment"),
+    ]:
+        assert L.normalize_pyflakes_line(before) == L.normalize_pyflakes_line(after), before
+
+
+def test_734_a_different_name_is_a_different_finding_and_digitless_findings_are_untouched():
+    from app import lint_findings as L
+    x = L.normalize_pyflakes_line("app/x.py:1:1: redefinition of unused 'x' from line 5")
+    y = L.normalize_pyflakes_line("app/x.py:1:1: redefinition of unused 'y' from line 5")
+    assert x != y
+    assert L.normalize_pyflakes_line("app/x.py:7:3: undefined name 'bar'") == "app/x.py: undefined name 'bar'"
+
+
+def test_734_inserting_lines_above_a_redefinition_is_an_empty_delta_both_ways():
+    """The shape `gate.rung_static` compares: post - base and base - post."""
+    import subprocess
+    import sys
+    import tempfile
+    import textwrap
+    from pathlib import Path
+    from app import lint_findings as L
+    body = textwrap.dedent("""\
+        def f():
+            return 1
+
+
+        def f():
+            return 2
+        """)
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "m.py"
+        runs = []
+        for text in (body, "# one\n# two\n# three\n" + body):
+            p.write_text(text)
+            r = subprocess.run([sys.executable, "-m", "pyflakes", p.name], cwd=d, capture_output=True, text=True)
+            runs.append(L.parse_pyflakes(r.stdout + r.stderr))
+    base, post = runs
+    assert base, "positive control: pyflakes does report the redefinition"
+    assert post - base == set() and base - post == set()
