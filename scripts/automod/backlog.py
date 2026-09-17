@@ -2405,6 +2405,20 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     for d in _ledger_events(ledger, "backlog_implement"):
         if d.get("phase") == "finished" and str(d.get("round_id") or "") in live_promoted:
             observing.add(int(d["item_id"]))
+    # A landing in flight is a round in flight (2026-09-17). `automod_land`
+    # returns at once and the turn ends; the detached promoter writes
+    # `promoted` minutes later. The reconcile that runs at turn end saw a
+    # finished row with no promotion and read it as spent: #1197 twice and
+    # #1199 were parked `draft` + needs-human for one poll while their
+    # landing was mid-drain, and came back at the next. The landing marker
+    # (`land.running`, alive pid) is the record that closes the gap.
+    from scripts.automod import state as S
+    for d in _ledger_events(ledger, "backlog_implement"):
+        if d.get("phase") != "finished":
+            continue
+        rid = str(d.get("round_id") or "")
+        if rid and rid not in live_promoted and S.land_in_progress(rid):
+            in_flight.add(int(d["item_id"]))
     # The landing's own outcome, last per item. `in_progress` means a round
     # is running on the item and nothing else (Alan's ruling, 2026-09-13):
     # a landing that settled and left the item open is not running — it is

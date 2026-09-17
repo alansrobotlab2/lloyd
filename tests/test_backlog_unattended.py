@@ -2426,3 +2426,35 @@ def _format_keys(template: str) -> set[str]:
     import string
     return {f for _, f, _, _ in string.Formatter().parse(template) if f}
 
+
+
+# ===========================================================================
+# A landing in flight is a round in flight (2026-09-17)
+# ===========================================================================
+
+def test_an_item_whose_landing_is_mid_drain_stays_in_progress(isolated, monkeypatch):
+    """#1199: the turn's `finished` row landed at 03:21:56Z, `promoted` at
+    03:23:19Z, and the reconcile in between parked it needs-human as spent."""
+    write_item(isolated, 1199, status="in_progress")
+    _confirm(1199)
+    S.append_event({"event": "backlog_implement", "item_id": 1199, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": 1199, "phase": "finished",
+                    "round_id": "SM_LAND", "stop_reason": "stop",
+                    "outcome": {"landed": True, "acceptance": "met"}}, path=S.LEDGER_PATH)
+    monkeypatch.setattr(S, "land_in_progress", lambda rid: {"pid": 1} if rid == "SM_LAND" else None)
+    status, why, *rest = B.desired_statuses(S.LEDGER_PATH)[1199]
+    assert status == "in_progress" and "in flight" in why, (status, why)
+    moves = B.reconcile_statuses(S.LEDGER_PATH)
+    assert all(m["to"] == "in_progress" for m in moves), moves
+    assert B.item_by_id(1199).status == "in_progress" and B.NEEDS_HUMAN_TAG not in B.item_by_id(1199).tags
+    # The promoter died without a `promoted` row: the marker is gone, and the
+    # old reading (spent, a human decides) is the right one again.
+    monkeypatch.setattr(S, "land_in_progress", lambda rid: None)
+    status, why, *rest = B.desired_statuses(S.LEDGER_PATH)[1199]
+    assert status == "draft" and rest == [True]
+    # The promotion recorded: under observation, and still in progress.
+    monkeypatch.setattr(S, "land_in_progress", lambda rid: None)
+    S.append_event({"event": "promoted", "round_id": "SM_LAND", "commit": "d" * 40}, path=S.LEDGER_PATH)
+    status, why, *rest = B.desired_statuses(S.LEDGER_PATH)[1199]
+    assert status == "in_progress" and "observation" in why
