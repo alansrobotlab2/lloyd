@@ -174,10 +174,26 @@ DESCRIPTION_OVERRIDES = {
 # The tool list only changes when the bridge restarts, so a TTL is ample.
 DISCOVERY_TTL_SECONDS = 300.0
 
+# A failed discovery is cached too, for less time, so a Thunderbird that
+# comes back is picked up within a minute. Until 2026-09-18 the cache check
+# was `if _cached_tools and …`, which an empty list never passes: with
+# Thunderbird closed every discovery re-tried the bridge and waited ~5 s for
+# it to fail, twice per tool call. From 18:11 on 09-17 to 08:57 on 09-18 a
+# `Glob` took 10 s end to end and every agent iteration ran 2-4x slower.
+UNAVAILABLE_RETRY_SECONDS = 60.0
+
 _pool: Any = None                       # MCPPool | None
 _pool_lock = asyncio.Lock()
+_discovery_lock = asyncio.Lock()
 _cached_tools: list[Tool] = []
-_cached_at = 0.0
+_cached_at: float | None = None         # None = never discovered
+
+
+def _cache_fresh() -> bool:
+    if _cached_at is None:
+        return False
+    ttl = DISCOVERY_TTL_SECONDS if _cached_tools else UNAVAILABLE_RETRY_SECONDS
+    return (time.monotonic() - _cached_at) < ttl
 
 
 def _lloyd_name(bridge_name: str) -> str:
@@ -248,16 +264,28 @@ async def list_tools() -> list[Tool]:
     Degrades to an empty list when Thunderbird isn't running: these tools
     simply don't appear, and the other modules are unaffected. Cached for
     DISCOVERY_TTL_SECONDS so each new client connection doesn't pay for a
-    round trip to Node.
-    """
-    global _cached_tools, _cached_at
-    if _cached_tools and (time.monotonic() - _cached_at) < DISCOVERY_TTL_SECONDS:
-        return _cached_tools
+    round trip to Node, and a failure for UNAVAILABLE_RETRY_SECONDS.
 
+    One discovery at a time: concurrent callers that all missed the cache
+    used to queue on `_pool_lock` and each wait out their own failed open in
+    turn. The second check under `_discovery_lock` hands them the answer the
+    first one just got.
+    """
+    if _cache_fresh():
+        return _cached_tools
+    async with _discovery_lock:
+        if _cache_fresh():
+            return _cached_tools
+        return await _discover()
+
+
+async def _discover() -> list[Tool]:
+    global _cached_tools, _cached_at
     try:
         pool = await _get_pool()
     except Exception as exc:
-        logger.warning("thunderbird: bridge unavailable (%s); exporting no tools", exc)
+        logger.warning("thunderbird: bridge unavailable (%s); exporting no tools "
+                       "for %.0f s", exc, UNAVAILABLE_RETRY_SECONDS)
         _cached_tools, _cached_at = [], time.monotonic()
         return []
 
@@ -319,7 +347,7 @@ async def shutdown() -> None:
     """
     global _pool, _cached_tools, _cached_at
     pool, _pool = _pool, None
-    _cached_tools, _cached_at = [], 0.0
+    _cached_tools, _cached_at = [], None
     if pool is not None:
         try:
             await pool.aclose()
