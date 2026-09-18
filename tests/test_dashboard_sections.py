@@ -1,7 +1,7 @@
 """Dashboard section aggregation.
 
-Two pieces of judgment are encoded here and both are easy to get wrong in
-a way that looks fine:
+Three pieces of judgment are encoded here and all three are easy to get wrong
+in a way that looks fine:
 
 * **Overdue is not "next up."** Sorting every scheduled task by `next_run`
   ascending and labelling the head "next up" makes a fleet whose ticker
@@ -10,12 +10,17 @@ a way that looks fine:
 * **`completed` is not open work.** The queue's depth table is dominated
   by lifetime `completed` rows (3,400+ on this box). Summing it into a
   backlog figure buries the handful of items actually waiting.
+* **Queue depth is not run outcomes.** A queue row is a slot that gets
+  re-used, so its state says nothing about how many runs went wrong. The
+  workers section publishes both, named apart (#1092).
 """
 
 from __future__ import annotations
 
+import json
 import shutil
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -341,6 +346,193 @@ def test_open_states_exclude_completed():
     would report thousands of items waiting."""
     assert "completed" not in dash._OPEN_STATES
     assert "queued" in dash._OPEN_STATES and "running" in dash._OPEN_STATES
+
+
+# ── Workers: run outcomes vs queue depth (#1092) ─────────────────────────
+#
+# Two tables answer two questions and the panel published only the first under
+# the word "failed". A `queue` row is a slot that gets re-used:
+# `WorkQueue.mark_failed` puts it back on `queued` (or `poisoned` once attempts
+# run out) and no code path writes `state='failed'` at all, so the queue-state
+# failure count of a source whose every run failed stays 0 forever. Measured
+# live 2026-09-18T10:40Z: 13 configured sources each reporting `failed: 0` while
+# `run_rollup_by_source` counted 90 failed runs over an exact 48 h window (98
+# from the wider `date('now','-2 day')`); the one queue row behind the published
+# `failed: 1` was a 2026-09-09 `domain-research` item belonging to no configured
+# source. Run *outcomes* live in `runs`.
+#
+# Every fixture below is a real `WorkQueue` on a scratch database, because each
+# figure under test is the output of a real `GROUP BY` over a real lifecycle —
+# a mocked queue would pin the mock and leave the SQL unpinned.
+
+@pytest.fixture
+def queue(tmp_path, monkeypatch):
+    """A real WorkQueue on a scratch db, wired where the section reads it."""
+    from workers.queue import WorkQueue
+
+    q = WorkQueue(tmp_path / "workers.db")
+    monkeypatch.setattr("workers.queue.get_queue", lambda db_path=None: q)
+    monkeypatch.setattr(
+        "app.config.CONFIG",
+        {"workers": {"enabled": True, "sources": {"autocode": {"enabled": True}}}},
+    )
+    return q
+
+
+def _run(q, source, status, *, hours_ago=1.0, duration=60.0):
+    """One `runs` row at a stated age, written the way the pool writes it."""
+    from workers.queue import new_run_id
+
+    at = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+    q.record_run(new_run_id(source), None, source, status, at, at, duration,
+                 summary="boom" if status == "failed" else "")
+
+
+def _clear_backoff(q, item_id):
+    """Skip the 30 s retry backoff `mark_failed` parks an item in.
+
+    Production waits; a test that waited three times would take 90 seconds to
+    prove nothing about the counter.
+    """
+    with q._connect() as conn:
+        conn.execute("UPDATE queue SET not_before=NULL WHERE id=?", (item_id,))
+        conn.commit()
+
+
+def _retry_then_recover(q, source, failures):
+    """Drive `failures` failed attempts through the real queue lifecycle.
+
+    Each pass claims the item and fails it, which requeues it (`attempts` stays
+    under `max_attempts`, so nothing is poisoned); the last pass claims, runs
+    and completes it. The queue row therefore ends `completed` with no `failed`
+    row anywhere, while `runs` holds `failures` failed outcomes — exactly the
+    state the old counter could not see.
+    """
+    q.enqueue(source, "prompt")
+    for _ in range(failures):
+        item = q.claim_next("w1")
+        assert item is not None and item.source == source, "fixture lost the claim race"
+        _run(q, source, "failed")
+        assert q.mark_failed(item.id, "boom", max_attempts=failures + 1) == "queued"
+        _clear_backoff(q, item.id)
+    item = q.claim_next("w1")
+    assert item is not None, "requeued item never became claimable"
+    q.mark_running(item.id)
+    _run(q, source, "success")
+    q.mark_completed(item.id)
+
+
+def test_recovered_retries_report_run_failures_beside_zero_queue_failures(queue):
+    """Three failed runs whose queue item was requeued and later completed
+    report 3 run failures while that source's queue-state count is 0 — as two
+    distinct fields, because they are two distinct tables."""
+    _retry_then_recover(queue, "autocode", 3)
+
+    out = dash._workers()
+    (row,) = [s for s in out["sources"] if s["name"] == "autocode"]
+    assert row["run_failed"] == 3, "three failed runs must be visible as outcomes"
+    assert row["run_total"] == 4, "three failures plus the run that recovered"
+    assert row["queue_failed"] == 0, "the item recovered, so no queue row is left failed"
+    assert out["depth_by_source"]["autocode"] == {"completed": 1}, (
+        "the queue table holds one completed row for that source — no `failed` key"
+    )
+    assert out["run_outcomes"]["failed"] == 3
+
+
+def test_run_failure_total_is_window_bounded_and_names_its_window(queue):
+    """The workers section carries a run-level failure total bounded by
+    `runs.completed_at`, and states the window length, so a failure-prevalence
+    denominator is computable from one fetch."""
+    _retry_then_recover(queue, "autocode", 2)
+    for _ in range(5):
+        _run(queue, "autocode", "failed", hours_ago=48 * 7)  # a week old
+
+    out = dash._workers()["run_outcomes"]
+    assert out["failed"] == 2, "runs completed before the window are not counted"
+    assert out["total"] == 3, "2 failures in window + the run that recovered"
+    assert out["skipped"] == 0
+    assert out["window_hours"] == dash._RUN_OUTCOME_WINDOW_HOURS == 48
+    assert out["fail_rate"] == pytest.approx(2 / 3)
+    assert out["sources_failing"] == 1, "one source is failing, not the whole fleet"
+
+    started = datetime.fromisoformat(out["window_start"])
+    age_h = (datetime.now(timezone.utc) - started).total_seconds() / 3600.0
+    assert 47.9 < age_h < 48.1, "window_start must be the bound the query used"
+
+
+def test_run_outcomes_cover_sources_the_config_does_not_name(queue):
+    """Counts are keyed by `runs.source`, not by configured source name: a
+    retired source that failed inside the window has no `sources` row and must
+    still be in the totals — the fossil queue row the old payload reported as
+    `failed: 1` was exactly such a source."""
+    _run(queue, "domain-research", "failed")
+
+    out = dash._workers()
+    assert "domain-research" not in [s["name"] for s in out["sources"]]
+    assert out["run_outcomes"]["by_source"]["domain-research"]["failed"] == 1
+    assert out["run_outcomes"]["failed"] == 1
+    assert out["run_outcomes"]["sources_failing"] == 1
+
+
+def test_no_per_source_field_named_failed_comes_from_queue_state(queue):
+    """A queue row parked in `state='failed'` — the fossil shape the live
+    payload carried — is still reported, under a queue-labelled name, and
+    `by_state` keeps counting queue rows rather than run outcomes."""
+    _retry_then_recover(queue, "autocode", 3)
+    with queue._connect() as conn:
+        conn.execute("UPDATE queue SET state='failed' WHERE source='autocode'")
+        conn.commit()
+
+    out = dash._workers()
+    (row,) = [s for s in out["sources"] if s["name"] == "autocode"]
+    assert "failed" not in row, "no per-source field named `failed` survives"
+    assert row["queue_failed"] == 1, "the parked row still shows, as depth"
+    assert row["run_failed"] == 3, "and the outcomes are not hidden by it"
+    assert out["by_state"].get("failed") == 1, "by_state is queue depth, unchanged"
+    assert out["run_outcomes"]["failed"] == 3, "outcomes are the other figure"
+    assert [s["name"] for s in out["sources"] if "failed" in s] == []
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_serialises_run_failures_apart_from_queue_depth(vault, queue):
+    """The HTTP seam: what a browser actually receives from
+    `GET /api/dashboard` after JSON round-tripping.
+
+    Asserted on the decoded response body rather than on the dict, because the
+    contract is about the payload — a field dropped by the serialiser, or a
+    per-source `failed` that survives under the new name, is invisible to a test
+    that stops at `_workers()`.
+    """
+    _retry_then_recover(queue, "autocode", 4)
+
+    payload = json.loads((await dash.get_dashboard()).body.decode("utf-8"))
+    workers = payload["workers"]
+    (row,) = [s for s in workers["sources"] if s["name"] == "autocode"]
+    assert row["run_failed"] == 4
+    assert row["queue_failed"] == 0
+    assert workers["run_outcomes"]["failed"] == 4
+    assert workers["run_outcomes"]["total"] == 5
+    assert workers["run_outcomes"]["window_hours"] == 48
+    assert workers["by_state"].get("completed") == 1, (
+        "the queue view is still there, still counting queue rows"
+    )
+    assert [s for s in workers["sources"] if "failed" in s] == [], (
+        "no per-source key survives the round-trip under the bare name `failed`"
+    )
+    assert "run_failed" in row and "queue_failed" in row
+
+
+def test_the_router_reaches_run_outcomes_only_through_workqueue():
+    """The dashboard must not become a second reader of `workers.db` with SQL
+    of its own — one aggregation shared with `/api/workers/health` is what keeps
+    the two views from meaning different things by `failed`."""
+    src = (Path(__file__).resolve().parents[1] / "app" / "routers" / "dashboard.py").read_text()
+    lines = src.count("\n")
+    assert lines > 500, f"positive control: read the wrong file, only {lines} lines"
+    assert "run_rollup_by_source" in src, "must call through WorkQueue"
+    assert "SELECT " not in src.upper(), "no SQL of its own in the router"
+    assert "sqlite3" not in src, "no direct sqlite connection in the router"
+    assert "execute(" not in src, "no query executed from the router"
 
 
 # ── Agent panel ────────────────────────────────────────────────────────

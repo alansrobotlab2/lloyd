@@ -401,15 +401,81 @@ def _services() -> dict[str, Any]:
 # table (3,400+ rows on this box) and would drown the live numbers.
 _OPEN_STATES = ("queued", "claimed", "running", "pending", "ready")
 
+# How far back the run-outcome block counts (#1092). 48 h is what an operator
+# asks about — "what broke since yesterday" — and it is short enough to stay
+# cheap beside a 2 s poll: measured 2026-09-18T10:40Z through the existing
+# `idx_runs_source_time` index, `run_rollup_by_source` answered over the 621
+# `runs` rows in that window in 1.6 ms against an 8,270-row table.
+_RUN_OUTCOME_WINDOW_HOURS = 48
+
+
+def _run_outcomes(q: Any) -> dict[str, Any]:
+    """Run *outcomes* over the reporting window, keyed by `runs.source`.
+
+    This exists beside the queue-depth figures because the two tables disagree
+    by design, and reading one as the other is what made the panel say
+    `failed: 1` while `run_rollup_by_source` reported 90 failed runs over the
+    same 48 h — 98 counting from `date('now','-2 day')`, which is a wider span
+    (measured 2026-09-18T10:40Z against `workers.db`; the single queue row
+    behind that `1` is a `domain-research` item from 2026-09-09 belonging to no
+    configured source). A queue row is a slot that gets re-used:
+    `WorkQueue.mark_failed` (`workers/queue.py:394-430`) writes `poisoned` at
+    the attempt ceiling and `queued` with a backoff below it, and never the
+    `failed` state this figure used to read — so a source whose runs all failed
+    reported a queue-state failure count of zero forever. `runs` is where the
+    outcome actually lands.
+
+    The counts come from `WorkQueue.run_rollup_by_source`, the same method
+    `/api/workers/health` already answers with, so this section adds no SQL of
+    its own and the two views cannot mean different things by `failed`.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    since = (datetime.now(timezone.utc)
+             - timedelta(hours=_RUN_OUTCOME_WINDOW_HOURS)).isoformat()
+    try:
+        rollup = q.run_rollup_by_source(since) if hasattr(q, "run_rollup_by_source") else {}
+    except Exception:
+        rollup = {}
+
+    by_source = {str(src): dict(row or {}) for src, row in (rollup or {}).items()}
+    total = sum(int(r.get("total", 0) or 0) for r in by_source.values())
+    ok = sum(int(r.get("ok", 0) or 0) for r in by_source.values())
+    failed = sum(int(r.get("failed", 0) or 0) for r in by_source.values())
+    skipped = sum(int(r.get("skipped", 0) or 0) for r in by_source.values())
+    return {
+        "window_hours": _RUN_OUTCOME_WINDOW_HOURS,
+        # The exact bound the query used, so a reader can reproduce the number
+        # with `WHERE completed_at >= window_start` instead of guessing at
+        # "roughly two days".
+        "window_start": since,
+        "total": total,
+        "ok": ok,
+        "failed": failed,
+        "skipped": skipped,
+        # Over zero runs the rate is unknown, not 0.0 — same rule the per-source
+        # rollup applies, and the reason a source that never ran does not read
+        # as a source that never failed.
+        "fail_rate": (failed / total) if total else None,
+        "sources_failing": sum(1 for r in by_source.values()
+                               if int(r.get("failed", 0) or 0) > 0),
+        # Every source the `runs` table names inside the window — including one
+        # config no longer lists, which has no row in `sources` and would
+        # otherwise be invisible here exactly as it is invisible there.
+        "by_source": by_source,
+    }
+
 
 def _workers() -> dict[str, Any]:
-    """Worker pool, per-source depth, and what just ran."""
+    """Worker pool, per-source depth, what just ran, and run outcomes."""
     from app.config import CONFIG
     from workers.pool import get_pool
     from workers.queue import get_queue
 
     q = get_queue()
     depth = q.depth_by_source() if hasattr(q, "depth_by_source") else {}
+    outcomes = _run_outcomes(q)
+    run_rows = outcomes["by_source"]
 
     by_state: dict[str, int] = {}
     for _src, states in (depth or {}).items():
@@ -424,21 +490,30 @@ def _workers() -> dict[str, Any]:
     except Exception:
         pool = {"running": False}
 
-    # One row per configured source, with its open (unfinished) backlog
-    # split out from the lifetime completed count.
+    # One row per configured source. The queue-derived figures (`open`,
+    # `running`, `completed`, `queue_failed`, `poisoned`, `quarantined`) are
+    # lifetime counts of rows in the `queue` table — how much is waiting or has
+    # been through. The `run_*` figures are outcomes over the window from the
+    # `runs` table. They are named apart because they disagree: a source that
+    # failed three times and then succeeded shows `queue_failed: 0,
+    # run_failed: 3` (#1092).
     sources_cfg = (CONFIG.get("workers") or {}).get("sources") or {}
     sources = []
     for name, cfg in sources_cfg.items():
         d = depth.get(name, {}) or {}
+        o = run_rows.get(name, {}) or {}
         sources.append({
             "name": name,
             "enabled": bool((cfg or {}).get("enabled", False)),
             "open": sum(int(d.get(st, 0)) for st in _OPEN_STATES),
             "running": int(d.get("running", 0)),
             "completed": int(d.get("completed", 0)),
-            "failed": int(d.get("failed", 0)),
+            "queue_failed": int(d.get("failed", 0)),
             "poisoned": int(d.get("poisoned", 0)),
             "quarantined": int(d.get("quarantined", 0)),
+            "run_total": int(o.get("total", 0) or 0),
+            "run_failed": int(o.get("failed", 0) or 0),
+            "run_fail_rate": o.get("fail_rate"),
         })
     sources.sort(key=lambda r: (-r["running"], -r["open"], r["name"]))
 
@@ -471,11 +546,19 @@ def _workers() -> dict[str, Any]:
         "enabled": bool((CONFIG.get("workers") or {}).get("enabled", False)),
         "duplicate_effects_suppressed": _duplicate_effects_suppressed(),
         "pool": pool,
+        # `depth_by_source` / `by_state` / `open_total` are queue depth: rows in
+        # the `queue` table by state, lifetime, and the sum of the same. Their
+        # meaning is unchanged (#1092) — what changed is that the only failure
+        # count a reader should reach for is `run_outcomes`, which counts
+        # outcomes in `runs`. A queue state named `failed` is a row that stopped
+        # being retried without being poisoned, which nothing writes any more;
+        # it is not "this run went wrong".
         "depth_by_source": depth,
         "by_state": by_state,
         "open_total": sum(by_state.get(st, 0) for st in _OPEN_STATES),
         "poisoned_total": by_state.get("poisoned", 0),
         "quarantined_total": by_state.get("quarantined", 0),
+        "run_outcomes": outcomes,
         "maintenance": maintenance,
         "sources": sources,
         "recent_runs": runs,

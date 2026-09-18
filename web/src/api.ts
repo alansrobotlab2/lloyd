@@ -2048,11 +2048,24 @@ export interface WorkersState {
   pool: { running: boolean; paused?: boolean; slots?: number; in_flight_count?: number
           in_flight?: Record<string, { source: string; kind: string; started_at: string }>
           kv_gate?: KvGateState }
+  // Queue depth: rows in the `queue` table, lifetime. `by_state` keys are queue
+  // states, so `by_state.failed` is a count of abandoned queue rows — not run
+  // outcomes. Read `run_outcomes` for failures (#1092).
   depth_by_source: Record<string, Record<string, number>>
   by_state: Record<string, number>
   open_total: number
   poisoned_total: number
   quarantined_total: number
+  /** Run outcomes from the `runs` table over the stated window. */
+  run_outcomes: {
+    window_hours: number; window_start: string
+    total: number; ok: number; failed: number; skipped: number
+    fail_rate: number | null; sources_failing: number
+    by_source: Record<string, {
+      total: number; ok: number; failed: number; skipped: number
+      fail_rate: number | null; gpu_hours?: number; last_completed?: string | null
+    }>
+  }
   /** Last poison sweep, or null if one has never run. */
   maintenance: {
     at: string; scanned: number; revived: number; quarantined: number
@@ -2061,7 +2074,8 @@ export interface WorkersState {
   } | null
   sources: Array<{
     name: string; enabled: boolean; open: number; running: number
-    completed: number; failed: number; poisoned: number; quarantined: number
+    completed: number; queue_failed: number; poisoned: number; quarantined: number
+    run_total: number; run_failed: number; run_fail_rate: number | null
   }>
   recent_runs: Array<{
     run_id: string; source: string; status: string; started_at: string
