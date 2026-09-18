@@ -787,3 +787,73 @@ def test_ambient_envelope_carries_the_server_measured_clock(tmp_path, monkeypatc
     assert text.startswith("<ambient ") and "Digest is ready" in text
     assert not re.search(r"\d{4}-\d{2}-\d{2}", turn.payload["text"])
     assert _stamp(turn.enqueued_at) in text, text
+
+
+# ── #1024: the ambient fact leg must not answer about other items ────────────
+
+def _class_row_facts_tree(tmp_path, monkeypatch, *, with_specific=True):
+    """A temp facts tree with the live shape: `Backlog Item` (51 facts about
+    OTHER items, one over FACT_GODNODE_THRESHOLD so the god-node filter is
+    engaged) plus, when asked for, the queried item's own row.
+
+    Returns (named_other_ids, bullet_query).
+    """
+    import yaml
+    import agent_mcp._shared as shared
+    from agent_mcp import retrieval, facts as facts_mod
+
+    facts_root = tmp_path / "facts"
+    facts_root.mkdir()
+    for mod in (shared, retrieval, facts_mod):
+        monkeypatch.setattr(mod, "FACTS_ROOT", facts_root)
+    shared._invalidate_entity_dirs_cache()
+    retrieval.invalidate_fact_file_cache()
+    retrieval._entity_index_cache = None
+
+    def write(entity, facts):
+        d = facts_root / entity
+        d.mkdir(parents=True, exist_ok=True)
+        fm = {"type": "facts", "entity": entity, "category": "activity",
+              "facts": facts}
+        (d / f"{entity}-activity.md").write_text(
+            f"---\n{yaml.dump(fm, sort_keys=False)}---\n")
+
+    named = [str(900 + i) for i in range(60)]
+    write("Backlog Item", [{"fact": f"Backlog item #{n} was created on the "
+                                  f"lloyd board.", "id": f"g{i:03d}",
+                            "confidence": 1.0}
+                           for i, n in enumerate(named)])
+    if with_specific:
+        write("Task #363", [{"fact": "Task #363 was created on the lloyd board "
+                                     "with Medium priority.", "id": "s001",
+                             "confidence": 0.6}])
+    return named
+
+
+def test_ambient_facts_for_one_item_never_come_from_the_class_row(tmp_path, monkeypatch):
+    """`prefetch._search_facts` runs on EVERY message ≥ MIN_MESSAGE_LEN and
+    applies no query-token filter at all: `FACT_MAX_ENTITIES = 2` then each
+    entity's facts by confidence alone. The class row's confidence-1.0 facts
+    about other items therefore reached the ambient block unconditionally.
+
+    The seam here is import-identity: `prefetch` binds
+    `_extract_entities_from_query` from `agent_mcp.facts`, which re-exports
+    `agent_mcp.retrieval.extract_entities_from_query`. The suppression lives in
+    retrieval, so this test is what proves the fix crosses that boundary.
+    """
+    named = _class_row_facts_tree(tmp_path, monkeypatch)
+    bullets = prefetch._search_facts("tell me about backlog item 363")
+    assert bullets, "the item has a fact; silence is not the intended outcome here"
+    wrong = [b for b in bullets if any(f"#{n}" in b for n in named)]
+    assert not wrong, (
+        f"{len(wrong)} of {len(bullets)} ambient bullets name another item: {wrong}")
+
+
+def test_ambient_facts_are_empty_rather_than_wrong_for_an_unwritten_item(
+        tmp_path, monkeypatch):
+    """Same leg, the case with no row for the named id: an empty ambient fact
+    block is required, not other items' facts."""
+    named = _class_row_facts_tree(tmp_path, monkeypatch, with_specific=False)
+    bullets = prefetch._search_facts("tell me about backlog item 363")
+    wrong = [b for b in bullets if any(f"#{n}" in b for n in named)]
+    assert not wrong, f"ambient block carried other items' facts: {wrong}"

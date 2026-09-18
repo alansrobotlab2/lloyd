@@ -21,6 +21,7 @@ their signatures as cross-module breaking changes.
 
 import math
 import re
+from functools import lru_cache
 from typing import Literal, Optional
 
 from app.entity_naming import _GENERIC_SINGLE
@@ -293,6 +294,48 @@ def _entity_pattern(e_lower: str) -> "re.Pattern":
     return pat
 
 
+# The nouns that name a *collection of records* rather than a subject. A live
+# entity directory whose every word is generic AND which carries one of these is
+# a row the facts of many different records get filed under: `Backlog Item`
+# (168 facts) and `Backlog` (125) hold per-item facts about hundreds of items, so
+# a query about one item seeded on them and got other items' facts (#1024).
+#
+# Requiring a record noun is what keeps this surgical. "Every word generic"
+# alone matched 144 directories carrying 6,705 facts (both re-measured 2026-09-18)
+# — including `Vault` (1,736), `Data Pipeline` (1,238) and `Knowledge Graph` (621),
+# which are genuine topics with facts of their own that a query is entitled to. The
+# record-class test matches 12 directories and 363 facts: the ten whose names
+# contain `backlog`, plus `Agent Facts Records` and `Queue Entries`.
+#
+# Deliberately retrieval-side. `app.entity_naming._GENERIC_SINGLE` also feeds the
+# fact extractor's known-name index under `if len(toks) == 1`, where admitting
+# `item`/`backlog` would change which names the extractor is offered — a
+# different surface, unscoped here.
+_RECORD_CLASS_WORDS = frozenset({
+    "backlog", "item", "items", "issue", "issues", "ticket", "tickets",
+    "record", "records", "entry", "entries", "board", "boards",
+})
+_NAME_WORD_RE = re.compile(r"\b\w+\b")
+
+
+@lru_cache(maxsize=8192)
+def _is_generic_seed_name(e_lower: str) -> bool:
+    """True when a candidate name denotes a class of records, not one record.
+
+    Two conditions, both required: every word is generic (`_GENERIC_SINGLE`
+    widened by `_RECORD_CLASS_WORDS`), and at least one word is a record noun.
+    So `Task #363` and `Backlog Task #363` survive on their digit, `Memory Bank`
+    and `Knowledge Graph` survive on a non-generic word, and `Backlog Item`,
+    `Backlog Task` and `Backlog` — made only of class words, one of them a record
+    noun — do not.
+    """
+    toks = _NAME_WORD_RE.findall(e_lower)
+    if not toks or not (set(toks) & _RECORD_CLASS_WORDS):
+        return False
+    generic = _GENERIC_SINGLE | _RECORD_CLASS_WORDS
+    return all(t in generic for t in toks)
+
+
 def extract_entities_from_query(query: str) -> list:
     """Rank known entities by how well they match the query.
 
@@ -325,9 +368,25 @@ def extract_entities_from_query(query: str) -> list:
 
     scores: dict[str, float] = {}
 
+    # Does the query name one record? `#363`, `task 363`, `backlog item 363` all
+    # match; a bare number does not, because every alternative here requires the
+    # `#`/`task`/`backlog` prefix. That prefix requirement is what makes this a
+    # safe trigger for the class-row rule below: a query that names no record
+    # keeps every answer it used to get.
+    names_an_instance = bool(_TASK_ID_RE.search(q_lower))
+
     def _bump(name: str, score: float) -> None:
         # Resolve to canonical case if we have a directory for it.
         canonical = entity_lookup.get(name.lower(), name)
+        # A query that names one record is not asking about the class that
+        # record's facts are also filed under. Checked here, at the one scoring
+        # choke point, so it covers the full-name bump AND token overlap: a class
+        # row demoted to a 0.33 token-overlap score would still reach
+        # `seed_entities[:10]` downstream, and `vault.py` ranks the whole pool by
+        # `fact_score` alone, where its `Backlog item #1121 …` facts score 0.50
+        # against the asked-about item's 0.333. #1024.
+        if names_an_instance and _is_generic_seed_name(canonical.lower()):
+            return
         if scores.get(canonical, 0.0) < score:
             scores[canonical] = score
 
@@ -351,10 +410,13 @@ def extract_entities_from_query(query: str) -> list:
 
     # 2. Full-name match at word boundaries.
     #
-    # A single generic word is not a full-name match worth 5.0. `memory`,
-    # `graph`, `session` and `state` are all real entity directories, so any
-    # query containing one of those words seeded on it at maximum score and
-    # pushed the query's actual subject out of FACT_MAX_ENTITIES.
+    # A generic name is not a full-name match worth 5.0 — single word (`memory`,
+    # `graph`, `session`) or several (`Backlog Item`). Both are real entity
+    # directories, so any query mentioning them seeded on the class row at
+    # maximum score and pushed the query's actual subject out of the seed budget.
+    # This guard is single-token by construction (`" " not in e_lower` exempts a
+    # multi-word name by shape, not by behaviour); the multi-word half is the
+    # class-row rule in `_bump` above, which also covers branch 3.
     for tok in q_tokens_all:
         for e_lower in first_tok.get(tok, ()):
             if len(e_lower) < 3:

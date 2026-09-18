@@ -5,7 +5,9 @@ penalty stayed a no-op for four months and `fact_profile` kept returning
 5,489 facts for one entity.
 """
 import asyncio
+import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -118,6 +120,195 @@ def test_task_ids_dispatch_to_the_canonical_form(world):
     _write_facts(root, "Task #67", "state", [{"fact": "x", "id": "stat-001"}])
     ranked = dict(retrieval.extract_entities_from_query("what happened with task 67"))
     assert ranked["Task #67"] == 10.0
+
+
+# ── A class name must not consume a query about one instance (#1024) ─────────
+
+ITEM_QUERY = "tell me about backlog item 363"
+
+
+def _backlog_world(root, *, with_specific=True, other_ids=60):
+    """The live shape: one `Task #363` row beside the `Backlog Item`/`Backlog`
+    class rows, whose facts are per-record facts about OTHER items.
+
+    The live store files an item's facts under `Backlog Item` as well as under
+    `Task #N`, so 168 and 125 facts sit on the class rows and every one of them
+    reads `Backlog item #1121 was …` — text that contains the query's own words,
+    which is why the god-node token filter keeps 139 of 144. `other_ids` writes
+    enough facts to clear FACT_GODNODE_THRESHOLD (50) so that filter runs here
+    too. Returns the ids the class rows name.
+    """
+    named = [str(900 + i) for i in range(other_ids)]
+    generic = [{"fact": f"Backlog item #{n} was created on the lloyd board "
+                          f"with priority High.", "id": f"g{i:03d}",
+                "confidence": 1.0}
+               for i, n in enumerate(named)]
+    _write_facts(root, "Backlog Item", "activity", generic)
+    _write_facts(root, "Backlog", "activity",
+                 generic[:40] + [{"fact": "Backlog board has 1200 items.",
+                                  "id": "b000", "confidence": 1.0}])
+    if with_specific:
+        _write_facts(root, "Task #363", "state", [
+            {"fact": "Task #363 was created on the lloyd board with Medium priority.",
+             "id": "s001", "confidence": 1.0},
+            {"fact": "Task #363 implementation plan was reordered to fix a dependency.",
+             "id": "s002", "confidence": 1.0},
+        ])
+    for extra in ("Backlog Task #363", "Issue #363", "#363"):
+        _write_facts(root, extra, "state", [
+            {"fact": f"{extra} #363 is the queried backlog item.", "id": "x001",
+             "confidence": 1.0}])
+    return named
+
+
+def _recall_fact_items(monkeypatch):
+    """Run the real `_vault_recall` fact leg with the doc leg silenced.
+
+    The doc leg is a qmd daemon call; empty-list is that function's genuine
+    zero-hit answer, not an outage, so the seed-fact leg still runs end to end —
+    `seed_entities` → `_collect(…, FACT_GODNODE_THRESHOLD)` → `_rank(…,
+    FACT_RANK_CAP_SEED)` — which is the path the clause is about.
+    """
+    from agent_mcp import vault as vault_mod
+    monkeypatch.setattr(vault_mod, "_qmd_daemon_search",
+                        lambda *a, **k: [])
+    return vault_mod._vault_recall({
+        "query": ITEM_QUERY, "limit": 5, "grep_code": False,
+        "include_facts": True, "expand_graph": False, "graph_rerank": False})
+
+
+def test_a_multiword_class_name_is_not_a_full_name_seed(world):
+    """`Backlog Item` and `Backlog` are real entity directories, so a query that
+    names ONE item full-matched the class name at 5.6/5.35 and every ranked slot
+    came from those two rows: the pre-fix probe on 2026-09-18 printed
+    `Counter({'Backlog Item': 10})` over a 318-fact pool while `Task #363` seeded
+    at 10.0 and won zero slots. Neither class row may be seeded at all when the
+    query names an instance — a demoted score would not be enough, because
+    `seed_entities` is the top 10 by rank whatever the number."""
+    root, _ = world
+    _backlog_world(root)
+    ranked = dict(retrieval.extract_entities_from_query(ITEM_QUERY))
+    assert "Backlog Item" not in ranked, (
+        f"the class row was seeded at {ranked.get('Backlog Item')}; the query names"
+        " item 363, not the class its facts also sit under")
+    assert "Backlog" not in ranked
+    above_one = {e: s for e, s in ranked.items() if s > 1.0}
+    assert above_one and all("#363" in e or e.endswith("363") for e in above_one), (
+        f"seeds scoring above 1.0 must all be the queried instance, got {above_one}")
+
+
+def test_a_topic_row_survives_a_query_about_one_item(world):
+    """The rule must cost nothing it is not fixing. Every-word-generic alone
+    matched 144 live entity directories carrying 6,705 facts (both re-measured
+    2026-09-18) — including `Vault` (1,736), `Data Pipeline` (1,238) and
+    `Knowledge Graph` (621), which have facts about themselves and are what such a
+    query is actually asking about.
+
+    So the rule requires a record noun as well as all-generic words, which matches
+    12 directories and 363 facts (also re-measured): ten whose name contains
+    `backlog` (`Backlog`, `Backlog Item`, `Backlog Board`, `vault-backlog`, …) plus
+    `Agent Facts Records` and `Queue Entries`. This pins the half of that boundary
+    the class-name test cannot see: a topic whose every word is generic stays
+    seeded even while the same query names one item.
+    """
+    root, _ = world
+    _backlog_world(root)
+    for name in ("Knowledge Graph", "Data Pipeline"):
+        _write_facts(root, name, "state", [{"fact": "x", "id": "stat-001"}])
+    ranked = dict(retrieval.extract_entities_from_query(
+        "how does the knowledge graph build the data pipeline for backlog item 363"))
+    for topic in ("Knowledge Graph", "Data Pipeline"):
+        assert topic in ranked, (
+            f"{topic} was suppressed by the class-name rule although it names no"
+            " record class")
+    assert retrieval._is_generic_seed_name("knowledge graph") is False
+    assert retrieval._is_generic_seed_name("backlog item") is True
+    assert retrieval._is_generic_seed_name("task #363") is False, (
+        "a name carrying the queried id must never be class-suppressed")
+
+
+def test_a_class_row_never_ranks_above_the_instance_it_describes(world, monkeypatch):
+    """The slot-occupancy clause: with the class rows and the specific row in the
+    same fixture, the specific row wins strictly more of FACT_RANK_CAP_SEED than
+    any class-named seed, and no ranked fact names an item other than 363.
+
+    Before the change this printed `{'Backlog Item': 10}` on the live store with
+    10 of 10 facts naming a different item id, all tied at fact_score 0.500
+    against the specific row's best 0.333 — a per-entity cap could not fix that,
+    since 5 slots for each class row still leaves the instance zero.
+    """
+    root, _ = world
+    named = _backlog_world(root)
+    facts = _recall_fact_items(monkeypatch)["facts"]
+    assert facts, "the queried item has facts; an empty answer is not the fix"
+    owners = Counter(f["entity"] for f in facts)
+    for class_row in ("Backlog Item", "Backlog"):
+        assert owners[class_row] < owners["Task #363"], (
+            f"{class_row} held {owners[class_row]} of {len(facts)} slots against "
+            f"Task #363's {owners['Task #363']}: the class row outranks the item "
+            f"the query names (all owners: {dict(owners)})")
+    wrong = [f for f in facts if any(f"#{n}" in f["fact"] for n in named)]
+    assert not wrong, (
+        f"{len(wrong)} of {len(facts)} ranked facts name an item id other than 363")
+
+
+async def test_the_mcp_tool_boundary_delivers_no_other_item_facts(world, monkeypatch):
+    """The process boundary the agent actually crosses: the MCP aggregator calls
+    `vault.call_tool`, which runs the handler on a worker thread
+    (`asyncio.to_thread`) and serialises the answer through `_wrap`'s single
+    `json.dumps`. A suppression that only survived a direct in-process call to
+    `_vault_recall` would still ship other items' facts to the caller, so this
+    asserts on the deserialised MCP payload, not on the handler's dict.
+
+    Same fixture and same requirement as the slot-occupancy test above.
+    """
+    root, _ = world
+    named = _backlog_world(root)
+    monkeypatch.setattr(vault, "_qmd_daemon_search", lambda *a, **k: [])
+    result = await vault.call_tool("vault_recall", {
+        "query": ITEM_QUERY, "limit": 5, "grep_code": False,
+        "include_facts": True, "expand_graph": False, "graph_rerank": False})
+    assert not result.is_error, result.content[0].text[:400]
+    facts = json.loads(result.content[0].text)["facts"]
+    assert facts, "the queried item has facts; an empty answer is not the fix"
+    wrong = [f for f in facts if any(f"#{n}" in f["fact"] for n in named)]
+    assert not wrong, (
+        f"{len(wrong)} of {len(facts)} MCP-delivered facts name an item id other"
+        " than 363")
+    assert not [f for f in facts if f["entity"] in ("Backlog Item", "Backlog")], (
+        f"a class row held a slot across the tool boundary: "
+        f"{Counter(f['entity'] for f in facts)}")
+
+
+def test_no_row_for_the_named_id_emits_no_other_item_facts(world, monkeypatch):
+    """A query for a recently created item, whose facts have not been written
+    yet, used to answer with 100% other-item facts: `_get_facts_sync` returns
+    nothing for the id, so the class rows were the entire seed set. Suppressing
+    them leaves NO facts — which is the required outcome, not other items' facts.
+    """
+    root, _ = world
+    named = _backlog_world(root, with_specific=False)
+    out = _recall_fact_items(monkeypatch)
+    wrong = [f for f in out["facts"] if any(f"#{n}" in f["fact"] for n in named)]
+    assert not wrong, (
+        f"{len(wrong)} facts name an item other than 363 with no row for 363;"
+        f" owners were {sorted({f['entity'] for f in out['facts']})}")
+
+
+def test_a_query_that_names_no_instance_still_seeds_the_class_row(world):
+    """The guard is scoped to instance queries. `what is the backlog item board`
+    names no id, so `Backlog Item` keeps the answer it has always given —
+    otherwise this would be a retrieval regression on every class-level question.
+    The live store holds 144 entity directories whose every word is generic,
+    carrying 6,705 facts (both re-measured 2026-09-18); this rule reaches only the
+    12 of those that also name a record class, and only when the query names one
+    record."""
+    root, _ = world
+    _backlog_world(root)
+    ranked = dict(retrieval.extract_entities_from_query(
+        "what does the backlog item board hold"))
+    assert ranked.get("Backlog Item", 0) >= 5.0, (
+        f"a class question lost its class row: {ranked}")
 
 
 def test_degree_breaks_ties_deterministically(world):
