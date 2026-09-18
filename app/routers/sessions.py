@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from datetime import datetime, timezone
 
+from app.date_fidelity import refusal_detail
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
     is_background_session_name,
@@ -888,11 +889,22 @@ async def inject_ambient_turn(session_id: str, request: Request):
     When `dedup_key` is supplied, any queued ambient with the same key
     is dropped (newest wins) — safe for producers that may re-fire the
     same context while the previous version is still queued.
+
+    A text whose weekday word and ordinal cannot both be true (`Fri Sept 19`
+    in 2026) is refused with 400 naming the fragment, before the target session
+    is even consulted: the payload is malformed whatever it is addressed to
+    (#1149, `app/date_fidelity.py`).
     """
     data = await request.json()
     text = (data.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
+
+    # Content before target: a self-contradictory date is a defect in the
+    # payload, and 400 says so whether or not this session is a readable one.
+    refusal = refusal_detail([text, data.get("summary") or ""])
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
 
     # A worker or autonomy session is not a place to tell the user anything;
     # 409 rather than a 200 "skipped" so `session_inject_context` reports
@@ -950,6 +962,11 @@ async def inject_ambient_prefetch(session_id: str, request: Request):
     stale session_id), returns 404. Producers should consult
     `GET /api/sessions/active` first or pass `session_id=""` to let the
     server resolve to the most recent user session.
+
+    Refused with 400, naming the fragment, when `summary` or `content` carries
+    a weekday word and an ordinal that cannot both be true (`Fri Sept 19` in
+    2026) — the same guard `/inject` applies, because both endpoints are the
+    only two doors a producer has (`app/date_fidelity.py`, #1149).
     """
     import time as _time
 
@@ -966,6 +983,10 @@ async def inject_ambient_prefetch(session_id: str, request: Request):
         raise HTTPException(status_code=400, detail="summary is required")
 
     content = (data.get("content") or "").strip()
+    refusal = refusal_detail([summary, content])
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
+
     dedup_key = (data.get("dedup_key") or source).strip()
     ttl_seconds = int(data.get("ttl_seconds") or 3600)
     now = _time.time()
