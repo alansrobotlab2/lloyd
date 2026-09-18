@@ -14,7 +14,7 @@ tags:
 - knowledge
 - memory
 type: reference
-updated: 2026-09-11
+updated: 2026-09-18
 ---
 
 # Knowledge Graph
@@ -37,9 +37,9 @@ in Obsidian. Everything structural lives in one SQLite file.
 
 ```
 _pipeline/vault-derived/
-├── facts/<Entity>/<Entity>-<category>.md   # THE FACT LAYER (68,834 files)
+├── facts/<Entity>/<Entity>-<category>.md   # THE FACT LAYER (71,868 files, 2026-09-18)
 │                                            # YAML frontmatter + generated body
-└── kg.sqlite                                # THE STORE (157 MB, WAL)
+└── kg.sqlite                                # THE STORE (192 MB, WAL)
     ├── entities   name, kind, definition, source_hash, timestamps
     ├── aliases    surface -> canonical, with kind and origin
     ├── edges      typed, with provenance, evidence, supersede chain
@@ -61,7 +61,7 @@ Not derivable, and therefore backed up: the edge graph, the alias table, merge
 history and hand-review state. Fact *content* can be re-extracted from the vault;
 the fact that two entities are related, and who decided so, cannot.
 
-### Scale (2026-09-11)
+### Scale (table: 2026-09-04 → 2026-09-11)
 
 | Metric | Count | 2026-09-08 | 2026-09-04 |
 |---|---|---|---|
@@ -78,6 +78,22 @@ the fact that two entities are related, and who decided so, cannot.
 Read the columns as a rate, not a snapshot: the pipeline runs 6x/day and these
 numbers move between two queries in the same session.
 
+Re-measured 2026-09-18T04:30Z, same queries: **26,110 entity dirs · 71,868 fact
+files · 314,613 indexed rows over 27,528 indexed entities · 78,606 edges with
+53,002 active · 14,086 nodes with ≥1 edge (54% of the registry) · 4,028 aliases
+(2,541 case, 1,378 punct, 61 suffix, 48 semantic) · kinds: 16,953 system, 4,258
+entity, 1,331 concept, 1,271 unclassified, 744 doc, 711 skill, 518 task, 164
+person, 87 project, 61 subsystem, 23 pipeline, 1 model · 0 fact files with a
+duplicate ID inside them.** Two things in that re-measure are not growth:
+`provenance_pct` is now effectively 100% (314,566 of 314,613 rows) because the
+gate's own metric counts the column, while the columns it meant to protect —
+`created_at` and `source_doc` — are NULL on 204,733 and 204,768 rows (65%), so
+two-thirds of the store still cannot be dated or attributed; and a re-run of the
+junk gate's own predicate (`looks_like_junk_entity`, `source_doc` unresolved) over
+the live tree names **977** entity dirs that
+`looks_like_junk_entity` rejects, against a gate that demands 0 — the gate that
+was never re-run after the junk was injected (2026-09-09), not a new defect.
+
 The 09-04 column is not history for its own sake: everything between it and
 09-08 was **one day of the pipeline running again**. #24 had been paused since
 2026-09-04 by a `kg_rebuild.py freeze` whose rebuild never passed its gate, and
@@ -90,8 +106,11 @@ sustained: edges tripled again and node coverage passed half the registry.
 Provenance is still the outstanding one, and it only improves going forward —
 the 0.37% floor was every fact written before the extractor started recording
 `created_at` and `source_doc`, and those cannot be dated now. What the column
-measures is therefore dilution, not repair: 27.9% is the old undated majority
-being outgrown by facts written since. Duplicate fact IDs used to sit beside it
+measures is therefore dilution, not repair — and as of 2026-09-18 the column has
+outrun its own metric: the gate's `provenance_pct` reads ~100% (314,566 of
+314,613 rows carry a `provenance`) while `created_at` is NULL on 204,733 rows and
+`source_doc` on 204,768, so two-thirds of the store still cannot be dated or
+reverted. A one-word column is not the same fact as a date and a source. Duplicate fact IDs used to sit beside it
 here; they were repaired in place on 2026-09-08 and the tree has held at zero
 since, see *The rebuild*. The semantic-alias jump from 1 to 49 is the one row
 that is not growth — see *The declared-identity gate*.
@@ -120,7 +139,7 @@ What the store changes:
 |---|---|
 | A write is all-or-nothing | `store.transaction()` — `BEGIN IMMEDIATE`, nestable. A sweep's alias writes and every edge rewrite commit together |
 | Two processes cannot lose a write | WAL + `busy_timeout=30000`; tested with two concurrent writer processes and a `kill -9` mid-write |
-| An unreadable store is not an empty one | `StoreUnavailable` is raised, never the empty schema. Writers abort; ranking-only readers degrade |
+| An unreadable store is not an empty one | `StoreUnavailable` is raised, never the empty schema. Writers abort; ranking-only readers degrade. **Only true of a file that exists and will not open**: `_open()` mkdirs and `sqlite3.connect`s, so an *absent* path is created empty and every count answers 0 — see *What Has Broken* (#1236) |
 | Nothing is silently overwritten | A merge *expires* each edge and re-adds it, returning `(old_id, new_id)` so a revert is exact. `retype` sets `superseded_edge_id` |
 | Every row says where it came from | `kg_store.ORIGINS` — extractor, sweep, semantic, fact_add, fact_relate, seed, classifier, conversation, revert, migration, manual, legacy — are the *known* writers, not a constraint: the column is free-form, and `schema` (the identity gate) is a real origin that predates nothing in that tuple. `aliases.origin` and `aliases.kind` likewise |
 | Caches cannot go stale | Adjacency, degree and the alias map memoise on `PRAGMA data_version`, which moves when *any* process commits |
@@ -145,7 +164,9 @@ s.aliases.resolve(name) / .set(surface, canonical, kind=…, origin=…)
 s.entities.register(name) / .lookup(name) / .kinds()
 s.facts_idx.for_entity(name, …) / .reindex(paths=None)
 
-s.export_json(dir)    # legacy shape, for backups and external readers
+s.export_json(dir)    # legacy shape; called only by the one-shot migration and
+                      # the pre-rebuild freeze, into timestamped dirs under
+                      # _pipeline/backups/ — never in the tree it describes (#474)
 s.backup(path)        # consistent under writers
 ```
 
@@ -192,14 +213,23 @@ Three other writers:
   shape. See `architecture/memory.md`.
 - **`conversation_relations.py`** (#51) — co-access pairs from session
   trajectories become `co_accessed` edges, `provenance: INFERRED`, with the
-  trajectory as `source_doc`. It has produced **2 edges**, both on 2026-09-10.
-  That is the honest number for a path that was writing nothing at all until
-  2026-09-04, and it is worth re-reading before anyone budgets work against it.
-- **`entity_naming.register_schema_keys`** — writes the declared aliases, and
-  is the only producer of `origin: schema` rows.
+  trajectory as `source_doc`. It has produced **143 active edges, 0 expired**,
+  and it is writing daily now: 2 on 09-10, 31 on 09-12, 53 on 09-15, 28 on 09-16,
+  15 on 09-17, 14 on 09-18. The "2 edges" figure this section carried was true on
+  2026-09-11 and is seven days stale; the 08-22 precedent says an expired edge is
+  worse than none, and nothing has expired one.
+- **`entity_naming.register_schema_keys`** — writes the declared aliases, but it
+  is not the only producer of `origin: schema` rows: `gate_entity_name` mints one
+  whenever a raw name matches a declared key spelled differently from the
+  canonical (entity_naming.py:759-761). That is 47 rows against the 41 aliases
+  the schema file declares, and **nothing retracts one when its declaration is
+  withdrawn** — six 2026-09-10 rows are still live, including `Task` →
+  `Entity Resolution Sweep`, which the landed schema's own `why` field says was
+  deliberately not declared. Filed as #1234.
 
-Measured by origin on 2026-09-11, active edges: extractor 35,188, classifier
-8,221, migration 3,096, `fact_relate` 7, conversation 2. The extractor is the
+Measured by origin on 2026-09-18, active edges: extractor 33,091, classifier
+16,614, migration 2,898, sweep 248, conversation 143, `fact_relate` 8. (The
+`semantic` origin carries 0 rows: #67 proposes, nothing has applied.) The extractor is the
 graph, and the classifier is what makes it typed; everything else is rounding.
 
 `seed_relationship_edges.py` still exists but is a **backfill tool for trees
@@ -327,7 +357,13 @@ see *Tools*.
 2. **Applies are attended.** #48 and #67 propose; a human runs `--apply`. Both
    incidents were unattended applies.
 3. **Refuse on a degraded graph.** `--apply` and `backup-graph.sh` both compare
-   active edges against `graph-baseline.json` and refuse below 50%. A backup
+   active edges against `graph-baseline.json` and refuse below 50%. Both halves
+   are wired, and both **fail open when that file is missing or unreadable**:
+   `load_baseline` returns 0 on any exception and `degraded_reason` answers
+   "not degraded" for a baseline of 0 (entity-resolution-sweep.py:1163-1185);
+   `backup-graph.sh:56-58` sets `base = 0` and skips the refusal entirely. The
+   baseline is also raised by the very program it guards (`update_baseline`,
+   :1172-1181), so a slow leak never trips it. Filed as #917. A backup
    taken after a wipe is worse than no backup: it rotates the last good
    snapshot out of the window.
 4. **Expire, never delete.** The pre-merge graph must stay readable, and a
@@ -554,3 +590,23 @@ running the scan. Against `Lloyd` that was 15 million comparisons: 113 seconds
 through MCP, returning 32,857 "contradictions" that were almost entirely the
 overlap heuristic firing on two facts phrased alike. Both tools now take
 `category` to scan a slice — 113s → 4ms.
+
+## Review log
+
+- **2026-09-18 — stale.** The mechanisms all still exist and the nine rules are
+  all still enforced in code, but the document had stopped describing the live
+  store: re-measured the Scale section (26,110 dirs / 71,868 files / 314,613
+  indexed rows / 53,002 active edges / 54% node coverage), corrected the
+  provenance claim (the gate's `provenance_pct` now reads ~100% while
+  `created_at`/`source_doc` are NULL on 65% of rows — the metric moved, the
+  coverage did not), corrected the `conversation` edge count from 2 to 143 and
+  the origin table, dropped two numbers no query supports (the 11 junk dirs and
+  the 30-snapshot daily-retention claim; junk is 977 dirs under the gate's own
+  predicate, and `_pipeline/vault-derived/store-backups/` is a different,
+  unrotated series written by apply scripts). Three architecture findings filed
+  against the tree, not the prose: **#1234** (a withdrawn schema declaration is
+  never retracted — `Task` still routes to `Entity Resolution Sweep`), **#917**
+  (both degraded-graph refusals fail open on a missing `graph-baseline.json`),
+  **#1236** (an absent store is auto-created empty, so `count()` answers 0 rather
+  than raising — the rule-7 invariant holds only for a file that exists and will
+  not open); the duplicate-fact-stock finding merged into the open **#1144**.
