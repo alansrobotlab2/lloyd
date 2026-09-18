@@ -9,17 +9,20 @@ Type=oneshot
 RemainAfterExit=yes
 # Per-GPU board power clamps (knob names: see set-gpu-power-limit.sh).
 #   GPU 0, 2 — RTX 3090                    -> 275 W
-#   GPU 1    — RTX PRO 6000 Blackwell      -> 400 W   (the Xid 79 card, RMA open)
-# The 400 W is above the flat 300 W this unit shipped until 2026-09-11, and the
-# only configuration ever described as stable on that card paired 400 W with a
-# <=2400 MHz clock cap. No clock cap is set anywhere on this box — `nvidia-smi
-# -i 1 --query-gpu=clocks.sm` read 2632 MHz on 2026-09-11, and 0 Xid lines were in
-# the kernel journal at that time with 400 W already applied at runtime. The
-# raise is deliberate with that gap open: if Xid 79/154 comes back on GPU 1,
-# drop this value before suspecting anything else.
+#   GPU 1    — RTX PRO 6000 Blackwell      -> 450 W   (the Xid 79 card, RMA open)
+# 450 W since 2026-09-17, Alan's call (#1107). It was 400 W from 2026-09-11 and
+# 300 W flat before that. GPU 1 had already been raised to 450 W by hand twice,
+# on 09-11 and again after the 09-15 boot reset it to 400 W, and the kernel
+# journal logged 0 Xid lines at 450 W. Each boot dropped it back to 400 W; this
+# line makes 450 W what the unit applies. The only configuration ever described
+# as stable on that card paired 400 W with a <=2400 MHz clock cap. No clock cap
+# is set anywhere on this box (`nvidia-smi -i 1 --query-gpu=clocks.sm` read
+# 2632 MHz on 2026-09-11), so 450 W runs further from that pairing than 400 W
+# did, and that is a deliberate choice. If Xid 79/154 comes back on GPU 1, drop
+# this value before suspecting anything else.
 Environment=GPU_POWER_LIMIT_W=300
 Environment=GPU_POWER_LIMIT_W_0=275
-Environment=GPU_POWER_LIMIT_W_1=400
+Environment=GPU_POWER_LIMIT_W_1=450
 Environment=GPU_POWER_LIMIT_W_2=275
 # Root-executed, so it deliberately runs from a root-owned system path rather
 # than the repo checkout. Reinstall from ~/lloyd after editing either file:
