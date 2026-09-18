@@ -139,7 +139,7 @@ What the store changes:
 |---|---|
 | A write is all-or-nothing | `store.transaction()` — `BEGIN IMMEDIATE`, nestable. A sweep's alias writes and every edge rewrite commit together |
 | Two processes cannot lose a write | WAL + `busy_timeout=30000`; tested with two concurrent writer processes and a `kill -9` mid-write |
-| An unreadable store is not an empty one | `StoreUnavailable` is raised, never the empty schema. Writers abort; ranking-only readers degrade. **Only true of a file that exists and will not open**: `_open()` mkdirs and `sqlite3.connect`s, so an *absent* path is created empty and every count answers 0 — see *What Has Broken* (#1236) |
+| An unreadable store is not an empty one | `StoreUnavailable` is raised, never the empty schema. Writers abort; ranking-only readers degrade. Since #1236 that covers an *absent* file too: `_open()` mkdirs and `sqlite3.connect`s, which CREATES a database whose every count answers 0, so the module-level reader `store()` calls `_require_database()` first and refuses a path holding no database, naming the resolved path. `KGStore(path)` and `configure(path)` remain the named routes that provision one |
 | Nothing is silently overwritten | A merge *expires* each edge and re-adds it, returning `(old_id, new_id)` so a revert is exact. `retype` sets `superseded_edge_id` |
 | Every row says where it came from | `kg_store.ORIGINS` — extractor, sweep, semantic, fact_add, fact_relate, seed, classifier, conversation, revert, migration, manual, legacy — are the *known* writers, not a constraint: the column is free-form, and `schema` (the identity gate) is a real origin that predates nothing in that tuple. `aliases.origin` and `aliases.kind` likewise |
 | Caches cannot go stale | Adjacency, degree and the alias map memoise on `PRAGMA data_version`, which moves when *any* process commits |
@@ -613,6 +613,24 @@ overlap heuristic firing on two facts phrased alike. Both tools now take
 
 ## Review log
 
+- **2026-09-18 — #1236 fixed: an absent store now refuses instead of answering
+  0.** The module-level reader `store()` calls `_require_database()`
+  (`app/kg_store.py`) before it opens anything, so a path with no database
+  raises `StoreUnavailable` naming the resolved path and leaves no file behind —
+  where it previously mkdir'd, `sqlite3.connect`'d into existence and answered
+  `facts_idx.count() == 0`, which is what a job booting from a self-mod worktree
+  hit, because `_pipeline/` is gitignored. `KGStore(path)` and `configure(path)`
+  still provision, so the rebuild and every test fixture keep creating; the
+  rebuild's `extract` phase now creates `kg-rebuild.sqlite` by name, because the
+  extractor only warns on `StoreUnavailable` and would have extracted a corpus
+  with no edges. Pinned by
+  `tests/test_kg_store.py::test_default_store_refuses_an_absent_database_and_creates_no_file`,
+  `::test_default_store_refuses_without_making_the_missing_directory`,
+  `::test_a_reader_process_refuses_an_absent_store_and_leaves_no_file` and
+  `::test_the_provisioning_routes_still_create_an_absent_database`. Counts still
+  have to name the path they read: the live tree holds ~314k indexed rows and a
+  worktree has no store at all, so the same query is now either a real number or
+  a refusal, never a zero.
 - **2026-09-18 — stale.** The mechanisms all still exist and the nine rules are
   all still enforced in code, but the document had stopped describing the live
   store: re-measured the Scale section (26,110 dirs / 71,868 files / 314,613
@@ -628,5 +646,6 @@ overlap heuristic firing on two facts phrased alike. Both tools now take
   never retracted — `Task` still routes to `Entity Resolution Sweep`), **#917**
   (both degraded-graph refusals fail open on a missing `graph-baseline.json`),
   **#1236** (an absent store is auto-created empty, so `count()` answers 0 rather
-  than raising — the rule-7 invariant holds only for a file that exists and will
-  not open); the duplicate-fact-stock finding merged into the open **#1144**.
+  than raising — the rule-7 invariant held only for a file that exists and will
+  not open; closed by the entry above, same day); the duplicate-fact-stock
+  finding merged into the open **#1144**.

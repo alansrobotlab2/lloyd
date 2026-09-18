@@ -59,14 +59,36 @@ def _queries_file(tmp_path: Path) -> Path:
     return p
 
 
+def _provision_store(db: Path, env: dict) -> None:
+    """Create the store this run is about to score, through the named route.
+
+    Since #1236 the reader `store()` refuses an absent database rather than
+    letting sqlite invent one, so a run that means "score against this empty
+    store" has to create it, the same way `_run` creates the empty facts root
+    beside it. An existing file (the unreadable-store test below) is left
+    exactly as it is. Subprocess for the reason in the module docstring: this
+    file imports nothing out of the tree it tests.
+    """
+    subprocess.run(
+        [str(PY), "-c",
+         "import sys; from app.kg_store import KGStore; KGStore(sys.argv[1]).close()",
+         str(db)],
+        cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=120,
+        check=True,
+    )
+
+
 def _run(tmp_path: Path, *args: str,
          kg_db: Path | None = None) -> subprocess.CompletedProcess:
     facts = tmp_path / "facts"
     facts.mkdir(exist_ok=True)
+    db = kg_db if kg_db is not None else tmp_path / "kg.sqlite"
     env = dict(os.environ)
     env["LLOYD_FACTS_ROOT"] = str(facts)
-    env["LLOYD_KG_DB"] = str(kg_db if kg_db is not None else tmp_path / "kg.sqlite")
+    env["LLOYD_KG_DB"] = str(db)
     env["LLOYD_VOICE_ALERTS"] = "0"
+    if not db.exists():
+        _provision_store(db, env)
     return subprocess.run(
         [str(PY), str(SCRIPT), "--queries", str(_queries_file(tmp_path)), *args],
         cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=300,

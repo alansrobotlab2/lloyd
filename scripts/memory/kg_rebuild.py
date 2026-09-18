@@ -358,6 +358,12 @@ def cmd_extract(args) -> int:
     swap on. Sweeping them up is mechanical, so it should not be manual.
     """
     REBUILD_FACTS.mkdir(parents=True, exist_ok=True)
+    # Provision the rebuild database HERE, by name. The extractor reaches it
+    # through the module-level `store()`, which since #1236 refuses an absent
+    # path instead of letting sqlite invent one — and the extractor's
+    # `except StoreUnavailable` only warns and skips indexing, so an
+    # unprovisioned rebuild would quietly produce a corpus with no edges.
+    KGStore(REBUILD_DB).close()
     env = _rebuild_env()
     # A hash index of its own, or the rebuild would skip every file the LIVE
     # tree has already extracted.
@@ -457,9 +463,14 @@ def cmd_import_worker(args) -> int:
     Every path this touches resolves through app.paths, which read the env
     at import — so `fact_add` here writes into the rebuild tree and the
     rebuild store, with no reloading and no globals left behind.
+
+    `configure`, not `store`: this command BUILDS the rebuild store, and since
+    #1236 the reader refuses an absent database instead of letting sqlite
+    invent one. `configure` provisions it and still installs it as this
+    process's default, which is what routes `fact_add` into the rebuild.
     """
-    from app.kg_store import store
-    from app.paths import VAULT_FACTS_ROOT as ROOT
+    from app.kg_store import configure
+    from app.paths import VAULT_FACTS_ROOT as ROOT, VAULT_KG_DB
     import agent_mcp.facts as facts_mod
 
     carry = Path(args.carryover)
@@ -467,7 +478,7 @@ def cmd_import_worker(args) -> int:
         print(f"refusing: LLOYD_FACTS_ROOT is {ROOT}, not the rebuild tree", file=sys.stderr)
         return 2
 
-    st = store()
+    st = configure(VAULT_KG_DB)
     stats = {"facts": 0, "already_present": 0, "rejected_junk": 0, "dropped": 0,
              "aliases": 0, "edges": 0, "experiments": 0}
     dropped: list = []

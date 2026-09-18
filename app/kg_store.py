@@ -9,6 +9,9 @@ looked exactly like an empty graph.
 
 Rules:
   * Nothing outside this module opens the database.
+  * A reader that finds no database raises `StoreUnavailable` rather than
+    being handed an empty one; `KGStore(path)` and `configure(path)` are the
+    named routes that provision a new file.
   * Every write is a transaction; `transaction()` nests.
   * Every edge and alias says where it came from (`origin`) and when.
   * The markdown fact files stay the human-readable fact layer. `facts_idx`
@@ -143,10 +146,14 @@ CREATE INDEX IF NOT EXISTS facts_source_doc ON facts_idx(source_doc);
 
 
 class StoreUnavailable(RuntimeError):
-    """The store exists but cannot be opened or read.
+    """The store cannot be opened or read.
 
     Deliberately not "return an empty graph": an unreadable store must never
     look like an empty one to a writer. Read paths may catch this and degrade.
+    Raised for a file that exists and will not open, for a closed connection,
+    and — since #1236 — for a path where no database is at all: `store()`
+    refuses rather than letting sqlite create an empty file whose every count
+    answers 0.
     """
 
 
@@ -1159,12 +1166,42 @@ _default: Optional[KGStore] = None
 _default_path: Path = VAULT_KG_DB
 
 
+def _require_database(path: Path) -> Path:
+    """Refuse a path that holds no database, before sqlite can invent one.
+
+    `sqlite3.connect` CREATES the file and `_init_schema()` then fills it with
+    empty tables, so a read against an absent path answers `0` for every count
+    with no exception anywhere. That is the false clean bill rule 7 of
+    `architecture/knowledge-graph.md` exists to stop, and it was reachable
+    through the documented recipe itself: `_pipeline/` is gitignored, so it is
+    never present in a self-modification worktree, and the same
+    `facts_idx.count()` answered 0 from a worktree and 300k-odd from the live
+    tree — both shaped like an answer. `app/uptake.py` had written this probe
+    by hand for itself; the store owes it to every reader.
+
+    A writer that means to CREATE a database says so by name: `KGStore(path)`
+    and `configure(path)` still provision an absent path.
+    """
+    if not path.is_file():
+        raise StoreUnavailable(
+            f"no knowledge-graph database at {path.resolve()}; refusing to read a "
+            "row count from a store that is not there. Create one deliberately "
+            "with KGStore(path) or configure(path)."
+        )
+    return path
+
+
 def store() -> KGStore:
     """The process-wide store for `app.paths.VAULT_KG_DB` (or whatever
-    `configure()` pointed it at). Opened lazily on first use."""
+    `configure()` pointed it at). Opened lazily on first use.
+
+    Raises `StoreUnavailable` naming the resolved path when no database is
+    there (#1236) — a reader never gets `0 rows` out of an absent file.
+    """
     global _default
     with _default_lock:
         if _default is None or _default.path != _default_path:
+            _require_database(_default_path)
             if _default is not None:
                 _default.close()
             _default = KGStore(_default_path)
@@ -1172,14 +1209,18 @@ def store() -> KGStore:
 
 
 def configure(path: Path | str) -> KGStore:
-    """Point the process default at `path` (tests, rebuilds). Returns it."""
+    """Point the process default at `path` (tests, rebuilds). Returns it.
+
+    This is a *provisioning* route: unlike `store()` it creates an absent
+    database, which is what `tests/` and the rebuild scripts depend on.
+    """
     global _default_path, _default
     with _default_lock:
         _default_path = Path(path)
         if _default is not None:
             _default.close()
-            _default = None
-    return store()
+        _default = KGStore(_default_path)
+        return _default
 
 
 def reset() -> None:

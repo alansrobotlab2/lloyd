@@ -50,8 +50,16 @@ def _patch_paths(facts_root: Path, aliases_path: Path):
 
 
 def _seed_aliases(mapping: dict) -> None:
-    """Put a `{surface: canonical}` map into the configured store."""
-    st = kg_store.store()
+    """Put a `{surface: canonical}` map into the configured store.
+
+    `configure`, not `store()`: seeding is provisioning, and since #1236 the
+    reader refuses an absent database instead of letting sqlite invent one. The
+    two tests that seed without calling `_patch_paths` land on the fresh path
+    `conftest._isolate_default_store` points the default at, so this is what
+    creates it; where `_patch_paths` already configured a store, `configure`
+    just reopens the same file.
+    """
+    st = kg_store.configure(kg_store._default_path)
     for surface, canonical in mapping.items():
         if surface == canonical:
             st.entities.register(canonical)

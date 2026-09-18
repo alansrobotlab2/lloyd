@@ -279,6 +279,67 @@ def test_unreadable_store_raises_store_unavailable(tmp_path):
         KGStore(p)
 
 
+def test_default_store_refuses_an_absent_database_and_creates_no_file(tmp_path, monkeypatch):
+    """An absent database is refused, not answered with zeros (#1236).
+
+    `sqlite3.connect` CREATES the file and `_init_schema()` fills it with empty
+    tables, so before the guard `store().facts_idx.count()` returned 0 against a
+    path holding no database — the false clean bill rule 7 of
+    `architecture/knowledge-graph.md` exists to stop, reachable from any
+    self-mod worktree because `_pipeline/` is gitignored.
+    """
+    store_dir = tmp_path / "vault-derived"
+    store_dir.mkdir()
+    absent = store_dir / "kg.sqlite"
+    monkeypatch.setattr(kg_store, "_default_path", absent)
+    kg_store.reset()
+
+    with pytest.raises(StoreUnavailable) as exc:
+        kg_store.store()
+
+    assert str(absent.resolve()) in str(exc.value)   # names the path it looked at
+    assert not absent.exists()
+    assert list(store_dir.iterdir()) == []           # nothing created as a side effect
+
+
+def test_default_store_refuses_without_making_the_missing_directory(tmp_path, monkeypatch):
+    """The refusal happens before `_open()`, which mkdirs the parent (#1236)."""
+    absent = tmp_path / "never-made" / "kg.sqlite"
+    monkeypatch.setattr(kg_store, "_default_path", absent)
+    kg_store.reset()
+
+    with pytest.raises(StoreUnavailable):
+        kg_store.store()
+
+    assert not (tmp_path / "never-made").exists()
+
+
+def test_a_reader_process_refuses_an_absent_store_and_leaves_no_file(tmp_path):
+    """The documented recipe, run the way it is written, at an absent path (#1236).
+
+    `architecture/knowledge-graph.md` tells a reader to run
+    `from app.kg_store import store; store().facts_idx.count()`. That crosses a
+    process boundary — `LLOYD_KG_DB` in the environment, `app.paths` reading it
+    at import, the module-level reader refusing — so it is run as a subprocess
+    rather than through in-process patching, and must leave no file behind.
+    """
+    store_dir = tmp_path / "vault-derived"
+    store_dir.mkdir()
+    absent = store_dir / "kg.sqlite"
+    env = dict(os.environ, PYTHONPATH=str(ROOT), LLOYD_KG_DB=str(absent))
+    env.pop("LLOYD_FACTS_ROOT", None)
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "from app.kg_store import store; print(store().facts_idx.count())"],
+        cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=120)
+
+    assert proc.returncode != 0
+    assert "StoreUnavailable" in proc.stderr
+    assert str(absent.resolve()) in proc.stderr
+    assert not absent.exists()
+    assert list(store_dir.iterdir()) == []
+
+
 def _writer(path, prefix, n):
     s = KGStore(path)
     for i in range(n):
@@ -336,4 +397,22 @@ def test_backup_is_a_consistent_copy(db, tmp_path):
 def test_default_store_can_be_pointed_at_a_path(tmp_path):
     s = kg_store.configure(tmp_path / "kg.sqlite")
     assert kg_store.store() is s
+    kg_store.reset()
+
+
+def test_the_provisioning_routes_still_create_an_absent_database(tmp_path):
+    """The guard sits on the reader `store()`, not on the routes that provision.
+
+    `KGStore(path)` and `configure(path)` are how a rebuild, a migration or a
+    test says "make this database": both still create a missing file, mkdirs and
+    all, and the store they hand back is readable at zero rows.
+    """
+    s = KGStore(tmp_path / "a" / "kg.sqlite")
+    assert s.path.is_file() and s.edges.count() == 0
+    s.close()
+
+    c = kg_store.configure(tmp_path / "b" / "kg.sqlite")
+    assert c.path.is_file()
+    assert kg_store.store() is c
+    assert c.facts_idx.count() == 0
     kg_store.reset()
