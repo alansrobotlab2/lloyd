@@ -428,6 +428,71 @@ def _frequency_interval_seconds(task: dict) -> Optional[float]:
     return freq_map.get(freq)
 
 
+def next_run_gap(task: dict,
+                 now: Optional[datetime.datetime] = None) -> dict:
+    """How far this task is behind its OWN declared frequency, as two numbers.
+
+    ONE predicate, shared by the two surfaces that had to agree (#1121): the
+    scheduler's next_run stall scan and `compute_health`. Before this they were
+    one private copy of the arithmetic each, which is exactly how the aggregate
+    view came to score #68 `fail_rate 0.0` while the alert beside it — had it
+    seen the task at all — would have named it. A board cannot be healthy in one
+    surface and stalled in the other when both read this function.
+
+    The two numbers, and why both are needed:
+
+    * `hours_since_last_run` — elapsed against `last_run`, window-independent.
+      A run-count window cannot see a task that stopped running: #68 scored
+      `runs 30 / successes 30` over a 1-day window while dark for half of it,
+      because the 30 runs that did happen were all successes.
+    * `gap_ratio` — that elapsed divided by the declared period, so the number
+      scales with the task's own cadence instead of a threshold somebody
+      guesses: #68 at `every-15min` is past 50 periods by lunchtime.
+
+    `past_next_run` is the stall predicate, and it stays keyed on `next_run` for
+    the reason #421 shipped it that way. `last_run`-based staleness crosses 1.0
+    at the moment a task becomes due, so a `gap_ratio > 1` alarm fires on every
+    on-cadence nightly job — measured on the live board 2026-09-18, healthy
+    task #51 reads 1.01 on that reference while #68 reads 169.4. `next_run` is
+    written at completion, so being a whole period past it means a full extra
+    period went by. The bound is strict and unchanged: > one interval.
+
+    A task that has never run has no `last_run`. Then `gap_ratio` is measured
+    against `next_run` and floored at 0.0, so "weekly, not yet due" reads 0.0
+    and "daily, never ran, three periods past" reads 3.0 — and `never_run` says
+    which shape the reader is looking at, because `run_count: 0` on its own
+    cannot tell an overdue job from one that has simply never been due.
+
+    A task with neither stamp yields None in every elapsed field: no verdict,
+    not a healthy verdict. Nothing here reports a rate it cannot compute."""
+    if now is None:
+        now = _utcnow()
+    interval = _frequency_interval_seconds(task)
+    last = _parse_iso(task.get("last_run"))
+    nxt = _parse_iso(task.get("next_run"))
+    hours_since_last = (now - last).total_seconds() / 3600.0 if last else None
+    hours_past_next = (now - nxt).total_seconds() / 3600.0 if nxt else None
+    reference = hours_since_last
+    if reference is None and hours_past_next is not None:
+        reference = max(0.0, hours_past_next)
+    gap_ratio = (round(reference * 3600.0 / interval, 2)
+                 if interval and reference is not None else None)
+    return {
+        "expected_interval_seconds": interval,
+        "hours_since_last_run": (round(hours_since_last, 2)
+                                 if hours_since_last is not None else None),
+        "hours_past_next_run": (round(hours_past_next, 2)
+                                if hours_past_next is not None else None),
+        "gap_ratio": gap_ratio,
+        "never_run": last is None,
+        # Strictly more than one period, exactly the bound the alert has used
+        # since #421. Widening WHICH statuses are scanned is #1121's change;
+        # widening this would make the alarm the noisy one all over again.
+        "past_next_run": bool(interval and hours_past_next is not None
+                              and hours_past_next * 3600.0 > interval),
+    }
+
+
 _no_skill_warned: set[str] = set()
 
 
@@ -1465,8 +1530,35 @@ def _row_claims(row: dict) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
-def compute_health(rows: list[dict], tasks: list[dict], days: int) -> dict:
-    """Aggregate run rows into per-task and fleet health. Pure function."""
+_GAP_ROW_KEYS = ("expected_interval_seconds", "hours_since_last_run",
+                 "hours_past_next_run", "gap_ratio", "never_run")
+
+
+def _health_gap_fields(task: dict, now: datetime.datetime) -> dict:
+    """The elapsed-time half of a health row, from `next_run_gap`.
+
+    Carried on EVERY row — a task with runs in the window, a task with none, and
+    a task that has never run — because the row this field exists to catch is
+    not the one with 0 runs in it. `past_next_run` is deliberately left out of
+    the row: the verdict lives in one place, the top-level `stalled` list, so a
+    reader cannot be handed a number and a bool that disagree."""
+    gap = next_run_gap(task, now=now)
+    return {k: gap[k] for k in _GAP_ROW_KEYS}
+
+
+def compute_health(rows: list[dict], tasks: list[dict], days: int,
+                   now: Optional[datetime.datetime] = None) -> dict:
+    """Aggregate run rows into per-task and fleet health. Pure function.
+
+    `now` is the one instant every elapsed-time field is measured against, and
+    it defaults to `_utcnow()` for the same reason `_is_task_due` takes one: the
+    gap arithmetic below has to be askable at a chosen instant or it cannot be
+    tested near a bound, and a fleet report that mixes two clocks is two
+    reports. Production passes nothing — the route reads the wall clock once,
+    here, and every field below inherits that single reading.
+    """
+    if now is None:
+        now = _utcnow()
     by_task: dict[str, dict] = {}
     task_by_id = {str(t.get("id")): t for t in tasks}
 
@@ -1579,9 +1671,14 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int) -> dict:
                 "timeout_seconds": t.get("timeout_seconds"),
                 "last_run": t.get("last_run"), "last_attempt": t.get("last_attempt"),
             })
+            e.update(_health_gap_fields(t, now))
         else:
             e["name"] = "(unattributed)" if tid == "unattributed" else f"task {tid}"
             e["status"] = "unknown"
+            # No task file, so no declared frequency and no stamps: None, not a
+            # 0.0 that would read as "on cadence" to anything summing this field.
+            e.update({k: None for k in _GAP_ROW_KEYS[:-1]})
+            e["never_run"] = False
         out_tasks.append(e)
 
     out_tasks.sort(key=lambda x: x["wasted_hours"], reverse=True)
@@ -1599,8 +1696,41 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int) -> dict:
              "refuted_or_insufficient_rate": None,
              "consecutive_failures": 0, "last_success": None,
              "failure_count": int(t.get("failure_count") or 0),
-             "last_run": t.get("last_run")}
+             "last_run": t.get("last_run"),
+             # An idle row is where a stopped task actually lands, so the gap
+             # fields have to be here as much as on a row with runs: `runs: 0`
+             # on its own cannot tell an overdue daily job from a weekly task
+             # that has never yet been due.
+             **_health_gap_fields(t, now)}
             for t in tasks if str(t.get("id")) not in seen]
+
+    # The stall list, and the reason it is built from `tasks` rather than from
+    # the rows in the window: a task that is not running is precisely the task
+    # whose rows are missing, so anything derived from `by_task` could not
+    # contain it — the shape #68 was in. Same predicate the scheduler's alert
+    # uses (`next_run_gap`), same instant, so the report and the alert agree.
+    # `runs_in_window` and `fail_rate` are carried ALONGSIDE the entry rather
+    # than as a filter on it: #68's 30 in-window successes scored 0.0 and were
+    # the reason nothing listed it. A passing rate suppresses nothing here.
+    stalled = []
+    for t in tasks:
+        gap = next_run_gap(t, now=now)
+        if not gap["past_next_run"]:
+            continue
+        row = by_task.get(str(t.get("id")))
+        stalled.append({
+            "task_id": str(t.get("id")), "name": t.get("name"),
+            "status": t.get("status"), "frequency": t.get("frequency"),
+            "expected_interval_seconds": gap["expected_interval_seconds"],
+            "hours_since_last_run": gap["hours_since_last_run"],
+            "hours_past_next_run": gap["hours_past_next_run"],
+            "gap_ratio": gap["gap_ratio"],
+            "never_run": gap["never_run"],
+            "runs_in_window": (row["runs"] if row else 0),
+            "fail_rate": (row["fail_rate"] if row else None),
+            "hold": hold_reason(t, tasks, now=now),
+        })
+    stalled.sort(key=lambda s: (-(s["gap_ratio"] or 0.0), s["task_id"]))
 
     total_runs = sum(t["runs"] for t in out_tasks)
     total_fail = sum(t["failures"] for t in out_tasks)
@@ -1638,4 +1768,8 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int) -> dict:
         },
         "tasks": out_tasks,
         "idle_tasks": idle,
+        # Tasks more than one period past their own next_run, whatever their
+        # status — the field whose absence let a `fail_rate: 0.0` stand in for
+        # "healthy" about a job that had not run in ~50 cycles (#1121).
+        "stalled": stalled,
     }

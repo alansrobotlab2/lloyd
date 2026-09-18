@@ -294,7 +294,13 @@ async def list_tools():
             "Fleet health over the last N days: per-task runs, failure rate, timeouts, "
             "empty runs, [SILENT] rate, GPU-hours, wasted hours, consecutive failures, "
             "plus fleet totals. Use this to find tasks that are burning GPU without "
-            "producing anything."), inputSchema={
+            "producing anything. It also answers the opposite question: every "
+            "per-task row carries `hours_since_last_run` and `gap_ratio` (elapsed "
+            "over the task's OWN declared frequency, independent of the window), "
+            "and the top-level `stalled` list names every task more than one "
+            "period past its own `next_run` whatever its status — so a "
+            "`fail_rate: 0.0` no longer stands for 'healthy' about a job that is "
+            "not running."), inputSchema={
             "type": "object",
             "properties": {"days": {"type": "integer", "description": "Window in days (default 7, max 90)"}},
         }),

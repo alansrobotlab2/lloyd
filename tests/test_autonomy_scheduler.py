@@ -1061,3 +1061,282 @@ async def test_the_pool_reaches_the_next_run_assertion_through_the_registry(
     assert not q.list_items(source="scheduled-task", limit=50), (
         "a dependency-blocked task reached the queue; this test would then "
         "have executed it")
+
+
+# ── #1121: the stall scan must see the statuses that stop a task ─────────────
+#
+# `_next_run_stalled` iterated the whole resolution set and then dropped every
+# task whose status was not `up_next`, so `draft`, `paused` and `failed` — the
+# statuses that STOP a task — were invisible to the one mechanism built to catch
+# a stall. #68 `Email & Calendar Triage` (frequency `every-15min`, the fleet's
+# highest-volume task) went dark on an unattributed `up_next -> draft` flip while
+# that alarm reported zero stalls; measured 2026-09-18 on the live board it sits
+# 42.1 h past its own `next_run`, a gap_ratio of 168 periods, and the shipped
+# scan returns `[]`. `autonomy_health` had no elapsed-time field at all, so the
+# same call scored #68 `runs 30 / successes 30 / fail_rate 0.0` over a 1-day
+# window and listed it in no failure, idle or gap list.
+#
+# Both halves now read one predicate, `autonomy.next_run_gap`, so the alert and
+# the fleet report cannot call the same board two different things.
+
+def _status_fleet(aut):
+    """Six tasks, one per shape, all read at the pinned `PIN`. Ids in the 900s.
+
+    906/907 are the case the filter swallowed: a `draft` task shaped like #68
+    and a `paused` task, each far past its own `next_run`. 908 is clause 5's
+    control — `up_next`, on cadence, half a period past `next_run`, and flagged
+    nowhere. 909/910 are the two never-run shapes clause 4 must tell apart: a
+    daily job three periods overdue and a weekly job whose `next_run` is still
+    five days off. 911 is a `draft` task that is NOT overdue, because a
+    deliberate stop is not itself a stall and the widening must not say it is.
+    902 is the noisy alarm's own control, reused from `_next_run_fleet` with the
+    same stamps, so clause 5's "unchanged" is asserted against a case that is
+    known to fire rather than against an empty list."""
+    day = dt.timedelta(days=1)
+    write_task(aut, 906, status="draft", frequency="every-15min",
+               last_run=(PIN - dt.timedelta(hours=12, minutes=30)).isoformat(),
+               next_run=(PIN - dt.timedelta(hours=12, minutes=15)).isoformat())
+    write_task(aut, 907, status="paused",
+               last_run=(PIN - 3 * day).isoformat(),
+               next_run=(PIN - 2 * day).isoformat())
+    write_task(aut, 908, frequency="hourly",
+               last_run=(PIN - dt.timedelta(minutes=40)).isoformat(),
+               next_run=(PIN - dt.timedelta(minutes=30)).isoformat())
+    write_task(aut, 909, last_run=None, next_run=(PIN - 3 * day).isoformat())
+    write_task(aut, 910, frequency="weekly", last_run=None,
+               next_run=(PIN + 5 * day).isoformat())
+    write_task(aut, 911, status="draft", frequency="weekly",
+               last_run=(PIN - 2 * day).isoformat(),
+               next_run=(PIN + 5 * day).isoformat())
+    write_task(aut, 902, last_run=(PIN - 5 * day).isoformat(),
+               next_run=(PIN - 4 * day).isoformat())
+
+
+def test_the_stall_scan_flags_a_draft_task_and_names_its_status(
+        aut, monkeypatch, tmp_path):
+    """Clauses 1 and 5, plus the never-run shapes clause 4 has to separate.
+
+    Pre-fix this fails on the first assertion: 906 and 907 were dropped by the
+    status filter, so the flagged set was {902, 909} and a board containing only
+    non-`up_next` tasks returned `[]` — which is exactly what the shipped alarm
+    returned for the live board while #68 was ~168 periods late."""
+    from workers.queue import WorkQueue
+    from workers.sources.scheduled_task import _grossly_overdue, _next_run_stalled
+
+    _pin(aut, monkeypatch)
+    _status_fleet(aut)
+    q = WorkQueue(tmp_path / "status-stall.db")
+
+    flagged = {e["id"]: e for e in _next_run_stalled(q)}
+    assert flagged[906]["status"] == "draft", (
+        "a draft task more than one period past its next_run is still invisible "
+        "to the stall scan — the filter this item exists to remove")
+    assert flagged[906]["hold"] == "draft", (
+        "the carried reason is not the string autonomy.hold_reason returns for a "
+        f"draft task: {flagged[906]['hold']!r}")
+    assert flagged[907]["status"] == flagged[907]["hold"] == "paused"
+    assert {906, 907, 909, 902} <= set(flagged), (
+        f"stall set is {sorted(flagged)} — every shape the scan should see must "
+        "be in it")
+
+    # Clause 4's two never-run shapes, separated at the row level: the daily job
+    # that has never run is 3 periods past and IS flagged; the weekly job that
+    # has never run is 0.0 and is not. `never_run` is True for both, so it is the
+    # gap_ratio that tells an overdue job from one that was never due.
+    assert flagged[909]["gap_ratio"] == pytest.approx(3.0, abs=0.01)
+    assert 910 not in flagged, "flagged a weekly task whose next_run is ahead"
+    assert 911 not in flagged, ("flagged a draft task that is not past its own "
+                                "next_run — a deliberate stop is not a stall")
+
+    # Clause 5, both directions in one line: widening the scan must not move the
+    # due-ness alarm. It still returns its own control 902, and only 902 —
+    # `draft`/`paused` are outside `_all_runnable_tasks`, the hourly control is
+    # inside its interval, and neither never-run task has a `last_run`.
+    assert _grossly_overdue(q) == [902], (
+        "the widened scan leaked into the noisy alarm")
+
+    # And the same predicate the scan used, read directly: the bound is still
+    # STRICTLY one interval, so 908 (half a period) is nowhere near it.
+    board = list(aut.dependency_resolution_set())
+    t908 = next(t for t in board if int(t["id"]) == 908)
+    assert aut.next_run_gap(t908, now=PIN)["past_next_run"] is False
+    assert 908 not in flagged, "flagged an up_next task less than one period late"
+
+
+async def test_the_widened_alert_names_the_draft_task_and_its_status(
+        aut, monkeypatch, tmp_path):
+    """Clause 2 across the executor seam, on a board nothing else can flag.
+
+    Only the #68-shaped draft task on the board, so the flagged set is entirely
+    non-`up_next`: pre-fix this test gets zero alerts on every tick and the
+    message it does not produce obviously cannot name a status. The count phrase
+    is asserted too, because the alert used to read `N up_next task(s)`
+    unconditionally — an alert that misdescribes its own contents is the same
+    defect one level up."""
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    _pin(aut, monkeypatch)
+    write_task(aut, 906, status="draft", frequency="every-15min",
+               last_run=(PIN - dt.timedelta(hours=12, minutes=30)).isoformat(),
+               next_run=(PIN - dt.timedelta(hours=12, minutes=15)).isoformat())
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(st, "_state", {**st._state, "startup_checked": True,
+                                       "stall_streak": 0, "stall_alerted_at": None,
+                                       "nextrun_streak": 0,
+                                       "nextrun_alerted_at": None})
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture)
+    q = WorkQueue(tmp_path / "draft-alert.db")
+    for _ in range(st._STALL_NEXTRUN_TICKS):
+        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+
+    assert len(alerts) == 1, f"expected one alert on the confirm tick, got {alerts}"
+    msg = alerts[0]
+    assert "#906" in msg, f"the draft task is not named in the alert: {msg}"
+    assert "held: draft" in msg, (
+        f"the alert does not carry the status as its reason: {msg}")
+    assert msg.startswith("1 draft task(s)"), (
+        f"the count line does not describe the statuses it flagged: {msg}")
+    assert "up_next task(s)" not in msg, (
+        f"the message still asserts the old scope while flagging a draft task: {msg}")
+    assert "Autonomy scheduler may be stalled" not in msg, (
+        "the due-ness alarm fired on a board with no runnable task")
+
+
+def test_next_run_gap_is_the_single_predicate_both_surfaces_share(aut, monkeypatch):
+    """The arithmetic both #1121 halves read, at its three bounds.
+
+    `gap_ratio` is measured against `last_run` — the reference the item's clause
+    3 names — and the stall bound against `next_run`, because a last_run-based
+    ratio crosses 1.0 the moment a task becomes due: measured on the live board
+    2026-09-18, the healthy nightly task #51 reads gap_ratio 1.01 on that
+    reference while #68 reads 169.4, so `gap_ratio > 1` as an alarm would fire on
+    every on-cadence job. This test pins that the two are NOT conflated."""
+    _pin(aut, monkeypatch)
+    day = dt.timedelta(days=1)
+    write_task(aut, 920, frequency="daily",
+               last_run=(PIN - dt.timedelta(hours=25)).isoformat(),
+               next_run=(PIN - dt.timedelta(hours=1)).isoformat())
+    write_task(aut, 921, frequency="weekly",
+               last_run=(PIN - 2 * day).isoformat(),
+               next_run=(PIN - 2 * day).isoformat())
+    write_task(aut, 922, frequency="bogus",
+               last_run=(PIN - 9 * day).isoformat())
+    board = {int(t["id"]): t for t in aut.dependency_resolution_set()}
+
+    g920 = aut.next_run_gap(board[920], now=PIN)
+    assert g920["expected_interval_seconds"] == 86400
+    assert g920["hours_since_last_run"] == pytest.approx(25.0, abs=0.01)
+    assert g920["gap_ratio"] == pytest.approx(25 / 24, abs=0.01)
+    # One hour past next_run against a one-day period: inside the bound, so a
+    # task on cadence inside its own window is never a stall. That is the
+    # difference between this alarm and the noisy one.
+    assert g920["past_next_run"] is False, (
+        "the stall bound moved off the strict one-interval next_run test")
+    assert g920["never_run"] is False
+
+    # Two days past `next_run` against a SEVEN-day period is still inside one
+    # period, so the widened scan does not flag it. This is the bound clause 5
+    # leans on: widening which statuses are scanned did not widen how late a task
+    # has to be, and a weekly job cannot be made to look stalled by a bad week.
+    g921 = aut.next_run_gap(board[921], now=PIN)
+    assert g921["past_next_run"] is False, (
+        "flagged a weekly task 2 days past next_run — the bound is one full "
+        "interval, not one calendar day")
+    assert g921["gap_ratio"] == pytest.approx(2 / 7, abs=0.01)
+
+    # A frequency the parser does not know yields no verdict, not a healthy one:
+    # a denominator of None must never become a 0.0 gap.
+    g922 = aut.next_run_gap(board[922], now=PIN)
+    assert g922["gap_ratio"] is None and g922["past_next_run"] is False
+    assert g922["hours_since_last_run"] == pytest.approx(216.0, abs=0.01)
+
+
+def test_health_reports_the_real_68_gap_alongside_a_passing_fail_rate(aut, monkeypatch):
+    """Clauses 3 and 4 on #68's real row shape: 30 successes in the window, dark
+    for half of it.
+
+    `compute_health` is given `now=` so the elapsed arithmetic is askable at a
+    chosen instant instead of at whatever wall clock the suite runs on. The
+    window contains only successes — that is the whole point: `fail_rate 0.0`
+    must not be able to cover a task that has stopped running, which is what the
+    2026-09-17 `autonomy_health(days=1)` call did to #68."""
+    _pin(aut, monkeypatch)
+    minutes = dt.timedelta(minutes=15)
+    write_task(aut, 968, status="draft", name="Email Calendar Triage",
+               frequency="every-15min",
+               last_run=(PIN - dt.timedelta(hours=12, minutes=30)).isoformat(),
+               next_run=(PIN - dt.timedelta(hours=12, minutes=15)).isoformat())
+    rows = [{"task_id": "968", "status": "success", "duration_seconds": 60.0,
+             "summary": "ok", "response_json": "did work", "meta_json": None,
+             # The 30 runs sit BEFORE the 12.5 h dark period, the way #68's did:
+             # the window holds only successes, then the task stops, and the
+             # window still cannot see the stopping.
+             "completed_at": (PIN - dt.timedelta(hours=13) - i * minutes).isoformat()}
+            for i in range(30)]
+    tasks = list(aut.dependency_resolution_set())
+    h = autonomy.compute_health(rows, tasks, 1, now=PIN)
+
+    row = next(t for t in h["tasks"] if t["task_id"] == "968")
+    assert row["runs"] == 30 and row["fail_rate"] == 0.0, (
+        "the fixture stopped being the passing-rate case")
+    assert row["expected_interval_seconds"] == 900
+    assert row["hours_since_last_run"] == pytest.approx(12.5, abs=0.01)
+    assert row["gap_ratio"] >= 40, (
+        f"gap_ratio {row['gap_ratio']} is not the ≥ 40 the item's clause 3 "
+        "requires for a 12.5 h gap at every-15min")
+    assert row["never_run"] is False
+
+    stalled = {s["task_id"]: s for s in h["stalled"]}
+    assert "968" in stalled, (
+        f"a task 50 periods past its next_run is absent from the stalled list: "
+        f"{sorted(stalled)}")
+    assert stalled["968"]["fail_rate"] == 0.0 and stalled["968"]["runs_in_window"] == 30, (
+        "the stalled entry was filtered out by a passing rate rather than carried "
+        "alongside it")
+    assert stalled["968"]["hold"] == "draft"
+    assert stalled["968"]["gap_ratio"] == row["gap_ratio"], (
+        "the stalled entry and the per-task row computed the same task's gap "
+        "differently — the two surfaces must read one predicate")
+
+    # Window-independence, asserted rather than asserted-by-construction: an
+    # identical task with NO rows in the window carries the same gap fields.
+    write_task(aut, 969, status="draft", frequency="every-15min",
+               last_run=(PIN - dt.timedelta(hours=12, minutes=30)).isoformat(),
+               next_run=(PIN - dt.timedelta(hours=12, minutes=15)).isoformat())
+    h2 = autonomy.compute_health(rows, list(aut.dependency_resolution_set()), 1, now=PIN)
+    idle = next(t for t in h2["idle_tasks"] if t["task_id"] == "969")
+    assert idle["runs"] == 0
+    assert (idle["hours_since_last_run"], idle["gap_ratio"]) == (
+        row["hours_since_last_run"], row["gap_ratio"]), (
+        "the gap fields depend on how many rows fell in the window; they must "
+        "come from the task's own stamps")
+
+
+def test_health_distinguishes_a_never_run_overdue_task_from_a_weekly_one_not_due(
+        aut, monkeypatch):
+    """Clause 4's second half: `run_count: 0` alone cannot say which of the two
+    shapes it is, so both fields have to be on the row."""
+    _pin(aut, monkeypatch)
+    day = dt.timedelta(days=1)
+    write_task(aut, 909, last_run=None, next_run=(PIN - 3 * day).isoformat())
+    write_task(aut, 910, frequency="weekly", last_run=None,
+               next_run=(PIN + 5 * day).isoformat())
+    h = autonomy.compute_health([], list(aut.dependency_resolution_set()), 1, now=PIN)
+
+    rows = {t["task_id"]: t for t in h["idle_tasks"]}
+    assert rows["909"]["never_run"] is True and rows["910"]["never_run"] is True
+    assert rows["909"]["gap_ratio"] == pytest.approx(3.0, abs=0.01)
+    assert rows["910"]["gap_ratio"] == 0.0, (
+        "a weekly task whose next_run is still ahead read as late")
+    assert rows["909"]["hours_since_last_run"] is None, (
+        "never-ran reported an elapsed time it cannot know")
+    stalled = {s["task_id"] for s in h["stalled"]}
+    assert stalled == {"909"}, (
+        f"stalled set {sorted(stalled)} does not separate an overdue never-run "
+        "daily task from a weekly task that was never due")

@@ -147,21 +147,36 @@ def _grossly_overdue(queue: WorkQueue) -> list:
 
 
 def _next_run_stalled(queue: WorkQueue) -> list[dict]:
-    """up_next tasks sitting more than one period past their OWN `next_run`.
+    """Tasks of ANY status sitting more than one period past their OWN `next_run`.
 
     The companion to `_grossly_overdue`, and deliberately not a variant of it:
-    the only task state it reads is `next_run` (plus `status` and `frequency` to
-    know what a period is), so the three filters that make the noisy alarm
-    survivable — skip not-due, skip queue-waiting, skip never-run — cannot hide
-    a stall here. Those three are the shapes #421 was filed for: #51 41 h and
-    #40 60 h overdue, `failure_count: 0`, no run record, because an upstream's
-    run was never recorded and that makes the dependent not-due forever.
+    the only task state it reads is `next_run` (plus `frequency` to know what a
+    period is), so the three filters that make the noisy alarm survivable — skip
+    not-due, skip queue-waiting, skip never-run — cannot hide a stall here. Those
+    three are the shapes #421 was filed for: #51 41 h and #40 60 h overdue,
+    `failure_count: 0`, no run record, because an upstream's run was never
+    recorded and that makes the dependent not-due forever.
 
-    Each entry carries the reason dispatch itself would give — `hold_reason`,
-    the same function the dispatch loop's "Holding #" line uses — so the alert
-    says WHY it has not run rather than only THAT it has not. A task with no
-    hold reason was skipped below this loop: a per-task model-server health
-    check, or the vLLM gate that #938 tracks separately.
+    It used to read `status` as well, and that is the one thing #1121 had to
+    change: line 174 of this file was `if status != "up_next": continue`, which
+    dropped `draft`, `paused` and `failed` out of the only mechanism built to
+    catch a stall. An unattributed `up_next -> draft` flip is exactly how #68
+    (frequency `every-15min`, the fleet's highest-volume task) stopped, and the
+    alarm shipped for that purpose reported zero stalls while #68 sat ~50 cycles
+    past its own `next_run`. The status is not a reason to skip the scan any
+    more; it is the REASON, carried in `status` and in `hold` — `hold_reason`
+    returns the status string itself for any non-`up_next` task, so widening the
+    scan needed no new reason code.
+
+    Each entry therefore carries the reason dispatch itself would give —
+    `hold_reason`, the same function the dispatch loop's "Holding #" line uses —
+    so the alert says WHY it has not run rather than only THAT it has not. A task
+    with no hold reason was skipped below this loop: a per-task model-server
+    health check, or the vLLM gate that #938 tracks separately.
+
+    The bound is unchanged and strict (> one interval), and it comes from
+    `autonomy.next_run_gap`, the same predicate `compute_health` reads, so the
+    alert and the fleet report cannot call the same board two different things.
 
     The instant is `autonomy._utcnow()`, like the alarm beside it, so one clock
     pin moves both."""
@@ -171,23 +186,43 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
     active = _active_task_ids(queue)
     stalled = []
     for t in resolution:
-        if str(t.get("status", "")).strip() != "up_next":
-            continue
-        interval = autonomy._frequency_interval_seconds(t)
-        nxt = autonomy._parse_iso(t.get("next_run"))
-        if not interval or not nxt:
-            continue
-        overdue = (now - nxt).total_seconds()
-        if overdue <= interval:
+        gap = autonomy.next_run_gap(t, now=now)
+        if not gap["past_next_run"]:
             continue
         stalled.append({
             "id": t.get("id"),
             "name": t.get("name"),
-            "hours": overdue / 3600.0,
+            "status": str(t.get("status", "")).strip(),
+            "hours": gap["hours_past_next_run"],
+            "gap_ratio": gap["gap_ratio"],
             "hold": autonomy.hold_reason(t, resolution, now=now),
             "queued": str(t.get("id")) in active,
         })
     return stalled
+
+
+def _nextrun_alert_message(stalled: list[dict]) -> str:
+    """Alert text for the scan above, describing the statuses it actually found.
+
+    The count line used to read `N up_next task(s)` unconditionally, which was
+    only true while the scan filtered on that status. Now it names the statuses
+    in the flagged set: an alert that misdescribes its own contents is the
+    failure this item is about, because a reader who knows #68 is `draft` and
+    reads "up_next task(s)" concludes the message is about some other task and
+    drops it. When every flagged task is `up_next` — late against its own
+    `next_run` and held by nothing — the wording is exactly what it was before
+    the widening, so a reader of the old alert reads the same sentence."""
+    statuses = sorted({str(e.get("status") or "unknown") for e in stalled})
+    # `up_next task(s)` alone reproduces the pre-widening string byte for byte,
+    # so anything that matches on the old alert text keeps matching.
+    scope = f"{'/'.join(statuses)} task(s)"
+    lines = "; ".join(
+        f"#{e['id']} ({e['name']}) is {e['hours']:.1f}h past its next_run"
+        f" — {_hold_note(e)}"
+        for e in stalled[:15])
+    return (f"{len(stalled)} {scope} more than one period past "
+            f"their own next_run, which the due-ness stall alarm cannot "
+            f"see: {lines}")
 
 
 def _hold_note(entry: dict) -> str:
@@ -309,13 +344,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
                 or (nr_now - last_nextrun).total_seconds()
                 >= _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS):
             _state["nextrun_alerted_at"] = nr_now
-            lines = "; ".join(
-                f"#{e['id']} ({e['name']}) is {e['hours']:.1f}h past its next_run"
-                f" — {_hold_note(e)}"
-                for e in stalled[:15])
-            msg = (f"{len(stalled)} up_next task(s) more than one period past "
-                   f"their own next_run, which the due-ness stall alarm cannot "
-                   f"see: {lines}")
+            msg = _nextrun_alert_message(stalled)
             logger.error("%s", msg)
             await _alert(msg)
 
