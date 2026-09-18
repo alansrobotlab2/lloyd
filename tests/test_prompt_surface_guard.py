@@ -121,6 +121,153 @@ def test_memory_that_merely_quotes_the_contract_is_fine():
     assert ps.check_contract(GOOD_CONTRACT, memory) == []
 
 
+# ── front matter: the shape every real file is in ────────────────────────────
+# The three loaded prompt files are Obsidian notes, so each one opens with a
+# YAML `---` fence — and `scripts/automod/vault_round.py::frontmatter_error`
+# *requires* that fence on every touched `.md`. Comparing raw line 1 therefore
+# compared `---` to `---`, and the #464 guard fired on every real file pair from
+# 2026-09-11 on while every fixture here, being front-matter-free, stayed green
+# (#1069). A guard test without a fenced fixture is what let that happen.
+FRONT_MATTER = (
+    "---\n"
+    "type: note\n"
+    "segment: lloyd\n"
+    "timestamp: '2026-09-11T12:27:57'\n"
+    "---\n"
+)
+
+MEMORY_BODY = (
+    "# Lloyd Long-Term Memory\n"
+    "\n"
+    "## Key Knowledge\n"
+    "- The block signal is raw text, not a fenced JSON block.\n"
+    "- A guard that always fires guards nothing.\n"
+)
+
+SOUL_FM = FRONT_MATTER + GOOD_CONTRACT
+
+
+def test_a_fenced_pair_with_different_h1s_is_not_a_duplicate_contract():
+    """The healthy live pair: both files fenced, bodies titled differently."""
+    assert ps.check_contract(SOUL_FM, FRONT_MATTER + MEMORY_BODY) == []
+
+
+def test_a_pasted_h1_under_front_matter_is_still_refused():
+    """The paste the guard exists to catch stays caught behind a fence (#464)."""
+    errs = ps.check_contract(SOUL_FM, FRONT_MATTER + GOOD_CONTRACT)
+    assert any("H1" in e for e in errs), errs
+
+
+def test_a_fenced_memory_file_that_merely_quotes_the_contract_is_fine():
+    """The corrected read must not become a blanket refusal."""
+    memory = FRONT_MATTER + (
+        "# Lloyd Long-Term Memory\n\n## Key Knowledge\n"
+        "- The contract says to emit the block signal at byte 0.\n"
+        "## Core Identity\n"          # one verbatim line, deliberately
+        + "\n".join(f"- Real memory entry number {i}." for i in range(40))
+    )
+    assert ps.check_contract(SOUL_FM, memory) == []
+
+
+def test_shared_front_matter_is_not_counted_as_a_pasted_line():
+    """Five of this fixture's nine nonblank lines are the fence and its keys.
+
+    Read raw that is 5/9 = 55% of MEMORY.md's lines shared verbatim with SOUL.md,
+    far over the 10% ceiling; read as a body it is 0.0. On the live pair front
+    matter *was* the entire non-zero share — 0.0482 raw (2026-09-18; 0.0606 at
+    triage) against a 0.10 ceiling, 0.0 body-only both times — so every point of
+    the duplicate guard's real headroom was four to six, all of it metadata.
+
+    The two raw computations below are the superseded read, in this file and
+    nowhere else, as the negative control that proves the fixture is actually
+    front-matter-delimited: the old line-share and the old line-1 comparison both
+    refuse this healthy pair. Without that the fixture could silently drift back
+    to being front-matter-free, which is the blind spot that hid #1069 — every
+    fixture in this file opened with an H1, so raw line 1 differed and the guard
+    looked healthy.
+    """
+    memory = (FRONT_MATTER
+              + "# Lloyd Long-Term Memory\n\n## Key Knowledge\n"
+                "- One real entry.\n- Another real entry.\n")
+    assert ps.shared_line_share(memory, SOUL_FM) == 0.0
+    assert ps.check_contract(SOUL_FM, memory) == []
+
+    mem_nonblank = [ln for ln in memory.split("\n") if ln.strip()]
+    soul_nonblank = {ln for ln in SOUL_FM.split("\n") if ln.strip()}
+    raw_share = sum(1 for ln in mem_nonblank if ln in soul_nonblank) / len(mem_nonblank)
+    assert raw_share > ps.DUPLICATE_CONTRACT_CEILING, raw_share
+    assert (memory.split("\n", 1)[0].strip()
+            == SOUL_FM.split("\n", 1)[0].strip() == "---")
+
+
+def test_front_matter_is_outside_every_metric_check_contract_reads():
+    """A fence in the denominator is not contract content, and it dilutes.
+
+    On live SOUL.md the raw readings were gate share 45.27% and prohibition
+    ratio 19.30% against ceilings of 50% and 25%; body-only they are 45.63% and
+    20.75%. Both ceilings sit ~4 points from the *body* number, so until now the
+    fences were part of the reason the guards read under their limits.
+    """
+    assert ps.gate_share(SOUL_FM) == ps.gate_share(GOOD_CONTRACT)
+    assert ps.prohibition_ratio(SOUL_FM) == ps.prohibition_ratio(GOOD_CONTRACT)
+
+
+def test_a_heading_shaped_yaml_comment_is_not_a_gate_section():
+    """`##` starts a YAML comment, so the fence can hold a heading look-alike.
+
+    The negative control for the test above, which on its own is satisfied by a
+    `gate_share` that body-scoped only its denominator: `## L0 PRE-COMMIT SAFETY
+    CHECKLIST` is a name in `GATE_HEADS`, so a raw scan counts its bytes into the
+    gate stack from a file that only has it as a YAML comment. `sections()` reads
+    `body()`, so numerator and denominator are the same document.
+    """
+    fenced = "---\ntype: note\n## L0 PRE-COMMIT SAFETY CHECKLIST\n---\n" + GOOD_CONTRACT
+    assert ps.gate_share(fenced) == ps.gate_share(GOOD_CONTRACT)
+    assert ps.prohibition_ratio(fenced) == ps.prohibition_ratio(GOOD_CONTRACT)
+
+    raw_heads = [ln[3:] for ln in fenced.split("\n") if ln.startswith("## ")]
+    assert "L0 PRE-COMMIT SAFETY CHECKLIST" in raw_heads      # what a raw scan sees
+    assert "L0 PRE-COMMIT SAFETY CHECKLIST" not in [h for h, _ in ps.sections(fenced)]
+
+
+def test_body_and_h1_are_the_two_readers_the_contract_checks_use():
+    """`body()` strips the fence; `h1()` reads the title from the stripped text.
+
+    `h1` deliberately skips a fence whose opener never closes rather than
+    reporting "no title": an unclosed fence is `frontmatter_error`'s to refuse,
+    and a guard that answered "there is no H1" here would be a second always-
+    wrong read, the mistake #1069 is about.
+    """
+    assert ps.body(SOUL_FM).startswith("# Lloyd Operating Contract")
+    assert ps.h1(SOUL_FM) == "# Lloyd Operating Contract"
+    assert ps.h1("---\ntype: note\n") == ""              # never closes: no body, no title
+    assert ps.h1("---\ntype: note\n---\nno heading\n") == ""
+    # The opener must be at byte 0: a fence mid-file is prose, not front matter.
+    assert ps.h1("# Title\n---\ntype: note\n---\n") == "# Title"
+    # A `---` rule further down is content, and body() stops at the first closer.
+    assert ps.body("---\ntype: note\n---\nbody text\n---\nmore\n") == "body text\n---\nmore\n"
+
+
+def test_body_strips_only_a_leading_front_matter_block():
+    assert ps.body(FRONT_MATTER + "x") == "x"
+    assert ps.body("no fence here") == "no fence here"
+    assert ps.body("") == ""
+    # An unclosed fence is prose here; `frontmatter_error` is what refuses it.
+    assert ps.body("---\ntype: note\n") == "---\ntype: note\n"
+    # Only the LEADING block: a rule further down is content, not a second fence.
+    assert ps.body("---\ntype: note\n---\nbody\n---\nmore\n") == "body\n---\nmore\n"
+
+
+def test_h1_reads_the_body_and_not_the_fence():
+    assert ps.h1(SOUL_FM) == "# Lloyd Operating Contract"
+    assert ps.h1(GOOD_CONTRACT) == "# Lloyd Operating Contract"
+    assert ps.h1(FRONT_MATTER) == ""
+    assert ps.h1("## no h1 in this one\n") == ""
+    # A YAML comment is legal front matter, so a scan that did not stop at the
+    # fence would report it as the file's title — a name no reader ever sees.
+    assert ps.h1("---\n# generated by the nightly\n---\n# Real Title\n") == "# Real Title"
+
+
 # ── empty headings ───────────────────────────────────────────────────────────
 
 def test_a_title_followed_by_its_first_section_is_not_empty():
@@ -139,6 +286,25 @@ def test_a_heading_that_ends_the_file_is_empty():
 
 def test_a_section_with_a_deeper_subheading_is_not_empty():
     assert ps.empty_sections("## Parent\n### Child\nBody.\n") == []
+
+
+def test_promote_does_not_refuse_an_overlay_that_changes_nothing(tmp_path, monkeypatch):
+    """A NO-OP promotion was refused outright, so the search could not promote anything.
+
+    `CANONICAL_PROMPTS` points at the vault files themselves, so `_prospective()`
+    falls back to the live, front-mattered `SOUL.md`/`MEMORY.md` whenever the
+    overlay omits them — and `check_contract` compared their raw line 1. Triage
+    reproduced that against an empty temp directory; this is the same call with
+    both canonical files fenced on disk, which is the shape the live vault is in.
+    """
+    from scripts.autoresearch import promote as P
+
+    overlay = tmp_path / "variant"
+    overlay.mkdir()
+    vault = _fake_vault(tmp_path, SOUL_FM, FRONT_MATTER + MEMORY_BODY)
+    for name in ("SOUL.md", "MEMORY.md"):
+        monkeypatch.setitem(P.CANONICAL_PROMPTS, name, vault / "lloyd" / name)
+    assert P.contract_refusals(overlay) == []
 
 
 # ── writer 1: the loop's vault route ─────────────────────────────────────────
@@ -169,6 +335,20 @@ def test_vault_route_passes_a_healthy_contract(tmp_path, monkeypatch):
     from scripts.automod import vault_round as VR
 
     monkeypatch.setattr(VR, "VAULT", _fake_vault(tmp_path, GOOD_CONTRACT))
+    assert VR.contract_errors(["lloyd/SOUL.md", "lloyd/MEMORY.md"]) == []
+
+
+def test_vault_route_passes_a_healthy_fenced_pair(tmp_path, monkeypatch):
+    """The live route end to end: files on disk, both carrying the fence.
+
+    This is the pair `automod_vault_land` actually reads — the same bytes the
+    vault's own `frontmatter_error` demands — and since 2026-09-11 every diff
+    naming either file came back refused by `check_paths` on it (#1069).
+    """
+    from scripts.automod import vault_round as VR
+
+    monkeypatch.setattr(VR, "VAULT",
+                        _fake_vault(tmp_path, SOUL_FM, FRONT_MATTER + MEMORY_BODY))
     assert VR.contract_errors(["lloyd/SOUL.md", "lloyd/MEMORY.md"]) == []
 
 
@@ -260,6 +440,23 @@ def test_gate_tests_rung_excludes_live_vault_assertions():
     src = (Path(__file__).resolve().parent.parent
            / "scripts" / "automod" / "gate.py").read_text(encoding="utf-8")
     assert '"-m", "not live_vault"' in src
+
+
+def test_the_reporting_copy_asserts_the_paste_through_the_module():
+    """No private copy of the #464 invariant may live in the reporting file.
+
+    `9ca4fc6` rewrote the local `_h1()` inside `test_prompt_surface_budget.py` and
+    never touched `prompt_surface.py`, which is how the reporting group passed 7/7
+    over two writers that refused every real file pair for two days (#1069). A
+    reimplementation in the report cannot fail when the module breaks.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "tests" / "test_prompt_surface_budget.py").read_text(encoding="utf-8")
+    assert "def _h1" not in src, "the private H1 read is back"
+    assert "def _shared_line_share" not in src, "the private line-share is back"
+    assert "ps.duplicate_contract_errors" in src, (
+        "the reporting copy no longer asserts through the function the writers run"
+    )
 
 
 def test_live_vault_marker_is_registered():

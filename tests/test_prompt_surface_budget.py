@@ -65,14 +65,15 @@ vault_only = pytest.mark.skipif(
 )
 live_vault = pytest.mark.live_vault
 
-# `_sections`, `_gate_share`, `_prohibition_ratio` and `_shared_line_share`
-# live in `prompt_surface` now, because the writers have to run the same checks
-# and a second private definition of "is the contract bloated" is how the two
-# halves drift apart. Thin aliases keep the assertions below readable.
+# `_sections`, `_gate_share` and `_prohibition_ratio` live in `prompt_surface`
+# now, because the writers have to run the same checks and a second private
+# definition of "is the contract bloated" is how the two halves drift apart.
+# Thin aliases keep the assertions below readable. There is deliberately no
+# alias or local copy for the #464 check: see
+# `test_memory_md_is_not_a_copy_of_the_contract`.
 _sections = ps.sections
 _gate_share = ps.gate_share
 _prohibition_ratio = ps.prohibition_ratio
-_shared_line_share = ps.shared_line_share
 
 
 @pytest.fixture(scope="module")
@@ -93,15 +94,6 @@ def _normalize(text: str) -> str:
     different sections, which would report a covered section as missing.
     """
     return re.sub(r"[^a-z0-9&]+", " ", text.lower()).strip()
-
-
-def _shared_line_share(memory: str, soul: str) -> float:
-    """Share of MEMORY.md's nonblank lines that are verbatim SOUL.md lines."""
-    mem_lines = [ln for ln in memory.split("\n") if ln.strip()]
-    soul_lines = {ln for ln in soul.split("\n") if ln.strip()}
-    if not mem_lines:
-        return 0.0
-    return sum(1 for ln in mem_lines if ln in soul_lines) / len(mem_lines)
 
 
 # ── live vault: the #377 acceptance check ────────────────────────────────────
@@ -148,20 +140,25 @@ def test_prohibition_line_ratio_is_under_the_ceiling(soul_text):
 def test_memory_md_is_not_a_copy_of_the_contract(memory_text, soul_text):
     """#464 — MEMORY.md was overwritten with SOUL.md; the contract arrived twice.
 
-    The H1, not the first *line*: both files gained `---` front matter, and
-    comparing line 1 compared `---` to `---`, so this half could never pass
-    again — a guard that always fires guards nothing. The property is
-    unchanged; only where it reads the title is.
+    Asserted through `prompt_surface.duplicate_contract_errors` — the exact
+    function `vault_round` and `promote` call — and not through a local `_h1()`
+    plus a local line-share loop. That private copy is the reason this file read
+    green while both writers stayed red: `9ca4fc6` corrected the read *here* only,
+    so the report said healthy and `check_contract` went on comparing raw line 1,
+    refusing every real file pair until #1069. A local reimplementation of an
+    invariant cannot fail when the module breaks, which is the only job a
+    reporting copy has.
+
+    The two halves are then named individually, through module functions, so a
+    failure says which one moved rather than only "not empty".
     """
-    def _h1(text: str) -> str:
-        for line in text.splitlines():
-            if line.startswith("# "):
-                return line.strip()
-        return ""
-    assert _h1(memory_text) and _h1(memory_text) != _h1(soul_text), (
-        "MEMORY.md opens with SOUL.md's H1 — the operating-contract paste is back"
+    assert ps.duplicate_contract_errors(soul_text, memory_text) == []
+
+    assert ps.h1(memory_text) and ps.h1(memory_text) != ps.h1(soul_text), (
+        f"MEMORY.md opens with SOUL.md's H1 {ps.h1(soul_text)!r} — the "
+        "operating-contract paste is back"
     )
-    dup = _shared_line_share(memory_text, soul_text)
+    dup = ps.shared_line_share(memory_text, soul_text)
     assert dup <= DUPLICATE_CONTRACT_CEILING, (
         f"{dup:.0%} of MEMORY.md's lines are verbatim SOUL.md lines — the "
         "operating contract is being injected twice per turn again"

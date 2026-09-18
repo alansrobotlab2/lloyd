@@ -28,6 +28,12 @@ heavy or circular import here would be paid on both paths.
 The ceilings are growth tripwires, not descriptions of today. #377 landed the
 gate stack at 48.2% and the prohibition ratio at 19%; the ceilings sit above
 both so that a *change* trips them, rather than the file as it shipped.
+
+Everything here reads `body()`, not the raw file. The three loaded prompt files
+are Obsidian notes, so they open with a YAML `---` fence that
+`vault_round.frontmatter_error` *requires* and this module used to count: line 1
+was `---` in all three, which made the #464 guard fire on every healthy pair and
+put the fence inside every ratio it reports (#1069).
 """
 
 from __future__ import annotations
@@ -75,9 +81,58 @@ _PROHIBITION = re.compile(
 )
 
 
-def sections(text: str) -> list[tuple[str, int]]:
-    """(heading, byte size) per `## ` section, through the next heading."""
+def body(text: str) -> str:
+    """The file's content with its leading YAML front-matter block removed.
+
+    Every loaded prompt file is an Obsidian note, so line 1 is `---` in all of
+    them — and `scripts/automod/vault_round.py::frontmatter_error` *requires*
+    that fence on every `.md` a vault round touches. A reader that starts at raw
+    line 1 therefore reads `---` out of every file: it can compare the fence to
+    the fence and call that a contract paste (#1069, and the #464 guard fired on
+    every healthy pair from 2026-09-11 on), and it counts the fence and
+    `type:`/`timestamp:` lines in the byte and line ratios the bloat guards
+    report on.
+
+    The closing rule is the *validator*'s, deliberately: first line starting
+    `---`, closed by the next line that strips to `---`. The check that demands
+    the fence and the check that reads the title have to agree where the body
+    starts, or a file can be simultaneously mandatory and unreadable. An
+    unclosed fence returns the text whole — `frontmatter_error` is what refuses
+    that file; a guard that reported "no body" here would be a second always-fires
+    artifact.
+    """
+    if not text.startswith("---"):
+        return text
     lines = text.split("\n")
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return "\n".join(lines[i + 1:])
+    return text
+
+
+def h1(text: str) -> str:
+    """The body's first `# ` heading, stripped; '' when the body has none.
+
+    Not "the first line": that is what made the duplicate-contract guard fire on
+    front matter (`9ca4fc6` found it in the reporting copy, #1069 in the
+    enforcement copy). Heading depth 1 only — a `## ` is a section, not a title,
+    so a memory file that opens with a section is not echoing the contract.
+    """
+    for line in body(text).split("\n"):
+        if line.startswith("# "):
+            return line.strip()
+    return ""
+
+
+def sections(text: str) -> list[tuple[str, int]]:
+    """(heading, byte size) per `## ` section of the `body()`, through the next heading.
+
+    Body-scoped here rather than at each caller so the fence cannot be content in
+    one metric and metadata in another: `##` is also YAML's comment marker, so a
+    heading-shaped line inside the front matter would otherwise be counted as a
+    gate section (#1069).
+    """
+    lines = body(text).split("\n")
     heads = [(i, ln) for i, ln in enumerate(lines, 1) if ln.startswith("## ")]
     out: list[tuple[str, int]] = []
     for idx, (ln, heading) in enumerate(heads):
@@ -87,23 +142,38 @@ def sections(text: str) -> list[tuple[str, int]]:
 
 
 def gate_share(text: str) -> tuple[float, int, int]:
-    """(ratio, gate bytes, total bytes) for the gate-stack sections."""
-    total = len(text.encode())
+    """(ratio, gate bytes, total bytes) for the gate-stack sections.
+
+    Both terms over `body()`, not just the denominator: numerator and denominator
+    have to be the same document or the ratio is a difference of two texts. The
+    fence and its keys are container metadata, and leaving them in diluted the
+    bloat guard (#1069) — live SOUL.md reads 45.27% raw against 45.63% as a body,
+    under a 50% ceiling.
+    """
+    total = len(body(text).encode())
     gate = sum(b for h, b in sections(text) if h.startswith(GATE_HEADS))
     return (gate / total if total else 1.0), gate, total
 
 
 def prohibition_ratio(text: str) -> tuple[float, int, int]:
-    """(ratio, prohibition lines, nonblank lines)."""
-    nonblank = [ln for ln in text.split("\n") if ln.strip()]
+    """(ratio, prohibition lines, nonblank lines), over `body()`."""
+    nonblank = [ln for ln in body(text).split("\n") if ln.strip()]
     hits = [ln for ln in nonblank if _PROHIBITION.search(ln)]
     return (len(hits) / len(nonblank) if nonblank else 0.0), len(hits), len(nonblank)
 
 
 def shared_line_share(memory: str, soul: str) -> float:
-    """Share of MEMORY.md's nonblank lines that are verbatim SOUL.md lines."""
-    mem_lines = [ln for ln in memory.split("\n") if ln.strip()]
-    soul_lines = {ln for ln in soul.split("\n") if ln.strip()}
+    """Share of MEMORY.md's nonblank body lines that are verbatim SOUL.md lines.
+
+    Both sides over `body()`. On the live pair the front matter — `type: note`
+    and `timestamp: …` appear in every note — was the *entire* non-zero share:
+    0.0606 raw at triage (2026-09-16) and 0.0482 on 2026-09-18, against a 0.10
+    ceiling, and 0.0 body-only both times. Counting it left the duplicate guard
+    four to six points of real headroom, and it is what made the corrected H1
+    read necessary rather than cosmetic (#1069).
+    """
+    mem_lines = [ln for ln in body(memory).split("\n") if ln.strip()]
+    soul_lines = {ln for ln in body(soul).split("\n") if ln.strip()}
     if not mem_lines:
         return 0.0
     return sum(1 for ln in mem_lines if ln in soul_lines) / len(mem_lines)
@@ -156,12 +226,46 @@ def empty_sections(text: str) -> list[str]:
     return out
 
 
+def duplicate_contract_errors(soul_text: str, memory_text: str) -> list[str]:
+    """The two #464 halves, in one place, read over `body()`.
+
+    Split out of `check_contract` because the reporting copy in
+    `tests/test_prompt_surface_budget.py` used to carry its own `_h1()` and its
+    own line-share loop. That private copy is how the two halves drifted:
+    `9ca4fc6` corrected the read *there* and left this module comparing raw line
+    1, so the reporting test passed 7/7 while every writer-side enforcement point
+    was permanently red (#1069). One definition, asserted through from both sides.
+    """
+    errors: list[str] = []
+
+    soul_h1 = h1(soul_text)
+    memory_h1 = h1(memory_text)
+    if memory_h1 and memory_h1 == soul_h1:
+        errors.append(
+            "MEMORY.md opens with SOUL.md's H1 — the #464 operating-contract "
+            "paste is back and the contract reaches the model twice per turn"
+        )
+
+    dup = shared_line_share(memory_text, soul_text)
+    if dup > DUPLICATE_CONTRACT_CEILING:
+        errors.append(
+            f"{dup:.0%} of MEMORY.md's lines are verbatim SOUL.md lines, over the "
+            f"{DUPLICATE_CONTRACT_CEILING:.0%} ceiling (#464)"
+        )
+    return errors
+
+
 def check_contract(soul_text: str, memory_text: str | None = None) -> list[str]:
     """Every invariant the identity surface has to keep. [] means it may land.
 
     Deliberately returns *all* failures rather than the first: a caller that
     is about to refuse a write should say everything that is wrong with it,
     because the next attempt is a whole regenerated file, not a patch.
+
+    Every measurement below — bytes, line counts, the H1 comparison — is over
+    `body()`, so a file's YAML fence is neither content nor a title. One body,
+    one set of ratios: a check that counted the fence in the denominator while
+    reading the title from line 1 was measuring two different documents (#1069).
     """
     errors: list[str] = []
 
@@ -196,18 +300,7 @@ def check_contract(soul_text: str, memory_text: str | None = None) -> list[str]:
         errors.append(f"headings with no content under them: {empties[:5]}")
 
     if memory_text is not None:
-        if (memory_text.split("\n", 1)[0].strip()
-                == soul_text.split("\n", 1)[0].strip()):
-            errors.append(
-                "MEMORY.md opens with SOUL.md's H1 — the #464 operating-contract "
-                "paste is back and the contract reaches the model twice per turn"
-            )
-        dup = shared_line_share(memory_text, soul_text)
-        if dup > DUPLICATE_CONTRACT_CEILING:
-            errors.append(
-                f"{dup:.0%} of MEMORY.md's lines are verbatim SOUL.md lines, over the "
-                f"{DUPLICATE_CONTRACT_CEILING:.0%} ceiling (#464)"
-            )
+        errors.extend(duplicate_contract_errors(soul_text, memory_text))
 
     return errors
 
