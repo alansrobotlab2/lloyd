@@ -22,6 +22,7 @@ so nothing here can write to `~/obsidian/lloyd/`. The two tests that need to
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -458,6 +459,289 @@ def test_promote_still_refuses_on_a_runtime_snapshot_error_and_applies_nothing(
     assert result["snapshot_dir"] is None
     # The overlay never got its turn on the contract.
     assert isolated_prompts["SOUL.md"].read_text() == "canonical SOUL.md\n"
+
+
+# ── rollback through the vault route (#1009) ─────────────────────────────────
+#
+# `rollback()` used to be three `shutil.copy2` calls with no validator, no commit
+# and no ledger line. Its targets are tracked vault files, so a restore left the
+# contract dirty in the working tree while HEAD still pointed at the promotion —
+# and `scripts/util/vault-commit.sh` runs `git add -A` over the vault from seven
+# nightly skills, which lands that restore under an unrelated job's message. The
+# tests below therefore run against a real git-backed vault: "the restore was
+# committed, validated and recorded" is not observable in a plain tmp dir.
+
+GOOD_MEMORY = "# Lloyd Long-Term Memory\n\n## Meta-Instructions\n- Measure before reporting.\n"
+GOOD_USER = "# Alan\n\n- Prefers a scoped change over a rewrite.\n"
+
+# Stripped of every gate-role heading and of the load-bearing markers: what a
+# snapshot looks like once the contract has moved on underneath it.
+GUTTED_SOUL = "# Lloyd Operating Contract\n\n## Core Identity\nBe helpful.\n"
+
+
+def git(repo, *args):
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+
+
+def git_ok(repo, *args):
+    """A git command that BUILDS the scenario. Its failure would otherwise show up
+    only as a confusing assertion about a commit that was never made, so fail here
+    with git's own message — a silently failing `add` is how a dirty-tree test
+    starts passing for the wrong reason."""
+    r = git(repo, *args)
+    assert r.returncode == 0, f"git {' '.join(args)} failed: {r.stdout}{r.stderr}"
+    return r
+
+
+def vault_land_rows(tmp_path):
+    """The `vault_land` rows the rollback under test appended, read off disk."""
+    from scripts.automod import state as S
+    return [e for e in S.read_events(path=tmp_path / "ledger.jsonl")
+            if e.get("event") == "vault_land"]
+
+
+@pytest.fixture
+def vault_prompts(isolated_prompts, tmp_path, monkeypatch):
+    """The canonical prompts as tracked files in a scratch vault repo.
+
+    `isolated_prompts` is autouse and runs first; re-patching
+    `CANONICAL_PROMPTS` here moves the targets *inside* a git tree, which is the
+    only state in which the commit half of `rollback()` is reachable.
+
+    The validators are NOT stubbed: the front-matter, prompt-surface and
+    fresh-interpreter loader checks all run over the restored paths, which is the
+    only way "the restore was validated" is a fact rather than an intention. The
+    loader subprocess is cheap here because `LLOYD_HOME` still points at this
+    checkout, so `build_system_prompt()` reads this repo's fallback prompt — one
+    build, ~0.8 s — and a healthy tree returns no verdicts.
+    `test_the_fresh_interpreter_loader_check_runs_inside_a_rollback` points
+    `LLOYD_HOME` at a prompt builder that fails, to prove that check can refuse.
+    """
+    from scripts.automod import state as S, vault_round as V
+    from tests.test_prompt_surface_guard import GOOD_CONTRACT
+
+    root = tmp_path / "obsidian"
+    (root / "lloyd").mkdir(parents=True)
+    git_ok(tmp_path, "init", "-q", "-b", "main", str(root))
+    git_ok(root, "config", "user.email", "t@e.com")
+    git_ok(root, "config", "user.name", "t")
+    for name, text in (("SOUL.md", GOOD_CONTRACT), ("MEMORY.md", GOOD_MEMORY),
+                       ("USER.md", GOOD_USER)):
+        (root / "lloyd" / name).write_text(text, encoding="utf-8")
+    git_ok(root, "add", "-A")
+    git_ok(root, "commit", "-q", "-m", "base contract")
+    monkeypatch.setattr(V, "VAULT", root)
+    monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(promote, "CANONICAL_PROMPTS",
+                        {name: root / "lloyd" / name for name in PROMPT_NAMES})
+    return root
+
+
+def promote_into_vault(vault: Path, text: str = "variant") -> None:
+    """Simulate a promotion that already landed: the files move and HEAD moves."""
+    for name in PROMPT_NAMES:
+        (vault / "lloyd" / name).write_text(f"{text} {name}\n", encoding="utf-8")
+    git_ok(vault, "add", "-A")
+    git_ok(vault, "commit", "-q", "-m", "autoresearch: promote V_x")
+
+
+def dirty_paths(vault: Path) -> str:
+    return git(vault, "status", "--porcelain", "--", *[f"lloyd/{n}" for n in PROMPT_NAMES]).stdout
+
+
+# clause 1
+def test_rollback_of_a_vault_backed_contract_leaves_no_uncommitted_change(vault_prompts, tmp_path):
+    """The restored bytes equal the snapshot AND sit in a commit: nothing for a
+    later `git add -A` to absorb under someone else's message."""
+    cfg = make_cfg(tmp_path)
+    snap = promote.snapshot_current_prompts(cfg)
+    promote_into_vault(vault_prompts)
+    assert dirty_paths(vault_prompts) == "", "the fixture starts clean"
+
+    result = promote.rollback(cfg, snap.name)
+
+    assert result.get("refused") is None, result
+    for name in PROMPT_NAMES:
+        live = vault_prompts / "lloyd" / name
+        assert live.read_text(encoding="utf-8") == (snap / name).read_text(encoding="utf-8")
+    assert dirty_paths(vault_prompts) == "", f"restore left the tree dirty: {dirty_paths(vault_prompts)}"
+
+
+# clause 2
+def test_a_committed_rollback_appends_one_vault_land_row_with_the_sha_and_ts(vault_prompts, tmp_path):
+    """One row, `ok: true`, carrying the sha it created and the snapshot it came
+    from — the audit line the raw copy never wrote."""
+    cfg = make_cfg(tmp_path)
+    snap = promote.snapshot_current_prompts(cfg)
+    promote_into_vault(vault_prompts)
+
+    result = promote.rollback(cfg, snap.name)
+    sha = result["vault_commit"]
+
+    rows = vault_land_rows(tmp_path)
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["ok"] is True and row["commit"] == sha, row
+    assert snap.name in row["message"], row["message"]
+    # The same ts is in the commit itself, so blame names the restore.
+    subject = git(vault_prompts, "log", "-1", "--format=%s").stdout
+    assert snap.name in subject, subject
+
+
+# clause 3
+def test_rollback_returns_the_vault_sha_and_keeps_the_other_two_keys(vault_prompts, tmp_path):
+    """`snapshot` and `restored_files` mean what they meant before; `vault_commit`
+    is new and resolves to a commit that changed exactly the prompt files."""
+    cfg = make_cfg(tmp_path)
+    snap = promote.snapshot_current_prompts(cfg)
+    promote_into_vault(vault_prompts)
+
+    result = promote.rollback(cfg, snap.name)
+    sha = result["vault_commit"]
+
+    assert result["snapshot"] == str(snap)
+    assert sorted(result["restored_files"]) == sorted(PROMPT_NAMES)
+    assert sha and git(vault_prompts, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
+    shown = git(vault_prompts, "show", "--name-only", "--format=", sha).stdout.splitlines()
+    assert sorted(line.strip() for line in shown if line.strip()) == sorted(
+        f"lloyd/{name}" for name in PROMPT_NAMES)
+
+
+# clause 3, across the process boundary the agent actually calls
+def test_the_rollback_tool_result_carries_the_vault_sha(vault_prompts, tmp_path, monkeypatch):
+    """`autoresearch_rollback` returns `promote.rollback()` verbatim, so the sha
+    only reaches the caller if the handler's JSON does too."""
+    import agent_mcp.autoresearch as AR
+
+    cfg = make_cfg(tmp_path)
+    snap = promote.snapshot_current_prompts(cfg)
+    promote_into_vault(vault_prompts)
+    monkeypatch.setattr(AR, "_load_cfg", lambda: cfg)
+
+    payload = json.loads(AR._handle_rollback({"snapshot_ts": snap.name}))
+
+    assert payload.get("refused") is None, payload
+    assert payload["vault_commit"] and payload["vault_commit"] == git(
+        vault_prompts, "rev-parse", "HEAD").stdout.strip()
+    assert sorted(payload["restored_files"]) == sorted(PROMPT_NAMES)
+
+
+# clause 3, across the MCP endpoint the agent actually calls
+async def test_the_mcp_endpoint_returns_the_vault_sha_and_its_own_description(vault_prompts, tmp_path, monkeypatch):
+    """Through `call_tool`, not the handler: the agent sees what `text_result` put
+    in `content[0].text`, and a refusal must not arrive as a transport error."""
+    import agent_mcp.autoresearch as AR
+
+    cfg = make_cfg(tmp_path)
+    snap = promote.snapshot_current_prompts(cfg)
+    promote_into_vault(vault_prompts)
+    monkeypatch.setattr(AR, "_load_cfg", lambda: cfg)
+
+    rollback_tool = next(t for t in await AR.list_tools() if t.name == "autoresearch_rollback")
+    assert rollback_tool.input_schema["required"] == ["snapshot_ts"]
+    for claim in ("vault", "commit", "vault_land"):
+        assert claim in rollback_tool.description, rollback_tool.description
+
+    result = await AR.call_tool("autoresearch_rollback", {"snapshot_ts": snap.name})
+    payload = json.loads(result.content[0].text)
+
+    assert result.is_error is False, payload
+    assert payload["vault_commit"] and payload["vault_commit"] == git(
+        vault_prompts, "rev-parse", "HEAD").stdout.strip()
+    assert payload["no_change"] is False
+    assert sorted(payload["restored_files"]) == sorted(PROMPT_NAMES)
+    assert git(vault_prompts, "status", "--porcelain").stdout == ""
+
+
+async def test_a_refused_restore_crosses_the_mcp_endpoint_as_a_refusal_not_a_crash(vault_prompts, tmp_path, monkeypatch):
+    """`refused` is a verdict about the content, so it must not arrive as `isError`
+    (which reads as "the tool broke") — and it must still arrive with its reason."""
+    import agent_mcp.autoresearch as AR
+
+    cfg = make_cfg(tmp_path)
+    snap = promote.snapshot_current_prompts(cfg)
+    (snap / "SOUL.md").write_text(GUTTED_SOUL, encoding="utf-8")
+    promote_into_vault(vault_prompts)
+    monkeypatch.setattr(AR, "_load_cfg", lambda: cfg)
+
+    result = await AR.call_tool("autoresearch_rollback", {"snapshot_ts": snap.name})
+    payload = json.loads(result.content[0].text)
+
+    assert result.is_error is False, payload
+    assert payload.get("refused") and "gate roles" in payload["refused"][0], payload
+    assert payload.get("vault_commit") is None
+    assert git(vault_prompts, "status", "--porcelain").stdout == ""
+
+
+# the fresh-interpreter loader rung, driven from inside a rollback
+def test_the_fresh_interpreter_loader_check_runs_inside_a_rollback(vault_prompts, tmp_path, monkeypatch):
+    """The loader check is a subprocess, so a rollback could have skipped it silently.
+
+    `vault_round` runs that subprocess with `LLOYD_HOME` as its cwd, and the loader
+    imports `prompt_builder` off `sys.path[0]` — so pointing `LLOYD_HOME` at a
+    directory holding a prompt builder that returns a stub makes the real subprocess
+    report the real verdict for a contract that no longer builds. Nothing is stubbed
+    inside `land()`: the refusal below comes out of the subprocess's own stdout.
+    """
+    from scripts.automod import vault_round as V
+
+    stub = tmp_path / "fallback-checkout"
+    stub.mkdir()
+    (stub / "prompt_builder.py").write_text(
+        "def build_system_prompt(*a, **k):\n    return 'stub'\n", encoding="utf-8")
+    monkeypatch.setattr(V, "LLOYD_HOME", stub)
+
+    cfg = make_cfg(tmp_path)
+    snap = promote.snapshot_current_prompts(cfg)
+    promote_into_vault(vault_prompts)
+
+    result = promote.rollback(cfg, snap.name)
+
+    assert result.get("refused"), result
+    assert "system prompt failed to build" in result["refused"][0], result
+    assert result["vault_commit"] is None and result["restored_files"] == []
+    assert git(vault_prompts, "status", "--porcelain").stdout == "", "a refused restore left the tree dirty"
+    assert (vault_prompts / "lloyd" / "SOUL.md").read_text(encoding="utf-8") == "variant SOUL.md\n"
+    rows = vault_land_rows(tmp_path)
+    assert len(rows) == 1 and rows[0]["ok"] is False, rows
+
+
+# clause 4
+def test_a_restore_that_breaks_the_contract_is_refused_and_not_left_applied(vault_prompts, tmp_path):
+    """An old snapshot predating a structural change must be refused, not applied:
+    the tree ends back at HEAD and the result says why."""
+    cfg = make_cfg(tmp_path)
+    snap = promote.snapshot_current_prompts(cfg)
+    (snap / "SOUL.md").write_text(GUTTED_SOUL, encoding="utf-8")
+    promote_into_vault(vault_prompts)
+
+    result = promote.rollback(cfg, snap.name)
+
+    assert result.get("refused"), result
+    assert "gate roles" in result["refused"][0], result["refused"]
+    assert result.get("vault_commit") is None
+    assert result["restored_files"] == [], "a refused restore did not happen"
+    assert (vault_prompts / "lloyd" / "SOUL.md").read_text(encoding="utf-8") == "variant SOUL.md\n"
+    assert dirty_paths(vault_prompts) == "", "a refused restore left the tree dirty"
+    rows = vault_land_rows(tmp_path)
+    assert len(rows) == 1 and rows[0]["ok"] is False, rows
+
+
+# clause 5
+def test_a_rollback_onto_content_that_already_matches_head_reports_no_commit(vault_prompts, tmp_path):
+    """A repeated rollback, or a snapshot equal to the live contract, is a no-op —
+    `VaultRoundError("nothing to commit")` must not escape the tool as an error."""
+    cfg = make_cfg(tmp_path)
+    snap = promote.snapshot_current_prompts(cfg)
+
+    result = promote.rollback(cfg, snap.name)
+
+    assert result.get("refused") is None, result
+    assert "error" not in result, result
+    assert result["no_change"] is True and result["vault_commit"] is None
+    assert sorted(result["restored_files"]) == sorted(PROMPT_NAMES)
+    assert dirty_paths(vault_prompts) == ""
+    assert [r["ok"] for r in vault_land_rows(tmp_path)] == [], "a no-op cannot ledger a landing"
 
 
 # ── the live default, asserted as a fact rather than assumed ─────────────────

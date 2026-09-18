@@ -9,7 +9,10 @@ currently `~/lloyd/_pipeline/vault-derived/facts/experiments/`) so it's
 queryable via the normal memory pipeline.
 
 `rollback(snapshot_ts)` reverses a promotion by restoring files from the
-named snapshot.
+named snapshot. Both directions reach the live vault through
+`scripts.automod.vault_round.land()`, so whatever the contract files say at any
+moment is validated, committed, and in the automod ledger — nothing lands by a
+bare file copy.
 """
 
 from __future__ import annotations
@@ -205,6 +208,33 @@ def write_experiment_fact(
     return fact_file
 
 
+def _vault_relative_paths(names: list[str]) -> tuple[list[str], list[str], Path]:
+    """Resolve prompt names to (the ones inside the vault, their vault-relative
+    paths, the vault root) — one derivation shared by `promote()` and `rollback()`.
+
+    Both write `CANONICAL_PROMPTS`, and both have to answer the same question
+    before they reach for a commit: *are these files actually in the vault?* If
+    any one target resolves outside it the answer is "no" for the whole set, so
+    nothing is committed rather than half a contract.
+
+    The `vault_round` import is deliberately **not** wrapped: a caller that
+    cannot reach the landing route must see that as a failure, not be handed the
+    `([], …)` answer that means "outside the vault, commit nothing".
+    """
+    from scripts.automod import vault_round as VR
+
+    vault_root = VR.VAULT.resolve()
+    kept: list[str] = []
+    rel: list[str] = []
+    for name in names:
+        try:
+            rel.append(str(CANONICAL_PROMPTS[name].resolve().relative_to(vault_root)))
+        except ValueError:
+            return [], [], vault_root
+        kept.append(name)
+    return kept, rel, vault_root
+
+
 def promote(
     cfg: AutoresearchConfig,
     variant: dict[str, Any],
@@ -262,14 +292,7 @@ def promote(
         # all. `CANONICAL_PROMPTS` is redirected by tests and by the variant
         # sandbox, and a hardcoded prefix would have made this function run
         # `git add` against the real `~/obsidian` from inside a unit test.
-        rel: list[str] = []
-        vault_root = VR.VAULT.resolve()
-        for name in applied:
-            try:
-                rel.append(str(CANONICAL_PROMPTS[name].resolve().relative_to(vault_root)))
-            except ValueError:
-                rel = []
-                break
+        _applied_in_vault, rel, vault_root = _vault_relative_paths(applied)
         if rel:
             landed = VR.land(
                 rel,
@@ -301,15 +324,92 @@ def promote(
 
 
 def rollback(cfg: AutoresearchConfig, snapshot_ts: str) -> dict[str, Any]:
-    """Restore canonical prompts from the named snapshot."""
+    """Restore canonical prompts from the named snapshot, through the vault route.
+
+    This is the one undo path for a bad prompt promotion, and it used to be three
+    `shutil.copy2` calls. Its targets are `CANONICAL_PROMPTS` — tracked files in
+    the live vault — so a raw copy left the contract modified in the working tree
+    while HEAD still pointed at the promotion commit, and nothing anywhere
+    recorded that a restore had happened. `scripts/util/vault-commit.sh:53` runs
+    `git add -A` over `~/obsidian` from ten call sites in seven nightly skills, so
+    the next job to commit a dirty vault landed the restore under *its* message:
+    the blame-masking that let the 2026-09-10 MEMORY.md truncation sit undiscovered
+    for 19 hours (see the clobber note in lloyd/MEMORY.md).
+
+    The copy stays — a validated commit is not a revert, and the bytes have to be
+    in the tree before anything can validate them — but
+    `scripts.automod.vault_round.land` finishes the job the way every other vault
+    write is finished: it runs the prompt-surface validators and the real loaders,
+    puts the paths back if any of them fails, commits exactly the restored files
+    on the vault's `main` with the snapshot ts in the message, and appends a
+    `vault_land` ledger event carrying the sha. The sha is returned.
+    """
     snap = cfg.paths.snapshots_dir / snapshot_ts
+    result: dict[str, Any] = {"snapshot": str(snap), "restored_files": [],
+                              "vault_commit": None, "no_change": False}
     if not snap.exists():
-        return {"error": f"snapshot {snapshot_ts} not found"}
-    restored: list[str] = []
-    for name, dest in CANONICAL_PROMPTS.items():
-        src = snap / name
-        if src.exists():
-            shutil.copy2(src, dest)
-            restored.append(name)
-    logger.info("rolled back %s files from %s", len(restored), snap)
-    return {"snapshot": str(snap), "restored_files": restored}
+        result["error"] = f"snapshot {snapshot_ts} not found"
+        return result
+
+    present = [name for name in CANONICAL_PROMPTS if (snap / name).exists()]
+    try:
+        _present_in_vault, rel, vault_root = _vault_relative_paths(present)
+    except Exception as exc:  # noqa: BLE001 — no landing route reachable: refuse, do not raw-copy
+        result["refused"] = [f"cannot reach the vault landing route: {exc}"]
+        logger.error("rollback to %s refused before touching anything: %s", snapshot_ts, exc)
+        return result
+
+    for name in present:
+        shutil.copy2(snap / name, CANONICAL_PROMPTS[name])
+        result["restored_files"].append(name)
+
+    if not present:
+        # A snapshot directory that holds no prompt file restores nothing and has
+        # nothing to commit. `land` would refuse an empty path list; that refusal
+        # is about a malformed call, not about this, so say the true thing here.
+        logger.warning("snapshot %s holds none of %s — nothing restored",
+                       snap, sorted(CANONICAL_PROMPTS))
+        return result
+
+    if not rel:
+        # Not an error: the variant sandbox and the unit tests point the canonical
+        # prompts at a directory that is not the vault, where a raw copy is all
+        # that can be done — and no nightly sweep commits that tree, so there is
+        # nothing to mask. `promote()` has the same branch.
+        logger.info("rolled back %s files from %s with no vault commit — those "
+                    "paths are outside %s", len(result["restored_files"]), snap, vault_root)
+        return result
+
+    try:
+        from scripts.automod import vault_round as VR
+
+        landed = VR.land(
+            rel,
+            f"autoresearch: rollback to snapshot {snapshot_ts}\n\n"
+            f"Restored {', '.join(result['restored_files']) or 'no files'} from {snap}. "
+            "The vault route validated the restored contract before committing it, so a "
+            "bad promotion is undone by one revert.",
+        )
+    except Exception as exc:  # VaultRoundError, or git refusing for any reason
+        if "nothing to commit" in str(exc):
+            # Content that already matches HEAD: a repeated rollback, or a
+            # snapshot that *is* the live contract. A no-op is not a failed undo,
+            # and letting this raise would answer the tool's caller with an error
+            # for having asked the same question twice.
+            result["no_change"] = True
+            logger.info("rollback to %s restored content that already matches "
+                        "HEAD — nothing to commit", snapshot_ts)
+            return result
+        # `land` reverted the paths it validated before raising, so the tree is
+        # back at HEAD and the live contract is the pre-rollback one. Report it as
+        # a refusal rather than a restore that did not happen: an old snapshot
+        # predating a structural change must be refused, not silently applied.
+        logger.error("rollback to %s refused; contract restored: %s", snapshot_ts, exc)
+        result["refused"] = [str(exc)]
+        result["restored_files"] = []
+        return result
+
+    result["vault_commit"] = landed.get("commit")
+    logger.info("rolled back %s files to %s: vault_commit=%s",
+                len(result["restored_files"]), snapshot_ts, result["vault_commit"])
+    return result

@@ -118,7 +118,15 @@ async def list_tools():
         ),
         Tool(
             name="autoresearch_rollback",
-            description="Restore canonical prompt files from a snapshot directory (by timestamp).",
+            description=(
+                "Restore canonical prompt files from a snapshot directory (by timestamp). "
+                "The restore goes through the vault landing route: validated against the "
+                "prompt surface and the real loaders, committed on the vault's main with the "
+                "snapshot ts in the message, and ledgered as a `vault_land` event. A restore "
+                "that fails validation is refused and the tree is left at HEAD. `vault_commit` "
+                "carries the new sha; `no_change` is true when the restored bytes already "
+                "match HEAD."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {"snapshot_ts": {"type": "string", "description": "Directory name under research/snapshots/."}},
