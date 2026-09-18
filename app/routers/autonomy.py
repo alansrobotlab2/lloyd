@@ -4,7 +4,7 @@ plus the background scheduler ticker registered at app startup.
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -276,6 +276,7 @@ async def autonomy_task_write(request: Request):
         task = _autonomy_parse(path)
         if not task:
             raise HTTPException(status_code=500, detail=f"Failed to parse task {task_id}")
+        prior_status = task.get("status")
         for key in ("name", "description", "status", "priority", "frequency", "skill_name",
                      "agent_id", "model", "scheduled_at", "pipeline", "auto_advance",
                      "preemptible", "pipeline_mode", "notify_on_complete", "timeout_seconds",
@@ -284,6 +285,22 @@ async def autonomy_task_write(request: Request):
                 task[key] = data[key]
         task["created"] = task.get("created_at") or task.get("created", "")
         task["updated"] = now
+        # A status change from outside the scheduler records itself in the task's
+        # own markdown (#1127 clause 4). `draft` and `paused` are never dispatched,
+        # so before this the endpoint could park a task with no reason anywhere —
+        # #68's disable read as unattributable for a day for exactly that reason.
+        # The write is NOT blocked: a legitimate claim (`up_next` -> `in_progress`)
+        # is an ordinary write, so the rung is a record, not a gate.
+        #
+        # The stamp here is true UTC, not the `now` above: `now` is naive local
+        # time labelled `Z` on this PDT box (its own defect, #1128), and an audit
+        # line naming a dispatch-killing change cannot carry a timestamp that is
+        # eight hours off. Fixing `updated:` is #1128's, not this round's.
+        from autonomy import append_activity_line, status_change_note
+        status_note = status_change_note(prior_status, task.get("status"))
+        if status_note:
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            task["body"] = append_activity_line(task.get("body", ""), status_note, stamp)
         _autonomy_write_file(task)
         return JSONResponse({"task": {"id": task_id}})
 

@@ -183,6 +183,54 @@ def _append_activity_log(task_id, note: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+# ── Status changes that stop a task dispatching ───────────────────────────────
+# Dispatch reads exactly two things off a task's `status`: `_all_runnable_tasks`
+# (:323) drops anything outside `("up_next", "in_progress", "failed")`, and the
+# queue's own source (`workers/sources/scheduled_task.py:174`) skips anything
+# that is not `up_next`. So every other value — `draft` and `paused` above all —
+# is a dispatch kill switch that leaves the task looking configured: live
+# `next_run`, normal-looking board row, no log line saying it was parked. #68
+# (`frequency: every-15min`, the fleet's highest-volume task) sat in `draft` for
+# ~30 h — ~120 missed cycles — after a vault pre-flight commit flipped it there,
+# and no record named the change or its author. Hence: report it before the
+# commit (`scripts/util/autonomy_status_findings.py`) and record it when written
+# (`status_change_note`, used by every writer that is not the scheduler).
+DISPATCH_STOPPING_STATUSES = ("draft", "paused")
+
+
+def status_change_note(old_status, new_status) -> Optional[str]:
+    """An activity-log note for a task status transition, or None if there is none.
+
+    Returns None when the new status is missing or equals the old, so a writer
+    that only touched other front matter adds no line. A transition into a
+    dispatch-stopping status is labelled, because that is the one a reader cannot
+    infer from the file: the task still looks scheduled.
+    """
+    old = str(old_status or "").strip()
+    new = str(new_status or "").strip()
+    if not new or old == new:
+        return None
+    note = f"status changed: {old or '(no status recorded)'} -> {new}"
+    if new in DISPATCH_STOPPING_STATUSES:
+        note += " (dispatch-stopping)"
+    return note
+
+
+def append_activity_line(body: str, note: str, now_str: str) -> str:
+    """Append one `- <ts>: <note>` line to a body's `## Activity Log` heading.
+
+    The same shape `_append_activity_log` writes for the scheduler, for callers
+    that hold the body in memory instead of the file: both non-scheduler writers
+    serialise the whole task file themselves, so they append here and still write
+    exactly once. Creates the heading when the body has none.
+    """
+    text = body or ""
+    log_line = f"\n- {now_str}: {note}\n"
+    if "## Activity Log" in text:
+        return text.rstrip() + log_line
+    return text.rstrip() + "\n\n## Activity Log\n" + log_line
+
+
 # ── Failure backoff ───────────────────────────────────────────────────────────
 # A failed run used to leave `last_run` untouched, and `_is_task_due` gates only
 # on `last_run` — so a task that timed out was due again on the very next 60s
