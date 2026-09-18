@@ -823,17 +823,20 @@ async def revert_turn(session_id: str, turn_id: str, request: Request):
     paths = [str(p) for p in paths] if isinstance(paths, list) else None
 
     import httpx
-    from app.config import service_url
 
-    base = service_url("lloyd_mcp", "http://127.0.0.1:8500/mcp").rstrip("/")
-    if base.endswith("/mcp"):
-        base = base[: -len("/mcp")]
+    from app.aggregator_config import auth_headers_for, route
+
+    revert_url = route("changes_revert")
     payload = {"session": session_id, "turn": turn_id}
     if paths:
         payload["paths"] = paths
     try:
         async with httpx.AsyncClient(timeout=10.0) as cli:
-            resp = await cli.post(f"{base}/changes/revert", json=payload)
+            # The credential matters most here: this route takes a session and a
+            # turn id from the request body and undoes that turn's writes, so
+            # before #1053 any local process could revert a turn it named.
+            resp = await cli.post(revert_url, json=payload,
+                                  headers=auth_headers_for(revert_url))
     except Exception as exc:
         raise HTTPException(status_code=503,
                             detail=f"change ledger unreachable: {exc}") from None

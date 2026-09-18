@@ -194,6 +194,20 @@ def refusal(name: str, arguments: dict | None) -> str | None:
             "eval sessions may observe this machine but never change it)")
 
 
+def state_changing_tool(name: str) -> bool:
+    """Whether a call to `name` can change state, for the no-session rule.
+
+    Everything except `READ_ONLY` qualifies, **including `Bash`** — which is
+    the one tool `refusal` above lets a sandboxed session run, because it runs
+    inside bubblewrap. That exception is exactly backwards for the caller this
+    exists for: `main.call_tool` asks here only when the request carried no
+    session id, where there is no sandbox verdict to apply and the command
+    would reach a shell with only `check_bash_command` in front of it. So a
+    sessionless `Bash` is treated as the write it is.
+    """
+    return name not in _annotations.READ_ONLY
+
+
 def status() -> dict:
     ok, err = sandbox_available()
     return {

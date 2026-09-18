@@ -261,3 +261,126 @@ async def test_dispatch_does_not_refuse_the_word_sudo_in_text(dispatch, monkeypa
     result = await M.call_tool("Bash", {"command": cmd},
                                {M.META_SESSION_ID: "20260914_123000_autonomy_ab12"})
     assert "Tool call denied" not in _text(result)
+
+
+# ── #1053: a write that names no session is refused, not waved through ──────
+#
+# `is_sandboxed_session("")` is False by construction — an empty id cannot be a
+# bench id — so before #1053 the *absence* of a session id was itself a way to
+# read as "not sandboxed". A bench trial that dropped its own id from `_meta`
+# got the whole write surface back, and the same was true of any caller that
+# omitted it. `agent_mcp.main.call_tool` now asks whether the call can change
+# state before it asks whether the session is sandboxed, so there is no third
+# answer.
+#
+# The request credential is the other half of #1053 and lives at the ASGI layer
+# (`agent_mcp.aggregator_auth`, tested in `tests/test_aggregator_auth.py`); these
+# tests sit below it, so every call here is one that a credentialed caller — the
+# harness pool — is allowed to have made. What they pin is what such a caller
+# gets back when it names no session.
+
+HARNESS_META = {"lloyd/session_id": "20260918_sandbox_test_session"}
+
+
+@pytest.fixture
+def dispatch_stub(monkeypatch):
+    """A stand-in module table, so these legs never reach a real writer."""
+    import agent_mcp.main as M
+
+    calls: list[tuple[str, dict]] = []
+
+    class Stub:
+        async def call_tool(self, name, arguments):
+            calls.append((name, dict(arguments)))
+            return M.CallToolResult(
+                content=[M.TextContent(type="text", text="MODULE HANDLER RAN")],
+                isError=False)
+
+    async def _discover():
+        return []
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(M, "_discovery_status", {"stub": {"ok": True, "tools": 1}})
+    monkeypatch.setattr(M, "list_tools", _discover)
+    # No ambient/task session capture and no effect ledger: these legs are about
+    # the session rule alone. The `_meta` they send carries no
+    # `lloyd/effect_scope`, so `_tool_effects.claim` returns `_UNLEDGERED` on its
+    # own and dispatch proceeds without the ledger's database being touched.
+    table = dict(getattr(M, "_dispatch", None) or {})
+    for name in ("vault_write", "Write", "Bash", "Read"):
+        table[name] = Stub()
+    monkeypatch.setattr(M, "_dispatch", table)
+    return M, calls
+
+
+async def test_a_write_with_no_session_id_is_refused_and_says_why(dispatch_stub):
+    M, calls = dispatch_stub
+    for name in ("vault_write", "Write"):
+        result = await M.call_tool(name, {"path": "/tmp/whatever", "content": "x"})
+        assert result.is_error is True, f"{name} with no session id dispatched"
+        text = result.content[0].text
+        assert "session" in text, f"the {name} refusal did not name the cause: {text[:200]}"
+    assert calls == [], "a sessionless write reached the module handler"
+
+
+async def test_the_same_write_carrying_its_session_id_dispatches(dispatch_stub):
+    """The positive half: the rule is about an unnamed write, not about writes."""
+    M, calls = dispatch_stub
+    result = await M.call_tool("vault_write",
+                               {"path": "/tmp/whatever", "content": "x"},
+                               HARNESS_META)
+    assert result.is_error is False, result.content[0].text[:200]
+    assert [c[0] for c in calls] == ["vault_write"]
+
+
+async def test_a_read_with_no_session_id_still_dispatches(dispatch_stub):
+    """Discovery, `tools/list` and every probe stay working with no session.
+
+    Scoping the refusal to writes is what keeps this mergeable: `app/harness/
+    mcp_pool.py` stamps a session id only when the caller has one
+    (`call_tool(..., session_id="")` is a real path), and a rule that also
+    covered `Read` would have broken the pool's sessionless legs rather than
+    closing an escape — a read that names no session cannot delete a vault.
+    """
+    M, calls = dispatch_stub
+    assert "Read" in S._annotations.READ_ONLY
+    result = await M.call_tool("Read", {"file_path": "/etc/hostname"})
+    assert result.is_error is False, result.content[0].text[:200]
+    assert [c[0] for c in calls] == ["Read"]
+
+
+async def test_bash_with_no_session_id_is_refused_as_the_write_it_is(dispatch_stub):
+    """The one exception the sandbox makes is exactly backwards here.
+
+    `refusal` lets a sandboxed session run `Bash` because it runs inside
+    bubblewrap. With no session id there is no sandbox verdict to apply, and
+    `check_bash_command` alone is not a containment boundary — it is a pattern
+    check. So a sessionless `Bash` is refused for the same reason a `vault_write`
+    with no session id is, and a bench trial that strips its own id out of
+    `_meta` gets a refusal rather than a shell.
+    """
+    M, calls = dispatch_stub
+    result = await M.call_tool("Bash", {"command": "echo hi"})
+    assert result.is_error is True
+    assert "session" in result.content[0].text
+    assert calls == [], "sessionless Bash reached builtin_bash"
+
+
+def test_the_classification_reuses_the_sandbox_vocabulary_verbatim():
+    """No second list of what counts as a write.
+
+    The escape worked because one predicate answered "is this session
+    sandboxed" and nothing answered "is this call a write". Both questions now
+    read the same `READ_ONLY` set, so a tool added to that set is a read for the
+    sandbox and for the session rule in one edit, and cannot be a read for one
+    and a write for the other.
+    """
+    for name in ("Read", "Grep", "vault_search", "Glob"):
+        assert name in S._annotations.READ_ONLY
+        assert S.state_changing_tool(name) is False, name
+    for name in ("vault_write", "Write", "Edit", "email_send", "backlog_write_task",
+                 "Bash", "grant_create", "automod_land"):
+        assert name not in S._annotations.READ_ONLY
+        assert S.state_changing_tool(name) is True, name

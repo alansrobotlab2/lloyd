@@ -37,6 +37,12 @@ except Exception:  # pragma: no cover - older SDK
 from app.config import service_url
 from app.harness.errors import ToolDiscoveryError, ToolDispatchError
 
+# The aggregator's request credential (#1053). Stdlib-only module, and the one
+# piece of `agent_mcp` a client is allowed to import: everything else in that
+# package is server-side tool code. `agent_mcp.thunderbird` imports this file,
+# so the import must stay acyclic — aggregator_auth imports nothing from `app`.
+from agent_mcp.aggregator_auth import headers_for_url as aggregator_headers
+
 logger = logging.getLogger("lloyd-harness-mcp-pool")
 
 # Default URL for the unified lloyd-mcp aggregator (agent_mcp/main.py).
@@ -334,13 +340,19 @@ class MCPPool:
         single-digit milliseconds.
         """
         url = cfg["url"]
+        # The aggregator refuses a request that carries no credential (#1053);
+        # this is the harness, so it is the caller the credential is issued to.
+        # Resolved per session, never cached at import: the aggregator mints the
+        # value on its own first boot, and a header dict built once at import
+        # would freeze "absent" across that boot for the life of the backend.
+        headers = aggregator_headers(url)
         async with AsyncExitStack() as stack:
             if cfg.get("type") == "sse":
-                ctx = sse_client(url)
+                ctx = sse_client(url, headers=headers or None)
             else:
                 # A client we hand in is a client we own: the SDK closes only
                 # the one it built itself.
-                client = _http_client()
+                client = _http_client(headers=headers)
                 if client is not None:
                     await stack.enter_async_context(client)
                 ctx = streamable_http_client(url, http_client=client)
@@ -647,13 +659,21 @@ class MCPPool:
         """
         server_type = cfg.get("type", "stdio")
         if server_type in ("http", "streamable-http", "streamable_http"):
-            ctx = streamable_http_client(cfg["url"])
+            # Same credential as the per-call path above: an un-credentialed
+            # session here would fail discovery, not just dispatch, and would
+            # read as "this server advertises nothing".
+            client = _http_client(headers=aggregator_headers(cfg["url"]))
+            if client is not None:
+                await stack.enter_async_context(client)
+                ctx = streamable_http_client(cfg["url"], http_client=client)
+            else:
+                ctx = streamable_http_client(cfg["url"])
         elif server_type == "sse":
             # Legacy HTTP+SSE transport, deprecated upstream as of
             # 2026-07-28 with a 12-month removal window. Kept for any
             # third-party server that hasn't moved; lloyd-mcp is on
             # streamable HTTP.
-            ctx = sse_client(cfg["url"])
+            ctx = sse_client(cfg["url"], headers=aggregator_headers(cfg["url"]) or None)
         elif server_type == "stdio":
             command = cfg.get("command")
             if not command:
@@ -700,16 +720,19 @@ class MCPPool:
         ]
 
 
-def _http_client():
+def _http_client(headers: dict[str, str] | None = None):
     """An httpx client whose read timeout outlives `CALL_TIMEOUT_SECONDS`.
 
     None when the SDK's factory is unavailable, which hands
     `streamable_http_client` its own default (read=300) — the pre-2026-09-11
-    behaviour, kept only as the fallback for an SDK without the helper.
+    behaviour, kept only as the fallback for an SDK without the helper. That
+    fallback sends no credential, so a server enforcing #1053 refuses the call
+    rather than accepting an unauthenticated one.
     """
     if create_mcp_http_client is None or httpx2 is None:
         return None
     return create_mcp_http_client(
+        headers=headers or None,
         timeout=httpx2.Timeout(60.0, read=HTTP_READ_TIMEOUT_SECONDS))
 
 

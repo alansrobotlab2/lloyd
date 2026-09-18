@@ -774,8 +774,16 @@ def test_aggregator_serves_the_navigate_route():
 def test_backend_proxies_the_url_bar_to_the_aggregator():
     src = (ROOT / "app" / "routers" / "browser.py").read_text(encoding="utf-8")
     assert "/api/browser/navigate" in src
-    assert "8500/browser/navigate" in src, \
-        "the proxy must target the aggregator, which is where the browser is"
+    # Resolved, not grepped for a port: since #1053 the URL comes from
+    # `app.aggregator_config.route("browser_navigate")`, which derives it from
+    # `services.lloyd_mcp` — the same module that hands the proxy the request
+    # credential, so the endpoint and the header cannot drift apart. What has to
+    # stay true is the destination: the aggregator process that owns Playwright.
+    assert "aggregator_route(" in src, "the proxy stopped deriving its target"
+    from app.aggregator_config import route
+    assert route("browser_navigate") == browser_router._MCP_NAVIGATE_URL
+    assert route("browser_navigate").startswith("http://127.0.0.1:")
+    assert route("browser_navigate").endswith("/browser/navigate")
 
 
 def test_navigate_summary_never_carries_the_screenshot():

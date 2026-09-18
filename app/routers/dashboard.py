@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse
 
 from app import host_metrics, sessions_io, vllm_metrics
 from app.sessions_io import is_background_session_name, is_user_session
+from app.aggregator_config import route as aggregator_route
 from app.backlog_status import CLOSED_STATUSES
 
 # One cold cycle parses the front matter of every file on the backlog board
@@ -49,8 +50,11 @@ router = APIRouter()
 
 # The aggregator's loopback state route. Same host, same machine — if
 # this is slow the aggregator is wedged, and a short timeout keeps that
-# from becoming the dashboard's problem too.
-_MCP_STATE_URL = "http://127.0.0.1:8500/state"
+# from becoming the dashboard's problem too. Derived from
+# `services.lloyd_mcp` through the aggregator route registry rather than
+# spelled out here, because since #1053 this read also needs the request
+# credential and the two must come from one place.
+_MCP_STATE_URL = aggregator_route("state")
 _MCP_TIMEOUT_S = 2.0
 
 
@@ -167,8 +171,11 @@ async def _agent_state() -> dict[str, Any]:
     """
     import httpx
 
+    from app.aggregator_config import auth_headers_for
+
     async with httpx.AsyncClient() as client:
-        resp = await client.get(_MCP_STATE_URL, timeout=_MCP_TIMEOUT_S)
+        resp = await client.get(_MCP_STATE_URL, timeout=_MCP_TIMEOUT_S,
+                                headers=auth_headers_for(_MCP_STATE_URL))
         resp.raise_for_status()
         return resp.json()
 

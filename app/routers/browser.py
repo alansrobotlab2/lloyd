@@ -27,6 +27,9 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.aggregator_config import auth_headers_for
+from app.aggregator_config import route as aggregator_route
+
 logger = logging.getLogger("lloyd-server")
 
 router = APIRouter()
@@ -35,10 +38,11 @@ _latest: dict | None = None
 _subscribers: set[asyncio.Queue] = set()
 
 # Playwright runs in the lloyd-mcp process, so a control action has to cross
-# that seam. Hardcoded like `dashboard._MCP_STATE_URL` and for the same
-# reason: `services.lloyd_mcp` carries the /mcp path, which is the JSON-RPC
-# endpoint rather than the origin these side routes hang off.
-_MCP_NAVIGATE_URL = "http://127.0.0.1:8500/browser/navigate"
+# that seam. Derived from `services.lloyd_mcp` through the aggregator route
+# registry (`app.aggregator_config`), which is also where the request credential
+# of #1053 comes from: the URL and the header travel together, so a proxy cannot
+# be updated to send one and forget the other.
+_MCP_NAVIGATE_URL = aggregator_route("browser_navigate")
 
 # A navigation is a page load (up to 30s in the tool) plus a screenshot and
 # an aria snapshot, and the viewer is watching a spinner for all of it.
@@ -121,7 +125,8 @@ async def post_browser_navigate(body: dict):
 
     try:
         async with httpx.AsyncClient(timeout=_NAVIGATE_TIMEOUT_S) as client:
-            r = await client.post(_MCP_NAVIGATE_URL, json={"url": url.strip()})
+            r = await client.post(_MCP_NAVIGATE_URL, json={"url": url.strip()},
+                                  headers=auth_headers_for(_MCP_NAVIGATE_URL))
     except Exception as e:
         # The aggregator being down is the single most likely failure here
         # and the viewer needs to be told which half is broken.

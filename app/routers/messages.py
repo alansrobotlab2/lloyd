@@ -448,14 +448,14 @@ async def _fetch_files_changed(session_id: str, turn_id: str) -> dict | None:
         return None
     try:
         import httpx
-        from app.config import service_url
-        base = service_url("lloyd_mcp", "http://127.0.0.1:8500/mcp")
-        base = base.rstrip("/")
-        if base.endswith("/mcp"):
-            base = base[: -len("/mcp")]
+
+        from app.aggregator_config import auth_headers_for, route
+
+        changes_url = route("changes")
         async with httpx.AsyncClient(timeout=2.0) as cli:
-            resp = await cli.get(f"{base}/changes",
-                                 params={"session": session_id, "turn": turn_id})
+            resp = await cli.get(changes_url,
+                                 params={"session": session_id, "turn": turn_id},
+                                 headers=auth_headers_for(changes_url))
         if resp.status_code != 200:
             return None
         files = resp.json().get("files") or []

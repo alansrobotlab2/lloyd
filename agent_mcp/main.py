@@ -52,6 +52,7 @@ from starlette.routing import Route
 from agent_mcp import (
     _change_ledger,
     _subagent_registry,
+    aggregator_auth,
     _task_registry,
     _tool_effects,
     _tool_sandbox,
@@ -494,6 +495,31 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
                            sid, label, (arguments.get("command") or "")[:500])
             return _refused_call(name, f"harness safety: blocked {label!r} on {excerpt!r}")
 
+    # 3. A state-changing call that arrives with no session id is refused
+    #    (#1053). `_tool_sandbox.is_sandboxed_session("")` is False by design —
+    #    an empty id cannot be a bench id — so before this line the *absence* of
+    #    a session id was itself a way to read as "not sandboxed": a bench trial
+    #    that dropped its own id from `_meta` got the whole write surface back,
+    #    and so did anything else that omitted it. Attributing a write to nothing
+    #    is also what blinds the change ledger and the effect ledger, which both
+    #    key on the session.
+    #
+    #    Every caller this can plausibly break names a session: `loop.py` mints
+    #    one before its first dispatch (`run_query` falls back to a uuid when
+    #    `options.session_id` is empty) and passes it as `session_id` in
+    #    `call_kw`; the background-task drain at `app/routers/messages.py` passes
+    #    one too. A caller that genuinely has no session and needs to write is
+    #    rare enough that the honest answer is to give it one, not to reopen the
+    #    hole. Read-only tools keep dispatching with no session id, so
+    #    discovery, `tools/list` and every probe are untouched.
+    if not sid and _tool_sandbox.state_changing_tool(name):
+        logger.warning("sessionless write: refused %s with no session id", name)
+        return _refused_call(
+            name,
+            "a call that can change state arrived with no session id — refusing "
+            "rather than treating a missing session id as 'not sandboxed' "
+            "(#1053); pass the session id in `lloyd/session_id` `_meta`")
+
     parent_model = meta.get(META_MODEL, "") if isinstance(meta, dict) else ""
     parent_base_url = meta.get(META_BASE_URL, "") if isinstance(meta, dict) else ""
     call_summary = meta.get(META_SUMMARY, "") if isinstance(meta, dict) else ""
@@ -858,6 +884,22 @@ starlette_app = combined.streamable_http_app(
         Route("/changes/revert", changes_revert, methods=["POST"]),
     ],
 )
+
+# Everything above is the route table; this is the one control that applies to
+# all of it at once (#1053). Until this line existed the aggregator's only
+# request check was the SDK's Host/Origin guard, so any process on this box
+# could POST a `tools/call` straight to `/mcp` and have it dispatched with none
+# of the harness gates applied — the grant gate is a PreToolUse hook, plan mode
+# only removes tools from `tools/list`, the effect ledger is fed from harness
+# `_meta`, and the bench/eval sandbox is keyed on a session id an out-of-band
+# caller simply omits. Wrapping the ASGI app is what makes the control
+# un-forgettable: a new route is inside it on the day it is added, and the two
+# mutating custom routes (`/changes/revert`, `/browser/navigate`) are covered by
+# the same line as the MCP transport. `GET /health` is the sole open path —
+# supervisord, `app/routers/health.py`, the promotion gate and the guardian all
+# probe it with no credential, and refusing it would turn a healthy aggregator
+# into a restart storm.
+starlette_app = aggregator_auth.require_credential(starlette_app)
 
 if __name__ == "__main__":
     uvicorn.run(starlette_app, host="127.0.0.1", port=PORT)

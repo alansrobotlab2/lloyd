@@ -10,6 +10,7 @@ persisted message so a reload does not offer the button again.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -42,14 +43,14 @@ class _Client:
     async def __aexit__(self, *a):
         return False
 
-    async def get(self, url, params=None):
-        _Client.calls.append(("GET", url, params))
+    async def get(self, url, params=None, headers=None):
+        _Client.calls.append(("GET", url, params, headers or {}))
         if _Client.raises:
             raise _Client.raises
         return _Client.response
 
-    async def post(self, url, json=None):
-        _Client.calls.append(("POST", url, json))
+    async def post(self, url, json=None, headers=None):
+        _Client.calls.append(("POST", url, json, headers or {}))
         if _Client.raises:
             raise _Client.raises
         return _Client.response
@@ -81,7 +82,7 @@ async def test_files_changed_is_fetched_over_loopback(_client):
     assert out["turn_id"] == "turn-1"
     assert [f["path"] for f in out["files"]] == ["/home/x/a.py", "/home/x/b.tsx"]
     assert [f["op"] for f in out["files"]] == ["edit", "create"]
-    method, url, params = _client.calls[0]
+    method, url, params, _hdrs = _client.calls[0]
     assert method == "GET" and url.endswith("/changes")
     assert params == {"session": "sid", "turn": "turn-1"}
 
@@ -95,6 +96,53 @@ async def test_the_aggregator_url_comes_from_the_service_registry(_client, monke
     _client.response = _Resp(200, {"files": LEDGER_FILES})
     await M._fetch_files_changed("sid", "turn-1")
     assert _client.calls[0][1] == "http://127.0.0.1:9999/changes"
+
+
+async def test_both_ledger_calls_carry_the_aggregator_credential(_client, tmp_path,
+                                                                monkeypatch):
+    """#1053 turned these two loopback calls into authenticated ones.
+
+    The aggregator now refuses any request that does not carry its credential, so a
+    proxy that forgot the header does not fail loudly: `_fetch_files_changed`
+    swallows the 401 into `None` — no footer, by design — and `revert_turn` turns it
+    into a 503 that reads as "the ledger is down". Pinned against a real token file,
+    on the request each proxy actually builds, because the aggregator side of this
+    seam is pinned in tests/test_aggregator_auth.py and neither file alone proves
+    the two agree.
+    """
+    from agent_mcp import aggregator_auth as A
+    from app.routers import sessions as S
+
+    token_file = tmp_path / "aggregator-token"
+    token_file.write_text("a" * 64 + "\n")
+    os.chmod(token_file, 0o600)
+    monkeypatch.delenv(A.TOKEN_ENV, raising=False)
+    monkeypatch.setenv(A.TOKEN_FILE_ENV, str(token_file))
+    A.reset_for_tests()
+
+    class _Req:
+        async def json(self):
+            return {}
+
+    async def fake_mutate(session_id, fn):
+        fn({"messages": []})
+        return True
+    monkeypatch.setattr(S, "mutate_session", fake_mutate)
+
+    try:
+        _client.response = _Resp(200, {"files": LEDGER_FILES})
+        await M._fetch_files_changed("sid", "turn-1")
+        read_headers = _client.calls[-1][3]
+
+        _client.response = _Resp(200, {"results": []})
+        await S.revert_turn("sid", "turn-1", _Req())
+        revert_headers = _client.calls[-1][3]
+    finally:
+        A.reset_for_tests()
+
+    for label, hdrs in (("GET /changes", read_headers),
+                        ("POST /changes/revert", revert_headers)):
+        assert hdrs.get(A.AUTH_HEADER) == "a" * 64, f"{label} sends no credential"
 
 
 async def test_no_files_means_no_footer(_client):
@@ -214,7 +262,7 @@ async def test_named_paths_are_forwarded(_client, monkeypatch):
             return {"paths": ["/home/x/a.py"]}
 
     await S.revert_turn("sid", "turn-1", _Req())
-    _method, url, body = _client.calls[0]
+    _method, url, body, _hdrs = _client.calls[0]
     assert url.endswith("/changes/revert")
     assert body == {"session": "sid", "turn": "turn-1", "paths": ["/home/x/a.py"]}
 

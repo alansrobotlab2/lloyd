@@ -168,6 +168,14 @@ async def test_dispatch_never_observed_empty_during_rebuild():
 
 # ── Error signalling (P1-2) ──────────────────────────────────────────────────
 
+# A `_meta` block with a session id, which is what `app/harness/mcp_pool.py`
+# stamps on every `tools/call` the harness makes. Needed here since #1053: a
+# state-changing call that names no session is refused before the module handler
+# runs, so `Bash` with no id would return the refusal — an error result, which
+# would let the failure test below pass without ever reaching `builtin_bash`.
+HARNESS_META = {"lloyd/session_id": "20260918_layer_test_session"}
+
+
 @pytest.mark.parametrize("tool,args", [
     ("Read", {"file_path": "/definitely/not/here"}),
     ("Bash", {"command": "exit 7"}),
@@ -178,7 +186,7 @@ async def test_dispatch_never_observed_empty_during_rebuild():
     ("research_complete", {}),
 ])
 async def test_failures_set_is_error(tool, args):
-    result = await M.call_tool(tool, args)
+    result = await M.call_tool(tool, args, HARNESS_META)
     assert isinstance(result, CallToolResult)
     assert result.is_error is True, f"{tool}{args} did not report isError"
 
@@ -189,7 +197,7 @@ async def test_failures_set_is_error(tool, args):
     ("Glob", {"pattern": "*.py", "path": str(ROOT / "agent_mcp")}),
 ])
 async def test_successes_do_not_set_is_error(tool, args):
-    result = await M.call_tool(tool, args)
+    result = await M.call_tool(tool, args, HARNESS_META)
     assert isinstance(result, CallToolResult)
     assert result.is_error is False
 

@@ -225,9 +225,15 @@ async def require_tool_sandbox(state_url: str | None = None) -> None:
         server = (_get_mcp_servers() or {}).get("lloyd-mcp") or {}
         base = str(server.get("url") or "http://127.0.0.1:8500/mcp")
         state_url = base.rsplit("/mcp", 1)[0] + "/state"
+    from app.aggregator_config import auth_headers_for
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(state_url)
+            # `/state` is credential-bearing like every other aggregator route
+            # (#1053); this pre-flight is a harness caller, so it carries it.
+            # Without it the read fails and every trial is refused — fail-closed,
+            # but a bench that cannot run is not a bench.
+            resp = await client.get(state_url, headers=auth_headers_for(state_url))
             body = resp.json()
     except Exception as exc:  # noqa: BLE001
         raise ToolSandboxUnavailable(

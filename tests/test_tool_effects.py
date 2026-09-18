@@ -41,6 +41,15 @@ from workers.queue import QueueItem, WorkQueue
 SCOPE = "item:scheduled-task:7"
 ARGS = {"to": "someone@example.com", "subject": "digest", "body": "hello"}
 
+#: Every `_meta` block here carries a session id as well as a scope, and #1053 is
+#: why: a state-changing call that names no session is now refused before the
+#: ledger is consulted, so a meta carrying only the scope would make every test
+#: below pass by being refused rather than by being ledgered. The pair is what a
+#: real harness call puts on the wire — `app/harness/mcp_pool.py` stamps
+#: `lloyd/session_id` and `lloyd/effect_scope` into the same `_meta`.
+SESSION = "20260918_ledger_test_session"
+META: dict = {M.META_SESSION_ID: SESSION, M.META_EFFECT_SCOPE: SCOPE}
+
 
 class FakeWriter:
     """A side-effecting tool module: counts how many times it actually ran."""
@@ -185,7 +194,7 @@ async def test_an_edit_that_flips_a_file_back_and_forth_is_never_replayed(
     base = dict(getattr(M, "_dispatch", None) or {})
     base["Edit"] = EditLike()
     monkeypatch.setattr(M, "_dispatch", base)
-    meta = {M.META_EFFECT_SCOPE: SCOPE}
+    meta = META
     for old, new in (("A", "B"), ("B", "A"), ("A", "B")):
         await M.call_tool("Edit", {"file_path": str(target), "old_string": f"colour = {old}",
                                    "new_string": f"colour = {new}"}, meta)
@@ -206,7 +215,7 @@ async def test_the_kill_switch_turns_the_ledger_off_without_breaking_a_call(
     monkeypatch.setitem(CONFIG, "harness", harness)
     assert not TE.enabled()
     for _ in range(2):
-        await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+        await M.call_tool("fake_writer", dict(ARGS), META)
     assert len(effects) == 2
     assert not ledger.exists()
     assert TE.config()["retention_days"] == 14, "defaults survive a partial block"
@@ -240,7 +249,7 @@ async def test_a_suppression_is_logged_with_the_arguments_that_produced_it(
     effects: list = []
     _register(monkeypatch, FakeWriter(effects))
     for _ in range(2):
-        await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+        await M.call_tool("fake_writer", dict(ARGS), META)
     lines = [r.getMessage() for r in caplog.records if "suppressed duplicate" in r.getMessage()]
     assert lines and "someone@example.com" in lines[-1]
 
@@ -279,10 +288,10 @@ async def test_a_second_identical_effect_is_replayed_not_refired(monkeypatch, le
     effects: list = []
     _register(monkeypatch, FakeWriter(effects))
 
-    first = await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+    first = await M.call_tool("fake_writer", dict(ARGS), META)
     assert len(effects) == 1 and '"filed": 42' in _texts(first)
 
-    second = await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+    second = await M.call_tool("fake_writer", dict(ARGS), META)
     assert len(effects) == 1, "the effect fired twice inside one scope"
     body = _texts(second)
     assert '"filed": 42' in body, "the replay must carry the original result"
@@ -300,7 +309,7 @@ async def test_a_different_call_in_the_same_scope_still_fires(monkeypatch, ledge
     _register(monkeypatch, FakeWriter(effects))
     for body in ("first", "second", "third"):
         await M.call_tool("fake_writer", {**ARGS, "body": body},
-                          {M.META_EFFECT_SCOPE: SCOPE})
+                          META)
     assert len(effects) == 3
     assert len(_rows(ledger)) == 3
     assert TE.suppressed_total() == 0
@@ -311,9 +320,9 @@ async def test_a_failed_answer_leaves_the_effect_retriable(monkeypatch, ledger):
     and answered that it did not do the thing."""
     effects: list = []
     _register(monkeypatch, FakeWriter(effects, mode="is_error"))
-    await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+    await M.call_tool("fake_writer", dict(ARGS), META)
     assert [r["status"] for r in _rows(ledger)] == ["error"]
-    await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+    await M.call_tool("fake_writer", dict(ARGS), META)
     assert len(effects) == 2, "an answered failure must not wedge the scope"
 
 
@@ -321,7 +330,7 @@ async def test_a_handler_that_dies_leaves_the_effect_unknown(monkeypatch, ledger
     effects: list = []
     _register(monkeypatch, FakeWriter(effects, mode="raise"))
     with pytest.raises(RuntimeError):
-        await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+        await M.call_tool("fake_writer", dict(ARGS), META)
     # `error` would license a retry to fire a second effect. The true state is
     # unknown: the handler may have written before it died.
     assert [r["status"] for r in _rows(ledger)] == ["unknown"]
@@ -339,10 +348,10 @@ async def test_an_unknown_effect_refuses_and_fires_nothing(monkeypatch, ledger):
     # Establish the unknown row the only way it happens in production: a
     # handler that dies.
     with pytest.raises(RuntimeError):
-        await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+        await M.call_tool("fake_writer", dict(ARGS), META)
     assert len(effects) == 1
 
-    refused = await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+    refused = await M.call_tool("fake_writer", dict(ARGS), META)
     # Zero effects from the refused call: the count did not move past the one
     # the dying handler may or may not have landed.
     assert len(effects) == 1, "an unknown effect was re-fired"
@@ -360,7 +369,7 @@ async def test_the_ledger_fails_open_when_the_database_is_unusable(monkeypatch, 
     effects: list = []
     _register(monkeypatch, FakeWriter(effects))
     monkeypatch.setenv("LLOYD_EFFECT_LEDGER_DB", "/proc/cannot/write/this.db")
-    out = await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+    out = await M.call_tool("fake_writer", dict(ARGS), META)
     assert len(effects) == 1, "the guard blocked a call it could not record"
     assert '"filed": 42' in _texts(out)
     assert TE.suppressed_total() == 0
@@ -407,8 +416,12 @@ async def test_a_timed_out_retry_fires_the_effect_once(q, tmp_path, monkeypatch)
 
     async def execute(item):
         # Exactly what `app/harness/loop.py` does: read the scope the pool
-        # bound for this job and hand it to the aggregator in `_meta`.
-        meta = {M.META_EFFECT_SCOPE: policy.current_effect_scope.get()}
+        # bound for this job and hand it to the aggregator in `_meta`, together
+        # with the session id `pool.call_tool` stamps into the same block
+        # (#1053 refuses a write that names no session, and `fake_writer` is a
+        # write by construction).
+        meta = {M.META_SESSION_ID: SESSION,
+                M.META_EFFECT_SCOPE: policy.current_effect_scope.get()}
         await M.call_tool("fake_writer", dict(ARGS), meta)
         await asyncio.sleep(30)     # overrun the 1s cap below
 
@@ -448,6 +461,11 @@ async def test_a_caller_without_a_scope_gets_no_ledger(monkeypatch, ledger):
     empty-scope key collision. Two identical calls with **no** scope both
     fire and leave no row.
 
+    Both legs carry a session id, because #1053 refuses a state-changing call
+    that names none and this tool is state-changing by construction: the thing
+    under test here is the missing *scope*, and a missing session id would have
+    replaced the assertion with a refusal.
+
     (The first cut of this test ran the call through a real pool — which
     binds a scope, so it tested the opposite path — and then asserted
     `_rows(...) == [] or True`.)
@@ -455,8 +473,9 @@ async def test_a_caller_without_a_scope_gets_no_ledger(monkeypatch, ledger):
     effects: list = []
     _register(monkeypatch, FakeWriter(effects))
     for _ in range(2):
-        await M.call_tool("fake_writer", dict(ARGS), {})
-        await M.call_tool("fake_writer", dict(ARGS), None)
+        await M.call_tool("fake_writer", dict(ARGS), {M.META_SESSION_ID: SESSION})
+        await M.call_tool("fake_writer", dict(ARGS),
+                          {M.META_SESSION_ID: SESSION, "other_meta": True})
     assert len(effects) == 4
     assert not ledger.exists()
     assert TE.suppressed_total() == 0
@@ -473,7 +492,8 @@ async def test_a_task_subagents_writes_inherit_the_items_scope(monkeypatch, ledg
 
     class TaskLike:
         async def call_tool(self, name, arguments):
-            inner_meta = {M.META_EFFECT_SCOPE: policy.current_effect_scope.get()}
+            inner_meta = {M.META_SESSION_ID: SESSION,
+                          M.META_EFFECT_SCOPE: policy.current_effect_scope.get()}
             await M.call_tool("fake_writer", dict(ARGS), inner_meta)
             return [M.TextContent(type="text", text="subagent done")]
 
@@ -482,8 +502,8 @@ async def test_a_task_subagents_writes_inherit_the_items_scope(monkeypatch, ledg
     base["Task"] = TaskLike()
     monkeypatch.setattr(M, "_dispatch", base)
 
-    await M.call_tool("Task", {"prompt": "go"}, {M.META_EFFECT_SCOPE: SCOPE})
-    await M.call_tool("Task", {"prompt": "go"}, {M.META_EFFECT_SCOPE: SCOPE})
+    await M.call_tool("Task", {"prompt": "go"}, META)
+    await M.call_tool("Task", {"prompt": "go"}, META)
     assert len(effects) == 1, "the subagent's second identical write fired"
     rows = _rows(ledger)
     assert [(r["tool"], r["scope"]) for r in rows] == [("fake_writer", SCOPE)]
@@ -550,6 +570,6 @@ async def test_the_dashboard_reports_suppressions_next_to_the_workers(monkeypatc
     effects: list = []
     _register(monkeypatch, FakeWriter(effects))
     for _ in range(3):
-        await M.call_tool("fake_writer", dict(ARGS), {M.META_EFFECT_SCOPE: SCOPE})
+        await M.call_tool("fake_writer", dict(ARGS), META)
     assert len(effects) == 1
     assert dashboard._duplicate_effects_suppressed() == 2
