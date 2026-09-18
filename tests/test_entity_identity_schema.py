@@ -14,10 +14,15 @@ Pins, in order:
   5. an unknown name WITHOUT one goes to the candidates sidecar and mints
      nothing;
   6. nothing is ever merged by string similarity — the whole point;
-  7. the extractor's write path actually routes through the gate.
+  7. the extractor's write path actually routes through the gate;
+  8. `register_schema_keys` RECONCILES the `origin='schema'` alias population
+     (#1234) — a withdrawn declaration is retracted, a spelling variant the
+     gate itself minted is kept, every other provenance is untouched, and an
+     unbalanced-bracket surface is never written.
 """
 import importlib.util
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -267,3 +272,186 @@ def test_prompt_asks_the_model_for_a_declared_type():
     assert "is not created at all" in rendered
     # An unrendered template must not be what reaches the model.
     assert "{entity_types}" not in rendered
+
+
+# ── 8. a withdrawn declaration is retracted, not merely superseded (#1234) ────
+
+def _declared_aliases():
+    """Every declared alias surface → its canonical, straight from the schema."""
+    schema = en.load_identity_schema()
+    return {a.strip(): e["canonical"]
+            for e in schema["entities"] for a in (e.get("aliases") or [])}
+
+
+# The six rows the live store still carries: every one of them is stamped
+# `2026-09-10T04:55:14…Z`, the bulk registration under the feature's earlier
+# shape (`extraction_schema.yaml`, commit `13fcc71`, not an ancestor of HEAD),
+# and the landed JSON schema dropped all six. Reproduced verbatim, because the
+# retractor has to cover the truncated surface as well as the withdrawn ones.
+LIVE_WITHDRAWN_ROWS = (
+    ("Task", "Entity Resolution Sweep"),
+    ("Entity Resolution Sweep (Task", "Entity Resolution Sweep"),
+    ("Knowledge Graphs", "Knowledge Graph"),
+    ("Periodic Memory Capture", "Memory Capture"),
+    ("Periodic Memory Capture Skill", "Memory Capture"),
+    ("memory capture skill", "Memory Capture"),
+)
+
+
+def _seed_withdrawn_declaration(st):
+    """Put the live store's six undeclared `semantic`/`schema` rows in a test
+    store, with the canonicals they route to."""
+    for canon, kind in (("Entity Resolution Sweep", "pipeline"),
+                        ("Knowledge Graph", "system"),
+                        ("Memory Capture", "pipeline")):
+        st.entities.register(canon, kind=kind)
+    for surface, canon in LIVE_WITHDRAWN_ROWS:
+        st.aliases.set(surface, canon, kind="semantic", origin="schema")
+
+
+def test_a_withdrawn_declaration_is_retracted_by_the_next_register(store):
+    """Clause 1. `register_schema_keys` used only to INSTALL, so a declaration
+    that was withdrawn left its row behind permanently: six rows survived the
+    move from `extraction_schema.yaml` to the JSON schema, and because
+    `gate_entity_name` answers `alias` before `typed_new`, the withdrawn
+    mapping outranked every live judgement — a generic word, `Task`, filed
+    facts against the entity-resolution pipeline. Registering must reconcile
+    the population, and it must not lose a declaration while doing it."""
+    _seed_withdrawn_declaration(store)
+    assert store.aliases.resolve("Task") == "Entity Resolution Sweep"
+    en.register_schema_keys()
+    assert store.aliases.resolve("Task") is None
+    # The truncated surface is the one row the FOLD alone would keep: `_schema_key`
+    # drops the parenthesis, so `Entity Resolution Sweep (Task` folds to the
+    # declared alias `Entity Resolution Sweep Task` and reads as declared. Only
+    # the shape half of the predicate retracts it, which makes this the assertion
+    # that pins that half — and the bracketed surface the schema really declares
+    # has to survive the same call.
+    assert store.aliases.resolve("Entity Resolution Sweep (Task") is None, (
+        "the truncated surface survived: the bracket half of the predicate is not running")
+    assert store.aliases.resolve("Knowledge Graph (KG)") == "Knowledge Graph"
+    declared = _declared_aliases()
+    assert len(declared) == 41, f"schema declares {len(declared)} aliases, expected 41"
+    for surface, canon in declared.items():
+        assert store.aliases.resolve(surface) == canon, surface
+
+
+def test_retraction_folds_the_normalisation_the_gate_installs_with(store):
+    """Clause 2. The predicate cannot be a literal (surface, canonical) pair
+    test: the schema spells `KG`, `gate_entity_name` legitimately mints `kg`
+    for that same declaration, and deleting a row the next gate call re-mints
+    is the churn reconciling exists to prevent. Keeping a row here means its
+    `created_at` is untouched too — a nightly run must not re-date it."""
+    en.register_schema_keys()
+    assert en.gate_entity_name("kg", declared_type="system") == ("Knowledge Graph", "schema")
+    row = next(r for r in store.aliases.rows() if r["surface"] == "kg")
+    assert (row["canonical"], row["kind"], row["origin"]) == (
+        "Knowledge Graph", "semantic", "schema")
+    assert row["report_path"] is None
+    before_rows = store.aliases.rows()
+    assert en.register_schema_keys() == 0, "a reconcile over a settled store must write nothing"
+    assert store.aliases.rows() == before_rows, "nothing added, nothing retracted"
+    assert store.aliases.resolve("kg") == "Knowledge Graph"
+
+
+def test_retraction_leaves_every_other_provenance_alone(store, tmp_path):
+    """Clause 3. The retractor's scope is `origin='schema'` with no report, and
+    nothing wider — the table also carries migration/sweep/test/triage rows,
+    28 of the live unbalanced-bracket surfaces among them, which punct-stripping
+    produced legitimately and this change has no business deleting. Nor may it
+    take a `schema` row that names the run that authorized it: #475's
+    verification is exactly 'apply-origin rows that name their report'.
+
+    Two rows are seeded so that a wrong key shows up as a named loss rather than
+    a matching count: a case-variant of a withdrawn surface, which a
+    (canonical, surface_lc) delete would take with it, and a reported row on a
+    surface the declaration does not resolve, which only `report_path IS NULL`
+    spares."""
+    en.register_schema_keys()
+    report = tmp_path / "entity-merges-applied-2026-09-13-010000Z.json"
+    report.write_text("{}")
+    store.aliases.set("RWKV)", "RWKV", kind="punct", origin="migration")
+    store.aliases.set("TypeScript)", "TypeScript", kind="punct", origin="sweep")
+    store.aliases.set("vllm-engine", "vLLM", kind="suffix", origin="test")
+    store.aliases.set("claude-code", "Claude Code", kind="punct",
+                      origin="triage-893")   # the one live triage row, verbatim
+    # A foreign row sharing the FOLDED surface of a withdrawn one, carrying the
+    # (kind, origin) shape of 2,540 live `case`/`migration` rows. The primary key
+    # is `surface`, so `task` and `Task` are two rows standing in one store, and
+    # that is what makes this the discriminating seed: a retractor built on
+    # `remove_where`, which keys on (canonical, surface_lc), deletes both. The one
+    # this change ships keys on surface AND canonical AND origin, so this row has
+    # to be here afterwards.
+    store.aliases.set("task", "Entity Resolution Sweep", kind="case",
+                      origin="migration")
+    # A #475 apply-provenance row on a surface the declaration does NOT resolve.
+    # Seeding it on a kept surface (the `kg` row) would protect it twice over and
+    # test neither guard: this one is undeclared, so the only thing standing
+    # between it and the DELETE is `report_path IS NULL`.
+    store.aliases.set("Memory Capture Skill", "Memory Capture", kind="semantic",
+                      origin="schema", report_path=str(report))
+    store.aliases.set("kg", "Knowledge Graph", kind="semantic", origin="schema",
+                      report_path=str(report))
+    _seed_withdrawn_declaration(store)
+    before = store.aliases.rows()
+    foreign_before = [r for r in before if r["origin"] != "schema"
+                      or r["report_path"] is not None]
+    en.register_schema_keys()
+    after = store.aliases.rows()
+    foreign_after = [r for r in after if r["origin"] != "schema"
+                     or r["report_path"] is not None]
+    assert len(foreign_after) == len(foreign_before), "count of other-provenance rows moved"
+    assert foreign_after == foreign_before, "content of other-provenance rows moved"
+    # Named, not just aggregated: the two rows the guards exist for.
+    assert [(r["canonical"], r["kind"], r["origin"]) for r in after if r["surface"] == "task"] == [
+        ("Entity Resolution Sweep", "case", "migration")], "the case-variant row moved"
+    assert [(r["canonical"], r["origin"], r["report_path"]) for r in after
+            if r["surface"] == "Memory Capture Skill"] == [
+        ("Memory Capture", "schema", str(report))], "the #475 reported row was retracted"
+    # Exact surface, not `resolve`: `resolve` answers case-insensitively, so once
+    # a `task` row stands — and it must, clause 3's whole point is that it
+    # survives — `resolve("Task")` reaches that row and answers a canonical. What
+    # has to be gone is the withdrawn ROW.
+    assert "Task" not in store.aliases.all(), "the withdrawn row is still retracted"
+
+
+def test_an_unbalanced_bracket_surface_is_never_written(store, tmp_path, caplog):
+    """Clause 4. `Entity Resolution Sweep (Task` is in the live alias table and
+    is permanently canonical: a heading read too far by a parser, stored because
+    nothing checked the shape. Unbalanced brackets are evidence the string was
+    cut, so the declaration path refuses one and says so — while
+    `Knowledge Graph (KG)`, the one bracketed surface the schema declares,
+    installs as normal."""
+    schema = json.loads((ROOT / "scripts" / "memory" / "entity_identity_schema.json")
+                        .read_text(encoding="utf-8"))
+    schema["entities"].append({"canonical": "Foo Widget", "type": "system",
+                               "aliases": ["Foo (Bar"]})
+    copy = tmp_path / "entity_identity_schema.json"
+    copy.write_text(json.dumps(schema), encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="app.entity_naming"):
+        en.register_schema_keys(copy)
+    assert "Foo (Bar" not in store.aliases.all(), "unbalanced surface was stored"
+    assert "Foo (Bar" in caplog.text, "the refusal was not reported"
+    assert store.aliases.resolve("Knowledge Graph (KG)") == "Knowledge Graph"
+    # `gate_entity_name` is the OTHER producer of `origin='schema'` rows — it
+    # mints one whenever a raw name matches a declared key spelled differently
+    # from the canonical — so the guard has to hold there too. It does, because
+    # it sits on the shared write: the name still resolves to its canonical, it
+    # just acquires no alias row for the truncated spelling.
+    assert en.gate_entity_name("Foo (Bar", declared_type="system",
+                               path=copy) == ("Foo Widget", "schema")
+    assert "Foo (Bar" not in store.aliases.all()
+
+
+def test_the_extractor_no_longer_files_task_under_the_pipeline(extractor):
+    """The seam this whole item is about: the nightly extractor runs in its own
+    process against the live store, and its first gated name is what installs
+    the declarations. Seeding the withdrawn row first is that process's start
+    state. Before the fix `Task` filed under `Entity Resolution Sweep`; after
+    it, the row is retracted by the install the extractor itself triggers, so
+    the extractor's write path judges `Task` as `typed_new`."""
+    st = kg_store.store()          # the extractor fixture owns this store
+    _seed_withdrawn_declaration(st)
+    e, _ = extractor
+    assert e._sanitize_entity("Task", declared_type="system") == "Task"
+    assert e._sanitize_entity("Relationship Graph", enforce=True) == "Knowledge Graph"

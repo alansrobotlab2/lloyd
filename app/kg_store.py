@@ -753,6 +753,25 @@ class _Aliases:
                 c.execute("DELETE FROM aliases WHERE canonical=?", (canonical,))
             return [r["surface"] for r in rows]
 
+    def remove_exact(self, surface: str, *, canonical: str, origin: str,
+                     unreported: bool = True) -> bool:
+        """Delete one row, keyed on everything that identifies it.
+
+        Neither existing remover can answer "this row and only this row":
+        `remove` keys on `surface` alone, so it takes whatever the surface
+        routes to now, and `remove_where` keys on (`canonical`, `surface_lc`),
+        so it also takes every case-variant of that surface — including the
+        ones a different provenance wrote. A retraction that must leave other
+        origins standing needs surface, canonical and origin all in the WHERE
+        clause, and `unreported` keeps #475's protection in the statement
+        rather than in the caller's memory."""
+        sql = "DELETE FROM aliases WHERE surface=? AND canonical=? AND origin=?"
+        args: list = [surface, canonical, origin]
+        if unreported:
+            sql += " AND report_path IS NULL"
+        with self._s.transaction() as c:
+            return c.execute(sql, args).rowcount > 0
+
     def for_canonical(self, canonical: str) -> list[dict]:
         return [dict(r) for r in self._s._query(
             "SELECT surface, kind, origin, created_at, report_path FROM aliases WHERE canonical=? ORDER BY surface",

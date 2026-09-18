@@ -218,14 +218,34 @@ Three other writers:
   15 on 09-17, 14 on 09-18. The "2 edges" figure this section carried was true on
   2026-09-11 and is seven days stale; the 08-22 precedent says an expired edge is
   worse than none, and nothing has expired one.
-- **`entity_naming.register_schema_keys`** — writes the declared aliases, but it
+- **`entity_naming.register_schema_keys`** — writes the declared aliases, and it
   is not the only producer of `origin: schema` rows: `gate_entity_name` mints one
   whenever a raw name matches a declared key spelled differently from the
-  canonical (entity_naming.py:759-761). That is 47 rows against the 41 aliases
-  the schema file declares, and **nothing retracts one when its declaration is
-  withdrawn** — six 2026-09-10 rows are still live, including `Task` →
-  `Entity Resolution Sweep`, which the landed schema's own `why` field says was
-  deliberately not declared. Filed as #1234.
+  canonical (entity_naming.py:871). That is why the live count was 47 against the
+  41 aliases the schema file declares. It used to INSTALL only, so **a withdrawn
+  declaration was permanent policy**: six `2026-09-10` rows survived the move from
+  `extraction_schema.yaml` to JSON — including `Task` → `Entity Resolution Sweep`,
+  which the landed schema's own `why` field says was deliberately not declared —
+  and `gate_entity_name` answering `alias` before `typed_new` meant a generic word
+  routed into the entity-resolution pipeline. It now reconciles as well
+  (`_retract_undeclared_schema_rows`, entity_naming.py:686): a row goes when
+  `_schema_key` — the same fold the gate uses, not a literal pair — does not
+  resolve it to the same canonical, or when the surface is one the declaration
+  path would refuse (`_brackets_balanced`, entity_naming.py:600, which is why
+  `Entity Resolution Sweep (Task` goes while `Knowledge Graph (KG)` stays). Only
+  `origin='schema'` with a NULL `report_path` is retractable; migration/sweep/
+  test/triage rows and #475's apply-provenance rows are not its to touch, and
+  entities are never unregistered here. Pinned by
+  `tests/test_entity_identity_schema.py::test_a_withdrawn_declaration_is_retracted_by_the_next_register`
+  and its four siblings — fold-not-literal, other-provenance, bracket-shape, and
+  the extractor's own write path. So the six rows are gone the first time a
+  gated write runs against the live store — the nightly extractor does it by
+  itself. What is
+  still a person's decision, and keeps #1234 open: whether `Knowledge Graphs`
+  (22 facts) and `Periodic Memory Capture` (1 fact) merge into their old alias
+  targets now that nothing routes them there, and which side is intended for
+  `periodic memory capture`, where `aliases.resolve` answers `Memory Capture` and
+  `aliases.all_lower()` answers `Periodic Memory Capture`.
 
 Measured by origin on 2026-09-18, active edges: extractor 33,091, classifier
 16,614, migration 2,898, sweep 248, conversation 143, `fact_relate` 8. (The

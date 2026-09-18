@@ -22,6 +22,7 @@ The facts root lives at `app.paths.VAULT_FACTS_ROOT` (currently
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from pathlib import Path
@@ -29,6 +30,8 @@ from pathlib import Path
 from app.entity_kind import KINDS as _ENTITY_KINDS
 from app.kg_store import StoreUnavailable, alias_kind as _alias_kind, store as _store
 from app.paths import VAULT_DERIVED_ROOT
+
+logger = logging.getLogger("app.entity_naming")
 
 # ── Junk-entity guard ────────────────────────────────────────────────────────
 # The LLM extractor occasionally emits a *filename* or a code/description
@@ -590,6 +593,30 @@ def normalize_declared_type(raw) -> str | None:
     return None
 
 
+_BRACKET_OPENS = {"(": ")", "[": "]", "{": "}"}
+_BRACKET_CLOSES = set(_BRACKET_OPENS.values())
+
+
+def _brackets_balanced(surface: str) -> bool:
+    """True when every bracket opened in `surface` is closed again, in order.
+
+    Unbalanced brackets are not a name carrying a stray character; they are
+    evidence the string was cut. `Entity Resolution Sweep (Task` sits in the
+    live alias table — a heading read one token too far by a parser, storable
+    because nothing looked at the shape, and canonical ever since. The one
+    bracketed surface the shipped schema declares, `Knowledge Graph (KG)`,
+    balances, so refusing an unbalanced one costs no declaration.
+    """
+    stack: list[str] = []
+    for ch in surface:
+        if ch in _BRACKET_OPENS:
+            stack.append(_BRACKET_OPENS[ch])
+        elif ch in _BRACKET_CLOSES:
+            if not stack or stack.pop() != ch:
+                return False
+    return not stack
+
+
 def _ensure_alias(surface: str, canonical: str, *, kind: str, origin: str) -> bool:
     """Route `surface` to `canonical` unless it already does. True if written.
 
@@ -604,6 +631,18 @@ def _ensure_alias(surface: str, canonical: str, *, kind: str, origin: str) -> bo
     upsert; nothing is lost by leaving the applied row standing.
     """
     if not surface or not canonical or surface == canonical:
+        return False
+    if origin == "schema" and not _brackets_balanced(surface):
+        # Scoped to the declaration path on purpose. 28 of the live
+        # unbalanced-bracket surfaces are `punct` rows that migration and the
+        # sweep produced by legitimately stripping a trailing parenthesis; a
+        # blanket refusal inside `Aliases.set` would reject those too. What
+        # this guards is a declaration — the thing that is authoritative over
+        # every inference — being written from a truncated string.
+        logger.warning(
+            "declared-identity schema refused alias surface %r → %r: unbalanced "
+            "brackets, so the surface is a truncation rather than a name",
+            surface, canonical)
         return False
     try:
         st = _store()
@@ -644,16 +683,83 @@ def _ensure_entity(name: str, type_: str | None) -> None:
         st.entities.register(name)
 
 
-def register_schema_keys(path=None) -> int:
-    """Put every declared key and alias into the store; return rows written.
+def _retract_undeclared_schema_rows(st, schema: dict) -> list[str]:
+    """Delete `origin='schema'` alias rows the current declaration no longer resolves.
 
-    Idempotent — the second call writes nothing, so a nightly extractor can
-    call it every run without churning `created_at`. Declared aliases are
-    `kind='semantic'`: they are not a case or punctuation difference
-    (`Autonomy Pipeline` is not `Autonomy Data Pipeline` spelled differently),
-    they are a claim that two names are one thing, which is what the semantic
-    kind means and why the alias table carried exactly one of them before a
-    declaration existed.
+    A declaration is the only authority this layer has, so a withdrawn one has to
+    leave the store with it. `register_schema_keys` used only to install, which
+    made withdrawal impossible: the six rows the 2026-09-10 bulk registration
+    wrote under an earlier shape of the feature (`extraction_schema.yaml`,
+    commit `13fcc71`, not an ancestor of HEAD) survived the move to JSON —
+    `e96ab1b` dropped them and even wrote, in the `Memory Capture` entry's own
+    `why`, that the bare `Periodic Memory Capture` spelling was deliberately NOT
+    declared. The store declared it anyway. That is not inert bookkeeping:
+    `gate_entity_name` answers `alias` before `typed_new`, so `Task` still
+    resolved to `Entity Resolution Sweep` and every fact naming a task was
+    filed against the entity-resolution pipeline.
+
+    The predicate is the SAME normalisation the gate uses to recognise a
+    declaration — `_schema_key` folds case, punctuation and whitespace — not a
+    literal (surface, canonical) pair. A literal test would delete the
+    `kg → Knowledge Graph` row that `gate_entity_name` legitimately mints for a
+    declaration spelling `KG`, and the next gate call would write it back:
+    churn is exactly what this function exists to prevent.
+
+    A row also goes when its surface is no longer writable — the shape guard in
+    `_ensure_alias`. `Entity Resolution Sweep (Task` survives the folded test
+    (`_schema_key` drops the parenthesis, so it reads as the declared alias
+    `Entity Resolution Sweep Task`) but the declaration path refuses it, and a
+    row the declaration path would not write is not the declaration's. Only
+    `Knowledge Graph (KG)` is bracketed among declared surfaces, and it
+    balances, so this half costs no declaration either.
+
+    Scope is exact. Only `origin='schema'` with a NULL `report_path` is
+    retractable — migration/sweep/test/triage rows and #475's apply-provenance
+    rows are not this function's to touch. Entities are never unregistered
+    here either: an entity dir with facts and edges behind it is a merge-class
+    decision for a person, not a side effect of a nightly reconcile.
+    """
+    index = schema["_index"]
+    retracted: list[str] = []
+    # The snapshot is taken before the deletes and matched on surface AND
+    # canonical when deleting, so a row another writer moved in between answers
+    # to no key here and is left standing rather than deleted for a verdict
+    # that no longer describes it.
+    with st.transaction():
+        for row in st.aliases.rows():
+            if row["origin"] != "schema" or row.get("report_path"):
+                continue
+            declared = index.get(_schema_key(row["surface"])) == row["canonical"]
+            if declared and _brackets_balanced(row["surface"]):
+                continue
+            if st.aliases.remove_exact(row["surface"], canonical=row["canonical"],
+                                       origin="schema"):
+                retracted.append(row["surface"])
+    if retracted:
+        logger.warning(
+            "declared-identity schema retracted %d alias row(s) it no longer "
+            "declares: %s", len(retracted), ", ".join(sorted(retracted)))
+    return retracted
+
+
+def register_schema_keys(path=None) -> int:
+    """Install every declared key and alias, reconcile the declared population,
+    and return the number of rows WRITTEN.
+
+    Idempotent in both directions — a second call over a settled store writes
+    nothing and retracts nothing — so a nightly extractor can call it every run
+    without churning `created_at`. Declared aliases are `kind='semantic'`: they
+    are not a case or punctuation difference (`Autonomy Pipeline` is not
+    `Autonomy Data Pipeline` spelled differently), they are a claim that two
+    names are one thing, which is what the semantic kind means and why the alias
+    table carried exactly one of them before a declaration existed.
+
+    Reconciliation is part of installing: a store that only ever gains alias
+    rows is a store in which a withdrawn declaration is permanent policy. See
+    `_retract_undeclared_schema_rows`. It runs only for the shipped declaration
+    (`path is None`); an explicit `path` is a copy — a fixture or an eval
+    overlay — and retracting against it would delete rows the real schema
+    supports.
     """
     data = load_identity_schema(path)
     try:
@@ -668,6 +774,10 @@ def register_schema_keys(path=None) -> int:
             if _ensure_alias(alias.strip(), canon, kind="semantic", origin="schema"):
                 written += 1
     if path is None:
+        # Installed first, then reconciled: the declared rows must be in place
+        # before anything is judged against them, or a retraction could race the
+        # install it is supposed to be measured against.
+        _retract_undeclared_schema_rows(st, data)
         # `PRAGMA data_version` tracks other connections; this process's own
         # writes need an explicit drop or `entities.kinds()` answers stale.
         st.invalidate_caches()
