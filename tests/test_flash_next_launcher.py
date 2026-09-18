@@ -152,6 +152,35 @@ def test_an_empty_chunk_budget_means_vllms_default(tmp_path):
     assert "batched=<default>" in out
 
 
+# ── FlashInfer's JIT cache is per venv, and its compiles are capped ────
+# Two venvs on one flashinfer version shared ~/.cache/flashinfer, whose
+# build.ninja embeds the venv's include paths, so each venv switch rebuilt
+# fused_moe_120 32 wide. On 2026-09-18 that held 83 GiB in `cicc` on top of
+# the PLE table and took MemAvailable to 0.
+
+
+def _flashinfer_env(out: str) -> dict[str, str]:
+    line = next(ln for ln in out.splitlines() if ln.startswith("DRY_RUN: FLASHINFER_"))
+    return dict(kv.split("=", 1) for kv in line.removeprefix("DRY_RUN: ").split())
+
+
+def test_each_venv_gets_its_own_flashinfer_cache(tmp_path):
+    env = _flashinfer_env(_dry_run(tmp_path, FLASHINFER_WORKSPACE_BASE=""))
+    # The launcher's `:-` default treats empty as unset.
+    assert env["FLASHINFER_WORKSPACE_BASE"] == _conf_env()["VLLM_VENV"]
+
+
+def test_flashinfer_compiles_are_capped(tmp_path):
+    out = _dry_run(tmp_path, MAX_JOBS="")
+    assert _flashinfer_env(out)["MAX_JOBS"] == "8"
+
+
+def test_the_flashinfer_knobs_can_still_be_overridden(tmp_path):
+    env = _flashinfer_env(_dry_run(tmp_path, FLASHINFER_WORKSPACE_BASE=str(tmp_path),
+                                   MAX_JOBS="4"))
+    assert env == {"FLASHINFER_WORKSPACE_BASE": str(tmp_path), "MAX_JOBS": "4"}
+
+
 # ── the arm file is read before the knobs it is meant to move ─────────
 # Until 2026-09-17 `source "$ARM_ENV"` sat below VLLM_VENV, MODEL_DIR,
 # MAX_MODEL_LEN, MTP_ENABLED and MTP_TOKENS, so an arm could not move any

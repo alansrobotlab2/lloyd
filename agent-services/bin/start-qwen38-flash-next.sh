@@ -589,6 +589,19 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_MODULE_LOADING=LAZY
 export VLLM_ENABLE_CUDAGRAPH_GC=1
 
+# FlashInfer JIT: one kernel cache per venv, and a cap on parallel compiles.
+# Both venvs carry flashinfer 0.6.18.post1, so by default they shared
+# ~/.cache/flashinfer/0.6.18.post1/120f/cached_ops — but the build.ninja
+# written there embeds the venv's absolute include paths, so every switch
+# between venvs rebuilt all ~64 fused_moe_120 objects. Uncapped, ninja ran
+# them 32 wide (nproc): on 2026-09-18 09:39 thirty `cicc` processes held
+# 83 GiB on top of the 137 GiB PLE table, MemAvailable hit 0 and the boot
+# had to be stopped. The 09-17 17:09 oomd kill of the whole unit was the
+# first dff1bde boot doing the same rebuild. At 8 jobs a rebuild peaks near
+# 45 GiB, inside the ~77 GiB still free once the weights are in.
+export FLASHINFER_WORKSPACE_BASE="${FLASHINFER_WORKSPACE_BASE:-$VLLM_VENV}"
+export MAX_JOBS="${MAX_JOBS:-8}"
+
 CMD=("$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server
   --model "$MODEL_DIR"
   --served-model-name Qwen3.8-Flash-Next-nvfp4 primary
@@ -616,6 +629,7 @@ CMD=("$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server
 # the 2026-09-10 FP8 trial); production stays on 8096.
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   echo "DRY_RUN: PLE_IMPL=$PLE_IMPL VLLM_PLE_CPU_OFFLOAD=${VLLM_PLE_CPU_OFFLOAD:-<unset>} VLLM_ALLOW_LONG_MAX_MODEL_LEN=${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-<unset>}"
+  echo "DRY_RUN: FLASHINFER_WORKSPACE_BASE=$FLASHINFER_WORKSPACE_BASE MAX_JOBS=$MAX_JOBS"
   printf '%q ' "${CMD[@]}"; echo
   exit 0
 fi
