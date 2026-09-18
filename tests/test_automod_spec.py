@@ -8,9 +8,15 @@ listing a denied path in `writable_paths`.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from scripts.automod import spec
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 # ---------------------------------------------------------------------------
@@ -20,9 +26,15 @@ from scripts.automod import spec
 @pytest.mark.parametrize("path", [
     "app/harness/loop.py", "agent_mcp/facts.py", "workers/pool.py",
     "tests/test_x.py", "eval/run_eval.py", "server.py", "autonomy.py",
-    "prompt_builder.py", "scripts/memory/kg_rebuild.py",
+    "prompt_builder.py", "prompt_surface.py", "scripts/memory/kg_rebuild.py",
 ])
 def test_ordinary_code_is_allowed(path):
+    """`prompt_surface.py` joined this list on 2026-09-18 (#1242). It is the
+    same shape of file as `prompt_builder.py` — root-level, loaded-prompt
+    machinery — but was never enumerated, so item #1069, whose entire fix is
+    that module, was unimplementable by any round: three rounds wrote the fix
+    and were refused at rung 0 (SM_20260911_190850, SM_20260914_114935,
+    SM_20260918_145241)."""
     assert spec.classify(path) == "allowed"
 
 
@@ -111,6 +123,87 @@ def test_scope_accepts_protected_paths_and_flags_the_drill():
 def test_a_clean_ordinary_diff_needs_no_drill():
     ok, _, buckets = spec.check_scope(["app/harness/loop.py", "tests/test_harness.py"])
     assert ok and not buckets["protected"]
+
+
+def test_scope_accepts_a_diff_whose_fix_is_prompt_surface():
+    """The diff #1069 has to write — the module plus its test files — is now
+    in scope, which is the whole point of admitting the path. Before this entry
+    rung 0 refused exactly this list: three rounds were refused for
+    `['prompt_surface.py']` (SM_20260911_190850, SM_20260914_114935,
+    SM_20260918_145241)."""
+    ok, reason, buckets = spec.check_scope(
+        ["prompt_surface.py", "tests/test_prompt_surface_guard.py"])
+    assert ok, reason
+    assert reason == "in scope"
+    assert not buckets["unlisted"] and not buckets["protected"]
+
+
+def test_admitting_prompt_surface_did_not_widen_anything_else():
+    """The grant is one filename, not a pattern.
+
+    Rung 0 must still refuse a root-level file the loop was never given, and
+    the scope module must still classify as its own protected path — a round
+    that widened the writable set and quietly un-armed the drill for the
+    control surface it just edited would have removed the only guard
+    permanently (see `test_the_denylist_is_not_overridable_by_a_spec`).
+    """
+    assert spec.classify("Makefile") == "unlisted"
+    assert spec.classify("some/random/thing.txt") == "unlisted"
+    assert spec.classify("scripts/automod/spec.py") == "protected"
+    assert spec.requires_drill(["scripts/automod/spec.py"])
+    ok, reason, _ = spec.check_scope(["prompt_surface.py", "Makefile"])
+    assert not ok and "outside the writable set" in reason
+
+
+def test_a_second_interpreter_reaches_the_same_verdict_as_rung_0():
+    """The seam #1069 died at, crossed the way the gate crosses it.
+
+    `automod_gate` does not gate in-process: `agent_mcp/automod.py:243-246`
+    spawns `[LIVE_ROOT/.venvs/lloyd/bin/python, "-m",
+    "scripts.automod.round", "gate", <id>]` detached with `cwd=LIVE_ROOT`, and
+    `run_gate` (round.py:147) builds the `Gate` at round.py:163, whose rung 0 calls
+    `spec.check_scope(changed)` (gate.py:765) on the `spec` module THAT
+    interpreter imported. `run_spec.yaml`'s `writable_paths` is not what decides
+    a code round's scope — the tuple as re-imported by the gate process is. So
+    start a fresh interpreter the same way, from the same cwd, and read the two
+    verdicts it prints.
+
+    The same mechanism is the safety property that makes this edit safe to make
+    at all: the gate process imports the tree it was launched in, so a round
+    editing `spec.py` in its own worktree cannot widen the writable set its own
+    gate checks it against. The grant binds only once it has landed.
+    """
+    probe = (
+        "from scripts.automod import spec; "
+        "print(spec.classify('prompt_surface.py')); "
+        "print(spec.check_scope(['prompt_surface.py', "
+        "'tests/test_prompt_surface_guard.py'])[0:2])"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], cwd=REPO_ROOT,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.strip().splitlines()
+    assert lines[0] == "allowed", out.stdout
+    assert lines[1] == "(True, 'in scope')", out.stdout
+
+
+def test_the_writable_set_every_round_is_built_with_still_validates():
+    """`round.start()` writes ALLOWED_GLOBS into every round's run spec
+    (round.py:90) and refuses to open the round if the validator rejects it
+    (round.py:107-111, `W.remove(rid)` then a raise). So a malformed entry — a
+    leading slash, a `..`, a non-string — is not one refused diff, it is no
+    rounds at all. This is the only consumer of that serialised field: the gate
+    decides a code round's scope by re-importing the tuple, not by reading it
+    (see `test_a_second_interpreter_reaches_the_same_verdict_as_rung_0`)."""
+    run_spec = {
+        "objective": "x",
+        "evaluation": {"command": "scripts.automod.gate", "timeout_secs": 3600},
+        "budget": {"max_rounds": 1, "max_variants_per_round": 1},
+        "mutation_scope": {"writable_paths": list(spec.ALLOWED_GLOBS)},
+        "code": {"base_commit": "a" * 40, "branch": "automod/SM_1",
+                 "worktree": "/home/lloyd"},
+    }
+    assert spec.validate_code_run_spec(run_spec) is None
 
 
 # ---------------------------------------------------------------------------

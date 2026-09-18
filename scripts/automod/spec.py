@@ -48,6 +48,12 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     "scripts/**",
     "architecture/**",
     "prompt_builder.py",
+    # Root-level loaded-prompt machinery, same shape as the two below. Added
+    # 2026-09-18 (#1242): #1069's entire fix is this file, and three rounds
+    # (SM_20260911_190850, SM_20260914_114935, SM_20260918_145241) wrote it and
+    # were refused at rung 0 for the unlisted path — an item the implement pool
+    # could never close, whatever the attempt.
+    "prompt_surface.py",
     "autonomy.py",
     "prefetch.py",
     "usage_store.py",
