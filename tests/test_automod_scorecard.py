@@ -176,6 +176,29 @@ def test_the_row_adds_up_a_realistic_week(tmp_path, repo):
     assert json.loads(out.read_text().splitlines()[-1])["acceptance"]["met"] == 2
 
 
+def test_row_9_counts_the_two_ways_a_gated_change_used_to_be_lost(tmp_path, repo):
+    """A gate that passed after its turn ended (`land_rescued`, the reaper
+    lands it) and an item verdict from a turn that was landing
+    (`outcome_refused`, no longer taken). Both were found by reading
+    transcripts on 2026-09-18; they are numbers now."""
+    events = [
+        _ev("land_rescued", 1, round_id="SM_A", item_id=1),
+        _ev("land_rescued", 2, round_id="SM_B", item_id=2),
+        _ev("land_rescued", 30, round_id="SM_OLD", item_id=9),      # outside the window
+        _ev("backlog_implement", 1, item_id=3, phase="finished", round_id="SM_C",
+            outcome_refused="`rejected` with no measurement in `summary`"),
+        _ev("backlog_implement", 1, item_id=4, phase="finished", round_id="SM_D",
+            outcome_refused=""),
+    ]
+    row = SC.compute(since_days=7, ledger=_ledger(tmp_path, events), backlog_dir=tmp_path / "nope",
+                     repo=repo, now=NOW)
+    assert row["throughput"]["landings_rescued"] == 2
+    assert row["throughput"]["item_verdicts_refused"] == 1
+    text = SC.render(row)
+    assert "2 landed by the reaper after their turn ended" in text
+    assert "1 item verdict(s) not taken from a landing round" in text
+
+
 def test_since_parses_days_hours_and_weeks():
     assert SC.parse_since("7d") == 7 and SC.parse_since("36h") == 1.5 and SC.parse_since("2w") == 14
     assert SC.parse_since("3") == 3

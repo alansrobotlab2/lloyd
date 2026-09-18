@@ -158,34 +158,29 @@ def _land_detached(round_id: str) -> dict:
     worked when a human drove it and would have failed the first time Lloyd
     did, which is the case it exists for.
     """
-    from scripts.automod import state as S, worktree as W
+    from scripts.automod import round as R
 
-    if S.gate_in_progress(round_id):
-        return {"error": f"a gate is still running for {round_id} — automod_gate_wait first"}
-    if S.land_in_progress(round_id):
-        return {"error": f"a landing is already running for {round_id} — end your turn"}
-    gate_path = S.ROUNDS_DIR / round_id / "gate.json"
-    if not gate_path.exists():
-        return {"error": f"{round_id} has no gate report — run automod_gate first"}
-    report = json.loads(gate_path.read_text())
-    if not report.get("ok"):
-        failed = [r["name"] for r in report.get("rungs", []) if not r["ok"]]
-        return {"error": f"gate did not pass (failed: {failed})"}
-    if not W.worktree_path(round_id).exists():
-        return {"error": f"no worktree for {round_id}"}
-
-    log = S.ROUNDS_DIR / round_id / "land.log"
-    python = W.LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
-    pid = S.spawn_detached(
-        [python, "-m", "scripts.automod.round", "land", round_id],
-        log, cwd=W.LIVE_ROOT)
-    # Before this call returns and the turn ends: the child takes seconds to
-    # import and write its own, and the implement source reaps an open round
-    # the moment the turn is over. Same pid, so the child's write replaces it.
-    S.write_land_marker(round_id, pid=pid, by="automod_land")
+    # The checks, the spawn and the marker are `round.land_detached`'s: the
+    # reaper starts a landing the same way (a gate that passed after its turn
+    # ended), and two copies of "start a landing" would drift.
+    started = R.land_detached(round_id, by="automod_land")
+    if started.get("error"):
+        return started
+    pid, log = started["pid"], started["log"]
     return {
         "landing": round_id, "pid": pid, "log": str(log),
         "next": "END YOUR TURN NOW. Do not poll, do not call another tool.",
+        # The last thing the model reads before the structured finalizer asks
+        # it what happened. #1242 answered `landed: false` and `rejected`
+        # because it "could not state landed: true on evidence it did not
+        # have", and the item was closed as tried-and-rejected while its change
+        # promoted (2026-09-18).
+        "outcome": (
+            "When you restate the result: `landed` is TRUE — you called automod_land on a "
+            "passed gate, and that is what the field asks; the ledger records the promotion, "
+            "you are not asked to watch it. Report each clause as the review graded it. "
+            "`unnecessary` and `rejected` are for a round that lands nothing; this one is "
+            "landing."),
         "note": (
             "Detached, because landing restarts lloyd-mcp and would otherwise kill "
             "the promoter mid-flight. It now waits for the backend to be IDLE — and "
@@ -216,7 +211,10 @@ def _background_tasks_for_session() -> list[dict]:
 def _gate_detached(round_id: str, *, skip_smoke: bool = False) -> dict:
     """Start the gate in its own session and return at once.
 
-    A gate with the review rung runs seven to twelve minutes, and the
+    A gate with the review rung ran seven to twelve minutes then (sixteen by
+    2026-09-18 — `_gate_minutes_note` reads the figure off the ledger, and the
+    tool DESCRIPTION carries no number, because it is part of every turn's
+    cached prompt prefix and must not change with a median), and the
     2026-09-11 lesson is that one tool call cannot sit silent on the wire
     that long: the transport's read timeout fired, the pool re-sent the
     request, and the same round was gated twice at once — both review
@@ -254,9 +252,25 @@ def _gate_detached(round_id: str, *, skip_smoke: bool = False) -> dict:
                  "anything in the worktree while the gate runs: the review grades a "
                  "snapshot of the commit you gated, and every commit it refuses spends "
                  "one of the round's two review attempts."),
-        "note": ("Detached: with the review rung a gate runs seven to twelve minutes, "
-                 "longer than one tool call may stay silent on the wire."),
+        "note": (f"Detached: {_gate_minutes_note()}, longer than one tool call may stay "
+                 "silent on the wire. If your turn ends first, a gate that PASSES is landed "
+                 "by the loop and a refused one comes back with its findings."),
     }
+
+
+def _gate_minutes_note() -> str:
+    """How long a full gate takes now, off the ledger. This said "seven to
+    twelve minutes" for a week in which the median went from five to sixteen."""
+    try:
+        from scripts.automod import backlog as B, state as S
+        stats = B.gate_duration_stats(S.LEDGER_PATH)
+        if stats.get("n"):
+            return (f"a full gate takes about {round(stats['median_s'] / 60)} minutes now "
+                    f"(median of the last {stats['n']}; the slow ones "
+                    f"{round(stats['p90_s'] / 60)})")
+    except Exception:  # noqa: BLE001 — a note is never the gate
+        pass
+    return "a full gate takes many minutes"
 
 
 def _rungs_since(round_id: str, since_ts: float) -> list[str]:
@@ -311,7 +325,7 @@ def _gate_wait(round_id: str, *, wait_seconds: int = 240, note: str = "") -> dic
                 f"has been judged yet."
             )
             rep["retry_after_s"] = after
-        return rep
+        return _with_headline(rep)
 
     while True:
         marker = S.read_gate_marker(round_id)
@@ -335,6 +349,120 @@ def _gate_wait(round_id: str, *, wait_seconds: int = 240, note: str = "") -> dic
                 out["note"] = note
             return out
         time.sleep(5)
+
+
+def _with_headline(rep: dict) -> dict:
+    """A finished gate report that says what it is before it says anything else.
+
+    The report was `gate.json` verbatim: `"ok": true` on its fifth line, then
+    several hundred more, and on a PASS those end in the reviewer's advisory
+    findings — "cannot fail", "is still grep-only", "no test opens…" — which
+    read exactly like the reasons a refusal gives. Four rounds in four days
+    aborted a change 20–90 s after it had passed every rung, each reporting a
+    refusal that is on no ledger row: #1131 (2026-09-15, "both review attempts
+    spent" on a 5-of-5 pass), #1190 (09-16, "review refused clause 4" on a
+    first-attempt pass and a green rollback drill), #1053 twice (09-18). The
+    model had the whole report each time; it was not cut. Only an external
+    blocker carried a `next`, because only that misreading had happened yet.
+
+    So: `verdict` and `next` first, in words; on a pass the advisories move out
+    of the review rung into `notes_that_did_not_block`, labelled as what they
+    are (the gate has already written them onto the item); and preflight's
+    `allowed` bucket, a second copy of `changed_paths`, is dropped.
+    """
+    from scripts.automod import review as RV
+    rungs = [r for r in (rep.get("rungs") or []) if isinstance(r, dict)]
+    failed = next((r for r in rungs if not r.get("ok")), None)
+    review = next((r for r in rungs if r.get("name") == "review"), None) or {}
+    rdata = review.get("data") if isinstance(review.get("data"), dict) else {}
+    notes = None
+    if rep.get("ok"):
+        graded = str(review.get("detail") or "").split(";", 1)[0].strip()
+        verdict = "PASSED — every rung is green" + (f" ({graded})" if graded else "")
+        nxt = (f"Call automod_land(\"{rep.get('round_id')}\") now, then end your turn. "
+               "Nothing in this report is a refusal, and automod_abort would discard a "
+               "change that is ready to land.")
+        seams = list(rdata.pop("advisory_seams", None) or [])
+        findings = list(rdata.pop("advisory_findings", None) or [])
+        if seams or findings:
+            notes = {"what": ("The reviewer's notes on a change it PASSED. They did not block, "
+                              "the gate has already recorded them on the item, and they are "
+                              "not a reason to edit, re-gate or abort."),
+                     "seams": seams, "findings": findings}
+    elif rep.get("next"):
+        verdict = (f"NOT JUDGED — the {failed.get('name') if failed else '?'} rung failed for a "
+                   f"reason outside your diff")
+        nxt = rep["next"]
+    elif failed and failed.get("name") == "review":
+        fdata = failed.get("data") if isinstance(failed.get("data"), dict) else {}
+        attempt = int(fdata.get("review_attempt") or 0)
+        if fdata.get("review_premise_unsound"):
+            verdict = "REFUSED at review — the reviewer judged the premise unsound"
+            nxt = "automod_abort with the reviewer's summary as the reason (branch kept)."
+        elif fdata.get("review_retry") and attempt and attempt < RV.REVIEW_MAX_PER_ROUND:
+            verdict = f"REFUSED at review — attempt {attempt} of {RV.REVIEW_MAX_PER_ROUND}"
+            nxt = ("Fix what the review rung's `detail` names, commit, and call automod_gate "
+                   "again. One attempt is left.")
+        elif fdata.get("review_retry"):
+            verdict = (f"REFUSED at review — attempt {attempt or RV.REVIEW_MAX_PER_ROUND} of "
+                       f"{RV.REVIEW_MAX_PER_ROUND}, the last")
+            nxt = ("automod_abort with the findings as the reason (branch kept); the item "
+                   "comes back with them. No edit, no re-gate, no land.")
+        else:
+            verdict = "NOT GRADED — the review rung could not run"
+            nxt = "Read the review rung's `detail`; it says whether to gate again."
+    else:
+        name = failed.get("name") if failed else "?"
+        verdict = f"FAILED at {name}"
+        nxt = f"Fix what the {name} rung's `detail` names, commit, and call automod_gate again."
+    for r in rungs:
+        data = r.get("data") if isinstance(r.get("data"), dict) else None
+        buckets = data.get("buckets") if data else None
+        if (r.get("name") == "preflight" and isinstance(buckets, dict)
+                and sorted(buckets.get("allowed") or []) == sorted(rep.get("changed_paths") or [])):
+            buckets.pop("allowed", None)
+    out = {"verdict": verdict, "next": nxt}
+    if notes:
+        out["notes_that_did_not_block"] = notes
+    out.update({k: v for k, v in rep.items() if k != "next"})
+    return out
+
+
+def _abort_refusal(round_id: str, *, discard_passed_gate: bool = False) -> dict | None:
+    """Why `automod_abort` will not run as asked, or None.
+
+    An abort removes the worktree. Under a running landing that takes the tree
+    out from beneath the promoter; on a round whose gate PASSED at the commit
+    it still holds, it throws away a change that needed one more call — which
+    is what each of the four rounds in `_with_headline` did. Refused once,
+    with the verdict in the refusal; `discard_passed_gate=true` is how a round
+    that really means it says so, and the reason goes on the ledger either way.
+    The CLI and the reaper call `round.abort` directly and are not asked.
+    """
+    from scripts.automod import state as S, worktree as W
+    if S.land_in_progress(round_id):
+        return {"error": (f"a landing is running for {round_id}; aborting would remove the "
+                          f"worktree under it. End your turn — the landing reports to the ledger.")}
+    gate_path = S.ROUNDS_DIR / round_id / "gate.json"
+    if discard_passed_gate or not gate_path.exists():
+        return None
+    try:
+        report = json.loads(gate_path.read_text(encoding="utf-8"))
+        head = W.head(W.worktree_path(round_id)) or ""
+    except Exception:  # noqa: BLE001 — an unreadable report never blocks an abort
+        return None
+    if not report.get("ok") or not head or str(report.get("head") or "") != head:
+        return None
+    review = next((r for r in (report.get("rungs") or [])
+                   if isinstance(r, dict) and r.get("name") == "review"), None) or {}
+    return {"error": (f"{round_id} PASSED its gate at {head[:8]} — every rung green"
+                      + (f" ({str(review.get('detail') or '').split(';', 1)[0].strip()})"
+                         if review.get("detail") else "")
+                      + ". Aborting discards a change that is ready to land."),
+            "next": (f"Call automod_land(\"{round_id}\"), then end your turn. If you read a "
+                     f"refusal in the gate report, read its `verdict` line again: advisory notes "
+                     f"on a pass are not a refusal. To abandon a passed change anyway, call "
+                     f"automod_abort again with discard_passed_gate=true and say why in `reason`.")}
 
 
 def _amend_clause(round_id: str, clause, text: str, reason: str) -> dict:
@@ -393,8 +521,8 @@ async def list_tools() -> list[Tool]:
                 "clauses), a candidate venv if requirements changed, a canary boot on "
                 "alternate ports, one real agent turn, and a guardian drill if the diff "
                 "touches the rollback path. RETURNS IMMEDIATELY — the gate runs detached "
-                "for seven to twelve minutes; call automod_gate_wait for the per-rung "
-                "report. Refuses while a gate is already running for the round or while "
+                "for many minutes (the result says how long one takes now); call "
+                "automod_gate_wait for the report. Refuses while a gate is already running for the round or while "
                 "a background task of yours is in flight."
             ),
             inputSchema={
@@ -420,7 +548,8 @@ async def list_tools() -> list[Tool]:
                 "Wait for the detached gate started by automod_gate. Blocks up to "
                 "wait_seconds (default 240) and returns the per-rung report when the "
                 "ladder has finished, or {running: true, rungs_so_far: [...]} if it has "
-                "not — call again then. Read the failing rung's detail; it names the cause."
+                "not — call again then. A finished report opens with `verdict` and `next`: "
+                "read those first. On a failure the failing rung's detail names the cause."
             ),
             inputSchema={
                 "type": "object",
@@ -490,14 +619,20 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="automod_abort",
             description=("Abandon a round. Removes its worktree but KEEPS the branch, which "
-                         "is the only record of what was attempted."),
+                         "is the only record of what was attempted. Refused while the round's "
+                         "landing is running, and refused once for a round whose gate PASSED "
+                         "at its current commit — that round wants automod_land."),
             inputSchema={
                 "type": "object",
                 "properties": {"round_id": {"type": "string",
                                             "description": "Round id to abandon."},
                                "reason": {"type": "string",
                                           "description": ("Why — one line. When the review rung "
-                                                          "sent the round back, its findings.")}},
+                                                          "sent the round back, its findings.")},
+                               "discard_passed_gate": {
+                                   "type": "boolean",
+                                   "description": ("Only to abandon a change whose gate PASSED at "
+                                                   "its current commit. Say why in `reason`.")}},
                 "required": ["round_id"],
             },
         ),
@@ -614,8 +749,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return text_result(json.dumps(_land_detached(rid), indent=2))
 
         if name == "automod_abort":
-            return text_result(json.dumps(R.abort(arguments.get("round_id") or "",
-                                                  reason=str(arguments.get("reason") or "")),
+            rid = str(arguments.get("round_id") or "")
+            refusal = _abort_refusal(
+                rid, discard_passed_gate=bool(arguments.get("discard_passed_gate")))
+            if refusal:
+                return text_result(json.dumps(refusal, indent=2))
+            return text_result(json.dumps(R.abort(rid, reason=str(arguments.get("reason") or "")),
                                           indent=2))
 
         if name == "automod_vault_land":

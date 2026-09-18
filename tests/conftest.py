@@ -12,13 +12,49 @@ leaked in and broke tests that had nothing to do with them:
 Both are forced to a known value here. A test that wants the other value
 patches it explicitly.
 """
+import atexit
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+
+def _default_state_dirs_to_scratch() -> None:
+    """No pytest run reads or writes the machine's automod or guardian state.
+
+    `scripts.automod.state` and the guardian's `policy` resolve their state
+    dir from the environment **at import**, and default to the production
+    path. `gate._child_env` sets both variables so a candidate's tests cannot
+    reach the production ledger — but that covers the gate's own pytest only.
+    A round's model runs the suite from Bash with a plain environment, thirty
+    times a day (31 launches across 22 turns on 2026-09-18), and every one of
+    those addressed `~/.local/state/lloyd-automod` by default, relying on each
+    test to patch each path it touches. One did not: a `land()` whose leaked
+    SIGTERM handler wrote `land_failed` for the fixture round `SM_L` into the
+    live ledger, twice in one day, when the model `pkill`ed its own run.
+
+    Set here, at conftest import, because that is the one moment that is
+    before every test module's `from scripts.automod import state`. A caller
+    that already chose a state dir (the gate, `review_tools`) keeps it.
+    """
+    scratch: Path | None = None
+    for var, sub in (("LLOYD_AUTOMOD_STATE", "automod"), ("LLOYD_GUARDIAN_STATE", "guardian")):
+        if os.environ.get(var):
+            continue
+        if scratch is None:
+            scratch = Path(tempfile.mkdtemp(prefix="lloyd-test-state-"))
+            atexit.register(shutil.rmtree, scratch, ignore_errors=True)
+        (scratch / sub).mkdir(parents=True, exist_ok=True)
+        os.environ[var] = str(scratch / sub)
+
+
+_default_state_dirs_to_scratch()
 
 
 @pytest.fixture(autouse=True)

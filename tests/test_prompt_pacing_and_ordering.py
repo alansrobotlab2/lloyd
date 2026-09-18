@@ -28,7 +28,7 @@ def _prompt(**over):
               triaged_ago="today", surface="code", check="c", evidence="e",
               acceptance="a", clauses="    1. a", spawn_cap=I.SPAWN_CAP,
               max_turns=I.DEFAULT_MAX_TURNS, reoffer="", members="",
-              human_clauses="", surface_rules="")
+              human_clauses="", surface_rules="", gate_minutes=16, first_gate_by=23)
     kw.update(over)
     return I.PROMPT.format(**kw)
 
@@ -47,8 +47,18 @@ def test_the_template_stays_bounded():
     pacing, and the finalizer's outcome vocabulary. Procedure the model can
     read once belongs in a file it reads; procedure in a prompt is re-sent
     every iteration and re-derived by every re-offer. 11.8k -> 10.3k -> 4.9k.
+
+    5.5k -> 5.9k on 2026-09-18, for two things that are contract and cannot
+    live in the skill. Pacing (+190): the gate's MEASURED minutes, "commit and
+    gate, however late", and "never the whole suite" — four rounds that day
+    were lost to a clock the old literal marks misdescribed, and 22 turns
+    launched the full suite 31 times beside a gate that runs it. And one
+    sentence of outcome vocabulary (+127): a clause is judged on the change,
+    not on whether it has been promoted — two turns reported every clause
+    `not_met` for a finished, gated change. What `landed` means went into the
+    finalizer's own prompt and `automod_land`'s result, which cost nothing here.
     """
-    assert len(I.PROMPT) < 5_500, f"{len(I.PROMPT)} chars"
+    assert len(I.PROMPT) < 5_900, f"{len(I.PROMPT)} chars"
 
 
 SKILL_PATH = Path.home() / "obsidian" / "skills" / "automod-change-own-code" / "SKILL.md"
@@ -129,11 +139,67 @@ def test_the_prompt_carries_the_turns_it_actually_has():
 
 
 def test_the_pacing_block_names_the_three_marks():
-    text = _prompt()
+    text = " ".join(_prompt(gate_minutes=17, first_gate_by=22).split())
     assert "automod_start` by iteration 6" in text
     assert "iteration 25" in text
-    assert "minute 30" in text
-    assert "minute 40" in text
+    # The third mark is measured now, not written down: "minute 30" and "after
+    # minute 40 start nothing you cannot gate" described a five-minute gate.
+    assert "A full gate takes about 17 minutes now (measured)" in text
+    assert "the first `automod_gate` by minute 22" in text
+    assert "minute 30" not in text and "minute 40" not in text
+
+
+def test_the_gate_mark_is_measured_off_the_ledger(tmp_path, monkeypatch):
+    """`first_gate_by` leaves room for the slow gate, a refusal and the re-gate
+    after it. On 2026-09-18's numbers — median 967 s, p90 1235 s, a 59-minute
+    turn — that is minute 23, and the four rounds the clock cost that day
+    opened their gates at minutes 37, 40, 42 and 45."""
+    from scripts.automod import state as S
+    from workers.sources import _common as C
+    ledger = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(S, "LEDGER_PATH", ledger)
+    monkeypatch.setattr(C, "turn_timeout_for", lambda source, default=3600.0: 3540.0)
+    assert B.gate_duration_stats(ledger) == {"n": 0}
+    assert I._pacing_marks() == {"gate_minutes": I.DEFAULT_GATE_MINUTES, "first_gate_by": 30}
+
+    def gate(rid, t0, seconds, *, tests="5830 passed", review=True):
+        rows = [("preflight", 0.2, "3 file(s) in scope"), ("tests", seconds * 0.55, tests)]
+        if review:
+            rows.append(("review", seconds * 0.45, "review: 4 met of 4 clause(s)"))
+        rows.append(("drill", 0.0, "not required"))
+        t = t0
+        for rung, secs, detail in rows:
+            t += secs
+            S.append_event({"event": "gate", "round_id": rid, "rung": rung, "ok": True,
+                            "seconds": secs, "detail": detail, "ts": t}, path=ledger)
+
+    for n, secs in enumerate([900, 960, 975, 1000, 1235] * 4):
+        gate(f"SM_{n}", 1_000_000 + n * 5000, secs)
+    # Not full gates, so not in the figure: a re-gate that re-ran two test
+    # files, a reused suite, and a run that never reached the review.
+    gate("SM_partial", 2_000_000, 120, tests="pytest (partial, 2 changed test file(s)…): 20 passed")
+    gate("SM_reused", 2_010_000, 60, tests="REUSED (nothing committed since)")
+    gate("SM_noreview", 2_020_000, 30, review=False)
+    stats = B.gate_duration_stats(ledger)
+    assert stats["n"] == 20 and 955 <= stats["median_s"] <= 985 and stats["p90_s"] >= 1200
+    marks = I._pacing_marks()
+    assert marks == {"gate_minutes": 16, "first_gate_by": 23}, marks
+    # Faster gates move the mark later, never past the old advice; slower ones
+    # move it earlier, never below ten.
+    for n in range(20):
+        gate(f"SM_fast{n}", 3_000_000 + n * 5000, 300)
+    assert I._pacing_marks() == {"gate_minutes": 5, "first_gate_by": 30}
+    for n in range(20):
+        gate(f"SM_slow{n}", 4_000_000 + n * 5000, 2400)
+    assert I._pacing_marks()["first_gate_by"] == 10
+
+
+def test_pacing_says_gate_late_rather_than_not_at_all_and_never_the_whole_suite():
+    text = " ".join(_prompt().split())
+    assert "commit and gate, however late" in text
+    assert "a gate that passes after your turn ends is landed by the loop" in text
+    assert "When a gate passes, `automod_land` at once" in text
+    assert "Run the tests you changed, never the whole suite" in text
 
 
 def test_pacing_says_commit_before_every_gate():

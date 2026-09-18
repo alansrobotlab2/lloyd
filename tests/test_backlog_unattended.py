@@ -354,12 +354,18 @@ def test_a_free_loop_is_free(monkeypatch):
 
 
 def _housekeeping_counter(monkeypatch):
-    calls = {"reap": 0}
+    """`board` counts housekeeping runs by one of its board walks; `reap`
+    counts the reaper, which since 2026-09-18 ALSO runs alone on every held
+    look — it reads the ledger's tail, not the board."""
+    calls = {"reap": 0, "board": 0}
     def reap(now=None, **kw):
         calls["reap"] += 1
         return []
+    def close(*a, **k):
+        calls["board"] += 1
+        return []
     monkeypatch.setattr(I, "reap_abandoned_rounds", reap)
-    monkeypatch.setattr(B, "close_settled_items", lambda *a, **k: [])
+    monkeypatch.setattr(B, "close_settled_items", close)
     monkeypatch.setattr(B, "unfold_spent_umbrellas", lambda *a, **k: [])
     monkeypatch.setattr(B, "reconcile_statuses", lambda *a, **k: [])
     monkeypatch.setattr(B, "expire_stale_spawns", lambda *a, **k: [])
@@ -378,12 +384,16 @@ def test_a_busy_loop_declines_and_housekeeping_keeps_its_own_clock(isolated, mon
     cfg = {"interval_seconds": 900, "retry_seconds": 60}
     assert asyncio.run(I.enqueue_if_due(q, cfg)) == DECLINED
     assert asyncio.run(I.enqueue_if_due(q, cfg)) == DECLINED
-    assert calls["reap"] == 1, "housekeeping ran on the retry clock"
-    # Once its own interval has passed, it runs again.
+    assert calls["board"] == 1, "housekeeping ran on the retry clock"
+    # The reaper alone does ride the retry clock while the loop is held: once
+    # with housekeeping, once per held look. A round whose gate finished after
+    # its turn did used to wait a whole interval to be landed or closed.
+    assert calls["reap"] == 3
+    # Once its own interval has passed, housekeeping runs again.
     stamp = datetime.fromisoformat(q.wm_get(I.NAME, I.HOUSEKEEPING_KEY))
     q.wm_set(I.NAME, I.HOUSEKEEPING_KEY, (stamp - timedelta(seconds=901)).isoformat())
     asyncio.run(I.enqueue_if_due(q, cfg))
-    assert calls["reap"] == 2
+    assert calls["board"] == 2
 
 
 def test_a_free_loop_enqueues_and_says_nothing_special(isolated, monkeypatch, tmp_path):
@@ -822,13 +832,28 @@ def test_a_landing_owns_its_marker_and_a_dry_run_leaves_it_alone(monkeypatch, tm
     monkeypatch.setattr(R.S, "Lock", lambda owner="": type("L", (), {
         "acquire": lambda self: self, "release": lambda self: None})())
     monkeypatch.setattr(S, "require_enabled", lambda *a, **k: None)
-    # With `automod.chamber` on in config.yaml, `land` first waits for the
-    # LIVE state dir's observed promotion to settle — not this test's business.
+    # The chamber is production's business, not this test's — and stubbing the
+    # WAIT alone was not enough. `_land_lock` re-reads `current.json` after it
+    # takes the lock and loops while that says `observing`; with the wait a
+    # no-op and the lock a fake that always acquires, the loop had no brake,
+    # and `S.read_current` was reading the LIVE state dir (see
+    # `test_automod_hardening.isolated_state`). So this test ran for as long as
+    # production's newest promotion was under observation: 822 s on
+    # 2026-09-18, inside the gate's tests rung as well as outside it.
     monkeypatch.setattr(R.P, "wait_for_settle", lambda **k: None)
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    import signal
+    before = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
     (tmp_path / "SM_L").mkdir()
     (tmp_path / "SM_L" / "gate.json").write_text(json.dumps({"ok": True, "base": "b" * 40}))
     R.land("SM_L")
     assert seen["marker"]["pid"] == os.getpid() and S.read_land_marker("SM_L") is None
+    # A landing that is over gives back the signal handlers it took. Left
+    # installed, the next SIGTERM this process receives — a model `pkill`ing
+    # its own pytest — is recorded as `land_failed` for SM_L, in whatever
+    # ledger `S.LEDGER_PATH` names by then.
+    assert {sig: signal.getsignal(sig) for sig in before} == before
     S.write_land_marker("SM_L", pid=os.getppid())
     with pytest.raises(RuntimeError, match="already running"):
         R.land("SM_L")
@@ -1025,6 +1050,50 @@ def test_a_first_spend_is_sent_back_through_triage_with_its_refusal(isolated):
     assert "no test across the seam" in ev["findings"]
     assert ev["clauses"][1] == {"clause": 2, "verdict": "unmet", "note": "no seam test"}
     assert ev["unmet_twice"] == [2]
+
+
+def _deferred_to(item_id, blocker_id, round_id="SM_DEF"):
+    """#1069's first round: refused at preflight for a path no round could
+    write, a blocker filed for that, the clause deferred to it."""
+    _confirm(item_id)
+    S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "gate", "round_id": round_id, "rung": "preflight", "ok": False,
+                    "detail": "paths outside the writable set: ['prompt_surface.py']"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "finished",
+                    "round_id": round_id, "stop_reason": "stop", "num_turns": 80,
+                    "outcome": {"landed": False, "acceptance": "deferred", "summary": "",
+                                "deferred_to": [blocker_id], "spawned": [blocker_id],
+                                "clause_outcomes": [{"clause": 1, "outcome": "deferred",
+                                                     "evidence": "preflight",
+                                                     "deferred_to": [blocker_id]}]}},
+                   path=S.LEDGER_PATH)
+
+
+def test_an_item_deferred_to_an_open_blocker_waits_for_it_before_its_second_triage(isolated):
+    """#1069, 2026-09-18. Deferred to #1242 at 15:33Z; re-triaged at 15:58Z on
+    a tree that still had the obstacle, so triage wrote `human-only:` citing
+    #1242; #1242 landed at 17:43Z and nothing would ever read #1069 again."""
+    write_item(isolated, 1069)
+    blocker = write_item(isolated, 1242, name="Blocker", status="up_next")
+    _deferred_to(1069, 1242)
+    assert B.implement_outcomes(S.LEDGER_PATH)[1069][0] == "spent"
+    assert B.retriage_spent_items(S.LEDGER_PATH) == [], "re-triaged under its own open blocker"
+    # The blocker lands (or is retired — any close releases the item).
+    B.update_frontmatter(blocker, {"status": "done"})
+    assert [r["item_id"] for r in B.retriage_spent_items(S.LEDGER_PATH)] == [1069]
+
+
+def test_a_deferral_to_itself_or_to_a_closed_item_holds_nothing(isolated):
+    """Two of that day's outcomes deferred to their own id."""
+    write_item(isolated, 1234)
+    _deferred_to(1234, 1234)
+    assert [r["item_id"] for r in B.retriage_spent_items(S.LEDGER_PATH)] == [1234]
+    write_item(isolated, 1300)
+    write_item(isolated, 1301, name="Closed blocker", status="done")
+    _deferred_to(1300, 1301, round_id="SM_DEF2")
+    assert [r["item_id"] for r in B.retriage_spent_items(S.LEDGER_PATH)] == [1300]
 
 
 def test_a_retriaged_item_is_untriaged_and_unattempted_again(isolated):
@@ -1515,7 +1584,9 @@ def test_a_round_with_no_structured_outcome_is_noted_but_a_human_decides(isolate
     assert out == [{"item_id": 353, "closed": False, "acceptance": None}]
     fm = _fm(p)
     assert fm["status"] == "up_next" and fm["automod_landed"] == "d29112b5d291"
-    assert "predates the finalizer" in fm["activity_log"][-1]
+    # No outcome and no review on the ledger either, so nothing stands in.
+    assert "no structured outcome" in fm["activity_log"][-1]
+    assert "a human decides" in fm["activity_log"][-1]
 
 
 def test_not_met_leaves_the_item_open(isolated):
@@ -2287,10 +2358,11 @@ def test_orphans_are_settled_at_the_first_poll_after_a_boot_and_only_then(isolat
     monkeypatch.setattr(I, "settle_orphaned_turns",
                         lambda: settled.append(1) or [{"round_id": "SM_OOM"}])
     cfg = {"interval_seconds": 900}
-    asyncio.run(I.enqueue_if_due(q, cfg))   # housekeeping is due too: two reaps
-    asyncio.run(I.enqueue_if_due(q, cfg))
+    asyncio.run(I.enqueue_if_due(q, cfg))   # boot pass, housekeeping, and the held look: three
+    assert settled == [1] and calls["reap"] == 3, "the boot pass reaps what it settled, at once"
+    asyncio.run(I.enqueue_if_due(q, cfg))   # the second look is held too: one more
     assert settled == [1], "once per process"
-    assert calls["reap"] == 2, "the boot pass reaps what it settled, at once"
+    assert calls["reap"] == 4 and calls["board"] == 1
 
 
 def test_a_failed_boot_pass_is_retried(isolated, monkeypatch, tmp_path):
@@ -2421,7 +2493,7 @@ def test_the_implement_prompt_says_abort_on_a_late_refusal_and_never_restart():
     assert "A review refusal with under 25 iterations left is an abort" in p
     assert "`automod_abort` (branch kept" in p
     assert "Never restart an engine or a service from a round" in p
-    assert len(I.PROMPT) < 5_500, "the template's bound (tests/test_prompt_pacing_and_ordering.py)"
+    assert len(I.PROMPT) < 5_900, "the template's bound (tests/test_prompt_pacing_and_ordering.py)"
 
 
 def test_the_triage_prompt_forbids_pinning_an_invariant_the_tree_does_not_hold():

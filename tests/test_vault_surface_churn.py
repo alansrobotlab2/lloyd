@@ -347,7 +347,7 @@ def _render(surface):
         item_id=575, status="up_next", priority="medium", name="n", body="b",
         triaged_ago="today", surface=surface, check="c", evidence="e", acceptance="a",
         clauses="    1. a", spawn_cap=I.SPAWN_CAP, max_turns=I.DEFAULT_MAX_TURNS,
-        reoffer="", members="", human_clauses="",
+        gate_minutes=16, first_gate_by=23, reoffer="", members="", human_clauses="",
         surface_rules=I._surface_rules(surface, 575))
 
 

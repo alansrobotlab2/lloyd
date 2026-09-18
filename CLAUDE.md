@@ -1106,6 +1106,50 @@ leaves the next incident open:
 `tests/test_landing_killed.py` pins all three, the second with a real child
 process and a real SIGTERM.
 
+### Between the gate and `main`: a finished change is not lost
+
+On 2026-09-18 a quarter of the day's implement time (250 of 994 min) went to
+redoing changes that had already passed every rung, and two items were closed
+"rejected" minutes before their changes promoted. `architecture/automod.md`
+§3.2g is the long version; §4.3 has the test-isolation half.
+
+- **A passed gate whose turn is over is landed, not aborted**
+  (`autocode._land_if_passed`, ledger `land_rescued`, switch
+  `workers.sources.autocode.land_passed_gates`): gate `ok` at the commit the
+  worktree still holds, no item verdict, never twice. It is #278's observer
+  rescue made deterministic. `round.land_detached` is the one way a landing is
+  started, for `automod_land` and the reaper both. The reaper also runs on
+  every declined look, not only at turn end and with housekeeping.
+- **A finished gate report leads with `verdict` and `next`**
+  (`automod._with_headline`); a pass's advisory findings move to
+  `notes_that_did_not_block`. Four rounds in four days were aborted by their
+  author seconds after a pass they read as a refusal — with the whole report
+  in front of them. `automod_abort` refuses once for a round whose gate passed
+  at its current commit (`discard_passed_gate`), and always under a running
+  landing. The CLI and the reaper call `round.abort` and are never asked.
+- **`unnecessary` / `rejected` are checked before they close anything**
+  (`backlog.settle_item_verdict`): not taken from a round the ledger shows
+  landing, nor a `rejected` with no measurement. When a landing has no reported
+  outcome, the review rung's all-`met` grading stands in
+  (`backlog.code_review_outcome`), as the vault review already did. A reported
+  outcome is never overridden.
+- **Numbers a round is told are measured** (`backlog.gate_duration_stats`,
+  `autocode._pacing_marks`): a full gate went 311 s → 995 s in a week while the
+  prompt still said "first gate by minute 30". Never put such a number in a
+  tool DESCRIPTION — it is part of every turn's cached prefix.
+- **A deferral waits for what it deferred to** (`_open_deferral_targets`):
+  #1069 was re-triaged into a `human-only:` contract 100 minutes before its
+  blocker landed.
+- **No pytest run addresses production's automod state.** A fixture's
+  `delenv` + `reload` pointed every later test at `~/.local/state/lloyd-automod`
+  for nine days, the gate's tests rung included. `tests/conftest.py` defaults
+  both state variables to scratch; a fixture that reloads a module restores the
+  environment it found.
+- **A change to who may call the aggregator must list its callers by
+  `mcp_servers:` URL too.** #1053 missed `app/mcp_discovery.py`, which never
+  names the port; the Tools page and one LIVE-service test went red on main the
+  moment it landed, and its own gate could not see it.
+
 ### One commit on main per landing
 
 Until 2026-09-17 the promoter fast-forwarded a round's whole working history

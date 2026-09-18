@@ -634,7 +634,7 @@ def test_the_implement_prompt_names_the_clauses_the_seams_and_the_item_id():
     text = I.PROMPT.format(item_id=9, status="up_next", priority="high", name="n", body="b",
                            triaged_ago="today", surface="code", check="c", evidence="e",
                            acceptance="a", clauses="    1. a\n    2. b", spawn_cap=I.SPAWN_CAP,
-                           max_turns=I.DEFAULT_MAX_TURNS,
+                           max_turns=I.DEFAULT_MAX_TURNS, gate_minutes=16, first_gate_by=23,
                            round_label="item9", reoffer="", members="", human_clauses="",
                            surface_rules="")
     assert "    1. a\n    2. b" in text

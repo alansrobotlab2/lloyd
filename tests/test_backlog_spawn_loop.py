@@ -314,7 +314,7 @@ def _impl_prompt(**over):
     kw = dict(item_id=9, status="draft", priority="low", name="n", body="b",
               triaged_ago="an hour ago", surface="code", check="c", evidence="e",
               acceptance="a", clauses="    1. a", spawn_cap=I.SPAWN_CAP,
-              max_turns=I.DEFAULT_MAX_TURNS,
+              max_turns=I.DEFAULT_MAX_TURNS, gate_minutes=16, first_gate_by=23,
               round_label="item9", reoffer="", members="", human_clauses="",
               surface_rules="")
     kw.update(over)

@@ -601,7 +601,17 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
     # its item as surely as a landing did (Alan's rule, 2026-09-16); counted
     # beside the landings so the row reads "resolved", not "shipped".
     rejected = sum(1 for e in by("item_closed") if e.get("acceptance") == "rejected")
+    # Two ways a finished change used to be lost between its gate and `main`,
+    # counted so their cost is a number rather than a reading of transcripts
+    # (2026-09-18): a gate that passed after its turn ended, which the reaper
+    # now lands (`land_rescued`), and an `unnecessary`/`rejected` from a turn
+    # that was landing, which is no longer taken (`outcome_refused`). A rise in
+    # the first says turns are reaching their gate late; any of the second says
+    # the finalizer is still misreporting landings.
+    rescued = len(by("land_rescued"))
+    verdicts_refused = sum(1 for e in finished if e.get("outcome_refused"))
     throughput = {"items_closed": closed_items,
+                  "landings_rescued": rescued, "item_verdicts_refused": verdicts_refused,
                   "items_closed_per_day": round(closed_items / max(since_days, 0.01), 2),
                   "rounds_finished": len(finished), "rounds_landed": len(landed),
                   "rounds_rejected": rejected,
@@ -683,7 +693,7 @@ def render(row: dict) -> str:
         f"| 6 | test honesty | {t['grader_findings']} findings | {t['per_gated_round'] if t['per_gated_round'] is not None else '—'} per graded round; {t['landed_with_or_true']} landed commits add `or True`/`assert True` |",
         f"| 7 | bookkeeping defects | {b['nameless_deferrals'] + b['stranded_landings'] + b['bare_aborts']} | {b['nameless_deferrals']} nameless deferrals, {b['stranded_landings']} stranded landings, {b['bare_aborts']} bare aborts |",
         f"| 8 | verdict plumbing | {_pct(p['regex_rate'])} regex | {p['regex']} of {p['verdicts_with_source']} verdicts fell back; {p['truncated']} truncated; median finalizer tokens {p['finalizer_tokens_median'] if p['finalizer_tokens_median'] is not None else '—'} |",
-        f"| 9 | throughput | {th['items_closed_per_day']}/day | {th['items_closed']} closed; {th['rounds_landed']} of {th['rounds_finished']} rounds landed, {th.get('rounds_rejected', 0)} rejected on evidence; median turns {th['median_turns_landed'] if th['median_turns_landed'] is not None else '—'}; median gate {th['median_gate_seconds'] if th['median_gate_seconds'] is not None else '—'} s |",
+        f"| 9 | throughput | {th['items_closed_per_day']}/day | {th['items_closed']} closed; {th['rounds_landed']} of {th['rounds_finished']} rounds landed, {th.get('rounds_rejected', 0)} rejected on evidence, {th.get('landings_rescued', 0)} landed by the reaper after their turn ended, {th.get('item_verdicts_refused', 0)} item verdict(s) not taken from a landing round; median turns {th['median_turns_landed'] if th['median_turns_landed'] is not None else '—'}; median gate {th['median_gate_seconds'] if th['median_gate_seconds'] is not None else '—'} s |",
         f"| 10 | rollbacks | {rb['count']} | triggers {', '.join(rb['triggers']) or '—'}; true positives: human judgment, not computed |",
         f"| 11 | grouping | {row.get('grouping', {}).get('group_triages', 0)} group triages | {row.get('grouping', {}).get('clusters_formed', 0)} clusters over {row.get('grouping', {}).get('items_clustered', 0)} items last night; {row.get('grouping', {}).get('duplicates_closed', 0)} duplicates closed, {row.get('grouping', {}).get('retired_in_group', 0)} retired, {row.get('grouping', {}).get('folded', 0)} folded, {row.get('grouping', {}).get('kept', 0)} kept; {row.get('grouping', {}).get('umbrellas_formed', 0)} umbrellas formed, {row.get('grouping', {}).get('umbrellas_landed', 0)} landed closing {row.get('grouping', {}).get('members_closed', 0)} members |",
     ]

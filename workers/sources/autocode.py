@@ -175,13 +175,16 @@ line counts, git shas and grep results in it are current: read them, do not
 re-derive them. Re-measure exactly one thing — the acceptance check, which you
 must confirm fails before you start and passes when you finish.
 
-**Pacing.** You have {max_turns} iterations and a wall clock; running out of
-either lands nothing. Triage read for you: `automod_start` by iteration 6
-or minute 8; the failing test by iteration 25; the first `automod_gate` by
-minute 30; after minute 40 start nothing you cannot gate. Commit before every
-gate: re-gating the same commit is answered from the ledger without a review.
-If a `<context>` or `<budget>` anchor fires, it is not advice — commit, gate,
-and land or abort. A review refusal with under 25 iterations left is an abort:
+**Pacing.** You have {max_turns} iterations and a wall clock. A full gate
+takes about {gate_minutes} minutes now (measured), so: `automod_start` by
+iteration 6 or minute 8; the failing test by iteration 25; the first
+`automod_gate` by minute {first_gate_by}. Run the tests you changed, never the
+whole suite — the gate runs it. Commit before every gate: re-gating the same
+commit is answered from the ledger without a review. If a `<context>` or
+`<budget>` anchor fires, it is not advice — commit and gate, however late: a
+gate that passes after your turn ends is landed by the loop, a refused one
+comes back with its findings. When a gate passes, `automod_land` at once.
+A review refusal with under 25 iterations left is an abort:
 `automod_abort` (branch kept; the re-offer resumes with the findings), never an
 edit, a re-gate or a `land`. Never restart an engine or a service from a round
 — refused at dispatch; note it on the item.
@@ -190,7 +193,8 @@ edit, a re-gate or a `land`. Never restart an engine or a service from a round
 not a promise: find out whether it improves Lloyd, and land it only if it does. \
 When this turn ends you restate the result as one JSON object: whether the \
 change landed, and **per clause** `met`, `not_met` or `deferred`, with the test \
-node id or file:line. Once the promotion settles, an all-`met` item is closed \
+node id or file:line. Judge each clause on the change itself — `not_met` means \
+the change does not satisfy it, never that it is not promoted yet. Once the promotion settles, an all-`met` item is closed \
 automatically. `deferred` \
 leaves it open and names the ids it waits on. A deferral that names no id is \
 recorded as `not_met`. `not_met` re-offers it once for those clauses. Two verdicts close \
@@ -390,6 +394,61 @@ def _review_note(events: list[dict], round_id: str | None) -> dict | None:
     return None
 
 
+# What the pacing block says when the ledger holds no full gate to measure: a
+# fresh install, a test. Today's real figure, rounded.
+DEFAULT_GATE_MINUTES = 15
+
+
+def _pacing_marks() -> dict:
+    """`{gate_minutes, first_gate_by}` for the prompt's pacing block, measured.
+
+    The block used to say "the first `automod_gate` by minute 30; after minute
+    40 start nothing you cannot gate", written while a gate took five to
+    eight minutes. On 2026-09-18 a full gate took a median 995 s, p90 1234 s,
+    and the four rounds the clock cost that day opened their gates at minutes
+    37, 40, 42 and 45 of 59 — each doing what it had been told.
+
+    `first_gate_by` leaves room for the SLOW gate, one review refusal, and the
+    re-gate that follows it (changed test files only, about half a gate), plus
+    the landing call and the report. Clamped to [10, 30]: earlier than ten is
+    not a plan, and later than thirty was the old advice.
+    """
+    from scripts.automod import backlog as B, state as S
+    from workers.sources import _common as C
+    turn_minutes = C.turn_timeout_for(NAME) / 60.0
+    try:
+        stats = B.gate_duration_stats(S.LEDGER_PATH)
+    except Exception:  # noqa: BLE001 — a number for a prompt is never the round
+        stats = {"n": 0}
+    if stats.get("n"):
+        typical, slow = stats["median_s"] / 60.0, stats["p90_s"] / 60.0
+    else:
+        typical = slow = float(DEFAULT_GATE_MINUTES)
+    first = int(turn_minutes - 1.5 * slow - 5)
+    return {"gate_minutes": max(1, round(typical)),
+            "first_gate_by": max(10, min(30, first))}
+
+
+def _landing_seen(round_id: str | None, events: list[dict]) -> bool:
+    """Did this round reach `round land`? Read from what the landing itself
+    leaves behind, never from what the turn says about it: its live marker
+    (`automod_land` writes one before it returns), the promotion under way in
+    `current.json`, or a `promoted` / `land_failed` / `land_rescued` row."""
+    if not round_id:
+        return False
+    from scripts.automod import state as S
+    try:
+        if S.land_in_progress(round_id):
+            return True
+        if str((S.read_current() or {}).get("round_id") or "") == round_id:
+            return True
+    except Exception:  # noqa: BLE001 — an unreadable marker is not a landing
+        pass
+    return any(ev.get("round_id") == round_id
+               and ev.get("event") in ("promoted", "land_failed", "land_rescued")
+               for ev in events)
+
+
 def _abandon_grace_seconds() -> int:
     """How long a round left open waits for a rescue: `ABANDON_GRACE_SECONDS`
     while the Inner Voice observer watches this source, else none — the
@@ -425,6 +484,13 @@ def reap_abandoned_rounds(now: float | None = None, *,
     landing is in flight (`S.land_in_progress` — waiting for idle, or
     re-gating after `main` moved) is never reaped. The branch is kept — it is
     the only record of what was attempted — and the item is told where it is.
+
+    **A round whose gate PASSED is landed, not closed** (2026-09-18,
+    `_land_if_passed`): the deterministic form of #278's rescue, which went
+    away with the observer. Everything else here is unchanged by it — a gate
+    that failed, a commit made after the gate, a turn that ended on
+    `unnecessary` or `rejected`, a landing that already failed once, all close
+    as they always have.
 
     A second pass (2026-09-17) closes an **orphan**: a round a tool opened
     (`opened_by: tool` on its `round_start`) that no implement row names.
@@ -471,6 +537,13 @@ def reap_abandoned_rounds(now: float | None = None, *,
         age = now - float(e.get("ts") or 0)
         if age < grace or e.get("session_id") in busy or not _reapable(rid):
             continue
+        # A gate that PASSED at the commit the round still holds is one call
+        # short of landed, and the turn that would have made it is over.
+        landing = _land_if_passed(rid, e, events)
+        if landing is not None:
+            closed.add(rid)
+            reaped.append(landing)
+            continue
         review = _review_note(events, rid)
         why = (f"implement turn ended ({e.get('stop_reason')}) and the round "
                f"stayed open for {int(age // 60)} min with nothing running in "
@@ -506,6 +579,81 @@ def reap_abandoned_rounds(now: float | None = None, *,
 # session is busy, so the age never matters); the floor is for the seconds
 # between `automod_start` returning and the turn's next tool call.
 ORPHAN_ROUND_MIN_AGE_SECONDS = 600
+
+
+def _land_if_passed(rid: str, finished: dict, events: list[dict]) -> dict | None:
+    """Start the landing of a round whose gate passed and whose turn is over.
+    The record of it, or None when the round is not landable and the reaper
+    should close it as it always has.
+
+    #278's rescue, made deterministic. That round died at its iteration cap
+    with the change written, and two minutes later the Inner Voice observer
+    sent "if the gate passed, land it" into the session; the second turn
+    landed it. Cut 1 of senses-not-supervision switched the observer off for
+    unattended turns (2026-09-12) and replaced its stall, budget and context
+    nudges with deterministic anchors — but not this one, so from then on a
+    round that was gated and green when its turn ended was aborted and its
+    item re-offered for a whole new round. On 2026-09-18 that was four rounds:
+    three turns ended while the gate was still running (it passed minutes
+    later; a full gate had grown from five minutes to sixteen) and one saw the
+    pass with 146 s left and obeyed "stop calling tools". With the two rounds a
+    model aborted after a pass it misread, a quarter of that day's implement
+    time went to redoing changes that had already passed every rung.
+
+    Landable means exactly what `automod_land` requires, plus what only the
+    reaper can know:
+
+      * the round's gate report is `ok` AND names the commit the worktree
+        still holds — a commit made after the gate was never judged;
+      * the turn did not end on an item verdict (`unnecessary` / `rejected`
+        close the item with no landing; the author decided);
+      * nothing has tried to land it before — no `promoted`, `land_failed` or
+        `land_rescued` row. One rescue per round: a landing that failed is a
+        ledger verdict the re-offer already reads, not something to retry here;
+      * promotions are not halted, the guardian is not BROKEN, and the loop is
+        enabled — `round land` would refuse, and refusing is not worth a process.
+
+    The landing is `round.land_detached`, the same spawn `automod_land` makes,
+    so everything downstream is unchanged: it waits for the other round's
+    turn, queues for the lock, chases a moved `main` by re-gating, and is
+    watched by the guardian. The item closes on the turn's own outcome when it
+    reported one, and on the review rung's grading when it reported none
+    (`backlog.code_review_outcome`). Kill switch:
+    `workers.sources.autocode.land_passed_gates`.
+    """
+    from scripts.automod import backlog as B, round as R, state as S, worktree as W
+    if not bool(_source_cfg(NAME).get("land_passed_gates", True)):
+        return None
+    outcome = finished.get("outcome")
+    if isinstance(outcome, dict) and outcome.get("acceptance") in B.ITEM_VERDICT_OUTCOMES:
+        return None
+    if any(ev.get("round_id") == rid and ev.get("event") in ("promoted", "land_failed", "land_rescued")
+           for ev in events):
+        return None
+    try:
+        report = json.loads((S.ROUNDS_DIR / rid / "gate.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    head = W.head(W.worktree_path(rid)) or ""
+    if report.get("ok") is not True or not head or str(report.get("head") or "") != head:
+        return None
+    if S.is_halted() or S.is_broken() or not S.is_enabled(LIVE_ROOT):
+        return None
+    started = R.land_detached(rid, by="reaper")
+    if started.get("error"):
+        logger.warning("round %s passed its gate but its landing could not start: %s",
+                       rid, started["error"])
+        return None
+    item_id = finished.get("item_id")
+    why = (f"its turn ended ({finished.get('stop_reason')}) with the gate passed at {head[:8]} "
+           f"and no landing; the loop started one (pid {started['pid']})")
+    rec = {"event": "land_rescued", "round_id": rid, "item_id": item_id, "head": head,
+           "pid": started["pid"], "reason": why, "verb": "landing"}
+    S.append_event(rec)
+    if item_id is not None:
+        B.note_item(int(item_id), f"automod round {rid}: {why}.")
+    logger.info("round %s: %s", rid, why)
+    return rec
 
 
 def _reap_round(rid: str, item_id, why: str, reaped: list[dict]) -> None:
@@ -630,8 +778,8 @@ def _settle_boot_orphans() -> None:
     try:
         if settle_orphaned_turns():
             for r in reap_abandoned_rounds():
-                logger.info("reaped round %s after a backend restart: %s",
-                            r["round_id"], r["reason"])
+                logger.info("%s round %s after a backend restart: %s",
+                            r.get("verb", "reaped"), r["round_id"], r["reason"])
         _boot_settled["done"] = True
     except Exception as exc:  # noqa: BLE001 — retried at the next poll
         logger.warning("settle_orphaned_turns failed: %s", exc)
@@ -820,6 +968,15 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
         (logger.info if why != _last_decline["why"] else logger.debug)(
             "autocode: not queueing — %s", why)
         _last_decline["why"] = why
+        # The reaper, at the retry cadence while the loop is held. It ran at
+        # turn end and then only with housekeeping, so a round whose gate
+        # finished AFTER its turn did — three of 2026-09-18's four lost rounds
+        # — sat for up to `interval_seconds`, and an open round with a passed
+        # gate is exactly what `_rounds_about_to_land` holds the other slots
+        # for. It is cheap (the ledger's tail, the session snapshot) and its
+        # conditions are the ones it has at turn end; what it finds is either
+        # landed (`_land_if_passed`) or closed, a minute after the gate says.
+        await asyncio.to_thread(_reap_quietly)
         return DECLINED
     _last_decline["why"] = ""
     # The gear change (2026-09-15): while autotriage's sweep still has open
@@ -873,6 +1030,16 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
     # One row per look. With a slot still empty, the next look is a retry
     # away rather than an interval — a decline in everything but name.
     return DECLINED if slot + 1 < depth else None
+
+
+def _reap_quietly() -> None:
+    """`reap_abandoned_rounds`, guarded: a backstop never takes the scheduler down."""
+    try:
+        for r in reap_abandoned_rounds():
+            logger.info("%s round %s while the loop was held: %s",
+                        r.get("verb", "reaped"), r["round_id"], r["reason"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reap while held failed: %s", exc)
 
 
 def _housekeeping(src_cfg: dict) -> None:
@@ -1112,7 +1279,8 @@ async def _reap_at_turn_end(session_id: str | None) -> None:
     """
     try:
         for r in await asyncio.to_thread(reap_abandoned_rounds, finished_session=session_id):
-            logger.info("reaped round %s at turn end: %s", r["round_id"], r["reason"])
+            logger.info("%s round %s at turn end: %s", r.get("verb", "reaped"),
+                        r["round_id"], r["reason"])
     except Exception as exc:  # noqa: BLE001
         logger.warning("reap at turn end failed: %s", exc)
 
@@ -1150,6 +1318,8 @@ async def _run_and_record(item, candidate, triage, budget, started,
         # The budget the model actually has, so the pacing block is about
         # this turn rather than about a number nobody passed in.
         max_turns=budget,
+        # And the gate it is actually going to wait for, off the ledger.
+        **_pacing_marks(),
         triaged_ago=_age_phrase(triage.get("ts")),
         surface=triage.get("surface") or "code",
         check=triage.get("check") or "(none recorded)",
@@ -1187,7 +1357,12 @@ async def _run_and_record(item, candidate, triage, budget, started,
                 "ids as your SPAWNED line. This is a transcription of what you already "
                 "reported, not a re-decision — `met` on every clause closes the item "
                 "once the promotion settles, and a deferral that names no id is "
-                "recorded as not_met, so say what is true."
+                "recorded as not_met, so say what is true. `landed` is true if you "
+                "called automod_land on a passed gate: the ledger records the promotion, "
+                "you were told to end the turn rather than watch it, and that is no "
+                "reason for `landed: false`, `not_met` or `rejected`. Judge each clause "
+                "on the change itself. `unnecessary` and `rejected` close the item with "
+                "no landing, so neither fits a round you landed with every clause met."
             ))
     except DrainActive as exc:
         S.append_event({"event": "backlog_implement", "item_id": candidate.id,
@@ -1239,6 +1414,16 @@ async def _run_and_record(item, candidate, triage, budget, started,
     vault_commits = _vault_commits_since(events, candidate.id, started)
     outcome = B.parse_outcome(run.get("structured")) if want_outcome else None
     outcome_error = str(run.get("structured_error") or "")
+    # `unnecessary` / `rejected` close the item below, now, with no landing to
+    # wait for — so they are checked against the one thing this process can
+    # see for itself: whether the round went to land. Both `rejected` outcomes
+    # the loop had recorded by 2026-09-18 came from turns whose last tool call
+    # was `automod_land`.
+    outcome, verdict_refused = B.settle_item_verdict(
+        outcome, landing_seen=_landing_seen(round_id, events))
+    if verdict_refused:
+        logger.warning("backlog #%s: item verdict not taken — %s (round %s)",
+                       candidate.id, verdict_refused, round_id)
     # A path the round needed and the loop may never write. Recorded on the
     # item, which tags it `needs-human` and holds it open — reported rather
     # than hidden, which is what `git add -f` was.
@@ -1327,6 +1512,9 @@ async def _run_and_record(item, candidate, triage, budget, started,
                     # there is none when there is none — a finalizer that
                     # quietly stopped working must not look like one working.
                     "outcome": outcome, "outcome_error": outcome_error,
+                    # Why an `unnecessary`/`rejected` was not taken, when one
+                    # was not (`backlog.settle_item_verdict`). Empty otherwise.
+                    "outcome_refused": verdict_refused,
                     "finalizer_tokens": run.get("finalizer_tokens"),
                     "response_tail": (run.get("text") or "")[-1500:]})
     outcome = (f"round {round_id}" if round_id else

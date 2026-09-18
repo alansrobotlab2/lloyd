@@ -44,13 +44,31 @@ def git(repo, *args):
 
 @pytest.fixture()
 def isolated_state(tmp_path, monkeypatch):
-    """Point the state module at a scratch dir. Never the live one."""
+    """Point the state module at a scratch dir. Never the live one — on the
+    way OUT as well as on the way in.
+
+    The teardown used to `delenv` and reload. A reload re-reads the
+    environment, so with the variable deleted `S.STATE_DIR` came back as
+    `~/.local/state/lloyd-automod` and stayed there for **every test that ran
+    after this file**, the gate's tests rung included: `gate._child_env` sets
+    `LLOYD_AUTOMOD_STATE` precisely so candidate tests cannot reach the
+    production ledger, and this fixture unset it one file into the run. From
+    2026-09-09 to 2026-09-18 that was latent, then it cost twice in a day —
+    `land_failed` rows for a fixture round (`SM_L`) in the live ledger, and
+    `test_a_landing_owns_its_marker…` spinning in `round._land_lock` for as
+    long as PRODUCTION had a promotion under observation (822 s in one run).
+    Restore what was there; `tests/conftest.py` guarantees something was.
+    """
     import importlib
+    before = os.environ.get("LLOYD_AUTOMOD_STATE")
     monkeypatch.setenv("LLOYD_AUTOMOD_STATE", str(tmp_path / "state"))
     importlib.reload(S)
     S.ensure_dirs()
     yield tmp_path / "state"
-    monkeypatch.delenv("LLOYD_AUTOMOD_STATE", raising=False)
+    if before is None:
+        monkeypatch.delenv("LLOYD_AUTOMOD_STATE", raising=False)
+    else:
+        monkeypatch.setenv("LLOYD_AUTOMOD_STATE", before)
     importlib.reload(S)
 
 
@@ -814,6 +832,7 @@ def test_the_grep_corpus_can_be_repointed(monkeypatch, tmp_path):
     import importlib
     (tmp_path / "agent_mcp").mkdir()
     (tmp_path / "app").mkdir()
+    before = os.environ.get("LLOYD_CODE_ROOT")
     monkeypatch.setenv("LLOYD_CODE_ROOT", str(tmp_path))
     import agent_mcp.vault as V
     importlib.reload(V)
@@ -821,7 +840,14 @@ def test_the_grep_corpus_can_be_repointed(monkeypatch, tmp_path):
         assert V.LLOYD_CODE_ROOTS[0] == tmp_path / "agent_mcp"
         assert V.LLOYD_CODE_PREFIX == str(tmp_path) + "/"
     finally:
-        monkeypatch.delenv("LLOYD_CODE_ROOT", raising=False)
+        # Restore, never delete: a reload re-reads the environment, and a
+        # caller that set this for the whole run (an eval arm does) would
+        # otherwise lose it for every test after this one. Same shape as
+        # `isolated_state` above.
+        if before is None:
+            monkeypatch.delenv("LLOYD_CODE_ROOT", raising=False)
+        else:
+            monkeypatch.setenv("LLOYD_CODE_ROOT", before)
         importlib.reload(V)
 
 

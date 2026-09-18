@@ -1074,6 +1074,101 @@ that now overlap another round's turn. Going back to 1 and 1 is two numbers
 in config.yaml (and `slots` back to 3) and a backend restart; nothing else
 changes shape. `tests/test_loop_depth.py` pins all of it.
 
+### 3.2g Between the gate and `main`: a finished change is not lost
+
+Added 2026-09-18, from one day read end to end: 22 rounds, 12 promotions, no
+rollback — and **250 of that day's 994 implement minutes (25%) spent redoing
+changes that had already passed every rung**. Six rounds passed their gate and
+were then thrown away, by three mechanisms; and two items were closed
+"tried it and rejected it" minutes before their changes promoted. None of it
+showed as a failure anywhere: each lost round was re-offered, and landed.
+
+**The gate outgrew the turn.** `backlog.gate_duration_stats` is the measure:
+
+| day | full gates | median (s) | p90 | `tests` rung | `review` rung |
+|---|---|---|---|---|---|
+| 09-12 | 6 | 311 | 354 | 153 | 158 |
+| 09-14 | 32 | 483 | 674 | 231 | 241 |
+| 09-16 | 26 | 692 | 841 | 343 | 330 |
+| 09-18 | 23 | 995 | 1234 | 476 | 401 |
+
+The suite went from ~4,900 to ~5,830 tests and runs serially (no single hot
+test: the slowest is 12 s); at depth 2 the second gate queues 400–470 s for
+`gate-tests.lock`; the grader shares the primary with four turns. The turn's
+clock stayed 3540 s, and the prompt still said "the first `automod_gate` by
+minute 30; after minute 40 start nothing you cannot gate", written when a gate
+took five minutes. The four rounds the clock cost opened their gates at minutes
+37, 40, 42 and 45 — each as told. Three turns ended with the gate still
+running; it passed 1, 5 and 7 minutes later. The fourth saw the pass with 146 s
+left and obeyed the 90% anchor's "stop calling tools".
+
+| what | where | rule |
+|---|---|---|
+| a passed gate whose turn is over is **landed** | `autocode._land_if_passed`, from `reap_abandoned_rounds` | gate `ok` at the commit the worktree still holds; the turn did not end on `unnecessary`/`rejected`; no `promoted`/`land_failed`/`land_rescued` row yet; not halted, not BROKEN, enabled. Ledger row `land_rescued`. Switch `workers.sources.autocode.land_passed_gates` |
+| one definition of "start a landing" | `round.land_detached(round_id, by=)` | the checks, `spawn_detached`, the marker with the child's pid — `automod_land` and the reaper both call it |
+| the reaper keeps up | `autocode.enqueue_if_due` → `_reap_quietly` | also on every look the loop declines (`retry_seconds`), not only at turn end and with housekeeping: a gate that finished after its turn sat up to 900 s, holding the other slots through `_rounds_about_to_land` |
+| pacing is measured | `autocode._pacing_marks` → `{gate_minutes}`, `{first_gate_by}` | median for "a full gate takes about N minutes now"; `first_gate_by = clamp(turn − 1.5 × p90 − 5, 10, 30)` — the slow gate, one refusal, the half-length re-gate. 09-18's ledger: 16 and 23 |
+| gate late rather than not at all | the prompt's pacing block | "commit and gate, however late: a gate that passes after your turn ends is landed by the loop, a refused one comes back with its findings"; "when a gate passes, `automod_land` at once"; "run the tests you changed, never the whole suite — the gate runs it" (22 turns launched the full suite 31 times that day; one slept 12 minutes on it) |
+| the tool says how long | `automod._gate_minutes_note` in `automod_gate`'s RESULT | never in the tool's description: that is part of every turn's cached prompt prefix, and a number that moved with the ledger would re-prefill every session |
+
+This is #278's rescue, made deterministic. That round died at its cap with the
+change written, and the Inner Voice observer sent "if the gate passed, land it"
+into the session. Cut 1 of senses-not-supervision (09-12) switched the observer
+off for unattended turns and replaced its stall, budget and context nudges with
+deterministic anchors — but not that one.
+
+**A model that misreads a pass.** Four rounds in four days were aborted by
+their author 20–90 s after passing every rung, each reporting a refusal that is
+on no ledger row: #1131 (09-15, "both review attempts spent" on a 5-of-5 pass),
+#1190 (09-16, "review refused clause 4" on a first-attempt pass and a green
+rollback drill), #1053 twice (09-18, quoting "REVIEW refused: fixable
+problems" — a phrase in no tool result of that session). The model had the
+whole report each time: `transcript_entries.TOOL_RESULT_MAX_CHARS` clamps the
+stored transcript, never what the model is sent, and the spill threshold is
+50 kB against a 10–21 kB report. What it had was `gate.json` verbatim —
+`"ok": true` on line five, and several hundred lines later the reviewer's
+**advisory** findings, worded as a refusal's are ("cannot fail", "is still
+grep-only"). `_gate_wait` added a `next` only for an external blocker, because
+only that misreading had happened yet.
+
+| what | where | rule |
+|---|---|---|
+| verdict first | `automod._with_headline` | `verdict` and `next` lead every finished report: PASSED → `automod_land` now; REFUSED at review → which attempt, and what that leaves; NOT JUDGED (external) → wait and re-gate; NOT GRADED; FAILED at `<rung>` |
+| advisories are labelled | same | on a pass they move out of the review rung into `notes_that_did_not_block`, which says they did not block and are already on the item; preflight's `allowed` bucket (a second copy of `changed_paths`) is dropped |
+| an abort asks first | `automod._abort_refusal` | refused once for a round whose gate PASSED at its current commit (`discard_passed_gate=true` to mean it), and always while the round's landing is running — `round.abort` removes the worktree. The CLI and the reaper call `round.abort` directly and are not asked |
+
+**An item verdict from a round that is landing.** `unnecessary` and `rejected`
+close the item at the end of the turn, and `parse_outcome` keeps them "as
+stated whatever the clauses say". `rejected` was recorded twice in its first
+two days and was wrong both times: #1242 (`landed: false`, no clauses, a
+summary saying it "cannot state `landed: true` on evidence I do not have" —
+its own `automod_land` was in flight) and #1053 (`landed: true`, four clauses
+`met`, empty summary). Both landed. `close_settled_items` walks open items, so
+neither landing reached its item, and had either promotion failed the item
+would never have been offered again. In a third turn that day the finalizer's
+`summary` invented a review refusal while the review was still running.
+
+| what | where | rule |
+|---|---|---|
+| the verdict is checked | `backlog.settle_item_verdict`, called by `autocode.execute` before the close | refused when `rejected` has no `summary`; when the round is landing and every clause is `met`; or when the ledger shows the landing and the outcome says `landed: false`. Acceptance re-derived from the clauses, `""` with none. `outcome_refused` on the `finished` row |
+| what "landing" means | `autocode._landing_seen` | the live land marker, `current.json`, or a `promoted`/`land_failed`/`land_rescued` row — never the turn's word |
+| the review stands in for a missing outcome | `backlog.code_review_outcome`, in `settled_landings` | the vault rule (§3.2b) for the other surface: newest graded review of the round, not blocking, clauses 1..n all `met`. A reported outcome is never overridden |
+| said where it is read | `automod_land`'s result (`outcome`), the finalizer's own prompt | what `landed` means costs the length-bounded template nothing; the template gained one sentence — a clause is judged on the change, "never that it is not promoted yet" (two turns reported every clause `not_met` for a finished, gated change) |
+
+What still stands: `unnecessary` with nothing landing, and `rejected` with its
+measurement — including a round that landed its instrument and rejected the
+idea (`landed: true`, a clause not met, the numbers in `summary`).
+
+**A deferral waits for what it deferred to.** `backlog._open_deferral_targets`:
+`retriage_spent_items` skips an item whose last round deferred to a still-open
+item. #1069 deferred to blocker #1242, was re-triaged 25 minutes later on a
+tree that still had the obstacle, got a `human-only:` contract citing #1242 —
+and #1242 landed two hours after that with nothing left to read #1069 again.
+
+Scorecard row 9 counts `landings_rescued` and `item_verdicts_refused`. Tests:
+`test_reaper_lands_passed_gates.py`, `test_gate_report_headline.py`,
+`test_outcome_item_verdict.py`, `test_prompt_pacing_and_ordering.py`.
+
 ### 3.3 For humans (this repo's development)
 
 `/home/alansrobotlab/lloyd` is production. Non-trivial work belongs in the
@@ -1704,6 +1799,35 @@ candidate test that forgot its isolation fixture could write a real `BROKEN`
 or `promotions-halted` flag, or append to the production audit trail — from
 inside the gate whose entire contract is read-only judgment. `Gate._child_env`
 points all three at a per-round scratch dir and sets `LLOYD_VOICE_ALERTS=0`.
+
+**That held for one test file, from 2026-09-09 to 2026-09-18.**
+`test_automod_hardening.isolated_state` — "Point the state module at a scratch
+dir. Never the live one." — tore down with `delenv("LLOYD_AUTOMOD_STATE")` and
+`importlib.reload(S)`. A reload re-reads the environment, so `S.STATE_DIR` came
+back as `~/.local/state/lloyd-automod` for every test that ran after that file
+in the session. A two-test probe under the gate's exact environment shows it:
+scratch alone, production after one `isolated_state` test. It was latent until
+two things met it:
+
+- `round.land` installs SIGTERM/SIGHUP handlers and never gave them back. The
+  CLI's process ends with the landing; a test's does not. A round's model
+  `pkill`ed its own background suite run before gating, twice in a day, and the
+  handler a finished `land("SM_L")` had left behind wrote `land_failed` for
+  that fixture round into the production ledger.
+- `test_a_landing_owns_its_marker…` stubs `wait_for_settle` and fakes the lock,
+  and `round._land_lock` re-checks `current.json` after taking the lock and
+  loops while it reads `observing` — with no sleep. Reading production's
+  `current.json`, it spun at one core for as long as production had a promotion
+  under observation: 822 s in one run, three of 09-18's gate runs stretched by
+  three to seven minutes, and one turn slept twelve minutes on its own suite.
+
+Fixed four ways, because each alone leaves the next one open: the fixture
+restores the variable it found; `tests/conftest.py` sets both state variables
+to a scratch dir at import when the caller set none, so a model's plain
+`pytest` cannot address production either; `land` restores the handlers in its
+`finally`; and the re-check sleeps `LAND_LOCK_POLL` before it loops.
+`tests/test_automod_state_isolation.py` pins all four, the first as a child
+pytest session.
 
 ### 4.4 The canary smoke asserts only what is deterministic
 

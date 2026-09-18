@@ -1375,6 +1375,12 @@ workers:
       # turn ends, unless its gate or landing is still running. Turning this
       # back on brings the grace back with it.
       inner_voice: false
+      # The rescue the observer used to make (#278: "if the gate passed, land
+      # it"), done by the reaper since 2026-09-18: a round whose gate PASSED at
+      # the commit it still holds, and whose turn is over, is landed rather
+      # than aborted and re-offered for a whole new round. Four rounds that
+      # day; architecture/automod.md §3.2g. Off: aborted, as before.
+      land_passed_gates: true
       # The hard bound on the board. A self-filed draft that nothing —
       # clustering, group triage, a human — picked up in
       # expire_spawns_after_days is closed, tagged `expired`, and reopens by

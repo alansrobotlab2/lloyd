@@ -417,6 +417,70 @@ def parse_outcome(structured) -> dict | None:
             "human_paths": human_paths}
 
 
+def settle_item_verdict(outcome: dict | None, *, landing_seen: bool) -> tuple[dict | None, str]:
+    """An item verdict checked against what the ledger and the outcome itself
+    say. Returns `(outcome, why_refused)`; `why_refused` is empty when it stands.
+
+    `unnecessary` and `rejected` close an item at the end of the turn, with no
+    landing to wait for and no re-triage afterwards, and `parse_outcome` keeps
+    them "as stated whatever the clauses say". That made them the one field of
+    the finalizer whose cost of being wrong is unrecoverable and the one field
+    nothing cross-checked. `rejected` was recorded twice in its first two days
+    and was wrong both times (2026-09-18): #1242 — `landed: false`, no clauses,
+    a summary saying it would not claim a landing it had not watched finish,
+    while its own `automod_land` was in flight — and #1053 — `landed: true`,
+    four clauses `met`, an empty summary. Both changes landed; both items were
+    closed "tried it and rejected it on the evidence" minutes earlier, and a
+    closed item is invisible to the settle sweep, so had either landing failed
+    the item would never have been offered again.
+
+    Refused, and the acceptance re-derived from the clauses, when:
+
+    * `rejected` carries no `summary` — the schema asks for the measurement
+      there, and a rejection without one is not the verdict Alan's rule
+      (2026-09-16) describes;
+    * the round is landing (`landing_seen`, or the outcome's own `landed`) and
+      every reported clause is `met` — that is what `met` means;
+    * `landing_seen` while the outcome says `landed: false` — it misreports the
+      one fact the ledger can check, so its verdict on the item is not taken.
+
+    What still stands: `unnecessary` with nothing landing (the premise no
+    longer holds, or every clause is already true), and `rejected` with its
+    measurement — including a round that LANDED its instrument and rejected
+    the idea, which reports `landed: true` and at least one clause not met.
+
+    With no clauses to derive from the acceptance becomes `""`: unreported,
+    which `settled_landings` fills from the review rung's grading when that
+    found every clause met (`code_review_outcome`), and otherwise leaves for a
+    person — never a close on the finalizer's word alone.
+    """
+    if not outcome or outcome.get("acceptance") not in ITEM_VERDICT_OUTCOMES:
+        return outcome, ""
+    verdict = outcome["acceptance"]
+    clauses = outcome.get("clause_outcomes") or []
+    outcomes = {c.get("outcome") for c in clauses}
+    landing = bool(landing_seen or outcome.get("landed"))
+    why = ""
+    if verdict == "rejected" and not str(outcome.get("summary") or "").strip():
+        why = "`rejected` with no measurement in `summary`"
+    elif landing and clauses and outcomes == {"met"}:
+        why = f"`{verdict}` from a round that is landing with every clause reported met"
+    elif landing_seen and not outcome.get("landed"):
+        why = f"`{verdict}` with `landed: false` while the round's own landing was in flight"
+    if not why:
+        return outcome, ""
+    if not clauses:
+        derived = ""
+    elif "not_met" in outcomes:
+        derived = "not_met"
+    elif outcomes == {"met"}:
+        derived = "met"
+    else:
+        derived = "deferred" if outcome.get("deferred_to") else "not_met"
+    return {**outcome, "acceptance": derived, "item_verdict_refused": verdict,
+            "landed": bool(landing)}, why
+
+
 def apply_post_landing(outcome: dict | None, post_landing: list[int]) -> dict | None:
     """Re-read an outcome with the review's `post_landing` clauses honoured.
 
@@ -1409,6 +1473,56 @@ PARTIAL_RETRY_CAP = 1
 INCOMPLETE_STOP_REASONS = {"turn_timeout", "max_turns"}
 
 
+def gate_duration_stats(ledger: Path, *, last: int = 20) -> dict:
+    """How long a FULL gate takes now: `{"n", "median_s", "p90_s"}` over the
+    newest `last` of them, or `{"n": 0}` with no history.
+
+    A number a round is told has to be measured where it is read. The
+    implement prompt said "the first `automod_gate` by minute 30; after minute
+    40 start nothing you cannot gate" and the gate tool said "seven to twelve
+    minutes", both written while a gate took five to eight. By 2026-09-18 the
+    median was 995 s — the suite had tripled, two rounds queue for it at depth
+    2, and the grader shares an engine with four turns — and every round lost
+    to its clock that day started its gate between minute 37 and minute 45.
+
+    A full gate is one run of the ladder (it starts at `preflight`) whose
+    `tests` rung ran the whole suite — not `REUSED`, not the partial re-run of
+    changed files a re-gate gets — and that reached the `review` rung. Timed
+    from the first rung's start to the last rung's end, so the wait for the
+    suite lock is in it: that wait is part of what the round's clock pays.
+    """
+    runs: dict[str, list[list[dict]]] = {}
+    for d in _ledger_events(ledger, "gate", require_item=False):
+        rid = str(d.get("round_id") or "")
+        if not rid:
+            continue
+        per_round = runs.setdefault(rid, [])
+        if d.get("rung") == "preflight" or not per_round:
+            per_round.append([])
+        per_round[-1].append(d)
+    timed: list[tuple[float, float]] = []
+    for per_round in runs.values():
+        for run in per_round:
+            tests = next((e for e in run if e.get("rung") == "tests"), None)
+            if tests is None or not any(e.get("rung") == "review" for e in run):
+                continue
+            detail = str(tests.get("detail") or "")
+            if tests.get("skipped") or detail.startswith("REUSED") or "(partial" in detail:
+                continue
+            start = float(run[0].get("ts") or 0) - float(run[0].get("seconds") or 0)
+            end = float(run[-1].get("ts") or 0)
+            if end > start > 0:
+                timed.append((end, end - start))
+    timed.sort()
+    secs = sorted(s for _, s in timed[-max(1, int(last)):])
+    if not secs:
+        return {"n": 0}
+    mid = len(secs) // 2
+    median = secs[mid] if len(secs) % 2 else (secs[mid - 1] + secs[mid]) / 2
+    return {"n": len(secs), "median_s": round(median, 1),
+            "p90_s": round(secs[min(len(secs) - 1, int(0.9 * (len(secs) - 1) + 0.5))], 1)}
+
+
 def _last_gate_per_round(ledger: Path) -> dict[str, dict]:
     """The event that last JUDGED each round: the rung that ended its most
     recent gate run, or a landing that failed after the gate had passed.
@@ -1936,9 +2050,18 @@ def settled_landings(ledger: Path) -> list[dict]:
         reported = outcome.get("acceptance") if isinstance(outcome, dict) else None
         if rid in promoted and promoted[rid]["commit"] not in reverted:
             p = promoted[rid]
+            # Nothing reported: the vault review for a `vault` contract, else
+            # the review rung's own grading of this round. Both answer only
+            # when every clause was `met`; a reported outcome is never
+            # overridden. The refused item verdict rides along so the sweep's
+            # note can say why the turn's word was not taken.
+            stand_in = None if reported else (graded_for(d, vault)
+                                              or code_review_outcome(ledger, rid))
+            if stand_in and isinstance(outcome, dict) and outcome.get("item_verdict_refused"):
+                stand_in = {**stand_in, "item_verdict_refused": outcome["item_verdict_refused"]}
             out.append({"item_id": int(d["item_id"]), "round_id": rid, "commit": p["commit"],
                         "settled_at": settled[p["commit"]].get("created_at"),
-                        "outcome": outcome if reported else (graded_for(d, vault) or outcome),
+                        "outcome": outcome if reported else (stand_in or outcome),
                         "vault": False})
             continue
         if not vault:
@@ -2008,6 +2131,53 @@ def vault_review_outcome(ledger: Path, vault_commits: list[str], *,
                                  "evidence": f"vault review of {sha[:8]}"}
                                 for i in sorted(verdicts)],
             "summary": f"the vault review of {sha[:8]} graded all {n} clause(s) met"}
+
+
+def code_review_outcome(ledger: Path, round_id: str) -> dict | None:
+    """A `met` outcome built from the review rung's grading of a code round, or None.
+
+    The vault rule (`vault_review_outcome`), for the other surface, and for the
+    same reason: a landing with no reported outcome used to wait for a person,
+    and the review rung had already graded the whole contract with evidence.
+    Three ways a code landing arrives here with nothing reported — a turn that
+    died at `max_turns` or its wall clock has no finalizer, a gate that passed
+    after the turn ended is landed by the reaper (`land_rescued`), and an item
+    verdict the landing contradicts is refused (`settle_item_verdict`). Only
+    ever a stand-in for an outcome that is MISSING: what the turn did report is
+    never overridden.
+
+    Reads the round's NEWEST graded review. It must not be blocking, its
+    verdicts must cover clauses 1..n with no gap, and every one must be `met` —
+    `unmet`, `unsatisfiable`, `post_landing` or anything else answers None,
+    which leaves the landing exactly where it stood. A rebase re-uses that
+    review by patch-id (`gate.rung_review`), so the newest row is the one whose
+    diff landed.
+    """
+    rid = str(round_id or "")
+    if not rid:
+        return None
+    graded = [d for d in _ledger_events(ledger, "review", require_item=False)
+              if str(d.get("round_id") or "") == rid and d.get("ok") and d.get("clauses")]
+    if not graded:
+        return None
+    last = max(graded, key=lambda d: float(d.get("ts") or 0))
+    if last.get("blocking"):
+        return None
+    verdicts: dict[int, str] = {}
+    for c in last["clauses"]:
+        try:
+            verdicts[int(c["clause"])] = str(c["verdict"])
+        except (KeyError, TypeError, ValueError):
+            return None
+    n = len(verdicts)
+    if not n or set(verdicts) != set(range(1, n + 1)) or any(v != "met" for v in verdicts.values()):
+        return None
+    return {"acceptance": "met", "landed": True, "source": "code_review",
+            "deferred_to": [], "spawned": [],
+            "clause_outcomes": [{"clause": i, "outcome": "met", "deferred_to": [],
+                                 "evidence": f"review rung, round {rid}"}
+                                for i in sorted(verdicts)],
+            "summary": f"the review rung graded all {n} clause(s) met for round {rid}"}
 
 
 def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
@@ -2111,10 +2281,19 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
                    "still owes: " + "; ".join(human))
         elif acc == "met":
             close = True
-            why = ("the vault review graded every acceptance clause met; the turn ended "
-                   "without reporting an outcome" if outcome.get("source") == "vault_review"
-                   else "the round reported the acceptance check met") + (
-                f" — {outcome['summary']}" if outcome.get("summary") else "")
+            refused = outcome.get("item_verdict_refused")
+            stood_in = {"vault_review": "the vault review", "code_review": "the review rung"}.get(
+                str(outcome.get("source") or ""))
+            if stood_in:
+                why = (f"{stood_in} graded every acceptance clause met; "
+                       + (f"the turn's own `{refused}` was not taken, because its round landed"
+                          if refused else "the turn ended without reporting an outcome"))
+            elif refused:
+                why = (f"the round reported every acceptance clause met; its `{refused}` was not "
+                       f"taken, because its round landed")
+            else:
+                why = "the round reported the acceptance check met"
+            why += f" — {outcome['summary']}" if outcome.get("summary") else ""
         elif acc == "deferred":
             ids = ", ".join(f"#{i}" for i in outcome.get("deferred_to") or []) or "an unnamed follow-up"
             close, why = False, (f"the round deferred the acceptance check to {ids}; "
@@ -2124,9 +2303,13 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
             close, why = False, ("the round landed but reported the acceptance check not met"
                                  + (f" (clause(s) {unmet}); offered again for those" if unmet
                                     else ""))
+        elif outcome.get("item_verdict_refused"):
+            close, why = False, (f"the turn reported `{outcome['item_verdict_refused']}` for a round "
+                                 f"that landed, which was not taken, and the review rung did not "
+                                 f"grade every clause met; a human decides")
         else:
-            close, why = False, ("the round recorded no structured outcome (it predates the "
-                                 "finalizer); a human decides")
+            close, why = False, ("the round recorded no structured outcome, and the review rung "
+                                 "did not grade every clause met; a human decides")
         close_landed(item, commit=landing["commit"], round_id=landing["round_id"],
                      settled_at=str(landing.get("settled_at") or ""), close=close, why=why,
                      tags=tags)
@@ -4041,6 +4224,35 @@ def _refusal_for_retriage(ledger: Path, item_id: int, round_id: str, detail: str
             "unmet_twice": sorted(n for n, k in flagged.items() if k >= 2)}
 
 
+def _open_deferral_targets(rows: list[dict], item_id: int, open_ids: set[int]) -> list[int]:
+    """The still-open items an item's LAST finished round deferred to.
+
+    The handoff a blocker exists for: a round files it ("Blocks #N"), defers
+    its clause to it, and ends. That reads as `spent`, and the second life used
+    to follow within one housekeeping tick — so the item was re-triaged on a
+    tree that still had the obstacle in it. #1069 (2026-09-18) deferred to
+    #1242 at 15:33Z because `prompt_surface.py` was outside every round's
+    writable set; it was re-triaged at 15:58Z, the triage correctly found that
+    path unwritable and wrote a `human-only:` contract citing #1242; #1242
+    landed at 17:43Z; and the item sat in `draft`, high priority, its work on a
+    kept branch, with nothing left that would ever read it again.
+
+    Waiting costs nothing the loop needs: a live blocker is triaged and
+    implemented ahead of everything else, and a blocker that closes any other
+    way (stale, rejected, a person) releases the item just the same. The item's
+    own id is ignored — two of that day's outcomes deferred to themselves.
+    """
+    last = next((r for r in reversed(rows) if str(r.get("phase") or "") == "finished"), None)
+    outcome = (last or {}).get("outcome")
+    if not isinstance(outcome, dict):
+        return []
+    targets = _ints(outcome.get("deferred_to"))
+    for c in outcome.get("clause_outcomes") or []:
+        if isinstance(c, dict):
+            targets += [i for i in _ints(c.get("deferred_to")) if i not in targets]
+    return [i for i in targets if i != int(item_id) and i in open_ids]
+
+
 def retriage_spent_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
                          enabled: bool = True) -> list[dict]:
     """Send a spent item back through triage once, with its refusal attached.
@@ -4072,6 +4284,7 @@ def retriage_spent_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_
     unfinished = items_with_unfinished_rounds(ledger, history=history)
     last_round = {iid: next((str(r["round_id"]) for r in reversed(rows) if r.get("round_id")), "")
                   for iid, rows in history.items()}
+    open_ids = {i.id for i in open_items(None)}
     out: list[dict] = []
     for item in open_items(boards):
         verdict, detail = outcomes.get(item.id, ("", ""))
@@ -4085,6 +4298,11 @@ def retriage_spent_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_
             continue
         fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
         if fm.get(LANDED_MARKER) or any(fm.get(m) for m in _LEGACY_LANDED_MARKERS):
+            continue
+        # Deferred to an item that is still open: wait for it. The second
+        # triage judges the tree as it stands, and until the blocker lands the
+        # tree still has the obstacle in it (see `_open_deferral_targets`).
+        if _open_deferral_targets(history.get(item.id) or [], item.id, open_ids):
             continue
         rid = last_round.get(item.id, "")
         refusal = _refusal_for_retriage(ledger, item.id, rid, detail)

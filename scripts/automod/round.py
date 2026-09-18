@@ -232,6 +232,12 @@ def _land_lock(round_id: str, *, dry_run: bool = False) -> "S.Lock":
         now = S.read_current() if not dry_run and S.chamber_enabled(LIVE_ROOT) else None
         if now and now.get("state") == "observing" and time.time() < deadline:
             lock.release()
+            # Paced like the `LockHeld` branch. What bounds this loop is
+            # `wait_for_settle` blocking at its top, and a loop whose only
+            # brake is a callee is a busy loop the day that callee returns
+            # early: with it stubbed, a test spun here at 100% CPU for 822 s,
+            # re-parsing config.yaml, until PRODUCTION's promotion settled.
+            time.sleep(LAND_LOCK_POLL)
             continue
         return lock
 
@@ -240,7 +246,7 @@ class LandingKilled(RuntimeError):
     """The landing process was signalled before it promoted anything."""
 
 
-def _die_loudly_on_signal(round_id: str) -> None:
+def _die_loudly_on_signal(round_id: str):
     """SIGTERM/SIGHUP while a landing WAITS becomes an external `land_failed`.
 
     Python's default SIGTERM ends the process with no `finally`: the land
@@ -252,6 +258,14 @@ def _die_loudly_on_signal(round_id: str) -> None:
     has merged: once `promote` is past the fast-forward its own rollback
     path owns the failure, and this handler is restored to the default there
     by the process simply not being in a wait.
+
+    Returns a callable that puts the previous handlers back, and `land` calls
+    it on the way out. The CLI never needed that — its process ends with the
+    landing — but `land` is also called in-process (the tests do), and a
+    handler that outlives the landing it names speaks for a round that is
+    over: on 2026-09-18 a round's model `pkill`ed its own background pytest,
+    twice, and each time the handler a finished `land("SM_L")` had left behind
+    wrote `land_failed` for that fixture round into the production ledger.
     """
     import signal
 
@@ -262,11 +276,22 @@ def _die_loudly_on_signal(round_id: str) -> None:
                                    f"promoted anything — a foreground `round land` under a Bash "
                                    f"timeout does this; use automod_land")})
         raise LandingKilled(f"landing of {round_id} killed by signal {int(signum)}")
+    previous: dict = {}
     for sig in (signal.SIGTERM, signal.SIGHUP):
         try:
-            signal.signal(sig, _handler)
+            previous[sig] = signal.signal(sig, _handler)
         except (ValueError, OSError):   # not the main thread: nothing to install
-            return
+            break
+
+    def _restore() -> None:
+        for sig, old in previous.items():
+            try:
+                # `None` is what `signal.signal` returns for a handler that was
+                # not installed from Python; the default is the honest stand-in.
+                signal.signal(sig, signal.SIG_DFL if old is None else old)
+            except (ValueError, OSError):
+                pass
+    return _restore
 
 
 def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
@@ -277,13 +302,14 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
     `automod_land` ends — cannot abort a round that is waiting for idle or
     chasing a moved `main`. A dry run neither writes nor clears it.
     """
+    restore_signals = None
     if not dry_run:
         live = S.land_in_progress(round_id)
         if live and int(live.get("pid") or 0) != os.getpid():
             raise RuntimeError(f"a landing is already running for {round_id} (pid "
                                f"{live['pid']}, started {live.get('started_iso')})")
         S.write_land_marker(round_id, pid=os.getpid(), by="round.land")
-        _die_loudly_on_signal(round_id)
+        restore_signals = _die_loudly_on_signal(round_id)
     try:
         if not (force or dry_run):
             S.require_enabled("land a round", LIVE_ROOT)
@@ -315,6 +341,46 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
     finally:
         if not dry_run:
             S.clear_land_marker(round_id, pid=os.getpid())
+        if restore_signals is not None:
+            restore_signals()
+
+
+def land_detached(round_id: str, *, by: str) -> dict:
+    """Start `round land` for a gate-passed round in its own session.
+
+    `{"pid", "log"}` on success, `{"error"}` otherwise. The one definition of
+    "start a landing from inside the stack", for its two callers: the
+    `automod_land` tool, which runs inside lloyd-mcp, and the implement
+    source's reaper, which runs inside the backend. A landing restarts both,
+    and both confs set `stopasgroup`, so a landing run in-process is killed
+    partway through its own restart (`agent_mcp/automod.py::_land_detached`
+    has the long version); `spawn_detached` is what a process-group signal
+    cannot reach.
+
+    The marker is written here, with the child's pid, BEFORE this returns: the
+    child takes seconds to import and write its own, and the reaper looks at
+    an open round the moment its turn is over. Same pid, so the child's write
+    replaces it.
+    """
+    if S.gate_in_progress(round_id):
+        return {"error": f"a gate is still running for {round_id} — automod_gate_wait first"}
+    if S.land_in_progress(round_id):
+        return {"error": f"a landing is already running for {round_id} — end your turn"}
+    gate_path = S.ROUNDS_DIR / round_id / "gate.json"
+    if not gate_path.exists():
+        return {"error": f"{round_id} has no gate report — run automod_gate first"}
+    report = json.loads(gate_path.read_text())
+    if not report.get("ok"):
+        failed = [r["name"] for r in report.get("rungs", []) if not r["ok"]]
+        return {"error": f"gate did not pass (failed: {failed})"}
+    if not W.worktree_path(round_id).exists():
+        return {"error": f"no worktree for {round_id}"}
+    log = S.ROUNDS_DIR / round_id / "land.log"
+    python = LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
+    pid = S.spawn_detached([python, "-m", "scripts.automod.round", "land", round_id],
+                           log, cwd=LIVE_ROOT)
+    S.write_land_marker(round_id, pid=pid, by=by)
+    return {"pid": pid, "log": str(log)}
 
 
 def abort(round_id: str, reason: str = "") -> dict:
