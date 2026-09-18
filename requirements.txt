@@ -33,3 +33,12 @@ playwright>=1.58.0
 
 # Discord bot
 discord.py>=2.3.0
+
+# Voice worker (agent-services/voice/). Parakeet ASR through sherpa-onnx, CPU.
+# Silero VAD is NOT a package dependency on purpose: `silero-vad` requires
+# torchaudio, which pins torch — installing it moved this venv from torch
+# 2.11.0 (CUDA 13) to 2.9.1 (CUDA 12) on 2026-09-17. Its ONNX model is
+# vendored at agent-services/models/silero-vad/ and called via onnxruntime.
+sherpa-onnx>=1.13.8
+# scripts/voice/asr_eval.py reads its corpus from parquet.
+pyarrow>=25.0

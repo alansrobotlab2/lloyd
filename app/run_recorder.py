@@ -228,6 +228,7 @@ class _RunRecorder:
                     self.text, timestamp=datetime.now().isoformat(),
                     stats=dict(self.iteration_stats),
                     reasoning=self.thinking, reasoning_ms=self.thinking_ms,
+                    turn_id=self.turn_id,
                 )])
                 self.text = ""
                 self.thinking = ""
@@ -304,6 +305,7 @@ class _RunRecorder:
                     structured=evt.get("structured"),
                     cancelled=self.stop_reason == "cancelled",
                     source=self.source or "background",
+                    turn_id=self.turn_id,
                 ))
             await self._append(tail)
             self.text = ""
@@ -343,6 +345,7 @@ class _RunRecorder:
                 self.text, timestamp=ts, reasoning=self.thinking,
                 reasoning_ms=self.thinking_ms, cancelled=True,
                 source=self.source or "background",
+                turn_id=self.turn_id,
             ))
         await self._append(tail)
         self._log("background.run_interrupted", {

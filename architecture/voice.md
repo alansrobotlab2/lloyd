@@ -1,23 +1,33 @@
 ---
 segment: architecture
-tags: [architecture, lloyd, voice, livekit, tts, stt, asr, wakeword, speaker-id]
+tags: [architecture, lloyd, voice, livekit, tts, stt, asr, wakeword, speaker-id, vad, turn-detection]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-09-17
 ---
 
 # Voice
 
 Talking to Lloyd out loud, and Lloyd talking back. This is the whole round
-trip in one place: the LiveKit transport, the wake word, ASR, the gate that
-decides whether a transcript becomes a turn, the cloned TTS voice, and the two
+trip in one place: the LiveKit transport, the hearing pipeline (VAD, wake word,
+end-of-turn, ASR), the gate that decides whether an utterance becomes a turn,
+the reply spoken while it streams, the cloned TTS voice, and the two
 corrections applied to it on the way out. Where a piece has a setup story — a
 model file on disk, a vendored upstream, a secret — that story is here too, and
 [[infrastructure]] / `SETUP.md` carry only the pointer.
 
 One agent worker (`lloyd-agent-worker`) sits in a LiveKit room with the
 browser, turns what it hears into an ordinary user turn on a chat session, and
-speaks the reply back in a voice it corrects client-side.
+speaks the reply back — clause by clause as the model writes it — in a voice it
+corrects client-side.
+
+**The hearing and speaking halves were rebuilt on 2026-09-17** after a review
+measured the old ones: the wake word had fired 5 times in 949 utterances, an
+energy VAD was discarding normal-volume speech, Whisper `base.en` took longer
+on shorter clips, and a reply was not spoken until it had been finished,
+rewritten by a second model and found by a 500 ms transcript poll. "The
+2026-09-17 rework" below is the account; the measurements that decided each
+piece are in it, and `scripts/voice/` reproduces them.
 
 ## The round trip
 
@@ -28,35 +38,35 @@ which is why each half can be restarted, or break, on its own.
 | Process | Port | Role | Launcher |
 |---|---|---|---|
 | `agent-livekit-server` | 7880 (+7881 TCP, 50000–50100 UDP) | the LiveKit SFU binary. Never reads TTS config | `bin/start-livekit-server.sh` |
-| `lloyd-agent-worker` | 8501 (loopback, diag only) | `agent-services/livekit_worker.py` — VAD, wake word, STT, speaker id, TTS shaping | supervisord runs it directly |
+| `lloyd-agent-worker` | 8501 (loopback, diag only) | `agent-services/livekit_worker.py` + `agent-services/voice/` — hearing, the gate, streaming TTS | supervisord runs it directly |
 | `agent-tts` | 8090 | Qwen3-TTS, OpenAI-shaped `/v1/audio/speech` | `bin/start-qwen3-tts.sh` |
 | `lloyd-mc:lloyd-backend` | 8080 | `/api/voice/*`, `/api/livekit/token`, the turn itself | `server.py` |
 | `lloyd-mc:lloyd-frontend` | 5173 | Vite: proxies `/api` to the backend and `/livekit` to the SFU | `npm --prefix web run dev` |
 
 Both the worker and the TTS engine are pinned to **GPU 0** (the desktop 3090)
 by `CUDA_VISIBLE_DEVICES` in their supervisord programs — see
-[[infrastructure]] for why the worker must stay off GPU 1. STT, VAD and the
-speaker encoder are all `device: cpu`; the worker's VRAM is a dependency
-initialising a CUDA context, not a model.
+[[infrastructure]] for why the worker must stay off GPU 1. Every model the
+worker runs is CPU ONNX: Silero VAD, openWakeWord, Smart Turn, Parakeet (via
+sherpa-onnx) and Resemblyzer. The worker's VRAM is a dependency initialising a
+CUDA context, not a model.
 
 ```mermaid
 graph TB
     Browser["Browser mic<br/>VoiceRoom.tsx"] -->|"WebRTC"| SFU["agent-livekit-server<br/>:7880"]
-    SFU --> Worker["lloyd-agent-worker<br/>livekit_worker.py"]
+    SFU --> Worker["lloyd-agent-worker"]
 
-    subgraph "in the worker"
-        VAD["UtteranceSegmenter<br/>(energy VAD)"] --> WW["AcousticWakeWord<br/>(openWakeWord)"]
-        WW --> STT["WhisperSTT<br/>(faster-whisper base.en)"]
-        STT --> Gate["WakeState gate<br/>+ voiceprint anchor"]
+    subgraph "hearing thread, one per participant (voice/)"
+        RS["StreamResampler → 16 kHz"] --> WW["ContinuousWakeWord<br/>(openWakeWord, fed every frame)"]
+        RS --> VAD["SileroSegmenter"]
     end
+    Worker --> RS
+    WW -->|"wake event, mid-word"| Gate
+    VAD -->|"utterance"| Gate["gate: Smart Turn → Parakeet →<br/>wake / text-wake / window"]
 
-    Worker --> VAD
-    Gate -->|"POST /api/voice/inject"| Backend["backend :8080"]
-
-    Backend -->|"GET /api/messages/&lt;session&gt;"| Worker
-    Worker -->|"POST /api/voice/summarize"| Backend
-    Backend -.->|"secondary model"| Backend
-    Worker -->|"POST /v1/audio/speech"| TTS["Qwen3-TTS :8090"]
+    WW -.->|"POST /api/voice/prewarm"| Backend
+    Gate -->|"POST /api/voice/inject {stream:true}"| Backend["backend :8080"]
+    Backend -->|"SSE: the turn's own events"| Clauses["ClauseStream<br/>(voice/speakable.py)"]
+    Clauses -->|"POST /v1/audio/speech, per clause"| TTS["Qwen3-TTS :8090"]
     TTS -->|"s16le PCM"| Shaper["OutputShaper<br/>presence EQ + WSOLA"]
     Shaper -->|"100 ms frames"| SFU
     SFU --> Browser
@@ -70,16 +80,23 @@ End to end, one utterance:
 1. The browser mints a room-scoped JWT from `POST /api/livekit/token` and joins
    `lloyd-<session_id>` over WebRTC.
 2. `WorkerManager` sees a room with a non-agent participant within 2 s and
-   opens a `RoomBridge` on it.
-3. `UtteranceSegmenter` cuts the incoming frames into utterances on energy.
-4. openWakeWord and Whisper run on that utterance **in parallel**; `WakeState`
-   decides whether it opens a window, extends one, or is dropped.
-5. What survives is POSTed to `/api/voice/inject` as `source="user"`, and from
-   there it is an ordinary chat turn — SSE to any open UI, the usual harness.
-6. `_poll_session_messages` notices the new assistant message, rewrites it for
-   speech on the secondary model, and synthesises it.
-7. `OutputShaper` corrects the audio and pushes 100 ms frames onto the
-   `lloyd-tts` track; the browser plays it and mutes the mic while it does.
+   opens a `RoomBridge` on it. Each participant's audio gets its own
+   `HearingThread`, which runs a `HearingPipeline` off the event loop.
+3. Every frame is resampled once to 16 kHz and fed to the wake word and to
+   Silero. The wake word fires **while the word is being said**; the worker
+   opens the window, pushes `wake_state: listening` to the browser and asks the
+   backend to prewarm the session's prompt, all before the sentence ends.
+4. Silero closes the utterance after 380 ms of silence. Smart Turn decides
+   whether it is a finished thought (if not, it is held and joined to what
+   follows); Parakeet transcribes it in ~60 ms.
+5. The gate decides: wake detected in it, or a transcript that opens with a
+   wake phrase, or the locked speaker's continuation window. What survives is
+   POSTed to `/api/voice/inject` with `stream: true`.
+6. The backend enqueues an ordinary user turn — with a voice reminder in the
+   prompt's tail and thinking off — and streams that turn's own events back.
+7. The worker cuts the streamed text into clauses and sends each to TTS the
+   moment it is complete; `OutputShaper` corrects the audio and 100 ms frames go
+   out on the `lloyd-tts` track while the model is still writing.
 
 ## LiveKit: the transport
 
@@ -153,120 +170,204 @@ backend answers 503 rather than minting an unsigned token when they are absent.
 
 ## Hearing
 
-Four stages, and the ordering of the middle two is a latency decision rather
-than a logical one.
+`agent-services/voice/` is the whole of it, and none of it imports LiveKit or
+the worker — so every stage can be driven from a WAV. That is the point of the
+split: the pipeline it replaced lived inline in `RoomBridge`, could not be
+built without a room, and was observable only through its log, which is how
+5 wake fires in 949 utterances went unnoticed for three weeks.
 
-### Segmentation
+| Module | Stage |
+|---|---|
+| `resample.py` | `StreamResampler`: one stateful resample to 16 kHz, shared by every model |
+| `wake.py` | `ContinuousWakeWord`, `WakeWordFactory`: openWakeWord fed continuously |
+| `vad.py` | `SileroSegmenter`: speech, not energy |
+| `turn.py` | `SmartTurn`: "was that a finished thought?" |
+| `asr.py` | `SherpaOfflineRecognizer` (Parakeet), `WhisperRecognizer`, `SherpaStreamingRecognizer` |
+| `pipeline.py` | `HearingPipeline`: owns one stream's clock and emits `HearingEvent`s |
+| `runner.py` | `HearingThread`: one per participant, off the event loop |
+| `speakable.py` | `ClauseStream`: the speaking half's text segmenter (below) |
 
-`UtteranceSegmenter` is an energy VAD, not Silero: `speech_rms` 0.025,
-`min_speech_frames_to_start` 3 to debounce a mic click, `silence_ms` 500 to
-close an utterance, `min_utterance_ms` 350 and `max_utterance_ms` 30000 as the
-floor and the hard cap. It keeps a `LEAD_IN_MS` (200 ms) ring of pre-speech
-audio so the first phoneme is not clipped, and those lead-in samples
-deliberately do **not** count toward the `min_voiced_ratio` 0.3 check — they
-are the silence kept to protect the onset, and counting them would make every
-utterance look less voiced than it is. Drops are logged as `diag-drop` with the
-reason.
+### One stream, one clock, one thread
 
-### The acoustic wake word
+Everything in the pipeline holds per-stream state — the resampler's filter
+history, Silero's recurrent state, openWakeWord's feature window — so a
+`HearingPipeline` is per participant and never shared. Every index it reports
+is 16 kHz samples since the stream opened, which is how a wake detection
+(stamped by a model that reads 1280-sample frames) is attached to an utterance
+(closed by one that reads 512).
 
-`AcousticWakeWord` runs openWakeWord directly on the audio, at
-`threshold: 0.4`. It exists because Whisper is unreliable on the wake phrase
-specifically — "Lloyd" comes back as "Floyd", "Eloid" or "Alloyed" when said
-quietly, and a text-match gate then drops a turn the user definitely addressed
-to Lloyd. Audio is resampled to 16 kHz with `resample_poly` and swept in
-1280-sample (80 ms) chunks, keeping the max score per model. `predict()`
-accumulates confidence across chunks, so the model is `reset()` before each
-utterance or the previous one leaks in.
+It runs on its own thread, fed by an unbounded queue, and posts events back
+with `call_soon_threadsafe`. The pipeline costs ~6% of a core per participant
+but arrives as a spike every eighth frame, on the loop that paces TTS frames
+into LiveKit; and `asyncio.to_thread` per 10 ms frame would be a hundred
+handoffs a second. The queue never drops audio, because a bounded one that did
+would reintroduce the silent gaps this work removes.
 
-Four ONNX files make it work, and all four **are tracked in this repo** — they
-arrive with the clone and there is nothing to install:
+**The resampler guards both edges.** `resample_poly` zero-pads each end of
+whatever it is handed. The first cut only prepended history and still emitted
+the tail — 6.7e-2 peak error against the one-shot result, audible, and
+invisible to anything but `test_streaming_matches_one_shot`, which now pins it
+to 1e-6. It holds the last filter-length of input back until it has right-hand
+support: 2.7 ms of delay at 48 kHz.
 
-```
-agent-services/models/wakeword/Lloyd.onnx          # custom-trained
-agent-services/models/wakeword/Hey_Lloyd.onnx      # custom-trained
-agent-services/models/openwakeword/melspectrogram.onnx   # the shared frontend
-agent-services/models/openwakeword/embedding_model.onnx
-```
+### Segmentation: Silero, not an energy threshold
 
-`models_dir` holds the two wake models, `engine_dir` the two openWakeWord
-engine models every wake model runs on top of. They are **force-added past**
-`agent-services/.gitignore`'s `models/` rule, which is unanchored and would
-otherwise also swallow the 311 GB `llm/models/` tree — so if you retrain a wake
-word, `git add -f` the new file rather than trying to negate the ignore rule.
-Without them, `livekit.acoustic_wake.enabled: true` cannot load and detection
-falls back to text matching alone, which is the failure this stage was added to
-fix.
+The energy VAD was the root cause of voice barely working. Its `speech_rms`
+was 0.025 and every wake-word utterance in the diagnostic corpus measured
+`rms_mean` 0.013–0.017 — normal speech at a normal distance sat below the
+speech threshold, so only the loudest syllables crossed it and sentences
+arrived as fragments with the quiet parts missing. No threshold could fix it:
+loudness is the wrong quantity. Silero asks whether the sound is speech;
+measured here its mean speech probability held at 0.87–0.89 across a 16×
+attenuation, and it costs 0.14 ms per 32 ms frame.
 
-The text list (`livekit.wake.words`: `lloyd`, `hey lloyd`, `hi lloyd`,
-`okay lloyd`, `hello lloyd`) is the second, independent path — `_strip_wake_word`
-matches against the transcript and removes the phrase before injection.
+`livekit.vad`: `threshold` 0.45 (a false positive is cheap now — the gate
+decides — and a false negative is a sentence never heard), `min_silence_ms`
+380, `speech_pad_ms` 220 of pre-roll, `min_utterance_ms` 250,
+`max_utterance_ms` 30000. The old `min_voiced_ratio` is gone: Silero's
+probability *is* the voicing measure, and a second one on top dropped 208
+utterances. A capped utterance continues straight into the next rather than
+waiting for a fresh onset, so the word after the cap survives; a participant
+who leaves mid-sentence has it flushed.
 
-### STT
+### The acoustic wake word, fed continuously
 
-`WhisperSTT` wraps faster-whisper (`base.en`, cpu, int8). It is constructed
-lazily but **eager-loaded in `WorkerManager.run()`**, so the first utterance
-does not pay for it; a failed eager load only warns and retries on first use.
-Weights download to `~/.cache/huggingface` on first run, which is the only
-network dependency in the hearing path.
+The old `AcousticWakeWord` waited for the VAD to close an utterance, reset the
+model and swept `predict()` across it. That gated the wake word on the very
+component dropping the audio, and it shared one stateful `Model` across every
+room from a thread pool. Now each stream owns a model fed every frame and
+never reset, so the word is heard as it is said:
 
-The decode thresholds are tightened well past the defaults
-(`no_speech_threshold` 0.7, `log_prob_threshold` -0.8,
-`compression_ratio_threshold` 2.0) because the defaults are tuned for long-form
-audio and short utterances make Whisper hallucinate politely — "Thank you.
-Thank you. Thank you." on near-silence. `_looks_repetitive` catches what
-survives that: any 1- or 2-word phrase repeated four or more times
-consecutively drops the whole transcript.
+- **It fires as the word ends**, measured −60 to +20 ms from the last phoneme
+  (`test_the_wake_fires_as_the_word_ends_…`). The window opens, the browser
+  shows "Listening" and the backend starts prewarming before the sentence is
+  finished — 1.8–1.9 s before its end in the end-to-end runs.
+- **False accepts fell from 6 to 0** on the 496 non-wake utterances of real
+  room audio in the diagnostic corpus, at the production threshold of 0.4
+  (`scripts/voice/replay.py compare-wake`). A reset model sees an empty
+  feature history, and on that the tail of a word ("…oyd", "go go") scores
+  like the whole phrase.
+- **Recall roughly doubled** on 48 synthetic wake phrases in six voices: 10
+  for the sweep, 17–23 continuous depending on lead-in and level.
 
-`hotwords_file` (`~/obsidian/hotwords.md`) biases the decoder toward names it
-would otherwise mangle — it is an ordinary vault note, so adding a name is an
-edit, not a deploy.
+A note on what was *not* the problem, because the first version of this doc
+claimed it was: `predict()` zeroes its first 5 outputs after a reset, but only
+its outputs — the feature buffers keep filling — so a word that starts 200 ms
+into a swept clip still scores 0.95. Measure before believing a mechanism.
 
-PCM is wrapped into an in-memory WAV and handed to faster-whisper's own
-`decode_audio` rather than resampled by hand.
+`WakeWordFactory.validate()` runs at boot and a missing model file is a boot
+error, not a warning: the old fallback to text matching is how the worker
+stayed silently deaf. It also absorbs openwakeword's 0.4 → 0.6 constructor
+change; 0.4.0 is installed and nothing here needs 0.6. `refractory_ms` 1500
+stops one "hey Lloyd" opening the window three times (the score stays high for
+several frames after the word). The running peak score is reset at each speech
+onset, so the `wake_peak` on a drop line describes that utterance.
+
+**The models themselves are the weak link.** Even continuous, `Lloyd.onnx` and
+`Hey_Lloyd.onnx` caught fewer than half of clean synthetic wake phrases —
+almost none of "Hi / Okay / Hello Lloyd" — and scored "Floyd came over" at
+0.59. Retraining them (openWakeWord's recipe, or livekit-wakeword, which loads
+the same embedding front end) is the open item. Until then the transcript
+covers it:
+
+### The second wake path: the transcript
+
+`livekit.wake.text_fallback`: an idle utterance the acoustic model did not
+claim is transcribed, and wakes Lloyd if the transcript **opens** with a wake
+phrase (`_strip_wake_word`, one leading "uh" / "um" / "oh" allowed, never two —
+"so I told Lloyd" is the name, not an address). Measured on the same sets:
+
+| wake path | 48 wake phrases, 6 voices | 48 near-misses | 496 real room utterances |
+|---|---|---|---|
+| acoustic, continuous | 17–23 | 0–1 | 0 |
+| transcript opens with a wake phrase | **40** | **0** | **0** |
+
+This was never viable before: it means transcribing every idle utterance, and
+Whisper cost 2.76 s a clip. Parakeet costs ~60 ms. The acoustic path stays — it
+fires mid-word, the transcript only at utterance end — so the two together are
+what `text_fallback: true` means.
+
+### End of turn: Smart Turn
+
+A VAD answers only "has the sound stopped", and every pause inside a sentence
+looks like the end of one: the old 500 ms silence both cut people off and cost
+every turn half a second. `SmartTurn` (pipecat's Smart Turn v3.2, BSD-2-Clause,
+8 MB int8 ONNX: a Whisper-tiny encoder with a linear head over the last 8 s)
+turns the trade into a decision. In the window, an utterance it calls
+unfinished is **held** and glued to what comes next, so the silence can be 380
+ms without sending half a question; `hold_timeout_ms` (2200) releases a held
+turn when the speaker simply trails off, and `hold_max_seconds` (12) bounds
+how much can accumulate. It fails open — a model that will not load means
+"complete", because answering early beats not answering.
+
+Its preprocessing must match pipecat's `inference.py` exactly, since the head
+is a linear probe on a frozen encoder: keep the last 8 s, zero-pad to 128000
+samples, zero-mean/unit-variance over the *real* samples only, re-zero the
+padding, then Whisper's own log-mel — faster-whisper's `FeatureExtractor`,
+which is that mel to the line, with `padding=0` for exactly 800 frames. The
+check that it is right: a complete question scores 0.976 and the same voice
+cut mid-phrase 0.019 (`test_a_finished_question_and_a_cut_phrase_are_told_apart`).
+~75 ms on this CPU. It runs only on utterances that already passed the wake
+gate or the window, never on idle room audio.
+
+### ASR: Parakeet
+
+`livekit.stt.backend: parakeet` — NeMo Parakeet TDT 0.6B v3, int8, through
+sherpa-onnx on 4 CPU threads, no GPU. LibriSpeech validation.clean, 73 clips,
+via `scripts/voice/asr_eval.py`:
+
+| | WER clean | WER at 10 dB SNR | RTFx |
+|---|---|---|---|
+| parakeet | **3.83%** | **9.30%** | 24× |
+| whisper base.en (fallback off) | 10.61% | 18.96% | 16× |
+
+On utterance-length audio the gap is wider: a 1 s clip took `base.en` 2.76 s
+in production and Parakeet 0.06 s. Whisper was *slower on shorter audio*
+(0.57 s for clips over 8 s) because its temperature fallback re-decodes the
+whole clip each time a tightened threshold fails, and short utterances are what
+fail them. `backend: whisper` remains — with `temperature_fallback: false`,
+which alone took it from 2.75 s to 0.62 s — because it is the engine with
+hotword biasing; hotwords matter much less now that they no longer carry the
+wake word. Audio reaches sherpa already at 16 kHz: handed 48 kHz it builds a
+fresh resampler per stream and logs a paragraph each time.
+
+`livekit.stt.streaming` (off) runs a cache-aware streaming FastConformer CTC
+for live partial transcripts on the data channel (`partial_transcript`).
+Display only — nothing reads partials yet, and the committed transcript is
+always the offline recogniser's. Preemptive generation is the reason to turn
+it on.
 
 ### The gate
 
-`WakeState` is IDLE or CONTINUATION. In IDLE an utterance is dropped unless the
-wake word fired. A match opens a `continuation_seconds` (6 s) window in which
-follow-ups from the locked participant pass through with no wake word, and
-every pass-through extends it.
+`RoomBridge._handle_utterance_event` decides what a closed utterance means.
+The wake decision arrives *with* the utterance (`ev.wake`, the detection that
+fell inside its span) — the inversion at the heart of the rework, since the
+old gate had to ask openWakeWord here, after the VAD had already mangled the
+audio.
 
-**The wake word is detected in parallel with transcription, and that is worth
-the complexity.** On the IDLE path `_handle_utterance` starts the STT task,
-then runs openWakeWord while it is in flight; on a match it embeds the speaker,
-sets the anchor, opens the window and publishes `wake_state` to the browser
-*before* awaiting Whisper. The UI flips to "Listening" off that publish, so
-cutting Whisper out of that wait saves ~400 ms of perceived wake-word latency.
-Correctness does not depend on it — the transcript is collected immediately
-afterwards and decides what, if anything, is injected.
+1. Not woke, not in the window: try the transcript path (above). If it does
+   not wake, drop — logged with the VAD probability, the utterance's wake peak
+   and the transcript.
+2. Smart Turn: hold an unfinished thought (skipped for a transcript wake, whose
+   audio is already transcribed and whose request continues in the window).
+3. Parakeet on the (possibly joined) audio.
+4. Woke: embed the speaker, set the anchor, open the window, publish state.
+5. Continuation (not woke): the locked LiveKit identity, and — only when the
+   wake-word utterance matched an *enrolled* profile — the voiceprint anchor.
+6. Woke: strip the wake phrase; a bare wake opens the window and injects
+   nothing; a short unmatched transcript on an acoustic wake is a misheard bare
+   wake; a long one is injected as-is, since the acoustic model is the
+   authority on whether the word was said.
 
-**Identity is checked twice, and the second check is conditional for a
-reason.** The LiveKit participant identity is always required to match the lock
-(one browser tab, one identity). When a `SpeakerIdentifier` is attached, a
-follow-up must *also* clear `anchor_threshold` cosine against the embedding
-taken from the wake-word utterance — that is what catches "different person,
-same browser tab". But it is applied only when the wake-word utterance matched
-an *enrolled* profile. An unknown speaker's anchor is a noisy one-second
-embedding, and comparing against it rejects real follow-ups while providing no
-meaningful safety, so that case falls back to identity alone. An embedding that
-fails outright degrades to identity-only for that turn rather than dropping a
-real utterance.
-
-A bare wake word (`skip_inject_if_only_wake_word`) opens the window and injects
-nothing. So does a short transcript with no wake-word match when openWakeWord
-already fired — that is a mistranscribed "Lloyd", and the right move is to wait
-for the follow-up. What does get injected is POSTed to `/api/voice/inject` with
-the session key and, when known, the speaker name; the backend prefixes it as
-`[Name]: text` and enqueues it as `source="user"` so it streams through the
-ordinary turn path and any open chat UI sees it. A payload with no session key
-falls back to the legacy `voice-main` catch-all.
+`WakeState` is IDLE or CONTINUATION as before: a wake opens a
+`continuation_seconds` (6 s) window for the locked participant, every
+pass-through extends it, and a finished reply reopens it.
+`tests/test_voice_gate.py` drives the whole gate with a scripted recogniser.
 
 Note that the code defaults and the config disagree in two places, and
 config.yaml wins: `WakeState.continuation_seconds` defaults to 12.0 against the
 configured 6.0, and `RoomBridge.anchor_threshold` defaults to 0.65 against the
-configured 0.4. The code defaults are what a worker with no `livekit.wake` /
-`livekit.voiceprint` block would use.
+configured 0.4.
 
 ### Who is speaking: profiles and enrollment
 
@@ -281,8 +382,15 @@ cosine is a dot product — and it does two different jobs with one encoder:
   `anchor_threshold` (0.4) — a deliberately looser bar, because it is answering
   "same voice as ten seconds ago", not "who is this".
 
-One `SpeakerIdentifier` is shared across every room, so the encoder loads once,
-and the encoder itself is lazy — keeping a torch load out of worker startup.
+One `SpeakerIdentifier` is shared across every room, so the encoder loads
+once — at worker startup since 2026-09-17. Lazy, it cost 0.8 s on the first
+wake of every worker lifetime, in the path between transcript and inject.
+
+It takes **int16** and divides by 32768 itself. The hearing pipeline produces
+float32 in [-1, 1], so `_embed_async` converts first; passed straight through,
+that is a 90 dB attenuation ahead of Resemblyzer's silence trimming — invisible
+while no profile is enrolled, wrong the day one is
+(`test_the_speaker_encoder_is_handed_int16`).
 
 Enrollment is a UI action, not a script: **Settings → Voice profiles** records
 a clip in the browser and POSTs it to `/api/voice/speakers/enroll`
@@ -304,37 +412,137 @@ records, and an aiohttp server on `127.0.0.1:8501` exposes `/healthz`,
 `/ww_miss` and `/ww_label`. The backend proxies `/api/voice/ww_miss` and
 `/api/voice/ww_label` to it. It is for tuning the threshold against real misses
 rather than synthetic audio: say the wake word, have it ignored, and flag it
-while the audio is still in the ring. On by default
+while the audio is still in the ring.
+
+Utterances are recorded at **16 kHz**, the rate every model in the pipeline
+actually saw, so a replay reproduces the decision instead of approximating it
+from the room's 48 kHz. `scripts/voice/replay.py run <wav>…` feeds any
+recording — a miss dump, an utterance, a test clip — through the full pipeline
+and prints each event with its transcript and Smart Turn verdict;
+`replay.py compare-wake` is the false-accept comparison quoted above. The
+corpus is room audio from the house and is never committed. On by default
 (`livekit.acoustic_wake.diag.enabled`); a port it cannot bind disables the rig
 and leaves the worker running.
 
 ## Speaking
 
-### Choosing what to say
+### A spoken turn streams its reply
 
-`RoomBridge._poll_session_messages` watches `GET /api/messages/<session>` every
-`SESSION_POLL_INTERVAL` (0.5 s) for new assistant turns. The spoken set is
-**seeded with the entire existing history at connect**, so reconnecting to a
-live room does not re-speak the conversation so far.
+A voice turn's reply used to be spoken only once it existed in full: the
+worker polled `GET /api/messages/<session>` every 500 ms, waited for the
+assistant message, sent it to the **secondary** model to be rewritten for
+speech (0.5–2 s, on a single-tenant engine every agent turn also queues
+behind), and then synthesised the result. Now the first sentence goes to TTS
+as soon as the model has written it.
 
-Each candidate goes through `POST /api/voice/summarize` first, which rewrites
-it on the **secondary** model into spoken form — the primary's answer is often
-long and full of code blocks and tool references, none of which TTS gracefully.
-`_is_trivially_speakable` skips the round-trip for short plain prose (under 300
-chars, no markdown), because the secondary's prompt would just echo it back and
-the call costs 0.5–2 s. A failed or empty summary falls back to the raw text
-and says which path it took in the log; `used_summary` on the response is how
-the caller can tell.
+**`/api/voice/inject` with `stream: true` returns the turn's own event
+stream.** A `SessionTurn`'s `events` queue has exactly one reader; for a typed
+turn it is `/api/message/stream`, and for a spoken turn there was none — the
+events piled up unread while the worker polled. The caller that enqueued the
+turn now owns that reader: a `voice_turn` frame with the turn id, then the same
+`text_delta` / `tool_start` / `done` frames the chat gets. Without `stream` the
+endpoint answers the JSON it always did, so an old worker keeps working
+against a new backend and the reverse falls back to the poller.
 
-`TTSStreamer` then POSTs to Qwen3-TTS with `stream: true`,
-`response_format: pcm`, publishes one `lloyd-tts` track per room, and pushes
-100 ms frames (`FRAME_MS`; the SDK requires a 10 ms multiple). Utterances run
-serially through a queue so Lloyd's voice cannot overlap itself when the
-harness produces several replies quickly.
+**The rewrite moved to the source.** A reply that has not been written yet
+cannot be rewritten, so the model is told it is being heard:
+`VOICE_TURN_REMINDER` — plain spoken sentences, no markdown, lists, code,
+URLs, paths or hashes; lead with the answer; put anything long after a line
+of `---` and say it is in the chat. It is prepended to `prefetched_text` — the
+user message the *model* sees — never to the text the chat shows, which stays
+exactly what was said. That puts it in the prompt's tail, like the 20-turn
+memory nudge, so the cached prefix is untouched, and it is recorded as that
+turn's subliminal context like every other injection. `voice_turn.reminder`
+switches it off.
 
-`interrupt()` — driven by `{"type": "interrupt"}` on the LiveKit data channel,
-which is what the browser's interrupt button sends — drops everything queued,
-cancels the in-flight utterance and best-effort calls `source.clear_queue()`.
+**Thinking is off for spoken turns** (`voice_turn.thinking: off` →
+`chat_template_kwargs.enable_thinking: false` via `RunOptions.extra_body`; the
+Qwen template applies it to the generation prompt only, so the history and
+the cached prefix are unchanged). Measured on the live primary with the real
+77 k-character system prompt and the reminder, five conversational questions:
+
+| thinking | median to first spoken word | max |
+|---|---|---|
+| on | 2.00 s | 2.67 s |
+| off | **0.47 s** | 2.19 s |
+
+The answers were equivalent. Thinking earns its keep on multi-step tool work;
+if a spoken request that needs that goes wrong, `thinking: "on"` is the lever.
+Typed turns are never affected.
+
+### From deltas to clauses
+
+`voice/speakable.py::ClauseStream` works on text that arrives a few characters
+at a time, which is what makes it more than a regex:
+
+- **Where to cut.** A clause goes to TTS as soon as it ends — a sentence end
+  (abbreviations and decimals excepted) or a line break. The *first* clause may
+  also be cut at a comma once it is 45 characters long, because it is the one
+  the listener is waiting on. Later clauses shorter than 24 characters are held
+  and joined to the next; a string of three-word syntheses sounds like a list
+  being read. Nothing is cut above 240 without a boundary.
+- **What not to say.** Block constructs are classified at the start of a line
+  and a partial line that *could* be one (a fence, a divider, a table row, a
+  list marker) waits for its next character: fenced code is skipped whole,
+  table rows dropped, headings and list markers stripped, and everything after
+  a `---` line is the written part of the reply. Inline markdown is unwrapped,
+  URLs removed. A partial line keeps its trailing space — the first cut
+  stripped it and sent "Thebuild" to TTS.
+
+### The worker's side
+
+`RoomBridge._speak_voice_turn` runs one task per spoken turn, for the whole
+turn (minutes, with tools), so the utterance handler returns at once and the
+next thing the user says is still heard.
+
+- **`voice_turn` registers the turn id before any text exists**, into
+  `_streamed_turns`. Assistant rows now carry `turn_id`
+  (`app/transcript_entries.py`, both writers), and the session poller — which
+  still covers typed and ambient turns, with the secondary rewrite — skips any
+  row a streamed turn wrote. Registered first, the stream cannot race the
+  poller for its own reply.
+- **Text before a tool call is said before the tool runs** ("Let me check the
+  calendar."): `tool_start` flushes the clause stream.
+- **A filler covers silence, never an answer**: once per turn, after
+  `filler.after_seconds` (2.5 s) of nothing, or at a tool call before any
+  words. The end-to-end run's first, cold turn said "One moment." before
+  "42"; with the prewarm it did not need to.
+- **A runaway reply is capped** at `max_spoken_chars` (1500) with "The rest is
+  in the chat.", and skipped code gets "I've put the code in the chat."
+- **An interrupt stops it**: `TTSStreamer.generation` is bumped by
+  `interrupt()`, clauses queued before it are dropped, and the stream stops
+  being spoken (the browser's button also cancels the turn server-side).
+- **A backend without streaming** answers JSON; the worker leaves the turn to
+  the poller.
+
+### Prewarm: the prefill happens during the sentence
+
+A spoken turn's prefix is the session's system prompt, tools and history, and
+after a break it is usually no longer in the engine's cache — the worker pool
+runs 100–200 k-token turns around the clock. Through a real room, a cold
+session's first answer token came 4.16 s after inject and the warm turn after
+it 0.45 s. The wake word fires ~3 s before the finished utterance is injected,
+so the worker posts `/api/voice/prewarm` from the wake event and the backend
+runs one completion of **one token** over the exact prefix the turn will send
+(`_voice_turn_setup` builds both — one definition, so they cannot drift — with
+the same history loader). Debounced 20 s per session; skipped for a session
+over its compaction threshold, whose turn will summarize (and whose prewarm
+would otherwise spend a summarization call on what might be a false wake —
+it loads with `mode_override="truncate"`, which never calls a model).
+`voice_turn.prewarm` switches it off.
+
+### Clauses play back to back
+
+`TTSStreamer` POSTs each clause to Qwen3-TTS (`stream: true`,
+`response_format: pcm`) and pushes 100 ms frames (`FRAME_MS`; the SDK requires
+a 10 ms multiple) onto one `lloyd-tts` track per room, serially, so the voice
+never overlaps itself. What changed is where a *reply* ends: tail silence, the
+playout wait and `on_utterance_end` now happen in `_drain` only when the queue
+is empty — and the playout wait gives way the moment another clause arrives.
+Waiting for playout between clauses would put a synthesis latency (~250 ms)
+of dead air after every sentence, and firing `on_utterance_end` per clause
+would re-extend the wake window mid-reply
+(`test_clauses_of_one_reply_run_together_and_end_once`).
 
 ### The TTS server
 
@@ -479,6 +687,30 @@ hot for whatever the server is now sending.
 utterance begins from silence, and the steady-state initial condition would
 open it with a step transient.
 
+#### A neural bandwidth extender was measured and did not win
+
+LavaSR v2 (Apache-2.0, ~100× realtime on CPU) was tried on 2026-09-17 as an
+alternative to the shelves, on three sentences in the cloned voice, measured
+the same way (frames gated on sub-1 kHz energy, bands normalised to
+100–1500 Hz, difference from the reference clip):
+
+| variant | 1.5–2.5k | 2.5–3.5k | 3.5–5k | 5–9k | 9–12k | 12–20k |
+|---|---|---|---|---|---|---|
+| raw TTS | −0.4 | −1.8 | −3.1 | −4.6 | −4.5 | — |
+| **shelves (shipped)** | +1.3 | +1.1 | −0.1 | −0.7 | +2.1 | — |
+| LavaSR 48 kHz | −0.4 | −1.8 | −3.9 | −8.8 | −7.2 | −4.1 |
+| LavaSR + shelves | +1.3 | +1.1 | −0.7 | −5.0 | −1.3 | +2.5 |
+
+It cannot fix this defect: its pipeline resamples to 16 kHz first, discarding
+the 8–12 kHz the TTS *does* produce, and regenerates that band weaker. What it
+adds is air above 12 kHz, which the 24 kHz output has none of — an ear
+question, not a measurement one; the renders are in
+`~/.cache/lloyd-voice-eval/tts-ab/`. Note its `enhance()` hard-codes a
+16 → 48 kHz resample, so audio loaded at any other rate comes out time-stretched
+— the first measurement of it was wrong for exactly that reason. The candidate
+not yet tried is a 48 kHz decoder for the 12 Hz tokenizer itself (a community
+fine-tune, licence unstated), which would keep the model's own content.
+
 #### Speed: the server drops it, so the worker applies it
 
 `generate_voice_clone_streaming` takes no `speed` parameter while the
@@ -541,9 +773,9 @@ played. So `on_utterance_end` fired early, `is_speaking` lied, and anything
 calling `interrupt()` → `clear_queue()` discarded speech that had not come out
 yet — the last syllable, reliably. Two fixes, and they are complementary:
 
-- **`tail_silence_ms`** (250 ms) appends silence to every utterance, so the
-  audio occupying that discarded position is silence rather than the end of a
-  word.
+- **`tail_silence_ms`** (250 ms) appends silence to the end of every reply
+  (not every clause — see "Clauses play back to back"), so the audio occupying
+  that discarded position is silence rather than the end of a word.
 - **`_await_playout()`** waits on `AudioSource.wait_for_playout()`, bounded at
   the queue's own duration + 2 s and best-effort, so `is_speaking` and the
   wake-word continuation window describe audio the user has actually heard. A
@@ -696,7 +928,8 @@ clones, and voice mode keeps speaking the old voice.
 | `livekit.tts.voice` / `.speed` / `.shaping` | `lloyd-agent-worker` — it reads `livekit.tts` once, at `TTSStreamer.__init__` |
 | the same, for spoken alerts | `systemctl --user restart lloyd-guardian` — re-stages, which re-runs `sync-voice-config.py` |
 | TTS model path / `default_model` | `agent-tts` |
-| `livekit.stt` / `.vad` / `.wake` / `.acoustic_wake` / `.voiceprint` | `lloyd-agent-worker` |
+| `livekit.stt` / `.vad` / `.wake` / `.acoustic_wake` / `.voiceprint` / `.turn_detection` / `.barge_in` | `lloyd-agent-worker` |
+| `livekit.voice_turn` | **both**: the backend reads `reminder`, `thinking` and `prewarm` (`round restart --only lloyd-backend`); the worker reads `stream_replies`, `filler`, `max_spoken_chars` and `prewarm` (`lloyd-agent-worker`) |
 | `livekit.yaml`, or the host's tailnet address | `agent-livekit-server` — it resolves `node_ip` at boot |
 
 `agent-livekit-server` is the SFU binary and never reads TTS config —
@@ -712,7 +945,8 @@ voice.
 
 | Asset | Tracked? |
 |---|---|
-| `agent-services/models/{wakeword,openwakeword}/*.onnx` | **yes**, force-added past `models/` |
+| `agent-services/models/{wakeword,openwakeword,silero-vad}/*.onnx` | **yes**, force-added past `models/` |
+| `agent-services/models/{smart-turn,parakeet-tdt-v3,nemo-streaming-480ms}/` (~1.1 GB) | **no** — `bash agent-services/setup/fetch-voice-models.sh`, size-checked |
 | `agent-services/services/tts/qwen3-tts-local.patch` + `-upstream-commit.txt` | **yes** |
 | `agent-services/conf/livekit.yaml` (template) | **yes** |
 | `voice_library/profiles/dave_cullen/` | **no** — back up; not reproducible |
@@ -720,20 +954,67 @@ voice.
 | `.env` (`LIVEKIT_API_*`) | **no** — regenerate with `gen-livekit-secrets.sh` |
 | `~/lloyd/voice_profiles/*.npy` | **no** — re-enroll from Settings |
 
-### Tests
+### Tests and tools
 
-- `tests/test_tts_output_shaping.py` — the shelves lift above 1.5 kHz and leave
-  the low-mid alone, EQ and stretch state really carry across chunk boundaries,
-  the stretch holds its rate without drifting and does not move pitch, a sample
-  split across two chunks survives, a shelf above Nyquist is a passthrough
-  rather than an error, and the worker-level properties: tail silence, playout
-  wait, `speed: 1.0` on the wire, and no shaper state leaking past an
-  interrupt.
-- `tests/test_guardian_speak.py` — what it says aloud, cross-process
-  suppression, quiet hours (including the midnight wrap and the empty window),
-  the shaping tiers, and that a broken voice channel cannot break the alert.
+- `tests/test_voice_hearing.py` — the resampler equals a one-shot resample to
+  1e-6; segmentation keeps quiet speech, bridges a breath, keeps its pre-roll,
+  continues across the length cap and flushes a half-sentence; a wake inside or
+  just after an utterance attaches to it and a stale one does not; the wake is
+  reported before the utterance closes; the reported peak belongs to the
+  dropped utterance; the numpy Silero equals the package's output; the VAD
+  imports no torch.
+- `tests/test_voice_wake_and_turn.py` — the refractory window, near-miss
+  peaks, a model that raises; on the real model: a detection in a continuous
+  stream, through a 16× attenuation, per-stream isolation, and the fire landing
+  within 200 ms of the word's end; Smart Turn told a finished question from a
+  cut phrase, padding and the 8 s window, failing open.
+- `tests/test_voice_gate.py` — the transcript wake path and its near-misses,
+  its kill switch, a bare wake and the follow-up, the window's owner, a held
+  sentence sent as one turn, the one-filler matcher, the speaker encoder
+  handed int16, the prewarm request.
+- `tests/test_voice_speakable.py` — clauses whatever the slicing, the early
+  first clause, abbreviations and decimals, code, dividers, lists, tables,
+  inline markdown, short-clause joining, the ceiling.
+- `tests/test_voice_reply_stream.py` — the worker's consumer against a fake
+  SSE stream: order, registration, text before a tool, the filler rules, an
+  interrupt, the cap, skipped code, an old backend, the SSE parser.
+- `tests/test_voice_inject_stream.py` — the endpoint's stream and its JSON
+  fallback, the reminder in the model's text and not the chat's, thinking
+  config, and the prewarm's prefix, debounce, switch and summarization skip.
+- `tests/test_tts_output_shaping.py` — the shelves, WSOLA, and the drain loop:
+  tail silence and playout wait at the end of a reply, clauses back to back
+  with one end, a clause from before an interrupt never spoken.
+- `tests/test_transcript_entries.py` — assistant rows carry their `turn_id`,
+  in both writers.
+- `tests/test_guardian_speak.py` — the spoken alert channel (unchanged).
+
+`scripts/voice/`: `replay.py` (the pipeline over WAVs; `compare-wake`) —
+which replaces `scripts/ww_replay.py`, a replay of the retired per-utterance
+sweep that would now measure an algorithm nothing runs —
+`asr_eval.py` (WER and speed per backend on LibriSpeech, `--snr` for noise)
+and `e2e_voice.py` — a real LiveKit room, a canary backend on 18180/18600
+under a scratch HOME, a second worker on the `e2e-` prefix, and a synthetic
+participant that talks and times the replies. Nothing it runs touches live
+sessions, but its turns run on the live primary: pause the pool first, and do
+not run it beside a primary benchmark.
 
 ## History
+
+**2026-09-17 — the rework.** A review measured what the pipeline did and found
+it barely working: 5 wake fires in 949 utterances since 2026-08-22, no spoken
+follow-up ever injected, STT at 2.76 s on sub-second clips, and replies
+spoken only after a full rewrite and a poll. The hearing half moved into
+`agent-services/voice/` (Silero, the wake word fed continuously, Smart Turn,
+Parakeet, the transcript wake path) and the speaking half became a stream
+(`/api/voice/inject` SSE, clause segmentation, the reminder, thinking off,
+prewarm). Measured end to end through a real room afterwards: 5 of 5 scripted
+exchanges right, 1.5–2.3 s from the end of speech to the first sound of the
+answer on a warm session, the "Listening" state shown ~1.9 s *before* the
+sentence ended, and a cold first turn cut from 4.5 s to 1.8 s by the prewarm
+and an eagerly loaded speaker encoder. Two lessons worth keeping: the wake-word
+models were the weak link all along (the transcript path now carries recall,
+40 of 48 against 17–23), and installing `silero-vad` into `.venvs/lloyd`
+silently replaced its torch (see `SETUP.md`).
 
 **Until 2026-09-06 the pace and the presence band were both wrong**, and only
 one of them was known. `speed` had been configured since the clone shipped and
@@ -759,10 +1040,12 @@ retired the `voice_mode` daemon path — the `:8092` proxy, the
 `/api/voice/{status,toggle,say,…}` routes — in favour of the worker calling
 `/api/voice/inject` with an explicit session key and publishing TTS as a
 LiveKit track. Two pieces survived the move rather than being rewritten:
-openWakeWord, now `AcousticWakeWord` inside the worker, and the Resemblyzer
-speaker identifier, ported to `agent-services/speaker_id.py` and still carrying
-the legacy anchor-matching heuristic. Silero VAD did not survive; the segmenter
-is energy-based. The only stale reference left in the tree is a `pkill` line
+openWakeWord (as `AcousticWakeWord` in the worker until the 2026-09-17 rework
+moved it to `voice/wake.py`), and the Resemblyzer speaker identifier, ported to
+`agent-services/speaker_id.py` and still carrying the legacy anchor-matching
+heuristic. Silero VAD did not survive that move — the segmenter was
+energy-based from then until 2026-09-17, which is what the rework undid. The
+only stale reference left in the tree is a `pkill` line
 for `voice_services.py --port 8094` in
 `agent-services/bin/cleanup-orphans.sh`, and one stale doc:
 `agent-services/docs/voice-mode-integration.md` describes the OpenClaw bridge

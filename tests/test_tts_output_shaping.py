@@ -244,15 +244,42 @@ def _streamer(chunks, **cfg_overrides):
     return st, pushed
 
 
+def _drain_until_done(st, texts, timeout=5.0):
+    """Run the real drain loop over `texts` until the reply is reported done.
+
+    Tail silence, the playout wait and `on_utterance_end` belong to the end of
+    a *reply*, not of each clause, since replies became streams of clauses —
+    so the properties are exercised through `_drain`, where they now live.
+    """
+    import asyncio
+
+    async def run():
+        done = asyncio.Event()
+        ends = []
+
+        def _end():
+            ends.append(1)
+            done.set()
+
+        st.on_utterance_end = _end
+        for t in texts:
+            st._queue.put_nowait((st.generation, t))
+        task = asyncio.create_task(st._drain())
+        await asyncio.wait_for(done.wait(), timeout)
+        await asyncio.sleep(0.05)   # a second, spurious end would land here
+        task.cancel()
+        return ends
+
+    return asyncio.run(run())
+
+
 def test_utterance_ends_with_configured_silence():
     """The last syllable was being cut off: the coroutine returns when audio is
     queued, not played, and `interrupt()` clears the queue. Pad so the audio in
     that position is silence."""
-    import asyncio
-
     speech = _pcm(_tone(180, 0.5, amp=0.5))
     st, pushed = _streamer([speech], tail_silence_ms=250)
-    asyncio.run(st._stream_utterance("hello"))
+    _drain_until_done(st, ["hello"])
 
     out = np.frombuffer(bytes(pushed), dtype="<i2")
     assert len(out) >= len(speech) // 2, "no speech may be dropped"
@@ -263,11 +290,9 @@ def test_utterance_ends_with_configured_silence():
 
 
 def test_tail_silence_can_be_switched_off():
-    import asyncio
-
     speech = _pcm(_tone(180, 0.3, amp=0.5))
     st, pushed = _streamer([speech], tail_silence_ms=0)
-    asyncio.run(st._stream_utterance("hello"))
+    _drain_until_done(st, ["hello"])
     out = np.frombuffer(bytes(pushed), dtype="<i2")
     assert len(out) <= len(speech) // 2 + SR // 100  # at most one padding frame
 
@@ -278,8 +303,51 @@ def test_utterance_waits_for_playout_before_reporting_done():
     import asyncio
 
     st, _ = _streamer([_pcm(_tone(180, 0.2, amp=0.5))])
-    asyncio.run(st._stream_utterance("hello"))
+    _drain_until_done(st, ["hello"])
     assert st.source.played_out
+
+
+def test_clauses_of_one_reply_run_together_and_end_once():
+    """A streamed reply is many clauses. Silence and a playout wait between
+    them would put ~250 ms of dead air after every sentence, and one
+    `on_utterance_end` per clause would re-extend the wake window mid-reply."""
+    speech = _pcm(_tone(180, 0.3, amp=0.5))
+    st, pushed = _streamer([speech], tail_silence_ms=250)
+    ends = _drain_until_done(st, ["First clause.", "Second clause."])
+    assert ends == [1], "the reply must end exactly once"
+
+    out = np.frombuffer(bytes(pushed), dtype="<i2")
+    n = len(speech) // 2
+    between = out[n - SR // 50: n + SR // 50]
+    assert np.abs(between).max() > 0, "no silence may be inserted between clauses"
+    assert np.all(out[-(SR * 250 // 1000):] == 0), "the reply still ends in silence"
+
+
+def test_a_clause_queued_before_an_interrupt_is_not_spoken():
+    """The listener cut Lloyd off; a clause the stream had already queued
+    must not start a second later."""
+    import asyncio
+
+    st, pushed = _streamer([_pcm(_tone(180, 0.2, amp=0.5))])
+
+    async def run():
+        st._queue.put_nowait((st.generation, "stale"))
+        st.interrupt()
+        st._queue.put_nowait((st.generation, "fresh"))
+        spoken = []
+        orig = st._stream_utterance
+
+        async def record(text):
+            spoken.append(text)
+            await orig(text)
+
+        st._stream_utterance = record
+        task = asyncio.create_task(st._drain())
+        await asyncio.sleep(0.3)
+        task.cancel()
+        return spoken
+
+    assert asyncio.run(run()) == ["fresh"]
 
 
 def test_speed_is_not_asked_of_the_server():

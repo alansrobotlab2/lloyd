@@ -134,7 +134,7 @@ def _chat_entries(events: list[dict]) -> list[dict]:
             }
             if evt.get("tool_calls") and text.strip():
                 written.append(te.build_assistant_text_entry(
-                    text, timestamp="T", stats=dict(iteration_stats)))
+                    text, timestamp="T", stats=dict(iteration_stats), turn_id="turn1"))
                 text = ""
         elif t == "tool_call":
             calls.append(te.build_tool_call(
@@ -161,7 +161,7 @@ def _chat_entries(events: list[dict]) -> list[dict]:
                 "reprefill_tokens": 0, "prefix_misses": 0,
             }
             written.append(te.build_assistant_text_entry(
-                text, timestamp="T", stats=stats, source="background"))
+                text, timestamp="T", stats=stats, source="background", turn_id="turn1"))
     return written
 
 
@@ -206,3 +206,14 @@ def test_both_writers_produce_identical_entries(recorder_sessions):
     recorded = _recorder_entries(events, recorder_sessions)
     chat = _chat_entries(events)
     assert _normalise(recorded) == _normalise(chat)
+
+
+def test_an_assistant_entry_names_the_turn_that_wrote_it():
+    """A turn persists one text row per segment between tool calls. The voice
+    worker speaks a turn as it streams and must recognise every one of those
+    rows afterwards, or the poller that covers typed turns says the reply a
+    second time. An empty turn id stays off the row, so a caller with none
+    writes exactly what it wrote before."""
+    named = te.build_assistant_text_entry("hi", timestamp="T", turn_id="abc123")
+    assert named["turn_id"] == "abc123"
+    assert "turn_id" not in te.build_assistant_text_entry("hi", timestamp="T")

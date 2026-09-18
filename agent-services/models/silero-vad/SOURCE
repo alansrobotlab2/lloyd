@@ -1,0 +1,3 @@
+silero_vad.onnx: Silero VAD v6 (https://github.com/snakers4/silero-vad), MIT License.
+Copied from the silero-vad 6.2.2 wheel (silero_vad/data/silero_vad.onnx); called through
+onnxruntime by agent-services/voice/vad.py::SileroOnnx.

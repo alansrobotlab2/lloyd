@@ -62,6 +62,7 @@ def build_assistant_text_entry(
     cancelled: bool = False,
     synthetic_empty_terminal: bool = False,
     entry_id: str = "",
+    turn_id: str = "",
 ) -> dict:
     """One assistant text row.
 
@@ -93,6 +94,12 @@ def build_assistant_text_entry(
         entry["synthetic_empty_terminal"] = True
     if source and source != "user":
         entry["source"] = source
+    # Which turn wrote the row. A turn persists several text rows (one per
+    # segment between tool calls), and a reader that watched the turn live —
+    # the voice worker speaking it as it streams — needs to recognise every
+    # one of them afterwards, or it says the reply a second time.
+    if turn_id:
+        entry["turn_id"] = turn_id
     return entry
 
 

@@ -616,12 +616,45 @@ livekit:
   room_prefix: lloyd-
   agent_identity: lloyd-agent
   stt:
+    # `parakeet` is NeMo Parakeet TDT 0.6B v3 (int8) through sherpa-onnx;
+    # `whisper` is the old faster-whisper path, kept as a fallback.
+    #
+    # Measured on this box, 2026-09-17, LibriSpeech validation.clean (73 clips,
+    # 481 s), via scripts/voice/asr_eval.py:
+    #
+    #             WER clean   WER @10 dB SNR   RTFx
+    #   parakeet    3.83%         9.30%         24x
+    #   whisper    10.61%        18.96%         16x
+    #
+    # Better and faster on both, and the whisper column there is already the
+    # *fast* whisper (temperature_fallback off). On short utterances the gap
+    # widens: a 1 s clip took base.en 2.76 s and parakeet 0.06 s. Whisper was
+    # slower on SHORTER audio (0.57 s for clips over 8 s) because its
+    # temperature fallback re-decodes the whole clip on each failed threshold,
+    # and short utterances are what trip those thresholds.
+    backend: parakeet
+    model_dir: agent-services/models/parakeet-tdt-v3
+    num_threads: 4
+    # --- whisper fallback only; ignored by the parakeet backend ---
     model: base.en
     device: cpu
     compute_type: int8
     language: en
     beam_size: 1
+    # The fallback costs ~4.4x wall clock and changes the transcript on about
+    # half of short clips — not reliably for the better. Leave off.
+    temperature_fallback: false
+    # Whisper-only name biasing. It used to be what carried the wake word,
+    # which is no longer its job: openWakeWord decides that acoustically now.
     hotwords_file: ~/obsidian/hotwords.md
+    streaming:
+      # Cache-aware streaming FastConformer CTC, for live partial transcripts
+      # in the browser. Display only — the committed transcript is always the
+      # offline recogniser's. Off until something reads partials for more than
+      # decoration; preemptive LLM generation is the reason to turn it on.
+      enabled: false
+      model_dir: agent-services/models/nemo-streaming-480ms
+      num_threads: 2
   tts:
     api_url: http://127.0.0.1:8090
     model: qwen3-tts
@@ -677,12 +710,92 @@ livekit:
         - {freq: 1800, gain_db: 2.75, q: 1.0}
         - {freq: 8000, gain_db: 4.0, q: 0.7}
   vad:
-    speech_rms: 0.025
-    min_speech_frames_to_start: 3
-    min_voiced_ratio: 0.3
-    silence_ms: 500
-    min_utterance_ms: 350
+    # Silero VAD v6 (ONNX), replacing the energy threshold on 2026-09-17.
+    #
+    # The old `speech_rms: 0.025` was the root cause of voice barely working:
+    # every wake-word utterance in the diagnostic corpus measured rms 0.013 to
+    # 0.017, i.e. normal speech at a normal distance sat *below* the speech
+    # threshold. Only the loudest syllables crossed it, so sentences arrived as
+    # fragments with the quiet parts missing. Tuning the number could not fix
+    # it, because loudness is the wrong quantity — a fan and a whisper at the
+    # same level are the same number to RMS and obviously different to Silero.
+    # Measured here: Silero's mean speech probability held at 0.87-0.89 across
+    # a 16x attenuation, so it is level-invariant where RMS is nothing but
+    # level.
+    #
+    # 0.45 rather than Silero's own 0.5 default because a false positive is now
+    # cheap — the wake word gates everything downstream — while a false
+    # negative is a sentence Lloyd never hears.
+    threshold: 0.45
+    # Closing silence. 380 ms rather than the old 500 ms because Smart Turn
+    # (below) catches the mid-sentence pauses that a short silence would
+    # otherwise cut; without that this would have to be 700 ms or more.
+    min_silence_ms: 380
+    # Audio kept from before the onset, so the first phoneme is not clipped.
+    # This is the old LEAD_IN_MS, raised from 200 ms because Silero triggers a
+    # frame or two later than an energy threshold does on a soft onset.
+    speech_pad_ms: 220
+    min_utterance_ms: 250
     max_utterance_ms: 30000
+  turn_detection:
+    # Smart Turn v3.2 (pipecat, BSD-2-Clause): "did the speaker finish?", from
+    # the waveform rather than the transcript. Validated on this box against
+    # synthesized speech — a complete question scored 0.976 and the same voice
+    # cut mid-phrase scored 0.019.
+    #
+    # This is what lets min_silence_ms be short. When it says the thought is
+    # unfinished, the audio is held and glued to whatever comes next, so a
+    # breath mid-sentence no longer sends half a question to the model.
+    enabled: true
+    model_path: agent-services/models/smart-turn/smart-turn-v3.2-cpu.onnx
+    threshold: 0.5
+    # How long a held turn waits for its continuation before being released
+    # anyway. "Unfinished" is also what a trailing-off sentence looks like, and
+    # without this one of those would sit in the buffer indefinitely.
+    hold_timeout_ms: 2200
+    hold_max_seconds: 12.0
+  voice_turn:
+    # How a spoken turn is asked of the model and spoken back
+    # (app/routers/voice.py, agent-services/livekit_worker.py).
+    #
+    # Speak the reply as it streams, clause by clause, from the turn's own
+    # event stream. Off = the old path: wait for the finished message, have the
+    # secondary rewrite it, poll it out of the transcript.
+    stream_replies: true
+    # Tell the model it is being heard, in the prompt's tail (never the text
+    # the chat shows). This is what replaced the secondary's rewrite, which
+    # cannot run on a reply that has not been written yet.
+    reminder: true
+    # `off` sends enable_thinking=false for spoken turns only; typed turns are
+    # untouched. Measured 2026-09-17 on the live primary with the real system
+    # prompt (77 k chars, prefix warm) and this reminder, five conversational
+    # questions: time to the first spoken word was median 2.00 s (max 2.67)
+    # with thinking on and 0.47 s (max 2.19) with it off, and the answers were
+    # equivalent. Thinking earns its keep on multi-step tool work, which is
+    # the case to watch if a spoken request goes wrong — flip to "on" for that.
+    thinking: "off"
+    # When the wake word fires — mid-sentence, ~3 s before the utterance is
+    # injected — prefill the session's prompt so the turn finds it cached. A
+    # cold first turn measured 4.16 s to the first answer token through a real
+    # room, the warm turn after it 0.45 s. Skipped for a session over its
+    # compaction threshold (its turn will summarize, changing the prefix).
+    prewarm: true
+    # Stop and say "The rest is in the chat." past this many characters.
+    max_spoken_chars: 1500
+    filler:
+      # Said once, only while nothing else has been: after `after_seconds` of
+      # silence, or when a tool call starts before any words.
+      enabled: true
+      after_seconds: 2.5
+      phrases: ["One moment.", "Let me check.", "Checking now."]
+  barge_in:
+    # Interrupt Lloyd when the enrolled speaker starts talking over him.
+    # Off by default because it needs client-side echo cancellation to be
+    # safe: without AEC his own voice returns through the mic and he
+    # interrupts himself on every utterance. VoiceRoom's half-duplex mute
+    # currently makes that moot; turning this on is a decision to move to
+    # full duplex, and wants `?raw_audio=0` (browser APM on).
+    enabled: false
   wake:
     enabled: true
     words:
@@ -690,14 +803,29 @@ livekit:
     - hey lloyd
     - hi lloyd
     - okay lloyd
+    - ok lloyd
     - hello lloyd
     continuation_seconds: 6.0
     skip_inject_if_only_wake_word: true
+    # Also wake on a transcript that STARTS with one of the phrases above (one
+    # leading "uh"/"um"/"oh" allowed). Measured 2026-09-17 over 48 wake
+    # phrases in six TTS voices: the acoustic models caught 17-23, the
+    # transcript 40; neither path accepted any of 48 near-misses ("Floyd came
+    # over", "alloy wheels"), and the transcript path accepted none of 496
+    # real utterances of room audio. It costs a Parakeet pass (~60 ms CPU) on
+    # every idle utterance — the old gate ran Whisper on every one anyway.
+    # The acoustic path stays: it fires mid-word, this one at utterance end.
+    text_fallback: true
   acoustic_wake:
     enabled: true
     models_dir: agent-services/models/wakeword
     engine_dir: agent-services/models/openwakeword
     threshold: 0.4
+    # Suppression window after a fire. openWakeWord's score stays above
+    # threshold for several frames after the word, so without this one
+    # "hey Lloyd" opens the window three times and the diagnostic log reads
+    # as three separate wakes.
+    refractory_ms: 1500
   voiceprint:
     enabled: true
     profiles_dir: ~/lloyd/voice_profiles

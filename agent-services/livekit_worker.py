@@ -1,11 +1,23 @@
-"""Lloyd LiveKit agent worker — STT bridge.
+"""Lloyd LiveKit agent worker — the voice round trip.
 
-Joins every `${room_prefix}*` room that has a participant, segments their
-audio into utterances via energy-based VAD, transcribes each utterance with
-faster-whisper, and POSTs the transcript to /api/voice/inject so it lands
-as a user turn in the matching chat session.
+Joins every `${room_prefix}*` room that has a participant, listens, injects
+what was addressed to Lloyd into the matching chat session as a user turn, and
+speaks the reply back on a published `lloyd-tts` track.
 
-Phase 4 deliverable. No TTS / agent audio publishing yet — that's 5A.
+The hearing half lives in `agent-services/voice/` and is driven from here:
+
+    frames -> voice.runner.HearingThread -> voice.pipeline.HearingPipeline
+                                              StreamResampler     (one resample)
+                                              ContinuousWakeWord  (continuous)
+                                              SileroSegmenter     (speech, not energy)
+              -> HearingEvent -> RoomBridge._on_hearing_event
+              -> voice.turn.SmartTurn (finished thought?) -> ASR -> gate -> inject
+
+That structure is the 2026-09-17 rework. The old pipeline was inline in this
+file and could not be constructed without a LiveKit room, which is part of why
+three weeks of it firing the wake word 5 times in 949 utterances went
+unnoticed. Everything below the event boundary is now replayable offline —
+`scripts/voice/replay.py` is what replays it.
 
 Run via:
   python agent-services/livekit_worker.py
@@ -14,13 +26,14 @@ Or under supervisord (agent-services/supervisor/conf.d/lloyd-agent-worker.conf).
 
 Config — see config.yaml `livekit:` block:
   livekit.url, .api_key, .api_secret, .room_prefix, .agent_identity
-  livekit.stt.{model, device, compute_type, language, beam_size}
-  livekit.vad.{speech_rms, silence_ms, min_utterance_ms, max_utterance_ms}
+  livekit.stt.{backend, model_dir, ...}                        — voice/asr.py
+  livekit.vad.{threshold, min_silence_ms, speech_pad_ms, ...}  — voice/vad.py
+  livekit.acoustic_wake.{threshold, refractory_ms, ...}        — voice/wake.py
+  livekit.turn_detection.{enabled, threshold, ...}             — voice/turn.py
 """
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import logging
 import os
@@ -40,14 +53,31 @@ import yaml
 from livekit import api as lkapi
 from livekit import rtc
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from voice import asr as voice_asr  # noqa: E402
+from voice import turn as voice_turn  # noqa: E402
+from voice import vad as voice_vad  # noqa: E402
+from voice import wake as voice_wake  # noqa: E402
+from voice.pipeline import HearingEvent, HearingPipeline  # noqa: E402
+from voice.runner import HearingThread  # noqa: E402
+from voice.resample import to_int16  # noqa: E402
+from voice.speakable import ClauseStream  # noqa: E402
+
 
 LOG = logging.getLogger("lloyd-agent-worker")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config.yaml"
 ENV_PATH = REPO_ROOT / ".env"
-INJECT_URL = "http://127.0.0.1:8080/api/voice/inject"
-SUMMARIZE_URL = "http://127.0.0.1:8080/api/voice/summarize"
+#: The backend this worker speaks for. Overridable so a second worker can run
+#: beside the live one against a canary backend — which is how
+#: `scripts/voice/e2e_voice.py` tests a build end to end without touching the
+#: live session store (pair it with LLOYD_LIVEKIT_ROOM_PREFIX, or both workers
+#: join the same room and answer twice).
+BACKEND_URL = os.environ.get("LLOYD_BACKEND_URL", "http://127.0.0.1:8080").rstrip("/")
+INJECT_URL = f"{BACKEND_URL}/api/voice/inject"
+SUMMARIZE_URL = f"{BACKEND_URL}/api/voice/summarize"
+PREWARM_URL = f"{BACKEND_URL}/api/voice/prewarm"
 
 _ENV_VAR_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
 
@@ -117,6 +147,8 @@ def _load_cfg() -> dict:
         cfg = yaml.safe_load(f) or {}
     cfg = _expand_env(cfg)
     lk = cfg.get("livekit") or {}
+    if os.environ.get("LLOYD_LIVEKIT_ROOM_PREFIX"):
+        lk["room_prefix"] = os.environ["LLOYD_LIVEKIT_ROOM_PREFIX"]
     if not lk.get("url") or not lk.get("api_key") or not lk.get("api_secret"):
         raise SystemExit("config.yaml: livekit.{url,api_key,api_secret} are required (check .env for LIVEKIT_API_KEY/LIVEKIT_API_SECRET)")
     return cfg
@@ -182,6 +214,13 @@ class TTSStreamer:
         # cancels it; _drain catches the CancelledError and moves on.
         self._current_task: Optional[asyncio.Task] = None
         self._speaking = asyncio.Event()
+        #: Bumped by `interrupt()`. A clause queued before an interrupt carries
+        #: the old number and is dropped, and a streaming reply compares it to
+        #: know the listener has cut it off.
+        self.generation = 0
+        #: Characters synthesised since the queue last drained — the length
+        #: of what the listener has been told in this reply.
+        self.spoken_chars = 0
         # Lazy import — keeps top-of-file clean.
         import httpx
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=120.0))
@@ -206,7 +245,7 @@ class TTSStreamer:
         if not text:
             return
         await self.ensure_published()
-        await self._queue.put(text)
+        await self._queue.put((self.generation, text))
 
     @property
     def is_speaking(self) -> bool:
@@ -231,6 +270,7 @@ class TTSStreamer:
         in-flight one isn't counted). Safe to call when nothing is
         playing — both operations are no-ops in that case.
         """
+        self.generation += 1
         dropped = 0
         while not self._queue.empty():
             try:
@@ -252,28 +292,77 @@ class TTSStreamer:
         return dropped
 
     async def _drain(self) -> None:
+        """Speak queued clauses back to back.
+
+        A streamed reply arrives as many clauses, and the gap between them is
+        what the listener hears. So a clause is followed by the playout wait,
+        the tail silence and the end-of-utterance callback only when nothing
+        else is queued — and even then the wait gives way the moment another
+        clause arrives. Waiting for playout between clauses would put a full
+        synthesis latency (~250 ms) of dead air after every sentence.
+        """
         while True:
-            text = await self._queue.get()
+            gen, text = await self._queue.get()
+            if gen != self.generation:
+                continue  # queued before an interrupt
             self._speaking.set()
             self._current_task = asyncio.create_task(self._stream_utterance(text))
             try:
                 await self._current_task
+                self.spoken_chars += len(text)
             except asyncio.CancelledError:
                 LOG.info("TTS interrupted mid-utterance")
             except Exception as e:
                 LOG.warning("TTS error for %r: %s", text[:60], e)
             finally:
                 self._current_task = None
-                self._speaking.clear()
-                # Notify the bridge that this utterance finished draining so
-                # it can extend the wake-word continuation window. Best-effort:
-                # any callback exception is swallowed, the drain loop survives.
-                cb = self.on_utterance_end
-                if cb is not None:
-                    try:
-                        cb()
-                    except Exception as e:
-                        LOG.warning("on_utterance_end callback raised: %s", e)
+            if not self._queue.empty():
+                continue
+            # Nothing queued: close the reply out. Tail silence first, so the
+            # last syllable is not the thing `clear_queue()` discards.
+            try:
+                await self._push_tail_silence()
+                if await self._await_playout_or_next():
+                    continue  # another clause arrived while this one played
+            except Exception as e:
+                LOG.debug("TTS close-out failed: %s", e)
+            self._speaking.clear()
+            self.spoken_chars = 0
+            # Notify the bridge that the reply finished playing so it can
+            # extend the wake-word continuation window. Best-effort: any
+            # callback exception is swallowed, the drain loop survives.
+            cb = self.on_utterance_end
+            if cb is not None:
+                try:
+                    cb()
+                except Exception as e:
+                    LOG.warning("on_utterance_end callback raised: %s", e)
+
+    async def _await_playout_or_next(self) -> bool:
+        """Wait for queued audio to play, or for a new clause. True if a
+        clause arrived first — the reply is still going."""
+        playout = asyncio.create_task(self._await_playout())
+        waiter = asyncio.create_task(self._peek_queue())
+        try:
+            done, _ = await asyncio.wait({playout, waiter},
+                                         return_when=asyncio.FIRST_COMPLETED)
+            return waiter in done and not self._queue.empty()
+        finally:
+            for t in (playout, waiter):
+                if not t.done():
+                    t.cancel()
+
+    async def _peek_queue(self) -> None:
+        while self._queue.empty():
+            await asyncio.sleep(0.02)
+
+    async def _push_tail_silence(self) -> None:
+        if self.tail_silence_ms <= 0 or self.source is None:
+            return
+        samples = self.sample_rate * self.tail_silence_ms // 1000
+        samples -= samples % (self.sample_rate // 100)
+        if samples > 0:
+            await self._push_frame(bytes(2 * samples), samples)
 
     async def _stream_utterance(self, text: str) -> None:
         """POST to /v1/audio/speech with stream:true,response_format:pcm and
@@ -327,13 +416,12 @@ class TTSStreamer:
             # just talked over.
             if not drained:
                 self._shaper.flush()
-        # Trailing silence. The last frames of an utterance were being cut off:
-        # this coroutine returns once the audio is *queued*, and whatever
-        # happens next — `interrupt()` calling `source.clear_queue()`, the room
-        # going quiet — discards whatever has not played yet. Padding means the
-        # audio holding that position is silence rather than the end of a word.
-        if self.tail_silence_ms > 0:
-            leftover.extend(bytes(2 * (self.sample_rate * self.tail_silence_ms // 1000)))
+        # Trailing silence is `_drain`'s job now, and only at the end of a
+        # reply: the last frames of an utterance were being cut off, because
+        # this coroutine returns once the audio is *queued* and whatever runs
+        # next — `interrupt()` calling `source.clear_queue()`, the room going
+        # quiet — discards what has not played. Padding between clauses of one
+        # reply would just be a pause in the middle of a sentence.
         while len(leftover) >= bytes_per_frame:
             frame_bytes = bytes(leftover[:bytes_per_frame])
             del leftover[:bytes_per_frame]
@@ -351,11 +439,6 @@ class TTSStreamer:
             if samples:
                 await self._push_frame(tail, samples)
                 n_pushed += 1
-        # Wait for the queue to actually play out, so `is_speaking` and
-        # `on_utterance_end` describe the audio the user hears rather than the
-        # moment we handed it to the SDK. Bounded and best-effort: a room with
-        # no subscriber must not wedge the drain loop.
-        await self._await_playout()
         elapsed = time.monotonic() - t0
         LOG.info("TTS spoke %r in %.2fs (%d frames)", text[:60], elapsed, n_pushed)
         # The presence shelves add ~1.5 dB of peak. Measured output sits at 0.75
@@ -437,6 +520,11 @@ class WakeState:
         self.skip_inject_if_only_wake_word: bool = bool(
             cfg.get("skip_inject_if_only_wake_word", True)
         )
+        #: Also wake on a transcript that STARTS with a wake phrase. See the
+        #: config comment for the measurement; the short version is that the
+        #: acoustic models catch well under half of clean wake phrases, and
+        #: transcribing an idle utterance costs ~60 ms since Parakeet.
+        self.text_fallback: bool = bool(cfg.get("text_fallback", True))
         # Set by extend(); compared in in_continuation().
         self._until: float = 0.0
         self._locked_identity: Optional[str] = None
@@ -528,167 +616,41 @@ def _strip_wake_word(text: str, words: list[str]) -> Optional[str]:
       'Lloyd, set a timer.'    → 'set a timer.'
       'Lloyd's birthday is...' → None                (apostrophe ≠ boundary)
       'Hello world'            → None
+      'Uh, hey Lloyd, stop.'   → 'stop.'             (one leading filler)
+
+    One leading disfluency is allowed, because a transcript is now also a
+    wake path (`livekit.wake.text_fallback`) and people say "uh, hey Lloyd".
+    Only one: "so I told Lloyd" must not wake anything.
     """
     import re
     normalized = re.sub(r"[^a-z']+", " ", text.lower()).strip()
     if not normalized:
         return None
+    filler = ""
+    first, _, rest = normalized.partition(" ")
+    if first in _WAKE_FILLERS and rest:
+        filler, normalized = first, rest
     for w in words:
         if normalized == w or normalized.startswith(w + " "):
             # Build a regex that matches the wake-word in the original text
             # tolerating any punctuation/whitespace between the word parts
             # and trailing the match. Anchored to the start.
-            parts = w.split()
+            parts = ([filler] if filler else []) + w.split()
             pattern = r"^\W*" + r"\W+".join(re.escape(p) for p in parts) + r"[\s.,!?;:'\"]*"
             tail = re.sub(pattern, "", text, count=1, flags=re.IGNORECASE)
             return tail.strip()
     return None
 
 
-def _looks_repetitive(text: str) -> bool:
-    """Heuristic for Whisper hallucinations on near-silence: any 1- or
-    2-word phrase repeated 4+ times consecutively. Catches both "Bye.
-    Bye. Bye." and "Thank you. Thank you. Thank you. Thank you." styles
-    without affecting normal speech."""
-    if not text:
-        return False
-    import re
-    words = re.findall(r"[A-Za-z']+", text.lower())
-    if len(words) < 4:
-        return False
-    for ngram in (1, 2):
-        if len(words) < ngram * 4:
-            continue
-        run = 1
-        prev = tuple(words[:ngram])
-        for i in range(ngram, len(words) - ngram + 1, ngram):
-            cur = tuple(words[i:i + ngram])
-            if cur == prev:
-                run += 1
-                if run >= 4:
-                    return True
-            else:
-                run = 1
-            prev = cur
-    return False
+#: Disfluencies allowed ahead of a wake phrase in a transcript.
+_WAKE_FILLERS = frozenset({"uh", "um", "er", "erm", "oh", "ah", "so", "well", "and"})
 
 
-# ── Acoustic wake-word (openWakeWord) ────────────────────────────────────
-
-class AcousticWakeWord:
-    """openWakeWord wrapper that detects wake-phrases directly on audio
-    rather than going through Whisper text. Loads the user's custom-trained
-    Hey_Lloyd / Lloyd ONNX models. Loaded lazily so worker startup stays fast.
-
-    openWakeWord runs on 16kHz int16 mono in 80ms (1280-sample) chunks. We
-    resample if the room audio is at a different rate (typically 48kHz),
-    then sweep `predict()` across the utterance and keep the max score per
-    model. If the max score across any model crosses `threshold`, the
-    utterance contained a wake-word.
-
-    Per-utterance state reset matters: `predict()` accumulates state across
-    chunks within one utterance (that's how openWakeWord builds confidence),
-    so we must reset before each utterance to avoid leaking state from the
-    previous one.
-    """
-
-    def __init__(self, models_dir: str | Path, engine_dir: str | Path, threshold: float = 0.5):
-        self.models_dir = Path(models_dir).expanduser()
-        self.engine_dir = Path(engine_dir).expanduser()
-        self.threshold = float(threshold)
-        self._model = None
-        self._lock = asyncio.Lock()
-
-    async def _ensure_loaded(self):
-        if self._model is not None:
-            return
-        async with self._lock:
-            if self._model is not None:
-                return
-            from openwakeword.model import Model
-            ww_paths = sorted(str(p) for p in self.models_dir.glob("*.onnx"))
-            if not ww_paths:
-                raise RuntimeError(f"no .onnx models in {self.models_dir}")
-            mel = self.engine_dir / "melspectrogram.onnx"
-            emb = self.engine_dir / "embedding_model.onnx"
-            if not mel.exists() or not emb.exists():
-                raise RuntimeError(f"missing engine files: {mel}, {emb}")
-            t0 = time.monotonic()
-            self._model = await asyncio.to_thread(
-                Model,
-                wakeword_model_paths=ww_paths,
-                melspec_onnx_model_path=str(mel),
-                embedding_onnx_model_path=str(emb),
-            )
-            LOG.info(
-                "openWakeWord loaded in %.2fs (%s) threshold=%.2f",
-                time.monotonic() - t0,
-                ", ".join(self._model.models.keys()),
-                self.threshold,
-            )
-
-    def _detect_blocking(self, samples_int16: np.ndarray, sample_rate: int) -> tuple[bool, str, float]:
-        # Resample to 16kHz if needed. scipy.signal.resample_poly does a
-        # high-quality polyphase resample — much better than naive striding.
-        if sample_rate != 16000:
-            from scipy.signal import resample_poly
-            up, down = 16000, sample_rate
-            # Reduce by gcd to keep the polyphase tables small.
-            from math import gcd
-            g = gcd(up, down)
-            samples = resample_poly(samples_int16.astype(np.float32), up // g, down // g)
-            samples = np.clip(samples, -32768, 32767).astype(np.int16)
-        else:
-            samples = samples_int16
-        # Reset internal state so we don't leak confidence from a prior
-        # utterance — each call starts from zero.
-        try:
-            self._model.reset()
-        except Exception:
-            pass
-        chunk = 1280  # 80ms @ 16kHz
-        max_per_model = {n: 0.0 for n in self._model.models.keys()}
-        i = 0
-        while i + chunk <= len(samples):
-            scores = self._model.predict(samples[i:i + chunk])
-            for n, s in scores.items():
-                if s > max_per_model[n]:
-                    max_per_model[n] = float(s)
-            i += chunk
-        if not max_per_model:
-            return False, "", 0.0
-        best_name = max(max_per_model, key=max_per_model.get)
-        best_score = max_per_model[best_name]
-        return best_score >= self.threshold, best_name, best_score
-
-    async def detect(self, samples_int16: np.ndarray, sample_rate: int) -> tuple[bool, str, float]:
-        """Returns (matched, model_name, max_score). All three regardless of
-        match — caller can log the score for tuning the threshold."""
-        try:
-            await self._ensure_loaded()
-            return await asyncio.to_thread(self._detect_blocking, samples_int16, sample_rate)
-        except Exception as e:
-            LOG.warning("acoustic wake-word detect failed: %s", e)
-            return False, "", 0.0
-
-
-def _build_acoustic_wake_word(cfg: dict) -> Optional[AcousticWakeWord]:
-    """Construct AcousticWakeWord from the `livekit.acoustic_wake` config
-    block, or None when disabled / construction fails. Falls back gracefully
-    so the worker still runs (text-match path) if openwakeword isn't
-    installed or the model files are missing."""
-    if not cfg.get("enabled", True):
-        LOG.info("acoustic wake-word disabled in config")
-        return None
-    try:
-        return AcousticWakeWord(
-            models_dir=cfg.get("models_dir", "agent-services/models/wakeword"),
-            engine_dir=cfg.get("engine_dir", "agent-services/models/openwakeword"),
-            threshold=float(cfg.get("threshold", 0.5)),
-        )
-    except Exception as e:
-        LOG.warning("acoustic wake-word init failed (%s) — falling back to text-match only", e)
-        return None
+#: Kept as a module-level name because it is what the transcript gate reads,
+#: but the definition now lives beside the recognisers that produce the text —
+#: two copies of "does this look hallucinated" is how the engines would come to
+#: disagree about the same utterance.
+_looks_repetitive = voice_asr.looks_repetitive
 
 
 # ── Wake-word miss capture (diagnostic rig) ──────────────────────────────
@@ -1051,216 +1013,6 @@ def _load_hotwords(path: str | Path) -> Optional[str]:
     return " ".join(names)
 
 
-class WhisperSTT:
-    """Lazy faster-whisper wrapper. Loads on first transcribe call so the
-    worker can advertise itself as ready before the model finishes downloading."""
-
-    def __init__(self, stt_cfg: dict) -> None:
-        self.cfg = stt_cfg
-        self._model = None
-        self._lock = asyncio.Lock()
-        # Optional name biasing. faster-whisper's `hotwords=` parameter
-        # nudges the decoder toward the listed tokens — important for our
-        # wake-word detection because Whisper-tiny/base regularly mishear
-        # "Lloyd" as "Floyd", "Eloid", or "Alloyed" when said quietly.
-        hotwords_path = stt_cfg.get("hotwords_file")
-        self.hotwords: Optional[str] = (
-            _load_hotwords(hotwords_path) if hotwords_path else None
-        )
-        if self.hotwords:
-            LOG.info("STT hotwords loaded: %r", self.hotwords)
-
-    async def _ensure_loaded(self) -> None:
-        if self._model is not None:
-            return
-        async with self._lock:
-            if self._model is not None:
-                return
-            from faster_whisper import WhisperModel
-            model_name = self.cfg.get("model", "base.en")
-            device = self.cfg.get("device", "cpu")
-            compute_type = self.cfg.get("compute_type", "int8")
-            LOG.info("loading faster-whisper model=%s device=%s compute=%s",
-                     model_name, device, compute_type)
-            t0 = time.monotonic()
-            # First-run downloads weights to ~/.cache/huggingface; subsequent
-            # loads are instant.
-            self._model = await asyncio.to_thread(
-                WhisperModel, model_name, device=device, compute_type=compute_type
-            )
-            LOG.info("faster-whisper loaded in %.1fs", time.monotonic() - t0)
-
-    async def transcribe(self, samples_int16: np.ndarray, sample_rate: int) -> str:
-        """Transcribe an utterance. Returns empty string for non-speech."""
-        await self._ensure_loaded()
-        # Wrap PCM into a WAV BytesIO so faster-whisper.decode_audio can
-        # resample it to 16kHz mono float32 via PyAV. Avoids hand-rolling
-        # a resampler.
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(sample_rate)
-            wf.writeframes(samples_int16.tobytes())
-        buf.seek(0)
-
-        def _run() -> str:
-            kwargs = dict(
-                language=self.cfg.get("language", "en"),
-                beam_size=int(self.cfg.get("beam_size", 1)),
-                vad_filter=False,           # we already segmented
-                condition_on_previous_text=False,
-                # Tighten hallucination thresholds — defaults are tuned for
-                # long-form audio; short utterances need stricter gates or
-                # whisper happily produces "Bye. Bye. Bye…" on near-silence.
-                no_speech_threshold=0.7,
-                log_prob_threshold=-0.8,
-                compression_ratio_threshold=2.0,
-            )
-            if self.hotwords:
-                kwargs["hotwords"] = self.hotwords
-            segments, _info = self._model.transcribe(buf, **kwargs)
-            return "".join(s.text for s in segments).strip()
-
-        text = await asyncio.to_thread(_run)
-        # Catch the residual hallucinations whisper still ships through:
-        # "Thank you. Thank you. ... Bye. Bye. Bye." style output where the
-        # same short token repeats. Drop the whole transcript if any token
-        # repeats ≥ 4 times consecutively in a small window.
-        if _looks_repetitive(text):
-            return ""
-        return text
-
-
-# ── VAD / utterance segmentation ─────────────────────────────────────────
-
-class UtteranceSegmenter:
-    """Energy-based VAD. Feeds it int16 PCM frames and gets back utterance
-    chunks once a trailing silence threshold is crossed.
-
-    State machine:
-      silence  →[loud frame]→  speaking  →[silence_ms of quiet]→ emit utterance
-                              ⤷ (max_utterance_ms hard cap also emits)
-
-    Buffers a small "lead-in" so the first phoneme isn't clipped.
-    """
-
-    LEAD_IN_MS = 200
-
-    def __init__(self, vad_cfg: dict, sample_rate: int, room_name: str = "") -> None:
-        self.sample_rate = sample_rate
-        self.room_name = room_name
-        self.speech_rms = float(vad_cfg.get("speech_rms", 0.025))
-        self.silence_ms = int(vad_cfg.get("silence_ms", 500))
-        self.min_ms = int(vad_cfg.get("min_utterance_ms", 350))
-        self.max_ms = int(vad_cfg.get("max_utterance_ms", 30000))
-        self.min_start_frames = int(vad_cfg.get("min_speech_frames_to_start", 3))
-        self.min_voiced_ratio = float(vad_cfg.get("min_voiced_ratio", 0.30))
-        self._lead_in_samples = int(self.LEAD_IN_MS / 1000 * sample_rate)
-        self._silence_samples = int(self.silence_ms / 1000 * sample_rate)
-        self._max_samples = int(self.max_ms / 1000 * sample_rate)
-        self._min_samples = int(self.min_ms / 1000 * sample_rate)
-
-        # Rolling buffer of recent silence so we can prepend lead-in.
-        self._lead_buf: list[np.ndarray] = []
-        self._lead_count = 0
-        # Pending consecutive-loud-frames counter before we commit to
-        # "speaking" — debounces single noise spikes.
-        self._pending_speech_frames = 0
-        # Active utterance buffer.
-        self._buf: list[np.ndarray] = []
-        self._buf_count = 0
-        self._voiced_samples = 0
-        self._silence_run = 0
-        self._speaking = False
-
-    def _rms(self, frame: np.ndarray) -> float:
-        if frame.size == 0:
-            return 0.0
-        # frame is int16; normalize by 32768.
-        f32 = frame.astype(np.float32) / 32768.0
-        return float(np.sqrt(np.mean(f32 * f32)))
-
-    def push(self, frame: np.ndarray) -> Optional[np.ndarray]:
-        """Append a PCM int16 frame; return a complete utterance if one ends.
-        Frame must be 1-D int16."""
-        rms = self._rms(frame)
-        is_speech = rms >= self.speech_rms
-
-        if not self._speaking:
-            # Maintain lead-in ring.
-            self._lead_buf.append(frame)
-            self._lead_count += frame.size
-            while self._lead_count - (self._lead_buf[0].size if self._lead_buf else 0) > self._lead_in_samples:
-                self._lead_count -= self._lead_buf[0].size
-                self._lead_buf.pop(0)
-
-            # Require N consecutive voiced frames to commit to "speaking".
-            # Suppresses single mic clicks / noise spikes.
-            if is_speech:
-                self._pending_speech_frames += 1
-            else:
-                self._pending_speech_frames = 0
-
-            if self._pending_speech_frames >= self.min_start_frames:
-                self._speaking = True
-                self._buf = list(self._lead_buf)
-                self._buf_count = self._lead_count
-                # Lead-in samples don't count towards voiced_samples — they're
-                # the silence we kept around to avoid clipping the first
-                # phoneme. Voiced ratio is computed from speaking-state frames.
-                self._voiced_samples = 0
-                self._lead_buf = []
-                self._lead_count = 0
-                self._silence_run = 0
-                self._pending_speech_frames = 0
-            return None
-
-        # Speaking — keep accumulating.
-        self._buf.append(frame)
-        self._buf_count += frame.size
-        if is_speech:
-            self._voiced_samples += frame.size
-            self._silence_run = 0
-        else:
-            self._silence_run += frame.size
-
-        ended = self._silence_run >= self._silence_samples
-        capped = self._buf_count >= self._max_samples
-        if ended or capped:
-            utterance = np.concatenate(self._buf) if self._buf else np.zeros(0, dtype=np.int16)
-            voiced = self._voiced_samples
-            buf_count = self._buf_count
-            self._reset()
-            dur_s = utterance.size / max(1, self.sample_rate)
-            if utterance.size < self._min_samples:
-                LOG.info(
-                    "[%s][diag-drop] reason=too_short dur=%.2fs min=%.2fs voiced_samples=%d",
-                    self.room_name or "?", dur_s, self._min_samples / max(1, self.sample_rate), voiced,
-                )
-                return None
-            voicing_window = max(1, buf_count - self._lead_in_samples - self._silence_samples)
-            voiced_ratio = voiced / voicing_window
-            if voiced_ratio < self.min_voiced_ratio:
-                LOG.info(
-                    "[%s][diag-drop] reason=low_voiced dur=%.2fs voiced_ratio=%.2f min=%.2f",
-                    self.room_name or "?", dur_s, voiced_ratio, self.min_voiced_ratio,
-                )
-                return None
-            return utterance
-        return None
-
-    def _reset(self) -> None:
-        self._buf = []
-        self._buf_count = 0
-        self._voiced_samples = 0
-        self._silence_run = 0
-        self._speaking = False
-        self._lead_buf = []
-        self._lead_count = 0
-        self._pending_speech_frames = 0
-
-
 # ── Per-room bridge ──────────────────────────────────────────────────────
 
 class RoomBridge:
@@ -1271,17 +1023,32 @@ class RoomBridge:
     # turns to TTS. 500ms matches the page poll cadence; tightening to
     # 250ms gives marginally lower mouth-latency at minor server load.
     SESSION_POLL_INTERVAL = 0.5
-    MESSAGES_URL_TEMPLATE = "http://127.0.0.1:8080/api/messages/{session_id}"
+    MESSAGES_URL_TEMPLATE = BACKEND_URL + "/api/messages/{session_id}"
 
-    def __init__(self, room_name: str, lk_cfg: dict, stt: WhisperSTT,
+    def __init__(self, room_name: str, lk_cfg: dict, stt,
                  vad_cfg: dict, http_client, speaker_id=None,
-                 acoustic_wake=None, wake_capture: Optional[WakeMissCapture] = None) -> None:
+                 wake_factory=None, wake_capture: Optional[WakeMissCapture] = None,
+                 smart_turn=None, streaming_asr=None) -> None:
         self.room_name = room_name
         self.lk_cfg = lk_cfg
         self.stt = stt
         self.vad_cfg = vad_cfg
         self.http = http_client
         self.wake_capture = wake_capture
+        # Builds one ContinuousWakeWord per audio stream. It has to be per
+        # stream: openWakeWord's Model carries a rolling feature window and is
+        # not thread-safe, and the old code shared one instance across every
+        # room while calling it from a thread pool.
+        self.wake_factory = wake_factory
+        self.smart_turn = smart_turn
+        self.streaming_asr = streaming_asr
+        #: identity -> HearingThread. One pipeline per participant.
+        self._hearing: dict[str, HearingThread] = {}
+        #: Utterances held back because Smart Turn called them unfinished, keyed
+        #: by identity. The next utterance from that speaker is appended to them
+        #: so a sentence split by a breath arrives as one turn.
+        self._held: dict[str, list] = {}
+        self._held_deadline: dict[str, float] = {}
         # identity -> client_info dict (browser UA, mobile flag, audio
         # constraints). Populated by `client_info` data-channel messages
         # from VoiceRoom on connect. Used by ww-diag to A/B browser DSP
@@ -1295,9 +1062,6 @@ class RoomBridge:
         # wake-word utterance". Separate from the profile threshold —
         # anchor matching is an easier task than full identification.
         self.anchor_threshold = float(vp_cfg.get("anchor_threshold", 0.65))
-        # Optional AcousticWakeWord — parallel detection path that catches
-        # wake-words even when Whisper transcribes them as "Eloid" etc.
-        self.acoustic_wake = acoustic_wake
         self.room = rtc.Room()
         self._tasks: list[asyncio.Task] = []
         # Strong refs to in-flight utterance handlers. asyncio's create_task
@@ -1314,6 +1078,36 @@ class RoomBridge:
         self.tts: Optional[TTSStreamer] = None
         # Wake-word gate. Per-room so multi-room workers don't share state.
         self.wake = WakeState(lk_cfg.get("wake", {}) or {})
+        turn_cfg = lk_cfg.get("turn_detection", {}) or {}
+        #: How long a turn Smart Turn called unfinished waits for its
+        #: continuation before being released anyway.
+        self._hold_timeout_s = float(turn_cfg.get("hold_timeout_ms", 2200)) / 1000.0
+        #: And the ceiling on how much can accumulate that way, so a speaker
+        #: who never lands a complete-sounding sentence still gets answered.
+        self._hold_max_s = float(turn_cfg.get("hold_max_seconds", 12.0))
+        #: Barge-in needs client-side echo cancellation; without it Lloyd's own
+        #: voice returns through the mic and interrupts him. VoiceRoom's
+        #: half-duplex mute is the belt to this one's braces.
+        self._barge_in_enabled = bool(
+            (lk_cfg.get("barge_in", {}) or {}).get("enabled", False)
+        )
+        self._last_partial = ""
+        #: Turns whose reply was spoken from their own stream, so the session
+        #: poller — which still covers typed and ambient turns — must not say
+        #: them again. Bounded: a turn is only at risk while it is recent.
+        self._streamed_turns: deque[str] = deque(maxlen=128)
+        #: In-flight spoken-reply consumers, cancelled on disconnect.
+        self._turn_tasks: set[asyncio.Task] = set()
+        vt = lk_cfg.get("voice_turn", {}) or {}
+        self._stream_replies = bool(vt.get("stream_replies", True))
+        self._max_spoken_chars = int(vt.get("max_spoken_chars", 1500))
+        filler = vt.get("filler", {}) or {}
+        self._filler_enabled = bool(filler.get("enabled", True))
+        self._filler_after_s = float(filler.get("after_seconds", 2.5))
+        self._filler_phrases = list(filler.get("phrases") or
+                                    ["One moment.", "Let me check.", "Checking now."])
+        self._filler_i = 0
+        self._prewarm = bool(vt.get("prewarm", True))
         # Track which assistant message ids have already been TTS'd so the
         # session poller doesn't speak the same reply twice. Seeded at
         # connect time with the entire existing history so we only speak
@@ -1359,6 +1153,7 @@ class RoomBridge:
         await self._seed_spoken_set()
         poll_task = asyncio.create_task(self._poll_session_messages())
         self._tasks.append(poll_task)
+        self._tasks.append(asyncio.create_task(self._flush_held_loop()))
 
     @property
     def has_remote_participants(self) -> bool:
@@ -1373,6 +1168,19 @@ class RoomBridge:
     async def disconnect(self) -> None:
         for t in self._tasks:
             t.cancel()
+        # A reply still streaming keeps running server-side (the turn does not
+        # depend on its reader); only the speaking stops.
+        for t in list(self._turn_tasks):
+            t.cancel()
+        # Stop the hearing threads first. Each one flushes a half-spoken
+        # utterance on the way out, so this has to happen before the wait
+        # below or that final sentence has nothing left to run on.
+        for ht in list(self._hearing.values()):
+            try:
+                ht.stop()
+            except Exception:
+                pass
+        self._hearing.clear()
         # Let any in-flight utterance handler finish (transcribe + POST) so
         # the last thing the user said before leaving still lands in the
         # session. Cap the wait so we don't hang on a stuck POST.
@@ -1417,6 +1225,32 @@ class RoomBridge:
             self.wake.continuation_seconds,
         )
         self._schedule_wake_state_publish()
+
+    def _schedule_partial_publish(self, text: str) -> None:
+        """Push a running transcript to the browser.
+
+        Display only. The final transcript is the offline recogniser's, which
+        is both more accurate and cheap enough that there is no reason to
+        commit a streaming hypothesis.
+        """
+        if text == self._last_partial:
+            return
+        self._last_partial = text
+
+        async def _send():
+            try:
+                await self.room.local_participant.publish_data(
+                    json.dumps({"type": "partial_transcript", "text": text,
+                                "ts": time.time()}).encode("utf-8"),
+                    reliable=False,
+                )
+            except Exception as e:
+                LOG.debug("[%s] partial publish failed: %s", self.room_name, e)
+
+        try:
+            asyncio.create_task(_send())
+        except RuntimeError:
+            pass
 
     def _schedule_wake_state_publish(self) -> None:
         """Fire-and-forget data-channel publish of the current wake state.
@@ -1490,6 +1324,10 @@ class RoomBridge:
                                 continue
                             mid = m.get("id")
                             if not mid or mid in self._spoken_ids:
+                                continue
+                            if m.get("turn_id") in self._streamed_turns:
+                                # Already said, clause by clause, as it streamed.
+                                self._spoken_ids.add(mid)
                                 continue
                             text = "".join(
                                 c.get("text", "") for c in (m.get("content") or [])
@@ -1614,9 +1452,42 @@ class RoomBridge:
         if exc is not None:
             LOG.warning("[%s] utterance handler raised: %r", self.room_name, exc)
 
+    def _build_hearing(self, identity: str, sample_rate: int) -> HearingThread:
+        """One pipeline per participant, on its own thread.
+
+        Everything in it is stateful per stream — the resampler's filter
+        history, Silero's recurrent state, openWakeWord's feature window — so
+        sharing any of it between participants interleaves two conversations
+        inside one model.
+        """
+        pipeline = HearingPipeline(
+            in_rate=sample_rate,
+            wake=self.wake_factory.create() if self.wake_factory is not None else None,
+            segmenter=voice_vad.build_segmenter(self.vad_cfg),
+            streaming=self.streaming_asr,
+        )
+        ht = HearingThread(
+            pipeline,
+            on_event=lambda ev: self._on_hearing_event(ev, identity),
+            name=f"hearing-{identity[:8]}",
+        )
+        ht.start()
+        LOG.info("[%s] hearing pipeline up for %s @ %d Hz (wake=%s turn=%s asr=%s)",
+                 self.room_name, identity, sample_rate,
+                 self.wake_factory is not None, self.smart_turn is not None,
+                 getattr(self.stt, "name", "?"))
+        return ht
+
     async def _consume_audio(self, track, identity: str) -> None:
+        """Pump frames into the participant's hearing thread.
+
+        This coroutine does no signal processing at all any more. It used to
+        run the energy VAD inline, which was cheap; the pipeline that replaced
+        it is not, and this is the same event loop that paces TTS frames into
+        LiveKit on a 100 ms clock.
+        """
         stream = rtc.AudioStream(track)
-        segmenter: Optional[UtteranceSegmenter] = None
+        hearing: Optional[HearingThread] = None
         try:
             async for evt in stream:
                 frame = evt.frame
@@ -1631,19 +1502,82 @@ class RoomBridge:
                         self.wake_capture.push_raw_frame(self.room_name, samples, frame.sample_rate)
                     except Exception as e:
                         LOG.debug("[%s] ww-diag ring push failed: %s", self.room_name, e)
-                if segmenter is None:
-                    segmenter = UtteranceSegmenter(self.vad_cfg, frame.sample_rate, self.room_name)
-                utterance = segmenter.push(samples)
-                if utterance is not None:
-                    task = asyncio.create_task(
-                        self._handle_utterance(utterance, frame.sample_rate, identity)
-                    )
-                    self._utterance_tasks.add(task)
-                    task.add_done_callback(self._handle_utterance_done)
+                if hearing is None:
+                    hearing = self._build_hearing(identity, frame.sample_rate)
+                    self._hearing[identity] = hearing
+                hearing.push(samples, frame.sample_rate)
         except asyncio.CancelledError:
             pass
         finally:
+            if hearing is not None:
+                hearing.stop()
+                self._hearing.pop(identity, None)
             await stream.aclose()
+
+    # ── Hearing events ───────────────────────────────────────────────────
+
+    def _on_hearing_event(self, ev: HearingEvent, identity: str) -> None:
+        """Called on the event loop, from the hearing thread.
+
+        Synchronous and fast: it either publishes a small state update or
+        spawns the utterance handler. Anything that waits belongs in a task.
+        """
+        if ev.kind == "wake":
+            self._on_wake(ev, identity)
+        elif ev.kind == "speech":
+            self._on_speech_start(identity)
+        elif ev.kind == "partial":
+            self._schedule_partial_publish(ev.text)
+        elif ev.kind == "utterance":
+            task = asyncio.create_task(self._handle_utterance_event(ev, identity))
+            self._utterance_tasks.add(task)
+            task.add_done_callback(self._handle_utterance_done)
+
+    def _on_wake(self, ev: HearingEvent, identity: str) -> None:
+        """Open the window the instant the word is heard.
+
+        This is the whole latency win of continuous detection. The old worker
+        could not reach this point until the VAD had closed the utterance and
+        Whisper had returned, so the UI flipped to "Listening" roughly half a
+        second after the user stopped speaking. The speaker embedding is
+        deliberately *not* awaited here — it is attached when the utterance
+        arrives, a few hundred milliseconds later, and making the window wait
+        on Resemblyzer would give back most of what was gained.
+        """
+        if not self.wake.enabled:
+            return
+        det = ev.detection
+        self.wake.extend(identity)
+        self._schedule_wake_state_publish()
+        if self._prewarm:
+            # The user is still mid-sentence; spend that time prefilling the
+            # session's prompt (see /api/voice/prewarm).
+            try:
+                asyncio.create_task(self._post_prewarm())
+            except RuntimeError:
+                pass
+        LOG.info("[%s] wake fired: %s/%.2f — window open (%.1fs)",
+                 self.room_name, det.name if det else "?",
+                 det.score if det else 0.0, self.wake.continuation_seconds)
+
+    def _on_speech_start(self, identity: str) -> None:
+        """Barge-in: the user started talking while Lloyd was.
+
+        Only inside the continuation window and only for the locked speaker —
+        otherwise a television in the room silences every reply. Gated on
+        `barge_in.enabled` because it needs client-side echo cancellation to be
+        safe: without AEC the agent's own voice comes back through the mic and
+        interrupts itself on every utterance.
+        """
+        if not self._barge_in_enabled:
+            return
+        if self.tts is None or not self.tts.is_speaking:
+            return
+        if not self.wake.matches_lock(identity):
+            return
+        dropped = self.tts.interrupt()
+        LOG.info("[%s] barge-in from %s — interrupted, dropped %d queued",
+                 self.room_name, identity, dropped)
 
     async def _embed_async(self, samples: np.ndarray, sample_rate: int):
         """Run resemblyzer's blocking embed in a thread so the event loop
@@ -1656,6 +1590,12 @@ class RoomBridge:
         first because that's what the gate cares about most)."""
         if self.speaker_id is None:
             return None, "Unknown", 0.0
+        # SpeakerIdentifier takes int16 and divides by 32768 itself. The hearing
+        # pipeline hands over float32 in [-1, 1]; passed straight through, that
+        # is a 90 dB attenuation ahead of Resemblyzer's silence trimming —
+        # invisible while no profile is enrolled, wrong the day one is.
+        if samples.dtype != np.int16:
+            samples = to_int16(samples)
         loop = asyncio.get_running_loop()
         try:
             name, score, emb = await loop.run_in_executor(
@@ -1666,130 +1606,207 @@ class RoomBridge:
             LOG.warning("[%s] voiceprint embed failed: %s", self.room_name, e)
             return None, "Unknown", 0.0
 
-    async def _handle_utterance(self, samples: np.ndarray, sample_rate: int, identity: str) -> None:
-        duration_s = samples.size / sample_rate
-        utterance_id = uuid.uuid4().hex[:12]
+    # ── Held (unfinished) turns ──────────────────────────────────────────
 
-        # Diagnostic stats: mean/peak RMS over the whole utterance and a
-        # voiced-ratio computed in 10ms windows (mirrors the VAD's frame
-        # view). Cheap O(n) numpy ops on a few hundred ms of audio.
-        f32 = samples.astype(np.float32) / 32768.0
-        if f32.size:
-            rms_mean = float(np.sqrt(np.mean(f32 * f32)))
-            rms_peak = float(np.max(np.abs(f32)))
-            chunk = max(1, sample_rate // 100)
-            n_chunks = f32.size // chunk
-            if n_chunks > 0:
-                trimmed = f32[: n_chunks * chunk].reshape(n_chunks, chunk)
-                chunk_rms = np.sqrt(np.mean(trimmed * trimmed, axis=1))
-                voiced_ratio = float(np.mean(chunk_rms >= float(self.vad_cfg.get("speech_rms", 0.025))))
-            else:
-                voiced_ratio = 0.0
-        else:
-            rms_mean = rms_peak = voiced_ratio = 0.0
+    def _take_held(self, identity: str, audio: np.ndarray) -> tuple[np.ndarray, float]:
+        """Prepend anything held for this speaker, and clear the hold."""
+        held = self._held.pop(identity, None)
+        self._held_deadline.pop(identity, None)
+        if not held:
+            return audio, 0.0
+        joined = np.concatenate(held + [audio])
+        return joined, sum(h.size for h in held) / 16000
 
-        utterance_start_t = time.monotonic() - duration_s
-        wake = self.wake
-        in_continuation = wake.enabled and wake.matches_lock(identity, at=utterance_start_t)
+    def _hold(self, identity: str, audio: np.ndarray) -> None:
+        self._held[identity] = [audio]
+        self._held_deadline[identity] = time.monotonic() + self._hold_timeout_s
 
-        stt_task = asyncio.create_task(self.stt.transcribe(samples, sample_rate))
-        t0 = time.monotonic()
+    async def _flush_held_loop(self) -> None:
+        """Release a held turn when the speaker simply stopped.
 
-        def _record_diag(text: str, latency: float) -> None:
-            cap = self.wake_capture
-            if cap is None:
-                return
-            try:
-                cap.record_utterance(
-                    utterance_id=utterance_id,
-                    room=self.room_name,
-                    identity=identity,
-                    duration_s=duration_s,
-                    rms_mean=rms_mean,
-                    rms_peak=rms_peak,
-                    voiced_ratio=voiced_ratio,
-                    ww_ran=ww_ran,
-                    ww_name=ww_name,
-                    ww_score=ww_score,
-                    ww_threshold=(self.acoustic_wake.threshold
-                                  if self.acoustic_wake is not None else 0.0),
-                    ww_fired=ww_already_fired,
-                    in_continuation=in_continuation,
-                    stt_text=text,
-                    stt_latency_s=latency,
-                    samples=samples,
-                    sample_rate=sample_rate,
-                    client_info=self._client_meta.get(identity),
-                )
-            except Exception as e:
-                LOG.debug("[%s] ww-diag record failed: %s", self.room_name, e)
-
-        # ── IDLE state: openWakeWord first, publish ASAP ────────────
-        ww_already_fired = False
-        ww_name = ""
-        ww_score = 0.0
-        ww_ran = False
-        if wake.enabled and not in_continuation and self.acoustic_wake is not None:
-            ww_match, ww_name, ww_score = await self.acoustic_wake.detect(samples, sample_rate)
-            ww_ran = True
-            if ww_match:
-                # Run embedding + state-publish before waiting for Whisper.
-                # This is the latency-critical path — the UI flips to
-                # "Listening" off this publish, so cutting Whisper out of
-                # the wait saves ~400ms of perceived wake-word latency.
-                emb, name, score = await self._embed_async(samples, sample_rate)
-                if emb is not None and self.speaker_id is not None:
-                    LOG.info("[%s] wake-word speaker: %s (cos=%.2f)",
-                             self.room_name, name, score)
-                wake.set_anchor(emb, name if name and name != "Unknown" else None)
-                wake.extend(identity)
-                await self._publish_wake_state()
-                ww_already_fired = True
-                LOG.info("[%s] wake-word matched (acoustic=%s/%.2f) — UI notified, awaiting STT",
-                         self.room_name, ww_name, ww_score)
-
-        # Now collect Whisper's result.
+        Smart Turn says "unfinished" both for a real mid-sentence pause and for
+        a trailing-off sentence nobody intends to finish. Without this, the
+        second case would sit in the buffer until the next thing anyone said —
+        which could be the following morning.
+        """
         try:
-            text = await stt_task
-        except Exception as e:
-            latency = time.monotonic() - t0
-            LOG.warning(
-                "[%s][diag] STT_FAIL dur=%.2fs rms_mean=%.3f rms_peak=%.3f voiced=%.2f ww=%s err=%s",
-                self.room_name, duration_s, rms_mean, rms_peak, voiced_ratio,
-                f"{ww_name or '-'}:{ww_score:.2f}" if ww_ran else "skipped",
-                e,
-            )
-            _record_diag("", latency)
+            while True:
+                await asyncio.sleep(0.25)
+                now = time.monotonic()
+                for identity, deadline in list(self._held_deadline.items()):
+                    if now < deadline:
+                        continue
+                    held = self._held.pop(identity, None)
+                    self._held_deadline.pop(identity, None)
+                    if not held:
+                        continue
+                    audio = np.concatenate(held)
+                    LOG.info("[%s] releasing %.2fs held turn from %s (timeout)",
+                             self.room_name, audio.size / 16000, identity)
+                    ev = HearingEvent(
+                        "utterance",
+                        utterance=voice_vad.Utterance(
+                            audio=audio, start_sample=0, end_sample=audio.size,
+                            max_prob=1.0, reason="hold_timeout",
+                        ),
+                    )
+                    task = asyncio.create_task(self._handle_utterance_event(ev, identity))
+                    self._utterance_tasks.add(task)
+                    task.add_done_callback(self._handle_utterance_done)
+        except asyncio.CancelledError:
             return
-        latency = time.monotonic() - t0
-        LOG.info(
-            "[%s][diag] dur=%.2fs rms_mean=%.3f rms_peak=%.3f voiced=%.2f ww=%s stt_lat=%.2fs cont=%s text=%r",
-            self.room_name, duration_s, rms_mean, rms_peak, voiced_ratio,
-            f"{ww_name or '-'}:{ww_score:.2f}" if ww_ran else "skipped",
-            latency, "Y" if in_continuation else "N", (text or "")[:80],
-        )
-        _record_diag(text or "", latency)
-        if not text:
-            # Empty transcript. If acoustic wake-word already fired, treat as
-            # bare wake-word (window already opened above). Otherwise drop.
-            if ww_already_fired:
+
+    def _wake_peak(self, identity: str) -> tuple[str, float]:
+        """Best wake score seen since the last drop, for the diag line."""
+        ht = self._hearing.get(identity)
+        if ht is None or ht.pipeline.wake is None:
+            return "", 0.0
+        return ht.pipeline.wake.take_peak()
+
+    def _record_diag(self, identity: str, audio: np.ndarray, ev: HearingEvent,
+                     text: str, latency: float, in_continuation: bool) -> None:
+        cap = self.wake_capture
+        if cap is None:
+            return
+        try:
+            f32 = np.asarray(audio, dtype=np.float32)
+            cap.record_utterance(
+                utterance_id=uuid.uuid4().hex[:12],
+                room=self.room_name,
+                identity=identity,
+                duration_s=f32.size / 16000,
+                rms_mean=float(np.sqrt(np.mean(f32 * f32))) if f32.size else 0.0,
+                rms_peak=float(np.max(np.abs(f32))) if f32.size else 0.0,
+                voiced_ratio=float(ev.utterance.max_prob) if ev.utterance else 0.0,
+                ww_ran=True,
+                ww_name=ev.wake.name if ev.wake else "",
+                ww_score=ev.wake.score if ev.wake else 0.0,
+                ww_threshold=(self.wake_factory.threshold
+                              if self.wake_factory is not None else 0.0),
+                ww_fired=ev.wake is not None,
+                in_continuation=in_continuation,
+                stt_text=text,
+                stt_latency_s=latency,
+                # Recorded at 16 kHz now: that is the rate every model in the
+                # pipeline actually saw, so a replay reproduces the decision
+                # rather than approximating it from the room's 48 kHz.
+                samples=to_int16(f32),
+                sample_rate=16000,
+                client_info=self._client_meta.get(identity),
+            )
+        except Exception as e:
+            LOG.debug("[%s] ww-diag record failed: %s", self.room_name, e)
+
+    async def _handle_utterance_event(self, ev: HearingEvent, identity: str) -> None:
+        """Decide what a closed utterance means, and inject it if it was for us.
+
+        The wake decision is already made by the time this runs — `ev.wake` is
+        the detection that fell inside this utterance's span, or None. That is
+        the inversion at the heart of the rework: the old version had to *ask*
+        openWakeWord here, after the VAD, which is why it never heard anything
+        the VAD had already mangled.
+        """
+        utt = ev.utterance
+        wake = self.wake
+        utterance_start_t = time.monotonic() - utt.duration_s
+        in_continuation = wake.enabled and wake.matches_lock(identity, at=utterance_start_t)
+        woke = ev.wake is not None
+        early: Optional[voice_asr.Transcript] = None
+
+        if wake.enabled and not woke and not in_continuation:
+            peak_name, peak = self._wake_peak(identity)
+            if wake.text_fallback:
+                # The second wake path: the acoustic models missed it, but the
+                # transcript may still open with "hey Lloyd". Transcribing an
+                # idle utterance is ~60 ms with Parakeet, where Whisper was
+                # the reason this was never done.
+                try:
+                    early = await asyncio.to_thread(self.stt.transcribe, utt.audio)
+                except Exception as e:
+                    LOG.warning("[%s] text-wake STT failed: %s", self.room_name, e)
+                if early is not None and _strip_wake_word(early.text, wake.words) is not None:
+                    woke = True
+                    LOG.info("[%s] wake from transcript %r (acoustic peak %s/%.2f)",
+                             self.room_name, early.text[:60], peak_name or "-", peak)
+            if not woke:
                 LOG.info(
-                    "[%s] bare wake-word — opening %.1fs window (empty Whisper)",
-                    self.room_name, wake.continuation_seconds,
+                    "[%s] not addressed to Lloyd — dropped %.2fs "
+                    "(vad=%.2f wake_peak=%s/%.2f text=%r)",
+                    self.room_name, utt.duration_s, utt.max_prob, peak_name or "-",
+                    peak, (early.text[:60] if early else None),
                 )
                 return
-            LOG.info("[%s] empty transcript for %.2fs utterance from %s (%.1fs whisper)",
-                     self.room_name, duration_s, identity, latency)
+
+        # ── Is it a finished thought? ───────────────────────────────
+        # A 380 ms silence closes an utterance; people pause longer than that
+        # mid-sentence. Rather than lengthening the silence for everyone, hold
+        # the audio when Smart Turn says the speaker has not finished, and
+        # glue it to what comes next.
+        audio, held_s = self._take_held(identity, utt.audio)
+        if (self.smart_turn is not None and early is None
+                and utt.reason != "max_duration"):
+            verdict = await asyncio.to_thread(self.smart_turn.predict, audio)
+            if not verdict.complete and held_s < self._hold_max_s:
+                self._hold(identity, audio)
+                LOG.info(
+                    "[%s] holding %.2fs — turn looks unfinished (p=%.2f, %.0f ms)",
+                    self.room_name, audio.size / 16000, verdict.probability,
+                    verdict.elapsed_ms,
+                )
+                return
+            LOG.debug("[%s] turn complete p=%.2f (%.0f ms)",
+                      self.room_name, verdict.probability, verdict.elapsed_ms)
+
+        # ── Transcribe ──────────────────────────────────────────────
+        t0 = time.monotonic()
+        try:
+            # A text wake already transcribed this exact audio; nothing was
+            # held in front of it, because a held turn implies an open window.
+            result = early if early is not None and held_s == 0 else \
+                await asyncio.to_thread(self.stt.transcribe, audio)
+        except Exception as e:
+            LOG.warning("[%s] STT failed on %.2fs: %s",
+                        self.room_name, audio.size / 16000, e)
             return
-        LOG.info("[%s] %s → %r  (%.2fs audio, %.1fs whisper)",
-                 self.room_name, identity, text, duration_s, latency)
+        text = result.text
+        latency = time.monotonic() - t0
+        duration_s = audio.size / 16000
+        LOG.info(
+            "[%s][diag] dur=%.2fs vad=%.2f wake=%s asr=%s/%.2fs cont=%s text=%r",
+            self.room_name, duration_s, utt.max_prob,
+            (f"{ev.wake.name}:{ev.wake.score:.2f}" if ev.wake else "text") if woke else "-",
+            result.backend, latency, "Y" if in_continuation else "N",
+            (text or "")[:80],
+        )
+        self._record_diag(identity, audio, ev, text, latency, in_continuation)
+
+        # ── Who said it ─────────────────────────────────────────────
+        # Deliberately after the wake window was opened, not before: the
+        # window is what the UI reacts to and Resemblyzer costs ~150 ms.
+        if woke:
+            emb, name, score = await self._embed_async(audio, 16000)
+            if emb is not None and self.speaker_id is not None:
+                LOG.info("[%s] wake speaker: %s (cos=%.2f)", self.room_name, name, score)
+            wake.set_anchor(emb, name if name and name != "Unknown" else None)
+            wake.extend(identity)
+            await self._publish_wake_state()
+
+        if not text:
+            if woke:
+                LOG.info("[%s] bare wake word — window open %.1fs, nothing to inject",
+                         self.room_name, wake.continuation_seconds)
+            else:
+                LOG.info("[%s] empty transcript for %.2fs from %s",
+                         self.room_name, duration_s, identity)
+            return
 
         # ── Gate decisions ──────────────────────────────────────────
         inject_text: Optional[str] = None
         speaker_name: Optional[str] = None  # populated from anchor or fresh ID
+        samples, sample_rate = audio, 16000
         if not wake.enabled:
             inject_text = text
-        elif in_continuation:
+        elif in_continuation and not woke:
             # Identity matches the locked participant. If voiceprint is
             # enabled AND the wake-word utterance was identified as a known
             # speaker, also require the embedding to match the anchor —
@@ -1824,25 +1841,13 @@ class RoomBridge:
             LOG.info("[%s] continuation pass-through (%.1fs left)",
                      self.room_name, wake.remaining_s())
         else:
-            # IDLE state: openWakeWord decision was already made above
-            # (parallel with Whisper). If it didn't fire, drop. If it did,
-            # the anchor + state publish already happened — we just need
-            # to decide what (if anything) to inject from the transcript.
-            if not ww_already_fired:
-                if self.acoustic_wake is None:
-                    LOG.warning("[%s] acoustic wake-word not available — dropping %r",
-                                self.room_name, text[:80])
-                else:
-                    LOG.info(
-                        "[%s] no wake-word (acoustic=%s/%.2f) in %r — dropped",
-                        self.room_name, ww_name or "?", ww_score, text[:80],
-                    )
-                return
-            # Wake-word already detected & state published. Just clean up
-            # the transcript for injection.
+            # The wake word fired inside this utterance. All that is left is
+            # deciding how much of the transcript is the word itself.
             speaker_name = wake.anchor_name
             tail = _strip_wake_word(text, wake.words)
             word_count = len([w for w in text.split() if w.strip(".,!?;:'\"")])
+            ww_name = ev.wake.name if ev.wake else "?"
+            ww_score = ev.wake.score if ev.wake else 0.0
             if tail is not None:
                 if not tail and wake.skip_inject_if_only_wake_word:
                     LOG.info(
@@ -1852,16 +1857,18 @@ class RoomBridge:
                     return
                 inject_text = tail or text
             elif word_count <= 2:
-                # Short transcript with no wake-word match: probably a
-                # mistranscribed bare wake-word (Whisper heard "Eloid"
-                # alone). Open the window and wait for the follow-up.
+                # A short transcript the matcher did not recognise, on an
+                # utterance the acoustic model *did*. That is a mistranscribed
+                # bare wake word, so open the window and wait for the follow-up
+                # rather than injecting "Eloid" as a question.
                 LOG.info(
                     "[%s] bare wake-word inferred from short transcript %r (%s/%.2f) — opening %.1fs window",
                     self.room_name, text[:40], ww_name, ww_score, wake.continuation_seconds,
                 )
                 return
             else:
-                # Full transcript with mistranscribed wake-word. Inject as-is.
+                # A full sentence whose wake word the ASR spelled differently.
+                # The acoustic model is the authority here, so inject as-is.
                 inject_text = text
             LOG.info(
                 "[%s] wake-word injecting %r (acoustic=%s/%.2f)",
@@ -1873,6 +1880,24 @@ class RoomBridge:
         payload = {"text": inject_text, "session_key": self.session_id}
         if speaker_name:
             payload["speaker"] = speaker_name
+        if not (self._stream_replies and self.tts is not None):
+            await self._inject_only(payload)
+            return
+        # The reply is spoken by its own task, which lives for the whole turn
+        # — minutes, with tools. The utterance handler returns now, so the next
+        # thing the user says is heard while Lloyd is still answering.
+        task = asyncio.create_task(self._speak_voice_turn(payload))
+        self._turn_tasks.add(task)
+        task.add_done_callback(self._turn_tasks.discard)
+
+    async def _post_prewarm(self) -> None:
+        try:
+            await self.http.post(PREWARM_URL, json={"session_key": self.session_id},
+                                 timeout=5.0)
+        except Exception as e:
+            LOG.debug("[%s] prewarm request failed: %s", self.room_name, e)
+
+    async def _inject_only(self, payload: dict) -> None:
         try:
             r = await self.http.post(INJECT_URL, json=payload, timeout=10.0)
             if r.status_code >= 300:
@@ -1880,6 +1905,128 @@ class RoomBridge:
                             self.room_name, r.status_code, r.text[:200])
         except Exception as e:
             LOG.warning("[%s] inject POST failed: %s", self.room_name, e)
+
+    # ── Speaking a reply as it streams ───────────────────────────────────
+
+    async def _speak_voice_turn(self, payload: dict) -> None:
+        """Inject the turn and speak its reply clause by clause as it streams.
+
+        The old path waited for the whole answer, then for the secondary model
+        to rewrite it (0.5-2 s), then for the 500 ms session poll to notice
+        it. Now the first sentence goes to TTS as soon as the model finishes
+        writing it, and the rewrite happens at the source: `/api/voice/inject`
+        tells the model it is speaking (see VOICE_TURN_REMINDER there).
+        """
+        import httpx
+
+        tts = self.tts
+        gen = tts.generation
+        cs = ClauseStream()
+        t0 = time.monotonic()
+        state = {"said": 0, "capped": False, "filler": False, "first_at": None}
+        filler_task: Optional[asyncio.Task] = None
+
+        async def say(clause: str) -> None:
+            if state["capped"] or tts.generation != gen:
+                return
+            if state["said"] + len(clause) > self._max_spoken_chars and state["said"]:
+                state["capped"] = True
+                await tts.speak("The rest is in the chat.")
+                return
+            if state["first_at"] is None:
+                state["first_at"] = time.monotonic()
+                LOG.info("[%s] first clause %.2fs after inject: %r",
+                         self.room_name, state["first_at"] - t0, clause[:60])
+            state["said"] += len(clause)
+            await tts.speak(clause)
+
+        async def filler() -> None:
+            # Only when nothing has been said yet, and only once a turn: a
+            # filler is for the silence before the answer, not a tic.
+            if not self._filler_enabled or state["filler"] or state["said"]:
+                return
+            state["filler"] = True
+            phrase = self._filler_phrases[self._filler_i % len(self._filler_phrases)]
+            self._filler_i += 1
+            await tts.speak(phrase)
+
+        async def filler_after_delay() -> None:
+            await asyncio.sleep(self._filler_after_s)
+            await filler()
+
+        try:
+            async with self.http.stream(
+                "POST", INJECT_URL, json=dict(payload, stream=True),
+                timeout=httpx.Timeout(10.0, read=None),
+            ) as resp:
+                if resp.status_code >= 300:
+                    body = await resp.aread()
+                    LOG.warning("[%s] inject failed %d: %s",
+                                self.room_name, resp.status_code, body[:200])
+                    return
+                if "text/event-stream" not in resp.headers.get("content-type", ""):
+                    # A backend from before streaming: the turn is queued and
+                    # the session poller will speak it the old way.
+                    await resp.aread()
+                    LOG.info("[%s] inject answered without a stream — poller speaks it",
+                             self.room_name)
+                    return
+                filler_task = asyncio.create_task(filler_after_delay())
+                async for event, data in _iter_sse(resp):
+                    if tts.generation != gen:
+                        LOG.info("[%s] reply interrupted — no longer speaking it",
+                                 self.room_name)
+                        break
+                    if event == "voice_turn":
+                        # Registered before the first segment can be persisted,
+                        # so the poller never races the stream for it.
+                        self._streamed_turns.append(data.get("turn_id", ""))
+                    elif event == "text_delta":
+                        for clause in cs.feed(data.get("text", "")):
+                            await say(clause)
+                    elif event == "tool_start":
+                        # Whatever was written before the tool is a finished
+                        # thought ("Let me check the calendar.") — say it now,
+                        # and if nothing at all has been said, say something.
+                        for clause in cs.flush():
+                            await say(clause)
+                        await filler()
+                    elif event in ("done", "error"):
+                        break
+                for clause in cs.flush():
+                    await say(clause)
+                if cs.skipped_code and not cs.stopped and state["said"]:
+                    await say("I've put the code in the chat.")
+                LOG.info("[%s] voice turn spoken: %d chars in %.1fs%s%s",
+                         self.room_name, state["said"], time.monotonic() - t0,
+                         " (capped)" if state["capped"] else "",
+                         " (filler)" if state["filler"] else "")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            LOG.warning("[%s] voice turn stream failed: %s", self.room_name, e)
+        finally:
+            if filler_task is not None and not filler_task.done():
+                filler_task.cancel()
+
+
+async def _iter_sse(resp):
+    """(event, data) pairs from a server-sent-events response."""
+    event, data_lines = "message", []
+    async for line in resp.aiter_lines():
+        if not line:
+            if data_lines:
+                try:
+                    payload = json.loads("\n".join(data_lines))
+                except ValueError:
+                    payload = {}
+                yield event, payload if isinstance(payload, dict) else {}
+            event, data_lines = "message", []
+            continue
+        if line.startswith("event:"):
+            event = line[6:].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
 
 
 # ── Worker manager ───────────────────────────────────────────────────────
@@ -1892,18 +2039,30 @@ class WorkerManager:
         self.bridges: dict[str, RoomBridge] = {}
         self._stopping = asyncio.Event()
         self._http_url = _http_url(self.lk_cfg["url"])
-        self.stt = WhisperSTT(self.lk_cfg.get("stt", {}))
-        self.vad_cfg = self.lk_cfg.get("vad", {})
+        stt_cfg = self.lk_cfg.get("stt", {}) or {}
+        # The recogniser itself is shared across rooms and stateless per call;
+        # only the *streaming* recogniser hands out per-stream objects.
+        self.stt = voice_asr.build_recognizer(stt_cfg)
+        if isinstance(self.stt, voice_asr.WhisperRecognizer):
+            hw = stt_cfg.get("hotwords_file")
+            self.stt.hotwords = _load_hotwords(hw) if hw else None
+            if self.stt.hotwords:
+                LOG.info("STT hotwords loaded: %r", self.stt.hotwords)
+        self.streaming_asr = voice_asr.build_streaming_recognizer(stt_cfg)
+        self.vad_cfg = self.lk_cfg.get("vad", {}) or {}
         # SpeakerIdentifier is shared across rooms — one VoiceEncoder load,
         # one profiles_dir watcher, single source of truth. None when
         # voiceprint matching is disabled in config.
         self.speaker_id = _build_speaker_id(self.lk_cfg.get("voiceprint", {}) or {})
-        # AcousticWakeWord runs in parallel with text-match wake detection.
-        # Critical because Whisper is unreliable at transcribing the brief
-        # wake-word phrase ("Eloid"/"Floyd"/"Alloyed" mishears). openWakeWord
-        # detects directly on the audio. Shared across rooms, lazy-loaded.
-        self.acoustic_wake = _build_acoustic_wake_word(
+        # Validates the wake-word files once here, then mints one model per
+        # audio stream — openWakeWord's Model is stateful and not thread-safe,
+        # and the old code shared a single instance across every room.
+        self.wake_factory = voice_wake.build_factory(
             self.lk_cfg.get("acoustic_wake", {}) or {}
+        )
+        # Smart Turn is stateless per call and genuinely shareable.
+        self.smart_turn = voice_turn.build_smart_turn(
+            self.lk_cfg.get("turn_detection", {}) or {}
         )
         # Wake-word miss capture rig (Phase A). Always-on by default; gate
         # via livekit.acoustic_wake.diag.{enabled,host,port}. The aiohttp
@@ -1928,9 +2087,16 @@ class WorkerManager:
                  self._http_url, POLL_INTERVAL, self.room_prefix)
         # Eager-load STT so the first utterance doesn't pay the load latency.
         try:
-            await self.stt._ensure_loaded()
+            await asyncio.to_thread(self.stt.load)
         except Exception as e:
             LOG.warning("STT eager-load failed (will retry on first utterance): %s", e)
+        # The speaker encoder too: loaded lazily it cost 0.8 s on the first wake
+        # of every worker lifetime, in the path between transcript and inject.
+        if self.speaker_id is not None:
+            try:
+                await asyncio.to_thread(self.speaker_id._ensure_encoder)
+            except Exception as e:
+                LOG.warning("speaker encoder eager-load failed: %s", e)
         if self.wake_capture is not None:
             self._diag_runner = await _start_ww_diag_server(
                 self.wake_capture, host=self._diag_host, port=self._diag_port,
@@ -1969,8 +2135,10 @@ class WorkerManager:
             bridge = RoomBridge(
                 r.name, self.lk_cfg, self.stt, self.vad_cfg, self._http,
                 speaker_id=self.speaker_id,
-                acoustic_wake=self.acoustic_wake,
+                wake_factory=self.wake_factory,
                 wake_capture=self.wake_capture,
+                smart_turn=self.smart_turn,
+                streaming_asr=self.streaming_asr,
             )
             try:
                 await bridge.connect()

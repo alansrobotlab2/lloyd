@@ -1099,6 +1099,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         stats=dict(current_iteration_stats),
                         reasoning=accumulated_thinking,
                         reasoning_ms=accumulated_thinking_ms,
+                        turn_id=turn.turn_id,
                     )
                     await _append_messages(session_id, [seg_entry])
                     full_response = ""
@@ -1331,6 +1332,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                             reasoning=accumulated_thinking,
                             reasoning_ms=accumulated_thinking_ms,
                             cancelled=True,
+                            turn_id=turn.turn_id,
                         ))
                     if tail:
                         await _append_messages(session_id, tail)
@@ -1354,6 +1356,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         reasoning=accumulated_thinking,
                         reasoning_ms=accumulated_thinking_ms,
                         source=turn.source,
+                        turn_id=turn.turn_id,
                     ))
                 elif tool_calls_log and turn.source == "user" and not cancelled_mid_stream:
                     # Empty terminal iteration after tool calls. The
@@ -1371,6 +1374,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     tail.append(build_assistant_text_entry(
                         placeholder_text, timestamp=end_ts, stats=stats_dict,
                         source=turn.source, synthetic_empty_terminal=True,
+                        turn_id=turn.turn_id,
                     ))
                     done_text = placeholder_text
                     logger.warning(
@@ -1440,6 +1444,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         full_response, timestamp=err_ts, stats=stream_stats,
                         reasoning=accumulated_thinking,
                         reasoning_ms=accumulated_thinking_ms,
+                        turn_id=turn.turn_id,
                     ))
                 if tail:
                     await _append_messages(session_id, tail)

@@ -196,14 +196,21 @@ else
     todo "Primary model not downloaded (22 GB). Run: bash setup/setup-qwen3.8-27b-nvfp4.sh   (or re-run with --with-models)"
 fi
 
-for f in models/wakeword/Lloyd.onnx models/openwakeword/melspectrogram.onnx; do
+for f in models/wakeword/Lloyd.onnx models/openwakeword/melspectrogram.onnx models/silero-vad/silero_vad.onnx; do
     [[ -f "$PROJECT_DIR/$f" ]] && ok "$f" \
-        || todo "agent-services/$f missing — restore from backup (custom-trained, not downloadable)"
+        || todo "agent-services/$f missing — it is tracked; check out the repo again"
 done
 
-TTS_VOICE="$PROJECT_DIR/services/tts/qwen3-tts/voice_library/profiles/cullen"
-[[ -d "$TTS_VOICE" ]] && ok "clone:cullen voice profile" \
-    || todo "TTS voice profile 'cullen' missing — restore voice_library/profiles/cullen/ (config.yaml references clone:cullen)"
+# Smart Turn, Parakeet, streaming ASR: ~1.1 GB, re-downloadable, untracked.
+if bash "$PROJECT_DIR/setup/fetch-voice-models.sh" --check >/dev/null 2>&1; then
+    ok "voice models (smart-turn, parakeet, nemo-streaming)"
+else
+    run bash "$PROJECT_DIR/setup/fetch-voice-models.sh"
+fi
+
+TTS_VOICE="$PROJECT_DIR/services/tts/qwen3-tts/voice_library/profiles/dave_cullen"
+[[ -d "$TTS_VOICE" ]] && ok "clone:dave_cullen voice profile" \
+    || todo "TTS voice profile 'dave_cullen' missing — restore voice_library/profiles/dave_cullen/ from backup (config.yaml references clone:dave_cullen; not reproducible)"
 
 # ── 9. Services ─────────────────────────────────────────────────────
 step "9/9  supervisord + systemd"

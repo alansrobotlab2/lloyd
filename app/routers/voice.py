@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.config import (
     CONFIG,
@@ -47,6 +47,48 @@ router = APIRouter()
 logger = logging.getLogger("lloyd-server")
 
 
+#: Prepended to what the model sees for a spoken turn — never to the text the
+#: chat shows, which stays exactly what was said. Rides in the prompt's tail
+#: the way the 20-turn memory nudge does, so the cached prefix is untouched,
+#: and it is recorded as that turn's subliminal context like every other
+#: injection.
+#:
+#: It exists because the reply is now spoken AS IT STREAMS. The old path
+#: waited for the whole answer and had the secondary model rewrite it for
+#: speech (0.5-2 s, on a single-tenant engine that every agent turn also
+#: queues behind); that rewrite cannot run on text that has not been written
+#: yet, so the instruction moves to the one place that can act on it before
+#: the first word — the model writing the answer.
+VOICE_TURN_REMINDER = (
+    "<system-reminder>This message was spoken aloud, and your reply is read "
+    "out by text-to-speech as you write it. Answer in plain spoken sentences: "
+    "no markdown, bullets, headings, tables or code blocks, and never read out "
+    "a URL, a file path or a hash. Lead with the answer and keep it to a few "
+    "sentences unless asked for more. If the full answer needs code, a table "
+    "or a link, put it in your reply after a line containing only `---` and "
+    "say that it is in the chat; nothing after that line is spoken. Write "
+    "numbers, times and units the way a person says them."
+    "</system-reminder>\n\n"
+)
+
+
+def _voice_turn_cfg() -> dict:
+    return ((CONFIG.get("livekit") or {}).get("voice_turn") or {})
+
+
+def _voice_extra_body() -> dict:
+    """Request-body extras for a spoken turn.
+
+    `thinking: off` sends `enable_thinking: false`, which the Qwen template
+    applies to the generation prompt only — the rendered history, and so the
+    cached prefix, is unchanged. Everything before the first spoken word is
+    dead air, and a reasoning phase is the largest thing that can sit there.
+    """
+    if str(_voice_turn_cfg().get("thinking", "on")).lower() in ("off", "false", "0"):
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    return {}
+
+
 # ── /api/voice/inject ─────────────────────────────────────────────────────
 
 @router.post("/api/voice/inject")
@@ -59,8 +101,18 @@ async def voice_inject(request: Request):
     persists the user message to the session JSON, broadcasts SSE events to
     any open chat UI, and produces a normal harness reply.
 
-    Payload: {text: str, session_key?: str, speaker?: str}
+    Payload: {text: str, session_key?: str, speaker?: str, stream?: bool}
     Response: {success: bool, session_id: str, turn_id: str}
+              — or, with `stream: true`, the turn's own event stream as SSE
+              (the same frames `/api/message/stream` sends), headed by a
+              `voice_turn` frame carrying the turn id.
+
+    `stream` is what lets the worker speak a reply while it is being written.
+    A turn's events queue has exactly one reader, and until this a spoken
+    turn had none: the events accumulated unread and the worker found the
+    answer by re-fetching the whole transcript every 500 ms, then waited for
+    it to finish. The caller that enqueued the turn is the natural owner of
+    that reader.
 
     The worker derives session_key from the LiveKit room name (room name
     is `lloyd-${session_id}`), so the payload session_key is always
@@ -77,6 +129,7 @@ async def voice_inject(request: Request):
 
     if not text:
         raise HTTPException(status_code=400, detail="Message text required")
+    stream = bool(data.get("stream"))
 
     prompt_text = (
         f"[{speaker}]: {text}"
@@ -84,58 +137,13 @@ async def voice_inject(request: Request):
         else text
     )
 
-    model = ""
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
-    existing: dict = {}
-    if meta_path.exists():
-        try:
-            existing = json.loads(meta_path.read_text())
-            model = existing.get("model", "") or ""
-        except Exception:
-            pass
-
-    if not model:
-        model = CONFIG.get("model", {}).get("default", "")
-    model = _resolve_model_name(model)
-    model_env = _get_model_env(model)
-
-    voice_plan = existing.get("plan") or {}
-    voice_plan_mode = bool(voice_plan.get("plan_mode"))
-    system_prompt = build_system_prompt(
-        session_id=session_id,
-        todos=existing.get("todos") or [], plan=voice_plan,
-    )
-
-    _voice_session_id = session_id
-
-    def _voice_refresh_disallowed() -> list[str]:
-        from app.paths import SESSIONS_DIR as _SD
-        try:
-            d = json.loads((_SD / f"{_voice_session_id}.json").read_text())
-            live = bool((d.get("plan") or {}).get("plan_mode"))
-        except Exception:
-            live = False
-        return _get_disallowed_tools(plan_mode=live)
+    setup = _voice_turn_setup(session_id)
+    model, meta_path, options = setup["model"], setup["meta_path"], setup["options"]
     prefetched_text = await prefetch_context_async(
-        prompt_text, session_id=session_id, plan_mode=voice_plan_mode,
+        prompt_text, session_id=session_id, plan_mode=setup["plan_mode"],
     )
-
-    options = RunOptions(
-        model=model,
-        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
-        system_prompt=system_prompt,
-        max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
-        permission_mode=CONFIG.get("agent", {}).get(
-            "permission_mode", "bypassPermissions"
-        ),
-        mcp_servers=_get_mcp_servers(),
-        disallowed_tools=_get_disallowed_tools(plan_mode=voice_plan_mode),
-        disallowed_tools_refresh=_voice_refresh_disallowed,
-        env=model_env,
-        session_id=session_id,
-        priority=0,
-        **_get_harness_kwargs(),
-    )
+    if _voice_turn_cfg().get("reminder", True):
+        prefetched_text = VOICE_TURN_REMINDER + prefetched_text
 
     await _save_session_meta(session_id, model, preview=prompt_text)
 
@@ -167,9 +175,166 @@ async def voice_inject(request: Request):
 
     set_last_user_session(session_id)
 
+    if stream:
+        from app.routers.messages import _turn_sse_generator
+
+        async def _sse():
+            head = {"session_id": session_id, "turn_id": turn.turn_id}
+            yield f"event: voice_turn\ndata: {json.dumps(head)}\n\n"
+            async for chunk in _turn_sse_generator(turn):
+                yield chunk
+
+        return StreamingResponse(_sse(), media_type="text/event-stream")
+
     return JSONResponse(
         {"success": True, "session_id": session_id, "turn_id": turn.turn_id}
     )
+
+
+def _voice_turn_setup(session_id: str) -> dict:
+    """Model, system prompt and RunOptions for a spoken turn on `session_id`.
+
+    One definition for the turn and for its prewarm, because the prewarm is
+    worth something only if it sends the engine the byte-identical prefix the
+    turn will send a moment later — two private copies of "how a voice turn is
+    set up" would drift, and the first sign would be a prewarm that silently
+    warms a prefix nobody uses.
+    """
+    import json
+
+    model = ""
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    existing: dict = {}
+    if meta_path.exists():
+        try:
+            existing = json.loads(meta_path.read_text())
+            model = existing.get("model", "") or ""
+        except Exception:
+            pass
+
+    if not model:
+        model = CONFIG.get("model", {}).get("default", "")
+    model = _resolve_model_name(model)
+    model_env = _get_model_env(model)
+
+    voice_plan = existing.get("plan") or {}
+    voice_plan_mode = bool(voice_plan.get("plan_mode"))
+    system_prompt = build_system_prompt(
+        session_id=session_id,
+        todos=existing.get("todos") or [], plan=voice_plan,
+    )
+
+    def _voice_refresh_disallowed() -> list[str]:
+        from app.paths import SESSIONS_DIR as _SD
+        try:
+            d = json.loads((_SD / f"{session_id}.json").read_text())
+            live = bool((d.get("plan") or {}).get("plan_mode"))
+        except Exception:
+            live = False
+        return _get_disallowed_tools(plan_mode=live)
+
+    options = RunOptions(
+        model=model,
+        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
+        system_prompt=system_prompt,
+        max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
+        permission_mode=CONFIG.get("agent", {}).get(
+            "permission_mode", "bypassPermissions"
+        ),
+        mcp_servers=_get_mcp_servers(),
+        disallowed_tools=_get_disallowed_tools(plan_mode=voice_plan_mode),
+        disallowed_tools_refresh=_voice_refresh_disallowed,
+        env=model_env,
+        session_id=session_id,
+        priority=0,
+        extra_body=_voice_extra_body(),
+        **_get_harness_kwargs(),
+    )
+    return {"model": model, "meta_path": meta_path, "options": options,
+            "plan_mode": voice_plan_mode}
+
+
+# ── /api/voice/prewarm ────────────────────────────────────────────────────
+
+#: session_id -> monotonic time of the last prewarm, so a burst of wake fires
+#: (or a wake per sentence inside one window) costs one prefill, not several.
+_PREWARM_LAST: dict[str, float] = {}
+_PREWARM_DEBOUNCE_S = 20.0
+
+
+@router.post("/api/voice/prewarm")
+async def voice_prewarm(request: Request):
+    """Prefill a session's prompt while the user is still talking.
+
+    The worker calls this the moment the wake word fires — mid-sentence,
+    measured at ~3 s before the finished utterance is injected. A spoken
+    turn's prefix is the session's system prompt, tools and history, and after
+    a break it is usually not in the engine's cache any more: the worker pool
+    runs 100-200k-token turns around the clock. Measured through a real room
+    on 2026-09-17: first answer token 4.16 s after inject on a cold session,
+    0.45 s on the warm turn after it. This spends that prefill during the
+    user's own sentence.
+
+    Body: {session_key}. Answers at once; the prefill runs in the background.
+    Fire-and-forget by design — a prewarm that fails costs nothing but the
+    head start.
+    """
+    import asyncio
+    import time
+
+    data = await request.json() if (await request.body()) else {}
+    session_id = (data.get("session_key") or data.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_key is required")
+    if not _voice_turn_cfg().get("prewarm", True):
+        return JSONResponse({"started": False, "reason": "disabled"})
+    now = time.monotonic()
+    if now - _PREWARM_LAST.get(session_id, 0.0) < _PREWARM_DEBOUNCE_S:
+        return JSONResponse({"started": False, "reason": "recent"})
+    _PREWARM_LAST[session_id] = now
+    asyncio.get_running_loop().create_task(_prewarm(session_id))
+    return JSONResponse({"started": True})
+
+
+async def _prewarm(session_id: str) -> None:
+    """One completion of one token over the prefix the next spoken turn sends.
+
+    Built with the turn's own setup and history loader, so the prefix matches
+    — up to the user message, which is the only thing that differs and sits
+    last. A session over its compaction threshold is skipped: its real turn
+    will summarize, which changes the history, and a prewarm must not spend a
+    summarization call on a wake that might have been a false alarm.
+    """
+    import time
+
+    from app.compaction import load_and_compact_session
+    from app.harness import run_query
+    from app.routers._messages_harness_adapter import _prepare_messages_for_harness
+
+    t0 = time.monotonic()
+    try:
+        setup = _voice_turn_setup(session_id)
+        options, meta_path = setup["options"], setup["meta_path"]
+        history: list[dict] = []
+        if meta_path.exists():
+            comp = await load_and_compact_session(
+                meta_path, model=setup["model"], mode_override="truncate")
+            if comp.get("truncated"):
+                logger.info("voice prewarm %s: skipped (over the compaction "
+                            "threshold — the turn will summarize)", session_id)
+                return
+            history = await _prepare_messages_for_harness(comp["history"])
+            if history and history[-1].get("role") == "user":
+                history = history[:-1]
+        options.extra_body = {**options.extra_body, "max_tokens": 1}
+        options.max_turns = 1
+        async for _ in run_query(history + [{"role": "user", "content": "."}], options):
+            pass
+        logger.info("voice prewarm %s: prefilled in %.2fs (%d history messages)",
+                    session_id, time.monotonic() - t0, len(history))
+    except Exception as e:
+        logger.warning("voice prewarm %s failed after %.2fs: %s",
+                       session_id, time.monotonic() - t0, e)
 
 
 # ── /api/voice/summarize ──────────────────────────────────────────────────

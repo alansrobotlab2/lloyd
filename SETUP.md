@@ -50,13 +50,19 @@ What it captures, and why each matters:
 | `~/lloyd/sessions/` | 725 MB | Conversation history. Gitignored. Optional but not recoverable. |
 | `~/backups/backup_*.tar.gz` (latest + `.sha256`) | varies | The daily archive itself. |
 
-Four things that **used** to live only on this disk are now tracked in the repo,
+Five things that **used** to live only on this disk are now tracked in the repo,
 so they arrive with a `git clone` and need no backup: the custom-trained
-wake-word ONNX models, the openwakeword base models, the vendored TTS repo's
-local patch (`qwen3-tts-local.patch`), and the qmd collection definitions
+wake-word ONNX models, the openwakeword base models, the Silero VAD model
+(`agent-services/models/silero-vad/`), the vendored TTS repo's local patch
+(`qwen3-tts-local.patch`), and the qmd collection definitions
 (`agent-services/conf/qmd-index.yml`). Keep them that way — if you retrain a wake
 word or edit the vendored TTS code, re-sync into the repo rather than relying on
 a backup.
+
+The voice worker's larger models — Smart Turn, Parakeet ASR and the streaming
+ASR, ~1.1 GB — are untracked and re-downloadable:
+`bash agent-services/setup/fetch-voice-models.sh` (size-checked; `--check`
+reports only). `setup-all.sh` runs it.
 
 **Models are the big one.** `agent-services/llm/models/` is **311 GB** and
 `agent-services/services/tts/qwen3-tts/models/` is another 4.3 GB. All of it is
@@ -267,10 +273,19 @@ uv venv .venvs/lloyd --python 3.12
 > once if you want the bare `pip` path this document used to assume.
 
 Install from **`requirements.lock`**, not `requirements.txt`. The lock is the
-frozen 175-package snapshot; `requirements.txt` holds loose human-edited intent
+frozen 179-package snapshot; `requirements.txt` holds loose human-edited intent
 and resolving it fresh will pull an incompatible `mcp` major. It carries the
-voice stack too — `faster-whisper`, `ctranslate2`, `openwakeword`, `onnxruntime`,
-`Resemblyzer`, `livekit`, and a CPU `torch` 2.11.
+voice stack too — `sherpa-onnx` (Parakeet ASR), `faster-whisper`, `ctranslate2`,
+`openwakeword`, `onnxruntime`, `Resemblyzer`, `livekit`, and `torch` 2.11 (the
+CUDA 13 build, with its `nvidia-*` cu13 wheels).
+
+**Do not `pip install silero-vad` into this venv.** It requires `torchaudio`,
+which pins torch: on 2026-09-17 it moved the venv to torch 2.9.1 with a second
+set of CUDA 12 wheels, and uninstalling those afterwards deleted shared
+`nvidia/` files the CUDA 13 wheels own (`libcudnn.so.9` — torch would not
+import) until they were force-reinstalled from the lock. The VAD uses Silero's
+ONNX model through `onnxruntime` directly (`agent-services/voice/vad.py`). Diff
+`pip freeze` against the lock after any install here.
 
 `trafilatura` (with `lxml`, `courlan`, `htmldate`, `justext`) is what `http_fetch`
 extracts pages with — pure Python over the system `libxml2` that `lxml` already
