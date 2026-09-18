@@ -780,3 +780,36 @@ async def test_a_state_changing_write_with_no_session_id_is_refused_over_the_wir
     finally:
         if os.path.exists(path):
             os.unlink(path)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_the_tools_page_discovery_carries_the_credential(aggregator, monkeypatch):
+    """`app.mcp_discovery._discover_mcp_tools` against the guarded server.
+
+    The fifth caller of the aggregator, and the one #1053 did not list: it
+    names the server by its `mcp_servers:` URL, so a search for the port or for
+    `services.lloyd_mcp` never finds it. It opened its own SDK client with no
+    headers, so on the day the guard landed (2026-09-18) the Tools page read
+    "Server returned an error response" and
+    `test_mcp_layer.test_discovery_resolves_the_configured_transport` went red
+    on main — for every round's tests rung, not only its author's. That test
+    could not catch it in #1053's own gate, because it talks to the LIVE
+    aggregator, and the live one was still the unguarded build.
+
+    This one owns both halves of the seam, so it fails in the gate of whoever
+    breaks it.
+    """
+    from app.mcp_discovery import _discover_mcp_tools
+
+    cfg = {"type": "streamable-http", "url": aggregator}
+    found, err = await _discover_mcp_tools("lloyd-mcp", cfg)
+    assert err is None, f"discovery was refused by the guard: {err}"
+    assert {"Bash", "Read", "Write", "Edit"} <= {t["name"] for t in found}
+
+    # The control: the same call with no credential to send is the refusal the
+    # Tools page showed. Without it, "err is None" could be a server that stopped
+    # asking.
+    import agent_mcp.aggregator_auth as A
+    monkeypatch.setattr(A, "read_token", lambda publish=False, **kw: "")
+    found, err = await _discover_mcp_tools("lloyd-mcp", cfg)
+    assert found == [] and err, "an uncredentialed discovery was served"

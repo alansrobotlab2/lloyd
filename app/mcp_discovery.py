@@ -339,26 +339,49 @@ async def _discover_mcp_tools(server_name: str, cfg: dict) -> tuple[list[dict], 
         # ("sse", "http"), so `streamable-http` fell through to stdio and
         # tried to spawn a bare `python` — the Tools page then sat on
         # "Discovering tools..." until the timeout, with nothing logged.
-        if server_type in HTTP_TRANSPORTS:
-            url = cfg.get("url", "")
-            ctx = sse_client(url) if server_type == "sse" else streamable_http_client(url)
-        elif server_type in STDIO_TRANSPORTS:
-            ctx = stdio_client(StdioServerParameters(
-                command=cfg.get("command", "python"),
-                args=list(cfg.get("args") or []),
-                env=dict(cfg["env"]) if cfg.get("env") else None,
-                cwd=cfg.get("cwd") or None,
-            ))
-        else:
-            raise ValueError(f"unknown transport type {server_type!r}")
-        async with ctx as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                result = await session.list_tools()
-                return [
-                    {"name": t.name, "description": t.description or ""}
-                    for t in result.tools
-                ]
+        from contextlib import AsyncExitStack
+
+        async with AsyncExitStack() as stack:
+            if server_type in HTTP_TRANSPORTS:
+                url = cfg.get("url", "")
+                # The aggregator refuses a request that carries no credential
+                # (#1053), and this is a fifth caller of it that #1053 did not
+                # list: it names the server by its `mcp_servers:` URL, so a
+                # grep for the port or for `services.lloyd_mcp` never finds
+                # it. The day the guard landed the Tools page read
+                # "Server returned an error response" — the SDK's rendering of
+                # a 401 — and `test_discovery_resolves_the_configured_transport`
+                # went red on main for every round's tests rung, which the
+                # change's own gate could not see because that test talks to
+                # the LIVE aggregator and the live one was still unguarded.
+                # The pool's helpers, not a second copy: loopback only, read
+                # per call, and a client we hand in is one we close.
+                from app.harness.mcp_pool import _http_client, aggregator_headers
+                headers = aggregator_headers(url)
+                if server_type == "sse":
+                    ctx = sse_client(url, headers=headers or None)
+                else:
+                    client = _http_client(headers=headers)
+                    if client is not None:
+                        await stack.enter_async_context(client)
+                    ctx = streamable_http_client(url, http_client=client)
+            elif server_type in STDIO_TRANSPORTS:
+                ctx = stdio_client(StdioServerParameters(
+                    command=cfg.get("command", "python"),
+                    args=list(cfg.get("args") or []),
+                    env=dict(cfg["env"]) if cfg.get("env") else None,
+                    cwd=cfg.get("cwd") or None,
+                ))
+            else:
+                raise ValueError(f"unknown transport type {server_type!r}")
+            read_stream, write_stream = await stack.enter_async_context(ctx)
+            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            await session.initialize()
+            result = await session.list_tools()
+            return [
+                {"name": t.name, "description": t.description or ""}
+                for t in result.tools
+            ]
 
     try:
         # Bound the whole exchange rather than the read: ClientSession only
