@@ -2641,3 +2641,27 @@ def test_a_landed_not_met_or_deferred_item_keeps_its_own_destination(isolated):
     assert B.item_by_id(653).status == "up_next", "not_met is re-offered, never closed"
     assert B.item_by_id(654).status == "draft", "deferred stays parked in draft"
     assert B.NEEDS_HUMAN_TAG not in _fm(isolated / "654-a-thing.md")["tags"]
+
+
+def test_the_unparsed_write_guard_costs_a_parseable_item_nothing(isolated):
+    """#1020's other half: the guard refuses only what it could not parse.
+
+    Every backlog writer that dumps a parsed dict back now shares
+    `_unparsed_guard`, which refuses a file opening with a `---` fence whose front
+    matter yielded no keys. A guard that also fired on healthy files would
+    paralyse the board — its `False` is indistinguishable from a refused move —
+    so the ordinary status move is pinned against the shipped guard: `set_status`
+    returns True, the reason lands on the last activity line, and `updated` is
+    stamped. `tests/test_frontmatter_parsing.py` pins the refusal side.
+    """
+    path = write_item(isolated, 790)
+    before = _fm(path)
+    assert "updated" not in before, "the fixture starts unstamped"
+    assert B.set_status(790, "up_next", "test: confirmed") is True
+    after = _fm(path)
+    assert after["status"] == "up_next"
+    assert len(after["activity_log"]) == 1
+    assert "test: confirmed" in after["activity_log"][-1]
+    assert after["updated"], "the move stamps `updated`"
+    assert after["board"] == "lloyd" and after["priority"] == "medium"
+    assert "Do the thing." in path.read_text(), "the body survives the rewrite"

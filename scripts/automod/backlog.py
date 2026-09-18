@@ -29,6 +29,7 @@ request for a human to sharpen the item, not a failure.
 from __future__ import annotations
 
 import json
+import logging
 import time
 import re
 import threading
@@ -61,6 +62,12 @@ from app.backlog_status import (
 from app.backlog_tags import is_spawn_tag, normalize_tags
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
+
+# The module had no logger, which is why a writer that refused a file left no
+# trace of why: `False` from `update_frontmatter` was indistinguishable from
+# `False` meaning "nothing to change" (#1020). Every refusal below names the
+# file here.
+logger = logging.getLogger(__name__)
 
 # Tags `backlog_write_task` puts on items this loop files for itself —
 # `spawned-by-triage` from a verdict turn, `spawned-by-autocode` from an
@@ -838,6 +845,18 @@ def last_graded_review(ledger: Path, round_id: str) -> dict | None:
 
 
 def _write_item(path: Path, fm: dict, body: str) -> None:
+    """Write one item file from a dict its caller already built.
+
+    The module's only other fence-and-dump write, and it cannot hold
+    `_unparsed_guard`: it never parses, so it cannot tell a refused read from a
+    good one. The invariant lives in its three callers instead — `amend_clause`,
+    `settle_amendments` and `orphan_stale_amendments` each parse first, and each
+    raises or returns before reaching here when that parse yielded nothing: an
+    empty `fm` has no `acceptance_clauses` to amend (ValueError), no pending
+    amendment record to settle, and no stale amendment to orphan. That is why the
+    refusal guard sits on the five writers that dump straight back and this sink
+    still cannot destroy a front matter (#1020).
+    """
     path.write_text(
         f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
         f"---\n{body}", encoding="utf-8")
@@ -1018,6 +1037,35 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
     return (fm if isinstance(fm, dict) else {}), parts[2]
 
 
+def _unparsed_guard(path: Path, text: str, fm: dict, writer: str) -> bool:
+    """True when a writer must refuse: a fenced file that parsed to no keys.
+
+    The rule `update_frontmatter` documented and carried for itself: "a dict
+    that came back empty because the YAML was broken would be written back as
+    a file with its frontmatter destroyed". Lifted out of that one caller so
+    every writer here that dumps a parsed dict back shares it — `_apply_status`
+    and `note_item` did not have it, which is how one status move on a file with
+    one unterminated quote left it holding only the keys that writer itself sets
+    (`activity_log`, `status`, `tags`, `updated`): everything it did not write was
+    gone, and the surviving front-matter text was glued onto the top of the body,
+    corrupting the `# ` heading extraction of every later read (#1020).
+
+    Refusing is the whole point, and it is logged: a bare `False` from a writer
+    is indistinguishable from "nothing to change", so the operator cannot tell a
+    guard from a no-op. A file with no opening fence at all is *not* refused —
+    that is a plain note, and a writer may legitimately give it front matter. An
+    empty but well-formed block parses to no keys and is refused exactly as
+    `update_frontmatter` has always refused it: from here a parse failure is
+    indistinguishable from an empty block, and the triage count for the live
+    board was zero files in either shape (#1020).
+    """
+    if text.startswith("---") and not fm:
+        logger.warning("%s refused on %s: the file opens with a front-matter "
+                       "fence but parsed to no keys — not rewriting it", writer, path)
+        return True
+    return False
+
+
 def load_item(path: Path) -> Item | None:
     try:
         fm, body = _split_frontmatter(path.read_text(encoding="utf-8"))
@@ -1064,15 +1112,16 @@ def update_frontmatter(path: Path, updates: dict, *, activity: str = "",
     """Set frontmatter keys on an item without moving its status.
 
     The one writer for the relation keys (`parent`, `group`, `members`,
-    `duplicate_of`). Refuses a file whose YAML did not parse: the other
-    writers here rewrite the file from the parsed dict, and a dict that came
-    back empty because the YAML was broken would be written back as a file
-    with its frontmatter destroyed — the MCP writer guards the same case
-    with `_yaml_broken`. A key set to None is removed.
+    `duplicate_of`). Refuses a file whose YAML did not parse: this writer dumps
+    the parsed dict back, and a dict that came back empty because the YAML was
+    broken would be written back as a file with its frontmatter destroyed — the
+    MCP writer guards the same case with `_yaml_broken`. It is `_unparsed_guard`,
+    shared now by every writer in this module that parses and re-dumps. A key set
+    to None is removed.
     """
     text = path.read_text(encoding="utf-8")
     fm, body = _split_frontmatter(text)
-    if text.startswith("---") and not fm:
+    if _unparsed_guard(path, text, fm, "update_frontmatter"):
         return False
     changed = False
     for k, v in (updates or {}).items():
@@ -2181,14 +2230,23 @@ def code_review_outcome(ledger: Path, round_id: str) -> dict | None:
 
 
 def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
-                 close: bool, why: str, tags: tuple[str, ...] = ()) -> Path:
+                 close: bool, why: str, tags: tuple[str, ...] = ()) -> Path | None:
     """Record the landing on the item; close it when `close`.
 
     The marker is written either way, so a landing is processed once. A
     human can still close an item the loop left open; the loop will not
     reopen one a human closed.
+
+    Returns None when the item's front matter starts with a fence and parses to
+    no keys: the landed marker and the closing move would be dumped over an empty
+    dict, which is the destruction this module's writers refuse (#1020). The
+    caller's ledger row is written whether or not this write happened — see the
+    note on the item.
     """
-    fm, body = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+    text = item.path.read_text(encoding="utf-8")
+    fm, body = _split_frontmatter(text)
+    if _unparsed_guard(item.path, text, fm, "close_landed"):
+        return None
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
     where = f"round {round_id}" if round_id else "a vault round"
     entry = (f"**{stamp}** — automod landed as `{commit[:8]}` ({where}, "
@@ -2691,8 +2749,16 @@ def _apply_status(path: Path, status: str, why: str, *,
     fixing is by definition not in `open_items`. A second definition of
     "record a status move" is how the two would come to disagree about the
     log line, the `updated` stamp, or which moves are refused.
+
+    Refuses a file whose front matter did not parse, before any other check:
+    the item it is reached through was loaded with defaulted fields, so an
+    unparseable file looks perfectly open here right up until the write
+    destroys it (#1020).
     """
-    fm, body = _split_frontmatter(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    fm, body = _split_frontmatter(text)
+    if _unparsed_guard(path, text, fm, "_apply_status"):
+        return False
     if fm.get("status") == status or fm.get("status") == "done":
         return False
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
@@ -2956,11 +3022,22 @@ def reopen_item(item_id: int, reason: str, *, ledger: Path | None = None) -> dic
 
 
 def note_item(item_id: int, text: str) -> bool:
-    """Append one activity-log line to an open item. False if not found."""
+    """Append one activity-log line to an open item. False if not found.
+
+    Also False, with the reason logged, when the item's front matter starts with
+    a fence and parses to no keys: `fm` is then the empty dict, and the write
+    would replace the file's whole front matter with the two keys this function
+    sets (`activity_log`, `updated`) — the same destruction `update_frontmatter`
+    has always refused, reached here through `open_items`, which admits an
+    unparseable file with defaulted fields (#1020).
+    """
     for item in open_items(None):
         if item.id == int(item_id):
+            raw = item.path.read_text(encoding="utf-8")
+            fm, body = _split_frontmatter(raw)
+            if _unparsed_guard(item.path, raw, fm, "note_item"):
+                return False
             stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
-            fm, body = _split_frontmatter(item.path.read_text(encoding="utf-8"))
             log = list(fm.get("activity_log") or [])
             log.append(f"**{stamp}** — {text}")
             fm["activity_log"] = log
@@ -3802,10 +3879,20 @@ def last_review_all_met(ledger: Path) -> set[int]:
 
 
 def tag_item(item_id: int, *, add: tuple[str, ...] = (), remove: tuple[str, ...] = ()) -> bool:
-    """Add or remove tags on an open item without moving its status."""
+    """Add or remove tags on an open item without moving its status.
+
+    Refuses an unparseable file the way `note_item` does: reached by id through
+    `open_items(None)`, so it is exactly as reachable as the two writers this
+    item names, and an empty `fm` would have made its `tags` list the only front
+    matter left (#1020). A refusal is logged, so it is not confusable with the
+    no-change `False` below.
+    """
     for item in open_items(None):
         if item.id == int(item_id):
-            fm, body = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+            raw = item.path.read_text(encoding="utf-8")
+            fm, body = _split_frontmatter(raw)
+            if _unparsed_guard(item.path, raw, fm, "tag_item"):
+                return False
             tags = normalize_tags(fm.get("tags"))
             new = [t for t in tags if t not in remove] + [t for t in add if t not in tags]
             if new == tags and isinstance(fm.get("tags"), list):
@@ -3827,7 +3914,7 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
                    acceptance_clauses: list[str] | tuple[str, ...] = (),
                    human_clauses: list[str] | tuple[str, ...] = (),
                    dropped_clauses: list[str] | tuple[str, ...] = (),
-                   hold: bool = False) -> Path:
+                   hold: bool = False) -> Path | None:
     """Append the verdict to the item's activity log, optionally closing it.
 
     Always writes the evidence, never just the conclusion. An item closed as
@@ -3839,11 +3926,21 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
     instead of moving it into the implement pool — the caller found the pool
     full. The caller's ledger row must carry `held: true`; that row, not the
     tag, is what `held_confirmations` reads.
+
+    Returns None, with the reason logged, when the item's front matter starts
+    with a fence and parses to no keys: the verdict would be dumped over an
+    empty dict and every key the writer does not set would be gone. That is the
+    same file the MCP/HTTP store already refuses to write (`_reject_broken_fm` →
+    409); this module was the loud-refuse/silent-destroy asymmetry (#1020). A
+    triage row on the ledger with no matching change on the item is the
+    consequence — see the note on the item.
     """
     if verdict not in VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r}")
     text = item.path.read_text(encoding="utf-8")
     fm, body = _split_frontmatter(text)
+    if _unparsed_guard(item.path, text, fm, "record_verdict"):
+        return None
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
     entry = f"**{stamp}** — autotriage: **{verdict}**. {evidence.strip()}"
