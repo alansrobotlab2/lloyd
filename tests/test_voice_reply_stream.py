@@ -35,13 +35,17 @@ def _sse(*events):
 
 class _Resp:
     def __init__(self, lines, content_type="text/event-stream", status=200,
-                 gate=None):
+                 gate=None, open_delay=0.0):
         self._lines = lines
         self.headers = {"content-type": content_type}
         self.status_code = status
         self._gate = gate
+        self._open_delay = open_delay
 
     async def __aenter__(self):
+        # The backend runs prefetch before it answers, so the headers
+        # themselves can be late.
+        await asyncio.sleep(self._open_delay)
         return self
 
     async def __aexit__(self, *exc):
@@ -190,6 +194,17 @@ def test_skipped_code_is_pointed_at():
                  ("done", {}))
     b = _bridge(_Resp(lines), filler={"enabled": False})
     assert _run(b) == ["Here is the fix.", "I've put the code in the chat."]
+
+
+def test_the_filler_clock_starts_at_the_question_not_at_the_headers():
+    # 2026-09-18: the clock started only once the stream opened, so time the
+    # backend spent before answering was silence nobody filled.
+    quick = _sse(("voice_turn", {"turn_id": "t"}),
+                 ("text_delta", {"text": "Here it is."}), ("done", {}))
+    b = _bridge(_Resp(quick, open_delay=0.25),
+                filler={"enabled": True, "after_seconds": 0.1,
+                        "phrases": ["One moment."]})
+    assert _run(b) == ["One moment.", "Here it is."]
 
 
 def test_a_backend_without_streaming_is_left_to_the_poller():

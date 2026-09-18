@@ -351,11 +351,59 @@ On utterance-length audio the gap is wider: a 1 s clip took `base.en` 2.76 s
 in production and Parakeet 0.06 s. Whisper was *slower on shorter audio*
 (0.57 s for clips over 8 s) because its temperature fallback re-decodes the
 whole clip each time a tightened threshold fails, and short utterances are what
-fail them. `backend: whisper` remains — with `temperature_fallback: false`,
-which alone took it from 2.75 s to 0.62 s — because it is the engine with
-hotword biasing; hotwords matter much less now that they no longer carry the
-wake word. Audio reaches sherpa already at 16 kHz: handed 48 kHz it builds a
-fresh resampler per stream and logs a paragraph each time.
+fail them. `backend: whisper` remains as the fallback, with
+`temperature_fallback: false`, which alone took it from 2.75 s to 0.62 s.
+Audio reaches sherpa already at 16 kHz: handed 48 kHz it builds a fresh
+resampler per stream and logs a paragraph each time.
+
+#### Names and terms: a second, biased decode
+
+The first real session on Parakeet (2026-09-18) heard "how many items are in
+our Lloyd backlog" as "back block". Whisper had been handed
+`~/obsidian/hotwords.md` (the family and project names) and Parakeet never
+was. Three things made the obvious fix the wrong one:
+
+- **sherpa biases only in beam search, and beam search alone is worse here**:
+  LibriSpeech 3.83% → 4.78% clean, and it changes 188 of 500 real-room
+  transcripts — mostly silence turned into "Mm." or "Yeah.", which inside a
+  follow-up window would be sent to Lloyd as a turn.
+- **sherpa will not take hand-split pieces.** Handed `▁back log` it splits at
+  the `▁`, logs `Cannot find ID`, skips the word and loads anyway. It needs
+  `modeling_unit: bpe` and a sentencepiece vocab to encode words itself; the
+  export ships only `tokens.txt`, so `bpe_vocab_from_tokens` rebuilds one
+  (pieces in merge order, score `-id`). `test_every_configured_hotword_encodes…`
+  fails on that log line.
+- **Biasing toward the wake name wakes Lloyd.** With "Lloyd" on the list,
+  "Floyd came over yesterday" came out "Lloyd came over yesterday" — a
+  transcript that opens with the wake word. The worker excludes every wake-word
+  token (`parakeet_hotwords(…, exclude=)`).
+
+So `HotwordRecognizer` runs greedy and a biased beam decode side by side (the
+biased one on its own thread) and keeps greedy's transcript unless the biased
+one *gained* a word on the list (`prefer_biased`). Measured with
+`scripts/voice/hotword_eval.py` on 132 held-out TTS sentences that contain a
+hotword and 72 sound-alikes that do not (`synth_hotword_corpus.py`: "the back
+lot", "Emily", "stomping", "Floyd"), plus LibriSpeech and the 500 real
+utterances:
+
+| the configured list (10 words) | hotword recall | false insertions | LibriSpeech clean / 10 dB | real changed |
+|---|---|---|---|---|
+| greedy (before) | 87/132 | 0/72 | 3.83% / 9.30% | — |
+| beam + list @1.0 | 104/132 | 0/72 | 4.78% / 8.78% | 186/500 |
+| **greedy, biased where it gains @1.0** | **106/132** | **0/72** | **3.83% / 9.30%** | **1/500** |
+
+The one real change is "back block" → "backlog". Per word, greedy →
+combined: LiveKit 0 → 6 of 6, Stompy 5 → 11 of 12, Alan 5 → 9 of 12, Lisa,
+Inner Voice and backlog one more each. With a 13-word list at 1.5 recall
+was 110/132 but "the back lot" became "the backlog" for four voices, so 1.0.
+autotriage, autocode and Mission Control were tried and did not gain, so
+`livekit.stt.hotwords` lists only backlog, LiveKit and Inner Voice; the vault
+file is read as it is ("gr00t" does nothing either — the model hears
+"group"). The price is
+~+100 ms per utterance and a second copy of the model, ~1 GB. The
+transcript's `backend` reads `parakeet+hw` when the biased decode was used,
+so the diag line says which one spoke. `parakeet_hotwords: false` is the
+switch.
 
 `livekit.stt.streaming` (off) runs a cache-aware streaming FastConformer CTC
 for live partial transcripts on the data channel (`partial_transcript`).
@@ -532,7 +580,12 @@ next thing the user says is still heard.
 - **A filler covers silence, never an answer**: once per turn, after
   `filler.after_seconds` (2.5 s) of nothing, or at a tool call before any
   words. The end-to-end run's first, cold turn said "One moment." before
-  "42"; with the prewarm it did not need to.
+  "42"; with the prewarm it did not need to. The clock starts when the worker
+  sends the question, not when the stream opens: the backend runs its context
+  prefetch (a 300 ms budget, overrun on 2026-09-18) before it answers, and a
+  clock started at the headers put "One moment." about four seconds into the
+  silence it exists to fill. Each filler logs its cause and offset
+  (`filler 'One moment.' at 2.50s (timer)` / `(tool)`).
 - **A runaway reply is capped** at `max_spoken_chars` (1500) with "The rest is
   in the chat.", and skipped code gets "I've put the code in the chat."
 - **An interrupt stops it**: `TTSStreamer.generation` is bumped by
@@ -840,6 +893,28 @@ On connect it also sends a `client_info` message carrying the browser's UA,
 mobile flag, the audio constraints actually in force and the mic gain, so the
 wake-miss rig can correlate misses with a device's DSP configuration.
 
+**A mic that never starts is said, on both ends.** On 2026-09-18 a session sat
+four minutes with nothing heard: the page joined the room and never published
+its mic — the SFU's log showed Lloyd's track and no other — while the pill
+read "Say 'Lloyd'" and the worker logged "connected" and then nothing. The
+error `VoiceRoom` recorded for a failed mic was rendered nowhere; the sidebar
+drew its own error slot and not the room's. Now:
+
+- `VoiceRoom` carries `micState` (`off` → `starting` → `live` | `failed`).
+  `getUserMedia` and `publishTrack` have no timeout of their own, and an
+  unanswered permission prompt neither resolves nor rejects, so after
+  `MIC_SLOW_MS` (8 s) in `starting` the page says to check the mic permission;
+  a rejection is named (`micErrorMessage`: denied, no device, busy).
+- `web/src/lib/voiceIndicator.ts` is the one definition of what the pill and
+  the collapsed-bar dot say, and the mic ranks below Lloyd's own activity and
+  above the wake state: "No mic" or "Starting mic…", never "Say 'Lloyd'"
+  while nothing can hear it. `RightChatSidebar` renders the room's error.
+- The worker logs, once per participant, anyone in the room
+  `NO_AUDIO_WARN_S` (15 s) with no audio track (`… no audio has arrived —
+  their browser never published a microphone`), and when late audio does
+  arrive, how late. Grep for `no audio has arrived` before reading the SFU
+  log.
+
 ## The spoken alert channel is separate, deliberately
 
 The guardian says alerts aloud in the same cloned voice —
@@ -1052,8 +1127,20 @@ voice.
   first clause, abbreviations and decimals, code, dividers, lists, tables,
   inline markdown, short-clause joining, the ceiling.
 - `tests/test_voice_reply_stream.py` — the worker's consumer against a fake
-  SSE stream: order, registration, text before a tool, the filler rules, an
-  interrupt, the cap, skipped code, an old backend, the SSE parser.
+  SSE stream: order, registration, text before a tool, the filler rules
+  (including a stream that opens late), an interrupt, the cap, skipped code,
+  an old backend, the SSE parser.
+- `tests/test_voice_asr_hotwords.py` — the hotwords file parsed, the cased
+  variants, the rebuilt vocab, the wake name excluded, the biased decode used
+  only for a gained hotword, every configured word encoding against the real
+  vocab (sherpa's stderr), and on the real model a synthetic "LiveKit" clip
+  greedy misses and the combination gets.
+- `tests/test_voice_no_audio.py` — a participant with no audio reported once
+  after the grace, never when audio arrived, timed from the join, and judged
+  afresh after a rejoin.
+- `web/src/lib/voiceIndicator.test.ts` (vitest) — the pill never says "Say
+  'Lloyd'" while the mic is not live, the precedence, and the named mic
+  errors.
 - `tests/test_voice_inject_stream.py` — the endpoint's stream and its JSON
   fallback, the reminder in the model's text and not the chat's, thinking
   config, and the prewarm's prefix, debounce, switch and summarization skip.
@@ -1067,7 +1154,10 @@ voice.
 `scripts/voice/`: `replay.py` (the pipeline over WAVs; `compare-wake`) —
 which replaces `scripts/ww_replay.py`, a replay of the retired per-utterance
 sweep that would now measure an algorithm nothing runs —
-`asr_eval.py` (WER and speed per backend on LibriSpeech, `--snr` for noise)
+`asr_eval.py` (WER and speed per backend on LibriSpeech, `--snr` for noise),
+`hotword_eval.py` with its corpus builder `synth_hotword_corpus.py` (the
+Parakeet hotword measurements above; re-run it before adding a word — only
+terms that measure a gain belong in `livekit.stt.hotwords`)
 and `e2e_voice.py` — a real LiveKit room, a canary backend on 18180/18600
 under a scratch HOME, a second worker on the `e2e-` prefix, and a synthetic
 participant that talks and times the replies. Nothing it runs touches live

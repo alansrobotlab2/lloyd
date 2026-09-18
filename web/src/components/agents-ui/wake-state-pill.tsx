@@ -1,20 +1,25 @@
 import { cn } from '@/lib/utils'
+import { voiceIndicator, type MicState } from '@/lib/voiceIndicator'
 
-/** Visual indicator for the wake-word gate state. Five states top-to-bottom:
+/** Visual indicator for the wake-word gate state. Seven states top-to-bottom:
  *
  *   disconnected — gray dot, "not connected"
  *   thinking     — amber pulse, "Lloyd is thinking…"
  *   speaking     — primary pulse, "Lloyd is speaking" (continuation will
  *                  open after he finishes)
+ *   mic-failed   — red, "No mic": nothing you say can reach Lloyd
+ *   mic-starting — amber, "Starting mic…" (or waiting on a permission prompt)
  *   listening    — emerald pulse, "Listening (Xs left)" + countdown bar
  *   idle         — muted, "Say 'Lloyd' to start"
  *
  * Order matters because the worker sets wake='listening' as soon as the
  * wake-word matches — but if the agent is currently speaking, the user
- * cares more about that than the still-open continuation window.
+ * cares more about that than the still-open continuation window. The order
+ * itself lives in `voiceIndicator`, shared with the sidebar's status dot.
  */
 export interface WakeStatePillProps {
   status: 'idle' | 'connecting' | 'connected' | 'failed'
+  micState?: MicState
   wakeState: 'idle' | 'listening'
   wakeRemainingS: number
   wakeContinuationS: number
@@ -27,6 +32,7 @@ export interface WakeStatePillProps {
 
 export function WakeStatePill({
   status,
+  micState,
   wakeState,
   wakeRemainingS,
   wakeContinuationS,
@@ -37,8 +43,9 @@ export function WakeStatePill({
 }: WakeStatePillProps) {
   const padding = compact ? 'px-3 py-1.5 text-xs' : 'px-4 py-2 text-sm'
   const wWidth = compact ? 'w-full' : 'w-72'
+  const kind = voiceIndicator({ status, micState, agentThinking, agentSpeaking, wakeState })
 
-  if (status !== 'connected') {
+  if (kind === 'disconnected') {
     return (
       <div className={cn(
         'flex items-center gap-2 rounded-full border border-border bg-card text-muted-foreground',
@@ -49,7 +56,7 @@ export function WakeStatePill({
       </div>
     )
   }
-  if (agentThinking) {
+  if (kind === 'thinking') {
     return (
       <div className={cn(
         'flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-300',
@@ -60,7 +67,7 @@ export function WakeStatePill({
       </div>
     )
   }
-  if (agentSpeaking) {
+  if (kind === 'speaking') {
     return (
       <div className={cn(
         'flex items-center gap-2 rounded-full border border-primary/40 bg-primary/10 text-primary',
@@ -71,7 +78,25 @@ export function WakeStatePill({
       </div>
     )
   }
-  if (wakeState === 'listening') {
+  if (kind === 'mic-failed' || kind === 'mic-starting') {
+    const failed = kind === 'mic-failed'
+    return (
+      <div className={cn(
+        'flex items-center gap-2 rounded-full border',
+        failed
+          ? 'border-destructive/50 bg-destructive/10 text-destructive'
+          : 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+        padding,
+      )}>
+        <span className={cn(
+          'inline-block h-2 w-2 rounded-full shrink-0',
+          failed ? 'bg-destructive' : 'bg-amber-400 animate-pulse',
+        )} />
+        <span className="truncate">{failed ? 'No mic' : 'Starting mic…'}</span>
+      </div>
+    )
+  }
+  if (kind === 'listening') {
     const pct = Math.max(0, Math.min(100, (wakeRemainingS / wakeContinuationS) * 100))
     return (
       <div className={cn(

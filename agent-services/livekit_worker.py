@@ -117,6 +117,11 @@ def _expand_env(value):
 
 POLL_INTERVAL = 2.0           # seconds between RoomService polls
 DEFAULT_ROOM_PREFIX = "lloyd-"
+# A browser that joins and never publishes its mic looks, from here, exactly
+# like a quiet room: on 2026-09-18 a session sat four minutes with nothing
+# heard and nothing logged, and only the SFU's own log could say why. The
+# page publishes within a second or two of joining when it works at all.
+NO_AUDIO_WARN_S = 15.0
 
 
 def _build_speaker_id(vp_cfg: dict):
@@ -996,43 +1001,10 @@ async def _start_ww_diag_server(capture: WakeMissCapture,
 # ── STT ──────────────────────────────────────────────────────────────────
 
 def _load_hotwords(path: str | Path) -> Optional[str]:
-    """Read names from a markdown hotwords file (with optional YAML
-    frontmatter) and return them as a single space-separated string for
-    faster-whisper's `hotwords=` parameter, or None on any error.
-
-    File format (matching the user's ~/obsidian/hotwords.md):
-      ---
-      title: Hotwords
-      tags: [...]
-      ---
-      Lloyd
-      Alan
-      Lisa
-      ...
-    """
-    p = Path(path).expanduser()
-    if not p.exists():
-        return None
-    try:
-        text = p.read_text()
-    except Exception as e:
-        LOG.warning("hotwords: failed to read %s: %s", p, e)
-        return None
-    # Strip YAML frontmatter if present.
-    if text.startswith("---"):
-        end = text.find("\n---", 3)
-        if end >= 0:
-            text = text[end + 4:]
-    names = []
-    for line in text.splitlines():
-        line = line.strip()
-        # Skip blanks, comments, and accidental markdown bullets.
-        if not line or line.startswith("#") or line.startswith("-"):
-            continue
-        names.append(line)
-    if not names:
-        return None
-    return " ".join(names)
+    """The hotwords file as faster-whisper's `hotwords=` string (space-joined),
+    or None. The parsing is `voice.asr.read_hotwords`, shared with Parakeet."""
+    names = voice_asr.read_hotwords(path)
+    return " ".join(names) if names else None
 
 
 # ── Per-room bridge ──────────────────────────────────────────────────────
@@ -1095,6 +1067,10 @@ class RoomBridge:
         # one when its participant leaves (otherwise stale streams keep
         # producing duplicate transcripts).
         self._audio_tasks: dict[str, asyncio.Task] = {}
+        # When each remote participant was first seen, and who has already
+        # been reported as sending no audio (see NO_AUDIO_WARN_S).
+        self._present_since: dict[str, float] = {}
+        self._no_audio_warned: set[str] = set()
         # TTS pipeline (lazy-initialized on connect).
         self._tts_cfg = lk_cfg.get("tts", {}) or {}
         self.tts: Optional[TTSStreamer] = None
@@ -1176,6 +1152,7 @@ class RoomBridge:
         poll_task = asyncio.create_task(self._poll_session_messages())
         self._tasks.append(poll_task)
         self._tasks.append(asyncio.create_task(self._flush_held_loop()))
+        self._tasks.append(asyncio.create_task(self._watch_audio_loop()))
 
     @property
     def has_remote_participants(self) -> bool:
@@ -1399,12 +1376,18 @@ class RoomBridge:
         if prior is not None and not prior.done():
             prior.cancel()
         LOG.info("[%s] subscribed to audio from %s", self.room_name, identity)
+        if identity in self._no_audio_warned:
+            since = self._present_since.get(identity)
+            LOG.info("[%s] audio from %s arrived %.0fs after joining", self.room_name,
+                     identity, time.monotonic() - since if since else -1)
+            self._no_audio_warned.discard(identity)
         task = asyncio.create_task(self._consume_audio(track, identity))
         self._tasks.append(task)
         self._audio_tasks[identity] = task
 
     def _on_participant_connected(self, participant) -> None:
         LOG.info("[%s] participant joined: %s", self.room_name, participant.identity)
+        self._present_since[participant.identity] = time.monotonic()
         # Push the current wake state so the freshly-joined browser doesn't
         # have to wait for the next utterance to learn whether we're idle
         # or already in continuation.
@@ -1413,6 +1396,8 @@ class RoomBridge:
     def _on_participant_disconnected(self, participant) -> None:
         identity = participant.identity
         LOG.info("[%s] participant left: %s", self.room_name, identity)
+        self._present_since.pop(identity, None)
+        self._no_audio_warned.discard(identity)
         # Cancel the per-participant audio consumer so a stale stream can't
         # keep producing duplicate transcripts after the participant is gone.
         task = self._audio_tasks.pop(identity, None)
@@ -1642,6 +1627,41 @@ class RoomBridge:
     def _hold(self, identity: str, audio: np.ndarray) -> None:
         self._held[identity] = [audio]
         self._held_deadline[identity] = time.monotonic() + self._hold_timeout_s
+
+    def _check_silent_participants(self, now: float) -> list[str]:
+        """Report, once each, anyone who has been in the room NO_AUDIO_WARN_S
+        without an audio track reaching us. Returns the identities reported.
+
+        A participant already present when we connected is timed from our
+        first look, not from their join: nothing could have reached us before
+        we were in the room either."""
+        try:
+            present = list(self.room.remote_participants.keys())
+        except Exception:
+            return []
+        reported = []
+        for identity in present:
+            since = self._present_since.setdefault(identity, now)
+            if identity in self._audio_tasks or identity in self._no_audio_warned:
+                continue
+            if now - since < NO_AUDIO_WARN_S:
+                continue
+            self._no_audio_warned.add(identity)
+            reported.append(identity)
+            LOG.warning(
+                "[%s] %s has been in the room %.0fs and no audio has arrived — "
+                "their browser never published a microphone (permission prompt "
+                "unanswered, denied, or no input device)",
+                self.room_name, identity, now - since)
+        return reported
+
+    async def _watch_audio_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+                self._check_silent_participants(time.monotonic())
+        except asyncio.CancelledError:
+            pass
 
     async def _flush_held_loop(self) -> None:
         """Release a held turn when the speaker simply stopped.
@@ -1957,7 +1977,6 @@ class RoomBridge:
         cs = ClauseStream()
         t0 = time.monotonic()
         state = {"said": 0, "capped": False, "filler": False, "first_at": None}
-        filler_task: Optional[asyncio.Task] = None
 
         async def say(clause: str) -> None:
             if state["capped"] or tts.generation != gen:
@@ -1973,7 +1992,7 @@ class RoomBridge:
             state["said"] += len(clause)
             await tts.speak(clause)
 
-        async def filler() -> None:
+        async def filler(cause: str) -> None:
             # Only when nothing has been said yet, and only once a turn: a
             # filler is for the silence before the answer, not a tic.
             if not self._filler_enabled or state["filler"] or state["said"]:
@@ -1981,12 +2000,20 @@ class RoomBridge:
             state["filler"] = True
             phrase = self._filler_phrases[self._filler_i % len(self._filler_phrases)]
             self._filler_i += 1
+            LOG.info("[%s] filler %r at %.2fs (%s)", self.room_name, phrase,
+                     time.monotonic() - t0, cause)
             await tts.speak(phrase)
 
         async def filler_after_delay() -> None:
             await asyncio.sleep(self._filler_after_s)
-            await filler()
+            await filler("timer")
 
+        # The silence the listener hears starts now, not when the backend
+        # answers: prefetch runs before the stream opens (300 ms budget, and
+        # it overran on 2026-09-18), and the clock started only at the
+        # headers, so "One moment." arrived four seconds into the silence it
+        # exists to fill. Cancelled in `finally` on every path that ends.
+        filler_task = asyncio.create_task(filler_after_delay())
         try:
             async with self.http.stream(
                 "POST", INJECT_URL, json=dict(payload, stream=True),
@@ -2004,7 +2031,6 @@ class RoomBridge:
                     LOG.info("[%s] inject answered without a stream — poller speaks it",
                              self.room_name)
                     return
-                filler_task = asyncio.create_task(filler_after_delay())
                 async for event, data in _iter_sse(resp):
                     if tts.generation != gen:
                         LOG.info("[%s] reply interrupted — no longer speaking it",
@@ -2023,7 +2049,7 @@ class RoomBridge:
                         # and if nothing at all has been said, say something.
                         for clause in cs.flush():
                             await say(clause)
-                        await filler()
+                        await filler("tool")
                     elif event in ("done", "error"):
                         break
                 for clause in cs.flush():
@@ -2075,7 +2101,15 @@ class WorkerManager:
         stt_cfg = self.lk_cfg.get("stt", {}) or {}
         # The recogniser itself is shared across rooms and stateless per call;
         # only the *streaming* recogniser hands out per-stream objects.
-        self.stt = voice_asr.build_recognizer(stt_cfg)
+        # Never bias the transcript toward the wake name: a transcript that
+        # opens with it wakes Lloyd (see voice_asr.parakeet_hotwords).
+        # Every word of every phrase: "hey"/"okay" are never hotwords anyway.
+        wake_tokens = {t for w in ((self.lk_cfg.get("wake") or {}).get("words") or [])
+                       for t in str(w).split()}
+        self.stt = voice_asr.build_recognizer(stt_cfg, exclude_hotwords=wake_tokens)
+        if isinstance(self.stt, voice_asr.HotwordRecognizer):
+            LOG.info("parakeet biased toward %d hotwords: %s",
+                     len(self.stt.hotwords), ", ".join(self.stt.hotwords))
         if isinstance(self.stt, voice_asr.WhisperRecognizer):
             hw = stt_cfg.get("hotwords_file")
             self.stt.hotwords = _load_hotwords(hw) if hw else None

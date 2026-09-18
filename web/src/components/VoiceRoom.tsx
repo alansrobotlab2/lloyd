@@ -13,6 +13,7 @@ import { RoomContext, RoomAudioRenderer, useTrackVolume } from '@livekit/compone
 import type { AgentState } from '@livekit/components-react'
 import { api } from '../api'
 import { getMicGain, subscribeMicGain } from '../lib/micGain'
+import { MIC_SLOW_MESSAGE, MIC_SLOW_MS, micErrorMessage, type MicState } from '../lib/voiceIndicator'
 
 const AGENT_IDENTITY_PREFIX = 'lloyd-agent'
 // Volume threshold (0..1 from useTrackVolume) above which we treat the agent
@@ -27,6 +28,10 @@ export interface VoiceRoomState {
   status: ConnectionStatus
   /** True once the local mic track is published. */
   micPublished: boolean
+  /** Where the mic is: 'off' when not requested, 'starting' while waiting on
+   *  getUserMedia + publish (a permission prompt nobody answers waits here
+   *  forever), then 'live' or 'failed'. */
+  micState: MicState
   /** True if the local mic is muted (e.g. half-duplex during agent TTS). */
   micMuted: boolean
   /** True while the agent track is producing audio above threshold. */
@@ -93,6 +98,7 @@ export default function VoiceRoom({
 
   const [status, setStatus] = useState<ConnectionStatus>('idle')
   const [micPublished, setMicPublished] = useState(false)
+  const [micState, setMicState] = useState<MicState>('off')
   const [micMuted, setMicMuted] = useState(false)
   const [localAudioTrack, setLocalAudioTrack] = useState<LocalAudioTrack | undefined>(undefined)
   const [agentAudioTrack, setAgentAudioTrack] = useState<RemoteAudioTrack | undefined>(undefined)
@@ -229,10 +235,13 @@ export default function VoiceRoom({
     room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed)
     room.on(RoomEvent.DataReceived, onDataReceived)
 
+    let slowTimer: ReturnType<typeof setTimeout> | undefined
+
     const connect = async () => {
       try {
         setStatus('connecting')
         setError(null)
+        setMicState('off')
         const t = await api.livekitToken(sessionId)
         if (cancelled) return
         await room.connect(t.url, t.token, { autoSubscribe: true })
@@ -240,6 +249,7 @@ export default function VoiceRoom({
         setStatus('connected')
 
         if (publishMic) {
+          setMicState('starting')
           // Secure-context check: browsers only expose getUserMedia on
           // localhost or HTTPS. Detect it explicitly so the user sees a
           // useful message instead of "Cannot read properties of undefined".
@@ -251,7 +261,14 @@ export default function VoiceRoom({
               : `Browser blocks getUserMedia on http://${host}. Load mc via http://localhost:5173/ or set up HTTPS.`
             console.warn('[VoiceRoom]', hint)
             setError(hint)
+            setMicState('failed')
           } else {
+            // Neither awaited step below has a timeout of its own, and an
+            // unanswered permission prompt neither resolves nor rejects — so
+            // say so rather than sit silently in a room nobody can hear.
+            slowTimer = setTimeout(() => {
+              if (!cancelled) setError(MIC_SLOW_MESSAGE)
+            }, MIC_SLOW_MS)
             try {
               // Manual capture chain so we can sit a per-client GainNode
               // between the mic and LiveKit. Browser AEC/NS/AGC stays on;
@@ -318,8 +335,11 @@ export default function VoiceRoom({
                 source: Track.Source.Microphone,
               })
               if (cancelled) return
+              clearTimeout(slowTimer)
               setLocalAudioTrack(lkTrack)
               setMicPublished(true)
+              setMicState('live')
+              setError(prev => (prev === MIC_SLOW_MESSAGE ? null : prev))
               // Diagnostic: tell the worker what audio path this client
               // is using. The worker stores this per-identity and includes
               // it in every per-utterance ww-diag record so we can A/B
@@ -352,7 +372,10 @@ export default function VoiceRoom({
               // Permission denied, no device, or revoked — keep the room
               // alive but surface the error to the UI.
               console.warn('mic publish failed:', e)
-              setError(e instanceof Error ? e.message : String(e))
+              clearTimeout(slowTimer)
+              if (cancelled) return
+              setMicState('failed')
+              setError(micErrorMessage(e))
             }
           }
         }
@@ -368,6 +391,7 @@ export default function VoiceRoom({
 
     return () => {
       cancelled = true
+      clearTimeout(slowTimer)
       room.off(RoomEvent.Disconnected, onDisconnected)
       room.off(RoomEvent.Reconnecting, onReconnecting)
       room.off(RoomEvent.Reconnected, onReconnected)
@@ -450,6 +474,7 @@ export default function VoiceRoom({
     room,
     status,
     micPublished,
+    micState,
     micMuted,
     agentSpeaking,
     localAudioTrack,
@@ -463,7 +488,7 @@ export default function VoiceRoom({
     reconnect,
     interrupt,
   }), [
-    room, status, micPublished, micMuted, agentSpeaking,
+    room, status, micPublished, micState, micMuted, agentSpeaking,
     localAudioTrack, agentAudioTrack, agentState,
     wakeState, wakeRemainingS, wakeContinuationS, wakeSpeaker,
     error, reconnect, interrupt,

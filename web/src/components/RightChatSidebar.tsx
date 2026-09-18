@@ -14,6 +14,7 @@ import {
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { sessionLabel } from '@/lib/sessionLabel'
+import { voiceIndicator, type MicState, type VoiceIndicator } from '@/lib/voiceIndicator'
 import { api } from '../api'
 import { useSessionMeta } from '../hooks/useSessionMeta'
 import { useVoiceMode } from '../contexts/VoiceModeContext'
@@ -94,29 +95,24 @@ function MicDbMini({
 
 /** Single colored dot mirroring the wake-state pill's status colors —
  *  used in collapsed mode where the full pill won't fit. */
-function StatusDot({
-  status,
-  agentSpeaking,
-  agentThinking,
-  wakeState,
-}: {
+const DOT: Record<VoiceIndicator, [string, string]> = {
+  'disconnected': ['bg-muted-foreground', 'Not connected'],
+  'thinking': ['bg-amber-400 animate-pulse', 'Thinking…'],
+  'speaking': ['bg-primary animate-pulse', 'Speaking'],
+  'mic-failed': ['bg-destructive', 'No mic — Lloyd cannot hear you'],
+  'mic-starting': ['bg-amber-400 animate-pulse', 'Starting mic…'],
+  'listening': ['bg-emerald-400 animate-pulse', 'Listening'],
+  'idle': ['bg-muted-foreground/60', "Say 'Lloyd'"],
+}
+
+function StatusDot(props: {
   status: 'idle' | 'connecting' | 'connected' | 'failed'
+  micState?: MicState
   agentSpeaking: boolean
   agentThinking: boolean
   wakeState: 'idle' | 'listening'
 }) {
-  const cls =
-    status !== 'connected' ? 'bg-muted-foreground' :
-    agentThinking ? 'bg-amber-400 animate-pulse' :
-    agentSpeaking ? 'bg-primary animate-pulse' :
-    wakeState === 'listening' ? 'bg-emerald-400 animate-pulse' :
-    'bg-muted-foreground/60'
-  const label =
-    status !== 'connected' ? 'Not connected' :
-    agentThinking ? 'Thinking…' :
-    agentSpeaking ? 'Speaking' :
-    wakeState === 'listening' ? 'Listening' :
-    "Say 'Lloyd'"
+  const [cls, label] = DOT[voiceIndicator(props)]
   return <span className={cn('inline-block h-2 w-2 rounded-full', cls)} title={label} />
 }
 
@@ -360,6 +356,7 @@ export default function RightChatSidebar({ isMobile = false }: { isMobile?: bool
           />
           <StatusDot
             status={status}
+            micState={room?.micState}
             agentSpeaking={isSpeaking}
             agentThinking={chatThinking}
             wakeState={room?.wakeState ?? 'idle'}
@@ -479,6 +476,7 @@ export default function RightChatSidebar({ isMobile = false }: { isMobile?: bool
             <WakeStatePill
               compact
               status={status}
+              micState={room?.micState}
               wakeState={room?.wakeState ?? 'idle'}
               wakeRemainingS={room?.wakeRemainingS ?? 0}
               wakeContinuationS={room?.wakeContinuationS ?? 6}
@@ -536,6 +534,12 @@ export default function RightChatSidebar({ isMobile = false }: { isMobile?: bool
         )}
         {error && (
           <div className="text-xs text-destructive break-words">{error}</div>
+        )}
+        {/* The voice room's own error (mic denied, mic never started, token
+            or connect failure). VoiceRoom recorded it all along; nothing
+            rendered it, so a dead mic looked like a quiet room. */}
+        {room?.error && (
+          <div className="text-xs text-destructive break-words">{room.error}</div>
         )}
       </div>
 

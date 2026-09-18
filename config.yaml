@@ -635,6 +635,29 @@ livekit:
     backend: parakeet
     model_dir: agent-services/models/parakeet-tdt-v3
     num_threads: 4
+    # Names and terms. Both backends read `hotwords_file` (one per line, the
+    # same file the vault keeps for people); Parakeet also reads `hotwords`,
+    # and never biases toward a wake word (Lloyd): the worker excludes those,
+    # because "Floyd came over" came out "Lloyd came over", which wakes him.
+    #
+    # Parakeet can only be biased in beam search, and beam search alone is
+    # WORSE here (LibriSpeech 3.83% -> 4.78%, 188 of 500 real transcripts
+    # changed). So a second, biased decode runs beside greedy and is used only
+    # when it gained a word on the list. 2026-09-18, scripts/voice/hotword_eval.py,
+    # 132 held-out TTS sentences with a hotword and 72 sound-alikes without:
+    #
+    #                    hotword recall  false ins.  LibriSpeech clean/10 dB  real changed
+    #   greedy               87/132        0/72         3.83% / 9.30%            -
+    #   greedy+hw @1.0      106/132        0/72         3.83% / 9.30%          1/500
+    #
+    # The one real change is "our Lloyd back block" -> "backlog". At 1.5 (a
+    # wider list) "the back lot" became "the backlog". Cost: ~+100 ms and ~1 GB for the
+    # second model copy. `parakeet_hotwords: false` turns it off. Only terms
+    # the eval showed a gain for are listed; autotriage/autocode did nothing.
+    hotwords_file: ~/obsidian/hotwords.md
+    hotwords: [backlog, LiveKit, Inner Voice]
+    hotwords_score: 1.0
+    parakeet_hotwords: true
     # --- whisper fallback only; ignored by the parakeet backend ---
     model: base.en
     device: cpu
@@ -644,9 +667,6 @@ livekit:
     # The fallback costs ~4.4x wall clock and changes the transcript on about
     # half of short clips — not reliably for the better. Leave off.
     temperature_fallback: false
-    # Whisper-only name biasing. It used to be what carried the wake word,
-    # which is no longer its job: openWakeWord decides that acoustically now.
-    hotwords_file: ~/obsidian/hotwords.md
     streaming:
       # Cache-aware streaming FastConformer CTC, for live partial transcripts
       # in the browser. Display only — the committed transcript is always the
