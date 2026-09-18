@@ -374,7 +374,17 @@ def _reset_graph_cache():
 
 
 @pytest.fixture
-def repo(tmp_path):
+def repo(tmp_path, monkeypatch):
+    """The fixture repo, with a rail budget no machine load can spend.
+
+    These tests are about what the rail SAYS — which caller, which file, how
+    many lines. The 90 ms budget decides whether it says anything at all, and
+    that is a fact about the box during the run: under eight parallel test
+    workers the first call of this file (it pays the graph module's imports)
+    missed it three runs in three. The budget keeps its own test below, which
+    sets the real value back.
+    """
+    monkeypatch.setattr(D, "RAIL_BUDGET_S", 10.0)
     _reset_graph_cache()
     yield _fixture_repo(tmp_path)
     _reset_graph_cache()
@@ -589,6 +599,7 @@ async def test_a_graph_that_takes_a_second_to_load_does_not_delay_the_edit(
         bound, repo, monkeypatch):
     """The budget is the contract: too slow means no block, never a slow edit."""
     import agent_mcp.code_graph as CG
+    monkeypatch.setattr(D, "RAIL_BUDGET_S", 0.09)   # production's; `repo` relaxed it
     real = CG._load_sync
 
     def slow(root):

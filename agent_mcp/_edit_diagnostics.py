@@ -663,14 +663,25 @@ def _probe(box: dict, path: str, real: str, fallback_root: str,
 
 def callers_block(path: str, pre_bytes: bytes | None, post_text: str, *,
                   real: str = "", fallback_root: str = "",
-                  budget_s: float = RAIL_BUDGET_S) -> str:
+                  budget_s: float | None = None) -> str:
     """The `<blast_radius>` block for one edit, or "" when there is nothing to say.
 
     Costs an edit at most `budget_s`: the work runs in a daemon thread the
     caller joins for that long and then abandons — and abandoning is not
     wasted, because the thread finishes the load and fills the per-root
     cache, so the *next* edit in the same tree gets its answer.
+
+    `budget_s=None` reads `RAIL_BUDGET_S` at CALL time. As a default argument
+    it was bound at import, so nothing could move it — and the tests about what
+    the rail SAYS were therefore also tests of whether this box could load a
+    graph in 90 ms while they ran. Under eight parallel test workers it could
+    not: `test_a_cross_file_break_names_its_caller[rename_function]`, the
+    first call of the file and the one that pays the imports, failed in three
+    runs of three (2026-09-18). The budget has its own test; the content tests
+    now take a budget no load can spend.
     """
+    if budget_s is None:
+        budget_s = RAIL_BUDGET_S
     try:
         if not is_python(path):
             return ""

@@ -1244,7 +1244,7 @@ candidate that weakens the gate is judged by the old gate.
 | preflight | ~0s | dirty tree, moved base, merge commits, out-of-scope paths; an item with no clauses, a code diff with no test |
 | static | ~2s | syntax errors, **import failures**, new pyflakes findings |
 | frontend | ~5s | new tsc errors, a broken vite build (only when `web/` changed) |
-| tests | 2-2.5m | the full suite, plus floors on collected AND passed |
+| tests | ~70s on 8 workers (~10m serial) | the full suite, plus floors on collected AND passed — §4.2f |
 | review | 3.5-6.5m | a diff that does not do what the item asked — §4.5 |
 | venv | 3s–5m | only when `requirements*` changed |
 | canary_boot | ~2-30s | a build that will not start |
@@ -1253,9 +1253,11 @@ candidate that weakens the gate is judged by the old gate.
 
 Timings above are the measured runtimes of the last full ladder
 (`gate.json` per round, 2026-09-11/12): static 2s, tests 127-152s, review
-215-394s, canary_boot 2.3s, canary_smoke 6-7s, drill 33s. `gate.py`'s own module
-docstring still says `tests ~35s` and lists eight rungs — it has not been
-re-measured since `frontend` and `review` joined the ladder.
+215-394s, canary_boot 2.3s, canary_smoke 6-7s, drill 33s. A week later the
+same serial `tests` rung took 430-600 s and `review` a median 401 s
+(`backlog.gate_duration_stats`, §3.2g); `tests` has run in parallel since
+2026-09-18 (§4.2f), and the prompt and the gate tool read the current figure
+off the ledger rather than from this table.
 
 Two rungs carry most of the weight.
 
@@ -1790,6 +1792,61 @@ stopped, restored and restarted the services for a tree that had not moved.
 With dirt tolerated in that tree, that path would have stashed the human's
 edits out from under their editor for nothing. A `merged` flag gates it now;
 a post-merge failure still restores, and the event names the patch.
+
+### 4.2f The suite runs in parallel; a failure is re-asked serially
+
+Added 2026-09-18. The `tests` rung was the largest fixed cost of every round
+and the one that compounds with depth: serial pytest on a 32-core box, 153 s on
+09-12 and ~600 s on 09-18 (4,900 → 5,900 tests, the slowest of them 12 s — it
+is slow by breadth), holding `gate-tests.lock` for all of it, so each further
+round in flight queues that long again (400–470 s measured at depth 2; depth
+went to 3 the same day). `Gate._run_suite` runs a FULL suite on
+`automod.gate.test_workers` xdist workers, `--dist loadfile`:
+
+| run | workers | wall | result |
+|---|---|---|---|
+| serial, gate env | 1 | 602 s | 5895 passed |
+| trial 1–3 | 8 | 76 / 67 / 69 s | 1 failed, the same test each time |
+| trial 4–6, after the budget fix below | 8 | 69 / 67 / 70 s | green, 5896 passed |
+| trial 7 | 12 | 58 s | green |
+| trial 8 | 16 | 56 s | green |
+
+8, not 16: doubling the workers buys thirteen seconds, and the box is also
+serving two engines and up to four turns.
+
+**What parallelism costs is load, so a failure under it is never believed.**
+The one test that failed, three runs in three, asserts that the blast-radius
+rail answers inside its 90 ms budget; under eight workers the first call of
+that file (it pays the graph module's imports) did not. That is a fact about
+the box during the run. Every file with a failure is run again serially, and
+that run is the verdict:
+
+- it passes → the rung passes, and `parallel_only_failures` in the rung data
+  (and in the pass line) names what flinched, so a load-sensitive test is a
+  number on the ledger rather than a mystery;
+- it fails → the failure is judged exactly as a serial run's always was: by the
+  serial run's node ids, through the same base probe (§4.2b). The counts stay
+  the whole suite's;
+- a parallel failure that names no file (a crashed worker, a timeout), or more
+  than `PARALLEL_RETRY_MAX_FILES` (40 — that is a broken tree, not load),
+  re-runs the whole suite serially.
+
+`loadfile` keeps one file's tests on one worker, in order, so a module-scoped
+fixture (a booted uvicorn, a temp repo) is built once per file as before. A
+partial run — the changed test files a re-gate gets — stays serial. Serial too,
+and saying so (`parallel_unavailable`), whenever `xdist` is not importable in
+the venv the gate runs tests with: a candidate venv, a fresh clone, a box where
+nobody installed it must all still gate. `pytest-xdist` is in
+`requirements.txt` and the lock; it pulls in `execnet` and nothing else.
+
+The test itself was fixed rather than left to flinch on every gate:
+`_edit_diagnostics.callers_block` bound `RAIL_BUDGET_S` as a default argument
+at import, so nothing could move it, and every test about what the rail SAYS
+was also a test of whether the box could load a graph in 90 ms while it ran.
+It is read at call time now; the content tests take a budget no load can spend
+and the budget keeps its own test. A gate rung must not depend on the wall
+clock (§4, the quiet-hours tests) — nor on how busy the machine is.
+`tests/test_gate_parallel_tests.py`.
 
 ### 4.3 Rungs that run candidate code run it against scratch state
 

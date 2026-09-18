@@ -42,3 +42,8 @@ discord.py>=2.3.0
 sherpa-onnx>=1.13.8
 # scripts/voice/asr_eval.py reads its corpus from parquet.
 pyarrow>=25.0
+
+# The automod gate's `tests` rung runs the suite on `automod.gate.test_workers`
+# xdist workers (scripts/automod/gate.py::Gate._run_suite). Pure Python, pulls
+# in execnet and nothing else; without it the rung runs serially and says so.
+pytest-xdist>=3.8.0

@@ -910,6 +910,16 @@ automod:
     # test files (and no conftest or helper) re-runs just those files.
     reuse_rungs: true
     reuse_max_age_s: 3600
+    # The `tests` rung's FULL runs, in parallel (pytest-xdist, `--dist
+    # loadfile`). The suite went 153 s -> ~600 s serial in the week to
+    # 2026-09-18 on a 32-core box, holding gate-tests.lock the whole time, so
+    # each extra round in flight queued that long again; 8 workers run it in
+    # ~70 s. A failure under load is never believed: every file that failed is
+    # re-run serially and THAT run is the verdict (`parallel_only_failures`
+    # in the rung data names what flinched). 1 = serial, as before; also
+    # serial, saying so, whenever xdist is not importable in the gate's venv.
+    # Read by each gate process at start: no restart needed.
+    test_workers: 8
   # The review rung's policy knobs. The rung refused 86% of the rounds it
   # graded over 2026-09-11 and the two largest contributors were both
   # findings that are real and usually unfixable INSIDE the round.

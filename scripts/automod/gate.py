@@ -13,9 +13,11 @@ cost 3 seconds, not a full canary boot.
   0 preflight      ~1s    lock, clean tree, ancestry, diff scope; with an item
                           bound, that it has clauses and the diff has a test
   1 static         ~8s    compileall, import smoke, pyflakes delta
-  2 tests         ~35s    full pytest + a collected-count floor; on
-                          failure, re-probes the failing files at the
-                          round's base to say whose breakage it is
+  2 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
+                          workers (~600 s serial) + a collected-count floor.
+                          A failure under load is re-run serially before it
+                          is believed; a real one re-probes the failing files
+                          at the round's base to say whose breakage it is
   3 review      60-180s   a second reader: a fresh session on the LIVE
                           backend grades the diff against the item's
                           acceptance clauses (scripts/automod/review.py).
@@ -1011,6 +1013,106 @@ class Gate:
             files.append(rel)
         return files or None
 
+    # A parallel failure naming more files than this is not load, it is a
+    # broken tree: re-ask the whole suite serially rather than file by file.
+    PARALLEL_RETRY_MAX_FILES = 40
+
+    def _test_workers(self) -> tuple[int, str]:
+        """`(workers, why_serial)` for a FULL run of the suite.
+
+        `automod.gate.test_workers`, and only when the venv this gate runs
+        tests with can import `xdist` — a candidate venv built by the `venv`
+        rung, a fresh clone before `pip install`, and a box where nobody
+        installed it must all still gate, serially, and say why.
+        """
+        try:
+            n = int(_gate_cfg("test_workers", 1) or 1)
+        except (TypeError, ValueError):
+            n = 1
+        if n <= 1:
+            return 1, ""
+        probe = _run([str(self.python), "-c", "import xdist"], cwd=self.worktree,
+                     env=self._child_env(), timeout=60)
+        if probe.returncode != 0:
+            return 1, "pytest-xdist is not importable in the gate's venv"
+        return n, ""
+
+    def _run_suite(self, only: list[str] | None):
+        """Run pytest for the `tests` rung: `(completed, text, counts)`.
+
+        **The whole suite runs in parallel; a failure is re-asked serially
+        before it is believed.** The suite grew from ~4,900 tests to ~5,900 in
+        the week to 2026-09-18 and its serial run from 153 s to ~600 s, on a
+        32-core box, holding `gate-tests.lock` the whole time — so at depth 2
+        the second gate waited another 400–470 s, and the gate outgrew the
+        turn that has to wait for it (automod.md §3.2g). Eight `xdist` workers
+        run it in ~76 s.
+
+        What parallelism costs is load: a test that asserts a latency budget
+        can lose it. The first trial did exactly that —
+        `test_edit_diagnostics::test_a_cross_file_break_names_its_caller`
+        asserts the blast-radius rail answers inside its 90 ms budget, and
+        under eight workers it did not. That is a fact about the box during
+        the run, not about the candidate. So every file with a failure is run
+        again, serially, and THAT run is the verdict: it passes, the rung
+        passes and `parallel_only_failures` names what flinched (so a flaky
+        test is a number, not a mystery); it fails, and the failure is judged
+        exactly as a serial run's always was — by the serial run's own node
+        ids, through the same base probe. A parallel failure that names no
+        file (a crashed worker, a timeout) or more than
+        `PARALLEL_RETRY_MAX_FILES` re-runs the whole suite serially.
+
+        `--dist loadfile`: one file's tests stay on one worker, in order, so
+        module-scoped fixtures (a booted uvicorn, a temp repo) are built once
+        per file as they always were. A partial run — the changed test files
+        a re-gate gets — is seconds long and stays serial.
+        """
+        base_cmd = [str(self.python), "-m", "pytest", "-q", "-m", "not live_vault"]
+        env = self._child_env()
+
+        def serial(extra: list[str]):
+            done = _run(base_cmd + list(extra), cwd=self.worktree, env=env, timeout=1800)
+            out = done.stdout + done.stderr
+            return done, out, _parse_pytest_summary(out)
+
+        workers, why_serial = (1, "") if only else self._test_workers()
+        if workers <= 1:
+            r, text, counts = serial(list(only or []))
+            counts["workers"] = 1
+            if why_serial:
+                counts["parallel_unavailable"] = why_serial
+            return r, text, counts
+
+        r = _run(base_cmd + ["-n", str(workers), "--dist", "loadfile"],
+                 cwd=self.worktree, env=env, timeout=1800)
+        text = r.stdout + r.stderr
+        counts = _parse_pytest_summary(text)
+        counts["workers"] = workers
+        if r.returncode == 0:
+            return r, text, counts
+        node_ids = _failed_node_ids(text)
+        files = sorted({nid.split("::", 1)[0] for nid in node_ids})
+        if not files or len(files) > self.PARALLEL_RETRY_MAX_FILES:
+            r2, text2, counts2 = serial([])
+            counts2.update({"workers": workers, "serial_rerun": "whole suite",
+                            "parallel_failures": node_ids[:50]})
+            return r2, text2, counts2
+        r2, text2, counts2 = serial(files)
+        counts["serial_retry_files"] = files
+        if r2.returncode == 0:
+            counts["passed"] += counts["failed"] + counts["errors"]
+            counts["failed"] = counts["errors"] = 0
+            counts["parallel_only_failures"] = node_ids
+            return subprocess.CompletedProcess(r.args, 0, r.stdout, r.stderr), text, counts
+        # Real. The serial run names the failures; the counts stay the whole
+        # suite's, with the serial run's word on how many of them failed.
+        still = counts2["failed"] + counts2["errors"]
+        counts["passed"] += max(0, counts["failed"] + counts["errors"] - still)
+        counts["failed"], counts["errors"] = counts2["failed"], counts2["errors"]
+        counts["parallel_only_failures"] = [n for n in node_ids
+                                            if n not in set(_failed_node_ids(text2))]
+        return r2, text2, counts
+
     def rung_tests(self, only: list[str] | None = None):
         # `-m "not live_vault"`: this rung judges the CANDIDATE, and a test that
         # reads the live `~/obsidian` vault judges whatever last wrote to it.
@@ -1024,12 +1126,7 @@ class Gate:
         # `vault_round.validate` and `autoresearch.promote` both call
         # `prompt_surface.check_contract` before committing.
         only = only if only is not None else self._tests_delta_only()
-        cmd = [str(self.python), "-m", "pytest", "-q", "-m", "not live_vault"]
-        if only:
-            cmd += list(only)
-        r = _run(cmd, cwd=self.worktree, env=self._child_env(), timeout=1800)
-        text = r.stdout + r.stderr
-        counts = _parse_pytest_summary(text)
+        r, text, counts = self._run_suite(only)
         if r.returncode != 0:
             tail = "\n".join(text.strip().splitlines()[-15:])
             node_ids = _failed_node_ids(text)
@@ -1109,8 +1206,12 @@ class Gate:
                    if p.startswith("tests/") and not (self.worktree / p).exists()]
         if removed:
             return False, f"test files removed: {removed}", counts
+        flinched = counts.get("parallel_only_failures") or []
         return True, (f"{counts['passed']} passed, {counts['xfailed']} xfailed, "
-                      f"{counts['tests_skipped']} skipped"), counts
+                      f"{counts['tests_skipped']} skipped"
+                      + (f" ({counts['workers']} workers)" if counts.get("workers", 1) > 1 else "")
+                      + (f"; {len(flinched)} failed only under parallel load and passed "
+                         f"serially: {_name_ids(flinched)}" if flinched else "")), counts
 
     def rung_review(self):
         """A second reader grades the diff against the item's clauses.
