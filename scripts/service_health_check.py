@@ -92,6 +92,44 @@ def http_check(port: int, host: str = "localhost") -> tuple:
     return (False, last_err)
 
 
+# supervisor prints its status line as `name  STATENAME  description`, so the
+# state is field 2 and only field 2 may be read as health. Reading anything
+# else mis-verdicts, for two reasons measured on this box with the installed
+# supervisor 4.3.0:
+#
+#   * `supervisorctl status` exits 0 for BACKOFF. `do_status` moves the exit
+#     status off SUCCESS only for `states.STOPPED_STATES`
+#     (supervisorctl.py:696-698), and states.py:14-22 files BACKOFF under
+#     RUNNING_STATES — so a process that is spawned, dies inside `startsecs`
+#     and is being retried used to satisfy the old
+#     `healthy = result.returncode == 0` fallback and printed `[✓] healthy`.
+#   * field 3 is free text, so `agent-tts  FATAL  can't spawn process: RUNNING
+#     helper not found` satisfied the old `"RUNNING" in output` test and was
+#     reported as `healthy=True, status="RUNNING"`.
+#
+# The exit code is deliberately not consulted: acting on it is #1029's
+# contract, not this script's.
+def _supervisor_verdict(output: str) -> tuple:
+    """Decide health from supervisorctl's own state field.
+
+    Returns `(status, healthy)`. Healthy only when every printed status line
+    names exactly `RUNNING`: a group namespec (or a bare `supervisorctl
+    status`) prints one line per process, so one BACKOFF process inside an
+    otherwise RUNNING answer is not a healthy service. A line with no state
+    field, and an empty answer, are unparsable and therefore unhealthy — the
+    raw output is returned as `status` so the printed verdict still carries
+    what supervisor actually said.
+    """
+    lines = [line for line in output.splitlines() if line.strip()]
+    if not lines:
+        return ("unknown (empty supervisorctl status output)", False)
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 2 or fields[1] != "RUNNING":
+            return (output, False)
+    return ("RUNNING", True)
+
+
 def check_service(name: str, service_def: dict) -> dict:
     """Check a single service status."""
     command = service_def["command"]
@@ -109,23 +147,10 @@ def check_service(name: str, service_def: dict) -> dict:
         status = output or "unknown"
         healthy = False
 
-        # Special handling for supervisorctl
+        # Special handling for supervisorctl: the state field decides, not the
+        # exit code and not a substring of the answer.
         if "supervisorctl" in command[0]:
-            if "RUNNING" in output:
-                status = "RUNNING"
-                healthy = True
-            elif "STOPPED" in output:
-                status = "STOPPED"
-                healthy = False
-            elif "STARTING" in output:
-                status = "STARTING"
-                healthy = False
-            elif "STOPPING" in output:
-                status = "STOPPING"
-                healthy = False
-            else:
-                status = output if output else "unknown"
-                healthy = result.returncode == 0
+            status, healthy = _supervisor_verdict(output)
 
         # If supervisor says running, also check port is reachable
         extra = ""
