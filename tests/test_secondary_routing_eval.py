@@ -1,0 +1,698 @@
+"""eval/secondary_routing_eval.py — the scorer, the two arms, the decision.
+
+Three things here have to be unbreakable for the numbers to mean anything,
+so each gets a test rather than a comment: the eval must call the *real*
+routed functions (otherwise it measures a re-implementation), the primary
+arm must actually reach the primary engine (an alias override that silently
+failed would leave two identical arms and a plausible table), and a pinned
+input must not be allowed to move quietly. The scorer's own checks are
+pinned both ways — a good output passes, the specific failure the job is
+prone to fails — because a scorer that cannot fail is how #525's
+zero-claim problem got built.
+"""
+import inspect
+import json
+import sys
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+import eval.secondary_routing_eval as ev  # noqa: E402
+from app import post_capture, secondary_models as sm  # noqa: E402
+
+AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
+
+GOOD = {
+    "title": "Vault retrieval eval regression",
+    "capture": "The session fixed the nightly retrieval eval baseline. "
+               "The runner defaults were imported from agent_mcp.vault. "
+               "Two stale columns were removed from the compare step.",
+    "facts": "[Retrieval Eval] runner defaults now import from agent_mcp.vault\n"
+             "[Retrieval Eval] the compare step read three missing columns\n"
+             "[Baseline] the 2026-09-04 run recorded ndcg10 of 0.594",
+    "focus": "retrieval eval defaults\nstale compare columns\nbaseline trend recording",
+    "voice": "The nightly retrieval eval is green. Ndcg came out at 0.594, "
+             "which is where it has been all week.",
+}
+
+
+# ── The eval must be measuring the routed jobs, not a copy of them ───────
+
+def test_every_secondary_routed_job_is_covered():
+    assert set(ev.JOB_CALLS) == set(ev.JOBS) == set(ev.LENGTH_BUDGETS) == set(
+        ev.FORMAT_CHECKS)
+
+
+def test_each_job_dispatches_to_the_live_production_function():
+    """Identity, not name equality: the eval and the router must be running
+    the same object, so a prompt edit in production moves the measurement."""
+    assert ev.JOB_CALLS["title"] is sm._sync_secondary_title
+    assert ev.JOB_CALLS["capture"] is sm._sync_secondary_capture_call
+    assert ev.JOB_CALLS["facts"] is sm._sync_secondary_fact_extraction
+    assert ev.JOB_CALLS["focus"] is sm._sync_secondary_focus_extraction
+    assert ev.JOB_CALLS["voice"] is sm._sync_secondary_voice_summary
+
+
+def test_eval_file_names_the_routed_call_it_measures():
+    """The acceptance check is a grep for `_sync_secondary_capture_call`
+    under eval/ — this is that grep, pinned."""
+    source = (ROOT / "eval" / "secondary_routing_eval.py").read_text(encoding="utf-8")
+    for name in ("_sync_secondary_capture_call", "_sync_secondary_title",
+                 "_sync_secondary_fact_extraction", "_sync_secondary_focus_extraction",
+                 "_sync_secondary_voice_summary"):
+        assert name in source, name
+
+
+# ── The two arms ─────────────────────────────────────────────────────────
+
+class _FakeResponse:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def _fake_transport(monkeypatch, content: str = "ok", completion: int = 42) -> list:
+    """Stand in for the engines. Returns the list the fake appends requests to."""
+    body = json.dumps({
+        "choices": [{"message": {"content": content}}],
+        "usage": {"completion_tokens": completion, "prompt_tokens": 1234},
+    }).encode()
+    seen: list = []
+
+    def fake(req, *args, **kwargs):
+        seen.append(req)
+        return _FakeResponse(body)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    return seen
+
+
+def test_primary_arm_really_reaches_the_primary_engine(monkeypatch):
+    """The one claim the comparison rests on, checked from the URL the call
+    used rather than from the label the run asked for.
+
+    The arms are separated through the production router —
+    `app.secondary_models.JOBS_ON_PRIMARY` — not by patching the alias
+    resolver, so this asserts that the per-job pin is what actually moves the
+    endpoint. A `JOBS_ON_PRIMARY` that production stopped reading would fail
+    here rather than produce a run where both arms answer from :8091."""
+    seen = _fake_transport(monkeypatch)
+    item = {"id": "voice-1", "input": "some reply with `code` in it", "anchors": []}
+
+    secondary = ev.run_trial("voice", item, "secondary")
+    primary = ev.run_trial("voice", item, "primary")
+
+    assert ":8091" in secondary["endpoint"], secondary["endpoint"]
+    assert ":8096" in primary["endpoint"], primary["endpoint"]
+    assert len(seen) == 2
+
+
+def test_recording_installs_its_spy_and_takes_it_back_off(monkeypatch):
+    """`app.secondary_models` reads the body once and drops `usage`; the tee
+    has to hand back a body that still reads, and — because it patches a
+    stdlib module attribute — put it back.
+
+    Asserted from inside the call: the fake records whatever `urlopen` was
+    while production called it. If the spy were never installed that reads
+    the fake; if the `finally` never restored it, the post-call read finds
+    the spy. Either failure fails one of the two asserts, which the earlier
+    version of this test (comparing against `original`, which both states
+    differ from) could not do.
+    """
+    calls: list = []
+    body = json.dumps({"choices": [{"message": {"content": "[Lloyd] a fact"}}],
+                       "usage": {"completion_tokens": 7, "prompt_tokens": 1234}}).encode()
+
+    def fake(req, *args, **kwargs):
+        calls.append(urllib.request.urlopen)     # what production saw at call time
+        return _FakeResponse(body)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    item = {"id": "voice-2", "input": "text with | a table", "anchors": []}
+
+    row = ev.run_trial("voice", item, "secondary")
+
+    assert row["output_tokens"] == 7              # from the engine's own usage
+    assert row["prompt_tokens"] == 1234
+    assert len(calls) == 1
+    assert calls[0] is not fake, "the spy was never installed over the transport"
+    assert urllib.request.urlopen is fake, "the spy was left installed on urllib"
+
+
+def test_arms_are_separate_catches_one_engine_answering_both():
+    merged = {"voice": {"secondary": {"endpoints": ["http://h:8091/v1"]},
+                        "primary": {"endpoints": ["http://h:8091/v1"]}}}
+    separate, why = ev.arms_are_separate(merged)
+    assert separate is False and "8091" in why
+
+    split = {"voice": {"secondary": {"endpoints": ["http://h:8091/v1"]},
+                       "primary": {"endpoints": ["http://h:8096/v1"]}}}
+    assert ev.arms_are_separate(split) == (True, "every arm reached a distinct engine endpoint")
+
+
+def test_plan_pairs_the_arms_adjacent_and_repeats_each_item():
+    items = [{"id": "title-1"}, {"id": "title-2"}]
+    trials = ev.plan(3, ["title"], items)
+    assert len(trials) == 12
+    pairs = [(t[1]["id"], t[2]) for t in trials]
+    assert pairs == [("title-1", "secondary"), ("title-1", "primary"),
+                     ("title-2", "secondary"), ("title-2", "primary")] * 3
+    # Back-to-back same-arm runs let one engine's warm cache flatter it.
+    for index in range(0, len(pairs), 2):
+        assert pairs[index][1] == "secondary" and pairs[index + 1][1] == "primary"
+
+
+# ── The item set ─────────────────────────────────────────────────────────
+
+def test_item_set_covers_every_routed_job_with_provenance():
+    items = ev.load_items(ev.ITEMS_PATH)
+    for job in ev.JOBS:
+        assert items[job], f"{job} has no items — the five-job coverage is the item's §1"
+        for item in items[job]:
+            assert item["source_session"], "capture items must name their session"
+            assert len(item["input_sha256"]) == 16
+            assert item["input_chars"] > 50
+            assert len(item["anchors"]) >= ev.MIN_ANCHORS, (
+                f"{item['id']} has nothing to check the output against")
+
+
+def test_pinned_inputs_still_rebuild_to_their_hash():
+    """A fixture whose sessions have moved would silently measure different
+    text than the checked-in hashes claim. Rebuild all five jobs' first item."""
+    items = ev.load_items(ev.ITEMS_PATH)
+    for job in ev.JOBS:
+        text = ev.resolve_input(items[job][0], ev.LIVE_SESSIONS_DIR)
+        assert len(text) == items[job][0]["input_chars"]
+
+
+def test_a_moved_input_is_refused_rather_than_rerun(monkeypatch, tmp_path):
+    session = {"session_id": "s-1", "messages": [{"role": "user", "content": "hello"}]}
+    (tmp_path / "s-1.json").write_text(json.dumps(session), encoding="utf-8")
+    item = {"id": "voice-9", "job": "voice", "source_session": "s-1",
+            "input_sha256": "0" * 16, "input_chars": 5}
+
+    with pytest.raises(SystemExit) as raised:
+        ev.resolve_input(item, tmp_path)
+    assert "pinned" in str(raised.value)
+
+
+def test_focus_replica_keeps_production_transcript_shape():
+    """`_maybe_extract_focus` builds its transcript inline, so the eval's
+    replica is only faithful while it matches those literals. Read them out
+    of the production source: change the window there and this fails."""
+    source = inspect.getsource(post_capture._maybe_extract_focus)
+    assert "messages[-10:]" in source, "production window moved; replica is stale"
+    assert 'f"{role}: {text[:200]}"' in source, "production per-turn cap moved"
+    assert '"USER"' in source and '"ASSISTANT"' in source
+
+    messages = [{"role": "user", "content": "x" * 500}] + [
+        {"role": "assistant", "content": "<context>injected</context>"},
+        {"role": "assistant", "content": "tail"},
+    ]
+    built = ev.focus_transcript(messages)
+    assert built.startswith("USER: ")
+    assert "x" * 200 in built and "x" * 201 not in built
+    assert "injected" not in built
+    assert built.splitlines()[-1] == "ASSISTANT: tail"
+
+
+def test_anchors_are_the_repeated_subject_not_the_harness_log_noise():
+    """The reason this derivation is frequency-based.
+
+    The identifier version picked the paths the harness injects, and both
+    engines then scored 0.0 on good summaries. If a future edit drags path
+    matching back in, this fails.
+    """
+    transcript = (
+        "/home/alansrobotlab/lloyd/_pipeline/tasks/bg-20260908-192331-4acd31.log "
+        "task_id task_notification exit_code "
+        "the retrieval eval kept failing on the retrieval baseline, "
+        "so the retrieval eval compare step was rewritten, and the "
+        "eval trend was recorded against the retrieval baseline again"
+    )
+    anchors = ev.anchors_from(transcript)
+    assert "retrieval" in anchors and "eval" in anchors
+    assert not any("/" in a or ".log" in a or a == "task_id" for a in anchors)
+    assert all(len(a) >= 4 for a in anchors) and len(anchors) <= 6
+
+
+def test_an_anchor_that_appears_once_is_not_an_anchor():
+    assert ev.anchors_from("a session about retrieval eval eval eval baseline") == ["eval"]
+
+
+# ── Scorers: each must be able to fail, and must fail on the real defect ─
+
+@pytest.mark.parametrize("job", sorted(ev.JOBS))
+def test_a_compliant_output_scores_high_and_clean(job):
+    row = ev.score(job, GOOD[job], anchors_from_good(job))
+    assert row["format_ok"] is True, row["format_fails"]
+    assert row["over_long"] is False
+    assert row["composite"] >= 90.0, row
+
+
+def anchors_from_good(job):
+    """Anchors as they would have been pinned from each GOOD output's source."""
+    return {
+        "title": ["vault", "retrieval"],
+        "capture": ["retrieval", "eval", "agent_mcp.vault"],
+        "facts": ["retrieval", "agent_mcp.vault", "ndcg10"],
+        "focus": ["retrieval", "eval", "baseline"],
+        "voice": ["retrieval", "eval", "ndcg"],
+    }[job]
+
+
+def test_title_fails_the_shape_a_weak_engine_actually_produces():
+    row = ev.score("title", "This conversation was about a fix to the nightly "
+                            "retrieval eval which took a while.", ["retrieval"])
+    assert row["format_ok"] is False
+    assert any("words" in f for f in row["format_fails"])
+    assert row["composite"] < 60.0
+
+
+def test_capture_flags_the_over_long_entry_defect():
+    """Standing problem #4 is over-long, over-duplicated entries; the capture
+    scorer is the one that has to see it."""
+    long_text = GOOD["capture"] + " " + GOOD["capture"]
+    row = ev.score("capture", long_text, ["retrieval eval"])
+    assert row["format_ok"] is False          # 6 sentences, prompt asks 2-4
+    assert any("sentences" in f for f in row["format_fails"])
+
+    padded = "The eval moved. " + ("padding words fill the budget. " * 40)
+    assert ev.score("capture", padded + " Done here.", ["eval"])["over_long"] is True
+
+
+def test_duplicate_rate_catches_a_restatement_not_only_an_exact_repeat():
+    text = ("The runner imports from agent_mcp.vault now.\n"
+            "The runner imports from agent_mcp.vault now today.\n"
+            "The compare step read three missing columns.")
+    assert ev.duplicate_rate(text) > 0.0
+    assert ev.duplicate_rate(GOOD["capture"]) == 0.0
+
+
+def test_facts_require_the_entity_prefix_that_production_would_hide():
+    """`_sync_secondary_fact_extraction` files a prefix-less line under
+    "Lloyd", so production never shows this failure and the scorer has to."""
+    row = ev.score("facts", "the runner imports from agent_mcp.vault\n"
+                            "the compare step read missing columns\n"
+                            "ndcg10 is 0.594", ["ndcg10"])
+    assert row["format_ok"] is False
+    assert any("[Entity]" in f for f in row["format_fails"])
+
+
+def test_focus_rejects_a_numbered_list_and_a_runon_topic():
+    assert any("numbered" in f for f in
+               ev.score("focus", "1. retrieval eval\n2. compare step\n3. baselines",
+                        ["eval"])["format_fails"])
+    assert any("words" in f for f in ev.score(
+        "focus", "retrieval eval defaults\ncompare\nbaselines", ["eval"])["format_fails"])
+
+
+def test_voice_rejects_markup_the_rewrite_exists_to_remove():
+    row = ev.score("voice", "Here is the result:\n- `ndcg10` at 0.594\n| a | b |", ["ndcg10"])
+    assert row["format_ok"] is False
+    assert any("markup" in f for f in row["format_fails"])
+
+
+def test_anchor_recall_is_a_groundedness_floor():
+    drifted = "The session covered several topics and reached a good outcome overall."
+    assert ev.anchor_recall(drifted, ["retrieval", "agent_mcp.vault"]) == 0.0
+    assert ev.anchor_recall(GOOD["capture"], ["retrieval", "eval"]) == 1.0
+    # A path anchor still counts when the output names the file, not the path
+    assert ev.anchor_recall(GOOD["capture"], ["/srv/app/post_capture.py"]) == 0.0
+    assert ev.anchor_recall("post_capture kept timing out", ["/srv/app/post_capture.py"]) == 1.0
+    assert ev.anchor_recall(GOOD["capture"], []) is None
+
+
+def test_an_empty_output_scores_zero_rather_than_raising():
+    """A job that returns None failed; that has to be countable, not an
+    exception that drops the trial out of the aggregate."""
+    for job in ev.JOBS:
+        assert ev.score(job, "", ["x"])["composite"] == 0.0
+    assert ev._as_text(None) == ""
+
+
+# ── Aggregation and the routing decision ────────────────────────────────
+
+def _arms(sec_score=88.0, pri_score=90.0, sec_defect=0.0, pri_defect=0.0,
+          n=6, items=2, repeats=3):
+    """Arm summaries shaped exactly like `summarise`'s output.
+
+    `n` is trials, `repeats` is times one input was replayed on the arm. They
+    are separate arguments because `decide` reads only `repeats`: 6 trials of
+    6 different items at 1 repeat each is more data and still cannot route.
+    """
+    def arm(score, defect, endpoint):
+        return {"n": n, "items": items, "repeats_min": repeats,
+                "repeats_max": repeats, "score_mean": score, "score_min": score - 2,
+                "score_max": score + 2,
+                "score_spread": 4.0, "score_stdev": 1.5, "format_ok_rate": 1.0,
+                "defect_rate": defect, "anchor_recall_mean": 0.8, "wall_s_mean": 1.0,
+                "wall_s_max": 1.2, "output_tokens_mean": 60.0, "endpoints": [endpoint],
+                "errors": 0, "judge_mean": None}
+    return {"secondary": arm(sec_score, sec_defect, "http://h:8091/v1"),
+            "primary": arm(pri_score, pri_defect, "http://h:8096/v1")}
+
+
+def test_secondary_keeps_a_job_it_is_within_margin_on():
+    decision = ev.decide("title", _arms(sec_score=86.0, pri_score=90.0))
+    assert decision["decision"] == "keep_secondary"
+    assert decision["margin_points"] == ev.KEEP_MARGIN_POINTS
+
+
+def test_a_job_flips_when_the_gap_costs_more_than_the_margin():
+    decision = ev.decide("facts", _arms(sec_score=70.0, pri_score=95.0))
+    assert decision["decision"] == "flip_to_primary"
+    assert decision["score_gap_primary_minus_secondary"] == 25.0
+    assert "latency" in decision["reason"]
+
+
+def test_a_job_flips_on_defects_even_at_equal_quality():
+    """Equal mean score with more over-long and duplicated entries is still
+    the defect the item was written about."""
+    decision = ev.decide("capture", _arms(sec_score=90.0, pri_score=90.0,
+                                          sec_defect=0.4, pri_defect=0.05))
+    assert decision["decision"] == "flip_to_primary"
+    assert decision["defect_gap_secondary_minus_primary"] == pytest.approx(0.35)
+
+
+def test_fewer_than_three_repeats_of_the_same_input_declines_to_route():
+    """The source walkthrough's own lesson: a harness pairing scored *below*
+    the plain model with no error bars shown. One sample of an input cannot
+    tell noise from a worse engine.
+
+    The arm here carries 12 trials — more data than the keeping and flipping
+    cases above, which have 6 — because it is 12 inputs at one repeat each.
+    The first version of `decide` compared `n` against the floor, so exactly
+    this shape passed: the 1-repeat pilot it ran produced a
+    `flip_to_primary` for voice off a single sample per input. Counting
+    repeats instead of trials is the difference between a wide run and a
+    repeated one, and only the second one has a spread."""
+    decision = ev.decide("voice", _arms(sec_score=10.0, pri_score=100.0,
+                                        n=12, items=12, repeats=1))
+    assert decision["decision"] == "insufficient_data"
+    assert "repeats_min=1" in decision["reason"]
+    assert "12 item" in decision["reason"]
+    assert "n=12" not in decision["reason"], "the reason must not restate a trial count"
+
+
+def test_summarise_reports_spread_wall_seconds_and_tokens():
+    rows = [
+        {"job": "voice", "item": "voice-1", "alias": "secondary", "composite": 90.0, "wall_s": 1.0,
+         "output_tokens": 50, "defect": False, "format_ok": True, "anchor_recall": 1.0,
+         "endpoint": "http://h:8091/v1", "error": None},
+        {"job": "voice", "item": "voice-2", "alias": "secondary", "composite": 70.0, "wall_s": 3.0,
+         "output_tokens": 70, "defect": True, "format_ok": False, "anchor_recall": 0.5,
+         "endpoint": "http://h:8091/v1", "error": None},
+        {"job": "voice", "item": "voice-1", "alias": "primary", "composite": 95.0, "wall_s": 0.5,
+         "output_tokens": 30, "defect": False, "format_ok": True, "anchor_recall": 1.0,
+         "endpoint": "http://h:8096/v1", "error": None},
+    ]
+    arms = ev.summarise(rows)["voice"]["secondary"]
+    assert arms["n"] == 2
+    # Both rows name no item key, so they are two unseen inputs at one
+    # repeat each: the arithmetic that stops a wide run counting as a repeated one.
+    assert arms["items"] == 2 and arms["repeats_min"] == 1 and arms["repeats_max"] == 1
+    assert arms["score_mean"] == 80.0 and arms["score_spread"] == 20.0
+    assert arms["wall_s_mean"] == 2.0 and arms["wall_s_max"] == 3.0
+    assert arms["output_tokens_mean"] == 60.0
+    assert arms["defect_rate"] == 0.5
+    assert arms["endpoints"] == ["http://h:8091/v1"]
+
+
+# ── The nightly wiring ───────────────────────────────────────────────────
+
+def test_a_nightly_autonomy_task_runs_the_eval():
+    """Verification the acceptance names: the eval is run by something."""
+    runners = [p for p in AUTONOMY_DIR.glob("*.md")
+               if "secondary_routing_eval.py" in p.read_text(encoding="utf-8")]
+    assert runners, "no autonomy task invokes eval/secondary_routing_eval.py"
+
+
+def test_that_nightly_task_is_one_the_scheduler_will_actually_run():
+    """`autonomy.py:433` refuses a task with no skill_name — "it will NEVER
+    run" — so a task file alone is not a nightly run."""
+    import yaml
+
+    runners = [p for p in AUTONOMY_DIR.glob("*.md")
+               if "secondary_routing_eval.py" in p.read_text(encoding="utf-8")]
+    assert runners
+    body = runners[0].read_text(encoding="utf-8")
+    front = yaml.safe_load(body.split("---\n")[1])
+    assert front["frequency"] == "daily"
+    assert front.get("skill_name"), f"{runners[0].name} would never run"
+    assert front["status"] in ("up_next", "in_progress")
+    assert "--repeats" in body and "3" in body, "the nightly run must be decision-grade"
+
+
+def test_the_paths_the_nightly_run_names_are_in_the_checkout():
+    """The two tests above only ever grep the task file for the script's name,
+    which is why four nights of task #85 "succeeded" against a script that was
+    not in the tree — the run found the name, improvised a scratch worktree of
+    an unmerged branch, and reported numbers measured on `app/` three days older
+    than production. Checking the string is not checking the instrument: every
+    path this eval's own nightly instructions name has to resolve in the
+    checkout that is running the test."""
+    named = {
+        "the sweep itself": ROOT / "eval" / "secondary_routing_eval.py",
+        "the pinned item set": ROOT / "eval" / "secondary_generation_items.yaml",
+        "the routing decision": ROOT / "eval" / "secondary-routing" / "decisions.yaml",
+    }
+    missing = {label: str(p) for label, p in named.items() if not p.exists()}
+    assert missing == {}, (
+        f"task #85's instructions name paths absent from this checkout: {missing}. "
+        "A nightly that cannot run the script is a failed run, not a result — "
+        "see item #1240."
+    )
+
+
+# ── Executing a flip: the router is written by the measurement or not at all ─
+
+def test_the_shipped_route_flips_only_the_job_the_measurements_flipped():
+    """The verdict as shipped state, not as behaviour one fake transport
+    happens to exercise.
+
+    Four decision-grade runs (2026-09-16 twice, 09-17, 09-18) put `title`
+    13.3 to 19.2 composite points outside a 5.0-point margin — the widest and
+    most stable gap on the board, with secondary format compliance 42-58 %
+    against the primary's 100 %. The other four jobs were keeps on all four
+    runs, so they still ask for the cheap engine. Asserted on the alias
+    because `_engine_for` only says what the pin asks for:
+    `resolve_model_alias` keeps the last word, and `secondary_enabled: false`
+    still lands every job on the primary.
+    """
+    assert sm.JOBS_ON_PRIMARY == frozenset({"title"})
+    assert sm._engine_for("title") == "primary"
+    for job in ("capture", "facts", "focus", "voice"):
+        assert sm._engine_for(job) == "secondary", (
+            f"{job} was a keep on all four decision-grade runs and must still "
+            "ask for the secondary")
+
+
+def test_the_endpoint_resolver_will_not_guess_a_job():
+    """`job` is required with no default, and that is the seam: a call site
+    that forgot to name its job would otherwise get the secondary, measure on
+    the secondary, and read as routed while the router file pinned it."""
+    param = inspect.signature(sm._endpoint).parameters["job"]
+    assert param.default is inspect.Parameter.empty, (
+        "_endpoint grew a default job; a forgotten job argument would then "
+        "resolve silently instead of raising TypeError")
+
+
+def test_each_production_call_site_names_its_own_job():
+    """The pin routes the job a call site *says*, so a mislabelled call site
+    routes the wrong work: `_sync_secondary_title` passing `"capture"` would
+    leave the flipped job on the cheap engine while every test that only
+    exercises the happy path stayed green. Read from the source, because a
+    monkeypatched transport proves what one job did, not what each one claims."""
+    for job, fn in (("title", sm._sync_secondary_title),
+                    ("capture", sm._sync_secondary_capture_call),
+                    ("facts", sm._sync_secondary_fact_extraction),
+                    ("focus", sm._sync_secondary_focus_extraction),
+                    ("voice", sm._sync_secondary_voice_summary)):
+        body = inspect.getsource(fn)
+        assert f'_endpoint("{job}")' in body, (
+            f"{fn.__name__} does not pass its own job name to _endpoint")
+
+
+def _router_call_sites() -> list[str]:
+    """Every call to `app.secondary_models._endpoint` in the checkout, as
+    `path:lineno`, with the offence for any that names no job.
+
+    Found syntactically, not by grep: a grep for `_endpoint(` also lands on
+    `_summary_endpoint(`, `_resolve_endpoint(`, `_consolidation_endpoint(` and
+    `rewrite_endpoint(`, four unrelated resolvers that live in this tree, and a
+    check with that many false positives is a check that gets widened away. A
+    call counts only when the file actually brings the router's name in — a
+    local `from app.secondary_models import _endpoint` or a qualified
+    `secondary_models._endpoint(...)` — which is what makes the scan about this
+    router rather than about a name.
+    """
+    import ast
+
+    offenders: list[str] = []
+    for path in sorted(ROOT.rglob("*.py")):
+        if {".venvs", "node_modules", ".git", ".worktrees"} & set(path.parts):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue
+        imports_it = any(
+            isinstance(n, ast.ImportFrom)
+            and (n.module or "").endswith("secondary_models")
+            and any(a.name == "_endpoint" for a in n.names)
+            for n in ast.walk(tree))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            qualified = (isinstance(f, ast.Attribute) and f.attr == "_endpoint"
+                         and isinstance(f.value, ast.Name)
+                         and f.value.id == "secondary_models")
+            if not ((isinstance(f, ast.Name) and f.id == "_endpoint" and imports_it)
+                    or qualified):
+                continue
+            first = node.args[0] if node.args else None
+            names_a_job = (isinstance(first, ast.Constant) and isinstance(first.value, str)
+                           and bool(first.value.strip()))
+            if not names_a_job:
+                rel = path.relative_to(ROOT)
+                offenders.append(f"{rel}:{node.lineno}")
+    return offenders
+
+
+def test_no_caller_of_the_router_asks_it_to_guess_a_job():
+    """`_endpoint` taking a required job is only a seam while every caller uses
+    it. Landed, the signature change silently broke the backlog pair-judge in
+    `scripts/automod/cluster.py` (`_judge_endpoint`, the second caller outside
+    `app/secondary_models.py`) — `TypeError: _endpoint() missing 1 required
+    positional argument` at the first ambiguous backlog edge, caught by the
+    judge loop's own `except Exception`, and reported as one more triage error
+    rather than as the router having changed under it. The same shape as the
+    four phantom nights: a consumer reaching for something the tree no longer
+    offers, and a handler that turns the failure into a shrug.
+
+    This is why the scan is repo-wide and not a list: the five call sites inside
+    `app/secondary_models.py` are pinned by name by the test above, and the two
+    outside it (`app/uptake.py`, `scripts/automod/cluster.py`) are exactly the
+    ones nobody was watching.
+    """
+    offenders = _router_call_sites()
+    assert offenders == [], (
+        f"these call sites call app.secondary_models._endpoint without naming a job: "
+        f"{offenders}. `_endpoint` has no default on purpose — pass the job the work "
+        "is (`uptake`, `cluster_judge`, or one of the five routed jobs).")
+
+
+def _router_copy(tmp_path):
+    """A copy of the real router file, so a pin edit can be tested without
+    touching the tree the rest of the suite reads."""
+    import shutil
+
+    dest = tmp_path / "secondary_models.py"
+    shutil.copy(ev.ROUTER_PATH, dest)
+    return dest
+
+
+def test_a_pin_is_written_to_the_router_source_and_read_back(tmp_path):
+    """The seam between the two halves of the clause: a decision the eval
+    reached has to land in the file production reads.
+
+    Read-back goes through `router_source`, i.e. the source text, so this fails
+    if the pin line stops being one line or stops being a literal set — the two
+    ways this edit would otherwise go quietly inert.
+    """
+    copy = _router_copy(tmp_path)
+    ev.set_router_pins(["title", "capture"], copy)
+    assert ev.router_source(copy) == frozenset({"title", "capture"})
+    line = [ln for ln in copy.read_text().splitlines()
+            if ln.startswith("JOBS_ON_PRIMARY")]
+    assert line == ["JOBS_ON_PRIMARY: frozenset = frozenset({'capture', 'title'})"], line
+    # An empty pin is its own shape, not `frozenset({})` — the file must stay
+    # importable, which a caller that renders no elements would break.
+    ev.set_router_pins([], copy)
+    assert ev.router_source(copy) == frozenset()
+    assert copy.read_text().count("frozenset({'capture', 'title'})") == 0
+
+
+def test_a_pin_edit_refuses_a_job_that_is_not_routable(tmp_path):
+    """A typo in a job name would otherwise pin a job that does not exist and
+    leave the real one on the cheap engine while reading as handled."""
+    copy = _router_copy(tmp_path)
+    before = ev.router_source(copy)
+    with pytest.raises(ValueError, match="not routable jobs"):
+        ev.set_router_pins(["captre"], copy)
+    assert ev.router_source(copy) == before
+
+
+def test_a_pin_edit_refuses_a_router_file_it_cannot_write_safely(tmp_path):
+    copy = tmp_path / "secondary_models.py"
+    copy.write_text("import x\n", encoding="utf-8")
+    with pytest.raises(LookupError, match="no longer states"):
+        ev.set_router_pins(["title"], copy)
+
+
+def test_the_pinned_router_and_the_recorded_decision_agree_in_the_tree():
+    """The clause's second half, checked as shipped state.
+
+    `decisions.yaml` is written only by a decision-grade run and the router
+    only by `--pin`, which reads that file. If these two disagree in the tree,
+    either someone hand-edited `app/secondary_models.py` past the measurement
+    or a flip was landed without its confirming run — which is the exact defect
+    #551 was opened to remove, so it is a red test rather than a warning.
+    """
+    recorded = ev.load_decisions()
+    assert recorded, (f"{ev.decisions_path()} is missing: the routing decision has to be "
+                      "a checked-in artifact, not a summary paragraph")
+    assert recorded["repeats_at_floor"] and recorded["arms_separate"], (
+        f"the recorded run was not decision-grade: {recorded}")
+    in_tree = ev.router_source(ev.ROUTER_PATH)
+    assert in_tree == frozenset(recorded["on_primary"]), (
+        f"router pins {sorted(in_tree)} but the measurement says "
+        f"{sorted(recorded['on_primary'])}")
+
+
+def test_the_pin_command_refuses_without_a_recorded_decision(monkeypatch, tmp_path):
+    """No measurement, no engine change — and the refusal has to come from the
+    command, not from a reviewer remembering to check."""
+    monkeypatch.setattr(ev, "load_decisions", lambda path=None: None)
+    before = ev.router_source(ev.ROUTER_PATH)
+    assert ev.main(["--pin", "title"]) == 3
+    assert ev.router_source(ev.ROUTER_PATH) == before, (
+        "the refusal must leave the router file exactly as it found it")
+
+
+def test_the_pin_command_refuses_a_set_the_measurement_did_not_reach(monkeypatch):
+    """A pin that names more jobs than the run recommends is a hand-edit with
+    the command's name on it."""
+    monkeypatch.setattr(ev, "load_decisions",
+                        lambda path=None: {"on_primary": ["capture"],
+                                           "repeats_at_floor": True,
+                                           "arms_separate": True})
+    assert ev.main(["--pin", "title,capture"]) == 3
+
+
+def test_the_downstream_windows_are_adjacent_and_never_overlap():
+    """Seven days against the prior seven. A baseline window that shared a day
+    with its own comparison would read a week against itself, and the drift
+    would look like an improvement."""
+    after = ev.window_dates("2026-09-15", 7)
+    before = ev.preceding_window("2026-09-15", 7)
+    assert len(after) == len(before) == 7
+    assert not set(after) & set(before)
+    assert after[0] > before[-1]
+    from datetime import date, timedelta
+    assert (date.fromisoformat(after[0]) - date.fromisoformat(before[-1])
+            == timedelta(days=1))

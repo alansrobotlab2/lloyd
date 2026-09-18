@@ -4,6 +4,13 @@ The primary model talks to the user; the secondary model handles
 summary/fact/focus extraction in the background so the primary generation
 path stays unblocked. When `secondary_enabled: false` in config.yaml, the
 alias resolver routes these calls to the primary instead.
+
+Per-job routing lives here, not in config.yaml, because the two knobs mean
+different things: `secondary_enabled` is "does the box have a secondary
+engine at all" (it also decides whether `agent-llm-secondary` is started —
+`server.py:172`), while `JOBS_ON_PRIMARY` is "this job's measured quality on
+the cheap engine was not good enough". Flipping the first to fix the second
+would take the engine down for every other job.
 """
 
 import json
@@ -15,11 +22,47 @@ from typing import Optional
 
 logger = logging.getLogger("lloyd-server")
 
+#: Job names whose work goes to the primary even while the secondary is
+#: enabled. The five routable jobs are `title`, `capture`, `facts`, `focus`
+#: and `voice`.
+#:
+#: It must not be filled in by hand: the only legitimate content is the set
+#: of jobs `eval/secondary_routing_eval.py` pairs primary against secondary
+#: for and sends outside its stated tolerance, written by that script's
+#: `--pin`, and `tests/test_secondary_routing_eval.py` fails if this set and
+#: the decisions in that eval's checked-in artifact
+#: (`eval/secondary-routing/decisions.yaml`) disagree. What is in here now —
+#: `title` — is the decision four decision-grade runs (2026-09-16 twice,
+#: 09-17, 09-18) reached independently, each of them putting `title` more
+#: than the 5.0-point margin outside tolerance. A routing change that nobody
+#: measured is exactly the defect item #551 exists to remove — the secondary
+#: was chosen for throughput and never re-checked against a quality number.
+JOBS_ON_PRIMARY: frozenset = frozenset({'title'})
 
-def _endpoint() -> tuple[str, str]:
-    """Resolve (chat_completions_url, model_name) for post-capture jobs."""
+
+def _engine_for(job: str) -> str:
+    """Alias for one routed job: `secondary`, or `primary` if it was flipped.
+
+    Returns the *alias*, so `resolve_model_alias` still has the last word and
+    `secondary_enabled: false` keeps overriding everything — a flipped job
+    asks for primary, a kept job asks for secondary, and both land on primary
+    when the engine is off.
+    """
+    return "primary" if job in JOBS_ON_PRIMARY else "secondary"
+
+
+def _endpoint(job: str) -> tuple[str, str]:
+    """Resolve (chat_completions_url, model_name) for one routed job.
+
+    `job` is required with no default on purpose. A default of "secondary"
+    would resolve happily for a caller that forgot to name its job, and a
+    newly-pinned job that forgot to pass its name would then quietly measure
+    and run on the cheap engine while reading as routed. There is no correct
+    default to pick: the whole point of item #551 is that the engine per job
+    is a measured decision, not a fallback.
+    """
     from app.config import resolve_model_alias, _get_model_cfg
-    name = resolve_model_alias("secondary")
+    name = resolve_model_alias(_engine_for(job))
     cfg = _get_model_cfg(name) or {}
     base = cfg.get("base_url") or cfg.get("env", {}).get("ANTHROPIC_BASE_URL", "")
     return f"{base.rstrip('/')}/v1/chat/completions", name
@@ -58,7 +101,7 @@ def _sync_secondary_capture_call(transcript: str) -> Optional[str]:
         f"Transcript:\n{transcript}"
     )
 
-    url, model_name = _endpoint()
+    url, model_name = _endpoint("capture")
     payload = {
         "model": model_name,
         "messages": [
@@ -87,7 +130,7 @@ def _sync_secondary_capture_call(transcript: str) -> Optional[str]:
 
 def _sync_secondary_fact_extraction(transcript: str) -> list[dict]:
     """Call secondary model to extract durable facts from a session transcript."""
-    url, model_name = _endpoint()
+    url, model_name = _endpoint("facts")
     payload = {
         "model": model_name,
         "messages": [
@@ -187,7 +230,7 @@ def _sync_secondary_voice_summary(primary_text: str, timeout: float = 15.0) -> O
     if not text:
         return None
 
-    url, model_name = _endpoint()
+    url, model_name = _endpoint("voice")
     payload = {
         "model": model_name,
         "messages": [
@@ -216,7 +259,7 @@ def _sync_secondary_voice_summary(primary_text: str, timeout: float = 15.0) -> O
 
 def _sync_secondary_focus_extraction(transcript: str) -> list[str]:
     """Call secondary model to extract 3-5 topic phrases from recent conversation."""
-    url, model_name = _endpoint()
+    url, model_name = _endpoint("focus")
     payload = {
         "model": model_name,
         "messages": [
@@ -265,7 +308,7 @@ def _sync_secondary_title(transcript: str, timeout: float = 30.0) -> Optional[st
     if not transcript.strip():
         return None
 
-    url, model_name = _endpoint()
+    url, model_name = _endpoint("title")
     payload = {
         "model": model_name,
         "messages": [

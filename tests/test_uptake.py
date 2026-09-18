@@ -988,7 +988,7 @@ class _Undo:
 
 def _patch_endpoint(module, url, model):
     old = module._endpoint
-    module._endpoint = lambda: (url, model)
+    module._endpoint = lambda job: (url, model)
     return _Undo(module, "_endpoint", old)
 
 
@@ -1738,7 +1738,7 @@ def test_the_secondary_url_the_measurement_uses_is_the_one_the_tree_resolves():
     """
     from app.secondary_models import _endpoint
 
-    url, model = _endpoint()
+    url, model = _endpoint("uptake")
     assert url.startswith(("http://", "https://")), url
     assert urlparse(url).port, f"no port in a localhost slot URL: {url}"
     assert model, "an empty model name means the slot was never resolved"
@@ -1747,7 +1747,7 @@ def test_the_secondary_url_the_measurement_uses_is_the_one_the_tree_resolves():
     # And the resolver's failure mode is describable, not exception-shaped: a
     # misconfigured slot must be reportable, because a bare exception in a test
     # message reads as "the test is broken" rather than "the engine is not there".
-    def boom():
+    def boom(job):
         raise RuntimeError("no slot configured")
     import app.secondary_models as sm
     saved = sm._endpoint

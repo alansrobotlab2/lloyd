@@ -554,7 +554,7 @@ def secondary_endpoint() -> str:
     """
     try:
         from app.secondary_models import _endpoint
-        url, _ = _endpoint()
+        url, _ = _endpoint("uptake")
         return url
     except Exception as exc:            # noqa: BLE001 - describe, never propagate
         return f"<unresolved: {type(exc).__name__}: {exc}>"
@@ -563,7 +563,7 @@ def secondary_endpoint() -> str:
 def _post_secondary(payload: dict[str, Any]) -> dict[str, Any]:
     from app.secondary_models import _endpoint  # the tree's own resolver
 
-    url, resolved = _endpoint()
+    url, resolved = _endpoint("uptake")
     body = dict(payload)
     body["model"] = resolved
     req = urllib.request.Request(

@@ -311,8 +311,19 @@ def judge_pair(a: B.Item, b: B.Item, pair: dict, *, endpoint: str, model: str,
 
 
 def _judge_endpoint() -> tuple[str, str]:
+    """(url, model) for the pair-judge: the secondary, always.
+
+    The job name is required, not decorative. `_endpoint` takes no default
+    since item #1240 landed the per-job route, so calling it with no argument
+    raised TypeError at the first ambiguous backlog edge — and the caller's
+    `except Exception` turned that into an error count while keeping every
+    edge, which reads exactly like "the judge found nothing to drop".
+    `cluster_judge` is not one of the five measured jobs, so it stays on the
+    cheap engine: an unmeasured consumer must not ride a flip a different job
+    earned.
+    """
     from app.secondary_models import _endpoint
-    return _endpoint()
+    return _endpoint("cluster_judge")
 
 
 # ── components ─────────────────────────────────────────────────────────────

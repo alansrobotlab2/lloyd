@@ -1,0 +1,250 @@
+# Item set for the secondary-engine routing eval (item #551).
+#
+# Each item names a finished user session and the sha256 of the input
+# that the routed job would have sent it. The input itself is not
+# checked in: it is a record of a person's day, and this repo has a
+# remote. `eval/secondary_routing_eval.py` rebuilds it from the local
+# session store with the production transcript builder and refuses to
+# run when the hash moves, so a stale item is an error rather than a
+# different measurement. Re-pin with `--build-items N`.
+#
+# `anchors` are identifying tokens (paths, identifiers, numbers) lifted
+# from that input; the scorer's groundedness floor is how many of them
+# the output names.
+title:
+  label: session title
+  items:
+  - id: title-1
+    job: title
+    source_session: 20260909_022107_iv0ffa
+    input_sha256: a91462adebc82b39
+    input_chars: 1701
+    anchors:
+    - lloyd
+    - user
+    - completed
+    - elapsed_seconds
+    - exit_code
+    - output_file
+  - id: title-2
+    job: title
+    source_session: 20260909_020810_iv6514
+    input_sha256: 5c2110ad3f797dc3
+    input_chars: 1999
+    anchors:
+    - poisoned
+    - lloyd
+    - skill
+    - error
+    - max_attempts
+    - user
+  - id: title-3
+    job: title
+    source_session: 20260909_014756_ivcbb7
+    input_sha256: b50e64d2810e5838
+    input_chars: 1305
+    anchors:
+    - deepseek
+    - check
+    - checked
+    - flash
+    - user
+    - answer
+  - id: title-4
+    job: title
+    source_session: 20260908_175625_iv4b8e
+    input_sha256: c6c60014f94ac264
+    input_chars: 1807
+    anchors:
+    - lloyd
+    - already
+    - backlog
+    - user
+    - against
+    - caption
+capture:
+  label: post-session capture
+  items:
+  - id: capture-1
+    job: capture
+    source_session: 20260909_022107_iv0ffa
+    input_sha256: 287f4bb452efa9e5
+    input_chars: 2070
+    anchors:
+    - user
+    - check
+    - completed
+    - elapsed_seconds
+    - exit_code
+    - lloyd
+  - id: capture-2
+    job: capture
+    source_session: 20260909_020810_iv6514
+    input_sha256: 28f960d041f3cb71
+    input_chars: 3372
+    anchors:
+    - poisoned
+    - skill
+    - assistant
+    - max_attempts
+    - user
+    - clear
+  - id: capture-3
+    job: capture
+    source_session: 20260909_014756_ivcbb7
+    input_sha256: 62a360cc0749f961
+    input_chars: 1859
+    anchors:
+    - deepseek
+    - flash
+    - still
+    - user
+    - check
+    - checked
+  - id: capture-4
+    job: capture
+    source_session: 20260908_175625_iv4b8e
+    input_sha256: 4f69bbb2236206e7
+    input_chars: 3347
+    anchors:
+    - already
+    - assistant
+    - backlog
+    - item
+    - lloyd
+    - user
+facts:
+  label: durable fact extraction
+  items:
+  - id: facts-1
+    job: facts
+    source_session: 20260909_022107_iv0ffa
+    input_sha256: 287f4bb452efa9e5
+    input_chars: 2070
+    anchors:
+    - user
+    - check
+    - completed
+    - elapsed_seconds
+    - exit_code
+    - lloyd
+  - id: facts-2
+    job: facts
+    source_session: 20260909_020810_iv6514
+    input_sha256: 28f960d041f3cb71
+    input_chars: 3372
+    anchors:
+    - poisoned
+    - skill
+    - assistant
+    - max_attempts
+    - user
+    - clear
+  - id: facts-3
+    job: facts
+    source_session: 20260909_014756_ivcbb7
+    input_sha256: 62a360cc0749f961
+    input_chars: 1859
+    anchors:
+    - deepseek
+    - flash
+    - still
+    - user
+    - check
+    - checked
+  - id: facts-4
+    job: facts
+    source_session: 20260908_175625_iv4b8e
+    input_sha256: 4f69bbb2236206e7
+    input_chars: 3347
+    anchors:
+    - already
+    - assistant
+    - backlog
+    - item
+    - lloyd
+    - user
+focus:
+  label: focus/topic extraction
+  items:
+  - id: focus-1
+    job: focus
+    source_session: 20260909_022107_iv0ffa
+    input_sha256: 8ae5bd2ba460c364
+    input_chars: 282
+    anchors:
+    - commits
+    - last
+  - id: focus-2
+    job: focus
+    source_session: 20260908_175625_iv4b8e
+    input_sha256: e2e19f83ee51c27f
+    input_chars: 418
+    anchors:
+    - asked
+    - brief
+    - triage
+  - id: focus-3
+    job: focus
+    source_session: 20260908_045305_iv0938
+    input_sha256: 59a87b84fec06086
+    input_chars: 418
+    anchors:
+    - brief
+    - triage
+  - id: focus-4
+    job: focus
+    source_session: 20260908_000607_ivd02f
+    input_sha256: 695a0182e6a01b51
+    input_chars: 206
+    anchors:
+    - meeting
+    - tonight
+voice:
+  label: voice summary
+  items:
+  - id: voice-1
+    job: voice
+    source_session: 20260908_045305_iv0938
+    input_sha256: cd93f181175fe22b
+    input_chars: 1041
+    anchors:
+    - discussion
+    - group
+    - brief
+    - calendar
+    - meeting
+    - nothing
+  - id: voice-2
+    job: voice
+    source_session: 20260908_000607_ivd02f
+    input_sha256: fc9ea1c0426cf29e
+    input_chars: 939
+    anchors:
+    - meeting
+    - rssc
+    - contact
+    - form
+    - join
+    - october
+  - id: voice-3
+    job: voice
+    source_session: 20260907_161840_iv4b74
+    input_sha256: 2f28119094b6dae7
+    input_chars: 615
+    anchors:
+    - birthday
+    - brief
+    - newsletter
+    - worth
+  - id: voice-4
+    job: voice
+    source_session: e2e_selfmod363_1788758995
+    input_sha256: 0330b1a58b94185f
+    input_chars: 528
+    anchors:
+    - today
+    - already
+    - brief
+    - eric
+    - nothing
