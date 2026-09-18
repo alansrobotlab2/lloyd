@@ -2,7 +2,7 @@
 title: Inner Voice — Architecture
 status: active
 created: 2026-05-02
-updated: 2026-09-11
+updated: 2026-09-18
 related:
   - architecture/subliminal.md
 ---
@@ -1237,7 +1237,15 @@ inner_voice:
   model: primary                             # pinned; see note below
   observer:
     max_tokens: 400                          # observer's response budget per event
-    timeout_seconds: 5                       # post-event LLM call timeout
+    timeout_seconds: 8                       # the two synchronous terminal
+                                             #   calls (assistant_message,
+                                             #   result). Raised 5 → 8 on
+                                             #   2026-09-14 by Alan's #458
+                                             #   ruling; 8 s sits above the
+                                             #   measured p95 (5.07 s).
+    probe_timeout_seconds: 1.0               # pre-flight liveness probe,
+                                             #   off-critical-path calls only
+                                             #   (code default; not in yaml)
     intervention_budget: 3                   # inject/ambient/clarify per turn
     primary_text_window_chars: 4000          # head+tail window of primary text
     priority: 1                              # FALLBACK ONLY since v5.4 — the
@@ -1266,6 +1274,33 @@ inner_voice:
     async_timeout_seconds: 12                # deadline for off-critical-path
                                              #   judgments (terminal calls keep
                                              #   the tight timeout_seconds)
+    # --- the unattended profile (2026-09-12, absent from this doc until 2026-09-18) ---
+    # An unattended turn is `platform in sessions_io.NON_USER_PLATFORMS`
+    # (`_is_unattended`), i.e. a worker or autonomy round. Every one of these
+    # exists because a round's observer injected "deliver the final report
+    # now" on the invented premise "working tree clean" and a healthy round
+    # was abandoned at iteration 38 with 44 minutes left.
+    unattended_tool_result_sample_every: 10  #   vs 5 for a chat turn
+    unattended_tool_result_escalate_bytes: 60000   #   vs 20000; a pytest tail
+                                             #   clears 20k and buys a call
+                                             #   that says nothing
+    unattended_terminal_content_deterministic: true
+                                             # the LLM still decides WHETHER to
+                                             #   speak; Python writes the words
+                                             #   (`UNATTENDED_TERMINAL_RESCUE_
+                                             #   CONTENT`), and a cancel with no
+                                             #   read inject becomes
+                                             #   `noop_unattended_cancel_unseen`
+    context_pressure_enabled: true           # prefer noop past this fraction of
+    context_pressure_threshold: 0.8          #   the compaction threshold, and
+                                             #   skip the terminal judgment
+                                             #   entirely below the loop's own
+                                             #   terminal_floor_tokens
+    repetition_exempt_tools: []              # merged OVER the built-in set
+                                             #   (automod_gate_wait, automod_status,
+                                             #   browser_wait, graph_status,
+                                             #   autoresearch_status); config can
+                                             #   add, never un-exempt
   todo_stewardship:
     enabled: true
     completion_gate: true
@@ -1294,11 +1329,17 @@ scheduler, and the observer silently moved to **Qwen3.5-4B at `:8091`** (GPU 2,
 an RTX 3090) with no config change, no code change, and no log line. Ten hours
 later it cancelled turn `20260905_011748_iv84e4`.
 
-The `model` column bounds the episode exactly: of 43,220 observation rows,
-**116 carry `secondary`, and every one of them falls between 08:29 and 18:28 on
-2026-09-04.** The other 43,104 are `primary`. That is the whole of the
+The `model` column bounds the episode exactly: of 43,220 observation rows *as of
+2026-09-11*, **116 carry `secondary`, and every one of them falls between 08:29 and
+18:28 on 2026-09-04.** The rest are `primary`. That is the whole of the
 experiment, and it is only legible because v5 fixed the column to record the
 observer's model rather than the primary's.
+
+**Re-probed 2026-09-18: 58,013 rows, and `model='secondary'` is still exactly 116,
+still inside 2026-09-04.** The 116 are a closed historical set — that is the claim
+the pin rests on — while the total is a growth number: +14,793 rows in seven days.
+Any bare row count quoted below this line is a timestamp, not a fact; see
+`backlog/1229` for why none of them survives a disk event.
 
 The one-day comparison, counting only rows where the LLM actually ran:
 
@@ -1369,7 +1410,9 @@ measured-as-bad.
 
 **It is measured now.** The running primary at `:8096` carries the flag, and
 **5,107 of the 43,220 observation rows record a non-zero `cache_read`** — all of
-them on `primary`, all of them inside the last week. The 116 `secondary` rows
+them on `primary`, all of them inside the last week (re-probed 2026-09-18: **7,219
+of 58,013**, same shape, so the hit rate is stable and the counts are only a moving
+denominator). The 116 `secondary` rows
 from the 2026-09-04 experiment still read 0 and always will: that engine was
 never launched with the flag, which is exactly why the question the experiment
 existed to answer went unanswered. Verify the primary with:
@@ -1377,6 +1420,12 @@ existed to answer went unanswered. Verify the primary with:
 ```bash
 ps -eo args | grep vllm.entrypoints | grep -c enable-prompt-tokens-details
 ```
+
+Re-run 2026-09-18 returns **2, not 1** — the second match is `grep vllm.entrypoints`
+itself, whose own command line is in `ps` output and carries both strings. The check
+is "≥ 1 and the matched line is the server"; `pgrep -fa vllm.entrypoints.api_server`
+is the form that cannot self-match, and it names
+`agent-services/llm/vllm-flash-next-main-0910` with the flag.
 
 Note what that command can and cannot tell you. It matches `vllm.entrypoints`,
 and `:8091` has been llama.cpp since 2026-09-06 — `start-secondary.sh` still has
@@ -1806,6 +1855,44 @@ on a long todo-driven turn it escalates roughly every fifth tool result on top o
 whatever the sampler already picked. Turn `8f3b7e77de07` ran 30 LLM calls and
 192k observer input tokens. Whether that spend earns anything is exactly the
 question `scripts/iv_grade.py` exists to answer, and it has not been asked.
+
+### 10. `iteration_pressure_enabled` guards only the prompt note, not the gate (2026-09-18)
+
+`inner_voice.observer.iteration_pressure_enabled: false` reads like the kill switch
+for iteration pressure and is not one. The key is consulted at exactly one site,
+`_iteration_pressure_note` (`observer.py:1437`), which renders the warning into the
+observer's own prompt. The other consumer of `guards.iteration_pressure` — the
+`_fast_path_assistant_message` gate that forces an LLM review at 80% of `max_turns`
+— reads only the result of that helper and never the flag. So turning the switch off
+silences the explanation and keeps the escalation: the documented meaning
+("nudge the primary to converge as it approaches `max_turns`", `config.yaml:99-101`)
+is the one thing the key does *not* stop. Same shape as the `goal_extraction_enabled`
+key that `97a86cc` had to add because four keys had no reader at all — this is the
+next one in that list, and the fix is the same shape: read the flag at the gate, not
+only at the renderer.
+
+## Review log
+
+- **2026-09-18 — `current`.** Architecture held; the numbers and the unattended
+  profile did not. The observer's model pin, the repetition guard's v5.2→v5.4
+  corrections (carrier rule, `_strip_cd_prefix`, `ubiquitous_identifiers`), the
+  async-lane work on #458 (`engine_unresponsive` / `call_slow`,
+  `max_attempts = 2 if async_call else 1`, `_probe_engine` in
+  `app/inner_voice/observer.py`, not `app/llm_engines.py`), the batch-ordering fix
+  (`_reorder_batch_messages` at `app/harness/loop.py:1717`), the five levers, the
+  five `/api/inner_voice` routes, and all 15 named test modules check out. Corrected:
+  `timeout_seconds` is 8 (5 → 8 on 2026-09-14, Alan's #458 ruling) and the block was
+  missing the whole unattended profile plus `context_pressure_*` and
+  `repetition_exempt_tools`; the table's row counts (43,220 → 58,013 live, `cache_read`
+  5,107 → 7,219) are re-probed and labelled as timestamps; the `Task`-subagent
+  82%-`secondary` figure is a 2026-09-03 reading of a slot that has run
+  Qwen3.6-35B-A3B under llama.cpp since 2026-09-06, so it can no longer be
+  re-measured at all; the two `noop_*` labels the code emits and the table omitted
+  (`noop_context_exhausted`, `noop_unattended_cancel_unseen`) are both 2026-09-12
+  unattended-profile additions — the feature was documented nowhere in this file until
+  now. Filed `backlog/1229` (measured baselines live only in gitignored `usage.db` and
+  a gitignored `_pipeline/` series) and `backlog/1230` (`secondary_enabled` still
+  rewrites the observer's model, no runtime guard).
 
 ## Version history
 
