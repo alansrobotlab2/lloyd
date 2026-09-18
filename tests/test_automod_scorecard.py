@@ -199,6 +199,25 @@ def test_row_9_counts_the_two_ways_a_gated_change_used_to_be_lost(tmp_path, repo
     assert "1 item verdict(s) not taken from a landing round" in text
 
 
+def test_a_rejection_whose_change_then_landed_is_not_counted_as_one(tmp_path, repo):
+    """#1242 and #1053 (2026-09-18): closed `rejected` by a finalizer that
+    misreported a landing round, minutes before their changes promoted. The
+    rows stay on the ledger; the landing recorded afterwards is what says they
+    were never rejections. A real one — nothing landed — still counts."""
+    events = [
+        _ev("item_closed", 2.0, item_id=1242, by="autocode", acceptance="rejected"),
+        _ev("item_landed", 1.9, item_id=1242, commit="e2fc0754", closed=True, acceptance="met"),
+        _ev("item_closed", 1.0, item_id=726, by="autocode", acceptance="rejected",
+            reason="MRR 0.500 -> 0.497; within noise"),
+        # A landing BEFORE the close is an earlier round's, not a contradiction.
+        _ev("item_landed", 3.0, item_id=800, commit="aaaa1111", closed=False, acceptance="not_met"),
+        _ev("item_closed", 0.5, item_id=800, by="autocode", acceptance="rejected", reason="no gain"),
+    ]
+    row = SC.compute(since_days=7, ledger=_ledger(tmp_path, events), backlog_dir=tmp_path / "nope",
+                     repo=repo, now=NOW)
+    assert row["throughput"]["rounds_rejected"] == 2, "726 and 800; 1242 landed"
+
+
 def test_since_parses_days_hours_and_weeks():
     assert SC.parse_since("7d") == 7 and SC.parse_since("36h") == 1.5 and SC.parse_since("2w") == 14
     assert SC.parse_since("3") == 3

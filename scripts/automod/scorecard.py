@@ -600,7 +600,19 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
     # A round that tried the idea and rejected it on the evidence resolved
     # its item as surely as a landing did (Alan's rule, 2026-09-16); counted
     # beside the landings so the row reads "resolved", not "shipped".
-    rejected = sum(1 for e in by("item_closed") if e.get("acceptance") == "rejected")
+    # ...unless the item's change then LANDED. Both `rejected` closes the
+    # loop had recorded by 2026-09-18 (#1242, #1053) were the finalizer
+    # misreporting a round that was landing; `settle_item_verdict` refuses that
+    # now, and the two rows stay on the append-only ledger. An `item_landed`
+    # row for the same item, at or after the close, is what says so.
+    landed_at = {}
+    for e in by("item_landed"):
+        if e.get("item_id") is not None:
+            landed_at[int(e["item_id"])] = max(landed_at.get(int(e["item_id"]), 0.0),
+                                               float(e.get("ts") or 0))
+    rejected = sum(1 for e in by("item_closed")
+                   if e.get("acceptance") == "rejected"
+                   and landed_at.get(int(e.get("item_id") or -1), -1.0) < float(e.get("ts") or 0))
     # Two ways a finished change used to be lost between its gate and `main`,
     # counted so their cost is a number rather than a reading of transcripts
     # (2026-09-18): a gate that passed after its turn ended, which the reaper
