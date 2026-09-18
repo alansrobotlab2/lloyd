@@ -1195,7 +1195,7 @@ workers:
       # reads (`backlog.claim_for_triage`) so two turns never take the same
       # item, cluster or sweep batch. 2 with autocode's (Alan, 2026-09-17);
       # back to 1 when the board is caught up. Needs a backend restart.
-      max_inflight: 2
+      max_inflight: 1
       # The sweep (2026-09-15, Alan's "switch gears"): while any open item
       # is unread, a run takes `sweep_batch` items in one turn instead of a
       # cluster or a single item, quarantine lifted, and either retires each
@@ -1346,7 +1346,7 @@ workers:
       # under the automod lock, and a landing waits out the other round's
       # turn before it pauses the pool. 2 while the board is being caught up
       # (Alan, 2026-09-17); back to 1 afterwards. Needs a backend restart.
-      max_inflight: 2
+      max_inflight: 3
       max_duration_seconds: 3600
       # 150, not 100 — the code's own default and its reason
       # (workers/sources/autocode.py DEFAULT_MAX_TURNS): a round called
