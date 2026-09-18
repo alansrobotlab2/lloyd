@@ -260,12 +260,19 @@ listing:
   two in the chat router and one in `POST /api/sessions/create`, both three-part.
   `tests/test_api_contracts.py` checks the create endpoint end to end.
 - **Three-part ids are parsed and judged by `platform`.** A chat-shaped name
-  carrying a background platform is still excluded — and the inverse leak is on
-  disk: 49 sessions carry `platform: browser` (ids `<ts>_iv<4hex>`, written by
-  the Inner Voice bench harness through `POST /api/sessions/create`, whose
-  `platform` field is taken from the request body unchecked). `NON_USER_PLATFORMS`
-  is `{"autonomy", "worker"}`, so those runs read as user sessions: they sit in
-  the chat history and export to `sessions/`, i.e. into the embedded corpus.
+  carrying a background platform is still excluded — and the inverse case is on
+  disk: 52 sessions carry `platform: browser` (ids `<ts>_iv<4hex>`, minted by the
+  Chrome extension's side panel, which posts `platform: "browser",
+  inner_voice: true` to `POST /api/sessions/create` from
+  `chrome-extension/src/background/lloyd-client.ts:15` — an endpoint that takes
+  `platform` from the request body unchecked). These are not harness runs: the
+  panel sends a real user turn per follow-up a person types. `NON_USER_PLATFORMS`
+  is `{"autonomy", "worker"}`, so they read as user sessions, which is right: they
+  sit in the chat history and export to `sessions/`, i.e. into the embedded
+  corpus, and since #1143 the trajectory miner keeps them under their own
+  `browser` class. An earlier draft of this page ascribed them to the observer's
+  own bench harness — the same wrong premise as #493's — and the count above is a
+  `platform` census of `sessions/`, not a claim about who typed.
 - **`/api/background/sessions` parses every four-part file** and judges it by
   `platform`, so there the name is a hint.
 

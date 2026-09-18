@@ -53,13 +53,65 @@ WATERMARK_PATH = OUTPUT_DIR / ".watermark.json"
 # machine sessions and 26 are interactive.
 #
 # Class is therefore read from fields every session JSON already carries.
-INTERACTIVE_CLASS = "interactive"   # the only class that is human-initiated work
+INTERACTIVE_CLASS = "interactive"   # a chat a person typed into
 
-# platform -> class. `browser` is its own class rather than folding into
-# `inner-voice`: #493's open scope question is whether browser-platform and
-# inner-voice turns belong in the interactive pool at all, and that call has to be
-# movable in one line of SESSION_CLASS without re-extracting the corpus. Collapsing
-# two platforms into one class would destroy the signal the decision needs.
+# ── Reclassified by backlog #1143 (Alan's ruling, 2026-09-14) ────────────────
+#
+# #493 keyed `interactive` on `platform == "mission-control"` AND `inner_voice`
+# falsy, which had the flag's meaning backwards. `inner_voice: true` is the switch
+# that turns the observer ON for a human's chat — set at creation by
+# `web/src/components/pages/InnerVoicePage.tsx:146`, the sidebar chat and the
+# Chrome extension — not a mark of an observer-only turn. So the rule excluded
+# every chat the observer was enabled for and kept what the flag happened to miss:
+# measured over the 14 days to 2026-09-14, 79 excluded `inner-voice` sessions are
+# real conversations of up to 26 user turns while 42 of the 42 kept
+# `interactive` sessions are test ids (`v2-*`, `dbg*`, `soak*`, `*_selftest_*`,
+# sandbox four-part ids). The first post-landing nightly kept 4 of 1,471 sessions
+# and mined nothing. The flag therefore plays no part in the class.
+#
+# Admission is `app.sessions_io.is_user_session` — the one definition of "a human
+# is reading this session" that the ambient-delivery path already uses — and not a
+# second private rule here, because a deny-list maintained in two places diverges:
+# a platform added to `NON_USER_PLATFORMS` for the chat listings must not keep
+# streaming into the mining corpus. Importing it is also why this module carries
+# the class *sets* the miner filters on: the writer and the reader of the corpus
+# then cannot drift, which is what #493's cross-file pin was holding shut.
+#
+# A human-platform session whose id is not the three-part chat shape is a script
+# that drove it, whatever `platform` the creation endpoint was handed — that is
+# exactly the 42 test ids above. `e2e-harness` is decided by platform first, so
+# its harness smokes stay `smoke` and keep their own reporting bucket.
+def _import_root_on_path() -> None:
+    """Make `app.*` importable when this script is run by path.
+
+    The nightly invokes `python3 ~/lloyd/scripts/extract-trajectories.py`, which
+    puts `scripts/` on `sys.path` and not the repo root, so the plain
+    `from app.sessions_io import ...` below would resolve only when pytest
+    happens to have the checkout on the path. `scripts/backfill_session_titles.py`
+    and `scripts/entity_resolution.py` do the same insertion for the same reason.
+    """
+    root = str(Path(__file__).resolve().parent.parent)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+
+_import_root_on_path()
+
+from app.sessions_io import is_user_session  # noqa: E402
+
+#: A chat id is `<8 digits>_<6 digits>_<suffix>` — `20260912_101010_9f2a1c` for a
+#: Mission Control chat, `..._iv0484` for one the inner voice was enabled on. The
+#: same shape `app.sessions_io.is_background_session_name` discriminates on; here
+#: it separates a conversation from a script that borrowed a human platform.
+CHAT_SESSION_ID_RE = re.compile(r"^\d{8}_\d{6}_[A-Za-z0-9]+$")
+
+# platform -> class. `browser` keeps its own label rather than folding into
+# `interactive`: it is the Chrome extension's side panel
+# (`chrome-extension/src/background/lloyd-client.ts:15`), a different surface with
+# its own failure modes, so a candidate that only ever came from it stays
+# attributable — and it is still a human session, so it is admitted (Alan's ruling:
+# "kept by default, under their own `browser` label so they can still be reported
+# separately").
 SESSION_CLASS = {
     "mission-control": INTERACTIVE_CLASS,
     "worker": "worker",
@@ -67,8 +119,16 @@ SESSION_CLASS = {
     "browser": "browser",
     "e2e-harness": "smoke",
 }
-UNKNOWN_CLASS = "unknown"           # no `platform` field at all
-INNER_VOICE_CLASS = "inner-voice"   # a mission-control turn the observer took
+UNKNOWN_CLASS = "unknown"           # no `platform`, or one no deny-list mentions
+TEST_CLASS = "test"                 # human platform, non-chat id: a script drove it
+
+#: The classes a person's own work appears in — what the mining exclusion admits.
+#: A new human-facing platform is one line in `SESSION_CLASS` plus one here, and
+#: `mine-trajectories.py` changes in neither case.
+HUMAN_CLASSES = frozenset({INTERACTIVE_CLASS, "browser"})
+#: What the exclusion drops. Neither set may contain a class the other has;
+#: `tests/test_trajectory_extraction.py` pins that.
+MACHINE_CLASSES = frozenset({"worker", "autonomy", "smoke", TEST_CLASS})
 
 # ── Sensitive data patterns ───────────────────────────────────────────────────
 
@@ -323,21 +383,49 @@ SIGNAL_RE = re.compile(r"SIGNAL:([A-Z_]+)")
 
 # ── Session classification ───────────────────────────────────────────────────
 
-def classify_session(data: dict) -> str:
+def classify_session(data: dict, session_id: str | None = None) -> str:
     """Class of the session from the session JSON's own fields.
 
     Takes the parsed object, not a path: the filename is exactly what must not be
-    an input (#493 clauses 1-2). A session is human-initiated work only when the
-    backend recorded it as a Mission Control turn that the inner voice did not
-    take — `platform == "mission-control"` and `inner_voice` falsy. Everything
-    else is loop traffic: worker runs, autonomy tasks, e2e-harness smokes, and the
-    inner-voice and browser turns that ride the human-facing platforms.
+    an input (#493 clauses 1-2). `session_id` is a fallback for a caller that has
+    a key but not the file's own field — the miner's join to
+    `~/lloyd/sessions/<session_key>.json`, whose rows are keyed on the name and
+    whose legacy rows predate any id being emitted.
+
+    Three decisions, in the order they are applied (#1143):
+
+    1. `app.sessions_io.is_user_session` decides admission, and it decides it
+       alone: a platform on its deny-list is never a human class here, whatever
+       `SESSION_CLASS` says about it. The extractor keeps no second list of which
+       platforms are machines, because the two would drift the first time a
+       platform was added to one and not the other — and the drift direction that
+       matters is a machine platform reading as Alan's chat.
+    2. A platform the backend records is then decided by `SESSION_CLASS`, so the
+       `e2e-harness` smokes stay `smoke` whatever their id looks like. A platform
+       nobody has heard of is `unknown`: reported, and not admitted.
+    3. A session that survives as a human class whose id is not the three-part
+       chat shape is `test`: `v2-*`, `dbg*`, `soak*`, `*_selftest_*` and four-part
+       sandbox ids are all created through the chat endpoint with
+       `platform: mission-control` and were, until now, the only thing the mining
+       corpus contained.
+
+    `inner_voice` decides nothing. It is the switch that enables the observer for
+    a human's chat, so reading it as "the observer took this turn" is what made
+    the corpus exclude the human chats (#493's wrong premise, closed by #1143).
     """
     platform = data.get("platform")
-    cls = SESSION_CLASS.get(platform) if platform is not None else None
-    if cls == INTERACTIVE_CLASS and data.get("inner_voice"):
-        return INNER_VOICE_CLASS
-    return cls or UNKNOWN_CLASS
+    cls = SESSION_CLASS.get(platform) or UNKNOWN_CLASS
+    if not is_user_session(data):
+        # A machine platform. `worker`/`autonomy` by name, anything else
+        # `unknown` — and never a class the miner admits, even if SESSION_CLASS
+        # mapped it to one: admission is is_user_session's to decide.
+        return UNKNOWN_CLASS if cls in HUMAN_CLASSES else cls
+    if cls in HUMAN_CLASSES:
+        sid = str(session_id or data.get("session_id")
+                  or data.get("id") or "")
+        if sid and not CHAT_SESSION_ID_RE.match(sid):
+            return TEST_CLASS
+    return cls
 
 
 # ── Session parsing ──────────────────────────────────────────────────────────
@@ -367,7 +455,7 @@ def parse_session(path: Path) -> dict | None:
     # corpus rows and for anyone still filtering on it; `session_class` below is
     # what decides whether a session is human-initiated work.
     agent_id = "autonomy" if path.stem.startswith("autonomy_") else "lloyd"
-    session_class = classify_session(data)
+    session_class = classify_session(data, session_id=session_id)
 
     # Build call_id → tool_call map from assistant messages
     call_map: dict[str, dict] = {}

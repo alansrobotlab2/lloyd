@@ -480,29 +480,43 @@ def is_corroborated_error(step: dict) -> bool:
 
 SESSION_STORE_DIR = Path.home() / "lloyd" / "sessions"
 
-# ── Session class (#493) ─────────────────────────────────────────────────────
+
+def set_session_store_dir(path: Path) -> None:
+    """Override the session store the class join reads.
+
+    Exists so a test can drive the real command line against a fixture store
+    instead of the live 2,800-file `~/lloyd/sessions/`: the class of every row is
+    resolved by that join, so without it no subprocess test could state which
+    session a row was classified from. `set_trajectory_dir` is its twin.
+    """
+    global SESSION_STORE_DIR
+    SESSION_STORE_DIR = path
+
+# ── Session class (#493, reclassified by #1143) ──────────────────────────────
 #
 # The gate qualifies a pattern on *distinct sessions*, so the loop's own traffic
 # inflates it: machine share of the corpus measured on the stored `platform` field
 # is 938 of 1083 sessions (86.6%) across 2026-09-02→12, monotone per day, and
 # 10,611 of 11,813 `Sessions Affected` bullets in the 2026-09-12 candidates are
-# machine sessions. Only `interactive` work — a Mission Control turn the inner
-# voice did not take — is human-initiated.
+# machine sessions.
 #
-# The class is written by `extract-trajectories.py` and is one string: these two
-# scripts are separate processes, so
-# `tests/test_trajectory_extraction.py` pins that they agree on it.
-INTERACTIVE_CLASS = "interactive"
-UNCODED_CLASS = "uncoded"   # no emitted class and no session JSON to join to
-
-
+# Which classes are human-initiated comes from the extractor module, not from a
+# second literal here. #493 pinned the two with a test that compared one string;
+# #1143 moved the human/non-human split into a set (`HUMAN_CLASSES`), which is the
+# thing that actually has to agree across the boundary, and a set copied into two
+# files is a set that drifts one member at a time. See the block above
+# `SESSION_CLASS` in `extract-trajectories.py` for why `inner_voice` decides
+# nothing and why browser-platform chats are admitted.
+#
+# The class is written by `extract-trajectories.py` and read by this script from
+# the session store, per run (see `effective_session_class`).
 def _extractor_module():
-    """The sibling extractor module, for its session classifier.
+    """The sibling extractor module, for its session classifier and class sets.
 
     Loaded by path (hyphenated filename, and `scripts/` is not a package) the same
     way `_verdicts_module()` loads its sibling. One classifier, not two: the
-    meaning of `interactive` is clause 2 of #493 and cannot drift between the
-    writer and the reader of the corpus.
+    meaning of `interactive` is clause 2 of #493 as amended by #1143 and cannot
+    drift between the writer and the reader of the corpus.
     """
     import importlib.util   # sibling script, loaded by path
     global _EXTRACTOR_MOD
@@ -517,6 +531,10 @@ def _extractor_module():
 
 _EXTRACTOR_MOD: Any = None
 
+INTERACTIVE_CLASS = _extractor_module().INTERACTIVE_CLASS
+HUMAN_CLASSES = _extractor_module().HUMAN_CLASSES
+UNCODED_CLASS = "uncoded"   # no emitted class and no session JSON to join to
+
 
 def effective_session_class(traj: dict, cache: dict) -> str:
     """Class the exclusion filters on, joined from the session store.
@@ -526,7 +544,10 @@ def effective_session_class(traj: dict, cache: dict) -> str:
     emitted class can only disagree with the store when the classifier changed —
     and then the store's answer is the current one. Trusting a stale `interactive`
     on a session whose JSON says `platform: worker` would reintroduce exactly the
-    row #493 is about, so a mis-stamped row is re-classified, not believed.
+    row #493 is about, so a mis-stamped row is re-classified, not believed. The
+    same property is why #1143 needed no backfill: every historical row is
+    reclassified through this join at read time, including the 1,411 of the 2,396
+    live rows that carry no emitted class at all.
 
     Every row written before the field existed lacks it (all 1,411 live rows as at
     2026-09-14), and the mining window is 7 days while extraction is incremental —
@@ -549,7 +570,10 @@ def effective_session_class(traj: dict, cache: dict) -> str:
             except (OSError, json.JSONDecodeError):
                 data = None
             if isinstance(data, dict):
-                resolved = _extractor_module().classify_session(data)
+                # `session_id` falls back to the corpus key: the id shape is half of
+                # what the classifier reads (#1143 clause 3), and a row whose JSON
+                # carries no id field is still named by the store it came from.
+                resolved = _extractor_module().classify_session(data, session_id=key)
     if resolved is None:
         # No session JSON: the emitted class is all that is left, and absence of
         # both is `uncoded`.
@@ -565,9 +589,14 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker",
                       class_counts: dict | None = None) -> list[dict]:
     """Load trajectory JSONL files with optional filters.
 
-    `exclude_machine` (default True) keeps only `interactive` sessions — the
+    `exclude_machine` (default True) keeps only the classes in `HUMAN_CLASSES` —
+    `interactive` chats and the Chrome extension's `browser` sessions — because the
     frequency gate counts distinct sessions, so the loop's own cadence otherwise
-    qualifies its own patterns (#493). `class_counts`, when given a dict, is filled
+    qualifies its own patterns (#493) while the test traffic that rode the human
+    platforms qualified as human work (#1143). Which classes are human is the
+    extractor's `HUMAN_CLASSES`, imported not restated: this script and
+    `extract-trajectories.py` cannot disagree about what a person's work is.
+    `class_counts`, when given a dict, is filled
     with `{"kept": {class: n}, "dropped": {class: n}}` so the caller can report what
     the exclusion removed; the exclusion is never silent.
     """
@@ -621,7 +650,7 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker",
                             # row re-classified from the store would print as its
                             # stale emitted value.
                             traj["session_class"] = cls
-                            if cls == INTERACTIVE_CLASS:
+                            if cls in HUMAN_CLASSES:
                                 tally("kept", cls)
                             else:
                                 tally("dropped", cls)
@@ -1482,11 +1511,17 @@ def main() -> None:
              "(default: ~/lloyd/_pipeline/trajectories)"
     )
     parser.add_argument(
+        "--sessions-dir", type=str, default=None,
+        help="Override the session store the session-class join reads "
+             "(default: ~/lloyd/sessions). Every row's class is resolved through "
+             "that store, so this is what decides what the exclusion filters on."
+    )
+    parser.add_argument(
         "--include-machine", action="store_true",
-        help="Mine every session class, including worker/autonomy/smoke/"
-             "inner-voice/browser traffic. Off by default: the gate qualifies on "
-             "distinct sessions, so loop cadence otherwise qualifies the loop's own "
-             "patterns (#493)."
+        help="Mine every session class, including worker/autonomy/smoke/test/"
+             "uncoded traffic. Off by default: the gate qualifies on distinct "
+             "sessions, so loop cadence otherwise qualifies the loop's own "
+             "patterns (#493) and scripted ids qualify as human work (#1143)."
     )
 
     args = parser.parse_args()
@@ -1495,6 +1530,8 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.trajectory_dir:
         set_trajectory_dir(Path(args.trajectory_dir))
+    if args.sessions_dir:
+        set_session_store_dir(Path(args.sessions_dir))
 
     # Load trajectories
     print(f"Loading trajectories from last {args.days} days...", file=sys.stderr)
@@ -1504,6 +1541,10 @@ def main() -> None:
                                      class_counts=class_counts)
     print(f"  Loaded {len(trajectories)} trajectory(ies)", file=sys.stderr)
     dropped = sum(class_counts.get("dropped", {}).values())
+    # The label is what `skills/trajectory-skill-mining/SKILL.md` quotes, so it
+    # stays parseable. It reads loosely on purpose — the dropped tally carries
+    # `test` and `uncoded` alongside the machine classes, and the per-class lines
+    # below are the attributable part.
     print(f"  Machine-class sessions dropped: {dropped}", file=sys.stderr)
     for cls, count in sorted(class_counts.get("dropped", {}).items(),
                              key=lambda x: -x[1]):

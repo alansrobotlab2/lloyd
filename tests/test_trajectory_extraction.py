@@ -1517,7 +1517,14 @@ def test_the_regenerated_window_flags_only_persisted_flag_failures():
 # — the loop renamed itself to `youtubed_*` / `autocode_*` / `autotriage_*` /
 # `benchmine_*` around 09-09 — so every row was `agent_id: "lloyd"` and the class
 # was unknowable downstream. The class now comes from fields every session JSON
-# already carries: `platform`, `source`, `inner_voice`.
+# already carries: `platform`, `source`, and the session id's shape (#1143).
+#
+# #1143 amended #493's rule on one point: `inner_voice` was read as "the observer
+# took this turn", and it is not — it is the switch that turns the observer on for
+# a human's chat, so the class it produced (`inner-voice`, 103 sessions on this
+# machine, and all 52 `browser` ones) excluded the chats people actually type into
+# while keeping the scripted ids. Admission is `app.sessions_io.is_user_session`'s
+# decision now; the extractor keeps no second list of machine platforms.
 #
 # These fixtures are the part a live-data test cannot prove: two session files
 # with the SAME filename stem, one human and one machine. Anything that reads the
@@ -1525,18 +1532,17 @@ def test_the_regenerated_window_flags_only_persisted_flag_failures():
 
 CLASS_STEM = "20260912_101010_autocode_beef"   # loop-shaped, used for both classes
 
-# (platform, inner_voice, expected class). `interactive` appears exactly once, on
-# the clause-2 condition; every other row is a class that is NOT human-initiated
-# work. `browser` stays its own class rather than folding into `inner-voice` even
-# though all 50 browser sessions in the store carry `inner_voice: true` (measured
-# 2026-09-14), because
-# #493's open scope question is precisely whether browser/inner-voice turns join
-# the interactive pool — that decision has to be movable in one line here without
-# re-extracting the corpus, and collapsing two platforms into one class would
-# destroy the signal it needs.
+# (platform, inner_voice, expected class) for a session whose id IS the three-part
+# chat shape. Admission is `app.sessions_io.is_user_session`'s, so `inner_voice`
+# appears in this table only to prove it changes nothing: every row with the same
+# platform and a different `inner_voice` has the same class (#1143 clause 1). The
+# `inner-voice` class of #493 is gone — those 103 sessions on this machine are
+# Mission Control chats typed by a person, which is the misclassification #1143
+# exists to fix. `browser` stays its own class rather than folding into
+# `interactive`: it is human-initiated, and it is still reportable separately.
 SESSION_CLASS_TABLE = [
     ("mission-control", False, "interactive"),
-    ("mission-control", True, "inner-voice"),
+    ("mission-control", True, "interactive"),
     ("browser", True, "browser"),
     ("browser", False, "browser"),
     ("worker", False, "worker"),
@@ -1547,17 +1553,23 @@ SESSION_CLASS_TABLE = [
     (None, False, "unknown"),
 ]
 
+#: A chat-shaped id, so a class in this table is never the id rule's doing.
+CHAT_ID = "20260912_101010_9f2a1c"
 
-def write_class_session(dir_, stem, platform, inner_voice=False, source=None):
+
+def write_class_session(dir_, stem, platform, inner_voice=False, source=None,
+                        session_id=None):
     """Write a session JSON with the fields the classifier reads.
 
     One corroborated `Bash` failure, so `parse_session` returns a row rather than
-    None for a tool-less session.
+    None for a tool-less session. `session_id` defaults to `stem`; passing it
+    deliberately is what separates clause 3's id-shape claim from clause 1's — the
+    classifier reads the field, never the filename (#493 clauses 1-2).
     """
     d = Path(dir_)
     d.mkdir(parents=True, exist_ok=True)
     body = {
-        "session_id": stem,
+        "session_id": session_id if session_id is not None else stem,
         "session_start": "2026-09-12T10:10:10Z",
         "inner_voice": inner_voice,
         "messages": [
@@ -1579,14 +1591,20 @@ def write_class_session(dir_, stem, platform, inner_voice=False, source=None):
     return path
 
 
+
 # ── clause 1: the class cannot come from the filename ────────────────────────
 
 def test_a_worker_session_is_not_interactive_under_a_loop_shaped_stem(tmp_path):
-    """Same stem, two classes — the discriminating case for `path.stem`."""
+    """Same stem, two classes — the discriminating case for `path.stem`.
+
+    Both files are named `20260912_101010_autocode_beef`; only the fields inside
+    differ, so any rule that opened the path would answer for both.
+    """
     worker = et.parse_session(write_class_session(
-        tmp_path / "a", CLASS_STEM, "worker", source="autocode"))
+        tmp_path / "a", CLASS_STEM, "worker", source="autocode",
+        session_id=CHAT_ID))
     human = et.parse_session(write_class_session(
-        tmp_path / "b", CLASS_STEM, "mission-control"))
+        tmp_path / "b", CLASS_STEM, "mission-control", session_id=CHAT_ID))
     assert worker["session_class"] == "worker"
     assert human["session_class"] == "interactive"
     # `agent_id` is still derived from the stem and is identical for both, so the
@@ -1595,10 +1613,11 @@ def test_a_worker_session_is_not_interactive_under_a_loop_shaped_stem(tmp_path):
 
 
 def test_an_autonomy_prefixed_stem_does_not_make_a_session_non_interactive(tmp_path):
-    """The old rule's own positive case, reversed: the filename says autonomy,
-    the session JSON says a human drove it from Mission Control."""
+    """The old rule's own positive case, reversed: the filename says autonomy, the
+    session JSON says a human drove it from Mission Control. The id inside the file
+    is the chat shape, so the id rule does not overrule that (#1143 clause 3)."""
     traj = et.parse_session(write_class_session(
-        tmp_path, "autonomy_task68", "mission-control"))
+        tmp_path, "autonomy_task68", "mission-control", session_id=CHAT_ID))
     assert traj["session_class"] == "interactive"
     assert traj["agent_id"] == "autonomy"   # legacy field keeps its old meaning
 
@@ -1609,33 +1628,100 @@ def test_classify_session_needs_no_filename_at_all():
     assert et.classify_session({}) == "unknown"
 
 
-# ── clause 2: interactive == mission-control and not inner_voice ─────────────
+# ── clause 1 (#1143): inner_voice is not a class, and browser is human ────────
 
 @pytest.mark.parametrize("platform,inner_voice,expected", SESSION_CLASS_TABLE)
-def test_the_class_comes_from_platform_and_inner_voice(platform, inner_voice, expected):
+def test_the_class_comes_from_platform_and_not_from_inner_voice(
+        platform, inner_voice, expected):
+    """The same chat-shaped id at both settings of `inner_voice`.
+
+    `inner_voice: true` is what the Inner Voice tab and the Chrome extension send
+    when a person starts a chat (`InnerVoicePage.tsx:146`,
+    `chrome-extension/src/background/lloyd-client.ts:15`), so a classifier that
+    read it as an observer turn classified Alan's chats away. #493 asserted the
+    opposite of every row in this table with `inner_voice` true.
+    """
     assert et.classify_session(
-        {"platform": platform, "inner_voice": inner_voice}) == expected
+        {"platform": platform, "inner_voice": inner_voice},
+        session_id=CHAT_ID) == expected
 
 
-def test_interactive_is_exactly_mission_control_without_inner_voice():
-    """Clause 2 in both directions, derived from the classifier and nothing else:
+def test_interactive_is_every_human_platform_whatever_inner_voice_says():
+    """Clause 1 in both directions, derived from the classifier and nothing else:
     every platform the backend records (plus one it does not) crossed with every
-    truthiness outcome of `inner_voice`, and exactly one pair is interactive.
+    truthiness outcome of `inner_voice`. The interactive set is exactly the
+    chat-shaped Mission Control sessions at all seven `inner_voice` values, and no
+    worker, autonomy, harness or machine-platform session is ever in it.
 
     Not read out of SESSION_CLASS_TABLE — that table is hand-written, so comparing
     it against a literal set would pass with a classifier that called every session
-    interactive. A classifier that dropped the `inner_voice` condition would fail
-    here, and would fail the live-store oracle below for the same reason.
+    interactive.
     """
     platforms = ["mission-control", "worker", "autonomy", "browser",
                  "e2e-harness", "slack", None]
     inner_voice_values = [True, False, 1, 0, "", None, "true"]
     interactive = {(p, bool(iv))
                    for p in platforms for iv in inner_voice_values
-                   if et.classify_session({"platform": p,
-                                           "inner_voice": iv})
+                   if et.classify_session({"platform": p, "inner_voice": iv},
+                                          session_id=CHAT_ID)
                    == et.INTERACTIVE_CLASS}
-    assert interactive == {("mission-control", False)}
+    assert interactive == {("mission-control", b)
+                           for b in (True, False)}, interactive
+    assert et.classify_session({"platform": "browser"},
+                               session_id=CHAT_ID) in mt.HUMAN_CLASSES
+
+
+@pytest.mark.parametrize("platform", ["browser", "mission-control"])
+def test_admission_is_is_user_sessions_and_nothing_else(monkeypatch, platform):
+    """Clause 2: the classifier holds no second list of machine platforms.
+
+    The fixture is a platform the classifier admits *today*, which is the only
+    kind that can discriminate. Patching in a platform nobody had heard of (`slack`
+    was the first attempt here) returns `unknown` before the patch and `unknown`
+    after it, so that test still passes with the `is_user_session` call deleted
+    outright, or swapped for a deny-list of this module's own. `browser` answers a
+    human class before the patch and a non-human class on the very next call after
+    `NON_USER_PLATFORMS` gains it, and no private rule can produce that flip.
+
+    Mutating the upstream set instead of the extractor is the claim itself: a
+    platform the chat listings and the ambient-delivery path already refuse has to
+    stop being mined with no change to this file, because a mining pool that
+    disagreed with them would be mining sessions nobody reads. The read is through
+    `is_user_session`, so the patch is visible at call time and not cached at
+    import.
+    """
+    from app import sessions_io
+    data = {"platform": platform, "inner_voice": True}
+    before = et.classify_session(data, session_id=CHAT_ID)
+    assert before in et.HUMAN_CLASSES, (
+        f"{platform} classified {before} before the patch; the discriminating "
+        "fixture has to start out admitted")
+    monkeypatch.setattr(sessions_io, "NON_USER_PLATFORMS",
+                        frozenset({"autonomy", "worker", platform}))
+    after = et.classify_session(data, session_id=CHAT_ID)
+    assert after not in et.HUMAN_CLASSES, (
+        f"{platform} still classified {after} after NON_USER_PLATFORMS gained it: "
+        "admission came from a rule of this module's own, not is_user_session's")
+    assert after == et.UNKNOWN_CLASS, (
+        f"{platform} -> {after}: a refused platform keeps its SESSION_CLASS human "
+        "label instead of falling out of it")
+    monkeypatch.undo()
+
+
+@pytest.mark.parametrize("platform", sorted(
+    __import__("app.sessions_io", fromlist=["x"]).NON_USER_PLATFORMS))
+def test_every_non_user_platform_is_excluded_from_a_class_fixture(
+        tmp_path, platform):
+    """One fixture per platform in NON_USER_PLATFORMS, at both `inner_voice`
+    settings: none of them is ever a human class, and none survives the default
+    exclusion."""
+    for iv in (True, False):
+        cls = et.classify_session({"platform": platform, "inner_voice": iv},
+                                  session_id=CHAT_ID)
+        assert cls not in et.HUMAN_CLASSES, f"{platform} inner_voice={iv} -> {cls}"
+        traj = et.parse_session(write_class_session(
+            tmp_path, CLASS_STEM, platform, inner_voice=iv, session_id=CHAT_ID))
+        assert traj["session_class"] == cls
 
 
 def test_the_classified_session_records_its_source_producer(tmp_path):
@@ -1646,11 +1732,104 @@ def test_the_classified_session_records_its_source_producer(tmp_path):
     assert traj["session_source"] == "autotriage"
 
 
-# ── clause 3: the exclusion is one flag over one corpus ──────────────────────
+# ── clause 3 (#1143): a human platform with a scripted id is `test` ──────────
+
+#: Ids created through `POST /api/sessions/create` with `platform:
+#: mission-control` by test and harness code: the sandbox four-part shape
+#: (`<8>_<6>_<slug>_<4hex>`) and the hand-named prefixes seen in the store.
+SCRIPTED_IDS = [
+    "20260909_153841_autonomy_1a2b",   # sandbox experiment, four parts
+    "v2-bench-mcp-01",
+    "dbg_tool_caps",
+    "soak_20260905_1200",
+    "20260906_113956_selftest_read",
+    "20260910_101010_ab12cd_extra",    # five parts
+]
+
+
+@pytest.mark.parametrize("sid", SCRIPTED_IDS)
+@pytest.mark.parametrize("platform", ["mission-control", "browser"])
+def test_a_non_chat_shaped_id_on_a_human_platform_classifies_test(platform, sid):
+    """Clause 3: the shape, not the prefix, is the rule.
+
+    Every one of these rides a human platform, which is why `is_user_session`
+    alone cannot exclude them — the census that found them is the one in #1143:
+    all 42 sessions the old classifier kept as `interactive` were ids like these.
+    """
+    assert et.classify_session({"platform": platform}, session_id=sid) == "test"
+
+
+#: The three suffixes the store actually holds on a chat-shaped id, censused over
+#: `~/lloyd/sessions` on 2026-09-18: 163 files named `<8 digits>_<6 digits>_<6
+#: chars>`, of which 152 are `iv<4 hex>` (the Inner Voice tab, the sidebar chat and
+#: the Chrome extension all mint them through `POST /api/sessions/create`), 9 are
+#: plain `<6 hex>` (the chat path), and 2 are `obs<hex>` — the latter two carry
+#: `platform: mission-control`, `inner_voice: true` and a real user turn. An id
+#: rule narrowed to the plain-hex form would drop exactly the chats #1143 exists to
+#: recover, so this list is the negative control on clause 3.
+LIVE_CHAT_IDS = [
+    "20260912_101010_9f2a1c",     # chat path
+    "20260912_101010_iv0484",     # POST /api/sessions/create, observer enabled
+    "20260904_211536_obs40b",     # observer-named chat, 1 user turn on disk
+]
+
+
+@pytest.mark.parametrize("sid", LIVE_CHAT_IDS)
+@pytest.mark.parametrize("platform,expected",
+                         [("mission-control", et.INTERACTIVE_CLASS),
+                          ("browser", "browser")])
+def test_every_chat_id_shape_the_store_holds_stays_human(platform, expected, sid):
+    """Clause 3's other half: the id rule fires on scripted ids and on nothing else.
+
+    Both human platforms, each id shape a person's chat really has on disk. The
+    assertion is membership in `HUMAN_CLASSES` as well as the exact label, because
+    what the nightly exclusion reads is the set, not the string.
+    """
+    cls = et.classify_session({"platform": platform, "inner_voice": True},
+                              session_id=sid)
+    assert cls == expected
+    assert cls in mt.HUMAN_CLASSES
+
+
+def test_e2e_harness_sessions_are_still_smoke_whatever_their_ids_look_like():
+    """The harness platform is decided before the id shape is consulted: the 3
+    live `e2e-harness` sessions are named `e2e_selfmod*_1788*`, and they were
+    already `smoke` under #493. A change to the id rule must not silently re-label
+    a class the nightly report already counts."""
+    for sid in ("e2e_selfmod_1788756141", "e2e_selfmod363_1788758995", CHAT_ID):
+        assert et.classify_session({"platform": "e2e-harness"},
+                                   session_id=sid) == "smoke"
+        assert "smoke" not in et.HUMAN_CLASSES
+
+
+def test_the_id_rule_reaches_a_legacy_corpus_row_through_the_store_join(
+        tmp_path, monkeypatch):
+    """The seam #1143 depends on for a backfill-free rollout.
+
+    A corpus row with no emitted `session_class` is classified by the session JSON
+    behind it, so a scripted id written off as interactive by the OLD extractor is
+    reclassified to `test` at read time — every historical row, 08-22 onwards,
+    without rewriting a byte of the corpus. The key is the four-part sandbox shape
+    and the JSON carries no id field at all, which is why the join passes the key.
+    """
+    store = isolated_store(tmp_path, monkeypatch)
+    (store / f"{CLASS_STEM}.json").write_text(
+        json.dumps({"platform": "mission-control", "inner_voice": False}),
+        encoding="utf-8")
+    corpus = write_traj_corpus(tmp_path / "corpus", [(CLASS_STEM, "interactive")])
+    monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
+    counts: dict = {}
+    kept = mt.load_trajectories(days=9999, agent_filter="all", class_counts=counts)
+    assert kept == [], "a scripted id rode the reclassification into the corpus"
+    assert counts["dropped"] == {"test": 1}
+
+
+# ── clause 3 (#493): the exclusion is one flag over one corpus ───────────────
 
 MACHINE_ROWS = [("i1", "interactive"), ("i2", "interactive"),
+                ("b1", "browser"),
                 ("w1", "worker"), ("w2", "worker"), ("a1", "autonomy"),
-                ("b1", "browser"), ("v1", "inner-voice")]
+                ("t1", "test"), ("v1", "inner-voice")]
 
 CORPUS_BUCKET = "2026-09-12.jsonl"
 
@@ -1670,12 +1849,18 @@ def write_traj_corpus(dir_, classed_rows):
     return d
 
 
-def test_load_trajectories_keeps_only_interactive_rows_when_the_exclusion_is_on(
+def test_load_trajectories_keeps_only_human_rows_when_the_exclusion_is_on(
         tmp_path, monkeypatch):
+    """Both human classes are kept and everything else is dropped.
+
+    The `inner-voice` row is a pre-#1143 emitted class that no classifier produces
+    any more; it stays dropped, so a corpus written by the old extractor cannot
+    leak an observer-ish row into the pool while the rows are being re-read.
+    """
     corpus = write_traj_corpus(tmp_path / "corpus", MACHINE_ROWS)
     monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
     kept = mt.load_trajectories(days=9999, agent_filter="all")
-    assert [t["session_key"] for t in kept] == ["i1", "i2"]
+    assert [t["session_key"] for t in kept] == ["i1", "i2", "b1"]
 
 
 def test_load_trajectories_returns_every_row_when_the_exclusion_is_off(
@@ -1693,9 +1878,9 @@ def test_the_exclusion_counts_what_it_dropped_by_class(tmp_path, monkeypatch):
     monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
     counts: dict = {}
     mt.load_trajectories(days=9999, agent_filter="all", class_counts=counts)
-    assert counts["dropped"] == {"worker": 2, "autonomy": 1, "browser": 1,
+    assert counts["dropped"] == {"worker": 2, "autonomy": 1, "test": 1,
                                  "inner-voice": 1}
-    assert counts["kept"] == {"interactive": 2}
+    assert counts["kept"] == {"interactive": 2, "browser": 1}
 
 
 def test_a_row_with_no_session_class_is_not_treated_as_interactive(
@@ -1734,6 +1919,16 @@ def isolated_store(tmp_path, monkeypatch):
     return store
 
 
+#: Chat-shaped corpus keys for the store-join tests. Since #1143 the id shape is
+#: half of what the join decides, and the join passes the corpus key as the id, so
+#: a bare `i9` would classify `test` for a reason the test is not about.
+#: Chat-shaped corpus keys for the store-join tests. Since #1143 the id shape is
+#: half of what the join decides and the join passes the corpus key as the id, so a
+#: four-part stem would classify `test` for a reason the test is not about.
+CHAT_HUMAN = "20260910_090000_aaaaaa"
+CHAT_HUMAN2 = "20260911_090000_bbbbbb"
+
+
 def test_a_class_less_row_is_rescued_as_interactive_by_the_store(
         tmp_path, monkeypatch):
     """The positive branch of the join: a legacy row with no emitted class is kept
@@ -1741,12 +1936,12 @@ def test_a_class_less_row_is_rescued_as_interactive_by_the_store(
     Without it the exclusion would blank the 7-day window — every live row is
     class-less — and emit nothing, which is clause 6's forbidden outcome."""
     store = isolated_store(tmp_path, monkeypatch)
-    write_class_session(store, "20260910_090000_human_aaaa", "mission-control")
-    corpus = write_traj_corpus(tmp_path / "corpus", [("20260910_090000_human_aaaa", None)])
+    write_class_session(store, CHAT_HUMAN, "mission-control")
+    corpus = write_traj_corpus(tmp_path / "corpus", [(CHAT_HUMAN, None)])
     monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
     counts: dict = {}
     kept = mt.load_trajectories(days=9999, agent_filter="all", class_counts=counts)
-    assert [t["session_key"] for t in kept] == ["20260910_090000_human_aaaa"]
+    assert [t["session_key"] for t in kept] == [CHAT_HUMAN]
     assert kept[0]["session_class"] == "interactive"
     assert counts == {"kept": {"interactive": 1}}
 
@@ -1788,13 +1983,13 @@ def test_the_store_outvotes_a_machine_stamp_on_a_human_session(
     extractor mis-stamped `autonomy` is restored to interactive by the store, so
     real work is not silently lost to a stale field."""
     store = isolated_store(tmp_path, monkeypatch)
-    write_class_session(store, "20260911_090000_human_bbbb", "mission-control")
+    write_class_session(store, CHAT_HUMAN2, "mission-control")
     corpus = write_traj_corpus(
-        tmp_path / "corpus", [("20260911_090000_human_bbbb", "autonomy")])
+        tmp_path / "corpus", [(CHAT_HUMAN2, "autonomy")])
     monkeypatch.setattr(mt, "TRAJECTORY_DIR", corpus)
     counts: dict = {}
     kept = mt.load_trajectories(days=9999, agent_filter="all", class_counts=counts)
-    assert [t["session_key"] for t in kept] == ["20260911_090000_human_bbbb"]
+    assert [t["session_key"] for t in kept] == [CHAT_HUMAN2]
     assert kept[0]["session_class"] == "interactive"
 
 
@@ -1816,8 +2011,42 @@ def test_the_extractor_writes_the_class_the_miner_reads(tmp_path, monkeypatch):
 
 
 def test_the_miner_and_the_extractor_name_the_interactive_class_alike():
-    """The miner compares a string, so the two modules must agree on it."""
+    """The miner compares a string, so the two modules must agree on it — and the
+    human/non-human split is the extractor's set, read through the loaded module
+    rather than restated in the miner."""
     assert mt.INTERACTIVE_CLASS == et.INTERACTIVE_CLASS == "interactive"
+    # `==`, not `is`: the miner loads the extractor by path, so it holds its own
+    # module object and its own copy of the set. Agreement across the boundary is
+    # the claim; object identity is not available and not needed.
+    assert mt.HUMAN_CLASSES == et.HUMAN_CLASSES
+    assert not (mt.HUMAN_CLASSES & et.MACHINE_CLASSES), (
+        "a class that is both admitted and dropped: the exclusion's answer depends "
+        "on which branch it reaches first")
+
+
+def test_a_by_path_boot_of_the_extractor_imports_its_admission_rule(tmp_path):
+    """The process boundary #1143 adds, with a test across it.
+
+    The nightly runs `python3 ~/lloyd/scripts/extract-trajectories.py`: `scripts/`
+    is not a package, so that puts `scripts/` and not the repo root on `sys.path`,
+    and the classifier's admission rule now lives in `app.sessions_io`. Without the
+    path insertion the failure is a `ModuleNotFoundError` at import — the whole
+    extraction step dies before it reads a session, and it dies in the nightly,
+    where pytest has not put the checkout on the path. Hence a real subprocess, from
+    a working directory that is not the checkout.
+
+    The second half is the other half of clause 2: the name `is_user_session` in the
+    extractor is the upstream function itself, not a local stand-in for it.
+    """
+    from app import sessions_io
+    proc = subprocess.run(
+        [sys.executable, str(_ROOT / "scripts" / "extract-trajectories.py"),
+         "--help"],
+        capture_output=True, text=True, timeout=120, cwd=tmp_path)
+    report = proc.stdout + proc.stderr
+    assert proc.returncode == 0, report
+    assert "ModuleNotFoundError" not in report and "Traceback" not in report, report
+    assert et.is_user_session is sessions_io.is_user_session
 
 
 # ── clause 5: the class histogram is no longer a single value ────────────────
@@ -1855,7 +2084,8 @@ def test_miner_stats_reports_more_than_one_session_class(tmp_path, monkeypatch,
 def test_extractor_stats_reports_more_than_one_session_class(tmp_path, capsys):
     et.append_trajectories([
         et.parse_session(write_class_session(tmp_path, "human_one",
-                                             "mission-control")),
+                                             "mission-control",
+                                             session_id=CHAT_ID)),
         et.parse_session(write_class_session(tmp_path, CLASS_STEM, "worker",
                                              source="autocode")),
     ])
@@ -1892,8 +2122,19 @@ def miner_row(key, cls, tool="Graphex493"):
     return row
 
 
-def run_miner(corpus, out_dir, extra_args=()):
+def run_miner(corpus, out_dir, extra_args=(), sessions_dir=None):
+    """Run the real command line the nightly runs.
+
+    `--sessions-dir` defaults to an empty directory, not the live
+    `~/lloyd/sessions`: since #1143 every row's class is resolved through that
+    store, so a subprocess test that left it alone would take its expected counts
+    from whatever happened to be on the machine. Pass `sessions_dir` to say where
+    the sessions came from.
+    """
+    store = sessions_dir if sessions_dir is not None else (corpus.parent / "store")
+    store.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, str(MINER_PATH), "--trajectory-dir", str(corpus),
+           "--sessions-dir", str(store),
            "--agent", NIGHTLY_AGENT, "--days", "9999", "--threshold", "2",
            "--output-dir", str(out_dir), *extra_args]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
@@ -1924,6 +2165,44 @@ def test_the_nightly_mining_run_excludes_machine_sessions_by_default(tmp_path):
     assert re.search(r"^sessions: 2$", fm, re.MULTILINE), fm
     assert re.search(r"^occurrences: 2$", fm, re.MULTILINE), fm
     assert "- i1" in fm and "- i2" in fm and "- w1" not in fm
+
+
+def test_the_inner_voice_chats_are_the_corpus_the_default_nightly_run_mines(
+        tmp_path):
+    """#1143 clause 4, across the real command line and the store join.
+
+    Two Mission Control chats typed with the observer switched on and two worker
+    runs share ONE failure signature. The default nightly path — no
+    `--include-machine` — must write the candidate on the strength of the two human
+    sessions, and the drop tally must name only the two worker sessions. Before
+    #1143 the same corpus emitted nothing at all: both human rows were labelled
+    `inner-voice` and excluded, so the threshold had one class left to reach and it
+    was machine traffic.
+    """
+    chat_one, chat_two = "20260912_101010_h00001", "20260912_101010_h00002"
+    work_one, work_two = "20260912_101010_w00001", "20260912_101010_w00002"
+    store = tmp_path / "store"
+    for key in (chat_one, chat_two):
+        write_class_session(store, key, "mission-control", inner_voice=True)
+    for key in (work_one, work_two):
+        write_class_session(store, key, "worker", source="autocode")
+    corpus = write_traj_corpus(tmp_path / "corpus", [])
+    rows = [miner_row(k, None) for k in (chat_one, chat_two, work_one, work_two)]
+    (corpus / CORPUS_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    out = tmp_path / "cands"
+    proc = run_miner(corpus, out, sessions_dir=store)
+    assert proc.returncode == 0, proc.stderr
+    report = proc.stdout + proc.stderr
+    # Only the machine sessions are dropped; neither chat appears in the tally.
+    assert "Machine-class sessions dropped: 2" in report, report
+    assert re.search(r"^\s+dropped worker: 2$", report, re.MULTILINE), report
+    assert "dropped interactive" not in report, report
+    assert chat_one not in report and chat_two not in report, report
+    fm = graphex_candidate(out)
+    assert re.search(r"^sessions: 2$", fm, re.MULTILINE), fm
+    assert chat_one in fm and chat_two in fm, fm
+    assert work_one not in fm, fm
 
 
 def test_excluding_machine_sessions_does_not_stop_the_gate_emitting_candidates(
@@ -2038,26 +2317,33 @@ def test_no_live_corpus_row_is_interactive_on_a_machine_platform():
         f"session: {emitted_violations[:5]}")
 
 
-def test_the_classifier_agrees_with_the_stored_fields_over_every_live_session():
+def test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session():
     """Read-only oracle over the real session store: for every session JSON on this
-    machine, the classifier's answer must equal clause 2 stated directly —
-    `platform == "mission-control"` and `inner_voice` falsy.
+    machine, the classifier's answer must equal the rule #1143 states directly —
+    a platform `is_user_session` admits, mapped by `SESSION_CLASS`, and demoted to
+    `test` when the id is not the three-part chat shape. `inner_voice` is not in
+    this expression at all, which is the whole point of #1143.
 
     This is the check that survives the corpus being re-extracted: it is computed
     from the stored session files themselves, not from anything the extractor
     already wrote, so a classifier mutation trips it even while every corpus row is
-    class-less — verified by mutating the classifier to ignore `inner_voice`, which
-    flags 89 of the 1,688 files on this machine. Measured over those 1,688 files on
-    2026-09-14: 44 classify interactive, and the `inner_voice` flag is what
-    separates them from the rest — 89 of the 133 `mission-control` sessions are
-    inner-voice turns, as are all 50 `browser` ones. `platform` alone would call 133
-    interactive and fail here.
+    class-less. Measured over the 3,000 session files on this machine on 2026-09-18
+    (the store grows daily, so treat these as a snapshot, not a threshold — the
+    assertions below are bounds): 2,219 `worker`, 578 `autonomy`, 103
+    `mission-control` with `inner_voice` true, of which 100 are chat-shaped and 3
+    carry scripted ids, 52 `browser`, 45 non-IV `mission-control` of which 34 are
+    script-shaped and 11 chat-shaped, 3 `e2e-harness`. Admitted: 163, and 152 of
+    those carry `inner_voice: true`. Before #1143 the classifier admitted only the
+    45 non-IV ones and 34 of those were scripted ids, so the corpus was mostly test
+    traffic and no human chat.
     """
+    from app import sessions_io
     assert LIVE_STORE.is_dir(), f"session store absent: {LIVE_STORE}"
     files = sorted(LIVE_STORE.glob("*.json"))
     assert len(files) > 500, f"only {len(files)} session files, so this is vacuous"
     violations: list[str] = []
-    interactive = 0
+    human = 0
+    human_with_observer_on = 0
     for path in files:
         try:
             data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
@@ -2065,18 +2351,39 @@ def test_the_classifier_agrees_with_the_stored_fields_over_every_live_session():
             continue
         if not isinstance(data, dict):
             continue
-        expected = et.INTERACTIVE_CLASS if (
-            data.get("platform") == "mission-control" and not data.get("inner_voice")
-        ) else "not-interactive"
-        got = et.classify_session(data)
-        if (got == et.INTERACTIVE_CLASS) != (expected == et.INTERACTIVE_CLASS):
-            violations.append(f"{path.name}: platform={data.get('platform')!r} "
-                              f"inner_voice={data.get('inner_voice')!r} -> {got}")
-        interactive += got == et.INTERACTIVE_CLASS
-    assert not violations, f"classifier disagrees with clause 2: {violations[:5]}"
-    assert 0 < interactive < len(files), (
-        f"interactive={interactive} of {len(files)}: a store with none or all "
-        "interactive means the oracle above cannot discriminate either direction")
+        platform = data.get("platform")
+        expected = et.SESSION_CLASS.get(platform) or et.UNKNOWN_CLASS
+        if not sessions_io.is_user_session(data):
+            expected = (et.UNKNOWN_CLASS if expected in et.HUMAN_CLASSES
+                        else expected)
+        elif expected in et.HUMAN_CLASSES:
+            sid = str(data.get("session_id") or path.stem)
+            if sid and not re.match(r"^\d{8}_\d{6}_[A-Za-z0-9]+$", sid):
+                expected = "test"
+        # The id is passed the way `parse_session` passes it — the file's own field,
+        # the stem only when the field is absent — so this oracle calls the
+        # classifier with exactly the extractor's inputs.
+        got = et.classify_session(data, session_id=data.get("session_id", path.stem))
+        if got != expected:
+            violations.append(f"{path.name}: platform={platform!r} "
+                              f"inner_voice={data.get('inner_voice')!r} "
+                              f"-> {got}, expected {expected}")
+        if got in et.HUMAN_CLASSES:
+            human += 1
+            if data.get("inner_voice"):
+                human_with_observer_on += 1
+    assert not violations, (
+        f"classifier disagrees with the ruled rule: {violations[:5]}")
+    assert 0 < human < len(files), (
+        f"human={human} of {len(files)}: a store with none or all human means the "
+        "oracle above cannot discriminate either direction")
+    # The positive control #493 could not have: the chats typed with the observer
+    # switched on have to be IN the admitted set, or a zero here is indistinguishable
+    # from the misclassification this item exists to close.
+    assert human_with_observer_on > 20, (
+        f"only {human_with_observer_on} admitted sessions carry `inner_voice: true`;"
+        " 152 did on 2026-09-18 (100 mission-control chats + 52 extension chats),"
+        " so the human chats are being dropped again")
 
 
 def test_a_row_the_store_cannot_answer_is_dropped_as_uncoded_and_says_so(
@@ -2101,3 +2408,27 @@ def test_a_row_the_store_cannot_answer_is_dropped_as_uncoded_and_says_so(
     assert "Machine-class sessions dropped: 1" in report, report
     assert "dropped uncoded: 1" in report, report
     assert re.search(r"^sessions: 2$", graphex_candidate(out), re.MULTILINE)
+
+
+# ── clause 5 (#1143): the architecture page must name who actually typed ─────
+
+ARCH_PAGE = _ROOT / "architecture" / "background-runs.md"
+
+
+def test_the_architecture_page_attributes_browser_sessions_to_the_extension():
+    """`architecture/background-runs.md` said the `platform: browser` sessions were
+    "written by ... the Inner Voice bench harness". They are not: the Chrome
+    extension's side panel creates them and a person types follow-ups into them,
+    which is half of why #1143's corpus was empty of human chats.
+
+    Asserted as text over the whole page, because the sentence is the artifact: the
+    count of those sessions moves with every extension turn, so what must not come
+    back is the attribution, and the name of the thing that really mints them.
+    """
+    assert ARCH_PAGE.is_file(), f"missing {ARCH_PAGE}"
+    text = " ".join(ARCH_PAGE.read_text(encoding="utf-8").split())
+    assert "chrome-extension/src/background/lloyd-client.ts" in text, text[:400]
+    assert "Inner Voice bench harness" not in text
+    assert "inner voice bench harness" not in text.lower()
+    block = [b for b in text.split("- **") if "platform: browser" in b]
+    assert block and "extension" in block[0].lower(), block
