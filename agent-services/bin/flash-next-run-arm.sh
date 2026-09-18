@@ -56,6 +56,20 @@ $SUP stop agent-llm-primary
 # the machine, not just the engine being restarted. Everything came back on
 # its own, but the arm was lost and the failure looked like the config under
 # test rather than the restart cadence.
+#
+# THIS WAIT IS NOT WHAT KEEPS oomd OFF THE UNIT, and reading it that way is
+# how 2026-09-15 got misattributed to a qemu VM on the desktop. On 2026-09-17
+# this check passed at 198 GiB and the unit was killed 129 seconds later:
+# ONE boot drives its own cgroup to ~226 GiB (a 170 GiB checkpoint read plus a
+# 95 GiB shared mapping, page cache charged to the reader's cgroup), so the
+# boot consumes the very thing this gauge measures -- MemAvailable fell to
+# 79 GiB while the load ran. What keeps oomd off the unit is Slice=lloyd.slice
+# on agent-supervisord.service (oomd watches only app.slice); see the comment
+# there, including the MemoryHigh attempt that must not come back.
+# What this wait IS good for is its original question, which MemAvailable does
+# answer correctly: has the PREVIOUS engine's shared mapping been released yet.
+# Keep it for that, and do not raise the floor expecting it to stop an oomd
+# kill -- it cannot.
 echo -n "waiting for host RAM to be released "
 for _ in $(seq 1 60); do
   AVAIL=$(awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo)

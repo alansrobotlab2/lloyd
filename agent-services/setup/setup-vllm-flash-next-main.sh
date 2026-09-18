@@ -27,13 +27,26 @@ set -euo pipefail
 #   See ~/.claude memory `fp8-kv-trial-2026-09-10` for the full table.
 #
 # WHAT IS NOT A PLAIN WHEEL, STILL
-#   1. FP8 main KV cache on the QSA path is open PR #55557 (three pure-Python
-#      files). Overlaid below from the PR head, after proving the wheel's copies
-#      are byte-identical to the PR's merge-base copies — otherwise the overlay
-#      is a guess. Self-retiring: skipped when the wheel already carries the
-#      change (its ops/qsa.py has the IS_FP8 kernel path).
-#   2. The sm_120 PDL hang in the QSA metadata kernel (vLLM issue #53960).
-#      is_arch_support_pdl() is still `major >= 9` on main.
+#   Exactly one thing, since 2026-09-17: the sm_120 PDL hang in the QSA
+#   metadata kernel. is_arch_support_pdl() is `major >= 9`, so it returns True
+#   on sm_120 (major 12), the QSA metadata kernel launches with PDL, and the
+#   dependent kernel waits forever on any prompt over ~8k tokens. Patched into
+#   the venv at step 2 below.
+#
+#   THAT BUG IS NOT FILED UPSTREAM, and this comment used to cite vLLM issue
+#   #53960 for it, which is a different bug — the PLE offload uniproc deadlock
+#   on GB10/sm_121, fixed by 95dc96d1d012 and irrelevant to the UVA build. A
+#   search of the tracker returns exactly one hit for `_metadata_launch_pdl`
+#   and it is a comment on that same #53960. So this patch has no upstream to
+#   retire it: it must be re-proved on every rebuild, which step 2 does by
+#   refusing to proceed if the function is not in the shape it expects.
+#
+#   The FP8 KV overlay is GONE. PR #55557 (fp8_e4m3 main KV cache on the QSA
+#   path), carried here from a contributor's fork since 2026-09-10, merged to
+#   main on 2026-09-16 as dff1bde84dd6 — which is what BASE_SHA now pins, so
+#   the wheel carries it natively and step 3 asserts that rather than patching.
+#   The merged version also brings per-dtype sm_120 tuning tables for the QSA
+#   kernel (_select_sm120_config), which the fork's copy did not have.
 #   The GDN FlashInfer prefill gate for SM12x (#55715) IS on main now, so the
 #   old bin/flash-next-gdn-sm12x-patch.py is not applied here.
 #
@@ -50,17 +63,32 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-flash-next-main}"
 
-# The main commit the cu130 nightly of 2026-09-10 was built from. Per-commit
-# wheel index, keyed by full SHA — the `nightly` index rolls daily and would
-# not have this build next week.
-BASE_SHA="6ee5bb0a0b3e32dd1a6d9fddb61b50905ccdd6e0"
-VLLM_PIN="0.28.1rc1.dev661+g6ee5bb0a0"
-# PR #55557 head (semerandre/vllm, s1/qsa-kv-fp8-pr) and the main commit it
-# last merged, i.e. the second parent of that head.
-FP8_PR_REPO="semerandre/vllm"
-FP8_PR_SHA="b7e3231af0276d6dee3363cf26f2da2aed8e195f"
-FP8_PR_BASE="b28c3e1568bfae930f61d4b24940e47528c85d4a"
-FP8_FILES="vllm/models/qwen4_exp/nvidia/qsa.py vllm/models/qwen4_exp/nvidia/ops/qsa.py"
+# Per-commit wheel index, keyed by full SHA — the `nightly` index rolls daily
+# and would not have this build next week.
+#
+# dff1bde84dd6 is the merge of PR #55557, i.e. the exact commit that upstreamed
+# the FP8 KV overlay this venv used to carry. It is chosen as the MINIMUM
+# commit that gets everything this box wanted and nothing else:
+#   #55557  fp8_e4m3 main KV cache on the QSA path   (was our overlay)
+#   #55309  fuse PLE residual + QSA output gate      (merged 09-14; 1.44x on
+#           the PLE outer-residual kernel at bs=1, 1.10x on the QSA gate)
+# Everything after it on main was, at the time of pinning, DeepSeek-V4.1 and
+# GLM-5.3 work plus #57273 (a QSA tuning table for sm_90 that dispatches
+# before the sm_120 branch and cannot reach this card) — churn with no
+# identified benefit here.
+#
+# Revert target, the build this slot served 2026-09-10 → 09-17:
+#   BASE_SHA=6ee5bb0a0b3e32dd1a6d9fddb61b50905ccdd6e0
+#   VLLM_PIN=0.28.1rc1.dev661+g6ee5bb0a0
+#   plus the FP8 overlay from semerandre/vllm@b7e3231af027 (PR #55557 head),
+#   which the version of this script at git 4a3ac77 still applies.
+#
+# The version string is the CI's, not semver: recent per-commit wheels read
+# 0.2.x/0.3.x.devN because the build clones shallow and finds no release tag.
+# It is consistent across neighbouring commits, so it is cosmetic — but it
+# must be quoted EXACTLY here or pip cannot resolve it.
+BASE_SHA="dff1bde84dd6e34a49c150116d0f212507280910"
+VLLM_PIN="0.2.1.dev19+gdff1bde84"
 
 echo "=== vLLM main venv for Qwen3.8-Flash-Next (UVA PLE offload + FP8 KV) ==="
 if [[ ! -x /opt/cuda/bin/nvcc ]]; then
@@ -103,8 +131,9 @@ old = """def _metadata_launch_pdl() -> bool:
 new = """def _metadata_launch_pdl() -> bool:
     # LLOYD_PDL_SM120_PATCH — is_arch_support_pdl() is `major >= 9`, which is
     # True on sm_120 (major 12), but the dependent kernel never fires there and
-    # any prompt over ~8k tokens hangs forever. Gate on the architectures PDL
-    # was actually validated on (Hopper 9.x, Blackwell datacenter 10.x).
+    # any prompt over ~8k tokens hangs forever. Not filed upstream, so nothing
+    # will retire this patch for us. Gate on the architectures PDL was
+    # actually validated on (Hopper 9.x, Blackwell datacenter 10.x).
     if not current_platform.is_arch_support_pdl():
         return False
     try:
@@ -120,26 +149,27 @@ PYEOF
 fi
 
 echo ""
-echo "=== 3/3 FP8 main KV cache on the QSA path (PR #55557) ==="
+echo "=== 3/3 FP8 main KV cache on the QSA path (PR #55557, merged) ==="
+# A precondition now, not a patch. BASE_SHA is at or after the merge, so a
+# wheel without the kernel path means the pin is wrong — and the failure that
+# would follow is the expensive kind: the engine boots, the QSA backend
+# refuses fp8, the launcher's own guard fires four minutes in, and the slot
+# falls back to a BF16 pool 1.74x smaller than the one production asserts.
+# Fail here instead, in 10 ms.
 if grep -q "IS_FP8" "$SP/vllm/models/qwen4_exp/nvidia/ops/qsa.py"; then
-    echo "  wheel already carries the fp8 QSA path — overlay skipped (PR #55557 merged?)"
+    echo "  ok  wheel carries the fp8 QSA kernel path (IS_FP8)"
 else
-    TMP="$(mktemp -d)"
-    for f in $FP8_FILES; do
-        curl -sfL "https://raw.githubusercontent.com/vllm-project/vllm/$FP8_PR_BASE/$f" -o "$TMP/base.py" \
-            || { echo "  FAIL fetching merge-base $f"; exit 1; }
-        if ! cmp -s "$TMP/base.py" "$SP/$f"; then
-            echo "  ERROR: the wheel's $f differs from the PR's merge-base copy."
-            echo "         BASE_SHA moved past what the PR was written against; re-derive"
-            echo "         FP8_PR_BASE from the PR head's second parent, or drop the overlay."
-            diff "$TMP/base.py" "$SP/$f" | head -20
-            exit 1
-        fi
-        curl -sfL "https://raw.githubusercontent.com/$FP8_PR_REPO/$FP8_PR_SHA/$f" -o "$SP/$f" \
-            || { echo "  FAIL fetching $f"; exit 1; }
-        echo "  ok  $f (wheel == merge-base, overlaid from $FP8_PR_REPO@${FP8_PR_SHA:0:12})"
-    done
-    rm -rf "$TMP"
+    echo "  ERROR: this wheel has no IS_FP8 path in vllm/models/qwen4_exp/nvidia/ops/qsa.py."
+    echo "         BASE_SHA ($BASE_SHA) predates the merge of PR #55557"
+    echo "         (dff1bde84dd6, 2026-09-16). Move the pin forward, or restore the"
+    echo "         overlay from the version of this script at git 4a3ac77."
+    exit 1
+fi
+if grep -q "_select_sm120_config" "$SP/vllm/models/qwen4_exp/nvidia/ops/qsa.py"; then
+    echo "  ok  wheel carries the sm_120 QSA tuning tables (_select_sm120_config)"
+else
+    echo "  WARN: no _select_sm120_config in this wheel — the QSA kernel will run"
+    echo "        generic launch parameters on this card. Not fatal."
 fi
 
 echo ""
@@ -191,13 +221,17 @@ if fail:
 print("\nOK — venv ready. Start: VLLM_VENV=$VLLM_VENV bash bin/start-qwen38-flash-next.sh")
 PYEOF
 
-MANIFEST="$PROJECT_DIR/setup/vllm-flash-next-main.versions.txt"
+# Named for the venv, not hardcoded: this script honours VLLM_VENV, and a
+# candidate build at a second path must not overwrite the manifest describing
+# the venv the primary slot is currently serving from. Identical path for the
+# default venv name.
+MANIFEST="$PROJECT_DIR/setup/$(basename "$VLLM_VENV").versions.txt"
 {
     echo "# vllm-flash-next-main venv — resolved $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "# rebuild: bash setup/setup-vllm-flash-next-main.sh"
     echo "# base wheel: vllm==$VLLM_PIN (per-commit, main@${BASE_SHA:0:12})"
-    echo "# overlay:    $FP8_PR_REPO@${FP8_PR_SHA:0:12} (PR #55557, fp8_e4m3 main KV on the QSA path)"
-    echo "# patch:      _metadata_launch_pdl() -> False on sm_120 (vLLM issue #53960)"
+    echo "# overlay:    none (PR #55557 merged upstream as dff1bde84dd6, 2026-09-16)"
+    echo "# patch:      _metadata_launch_pdl() -> False on sm_120 (not filed upstream)"
     "$PY" -m pip freeze 2>/dev/null | grep -vE "^(pip|setuptools|wheel)=="
 } > "$MANIFEST"
 echo "wrote $MANIFEST"

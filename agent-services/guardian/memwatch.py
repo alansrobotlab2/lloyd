@@ -12,7 +12,9 @@ Two facts about the kill decide the shape of this module. oomd watches
 full pressure for 20 s (`/etc/systemd/oomd.conf.d/10-omarchy.conf`), kills the
 descendant with the most reclaim activity — which is the stack, whatever else
 in the slice caused the pressure. So the snapshot covers every process, not
-just the unit's, and says which cgroup each belongs to. And the guardian is a
+just the unit's, and says which cgroup each belongs to. (Since 2026-09-17 the
+unit runs in its own `lloyd.slice`, outside that judgement; `app.slice` is
+still the slice read here, because it is the one whose pressure kills.) And the guardian is a
 separate unit, so it survives the kill it is recording.
 
 Every tick reads three small files (the unit's, `app.slice`'s and the host's
@@ -45,11 +47,33 @@ TOP_N = 30
 WALK_BUDGET_SECONDS = 3.0
 
 UNIT = "agent-supervisord.service"
+# The slice oomd judges, by name. Until 2026-09-17 it was also the unit's parent
+# and was read as `cgroup.parent`; the unit now lives in its own `lloyd.slice`,
+# outside oomd's reach, and the pressure that decides a kill — now only ever
+# of something on the desktop — is still this slice's.
+OOMD_SLICE = "app.slice"
+UNIT_SLICES = ("lloyd.slice", OOMD_SLICE)
+
+
+def _user_manager() -> Path:
+    uid = os.getuid()
+    return Path(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service")
 
 
 def unit_cgroup(unit: str = UNIT) -> Path:
-    uid = os.getuid()
-    return Path(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/{unit}")
+    """Wherever the unit's cgroup is. A unit that is down has none; the
+    `lloyd.slice` path is returned then, and a read of it is None, never an
+    error."""
+    mgr = _user_manager()
+    for slice_ in UNIT_SLICES:
+        path = mgr / slice_ / unit
+        if path.is_dir():
+            return path
+    return mgr / UNIT_SLICES[0] / unit
+
+
+def oomd_slice_cgroup() -> Path:
+    return _user_manager() / OOMD_SLICE
 
 
 def parse_pressure(text: str) -> dict:
@@ -146,9 +170,16 @@ def top_processes(limit: int = TOP_N, proc: Path = Path("/proc"),
 class MemWatch:
     def __init__(self, state_dir: Path, cgroup: Path | None = None,
                  host: Path = Path("/proc/pressure/memory"), *,
+                 slice_cgroup: Path | None = None,
                  trigger: float = TRIGGER_FULL_AVG10, min_interval: float = MIN_INTERVAL_SECONDS,
                  keep: int = KEEP):
+        # An explicit cgroup is fixed (tests); otherwise it is re-resolved each
+        # tick, because a restart of the unit is what moves it between slices.
+        self._fixed_cgroup = cgroup
         self.cgroup = cgroup or unit_cgroup()
+        # A caller handing only a unit cgroup keeps the old reading of its
+        # parent as the slice; the daemon reads the slice oomd judges by name.
+        self.slice = slice_cgroup or (cgroup.parent if cgroup else oomd_slice_cgroup())
         self.host = host
         self.out_dir = Path(state_dir) / "mem-pressure"
         self.trigger = trigger
@@ -157,8 +188,10 @@ class MemWatch:
         self.last_ts = 0.0
 
     def readings(self) -> dict:
+        if self._fixed_cgroup is None:
+            self.cgroup = unit_cgroup()
         return {"unit": read_pressure(self.cgroup / "memory.pressure"),
-                "slice": read_pressure(self.cgroup.parent / "memory.pressure"),
+                "slice": read_pressure(self.slice / "memory.pressure"),
                 "host": read_pressure(self.host)}
 
     def tick(self, now: float | None = None) -> Path | None:

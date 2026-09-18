@@ -150,3 +150,71 @@ def test_an_empty_chunk_budget_means_vllms_default(tmp_path):
     out = _dry_run(tmp_path, MAX_NUM_BATCHED_TOKENS="")
     assert "--max-num-batched-tokens" not in out
     assert "batched=<default>" in out
+
+
+# ── the arm file is read before the knobs it is meant to move ─────────
+# Until 2026-09-17 `source "$ARM_ENV"` sat below VLLM_VENV, MODEL_DIR,
+# MAX_MODEL_LEN, MTP_ENABLED and MTP_TOKENS, so an arm could not move any
+# of the five. Nothing failed: the boot came up on supervisord's own
+# `environment=` and flash-next-run-arm.sh appended the result under the
+# arm's label. MTP_TOKENS is documented in the launcher as "an A/B knob"
+# and had never once been movable by one.
+
+
+def _arm(tmp_path, *lines: str) -> dict[str, str]:
+    arm = tmp_path / "arm.env"
+    arm.write_text("# arm: test\n" + "".join(f"export {ln}\n" for ln in lines))
+    return {"ARM_ENV": str(arm)}
+
+
+def test_an_arm_moves_the_mtp_depth(tmp_path):
+    # A model dir carrying the draft head, so the arm is followed all the way
+    # to the engine argument rather than only to the echoed config line.
+    model = tmp_path / "mtp-model"
+    model.mkdir()
+    (model / "config.json").write_text("{}")
+    (model / "nvfp4_experts_mtp.safetensors").write_text("")
+    out = _dry_run(tmp_path, MODEL_DIR=str(model),
+                   **_arm(tmp_path, "MTP_TOKENS=2"))
+    assert "mtp=1/k=2" in out
+    # DRY_RUN prints the argv through printf '%q', so the JSON arrives escaped.
+    assert '"num_speculative_tokens": 2' in out.replace("\\", "")
+
+
+def test_an_arm_moves_the_context_length(tmp_path):
+    out = _dry_run(tmp_path, **_arm(tmp_path, "MAX_MODEL_LEN=131072"))
+    assert "max_model_len=131072" in out
+    assert "--max-model-len 131072" in out
+
+
+def test_an_arm_still_moves_a_knob_that_already_worked(tmp_path):
+    out = _dry_run(tmp_path, **_arm(tmp_path, "MAX_NUM_BATCHED_TOKENS=2048"))
+    assert "batched=2048" in out
+
+
+def test_an_arm_beats_the_supervisord_environment(tmp_path):
+    """The arm file is the override, not a default under it: supervisord
+    passes MAX_NUM_BATCHED_TOKENS=4096 in `environment=` and the arm wins."""
+    out = _dry_run(tmp_path, **_arm(tmp_path, "MAX_NUM_BATCHED_TOKENS=8192"))
+    assert "batched=8192" in out
+
+
+def test_the_arm_file_is_consumed_by_the_boot_that_reads_it(tmp_path):
+    """One-shot: a config that outlived its experiment is the failure this
+    slot can least afford."""
+    env = _arm(tmp_path, "MTP_TOKENS=2")
+    _dry_run(tmp_path, **env)
+    assert not Path(env["ARM_ENV"]).exists()
+
+
+def test_the_arm_is_sourced_above_every_knob_it_can_move():
+    """Structural, because the cost of getting this wrong is silent: an arm
+    that fell back reads exactly like an arm that made no difference."""
+    text = LAUNCHER.read_text()
+    source_at = text.index('source "$ARM_ENV"')
+    for knob in ("VLLM_VENV", "MODEL_DIR", "MAX_MODEL_LEN", "MTP_ENABLED",
+                 "MTP_TOKENS", "MAX_NUM_SEQS", "GPU_MEMORY_UTILIZATION",
+                 "KV_CACHE_MEMORY_BYTES", "KV_CACHE_DTYPE", "MOE_BACKEND",
+                 "GDN_PREFILL_BACKEND", "MAX_NUM_BATCHED_TOKENS"):
+        at = text.index(f'\n{knob}="${{{knob}:-')
+        assert source_at < at, f"{knob} is resolved before the arm file is read"

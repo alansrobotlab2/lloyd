@@ -188,3 +188,58 @@ def test_a_broken_recorder_never_breaks_the_tick(guardian, monkeypatch):
 def test_selftest_covers_the_recorder():
     src = (ROOT / "agent-services" / "guardian" / "selftest.py").read_text()
     assert "memwatch" in src and "memory-pressure recorder reads PSI" in src
+
+
+# ── the unit's slice moved; the slice oomd judges did not ──────────────
+# Since 2026-09-17 agent-supervisord.service runs in its own lloyd.slice
+# (Slice= in agent-services/systemd/agent-supervisord.service), outside the
+# app.slice oomd watches. memwatch used to hardcode the unit under app.slice
+# and read the "slice" as the unit's parent — after the move that is a path
+# that does not exist and a slice nobody kills in.
+
+
+def _user_manager(tmp_path: Path, unit_slice: str, *, unit=0.0, oomd_slice=0.0,
+                  unit_slice_pressure=0.0) -> Path:
+    mgr = tmp_path / "user@1000.service"
+    unit_dir = mgr / unit_slice / MW.UNIT
+    unit_dir.mkdir(parents=True)
+    (unit_dir / "memory.pressure").write_text(_psi(unit))
+    (unit_dir.parent / "memory.pressure").write_text(_psi(unit_slice_pressure))
+    (mgr / "app.slice").mkdir(exist_ok=True)
+    (mgr / "app.slice" / "memory.pressure").write_text(_psi(oomd_slice))
+    return mgr
+
+
+def test_the_unit_is_found_in_its_own_slice(tmp_path, monkeypatch):
+    mgr = _user_manager(tmp_path, "lloyd.slice")
+    monkeypatch.setattr(MW, "_user_manager", lambda: mgr)
+    assert MW.unit_cgroup() == mgr / "lloyd.slice" / MW.UNIT
+
+
+def test_the_unit_is_still_found_where_it_used_to_live(tmp_path, monkeypatch):
+    mgr = _user_manager(tmp_path, "app.slice")
+    monkeypatch.setattr(MW, "_user_manager", lambda: mgr)
+    assert MW.unit_cgroup() == mgr / "app.slice" / MW.UNIT
+
+
+def test_the_slice_read_is_the_one_oomd_judges_not_the_units_parent(tmp_path, monkeypatch):
+    """The desktop's pressure is what kills now; lloyd.slice's is nobody's."""
+    mgr = _user_manager(tmp_path, "lloyd.slice", oomd_slice=40.0, unit_slice_pressure=0.0)
+    monkeypatch.setattr(MW, "_user_manager", lambda: mgr)
+    w = MW.MemWatch(tmp_path / "state", host=tmp_path / "no-host")
+    r = w.readings()
+    assert r["slice"]["full"]["avg10"] == 40.0
+
+
+def test_the_unit_is_re_resolved_when_a_restart_moves_it(tmp_path, monkeypatch):
+    """The guardian outlives the unit; a restart is what changes its slice."""
+    mgr = _user_manager(tmp_path, "app.slice", unit=10.0)
+    monkeypatch.setattr(MW, "_user_manager", lambda: mgr)
+    w = MW.MemWatch(tmp_path / "state", host=tmp_path / "no-host")
+    assert w.readings()["unit"]["full"]["avg10"] == 10.0
+    moved = mgr / "lloyd.slice" / MW.UNIT
+    moved.mkdir(parents=True)
+    (moved / "memory.pressure").write_text(_psi(55.0))
+    import shutil
+    shutil.rmtree(mgr / "app.slice" / MW.UNIT)
+    assert w.readings()["unit"]["full"]["avg10"] == 55.0

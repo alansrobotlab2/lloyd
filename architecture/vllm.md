@@ -42,14 +42,21 @@ supervisord as `agent-llm-primary`. The live command line, verbatim:
   --async-scheduling
   --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3
   --speculative-config {"method": "mtp", "num_speculative_tokens": 3}
-  --kv-cache-memory-bytes 12348030976
+  --kv-cache-memory-bytes 15032385536
   --language-model-only
   --max-num-batched-tokens 4096
   --gdn-prefill-backend flashinfer --no-enable-flashinfer-autotune
 ```
 
-vLLM `0.28.1rc1.dev661+g6ee5bb0a0` — a **main** build, not a release, because
-the FP8 QSA path (PR #55557) is what §3 depends on.
+vLLM main at `dff1bde84dd6` (the wheel reports `0.2.1.dev19+gdff1bde84`) — a
+**main** build, not a release, because the FP8 QSA path §3 depends on is newer
+than any. Until 2026-09-17 that path was PR #55557 overlaid from a
+contributor's fork onto `0.28.1rc1.dev661+g6ee5bb0a0`; the PR merged as
+`dff1bde84dd6` on 09-16 and the venv was rebuilt at exactly that commit, which
+also brings #55309 (the PLE outer residual fused into the short-conv kernel,
+1.44x on that kernel at bs=1; the QSA output gate fused into the attention
+epilogue, 1.10x single-row). The old build is kept at
+`.venvs/vllm-flash-next-main-0910` as the revert target.
 
 Two served names, deliberately: `primary` is the alias every caller in this
 repo uses, and `Qwen3.8-Flash-Next-nvfp4` is what `models.primary.expect_model`
@@ -130,30 +137,32 @@ sudo systemctl daemon-reload && sudo systemctl restart nvidia-power-limit.servic
 | GPU | Card | Clamp | Card default | Accepted range |
 |---|---|---|---|---|
 | 0 | RTX 3090 (01:00.0) | 275 W | 350 W | 100–375 W |
-| 1 | RTX PRO 6000 Blackwell (41:00.0) | **400 W** | 600 W | 150–600 W |
+| 1 | RTX PRO 6000 Blackwell (41:00.0) | **450 W** | 600 W | 150–600 W |
 | 2 | RTX 3090 (61:00.0) | 275 W | 350 W | 100–375 W |
 
 `GPU_POWER_LIMIT_W` (300 W) is the fallback for any index without its own
-`GPU_POWER_LIMIT_W_<n>`. The numbers have moved twice: **500 W** flat while
-the report was being written (it is the figure in the report's own system
-table), **300 W** flat from 2026-08-22, and per-card **275/400/275** since
-2026-09-11 (`bb0dbca`).
+`GPU_POWER_LIMIT_W_<n>`. The numbers have moved three times: **500 W** flat
+while the report was being written (it is the figure in the report's own
+system table), **300 W** flat from 2026-08-22, per-card **275/400/275** from
+2026-09-11 (`bb0dbca`), and **275/450/275** since 2026-09-17 (#1107).
 
-**The 400 W is half of a pairing.** The only configuration ever described as
-stable on that card paired 400 W with a **≤2400 MHz** graphics clock — and no
-clock cap is set anywhere on this box. SM read 2527–2707 MHz against a
-3090 MHz max on 2026-09-11, and this driver answers applications-clock queries
-with "Requested functionality has been deprecated", so the old `-ac` route is
-not available either. The raise from 300 W was made deliberately with that gap
-open. **If Xid 79/154 returns on GPU 1, drop this value before suspecting
-anything else** — including anything in §3–§5.
+**GPU 1 runs above the only pairing ever described as stable.** That pairing
+was 400 W with a **≤2400 MHz** graphics clock, and no clock cap is set
+anywhere on this box. SM read 2527–2707 MHz against a 3090 MHz max on
+2026-09-11. This driver answers applications-clock queries with "Requested
+functionality has been deprecated", so the old `-ac` route is not available
+either. Both raises, 300 → 400 W and then 400 → 450 W, were deliberate choices
+made with that gap open. **If Xid 79/154 returns on GPU 1, drop this value
+before suspecting anything else**, including anything in §3–§5.
 
-**Runtime can disagree with the unit, and as of 2026-09-11 it does.** GPU 1
-reads **450 W**: `sudo nvidia-smi -i 1 -pl 450` was run by hand at 08:43,
-thirteen minutes after the unit applied 400 W at 08:30:51. Nothing reconciles
-the two — the unit is `oneshot` and exited long ago — so the hand-set value
-stands until the next boot, when 400 W comes back. `nvidia-smi` tells you what
-is in force; the unit tells you what will be.
+**Runtime can disagree with the unit.** Nothing reconciles the two: the unit
+is `oneshot` and exited long ago, so a hand-set `nvidia-smi -pl` stands until
+the next boot and is then overwritten without any message. That happened twice
+before the unit carried 450 W. GPU 1 was raised to 450 W by hand at 08:43 on
+2026-09-11, thirteen minutes after the unit applied 400 W. The 2026-09-15 boot
+put it back to 400 W and logged a success line, and it was then raised by hand
+again. `nvidia-smi` tells you what is in force; the unit tells you what will
+be.
 
 The script bounds rather than trusts: a value outside a card's own
 `[power.min_limit, power.max_limit]` is clamped into range instead of being
@@ -165,7 +174,7 @@ because GPU names contain spaces and cannot be split with `read`.
 **The index is not a stable hardware id**, and the known defect is precisely a
 card falling off the bus. If GPU 1 drops, the remaining cards shift down and a
 3090 inherits the override meant for the PRO 6000. The per-card range clamp is
-what bounds that: 400 W against a 3090's 375 W maximum lands at 375 W, not at
+what bounds that: 450 W against a 3090's 375 W maximum lands at 375 W, not at
 an error.
 
 ### 2.4 The index trap
@@ -226,8 +235,8 @@ Booted 2026-09-10 (`e35ab2b`). Live `vllm:cache_config_info`:
 | `cache_dtype` | `fp8` |
 | `kv_cache_size_tokens` | **692,263** (BF16 held 398,175 — ×1.74); **844,969** since 2026-09-15 at `KV_CACHE_MEMORY_BYTES` 14.0 GiB in the program's conf (3.22× at 262k; GPU 1 has nothing else resident and read 5.9 GiB free at the 4096 chunk, so 14.0 leaves ~3.3 GiB) |
 | `block_size` / `mamba_block_size` | **3200** (BF16 used 1600) |
-| `kv_cache_memory_bytes` | 12,348,030,976 (11.5 GiB, pinned explicitly) |
-| `kv_cache_max_concurrency` | 2.64 — the pool holds ~2.6 full-length contexts |
+| `kv_cache_memory_bytes` | 15,032,385,536 (14.0 GiB, pinned explicitly in the program's `environment=` since 2026-09-15; the launcher's own default is still 11.5 GiB) |
+| `kv_cache_max_concurrency` | 2.64 at 11.5 GiB, 3.22 at 14.0 — the pool holds ~3 full-length contexts |
 | `enable_prefix_caching` | `True` |
 | `mamba_cache_mode` | `align` |
 
@@ -335,13 +344,13 @@ Every knob is an environment variable the launcher reads, so an arm is one
 | `MODEL_DIR` | the NVFP4 checkpoint | default | the YaRN shadow is the alternative |
 | `MAX_NUM_SEQS` | `8` | default | |
 | `GPU_MEMORY_UTILIZATION` | `0.9345` | default | the headroom is vLLM's own prefill scratch, not the desktop's |
-| `KV_CACHE_MEMORY_BYTES` | `12348030976` | default | pinned rather than derived |
+| `KV_CACHE_MEMORY_BYTES` | `12348030976` | **`15032385536`** | pinned rather than derived; raised to 14.0 GiB 2026-09-15 |
 | `MTP_ENABLED` / `MTP_TOKENS` | `1` / `3` | default | multi-token prediction, k=3 |
 | `GDN_PREFILL_BACKEND` | `flashinfer` | default | |
 | `FLASHINFER_AUTOTUNE` | `0` | default | |
 | `LANGUAGE_MODEL_ONLY` | `1` | default | |
 | `MOE_BACKEND` | *(empty)* | default | |
-| `EXTRA_ARGS` / `ARM_ENV` | — | — | one-shot arm plumbing |
+| `EXTRA_ARGS` / `ARM_ENV` | — | — | one-shot arm plumbing; since 2026-09-17 the arm file is sourced above **every** row of this table (it used to sit below the first five, so an arm could not move them and said nothing) |
 
 `--scheduling-policy priority` matters to the rest of the stack: the harness
 sends a per-request priority, and vLLM orders *equal* priorities by arrival.
@@ -638,8 +647,9 @@ has still not been run as of 2026-09-11.
   across requests will be disabled".
 - **YaRN's short-prompt cost is unmeasured** (§4), which is the only thing
   standing between the staged arm and a decision.
-- **The ≤2400 MHz clock cap that pairs with GPU 1's 400 W is not set** (§2.3),
-  and the card is currently hand-raised to 450 W.
+- **The ≤2400 MHz clock cap from the only configuration described as stable
+  on GPU 1 is not set** (§2.3), and the unit now clamps the card at 450 W, not
+  that configuration's 400 W.
 
 ## 11. Found on the way
 

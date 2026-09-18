@@ -12,5 +12,34 @@ Restart=on-failure
 RestartSec=5
 KillMode=control-group
 
+# ── its own slice, and why it is not in app.slice ─────────────────────────
+# systemd-oomd on this box watches exactly one cgroup, app.slice
+# (/usr/lib/systemd/user/app.slice.d/10-oomd.conf: kill past 50% full memory
+# pressure for 20 s, taking the descendant reclaiming most). A --user unit with
+# no Slice= lands in app.slice beside the browser, the editor and the
+# terminals, so an engine boot — a 170 GiB checkpoint read plus a 95 GiB
+# shared N-gram table, page cache charged to the reader's cgroup, the unit
+# reaching 226 GiB of the box's 251 — was judged in the desktop's slice:
+#   2026-09-08 x2, 09-14, 09-15, 09-17 17:09  oomd took THIS unit, 716-953
+#                                            processes, every service at once.
+#
+# In lloyd.slice the stack's own pressure is not app.slice's, so oomd cannot
+# pick the services and cannot pick the desktop on the services' account. The
+# kernel OOM killer is still the backstop for real exhaustion, and it chooses
+# by size — the engine, which is the right victim.
+#
+# WHAT WAS TRIED FIRST, AND MUST NOT COME BACK (2026-09-17, one evening):
+# MemoryHigh on this unit, with ManagedOOMPreference=avoid, while it was still
+# in app.slice. It protected the services and turned every boot into a desktop
+# outage: throttling at the cap IS memory pressure, it counted in app.slice,
+# and `avoid` told oomd to take something else. 16 kills in the first 30
+# minutes — Chrome, VS Code, terminals, Thunderbird — where the week before
+# had none. And at 150G the cap sat below what a COLD boot needs resident, so
+# the 17:46 boot never finished: it livelocked in the throttle for 25 minutes
+# while oomd killed voxtype, terminals and the guardian every ~15 s. No
+# MemoryHigh here, then, unless it is measured against a cold boot's peak and
+# the unit is outside app.slice; `avoid` is moot now and stays out.
+Slice=lloyd.slice
+
 [Install]
 WantedBy=default.target

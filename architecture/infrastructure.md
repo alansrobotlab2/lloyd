@@ -189,6 +189,44 @@ shmem that no process's RSS shows, which is why the cgroup and meminfo
 figures ride along. `memwatch.py latest` prints the newest. A quiet tick
 costs ~0.1 ms; a snapshot ~45 ms and 14 KB.
 
+**A fifth kill, 2026-09-17 00:09:25Z (716 processes), is the one that produced
+a bound rather than another floor.** An A/B sweep's arm ran the launcher after
+its `MemAvailable` check passed at **198 GiB**; the unit was killed 129 seconds
+later. memwatch caught the whole build-up, and it says the floor was never
+capable of preventing it: eleven seconds before the kill the unit's own cgroup
+held **226.1 GiB** of the box's 251 — `file` 201.3 GiB (the 170 GiB checkpoint
+being read, charged to the cgroup that reads it), of which `shmem` 128.9 GiB
+(the UVA PLE path maps the table *shared*, so it can only go to swap), `anon`
+5.0 GiB — while `MemAvailable` had fallen from 198 to 79.5 GiB and unit full
+pressure had gone 31.1% → 69.1% in 26 s, peaking at 81.25% against oomd's 50%
+trigger. **One boot is sufficient on its own**; the 09-15 kill's qemu VM was a
+contributor, not the mechanism, and reading it as the mechanism is what put two
+more `MemAvailable` floors in the tree. The gauge cannot work here — the boot
+consumes precisely what it measures.
+
+**The fix is the slice, and the first fix was wrong.** The same evening
+`agent-supervisord.service` got `MemoryHigh` (170G, then 150G) and
+`ManagedOOMPreference=avoid`, still inside `app.slice`. It protected the
+services and made every boot a desktop outage. Throttling at the cap is itself
+memory pressure; it counted in `app.slice`, and `avoid` told oomd to take
+something else — Chrome at 17:21:47, VS Code (501 processes) at 17:22:03, then
+terminals, Thunderbird and voxtype. At 150G the cap was below a cold boot's
+resident need as well, so the 17:46 boot livelocked in the throttle for 25
+minutes while oomd killed something every ~15 s, the guardian included. The
+journal from 09-08 to 17:09 on 09-17 holds five oomd kills, all of this unit;
+from 17:21 to 18:14 it holds about sixty, none of it.
+
+What holds is `Slice=lloyd.slice` on the unit (tracked at
+`agent-services/systemd/`; the `~/.config/systemd/user/` entry is a symlink).
+oomd monitors only `app.slice` (`oomctl dump` lists that one path), so the
+stack's pressure is no longer the desktop's and oomd can choose neither. The
+kernel OOM killer remains the backstop for real exhaustion and picks by size —
+the engine. There is no `MemoryHigh` on the unit, deliberately: one that is
+not measured against a cold boot's peak livelocks the boot, and inside
+`app.slice` any cap at all converts the stack's pressure into the desktop's.
+`memwatch.py` finds the unit in whichever slice it lives and reads `app.slice`
+by name, because that is still the slice whose pressure kills.
+
 | Program | Port | What | Start script |
 |---|---|---|---|
 | `lloyd-mc:lloyd-backend` | 8080 | FastAPI + SSE, the worker pool, the autonomy scheduler | `server.py` |
@@ -266,7 +304,7 @@ each. Stop the hands before moving the floor.
 | `lloyd-groundskeeper-survey.timer` | user timer, 02:30 | `scripts/groundskeeper/groundskeeper-survey.py` — the vault-health scan ([[autonomy-jobs]], #36) |
 | `lloyd-graph-backup.timer` | user timer, 05:30 | `scripts/backup/backup-graph.sh` — the knowledge-graph store |
 | `thunderbird.service` | user service | Thunderbird itself, hosting the `thunderbird-mcp` extension and its bridge on `:8765` |
-| `nvidia-power-limit.service` | system service, root scope | GPU power clamp, via `/usr/local/sbin/set-gpu-power-limit.sh`. **Declared and live disagree as of this writing**: `nvidia-smi` reads 275 / **450** / 275 W while the unit declares `GPU_POWER_LIMIT_W_1=400` — the 450 on the Xid-79 card was set by hand on 09-11 at 08:43, eleven minutes after the unit's last run, so the next boot drops it back and prints a success line either way (#1107) |
+| `nvidia-power-limit.service` | system service, root scope | GPU power clamp, via `/usr/local/sbin/set-gpu-power-limit.sh`. Declares 275 / **450** / 275 W. GPU 1, the Xid-79 card, was raised to 450 W on 2026-09-17 (#1107). It had been set to 450 W by hand twice before that, and each boot reset it to the 400 W the unit declared at the time. A hand-set `-pl` still lasts only until the next boot, so compare the unit's `Environment=` against `nvidia-smi` |
 
 Unit files live in `agent-services/systemd/` and `install-services.sh:36`
 **symlinks** every `.service` and `.timer` in that directory into
@@ -464,7 +502,8 @@ mining. The systemd timers above are the only wall-clock schedules.
   timers plus `thunderbird`/`voxtype` #1109, the installer linking the
   root-only power unit into the user manager #1108, and a dead tracked
   `agent-services/autonomy.service` #1110). Recorded without changing: GPU 1
-  at 450 W against a declared 400 W (#1107).
+  at 450 W against a declared 400 W (#1107; the unit declares 450 W since
+  2026-09-17).
 
 ## Related
 

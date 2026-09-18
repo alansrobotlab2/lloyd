@@ -81,16 +81,16 @@ not merely the engine being restarted. Peak RSS was 230.3 GiB. Everything came
 back on its own, but the arm under test was lost and the failure looked like the
 config being tested rather than the restart cadence.
 
-Wait for `MemAvailable` to come back above ~150 GiB between boots;
-`agent-services/bin/flash-next-run-arm.sh` does this and refuses to start below
-120 GiB. Note the blast radius is the *unit*, so the guardian (a separate
-systemd unit, deliberately) survives it. **Those numbers assume the old
-desktop.** On 2026-09-15 a 16 GiB qemu VM was running beside the browser
-and the editor, `MemAvailable` read 57 GiB with the engine up, and a single
-boot through the 150 GiB floor still got the unit killed at 23:52Z.
-`round restart --only agent-llm-primary` is the way to restart it now
-(waits for 180 GiB, refuses under 150, rereads the conf, 20-minute boot
-wait under the lease); check what the desktop holds before any boot.
+**What keeps oomd off the services is `Slice=lloyd.slice`** on
+`agent-supervisord.service` (2026-09-17): omarchy's oomd watches only
+`app.slice`, where the desktop lives, so the stack's boot pressure can no longer
+cost either the services or the desktop. **Do not put `MemoryHigh` or
+`ManagedOOMPreference=avoid` back on the unit inside `app.slice`** — tried the
+same evening, it moved every kill onto Chrome, VS Code and the terminals (~60 in
+an hour) and at 150G livelocked a cold boot. The `MemAvailable` floors cannot
+prevent a kill (a boot consumes what they measure); they only confirm the last
+engine's table was released. `round restart --only agent-llm-primary` is still
+how to restart the engine. `architecture/infrastructure.md` has the numbers.
 
 A third kill on 2026-09-15 04:48Z came with no restart in progress and left
 no trace of what grew — oomd judges `app.slice`, which the desktop shares, and

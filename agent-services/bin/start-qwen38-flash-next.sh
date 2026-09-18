@@ -76,10 +76,13 @@ set -euo pipefail
 #   worker  ~/lloyd/.venvs/vllm-qwen38-flash-next   setup-vllm-qwen38-flash-next.sh
 #           The build described above: 08-31 base + PR #53899's offload worker.
 #   uva     ~/lloyd/.venvs/vllm-flash-next-main     setup-vllm-flash-next-main.sh
-#           vLLM main as of 2026-09-10: UVA PLE offload (#54371, merged 09-09 —
-#           the GPU reads the pinned host table directly, so no worker process,
-#           no ptrace requirement, none of the three deadlocks below), the
-#           rewritten QSA kernels, and PR #55557's FP8 main KV cache overlaid.
+#           vLLM main @ dff1bde84dd6 (rebuilt 2026-09-17): UVA PLE offload
+#           (#54371 — the GPU reads the pinned host table directly, so no
+#           worker process, no ptrace requirement, none of the three deadlocks
+#           below), the rewritten QSA kernels, #55309's fused PLE/QSA epilogues,
+#           and the FP8 main KV cache natively (PR #55557 merged 09-16; it was
+#           a fork overlay here 09-10..09-17). The 09-10 build is kept at
+#           ~/lloyd/.venvs/vllm-flash-next-main-0910 as the revert target.
 #   VLLM_VENV picks one. PLE_IMPL is detected from the venv's tree and decides
 #   the executor flag, the ptrace preflight and the offload spelling, so a swap
 #   cannot be half-applied. Measured on this card, same flags, 2026-09-10: main
@@ -160,6 +163,38 @@ set -euo pipefail
 #   out of our headroom — which is part of why 0.93 rather than 0.95 below.
 #
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# ── one-shot A/B env ──────────────────────────────────────────────────────
+# bin/flash-next-run-arm.sh writes this file, and it is CONSUMED: sourced once
+# and deleted in the same breath, so it can change exactly one boot. That is
+# the whole design. supervisord passes a fixed `environment=` and offers no
+# per-restart override, so an A/B under supervision needs a file — and a file
+# that persisted would be a config that silently outlives the experiment,
+# which is the failure this slot can least afford. If the sweep dies between
+# the source and the delete, the next boot is production config.
+# ARM_ENV overrides the path, and exists for one caller: a DRY_RUN from a test
+# must not consume an arm that flash-next-run-arm.sh has staged for the real
+# boot (tests/test_flash_next_launcher.py points it at a scratch file).
+#
+# IT IS SOURCED HERE, ABOVE EVERY KNOB, AND THAT POSITION IS THE WHOLE
+# POINT. Until 2026-09-17 it sat below the venv, the model dir, the
+# context length and the MTP settings, so those five were resolved from
+# supervisord's `environment=` before the arm file was read and an arm
+# could not move them. It did not fail: the boot came up on production
+# config and the sweep recorded it under the arm's label, which is the
+# one outcome this slot cannot afford — an arm that silently fell back
+# reads exactly like an arm that made no difference. MTP_TOKENS is
+# documented three sections below as "an A/B knob" and was never once
+# movable by an arm. Every `${VAR:-default}` below now sees the arm.
+# Nothing above this line may read one of those variables.
+ARM_ENV="${ARM_ENV:-$PROJECT_DIR/logs/flash-next-arm.env}"
+if [[ -f "$ARM_ENV" ]]; then
+  echo "consuming one-shot arm env: $ARM_ENV"
+  cat "$ARM_ENV"
+  # shellcheck disable=SC1090
+  source "$ARM_ENV"
+  rm -f "$ARM_ENV"
+fi
 
 VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-qwen38-flash-next}"
 MODEL_DIR="${MODEL_DIR:-$PROJECT_DIR/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP4}"
@@ -293,26 +328,6 @@ else
   echo "WARNING: nvfp4_experts_mtp.safetensors missing — starting WITHOUT speculative decode"
 fi
 
-# ── one-shot A/B env ──────────────────────────────────────────────────────
-# bin/flash-next-run-arm.sh writes this file, and it is CONSUMED: sourced once
-# and deleted in the same breath, so it can change exactly one boot. That is
-# the whole design. supervisord passes a fixed `environment=` and offers no
-# per-restart override, so an A/B under supervision needs a file — and a file
-# that persisted would be a config that silently outlives the experiment,
-# which is the failure this slot can least afford. If the sweep dies between
-# the source and the delete, the next boot is production config.
-# ARM_ENV overrides the path, and exists for one caller: a DRY_RUN from a test
-# must not consume an arm that flash-next-run-arm.sh has staged for the real
-# boot (tests/test_flash_next_launcher.py points it at a scratch file).
-ARM_ENV="${ARM_ENV:-$PROJECT_DIR/logs/flash-next-arm.env}"
-if [[ -f "$ARM_ENV" ]]; then
-  echo "consuming one-shot arm env: $ARM_ENV"
-  cat "$ARM_ENV"
-  # shellcheck disable=SC1090
-  source "$ARM_ENV"
-  rm -f "$ARM_ENV"
-fi
-
 # ── A/B knobs ─────────────────────────────────────────────────────────────
 # Every default below reproduces what this slot served before the 2026-09-08
 # sweep, so an unset environment is the old config exactly. They exist so an
@@ -383,7 +398,8 @@ KV_CACHE_MEMORY_BYTES="${KV_CACHE_MEMORY_BYTES:-12348030976}"
 
 # KV cache dtype. Empty = the engine default (BF16). 'fp8' stores the 12 QSA
 # layers' K/V as e4m3 with unit scales (the checkpoint ships no calibrated
-# k/v scales) and needs the uva venv, where PR #55557 is overlaid; the worker
+# k/v scales) and needs the uva venv, whose wheel carries PR #55557 natively
+# since the 2026-09-17 rebuild (it was a fork overlay before that); the worker
 # venv's QSA backend hard-rejects anything but BF16, so the guard below fails
 # in 10 ms rather than after a 4-minute load.
 #
