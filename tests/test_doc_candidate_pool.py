@@ -478,3 +478,82 @@ def test_the_eval_scorer_itself_reports_the_target_query_hitting():
         "doc_hit true with a null first_doc_rank is a scorer bug, not a pass")
     assert scoring["docs_matched"], (
         "no expected doc matched, so the scorer and the yaml disagree about the query")
+
+
+# ── #1129: the price that justified this widening is re-stated on fresh queries ──
+
+def test_the_widenings_price_is_stated_as_a_fresh_query_not_a_cached_repeat():
+    """The figures behind `RECALL_DOC_POOL` = 240 are fresh, and say which arm.
+
+    `agent_mcp/vault.py` priced the named arm at 110 ms (40-row pool) and 165 ms
+    (240-row pool), labelled "rerank on, warm", and that ~55 ms delta is what
+    justified asking qmd to cross-encode 240 pairs per recall. The measured cost
+    of the same widening is nightly `latency_ms_avg` 707.8 ms → 4,368.4 ms — 6.2x
+    — and the reason the comment could read 55 ms is that its samples were
+    repeats of one query the daemon had already embedded. `_qmd_daemon_search`'s
+    own docstring states the mechanism: the daemon caches query embeddings, so a
+    sequential A/B measures arm order, not arm.
+
+    So a price in this file is admissible only if it names the sample kind, and
+    the retired cached pair may not return. This is a whole-file check rather than
+    a near-the-constant grep on purpose: the figures lived in two places (the
+    `RECALL_DOC_POOL` comment and the `_qmd_daemon_search` docstring) and the
+    defect was that neither said which sample it was.
+
+    Provenance of the replacement numbers, measured by this round on 2026-09-18
+    against the live daemon, named segments, a fresh never-seen query text per
+    sample (3 samples per cell): 2,161-2,291 ms at pool 40 rerank-on,
+    3,672-4,027 ms at pool 240 rerank-on, 119-183 ms for the identical repeat of
+    a query just run at 240, and 150-210 ms at pool 240 with the rerank skipped.
+    """
+    import inspect
+    from pathlib import Path
+
+    src = Path(vault.__file__).read_text(encoding="utf-8")
+
+    for stale in ("110 ms", "140 ms", "165 ms", "577 ms"):
+        assert stale not in src, (
+            f"{stale} is back in vault.py — that figure was a cached repeat, and "
+            "it is the number that made a 6x latency step look like 55 ms")
+
+    doc = inspect.getsource(vault._qmd_daemon_search)
+    assert "2,161-2,291 ms FRESH named at a 40-row pool" in doc, (
+        "the fresh 40-row price is gone from the seam it prices")
+    assert "3,672-4,027 ms FRESH named at" in doc, (
+        "the fresh 240-row price is gone from the seam it prices")
+    assert "119-183 ms CACHED" in doc, "the cached-repeat counter-sample is gone"
+    assert "150-210 ms FRESH rerank-OFF" in doc, "the rerank-OFF price is gone"
+
+    # And the same four figures where the pool constant itself is justified, so a
+    # reader who lands on `RECALL_DOC_POOL` and never opens the function gets the
+    # fresh numbers too.
+    pool_comment = src[src.index('"Measured free"'):src.index("QMD_POOL_FACTOR = 3")]
+    # Not `assert pool_comment`: both `src.index()` anchors above raise ValueError
+    # before it could run, so a non-empty slice was guaranteed and the assertion
+    # could not fail. What must hold instead is that this block points at the real
+    # ceiling — the nightly figure has to be the one the owning module currently
+    # holds, read from that module rather than transcribed, so the comment cannot
+    # cite a budget that was moved or never written.
+    from workers.sources import automod_regression as R
+    nightly_ceiling = f"{R.LATENCY_BUDGET_MS[R.CONTEXT_NIGHTLY]:,.0f} ms"
+    assert nightly_ceiling in pool_comment, (
+        f"the block beside RECALL_DOC_POOL no longer names the {nightly_ceiling} "
+        "ceiling the budget module holds, so a reader who lands here cannot find "
+        "where the price is graded")
+    assert "2,161-2,291 ms" in pool_comment and "3,672-4,027 ms" in pool_comment, (
+        "the pool comment no longer carries the fresh prices")
+    assert "CACHED" in pool_comment, "the pool comment does not name its arm"
+
+    # The seam may not state a duration that reads as a current price without
+    # naming its sample kind. Four exact assertions above pin the fresh prices and
+    # the cached counter-sample; a general per-line sweep over the whole docstring
+    # was tried first and is deliberately NOT here: it also catches the two
+    # dated 2026-09-07 pairs and the disowned other-arm history that this change
+    # is not entitled to re-measure, and a rule that needs a three-line lookback
+    # to tell those apart is not a rule a reader can predict. Extending coverage
+    # to those pairs is a finding on #1129, not a clause of it.
+
+    # The two numbers the comment defers to must actually exist as a budget, so
+    # the comment cannot cite a ceiling nobody wrote. (`R` is in scope from the
+    # ceiling check above.)
+    assert set(R.LATENCY_BUDGET_MS) == {R.CONTEXT_NIGHTLY, R.CONTEXT_PAIRED_CHECK}

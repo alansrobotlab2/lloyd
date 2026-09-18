@@ -2017,7 +2017,17 @@ of 83 historical promotions were decided inside that noise.
 against an unchanged vault produced **identical** values for every quality
 metric (stdev 0.0000 for entity_hit_rate, entity_recall_avg,
 fact_entity_recall_avg, ndcg10, mrr_doc, doc_hit_rate, doc_recall_avg). Only
-`latency_ms_avg` moved, at 562ms stdev, and it is never compared.
+`latency_ms_avg` moved, at 562ms stdev — and it is the one metric that cannot
+take part in a paired comparison: the qmd daemon caches query embeddings, so the
+same text returns 20-34x faster than unseen text (priced 2026-09-18 at production
+width — pool 240, rerank on, a fresh query text per sample: 3,672-4,027 ms for a
+fresh query against 119-183 ms for the identical repeat). A before/after latency delta therefore measures arm
+order, not the change. So it is compared against a number instead of against the
+other arm — the per-context absolute ceiling `LATENCY_BUDGET_MS` (4,800 ms for
+the nightly `eval/run_eval.py` context, 14,000 ms for the pinned paired check) —
+and an over-ceiling average is the named verdict `latency_over_budget`, written
+into the `regression_check` event and `eval_last.json` as a report. It never
+enters `regressed` or `reasons`, so it cannot request a rollback (§13).
 
 So the eval contributes no noise — and the real confound is **vault drift**.
 Cross-day baselines differ by up to 0.044 because the vault changed, not the
@@ -2118,8 +2128,13 @@ document retrieval cannot be measured. Pinning both halves (above) made the
 four repeatable, and they are armed again — `evaluate` loops `ARMED_METRICS`
 and appends a rollback reason for any drop past `SIGMA_MULTIPLIER × σ`, so a
 `doc_recall_avg` delta is now the line that stops a promotion, not noise to be
-ignored. The limit that survives is `latency_ms_avg`: still report-only, still
-never compared.
+ignored. The limit that survives is `latency_ms_avg`: it still has no tolerance
+and cannot make a comparison regress — `regressed` and `reasons` remain the seven
+quality metrics and new eval errors, which is the only channel to
+`request_rollback` — but it is no longer merely recorded. Since #1129 it is
+compared against an absolute per-context ceiling, `LATENCY_BUDGET_MS` (4,800 ms
+nightly, 14,000 ms for the pinned paired check), and an over-ceiling average is
+the named report `latency_over_budget` — §8.1.
 
 **A query the daemon did not answer is not a score of zero.** On 2026-09-17
 05:34Z the check reverted #1194 — a change to `scripts/memory/revert-suffix-

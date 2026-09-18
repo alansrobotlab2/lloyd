@@ -182,10 +182,50 @@ def test_the_collected_floor_matches_the_doc():
 # ── §8.1 regression detector ────────────────────────────────────────────────
 
 def test_latency_is_never_armed():
-    """§8.1: "Only latency_ms_avg moved ... and it is never compared"."""
+    """§8.1: latency has no sigma and cannot make a comparison regress.
+
+    The two assertions are byte-identical to the version that pinned the doc
+    sentence "Only `latency_ms_avg` moved ... and it is never compared". #1129
+    deleted that sentence, because the second half became false — both contexts
+    now have a ceiling in `LATENCY_BUDGET_MS` and a run past it is reported. What
+    this test still owns is the half that survives it: latency is out of the armed
+    set. The reason is measured, not asserted — the daemon's query-embedding
+    cache moves it 20-34x on arm order alone (3,672-4,027 ms fresh against
+    119-183 ms for the identical cached repeat at pool 240, priced 2026-09-18), so a PAIRED
+    delta grades nothing but which arm ran first. What a ceiling may and may not do
+    is `test_the_doc_states_the_latency_budget_and_its_field`.
+    """
     from workers.sources import automod_regression as R
     assert "latency_ms_avg" not in R.ARMED_METRICS
     assert "latency_ms_avg" in R.REPORT_ONLY
+
+
+def test_the_doc_states_the_latency_budget_and_its_field():
+    """§8.1: the doc states the ceiling, the field, and not the retired band.
+
+    The field name is asserted against `R.OVER_BUDGET_FIELD` rather than a literal,
+    because a doc naming a key the code stopped writing is the exact defect this
+    file exists to catch — the sentence it replaced was itself only ever true of
+    the code as it stood when it was written.
+    """
+    from workers.sources import automod_regression as R
+    assert set(R.LATENCY_BUDGET_MS) == {R.CONTEXT_NIGHTLY, R.CONTEXT_PAIRED_CHECK}
+    flat = _flat(DOC)
+    assert "it is never compared" not in flat, (
+        "the doc still tells the reader latency goes unread, which #1129 ended")
+    for phrase in ("LATENCY_BUDGET_MS", R.OVER_BUDGET_FIELD):
+        assert phrase in flat, f"the doc does not state the budget ({phrase})"
+    # What the doc must now SAY, rather than a bare number it must not contain.
+    # `"1.7s" not in flat` was written here first and is gone: `git log
+    # -S'1.7s' -- architecture/automod.md` is empty, so this 2,100-line file never
+    # carried the asserted band — the module did, and
+    # `test_the_budget_comment_prices_itself_on_fresh_queries` is where removing it
+    # is pinned. Left here it could only ever fail on an unrelated future
+    # paragraph that happened to measure 1.7 seconds of something.
+    assert "3,672-4,027 ms" in flat and "119-183 ms" in flat, (
+        "the doc no longer states the fresh-vs-cached spread that replaced the "
+        "asserted 1.7 s band, so a reader cannot see why latency is graded "
+        "absolutely and never paired")
 
 
 def test_all_seven_are_armed_because_the_corpus_is_now_pinned():
@@ -315,16 +355,29 @@ def test_the_regression_module_comment_never_disarms_an_armed_metric():
 def test_the_doc_still_states_the_limits_that_survive_the_pin():
     """§8.1/§13: pinning the corpus fixed one limit and left two standing.
 
-    `latency_ms_avg` still moves ~1.7s between a cold and warm embedding
-    cache, and expiring 70% of the active edge set still moves nothing — so
-    edge quality has no armed metric. Rewriting the disarmed-metric prose
-    must not quietly drop either one.
+    `latency_ms_avg` still cannot be compared paired — the cold-to-warm
+    embedding-cache spread (3.5-3.9 s here: 3,672-4,027 ms fresh against 119-183 ms
+    for the cached repeat at pool 240) is wider than any step worth catching — and
+    expiring 70% of the active edge set still moves nothing, so edge quality has no
+    armed metric. Rewriting the disarmed-metric prose must not quietly drop either
+    one.
+
+    The latency sentence this test used to pin was `"it is never compared"`.
+    #1129 replaced it: the limit that survives is that no PAIRED delta is
+    graded, while an absolute per-context ceiling is, so this now pins the
+    ceiling sentence instead of the exemption — and pins `REPORT_ONLY` itself
+    unchanged, since a budget that quietly armed latency would have made this
+    whole paragraph a lie.
     """
     from workers.sources import automod_regression as R
     assert "latency_ms_avg" not in R.ARMED_METRICS
     assert "latency_ms_avg" in R.REPORT_ONLY
+    assert set(R.REPORT_ONLY) == {"latency_ms_avg", "n_queries"}
     flat = _flat(DOC)
-    assert "it is never compared" in flat, "the latency limit left the doc"
+    assert R.OVER_BUDGET_FIELD in flat, "the latency budget verdict left the doc"
+    for value in R.LATENCY_BUDGET_MS.values():
+        assert f"{int(value):,} ms" in flat, (
+            f"the doc does not state the {int(value)} ms ceiling the code has")
     assert "Edge quality has no armed metric" in flat, "the edge limit left the doc"
     assert "Graph EDGE quality is not checked by anything" in flat
 

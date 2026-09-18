@@ -239,3 +239,73 @@ def test_a_healthy_run_record_carries_its_corpus(tmp_path):
         _assert_corpus_shape(json.loads(written[0].read_text()))
     finally:
         _cleanup(label)
+
+
+def _latency_budgets() -> dict:
+    """The two ceilings, read from the owning module in a process of its own.
+
+    Restating the numbers here is the drift this file's `_production_knobs`
+    already exists to avoid, and the owning module is in `workers/`, not in the
+    eval script — which is exactly the seam #1129 joined."""
+    code = (
+        "import json;"
+        "from workers.sources import automod_regression as R;"
+        "print(json.dumps({'budgets': R.LATENCY_BUDGET_MS,"
+        " 'nightly': R.CONTEXT_NIGHTLY, 'field': R.OVER_BUDGET_FIELD}))"
+    )
+    proc = subprocess.run([str(PY), "-c", code], cwd=str(ROOT),
+                          capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_the_nightly_artifact_and_stdout_carry_the_latency_verdict(tmp_path):
+    """The nightly runner is `latency_ms_avg`'s consumer, across a process seam.
+
+    #1129's premise is that the field was written into 20 nightly artifacts and
+    read by nobody, which is how #504's 708 ms -> 4,230 ms step landed with every
+    rung green. A constant in `workers/` does not close that; the process that
+    produces the number has to write the verdict next to it. So this drives the
+    real CLI (subprocess, because `app.paths` reads LLOYD_FACTS_ROOT/LLOYD_KG_DB
+    at import time) and asserts BOTH surfaces a reader has: the `latency_budget`
+    block in the artifact, naming the nightly context and the ceiling the owning
+    module holds, and the printed line, naming the same ceiling and the same flag.
+
+    `--allow-empty-corpus` is here only so the run completes without the live fact
+    tree; the latency is whatever the run actually took, and `over` is asserted
+    against the budget rather than hardcoded — either answer is a pass here. What
+    must be impossible is a nightly record with an average and no verdict.
+    """
+    known = _latency_budgets()
+    budget = known["budgets"][known["nightly"]]
+    label = "pytest-latency-verdict"
+    _cleanup(label)
+    try:
+        proc = _run(tmp_path, "--label", label, "--allow-empty-corpus")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = list(BASELINES.glob(f"{label}-*.json"))
+        assert len(written) == 1, written
+        rec = json.loads(written[0].read_text())
+
+        verdict = rec["latency_budget"]
+        avg = rec["summary"]["overall"]["latency_ms_avg"]
+        assert verdict["context"] == known["nightly"]
+        assert verdict["budget_ms"] == budget, (
+            f"the artifact names a {verdict['budget_ms']} ms ceiling; the owning "
+            f"module holds {budget}")
+        assert verdict["latency_ms_avg"] == avg, (
+            "the verdict was computed on a different average than the one the "
+            "record reports")
+        assert verdict["over"] is (avg > budget), (
+            "the flag does not match its own two numbers — the ceiling is strict, "
+            "so an average exactly ON it is inside budget, and `>=` here would "
+            "fail the runner for a number the owning module calls compliant")
+
+        line = [ln for ln in proc.stdout.splitlines() if "budget" in ln.lower()]
+        assert line, f"nothing about the budget was printed:\n{proc.stdout}"
+        printed = " ".join(line)
+        assert f"{budget:,.0f} ms" in printed, printed
+        assert ("OVER BUDGET" if verdict["over"] else "inside budget") in printed, printed
+        assert f"{avg:,.0f} ms" in printed, printed
+    finally:
+        _cleanup(label)

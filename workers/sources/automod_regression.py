@@ -96,10 +96,17 @@ NOISE_PATH = Path(os.environ.get(
 # `execute` refuses to compare without it instead of falling back to the live
 # daemon, which would be the old broken comparison wearing the new name.
 #
-# `latency_ms_avg` is the one thing that still moves, by ~1.7s between a cold
-# and warm embedding cache, and it is never compared.
+# `latency_ms_avg` is the one thing that still moves, and it moves for a reason
+# that makes a *relative* comparison impossible: the qmd daemon caches query
+# embeddings, so the same text re-runs ~20x faster than an unseen one. It is
+# therefore the one metric compared ABSOLUTELY, against a per-context budget
+# (`LATENCY_BUDGET_MS` below), and never relatively against another arm.
 ARMED_METRICS = ("entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg",
                  "ndcg10", "mrr_doc", "doc_hit_rate", "doc_recall_avg")
+# Reported metrics: never scored against another run's value. `latency_ms_avg`
+# is still in this tuple — it has no tolerance and cannot make a comparison
+# regress — but it is no longer merely recorded: it is compared against
+# `LATENCY_BUDGET_MS`, which yields `over_budget` (see `evaluate`).
 REPORT_ONLY = ("latency_ms_avg", "n_queries")
 
 # What the armed set can and cannot see, MEASURED rather than assumed.
@@ -144,6 +151,101 @@ FACT_LAYER_METRICS = ("entity_hit_rate", "entity_recall_avg",
 # comparison, which removes vault drift rather than budgeting for it.
 MIN_SIGMA = 0.001
 SIGMA_MULTIPLIER = 3.0
+
+# ── the latency budget ──────────────────────────────────────────────────────
+#
+# Why latency gets a ceiling and not a sigma. Every other metric in this file is
+# compared against the other arm of the SAME run, which is what cancels corpus
+# drift. Latency cannot be compared that way, because the qmd daemon caches
+# query embeddings: re-sending identical text is 20-34x cheaper than sending
+# text the daemon has never seen, so a paired A/B of latency measures arm order.
+# Priced on this box 2026-09-18 by the two rounds that wrote and re-measured
+# this constant: 3 and 5 samples per cell, live daemon, named segments, a fresh
+# never-seen query text per sample and then the identical repeat, rerank ON at
+# pool 240 = `RECALL_DOC_POOL` — the shape `_vault_recall`'s document leg sends:
+#
+#   3,672-4,027 ms FRESH at pool 240  vs  119-183 ms CACHED (the same text again)
+#   2,161-2,291 ms FRESH at pool 40   and 150-210 ms FRESH at 240 rerank-OFF
+#
+# So the cache alone is a 3.5-3.9 s (20-34x) swing on arm order, wider than any
+# step worth catching, and no ratio, band or sigma on latency can be graded — only an
+# absolute number. The other two cells are the two levers a widening moves, and
+# the rerank-OFF figure is what says the cross-encoder is the whole regression:
+# the fetch leg alone is 150-210 ms at 240 and 109-139 ms at 40, so widening the
+# pool buys 1,500-1,700 ms of cross-encoding, not 150 ms of fetching. Re-measure the
+# first row with:
+#
+#   .venvs/lloyd/bin/python -c "import time,random,string,agent_mcp.vault as V; \
+#     q='aurora basalt cobalt delta ember index maintenance cadence '+''.join(random.choices(string.ascii_lowercase,k=10)); \
+#     t=time.perf_counter(); V._qmd_daemon_search(q,240,V.VAULT_SEGMENTS); \
+#     print(round((time.perf_counter()-t)*1000))"
+#
+# (run from the repo root; a query seen before returns 119-183 ms and is the
+# cached arm, not this one)
+#
+# Two contexts, because the two runs are not the same experiment. The nightly
+# eval hits the LIVE daemon; the pinned paired check runs two arms through a
+# frozen snapshot with one shared `LLOYD_CODE_ROOT`, so it is the same queries at
+# a different absolute cost (measured across the artifacts in `eval/baselines/`:
+# the nightly nights after #504 average 4,226-4,379 ms, and the fourteen newest
+# `automod-check-*.json` run 12,086-12,863 ms). One ceiling for both would be
+# wrong in whichever direction it was set.
+#
+# Each value is AT OR ABOVE the worst average that context has EVER recorded, so
+# no already-recorded run reads over budget: #504's accepted 6x cost is
+# grandfathered by construction, and the budget exists to make the NEXT step of
+# that class report itself. Widening a pool is exactly the change that moves this
+# number and nothing else — #504 landed at 708 -> 4,230 ms nightly with every
+# rung green, because latency was recorded and read by nobody.
+#
+# The nightly ceiling sits 8.9% over 4,408.0 ms, and that worst run is
+# `nightly-20260904-20260904-060219.json` — nine days BEFORE #504, on the narrow
+# pool. So the nightly series has one unexplained outlier the widening does not
+# account for (it is a finding on #1129, not something this constant settles);
+# the ceiling is set against the worst the context has actually produced rather
+# than against the post-widening 4,378.8, because "grandfather everything already
+# recorded" is the only rule here that cannot be argued with later.
+LATENCY_BUDGET_MS = {
+    "nightly": 4800.0,          # worst ever 4,408.0 (nightly-20260904-060219)
+    "paired_check": 14000.0,    # worst ever 12,863.4 (automod-check-20260917-024810)
+}
+# The two contexts this module knows, named so a caller passes one rather than a
+# free-text string that silently falls through to a default.
+CONTEXT_NIGHTLY = "nightly"
+CONTEXT_PAIRED_CHECK = "paired_check"
+# The field the verdict lands in. A separate key from `regressed`/`reasons`
+# because the whole point is that this verdict must never be the thing that
+# requests a rollback — the exemption it replaces existed to keep a
+# cache-order artefact from reverting healthy code, and an absolute ceiling on a
+# metric with a 20x cache spread does not make that property any less true.
+OVER_BUDGET_FIELD = "latency_over_budget"
+
+
+def latency_budget(context: str) -> float:
+    """The ceiling for `context`; 0.0 for one this file does not know.
+
+    Zero rather than a guess: an unknown context must read as "no verdict
+    possible", never as a number that silently grades a run it was never priced
+    for — which is how the 165 ms cached figure ended up justifying a 6x step.
+    """
+    return float(LATENCY_BUDGET_MS.get(context, 0.0))
+
+
+def over_budget(current: dict, context: str) -> dict | None:
+    """The absolute-latency verdict for one comparison, or None if undecidable.
+
+    None — not a pass — when there is no average to read or no budget priced
+    for the context. Same rule as the missing noise floor above: a measurement
+    that did not happen is never reported as a clean bill of health.
+    """
+    value = current.get("latency_ms_avg")
+    budget = latency_budget(context)
+    if value is None or budget <= 0:
+        return None
+    now = float(value)
+    return {"context": context, "budget_ms": budget, "latency_ms_avg": now,
+            "over": now > budget,
+            "ratio": (now / budget if budget else None)}
 
 
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
@@ -350,8 +452,18 @@ def _summarise_noise(samples: dict, trials: int, *, dropped: list[str] | None = 
     return noise
 
 
-def evaluate(current: dict, baseline: dict, noise: dict) -> tuple[bool, list[str], dict]:
-    """Pure comparison. Returns (regressed, reasons, per-metric detail)."""
+def evaluate(current: dict, baseline: dict, noise: dict,
+             context: str = CONTEXT_PAIRED_CHECK) -> tuple[bool, list[str], dict]:
+    """Pure comparison. Returns (regressed, reasons, per-metric detail).
+
+    `context` selects the absolute latency ceiling (`LATENCY_BUDGET_MS`) that
+    `latency_ms_avg` is read against. It changes what is REPORTED and never what
+    is `regressed`: the verdict lands in
+    `detail["latency_ms_avg"]["budget"]["over"]`, and `reasons` stays the armed
+    metrics plus new eval errors. That separation is the property the
+    report-only exemption was created to protect — latency movement, largely
+    cache order, must not be able to revert a healthy commit.
+    """
     reasons: list[str] = []
     detail: dict[str, Any] = {}
     metrics = (noise or {}).get("metrics") or {}
@@ -374,6 +486,21 @@ def evaluate(current: dict, baseline: dict, noise: dict) -> tuple[bool, list[str
             detail[key] = {"before": baseline[key], "after": current[key],
                            "delta": float(current[key]) - float(baseline[key]),
                            "armed": False}
+
+    # The one reported metric that is still COMPARED, and the only comparison in
+    # this function that is absolute rather than paired. Attached to the latency
+    # entry rather than appended to `reasons`: `regressed` must stay False for a
+    # run that merely reads slow, and `reasons` is the channel the guardian reads
+    # as a rollback request.
+    reading = over_budget(current, context)
+    if reading is not None:
+        entry = detail.setdefault("latency_ms_avg", {"armed": False})
+        entry["budget"] = reading
+        # The named verdict exists ONLY past the ceiling. An in-budget
+        # comparison gets the reading (`budget`, so a reader can tell "inside"
+        # from "never measured") and no verdict to act on.
+        if reading["over"]:
+            entry[OVER_BUDGET_FIELD] = reading
 
     if current.get("errors", 0) and not baseline.get("errors", 0):
         reasons.append(f"eval errors appeared: 0 → {current['errors']}")
@@ -538,8 +665,23 @@ def _execute_blocking() -> dict[str, Any]:
     # absorb a real regression of one query.
     stale_floor = (noise.get("queries_fingerprint") or "") != queries_fingerprint()
 
-    regressed, reasons, detail = evaluate(current["overall"], baseline["overall"], noise)
+    regressed, reasons, detail = evaluate(current["overall"], baseline["overall"], noise,
+                                          CONTEXT_PAIRED_CHECK)
     fact_side = [r for r in reasons if r.split()[0] in FACT_LAYER_METRICS]
+
+    # The latency verdict, on the same absolute ceiling `evaluate` reports inside
+    # its detail. Written into both records a later reader consults — the ledger
+    # event and `eval_last.json`, which the guardian folds into the LKG record —
+    # because before this the field was written into 20 nightly artifacts and read
+    # by nothing. Deliberately NOT in `reasons`: `regressed` is the rollback
+    # channel and this is a report.
+    latency_reading = over_budget(current["overall"], CONTEXT_PAIRED_CHECK)
+    latency_verdict = latency_reading if (latency_reading or {}).get("over") else None
+    if latency_verdict:
+        logger.warning("latency over budget after %s: %.0f ms > %.0f ms (%s) — "
+                       "reported, not a rollback reason", commit[:8],
+                       latency_verdict["latency_ms_avg"],
+                       latency_verdict["budget_ms"], latency_verdict["context"])
 
     # Hand the measurement to the guardian, which folds it into the LKG record
     # when this promotion settles. Written here rather than into
@@ -551,11 +693,19 @@ def _execute_blocking() -> dict[str, Any]:
         "overall": current["overall"], "corpus": current.get("corpus") or {},
         "pin": pin_provenance,
         "regressed": regressed, "reasons": reasons,
+        # Two keys, two meanings: `latency_budget` is the reading (present for
+        # every measurable run, inside or out, so a reader can tell "fast enough"
+        # from "never measured"), and `latency_over_budget` is the verdict — null
+        # unless this run actually went past the ceiling.
+        "latency_budget": latency_reading,
+        OVER_BUDGET_FIELD: latency_verdict,
     })
     S.append_event({"event": "regression_check", "regressed": regressed,
                     "reasons": reasons, "fact_side_reasons": fact_side,
                     "stage": stage, "baseline_commit": baseline_commit,
                     "pin": pin_provenance, "noise_floor_stale": stale_floor,
+                    "latency_budget": latency_reading,
+                    OVER_BUDGET_FIELD: latency_verdict,
                     "detail": detail, "commit": commit})
     if not regressed:
         return {"status": "success", "regressed": False, "stage": stage,

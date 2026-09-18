@@ -36,6 +36,12 @@ from agent_mcp.vault import (
 from agent_mcp.facts import _extract_entities_from_query
 from app.kg_store import StoreUnavailable, store
 from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB
+# The absolute latency ceiling for THIS run's context, read from the one module
+# that owns it. Before #1129 the runner wrote `latency_ms_avg` into every
+# artifact and nothing anywhere read it, which is how a 708 ms → 4,230 ms step
+# landed silently. Reading it here, at the moment the number is produced, is what
+# makes the nightly budget a live check instead of a constant with a test.
+from workers.sources.automod_regression import CONTEXT_NIGHTLY, over_budget
 # This file runs both as `python eval/run_eval.py` (script dir on sys.path) and
 # as `import eval.run_eval` from the tests; the second form needs the package
 # spelling.
@@ -568,6 +574,12 @@ def main() -> int:
         "identity_keying_evidence": cf.identity_keying_evidence(failures),
         "summary": summary,
         "records": records,
+        # The nightly context's ceiling applied to this run's own average
+        # (`workers/sources/automod_regression.LATENCY_BUDGET_MS`). A report:
+        # `over: true` is a finding to read, never a gate that fails the run —
+        # latency is largely qmd's embedding cache, so the paired promotion check
+        # compares quality and this compares against a fixed number.
+        "latency_budget": over_budget(summary["overall"], CONTEXT_NIGHTLY),
     }
     out_path = HERE / "baselines" / f"{args.label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -576,6 +588,13 @@ def main() -> int:
     print(_corpus_line(corpus))
 
     print_table(records, summary)
+    verdict = out["latency_budget"]
+    if verdict:
+        flag = "OVER BUDGET" if verdict["over"] else "inside budget"
+        print(f"\nLatency: {verdict['latency_ms_avg']:,.0f} ms average vs the "
+              f"{verdict['context']} budget of {verdict['budget_ms']:,.0f} ms — "
+              f"{flag}. Reported, not gated: quality is what the paired promotion "
+              f"check compares; this is the absolute ceiling (#1129).")
     print_failures(failures)
     return 0
 

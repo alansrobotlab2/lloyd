@@ -92,12 +92,27 @@ VAULT_SEGMENTS = [
 # own `RECALL_DOC_POOL`.
 #
 # "Measured free" was true of the *global* arm. On the named arm — the one #504
-# switches to — the ask is the only thing that decides how much qmd does, and it is
-# still cheap on this box: 110 ms at a 40-row pool, 140 ms at 60, 165 ms at 240
-# (live daemon, rerank on, warm, median of 3). The 826 ms -> 462 ms pair quoted in
-# `_qmd_daemon_search` was measured on the other arm and does not describe this
-# one, which is why the re-measurement went to a finding on #504 instead of staying
-# a justification here.
+# switches to — the ask is the only thing that decides how much qmd does. What it
+# costs was quoted here for a while as a pair of ~100-200 ms figures labelled
+# "rerank on, warm"; they were CACHED REPEATS. `_qmd_daemon_search` warns two
+# screens below that the daemon caches query embeddings so a sequential A/B
+# measures arm order, and the figures priced here had been taken off exactly that
+# cache. Re-priced 2026-09-18 by two rounds, 3 and 5 samples per cell, live
+# daemon, named segments, a fresh never-seen query text per sample, rerank ON:
+# 2,161-2,291 ms FRESH at a 40-row pool, 3,672-4,027 ms FRESH at 240. The
+# identical repeat of a query the daemon had already run at 240 came back in
+# 119-183 ms, CACHED — which is the shape those old figures had, and it understates
+# the same unseen request by 20-34x. The rerank is the whole difference: the same
+# 240-row ask with the cross-encoder skipped returns in 150-210 ms FRESH, so what
+# the widening bought is roughly 1.5-1.7 s of cross-encoding rows 41-240 per named
+# recall.
+#
+# So the widening is not free, and the number that governs it is no longer a
+# sample in a comment: `LATENCY_BUDGET_MS` in
+# `workers/sources/automod_regression.py` sets the ceiling this shape is read
+# against (nightly 4,800 ms, set over the worst nightly run on disk at 4,408.0 ms,
+# which is `nightly-20260904-20260904-060219.json` — nine days before #504) and
+# reports one that crosses it (#1129).
 QMD_POOL_FACTOR = 3
 QMD_POOL_MAX = 240
 # The size of the pool `_vault_recall`'s document leg ranks its answer out of,
@@ -449,10 +464,24 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
     `COLLECTION_VEC_EXACT_SCAN_MAX` (20,000 chunks), and every segment here is
     under it, so an empty list (which the REST handler resolves to `undefined`)
     took sqlite-vec's native `MATCH` path: one ANN scan instead of eleven exact
-    ones. That is still true and still costs: warm on this box today, the same
-    query returns in 31-38 ms globally and 110 ms named at a 40-row pool, 165 ms
-    named at 240 (medians of 3, rerank on, rotated arm order). ~130 ms on a
-    recall whose eval average is 577 ms.
+    ones. That is still true and still costs, and the price stated here used to be
+    a CACHED-REPEAT price — figures taken by re-sending one query the daemon had
+    already embedded, which is the measurement this docstring's own `skip_rerank`
+    paragraph warns against ("the daemon caches query embeddings, so a sequential
+    A/B measures arm order, not arm"). Re-priced 2026-09-18 by two rounds (3 and 5
+    samples per cell) on never-seen query text per sample against the live daemon,
+    rerank on — every figure below says which sample it is:
+    2,161-2,291 ms FRESH named at a 40-row pool, 3,672-4,027 ms FRESH named at
+    240, the identical repeat of a query just run at 240 in 119-183 ms CACHED, and
+    150-210 ms FRESH rerank-OFF at 240, which is the fetch leg alone. So the
+    widening #504 bought is roughly 1.5-1.7 s of extra cross-encoder per named
+    recall (and the rerank over the whole width is 3.5-3.9 s of the ~3.7 s a named
+    240-row recall costs), and it is
+    governed by `LATENCY_BUDGET_MS` in `workers/sources/automod_regression.py`
+    (nightly ceiling 4,800 ms) rather than by a sample in this comment: the
+    nightly eval averaged 707.8 ms FRESH on 2026-09-13, before the widening, and
+    4,368.4 ms FRESH on 2026-09-16 after it — both artifacts in
+    `eval/baselines/` (#1129).
 
     What it bought in recall turned out to be the thing it was breaking. The
     global reply is one top-k whose width qmd derives from `limit`, and
