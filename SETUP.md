@@ -879,15 +879,20 @@ If the secrets are missing it exits with a pointer to `gen-livekit-secrets.sh`.
 
 ### Wake word models
 
-These four ONNX files **are tracked in this repo** and arrive with the clone —
+These ONNX files **are tracked in this repo** and arrive with the clone —
 nothing to do:
 
 ```
-agent-services/models/wakeword/Lloyd.onnx        # custom-trained
-agent-services/models/wakeword/Hey_Lloyd.onnx    # custom-trained
+agent-services/models/wakeword/hey_lloyd.onnx    # trained 2026-09-17, recipe in scripts/voice/wakeword/
+agent-services/models/wakeword/Lloyd.onnx        # custom-trained, recipe lost in the 08-22 rebuild
 agent-services/models/openwakeword/melspectrogram.onnx
 agent-services/models/openwakeword/embedding_model.onnx
+agent-services/models/silero-vad/silero_vad.onnx
 ```
+
+`hey_lloyd.onnx` can be rebuilt from `scripts/voice/wakeword/` (about 1.5 h on
+a 3090; architecture/voice.md "Retraining the wake word"). `Lloyd.onnx` cannot —
+its training directory went with the old disk — so it is the one to back up.
 
 They are force-added past `agent-services/.gitignore`'s `models/` rule, which is
 unanchored and would otherwise also match the 311 GB `llm/models/` tree. If you

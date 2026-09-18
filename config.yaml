@@ -820,7 +820,16 @@ livekit:
     enabled: true
     models_dir: agent-services/models/wakeword
     engine_dir: agent-services/models/openwakeword
-    threshold: 0.4
+    # 0.7 since hey_lloyd.onnx replaced Hey_Lloyd.onnx (2026-09-17, retrained
+    # with livekit-wakeword's conv-attention head — scripts/voice/wakeword/).
+    # Held-out, 10 TTS voices, through the worker's own runtime
+    # (scripts/voice/wake_eval.py):
+    #                          hey/hi/okay/hello  bare   near-miss  real room
+    #   old models @ 0.4             16/60        7/20     2/80        0
+    #   new + old Lloyd @ 0.7        33/60        5/20     0/80        0
+    # The new model scores higher on everything, so the old 0.4 would let its
+    # tail through: at 0.4-0.6 it fired once on the real-room corpus.
+    threshold: 0.7
     # Suppression window after a fire. openWakeWord's score stays above
     # threshold for several frames after the word, so without this one
     # "hey Lloyd" opens the window three times and the diagnostic log reads

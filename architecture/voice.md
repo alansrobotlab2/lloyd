@@ -263,12 +263,38 @@ stops one "hey Lloyd" opening the window three times (the score stays high for
 several frames after the word). The running peak score is reset at each speech
 onset, so the `wake_peak` on a drop line describes that utterance.
 
-**The models themselves are the weak link.** Even continuous, `Lloyd.onnx` and
-`Hey_Lloyd.onnx` caught fewer than half of clean synthetic wake phrases —
-almost none of "Hi / Okay / Hello Lloyd" — and scored "Floyd came over" at
-0.59. Retraining them (openWakeWord's recipe, or livekit-wakeword, which loads
-the same embedding front end) is the open item. Until then the transcript
-covers it:
+**The models were the weak link, so `Hey_Lloyd.onnx` was retrained** the same
+evening. Even fed continuously, it and `Lloyd.onnx` caught fewer than half of
+clean synthetic wake phrases — almost none of "Hi / Okay / Hello Lloyd" — and
+scored "Floyd came over" at 0.59. Its replacement, `hey_lloyd.onnx`, is a
+livekit-wakeword conv-attention classifier over the same `(16, 96)` embedding
+window, so it loaded into the existing runtime with no code change (see
+"Retraining the wake word" below). Held-out — ten Qwen3-TTS voices, a different
+engine from the Piper voices it was trained on — through the worker's own
+runtime (`scripts/voice/wake_eval.py`):
+
+| model set | "hey / hi / okay / hello Lloyd" (60) | bare "Lloyd" (20) | near-misses (80) | real room (496 utts) | LibriSpeech (8 min) |
+|---|---|---|---|---|---|
+| `Hey_Lloyd` + `Lloyd` @ 0.4 (before) | 16 | 7 | 2 | 0 | 0 |
+| `hey_lloyd` + `Lloyd` @ 0.7 (now) | **33** | 5 | **0** | 0 | 0 |
+
+`Lloyd.onnx` stays, for bare "Lloyd…": at 0.7 it adds 5 of 20 of those and no
+false accepts on any set, including 24 sentences that merely *mention* Lloyd.
+Its training recipe was lost with the old disk; `hey_lloyd.onnx`'s is in the
+repo. The threshold rose from 0.4 because the new model's scores sit higher
+across the board — at 0.4–0.6 it fired once in the real-room corpus.
+
+**A fire on a mention is not a request.** One mention in 24 fires either way:
+"Did Lloyd finish the report?" scored 0.93 on the new model, because "did Lloyd"
+sounds like "hi Lloyd". The gate used to inject any acoustically-woken sentence
+whose transcript it could not match, trusting the acoustic model over Whisper's
+spelling. Parakeet spells the name right, so `_mentions_wake_name` now drops a
+woken utterance whose transcript names Lloyd *mid-sentence* ("did Lloyd…", "I
+told Lloyd…", "Lloyd's car…") while keeping the name first or last as an
+address ("what time is it, Lloyd?"). A transcript with no name in it at all is
+still a mishearing, and the acoustic model still wins.
+
+The transcript also carries recall on its own:
 
 ### The second wake path: the transcript
 
@@ -916,6 +942,55 @@ was never synced still sounds right; the sync only stops the two drifting after
 a voice *change*. `load_config` merges one level deep, so a `voice.json` that
 moves only `quiet_hours.start` does not silently drop `enabled` and `end`.
 
+## Retraining the wake word
+
+`scripts/voice/wakeword/` is the recipe for `hey_lloyd.onnx`: `hey_lloyd.yaml`
+(livekit-wakeword config: target phrases, the adversarial negatives, 25 000
+samples per class, a medium conv-attention head, 100 000 steps) and
+`train.py`, which drives the six stages. On a 3090 it took about 80 minutes:
+17 of Piper synthesis, 11 of augmentation, 25 of feature extraction on CPU,
+~25 of training.
+
+Everything runs outside `.venvs/lloyd`, on purpose (SETUP.md has the incident):
+
+```bash
+export WW_ROOT=~/.cache/lloyd-wakeword
+git clone https://github.com/livekit/livekit-wakeword $WW_ROOT/livekit-wakeword
+(cd $WW_ROOT/livekit-wakeword && uv sync --extra train --extra eval --extra export)
+# espeak-ng without root: unpack Arch's package into a private prefix
+mkdir -p $WW_ROOT/espeak/pkgs $WW_ROOT/espeak/root && cd $WW_ROOT/espeak/pkgs
+for u in $(pacman -Sp espeak-ng); do curl -fsSLO "$u"; done
+for f in *.pkg.tar.zst; do tar --zstd -xf "$f" -C $WW_ROOT/espeak/root; done
+# …and a bin/espeak-ng wrapper setting LD_LIBRARY_PATH and ESPEAK_DATA_PATH
+# (or just `sudo pacman -S espeak-ng`)
+sed "s#\${WW_ROOT}#$WW_ROOT#g" scripts/voice/wakeword/hey_lloyd.yaml > $WW_ROOT/hey_lloyd.yaml
+$WW_ROOT/livekit-wakeword/.venv/bin/livekit-wakeword setup --config $WW_ROOT/hey_lloyd.yaml  # ~18 GB
+systemd-run --user --unit=lloyd-wakeword-train --collect \
+    -p MemoryHigh=24G -p Nice=10 -p CPUWeight=20 \
+    --setenv=WW_ROOT=$WW_ROOT --setenv=CUDA_DEVICE_ORDER=PCI_BUS_ID \
+    --setenv=CUDA_VISIBLE_DEVICES=0 --setenv=PATH=$WW_ROOT/espeak/bin:/usr/bin:/bin \
+    $WW_ROOT/livekit-wakeword/.venv/bin/python $PWD/scripts/voice/wakeword/train.py \
+    $PWD/scripts/voice/wakeword/hey_lloyd.yaml
+```
+
+Three things that bit the first run:
+
+- **GPU 0 is shared with the TTS server and the qmd embedder.** Synthesis at
+  `tts_batch_size: 100` took 7.2 GB and left ~2 GB; at 25 it takes 1.6 GB and
+  runs just as fast. Augmentation still peaks near 8.6 GB for ~11 minutes —
+  voice mode works through it, with little headroom. Loading the TTS server's
+  built-in voices (as the eval corpus does) grows it from 4.4 to 8.7 GB until
+  it restarts.
+- **Upstream's `run` command crashes after augmentation** (`run_extraction()`
+  lost a default in 95448a7). `train.py` calls the stages directly; the one-line
+  fix is `livekit-wakeword-sess-options.patch`. `--from <stage>` resumes, since
+  every stage's output is on disk.
+- **The package's own evaluation is optimistic** — its validation voices come
+  from the same Piper engine as training (86% recall, 0.08 false accepts an
+  hour, at 0.75). Ship only on `scripts/voice/wake_eval.py`, whose voices do
+  not: old model set vs new, same thresholds, recall and every false-accept
+  set side by side.
+
 ## Operating it
 
 ### Restarting the right thing for a voice change
@@ -970,7 +1045,8 @@ voice.
   cut phrase, padding and the 8 s window, failing open.
 - `tests/test_voice_gate.py` — the transcript wake path and its near-misses,
   its kill switch, a bare wake and the follow-up, the window's owner, a held
-  sentence sent as one turn, the one-filler matcher, the speaker encoder
+  sentence sent as one turn, a woken mention dropped while a trailing
+  address is kept, the one-filler matcher, the speaker encoder
   handed int16, the prewarm request.
 - `tests/test_voice_speakable.py` — clauses whatever the slicing, the early
   first clause, abbreviations and decimals, code, dividers, lists, tables,

@@ -642,6 +642,28 @@ def _strip_wake_word(text: str, words: list[str]) -> Optional[str]:
     return None
 
 
+def _mentions_wake_name(text: str, words: list[str]) -> bool:
+    """True when the transcript names Lloyd somewhere other than as an address.
+
+    An address puts the name first ("Lloyd, …" — handled by `_strip_wake_word`)
+    or last ("what time is it, Lloyd?"). Anywhere else it is a mention: "did
+    Lloyd finish", "I told Lloyd about it", "Lloyd's car". Only the single-word
+    names count — the name, not the phrase, is what a sentence mentions.
+    """
+    import re
+
+    toks = re.findall(r"[a-z']+", text.lower())
+    names = {w for w in words if " " not in w}
+    last = len(toks) - 1
+    for i, tok in enumerate(toks):
+        possessive = tok.endswith("'s")
+        if (tok[:-2] if possessive else tok) not in names:
+            continue
+        if possessive or 0 < i < last:
+            return True
+    return False
+
+
 #: Disfluencies allowed ahead of a wake phrase in a transcript.
 _WAKE_FILLERS = frozenset({"uh", "um", "er", "erm", "oh", "ah", "so", "well", "and"})
 
@@ -1864,6 +1886,17 @@ class RoomBridge:
                 LOG.info(
                     "[%s] bare wake-word inferred from short transcript %r (%s/%.2f) — opening %.1fs window",
                     self.room_name, text[:40], ww_name, ww_score, wake.continuation_seconds,
+                )
+                return
+            elif _mentions_wake_name(text, wake.words):
+                # The name is in the transcript, but in the middle of the
+                # sentence: "Did Lloyd finish the report?" is ABOUT Lloyd, not
+                # TO him. The retrained model fired on exactly that at 0.93
+                # ("did Lloyd" sounds like "hi Lloyd"), and before Parakeet
+                # the transcript could not be trusted to tell the difference.
+                LOG.info(
+                    "[%s] wake name mentioned, not addressed (%s/%.2f) in %r — dropped",
+                    self.room_name, ww_name, ww_score, text[:80],
                 )
                 return
             else:

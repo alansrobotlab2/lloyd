@@ -1,0 +1,79 @@
+# Training recipe for agent-services/models/wakeword/hey_lloyd.onnx.
+# Run through scripts/voice/wakeword/train.py, which renders ${WW_ROOT} (the
+# pipeline does not expand `~` or env vars itself) and drives every stage.
+# architecture/voice.md "Retraining the wake word" has the whole procedure.
+#
+# Lloyd's wake word, trained with livekit-wakeword (conv-attention head) on
+# 2026-09-17. The classifier reads the same (16, 96) openWakeWord embedding
+# window the worker already computes, so the exported ONNX drops into
+# agent-services/models/wakeword/ with no code change.
+model_name: hey_lloyd
+target_phrases: ["hey lloyd", "hi lloyd", "okay lloyd", "ok lloyd", "hello lloyd"]
+
+n_samples: 25000
+n_samples_val: 5000
+n_background_samples: 2000
+n_background_samples_val: 500
+tts_batch_size: 25
+
+# Bare "Lloyd" is a NEGATIVE here: it is a name said mid-sentence, and the
+# transcript path covers "Lloyd, ..." at utterance end. The rest are the
+# phonetic neighbours that fooled the old models ("Floyd came over" scored
+# 0.59 on Lloyd.onnx) plus other assistants' wake words.
+custom_negative_phrases:
+  - "lloyd"
+  - "lloyd's"
+  - "hey floyd"
+  - "hi floyd"
+  - "okay floyd"
+  - "hey boyd"
+  - "hey void"
+  - "hey lord"
+  - "hey loyal"
+  - "hey alloy"
+  - "hey annoyed"
+  - "hey lois"
+  - "hey lloyds bank"
+  - "hey look"
+  - "hey light"
+  - "hey there"
+  - "hey you"
+  - "okay google"
+  - "hey siri"
+  - "alexa"
+  - "so i told lloyd"
+  - "ask lloyd"
+  - "floyd came over"
+  - "the alloy wheels"
+
+noise_scales: [0.98]
+noise_scale_ws: [0.98]
+length_scales: [0.75, 1.0, 1.25]
+slerp_weights: [0.2, 0.35, 0.5, 0.65, 0.8]
+
+data_dir: ${WW_ROOT}/data
+output_dir: ${WW_ROOT}/output
+
+augmentation:
+  clip_duration: 2.0
+  batch_size: 16
+  rounds: 3
+  background_paths: [${WW_ROOT}/data/backgrounds]
+  rir_paths: [${WW_ROOT}/data/rirs]
+
+model:
+  model_type: conv_attention
+  model_size: medium
+
+steps: 100000
+learning_rate: 0.0001
+weight_decay: 0.01
+label_smoothing: 0.05
+max_negative_weight: 3000
+target_fp_per_hour: 0.1
+
+batch_n_per_class:
+  positive: 50
+  adversarial_negative: 50
+  ACAV100M_sample: 1024
+  background_noise: 50

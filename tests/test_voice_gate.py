@@ -221,3 +221,29 @@ def test_barge_in_is_gated_on_the_switch_the_speaker_and_the_speech(
     b.wake.extend("user-a")
     b._on_speech_start(who)
     assert b.tts.interrupts == expected
+
+
+@pytest.mark.parametrize("text,injected", [
+    # Mentions: the model fired, the transcript names Lloyd mid-sentence.
+    # "Did Lloyd finish the report?" is the one the retrained model scored
+    # 0.93 on — "did Lloyd" sounds like "hi Lloyd".
+    ("Did Lloyd finish the report?", []),
+    ("I was telling Lloyd about it earlier.", []),
+    ("Lloyd's car is parked outside.", []),
+    # Addresses: first or last.
+    ("What time is it, Lloyd?", ["What time is it, Lloyd?"]),
+    # Misheard: no name in the transcript at all, so the acoustic model
+    # stays the authority on whether it was said.
+    ("Louida, what time is it?", ["Louida, what time is it?"]),
+])
+def test_an_acoustic_wake_on_a_mention_is_not_a_request(text, injected):
+    b = _bridge([text])
+    assert _hear(b, wake=True) == injected
+
+
+def test_the_mention_check_reads_the_name_not_the_phrases():
+    names = sorted(WORDS, key=len, reverse=True)
+    assert livekit_worker._mentions_wake_name("ask Lloyd later", names)
+    assert not livekit_worker._mentions_wake_name("thanks Lloyd", names)
+    assert not livekit_worker._mentions_wake_name("Lloyd, stop", names)
+    assert not livekit_worker._mentions_wake_name("the alloy wheels", names)
