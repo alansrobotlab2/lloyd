@@ -543,6 +543,15 @@ its own. `iv_inject_queue` and `zzq_phantom_handle_v3` qualify; `inner_voice`,
 `file_path` and `observer_prompt` do not — those are modules and argument keys
 that half the calls in a session mention in passing.
 
+Shape, though, only proves a token is *specific*, and since #1026 the predicate
+refuses the solo-carry to opaque ids too: a `^[0-9a-f]{7,40}$` hex id (a git
+short-SHA is exactly 16 characters) and anything containing a run of 6+ digits (a
+session key splices into the underscored fragment after its digits —
+`20260912_140009_autocode_7915.md` yields `_140009_autocode_7915`) are not source
+symbols, so three ordinary looks at one commit or one digest are not a loop. The
+exclusion is by token class and reaches the solo-carry branch only: a pair that
+also shares a real symbol clears `min_overlap` and names both terms.
+
 Net effect on the fixture: the first fire is still exactly at the 4th
 near-duplicate, and a **second** cluster is now caught — messages 72-79, where
 the primary hunts `build_subliminal_context`, a symbol never defined anywhere.

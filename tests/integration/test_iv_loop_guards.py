@@ -230,6 +230,191 @@ def test_repetition_ignores_three_greps_sharing_only_a_filename():
     print("test_repetition_ignores_three_greps_sharing_only_a_filename: OK")
 
 
+# ---------------------------------------------------------------------------
+# #1026 — an opaque id cannot carry a near match on its own
+# ---------------------------------------------------------------------------
+#
+# #523 closed the directory/filename channel; this is the other token class
+# that used to carry a match alone. `_is_distinctive` granted the solo-carry on
+# shape (`term.count("_") >= 2 or len(term) >= 16`), and two non-symbol shapes
+# satisfied it: a 16-char hex id clears the length test exactly, and the
+# identifier regex cannot start inside digits, so a session key splices into
+# the underscore-rich fragment after it
+# (`…/20260912_140009_autocode_7915.md` → `_140009_autocode_7915`).
+#
+# Measured live in `usage.db` (`inner_voice_observations`, action='inject',
+# reason LIKE 'deterministic:%near-identical%'): 14 injects naming an opaque id,
+# all of them dated 2026-09-12, the last reading
+# `3 near-identical Bash calls for _043416_iv9aa2, a9a5bdae37eff3d4`. Both named
+# terms were id artifacts; the primary was inspecting ONE commit from three
+# ordinary angles.
+#
+# SHA is a git short-SHA-shaped token, not a commit in this repo — the token
+# CLASS is the defect, which is also why the sequences below are shaped as
+# inspection rather than as a hunt.
+
+SHA = "a9a5bdae37eff3d4"
+SESSION_DIGEST = (
+    "/home/alansrobotlab/lloyd/_pipeline/vault-derived/sessions/"
+    "2026-09-12/20260912_140009_autocode_7915.md"
+)
+
+
+def test_repetition_ignores_one_hex_commit_id_alone():
+    """Clause 1a: three `git` calls naming one 16-hex id are not a loop.
+
+    `-- lloyd/MEMORY.md` / `--stat` / `--format=%B` is how a commit gets read,
+    and the only shared identifier is the id itself. The assertions before the
+    verdict pin WHY it is silent: the id is shared as an identifier and is not a
+    path operand, so neither the tokenizer nor #523's carrier rule is what
+    stopped the fire — only the predicate.
+    """
+    sigs = _sigs([
+        f"git show {SHA} -- lloyd/MEMORY.md",
+        f"git show {SHA} --stat",
+        f"git log -1 --format=%B {SHA}",
+    ])
+    assert all(s.idents == frozenset({SHA}) for s in sigs), [s.idents for s in sigs]
+    assert not any(s.path_idents for s in sigs), "the id must not be read as a location"
+    assert not guards._is_distinctive(SHA), "a hex id must not carry a match alone"
+    # `ambient=frozenset()` so the silence cannot be attributed to the ambient
+    # pass: with nothing stripped, the predicate is the only thing left.
+    assert guards.repetition_verdict(sigs, ambient=frozenset()) is None
+    print("test_repetition_ignores_one_hex_commit_id_alone: OK")
+
+
+def test_repetition_ignores_a_digit_spliced_session_id_fragment_alone():
+    """Clause 1b: three non-search reads of one session digest stay silent.
+
+    The shared token here is `_140009_autocode_7915` — three underscores, so it
+    cleared the old segment test — and it is a filename STEM, which #523 round 2
+    (`47077d8`) already demoted from carrier to location for SEARCHES. These
+    three calls are `wc -l` / `grep -c` / `tail -20`, the read shape that #523
+    deliberately KEEPS firing (see
+    `test_repetition_ignores_three_greps_sharing_only_a_filename`'s control
+    half), so the read shape cannot be what silences them. It is the token class:
+    the stem is an opaque session key, not a symbol. `test_trajectory_extraction`
+    — the pinned control stem — has no digit run and still fires, which is the
+    difference between these two tests.
+    """
+    sigs = _sigs([
+        f"wc -l {SESSION_DIGEST}",
+        f"grep -c Stop {SESSION_DIGEST}",
+        f"tail -20 {SESSION_DIGEST}",
+    ])
+    stem = "_140009_autocode_7915"
+    assert all(stem in s.idents for s in sigs), [s.idents for s in sigs]
+    assert stem not in sigs[0].path_idents, (
+        "precondition: a read's file is the target, so this is the shape that "
+        "must keep firing for a real symbol — silence here is the token class"
+    )
+    assert not guards._is_distinctive(stem)
+    assert guards.repetition_verdict(sigs, ambient=frozenset()) is None
+    print("test_repetition_ignores_a_digit_spliced_session_id_fragment_alone: OK")
+
+
+def test_repetition_still_fires_when_an_opaque_id_shares_with_a_real_symbol():
+    """Clause 3: the weakening reaches the solo-carry branch and nothing else.
+
+    Same three `git` shapes, same hex id — plus one hunted symbol in every
+    command. Two shared non-path terms clear `min_overlap` without any reference
+    to distinctiveness, so the verdict must come back and name BOTH: the id is
+    no longer a solo carrier, it has not become invisible. A change that
+    suppressed the id outright (a tokenizer deny-list, or read-shape
+    suppression) fails here.
+    """
+    sigs = _sigs([
+        f"git log --grep=iv_inject_queue {SHA}",
+        f"git log --grep=iv_inject_queue --oneline {SHA}",
+        f"git log --grep=iv_inject_queue -3 {SHA}",
+    ])
+    assert all(s.idents == frozenset({"iv_inject_queue", SHA}) for s in sigs)
+    verdict = guards.repetition_verdict(sigs, ambient=frozenset())
+    assert verdict is not None, "two shared terms still clear min_overlap"
+    assert set(verdict.shared_terms) == {"iv_inject_queue", SHA}, verdict.shared_terms
+    assert guards._is_distinctive("iv_inject_queue"), (
+        "and the symbol keeps its solo-carry: the id is what was demoted"
+    )
+    print("test_repetition_still_fires_when_an_opaque_id_shares_with_a_real_symbol: OK")
+
+
+def test_opaque_id_inspection_through_the_pretool_hook_produces_no_nudge():
+    """The seam this change has to hold: hook → guard → what the primary reads.
+
+    A predicate flipped in isolation proves nothing about the message the
+    primary receives, and the guard is reached through `fire_pre_tool_use`,
+    which keeps the ring, applies the ambient pass over more history than the
+    comparison window holds, and renders the nudge. So drive the two opaque-id
+    sequences through the real hook with no LLM available, then drive one real
+    reformulation through the same hook in a fresh observer to prove the channel
+    still speaks. Both halves are needed: the first alone would also pass if the
+    hook stopped wiring the repetition guard at all.
+    """
+    from unittest.mock import patch
+    from app.harness.hooks import HookRegistry
+    from app.inner_voice.observer import install_observer
+
+    cfg = obs_mod._observer_cfg()
+    cfg.update({"pretool_llm_enabled": False, "fast_path_enabled": True})
+
+    async def run(session_id: str, commands: list[str]) -> list:
+        def no_llm(**kwargs):
+            raise AssertionError("the repetition guard must not need an LLM call")
+
+        chat_messages: list = []
+        hooks = HookRegistry()
+        with patch.object(obs_mod, "_observer_cfg", return_value=cfg), \
+             patch.object(obs_mod, "extract_goal_card", new=_no_goal_card):
+            state = install_observer(
+                hooks=hooks, session_id=session_id, turn_id=f"{session_id}_turn",
+                user_request="inspect one commit, then a session digest",
+                chat_messages_handle=chat_messages,
+                cancel_event=asyncio.Event(), primary_model="primary",
+            )
+        with patch.object(obs_mod, "_post_chat_completion_with_tools", new=no_llm):
+            for command in commands:
+                await hooks.fire_pre_tool_use(
+                    session_id=session_id, tool_name="Bash",
+                    tool_input={"command": command},
+                )
+        obs_mod.close_observer(state)
+        return chat_messages
+
+    # The three SHA calls alone would stay silent even unfixed, and for a
+    # reason worth stating: the observer computes `ubiquitous_identifiers` over
+    # the whole ring it keeps, and in a ring where every call names the same id
+    # that id reads as ambient and is dropped. The live fires were never that
+    # shape — the primary inspected one commit INSIDE an ordinary working turn,
+    # so the id appeared in three calls of eleven and was not ubiquitous. That
+    # is the sequence replayed here, healthy calls first.
+    inspection = [
+        "git status --porcelain | head -20",
+        "pytest tests/integration/test_iv_loop_guards.py -k repetition -q",
+        "sed -n '1,40p' app/inner_voice/guards.py",
+        "grep -rn resolve_model_alias app/config.py",
+        "supervisorctl status | head -40",
+        "git log --format='%h %s' -3",
+        f"git show {SHA} -- lloyd/MEMORY.md",
+        f"git show {SHA} --stat",
+        f"git log -1 --format=%B {SHA}",
+        f"wc -l {SESSION_DIGEST}",
+    ]
+    injected = asyncio.new_event_loop().run_until_complete(
+        run("opaque_id_inspection", inspection)
+    )
+    assert injected == [], f"opaque ids carried a nudge to the primary: {injected}"
+
+    hunt = [
+        "grep -rn iv_inject_queue app/inner_voice",
+        "grep -rn iv_inject_queue app/routers --include=*.py | head -40",
+        'grep -rn "iv_inject_queue" workers/; echo EXIT=$?',
+    ]
+    spoke = asyncio.new_event_loop().run_until_complete(run("opaque_id_control", hunt))
+    assert len(spoke) == 1, f"the same hook stopped catching a real hunt: {spoke}"
+    assert "iv_inject_queue" in str(spoke[0].get("content")), spoke[0]
+    print("test_opaque_id_inspection_through_the_pretool_hook_produces_no_nudge: OK")
+
+
 def test_repetition_requires_a_carrier_that_is_not_a_path():
     """Clause 3: with `ambient=frozenset()` the carrier rule is load-bearing.
 

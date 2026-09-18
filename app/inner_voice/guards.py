@@ -923,6 +923,32 @@ def ubiquitous_identifiers(sigs: list[ToolCallSignature]) -> frozenset[str]:
     return frozenset(common)
 
 
+# Opaque identifiers — specific, and not a source symbol.
+#
+# Both of `_is_distinctive`'s branches admit them. A git short-SHA is
+# `^[0-9a-f]{7,40}$` by construction, so a 16-char id clears `len >= 16` exactly;
+# and `_IDENT_RE` cannot START inside digits, so a session key or a timestamped
+# id splices into whatever underscore-rich fragment follows its digits —
+# `20260912_043416_iv9aa2` yields `_043416_iv9aa2`, three underscores, therefore
+# distinctive. Either one then carries a near match alone, and inspecting ONE
+# commit, or one session digest, from three ordinary angles reads as a loop:
+# `git show <sha> -- FILE`, `git show <sha> --stat`,
+# `git log -1 --format=%B <sha>`. Live on 2026-09-12 that fired fourteen
+# deterministic repetition injects, the last naming
+# `_043416_iv9aa2, a9a5bdae37eff3d4` — neither term a search target (#1026).
+#
+# The rejection is by token CLASS, never by read shape. Three reads of one file
+# must keep firing on that file's stem — `test_iv_loop_guards.py
+# ::test_repetition_ignores_three_greps_sharing_only_a_filename` pins it, because
+# that is the shape calibration message 76 has — and the pinned stem
+# (`test_trajectory_extraction`) carries no digit run, so it is untouched here.
+# What goes is an id's right to stand alone as a subject. A match with a second,
+# genuine carrier still fires: two shared non-path terms clear `min_overlap`
+# without consulting this function at all.
+_HEX_ID_RE = re.compile(r"^[0-9a-f]{7,40}$")
+_LONG_DIGIT_RUN_RE = re.compile(r"\d{6,}")
+
+
 def _is_distinctive(term: str) -> bool:
     """True for an identifier specific enough to carry a match on its own.
 
@@ -936,7 +962,17 @@ def _is_distinctive(term: str) -> bool:
     underscore-joined parts is a specific symbol somebody is chasing; a
     two-part name (`inner_voice`, `file_path`, `observer_prompt`) is a module
     or an argument key that half the calls in a session mention in passing.
+
+    Shape alone, though, is only evidence that a token is *specific*, and an
+    opaque id is as specific as a symbol while naming no symbol at all. So a
+    hex id (`a9a5bdae37eff3d4`) and anything carrying a run of 6+ digits
+    (`_043416_iv9aa2`, `sm_20260908_165950`) are refused the solo-carry before
+    the shape test runs — see the two regexes above. This narrows the
+    solo-carry branch only; it does not touch `min_overlap`, so a pair sharing
+    the same id PLUS a real symbol still matches and still names both.
     """
+    if _HEX_ID_RE.match(term) or _LONG_DIGIT_RUN_RE.search(term):
+        return False
     return term.count("_") >= 2 or len(term) >= 16
 
 

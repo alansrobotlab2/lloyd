@@ -220,6 +220,45 @@ def test_distinctiveness_separates_symbols_from_module_names():
     assert not guards._is_distinctive("observer_prompt")
 
 
+def test_distinctiveness_refuses_opaque_ids():
+    """#1026: specificity is not the same property as being a source symbol.
+
+    Both of `_is_distinctive`'s branches read shape, and opaque ids have shape.
+    A 16-char git short-SHA clears `len(term) >= 16` exactly, and because
+    `_IDENT_RE` cannot start inside digits, a session key splices into the
+    underscore-rich fragment after it (`20260912_140009_autocode_7915.md` →
+    `_140009_autocode_7915`, three underscores). Each then carried a near match
+    alone, so three ordinary looks at one commit read as a loop. The live
+    evidence was 14 deterministic injects on 2026-09-12, the last naming
+    `_043416_iv9aa2, a9a5bdae37eff3d4` — neither term a search target.
+
+    These assertions are the false-cases half of the predicate; the
+    end-to-end half lives in
+    `test_iv_loop_guards.py::test_repetition_ignores_one_hex_commit_id_alone`
+    and its neighbours, because a unit assertion on the predicate cannot show
+    that the guard stops firing.
+    """
+    # Hex ids: git short-SHA / hash shapes, 7 through 40 characters.
+    for opaque in ("a9a5bdae37eff3d4",      # the 16-hex id from the live fire
+                   "deadbeef",              # 7, the shortest shape
+                   "0123456789abcdef0123456789abcdef01234567",  # 40, the longest
+                   "a9a5bdae37eff3d4e5f6"):
+        assert not guards._is_distinctive(opaque), opaque
+    # Long digit runs: session keys, timestamps, PIDs.
+    for digit_run in ("_043416_iv9aa2",                 # 6 digits, leading
+                      "_140009_autocode_7915",          # the session digest stem
+                      "sm_20260908_165950",             # the round-id shape
+                      "20260912_140009"):
+        assert guards._LONG_DIGIT_RUN_RE.search(digit_run), digit_run
+        assert not guards._is_distinctive(digit_run), digit_run
+    # Real symbols are untouched, including ones that end in a short version
+    # number: two digits is a version, six is an id.
+    assert guards._is_distinctive("iv_inject_queue")
+    assert guards._is_distinctive("zzq_phantom_handle_v3")
+    assert guards._is_distinctive("build_subliminal_context")
+    assert not guards._LONG_DIGIT_RUN_RE.search("zzq_phantom_handle_v3")
+
+
 # ---------------------------------------------------------------------------
 # Stall regex — announces that are actually delivered statements
 # ---------------------------------------------------------------------------
