@@ -232,7 +232,9 @@ def _build_state_anchor(session_id: str, max_turns: int = 0,
     worktree and was killed fourteen seconds — one `automod_gate` call — before
     the verdict that would have landed them, with 32 of its 100 iterations
     still unspent. The iteration anchor cannot see that clock and never fired.
-    `app.deadline_anchor` is the single definition, shared with autonomy.
+    `app.deadline_anchor` is the single definition of BOTH budget clocks — the
+    iteration anchor above is built there too, since #1061 gave the autonomy
+    path the same warning and a copy in each caller was the reason it had none.
 
     The **context** anchor is the third clock, and the one that was missing
     entirely. A turn can die with iterations and minutes to spare simply by
@@ -264,32 +266,23 @@ def _build_state_anchor(session_id: str, max_turns: int = 0,
     just seen it and does not need telling twice.
     """
     from app.config import CONFIG
+    from app.deadline_anchor import (
+        build_deadline_anchor,
+        build_iteration_anchor,
+        compose_state_anchors,
+    )
 
     interval = int(
         (CONFIG.get("harness") or {}).get("todo_anchor_interval_iterations", 10)
     )
     state = {"sig": None, "last_iter": 0}
 
-    fired: set[int] = set()
-
-    def budget(iteration: int) -> list[dict[str, Any]]:
-        if not max_turns or max_turns <= 0:
-            return []
-        out = []
-        for pct in (75, 90):
-            if pct in fired or iteration * 100 < pct * max_turns:
-                continue
-            fired.add(pct)
-            left = max(0, int(max_turns) - int(iteration))
-            out.append({"role": "user", "content": (
-                f"<budget>Iteration {iteration} of {max_turns}: {left} iteration(s) "
-                "remain before this turn is stopped. A turn cut off at the budget "
-                "ends with no report and lands nothing. If an automod round is open, "
-                "gate and land it now (automod_gate, then automod_land) or abort it; "
-                "otherwise finish — say what is done and what is not.</budget>")})
-        return out
-
-    from app.deadline_anchor import build_deadline_anchor
+    # Both budget clocks are built in `app.deadline_anchor`, which is also what
+    # `autonomy._build_task_anchor` builds from (#1061). The iteration warning
+    # used to be a closure defined right here, which is how a scheduled task
+    # came to reach `max_turns` with no warning at all: there was nothing to
+    # import.
+    budget = build_iteration_anchor(max_turns)
     deadline = build_deadline_anchor(deadline_seconds, what="turn")
 
     ctx_cfg = (CONFIG.get("harness") or {}).get("context_anchor") or {}
@@ -348,10 +341,13 @@ def _build_state_anchor(session_id: str, max_turns: int = 0,
                 f"now rather than after one more check.</context>")})
         return out
 
+    # The same composer autonomy uses, and the same order: the turn cap's two
+    # levels before the wall clock's. Context and todos stay here because they
+    # read session state this module owns.
+    clocks = compose_state_anchors(budget, deadline)
+
     async def anchor(iteration: int) -> list[dict[str, Any]]:
-        out = budget(iteration)
-        if deadline is not None:
-            out += await deadline(iteration)
+        out = await clocks(iteration) if clocks is not None else []
         out += context(iteration)
         return out + await todo_anchor(iteration)
 

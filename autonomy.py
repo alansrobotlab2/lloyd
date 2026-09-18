@@ -871,18 +871,32 @@ def _evidence_claims(final_response: str) -> list[dict]:
     return parse_claims_block(final_response)
 
 
-# Wall-clock budget anchor. The chat path warns a turn that it is running out of
-# ITERATIONS (app/routers/messages.py::_build_state_anchor, 75%/90% of
-# max_turns); an autonomy run is bounded by neither of those — it dies on
-# `asyncio.timeout(timeout_seconds)` — and nothing told the model that clock
-# existed. So a run that had the answer in hand at t-1s was killed without ever
-# being asked for it, and the run record read "(no output before timeout)".
+# Budget anchors, because an autonomy run is bounded by TWO clocks.
 #
-# That is the whole of the 2026-09-08 failure of #80: `validate_okf.py` takes
-# 2.4s, the budget was 300s, and three consecutive runs spent all of it
-# investigating and reported nothing. A timeout the model cannot see is a
-# deadline it cannot meet.
-from app.deadline_anchor import build_deadline_anchor
+# The wall clock is `asyncio.timeout(timeout_seconds)`. Nothing told the model
+# it existed until #80: `validate_okf.py` takes 2.4s, the budget was 300s, and
+# three consecutive runs on 2026-09-08 spent all of it investigating and
+# reported nothing. A timeout the model cannot see is a deadline it cannot meet.
+#
+# The iteration clock is `RunOptions.max_turns` — `agent.max_turns` below, which
+# is 60. The comment here used to read that an autonomy run "is bounded by
+# neither of those — it dies on `asyncio.timeout(timeout_seconds)`", and for the
+# population that is now common that was false: `app/harness/loop.py` breaks
+# with `stop_reason="max_turns"` the iteration past the cap, and
+# `app/harness/finalizer.py` records no verdict for that death at all.
+# `workers.db` holds 20 scheduled-task runs that died exactly there between
+# 2026-09-04 and 2026-09-18, six of them task #39 — whose 2400s wall clock puts
+# the deadline anchor's first level at 1680s, while all six died inside 1114s.
+# The warning they needed was the chat path's, and it lived as a closure inside
+# `app/routers/messages.py` with nothing to import (#1061).
+#
+# Both builders are in `app.deadline_anchor`, shared with the chat path, so each
+# warning is one string rather than two that drift.
+from app.deadline_anchor import (
+    build_deadline_anchor,
+    build_iteration_anchor,
+    compose_state_anchors,
+)
 
 
 def _task_inner_voice(task: dict) -> bool:
@@ -927,6 +941,29 @@ def _build_deadline_anchor(timeout_s: int):
     the identical behaviour, and two copies of "how close is the deadline"
     drift in the direction nobody is watching."""
     return build_deadline_anchor(timeout_s, what="task")
+
+
+def _build_task_anchor(timeout_s: int, max_turns: int):
+    """The one `state_anchor` a scheduled task gets, carrying both of its clocks.
+
+    `timeout_s` must be the clamped value `asyncio.timeout` actually receives
+    and `max_turns` the value handed to `RunOptions` — each warning is a
+    fraction of one of those, and a fraction of a budget the run does not have
+    arrives either too late to act on or after the run is already dead.
+
+    A run with no wall clock still has a turn cap and still dies on it, so this
+    returns an iteration-only anchor rather than `None`; `None` only when
+    neither budget exists. That is the whole of #1061 — the wall-clock half has
+    been here since #80, and 20 runs between 2026-09-04 and 09-18 died at
+    `turns=61` with nothing said about iterations.
+    """
+    # Iteration levels first, then the wall clock — the order the chat path has
+    # always emitted them in, so one run reading both messages sees them the way
+    # every chat turn has.
+    return compose_state_anchors(
+        build_iteration_anchor(max_turns),
+        _build_deadline_anchor(timeout_s),
+    )
 
 
 def _get_model_env(model_name: str) -> dict:
@@ -1205,18 +1242,24 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         task_hooks = HookRegistry()
         install_policy_hook(task_hooks, scope=grant_scope)
 
+        # ONE number for the cap and for the warning about the cap. The harness
+        # stops the run at `max_turns` (`app/harness/loop.py`), and the anchor
+        # below counts down to it; read twice, the two drift and the warning
+        # arrives at an iteration the run never reaches.
+        max_turns = int(config.get("agent", {}).get("max_turns", 60))
+
         options = RunOptions(
             model=task_model,
             base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
             system_prompt=system_prompt,
-            max_turns=config.get("agent", {}).get("max_turns", 60),
+            max_turns=max_turns,
             permission_mode="bypassPermissions",
             mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
             disallowed_tools=disallowed_tools,
             env=model_env,
             priority=1,
             hooks=task_hooks,
-            state_anchor=_build_deadline_anchor(timeout),
+            state_anchor=_build_task_anchor(timeout, max_turns),
             # Both, and both for a concrete reason. `session_id` routes this
             # run's tool-result spills under its own session instead of the
             # process-wide default; `turn_id` is what switches on the per-turn

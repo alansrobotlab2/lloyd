@@ -221,6 +221,42 @@ def test_budget_anchor_is_silent_without_a_budget(monkeypatch):
     assert all(asyncio.run(anchor(i)) == [] for i in range(1, 50))
 
 
+def test_the_iteration_warning_comes_from_one_builder_for_both_paths(monkeypatch):
+    """The chat path and the autonomy path must not each own a copy of the
+    `<budget>Iteration N of M` sentence.
+
+    The chat path has warned about `max_turns` since #278; the autonomy path
+    warned only about its wall clock, so a scheduled task reached its turn cap
+    with no warning at all (#1061). The fix lifts the sentence out of the chat
+    closure into `app.deadline_anchor.build_iteration_anchor`, which both
+    callers build from. That is what keeps the chat bytes unchanged — a second
+    copy could be edited in one place only, and the drift is invisible from
+    either file.
+    """
+    import inspect
+
+    import autonomy
+    from app.routers import messages as M
+    monkeypatch.setattr(M, "_load_session_todos", lambda sid: [])
+
+    chat = M._build_state_anchor("sess", max_turns=100)  # no deadline given
+    task = autonomy._build_task_anchor(0, 100)           # no wall clock given
+    for i in (75, 90):
+        chat_out = asyncio.run(chat(i))
+        task_out = asyncio.run(task(i))
+        assert len(chat_out) == 1 and len(task_out) == 1, (i, chat_out, task_out)
+        assert chat_out[0] == task_out[0], f"iteration {i}: the two paths diverged"
+        assert chat_out[0]["role"] == "user"
+        assert chat_out[0]["content"].startswith(
+            f"<budget>Iteration {i} of 100: {100 - i} iteration(s) "
+            "remain before this turn is stopped."
+        )
+
+    # And the shared builder is genuinely shared: the chat caller no longer
+    # holds the message text itself.
+    assert "Iteration {iteration} of" not in inspect.getsource(M._build_state_anchor)
+
+
 def test_budget_and_todo_anchors_ride_the_same_closure(monkeypatch):
     from app.routers import messages as M
     monkeypatch.setattr(M, "_load_session_todos", lambda sid: list(TODOS))

@@ -2852,12 +2852,14 @@ process**. `architecture/workers.md` is the long version.
 
 ### A budget the model cannot see is a deadline it cannot meet
 
-An autonomy run is bounded by wall clock — `asyncio.timeout(timeout_seconds)`
-in `autonomy.run_task` — and until 2026-09-08 nothing told the model that clock
-existed. The chat path has warned at 75%/90% of `max_turns` since
-`_build_state_anchor` landed, but that counts *iterations*, which is not the
-budget an autonomy task dies on, and `run_task` calls `run_query` directly and
-passed no `state_anchor` at all.
+An autonomy run is bounded by **two** clocks, and for years it was warned about
+neither, then about one. The wall clock is `asyncio.timeout(timeout_seconds)` in
+`autonomy.run_task`; the iteration clock is `RunOptions.max_turns`
+(`agent.max_turns`, 60), which `app/harness/loop.py` enforces and
+`app/harness/finalizer.py` records **no verdict for at all**. The chat path has
+warned at 75%/90% of `max_turns` since `_build_state_anchor` landed, but the
+warning was a closure inside that function, so `run_task` — which calls
+`run_query` directly — had nothing to import and passed no `state_anchor`.
 
 The failure that produces is silent and looks like a stall. Task #80 runs
 `validate_okf.py`, which takes **2.4 seconds**, on a 300 s budget. Three
@@ -2870,9 +2872,19 @@ a bubblewrap sandbox that does not exist (nothing in `agent_mcp/builtin_bash.py`
 sandboxes anything) — and was killed without ever being asked to write it down.
 #78 and #24 died the same way in the same window.
 
-`_build_deadline_anchor(timeout)` is now passed as `RunOptions.state_anchor`,
-firing once at 70% and once at 90% of the resolved budget. Three things about
-it are load-bearing:
+`_build_task_anchor(timeout, max_turns)` is now passed as the single
+`RunOptions.state_anchor`, and it carries both clocks: once at 70% and once at
+90% of the resolved wall-clock budget, plus once at 75% and once at 90% of
+`max_turns` in the chat path's exact `<budget>Iteration N of M` wording. Both
+builders live in `app/deadline_anchor` — `build_deadline_anchor` and
+`build_iteration_anchor`, joined by `compose_state_anchors` — because 20
+scheduled-task runs between 2026-09-04 and 09-18 died at
+`stop_reason=max_turns, turns=61`. Six of those predate the wall-clock anchor
+(`af038eb`, 2026-09-08 20:21 −07:00); of the 14 after it, every one finished
+its 61 iterations below 70% of its own clamped timeout — the shortest at 269 s,
+the longest at 2059 s against a 2499 s level — so the warning that does exist
+could not have fired on a single one (#1061). Four things about it are
+load-bearing:
 
 - **It is built from `timeout`, not `declared_timeout`.** The pool clamps the
   frontmatter value (`max_duration - _POOL_TIMEOUT_MARGIN`), so warning at 70%
@@ -2883,6 +2895,14 @@ it are load-bearing:
   reports nothing at all, and a partial report beats a failed run.
 - **Each level fires once.** The chat anchor's rule, for the same reason: a
   warning re-sent every iteration is one the model learns to skip.
+- **One callable, and it is not `None` just because the wall clock is absent.**
+  The harness takes exactly one `state_anchor`, and `app/harness/loop.py` calls
+  it inside a `try` that swallows what it raises and logs a warning — so a
+  composed anchor that misbehaves fails the same way a missing one does: a
+  warning nobody hears and no run record. A task with `timeout_seconds: 0` has
+  no wall clock but still has a turn cap and still dies on it, so
+  `_build_task_anchor` returns an iteration-only anchor there rather than
+  `None`, and `None` only when neither budget exists.
 
 Resolution is one iteration — a single tool call longer than the remaining
 budget still overruns. That is the accepted limit; the failure being fixed is
