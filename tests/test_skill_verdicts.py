@@ -23,6 +23,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
+import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -527,3 +531,415 @@ def test_a_widened_sequence_key_survives_the_candidate_round_trip(tmp_path, stor
     body = second.read_text(encoding="utf-8")
     assert f"pattern: {key}" in body
     assert f"status: {status}" in body.split("---", 2)[1]
+
+
+# ── #772: the ledger exists in two trees, and a lost artifact says so ────────
+#
+# Everything above pins that a verdict binds. This section pins that a verdict
+# *survives*, which is a different failure: the ledger lived only under
+# `~/lloyd/_pipeline/`, which `.gitignore` excludes from every repo on the box and no
+# backup job reads (the 15-minute vault snapshotter covers `~/obsidian` only), so one
+# `rm -rf _pipeline` erased 132 lines of decisions — prose reasons that exist nowhere
+# else — and `check` then printed `skipped_by_verdict: 0` as though the pipeline had
+# never rejected anything. A second, quieter half: a stored `evidence_cmd` invokes
+# scripts inside that same tree (20 of the ledger's 81 keys on 2026-09-19), so a wipe
+# left the verdict binding while the check meant to overturn it returned "No such file
+# or directory" — and nothing printed that, because no reader executed the command.
+#
+# Every test here redirects the mirror at its own tmp file or unsets it outright; none
+# of them may touch the real vault copy at `~/obsidian/memory/skill-verdicts/`.
+# `_mirror_target` makes that the default for a scratch `--store` (env unset → no
+# mirror), and `test_the_mirror_is_seeded_with_verdicts_recorded_before_it_existed`
+# relies on it: the two verdicts it calls "pre-change" are recorded with the env unset,
+# which is what makes the seeding branch below the only thing that can move them.
+
+@pytest.fixture
+def mirror(tmp_path, monkeypatch) -> Path:
+    durable = tmp_path / "vault" / "memory" / "skill-verdicts" / "verdicts.jsonl"
+    durable.parent.mkdir(parents=True)
+    monkeypatch.setenv("SKILL_VERDICTS_MIRROR", str(durable))
+    return durable
+
+
+def test_record_lands_the_identical_line_in_both_trees(store, mirror, monkeypatch):
+    """Clause 1: one `record` call, one decision, two trees, byte-identical lines.
+
+    The mirror path is derived in code from the vault root — `DEFAULT_MIRROR` is
+    `Path.home()/"obsidian"/...`, never a function of the store, because a mirror
+    computed from `_pipeline` would be erased by the same command that erased the
+    ledger. `$SKILL_VERDICTS_MIRROR` is the seam this suite writes through.
+    """
+    assert sv.DEFAULT_MIRROR.is_relative_to(Path.home() / "obsidian")
+    assert "_pipeline" not in str(sv.DEFAULT_MIRROR)
+    monkeypatch.delenv("SKILL_VERDICTS_MIRROR")
+    assert sv.mirror_path() == sv.DEFAULT_MIRROR
+    monkeypatch.setenv("SKILL_VERDICTS_MIRROR", str(mirror))
+    assert sv.mirror_path() == mirror
+
+    row = sv.record_verdict(
+        store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
+        reason="installed skill bash-timeout Pattern 3 cites this exact signature",
+        evidence_cmd="grep -c 'command timed out' ~/obsidian/skills/bash-timeout/SKILL.md",
+        occurrences=13)
+
+    live, durable = store.read_text().splitlines(), mirror.read_text().splitlines()
+    assert len(live) == len(durable) == 1
+    assert durable[0] == live[0], "the mirror must not be a re-serialisation"
+    assert json.loads(durable[0])["pattern_key"] == row["pattern_key"]
+
+
+def test_the_mirror_is_seeded_with_verdicts_recorded_before_it_existed(store, tmp_path,
+                                                                       monkeypatch):
+    """Clause 2: the copy created by the next `record` also holds every prior line.
+
+    The two pre-existing verdicts are recorded with `$SKILL_VERDICTS_MIRROR` **unset** —
+    so `_mirror_target` answers None and they exist in the live file alone. That is the
+    state every verdict on this box is in today, and it is the only state in which the
+    seeding branch of `_seed_mirror` runs: this test deliberately does **not** take the
+    `mirror` fixture, because a fixture that sets the env for the whole test lets those
+    two records mirror themselves and leaves the seeding body unexercised (review
+    finding, 2026-09-19). The durable path is then pointed at a file that does not exist
+    until the third `record` creates it. Deleting `_seed_mirror`'s copy body now fails
+    the first assertion below; deleting the append fails the second.
+
+    A copy that started empty would be a second file that loses history and makes a
+    restore look like it worked, which is the failure #772 was filed for.
+    """
+    for key in ("Bash/timeout", "Edit/not_found"):
+        sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                          reason="pre-existing decision", evidence_cmd="true")
+    before = store.read_text()
+    assert len(before.splitlines()) == 2, "two verdicts exist before any copy does"
+
+    durable = tmp_path / "vault" / "memory" / "skill-verdicts" / "verdicts.jsonl"
+    durable.parent.mkdir(parents=True)  # the vault directory exists; the copy does not
+    assert not durable.exists()
+    monkeypatch.setenv("SKILL_VERDICTS_MIRROR", str(durable))
+
+    sv.record_verdict(store=store, pattern_key="Bash/logic", verdict="rejected_false_positive",
+                      reason="decided after the mirror existed", evidence_cmd="true")
+
+    assert durable.read_text().splitlines() == store.read_text().splitlines(), \
+        "the new copy must hold the two pre-change verdicts as well as the new one"
+    assert len(durable.read_text().splitlines()) == 3
+    # Seeding is one-time: a later record appends, it does not re-copy the live file
+    # over the copy's own history.
+    durable.write_text(durable.read_text() + '{"pattern_key":"only-in-the-mirror"}\n')
+    sv.record_verdict(store=store, pattern_key="Read/missing", verdict="reviewed_no_skill",
+                      reason="fourth decision", evidence_cmd="true")
+    assert "only-in-the-mirror" in durable.read_text()
+    assert len(durable.read_text().splitlines()) == 5
+
+
+def test_check_answers_from_the_mirror_and_says_it_did(store, mirror, tmp_path, capsys):
+    """Clause 3: a wiped ledger reports itself instead of reading as zero verdicts.
+
+    The counts are asserted equal to the ones the same candidates produce from the live
+    ledger a moment earlier — the acceptance asks for the *same* `checked:` and
+    `skipped_by_verdict:` after the live file is deleted, and an equality between two
+    runs is the only form of that claim a test can check without pinning a number the
+    nightly moves under it. The verdict is recorded through the real route, not the
+    `seeded` fixture, so the mirror holds it too: `seeded` fires while the mirror env is
+    still unset and would leave the copy empty by the guard in `_mirror_target`.
+    """
+    sv.record_verdict(
+        store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
+        reason="installed skill bash-timeout Pattern 3 cites this exact signature",
+        evidence_cmd="grep -c 'command timed out' ~/obsidian/skills/bash-timeout/SKILL.md",
+        occurrences=13)
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+    mt.write_candidate_file(error_pattern(), cands, verdict_store=store)
+
+    capsys.readouterr()
+    assert sv.main(["check", "--candidates", str(cands), "--store", str(store)]) == 0
+    with_live = capsys.readouterr().out.splitlines()[-1]
+    assert with_live == "checked: 1  skipped_by_verdict: 1"
+
+    store.unlink()
+    assert sv.main(["check", "--candidates", str(cands), "--store", str(store)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-1] == with_live, "the mirror must answer the same counts, not zero"
+    naming = [ln for ln in lines if ln.startswith("verdict source:")]
+    assert naming == [f"verdict source: {mirror} (live ledger {store} is absent)"]
+
+
+def test_check_reports_a_verdict_whose_check_can_no_longer_run(tmp_path, store, mirror, capsys):
+    """Clause 4: an unexecutable falsifier is an incident; rc 0 and rc 1 are results.
+
+    Four keys, four outcomes. `false` exiting 1 is the falsifier *doing its job* —
+    reporting that the verdict's grounds no longer hold — and printing a warning for it
+    would train the nightly to ignore the warning. The absent-script key is the #772
+    fail-shut case: the verdict keeps suppressing candidates while nothing can overturn
+    it, which nothing could see before because `scan_candidates` never executed these
+    commands. The fourth is not hypothetical: the live ledger's `seq-2-read-edit` command
+    exits 2 with bash's own `unexpected EOF while looking for matching '"'` (measured
+    2026-09-19), a stored string that lost a quote, so exit 127 alone would have left the
+    one falsifier actually broken on this box unreported.
+    """
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+    for key, cmd in (("Bash/timeout", "true"),
+                     ("Edit/not_found", "false"),
+                     ("Bash/logic", f"{tmp_path}/gone/falsifier.sh"),
+                     ("Write/logic", 'echo "unbalanced')):
+        sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                          reason=f"grounds for {key}", evidence_cmd=cmd)
+        mt.write_candidate_file(error_pattern(tool=key.split("/")[0],
+                                              error_type=key.split("/")[1]),
+                                cands, verdict_store=store)
+
+    assert sv.main(["check", "--candidates", str(cands), "--store", str(store)]) == 0
+    out = capsys.readouterr().out
+    unrunnable = [ln for ln in out.splitlines() if ln.startswith("EVIDENCE_CMD_UNRUNNABLE")]
+    assert [ln.split(" ::")[0] for ln in unrunnable] == [
+        "EVIDENCE_CMD_UNRUNNABLE Bash/logic", "EVIDENCE_CMD_UNRUNNABLE Write/logic"], out
+    assert "No such file or directory" in unrunnable[0]
+    assert "unexpected EOF" in unrunnable[1]
+    assert "skipped_by_verdict: 4" in out, "a broken falsifier must not silently un-block"
+
+
+def test_a_hung_falsifier_is_reported_too(tmp_path, store, mirror):
+    """The bound in clause 4 is only worth having if firing it is an answer, not a hang.
+
+    `EVIDENCE_TIMEOUT_SECONDS` is 15 against a live ledger whose 75 blocking commands
+    re-execute in 2.0 s together, so this fires on a wedged grep, not on a slow pipeline.
+    """
+    sv.record_verdict(store=store, pattern_key="Bash/sleepy", verdict="reviewed_no_skill",
+                      reason="grounds that cannot be re-checked while the box waits",
+                      evidence_cmd="sleep 5")
+    rc, detail = sv.evidence_cmd_status(sv.load_verdicts(store)["Bash/sleepy"], timeout=1)
+    assert rc == sv.UNRUNNABLE
+    assert "still running after 1s" in detail
+
+
+def test_a_recorded_check_script_is_copied_into_the_mirror(tmp_path, store, mirror):
+    """Clause 5: re-executability outlives `_pipeline` too, not just the ledger.
+
+    Both halves run against a real `git init` repository under tmp, not a directory that
+    merely looks like one. `_git_tracked` shells out to `git ls-files --error-unmatch`,
+    and in a `.git`-less tree that guard is inert — "not a repository" and "not tracked"
+    are the same non-zero exit — so the negative assertion at the end would pass whether
+    or not tracking had ever been consulted (review finding, 2026-09-19). Here the two
+    scripts are siblings in one repo, and the only difference between them is that
+    `git add` named one of them.
+
+    The copy is byte-identical under its own basename and the stored command is *not*
+    rewritten, so the mirror stays a restore source and never becomes a shadow a later
+    run mistakes for the live falsifier. A script git already tracks is deliberately not
+    copied: a second copy of a tracked module in the vault is a fork waiting to happen.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tools").mkdir(parents=True)
+    untracked = repo / "tools" / "seq_falsifier.py"
+    untracked.write_text("print('seq falsifier v1')\n", encoding="utf-8")
+    tracked = repo / "tools" / "tracked_falsifier.py"
+    tracked.write_text("print('tracked falsifier')\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "tools/tracked_falsifier.py"], check=True)
+    assert subprocess.run(["git", "-C", str(tracked.parent), "ls-files", "--error-unmatch",
+                           tracked.name], capture_output=True).returncode == 0, \
+        "control: git really tracks this script, so the skip below has something to bite on"
+
+    sv.record_verdict(store=store, pattern_key="seq-3-bash-fs-bash-other",
+                      verdict="reviewed_no_skill", reason="grounds",
+                      evidence_cmd=f"python3 {untracked}")
+
+    copied = mirror.parent / untracked.name
+    assert copied.is_file()
+    assert copied.read_bytes() == untracked.read_bytes()
+    assert json.loads(mirror.read_text().splitlines()[-1])["evidence_cmd"] == f"python3 {untracked}"
+
+    sv.record_verdict(store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
+                      reason="grounds checked by a tracked module",
+                      evidence_cmd=f"python3 {tracked}")
+    assert not (mirror.parent / tracked.name).exists(), \
+        "a tracked script is durable already; a vault copy of it is a fork"
+
+
+def test_the_stored_check_is_run_by_a_real_child_process(tmp_path, store, mirror):
+    """Seam, not clause: ledger JSON → `bash -c` → exit code, measured on a child.
+
+    `evidence_cmd` is a string read out of a JSONL line and handed to
+    `subprocess.run(["bash", "-c", cmd])`, so the value under test only exists on the
+    far side of a process boundary. The two tests that read this seam via `sv.main`
+    assert on the *report*; this one asserts the child itself ran, three ways:
+
+    * the falsifier writes a file, so execution has an effect no in-process mock fakes;
+    * what it writes is its own pid, bash's `$$` expanded in the child and nowhere else,
+      and that pid is not this process's — so the stored string really became a shell;
+    * the same command, re-read from the ledger JSON and executed again after the script
+      file was deleted, is `UNRUNNABLE` — the clause-4 predicate decided by the OS
+      against a path, not by a stubbed return code.
+    """
+    marker = tmp_path / "child-pid"
+    script = tmp_path / "falsifier.sh"
+    script.write_text(f'echo "$$" > {marker}\n', encoding="utf-8")
+    sv.record_verdict(store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
+                      reason="grounds with a real re-executable check",
+                      evidence_cmd=f"bash {script}")
+
+    row = sv.load_verdicts(store)["Bash/timeout"]
+    assert row["evidence_cmd"] == f"bash {script}", "the seam's input is the stored string"
+    rc, detail = sv.evidence_cmd_status(row)
+    assert (rc, detail) == (0, ""), f"a runnable falsifier must return its own exit code: {detail}"
+    child_pid = int(marker.read_text().strip())
+    assert child_pid > 0 and child_pid != os.getpid(), \
+        f"the stored string was not executed by a separate shell: pid {child_pid}"
+
+    script.unlink()
+    rc, detail = sv.evidence_cmd_status(sv.load_verdicts(store)["Bash/timeout"])
+    assert rc == sv.UNRUNNABLE
+    assert "No such file or directory" in detail
+
+    # And the same child executes against the caller-supplied bound, in a process whose
+    # wall clock the test cannot see: the bound must stop the child, not merely describe it.
+    slow = tmp_path / "slow.sh"
+    slow.write_text('sleep 5\n', encoding="utf-8")
+    sv.record_verdict(store=store, pattern_key="Edit/not_found", verdict="reviewed_no_skill",
+                      reason="grounds whose check cannot finish", evidence_cmd=f"bash {slow}")
+    started = time.monotonic()
+    rc, detail = sv.evidence_cmd_status(sv.load_verdicts(store)["Edit/not_found"], timeout=1)
+    elapsed = time.monotonic() - started
+    assert rc == sv.UNRUNNABLE and "still running after 1s" in detail
+    assert elapsed < 4, f"the bound was not enforced, it was observed: {elapsed:.1f}s"
+
+
+def test_the_shipped_cli_writes_both_trees_and_answers_from_a_child(tmp_path, store, mirror):
+    """Seam, not clause: the nightly runs this as a *program*, not as an imported function.
+
+    `nightly-skill-consolidation` Phase 0 invokes `skill_verdicts.py check`, and Phase 5
+    invokes `record`, as subprocesses. So the ledger file, the env-derived mirror path
+    and the printed counts cross an interpreter boundary, and nothing about the durable
+    half has ever been exercised that way — an in-process `sv.main` call proves the
+    function, not the shipped CLI. This spawns the real module out of this checkout three
+    times with `$SKILL_VERDICTS_MIRROR` aimed at the tmp copy: one `record` (which must
+    leave the identical line in both trees from the child), one `check` (whose last
+    stdout line is the count line the runbook parses), and one more `check` after the live
+    ledger is deleted under a fresh child process.
+    """
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+    durable = mirror
+    env = dict(os.environ, SKILL_VERDICTS_MIRROR=str(durable))
+    run = lambda *args: subprocess.run(
+        [sys.executable, "-m", "scripts.skill_verdicts", *args],
+        cwd=_ROOT, env=env, capture_output=True, text=True, timeout=120)
+
+    proc = run("record", "--pattern", "Bash/timeout", "--verdict", "reviewed_no_skill",
+               "--reason", "installed skill bash-timeout Pattern 3 cites this exact signature",
+               "--evidence-cmd", "grep -c 'command timed out' x", "--occurrences", "13",
+               "--store", str(store))
+    assert proc.returncode == 0, proc.stderr
+    assert len(store.read_text().splitlines()) == 1, "the child wrote the live ledger"
+    assert durable.read_text().splitlines() == store.read_text().splitlines(), \
+        "a child-process `record` must leave the identical line in both trees"
+
+    mt.write_candidate_file(error_pattern(), cands, verdict_store=store)
+    proc = run("check", "--candidates", str(cands), "--store", str(store))
+    assert proc.returncode == 0, proc.stderr
+    with_live = proc.stdout.strip().splitlines()[-1]
+    assert with_live == "checked: 1  skipped_by_verdict: 1", proc.stdout
+
+    store.unlink()
+    proc = run("check", "--candidates", str(cands), "--store", str(store))
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.strip().splitlines()
+    assert lines[-1] == with_live, "a second child process must answer from the copy alone"
+    assert f"verdict source: {durable} (live ledger {store} is absent)" in "\n".join(lines[:-1])
+
+
+def test_check_names_a_verdict_the_two_trees_do_not_agree_on(tmp_path, store, mirror, capsys):
+    """Clause 2's invariant, enforced on every read instead of at one `record`.
+
+    Seeding and appending make the copy a *superset*; neither keeps the live file honest,
+    and `resolve_verdict_source` falls back only when the live file is *entirely* absent —
+    so a live ledger that dropped one of its 132 lines, in a file whose only documented
+    writer appends, would print exactly the counts two healthy trees print. `check`
+    therefore compares the two latest-per-key tables and names what disagrees. Three
+    incidents, three lines: the copy never receiving a verdict, the live file losing one,
+    and the two sides holding different decisions for one key. One shared silent symptom is
+    why all three get a line, and none of them has happened on this box yet — as of
+    2026-09-19T11:52Z both trees hold 132 lines and `cmp` reports them identical, which is
+    the state `test_agreeing_trees_and_a_scratch_ledger_print_no_divergence` pins as silent.
+    """
+    sv.record_verdict(store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
+                      reason="decided in both trees", evidence_cmd="true")
+    sv.record_verdict(store=store, pattern_key="Edit/not_found", verdict="reviewed_no_skill",
+                      reason="decided before the copy lagged", evidence_cmd="true")
+    # A third verdict appended straight to the live file, bypassing `record`: the nightly
+    # running pre-change code, `skill_verdicts.py seed`, or a hand `>>`.
+    with store.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"pattern_key": "tool_calls/truncated_args",
+                             "verdict": "reviewed_no_skill", "reason": "appended by a writer",
+                             "decided_at": "2026-09-19T11:00:00Z"}) + "\n")
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+
+    assert sv.main(["check", "--candidates", str(cands), "--store", str(store)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    missing = [ln for ln in lines if ln.startswith("MIRROR_MISSING")]
+    assert missing == [
+        "MIRROR_MISSING tool_calls/truncated_args :: reviewed_no_skill decided "
+        f"2026-09-19T11:00:00Z is in the live ledger but not in the durable copy {mirror}"], lines
+    assert not [ln for ln in lines if ln.startswith(("LEDGER_LOST", "LEDGER_MIRROR_CONFLICT"))]
+
+    # The other direction: the mirror still holds a verdict the live file has lost.
+    store.write_text("".join(
+        ln for ln in store.read_text().splitlines(keepends=True)
+        if "Edit/not_found" not in ln), encoding="utf-8")
+    assert sv.main(["check", "--candidates", str(cands), "--store", str(store)]) == 0
+    lost = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("LEDGER_LOST")]
+    assert len(lost) == 1 and lost[0].startswith("LEDGER_LOST Edit/not_found ::"), lost
+    assert "but the live ledger no longer holds it" in lost[0]
+
+    # And disagreement about one key, from a reopen one tree saw and the other did not.
+    with store.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"pattern_key": "Bash/timeout", "verdict": "noise",
+                             "reason": "reopened in the live ledger only",
+                             "decided_at": "2026-09-19T12:00:00Z"}) + "\n")
+    assert sv.main(["check", "--candidates", str(cands), "--store", str(store)]) == 0
+    final = capsys.readouterr().out.splitlines()
+    conflict = [ln for ln in final if ln.startswith("LEDGER_MIRROR_CONFLICT")]
+    assert conflict == [
+        f"LEDGER_MIRROR_CONFLICT Bash/timeout :: live=noise "
+        f"durable=reviewed_no_skill decided 2026-09-19T12:00:00Z/"
+        f"{sv.load_verdicts(mirror)['Bash/timeout']['decided_at']}"], conflict
+    assert final[-1] == "checked: 0  skipped_by_verdict: 0", \
+        "the count line stays last: the nightly parses splitlines()[-1]"
+
+
+def test_agreeing_trees_and_a_scratch_ledger_print_no_divergence(tmp_path, store, mirror,
+                                                                 monkeypatch, capsys):
+    """The divergence line must be able to stay silent, or the nightly stops reading it.
+
+    Two trees holding the same verdicts print nothing — that is the healthy case, and a
+    warning that fires on it joins the noise that trains a run to ignore warnings. A
+    scratch run with no mirror prints nothing either, which is the state the nightly is in
+    whenever `$SKILL_VERDICTS_MIRROR` is unset: `_mirror_target` then refuses an
+    off-default `--store` so a scratch ledger cannot append scratch verdicts into the real
+    vault copy, and reporting that deliberate guard as a divergence would turn every
+    scratch run into a false alarm.
+    """
+    sv.record_verdict(store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
+                      reason="decided in both trees", evidence_cmd="true")
+    capsys.readouterr()
+    assert sv.main(["check", "--candidates", str(tmp_path), "--store", str(store)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert not [ln for ln in out if ln.startswith(("MIRROR_MISSING", "LEDGER_LOST",
+                                                   "LEDGER_MIRROR_CONFLICT"))], out
+    assert out[-1] == "checked: 0  skipped_by_verdict: 0"
+
+    unmirrored = tmp_path / "scratch.jsonl"
+    monkeypatch.delenv("SKILL_VERDICTS_MIRROR")
+    assert sv._mirror_target(unmirrored) is None, \
+        "an off-default ledger with no mirror env gets no durable copy"
+    assert sv._mirror_target(sv.DEFAULT_STORE) == sv.DEFAULT_MIRROR
+    sv.record_verdict(store=unmirrored, pattern_key="Write/logic", verdict="reviewed_no_skill",
+                      reason="scratch decision", evidence_cmd="true")
+    capsys.readouterr()
+    assert sv.main(["check", "--candidates", str(tmp_path), "--store", str(unmirrored)]) == 0
+    silent = capsys.readouterr().out.splitlines()
+    assert not [ln for ln in silent if ln.startswith(("MIRROR_MISSING", "LEDGER_LOST",
+                                                      "LEDGER_MIRROR_CONFLICT"))], silent
+    assert silent[-1] == "checked: 0  skipped_by_verdict: 0"
