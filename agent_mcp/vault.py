@@ -170,6 +170,29 @@ RECALL_RERANK_ALPHA = 0.3      # only consulted when rerank is explicitly on
 RECALL_DEMOTE_DAILY_LOGS = True
 RECALL_GRAPH_TOP_K = 5
 RECALL_GRAPH_HOPS = 1
+# How many of the query's ranked entities become seeds. Raised from 5 to 10 in
+# the graph-consistency work: ties at low scores can knock out the canonical
+# entity — "Knowledge Graph Consistency" and "Knowledge Graph System" both
+# score 0.27 for one query, and with k=5 the canonical one is cut off — so the
+# wider slice won and stayed. What did NOT win was the number itself: it lived
+# here as the literal `[:10]` inside `_vault_recall` and in `eval/run_eval.py`
+# as two literal `[:5]`s, so from 2026-09-11 the nightly eval scored entity
+# metrics against a seed set production never assembles (#843). `entity_hit` is
+# a union with seeds FIRST and largest, and the error is one-directional: a
+# query whose 6th-to-10th seed is the gold entity is a miss in the eval and a
+# hit in production. One name, imported by the eval, is the whole fix.
+# Deliberately NOT in the `vault_recall` tool schema, and — unlike `demote_factor`,
+# `grep_code` and `graph_lookup`, which the schema also omits but this module
+# still reads out of `params` — deliberately NOT readable from `params` either.
+# `_vault_recall` is registered as the `vault_recall` handler (vault.py:1430) and
+# `call_tool` hands it the client's argument dict raw, and `memory_ops.recall`
+# forwards its params untouched (memory_ops.py:105), so a width taken from
+# `params` would be an agent-settable retrieval knob under a name no schema
+# declares — the "stray key changes retrieval" surface the review of #843
+# refused. It is a keyword-only argument instead, so only an in-process caller
+# can set it, and the only one that does is the eval, whose job is measuring a
+# width. tests/test_retrieval.py pins that a raw MCP call ignores the key.
+RECALL_SEED_TOP_K = 10
 
 # qmd's own cross-encoder reranker, distinct from graph_rerank above. This
 # client sent `skipRerank: true` on every request from the day it was
@@ -1061,7 +1084,20 @@ def _vault_search(params: dict) -> dict:
         return _err(str(exc), ErrorCode.INTERNAL, results=[])
 
 
-def _vault_recall(params: dict) -> dict:
+def _vault_recall(params: dict, *, seed_top_k: int | None = None) -> dict:
+    """Combined recall over documents, entity facts and graph neighbours.
+
+    `params` is what the `vault_recall` tool receives — `call_tool` hands this
+    handler the client's argument dict raw, and `memory_ops.recall` forwards its
+    params untouched — so every retrieval knob read out of it is agent-settable.
+    `seed_top_k` is keyword-only precisely so it is NOT one of them: it is absent
+    from the tool schema, a stray `{"seed_top_k": 3}` arriving over the wire
+    changes nothing, and the only caller that sets it is `eval/run_eval.py`, in
+    process, which is the one component whose job is measuring a seeding width
+    (#843 review). `None` means "production's width", resolved against
+    `RECALL_SEED_TOP_K` HERE rather than as a signature default, so a def-time
+    binding cannot freeze a number the constant later moved off.
+    """
     query = params.get("query", "").strip()
     if not query:
         return _err("query is required", ErrorCode.MISSING_PARAM, documents=[], facts=[])
@@ -1086,11 +1122,18 @@ def _vault_recall(params: dict) -> dict:
     graph_top_k = int(params.get("graph_top_k", RECALL_GRAPH_TOP_K))
     graph_hops = int(params.get("graph_hops", RECALL_GRAPH_HOPS))
 
-    # Take top-10 seeds (was 5). Ties at low scores can knock out the
-    # canonical entity; e.g. "Knowledge Graph Consistency" and "Knowledge
-    # Graph System" both score 0.27 for the same query, and with k=5 the
-    # canonical one can be cut off.
-    seed_entities = [e for e, _ in extract_entities_from_query(query)[:10]]
+    # Seed width. The number and why it is 10 rather than 5 are at
+    # RECALL_SEED_TOP_K; the reason it had to stop being a literal here is that
+    # eval/run_eval.py restated it as `[:5]` and scored entity metrics on the
+    # smaller set (#843). Unlike the eight knobs above, this one is NOT read out
+    # of `params`, so no client key can move it — see the docstring. Resolution
+    # happens here rather than in the signature so the constant is consulted at
+    # call time, which is what lets a test move the constant and watch the width
+    # move with it.
+    seed_entities = [
+        e for e, _ in
+        extract_entities_from_query(query)[
+            :(RECALL_SEED_TOP_K if seed_top_k is None else int(seed_top_k))]]
 
     # If graph_rerank is requested, we need neighbors regardless of expand_graph,
     # because rerank uses them as voters. Force graph expansion in that case.

@@ -5,6 +5,7 @@ penalty stayed a no-op for four months and `fact_profile` kept returning
 5,489 facts for one entity.
 """
 import asyncio
+import inspect
 import json
 import sys
 from collections import Counter
@@ -90,12 +91,18 @@ def test_graph_rerank_is_a_noop_without_voters(world):
 
 def test_production_defaults_are_what_the_eval_imports():
     """The eval ran rerank off / alpha 0.5 while production ran on / 0.3, so
-    a retrieval regression could not appear in the nightly numbers."""
+    a retrieval regression could not appear in the nightly numbers.
+
+    `RECALL_SEED_TOP_K` joins the list because the same drift already existed
+    one knob over: production seeded 10 entities and the eval scored 5 (#843).
+    Importing the constant is the fix; this line is what stops the import being
+    dropped and a literal restored."""
     import eval.run_eval as ev
     assert ev.RECALL_GRAPH_RERANK is vault.RECALL_GRAPH_RERANK
     assert ev.RECALL_RERANK_ALPHA == vault.RECALL_RERANK_ALPHA
     assert ev.RECALL_GRAPH_TOP_K == vault.RECALL_GRAPH_TOP_K
     assert ev.RECALL_GRAPH_HOPS == vault.RECALL_GRAPH_HOPS
+    assert ev.RECALL_SEED_TOP_K == vault.RECALL_SEED_TOP_K
 
 
 # ── extract_entities_from_query ──────────────────────────────────────────────
@@ -120,6 +127,165 @@ def test_task_ids_dispatch_to_the_canonical_form(world):
     _write_facts(root, "Task #67", "state", [{"fact": "x", "id": "stat-001"}])
     ranked = dict(retrieval.extract_entities_from_query("what happened with task 67"))
     assert ranked["Task #67"] == 10.0
+
+
+# ── How many query entities become seeds (#843) ──────────────────────────────
+
+SEED_NAMES = [f"seedcap{n}" for n in range(12)]
+
+
+def _seed_spy(vault_mod, monkeypatch) -> list[list[str]]:
+    """Install the spy that lets a test read the seed list `_vault_recall`
+    built, and return the list of seed lists it records.
+
+    The width is captured at `graph_weighted_neighbors` — the one call that
+    receives the WHOLE seed list (the fact legs slice it per entity). The recall
+    result carries facts and neighbours but never the seeds, so this is the only
+    call the width can be read off. qmd is stubbed: the document leg needs a
+    daemon and these tests are about seeding, not retrieval breadth.
+
+    The caller then invokes the handler however it wants — directly, or through
+    `call_tool` / `memory_ops.recall` to cross a process boundary — and reads
+    `handed[0]` afterwards."""
+    from agent_mcp import _shared as shared
+
+    shared._invalidate_entity_dirs_cache()
+    retrieval._entity_index_cache = None
+    handed: list[list[str]] = []
+    real = vault_mod.graph_weighted_neighbors
+
+    def spy(entities, *a, **k):
+        handed.append(list(entities))
+        return real(entities, *a, **k)
+
+    monkeypatch.setattr(vault_mod, "graph_weighted_neighbors", spy)
+    monkeypatch.setattr(vault_mod, "_qmd_daemon_search", lambda *a, **k: [])
+    return handed
+
+
+def _seeds_of(handed: list[list[str]]) -> list[str]:
+    assert handed, "_vault_recall seeded nothing, so the width is unmeasured"
+    return handed[0]
+
+
+def _twelve_entity_query(world):
+    """Seed a 12-entity fixture and return the query naming all of them — wide
+    enough that any plausible budget truncates it, which is the only condition
+    under which a seed count measures anything."""
+    root, _ = world
+    for name in SEED_NAMES:
+        _write_facts(root, name, "state", [{"fact": "x", "id": "stat-001"}])
+    query = " ".join(SEED_NAMES)
+    extracted = len(retrieval.extract_entities_from_query(query))
+    assert extracted > vault.RECALL_SEED_TOP_K, (
+        f"the fixture extracts {extracted} entities, no more than the width "
+        f"{vault.RECALL_SEED_TOP_K}, so no truncation is observable — widen "
+        "SEED_NAMES rather than reporting a pass")
+    return query
+
+
+def test_the_recall_path_seeds_at_the_shared_constant(world, monkeypatch):
+    """Clause 1. Production sliced the extractor at a literal `[:10]` while the
+    eval scored a literal `[:5]` off the same extractor (#843), so every
+    `entity_hit_rate` ever published described a seed set nothing served. The
+    width now has one name; a query naming 12 extractable entities must hand the
+    recall path exactly `RECALL_SEED_TOP_K` of them."""
+    query = _twelve_entity_query(world)
+    handed = _seed_spy(vault, monkeypatch)
+    vault._vault_recall({"query": query, "expand_graph": True})
+    assert len(_seeds_of(handed)) == vault.RECALL_SEED_TOP_K
+
+
+def test_the_seed_width_moves_with_the_constant_it_names(world, monkeypatch):
+    """Clause 1, the derivation half. Equality with 10 is not derivation: at a
+    retired literal `[:10]` the count assertion above passes just as well, which
+    is what the review of the first #843 round caught. Move the constant and the
+    width must move with it — a slice bound by a literal does not."""
+    query = _twelve_entity_query(world)
+    monkeypatch.setattr(vault, "RECALL_SEED_TOP_K", 7)
+    handed = _seed_spy(vault, monkeypatch)
+    vault._vault_recall({"query": query, "expand_graph": True})
+    assert len(_seeds_of(handed)) == 7, (
+        "RECALL_SEED_TOP_K says 7 and the recall path seeded otherwise, so the "
+        "width is still a literal inside _vault_recall")
+
+
+@pytest.mark.parametrize("requested", [3, 12],
+                         ids=["narrower than production", "wider than production"])
+def test_an_explicit_width_is_honoured_both_directions(world, monkeypatch, requested):
+    """The keyword is not advisory, and not clamped to production's number.
+
+    The companion tests above only ever leave the width unset or move the
+    constant, so a `_vault_recall` that read the keyword and then threw it away —
+    seeding at `RECALL_SEED_TOP_K` regardless — passed every one of them, and a
+    version that clamped a caller's width down to the constant passed too. Both
+    mutations matter here rather than only in the abstract: the eval is the caller,
+    and `--seed-top-k 3` against a recall path that silently seeded 10 would put
+    the artifact's seeds and retrieval's seeds back a part, which is #843 with a
+    different number. The wider case is what a raised constant will need on the
+    day it is raised."""
+    query = _twelve_entity_query(world)
+    ranked = [e for e, _ in retrieval.extract_entities_from_query(query)]
+    assert len(ranked) >= max(3, requested), (
+        f"the fixture only ranks {len(ranked)} entities, so a width of {requested} "
+        "is unmeasurable")
+    handed = _seed_spy(vault, monkeypatch)
+    vault._vault_recall({"query": query, "expand_graph": True},
+                        seed_top_k=requested)
+    seeds = _seeds_of(handed)
+    assert len(seeds) == requested, (
+        f"asked for {requested} seeds and got {len(seeds)}: the keyword reached "
+        "retrieval and was not the width it seeded at")
+    assert seeds == ranked[:requested], (
+        "the count moved but the set is not the ranked prefix every caller "
+        "assumes it to be")
+
+
+async def test_a_client_cannot_move_the_seed_set_through_the_tool_boundary(
+        world, monkeypatch):
+    """The seam the first #843 round was refused for. `_vault_recall` is
+    registered as the `vault_recall` handler and `call_tool` hands it the
+    client's raw argument dict; `memory_ops.recall` forwards its params the same
+    way (memory_ops.py:105). Reading the width out of `params` would therefore
+    have made an undocumented key able to change retrieval — a client that sent
+    `seed_top_k: 2` would have gotten 2 seeds where the schema offers no such
+    parameter. The width is keyword-only now, so neither boundary may move it."""
+    from agent_mcp import memory_ops
+
+    query = _twelve_entity_query(world)
+    width = vault.RECALL_SEED_TOP_K
+
+    handed = _seed_spy(vault, monkeypatch)
+    await vault.call_tool("vault_recall",
+                          {"query": query, "expand_graph": True, "seed_top_k": 2})
+    assert len(_seeds_of(handed)) == width, (
+        "a stray `seed_top_k` in the MCP arguments moved the seeding width, "
+        "which no tool schema declares and no eval asked for")
+
+    handed = _seed_spy(vault, monkeypatch)
+    memory_ops.recall({"query": query, "expand_graph": True, "seed_top_k": 2})
+    assert len(_seeds_of(handed)) == width, (
+        "memory_ops.recall forwards its params untouched, so the width must not "
+        "be readable from them")
+
+
+def test_the_width_is_keyword_only_and_stays_out_of_the_schema():
+    """The other side of the same boundary: keyword-only has to stay keyword-only.
+    A positional third argument, or a `seed_top_k` key carried in `params`, is
+    the shape that would put the knob back on the wire, where it is reachable by
+    any client that invents the key."""
+    sig = inspect.signature(vault._vault_recall)
+    assert sig.parameters["seed_top_k"].kind is inspect.Parameter.KEYWORD_ONLY, (
+        "a positional or dict-carried width is an agent-settable retrieval knob "
+        "that the vault_recall schema does not declare")
+    tool = next(t for t in asyncio.run(vault.list_tools())
+                if t.name == "vault_recall")
+    # `inputSchema` is the wire name; the mcp SDK's pydantic model exposes it as
+    # `input_schema`, and reading the wrong one raises AttributeError rather than
+    # returning an empty dict, which is the failure that would fake a pass here.
+    assert "seed_top_k" not in tool.input_schema["properties"], (
+        "the width must stay out of the tool schema, which is exactly why it is "
+        "a keyword argument and not a parameter read from params")
 
 
 # ── A class name must not consume a query about one instance (#1024) ─────────

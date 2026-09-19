@@ -31,6 +31,7 @@ from agent_mcp.vault import (
     RECALL_GRAPH_RERANK,
     RECALL_GRAPH_TOP_K,
     RECALL_RERANK_ALPHA,
+    RECALL_SEED_TOP_K,
     _vault_recall,
 )
 from agent_mcp.facts import _extract_entities_from_query
@@ -217,7 +218,8 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
     }
 
 
-# The four retrieval knobs default to production's value BY IMPORT, never by a
+# The five retrieval knobs below (`graph_rerank`, `rerank_alpha`, `graph_top_k`,
+# `graph_hops`, `seed_top_k`) default to production's value BY IMPORT, never by a
 # restated literal. Until #498 the literals here were the pre-#322 settings —
 # `rerank_alpha=0.5` against production's 0.3 — and 59cd7bf fixed only the
 # argparse half, so any programmatic caller inherited a configuration nothing
@@ -269,6 +271,7 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
              demote_factor: float | None = None,
              graph_top_k: int = RECALL_GRAPH_TOP_K,
              graph_hops: int = RECALL_GRAPH_HOPS,
+             seed_top_k: int = RECALL_SEED_TOP_K,
              counterfactual: bool = True) -> list[dict]:
     records = []
     # Frozen perturbation records, loaded once. Absent or short is surfaced per
@@ -288,7 +291,7 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
             continue
         t0 = time.perf_counter()
         try:
-            recall_params = {
+            recall_params: dict = {
                 "query": query,
                 "limit": limit,
                 "expand_graph": expand_graph,
@@ -299,14 +302,31 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
             }
             if demote_factor is not None:
                 recall_params["demote_factor"] = demote_factor
-            result = _vault_recall(recall_params)
+            # The width goes to retrieval as a KEYWORD argument, never as a
+            # `seed_top_k` key inside `recall_params`: `_vault_recall` is the
+            # `vault_recall` MCP handler and its `params` dict is the client's
+            # raw arguments, so a key put there is an undocumented tool
+            # parameter the schema does not declare (#843 review). Keyword-only
+            # keeps the property that matters here — the record's seeds are the
+            # seeds retrieval actually used — while leaving the wire shape
+            # exactly the schema's.
+            result = _vault_recall(recall_params, seed_top_k=seed_top_k)
             err = None
         except Exception as e:
             result = {"documents": [], "facts": []}
             err = f"{type(e).__name__}: {e}"
         latency_ms = (time.perf_counter() - t0) * 1000
 
-        seeds = [e for e, _ in (_extract_entities_from_query(query) or [])[:5]]
+        # Bounded by the knob, whose default IS `RECALL_SEED_TOP_K`, so both
+        # this record and the recall call above carry production's width by
+        # default and neither repeats the number. Until #843 this line said
+        # `[:5]` while `_vault_recall` sliced the same extractor at 10 —
+        # `entity_hit` is a union with these seeds first and largest, so the
+        # eval called a miss what production served as a hit, on 13 of the 20
+        # bench queries, and the artifact reported `matches_production_defaults:
+        # true` because the conjunction never looked at the seed count.
+        seeds = [e for e, _ in
+                 (_extract_entities_from_query(query) or [])[:seed_top_k]]
         scoring = _score(spec, result, seeds=seeds)
 
         rec = {
@@ -345,7 +365,7 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
         }
         if counterfactual:
             _attach_counterfactual(rec, spec, result, seeds, recall_params,
-                                   perturbations.get(qid))
+                                   perturbations.get(qid), seed_top_k=seed_top_k)
             # Float where scoreable, None where not — summarize averages over
             # the non-None values, which is how a query that cannot be pinned
             # stays out of pinned_rate's denominator instead of inflating it.
@@ -364,13 +384,22 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
 
 
 def _attach_counterfactual(rec: dict, spec: dict, result: dict, seeds: list[str],
-                           recall_params: dict, perturbation: dict | None) -> None:
+                           recall_params: dict, perturbation: dict | None,
+                           *,
+                           seed_top_k: int = RECALL_SEED_TOP_K) -> None:
     """Run this query's perturbed twin through the SAME path and score both
     directions onto the record.
 
     Reusing `recall_params` with only `query` swapped is the whole point: the
     two arms must differ in the one constraint and nothing else, so any
     difference in the entity-level output is attributable to that constraint.
+    `seed_top_k` is a parameter rather than a `recall_params` key — the dict is
+    the MCP wire shape and the width is not in the `vault_recall` schema — and
+    `run_eval` passes the same value it passed to the reference arm, so the
+    variant's seed slice is bounded by it rather than by a width of its own: an
+    arm cut to a different count from the arm retrieval seeded at makes
+    `seed_moved` — the label #537 depends on — a comparison of two truncations
+    instead of a comparison of two queries (#843).
     """
     if not perturbation:
         rec["counterfactual"] = None
@@ -378,9 +407,11 @@ def _attach_counterfactual(rec: dict, spec: dict, result: dict, seeds: list[str]
         return
     variant_query = perturbation.get("perturbed_query") or ""
     try:
-        variant = _vault_recall({**recall_params, "query": variant_query})
-        variant_seeds = [e for e, _ in
-                         (_extract_entities_from_query(variant_query) or [])[:5]]
+        variant = _vault_recall({**recall_params, "query": variant_query},
+                                seed_top_k=seed_top_k)
+        variant_seeds = [
+            e for e, _ in
+            (_extract_entities_from_query(variant_query) or [])[:seed_top_k]]
         rec["counterfactual"] = cf.score_pair(perturbation, result, seeds,
                                               variant, variant_seeds)
         rec["counterfactual"]["seeds_variant"] = variant_seeds
@@ -538,9 +569,16 @@ def build_parser() -> argparse.ArgumentParser:
     configuration nothing serves, so a retrieval regression could not show up in
     it (2026-09-03 review; the CLI half was fixed in 59cd7bf, `run_eval()`'s
     signature in #498). Say "whatever the constant says" rather than naming a
-    value: `RECALL_GRAPH_RERANK` is False today (agent_mcp/vault.py:113-124, the
+    value: `RECALL_GRAPH_RERANK` is False today (agent_mcp/vault.py:144-168, the
     2026-09-04 sweep), and a stale comment above its read in `_vault_recall`
     still claims default-on — that comment is #1001.
+
+    `--seed-top-k` is here because the parity flag has to be able to go false.
+    A `RECALL_SEED_TOP_K == RECALL_SEED_TOP_K` term would reproduce #1000's
+    `and not args.no_graph` defect one constant over — a conjunction can only be
+    falsified by something that is not itself the constant — and the flag that
+    cannot fail is why a run seeded at 5 against a production seeded at 10
+    reported `matches_production_defaults: true` for eight days (#843).
     """
     ap = argparse.ArgumentParser()
     ap.add_argument("--queries", default=str(HERE / "vault_recall_queries.yaml"))
@@ -560,6 +598,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"Graph expansion breadth (production {RECALL_GRAPH_TOP_K})")
     ap.add_argument("--graph-hops", type=int, default=RECALL_GRAPH_HOPS,
                     help=f"Graph expansion depth (production {RECALL_GRAPH_HOPS})")
+    ap.add_argument("--seed-top-k", type=int, default=RECALL_SEED_TOP_K,
+                    help=f"How many query entities become recall seeds "
+                         f"(production {RECALL_SEED_TOP_K})")
     # Measuring the no-graph baseline on purpose is legitimate — it is how the
     # blind spot above was found. Everything else that reaches an empty corpus
     # got there by accident and must not be handed a well-formed score sheet.
@@ -571,6 +612,45 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Skip the perturbed twin of every query (halves the "
                          "run; summary then carries null counterfactual rates)")
     return ap
+
+
+def build_run_config(args: argparse.Namespace) -> dict:
+    """What this run was scored with, and whether that is what production serves.
+
+    One module-level callable rather than an inline expression in `main()` for
+    two reasons. It is the only place the parsed CLI meets the production
+    constants, so it has to be reachable without a corpus — `main()`'s version
+    of this conjunction could only be read off a finished baseline file, which
+    means testing the flag costed a retrieval run and no test paid it, which is
+    how the conjunction lost the seed count in the first place and stayed
+    missing it while every artifact it stamped read `true`.
+
+    `matches_production_defaults` is a conjunction over the parsed values
+    against the constants — never one constant against itself. `expand_graph`
+    is recorded but not compared: production defaults it False while the eval
+    runs it on as a measurement choice, and #1000 owns the `not args.no_graph`
+    term still sitting in the conjunction.
+    """
+    return {
+        "expand_graph": not args.no_graph,
+        "graph_rerank": args.graph_rerank,
+        "rerank_alpha": args.alpha,
+        "graph_top_k": args.graph_top_k,
+        "graph_hops": args.graph_hops,
+        # The count the records' `seeds_extracted` were sliced at, in the
+        # artifact itself: a baseline can now be asked how many seeds it scored
+        # with instead of being assumed to have used the current constant.
+        "seed_top_k": args.seed_top_k,
+        "matches_production_defaults": (
+            args.graph_rerank == RECALL_GRAPH_RERANK
+            and args.alpha == RECALL_RERANK_ALPHA
+            and args.graph_top_k == RECALL_GRAPH_TOP_K
+            and args.graph_hops == RECALL_GRAPH_HOPS
+            # The term whose absence is #843: 5 against 10 used to read `true`.
+            and args.seed_top_k == RECALL_SEED_TOP_K
+            and not args.no_graph
+        ),
+    }
 
 
 def main() -> int:
@@ -623,6 +703,7 @@ def main() -> int:
         demote_factor=args.demote_factor,
         graph_top_k=args.graph_top_k,
         graph_hops=args.graph_hops,
+        seed_top_k=args.seed_top_k,
         counterfactual=args.counterfactual,
     )
     summary = summarize(records)
@@ -664,19 +745,13 @@ def main() -> int:
         "notes": args.notes,
         "ran_at": datetime.now(timezone.utc).isoformat(),
         "limit": args.limit,
-        "expand_graph": not args.no_graph,
-        "graph_rerank": args.graph_rerank,
-        "rerank_alpha": args.alpha,
-        "graph_top_k": args.graph_top_k,
-        "graph_hops": args.graph_hops,
+        # The run's retrieval shape and the parity verdict come from
+        # `build_run_config`, the one callable where parsed CLI meets production
+        # constants — written inline here, the conjunction sat behind a
+        # subprocess boundary no test could grade, so nothing pinned it and the
+        # seed term was never in it.
+        **build_run_config(args),
         "demote_daily_logs": RECALL_DEMOTE_DAILY_LOGS,
-        "matches_production_defaults": (
-            args.graph_rerank == RECALL_GRAPH_RERANK
-            and args.alpha == RECALL_RERANK_ALPHA
-            and args.graph_top_k == RECALL_GRAPH_TOP_K
-            and args.graph_hops == RECALL_GRAPH_HOPS
-            and not args.no_graph
-        ),
         "corpus": corpus,
         "corpus_ok": corpus_ok,
         # What the fact leg read (#1250), recorded on EVERY run — including the
