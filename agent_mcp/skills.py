@@ -80,6 +80,40 @@ def _load_skill(skill_dir: Path) -> Optional[dict]:
     }
 
 
+def skill_load_defect(skill_dir: Path) -> Optional[str]:
+    """Why `skill_dir` is a *damaged* skill, or None when it may sit on disk.
+
+    `_load_skill` answers one question — "put this in retrieval?" — with one
+    sentinel, `None`, for three different facts: there is no `SKILL.md`, the
+    file cannot be read, and the skill is deliberately quarantined by its
+    front-matter `status`. For discovery all three mean the same thing. For a
+    validator that asks "does this skill still load?" they do not, and reading
+    the third as damage is how `automod_vault_land` ended up unable to retire a
+    skill at all (#777): neither moving it into `skills/.archived/` nor
+    flipping its `status` could clear the land check, so every "archive this
+    skill" item had to be done by hand outside the only sanctioned route.
+
+    The quarantine is therefore stated, not inferred from the sentinel. A `None`
+    that is neither missing, unreadable, nor quarantined is still reported — the
+    day `_load_skill` grows a fourth reason to abstain, this names it instead of
+    quietly passing, which is the difference between loosening a check and
+    emptying one.
+    """
+    if _load_skill(skill_dir) is not None:
+        return None
+    skill_file = skill_dir / "SKILL.md"
+    if not skill_file.exists():
+        return "no SKILL.md"
+    try:
+        content = skill_file.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"SKILL.md unreadable: {exc}"
+    status = str(_parse_frontmatter(content)[0].get("status", "") or "").strip().lower()
+    if status in _QUARANTINE_STATUSES:
+        return None
+    return "does not load"
+
+
 def _iter_skills():
     """Yield loaded skill dicts from all skill directories."""
     seen = set()

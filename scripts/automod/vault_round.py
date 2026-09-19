@@ -23,7 +23,10 @@ failure:
      find.
   3. **Loaders**, for validated paths only and only for what changed: the
      system prompt must still build (SOUL.md, memories, the skills index),
-     each touched skill must still load through `agent_mcp.skills`, each
+     each touched skill directory must be undamaged by `agent_mcp.skills`'s own
+     verdict — a skill the loader abstains on because its front matter
+     quarantined it is retired, not broken, and a path under a dot-directory is
+     not a skill slug at all (#777) — and each
      touched task must still parse through `autonomy`. Scoped to the diff on
      purpose — a pre-existing broken file elsewhere in the vault must not
      block every round, the same delta principle as pyflakes and tsc in the
@@ -145,13 +148,43 @@ if any(p.startswith(("lloyd/", "skills/")) for p in paths):
     prompt = build_system_prompt()
     if not isinstance(prompt, str) or len(prompt) < 500:
         errs.append("system prompt failed to build or came back empty")
-skills = sorted({p.split("/")[1] for p in paths if p.startswith("skills/") and p.count("/") >= 2})
+# A path is a skill's own file only if its FIRST segment under `skills/` is the
+# slug. `skills/.archived/ingest/SKILL.md` has two, and `p.split("/")[1]` there
+# yields `.archived` — a slug for a tree `agent_mcp/skills.py:90` told discovery
+# to ignore (the dot-prefix is exactly what makes the archive an archive). The
+# loader was then asked to load that invented slug, abstained, and the rename
+# into the archive could never land, taking the rest of the batch down with it
+# (#777). Taking segment [1] and dropping dot-segments says the same thing the
+# discovery walk already says.
+skills = sorted({p.split("/")[1] for p in paths
+                 if p.startswith("skills/") and p.count("/") >= 2
+                 and not p.split("/")[1].startswith(".")})
+# The one shape a source path may name without existing: a rename INTO an
+# excluded tree. `skills/.archived/foo/SKILL.md` exists and
+# `skills/foo/SKILL.md` is gone, so the skill was retired, and the loader must
+# not be asked whether the empty source directory loads — that is the same
+# verdict-as-damage again, and it is why the retirement had to be done by hand
+# (vault `60776c12`). Stated as its own verdict rather than as an absence, so
+# `skills/bar/` with no SKILL.md and no destination stays the error it is.
+moved = {p.split("/")[-2] for p in paths
+         if p.startswith("skills/") and p.endswith("/SKILL.md") and p.count("/") >= 3
+         and any(seg.startswith(".") for seg in p.split("/")[1:-2])
+         and (vault / p).is_file()}
 if skills:
-    from agent_mcp.skills import _load_skill
+    # NOT `_load_skill(...) is None`: that sentinel also means "deliberately
+    # quarantined by front-matter `status`", so reading it as damage made
+    # `automod_vault_land` unable to retire a skill by either of the two ways the
+    # skills lifecycle retires one — moving it, or setting `status: archived`
+    # (#777, second half, proved in item #432's implement round). `skill_load_defect`
+    # answers only "is this skill damaged"; a quarantine is not damage.
+    from agent_mcp.skills import skill_load_defect
     for name in skills:
         d = vault / "skills" / name
-        if d.is_dir() and _load_skill(d) is None:
-            errs.append(f"skills/{name}: does not load")
+        if not d.is_dir() or name in moved:
+            continue
+        defect = skill_load_defect(d)
+        if defect:
+            errs.append(f"skills/{name}: {defect}")
 tasks = [p for p in paths if p.startswith("autonomy/") and p.endswith(".md")]
 if tasks:
     from autonomy import _parse_task_file

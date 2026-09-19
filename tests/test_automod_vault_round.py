@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_mcp.skills import _QUARANTINE_STATUSES
 from scripts.automod import state as S, vault_round as V
 
 
@@ -17,8 +18,16 @@ def git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
 
 
-@pytest.fixture
-def vault(tmp_path, monkeypatch):
+def _scratch_vault(tmp_path, monkeypatch, *, mock_loaders: bool):
+    """A git-init'd vault with one task, one skill, one backlog item.
+
+    `mock_loaders=False` leaves the lander's REAL loader subprocess in place.
+    Every fixture in this module until #777 mocked it, which is exactly how the
+    skills predicate inside that subprocess could invent the slug `.archived`
+    out of a dot-directory and refuse every archive rename while the suite
+    stayed green — the refusal lives on the other side of a process boundary,
+    so a mocked seam pinned everything except the one line that mattered.
+    """
     r = tmp_path / "obsidian"
     (r / "autonomy").mkdir(parents=True)
     (r / "skills" / "foo").mkdir(parents=True)
@@ -31,8 +40,20 @@ def vault(tmp_path, monkeypatch):
     git(r, "add", "-A"); git(r, "commit", "-q", "-m", "base")
     monkeypatch.setattr(V, "VAULT", r)
     monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
-    monkeypatch.setattr(V, "loader_errors", lambda paths: [])
+    if mock_loaders:
+        monkeypatch.setattr(V, "loader_errors", lambda paths: [])
     return r
+
+
+@pytest.fixture
+def vault(tmp_path, monkeypatch):
+    return _scratch_vault(tmp_path, monkeypatch, mock_loaders=True)
+
+
+@pytest.fixture
+def livevalidatorvault(tmp_path, monkeypatch):
+    """Same tree, real loader subprocess: the seam `automod_vault_land` uses."""
+    return _scratch_vault(tmp_path, monkeypatch, mock_loaders=False)
 
 
 def _events(kind):
@@ -333,3 +354,95 @@ def test_front_matter_checker():
     assert V.frontmatter_error(d / "b.md") is None
     assert "never closes" in V.frontmatter_error(d / "c.md")
     assert "mapping" in V.frontmatter_error(d / "d.md")
+
+
+# ── #777: the land check must be able to express retiring a skill ───────────
+#
+# `agent_mcp/skills.py:90` skips any dot-prefixed directory, which is what makes
+# `skills/.archived/` an archive; `agent_mcp/skills.py` also returns its "do not
+# retrieve this" sentinel for a skill whose front matter sets `status: archived`.
+# The lander read BOTH as "the skill is broken", so retiring a skill — by moving
+# it or by status — was impossible through `automod_vault_land`, and the failed
+# validation reverted every other path in the batch with it. Vault commit
+# `60776c12` archives `ingest` "by hand because automod_vault_land refuses a move
+# into skills/.archived/": the cost of this was a human doing the landing.
+#
+# These four tests call the real `loader_errors` (and, for the last, the real
+# `land`) against `livevalidatorvault`, because both halves of the defect live
+# inside the subprocess `loader_errors` spawns — a mocked seam cannot see them.
+
+
+def _retire_by_rename(vault) -> None:
+    """`skills/foo/` → `skills/.archived/foo/`, quarantined at the destination."""
+    d = vault / "skills" / ".archived" / "foo"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: foo\nstatus: archived\n---\n# foo retired\n")
+    (vault / "skills" / "foo" / "SKILL.md").unlink()
+
+
+def test_an_archive_directory_is_never_a_skill_slug_to_the_load_check(livevalidatorvault):
+    """Clause 1. The path set's only `skills/` entries sit under a dot-directory.
+
+    Before the fix this returned `['skills/.archived: does not load']`: the slug
+    was `p.split("/")[1]`, so a two-segment archive path yielded the directory
+    name `.archived`, the loader abstained on it — correctly, it is not a skill —
+    and the abstention was reported as damage.
+    """
+    _retire_by_rename(livevalidatorvault)
+    errors = V.loader_errors(["skills/foo/SKILL.md", "skills/.archived/foo/SKILL.md"])
+    assert not [e for e in errors if ".archived" in e], (
+        f"the load check invented a skill slug out of a dot-directory: {errors}")
+
+
+@pytest.mark.parametrize("status", sorted(_QUARANTINE_STATUSES))
+def test_a_quarantine_status_is_not_reported_as_a_broken_skill(livevalidatorvault, status):
+    """Clause 2. One test per status in the loader's own set, not a hand-picked one.
+
+    `_QUARANTINE_STATUSES` is imported rather than repeated, so a sixth status
+    added to the loader is covered here the same day it is added there; a
+    hard-coded list would silently stop covering the set it is meant to pin.
+    """
+    (livevalidatorvault / "skills" / "foo" / "SKILL.md").write_text(
+        f"---\nname: foo\nstatus: {status}\n---\n# foo\n", encoding="utf-8")
+    errors = V.loader_errors(["skills/foo/SKILL.md"])
+    assert not [e for e in errors if "skills/foo" in e], (
+        f"`status: {status}` is a deliberate quarantine — present on disk, pulled "
+        f"from retrieval — not a load failure: {errors}")
+
+
+def test_the_loosened_check_still_refuses_a_skill_directory_with_no_body(livevalidatorvault):
+    """Clause 3. Loosening must not empty the check: one call, both verdicts.
+
+    The archived rename from clause 1 and a live `skills/bar/` with no `SKILL.md`
+    are judged together, so a fix that made the predicate vacuous would have to
+    fail here rather than in the clause-1 test alone.
+    """
+    _retire_by_rename(livevalidatorvault)
+    (livevalidatorvault / "skills" / "bar").mkdir()
+    errors = V.loader_errors([
+        "skills/foo/SKILL.md", "skills/.archived/foo/SKILL.md", "skills/bar/SKILL.md"])
+    assert [e for e in errors if e.startswith("skills/bar:")] == ["skills/bar: no SKILL.md"], (
+        f"a live skill directory with no SKILL.md must still be refused: {errors}")
+    assert not [e for e in errors if ".archived" in e], errors
+
+
+def test_a_retirement_by_rename_lands_as_one_commit(livevalidatorvault):
+    """Clause 4. `land()`, end to end: one sha, destination present, source gone.
+
+    `loader_errors` unmocked means this exercises the same subprocess the MCP
+    tool does — a pass here is `automod_vault_land` accepting a skill retirement,
+    which is the acceptance check itself. No `item_id`: the second reader is not
+    what is under test, and a land bound to no item is the route the module CLI
+    and `scripts/autoresearch/promote.py` take.
+    """
+    before = int(git(livevalidatorvault, "rev-list", "--count", "HEAD").stdout.strip())
+    _retire_by_rename(livevalidatorvault)
+    out = V.land(["skills/foo/SKILL.md", "skills/.archived/foo/SKILL.md"],
+                 "archive the foo skill")
+    assert out["ok"], out
+    assert int(git(livevalidatorvault, "rev-list", "--count", "HEAD").stdout.strip()) == before + 1, \
+        "the retirement must be one commit, so one revert undoes it"
+    assert (livevalidatorvault / "skills" / ".archived" / "foo" / "SKILL.md").is_file()
+    assert not (livevalidatorvault / "skills" / "foo" / "SKILL.md").exists()
+    shown = git(livevalidatorvault, "show", "--name-only", "--format=", out["commit"]).stdout
+    assert {"skills/foo/SKILL.md", "skills/.archived/foo/SKILL.md"} <= set(shown.splitlines()), shown
