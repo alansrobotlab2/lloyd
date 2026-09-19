@@ -11,6 +11,7 @@ startup hooks (autonomy ticker, worker pool, watchers) stay off.
 import json
 import sys
 import uuid
+import datetime
 from pathlib import Path
 
 import httpx
@@ -254,11 +255,11 @@ async def test_autonomy_blocked_agrees_with_dispatch_at_one_instant(
     # satisfies 4.
     stale = (when - dt.timedelta(days=3)).isoformat()
     write(1, status="paused", last_run=(when - dt.timedelta(days=2)).isoformat())
-    write(2, depends_on=1, last_run=stale)          # held by #870's fix
+    write(2, depends_on=1, last_run=stale)          # parked upstream → held (#558)
     write(3, frequency=None, runs_per_day=3,
           last_run=(when - dt.timedelta(hours=10)).isoformat())
     write(4, depends_on=3, last_run=stale)          # upstream met → dispatches
-    write(5, depends_on=99, last_run=stale)         # id with no file → unresolved
+    write(5, depends_on=99, last_run=stale)         # id with no file → held (#558)
 
     r = await client.get("/api/autonomy/tasks")
     assert r.status_code == 200
@@ -293,11 +294,17 @@ async def test_autonomy_board_gates_against_the_directory_it_lists(
     variable — so calling it with no argument meant a request could enumerate one
     tree and gate it against another, and nothing would notice until a deployment
     moved one of the two. The test moves exactly one of them and puts the opposite
-    verdict in the other: the listed board holds `#2` on its own paused `#1`, the
-    scheduler's own directory has no `#1` at all (and an unresolvable id still
-    reads as met — #558's open question, left as it is). Pre-fix the endpoint
-    resolved against the second tree and reported `blocked = None` for a task its
-    own listing says is waiting.
+    verdict in the other: the listed board holds `#2` on its own paused `#1`, while
+    the scheduler's own directory has a FRESH, running `#1`, so gating there reports
+    `blocked = None` for a task its own listing says is waiting.
+
+    The second tree used to have NO `#1` at all, which discriminated under the old
+    fail-open (`an unresolvable id counts as met → None`). #558 closed that
+    fail-open, so a missing upstream now also reads as held — with the identical
+    `"waiting on #1"` string — and the original fixture would have passed against
+    EITHER tree. The opposite verdict has to come from a tree where the dependency
+    is genuinely satisfied; that is what a fixture whose whole job is to
+    discriminate between two trees must keep doing, whatever the gate's rule is.
     """
     import datetime as dt
 
@@ -325,7 +332,11 @@ async def test_autonomy_board_gates_against_the_directory_it_lists(
     write(listed_dir, 1, status="paused",
           last_run=(when - dt.timedelta(days=2)).isoformat())
     write(listed_dir, 2, depends_on=1, last_run=stale)
-    write(other_dir, 2, depends_on=1, last_run=stale)   # its #1 does not exist
+    # other_dir: the SAME #2, but upstream #1 is there, running and 6 h fresh —
+    # inside #2's 12 h half-interval bound, so the dependency is satisfied and the
+    # board would report no hold. The opposite verdict, from the wrong tree.
+    write(other_dir, 1, last_run=(when - dt.timedelta(hours=6)).isoformat())
+    write(other_dir, 2, depends_on=1, last_run=stale)
 
     monkeypatch.setattr(autonomy_router, "_AUTONOMY_DIR", listed_dir)
     monkeypatch.setattr(autonomy, "AUTONOMY_DIR", other_dir)
@@ -477,3 +488,100 @@ async def test_entity_graph_include_isolated_and_min_confidence(client, entity_w
     assert "Orphan Concept" in {n["id"] for n in body["nodes"]}
     strict = (await client.get("/api/entity-graph?min_confidence=0.99")).json()
     assert strict["edgeCount"] == 0 and strict["nodeCount"] == 0
+
+
+@pytest.mark.asyncio
+async def test_the_board_reports_a_parked_upstreams_hold_over_http(
+        client, tmp_path, monkeypatch):
+    """GET /api/autonomy/tasks reports the #558 hold, over the real ASGI app.
+
+    `blocked` is the only way a human sees WHY a task never ran, and it is
+    produced across a boundary this diff does not touch: `list_tasks` imports
+    `autonomy` INSIDE the handler and calls `hold_reason(task, resolution)` there
+    (app/routers/autonomy.py:223-226). Every other test in this file calls the
+    gate directly, which proves the function and not the wiring.
+
+    The two autonomy directory globals are made to DISAGREE, which is the seam
+    with no coverage at all: the endpoint lists task files from
+    `app.routers.autonomy._AUTONOMY_DIR` while the gate's own default is
+    `autonomy.AUTONOMY_DIR`. #3/#4 carry that test. #3 is `up_next` and fresh, so
+    #4 is genuinely unheld; the upstream exists ONLY in the dir the endpoint
+    listed. Gate against the other dir and #3 is simply absent, and since #558 an
+    absent upstream FAILS CLOSED — the board would print `waiting on #3` for a
+    task dispatch is running that same second. Before #558 the wrong directory
+    hid holds; now it invents them, which is the same bug pointed the other way
+    and is why the must-not-happen pair is the load-bearing assertion here.
+
+    `blocked` is asserted in the shape the endpoint actually returns:
+    `hold_reason`'s {"kind", "by"} dict is flattened to "waiting on #1" / "paused"
+    by the handler (autonomy.py:229-233), so the finding text is NOT in the HTTP
+    payload. Claiming otherwise here would pin a shape the API does not have.
+    """
+    import autonomy
+    from app.routers import autonomy as autonomy_router
+
+    listed_dir = tmp_path / "listed"
+    other_dir = tmp_path / "some-other-board"
+    listed_dir.mkdir()
+    other_dir.mkdir()
+    monkeypatch.setattr(autonomy_router, "_AUTONOMY_DIR", listed_dir)
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", other_dir)
+
+    # `hold_reason` reports `no skill` BEFORE a dependency, so each task needs a
+    # skill that resolves or the endpoint answers a different question than the
+    # one under test.
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("# test skill\nDo the thing.\n", encoding="utf-8")
+
+    def age(hours):
+        return (datetime.datetime.now(datetime.timezone.utc)
+                - datetime.timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    def write(tid, **fm):
+        base = {"id": tid, "name": f"task{tid}", "status": "up_next",
+                "frequency": "daily", "priority": "medium",
+                "skill_path": str(skill)}
+        base.update(fm)
+        body = "\n".join(f"{k}: {v}" for k, v in base.items())
+        (listed_dir / f"{tid}-task{tid}.md").write_text(
+            f"---\n{body}\n---\n\n# task {tid}\n\nbody\n", encoding="utf-8")
+
+    # #1: `paused`, last run INSIDE the freshness bound (6 h of a daily
+    # interval's 12 h half), so its status is the only thing holding #2.
+    write(1, status="paused", last_run=age(6))
+    write(2, depends_on=1, last_run=age(72))
+    # #3: `up_next` and fresh → #4 must be unheld, and #3 exists only in the dir
+    # the endpoint listed. This pair is the directory-seam test.
+    write(3, status="up_next", last_run=age(6))
+    write(4, depends_on=3, last_run=age(72))
+
+    async with client:
+        r = await client.get("/api/autonomy/tasks")
+    assert r.status_code == 200
+    tasks = {int(t["id"]): t for t in r.json()["tasks"]}
+    assert set(tasks) == {1, 2, 3, 4}, "endpoint did not list the whole board"
+
+    assert tasks[2].get("blocked") == "waiting on #1", (
+        f"#2 blocked={tasks[2].get('blocked')!r}: a dependent of a paused "
+        "upstream is not reported as held on the board, so the fail-closed rule "
+        "stays invisible to the one surface a human reads")
+
+    assert not tasks[4].get("blocked"), (
+        f"#4 is held ({tasks[4]['blocked']!r}) by a fresh, runnable upstream. "
+        "The upstream lives only in the dir the endpoint lists, so this is the "
+        "gate resolving against `autonomy.AUTONOMY_DIR` instead: an unfound "
+        "upstream fails closed after #558, and the board invents a hold dispatch "
+        "does not apply")
+
+    # The hold is dispatch's own answer, not a display opinion. Dispatch reads
+    # `autonomy.AUTONOMY_DIR`, which the fixture deliberately pointed at an empty
+    # tree to stage the disagreement above — point it back at the board the
+    # endpoint listed, which is what both surfaces read in production, and ask
+    # whether the two agree on the same four tasks.
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", listed_dir)
+    due = {int(t["id"]) for t in autonomy.get_due_tasks()}
+    assert 2 not in due, "the board holds #2 and dispatch still offers it"
+    assert 4 in due, (
+        f"dispatch offers neither #2 nor #4 ({sorted(due)}); with #4 also missing "
+        "the two assertions above compare the board against a scheduler that "
+        "refused everything, which is not agreement")

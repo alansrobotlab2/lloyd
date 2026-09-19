@@ -185,10 +185,14 @@ as `blocked`, and `dashboard._autonomy` to split past-due rows into `overdue`
 `classifier: "naive"` when `import autonomy` failed and every past-due task is
 being called overdue again, because a downgrade that looks like success is the
 failure this split exists to prevent. Note that the dependency gate resolves
-`depends_on` by id and treats an unresolvable id as **met**, so every caller
-must resolve against the *whole* board: `/api/autonomy/tasks?status=up_next`
-classified against its own filtered list would report every dependency
-satisfied, since the upstream is usually the task that just left that status.
+`depends_on` against the set it is handed, and since #558 a dependency it
+cannot find, or finds unpromisable, is **not met** — so every caller must
+resolve against the *whole* board. `/api/autonomy/tasks?status=up_next`
+classified against its own filtered list is the wrong direction now: the
+upstream is usually the task that just left that status, so the filtered view
+would report a satisfied dependency as `waiting on #N` and the hold would be
+invisible rather than under-reported. Either way one caller reading a
+half-board gets the wrong answer, which is the point of the next paragraph.
 That is no longer a convention each caller honouring on its own — #870 made it
 one function, `autonomy.dependency_resolution_set(directory)`, and dispatch
 (`get_due_tasks`), `_grossly_overdue`, `/api/autonomy/tasks` and
@@ -206,6 +210,22 @@ upstream must have succeeded within **half this task's interval**, not merely
 and the chains settle into a stable inverted order where every downstream task
 consumes a day-old artifact — observed June 2026, with reflection running
 39→38/40→42 and trajectory running 57 before 56.
+
+A dependency the gate cannot name holds its dependent — **fail closed** (#558).
+Two shapes reach that: no task file answers the id at all, and an upstream that
+exists but could not itself dispatch (parked `paused`/`draft`, disabled without
+ever having succeeded, or dropped for an unreadable `grants:` block — the same
+`_dispatch_blockers` list `_is_task_due` uses, so "may this task run?" and "may
+this task certify its dependent's input?" cannot diverge again, which is the
+2026-09-08 inversion: #42 sat `paused`, the scheduler could not see it, and
+#39/#40 ran at 06:00–06:03Z against a vacuously-satisfied gate while #42's
+handoff landed at 06:10Z). The hold is not silent: `_warn_fail_closed` logs the
+dependent, the upstream id, and what was found, deduplicated per episode so a
+60 s dispatch tick cannot shout. `stale_bypass_hours` is the escape and still
+fires, so a genuinely-dead upstream forwards on stale input rather than
+retiring the chain — and the bypass still refuses while the upstream is
+`in_progress`, which is why a wrong-id misconfiguration cannot use the bypass to
+dispatch both tasks on top of each other.
 
 `stale_bypass_hours` is principle 3 made real, and for a long time it was not:
 the field was set on the reflection chain and described in this document as

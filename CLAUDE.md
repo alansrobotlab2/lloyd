@@ -2301,10 +2301,13 @@ allowed to run, so the counter was never zero and therefore said nothing.
 The `classifier` field reports `naive` when `autonomy` could not be imported
 and every past-due task is being called overdue, because a downgrade that
 looks like success is the failure this whole split exists to prevent. Note
-that the dependency gate resolves `depends_on` by id and treats an
-unresolvable id as *met*, so it must always be handed the **whole** board —
-`/api/autonomy/tasks?status=up_next` classified against its own filtered list
-would report every dependency satisfied.
+that the dependency gate resolves `depends_on` against whatever set it is
+handed, and since #558 an id with no task file behind it, or an upstream
+dispatch would not run, is *not met* — so it must always be handed the **whole**
+board. Handed a status-filtered list (`/api/autonomy/tasks?status=up_next`) the
+gate cannot see an upstream that is `paused`, `in_progress` or `failed`, so
+every such row reads as `waiting on #N` and the board invents a hold that does
+not exist.
 
 **Front matter is bounded by its closing `---`, not by a byte count.**
 `_frontmatter` reads in 4 KB chunks up to a 64 KB ceiling and stops at a

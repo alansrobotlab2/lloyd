@@ -205,9 +205,10 @@ async def autonomy_tasks(status: str = "", tag: str = ""):
 
         # One resolution input, shared with dispatch (#870). This endpoint used to
         # assemble its own `everything` — every parsed task regardless of status,
-        # deliberately, because an unresolvable `depends_on` id counts as met and
-        # a filtered view would report every dependency satisfied — while dispatch
-        # resolved the same `depends_on` against the status-filtered runnable set.
+        # deliberately, because at the time an unresolvable `depends_on` id counted
+        # as met and a filtered view would have reported every dependency
+        # satisfied — while dispatch resolved the same `depends_on` against the
+        # status-filtered runnable set.
         # Same gate, two inputs: for a `paused` upstream the board printed
         # `waiting on #N` in the same second the scheduler dispatched the
         # dependent. The whole-board reasoning now lives in

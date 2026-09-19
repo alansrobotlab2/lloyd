@@ -461,8 +461,9 @@ class IdentitySchemaUnavailable(RuntimeError):
     Raised rather than treated as "no declarations". A gate whose input is
     missing reports success on every name that passes through it — this repo
     has been bitten three times by exactly that shape (`graph-baseline.json`
-    rewrites itself; `_is_dependency_met` returns True for an unfindable
-    upstream; dream-consolidation gated on a lock file that never existed), so
+    rewrites itself; `_is_dependency_met` returned True for an unfindable
+    upstream until #558 closed it; dream-consolidation gated on a lock file that
+    never existed), so
     the absence of this file is an error, not a permissive default.
     """
 

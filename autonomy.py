@@ -185,8 +185,8 @@ def _append_activity_log(task_id, note: str) -> None:
 
 # ── Status changes that stop a task dispatching ───────────────────────────────
 # Dispatch reads exactly two things off a task's `status`: `_all_runnable_tasks`
-# (:323) drops anything outside `("up_next", "in_progress", "failed")`, and the
-# queue's own source (`workers/sources/scheduled_task.py:174`) skips anything
+# drops anything outside `RUNNABLE_STATUSES`, and the
+# queue's own source (`workers/sources/scheduled_task.py`) skips anything
 # that is not `up_next`. So every other value — `draft` and `paused` above all —
 # is a dispatch kill switch that leaves the task looking configured: live
 # `next_run`, normal-looking board row, no log line saying it was parked. #68
@@ -303,6 +303,28 @@ def _write_run_record(task_id: int, run_id: str, status: str,
 
 # ── Scheduling logic (used by scheduled-task source) ──────────────────────────
 
+# The statuses dispatch may run a task in, in ONE place. `_all_runnable_tasks`
+# filters on it for the dispatch candidate; `_is_dependency_met` filters on it for
+# the upstream (#558). Those were two ad-hoc literals in two functions, and "may
+# this task run?" and "may this task certify its dependent's input?" are the same
+# question with the same answer — a dependent consuming an artifact its upstream
+# is not allowed to produce is fail-open with a log line attached. When the lists
+# diverged on 2026-09-08 the scheduler could not see a `paused` upstream,
+# `if not dep_task: return True` fired, and #39/#40 dispatched at 06:00-06:03Z
+# against a vacuously-satisfied gate while #42's handoff landed at 06:10Z.
+# `tests/test_autonomy_dependency_fail_closed.py::test_the_rung_that_decides_a_
+# dependent_is_the_rung_that_decides_a_run` asserts the two agree status by
+# status, so this tuple cannot drift from the filter silently again.
+#
+# `failed` is IN this set on Alan's ruling when #558 was reopened (2026-09-13):
+# exhausting a retry budget stops a task running AGAIN, it does not unmake the
+# artifact its last run produced. Whether that artifact is still usable is the
+# freshness rule's job, not the status word's. `failed` is nonetheless excluded
+# from DISPATCH — by `_is_task_due`'s own status gate, not by this tuple — and
+# that asymmetry is asserted, not implied.
+RUNNABLE_STATUSES = ("up_next", "in_progress", "failed")
+
+
 def _all_board_tasks(directory=None) -> list[dict]:
     """Every parseable task file, whatever its status or grants block.
 
@@ -343,14 +365,79 @@ def dependency_resolution_set(directory=None) -> list[dict]:
     is broken.
 
     Deliberately NOT a decision about what an *absent* upstream means: an id
-    with no file still resolves to nothing and is still treated as met. That
-    boundary is #558's to move, not this function's.
+    with no file resolves to nothing here, and `_is_dependency_met` is what
+    decides that a resolution which cannot name its upstream does not certify the
+    run (#558, on Alan's ruling that a `depends_on` pointing at no task file
+    holds its dependent). That verdict is why the whole-board membership below
+    matters as much as the shared parse: `paused` and `draft` upstreams are in
+    this set, so they are found and then judged by their status, rather than
+    silently resolving to nothing.
 
     `directory` is for the one caller whose board lives somewhere else (see
     `_all_board_tasks`); it is still the same function, the same membership rule,
     and the same parse.
     """
     return _all_board_tasks(directory)
+
+
+def _dispatch_blockers(task: dict) -> list[str]:
+    """Why this task is not something dispatch may run. Empty list means it may.
+
+    ONE predicate behind two questions: "may this task run?"
+    (`_all_runnable_tasks`) and "may this task certify the artifact its
+    dependent is about to consume?" (`_is_dependency_met`, #558). They are the
+    same question — an upstream that is not permitted to execute cannot have
+    produced the input downstream is reading — so they must not be two ad-hoc
+    lists that can drift. The drift is what burned the 2026-09-08 nightly chain:
+    dispatch could not see the `paused` upstream, `if not dep_task: return True`
+    fired, and #39/#40 consumed an analysis that had not been written yet.
+
+    The messages are the warning text clause 4 asks for, so they name what was
+    found (the status, or the grant errors) rather than just "unavailable".
+    """
+    blockers: list[str] = []
+    status = str(task.get("status", "") or "").strip()
+    if status not in RUNNABLE_STATUSES:
+        blockers.append(f"status {status or '(blank)'!r}, which dispatch does not run")
+    errors = _grant_block_errors(task, Path(str(task.get("_path") or "")))
+    if errors:
+        blockers.append("unreadable grants: block — " + "; ".join(errors[:2]))
+    return blockers
+
+
+_fail_closed_found: dict = {}
+
+
+def _warn_fail_closed(task: dict, dep_id: str, finding: str) -> None:
+    """Warn once per (dependent, upstream, finding) that a chain is held shut.
+
+    The hold has to be legible: a dependent that silently never runs is the #68
+    failure mode one layer up, and the 2026-09-08 inversion was undiagnosable for
+    exactly that reason — nothing said "#39 ran while #42 was paused".
+
+    Deduplicated on the FINDING rather than on the pair, so this repeats at most
+    once per episode instead of every 60 s dispatch tick, while a change in what
+    was found (paused → draft, or parked → deleted) still prints. `_no_skill_warned`
+    set the precedent for deduplicating a dispatch-tick warning; that one dedupes
+    forever, which is right for a missing skill and wrong here — a recurrence of
+    the parked-upstream shape is the news this warning exists to report, so the
+    entry is dropped the moment the upstream resolves and runnable again.
+    """
+    key = (str(task.get("id", "")), dep_id)
+    finding = f"upstream #{dep_id}: {finding}"
+    if _fail_closed_found.get(key) == finding:
+        return
+    _fail_closed_found[key] = finding
+    logger.warning("Task #%s is held: its depends_on %s — dispatching it would "
+                   "consume an artifact that will not be produced. Set "
+                   "stale_bypass_hours on the dependent to forward on stale "
+                   "input instead of waiting forever.",
+                   task.get("id"), finding)
+
+
+def _clear_fail_closed(task: dict, dep_id: str) -> None:
+    """Forget a resolved fail-closed warning so its recurrence can warn again."""
+    _fail_closed_found.pop((str(task.get("id", "")), dep_id), None)
 
 
 def _all_runnable_tasks(board: Optional[list[dict]] = None) -> list[dict]:
@@ -361,14 +448,17 @@ def _all_runnable_tasks(board: Optional[list[dict]] = None) -> list[dict]:
     to be blind to a paused upstream. Pass `board` to filter a snapshot already
     in hand, so one caller does not read the directory twice and get two
     different boards out of it.
+
+    The filter itself is `_dispatch_blockers`, shared with the dependency gate so
+    the two cannot answer "is this task able to run?" differently (#558).
     """
     tasks = []
     for task in (board if board is not None else _all_board_tasks()):
-        status = str(task.get("status", "")).strip()
-        # `failed` is included so a disabled upstream stays FINDABLE by
-        # _is_task_due's own status gate — it is excluded from dispatch there,
-        # not dropped here, so a broken upstream still reads as an upstream.
-        if status not in ("up_next", "in_progress", "failed"):
+        # `failed` is in `RUNNABLE_STATUSES` so a disabled upstream stays
+        # FINDABLE by _is_task_due's own status gate — it is excluded from
+        # dispatch there, not dropped here, so a broken upstream still reads as
+        # an upstream, and its last SUCCESS still counts (#558 clause 6, amended).
+        if _dispatch_blockers(task):
             continue
         # #534: a `grants:` block the loader cannot read is not the same thing
         # as a task with no grants. The block IS the human's authorization, so
@@ -377,9 +467,6 @@ def _all_runnable_tasks(board: Optional[list[dict]] = None) -> list[dict]:
         # nobody actually wrote. Drop it from the runnable set: it is not due,
         # it is not enqueued, it does not drain. The fix is legible in the
         # error and the file is one edit away.
-        _errors = _grant_block_errors(task, Path(str(task.get("_path") or "")))
-        if _errors:
-            continue
         tasks.append(task)
     return tasks
 
@@ -541,6 +628,25 @@ def _is_dependency_met(task: dict, all_tasks: list[dict], *,
     #813, which made it not a function of its inputs — two probes of a case near
     the freshness bound could legitimately disagree, so neither the gate nor a
     differential over it could be replayed. One evaluation reads one instant.
+
+    FAILS CLOSED on an upstream that cannot be the source of the artifact
+    (#558): no task file answers the id, or the file exists but
+    `_dispatch_blockers` says dispatch will not run it — a parked status
+    (`paused`, `draft`, `suspended`, a blank status) or an unreadable `grants:`
+    block. Both answer NOT met and log a warning naming the upstream and what
+    was found. The rule is Alan's ruling on the reopened item (2026-09-13), not
+    this round's judgement: a `depends_on` naming nothing is the same shape as a
+    deleted upstream, and under the old `return True` both silently unblocked
+    every dependent of a task that will never produce its input. That is the
+    2026-09-08 nightly chain: #42 `paused`, #39/#40 dispatched against a
+    vacuously-satisfied gate, #42's handoff written 6 minutes later.
+
+    `stale_bypass_hours` is the escape and it still works, past its own window
+    and never while the upstream is `in_progress` — fail closed must not become
+    fail forever (principle 3: forwarding on stale input beats not running). The
+    one status that IS accepted with a warning-free pass is `failed`: dispatch
+    will not run it again, its last SUCCESS still names a real artifact, and the
+    freshness rule below is what decides whether that artifact is usable.
     """
     if now is None:
         now = _utcnow()
@@ -554,10 +660,20 @@ def _is_dependency_met(task: dict, all_tasks: list[dict], *,
             dep_task = t
             break
     if not dep_task:
-        # Absent from the resolution set. Whether this should read as NOT met is
-        # #558's open decision; this round deliberately keeps the existing
-        # answer so the gate's agreement is not smuggled in as a verdict.
-        return True
+        # No task file answers this id: a typo, a deleted upstream, or a file
+        # whose front matter the board could not parse. There is no `last_run` to
+        # measure freshness against, so the declared bypass window is the only
+        # signal there is — hence the synthetic dep_task, which
+        # `_dependency_bypassed` reads for its `in_progress` guard alone.
+        _warn_fail_closed(task, dep_id, "no task file answers this depends_on id")
+        return _dependency_bypassed(task, {"id": dep_id, "status": "unknown"},
+                                    None, now)
+    blockers = _dispatch_blockers(dep_task)
+    if blockers:
+        _warn_fail_closed(task, dep_id, "; ".join(blockers))
+        return _dependency_bypassed(task, dep_task,
+                                    _parse_iso(dep_task.get("last_run")), now)
+    _clear_fail_closed(task, dep_id)
     dep_last_run = _parse_iso(dep_task.get("last_run"))
     if not dep_last_run:
         # Never succeeded — still eligible for a stale bypass.

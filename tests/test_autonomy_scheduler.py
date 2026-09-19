@@ -573,9 +573,14 @@ async def test_gate_is_a_function_of_its_inputs(aut, monkeypatch):
     upstream 2 days behind a 12 h half-interval bound (not met), while `AUX`, 42 h
     earlier, sits 6 h behind that same bound and after the dependent's own run
     (met). So the parameter is doing the work, and the helper is the only thing
-    that supplies it when it is absent."""
+    that supplies it when it is absent.
+
+    The upstream is `up_next`, not the section default of `paused`: #558 made a
+    parked upstream hold at EVERY instant, so with a parked one all three calls
+    return False and the test would pass without the `now=` parameter doing
+    anything. The straddle needs an upstream the gate is willing to consider."""
     _pin(aut, monkeypatch, when=AUX)
-    _stale_pair(aut)
+    _stale_pair(aut, up_status="up_next")
     tasks = [read_task(aut, 1), read_task(aut, 2)]
     first = aut._is_dependency_met(tasks[1], tasks, now=PIN)
     second = aut._is_dependency_met(tasks[1], tasks, now=PIN)
@@ -625,30 +630,35 @@ async def test_board_and_scheduler_agree_for_every_upstream_status(
     `depends_on` id has no file at all: the board's hold reason and the
     scheduler's due decision must give one verdict, at one instant.
 
-    The expected column is NOT this item choosing an answer for the absent id:
-    the no-file row keeps today's fail-open answer, which is #558's to move.
-    What is pinned here is that both surfaces say the same thing."""
+    What is pinned is the AGREEMENT — every row holds or none of them is
+    believed. The expected column for the absent id moved on 2026-09-19: this row
+    used to record `expect_held = False` with a note that the fail-open answer
+    was #558's to move, and #558 moved it. Alan's ruling on the reopened item is
+    that a `depends_on` naming no task file HOLDS its dependent (clause 3), so
+    the no-file row now expects the hold for the same reason the `paused` and
+    `draft` rows do. `test_the_rung_that_decides_a_dependent_is_the_rung_that_
+    decides_a_run` in tests/test_autonomy_dependency_fail_closed.py is where the
+    verdict itself is pinned, status by status; this test only refuses to let the
+    two surfaces disagree about it."""
     _pin(aut, monkeypatch)
     if up_status is None:                       # depends_on points at nothing
         write_task(aut, 2, depends_on=1,
                    last_run=(PIN - dt.timedelta(days=3)).isoformat())
-        expect_held = False
     else:
         _stale_pair(aut, up_status=up_status)
-        # Upstream exists and ran 2 days ago; the dependent is daily, so the
-        # half-interval freshness bound is 12 h and it is 40x past. Met → held,
-        # and `stale_bypass_hours` is unset, so nothing forwards past it.
-        expect_held = True
+    # In every row the upstream either cannot run (#558) or ran 2 days ago — and
+    # the dependent is daily, so the half-interval freshness bound is 12 h and
+    # that is 40x past. Not met either way, and `stale_bypass_hours` is unset, so
+    # nothing forwards past it.
     board = list(aut.dependency_resolution_set())
     due = [int(t["id"]) for t in aut.get_due_tasks(now=PIN)]
     dep = next(t for t in board if int(t["id"]) == 2)
     held = aut.hold_reason(dep, board, now=PIN)
     assert (2 in due) is not (held is not None), (
         f"upstream {up_status!r}: board said {held!r}, scheduler due={2 in due}")
-    if expect_held:
-        assert held == "waiting on #1" and 2 not in due
-    else:
-        assert held is None and 2 in due
+    assert held == "waiting on #1" and 2 not in due, (
+        f"upstream {up_status!r}: the scheduler dispatched a dependent whose "
+        f"upstream cannot produce its input (board said {held!r})")
 
 
 async def test_paused_upstream_never_both_holds_and_dispatches(aut, monkeypatch):
@@ -1788,3 +1798,69 @@ async def test_the_artifact_evidence_survives_the_real_execute_adapter(
     norm = normalize_result(item, out)
     assert norm["status"] == "success"
     assert norm["meta"]["output_artifact"]["bytes"] == 30237
+
+
+@pytest.mark.asyncio
+async def test_a_parked_upstream_keeps_its_dependent_out_of_the_queue(
+        aut, monkeypatch, tmp_path):
+    """A parked upstream means the dependent is never ENQUEUED, not enqueued-then-skipped.
+
+    #558's hold is asserted against `get_due_tasks` in
+    tests/test_autonomy_dependency_fail_closed.py. This pins the trip THROUGH the
+    worker pool, which is where a task is actually stopped: `enqueue_if_due`
+    computes due-ness on the pool's default executor — a different thread, with
+    `autonomy` imported inside the worker module rather than this test's — and
+    then applies its own model-health and open-item filters before `enqueue`. A
+    dependent of a parked upstream has to be absent from that loop entirely: a
+    source that enqueued first and second-guessed later would still take a worker
+    slot and still write a run record, which is the 2026-09-08 shape exactly
+    (#39/#40 ran at 06:00Z while #42 sat paused; #42's handoff landed at 06:10Z).
+    The queue mouth is where the fix has to be seen biting, not the board.
+
+    The health probe is stubbed so the tick reaches the enqueue loop; the real
+    `WorkQueue` is used so `enqueue` is really called. The control half at the end
+    is what turns the empty first half into a verdict rather than an artifact of a
+    tick that never got that far.
+    """
+    import workers.sources.scheduled_task as st
+    from workers.queue import WorkQueue
+
+    enqueued: list[str] = []
+
+    def _capture(_self, **kw):
+        # `enqueue_if_due` calls it all-keyword: source/kind/payload/priority/
+        # dedup_key, with the task id in payload. Reading the dedup key rather
+        # than a positional keeps this honest about the real call shape.
+        enqueued.append(str(kw["dedup_key"]).rsplit(":", 1)[-1])
+        return 1
+
+    monkeypatch.setattr(st.WorkQueue, "enqueue", _capture)
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(autonomy, "_local_hour", lambda: 2)
+
+    # The upstream's last run sits INSIDE the freshness bound (6 h of a daily
+    # interval's 12 h half), so the only thing holding #2 is its status. A stale
+    # upstream would hold the dependent through the freshness rule instead, and
+    # the test would be pinning the wrong mechanism.
+    write_task(aut, 1, status="paused", last_run=_iso(hours=6))
+    write_task(aut, 2, depends_on=1, preferred_hours=[2], last_run=_iso(days=3))
+
+    await st.enqueue_if_due(WorkQueue(tmp_path / "parked.db"),
+                            {"max_duration_seconds": 1800})
+    held = list(enqueued)
+    assert "2" not in held, (
+        f"queue was handed {held}: a dependent of a paused upstream reached the "
+        "worker pool. The hold has to hold at the enqueue mouth and not only on "
+        "the board — that is where a slot is spent and a run record written.")
+
+    # Control, same harness, same tick: flip ONLY the upstream status, and #2 must
+    # now be enqueued. Without it, the empty list above could equally mean the
+    # tick never reached the enqueue loop (health gate, open-item cap, a fixture
+    # that is simply not due) — the false negative this file exists to prevent.
+    enqueued.clear()
+    write_task(aut, 1, status="up_next", last_run=_iso(hours=6))
+    await st.enqueue_if_due(WorkQueue(tmp_path / "unparked.db"),
+                            {"max_duration_seconds": 1800})
+    assert "2" in enqueued, (
+        f"nothing enqueued even with a runnable upstream ({enqueued}): the fixture "
+        "was never due, so the assertion above proves nothing")

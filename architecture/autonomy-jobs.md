@@ -107,17 +107,22 @@ grouping those three jobs sat in one list and the alternation was invisible.
 Both were measured against the reflection chain, both are properties of the
 mechanism and apply to every edge above:
 
-- **An upstream that resolves to nothing satisfies `depends_on` vacuously.**
-  `_is_dependency_met` returns True when the id finds no task. Until item #870
-  landed (2026-09-11) that swallowed far more than a typo: dispatch resolved
-  against `_all_runnable_tasks()`, which keeps only `up_next`, `in_progress` and
+- **An upstream that resolves to nothing used to satisfy `depends_on`
+  vacuously — closed 2026-09-19 by #558.** `_is_dependency_met` returned True
+  when the id found no task, and until item #870 landed (2026-09-11) that
+  swallowed far more than a typo: dispatch resolved against
+  `_all_runnable_tasks()`, which kept only `up_next`, `in_progress` and
   `failed`, so a `paused` or `draft` upstream was *invisible* and unblocked
   everything below it — while the Mission Control board, resolving against every
   parsed task, printed `waiting on #N` for that same task in the same second.
   `dependency_resolution_set()` is the one set both surfaces read now, and an
-  upstream that exists on disk blocks whatever its status. What is still open as
-  backlog **#558** is the narrow case #870 deliberately left alone: an id with no
-  file behind it is still read as met.
+  upstream that exists on disk blocks whatever its status. The narrow case #870
+  deliberately left open — an id with no file behind it, which has no
+  `last_run` to measure — is now held too: it is read as NOT met and logged, on
+  Alan's ruling of 2026-09-13, with `stale_bypass_hours` as the escape. The one
+  status that still passes is `failed`, whose last SUCCESS is a real artifact.
+  So a chain whose upstream id is a typo stops rather than silently consuming
+  nothing, which is what inverted the nightly chain on 2026-09-08.
 - **An empty-but-successful run is indistinguishable from a dead one.** A run's
   status is decided by its terminal text, and the chains gate on status. Measured
   2026-09-11: `run_38_20260911_050055` wrote a complete signal report, was
