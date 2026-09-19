@@ -1150,14 +1150,25 @@ would never have been offered again. In a third turn that day the finalizer's
 
 | what | where | rule |
 |---|---|---|
-| the verdict is checked | `backlog.settle_item_verdict`, called by `autocode.execute` before the close | refused when `rejected` has no `summary`; when the round is landing and every clause is `met`; or when the ledger shows the landing and the outcome says `landed: false`. Acceptance re-derived from the clauses, `""` with none. `outcome_refused` on the `finished` row |
-| what "landing" means | `autocode._landing_seen` | the live land marker, `current.json`, or a `promoted`/`land_failed`/`land_rescued` row — never the turn's word |
+| the verdict carries its own evidence | `backlog.settle_item_verdict`, called by `autocode.execute` before the close | `unnecessary` stands only when nothing landed (the schema: "close WITHOUT a landing"). `rejected` stands only with a `summary` of at least `MIN_REJECTION_SUMMARY` (25) characters AND either nothing landed or a clause reported `not_met`. Either is refused when the ledger shows a landing and the outcome says `landed: false`. Acceptance re-derived from the clauses, `""` with none. `outcome_refused` on the `finished` row |
+| what "landing" means | `autocode._landing_seen`, or a vault commit this turn made | the live land marker, `current.json`, a `promoted`/`land_failed`/`land_rescued` row, or `vault_commits` — never the turn's word |
 | the review stands in for a missing outcome | `backlog.code_review_outcome`, in `settled_landings` | the vault rule (§3.2b) for the other surface: newest graded review of the round, not blocking, clauses 1..n all `met`. A reported outcome is never overridden |
 | said where it is read | `automod_land`'s result (`outcome`), the finalizer's own prompt | what `landed` means costs the length-bounded template nothing; the template gained one sentence — a clause is judged on the change, "never that it is not promoted yet" (two turns reported every clause `not_met` for a finished, gated change) |
 
 What still stands: `unnecessary` with nothing landing, and `rejected` with its
 measurement — including a round that landed its instrument and rejected the
 idea (`landed: true`, a clause not met, the numbers in `summary`).
+
+The first cut of that check listed contradictions, and a third false `rejected`
+walked through it the same evening: #982, a vault landing the vault review had
+just graded 4 of 4 met, whose finalizer wrote `landed: true`, no clauses, and
+the summary `"placeholder"`. Not empty; no clauses to be all met; and a vault
+turn has no round for a landing to be seen on. All three were the structured
+finalizer degenerating at the end of a long turn (333–865 tokens against ~1,000
+for a real outcome), and a degenerate object is still schema-valid — so the
+rule asks what a closing verdict SHOWS rather than what it contradicts.
+Replayed over the ledger: three item verdicts ever recorded, all `rejected`,
+all false, all refused; `unnecessary` has never been used.
 
 **A deferral waits for what it deferred to.** `backlog._open_deferral_targets`:
 `retriage_spent_items` skips an item whose last round deferred to a still-open

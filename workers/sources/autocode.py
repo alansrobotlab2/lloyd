@@ -1419,8 +1419,11 @@ async def _run_and_record(item, candidate, triage, budget, started,
     # see for itself: whether the round went to land. Both `rejected` outcomes
     # the loop had recorded by 2026-09-18 came from turns whose last tool call
     # was `automod_land`.
+    # A vault landing is a landing: #982's turn committed to the vault, the
+    # vault review graded it 4 of 4 met, and with no round to look at this
+    # read as "nothing landed".
     outcome, verdict_refused = B.settle_item_verdict(
-        outcome, landing_seen=_landing_seen(round_id, events))
+        outcome, landing_seen=_landing_seen(round_id, events) or bool(vault_commits))
     if verdict_refused:
         logger.warning("backlog #%s: item verdict not taken — %s (round %s)",
                        candidate.id, verdict_refused, round_id)

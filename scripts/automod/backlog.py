@@ -424,42 +424,59 @@ def parse_outcome(structured) -> dict | None:
             "human_paths": human_paths}
 
 
+# What a rejection's `summary` has to be at least: one sentence of measurement.
+# "MRR 0.500 -> 0.497 over 3 runs; within noise" is 45 characters; the summary
+# that closed #982 was the word "placeholder".
+MIN_REJECTION_SUMMARY = 25
+
+
 def settle_item_verdict(outcome: dict | None, *, landing_seen: bool) -> tuple[dict | None, str]:
-    """An item verdict checked against what the ledger and the outcome itself
-    say. Returns `(outcome, why_refused)`; `why_refused` is empty when it stands.
+    """An item verdict has to carry its own evidence, or it is not taken.
+    Returns `(outcome, why_refused)`; `why_refused` is empty when it stands.
 
     `unnecessary` and `rejected` close an item at the end of the turn, with no
     landing to wait for and no re-triage afterwards, and `parse_outcome` keeps
     them "as stated whatever the clauses say". That made them the one field of
     the finalizer whose cost of being wrong is unrecoverable and the one field
-    nothing cross-checked. `rejected` was recorded twice in its first two days
-    and was wrong both times (2026-09-18): #1242 — `landed: false`, no clauses,
-    a summary saying it would not claim a landing it had not watched finish,
-    while its own `automod_land` was in flight — and #1053 — `landed: true`,
-    four clauses `met`, an empty summary. Both changes landed; both items were
-    closed "tried it and rejected it on the evidence" minutes earlier, and a
-    closed item is invisible to the settle sweep, so had either landing failed
-    the item would never have been offered again.
+    nothing cross-checked. `rejected` was recorded three times in its first
+    three days and was wrong every time, always from a turn that had just
+    landed (2026-09-18):
 
-    Refused, and the acceptance re-derived from the clauses, when:
+    * #1242 — `landed: false`, no clauses, a summary saying it would not claim a
+      landing it had not watched finish, while its own `automod_land` was in
+      flight;
+    * #1053 — `landed: true`, four clauses `met`, an empty summary;
+    * #982 — a vault landing the vault review had just graded 4 of 4 `met`:
+      `landed: true`, no clauses, summary `"placeholder"`. It slipped through
+      the first cut of this check, which listed contradictions (no summary;
+      landing with every clause met; `landed: false` under a live landing) and
+      found none: the summary was not empty, there were no clauses to be all
+      met, and a vault turn has no round for a landing to be seen on.
 
-    * `rejected` carries no `summary` — the schema asks for the measurement
-      there, and a rejection without one is not the verdict Alan's rule
-      (2026-09-16) describes;
-    * the round is landing (`landing_seen`, or the outcome's own `landed`) and
-      every reported clause is `met` — that is what `met` means;
-    * `landing_seen` while the outcome says `landed: false` — it misreports the
-      one fact the ledger can check, so its verdict on the item is not taken.
+    Each was the structured finalizer degenerating at the end of a long turn
+    — 333 to 865 tokens, where a real outcome runs ~1,000 — and a degenerate
+    object is still schema-valid. So the rule is not a list of contradictions
+    any more. A verdict that closes an item has to show what it is:
 
-    What still stands: `unnecessary` with nothing landing (the premise no
-    longer holds, or every clause is already true), and `rejected` with its
-    measurement — including a round that LANDED its instrument and rejected
-    the idea, which reports `landed: true` and at least one clause not met.
+    * **`unnecessary`** says the item "should close WITHOUT a landing" (the
+      schema's words). It stands only when nothing landed: `landed` false AND
+      no landing seen.
+    * **`rejected`** says "you built or measured it and the evidence says it
+      does not improve things — put the measurement in summary". It stands only
+      with a summary of at least `MIN_REJECTION_SUMMARY` characters, AND either
+      nothing landed, or at least one clause is reported `not_met` — a round may
+      land its instrument and reject the idea, but then something it was asked
+      for is not met, and it says which.
+    * and either verdict with `landed: false` while `landing_seen` misreports
+      the one fact the ledger can check, so its word on the item is not taken.
 
-    With no clauses to derive from the acceptance becomes `""`: unreported,
-    which `settled_landings` fills from the review rung's grading when that
-    found every clause met (`code_review_outcome`), and otherwise leaves for a
-    person — never a close on the finalizer's word alone.
+    `landing_seen` is the caller's, from the ledger and the markers, and covers
+    both surfaces: a round that reached `round land`, or a vault commit this
+    turn made. When a verdict is refused the acceptance is re-derived from the
+    clauses; with none it becomes `""` — unreported — which `settled_landings`
+    fills from the review's own grading when that found every clause met
+    (`code_review_outcome`, `vault_review_outcome`) and otherwise leaves for a
+    person. Never a close on the finalizer's word alone.
     """
     if not outcome or outcome.get("acceptance") not in ITEM_VERDICT_OUTCOMES:
         return outcome, ""
@@ -467,13 +484,17 @@ def settle_item_verdict(outcome: dict | None, *, landing_seen: bool) -> tuple[di
     clauses = outcome.get("clause_outcomes") or []
     outcomes = {c.get("outcome") for c in clauses}
     landing = bool(landing_seen or outcome.get("landed"))
+    summary = " ".join(str(outcome.get("summary") or "").split())
     why = ""
-    if verdict == "rejected" and not str(outcome.get("summary") or "").strip():
-        why = "`rejected` with no measurement in `summary`"
-    elif landing and clauses and outcomes == {"met"}:
-        why = f"`{verdict}` from a round that is landing with every clause reported met"
-    elif landing_seen and not outcome.get("landed"):
-        why = f"`{verdict}` with `landed: false` while the round's own landing was in flight"
+    if landing_seen and not outcome.get("landed"):
+        why = f"`{verdict}` with `landed: false` while the turn's own landing is on the ledger"
+    elif verdict == "unnecessary" and landing:
+        why = "`unnecessary` closes an item WITHOUT a landing, and this turn landed"
+    elif verdict == "rejected" and len(summary) < MIN_REJECTION_SUMMARY:
+        why = (f"`rejected` with no measurement in `summary` ({summary!r})" if summary
+               else "`rejected` with no measurement in `summary`")
+    elif verdict == "rejected" and landing and "not_met" not in outcomes:
+        why = "`rejected` from a turn that landed, with no clause reported not met"
     if not why:
         return outcome, ""
     if not clauses:

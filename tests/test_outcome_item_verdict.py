@@ -9,7 +9,13 @@ their promotions. The settle sweep walks open items only, so neither landing
 ever reached its item, and had either promotion failed the item would not have
 been offered again.
 
-The two incident outcomes below are the ledger's, not paraphrases.
+And a third, the same evening, THROUGH the first cut of the check: #982, a
+vault landing the vault review had just graded 4 of 4 met, closed `rejected`
+on a summary that was the word "placeholder". That cut listed contradictions
+and found none. The rule now is that a verdict which closes an item has to
+carry its own evidence.
+
+The three incident outcomes below are the ledger's, not paraphrases.
 """
 
 from __future__ import annotations
@@ -32,6 +38,10 @@ OUTCOME_1053 = {
     "clause_outcomes": [
         {"clause": n, "outcome": "met", "evidence": f"tests/test_aggregator_auth.py::t{n}",
          "deferred_to": []} for n in (1, 2, 3, 4)],
+}
+OUTCOME_982 = {
+    "landed": True, "acceptance": "rejected", "clause_outcomes": [], "deferred_to": [],
+    "summary": "placeholder", "spawned": [], "human_paths": [],
 }
 OUTCOME_1242 = {
     "landed": False, "acceptance": "rejected", "clause_outcomes": [], "deferred_to": [],
@@ -82,10 +92,36 @@ def test_1053s_outcome_is_met_not_rejected():
     out, why = B.settle_item_verdict(B.parse_outcome(OUTCOME_1053), landing_seen=True)
     assert out["acceptance"] == "met" and out["item_verdict_refused"] == "rejected"
     assert "no measurement" in why
-    # The outcome's own `landed: true` is enough; the marker need not be seen.
+    # With a summary long enough to be one, it is still a turn that landed and
+    # named nothing it failed to do. The outcome's own `landed: true` is
+    # enough; the marker need not be seen.
     out, why = B.settle_item_verdict(
-        {**B.parse_outcome(OUTCOME_1053), "summary": "measured nothing"}, landing_seen=False)
-    assert out["acceptance"] == "met" and "every clause reported met" in why
+        {**B.parse_outcome(OUTCOME_1053), "summary": "the measurement found nothing worth reporting"},
+        landing_seen=False)
+    assert out["acceptance"] == "met" and "no clause reported not met" in why
+
+
+@pytest.mark.parametrize("landing_seen", [True, False])
+def test_982s_outcome_is_unreported_not_rejected(landing_seen):
+    """`landed: true`, no clauses, summary "placeholder" — a degenerate object
+    that is perfectly schema-valid. It is refused on what it says about itself,
+    whether or not the vault commit was seen."""
+    out, why = B.settle_item_verdict(B.parse_outcome(OUTCOME_982), landing_seen=landing_seen)
+    assert out["acceptance"] == "" and out["item_verdict_refused"] == "rejected"
+    assert "no measurement" in why and "placeholder" in why
+
+
+def test_unnecessary_means_nothing_landed():
+    """The schema's own words: "the item should close without a landing"."""
+    parsed = B.parse_outcome({"acceptance": "unnecessary", "landed": True, "deferred_to": [],
+                              "spawned": [], "summary": "already true at HEAD",
+                              "clause_outcomes": [{"clause": 1, "outcome": "met",
+                                                   "evidence": "t", "deferred_to": []}]})
+    out, why = B.settle_item_verdict(parsed, landing_seen=False)
+    assert out["acceptance"] == "met" and "WITHOUT a landing" in why
+    # …and from a turn whose landing is on the ledger while it says otherwise.
+    out, why = B.settle_item_verdict({**parsed, "landed": False}, landing_seen=True)
+    assert out["item_verdict_refused"] == "unnecessary" and "`landed: false`" in why
 
 
 def test_1242s_outcome_is_unreported_not_rejected():
@@ -177,6 +213,34 @@ def test_a_turn_that_called_automod_land_cannot_close_its_item_as_rejected(
     assert not [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_closed"]
     assert fin["outcome"]["acceptance"] == derived
     assert fin["outcome"]["item_verdict_refused"] == "rejected" and fin["outcome_refused"]
+
+
+def test_a_vault_turn_that_landed_cannot_close_its_item_as_rejected(isolated, monkeypatch, tmp_path):
+    """#982 through `execute`: no round at all, one `vault_land` for the item,
+    and the finalizer's "placeholder" object. A vault commit is a landing."""
+    import app.sessions_io as sio
+    p = _write_item(isolated, 982)
+    monkeypatch.setattr(sio, "active_sessions_snapshot", lambda: [])
+    monkeypatch.setattr(C, "source_inner_voice", lambda source, default=True: False)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, ""))
+    monkeypatch.setattr(B, "close_settled_items", lambda *a, **k: [])
+
+    async def turn(prompt, **kw):
+        S.append_event({"event": "vault_land", "ok": True, "item_id": 982,
+                        "commit": "9d0896a073f1e7c3d65ef3e1b22463bf0d192ebe",
+                        "paths": ["skills/morning-brief-and-triage/SKILL.md"]}, path=S.LEDGER_PATH)
+        return {"text": "landed in the vault\n\nSPAWNED: none\n", "session_id": "s-982",
+                "stop_reason": "stop", "num_turns": 210, "errors": [],
+                "structured": OUTCOME_982, "structured_error": ""}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    asyncio.run(I.execute(_Item({"structured_outcome": True})))
+    fm = _fm(p)
+    assert fm["status"] != "done" and B.REJECTED_TAG not in fm.get("tags", []), (
+        "closed as tried-and-rejected with its fix live in the vault")
+    fin = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "backlog_implement" and e.get("phase") == "finished"][-1]
+    assert fin["vault_commits"] and fin["outcome"]["item_verdict_refused"] == "rejected"
+    assert fin["outcome"]["acceptance"] == "" and "placeholder" in fin["outcome_refused"]
 
 
 def test_the_same_verdict_with_nothing_landing_still_closes_the_item(isolated, monkeypatch, tmp_path):
