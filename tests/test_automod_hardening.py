@@ -927,6 +927,12 @@ def test_the_pin_does_not_outlive_its_owner():
     kwargs = {k.arg for call in popens for k in call.keywords}
     assert "start_new_session" not in kwargs, "the pin would survive its owner"
     assert "process_group" in kwargs, "stop() could not reach the whole tree"
+    # Neither of those makes the title true, and on 2026-09-18 both held while
+    # an orphaned pin kept :8182 for five and a half hours: its own process
+    # group is exactly what a group signal to its owner cannot reach, and a
+    # child whose parent dies is re-parented, not killed. What makes it true is
+    # asking the kernel; `test_regression_runner` kills a real owner to see.
+    assert "preexec_fn" in kwargs, "nothing ends the pin when its owner dies"
 
 
 def test_the_pin_frees_its_snapshot_even_when_interrupted():

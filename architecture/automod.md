@@ -2374,6 +2374,51 @@ the LKG record's long-empty `eval` slot at settle. Read, never written, by the
 guardian: `last_known_good.json` has exactly one writer, and that is what
 makes it mean *observed healthy in production*.
 
+#### 8.1a Every promotion is measured, by a check a landing cannot kill
+
+Added 2026-09-18. The day landings sped up (gates went from ~16 min to ~7) the
+ledger said what the detector had really been doing: **8 of 17 promotions
+measured, 0 of the last 4** — and the five checks that finished after 11:00
+compared 0.0 with 0.0 on every document metric and recorded "no regression".
+Seven causes, stacked, and none of them new that day. The last was found only
+after the first six were fixed and a real check STILL timed out on every
+question — it had been under all of them:
+
+| # | what | consequence |
+|---|---|---|
+| 1 | `promote.wait_idle` counted agent turns (`/health.turns`); the check is `subprocess.run` evals on a thread | a landing restarted the backend under a running check |
+| 2 | the pinned qmd daemon runs in its own process group (`process_group=0`, so `stop` can take the tree), and "still a child" was the whole guarantee it would not outlive its owner | supervisord's group kill took the check and left the daemon: one orphan held :8182 for 5 h 30 min and burned two CPU-hours |
+| 3 | the pin's port check asked `127.0.0.1`; qmd binds `localhost`, which is `[::1]` here and nothing else | the check could not see a qmd daemon at all. "Refusing to compare against something I did not start" was never recorded once: a second daemon was started on top of the orphan and died on `EADDRINUSE`. If it died before the first start-up probe the skip read `pinned qmd exited immediately (rc=1); see <log>` — four times, each naming a log the caller had already deleted. If it took a second longer, the ORPHAN answered the probe and both arms ran against a daemon the check did not start: that is the five zero-against-zero checks. Which one a check got was a race |
+| 4 | `workers.round_hold` keeps the source unclaimed while a round is in flight, and one always is | a check could only START in the seconds after a restart — the one moment guaranteed to be followed by another |
+| 5 | it measured "the latest promotion" (`current.json`, else `last_settled.json`) | a promotion that landed while the previous check ran was measured by nobody |
+| 6 | qmd keeps working on a request its client abandoned, so once ONE recall outlasts the retriever's 15 s client timeout every later one queues behind it: 116–160 s a query by the end of an arm | every query empty in BOTH arms, which "every query empty stays a score" turned into zero-against-zero: no regression |
+| 7 | the pin RESTATED how production runs qmd (the published CLI, three CUDA variables) instead of reading it, and the restatement went stale the day after it was written: the daemon moved to the fork on 2026-09-07 with `QMD_RERANK_PARALLELISM=4` and a 1200-char rerank window. Invisible while a recall reranked 40 rows; #504 made it 240 | the ledger dates it to the hour: the paired check averaged **0.49–0.69 s** a question through 2026-09-14, **11.0–12.9 s** from the first check after #504, and 15.05 s — every recall at the client's timeout, nothing retrieved — from 2026-09-18 18:03Z, once anything else shared GPU 0. A 12 s average under a 15 s timeout also loses single questions from one arm or the other, and one of those was the false "regression" of 2026-09-17 05:34Z (`doc_hit_rate` 1.00 → 0.95), which `unanswered_doc_queries` then treated as a symptom. One snapshot, a fresh question per sample, one request at a time: **16.3–20.1 s** on the pin's build and settings, 14.3–15.7 s on the fork with the pin's settings, **4.6–5.5 s** on the fork with production's. It is the settings. `LATENCY_BUDGET_MS["paired_check"]` (14 s) was calibrated against the defect and is owed a re-derivation from readings on the corrected pin |
+
+What runs now:
+
+| what | where | rule |
+|---|---|---|
+| the comparison runs detached | `automod_regression.run_pending`, spawned by `start_runner` (the pool job, now milliseconds) and by `promote._start_regression_runner` the moment a landing is verified | its own session (`state.spawn_detached`), like the gate and the landing: a restart cannot reach it, it holds no pool slot, and no landing waits for it. `regression.lock` (flock) makes it one at a time; log in `regression.log`. Entry point `python -m scripts.automod.regression_runner run|pending` — its own module, because `-m` on the source module executes it twice (the registry imports it first). A promotion that comes back "cannot evaluate" for the last time is announced once (`promote.announce`): the runner's log is a file nobody tails |
+| one check per promotion | `pending_promotions` | read off the ledger: every `promoted` row of the last 24 h that was not rolled back, has no `regression_check`, and has not come back "cannot evaluate" `MAX_SKIPS_PER_COMMIT` (2) times. Oldest first; the queue is re-read after each check, so what lands meanwhile is picked up by the same runner; a regression stops it so the guardian acts first |
+| each check names what it compares | `check_promotion(subject, stage)` | `commit` against ITS `parent`, BOTH from a scratch worktree — the current arm used to run the live tree, which is the promoted commit only until the next landing. Every `regression_skipped` row carries the `commit` it could not evaluate |
+| the pin dies with its owner | `evalpin._die_with_parent` | `PR_SET_PDEATHSIG` via `preexec_fn`, libc resolved before the fork. `test_regression_runner` SIGKILLs a real owner and watches the child go — and, in the control, watches it survive without it |
+| an orphan is reaped, not refused | `evalpin.reap_stale`, first thing in `__enter__` | found by what it IS — a process of this user serving this `--index` on this `--port` whose parent is init or the user systemd — not by whether the port answers, which is the check that could not see it. A pin with a live parent is a run in progress and is left; anything else on the port is still refused. `port_free` asks both loopbacks, once, and only a refusal means free |
+| an answer counts only from the pin's own daemon | `PinnedCorpus.__enter__` | the start-up probe is believed only while the process it started is still alive |
+| a pin that dies at start says why | `PinnedCorpus._abandon` | the daemon's last 300 characters go into the `PinError` (and so onto the ledger), the daemon is stopped and the 1 GB snapshot removed — `__exit__` never runs for a `with` whose `__enter__` raised |
+| the pin serves production's retriever | `evalpin.production_daemon`, `pin_command` | argv and environment read from `agent-services/supervisor/conf.d/agent-qmd-daemon.conf`, on the pin's port and index. A conf it cannot read, or a CLI that is not there, is the published build and `source: "fallback: …"`; either way `pin.daemon {cli, source, settings}` rides on the `regression_check` row |
+| nothing is timed against a pin that cannot keep up | `PinnedCorpus.warm_up`, `production_payload` | the recall production sends — its pool and collections read from `agent_mcp.vault`, pinned against `_qmd_daemon_search` by a test — until one answers inside 10 s, two thirds of the client's timeout (7–11 s cold, then 4–5 s, measured). A DIFFERENT question every try: qmd caches a rerank score per (query, chunk) in the index it serves, so a repeated question comes back in ~0.2 s and passes the slowest daemon on its second try. The first cut asked for 30 rows, took 3.4 s, and waved through a daemon that then took 18 s a recall. Never → `PinError` → "cannot evaluate" |
+| what a killed check left is removed | `automod_regression.sweep_stale_scratch` | by the runner, under its lock: `automod-eval-*` checkouts (each a registered worktree of the LIVE repo — three were, that day) and `automod-pin-*` work dirs older than 2 h, which is older than any check can be |
+| an eval may wait longer than a live turn | `vault._qmd_timeout`, `LLOYD_QMD_TIMEOUT_S` | 15 s for production, 60 s for an eval arm; read per call. An arm whose code predates the override keeps its 15 s |
+| zero against zero is not "no regression" | `all_queries_empty(baseline)` | the BASELINE answering nothing is never the change — that code was live and answering — so it is `regression_skipped`. Only the CURRENT arm answering nothing stays a score, which is the one shape a change can produce |
+| a regression has to reproduce | `check_promotion`, `_would_regress` | while the pinned corpus is still up, a current arm that would be reported as a regression is run a SECOND time (`automod-check-confirm`). Under a pinned corpus the armed metrics are deterministic, so a real regression comes back the same; one that does not is recorded `regressed: false` with `unconfirmed_reasons` — a finding about the instrument — and a second look that fails or loses a question is "cannot evaluate". Both of this check's own rollback requests were false positives (2026-09-07 ndcg −0.006; 2026-09-17 one question lost to the client's timeout), and the queue now reaches promotions up to a day old, where a revert is a commit on top of other people's work. Costs one arm, only when it matters |
+| the idle gate sees every pool job | `promote.wait_idle` | with `turns` quiet it also asks `pool_in_flight()`; a job in flight under the promoter's pause is finite, and `idle_hard_max_wait_s` still bounds the whole wait |
+| the job is exempt from the round hold | `workers.round_hold.exempt` | it needs no engine and takes milliseconds |
+
+Scorecard row 10 carries `regression_coverage` — promotions, how many were
+measured, how many could not be evaluated — because a detector that is not
+running reads exactly like one that finds nothing.
+`tests/test_regression_runner.py`.
+
 ---
 
 ## 9. Incident: the false-positive rollback, 2026-09-06

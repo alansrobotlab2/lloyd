@@ -374,6 +374,22 @@ class QmdUnavailable(RuntimeError):
     """
 
 
+# What a qmd query may cost a live turn. An eval is not a live turn: it would
+# rather wait than score an answer it never received, so the paired regression
+# check raises this through the environment (`automod_regression.QMD_TIMEOUT_ENV`).
+QMD_TIMEOUT_S = 15.0
+
+
+def _qmd_timeout() -> float:
+    """`LLOYD_QMD_TIMEOUT_S` if it is a positive number, else 15 s. Read per
+    call: a default bound at import is one no caller can move."""
+    try:
+        value = float(os.environ.get("LLOYD_QMD_TIMEOUT_S") or 0)
+    except ValueError:
+        value = 0.0
+    return value if value > 0 else QMD_TIMEOUT_S
+
+
 def _qmd_post(payload: dict) -> list:
     req = urllib.request.Request(
         QMD_DAEMON_URL,
@@ -381,7 +397,7 @@ def _qmd_post(payload: dict) -> list:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=_qmd_timeout()) as resp:
         data = json.loads(resp.read())
     return [
         {

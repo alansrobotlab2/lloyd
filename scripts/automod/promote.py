@@ -304,7 +304,21 @@ def wait_idle(max_wait: float | None = None, *, drain: bool = True,
             turns = body.get("turns") or {}
             busy = (turns.get("active", 1) or turns.get("queued", 1)
                     or turns.get("harness_runs", 0))
-            if not busy:
+            # A pool job that is not an agent turn never shows in `turns`: it
+            # is a thread running `subprocess.run`, or pure Python. The idle
+            # gate learned to count `harness_runs` on 2026-09-06 and stopped
+            # there, so a landing restarted the backend under the paired
+            # regression check every time one was running — the check died,
+            # its pinned qmd daemon did not, and the promotion went unmeasured
+            # (8 of 17 measured on 2026-09-18). With the pool paused by this
+            # promoter a job in flight is finite, exactly as a harness job is.
+            jobs_quiet = pool_in_flight() if (pause_pool and not busy) else None
+            if not busy and jobs_quiet:
+                quiet = 0
+                deadline = time.time() + max_wait
+                busiest = "no turn in flight; waiting on pool job(s): " + ", ".join(
+                    sorted({str(j.get("source")) for j in jobs_quiet}))
+            elif not busy:
                 quiet += 1
                 if quiet >= IDLE_QUIET_POLLS:
                     return True, f"idle for {quiet} consecutive polls"
@@ -431,6 +445,25 @@ def _apply_service_changes(changed: list[str]) -> list[str]:
         notes.append("guardian restarted: "
                      f"{'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
     return notes
+
+
+def _start_regression_runner() -> str:
+    """Start the detached regression runner for what just landed. Never raises.
+
+    The check used to wait for the worker pool to offer it, and the pool holds
+    it back while a round is in flight — which, with rounds always in flight,
+    left only the seconds after a restart. Started from here it begins the
+    moment the landing is verified, in its own session, and the next landing
+    cannot kill it (`workers/sources/automod_regression.py::execute`). The
+    pool source stays as the safety net for a runner that could not start.
+    """
+    try:
+        python = LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
+        pid = S.spawn_detached([python, "-m", "scripts.automod.regression_runner", "run"],
+                               S.STATE_DIR / "regression.log", cwd=LIVE_ROOT)
+        return f"started (pid {pid})"
+    except Exception as exc:  # noqa: BLE001 — a measurement is never the landing
+        return f"not started: {exc!r}"[:200]
 
 
 def promotion_announcement(title: str, n_files: int) -> tuple[str, str]:
@@ -952,6 +985,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
                         "tree_hash": tree_hash, "service_changes": service_notes,
                         "errors_until": current["errors_until_ts"]})
         _announce_promoted(round_id, head, changed, title)
+        result["regression_runner"] = _start_regression_runner()
         result["promoted"] = True
         return result
 

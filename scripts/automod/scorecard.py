@@ -632,7 +632,21 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
                   "median_gate_seconds": _median(list(gate_seconds.values()))}
 
     # ── 10 rollbacks ────────────────────────────────────────────────────
-    rollbacks = {"count": len(by("rollback_succeeded")),
+    # ...and how much of what landed the regression detector actually looked
+    # at. A detector that is not running reads exactly like one that finds
+    # nothing: on 2026-09-18 it had measured 8 of 17 promotions, the last five
+    # of those comparing zero with zero, and the row said "6 rollbacks".
+    promoted_commits = {str(e.get("commit") or "") for e in by("promoted")} - {""}
+    measured = {str(e.get("commit") or "") for e in by("regression_check")
+                if S.regression_measured(e)} & promoted_commits
+    coverage = {"promotions": len(promoted_commits), "measured": len(measured),
+                "could_not_evaluate": len(by("regression_skipped")),
+                # A check that ran and compared nothing with nothing: it is on
+                # the ledger as "no regression", and it is not a measurement.
+                "compared_nothing": sum(1 for e in by("regression_check")
+                                        if not S.regression_measured(e))}
+    rollbacks = {"regression_coverage": coverage,
+                 "count": len(by("rollback_succeeded")),
                  "triggers": sorted({str(e.get("trigger") or "?") for e in by("rollback_succeeded")}),
                  # Whether a rollback was a true positive is a human judgment;
                  # every one so far has been a false positive. Recorded as
@@ -706,7 +720,7 @@ def render(row: dict) -> str:
         f"| 7 | bookkeeping defects | {b['nameless_deferrals'] + b['stranded_landings'] + b['bare_aborts']} | {b['nameless_deferrals']} nameless deferrals, {b['stranded_landings']} stranded landings, {b['bare_aborts']} bare aborts |",
         f"| 8 | verdict plumbing | {_pct(p['regex_rate'])} regex | {p['regex']} of {p['verdicts_with_source']} verdicts fell back; {p['truncated']} truncated; median finalizer tokens {p['finalizer_tokens_median'] if p['finalizer_tokens_median'] is not None else '—'} |",
         f"| 9 | throughput | {th['items_closed_per_day']}/day | {th['items_closed']} closed; {th['rounds_landed']} of {th['rounds_finished']} rounds landed, {th.get('rounds_rejected', 0)} rejected on evidence, {th.get('landings_rescued', 0)} landed by the reaper after their turn ended, {th.get('item_verdicts_refused', 0)} item verdict(s) not taken from a landing round; median turns {th['median_turns_landed'] if th['median_turns_landed'] is not None else '—'}; median gate {th['median_gate_seconds'] if th['median_gate_seconds'] is not None else '—'} s |",
-        f"| 10 | rollbacks | {rb['count']} | triggers {', '.join(rb['triggers']) or '—'}; true positives: human judgment, not computed |",
+        f"| 10 | rollbacks | {rb['count']} | triggers {', '.join(rb['triggers']) or '—'}; true positives: human judgment, not computed; regression check measured {(rb.get('regression_coverage') or {}).get('measured', '—')} of {(rb.get('regression_coverage') or {}).get('promotions', '—')} promotions ({(rb.get('regression_coverage') or {}).get('could_not_evaluate', '—')} could not be evaluated, {(rb.get('regression_coverage') or {}).get('compared_nothing', 0)} compared nothing with nothing) |",
         f"| 11 | grouping | {row.get('grouping', {}).get('group_triages', 0)} group triages | {row.get('grouping', {}).get('clusters_formed', 0)} clusters over {row.get('grouping', {}).get('items_clustered', 0)} items last night; {row.get('grouping', {}).get('duplicates_closed', 0)} duplicates closed, {row.get('grouping', {}).get('retired_in_group', 0)} retired, {row.get('grouping', {}).get('folded', 0)} folded, {row.get('grouping', {}).get('kept', 0)} kept; {row.get('grouping', {}).get('umbrellas_formed', 0)} umbrellas formed, {row.get('grouping', {}).get('umbrellas_landed', 0)} landed closing {row.get('grouping', {}).get('members_closed', 0)} members |",
     ]
     ar = row.get("arch_review") or {}

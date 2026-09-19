@@ -320,7 +320,7 @@ async def test_nothing_recent_to_check_is_a_noop(monkeypatch):
     import scripts.automod.state as S
     monkeypatch.setattr(S, "read_current", lambda: None)
     monkeypatch.setattr(S, "read_last_settled", lambda: None)
-    out = await R.execute(_Item())
+    out = R._execute_blocking()
     assert "skipped" in out
 
 
@@ -336,7 +336,7 @@ async def test_a_settled_promotion_is_still_checked(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "read_events", lambda **k: [])
     monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
     monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "absent.json")
-    out = await R.execute(_Item())
+    out = R._execute_blocking()
     # Got past subject selection: it failed on the noise floor, not on
     # "nothing to check".
     assert "no measured noise floor" in out["skipped"]
@@ -362,7 +362,7 @@ async def test_the_baseline_is_the_parent_not_the_lkg(monkeypatch, tmp_path):
                         lambda c: seen.setdefault("baseline", c) and _fake_worktree(c)
                         or _fake_worktree(c))
     monkeypatch.setattr(R, "_run_arm", lambda *a, **k: None)
-    await R.execute(_Item())
+    R._execute_blocking()
     assert seen["baseline"] == "a" * 40, "must compare against the parent"
 
 
@@ -373,7 +373,7 @@ async def test_one_measurement_per_promotion(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "read_last_settled", lambda: None)
     monkeypatch.setattr(S, "read_events", lambda **k: [
         {"event": "regression_check", "commit": "b" * 40}])
-    out = await R.execute(_Item())
+    out = R._execute_blocking()
     assert "already checked" in out["skipped"]
 
 
@@ -394,7 +394,7 @@ async def test_an_empty_corpus_arm_cannot_evaluate(monkeypatch, tmp_path):
     arms = iter([{"overall": base(), "corpus_ok": True, "corpus": {}},
                  {"overall": base(), "corpus_ok": False, "corpus": {"entities": 0}}])
     monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(arms))
-    out = await R.execute(_Item())
+    out = R._execute_blocking()
     assert "empty corpus" in out["skipped"]
 
 
@@ -411,10 +411,11 @@ async def test_a_regression_is_handed_to_the_guardian(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "write_eval_last", lambda payload: None)
     monkeypatch.setattr(S, "request_rollback", lambda **kw: captured.update(kw) or kw)
     _pin_ok(monkeypatch)
-    arms = iter([{"overall": base(), "corpus_ok": True, "corpus": {}},
-                 {"overall": base(entity_hit_rate=0.1), "corpus_ok": True, "corpus": {}}])
+    bad = {"overall": base(entity_hit_rate=0.1), "corpus_ok": True, "corpus": {}}
+    # Three arms: a regression is looked at twice before anyone acts on it.
+    arms = iter([{"overall": base(), "corpus_ok": True, "corpus": {}}, bad, dict(bad)])
     monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(arms))
-    out = await R.execute(_Item())
+    out = R._execute_blocking()
     assert out["regressed"] is True
     assert captured["trigger"] == "regression"
     assert captured["target"] == "a" * 40 and captured["commit"] == "b" * 40
@@ -448,7 +449,7 @@ async def test_an_over_budget_run_is_recorded_and_never_rolled_back(monkeypatch,
     slow = 99_000.0     # 7x the paired-check ceiling; quality untouched
     arms = iter([_arm(20, []), _arm(20, [], latency_ms_avg=slow)])
     monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(arms))
-    out = await R.execute(_Item())
+    out = R._execute_blocking()
 
     assert out["regressed"] is False, out
     assert not rollback, "an over-budget latency run must never request a rollback"
@@ -483,7 +484,7 @@ async def test_an_in_budget_run_records_the_reading_and_no_verdict(monkeypatch, 
     inside = R.latency_budget(R.CONTEXT_PAIRED_CHECK) - 1.0
     arms = iter([_arm(20, []), _arm(20, [], latency_ms_avg=inside)])
     monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(arms))
-    out = await R.execute(_Item())
+    out = R._execute_blocking()
 
     assert out["regressed"] is False
     assert eval_last[R.OVER_BUDGET_FIELD] is None, (
@@ -500,7 +501,7 @@ async def test_a_missing_noise_file_means_cannot_evaluate(monkeypatch, tmp_path)
     monkeypatch.setattr(S, "read_events", lambda **k: [])
     monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
     monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "absent.json")
-    out = await R.execute(_Item())
+    out = R._execute_blocking()
     assert "no measured noise floor" in out["skipped"]
 
 
@@ -515,7 +516,7 @@ async def test_a_failed_paired_baseline_does_not_silently_pass(monkeypatch, tmp_
     monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
     _pin_ok(monkeypatch)
     monkeypatch.setattr(R, "_run_arm", lambda *a, **k: None)
-    out = await R.execute(_Item())
+    out = R._execute_blocking()
     assert "paired baseline run failed" in out["skipped"]
 
 
@@ -591,7 +592,7 @@ async def test_an_arm_the_daemon_did_not_answer_cannot_evaluate(monkeypatch, tmp
     _pin_ok(monkeypatch)
     arms = iter([_arm(20, []), _arm(20, ["backlog-363"], doc_hit_rate=0.55)])
     monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(arms))
-    out = await R.execute(_Item())
+    out = R._execute_blocking()
     assert "did not answer" in out["skipped"] and "backlog-363" in out["skipped"]
     assert not captured, "a non-measurement must never request a rollback"
 
@@ -608,9 +609,10 @@ async def test_a_retriever_that_answers_nothing_is_still_a_regression(monkeypatc
     monkeypatch.setattr(S, "write_eval_last", lambda payload: None)
     monkeypatch.setattr(S, "request_rollback", lambda **kw: captured.update(kw) or kw)
     _pin_ok(monkeypatch)
-    arms = iter([_arm(3, []), _arm(3, ["a", "b", "c"], doc_hit_rate=0.0, mrr_doc=0.0)])
+    blind = _arm(3, ["a", "b", "c"], doc_hit_rate=0.0, mrr_doc=0.0)
+    arms = iter([_arm(3, []), blind, dict(blind)])      # the second look is blind too
     monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(arms))
-    out = await R.execute(_Item())
+    out = R._execute_blocking()
     assert out["regressed"] is True and captured["trigger"] == "regression"
 
 

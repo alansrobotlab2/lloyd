@@ -218,7 +218,13 @@ def test_the_idle_wait_drains_first_and_keeps_the_drain_armed(monkeypatch):
     monkeypatch.setattr(P, "set_drain", lambda on, ttl=P.DRAIN_TTL: calls.append(("drain", on)) or True)
     polls = iter([{"active": 0, "queued": 0, "harness_runs": 1}] * 2
                  + [{"active": 0, "queued": 0, "harness_runs": 0}] * 3)
-    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (calls.append(("poll",)) or (200, {"turns": next(polls)})))
+
+    def fake_get(url, timeout=5.0):
+        if url.endswith("/api/workers/status"):      # the quiet path asks the pool too
+            return 200, {"pool": {"in_flight": {}}}
+        calls.append(("poll",))
+        return 200, {"turns": next(polls)}
+    monkeypatch.setattr(P, "_get", fake_get)
     monkeypatch.setattr(P, "IDLE_POLL_SECONDS", 0.0)
     ok, why = P.wait_idle(max_wait=30)
     assert ok, why

@@ -168,7 +168,9 @@ def test_the_row_adds_up_a_realistic_week(tmp_path, repo):
     assert row["throughput"]["rounds_landed"] == 2 and row["throughput"]["rounds_finished"] == 4
     assert row["throughput"]["median_turns_landed"] == 60.0
     # 10 — only the rollback inside the window
+    coverage = row["rollbacks"].pop("regression_coverage")
     assert row["rollbacks"] == {"count": 1, "triggers": ["error_rate"], "true_positives": None}
+    assert coverage["measured"] <= coverage["promotions"], coverage
 
     text = SC.render(row)
     assert "100%" in text and "75%" in text and "stranded" in text
@@ -216,6 +218,28 @@ def test_a_rejection_whose_change_then_landed_is_not_counted_as_one(tmp_path, re
     row = SC.compute(since_days=7, ledger=_ledger(tmp_path, events), backlog_dir=tmp_path / "nope",
                      repo=repo, now=NOW)
     assert row["throughput"]["rounds_rejected"] == 2, "726 and 800; 1242 landed"
+
+
+def test_row_10_says_how_much_of_what_landed_was_measured(tmp_path, repo):
+    """A detector that is not running reads exactly like one that finds
+    nothing. 2026-09-18: 8 of 17 promotions measured, and the row said only
+    how many rollbacks there had been."""
+    events = [_ev("promoted", 2.0, round_id=f"SM_{c}", commit=c * 40) for c in "abcd"]
+    found = {"doc_hit_rate": {"before": 1.0, "after": 1.0, "delta": 0.0}}
+    nothing = {"doc_hit_rate": {"before": 0.0, "after": 0.0, "delta": 0.0}}
+    events += [_ev("regression_check", 1.9, commit="a" * 40, regressed=False, detail=found),
+               _ev("regression_check", 1.8, commit="b" * 40, regressed=False),      # an old row: believed
+               _ev("regression_check", 1.7, commit="z" * 40, regressed=False),      # not a promotion here
+               _ev("regression_skipped", 1.6, commit="c" * 40, reason="pinned corpus unavailable"),
+               # "no regression", on the ledger, from a daemon that answered
+               # neither arm: five of these on 2026-09-18.
+               _ev("regression_check", 1.5, commit="d" * 40, regressed=False, detail=nothing)]
+    row = SC.compute(since_days=7, ledger=_ledger(tmp_path, events), backlog_dir=tmp_path / "nope",
+                     repo=repo, now=NOW)
+    assert row["rollbacks"]["regression_coverage"] == {"promotions": 4, "measured": 2,
+                                                       "could_not_evaluate": 1, "compared_nothing": 1}
+    assert ("regression check measured 2 of 4 promotions (1 could not be evaluated, "
+            "1 compared nothing with nothing)") in SC.render(row)
 
 
 def test_since_parses_days_hours_and_weeks():

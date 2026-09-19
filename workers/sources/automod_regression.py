@@ -55,6 +55,14 @@ NAME = "automod-regression"
 DEFAULT_PRIORITY = 70
 DEDUP_KEY = "automod:regression"
 
+# The retriever's qmd client gives up at 15 s, which is production's latency
+# budget and the wrong number for a measurement: an eval arm that loses one
+# answer to the clock is "cannot evaluate", and one that loses all of them used
+# to score zero. `agent_mcp.vault._qmd_post` reads this at call time; an arm
+# whose code predates the override simply keeps the 15 s it always had.
+QMD_TIMEOUT_ENV = "LLOYD_QMD_TIMEOUT_S"
+EVAL_QMD_TIMEOUT_S = 60
+
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 # Both arms score THESE questions, whichever commit's code is running.
 LIVE_QUERIES = LIVE_ROOT / "eval" / "vault_recall_queries.yaml"
@@ -205,6 +213,21 @@ SIGMA_MULTIPLIER = 3.0
 # the ceiling is set against the worst the context has actually produced rather
 # than against the post-widening 4,378.8, because "grandfather everything already
 # recorded" is the only rule here that cannot be argued with later.
+#
+# Correction, 2026-09-18. "The same queries at a different absolute cost" was an
+# observation, not an explanation, and the explanation was a defect: the pin
+# served published qmd on default settings while production's daemon ran the
+# fork with a 4-way reranker and a 1200-char window (`evalpin.QMD_PROGRAM_CONF`).
+# The ledger dates it to the hour — the paired check averaged 0.49-0.69 s a
+# question through 2026-09-14, 11.0-12.9 s from the check after #504 landed, and
+# 15.05 s (every recall at the client's timeout, nothing retrieved) from
+# 2026-09-18 18:03Z. A 12 s average under a 15 s timeout is also why single
+# questions went missing from one arm or the other, and one of those was the
+# false "regression" of 2026-09-17 05:34Z (doc_hit_rate 1.00 -> 0.95). On
+# production's settings the same recall is 4.4-5.5 s. The paired ceiling below
+# still clears the old readings, because "no recorded run reads over budget" is
+# the rule this constant was set by; re-derive it from a week of readings taken
+# on the corrected pin rather than from one day's.
 LATENCY_BUDGET_MS = {
     "nightly": 4800.0,          # worst ever 4,408.0 (nightly-20260904-060219)
     "paired_check": 14000.0,    # worst ever 12,863.4 (automod-check-20260917-024810)
@@ -509,13 +532,57 @@ def evaluate(current: dict, baseline: dict, noise: dict,
 
 
 async def execute(item: QueueItem) -> dict[str, Any]:
-    """Compare quality against the promotion's PARENT, on live data, paired.
+    """Start the detached runner if a promotion is waiting to be measured.
 
-    Async only at the edge: the whole comparison is blocking, so it runs on a
-    thread. See `_execute_blocking` for why that is not a detail.
+    **The comparison no longer runs inside the backend**, because nothing that
+    runs there survives a landing, and at a landing every twenty minutes that
+    is every check. What 2026-09-18's ledger showed once landings sped up —
+    8 of 17 promotions measured, 0 of the last 4 — came from four things this
+    job being a pool job caused:
+
+    * the landing's idle gate counts agent turns, and this was two blocking
+      eval subprocesses on a thread, so a landing restarted the backend under
+      it;
+    * supervisord's group kill took the check and left its pinned qmd daemon
+      (own process group) holding :8182, where every later check started a
+      second one on top of it — the port probe asked the wrong loopback — and
+      recorded `pinned qmd exited immediately`;
+    * the round hold keeps this source unclaimed while a round is in flight,
+      which is always, so a check could only start in the seconds after a
+      restart — the one moment guaranteed to be followed by another restart;
+    * and it measured "the latest promotion", so one that landed while the
+      previous check ran was never measured by anyone.
+
+    `run_pending` is the same comparison in its own session (`spawn_detached`,
+    like the gate and the landing): one check per promotion, each with its own
+    commit and parent, oldest first, behind `regression.lock`. This job is now
+    a few milliseconds and needs no engine, so it is exempt from the round
+    hold; the promoter starts the runner too, the moment a landing is verified.
     """
     import asyncio
-    return await asyncio.to_thread(_execute_blocking)
+    return await asyncio.to_thread(start_runner)
+
+
+def start_runner() -> dict[str, Any]:
+    """Spawn `run_pending` detached, unless nothing is pending or one is running."""
+    from scripts.automod import state as S
+    try:
+        pending = pending_promotions()
+    except Exception as exc:  # noqa: BLE001 — an unreadable ledger is a skip, said so
+        return _skipped(f"could not read the ledger for pending promotions: {exc}")
+    if not pending:
+        return _skipped("no promotion is waiting to be measured")
+    if runner_alive():
+        return {"status": "success", "summary":
+                f"a regression runner is already working; {len(pending)} promotion(s) pending"}
+    log = S.STATE_DIR / "regression.log"
+    pid = S.spawn_detached(
+        [LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python", "-m", RUNNER_MODULE, "run"],
+        log, cwd=LIVE_ROOT)
+    return {"status": "success", "pid": pid,
+            "summary": (f"started the detached regression runner (pid {pid}) for "
+                        f"{len(pending)} promotion(s): "
+                        + ", ".join(str(p["commit"])[:8] for p in pending[:6]))}
 
 
 def _skipped(reason: str) -> dict[str, Any]:
@@ -579,9 +646,222 @@ def _execute_blocking() -> dict[str, Any]:
         if ev.get("event") == "regression_check" and ev.get("commit") == commit:
             return _skipped(f"{commit[:8]} already checked")
 
+    return check_promotion(subject, stage)
+
+
+# How many times one promotion may come back "cannot evaluate" before the
+# runner stops offering it. A skip is a measurement that did not happen, so it
+# is retried — but a promotion that can never be measured (its parent is gone,
+# the corpus will not pin) must not hold the queue for ever.
+MAX_SKIPS_PER_COMMIT = 2
+# The entry point the runner is started through — its own tiny module, because
+# `-m` on THIS one executes it twice (see `scripts/automod/regression_runner.py`).
+RUNNER_MODULE = "scripts.automod.regression_runner"
+PENDING_MAX_AGE_S = 24 * 3600.0
+REGRESSION_LOCK = "regression.lock"
+
+
+def pending_promotions(now: float | None = None) -> list[dict]:
+    """Promotions nobody has measured yet, oldest first.
+
+    Read off the ledger, which is what makes "one check per promotion" true at
+    any landing rate: every `promoted` row of the last day that was not rolled
+    back, has no `regression_check` row that measured anything
+    (`state.regression_measured` — zero against zero never did), and has not
+    already come back "cannot evaluate" `MAX_SKIPS_PER_COMMIT` times. Each carries its own `commit` and
+    `parent` — the check used to measure "whatever landed last", so a
+    promotion that landed while the previous check ran was measured by nobody.
+    """
+    from scripts.automod import state as S
+    now = now or time.time()
+    events = S.read_events(limit=4000)
+    checked = {str(e.get("commit") or "") for e in events
+               if e.get("event") == "regression_check" and S.regression_measured(e)}
+    reverted = {str(e.get("commit") or "") for e in events if e.get("event") == "rollback_succeeded"}
+    skips: dict[str, int] = {}
+    for e in events:
+        if e.get("event") == "regression_skipped" and e.get("commit"):
+            skips[str(e["commit"])] = skips.get(str(e["commit"]), 0) + 1
+    out: list[dict] = []
+    for e in events:
+        if e.get("event") != "promoted" or not e.get("commit"):
+            continue
+        commit = str(e["commit"])
+        landed = float(e.get("ts") or 0)
+        if now - landed > PENDING_MAX_AGE_S or commit in checked or commit in reverted:
+            continue
+        if skips.get(commit, 0) >= MAX_SKIPS_PER_COMMIT:
+            continue
+        out.append({"commit": commit, "parent": e.get("parent"), "landed_ts": landed,
+                    "round_id": e.get("round_id"), "changed_paths": e.get("changed_paths") or []})
+    out.sort(key=lambda p: p["landed_ts"])
+    return out
+
+
+def runner_alive() -> bool:
+    """Whether a runner holds `regression.lock` right now (flock: a dead
+    holder's lock is already gone, so this cannot go stale)."""
+    from scripts.automod import state as S
+    try:
+        S.Lock(S.STATE_DIR / REGRESSION_LOCK, owner="probe").acquire().release()
+        return False
+    except S.LockHeld:
+        return True
+
+
+# Older than any check can be: two arms at `_run_arm`'s 900 s each, the pin's
+# start-up and its warm-up. Scratch this old has no owner.
+STALE_SCRATCH_AGE_S = 2 * 3600.0
+SCRATCH_PREFIXES = ("automod-eval-", "automod-pin-")
+
+
+def sweep_stale_scratch(now: float | None = None) -> list[str]:
+    """Remove what a killed check left in the temp dir; the paths removed.
+
+    `_baseline_worktree` and `check_promotion` clean up in a `finally`, which a
+    SIGKILL never runs — and until 2026-09-18 every check ran inside the backend
+    a landing restarts. Each one left a whole checkout registered as a worktree
+    of the LIVE repo (three were, that day) plus the pin's work dir. Called by
+    the runner under its lock, so the only scratch a live check could own is
+    younger than `STALE_SCRATCH_AGE_S`.
+    """
+    now = now or time.time()
+    removed: list[str] = []
+    try:
+        entries = [e for e in Path(tempfile.gettempdir()).iterdir()
+                   if e.is_dir() and e.name.startswith(SCRATCH_PREFIXES)]
+    except OSError:
+        return removed
+    for scratch in entries:
+        try:
+            if now - scratch.stat().st_mtime < STALE_SCRATCH_AGE_S:
+                continue
+        except OSError:
+            continue
+        wt = scratch / "lloyd"
+        if wt.exists():
+            subprocess.run(["git", "-C", str(LIVE_ROOT), "worktree", "remove", "--force", str(wt)],
+                           capture_output=True, check=False)
+        shutil.rmtree(scratch, ignore_errors=True)
+        if not scratch.exists():
+            removed.append(str(scratch))
+    if removed:
+        subprocess.run(["git", "-C", str(LIVE_ROOT), "worktree", "prune"],
+                       capture_output=True, check=False)
+        logger.info("removed %d stale scratch dir(s) a killed check left: %s",
+                    len(removed), ", ".join(removed))
+    return removed
+
+
+def run_pending(max_checks: int | None = None) -> list[dict]:
+    """Measure every pending promotion, oldest first. One runner at a time.
+
+    Re-reads the queue after each check, so a promotion that lands while this
+    runs is picked up by the same runner rather than waiting for the next
+    start. Each check is the paired comparison it always was; what changed is
+    who runs it and what it is asked about.
+    """
+    from scripts.automod import state as S
+    try:
+        lock = S.Lock(S.STATE_DIR / REGRESSION_LOCK, owner=f"regression-runner-{os.getpid()}").acquire()
+    except S.LockHeld:
+        logger.info("another regression runner holds the lock; nothing to do")
+        return []
+    done: list[dict] = []
+    try:
+        try:
+            sweep_stale_scratch()
+        except Exception:  # noqa: BLE001 — housekeeping never costs a measurement
+            logger.exception("stale scratch sweep failed")
+        while max_checks is None or len(done) < max_checks:
+            pending = pending_promotions()
+            if not pending:
+                break
+            subject = pending[0]
+            logger.info("measuring %s against %s (%d pending)", subject["commit"][:8],
+                        str(subject.get("parent"))[:8], len(pending))
+            try:
+                result = check_promotion(subject, "detached")
+            except Exception as exc:  # noqa: BLE001 — one bad check never stops the queue
+                logger.exception("regression check of %s crashed", subject["commit"][:8])
+                S.append_event({"event": "regression_skipped", "commit": subject["commit"],
+                                "reason": f"the check crashed: {exc!r}"[:400]})
+                result = _skipped(f"the check crashed: {exc!r}")
+            done.append({"commit": subject["commit"], **{k: result.get(k) for k in
+                                                         ("status", "summary", "regressed")}})
+            if result.get("regressed"):
+                break       # a rollback has been requested; let the guardian act first
+    finally:
+        lock.release()
+    return done
+
+
+def _skip(commit: str, reason: str, *, level: int = logging.ERROR) -> dict[str, Any]:
+    """Record "cannot evaluate" FOR A COMMIT, and return the skipped result.
+
+    The row used to carry a reason and no commit, so nothing could tell which
+    promotion went unmeasured, or how many times."""
+    from scripts.automod import state as S
+    logger.log(level, "%s: %s", commit[:8], reason)
+    S.append_event({"event": "regression_skipped", "commit": commit, "reason": reason})
+    _announce_if_given_up(commit, reason)
+    return _skipped(reason)
+
+
+def _announce_if_given_up(commit: str, reason: str) -> None:
+    """One toast when a promotion has come back "cannot evaluate" for the last
+    time. The runner's log is a file nobody tails — this check's errors used to
+    land in `server.err` — and a promotion the queue has stopped offering is
+    exactly the silence the coverage gauge exists to break. News, not an
+    incident (`promote.announce`): the skip rows are already the record."""
+    try:
+        from scripts.automod import promote as P, state as S
+        skips = sum(1 for e in S.read_events(limit=4000)
+                    if e.get("event") == "regression_skipped" and e.get("commit") == commit)
+        if skips == MAX_SKIPS_PER_COMMIT:
+            P.announce(f"Regression check gave up on {commit[:8]}",
+                       f"It could not be evaluated {skips} times and will not be tried again: "
+                       f"{reason[:240]}")
+    except Exception:  # noqa: BLE001 — an announcement never costs the queue
+        logger.debug("give-up announcement failed", exc_info=True)
+
+
+def _would_regress(current: dict | None, baseline: dict | None, noise: dict) -> bool:
+    """Whether these two arms, as they stand, would be reported as a regression:
+    both measurable, and `evaluate` says so. The question `check_promotion` asks
+    while the pinned corpus is still up, to decide whether to look twice."""
+    if not baseline or not current or all_queries_empty(baseline):
+        return False
+    for blob in (baseline, current):
+        if blob.get("corpus_ok") is False or unanswered_doc_queries(blob):
+            return False
+    try:
+        return bool(evaluate(current["overall"], baseline["overall"], noise,
+                             CONTEXT_PAIRED_CHECK)[0])
+    except Exception:  # noqa: BLE001 — the real evaluation below will say why
+        return False
+
+
+def all_queries_empty(arm: dict) -> bool:
+    """Every question of the arm came back with no document at all."""
+    total = int(arm.get("n_records") or 0)
+    return total > 0 and len(arm.get("empty_doc_queries") or []) >= total
+
+
+def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
+    """The paired comparison for ONE promotion: `subject["commit"]` against
+    `subject["parent"]`, both checked out, both on live data, one pinned corpus.
+
+    Both arms run from a scratch worktree now. The current arm used to run the
+    live tree, which is the promoted commit only until the next landing —
+    exact for "the latest promotion", wrong for a queue.
+    """
+    from scripts.automod import state as S
+
+    commit = str(subject["commit"])
     baseline_commit = subject.get("parent") or subject.get("rollback_target")
     if not baseline_commit:
-        return _skipped("promotion record carries no parent to compare against")
+        return _skip(commit, "promotion record carries no parent to compare against")
 
     noise = None
     if NOISE_PATH.exists():
@@ -591,11 +871,9 @@ def _execute_blocking() -> dict[str, Any]:
             noise = None
     if not noise:
         # Explicitly "cannot evaluate" — never "no regression".
-        msg = (f"no measured noise floor at {NOISE_PATH}; run "
-               f"`automod_regression.measure_noise()` once on an unchanged tree")
-        logger.warning(msg)
-        S.append_event({"event": "regression_skipped", "reason": msg})
-        return _skipped(msg)
+        return _skip(commit, f"no measured noise floor at {NOISE_PATH}; run "
+                             f"`automod_regression.measure_noise()` once on an unchanged tree",
+                     level=logging.WARNING)
 
     # Both arms run inside ONE pinned corpus: a frozen qmd snapshot plus a
     # single grep root. Without that the comparison measures the corpus as
@@ -603,55 +881,76 @@ def _execute_blocking() -> dict[str, Any]:
     # so each arm was grepping its own source.
     pin_provenance: dict = {}
     work = Path(tempfile.mkdtemp(prefix="automod-pin-"))
+    baseline = current = confirm = None
+    confirm_ran = False
     try:
         with PinnedCorpus(work) as pin:
+            # Before anything is timed against it: the first query loads the
+            # models, and the retriever's client gives up at 15 s while qmd
+            # keeps working — one slow query and every later one queues behind
+            # it (2026-09-18: a whole arm at 116-160 s a query, all empty).
+            warm = getattr(pin, "warm_up", None)
+            if callable(warm):
+                warm()
             pin_provenance = dict(pin.provenance)
             with _baseline_worktree(baseline_commit) as wt:
                 if wt is None:
-                    S.append_event({"event": "regression_skipped",
-                                    "reason": "baseline worktree failed — cannot evaluate"})
-                    return _skipped("baseline worktree failed")
-                # The baseline tree is the shared grep corpus for BOTH arms.
-                env = pin.env_for(code_root=wt)
-                baseline = _run_arm(wt, "automod-paired-lkg", env)
-                current = _run_arm(LIVE_ROOT, "automod-check", env)
+                    return _skip(commit, "baseline worktree failed — cannot evaluate")
+                with _baseline_worktree(commit) as cur:
+                    if cur is None:
+                        return _skip(commit, "worktree of the promoted commit failed — cannot evaluate")
+                    # The baseline tree is the shared grep corpus for BOTH arms.
+                    env = {**pin.env_for(code_root=wt), QMD_TIMEOUT_ENV: str(EVAL_QMD_TIMEOUT_S)}
+                    baseline = _run_arm(wt, "automod-paired-lkg", env)
+                    current = _run_arm(cur, "automod-check", env)
+                    # A regression has to reproduce before anyone acts on it.
+                    # Under a pinned corpus the armed metrics are deterministic,
+                    # so a real one comes back the same; what does not is the
+                    # instrument — a recall lost to load, a rank flipped by the
+                    # GPU. Every rollback this loop has performed has been a
+                    # false positive, this check's own two among them
+                    # (2026-09-07: ndcg -0.006; 2026-09-17: one question lost to
+                    # the client's timeout), and a second look costs one arm.
+                    if _would_regress(current, baseline, noise):
+                        confirm_ran = True
+                        confirm = _run_arm(cur, "automod-check-confirm", env)
             pin.discard()
     except PinError as exc:
         # A comparison that quietly fell back to the live daemon would be the
         # unpinned comparison this replaced, wearing its name.
-        msg = f"pinned corpus unavailable: {exc}"
-        logger.error(msg)
-        S.append_event({"event": "regression_skipped", "reason": msg})
-        return _skipped(msg)
+        return _skip(commit, f"pinned corpus unavailable: {exc}")
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
     if not baseline:
-        S.append_event({"event": "regression_skipped",
-                        "reason": "paired baseline run failed — cannot evaluate"})
-        return _skipped("paired baseline run failed")
+        return _skip(commit, "paired baseline run failed — cannot evaluate")
     if not current:
-        S.append_event({"event": "regression_skipped", "reason": "eval run failed"})
-        return _skipped("eval run failed")
+        return _skip(commit, "eval run failed")
+
+    # The BASELINE answering nothing is never the change: that code was live
+    # and answering when it landed. It is the pinned daemon or the corpus, and
+    # zero against zero is not "no regression" — five checks in a row said so
+    # on 2026-09-18 (every document metric 0.0 in both arms, every query at the
+    # client's 15 s timeout). Only the CURRENT arm answering nothing is a score:
+    # that is the one shape a change under test can produce, and `evaluate`
+    # refuses it below.
+    if all_queries_empty(baseline):
+        return _skip(commit, f"baseline arm answered none of its {baseline.get('n_records')} "
+                             f"queries — the pinned daemon or the corpus, not the change; "
+                             f"cannot evaluate")
 
     # An arm that scored an EMPTY corpus is not a low score, it is a
     # measurement that did not happen — and the doc-side metrics read
     # identically with the graph deleted, so it looks like an ordinary result.
     for arm, blob in (("baseline", baseline), ("current", current)):
         if blob.get("corpus_ok") is False:
-            msg = (f"{arm} arm scored an empty corpus "
-                   f"({blob.get('corpus')}) — cannot evaluate")
-            logger.error(msg)
-            S.append_event({"event": "regression_skipped", "reason": msg})
-            return _skipped(msg)
+            return _skip(commit, f"{arm} arm scored an empty corpus "
+                                 f"({blob.get('corpus')}) — cannot evaluate")
         unanswered = unanswered_doc_queries(blob)
         if unanswered:
-            msg = (f"{arm} arm got zero documents for {len(unanswered)} of "
-                   f"{blob.get('n_records')} queries ({', '.join(unanswered)}) — "
-                   "the pinned daemon did not answer, cannot evaluate")
-            logger.error(msg)
-            S.append_event({"event": "regression_skipped", "reason": msg})
-            return _skipped(msg)
+            return _skip(commit, f"{arm} arm got zero documents for {len(unanswered)} of "
+                                 f"{blob.get('n_records')} queries ({', '.join(unanswered)}) — "
+                                 "the pinned daemon did not answer, cannot evaluate")
 
     # Provenance, not a gate. Under a pinned corpus every armed metric is
     # deterministic (re-measured 2026-09-17: five trials agree to 0.0000), so
@@ -667,6 +966,25 @@ def _execute_blocking() -> dict[str, Any]:
 
     regressed, reasons, detail = evaluate(current["overall"], baseline["overall"], noise,
                                           CONTEXT_PAIRED_CHECK)
+    unconfirmed: list[str] = []
+    confirmed_by: list[str] = []
+    if regressed and confirm_ran:
+        if not confirm:
+            return _skip(commit, "the run that would have confirmed a regression failed — "
+                                 "cannot evaluate: " + "; ".join(reasons)[:300])
+        if confirm.get("corpus_ok") is False or unanswered_doc_queries(confirm):
+            return _skip(commit, "the run that would have confirmed a regression did not get "
+                                 "an answer to every query — cannot evaluate: "
+                                 + "; ".join(reasons)[:300])
+        again, confirmed_by, detail_again = evaluate(confirm["overall"], baseline["overall"],
+                                                     noise, CONTEXT_PAIRED_CHECK)
+        if not again:
+            # Same code, same corpus, same questions, a different answer: that
+            # is a finding about the instrument, and it is recorded as one.
+            logger.warning("regression after %s did NOT reproduce on a second run of the same "
+                           "arm — not a regression: %s", commit[:8], "; ".join(reasons))
+            unconfirmed, regressed, reasons = reasons, False, []
+            current, detail = confirm, detail_again
     fact_side = [r for r in reasons if r.split()[0] in FACT_LAYER_METRICS]
 
     # The latency verdict, on the same absolute ceiling `evaluate` reports inside
@@ -706,6 +1024,10 @@ def _execute_blocking() -> dict[str, Any]:
                     "pin": pin_provenance, "noise_floor_stale": stale_floor,
                     "latency_budget": latency_reading,
                     OVER_BUDGET_FIELD: latency_verdict,
+                    # What a second run of the same arm said about a regression
+                    # the first one reported: reproduced, or not.
+                    "confirmed_by": confirmed_by if regressed else [],
+                    "unconfirmed_reasons": unconfirmed,
                     "detail": detail, "commit": commit})
     if not regressed:
         return {"status": "success", "regressed": False, "stage": stage,
@@ -728,3 +1050,31 @@ def _execute_blocking() -> dict[str, Any]:
             "summary": f"REGRESSION after {commit[:8]}: " + "; ".join(reasons),
             "fact_side_reasons": fact_side,
             "rollback_requested_to": baseline_commit}
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -m scripts.automod.regression_runner run|pending|latest`.
+
+    `run` is what `start_runner` and the promoter spawn, detached. It logs to
+    stderr (the caller points that at `regression.log`) and prints one JSON
+    line per promotion it measured."""
+    import argparse
+    ap = argparse.ArgumentParser(description="Paired behavioural-regression check")
+    ap.add_argument("command", choices=("run", "pending", "latest"))
+    ap.add_argument("--max", type=int, default=None, help="stop after this many checks")
+    args = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    if args.command == "pending":
+        print(json.dumps(pending_promotions(), indent=2))
+        return 0
+    if args.command == "latest":
+        print(json.dumps(_execute_blocking(), indent=2, default=str))
+        return 0
+    for row in run_pending(args.max):
+        print(json.dumps(row, default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

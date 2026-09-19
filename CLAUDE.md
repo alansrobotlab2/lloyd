@@ -1150,6 +1150,50 @@ redoing changes that had already passed every rung, and two items were closed
   names the port; the Tools page and one LIVE-service test went red on main the
   moment it landed, and its own gate could not see it.
 
+### Every promotion is measured, by a check a landing cannot kill
+
+On 2026-09-18 the behavioural-regression check had measured 8 of 17 promotions
+(0 of the last 4), and its last five results compared 0.0 with 0.0 and said
+"no regression". `architecture/automod.md` §8.1a has the seven stacked causes.
+
+- **The comparison runs detached** (`automod_regression.run_pending`, its own
+  session like the gate and the landing; `regression.lock`, `regression.log`),
+  started by the promoter the moment a landing verifies and by the pool job,
+  which is now a millisecond spawn and exempt from the round hold. A landing
+  restart cannot kill it and no landing waits for it.
+- **One check per promotion, off the ledger** (`pending_promotions`): each
+  `commit` against ITS `parent`, both from a scratch worktree, oldest first.
+  It used to measure "the latest promotion", so one that landed during a check
+  was measured by nobody.
+- **The pinned qmd daemon dies with its owner** (`PR_SET_PDEATHSIG`), and an
+  orphaned one is reaped first thing, found by what it is (`evalpin.reap_stale`)
+  — never by the port probe, which asked `127.0.0.1` while qmd binds `[::1]`
+  and so could not see a qmd daemon at all (`port_free` asks both now). Its own
+  process group is why supervisord's group kill missed it: one orphan held
+  :8182 for 5.5 hours. "Still a child" kills nothing.
+- **The pin serves production's retriever, read rather than restated**
+  (`evalpin.production_daemon`, from `agent-qmd-daemon.conf`). It had restated
+  the published build and default settings since the day before the daemon
+  moved to the fork; once #504 made a recall rerank 240 rows that was 16–20 s a
+  recall against a 15 s client timeout — every question, both arms — and
+  4.6–5.5 s on production's settings. **Change how the qmd daemon runs in that
+  conf and nowhere else.**
+- **Zero against zero is "cannot evaluate"**: the BASELINE arm answering no
+  query is never the change. The pin is warmed with the recall production
+  sends, a different question each try (`warm_up`, `production_payload` — a
+  repeated question is answered from qmd's rerank cache), and an eval arm's qmd
+  timeout is 60 s, not production's 15 — qmd keeps working on a request its
+  client abandoned, so one slow recall queues every later one behind it.
+- **A regression has to reproduce before a rollback is requested**: the
+  current arm is run a second time inside the same pinned corpus, and one that
+  comes back clean is recorded with `unconfirmed_reasons`, not acted on. Both
+  of this check's own rollback requests had been false positives.
+- **The landing's idle gate asks the pool too** (`promote.wait_idle`): a job
+  that is not an agent turn never shows in `/health.turns`.
+- Scorecard row 10 shows how many promotions were actually measured;
+  `python -m scripts.automod.regression_runner pending` lists what is still
+  owed one, and `… run` measures it (what the promoter spawns).
+
 ### One commit on main per landing
 
 Until 2026-09-17 the promoter fast-forwarded a round's whole working history

@@ -371,6 +371,21 @@ def read_eval_last() -> dict | None:
     return read_json(EVAL_LAST_PATH)
 
 
+def regression_measured(event: dict) -> bool:
+    """Whether a `regression_check` row is a measurement at all.
+
+    Five rows on 2026-09-18 compared 0.0 with 0.0 on every document metric — the
+    pinned daemon answered nothing in EITHER arm — and recorded "no regression".
+    The baseline arm's code was live and answering when it landed, so a baseline
+    that retrieved nothing is the instrument, never the change. Checks written
+    since refuse that as `regression_skipped`; this is how the rows written
+    before it are read, by the queue (the promotion is still unmeasured) and by
+    the scorecard (it was never measured). A row with no detail is believed.
+    """
+    hit = (event.get("detail") or {}).get("doc_hit_rate")
+    return not (isinstance(hit, dict) and hit.get("before") == 0.0)
+
+
 def write_eval_last(payload: dict) -> None:
     write_json(EVAL_LAST_PATH, payload)
 
