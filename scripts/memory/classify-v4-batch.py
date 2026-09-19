@@ -400,8 +400,22 @@ def main() -> int:
                                 thread_name_prefix="classify") as pool:
             futures = {pool.submit(_process_one, e): e for e in candidates}
             completed = 0
+            # Every future is submitted above, so one pass over the dict
+            # cancels everything that has not started — and a second pass has
+            # nothing left to cancel, only `Future.done()` calls left to make.
+            # The sweep used to sit inside the loop below, so a drain paid it
+            # once per yielded future: N² done() calls (measured: 1,440,000
+            # for 1,200 pairs; pinned by test_drain_sweeps_the_pending_set_once
+            # in tests/test_classify_v4_batch_drain.py). At task #74's live
+            # scale — ~30,760 pairs still queued when `timeout 1400` signalled
+            # on 2026-09-19 — that was 5+ minutes spinning at 99% of one core,
+            # long enough for the operator to send a second SIGTERM, whose
+            # handler `sys.exit(130)`s past the `cancelled (drain)` summary
+            # #526 added. Sweeping once is the same set of cancels, in O(N).
+            swept = False
             for fut in as_completed(futures):
-                if _stop.is_set():
+                if _stop.is_set() and not swept:
+                    swept = True
                     for pending in futures:
                         if not pending.done():
                             pending.cancel()
@@ -410,7 +424,7 @@ def main() -> int:
                     out = fut.result()
                 except CancelledError:
                     # Drain, not failure: `_stop` was set (SIGTERM, or the
-                    # endpoint-down guard further down) and the loop above
+                    # endpoint-down guard further down) and the sweep above
                     # cancelled every future that had not started. Task #74's
                     # run at 2026-09-09T01:53Z printed `2455 ok, 6239 failed`
                     # when 6,237 of those were this line and 2 were real, so

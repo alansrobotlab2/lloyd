@@ -3,7 +3,9 @@
 The batch runner consumed every future through one `except Exception`, and
 `concurrent.futures.CancelledError` **is** an Exception subclass (see
 test_cancelled_error_is_an_exception_below), so the futures the drain path
-cancels at classify-v4-batch.py:344-349 were tallied into `fail`. Task #74's
+cancels — the `for pending in futures` sweep inside `main()`'s
+`as_completed` loop in scripts/memory/classify-v4-batch.py, whose own cost is
+#722 — were tallied into `fail`. Task #74's
 run at 2026-09-09T01:53Z printed `2455 ok, 6239 failed` when 6,237 of those
 were `CancelledError()` and 2 were real — a clean timeout reading as
 catastrophic, with the genuine failures buried in the noise.
@@ -18,7 +20,7 @@ import re
 import sys
 import time
 import types
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, Future
 from pathlib import Path
 
 import pytest
@@ -224,9 +226,15 @@ def test_endpoint_down_path_still_reports_failures(
     monkeypatch.setattr(mod, "_endpoint_alive", lambda *a, **k: False)
     rc, stdout, _ = _run(mod, capsys, out)
 
+    # `_counts` already requires the `Classified: … cancelled (drain)`
+    # summary to be present and well-formed on this path (#722: the sweep
+    # hoist must not cost the outage drain its summary line either).
     ok, fail, skipped, cancelled = _counts(stdout)
     assert fail >= mod.CONSECUTIVE_FAILURE_LIMIT
     assert "[stopped] endpoint" in stdout
+    assert ok + fail + skipped + cancelled == mod.CONSECUTIVE_FAILURE_LIMIT + 2, (
+        f"the guard stopped the run but the lanes do not add up to the "
+        f"candidate count:\n{stdout}")
     assert rc == 1
 
 
@@ -323,3 +331,144 @@ def test_mixed_judged_and_unjudged_run_still_balances_all_four_lanes(
         "an unchanged-hash pair wrote a record")
     assert "src3" in written, "the churned pair was not re-classified"
     assert rc == 0, f"a clean drain with re-classification must exit 0: {rc}"
+
+
+# ---------------------------------------------------------------------------
+# #722 — the drain must sweep the pending set ONCE, not once per yielded
+# future. Until here the `for pending in futures: if not pending.done():
+# pending.cancel()` block lived inside `for fut in as_completed(futures)`, so
+# every iteration after `_stop` was set walked all N futures again. The sweep
+# is idempotent — one pass cancels everything cancelable — so each re-sweep
+# did nothing but take N `threading.Condition` locks. At the size task #74
+# actually runs, that is the difference between a drain that prints its
+# summary and one an operator kills.
+# ---------------------------------------------------------------------------
+
+def test_drain_sweeps_the_pending_set_once(mod, monkeypatch, tmp_path,
+                                           capsys):
+    """A drain's `Future.done()` traffic is O(N), not N².
+
+    `Future.done` is counted, not timed, so this is exact. One sweep calls
+    `done()` once per future, so N is the floor and any bound near it proves
+    the sweep ran a bounded number of times; before the hoist the count was
+    exactly N² — 1,440,000 for these 1,200 pairs, because the sweep ran once
+    per remaining iteration. The lower bound is what stops the assertion
+    passing on a runner that never swept at all.
+    """
+    total = 1200
+    out = _setup(mod, monkeypatch, tmp_path, total)
+
+    done_calls = [0]
+    real_done = Future.done
+
+    def counting_done(self):
+        done_calls[0] += 1
+        return real_done(self)
+
+    monkeypatch.setattr(Future, "done", counting_done)
+
+    def fake_classify(src, tgt, context, endpoint, model, timeout,
+                      skip_direction_check=False):
+        if src == "src0":
+            # Stand in for the `timeout 1400` SIGTERM landing on the first
+            # classification. The other 1,199 pairs are all still queued at
+            # that instant — task #74's real shape, ~30,760 pairs left at the
+            # signal on 2026-09-19. How many of them the sweep then finds
+            # PENDING depends on how far the workers ran ahead of the main
+            # loop while it was sweeping, so the assertions below are about
+            # the totals, never about an exact ok/cancelled split.
+            mod._stop.set()
+        return _verdict()
+
+    monkeypatch.setattr(mod, "classify_edge_v4", fake_classify)
+    rc, stdout, out_path = _run(mod, capsys, out)
+
+    calls = done_calls[0]
+    assert calls <= 8 * total, (
+        f"the drain swept {total} futures {calls // total} times over "
+        f"({calls} Future.done() calls for {total} pairs); the cancel sweep "
+        f"is idempotent and must run at most once per drain")
+
+    ok, fail, skipped, cancelled = _counts(stdout)
+    # Hoisting the sweep must not change what it cancels: the pairs that had
+    # not started still land in `cancelled (drain)`, the one pair in flight
+    # when the signal arrived still completes and is counted `ok`, and
+    # nothing is written for a cancelled pair.
+    assert fail == 0 and skipped == 0, (
+        f"a drain is not a failure and not a cache hit:\n{stdout}")
+    assert ok >= 1, f"the in-flight pair did not complete:\n{stdout}"
+    assert ok + cancelled == total, (
+        f"{cancelled} pairs were cancelled of {total} candidates, with {ok} "
+        f"ok:\n{stdout}")
+    assert calls >= total, (
+        f"only {calls} Future.done() calls for {total} pairs — the sweep "
+        f"never walked the pending set, so this run proves nothing about "
+        f"how often it walked it")
+    written = len(out_path.read_text().splitlines()) if out_path.exists() \
+        else 0
+    assert written == ok, "a cancelled pair wrote a record"
+
+
+def test_endpoint_down_drain_also_sweeps_once(mod, monkeypatch, tmp_path,
+                                              capsys):
+    """The outage drain is linear too — and it is the worse case.
+
+    The consecutive-failure guard trips at the 12th failure, so with all N
+    pairs still queued it is nearly the whole backlog yielded AFTER `_stop`
+    was set: the old in-loop sweep paid its full N per iteration there. Same
+    counter as above; the accounting assertions are the ones #722's
+    acceptance names for this path — the guard still fires, the summary still
+    prints, and the cancelled tail is not reported as failures.
+    """
+    total = 1200
+    out = _setup(mod, monkeypatch, tmp_path, total)
+
+    done_calls = [0]
+    real_done = Future.done
+
+    def counting_done(self):
+        done_calls[0] += 1
+        return real_done(self)
+
+    monkeypatch.setattr(Future, "done", counting_done)
+
+    def fake_classify(src, tgt, context, endpoint, model, timeout,
+                      skip_direction_check=False):
+        # A dead endpoint answers with a refusal in milliseconds, not in zero
+        # time — and it matters here. With an instant stub the single worker
+        # outruns the main loop and has consumed all 1,200 pairs before the
+        # guard counts its 12th failure, so the drain sweeps an empty queue
+        # and proves nothing (that is the SIGTERM-at-the-very-end shape the
+        # item says hid the cost). 1 ms per call — call + TCP refusal at task
+        # #74's endpoint — keeps the queue full: the worker needs ≥1.2 s for
+        # the backlog, the main loop reaches the trip in microseconds.
+        time.sleep(0.001)
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(mod, "classify_edge_v4", fake_classify)
+    monkeypatch.setattr(mod, "_endpoint_alive", lambda *a, **k: False)
+    rc, stdout, _ = _run(mod, capsys, out)
+
+    ok, fail, skipped, cancelled = _counts(stdout)
+    # The guard trips when the MAIN LOOP has tallied
+    # CONSECUTIVE_FAILURE_LIMIT failures; the worker thread keeps running
+    # ahead of that tally, so how many pairs had already started, and so
+    # failed, is a race. What is not a race: the guard fires, the lanes
+    # balance, and everything left in the queue is cancelled.
+    assert fail >= mod.CONSECUTIVE_FAILURE_LIMIT, (
+        f"the outage guard did not trip after "
+        f"{mod.CONSECUTIVE_FAILURE_LIMIT} consecutive failures:\n{stdout}")
+    assert "[stopped] endpoint" in stdout, (
+        f"the outage guard did not report the dead endpoint:\n{stdout}")
+    assert ok == 0 and skipped == 0
+    assert fail + cancelled == total, (
+        f"the outage drain lost pairs: {fail} failed + {cancelled} cancelled "
+        f"of {total} candidates:\n{stdout}")
+    assert cancelled > 0, (
+        f"nothing was left pending to cancel at N={total}, so this run does "
+        f"not exercise the outage sweep at all")
+    assert done_calls[0] <= 8 * total, (
+        f"the outage drain swept {total} futures "
+        f"{done_calls[0] // total} times over ({done_calls[0]} "
+        f"Future.done() calls for {total} pairs)")
+    assert rc == 1, "a dead endpoint must still exit non-zero"
