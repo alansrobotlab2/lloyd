@@ -54,7 +54,14 @@ from pathlib import Path
 
 import pytest
 
+from scripts.autoresearch import promote
 from scripts.autoresearch import promotion_fp_rate as pfr
+# `make_cfg` is the promotion-gate fixture factory; importing it rather than
+# rebuilding an AutoresearchConfig here keeps the two files' idea of "the live
+# spec" in one place. Cross-test-module imports are already how that file gets
+# its contract fixture (`from tests.test_prompt_surface_guard import
+# GOOD_CONTRACT`, four times, inside test bodies).
+from tests.test_autoresearch_promotion import make_cfg
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -111,6 +118,52 @@ def write_ledger(ledger_path: Path, rounds: dict[str, dict[str, dict[str, float]
 
 def score(rid: str, seed: float) -> dict[str, float]:
     return {f"task_{i}": round(seed + i * 0.01, 4) for i in range(2)}
+
+
+# ── the post-#549 report line, composed rather than transcribed ──────────────
+#
+# Eleven tasks in the live bench's proportions and categories: six in the
+# targeted categories (replay/synthetic), five in the veto categories
+# (adversarial/safety) — the same axis `bench_split` rotates, and the axis
+# `promote.derive_split` reads off the per-task `category` field.
+SPLIT_TASKS: list[dict[str, str]] = [
+    {"id": f"task_{i}", "category": cat}
+    for i, cat in enumerate(["replay", "synthetic"] * 3
+                            + ["adversarial", "safety", "adversarial", "safety", "adversarial"])
+]
+
+
+def bench_summary(scores: dict[str, float]) -> dict:
+    """A bench summary in the shape ``judge.aggregate_variant`` returns."""
+    cat = {t["id"]: t["category"] for t in SPLIT_TASKS}
+    per = [{"task_id": tid, "composite_score": sc, "category": cat[tid]}
+           for tid, sc in scores.items()]
+    return {"mean_composite": sum(scores.values()) / len(scores),
+            "safety_passed": True, "task_count": len(per), "per_task": per}
+
+
+def slice_scores(targeted: float, heldout: float) -> dict[str, float]:
+    """Every task at the score its slice earned: ``targeted`` for the six tasks
+    the proposer could aim at, ``heldout`` for the five it never saw named."""
+    return {t["id"]: (targeted if t["category"] in ("replay", "synthetic") else heldout)
+            for t in SPLIT_TASKS}
+
+
+def promote_line(vid: str, cfg, base: dict[str, float], var: dict[str, float]) -> str:
+    """The exact ``- \\`vid\\`: PROMOTE — …`` line ``run_round.run()`` writes.
+
+    Built by calling :func:`promote.evaluate_promotion` — the writer that produces
+    the reason string the report interpolates — rather than typed out here. A
+    transcription is how the previous version of this fixture came to pin a shape
+    the writer never emitted (``promote (delta=+0.3833)`` followed by
+    ``targeted_delta=…``: two different spellings of the same quantity, in one
+    line, from two different eras of the code), and the reader under test then
+    matched the *legacy* field and the test passed on a fiction.
+    """
+    should, reason = promote.evaluate_promotion(cfg, bench_summary(base), bench_summary(var),
+                                                split=None)
+    assert should, f"fixture is not promotable under the gate: {reason}"
+    return f"- `{vid}`: PROMOTE — {reason}"
 
 
 @pytest.fixture
@@ -259,6 +312,136 @@ def test_repeated_promotions_in_one_round_share_one_denominator_row(tmp_path):
     assert result["denominator"] == 1
     assert result["rounds"][0]["variants"] == ["V_a", "V_b"]
     assert len(result["gain_side"]["per_round"]) == 2  # both variants still reported
+
+
+def test_the_parsers_agree_when_the_report_carries_the_post_549_line(tmp_path):
+    """#549 made the gate's headline delta the TARGETED slice, not the overall mean.
+
+    The line now carries several signed deltas in different senses — the targeted
+    slice, the veto slice, the normalized gain, the win fraction — on one line. The
+    FP-rate derivation takes the recorded gain from the report text and the
+    ledger-derived gain from the ledger's per-task rows, then compares them;
+    ``test_the_real_promote_line_records_the_targeted_gain_and_nothing_else`` pins
+    the exact form `run_round` emits, so a formatter change that reorders or renames
+    the fields trips a test instead of quietly making the instrument compare a veto
+    slice against a mean.
+
+    The two round files below are written in that real shape (composed, not
+    hand-written — see the helper), because the whole point of this comparison is
+    that the report the instrument reads is the report the round wrote.
+    """
+    rounds_dir, ledger = tmp_path / "rounds", tmp_path / "ledger.jsonl"
+    rounds_dir.mkdir(parents=True, exist_ok=True)
+    cfg = make_cfg(tmp_path)
+
+    base = slice_scores(0.40, 0.40)                    # every task at 0.40
+    won_targeted = slice_scores(0.80, 0.60)            # targeted +0.40, veto +0.20
+    uniform = slice_scores(0.80, 0.80)                 # every task +0.40
+    won_veto_only = slice_scores(0.40, 0.90)           # targeted flat, veto +0.50
+
+    def report(rid: str, decision_line: str, split_note: bool = False) -> None:
+        lines = [f"# Autoresearch Round {rid}", ""]
+        if split_note:
+            lines += ["- targeted (6): the replay and synthetic tasks",
+                      "- held-out (5): the adversarial and safety tasks, never named to the proposer"]
+        lines += ["- baseline mean composite: 0.4000", "", "## Promotion decisions", "",
+                  decision_line, ""]
+        (rounds_dir / f"{rid}.md").write_text("\n".join(lines), encoding="utf-8")
+
+    # A round that moved the targeted slice harder than the veto slice: the gate's
+    # recorded gain (+0.4000) and the ledger's overall per-task delta (+0.3091) are
+    # different quantities, and that difference is what this comparison exists to see.
+    report("R_20261001_000000", promote_line("V_a", cfg, base, won_targeted), split_note=True)
+    # A uniform round: every task moved +0.40, so the targeted slice and the whole
+    # bench say the same number. This is the ONLY case where the two parsers must
+    # agree — uniform movement is exactly when a slice mean equals the overall mean.
+    report("R_20261003_000000", promote_line("V_c", cfg, base, uniform), split_note=True)
+    # A PROMOTE line whose only signed number is the veto slice. The real writer
+    # cannot emit this for an accept (`targeted_delta` leads every accept reason),
+    # so it is a robustness probe, not a transcription of a real round: if the
+    # reader ever fell through to a veto-side number, the instrument would credit
+    # a held-out move as the recorded gain.
+    report("R_20261002_000000",
+           "- `V_b`: PROMOTE — promote (heldout_delta=+0.5000, win_frac=1.00)")
+
+    write_ledger(ledger, {
+        "R_20261001_000000": {"BASELINE_V": base, "V_a": won_targeted},
+        "R_20261002_000000": {"BASELINE_V": base, "V_b": won_veto_only},
+        "R_20261003_000000": {"BASELINE_V": base, "V_c": uniform},
+    }, [
+        {"round_id": "R_20261001_000000", "event": "decision", "variant_id": "V_a",
+         "should_promote": True, "promoted": True},
+        {"round_id": "R_20261002_000000", "event": "decision", "variant_id": "V_b",
+         "should_promote": True, "promoted": True},
+        {"round_id": "R_20261003_000000", "event": "decision", "variant_id": "V_c",
+         "should_promote": True, "promoted": True},
+    ])
+    recorded = pfr.recorded_deltas(rounds_dir)
+    assert recorded == {("R_20261001_000000", "V_a"): 0.4000,
+                        ("R_20261003_000000", "V_c"): 0.4000}, (
+        "the targeted delta is the recorded gain; the veto delta, the normalized "
+        "gain and the win fraction on the same line are decoration, and a line "
+        "carrying only a veto number yields no recorded delta at all")
+
+    table = pfr.score_table(pfr.per_task_rows(ledger))
+    rounds = {"R_20261001_000000", "R_20261002_000000", "R_20261003_000000"}
+    paired, _ = pfr.paired_deltas(table, rounds, {"R_20261001_000000": ["V_a"],
+                                                  "R_20261002_000000": ["V_b"],
+                                                  "R_20261003_000000": ["V_c"]})
+    assert paired[("R_20261003_000000", "V_c")] == recorded[("R_20261003_000000", "V_c")]
+    # The two non-uniform rounds are the point: the ledger delta is diluted by the
+    # slice the gate deliberately does NOT score as a gain, so reading the wrong
+    # column would show a 0.09/0.23 swing rather than the gate's own number.
+    assert paired[("R_20261001_000000", "V_a")] == pytest.approx(0.3091, abs=1e-4)
+    assert ("R_20261002_000000", "V_b") not in recorded
+    assert paired[("R_20261002_000000", "V_b")] == pytest.approx(0.2273, abs=1e-4)
+
+
+def test_the_real_promote_line_records_the_targeted_gain_and_nothing_else(tmp_path):
+    """The exact PROMOTE-line shape `run_round.run()` writes after #549, pinned.
+
+    Kept separate from the derivation test above so a formatter edit shows up as a
+    name that says which contract broke.
+
+    The line is *composed* by the writer (:func:`promote.evaluate_promotion` →
+    ``f"- \\`vid\\`: PROMOTE — {reason}"``, the same expression as
+    ``run_round.run()``'s decision loop) instead of typed by hand, and the three
+    properties pinned are the ones the reader depends on: it parses, the captured
+    number is the TARGETED delta, and the veto slice / normalized gain / win
+    fraction that also ride on the line are not what gets captured.
+
+    The hand-written version of this test was collected by no one — it lacked the
+    ``test_`` prefix — and its content was false about the shape it claimed to pin:
+    it led with ``promote (delta=+0.3833)``, which is the legacy reason string,
+    followed by ``| targeted_delta=+0.4000``, which the writer never emits after a
+    pipe. Real post-#549 lines carry ``delta=`` nowhere at all (the writer replaced
+    that field with ``targeted_delta=`` in the reason), so the match it asserted
+    would have come from the legacy branch while the assertion named the new field.
+    """
+    cfg = make_cfg(tmp_path)
+    base = slice_scores(0.40, 0.40)
+    line = promote_line("V_20261008_074540_4e602b", cfg, base, slice_scores(0.80, 0.60))
+
+    match = pfr.PROMOTE_LINE_RE.match(line)
+    assert match is not None, f"the real promote line failed to parse: {line}"
+    assert match.group("delta") == "+0.4000", line
+    # What the writer actually puts on the line. A rename of any of these four is a
+    # reader change too, and this says so at the point of failure.
+    assert "PROMOTE — promote (targeted_delta=+0.4000, heldout_delta=+0.2000, " in line, line
+    assert "normalized_gain=" in line and "win_frac=" in line, line
+    assert "delta=+0.4000" in line and line.count("delta=+") == 2, (
+        "two signed `delta=` fields ride this line — the targeted slice and the "
+        "veto slice — and only the first may be the recorded gain")
+
+    veto_only = "- `V_x`: PROMOTE — promote (heldout_delta=+0.5000, win_frac=1.00)"
+    assert pfr.PROMOTE_LINE_RE.match(veto_only) is None, (
+        "a line carrying only the veto slice yields no recorded delta; guessing "
+        "there is how the instrument would score a refusal as a promotion")
+
+    legacy = "- `V_20260905_000504_f711cb`: PROMOTE — promote (delta=+0.0782, win_frac=0.55)"
+    assert pfr.PROMOTE_LINE_RE.match(legacy).group("delta") == "+0.0782", (
+        "rounds recorded before the split keep their single whole-bench delta, and "
+        "67 of them are still the corpus this instrument measures")
 
 
 def test_a_window_with_no_null_rounds_refuses_to_invent_a_floor(tmp_path):

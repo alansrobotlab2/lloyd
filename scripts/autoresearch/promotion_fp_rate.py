@@ -96,7 +96,23 @@ UNAVAILABLE_CONTROLS = {
 }
 
 BASELINE_RE = re.compile(r"^- baseline mean composite:\s*([0-9.]+)", re.M)
-PROMOTE_LINE_RE = re.compile(r"^-\s*`(?P<vid>[^`]+)`:\s*PROMOTE.*delta=(?P<delta>[+-][0-9.]+)")
+# The delta the gate led with. Before #549 that was `delta=` (overall mean); the
+# gate now leads with `targeted_delta=` and prints `held-out delta=` beside it, so
+# a loose `.*delta=` would read the veto slice's number as the gain — which is
+# the one substitution that turns this instrument inside out: every variant that
+# held its veto tasks flat would count as a false positive, and the ones that
+# bought their gain with a regression would look honest. Three guards, each
+# load-bearing (pinned by tests/test_promotion_fp_rate.py):
+#   * lazy `.*?` + leftmost match takes the gate's headline number, which
+#     `run_round.run()`'s report block writes first in the line;
+#   * `(?<![A-Za-z_])` refuses `heldout_delta=` and any other `*_delta=` token;
+#   * `(?<!held-out )` refuses the spaced veto field the report prints beside it.
+# A PROMOTE line carrying ONLY a veto number yields no recorded delta — that
+# fails loudly in the FP-rate derivation rather than silently misreading it.
+PROMOTE_LINE_RE = re.compile(
+    r"^-\s*`(?P<vid>[^`]+)`:\s*PROMOTE.*?(?<![A-Za-z_])(?<!held-out )"
+    r"(?:targeted_)?delta=(?P<delta>[+-][0-9.]+)"
+)
 
 
 def percentile(values: list[float], p: float) -> float:

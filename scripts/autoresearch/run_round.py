@@ -37,7 +37,13 @@ from .common import (
 )
 from .hypothesis_generator import propose_variants
 from .judge import aggregate_variant, judge_trace
-from .promote import evaluate_promotion, promote
+from . import bench_split
+# `slice_metrics` is imported by name, never reached through the module: the
+# name `promote` is bound two lines lower to the promotion *function*, so
+# `promote.slice_metrics(...)` at the call site raised AttributeError on a
+# function object — every real round died before it wrote a report, and only a
+# test that stubbed the decision loop could get that far.
+from .promote import evaluate_promotion, promote, slice_metrics
 from .variant_sandbox import AnchorApplyError, materialize, materialize_baseline
 
 logger = logging.getLogger("autoresearch.run_round")
@@ -230,6 +236,33 @@ async def _run_trials(
     return direct_traces, sdk_traces
 
 
+def record_split(cfg: AutoresearchConfig, all_tasks: list[dict], rid: str) -> dict:
+    """Write this round's bench split and record it in the ledger; return the split.
+
+    A function, not lines inside `run()`, so a test can drive the real write against
+    the real bench and read back the artifact — a unit test over a hand-built split
+    dict cannot tell you that `run()` never calls `write_split`, which is the mistake
+    a test that fakes the whole round makes. Raises `RuntimeError` from `write_split`
+    (no bench tasks, or the written artifact fails `verify`); the caller aborts the
+    round, because a round with no slice has no veto and would promote anything —
+    `compute_split` raises `RuntimeError` on a bench that yields no targeted or no
+    held-out task, so a one-sided split cannot be written at all.
+    """
+    split = bench_split.write_split(cfg, all_tasks, rid)
+    ledger_append(cfg.paths.ledger_path, {
+        "round_id": rid,
+        "event": "split",
+        "split_hash": split["split_hash"],
+        "targeted": split["targeted"],
+        "heldout": split["heldout"],
+        "rotated_into_heldout": split["rotated_into_heldout"],
+        "created_at": now_iso(),
+    })
+    logger.info("split %s: %d targeted / %d held-out (hash %s…)", rid,
+                len(split["targeted"]), len(split["heldout"]), split["split_hash"][:12])
+    return split
+
+
 async def run(
     targets: list[str] | None = None,
     budget_minutes: int | None = None,
@@ -273,15 +306,39 @@ async def run(
     else:
         logger.info("no prior promoted variant found — flat from baseline")
 
-    tasks = load_bench_tasks(cfg.paths.bench_dir)
-    if bench_limit:
-        tasks = tasks[:bench_limit]
-    if not tasks:
+    all_tasks = load_bench_tasks(cfg.paths.bench_dir)
+    if not all_tasks:
         msg = f"bench dir empty: {cfg.paths.bench_dir}"
         logger.error(msg)
         return {"round_id": rid, "error": msg}
 
+    # 3. Pin the held-out slice BEFORE anything is proposed (#549). Writing it
+    # here, not at decision time, is the point: the split has to exist before the
+    # proposer sees a score, or the hash only proves which slice was picked after
+    # the results were known.
+    #
+    # The split is written from the FULL bench, and `--bench-limit` is applied
+    # afterwards to the tasks this round actually runs. Truncating before the
+    # split instead is the vacuous-gate shape this item was filed on, one layer
+    # down from the one in the acceptance: a `--bench-limit 4` round would slice
+    # 4 targeted tasks and no veto task, and a gate with nothing to refuse on
+    # promotes anything. With the split over the whole bench, a truncated round
+    # scores no veto task at all, `evaluate_promotion` refuses it with
+    # `no_heldout_overlap` naming the slice, and the round still exercises the
+    # plumbing — it just cannot promote, which is the honest verdict for a round
+    # that never measured the half it is supposed to protect.
+    tasks = all_tasks[:bench_limit] if bench_limit else list(all_tasks)
+    if len(tasks) < len(all_tasks):
+        logger.info("bench-limit %d: split over all %d tasks, %d evaluated this round",
+                    bench_limit, len(all_tasks), len(tasks))
+
     logger.info("loaded %d bench tasks", len(tasks))
+
+    try:
+        split = record_split(cfg, all_tasks, rid)
+    except RuntimeError as exc:
+        logger.error("bench split failed: %s", exc)
+        return {"round_id": rid, "error": f"bench split: {exc}"}
 
     variants = await asyncio.to_thread(
         propose_variants,
@@ -357,10 +414,14 @@ async def run(
         vs = summaries.get(vid)
         if not vs:
             continue
-        should, reason = evaluate_promotion(cfg, baseline_summary, vs)
+        should, reason = evaluate_promotion(cfg, baseline_summary, vs, split=split)
+        m = slice_metrics(baseline_summary, vs, split)
         decisions.append({
             "variant_id": vid,
             "mean_composite": vs.get("mean_composite"),
+            "targeted_delta": m["targeted_delta"],
+            "heldout_delta": m["heldout_delta"],
+            "normalized_gain": m["normalized_gain"],
             "should_promote": should,
             "reason": reason,
         })
@@ -415,6 +476,20 @@ async def run(
         marker = " (baseline)" if vid == baseline_id else ""
         lines.append(f"- `{vid}`{marker}: mean={summ.get('mean_composite', 0.0):.4f}, "
                      f"safety={'pass' if summ.get('safety_passed') else 'fail'}, tasks={summ.get('task_count', 0)}")
+    # The held-out slice is reported here and never to the proposer (#549): the
+    # round is allowed to know which veto tasks declined, the optimizer is not.
+    lines.append("")
+    lines.append("## Bench split")
+    lines.append(f"- split_hash: `{split['split_hash']}`")
+    lines.append(f"- targeted ({len(split['targeted'])}): {', '.join(split['targeted'])}")
+    lines.append(f"- held-out ({len(split['heldout'])}): {', '.join(split['heldout'])}"
+                 f" (rotated in: {', '.join(split['rotated_into_heldout']) or 'none'})")
+    heldout_scores = {p["task_id"]: p["composite_score"]
+                      for p in baseline_summary.get("per_task", [])
+                      if p["task_id"] in set(split["heldout"])}
+    if heldout_scores:
+        lines.append("- baseline held-out scores: " + ", ".join(
+            f"{t}={heldout_scores[t]:.2f}" for t in sorted(heldout_scores)))
     lines.append("")
     lines.append("## Promotion decisions")
     for d in decisions:

@@ -38,14 +38,20 @@ from scripts.autoresearch.common import AutoresearchConfig, AutoresearchPaths
 
 BASELINE_ID = "BASELINE_fixture"
 
-#: Composite score per (variant_id, task_id). Baseline 0.40 on both tasks;
-#: `V_a` beats it by +0.4000 on every task (promotable), `V_b` by +0.0300 on
-#: average (below the 0.05 `promotion_min_composite_delta`, so it is judged and
-#: held — a held variant still has to produce a decision row).
+#: Composite score per (variant_id, task_id). Baseline 0.40 on both tasks.
+#: `bench_a` is category `replay` and `bench_b` is `adversarial`, so the pinned
+#: split puts bench_a in the targeted pool and bench_b in the veto pool with
+#: nothing rotated (a 1-task targeted pool cannot spare one — see
+#: `bench_split._rotated`). `V_a` clears both conditions (+0.4000 targeted,
+#: +0.5000 held-out) and promotes; `V_b` lifts only the held-out task, so its
+#: targeted slice is flat and the gate refuses it — a held variant still has to
+#: produce a decision row. Under the pre-#549 gate `V_b` scored +0.0100 overall
+#: and was refused by the absolute 0.05 delta; the reason string is the only
+#: thing that changed for it, and it changed because averaging is gone.
 COMPOSITE = {
     (BASELINE_ID, "bench_a"): 0.40, (BASELINE_ID, "bench_b"): 0.40,
-    ("V_a", "bench_a"): 0.80, ("V_a", "bench_b"): 0.80,
-    ("V_b", "bench_a"): 0.42, ("V_b", "bench_b"): 0.44,
+    ("V_a", "bench_a"): 0.80, ("V_a", "bench_b"): 0.90,
+    ("V_b", "bench_a"): 0.40, ("V_b", "bench_b"): 0.42,
 }
 
 
@@ -74,10 +80,13 @@ def cfg(tmp_path):
     c = make_cfg(tmp_path)
     c.paths.ensure()
     c.paths.bench_dir.mkdir(parents=True, exist_ok=True)
+    # One task per side of the split: `replay` is always targeted,
+    # `adversarial` is always the veto, so this fixture exercises the real
+    # two-condition gate instead of a bench no split can be drawn across.
     (c.paths.bench_dir / "bench_a.md").write_text(
-        "---\nid: bench_a\ncategory: c\n---\nbody a\n", encoding="utf-8")
+        "---\nid: bench_a\ncategory: replay\n---\nbody a\n", encoding="utf-8")
     (c.paths.bench_dir / "bench_b.md").write_text(
-        "---\nid: bench_b\ncategory: c\n---\nbody b\n", encoding="utf-8")
+        "---\nid: bench_b\ncategory: adversarial\n---\nbody b\n", encoding="utf-8")
     return c
 
 
@@ -257,7 +266,12 @@ def test_a_round_benches_every_survivor_and_writes_a_decision_row_for_each(
     # The decisions the round reached, and the winner it promoted over them.
     assert [(d["variant_id"], d["should_promote"]) for d in result["decisions"]] == [
         ("V_a", True), ("V_b", False)]
-    assert result["decisions"][1]["reason"] == "insufficient_delta (+0.0300 < 0.05)"
+    # `V_b` raised only the veto task, so the targeted slice is flat: the gate
+    # refuses it on the first condition, which is the whole point of the split —
+    # under the old averaged gate a held-out-only gain still moved the mean.
+    assert result["decisions"][1]["reason"] == (
+        "targeted_no_gain (targeted 0.4000 → 0.4000, +0.0000 on 1 tasks)"
+    )
     assert result["variants_dropped"] == 2
     assert calls["promote"][0] == "V_a"
     assert calls["promote"][1] == cfg.paths.variants_dir / "V_a"

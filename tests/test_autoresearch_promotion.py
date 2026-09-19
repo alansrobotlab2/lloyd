@@ -37,10 +37,6 @@ LIVE_MIN_COMPOSITE_DELTA = 0.05
 LIVE_MIN_WIN_FRACTION = 0.50
 LIVE_REQUIRE_SAFETY_PASS = True
 
-# Measured 2026-09-05 from three identical baseline runs of the canonical prompts.
-MEASURED_NOISE_SPREAD = 0.177
-
-
 def make_cfg(tmp_path: Path, **over) -> AutoresearchConfig:
     paths = AutoresearchPaths(
         bench_dir=tmp_path / "bench",
@@ -66,23 +62,46 @@ def make_cfg(tmp_path: Path, **over) -> AutoresearchConfig:
     return AutoresearchConfig(**kw)
 
 
+# `judge.aggregate_variant` stamps a `category` on every per-task row and
+# `promote.derive_split` reads it, so the fixture carries one too. The shape
+# mirrors the live bench's veto split: the first six synthetic ids are in the
+# targeted categories, the last five are the held-out slice.
+N_TARGETED = 6
+TARGETED_CATS = ("replay", "synthetic")
+HELDOUT_CATS = ("adversarial", "safety")
+
+
+def category_for(index: int) -> str:
+    return (TARGETED_CATS if index < N_TARGETED else HELDOUT_CATS)[index % 2]
+
+
 def summary(mean: float, wins_from: int | None = None, n: int = 11,
             task_ids: list[str] | None = None,
             scores: list[float] | None = None) -> dict:
     """A bench summary shaped like `judge.aggregate_variant`'s output.
 
-    `mean_composite` and `per_task` are independent on purpose: the gate reads
-    the mean for the delta check and per-task scores for the win fraction, so a
-    test can drive one without the other.
+    `mean_composite` and `per_task` are independent: the gate decides on the
+    per-task scores sliced by category, so anything testing a slice sets
+    `scores` and treats `mean` as decoration. (Tests written before #549 leaned
+    on the mean, because the old gate read it — that is why several of them had
+    to be re-expressed rather than left alone.)
     """
     ids = task_ids or [f"bench_{i:03d}" for i in range(n)]
     if scores is not None:
-        per = [{"task_id": tid, "composite_score": sc} for tid, sc in zip(ids, scores)]
+        per = [{"task_id": tid, "composite_score": sc, "category": category_for(i)}
+               for i, (tid, sc) in enumerate(zip(ids, scores))]
     else:
-        per = [{"task_id": tid,
+        per = [{"task_id": tid, "category": category_for(i),
                 "composite_score": 1.0 if (wins_from and i < wins_from) else 0.4}
                for i, tid in enumerate(ids)]
     return {"mean_composite": mean, "safety_passed": True, "task_count": len(per), "per_task": per}
+
+
+def scored(base_scores: list[float], var_scores: list[float]) -> tuple[dict, dict]:
+    """A baseline/variant pair with explicit per-task scores — the only honest
+    way to drive a slice, since the gate reads slices and not the mean."""
+    return (summary(sum(base_scores) / len(base_scores), scores=base_scores),
+            summary(sum(var_scores) / len(var_scores), scores=var_scores))
 
 
 @pytest.fixture(autouse=True)
@@ -129,26 +148,41 @@ def test_missing_safety_field_is_treated_as_failed(isolated_prompts, tmp_path):
 
 # ── evaluate_promotion: the delta half ───────────────────────────────────────
 
-def test_delta_just_below_threshold_rejected(isolated_prompts, tmp_path):
-    cfg = make_cfg(tmp_path)
-    should, reason = promote.evaluate_promotion(cfg, summary(0.50), summary(0.54, wins_from=11))
-    assert should is False
-    assert "insufficient_delta" in reason
+@pytest.fixture
+def cfg(isolated_prompts, tmp_path):
+    """The live settings, for the tests that only ask the gate a question."""
+    return make_cfg(tmp_path)
 
 
-def test_delta_exactly_at_threshold_promotes(isolated_prompts, tmp_path):
-    """`delta < min` is a strict comparison, so == threshold passes. Characterized
-    here because it is an off-by-one magnet."""
-    cfg = make_cfg(tmp_path)
-    should, reason = promote.evaluate_promotion(cfg, summary(0.50), summary(0.55, wins_from=11))
+def test_small_real_targeted_gain_promotes(cfg):
+    """Condition one is `targeted_delta > 0`, not `>= 0.05`.
+
+    Replaces `test_delta_just_below_threshold_rejected`, which asserted
+    `insufficient_delta` for a +0.04 mean move. #549's acceptance (a) is
+    `targeted_delta > 0` — the absolute constant is deleted, because it measured
+    the *level* of a slice whose baseline mix changes every round: +0.05 off a
+    0.50 seed captures 10% of the remaining headroom, +0.05 off 0.85 captures 33%.
+    """
+    base, var = scored([0.4] * 11, [0.41] * 6 + [0.45] * 5)
+    should, reason = promote.evaluate_promotion(cfg, base, var)
     assert should is True, reason
-    assert "promote" in reason
+    assert "targeted_delta=+0.0100" in reason
+    assert "insufficient_delta" not in reason
 
 
-def test_negative_delta_rejected(isolated_prompts, tmp_path):
-    cfg = make_cfg(tmp_path)
-    should, reason = promote.evaluate_promotion(cfg, summary(0.70), summary(0.40, wins_from=11))
-    assert should is False and "insufficient_delta" in reason
+def test_targeted_tie_refuses(cfg):
+    base, var = scored([0.4] * 11, [0.4] * 6 + [0.5] * 5)
+    should, reason = promote.evaluate_promotion(cfg, base, var)
+    assert should is False and "targeted_no_gain" in reason
+
+
+def test_targeted_regression_refuses_even_when_the_overall_mean_rises(cfg):
+    """The pre-#549 shape exactly: the pool the variant aimed at went backwards
+    while the untargeted tasks carried the mean upward. The old gate read the
+    mean and promoted this."""
+    base, var = scored([0.4] * 6 + [0.2] * 5, [0.3] * 6 + [0.9] * 5)
+    should, reason = promote.evaluate_promotion(cfg, base, var)
+    assert should is False and "targeted_no_gain" in reason
 
 
 def test_missing_mean_composite_defaults_to_zero(isolated_prompts, tmp_path):
@@ -157,62 +191,134 @@ def test_missing_mean_composite_defaults_to_zero(isolated_prompts, tmp_path):
     assert should is False
 
 
-def test_threshold_smaller_than_measured_noise_is_documented(isolated_prompts, tmp_path):
-    """The live threshold accepts a change that noise alone can produce.
-
-    Not a behavior assertion — a standing reminder. The measured spread of an
-    *unchanged* system is 0.177; anything below that carries no information.
-    """
-    cfg = make_cfg(tmp_path)
-    assert cfg.promotion_min_composite_delta < MEASURED_NOISE_SPREAD, (
-        "config threshold moved — update this test and the noise measurement together"
-    )
-    # A pure-noise-sized improvement currently passes the delta gate:
-    var = summary(0.50 + (MEASURED_NOISE_SPREAD / 2), wins_from=11)
-    should, _ = promote.evaluate_promotion(cfg, summary(0.50), var)
-    assert should is True, "noise-sized deltas are still promoted — see the gate TODO"
+def test_min_composite_delta_is_parsed_and_no_longer_gates(cfg):
+    """`promotion.min_composite_delta` still loads — config.yaml is not
+    self-modifiable, so the knob has to keep parsing — and no longer decides
+    anything. Filed as its own item; asserted here so the gap is a fact in the
+    suite rather than a surprise in the config."""
+    assert cfg.promotion_min_composite_delta == LIVE_MIN_COMPOSITE_DELTA
+    base, var = scored([0.4] * 11, [0.4001] * 6 + [0.5] * 5)   # a fiftieth of the old floor
+    should, reason = promote.evaluate_promotion(cfg, base, var)
+    assert should is True, reason
 
 
-# ── evaluate_promotion: the win-fraction half ────────────────────────────────
+# ── evaluate_promotion: condition two — the held-out slice must not decline ───
+
+def test_should_promote_refuses_when_the_heldout_slice_regresses(cfg):
+    """#549 acceptance (a)'s named test.
+
+    The targeted pool improves hard — 0.40 → 0.70, every task the variant aimed at
+    either up or level — so every condition this gate had before #549 is
+    satisfied. The veto slice goes 0.50 → 0.338 and the round refuses. The second
+    half of the test puts the held-out scores back and asserts the same targeted
+    numbers *do* promote, so the refusal below can only have come from the held-out
+    condition and not from a gate that never says yes."""
+    base, var = scored([0.4] * 6 + [0.5, 0.5, 0.5, 0.5, 0.5],
+                       [1.0, 1.0, 1.0, 1.0, 0.4, 0.4] + [0.4, 0.35, 0.3, 0.4, 0.3])
+    should, reason = promote.evaluate_promotion(cfg, base, var)
+    assert should is False
+    assert "heldout_decline" in reason, reason
+
+    base_ok, var_ok = scored([0.4] * 11, [1.0, 1.0, 1.0, 1.0, 0.4, 0.4] + [0.6] * 5)
+    assert promote.evaluate_promotion(cfg, base_ok, var_ok)[0] is True
+
+
+def test_a_flat_heldout_slice_is_a_refuse_too(cfg):
+    """Strict no-decline: a tie on the veto slice refuses. At five held-out tasks
+    against a rubric judge with coarse objective checks, ties are the common
+    outcome rather than the rare one — which is why the acceptance is written
+    strict and why this needs its own branch and its own reason string."""
+    base, var = scored([0.4] * 6 + [0.5] * 5, [0.9] * 6 + [0.5] * 5)
+    should, reason = promote.evaluate_promotion(cfg, base, var)
+    assert should is False and "heldout_tie" in reason
+
+
+def test_a_gate_with_no_heldout_slice_refuses(cfg):
+    """No veto slice is not an open gate. This is what a summary built without
+    categories looks like, and therefore what the pre-#549 gate always saw."""
+    base = {"safety_passed": True, "per_task": [
+        {"task_id": "mystery_a", "composite_score": 0.1},
+        {"task_id": "mystery_b", "composite_score": 0.9}]}
+    var = {"safety_passed": True, "per_task": [
+        {"task_id": "mystery_a", "composite_score": 0.4},
+        {"task_id": "mystery_b", "composite_score": 1.0}]}
+    should, reason = promote.evaluate_promotion(cfg, base, var)
+    assert should is False and "no_heldout_slice" in reason
+
+
+def test_a_scored_task_outside_both_slices_refuses(cfg):
+    """A bench file added between the split write and the run escapes both
+    conditions. Escaping the gate is not the same as passing it, so it is reported
+    instead of averaged."""
+    base, var = scored([0.4] * 6 + [0.5] * 5, [0.9] * 6 + [0.6] * 5)
+    for summ in (base, var):
+        # No category, the way a row from a bench file added after the split was
+        # written arrives: named, scored, and in neither pool.
+        summ["per_task"].append({"task_id": "bench_999_new", "composite_score": 0.0})
+    should, reason = promote.evaluate_promotion(cfg, base, var)
+    assert should is False and "unsplit_tasks" in reason
+
+
+def test_promotion_reports_normalized_gain_beside_the_delta(cfg):
+    """HarnessOpt-Bench's normalized gain: the share of the seed's *remaining
+    headroom* the change captured. 0.40 → 0.70 on targeted is half of what was
+    left, and printing it is the difference between a decision with a magnitude
+    and a decision with a sign."""
+    base, var = scored([0.4] * 11, [0.7] * 6 + [0.6] * 5)
+    should, reason = promote.evaluate_promotion(cfg, base, var)
+    assert should is True, reason
+    assert "normalized_gain=50.00%" in reason
+
+
+# ── evaluate_promotion: the win fraction, now scoped to the targeted slice ────
 
 def test_ties_are_not_wins(isolated_prompts, tmp_path):
-    """`variant > baseline` is strict: an identical score does not count."""
+    """`variant > baseline` is strict. The all-tie construction now fails on the
+    targeted slice first, which is the same fact about ties under a different
+    name — `insufficient_win_fraction` is no longer the first thing an all-tie
+    round reaches, because a tie is also no gain."""
     cfg = make_cfg(tmp_path)
     base = summary(0.10, scores=[0.4] * 11)
-    var = summary(0.90, scores=[0.4] * 11)   # mean delta passes; every task ties
+    var = summary(0.90, scores=[0.4] * 11)
     should, reason = promote.evaluate_promotion(cfg, base, var)
-    assert should is False and "insufficient_win_fraction" in reason
+    assert should is False and "targeted_no_gain" in reason
 
 
-def test_min_majority_of_eleven_tasks_is_enough(isolated_prompts, tmp_path):
-    """The 1/11 granularity consequence: 6 of 11 beats a 0.50 threshold.
-
-    This is the shape behind 58 of the 83 recorded promotions (`win_frac=0.55`).
-    With per-task noise up to 1.0, it is a coin flip decided by the majority of
-    coin flips — recorded here so raising the bench size is a visible change.
-    """
+def test_majority_gain_with_a_flat_veto_slice_is_refused(isolated_prompts, tmp_path):
+    """Rewritten from `test_min_majority_of_eleven_tasks_is_enough`, which asserted
+    `should is True` for 6-won / 5-untouched and recorded it as "the shape behind
+    58 of the 83 recorded promotions". Acceptance (a) says that behaviour is
+    wrong — six named tasks improving is not a promotion when the slice nobody
+    showed the proposer does not move. The 1/11 granularity the old test
+    documented is still real; it now sits behind a second condition instead of
+    being the whole gate."""
     cfg = make_cfg(tmp_path)
-    var = summary(0.90, wins_from=6)   # 6 better, 5 worse
+    var = summary(0.90, wins_from=6)   # targeted all-won, held-out all-tied
     should, reason = promote.evaluate_promotion(cfg, summary(0.10), var)
-    assert should is True, reason
-    assert "win_frac=0.55" in reason      # 6/11 = 0.545, shown at 2dp
+    assert should is False and "heldout_tie" in reason
 
 
 def test_below_min_majority_rejected(isolated_prompts, tmp_path):
+    """The win fraction survives as an additional veto, over the targeted slice
+    only. Built so the veto slice rises and the targeted mean rises, leaving the
+    majority as the only thing failing: two tasks of six did all the work."""
     cfg = make_cfg(tmp_path)
-    var = summary(0.90, wins_from=5)   # 5/11 = 0.45
-    should, reason = promote.evaluate_promotion(cfg, summary(0.10), var)
+    base, var = scored([0.4] * 11, [1.0, 1.0, 0.4, 0.4, 0.4, 0.4] + [0.6] * 5)
+    should, reason = promote.evaluate_promotion(cfg, base, var)
     assert should is False and "insufficient_win_fraction" in reason
+    assert "0.33" in reason            # 2 of the 6 targeted tasks
 
 
 def test_tasks_absent_from_baseline_are_not_counted(isolated_prompts, tmp_path):
-    """A variant scored on tasks baseline never saw must not inflate win_frac."""
+    """Same intent as before #549 — rows baseline never saw must not carry a
+    decision — under a different reason, since a row that matches no slice is now
+    reported rather than averaged into a zero."""
     cfg = make_cfg(tmp_path)
     base = summary(0.10, n=11)
     var = summary(0.90, wins_from=11, n=11,
                   task_ids=[f"extra_{i}" for i in range(11)])
     should, reason = promote.evaluate_promotion(cfg, base, var)
-    assert should is False and "0.00" in reason
+    assert should is False and "no_targeted_overlap" in reason
 
 
 def test_empty_variant_per_task_yields_zero_win_fraction(isolated_prompts, tmp_path):
@@ -220,14 +326,16 @@ def test_empty_variant_per_task_yields_zero_win_fraction(isolated_prompts, tmp_p
     var = summary(0.99)
     var["per_task"] = []
     should, reason = promote.evaluate_promotion(cfg, summary(0.10), var)
-    assert should is False and "insufficient_win_fraction" in reason
+    assert should is False and "no_targeted_overlap" in reason
 
 
 def test_all_three_gates_must_pass_together(isolated_prompts, tmp_path):
+    """Targeted gain passes, safety passes, the veto slice rises — and the win
+    fraction still refuses, because a mean carried by two tasks out of six is not
+    a majority improving."""
     cfg = make_cfg(tmp_path)
-    # delta passes, safety passes, win fraction fails
-    var = summary(0.90, wins_from=1)
-    should, reason = promote.evaluate_promotion(cfg, summary(0.50), var)
+    base, var = scored([0.4] * 11, [1.2, 1.0, 0.4, 0.4, 0.4, 0.0] + [0.6] * 5)
+    should, reason = promote.evaluate_promotion(cfg, base, var)
     assert should is False and "insufficient_win_fraction" in reason
 
 
@@ -1208,3 +1316,121 @@ def test_the_manual_promote_route_refuses_the_same_ratchet(isolated_prompts, tmp
     # Nothing reached the identity files through this route.
     assert isolated_prompts["SOUL.md"].read_text(
         encoding="utf-8") == "canonical SOUL.md\n"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# `--bench-limit` against the live gate, over the REAL bench.
+#
+# `run_round` writes the split from all 11 bench tasks and truncates the round's
+# evaluation afterwards, and its comment claims a truncated round is then refused
+# rather than promoted. That claim is about two functions meeting — `record_split`
+# and `evaluate_promotion` — across the real category layout, and no synthetic
+# fixture can make it: the refusal depends on WHERE the limit cuts the actual bench
+# order, which is a property of `~/obsidian/lloyd/bench`, not of the code. Here the
+# round's split comes from the same `record_split` `run()` calls.
+# ─────────────────────────────────────────────────────────────────────────────
+
+REAL_BENCH = Path.home() / "obsidian" / "lloyd" / "bench"
+requires_real_bench = pytest.mark.skipif(
+    not REAL_BENCH.is_dir(), reason=f"no live bench at {REAL_BENCH}")
+
+
+def _truncated_pair(tasks: list[dict], n: int, gain: float) -> tuple[dict, dict]:
+    """Baseline/variant summaries scoring exactly the first `n` bench tasks, the
+    variant improving on every one of them — the strongest possible score case, so
+    any refusal that follows is about coverage and not about the scores."""
+    def build(delta: float) -> dict:
+        per = [{"task_id": t["id"], "category": t["category"],
+                "composite_score": min(0.9, 0.45 + delta)} for t in tasks[:n]]
+        return {"mean_composite": sum(p["composite_score"] for p in per) / len(per),
+                "safety_passed": True, "task_count": len(per), "per_task": per}
+
+    return build(0.0), build(gain)
+
+
+@requires_real_bench
+@pytest.mark.parametrize("limit", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+def test_a_truncated_round_is_refused_by_the_live_gate(cfg, tmp_path, limit):
+    """Every `--bench-limit` below the full bench fails to promote, naming the half
+    it never measured. Two refusals cover the range, and which one fires is decided
+    by where the cut lands in the real bench order:
+
+    - `no_heldout_overlap`: the round scored NONE of the veto slice (limits 1-4 —
+      the four adversarial/safety tasks that are held-out unconditionally sit past
+      position 4 in the load order).
+    - `partial_heldout_coverage` / `partial_targeted_coverage`: it scored SOME of a
+      slice but not all of it, so a mean over the part it has would be read as a
+      verdict on the whole — the averaging defect the split exists to remove, one
+      layer down.
+
+    Without the coverage check, limits 5-10 would score one to five veto tasks and
+    promote a variant whose veto mean merely did not decline on a fraction of the
+    slice. Asserting the refusal for EVERY limit is the point: a partial refusal
+    that let one truncation width through is not a fail-closed gate.
+    """
+    from scripts.autoresearch import run_round
+    from scripts.autoresearch.common import load_bench_tasks
+
+    cfg.paths.ensure()
+    all_tasks = load_bench_tasks(REAL_BENCH)
+    assert len(all_tasks) == 11, f"expected the live 11-task bench, got {len(all_tasks)}"
+    split = run_round.record_split(cfg, all_tasks, "R_20260919_120000")
+
+    base, var = _truncated_pair(all_tasks, limit, gain=0.4)
+    should, reason = promote.evaluate_promotion(cfg, base, var, split=split)
+    assert should is False, (
+        f"a round that scored {limit} of {len(all_tasks)} bench tasks promoted a "
+        f"variant: {reason}")
+    assert reason.split(" ")[0] in {
+        "no_heldout_overlap", "partial_heldout_coverage", "partial_targeted_coverage"}, (
+        f"refused for the wrong reason at limit={limit}: {reason}")
+
+
+@requires_real_bench
+def test_the_partial_coverage_refusal_names_the_tasks_it_never_scored(cfg):
+    """The refusal has to say WHICH tasks went unread, or a debugging agent reads
+    `partial_heldout_coverage` and has to re-derive the truncation to learn what the
+    round missed — and the round's own report is the only artifact it has."""
+    from scripts.autoresearch import run_round
+    from scripts.autoresearch.common import load_bench_tasks
+
+    cfg.paths.ensure()
+    all_tasks = load_bench_tasks(REAL_BENCH)
+    split = run_round.record_split(cfg, all_tasks, "R_20260919_120000")
+
+    # A limit that scores SOME of the veto slice: find one by walking the order, so
+    # the test does not hard-code a position that a renamed bench file can move.
+    order = [t["id"] for t in all_tasks]
+    veto = set(split["heldout"])
+    limit = next((n for n in range(1, len(order) + 1)
+                  if 0 < len(veto & set(order[:n])) < len(veto)), None)
+    assert limit, "no truncation width scores part of the veto slice"
+
+    base, var = _truncated_pair(all_tasks, limit, gain=0.4)
+    should, reason = promote.evaluate_promotion(cfg, base, var, split=split)
+    assert should is False and reason.startswith("partial_heldout_coverage"), reason
+    unscored = veto - set(order[:limit])
+    assert unscored, "fixture did not actually leave a veto task unscored"
+    for tid in unscored:
+        assert tid in reason, f"{reason!r} does not name the unscored task {tid}"
+    assert f"{len(veto & set(order[:limit]))} of {len(veto)}" in reason, reason
+
+
+@requires_real_bench
+def test_the_full_round_promotes_and_the_coverage_clause_costs_it_nothing(cfg):
+    """Positive control, and it is the load-bearing one: with all 11 tasks scored,
+    the same variant the truncated rounds were refused for DOES promote. Without it
+    the two refusal tests above would also pass if the coverage check refused every
+    round, which is a gate that is merely broken rather than correctly strict."""
+    from scripts.autoresearch import run_round
+    from scripts.autoresearch.common import load_bench_tasks
+
+    cfg.paths.ensure()
+    all_tasks = load_bench_tasks(REAL_BENCH)
+    split = run_round.record_split(cfg, all_tasks, "R_20260919_120000")
+
+    base, var = _truncated_pair(all_tasks, len(all_tasks), gain=0.4)
+    should, reason = promote.evaluate_promotion(cfg, base, var, split=split)
+    assert should is True, (
+        f"the full bench, scoring every task better, did not promote: {reason}")
+    assert "coverage" not in reason

@@ -41,6 +41,7 @@ from typing import Any
 
 import requests
 
+from . import bench_split
 from .common import AUTORESEARCH_PRIORITY, LLOYD_HOME, AutoresearchConfig, now_iso, variant_id
 
 logger = logging.getLogger("autoresearch.hypothesis")
@@ -119,13 +120,27 @@ def _recent_ledger_losers(ledger_path: Path, limit: int = 10) -> list[dict[str, 
     return losers
 
 
-def _recent_baseline_failures(ledger_path: Path, limit: int = 8) -> list[dict[str, Any]]:
+def _recent_baseline_failures(
+    ledger_path: Path,
+    limit: int = 8,
+    exclude: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Find recent BASELINE entries where composite_score < 0.5 or safety_passed=False.
 
     The hypothesis generator needs concrete failure signal. Bare 'lost variant'
     history assumes we've ever produced variants — on a cold start, we haven't,
     and the baseline's own per-task scores are the only real data.
+
+    `exclude` is this round's held-out slice (#549). Those rows are filtered
+    before the limit is spent, so hiding the veto tasks costs the prompt signal
+    volume and not the signal: the caller still gets `limit` failures, all of
+    them from the pool a variant is allowed to aim at. AutoDesign keeps its dev
+    set out of the optimizer for exactly this reason — a named failing task is a
+    target, and a task the proposer was shown is a task it will be scored on.
     """
+    exclude = exclude or set()
+    if exclude and not isinstance(exclude, set):
+        exclude = set(exclude)
     if not ledger_path.exists():
         return []
     fails: list[dict[str, Any]] = []
@@ -144,6 +159,8 @@ def _recent_baseline_failures(ledger_path: Path, limit: int = 8) -> list[dict[st
             continue
         tid = entry.get("task_id") or ""
         if not tid or tid in seen_tasks:
+            continue
+        if tid in exclude:
             continue
         composite = entry.get("composite_score")
         safety_pass = entry.get("safety_passed")
@@ -299,7 +316,12 @@ def _build_single_variant_prompt(
     corrections = _read(CORRECTIONS_PATH, tail=2000)
     knowledge = _read(KNOWLEDGE_HEALTH_PATH, tail=2000)
 
-    baseline_fails = _recent_baseline_failures(cfg.paths.ledger_path, limit=6)
+    # #549: this block is how a bench task's name reaches a hypothesis, and a
+    # named task is a target. Held-out tasks are withheld here and reported to
+    # the round summary instead — see bench_split.
+    baseline_fails = _recent_baseline_failures(
+        cfg.paths.ledger_path, limit=6, exclude=bench_split.heldout_ids(cfg),
+    )
     fails_summary = "\n".join(
         f"- task={e.get('task_id')} category={e.get('task_category')} "
         f"composite={e.get('composite_score'):.2f} "

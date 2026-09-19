@@ -110,6 +110,24 @@ def world(tmp_path):
     return cfg
 
 
+def _two_sided_bench(cfg: AutoresearchConfig) -> None:
+    """A bench the #549 split can be drawn across: one targeted task, one veto.
+
+    Not a placeholder category. `compute_split` files an unknown category in no
+    slice and refuses a bench that yields no held-out tasks, so a one-category
+    bench now stops the round before it can write a report — which is the gate
+    doing its job (a split with no veto tasks is the vacuous gate this item was
+    filed on), and it means any fixture that drives `run_round.run()` has to
+    carry both sides. `replay` is always targeted, `adversarial` always held out,
+    and a 1-task targeted pool rotates none, so the pools here are exact.
+    """
+    cfg.paths.bench_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.paths.bench_dir / "bench_a.md").write_text(
+        "---\nid: bench_a\ncategory: replay\n---\nbody\n", encoding="utf-8")
+    (cfg.paths.bench_dir / "bench_b.md").write_text(
+        "---\nid: bench_b\ncategory: adversarial\n---\nbody\n", encoding="utf-8")
+
+
 def landed(vid: str = PROMOTED, snapshot: str = SNAPSHOT_DIR) -> dict:
     return {"variant_id": vid, "snapshot_dir": snapshot, "applied_files": ["SOUL.md"]}
 
@@ -580,8 +598,7 @@ def test_run_round_records_and_surfaces_on_the_live_path(world, monkeypatch):
     round's report has to be written from.
     """
     cfg = world
-    cfg.paths.bench_dir.mkdir(parents=True, exist_ok=True)
-    (cfg.paths.bench_dir / "bench_a.md").write_text("---\nid: bench_a\ncategory: c\n---\nbody\n", encoding="utf-8")
+    _two_sided_bench(cfg)
     overlay = cfg.paths.research_root / "overlay_V_new"
     overlay.mkdir(parents=True, exist_ok=True)
     (overlay / "SOUL.md").write_text("variant contract\n", encoding="utf-8")
@@ -608,7 +625,7 @@ def test_run_round_records_and_surfaces_on_the_live_path(world, monkeypatch):
         "mean_composite": 0.4364 if vid.startswith("BASELINE") else 0.7000,
         "per_task": [], "task_count": len(pairs), "safety_passed": True,
     })
-    monkeypatch.setattr(run_round, "evaluate_promotion", lambda c, b, v: (True, "promote (delta=+0.2636, win_frac=1.00)"))
+    monkeypatch.setattr(run_round, "evaluate_promotion", lambda c, b, v, **kw: (True, "promote (delta=+0.2636, win_frac=1.00)"))
     monkeypatch.setattr(run_round, "materialize_baseline", lambda c: ("BASELINE_fixture", c.paths.variants_dir))
     monkeypatch.setattr(run_round, "materialize", lambda c, v: overlay)
     promoted: list[str] = []
@@ -688,8 +705,7 @@ def test_a_later_round_reads_the_report_the_round_actually_wrote(world, monkeypa
     recorded nothing, whatever the gate had decided.
     """
     cfg = world
-    cfg.paths.bench_dir.mkdir(parents=True, exist_ok=True)
-    (cfg.paths.bench_dir / "bench_a.md").write_text("---\nid: bench_a\ncategory: c\n---\nbody\n", encoding="utf-8")
+    _two_sided_bench(cfg)
     overlay = cfg.paths.research_root / "overlay_V_new"
     overlay.mkdir(parents=True, exist_ok=True)
     (overlay / "SOUL.md").write_text("variant contract\n", encoding="utf-8")
@@ -711,7 +727,7 @@ def test_a_later_round_reads_the_report_the_round_actually_wrote(world, monkeypa
     monkeypatch.setattr(run_round, "aggregate_variant", lambda vid, pairs: {
         "mean_composite": 0.4364 if vid.startswith("BASELINE") else 0.7,
         "per_task": [], "task_count": len(pairs), "safety_passed": True})
-    monkeypatch.setattr(run_round, "evaluate_promotion", lambda c, b, v: (True, "promote (delta=+0.2636, win_frac=1.00)"))
+    monkeypatch.setattr(run_round, "evaluate_promotion", lambda c, b, v, **kw: (True, "promote (delta=+0.2636, win_frac=1.00)"))
     monkeypatch.setattr(run_round, "materialize_baseline", lambda c: ("BASELINE_fixture", c.paths.variants_dir))
     monkeypatch.setattr(run_round, "materialize", lambda c, v: overlay)
     monkeypatch.setattr(run_round, "promote", lambda c, v, o, vs, bs, dry_run=False: {
@@ -1047,8 +1063,7 @@ def test_the_report_run_writes_carries_the_shape_block_capped_at_five(world, mon
     was built from.
     """
     cfg = world
-    cfg.paths.bench_dir.mkdir(parents=True, exist_ok=True)
-    (cfg.paths.bench_dir / "bench_a.md").write_text("---\nid: bench_a\ncategory: c\n---\nbody\n", encoding="utf-8")
+    _two_sided_bench(cfg)
     soul, _ps = live_contract
     overlay = cfg.paths.research_root / "overlay_V_new"
     overlay.mkdir(parents=True, exist_ok=True)
@@ -1079,7 +1094,7 @@ def test_the_report_run_writes_carries_the_shape_block_capped_at_five(world, mon
     monkeypatch.setattr(run_round, "aggregate_variant", lambda vid, pairs: {
         "mean_composite": 0.4364, "per_task": [], "task_count": len(pairs),
         "safety_passed": True})
-    monkeypatch.setattr(run_round, "evaluate_promotion", lambda c, b, v: (False, "hold (win_frac 0.00)"))
+    monkeypatch.setattr(run_round, "evaluate_promotion", lambda c, b, v, **kw: (False, "hold (win_frac 0.00)"))
     monkeypatch.setattr(run_round, "materialize_baseline", lambda c: ("BASELINE_fixture", c.paths.variants_dir))
     monkeypatch.setattr(run_round, "materialize", lambda c, v: overlay)
 

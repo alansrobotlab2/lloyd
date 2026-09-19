@@ -24,9 +24,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import bench_split
 from .common import LLOYD_HOME, AutoresearchConfig, now_iso
 
 logger = logging.getLogger("autoresearch.promote")
+
+
+def _mean(scores: list[float]) -> float:
+    return sum(scores) / len(scores) if scores else 0.0
 
 # Canonical targets that can be overwritten by promotion
 CANONICAL_PROMPTS = {
@@ -40,41 +45,171 @@ def _ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
+def _per_task(summary: dict[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for p in summary.get("per_task", []) or []:
+        tid = p.get("task_id")
+        score = p.get("composite_score")
+        if tid is not None and isinstance(score, (int, float)):
+            out[str(tid)] = float(score)
+    return out
+
+
+def derive_split(*summaries: dict[str, Any]) -> dict[str, Any]:
+    """A category split taken from the summaries themselves.
+
+    `judge.aggregate_variant` already stamps `category` onto every per-task row,
+    so the two fixed halves of the split are recoverable from any real summary.
+    This is the fallback for a caller that has no written round split — it
+    carries the categories, never the per-round rotation.
+    """
+    cats: dict[str, str] = {}
+    for summ in summaries:
+        for p in summ.get("per_task", []) or []:
+            tid, cat = p.get("task_id"), p.get("category")
+            if tid and cat:
+                cats.setdefault(str(tid), str(cat))
+    return {
+        "round_id": None,
+        "targeted": sorted(t for t, c in cats.items() if c in bench_split.TARGETED_CATEGORIES),
+        "heldout": sorted(t for t, c in cats.items() if c in bench_split.HELDOUT_CATEGORIES),
+        "rotated_into_heldout": [],
+        "split_hash": None,
+        "derived_from": "task_category",
+    }
+
+
+def slice_metrics(
+    baseline_summary: dict[str, Any],
+    variant_summary: dict[str, Any],
+    split: dict[str, Any],
+) -> dict[str, Any]:
+    """Per-slice numbers the gate decides on. One implementation, shared with
+    `replay_promotion_gate.py` so a replay cannot drift from the predicate it is
+    replaying — a re-derived arithmetic would be measuring the replay, not the gate.
+    """
+    base_per = _per_task(baseline_summary)
+    var_per = _per_task(variant_summary)
+    targeted = [str(t) for t in (split.get("targeted") or [])]
+    heldout = [str(t) for t in (split.get("heldout") or [])]
+    known = set(targeted) | set(heldout)
+    unsplit = sorted((set(base_per) | set(var_per)) - known)
+
+    def pair(ids: list[str]) -> tuple[list[str], float, float]:
+        shared = [t for t in ids if t in base_per and t in var_per]
+        return shared, _mean([base_per[t] for t in shared]), _mean([var_per[t] for t in shared])
+
+    t_ids, t_base, t_var = pair(targeted)
+    h_ids, h_base, h_var = pair(heldout)
+    wins = sum(1 for t in t_ids if var_per[t] > base_per[t])
+    return {
+        "unsplit": unsplit,
+        "targeted_ids": t_ids, "targeted_baseline": t_base, "targeted_variant": t_var,
+        "targeted_delta": t_var - t_base,
+        "heldout_ids": h_ids, "heldout_baseline": h_base, "heldout_variant": h_var,
+        "heldout_delta": h_var - h_base,
+        "win_fraction": (wins / len(t_ids)) if t_ids else 0.0,
+        # HarnessOpt-Bench's normalized gain: the fraction of the seed's *remaining
+        # headroom* the change captured. A raw +0.05 over a 0.50 baseline is 10% of
+        # what was available; the same +0.05 over 0.85 is 33%. Printed beside the
+        # delta so a decision says how much it bought, not only which way it moved.
+        "headroom": 1.0 - t_base,
+        "normalized_gain": ((t_var - t_base) / (1.0 - t_base)) if t_base < 1.0 else None,
+    }
+
+
 def evaluate_promotion(
     cfg: AutoresearchConfig,
     baseline_summary: dict[str, Any],
     variant_summary: dict[str, Any],
+    split: dict[str, Any] | None = None,
+    require_full_slice: bool = True,
 ) -> tuple[bool, str]:
     """Decide whether a variant should be promoted over baseline.
+
+    Two conditions on two slices, per AutoDesign (arXiv:2608.13560): the targeted
+    slice must improve AND the held-out slice must not decline. `safety_passed`
+    and `contract_refusals()` stay as vetoes on top — neither is a substitute for
+    the split, because `safety_critical` is set on exactly one of the 11 tasks and
+    the contract guard reads the prompt, not the scores.
+
+    The absolute `promotion_min_composite_delta` is gone. It compared a raw delta
+    against a fixed 0.05 while the rounds' own baselines were seeded from
+    `composite < 0.5` tasks, so the gate's strictness moved with the baseline mix:
+    +0.05 off a 0.50 seed captured 10% of the available headroom, +0.05 off 0.85
+    captured 33%. `targeted_delta > 0` asks only for a real gain on the pool the
+    variant aimed at; the no-decline half is what stops a gain there from paying
+    for a loss anywhere else.
 
     Returns (should_promote, reason).
     """
     if not variant_summary.get("safety_passed", False) and cfg.promotion_require_safety_pass:
         return False, "safety_regression"
 
-    baseline_mean = float(baseline_summary.get("mean_composite", 0.0))
-    variant_mean = float(variant_summary.get("mean_composite", 0.0))
-    delta = variant_mean - baseline_mean
+    split = split or derive_split(baseline_summary, variant_summary)
+    if not split.get("heldout"):
+        # No veto slice means this is the pre-#549 gate wearing new clothes.
+        return False, "no_heldout_slice"
 
-    if delta < cfg.promotion_min_composite_delta:
-        return False, f"insufficient_delta ({delta:+.4f} < {cfg.promotion_min_composite_delta})"
+    m = slice_metrics(baseline_summary, variant_summary, split)
+    if m["unsplit"]:
+        # A scored task outside both pools is a task no condition looks at —
+        # usually a bench file added between the split write and the run.
+        return False, f"unsplit_tasks ({len(m['unsplit'])}: {', '.join(m['unsplit'][:3])})"
+    if not m["targeted_ids"]:
+        return False, "no_targeted_overlap"
+    if not m["heldout_ids"]:
+        return False, "no_heldout_overlap"
+    if require_full_slice:
+        # Every task the split declared has to have been scored. A round truncated
+        # by `--bench-limit` normally scores SOME of the veto slice — one task of
+        # four — and then "the held-out mean did not decline" is a verdict on a
+        # quarter of the veto, the same averaging defect the split exists to
+        # remove, moved one layer down. Fail closed and name what went unread.
+        for label, pool, scored in (("held-out", split["heldout"], m["heldout_ids"]),
+                                    ("targeted", split["targeted"], m["targeted_ids"])):
+            missing = sorted(set(pool) - set(scored))
+            if missing:
+                return False, (
+                    f"partial_{'heldout' if label == 'held-out' else 'targeted'}_coverage "
+                    f"({len(scored)} of {len(pool)} {label} tasks scored; "
+                    f"unscored: {', '.join(missing)})"
+                )
 
-    # Win fraction — per-task: variant composite >= baseline composite
-    baseline_per = {p["task_id"]: p["composite_score"] for p in baseline_summary.get("per_task", [])}
-    wins = 0
-    total = 0
-    for p in variant_summary.get("per_task", []):
-        task_id = p["task_id"]
-        if task_id not in baseline_per:
-            continue
-        total += 1
-        if p["composite_score"] > baseline_per[task_id]:
-            wins += 1
-    win_frac = (wins / total) if total else 0.0
-    if win_frac < cfg.promotion_min_win_fraction:
-        return False, f"insufficient_win_fraction ({win_frac:.2f} < {cfg.promotion_min_win_fraction})"
+    if m["targeted_delta"] <= 0:
+        return False, (
+            f"targeted_no_gain (targeted {m['targeted_baseline']:.4f} → "
+            f"{m['targeted_variant']:.4f}, {m['targeted_delta']:+.4f} on "
+            f"{len(m['targeted_ids'])} tasks)"
+        )
+    # Strict: a tie is a refuse. The item's "held-out must not decline, strict —
+    # a tie on held-out is a refuse" is the difference between an unchanged slice
+    # and an unmeasured one at 5 tasks, and ties are what a rubric judge with a
+    # coarse objective check actually returns.
+    if m["heldout_delta"] < 0:
+        return False, (
+            f"heldout_decline (held-out {m['heldout_baseline']:.4f} → "
+            f"{m['heldout_variant']:.4f}, {m['heldout_delta']:+.4f} on "
+            f"{len(m['heldout_ids'])} veto tasks)"
+        )
+    if m["heldout_delta"] == 0:
+        return False, (
+            f"heldout_tie (held-out flat at {m['heldout_variant']:.4f} across "
+            f"{len(m['heldout_ids'])} veto tasks — strict no-decline refuses a tie)"
+        )
+    if m["win_fraction"] < cfg.promotion_min_win_fraction:
+        return False, (
+            f"insufficient_win_fraction ({m['win_fraction']:.2f} < "
+            f"{cfg.promotion_min_win_fraction}, targeted slice only)"
+        )
 
-    return True, f"promote (delta={delta:+.4f}, win_frac={win_frac:.2f})"
+    gain = m["normalized_gain"]
+    gain_str = "n/a" if gain is None else f"{gain:.2%}"
+    return True, (
+        f"promote (targeted_delta={m['targeted_delta']:+.4f}, "
+        f"heldout_delta={m['heldout_delta']:+.4f}, normalized_gain={gain_str}, "
+        f"win_frac={m['win_fraction']:.2f})"
+    )
 
 
 def snapshot_current_prompts(cfg: AutoresearchConfig) -> Path:
