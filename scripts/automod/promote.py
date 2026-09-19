@@ -215,6 +215,12 @@ def _idle_budget(max_wait: float | None) -> tuple[float, float]:
     return budget, max(budget, _num("idle_hard_max_wait_s", IDLE_HARD_MAX_WAIT))
 
 
+# How many polls in a row must fail to read the pool before `wait_for_rounds`
+# stops waiting. At the 10 s poll that is a minute of a backend that cannot
+# say, which is a backend the drain's own wait should be judging.
+ROUNDS_UNREADABLE_POLLS = 6
+
+
 def wait_for_rounds(ceiling: float, *, source: str = "autocode",
                     poll: float = 10.0) -> tuple[bool, str]:
     """Wait, WITHOUT pausing or draining, until no `source` job is in flight.
@@ -239,12 +245,23 @@ def wait_for_rounds(ceiling: float, *, source: str = "autocode",
     starting meanwhile (`autocode._rounds_about_to_land`).
     """
     deadline = time.time() + ceiling
+    unreadable = 0
     while time.time() < deadline:
         jobs = pool_in_flight()
         if jobs is None:
-            return True, "pool state unreadable; going straight to the drain"
-        if not any(j.get("source") == source for j in jobs):
-            return True, f"no {source} turn in flight"
+            # One probe that did not answer is a busy event loop, not a
+            # backend that cannot say: `_get` gives up at 5 s, and with four
+            # turns streaming a single stall inside a twenty-minute wait was
+            # enough to send the landing straight into the drain under its
+            # siblings (2026-09-18: seven drains of 12-36 minutes).
+            unreadable += 1
+            if unreadable >= ROUNDS_UNREADABLE_POLLS:
+                return True, (f"pool state unreadable for {unreadable} consecutive polls; "
+                              f"going straight to the drain")
+        else:
+            unreadable = 0
+            if not any(j.get("source") == source for j in jobs):
+                return True, f"no {source} turn in flight"
         time.sleep(poll)
     return False, f"a {source} turn was still in flight after {ceiling:.0f}s"
 
@@ -563,6 +580,90 @@ def vault_commits_for(round_id: str) -> list[str]:
 # exactly like one that landed. It also spent the item. `land_failed` is the
 # verdict event for that case; `external` says the cause was the tree, not the
 # diff, and the item keeps its attempt.
+def _post_json(url: str, payload: dict, *, headers: dict | None = None,
+               timeout: float = 10.0) -> tuple[int | None, dict | None]:
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", **(headers or {})}, method="POST")
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=timeout) as r:
+            body = json.loads(r.read().decode("utf-8", "replace") or "null")
+            return r.status, body if isinstance(body, dict) else None
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except Exception:
+        return None, None
+
+
+# Non-Python paths no running process holds: read fresh by whatever uses them,
+# or by nothing at runtime at all. An allowlist, so an unrecognised file is a
+# reason to restart. `.md` anywhere is the rule `bless` already used.
+INERT_PREFIXES = ("tests/", "architecture/", "eval/")
+# Python here is never "not loaded, so inert": the guardian runs from a staged
+# snapshot and the service scripts belong to supervisord programs, and both
+# reach the running system through `_apply_service_changes`, not an import.
+ALWAYS_RESTART_PREFIXES = ("agent-services/",)
+
+
+def _loaded_in(name: str, url: str, paths: list[str], headers: dict | None = None):
+    """The members of `paths` a server has loaded, or None when it cannot say."""
+    status, body = _post_json(url, {"paths": paths}, headers=headers)
+    if status != 200 or not isinstance(body, dict) or not isinstance(body.get("loaded"), list):
+        return None
+    return [str(p) for p in body["loaded"]]
+
+
+def restart_needed(changed: list[str]) -> tuple[bool, str]:
+    """`(a landing of these paths must restart the services, why)`.
+
+    A landing drains the backend, waits for every sibling round's turn to end
+    and restarts two services so that what landed is what runs. When no
+    changed file is one either process has loaded, what runs is unchanged by
+    the merge and all of that buys nothing: on the night of 2026-09-18 nine of
+    nineteen promotions changed only tests, `eval/`, docs and scripts that run
+    fresh per invocation, and each still waited on up to three other turns.
+
+    Python is judged by asking the two processes (`app/loaded_paths.py`), not
+    by directory: the backend imports `scripts/automod/**` and a list would
+    not have known. Everything else is an allowlist. **Fails closed** at every
+    step — a server that does not answer, an answer of the wrong shape, a path
+    nothing here recognises, the kill switch (`automod.landing.skip_restart`)
+    — because a needless restart costs minutes and a skipped one that was
+    needed leaves `main` and the running code disagreeing until someone
+    notices.
+    """
+    if not bool(S.landing_cfg(LIVE_ROOT).get("skip_restart", True)):
+        return True, "automod.landing.skip_restart is off"
+    if not changed:
+        return True, "no changed paths named"
+    python: list[str] = []
+    for p in changed:
+        if p.startswith(ALWAYS_RESTART_PREFIXES):
+            return True, f"{p} is a service definition or guardian file"
+        if p.endswith(".py"):
+            python.append(p)
+        elif not (p.endswith(".md") or p.startswith(INERT_PREFIXES)):
+            return True, f"{p} is not a path known to be inert"
+    if python:
+        try:
+            from agent_mcp import aggregator_auth
+            mcp_headers = aggregator_auth.auth_headers()
+        except Exception:  # noqa: BLE001
+            mcp_headers = {}
+        for name, url, headers in (
+                ("backend", f"{BACKEND}/api/automod/loaded", None),
+                ("aggregator", MCP_HEALTH.rsplit("/health", 1)[0] + "/loaded", mcp_headers)):
+            hits = _loaded_in(name, url, python, headers)
+            if hits is None:
+                return True, f"the {name} could not say which modules it has loaded"
+            if hits:
+                return True, (f"the {name} has loaded {hits[0]}"
+                              + (f" and {len(hits) - 1} more" if len(hits) > 1 else ""))
+    return False, (f"none of the {len(changed)} changed path(s) is loaded by the backend "
+                   f"or the aggregator")
+
+
 def squash_enabled() -> bool:
     """`automod.landing.squash`, default on. Off: every commit of the round's
     branch is fast-forwarded onto `main`, as before 2026-09-17."""
@@ -849,7 +950,14 @@ def promote(round_id: str, worktree: Path, base: str, *,
     # ── idle gate + drain ──────────────────────────────────────────────
     # The other round's turn was waited out by `round.land` BEFORE it took the
     # automod lock (`wait_for_rounds`): under the lock that wait deadlocks.
-    ok, why = wait_idle()
+    #
+    # Unless nothing that runs would change (`restart_needed`): then there is
+    # no restart to protect a turn from, so nothing is paused, drained or
+    # waited for, and the merge below is the whole landing.
+    restart, restart_why = restart_needed(changed)
+    current["restart"] = result["restart"] = restart
+    result["restart_why"] = restart_why
+    ok, why = wait_idle() if restart else (True, restart_why)
     if not ok:
         S.clear_current()
         # A landing that never got the backend idle is the infrastructure's
@@ -861,12 +969,13 @@ def promote(round_id: str, worktree: Path, base: str, *,
         # while their commits sat on kept branches. As a `land_failed` with
         # `external_blocker`, the item keeps its attempt and its branch.
         _land_failed(round_id, why, external=True, waited_idle=True)
-    set_drain(True, DRAIN_TTL)
+    if restart:
+        set_drain(True, DRAIN_TTL)
     merged = False
     try:
         status, body = _get(f"{BACKEND}/health")
         turns = (body or {}).get("turns") or {}
-        if turns.get("active") or turns.get("queued") or turns.get("harness_runs"):
+        if restart and (turns.get("active") or turns.get("queued") or turns.get("harness_runs")):
             raise PromoteError(f"a turn started during the drain handshake: {turns}")
 
         # The idle wait can take fifteen minutes, and the human is still
@@ -878,7 +987,8 @@ def promote(round_id: str, worktree: Path, base: str, *,
         if live_now != base:
             base, head, gate_report = _regate_after_move(round_id, Path(worktree), live,
                                                          base, live_now)
-            set_drain(True, DRAIN_TTL)
+            if restart:
+                set_drain(True, DRAIN_TTL)
             live_head = live_now
             changed = W.changed_paths(Path(worktree), base)
             tree_hash = S.changed_tree_hash(worktree, head, changed)
@@ -909,7 +1019,8 @@ def promote(round_id: str, worktree: Path, base: str, *,
             result["squash"] = note
 
         # ── land ───────────────────────────────────────────────────────
-        S.set_pause(RESTART_LEASE)   # the guardian must not read our own restart as a crash
+        if restart:
+            S.set_pause(RESTART_LEASE)   # the guardian must not read our own restart as a crash
         merge = subprocess.run(
             ["git", "-C", str(live), "merge", "--ff-only", f"automod/{round_id}"],
             capture_output=True, text=True)
@@ -921,6 +1032,22 @@ def promote(round_id: str, worktree: Path, base: str, *,
                          f"{merge.stderr.strip()[:300]}",
                          external=True)
         merged = True
+
+        if not restart:
+            # Asked again now that the files have moved: a module imported
+            # between the first answer and the merge may have loaded the old
+            # file. Then this is an ordinary landing after all, late — the
+            # drain and the restart below, with the tree already in place.
+            again, again_why = restart_needed(changed)
+            if again:
+                restart = current["restart"] = result["restart"] = True
+                result["restart_why"] = f"after the merge: {again_why}"
+                S.write_verified(S.CURRENT_PATH, current)
+                ok, why = wait_idle()
+                if not ok:
+                    raise PromoteError(f"{again_why}, and {why}")
+                set_drain(True, DRAIN_TTL)
+                S.set_pause(RESTART_LEASE)
 
         venv_clone = Path(worktree) / ".venvs" / "lloyd"
         if venv_clone.exists():
@@ -936,7 +1063,8 @@ def promote(round_id: str, worktree: Path, base: str, *,
         service_notes = _apply_service_changes(changed)
 
         # ── restart, MCP first ─────────────────────────────────────────
-        for program, health in (("lloyd-mcp", MCP_HEALTH), ("lloyd-backend", f"{BACKEND}/health")):
+        for program, health in ((("lloyd-mcp", MCP_HEALTH),
+                                 ("lloyd-backend", f"{BACKEND}/health")) if restart else ()):
             # Refresh the lease before each leg. The lease is 120s and this
             # loop can legitimately spend 90s per service waiting on health,
             # so a single lease taken before the merge could expire mid-restart
@@ -956,13 +1084,27 @@ def promote(round_id: str, worktree: Path, base: str, *,
         # loop's every rollback has been a false positive, and this was one
         # more. A body that names a commit is the answer; the wrong commit
         # is a real failure; no answer within the budget is reported as such.
-        body = _wait_for_commit(f"{BACKEND}/health", VERIFY_COMMIT_BUDGET)
-        actual = (body or {}).get("commit")
-        if actual != head:
-            raise PromoteError(f"backend reports commit {actual}, expected {head} "
-                               "— the restart did not pick up the new code")
-        if current.get("boot_id") and (body or {}).get("boot_id") == current["boot_id"]:
-            raise PromoteError("backend boot_id unchanged — the process was never replaced")
+        if restart:
+            body = _wait_for_commit(f"{BACKEND}/health", VERIFY_COMMIT_BUDGET)
+            actual = (body or {}).get("commit")
+            if actual != head:
+                raise PromoteError(f"backend reports commit {actual}, expected {head} "
+                                   "— the restart did not pick up the new code")
+            if current.get("boot_id") and (body or {}).get("boot_id") == current["boot_id"]:
+                raise PromoteError("backend boot_id unchanged — the process was never replaced")
+        else:
+            # No process was replaced, so `/health.commit` still names the boot
+            # commit and proves nothing here. What a landing without a restart
+            # has to prove is that the tree moved and the services it did not
+            # touch are still answering.
+            on_disk = subprocess.run(["git", "-C", str(live), "rev-parse", "HEAD"],
+                                     capture_output=True, text=True).stdout.strip()
+            if on_disk != head:
+                raise PromoteError(f"live HEAD is {on_disk[:8]}, expected {head[:8]} after the merge")
+            status, body = _get(f"{BACKEND}/health")
+            if status != 200:
+                raise PromoteError(f"backend /health answered {status} after a landing that "
+                                   "restarted nothing")
 
         if any(p.startswith("web/") for p in changed):
             alive, note = _frontend_alive()
@@ -983,7 +1125,10 @@ def promote(round_id: str, worktree: Path, base: str, *,
                         "commit": head, "parent": live_head, "changed_paths": changed,
                         "vault_commits": current.get("vault_commits") or [],
                         "tree_hash": tree_hash, "service_changes": service_notes,
-                        "errors_until": current["errors_until_ts"]})
+                        "errors_until": current["errors_until_ts"],
+                        # False: the merge was the landing, nothing was drained
+                        # or restarted (`restart_needed`).
+                        "restarted": restart, "restart_why": result.get("restart_why", "")})
         _announce_promoted(round_id, head, changed, title)
         result["regression_runner"] = _start_regression_runner()
         result["promoted"] = True

@@ -544,6 +544,12 @@ def reap_abandoned_rounds(now: float | None = None, *,
             closed.add(rid)
             reaped.append(landing)
             continue
+        # A gate that never got a verdict from the grader is not a refusal:
+        # gate it again rather than spend a whole new round on a collision.
+        regate = _regate_if_unreviewed(rid, e, events)
+        if regate is not None:
+            reaped.append(regate)
+            continue
         review = _review_note(events, rid)
         why = (f"implement turn ended ({e.get('stop_reason')}) and the round "
                f"stayed open for {int(age // 60)} min with nothing running in "
@@ -649,6 +655,86 @@ def _land_if_passed(rid: str, finished: dict, events: list[dict]) -> dict | None
            f"and no landing; the loop started one (pid {started['pid']})")
     rec = {"event": "land_rescued", "round_id": rid, "item_id": item_id, "head": head,
            "pid": started["pid"], "reason": why, "verb": "landing"}
+    S.append_event(rec)
+    if item_id is not None:
+        B.note_item(int(item_id), f"automod round {rid}: {why}.")
+    logger.info("round %s: %s", rid, why)
+    return rec
+
+
+# How many times the reaper will re-gate one round whose grader could not be
+# reached. Each is a few minutes (the ladder reuses the rungs the ledger has
+# for that commit and re-runs the review); a grader down for longer than two
+# of them is the re-offer's problem, and the item keeps its attempt either way.
+REGATE_CAP = 2
+
+
+def _regate_if_unreviewed(rid: str, finished: dict, events: list[dict]) -> dict | None:
+    """Re-gate a round whose turn is over and whose ONLY failed rung was a
+    review that could not run. The record of it, or None when the reaper
+    should close the round as it always has.
+
+    The sibling of `_land_if_passed`, for the state one step earlier. On the
+    night of 2026-09-18, 17 of 51 review attempts ended `review could not run:
+    HTTP 503 ... Lloyd is landing a code update` — another round's landing had
+    the backend draining — and the turns, told the grader was unreachable,
+    wrote their report and stopped. The reaper then aborted each round and the
+    item was re-offered for a whole new turn: #832 took five rounds, #800
+    four, #1250, #789 and #874 three each, about eleven rounds redone for a
+    change that was finished, committed and green on every rung that ran. The
+    gate had already said so in its own words: "the grader, not the diff".
+
+    Re-gated only when all of this holds:
+
+      * the gate report names the commit the worktree still holds, its one
+        failed rung is `review`, and that rung carries `external_blocker` —
+        a graded refusal, or any other red rung, closes as before;
+      * the turn did not end on an item verdict, and nothing has tried to
+        land the round;
+      * fewer than `REGATE_CAP` re-gates of this round so far;
+      * promotions are not halted, the guardian is not BROKEN, the loop is on.
+
+    What happens next needs nothing new: while the gate runs the round is not
+    reapable (`S.gate_in_progress`); a pass is landed by `_land_if_passed` on
+    the reaper's next look, and a graded refusal is closed and re-offered with
+    its findings. Kill switch: `workers.sources.autocode.regate_unreviewed`.
+    """
+    from scripts.automod import backlog as B, round as R, state as S, worktree as W
+    if not bool(_source_cfg(NAME).get("regate_unreviewed", True)):
+        return None
+    outcome = finished.get("outcome")
+    if isinstance(outcome, dict) and outcome.get("acceptance") in B.ITEM_VERDICT_OUTCOMES:
+        return None
+    mine = [ev for ev in events if ev.get("round_id") == rid]
+    if any(ev.get("event") in ("promoted", "land_failed", "land_rescued") for ev in mine):
+        return None
+    if sum(1 for ev in mine if ev.get("event") == "gate_rescued") >= REGATE_CAP:
+        return None
+    try:
+        report = json.loads((S.ROUNDS_DIR / rid / "gate.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    head = W.head(W.worktree_path(rid)) or ""
+    if report.get("ok") is not False or not head or str(report.get("head") or "") != head:
+        return None
+    failed = [r for r in report.get("rungs") or [] if isinstance(r, dict) and not r.get("ok")]
+    if len(failed) != 1 or failed[0].get("name") != "review":
+        return None
+    if not (failed[0].get("data") or {}).get("external_blocker"):
+        return None
+    if S.is_halted() or S.is_broken() or not S.is_enabled(LIVE_ROOT):
+        return None
+    started = R.gate_detached(rid, by="reaper")
+    if started.get("error"):
+        logger.warning("round %s: its grader was unreachable but the re-gate could not start: %s",
+                       rid, started["error"])
+        return None
+    item_id = finished.get("item_id")
+    why = (f"its turn ended ({finished.get('stop_reason')}) on a gate whose review could not run "
+           f"at {head[:8]} ({str(failed[0].get('detail') or '')[:160]}); the loop gated it again "
+           f"(pid {started['pid']})")
+    rec = {"event": "gate_rescued", "round_id": rid, "item_id": item_id, "head": head,
+           "pid": started["pid"], "reason": why, "verb": "gating"}
     S.append_event(rec)
     if item_id is not None:
         B.note_item(int(item_id), f"automod round {rid}: {why}.")

@@ -1150,6 +1150,36 @@ redoing changes that had already passed every rung, and two items were closed
   names the port; the Tools page and one LIVE-service test went red on main the
   moment it landed, and its own gate could not see it.
 
+### A landing must not starve the rounds beside it
+
+At depth four (the night of 2026-09-18) 17 of 51 review attempts ended `HTTP
+503 … Lloyd is landing a code update`, the backend spent 189 of 840 minutes
+draining, and ~11 rounds were aborted with their change finished and green
+(#832 took five rounds). A landing's drain waited on sibling turns, which
+waited on gates, whose review rung needed a grader turn the drain refused.
+`architecture/automod.md` §3.2h is the long version.
+
+- **The drain admits a review grader while another turn is running**
+  (`automod.drain_admits`): never onto a quiet backend, where it could be the
+  turn the restart kills. Fails closed.
+- **A round whose only red rung was an unreachable grader is gated again by
+  the reaper, not aborted** (`autocode._regate_if_unreviewed`, ledger
+  `gate_rescued`, cap 2, switch `…autocode.regate_unreviewed`); its item stays
+  out of the pool while a gate or landing marker is live
+  (`backlog.items_being_gated_or_landed`).
+- **`wait_for_rounds` needs six unreadable probes in a row** — one stalled 5 s
+  probe used to send the landing into the drain beside live turns — and
+  `land_wait_rounds` on the ledger says what it saw.
+- **A landing that changes no file either service has loaded restarts
+  nothing** (`promote.restart_needed`, switch `automod.landing.skip_restart`):
+  no drain, no pause, no wait for siblings; 9 of that night's 19 promotions.
+  Python is judged by asking both processes (`app/loaded_paths.py`), never by
+  directory — the backend imports `scripts/automod/**` — and everything else
+  is an allowlist; every doubt is a restart. The record carries
+  `restart: false`, and the guardian does not blame a crash or an error spike
+  on it (data damage still is). `/health.commit` stays at the boot commit
+  after such a landing; `bless` accepts that difference.
+
 ### Every promotion is measured, by a check a landing cannot kill
 
 On 2026-09-18 the behavioural-regression check had measured 8 of 17 promotions
@@ -1373,7 +1403,8 @@ and #1218 was filed against a bug that was already fixed on disk. The rule:
   What runs fresh per invocation needs neither: `scripts/automod/gate.py`,
   `promote.py`, `round.py`, the test suite, docs.
 - Afterwards `/health.commit` must equal `git rev-parse HEAD` (or differ only
-  by docs). That equality is the check; a merge that "should be live" is not.
+  by docs, tests and files neither service has loaded — `round bless` checks
+  exactly this). That equality is the check; a merge that "should be live" is not.
 - It is a rule for people and for Claude Code, not a refusal in code: every
   loop fix on 2026-09-17 reached production as a hand merge, several of them
   to unblock the landing path itself, and a guard that refused merges outside

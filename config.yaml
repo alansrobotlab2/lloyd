@@ -982,6 +982,13 @@ automod:
     # history stays under refs/automod/rounds/<round>. false: every commit
     # of the branch lands, as before.
     squash: true
+    # A landing that changes no file the backend or the aggregator has
+    # loaded restarts nothing (2026-09-19): no drain, no pool pause, no wait
+    # for the other rounds' turns. The promoter asks both processes
+    # (app/loaded_paths.py) and fails closed; nine of nineteen promotions on
+    # the night of 09-18 were tests, eval/, docs and per-invocation scripts.
+    # false: every landing drains and restarts, as before.
+    skip_restart: true
     idle_quiet_polls: 3
     drain_ttl_s: 180
     liveness_window_s: 120
@@ -1402,6 +1409,13 @@ workers:
       # than aborted and re-offered for a whole new round. Four rounds that
       # day; architecture/automod.md §3.2g. Off: aborted, as before.
       land_passed_gates: true
+      # Its sibling, one step earlier (2026-09-19): a round whose turn is over
+      # and whose ONLY failed rung was a review that could not run — the
+      # grader was unreachable, usually behind another round's landing — is
+      # gated again by the loop (twice at most) instead of aborted and
+      # re-offered for a whole new turn. About eleven rounds on the night of
+      # 09-18. Off: aborted, as before.
+      regate_unreviewed: true
       # The hard bound on the board. A self-filed draft that nothing —
       # clustering, group triage, a human — picked up in
       # expire_spawns_after_days is closed, tagged `expired`, and reopens by

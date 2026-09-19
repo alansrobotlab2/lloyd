@@ -727,6 +727,21 @@ async def state(request):
     })
 
 
+async def loaded_paths(request):
+    """`POST /loaded {paths}`: which of them THIS process has loaded as
+    modules. The automod promoter asks before a landing, of the backend and of
+    this process both — a commit neither has loaded needs no restart
+    (`app/loaded_paths.py`). Read-only, and inside the credential like every
+    route but `/health`."""
+    from app.loaded_paths import answer
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    body = answer((data or {}).get("paths"))
+    return JSONResponse(body, status_code=400 if "error" in body else 200)
+
+
 async def browser_navigate(request):
     """Mission Control's URL bar. `POST /browser/navigate {url}`.
 
@@ -879,6 +894,7 @@ starlette_app = combined.streamable_http_app(
     custom_starlette_routes=[
         Route("/health", health, methods=["GET"]),
         Route("/state", state, methods=["GET"]),
+        Route("/loaded", loaded_paths, methods=["POST"]),
         Route("/browser/navigate", browser_navigate, methods=["POST"]),
         Route("/changes", changes, methods=["GET"]),
         Route("/changes/revert", changes_revert, methods=["POST"]),

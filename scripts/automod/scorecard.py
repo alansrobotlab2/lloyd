@@ -622,8 +622,19 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
     # the finalizer is still misreporting landings.
     rescued = len(by("land_rescued"))
     verdicts_refused = sum(1 for e in finished if e.get("outcome_refused"))
+    # 2026-09-19. `gates_rescued`: rounds the reaper gated again because the
+    # grader had been unreachable — before, each was a whole new round.
+    # `reviews_unavailable`: how often that still happens; after the drain
+    # began admitting graders it should be near zero, and a rise says landings
+    # are colliding with reviews again. `landed_without_restart`: promotions
+    # whose files neither service had loaded, landed by the merge alone.
     throughput = {"items_closed": closed_items,
                   "landings_rescued": rescued, "item_verdicts_refused": verdicts_refused,
+                  "gates_rescued": len(by("gate_rescued")),
+                  "reviews_unavailable": sum(1 for e in by("review")
+                                             if e.get("ok") is False and e.get("error")),
+                  "landed_without_restart": sum(1 for e in by("promoted")
+                                                if e.get("restarted") is False),
                   "items_closed_per_day": round(closed_items / max(since_days, 0.01), 2),
                   "rounds_finished": len(finished), "rounds_landed": len(landed),
                   "rounds_rejected": rejected,
@@ -719,7 +730,7 @@ def render(row: dict) -> str:
         f"| 6 | test honesty | {t['grader_findings']} findings | {t['per_gated_round'] if t['per_gated_round'] is not None else '—'} per graded round; {t['landed_with_or_true']} landed commits add `or True`/`assert True` |",
         f"| 7 | bookkeeping defects | {b['nameless_deferrals'] + b['stranded_landings'] + b['bare_aborts']} | {b['nameless_deferrals']} nameless deferrals, {b['stranded_landings']} stranded landings, {b['bare_aborts']} bare aborts |",
         f"| 8 | verdict plumbing | {_pct(p['regex_rate'])} regex | {p['regex']} of {p['verdicts_with_source']} verdicts fell back; {p['truncated']} truncated; median finalizer tokens {p['finalizer_tokens_median'] if p['finalizer_tokens_median'] is not None else '—'} |",
-        f"| 9 | throughput | {th['items_closed_per_day']}/day | {th['items_closed']} closed; {th['rounds_landed']} of {th['rounds_finished']} rounds landed, {th.get('rounds_rejected', 0)} rejected on evidence, {th.get('landings_rescued', 0)} landed by the reaper after their turn ended, {th.get('item_verdicts_refused', 0)} item verdict(s) not taken from a landing round; median turns {th['median_turns_landed'] if th['median_turns_landed'] is not None else '—'}; median gate {th['median_gate_seconds'] if th['median_gate_seconds'] is not None else '—'} s |",
+        f"| 9 | throughput | {th['items_closed_per_day']}/day | {th['items_closed']} closed; {th['rounds_landed']} of {th['rounds_finished']} rounds landed, {th.get('rounds_rejected', 0)} rejected on evidence, {th.get('landings_rescued', 0)} landed by the reaper after their turn ended, {th.get('gates_rescued', 0)} gated again after an unreachable grader ({th.get('reviews_unavailable', 0)} review(s) could not run), {th.get('landed_without_restart', 0)} landed without a restart, {th.get('item_verdicts_refused', 0)} item verdict(s) not taken from a landing round; median turns {th['median_turns_landed'] if th['median_turns_landed'] is not None else '—'}; median gate {th['median_gate_seconds'] if th['median_gate_seconds'] is not None else '—'} s |",
         f"| 10 | rollbacks | {rb['count']} | triggers {', '.join(rb['triggers']) or '—'}; true positives: human judgment, not computed; regression check measured {(rb.get('regression_coverage') or {}).get('measured', '—')} of {(rb.get('regression_coverage') or {}).get('promotions', '—')} promotions ({(rb.get('regression_coverage') or {}).get('could_not_evaluate', '—')} could not be evaluated, {(rb.get('regression_coverage') or {}).get('compared_nothing', 0)} compared nothing with nothing) |",
         f"| 11 | grouping | {row.get('grouping', {}).get('group_triages', 0)} group triages | {row.get('grouping', {}).get('clusters_formed', 0)} clusters over {row.get('grouping', {}).get('items_clustered', 0)} items last night; {row.get('grouping', {}).get('duplicates_closed', 0)} duplicates closed, {row.get('grouping', {}).get('retired_in_group', 0)} retired, {row.get('grouping', {}).get('folded', 0)} folded, {row.get('grouping', {}).get('kept', 0)} kept; {row.get('grouping', {}).get('umbrellas_formed', 0)} umbrellas formed, {row.get('grouping', {}).get('umbrellas_landed', 0)} landed closing {row.get('grouping', {}).get('members_closed', 0)} members |",
     ]

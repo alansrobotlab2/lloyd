@@ -1470,6 +1470,35 @@ def items_with_unfinished_rounds(ledger: Path, *,
     return out
 
 
+def items_being_gated_or_landed(ledger: Path, *,
+                                history: dict[int, list[dict]] | None = None) -> set[int]:
+    """Items whose latest round has a gate or a landing RUNNING right now.
+
+    Narrower than `items_with_unfinished_rounds`, and for a different reader:
+    `ready_confirmed`. The reaper re-gates a round whose grader could not be
+    reached (`autocode._regate_if_unreviewed`) and lands one whose gate passed,
+    both after the turn is over — and until that process ends the item's
+    outcome still reads `external`, which is a re-offer. A second round on an
+    item whose first is minutes from landing is the duplicate work the rescue
+    exists to avoid. Live markers only, never a bare worktree: a marker dies
+    with its process, while a worktree an abort failed to remove would hold
+    the item out of the pool for good. Unreadable means not held.
+    """
+    from scripts.automod import state as S
+    history = implement_history(ledger) if history is None else history
+    out: set[int] = set()
+    for iid, rows in history.items():
+        rids = [str(r["round_id"]) for r in rows if r.get("round_id")]
+        if not rids:
+            continue
+        try:
+            if S.gate_in_progress(rids[-1]) or S.land_in_progress(rids[-1]):
+                out.add(iid)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
 def triaged_ids(ledger: Path) -> dict[int, str]:
     """{item_id: verdict} for items with a TERMINAL verdict.
 
@@ -3609,10 +3638,12 @@ def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARD
     if outcomes is None:
         outcomes = implement_outcomes(ledger)
     done = {iid for iid, (verdict, _) in outcomes.items() if verdict == "spent"}
+    # A round the loop is still gating or landing after its turn ended.
+    busy = items_being_gated_or_landed(ledger)
     ready = []
     for item in (items if items is not None else open_items(boards)):
         ev = confirmed.get(item.id)
-        if not ev or item.id in done:
+        if not ev or item.id in done or item.id in busy:
             continue
         # The board is the state machine now: a confirmed item the loop may
         # take sits in `up_next`, and only there. A human parks one anywhere

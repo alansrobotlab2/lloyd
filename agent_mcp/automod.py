@@ -236,14 +236,11 @@ def _gate_detached(round_id: str, *, skip_smoke: bool = False) -> dict:
                           "restarts the backend under them. Wait for them (they report on "
                           "a later iteration) or kill them, then gate."),
                 "background_tasks": busy}
-    log = S.ROUNDS_DIR / round_id / "gate.log"
-    python = W.LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
-    argv = [python, "-m", "scripts.automod.round", "gate", round_id]
-    if skip_smoke:
-        argv.append("--skip-smoke")
-    pid = S.spawn_detached(argv, log, cwd=W.LIVE_ROOT)
-    S.write_gate_marker(round_id, pid=pid, head=W.head(W.worktree_path(round_id)) or "",
-                        by="automod_gate")
+    from scripts.automod import round as R
+    started = R.gate_detached(round_id, by="automod_gate", skip_smoke=skip_smoke)
+    if started.get("error"):
+        return started
+    pid, log = started["pid"], started["log"]
     return {
         "gate_started": round_id, "pid": pid, "log": str(log),
         "next": ("Call automod_gate_wait(round_id). It blocks up to four minutes and "
@@ -254,7 +251,8 @@ def _gate_detached(round_id: str, *, skip_smoke: bool = False) -> dict:
                  "one of the round's two review attempts."),
         "note": (f"Detached: {_gate_minutes_note()}, longer than one tool call may stay "
                  "silent on the wire. If your turn ends first, a gate that PASSES is landed "
-                 "by the loop and a refused one comes back with its findings."),
+                 "by the loop, one whose grader could not be reached is gated again by the loop, "
+                 "and a refused one comes back with its findings."),
     }
 
 

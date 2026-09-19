@@ -1180,6 +1180,97 @@ Scorecard row 9 counts `landings_rescued` and `item_verdicts_refused`. Tests:
 `test_reaper_lands_passed_gates.py`, `test_gate_report_headline.py`,
 `test_outcome_item_verdict.py`, `test_prompt_pacing_and_ordering.py`.
 
+### 3.2h A landing must not starve the rounds beside it (2026-09-19)
+
+Depth went to four rounds at a time on 2026-09-18, and that night's ledger
+(18:00–08:00 PDT) shows what a landing cost the other three:
+
+| | |
+|---|---|
+| rounds started / promoted | 44 / 19, no rollback |
+| review attempts that could not run | 17 of 51 (16 `HTTP 503 … Lloyd is landing a code update`, 1 timeout) |
+| minutes the backend spent draining | 189 of 840, in seven spans of 12–36 min; every other landing drained < 2 min |
+| rounds aborted with the change finished and green | ~11 — #832 took five rounds, #800 four, #1250 #789 #874 three each |
+| promotions that changed nothing either service had loaded | 9 of 19 |
+
+**The cycle.** A landing arms the drain and waits for every turn in flight. A
+sibling round's turn is waiting on its detached gate. That gate's review rung
+needs a grader turn on the live backend, which the drain refuses with a 503.
+Nothing moves until the grader's 420 s give-up — usually twice — after which
+the turn, told "the grader, not the diff", writes its report and stops with
+the round open, and the reaper aborts it. `wait_for_rounds` (§3.2f) exists to
+keep a landing out of the drain while sibling turns run, and did not hold: it
+took ONE unanswered 5 s probe of `/api/workers/status` as "the backend cannot
+say" and went straight on. At 21:45:58 a post-session capture was on the event
+loop; the drain armed at 21:46:13 beside three live turns and stayed armed for
+24 minutes. Nothing recorded what the wait had seen.
+
+Four changes, each with its own switch or none needed:
+
+1. **The drain admits a review grader while something else is running**
+   (`app/routers/automod.py::drain_admits`). Only a session the review rung
+   minted (`source: automod-review`, a non-user platform), and only while
+   `active_turn_summary()` is non-zero. The second half keeps the drain's
+   guarantee: the promoter restarts after N consecutive QUIET polls, so a
+   grader admitted onto a quiet backend could be the turn the restart kills,
+   while one admitted beside a running turn resets the count and is itself
+   counted until it ends. Admitting it can only shorten the wait — the landing
+   is already waiting on the turn that is waiting on the grader. Fails closed.
+2. **A round whose only failed rung was an unreachable grader is gated again,
+   not aborted** (`autocode._regate_if_unreviewed`, ledger `gate_rescued`,
+   switch `workers.sources.autocode.regate_unreviewed`). The sibling of
+   `_land_if_passed` one step earlier: gate report at the commit the worktree
+   still holds, exactly one red rung, `review`, carrying `external_blocker`;
+   no item verdict; nothing has tried to land it; at most `REGATE_CAP` (2)
+   times. The re-gate reuses what the ledger has for that commit, so it is
+   the review's few minutes rather than a new 40-minute turn. A pass is then
+   landed by `_land_if_passed` on the reaper's next look; a graded refusal
+   closes and re-offers with its findings, as before. `round.gate_detached`
+   is the one spawn, for the tool and the reaper both. While that gate or
+   landing runs the item's outcome still reads `external` — a re-offer — so
+   `backlog.items_being_gated_or_landed` holds it out of `ready_confirmed`:
+   live markers only, never a bare worktree, which an abort that failed would
+   leave behind for good.
+3. **`wait_for_rounds` needs `ROUNDS_UNREADABLE_POLLS` (6, a minute) unreadable
+   probes in a row** before it stops waiting, and `round.land` writes what it
+   saw as `land_wait_rounds {ok, detail, waited_s}` either way.
+4. **A landing that changes nothing either service has loaded restarts
+   nothing** (`promote.restart_needed`, switch `automod.landing.skip_restart`).
+   The drain, the wait for siblings and the restart exist so that what landed
+   is what runs; when no changed file is a module the backend or the
+   aggregator has loaded, what runs is unchanged by the merge. Python is
+   judged by ASKING the two processes (`app/loaded_paths.py`, `POST
+   /api/automod/loaded` on the backend, `POST /loaded` on the aggregator,
+   inside its credential) rather than by directory, because the backend
+   imports `scripts/automod/**`, `scripts/autoresearch/**` and `scripts/vault/`
+   and a list would not have known about the next one. Everything that is not
+   Python is an allowlist (`.md`, `tests/`, `architecture/`, `eval/`);
+   `agent-services/**` always restarts (the guardian runs from a snapshot, the
+   rest belongs to supervisord programs). It fails closed at every step — a
+   server that does not answer, a wrong-shaped answer, an unknown path, an
+   empty diff. A module imported lazily after the question loads the landed
+   file, so it needs nothing; the promoter asks a second time after the merge
+   to catch an import that raced it, and then drains and restarts late.
+   On this path `round.land` does not call `wait_for_rounds`, `promote` does
+   not pause the pool, arm the drain or take the restart lease, and the
+   verification is "live HEAD is the commit and `/health` still answers"
+   (`/health.commit` names the BOOT commit and proves nothing without a
+   restart). The record carries `restart: false`, the `promoted` row
+   `restarted: false` with the reason. The observation window, the settle and
+   the LKG advance are unchanged — **except that the guardian does not blame a
+   crash or an error spike on a promotion that replaced no running code**
+   (`guardian.tick`, `unrestarted`): a crash reads "Service down, but no
+   promotion to revert", and `evaluate_errors` is skipped. Data damage is still
+   judged, since a changed script can be run by a job inside the window.
+   `bless` accepts a served commit that differs from HEAD only by such paths
+   (`_served_code_is_head`), as it already did for `.md`.
+
+Scorecard row 9 carries `gates_rescued`, `reviews_unavailable` (should fall to
+near zero) and `landed_without_restart`. `tests/test_landing_review_deadlock.py`
+and `tests/test_landing_without_restart.py` pin all four; `tests/conftest.py`
+points the promoter's aggregator URL at the discard port as well as the
+backend's, so an unstubbed test gets "restart", never production's answer.
+
 ### 3.3 For humans (this repo's development)
 
 `/home/alansrobotlab/lloyd` is production. Non-trivial work belongs in the

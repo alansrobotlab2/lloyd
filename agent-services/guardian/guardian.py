@@ -871,6 +871,7 @@ class Guardian:
         if current and current.get("state") == "landing":
             current = None
 
+        unrestarted = bool(current) and current.get("restart") is False
         if live_down:
             # Rollback is only ever appropriate for a commit the LOOP promoted
             # and is still observing. With no `current.json` the tree moved for
@@ -879,12 +880,20 @@ class Guardian:
             # as invariant 1 (HEAD == LKG never rolls back), and it is the case
             # that actually bites: HEAD legitimately differs from LKG most of
             # the time.
-            if not current:
+            # ...and one that replaced a running process. A landing whose
+            # files neither service had loaded restarts nothing
+            # (`promote.restart_needed`, `restart: false` on the record): the
+            # code that just went down is the code that was running before it
+            # landed, so reverting the commit cannot be what brings it back.
+            if not current or unrestarted:
                 log(f"liveness failure with nothing under observation: {live_reason}")
                 self.alert("error", "Service down, but no promotion to revert",
                            f"{live_reason}\n\nHEAD is "
-                           f"{(rb.head_commit(self.repo) or '?')[:8]} and no self-modification "
-                           "is being observed, so this is infrastructure rather than a bad "
+                           f"{(rb.head_commit(self.repo) or '?')[:8]} and "
+                           + ("the promotion under observation restarted no service — "
+                              "the running code predates it — "
+                              if unrestarted else "no self-modification is being observed, ")
+                           + "so this is infrastructure rather than a bad "
                            "change. Not rewriting history — this needs a human.",
                            needs_human=True)
                 return "down_unobserved"
@@ -900,7 +909,10 @@ class Guardian:
 
         errors_until = float(current.get("errors_until_ts") or 0)
         if errors_until and time.time() < errors_until:
-            spiked, why = self.evaluate_errors(current)
+            # The error log is the running services' log, and an unrestarted
+            # landing changed nothing they run. Data damage is still judged: a
+            # script the landing changed can be run by a job inside the window.
+            spiked, why = (False, "") if unrestarted else self.evaluate_errors(current)
             if spiked:
                 log(f"error-rate failure: {why}")
                 self.do_rollback("error_rate", why)

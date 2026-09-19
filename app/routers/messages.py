@@ -1776,8 +1776,11 @@ async def post_message_stream(request: Request):
     # this flag, then restarts — without it a turn arriving in that gap is
     # cancelled mid-flight by shutdown_cleanup's 2s grace. The flag carries a
     # mandatory TTL, so a promoter that dies here cannot wedge the endpoint.
-    from app.routers.automod import drain_active, drain_remaining
-    if drain_active():
+    # A review grader is let through while another turn is still running:
+    # the landing is waiting on that turn and that turn is waiting on this
+    # grader (`drain_admits`).
+    from app.routers.automod import drain_active, drain_admits, drain_remaining
+    if drain_active() and not drain_admits(session_id):
         raise HTTPException(
             status_code=503,
             detail=(f"Lloyd is landing a code update; retry in "

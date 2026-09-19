@@ -326,7 +326,19 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
             # Outside the lock, or the turn being waited for cannot open its
             # round (see `P.wait_for_rounds`). An external failure: the item
             # keeps its attempt and its branch.
-            ok, why = P.wait_for_rounds(P._idle_budget(None)[1])
+            waited_from = time.time()
+            # A landing that restarts nothing kills no turn, so it has no
+            # sibling to wait for (`P.restart_needed`; asked again, under the
+            # lock, by `promote`).
+            restart, restart_why = P.restart_needed(
+                [str(p) for p in report.get("changed_paths") or []])
+            ok, why = (P.wait_for_rounds(P._idle_budget(None)[1]) if restart
+                       else (True, f"not waited for: {restart_why}"))
+            # On the ledger either way: on 2026-09-18 this wait let nine
+            # landings into the drain beside live sibling turns and nothing
+            # recorded what it had seen.
+            S.append_event({"event": "land_wait_rounds", "round_id": round_id, "ok": ok,
+                            "detail": why, "waited_s": round(time.time() - waited_from, 1)})
             if not ok:
                 P._land_failed(round_id, why, external=True, waited_rounds=True)
         lock = _land_lock(round_id, dry_run=dry_run)
@@ -380,6 +392,31 @@ def land_detached(round_id: str, *, by: str) -> dict:
     pid = S.spawn_detached([python, "-m", "scripts.automod.round", "land", round_id],
                            log, cwd=LIVE_ROOT)
     S.write_land_marker(round_id, pid=pid, by=by)
+    return {"pid": pid, "log": str(log)}
+
+
+def gate_detached(round_id: str, *, by: str, skip_smoke: bool = False) -> dict:
+    """Start `round gate` for an open round in its own session.
+
+    `{"pid", "log"}` on success, `{"error"}` otherwise. The one spawn, for the
+    `automod_gate` tool and for the implement source's reaper, which re-gates
+    a round whose only failed rung was a grader that could not be reached
+    (`autocode._regate_if_unreviewed`). The marker is written here with the
+    child's pid before this returns, for the reason `land_detached` gives.
+    """
+    if not W.worktree_path(round_id).exists():
+        return {"error": f"no worktree for {round_id}"}
+    if S.gate_in_progress(round_id):
+        return {"error": f"a gate is already running for {round_id}"}
+    if S.land_in_progress(round_id):
+        return {"error": f"a landing is already running for {round_id}"}
+    log = S.ROUNDS_DIR / round_id / "gate.log"
+    python = LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
+    argv = [python, "-m", "scripts.automod.round", "gate", round_id]
+    if skip_smoke:
+        argv.append("--skip-smoke")
+    pid = S.spawn_detached(argv, log, cwd=LIVE_ROOT)
+    S.write_gate_marker(round_id, pid=pid, head=W.head(W.worktree_path(round_id)) or "", by=by)
     return {"pid": pid, "log": str(log)}
 
 
@@ -477,6 +514,14 @@ def _served_code_is_head(running: str, head: str) -> tuple[bool, list[str]]:
         return False, []
     paths = [p for p in r.stdout.splitlines() if p.strip()]
     code = [p for p in paths if not p.endswith(".md")]
+    if code:
+        # Since 2026-09-19 a landing that changes no file either service has
+        # loaded restarts nothing (`P.restart_needed`), so HEAD routinely sits
+        # tests-and-scripts ahead of the served commit as well. Same question,
+        # same answer, asked of the running processes; fails closed.
+        restart, _ = P.restart_needed(paths)
+        if not restart:
+            return True, paths
     return not code, (code or paths)
 
 

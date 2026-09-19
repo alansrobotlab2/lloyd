@@ -107,10 +107,18 @@ def _promoter_cannot_reach_the_live_backend(monkeypatch):
     doing — it hung the first time it ran beside a real round (2026-09-17).
     The discard port refuses at once, which reads as "pool state unreadable"
     and returns. A test about the promoter's HTTP patches `_get`, as before.
+
+    One unreadable poll is enough here: production waits out
+    `ROUNDS_UNREADABLE_POLLS` of them, a minute, which no test should spend.
+    And the aggregator is as unreachable as the backend, so
+    `promote.restart_needed` never asks the LIVE services what they have
+    loaded — it fails closed to "restart", the landing every older test means.
     """
     try:
         from scripts.automod import promote
         monkeypatch.setattr(promote, "BACKEND", "http://127.0.0.1:9")
+        monkeypatch.setattr(promote, "MCP_HEALTH", "http://127.0.0.1:9/health")
+        monkeypatch.setattr(promote, "ROUNDS_UNREADABLE_POLLS", 1)
     except Exception:
         pass
 

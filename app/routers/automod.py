@@ -14,6 +14,18 @@ Two properties make the flag safe rather than a new way to wedge the backend:
     its own. This is the whole reason to prefer a TTL over a persistent mode.
   * **It is in-memory**, so the landing restart clears it for free. The
     promoter only needs to clear it explicitly on its abort path.
+
+**One caller is let through: a review grader, while something else is still
+running** (`drain_admits`, 2026-09-19). With several rounds open at once the
+drain deadlocked against the rounds it was waiting for. A landing arms the
+drain and waits for every turn in flight to end; a sibling round's turn is
+waiting on its gate; the gate's review rung needs a grader turn on THIS
+backend, which the drain refuses. Only the grader's 420 s give-up broke the
+cycle, usually twice, and the turn then ended with its round open. On the
+night of 2026-09-18 that was 17 of 51 review attempts, 189 of 840 minutes
+spent draining, and about eleven rounds redone. Admitting the grader can only
+shorten the wait: the landing is already waiting on the turn that is waiting
+on it.
 """
 
 from __future__ import annotations
@@ -49,6 +61,52 @@ def set_drain(on: bool, ttl_s: float = 180.0) -> float:
     return _drain_until
 
 
+# The `source` the review rung stamps on the session it mints
+# (`scripts/automod/review.py::write_session`). Spelled here rather than
+# imported: the backend does not import the automod CLI package on a chat path.
+REVIEW_SESSION_SOURCE = "automod-review"
+
+
+def drain_admits(session_id: str, *, busy: bool | None = None) -> bool:
+    """Whether a turn for `session_id` may start although the drain is armed.
+
+    Only a review grader's session (`source: automod-review`, a non-user
+    platform), and only while something else is in flight on this backend.
+    The second half is what keeps the drain's own guarantee: the promoter
+    restarts after N consecutive QUIET polls, so a grader admitted onto a quiet
+    backend could be the turn the restart kills — while one admitted beside a
+    running turn resets the count and is itself counted until it ends. A
+    grader refused here waits the landing out as before; with nothing else
+    running that is a minute or two, not the deadlock.
+
+    Fails closed: an unreadable session, or a liveness read that raises, is a
+    refusal.
+    """
+    if not session_id:
+        return False
+    try:
+        import json
+        from app.paths import SESSIONS_DIR
+        from app.sessions_io import NON_USER_PLATFORMS, active_turn_summary
+        path = SESSIONS_DIR / f"{session_id}.json"
+        # A grader session is minted empty for one turn. Anything large is not
+        # one, and is not worth parsing on the refusal path.
+        if not path.is_file() or path.stat().st_size > 256 * 1024:
+            return False
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("source") != REVIEW_SESSION_SOURCE:
+            return False
+        if data.get("platform") not in NON_USER_PLATFORMS:
+            return False
+        if busy is None:
+            turns = active_turn_summary()
+            busy = bool(turns.get("active") or turns.get("queued")
+                        or turns.get("harness_runs"))
+        return bool(busy)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _is_loopback(request: Request) -> bool:
     host = getattr(getattr(request, "client", None), "host", "") or ""
     return host in ("127.0.0.1", "::1", "localhost")
@@ -69,6 +127,22 @@ async def post_drain(request: Request):
     set_drain(on, ttl)
     logger.info("automod drain %s (ttl=%.0fs)", "ON" if on else "OFF", drain_remaining())
     return JSONResponse({"draining": drain_active(), "remaining_s": round(drain_remaining(), 1)})
+
+
+@router.post("/api/automod/loaded")
+async def post_loaded(request: Request):
+    """Which of `paths` this process has loaded as modules. The promoter's
+    question before a landing: does anything here need a restart to change?
+    (`app/loaded_paths.py`.) Loopback-only, read-only."""
+    if not _is_loopback(request):
+        return JSONResponse({"error": "loopback-only"}, status_code=403)
+    from app.loaded_paths import answer
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    body = answer((data or {}).get("paths"))
+    return JSONResponse(body, status_code=400 if "error" in body else 200)
 
 
 @router.get("/api/automod/drain")
