@@ -211,11 +211,16 @@ def test_evidence_of_a_deleted_file_stands_beside_a_changed_test(wt):
              changed_paths=("scripts/dead_report.py", "tests/test_x.py"))
     assert c["verdict"] == "met" and c["accepted"][0].startswith("evidence of absence")
     # The shape #487's grader actually wrote (a made-up name, so a real file
-    # in this machine's vault cannot make it pass for the wrong reason).
+    # in this machine's vault cannot make it pass for the wrong reason). Since
+    # #1252 the second token of that citation is tried, and it is a real test
+    # file — so the path rail holds on the test path and the absence waiver is
+    # no longer what carries the clause. `met` either way, now for the better
+    # reason: a file on disk is pointed at.
     c = _met(wt, evidence_path="~/obsidian/memory/no-such-report-7f3a.md (absent); "
                                "tests/test_x.py:396-406",
              test_node_id="tests/test_x.py::test_it")
-    assert c["verdict"] == "met" and c["accepted"][0].startswith("evidence of absence")
+    assert c["verdict"] == "met" and c["evidence_path"] == "tests/test_x.py"
+    assert "accepted" not in c
 
 
 def test_an_absence_marker_does_not_stand_without_a_node_of_its_own(wt):

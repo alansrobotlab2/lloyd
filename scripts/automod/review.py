@@ -981,6 +981,74 @@ def _grade_once(report: dict, *, backend: str, payload_prompt: str, session_id: 
 REVIEW_EVIDENCE_ROOTS: tuple[Path, ...] = (Path("~/obsidian").expanduser(),)
 
 
+def _citation_tokens(text: str) -> list[str]:
+    """Every path-shaped token of a citation, in the order the grader wrote it.
+
+    One field carries as many locations as the grader likes:
+    `app/x.py:377; tests/test_y.py:534`, `a.md + b.md (…)`. Splitting on
+    whitespace, `+` AND `;` is what `evidence_of_absence` already does; this
+    function split on the first two only and kept just the head token, so a
+    citation whose real path was the SECOND token resolved to nothing while
+    the very same string read as an absence to the caller.
+    """
+    return [t for t in re.split(r"[\s+;]", text) if t.strip()]
+
+
+def _path_candidates(token: str) -> list[str]:
+    """A token, plus that token with a symbol or anchor trimmed off.
+
+    `autonomy.py::_pin`, `autonomy.py:_pin`, `autonomy.py#L377`: the whole
+    token is tried first, then the path alone.
+    """
+    first = token.strip().strip("`'\"()[],;")
+    first = re.sub(r":[\d,\-]+$", "", first)
+    if not first:
+        return []
+    candidates = [first]
+    for sep in ("::", "#", ":"):
+        if sep in first:
+            candidates.append(first.split(sep, 1)[0])
+    return candidates
+
+
+def _resolve_in_worktree(cand: str, worktree: Path) -> str:
+    """One candidate path, as a worktree-relative path that exists, or ""."""
+    cand = cand.strip("`'\"()[],;")
+    if not cand:
+        return ""
+    if cand.startswith("~") or cand.startswith("/"):
+        p = Path(cand).expanduser()
+        if p.exists():
+            return str(p)
+        # An absolute path into a checkout that has since moved (the
+        # grader's snapshot is removed after grading): fall back to the
+        # worktree-relative tail when it resolves there.
+        parts = p.parts
+        for i in range(1, len(parts)):
+            tail = Path(*parts[i:])
+            if (worktree / tail).exists():
+                return str(tail)
+        return ""
+    rel = cand.lstrip("./")
+    if not rel:
+        return ""
+    if (worktree / rel).exists():
+        return rel
+    # #1252: this checkout keeps `autonomy.py`, `prompt_builder.py` and six
+    # other modules at the REPO ROOT, while the grader's mental model is a
+    # package — so it writes the true module as `app/autonomy.py`. The claim
+    # is accurate and the path is not, and that is how four mutation-verified
+    # `met`s were downgraded on 2026-09-19 (#832). Retry with the leading
+    # segment stripped, but only HERE, after the path as written missed, and
+    # only ONE segment deep: a citation that exists as written still wins, so
+    # `app/x.py` keeps resolving to `app/x.py` wherever both exist, and a
+    # fabricated `app/nonexistent/thing.py` still resolves to nothing.
+    parts = Path(rel).parts
+    if len(parts) > 1 and (worktree / Path(*parts[1:])).exists():
+        return str(Path(*parts[1:]))
+    return ""
+
+
 def normalize_evidence_path(raw: str, worktree: Path,
                             roots: tuple[Path, ...] | None = None) -> str:
     """The grader's `evidence_path` as a path that exists, or "".
@@ -988,51 +1056,33 @@ def normalize_evidence_path(raw: str, worktree: Path,
     The schema asks for a bare worktree-relative file and the grader writes
     `app/x.py:164`, `scripts/a.py:224,253,201-214`, `~/obsidian/lloyd/SOUL.md
     + ~/obsidian/…/audit.md (…)` — every one of the first four backfill rows
-    had a `met` downgraded for a path that was real. The first token is the
-    path; a `:lines` suffix is dropped; `~` and absolute paths are accepted
-    when they exist (a code round's evidence can legitimately be a vault
-    file it read); a relative path is resolved against the worktree.
+    had a `met` downgraded for a path that was real. Each `;`/space/`+`
+    separated token is tried in the order it was written and the first one
+    that exists wins; a `:lines` suffix and a `::symbol`/`#anchor`/`:symbol`
+    tail are dropped; `~` and absolute paths are accepted when they exist (a
+    code round's evidence can legitimately be a vault file it read); a
+    relative path is resolved against the worktree, and a root-level module
+    mis-cited under a package dir that does not exist resolves to the root
+    (see `_resolve_in_worktree`).
     """
     text = str(raw or "").strip()
     if not text:
         return ""
-    first = re.split(r"[\s+]", text, 1)[0].strip().strip("`'\"()[],;")
-    first = re.sub(r":[\d,\-]+$", "", first)
-    if not first:
-        return ""
-    # `autonomy.py::_pin`, `autonomy.py:_pin`, `autonomy.py#L377`: a symbol or
-    # anchor after the path. Try the whole token first, then the path alone.
-    candidates = [first]
-    for sep in ("::", "#", ":"):
-        if sep in first:
-            candidates.append(first.split(sep, 1)[0])
-    for cand in candidates:
-        cand = cand.strip("`'\"()[],;")
-        if not cand:
-            continue
-        if cand.startswith("~") or cand.startswith("/"):
-            p = Path(cand).expanduser()
-            if p.exists():
-                return str(p)
-            # An absolute path into a checkout that has since moved (the
-            # grader's snapshot is removed after grading): fall back to the
-            # worktree-relative tail when it resolves there.
-            parts = p.parts
-            for i in range(1, len(parts)):
-                tail = Path(*parts[i:])
-                if (Path(worktree) / tail).exists():
-                    return str(tail)
-            continue
-        rel = cand.lstrip("./")
-        if rel and (Path(worktree) / rel).exists():
-            return rel
+    worktree = Path(worktree)
+    tokens = _citation_tokens(text)
+    for token in tokens:
+        for cand in _path_candidates(token):
+            got = _resolve_in_worktree(cand, worktree)
+            if got:
+                return got
     # Not in the worktree. A vault-relative path (`lloyd/SOUL.md`,
     # `backlog/544-x.md`) is a real place the grader can have read from.
     for root in (REVIEW_EVIDENCE_ROOTS if roots is None else roots):
-        for cand in candidates:
-            rel = cand.strip("`\'\"()[],;").lstrip("./")
-            if rel and (Path(root) / rel).exists():
-                return str(Path(root) / rel)
+        for token in tokens:
+            for cand in _path_candidates(token):
+                rel = cand.strip("`\'\"()[],;").lstrip("./")
+                if rel and (Path(root) / rel).exists():
+                    return str(Path(root) / rel)
     return ""
 
 

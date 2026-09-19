@@ -238,6 +238,96 @@ def test_a_path_in_neither_place_is_still_empty(tmp_path):
                                       roots=(tmp_path / "vault",)) == ""
 
 
+# ---------------------------------------------------------------------------
+# a root-level module cited under a package dir this checkout does not have
+# (#1252: four `met`s on #832 were downgraded for this citation alone)
+# ---------------------------------------------------------------------------
+
+def test_a_root_module_cited_under_a_package_dir_that_is_not_there_resolves(tmp_path):
+    """`autonomy.py` is at the repo root and `app/` is routers only, but the
+    grader's mental model is a package, so it writes `app/autonomy.py:1605-1620`
+    — a true claim about a path that is on no disk. The `met` is right; the
+    resolver was the thing that could not see it."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "config.py").write_text("x")
+    (tmp_path / "autonomy.py").write_text("x")
+    assert RV.normalize_evidence_path("app/autonomy.py:1605-1620", tmp_path,
+                                      roots=(tmp_path / "vault",)) == "autonomy.py"
+
+
+def test_the_prefix_retry_runs_only_after_the_written_path_and_one_deep(tmp_path):
+    """The retry is a fallback, not a rewrite: a path that exists as written
+    keeps winning, and a made-up path stays refused because stripping stops at
+    one segment."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "x.py").write_text("x")
+    (tmp_path / "x.py").write_text("x")
+    n = RV.normalize_evidence_path
+    # Both places hold a file: the citation as written resolves.
+    assert n("app/x.py:5", tmp_path, roots=()) == "app/x.py"
+    # One segment deep and no further — `nonexistent/thing.py` is what is left
+    # after stripping `app/`, and the bare `thing.py` is never tried.
+    assert n("app/nonexistent/thing.py:10", tmp_path, roots=()) == ""
+    # A fabricated name under a real package dir still resolves to nothing.
+    assert n("app/no_such_module.py:1", tmp_path, roots=()) == ""
+
+
+def test_a_second_citation_token_resolves_when_the_first_token_misses(tmp_path):
+    """The grader puts two locations in one field. Only the head token was ever
+    tried — and `;` was not even in its separator set, which is why
+    `app/autonomy.py:1605; tests/test_autonomy_scheduler.py::test_x` resolved
+    to nothing with a real test path attached to it."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_autonomy_scheduler.py").write_text("x")
+    n = RV.normalize_evidence_path
+    assert n("app/autonomy.py:1605; tests/test_autonomy_scheduler.py::test_x",
+             tmp_path, roots=()) == "tests/test_autonomy_scheduler.py"
+    # A space-separated pair behaves the same.
+    assert n("app/autonomy.py:1605 tests/test_autonomy_scheduler.py:120",
+             tmp_path, roots=()) == "tests/test_autonomy_scheduler.py"
+    # Order still decides: once the head token names something real it wins,
+    # so this is a fallback across tokens, not a search for the best one.
+    (tmp_path / "autonomy.py").write_text("x")
+    assert n("app/autonomy.py:1605; tests/test_autonomy_scheduler.py::test_x",
+             tmp_path, roots=()) == "autonomy.py"
+
+
+def test_every_citation_that_resolved_before_resolves_identically(tmp_path):
+    """The no-regression half: neither the prefix retry nor the extra tokens
+    may move a citation that already resolved, including the spellings the
+    other files pin (`tests/test_automod_review.py::
+    test_evidence_paths_are_normalized_before_they_are_judged`,
+    `tests/test_review_transport.py::
+    test_evidence_paths_with_symbols_anchors_or_a_dead_absolute_prefix_still_resolve`)
+    and both `REVIEW_EVIDENCE_ROOTS` shapes."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "app" / "config.py").write_text("x")
+    (tmp_path / "tests" / "test_autonomy_scheduler.py").write_text("x")
+    vault = tmp_path / "vault"
+    (vault / "lloyd").mkdir(parents=True)
+    (vault / "lloyd" / "SOUL.md").write_text("soul")
+    n = RV.normalize_evidence_path
+    assert n("app/config.py:358", tmp_path, roots=(vault,)) == "app/config.py"
+    assert n("tests/test_autonomy_scheduler.py:100", tmp_path,
+             roots=(vault,)) == "tests/test_autonomy_scheduler.py"
+    assert n("app/config.py::helper", tmp_path, roots=(vault,)) == "app/config.py"
+    assert n("./app/config.py:3", tmp_path, roots=(vault,)) == "app/config.py"
+    # An absolute path into a checkout that has since moved: worktree tail.
+    assert n("/gone/checkout/review-abc/app/config.py", tmp_path,
+             roots=(vault,)) == "app/config.py"
+    # A real absolute path, two locations in one field, prose after them.
+    assert n(str(vault / "lloyd" / "SOUL.md") + " + " + str(vault / "lloyd")
+             + " (the trim is vault-side)", tmp_path, roots=()) == str(vault / "lloyd" / "SOUL.md")
+    # The vault-relative fallback, unchanged.
+    assert n("lloyd/SOUL.md:44-51", tmp_path / "wt",
+             roots=(vault,)) == str(vault / "lloyd" / "SOUL.md")
+    # And the refusals stay refusals.
+    assert n("nowhere/at/all.py", tmp_path, roots=(vault,)) == ""
+    assert n("/nope/x.md", tmp_path, roots=(vault,)) == ""
+    assert n("", tmp_path, roots=(vault,)) == ""
+
+
 def test_the_default_roots_name_the_vault():
     assert any(str(r).endswith("obsidian") for r in RV.REVIEW_EVIDENCE_ROOTS)
 
