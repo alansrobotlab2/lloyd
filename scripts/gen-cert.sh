@@ -10,16 +10,30 @@
 #   agent-services/cert/clients/        (per-device cert bundles)
 #
 # Usage:
-#   bash scripts/gen-cert.sh           # idempotent — skip if files exist
-#   bash scripts/gen-cert.sh --force   # regenerate CA + server (invalidates ALL existing client certs)
+#   bash scripts/gen-cert.sh                # idempotent — skip if files exist
+#   bash scripts/gen-cert.sh --force        # regenerate CA + server (invalidates ALL existing client certs)
+#   bash scripts/gen-cert.sh --print-sans   # print the SAN string the server leaf would get; write nothing
 #
 # Extra SANs for server cert (e.g. WAN hostname):
 #   LLOYD_CERT_EXTRA_SANS="DNS:lloyd.example.com,IP:1.2.3.4" bash scripts/gen-cert.sh
+#
+# Where the cert dir lives: agent-services/cert, or $LLOYD_CERT_DIR when set —
+# tests/test_gen_cert_sans.py mints a throwaway CA + leaf into a temp tree with it,
+# so a test can never reach the live agent-services/cert.
+#
+# The tailnet is deliberately part of the server SAN set. lloyd-frontend is
+# reached over the tailnet (the "mTLS dropped 2026-06-14" comment in
+# web/vite.config.ts makes the tailnet the access boundary), so a leaf naming only
+# localhost/hostname/LAN-IP makes every off-localhost client fail a hard TLS name
+# check — curl exit 60 with the CA installed, which is why installing the CA on a
+# device never helped (backlog #1045). Both the Tailscale IPv4 and the ts.net
+# MagicDNS name are read from `tailscale` below; a host that is not on a tailnet
+# mints exactly the SANs it minted before.
 
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-CERT_DIR="$REPO/agent-services/cert"
+CERT_DIR="${LLOYD_CERT_DIR:-$REPO/agent-services/cert}"
 CA_CRT="$CERT_DIR/ca.crt"
 CA_KEY="$CERT_DIR/ca.key"
 SRV_CRT="$CERT_DIR/lloyd.crt"
@@ -28,8 +42,74 @@ CLIENTS_DIR="$CERT_DIR/clients"
 ALLOWLIST="$CERT_DIR/clients.json"
 
 FORCE=0
-if [[ "${1:-}" == "--force" ]]; then
-  FORCE=1
+PRINT_SANS=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=1 ;;
+    --print-sans) PRINT_SANS=1 ;;
+    *)
+      echo "[gen-cert] unknown argument: $arg (expected --force or --print-sans)" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# ── Server SAN set ────────────────────────────────────────────────────────
+# Computed before the cert dir is created or its files checked, so --print-sans
+# below can answer without touching anything, and shared with the signing step,
+# so the printed string IS the string the leaf receives.
+HOSTNAME_FQDN="${HOSTNAME:-$(uname -n)}"
+LAN_IP="$(ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") { print $(i+1); exit }}')"
+if [[ -z "$LAN_IP" ]]; then
+  echo "[gen-cert] WARNING: could not auto-detect LAN IP" >&2
+fi
+
+# Tailscale IPv4 — the address tailnet clients actually connect to ("ss -tnp" on
+# this host shows :5173 sockets whose local address is it). Empty means no
+# tailscale binary, an unreachable socket, or a logged-out node: no tailnet, so
+# no SAN, exactly as before this existed.
+TS_IP="$(tailscale ip -4 2>/dev/null \
+  | sed -n -E 's/^[[:space:]]*([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})[[:space:]]*$/\1/p' \
+  | head -1 || true)"
+
+# The MagicDNS names this tailnet will issue Let's Encrypt certs for — i.e.
+# exactly the names `tailscale cert <name>` accepts, so exactly the names worth
+# naming in the leaf. An empty list means tailnet HTTPS is off for this node.
+TS_STATUS="$(tailscale status --json 2>/dev/null || true)"
+TS_CERT_DOMAINS=""
+if [[ -n "$TS_STATUS" ]]; then
+  if TS_CERT_DOMAINS="$(printf '%s\n' "$TS_STATUS" \
+      | python3 -c 'import json,sys; [print(n) for n in json.load(sys.stdin).get("CertDomains") or []]' 2>/dev/null)"; then
+    if [[ -z "$TS_CERT_DOMAINS" ]]; then
+      echo "[gen-cert] NOTE: this tailnet issues no Let's Encrypt certs (CertDomains is empty), so the leaf will not name a ts.net hostname." >&2
+    fi
+  else
+    echo "[gen-cert] WARNING: could not parse 'tailscale status --json'; the leaf will NOT name a ts.net hostname." >&2
+  fi
+fi
+
+SANS="DNS:localhost,DNS:${HOSTNAME_FQDN},IP:127.0.0.1"
+if [[ -n "$LAN_IP" ]]; then
+  SANS="${SANS},IP:${LAN_IP}"
+fi
+if [[ -n "$TS_IP" ]]; then
+  SANS="${SANS},IP:${TS_IP}"
+fi
+while IFS= read -r ts_name; do
+  if [[ -n "$ts_name" ]]; then
+    SANS="${SANS},DNS:${ts_name}"
+  fi
+done <<<"$TS_CERT_DOMAINS"
+if [[ -n "${LLOYD_CERT_EXTRA_SANS:-}" ]]; then
+  SANS="${SANS},${LLOYD_CERT_EXTRA_SANS}"
+fi
+
+if [[ $PRINT_SANS -eq 1 ]]; then
+  # No mkdir, no existence check, no --force invalidation warning, no write of any
+  # kind: inspecting what a mint WOULD contain must never be able to invalidate a
+  # device's trust (that is what --force does at the client allowlist).
+  printf '%s\n' "$SANS"
+  exit 0
 fi
 
 mkdir -p "$CERT_DIR" "$CLIENTS_DIR"
@@ -46,22 +126,14 @@ if [[ $FORCE -eq 1 && -d "$CLIENTS_DIR" && -n "$(ls -A "$CLIENTS_DIR" 2>/dev/nul
   echo "          Existing client certs are signed by the OLD CA and will be rejected after this."
 fi
 
-HOSTNAME_FQDN="${HOSTNAME:-$(uname -n)}"
-LAN_IP="$(ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") { print $(i+1); exit }}')"
-if [[ -z "$LAN_IP" ]]; then
-  echo "[gen-cert] WARNING: could not auto-detect LAN IP" >&2
-fi
-
-SANS="DNS:localhost,DNS:${HOSTNAME_FQDN},IP:127.0.0.1"
-if [[ -n "$LAN_IP" ]]; then
-  SANS="${SANS},IP:${LAN_IP}"
-fi
-if [[ -n "${LLOYD_CERT_EXTRA_SANS:-}" ]]; then
-  SANS="${SANS},${LLOYD_CERT_EXTRA_SANS}"
-fi
-
 echo "[gen-cert] hostname:    $HOSTNAME_FQDN"
 echo "[gen-cert] LAN IP:      ${LAN_IP:-<none>}"
+if [[ -n "$TS_IP" ]]; then
+  echo "[gen-cert] tailnet IP:  $TS_IP"
+fi
+if [[ -n "$TS_CERT_DOMAINS" ]]; then
+  echo "[gen-cert] cert names:  ${TS_CERT_DOMAINS//$'\n'/ }"
+fi
 echo "[gen-cert] server SANs: $SANS"
 
 # ── CA ────────────────────────────────────────────────────────────────────
