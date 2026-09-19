@@ -121,7 +121,7 @@ def _parse_task_file(path: Path) -> Optional[dict]:
             fallback_fields=(
                 "id", "name", "description", "status", "priority", "frequency",
                 "scheduled_at", "next_run", "last_run", "last_attempt", "agent_id",
-                "skill_name", "timeout_seconds", "preemptible", "auto_advance",
+                "skill_name", "timeout_seconds", "max_turns", "preemptible", "auto_advance",
                 "depends_on", "max_retries", "failure_count", "runs_per_day",
                 "preferred_hours", "model", "stale_bypass_hours",
                 "expected_error_patterns", "inner_voice",
@@ -935,6 +935,62 @@ def _task_inner_voice(task: dict) -> bool:
         return False
 
 
+def _resolve_task_max_turns(task: dict, global_max_turns: int) -> int:
+    """The iteration budget this one task gets, per task (#823).
+
+    The task's own frontmatter wins — the same way `timeout_seconds` does — and
+    `agent.max_turns` is the fallback for a task that declares nothing, which is
+    every task on the fleet today, so nothing's budget moves when this lands.
+
+    Why a per-task key rather than a bigger global: `agent.max_turns` is not an
+    autonomy-only knob. `app/routers/messages.py:157` and `app/routers/voice.py:127`
+    take the same key as the default iteration budget for an interactive and a
+    voice turn, so raising 60 to spare one nightly job re-bounds every chat turn
+    on the primary too. `run_task` is the only site that can hand one job a
+    larger budget without costing the fleet anything.
+
+    A declared value is FLOORED at the global, never honoured as-is when it is
+    smaller. Two task files carry a number that cannot mean an iteration budget —
+    `autonomy/48-entity-resolution-sweep.md` declares `max_turns: 6` and
+    `84-fact-improvement.md` declares `max_turns: 4`, each added believing the key
+    capped something else — and a too-small budget is precisely the failure this
+    item exists to fix: `app/harness/loop.py` breaks at the cap,
+    `app/harness/finalizer.py` records no verdict for that death, and the run
+    reports nothing after minutes of GPU. Honouring a 4 would hand two working
+    tasks that exact death, so the mismatch is logged at WARNING naming the task
+    and both numbers instead of being applied or swallowed.
+
+    The other direction is unbounded on purpose: a declared 5,000 is still cut
+    off by `asyncio.timeout(timeout_seconds)` around the run, so the wall clock —
+    not the iteration cap — is what bounds the GPU minutes an operator pays for.
+    """
+    task_id = task.get("id", "?")
+    raw = task.get("max_turns")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return global_max_turns
+    try:
+        declared = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "Task #%s: max_turns=%r is not a number; running at the global "
+            "agent.max_turns=%d instead", task_id, raw, global_max_turns)
+        return global_max_turns
+    if declared <= 0:
+        logger.warning(
+            "Task #%s: max_turns=%d is not a positive iteration budget; running "
+            "at the global agent.max_turns=%d instead",
+            task_id, declared, global_max_turns)
+        return global_max_turns
+    if declared < global_max_turns:
+        logger.warning(
+            "Task #%s declares max_turns=%d, below the global agent.max_turns=%d; "
+            "running it at %d — a turn budget under the fleet default is never "
+            "applied as-is (#823)",
+            task_id, declared, global_max_turns, global_max_turns)
+        return global_max_turns
+    return declared
+
+
 def _build_deadline_anchor(timeout_s: int):
     """The task-flavoured wall-clock anchor. One definition, in
     `app.deadline_anchor` — a second caller (the autocode worker turn) needs
@@ -1245,8 +1301,12 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         # ONE number for the cap and for the warning about the cap. The harness
         # stops the run at `max_turns` (`app/harness/loop.py`), and the anchor
         # below counts down to it; read twice, the two drift and the warning
-        # arrives at an iteration the run never reaches.
-        max_turns = int(config.get("agent", {}).get("max_turns", 60))
+        # arrives at an iteration the run never reaches. The task's own
+        # frontmatter decides that one number; `agent.max_turns` is both its
+        # fallback and its floor, so a task that declares nothing is built
+        # exactly as it was before this line existed (#823).
+        global_max_turns = int(config.get("agent", {}).get("max_turns", 60))
+        max_turns = _resolve_task_max_turns(task, global_max_turns)
 
         options = RunOptions(
             model=task_model,
