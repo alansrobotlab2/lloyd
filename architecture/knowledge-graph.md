@@ -377,13 +377,18 @@ see *Tools*.
 2. **Applies are attended.** #48 and #67 propose; a human runs `--apply`. Both
    incidents were unattended applies.
 3. **Refuse on a degraded graph.** `--apply` and `backup-graph.sh` both compare
-   active edges against `graph-baseline.json` and refuse below 50%. Both halves
-   are wired, and both **fail open when that file is missing or unreadable**:
+   active edges against `graph-baseline.json` and refuse below 50%. The backup
+   half no longer fails open on its own missing input: a baseline that is
+   missing, unparseable, or carries no positive `active_edges` is now a refusal
+   naming the path, before the tarball is written or the window rotated, and
+   every successful run prints the reference's `recorded_at` beside the counts
+   (`tests/test_backup_graph.py`). `--apply` still fails open there:
    `load_baseline` returns 0 on any exception and `degraded_reason` answers
-   "not degraded" for a baseline of 0 (entity-resolution-sweep.py:1163-1185);
-   `backup-graph.sh:56-58` sets `base = 0` and skips the refusal entirely. The
-   baseline is also raised by the very program it guards (`update_baseline`,
-   :1172-1181), so a slow leak never trips it. Filed as #917. A backup
+   "not degraded" for a baseline of 0 (entity-resolution-sweep.py:1162-1191),
+   and the sweep then ratchets the reference up to whatever the damaged store
+   reads. The baseline is also raised by the very program it guards
+   (`update_baseline`, :1170-1179), so a slow leak never trips it — which is
+   also what self-heals a refused backup within one nightly sweep. A backup
    taken after a wipe is worse than no backup: it rotates the last good
    snapshot out of the window.
 4. **Expire, never delete.** The pre-merge graph must stay readable, and a
