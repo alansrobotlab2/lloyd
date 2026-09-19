@@ -608,9 +608,17 @@ on the primary (`max_turns=8`) and stages a candidate task under
   inputs were wide open — the failed-runs input was advertised in the docstring
   from the day it was written and the directory was never opened. 104 failed
   runs in 7 days against 4,044 run files on disk.
-- **The ledger input can go quiet for days** (only an autoresearch round
-  appends to it, and that source is off) and has its own open defect: the ledger
-  writes `BASELINE_<int>` and the filter matches lowercase `baseline` (#625).
+- **The ledger input can go quiet for days** — only an autoresearch round
+  appends to it — and had a defect of its own: the writer mints `BASELINE_<int>`
+  while the filter matched lowercase `baseline`, a case-sensitive comparison
+  that never held, so the selector returned nothing for the ledger's entire
+  life. #625 made it case-insensitive and restricted losers to trials whose
+  `trace_status` is `success`, since `judge.py:177` scores an incomplete trace
+  0.0 and every errored baseline row is therefore a "loser" for harness rather
+  than model reasons. #876 has since cleared, the ledger is appending again (291
+  rows on 2026-09-19), and 104 baseline losers sit inside the 7-day window — so
+  the input should fire now, which production has yet to confirm: the queue held
+  0 rows of kind `mine` as of 2026-09-19.
 - **Every candidate carries a `calibration` block** — N trials against the
   canonical prompt, and whether the composite landed strictly inside the
   capability edge. A task the learner always passes and one it always fails both

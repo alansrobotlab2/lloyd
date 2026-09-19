@@ -4,10 +4,14 @@ Two inputs, kept deliberately independent. #522 found this source enabled,
 registered, and never once enqueued while both inputs were wide open:
 
 - **Ledger losers** at ``LEDGER_PATH``: bench tasks the baseline scored under
-  0.6 on. That file is appended to only by an autoresearch round, so this
-  input can go quiet for days — and its row selector has its own open defect
-  (#625: the ledger writes ``BASELINE_<int>``, this filter matches lowercase
-  ``baseline``), which is #625's to fix, not this module's to work around.
+  0.6 on, from a trial that actually ran. That file is appended to only by an
+  autoresearch round, so this input can go quiet for days — and for the
+  ledger's entire life the selector was quieter still, matching lowercase
+  ``baseline`` against the ``BASELINE_<int>`` ids the writer actually mints.
+  #625 fixed that comparison (case-insensitive now, pinned by
+  ``tests/test_workers_sources.py``) and added the trace-status guard, because
+  widening the prefix also un-hid the rows whose zero composite is a harness
+  failure rather than a weak task.
 - **Failed autonomy runs**: ``AUTONOMY_RUNS_DIR/**/run_*.md`` with ``status:
   failed``. The docstring advertised this input from the day it was written
   and never opened the directory: 104 failed runs in the last 7 days against
@@ -81,6 +85,28 @@ EDGE_DIRECTIONS = ("scenario-novelty", "skill-rarity", "execution-length")
 KIND_RUN = "mine-run"
 KIND_LEDGER = "mine"
 
+#: Uppercase form of the id the baseline writer mints
+#: (`variant_sandbox.materialize_baseline` → ``BASELINE_<int>``). Ledger rows
+#: are compared against it with `variant_id.upper()`, because the lowercase
+#: spelling matched nothing for the ledger's entire life (#625) and both
+#: spellings must keep working, not one swapped for the other.
+BASELINE_ID_PREFIX = "BASELINE"
+
+#: The only ``trace_status`` a mined loser may carry. ``bench_runner`` emits
+#: exactly three values — ``success``, ``timeout``, ``error``
+#: (``scripts/autoresearch/bench_runner.py:13``) — and ``judge_trace`` zeroes
+#: any trace that did not complete: ``if trace.get("status") != "success"``
+#: returns ``composite_score: 0.0`` outright (``scripts/autoresearch/judge.py:177``).
+#: So a timed-out or errored baseline trial writes a zero composite for a
+#: reason that has nothing to do with the task. Of the ledger's 4,080 baseline
+#: rows on 2026-09-19, 77 carry ``error`` and every one of them sits below the
+#: 0.6 loser line — by construction, not by measurement of the model. Before
+#: #625 widened the prefix match the case mismatch hid those rows along with
+#: everything else, so mining them is a new failure mode this widening introduces.
+#: A row with no ``trace_status`` at all is rejected too: absence is not
+#: evidence the trial ran.
+USABLE_TRACE_STATUSES = frozenset({"success"})
+
 
 def _recent_ledger_losers(days: int = 7, limit: int = 5) -> list[dict]:
     if not LEDGER_PATH.exists():
@@ -108,7 +134,20 @@ def _recent_ledger_losers(days: int = 7, limit: int = 5) -> list[dict]:
                     dt = dt.replace(tzinfo=timezone.utc)
                 if dt < cutoff:
                     continue
-                if not row.get("variant_id", "").startswith("baseline"):
+                # The row is a baseline trial, not a candidate variant. The
+                # writer (`scripts/autoresearch/variant_sandbox.py`
+                # `materialize_baseline`) mints `BASELINE_<int>`, while the
+                # original filter matched lowercase `baseline` — a comparison
+                # that never held for any row the ledger ever wrote (#625).
+                # Upper-casing the subject accepts both spellings and still
+                # rejects a `V_*` variant row.
+                variant_id = str(row.get("variant_id") or "").upper()
+                if not variant_id.startswith(BASELINE_ID_PREFIX):
+                    continue
+                # A composite of 0.0 from a trace that never completed is a
+                # number about the harness (`judge.py:177` zeroes it before
+                # looking at the task), so it is not failure signal to mine.
+                if str(row.get("trace_status") or "") not in USABLE_TRACE_STATUSES:
                     continue
                 if (row.get("composite_score") or 1.0) < 0.6:
                     rows.append(row)

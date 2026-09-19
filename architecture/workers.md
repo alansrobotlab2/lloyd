@@ -613,8 +613,8 @@ is the known self-grading failure mode, and this is where it is stopped.
   `scheduled-task`; the queue itself has no edges.
 - **One pool per machine.** `claim_next` is safe across processes, but
   `recover_claimed()` at startup assumes nothing else is running.
-- **`bench-mine` advertised an input it never opened, and still has one it
-  cannot read.** Before #522 its `enqueue_if_due` returned early on the ledger
+- **`bench-mine` advertised an input it never opened, and had a second it
+  could not read.** Before #522 its `enqueue_if_due` returned early on the ledger
   mtime, so the failed-run input its own docstring named since the first commit
   was unreachable and the queue held zero rows for its entire life. It now
   scans `AUTONOMY_RUNS_DIR/**/run_*.md` for `status: failed` on every tick,
@@ -622,13 +622,29 @@ is the known self-grading failure mode, and this is where it is stopped.
   Each candidate is calibrated (10 trials, composite kept only strictly inside
   0.05–0.95, and a calibration that scored fewer than 3 is a measurement of the
   engine rather than of the task) and tagged with one escalation direction. The
-  ledger half is still dead, and "idle" was never the right word for it:
-  `variant_sandbox.py` writes `BASELINE_<int>` while the filter matches
-  lowercase `baseline`, so 3,893 baseline rows — 648 of them recent losers —
-  have never been visible to it. That is #625, still open.
+  ledger half was dead for a second, dumber reason, and "idle" was never the
+  right word for it: `variant_sandbox.py` writes `BASELINE_<int>` while the
+  filter matched lowercase `baseline` — a case-sensitive comparison that held
+  for no row the ledger ever wrote. `workers.db` therefore held 0 queue rows of
+  kind `mine` against 134 of kind `mine-run` as of 2026-09-19, and the ledger
+  itself held 4,080 baseline rows (370 distinct ids among 32,411 rows), none of
+  them selectable. #625 made the comparison case-insensitive
+  (`BM.BASELINE_ID_PREFIX`) and added the guard the widening made reachable: a
+  loser may only be a trial whose `trace_status` is `success`, because
+  `judge.py:177` zeroes the composite of any trace that did not complete and
+  all 77 `error` baseline rows sit below the 0.6 line by construction. Both are
+  pinned in `tests/test_workers_sources.py`, one of those tests crossing the
+  writer→ledger→selector seam by asking `materialize_baseline` for its own id.
+  **This is a mechanism fix, not an observed one.** Production has to answer
+  whether the input now fires, on rows #876 had not yet frozen and then
+  un-froze; until `SELECT count(*) FROM queue WHERE source='bench-mine' AND
+  kind='mine'` is non-zero, nothing here has been demonstrated end to end. Note
+  too that mtime cannot be read as "the ledger is fresh": a watermark matched
+  the file's `stat` across an eight-day gap in which no row was appended, which
+  only proves the inode was touched.
 
-  **Production has since answered the last sentence of this paragraph, and the
-  answer is that the input fires and the mining turn does not.** 60 runs since
+  **Production has since answered the run-failure half of this paragraph, and
+  the answer is that the input fires and the mining turn does not.** 60 runs since
   2026-09-09: 6 success, 5 `skipped` (a candidate with no mechanical check is
   rejected rather than counted against the source), and **49 failed, every one
   of them `empty response (stop_reason=max_turns) — nothing written`**. The

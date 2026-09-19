@@ -416,6 +416,208 @@ async def test_a_missing_ledger_is_not_an_error(tmp_path, monkeypatch, q):
 
 
 # ---------------------------------------------------------------------------
+# bench-mine: the ledger-loser selector (#625)
+#
+# `variant_sandbox.materialize_baseline` mints the baseline's id as
+# `BASELINE_<int>`, and that id is what reaches `ledger.jsonl` as
+# `variant_id`. The filter that read these rows matched lowercase `baseline` —
+# a case-sensitive comparison that selected no baseline row in the ledger's
+# entire life, so the ledger half of this source never enqueued anything:
+# `workers.db` held 0 queue rows of kind `mine` against 134 of kind `mine-run`
+# as of 2026-09-19.
+#
+# Each row is produced the way the pipeline produces one: keys from
+# `bench_runner_sdk.ledger_row_for`, bytes from `common.ledger_append` (the same
+# appender `run_round.py` calls for every live row). A rename of
+# `trace_status`/`composite_score` in the builder, or a change to how a ledger
+# line is serialised, therefore lands on these tests rather than passing them
+# by.
+#
+# A fixture ledger rather than the live file. The live one can show the case
+# half: it grows again now that #876 has cleared, so counting the rows whose
+# `variant_id.upper()` starts `BASELINE` and whose `composite_score` is under
+# 0.6 inside the 7-day window yields rows, while the lowercase filter yields
+# none. It cannot show the `trace_status` half — no errored baseline row sits
+# inside the window — so only a fixture can pin that a harness failure is not
+# mined as a weakness of the task.
+# ---------------------------------------------------------------------------
+
+def _ledger_row(variant_id: str, task_id: str, score: float, *,
+                created_at: str | None = None,
+                trace_status: str = "success") -> dict:
+    """One baseline-trial ledger row, built by the pipeline's own row builder.
+
+    The keys come from `bench_runner_sdk.ledger_row_for` — the function that
+    stamps `trace_status` and `composite_score` onto every row both runners
+    write — rather than from a test-local spelling of them. Typing
+    `"trace_status"` by hand here would leave this file passing while the
+    writer renamed the key, which is the same one-sided contract that let
+    `startswith("baseline")` sit unread against `BASELINE_<int>` for the whole
+    life of the ledger.
+
+    `trace_status` defaults to `success` because that is what 4,003 of the
+    ledger's 4,080 baseline rows carry; 77 are `error`, and every one of those
+    scores under the 0.6 loser line.
+    """
+    from scripts.autoresearch.bench_runner_sdk import ledger_row_for
+
+    row = ledger_row_for(
+        {"variant_id": variant_id, "task_id": task_id, "status": trace_status},
+        {"composite_score": score, "objective_score": score, "rubric_overall": score},
+        "R_fixture")
+    if created_at:
+        # `ledger_row_for` stamps `now_iso()`, which is inside the window; only
+        # a row deliberately placed elsewhere needs this override.
+        row["created_at"] = created_at
+    return row
+
+
+def _fixture_ledger(tmp_path, monkeypatch, rows: list[dict]) -> Path:
+    """Point the source at a temp ledger; keep the run input off-screen.
+
+    `_recent_ledger_losers` is deliberately NOT monkeypatched here — the other
+    tests in this file do that, which is why none of them ever called the
+    selector and nothing caught the case mismatch.
+
+    Each row goes through the real `ledger_append`, so the bytes the selector
+    parses are the bytes the pipeline's own serializer produces rather than a
+    test-local `json.dumps` guess at them.
+    """
+    from scripts.autoresearch.common import ledger_append
+
+    ledger = tmp_path / "ledger.jsonl"
+    for row in rows:
+        ledger_append(ledger, row)
+    monkeypatch.setattr(BM, "LEDGER_PATH", ledger)
+    monkeypatch.setattr(BM, "AUTONOMY_RUNS_DIR", tmp_path / "no-runs")
+    return ledger
+
+
+def test_an_uppercase_baseline_loser_is_selected(tmp_path, monkeypatch):
+    """The selector must select the id the writer actually writes.
+
+    Before #625 was fixed this returned []: `startswith("baseline")` against
+    `BASELINE_123` is false, since `startswith` is case-sensitive.
+    """
+    _fixture_ledger(tmp_path, monkeypatch,
+                    [_ledger_row("BASELINE_123", "bench_004_shape_gate", 0.42)])
+    rows = BM._recent_ledger_losers()
+    assert [r["task_id"] for r in rows] == ["bench_004_shape_gate"], (
+        "a BASELINE_-prefixed row scoring 0.42 inside the window was not selected")
+
+
+def test_a_variant_row_is_still_not_losers(tmp_path, monkeypatch):
+    """Widening the prefix check must not turn it into "every low row".
+
+    A `V_*` candidate scoring 0.10 is a variant that lost to the baseline, not
+    a baseline loser; mining from it would mine the candidate's own weakness.
+    The ledger holds roughly seven `V_*` rows per baseline row, so leaking them
+    would dominate everything this selector returns.
+    """
+    _fixture_ledger(tmp_path, monkeypatch, [
+        _ledger_row("BASELINE_123", "bench_004_shape_gate", 0.42),
+        _ledger_row("V_20260916_000001_looser", "bench_010_safety_destructive", 0.10),
+    ])
+    rows = BM._recent_ledger_losers()
+    assert [r["task_id"] for r in rows] == ["bench_004_shape_gate"], (
+        "a V_* variant row leaked into the baseline losers")
+
+
+@pytest.mark.parametrize("trace_status", ["error", "timeout"])
+def test_a_baseline_trial_that_did_not_run_is_not_a_loser(
+        tmp_path, monkeypatch, trace_status):
+    """A low score from a broken trial is a measurement of the harness.
+
+    `bench_runner` emits exactly three trace statuses — success, timeout, error
+    (`scripts/autoresearch/bench_runner.py:13`) — and the ledger carries 77
+    baseline rows with `trace_status: "error"`, every one of them scoring under
+    the 0.6 loser line. #522's own case for mining baseline losers rested on
+    those scores being real; the selector has to keep that true, or widening the
+    prefix (which previously hid every row, errored included) would start
+    handing the miner a task the runner never finished as a weakness of the
+    model.
+    """
+    _fixture_ledger(tmp_path, monkeypatch, [
+        _ledger_row("BASELINE_123", "bench_004_shape_gate", 0.42),
+        _ledger_row("BASELINE_456", "bench_007_broken_trial", 0.10,
+                    trace_status=trace_status),
+    ])
+    rows = BM._recent_ledger_losers()
+    assert [r["task_id"] for r in rows] == ["bench_004_shape_gate"], (
+        f"a baseline trial with trace_status {trace_status!r} and composite 0.10 "
+        "was mined as a loser, so a harness failure reads as a task weakness")
+
+
+def test_a_baseline_row_with_no_trace_status_is_not_a_loser(tmp_path, monkeypatch):
+    """Absence is not success. A row written before the field existed, or by a
+    harness that omitted it, carries no evidence the trial completed, so it
+    cannot be the basis for a new bench task."""
+    row = _ledger_row("BASELINE_789", "bench_005_no_status", 0.30)
+    del row["trace_status"]
+    _fixture_ledger(tmp_path, monkeypatch, [
+        _ledger_row("BASELINE_123", "bench_004_shape_gate", 0.42), row,
+    ])
+    rows = BM._recent_ledger_losers()
+    assert [r["task_id"] for r in rows] == ["bench_004_shape_gate"], (
+        "a baseline row with no trace_status was mined as a loser")
+
+
+def test_both_spellings_of_the_baseline_prefix_are_accepted(tmp_path, monkeypatch):
+    """Neither spelling replaces the other; the comparison ignores case.
+
+    Replacing `"baseline"` with `"BASELINE"` would fix every live row and
+    silently drop any lowercase row a future writer or a hand-edited fixture
+    carries.
+    """
+    _fixture_ledger(tmp_path, monkeypatch, [
+        _ledger_row("BASELINE_123", "bench_004_shape_gate", 0.42),
+        _ledger_row("baseline_1", "bench_002_no_preamble", 0.37),
+        _ledger_row("V_20260916_000001_looser", "bench_010_safety_destructive", 0.10),
+    ])
+    ids = sorted(r["task_id"] for r in BM._recent_ledger_losers())
+    assert ids == ["bench_002_no_preamble", "bench_004_shape_gate"], (
+        "both baseline spellings must be selected, and the V_* row must not be")
+
+
+async def test_a_ledger_loser_reaches_the_queue_as_a_mine_item(tmp_path, monkeypatch, q):
+    """Selection is worth nothing if it stops short of the queue.
+
+    `KIND_LEDGER` is the kind `execute` routes to `_mine_ledger_losers`'s
+    prompt; this source produced zero of them before the selector was fixed.
+    """
+    _fixture_ledger(tmp_path, monkeypatch,
+                    [_ledger_row("BASELINE_123", "bench_004_shape_gate", 0.42)])
+
+    await BM.enqueue_if_due(q, {})
+
+    items = [i for i in q.list_items(source=BM.NAME) if i.kind == BM.KIND_LEDGER]
+    assert len(items) == 1, "the selected loser never reached the queue"
+    assert items[0].payload["loser_task_id"] == "bench_004_shape_gate"
+    assert items[0].payload["composite_score"] == 0.42
+
+
+def test_the_id_the_writer_mints_is_the_id_the_selector_selects(tmp_path, monkeypatch):
+    """The seam test: writer process → ledger.jsonl → this selector.
+
+    Typing `BASELINE_123` by hand would still pass if the writer's format
+    changed, which is the failure that cost 3,893 rows. So ask the real
+    `materialize_baseline` for an id and feed the selector what it returned.
+    """
+    from types import SimpleNamespace
+    from scripts.autoresearch import variant_sandbox as VS
+
+    variants = tmp_path / "variants"
+    variants.mkdir()
+    cfg = SimpleNamespace(paths=SimpleNamespace(variants_dir=variants))
+    baseline_id, _overlay = VS.materialize_baseline(cfg)
+    assert baseline_id.startswith("BASELINE_"), baseline_id
+
+    _fixture_ledger(tmp_path, monkeypatch,
+                    [_ledger_row(baseline_id, "bench_004_shape_gate", 0.42)])
+    assert [r["task_id"] for r in BM._recent_ledger_losers()] == ["bench_004_shape_gate"]
+
+
+# ---------------------------------------------------------------------------
 # bench-mine: the failed-autonomy-run input (#522)
 #
 # The ledger is not an input this source can rely on — it only grows during an
