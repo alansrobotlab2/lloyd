@@ -990,7 +990,7 @@ def _cli_home(tmp_path):
     return home, feeds
 
 
-def _run_cli(home, relevance, *flags):
+def _run_cli(home, relevance, *flags, extra_env=None):
     today = __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d")
     server = ThreadingHTTPServer(("127.0.0.1", 0), _StubModel)
     server.relevance = relevance
@@ -1000,6 +1000,7 @@ def _run_cli(home, relevance, *flags):
         env = dict(os.environ, HOME=str(home),
                    INTEL_DISABLE_LLM="0",
                    INTEL_LLM_URL=f"http://127.0.0.1:{server.server_port}/v1/chat/completions")
+        env.update(extra_env or {})
         proc = subprocess.run(
             [sys.executable, "-m", "intel_pipeline", *flags],
             cwd=str(INTEL_DIR), env=env, capture_output=True, text=True, timeout=180)
@@ -1105,3 +1106,252 @@ def test_cli_run_writes_a_graded_item_it_liked(tmp_path):
 
 def _knowledge_sections_for(knowledge: Path) -> int:
     return sum(_sections(p) for p in knowledge.rglob("*.md"))
+
+
+# --- backlog #739: YouTube feed coverage is a signal, not a silence ---------
+
+"""The 2026-09-10 defect, in the shape the tests below pin.
+
+Upstream answers a *well-formed* channel id with 404 or 500 intermittently — 55
+of 64 feeds lost on 09-10, 60/64 on 09-09, 37/64 on 09-12, all 64 on 09-13 — and
+the scanner made exactly one attempt per channel behind `except Exception: return
+[]`. `if not videos: continue` then merged "unreachable" with "idle", so a
+blackout and a quiet night produced the same run report: `YouTube scanner: 0
+items` and `=== Pipeline Complete ===` at exit 0.
+
+Three things had to change, and each test below pins one: a transient failure is
+retried with increasing waits; coverage is counted from fetch outcomes *before*
+the empty-feed branch and persisted to `scanner-state.json`; and a run whose
+coverage is under half the channels attempted exits non-zero without printing the
+success banner.
+
+Feed outcomes in the scan-level tests come from a loopback stub rather than a
+patched transport, because "the endpoint was unreachable" and "the feed was empty"
+are different HTTP responses — a fake that returns a Python value cannot tell
+them apart, which is precisely the confusion under test.
+"""
+
+_ATOM_NS = ('xmlns="http://www.w3.org/2005/Atom" '
+            'xmlns:media="http://search.yahoo.com/mrss/" '
+            'xmlns:yt="http://www.youtube.com/xml/schemas/2015"')
+
+
+def _atom_body(video_ids):
+    """A feed body in the shape the scanner parses: one <entry> per video id."""
+    entries = "".join(
+        f"<entry><id>yt:video:{v}</id><title>Video {v}</title>"
+        f"<published>2026-09-19T00:00:00Z</published>"
+        f'<link rel="alternate" href="https://youtu.be/{v}"/>'
+        f"<media:description>desc {v}</media:description></entry>"
+        for v in video_ids)
+    return (f'<?xml version="1.0" encoding="UTF-8"?>'
+            f'<feed {_ATOM_NS}><title>channel</title>{entries}</feed>')
+
+
+def _atom_bytes(video_ids):
+    return _atom_body(video_ids).encode()
+
+
+class _StubFeedsHandler(BaseHTTPRequestHandler):
+    """Answers the RSS endpoint the way the real one does, per channel id.
+
+    `server.outcomes` maps a channel id either to an HTTP status to answer with
+    (an unreachable feed is an *error response*, not an empty one) or to the list
+    of video ids to serve, which may be empty for a channel that published
+    nothing. Anything not listed answers 500. `server.hits` records the channel id
+    of every request, so attempts are counted on the wire rather than trusted from
+    the scanner's own printout.
+    """
+
+    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+        channel = self.path.split("channel_id=")[-1]
+        outcome = self.server.outcomes.get(channel, 500)
+        self.server.hits.append(channel)
+        body = b"<html>no such feed</html>" if isinstance(outcome, int) else _atom_bytes(outcome)
+        self.send_response(outcome if isinstance(outcome, int) else 200)
+        self.send_header("Content-Type", "application/atom+xml")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def feed_stub():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _StubFeedsHandler)
+    server.outcomes = {}
+    server.hits = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def _stub_rss_url(server):
+    return f"http://127.0.0.1:{server.server_port}/feeds/videos.xml"
+
+
+def _channels(*ids):
+    return [{"channel_id": i, "name": i, "handle": f"@{i}"} for i in ids]
+
+
+def _state_json():
+    """The state file the redirected `state` module is currently writing."""
+    return json.loads(state_mod.STATE_FILE.read_text())
+
+
+def test_a_feed_that_404s_twice_is_retried_and_its_entries_survive(monkeypatch):
+    """Clause 1: the 404 that was fatal on one attempt is a transient on the third.
+
+    The waits go through the module-level `sleep` so the ladder is observable
+    without spending wall clock, and are asserted as the exact increasing series
+    rather than "some positive numbers".
+    """
+    calls, waits = [], []
+    monkeypatch.setattr(yt_mod, "sleep", waits.append)
+
+    def flaky_get(url, headers=None, timeout=None):
+        calls.append(url)
+        if len(calls) < 3:
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        return _atom_body(["abc123"])
+
+    monkeypatch.setattr(yt_mod, "_http_get", flaky_get)
+
+    videos, fetched = yt_mod.fetch_channel_rss("UCrDwWp7EBBv4NwvScIpBDOA")
+
+    assert fetched is True, "a feed recovered on retry must count as fetched"
+    assert [v["id"] for v in videos] == ["abc123"]
+    assert len(calls) == 3, f"expected 3 HTTP attempts, got {len(calls)}"
+    assert waits == [5.0, 10.0], f"expected increasing waits, got {waits}"
+
+
+def test_a_feed_that_never_recovers_is_attempted_four_times_then_failed(monkeypatch):
+    """Clause 1's ceiling, and clause 2's failure half at the fetch seam."""
+    calls, waits = [], []
+    monkeypatch.setattr(yt_mod, "sleep", waits.append)
+
+    def dead_get(url, headers=None, timeout=None):
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 500, "Server Error", {}, None)
+
+    monkeypatch.setattr(yt_mod, "_http_get", dead_get)
+
+    videos, fetched = yt_mod.fetch_channel_rss("UCrDwWp7EBBv4NwvScIpBDOA")
+
+    assert videos == []
+    assert fetched is False, "an exhausted channel must be a coverage failure"
+    assert len(calls) == yt_mod.FETCH_ATTEMPTS == 4
+    assert waits == [5.0, 10.0, 20.0], f"expected 3 increasing waits, got {waits}"
+
+
+def test_an_unreachable_feed_is_a_coverage_failure_while_an_idle_one_is_not(
+        redirect_paths, monkeypatch, feed_stub):
+    """Clause 2: the distinction `if not videos: continue` used to erase.
+
+    One channel answers 404 to every attempt, the other answers 200 with a feed
+    holding zero entries. Both yield zero videos; only one is a coverage failure.
+    """
+    monkeypatch.setattr(yt_mod, "RSS_FEED_URL", _stub_rss_url(feed_stub))
+    monkeypatch.setattr(yt_mod, "sleep", lambda s: None)
+    monkeypatch.setattr(yt_mod, "load_youtube_channels_config",
+                        lambda: _channels("UCdead", "UCidle"))
+    feed_stub.outcomes = {"UCdead": 404, "UCidle": []}
+
+    items, coverage = yt_mod.scan_youtube_channels()
+
+    assert items == [], "neither channel had anything to report"
+    assert (coverage.fetched, coverage.attempted) == (1, 2), (
+        "the idle channel must be counted as fetched, the 404 channel must not")
+    # Exactly half is not *strictly below* half, which is where clause 4 draws the
+    # line; the degradation itself is pinned over the CLI at 1 fetched of 3.
+    assert coverage.degraded is False, "half the feeds reachable is at, not under, the floor"
+
+
+def test_the_run_persists_fetched_versus_attempted_counts_to_state(
+        redirect_paths, monkeypatch, feed_stub):
+    """Clause 3: the number has to outlive the run, in the file a reader checks."""
+    monkeypatch.setattr(yt_mod, "RSS_FEED_URL", _stub_rss_url(feed_stub))
+    monkeypatch.setattr(yt_mod, "sleep", lambda s: None)
+    monkeypatch.setattr(yt_mod, "load_youtube_channels_config",
+                        lambda: _channels("UCdead", "UCidle"))
+    feed_stub.outcomes = {"UCdead": 404, "UCidle": []}
+
+    yt_mod.scan_youtube_channels()
+
+    persisted = _state_json()["youtube_coverage"]
+    assert persisted == {"fetched": 1, "attempted": 2}, (
+        "one feed failed every attempt, so the state file must read 1 ok / 2 total")
+    # The denominator is channels that produced an outcome, not lines of config:
+    # nothing here was skipped for a missing id, so attempted equals the config size.
+    assert feed_stub.hits.count("UCdead") == yt_mod.FETCH_ATTEMPTS, (
+        "the failing channel must be retried on the wire, not just in intent")
+
+
+def _cli_channels(home, *ids):
+    """Write the channels config where the scanner looks for it, under scratch HOME."""
+    cfg = home / "lloyd" / "scripts" / "intel-pipeline" / "config" / "youtube-channels.yml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text("channels:\n" + "".join(
+        f"  - channel_id: {i}\n    name: {i}\n    handle: '@{i}'\n" for i in ids))
+
+
+def _cli_feed_env(feed_stub):
+    """Point the CLI's YouTube scanner at the stub, with retry waits that are not 5 s.
+
+    Both are read as environment by the package, which is what lets the *real*
+    `python -m intel_pipeline` process — not an in-process call — talk to the stub.
+    """
+    return {"INTEL_YOUTUBE_RSS_URL": _stub_rss_url(feed_stub),
+            "INTEL_YOUTUBE_RETRY_WAIT_SECONDS": "0.05"}
+
+
+def test_a_run_that_lost_most_feeds_fails_and_names_both_counts(tmp_path, feed_stub):
+    """Clause 4, over the CLI seam: exit status plus a line a reader can act on.
+
+    Three channels, two unreachable: coverage 1/3 is strictly under half. Before
+    this the same run printed `YouTube scanner: 0 items` and `=== Pipeline
+    Complete ===` and exited 0 (backlog #739, measured on 2026-09-10 at 1/64).
+    """
+    home, _feeds = _cli_home(tmp_path)
+    _cli_channels(home, "UCa", "UCb", "UCc")
+    feed_stub.outcomes = {"UCa": ["vid_a"], "UCb": 404, "UCc": 500}
+
+    _day, proc = _run_cli(home, 6, "--scan", extra_env=_cli_feed_env(feed_stub))
+
+    assert proc.returncode != 0, (
+        f"a run that reached 1 of 3 feeds must not exit 0\n{proc.stdout[-2500:]}")
+    assert "Pipeline Complete" not in proc.stdout, (
+        "the success banner is what made a blackout indistinguishable\n"
+        + proc.stdout[-2500:])
+    lowered = proc.stdout.lower()
+    assert "degraded" in lowered, proc.stdout[-2500:]
+    assert "1" in lowered and "3" in lowered, (
+        f"the degraded line must name both counts\n{proc.stdout[-2500:]}")
+
+
+def test_a_healthy_run_still_exits_zero_and_still_prints_complete(tmp_path, feed_stub):
+    """Clause 5: the new failure signal must not fire on a partially-idle day.
+
+    Every configured feed answers 200; two of the three hold no entries, which is
+    what an idle channel looks like and is not degradation. Coverage 3/3.
+    """
+    home, feeds = _cli_home(tmp_path)
+    _cli_channels(home, "UCa", "UCb", "UCc")
+    feed_stub.outcomes = {"UCa": ["vid_a"], "UCb": [], "UCc": []}
+
+    _day, proc = _run_cli(home, 6, "--scan", extra_env=_cli_feed_env(feed_stub))
+
+    assert proc.returncode == 0, (
+        f"three feeds fetched, two idle, must be a normal run\n{proc.stdout[-2500:]}\n"
+        f"{proc.stderr[-1500:]}")
+    assert "Pipeline Complete" in proc.stdout, proc.stdout[-2500:]
+    # The subprocess wrote its state under the scratch HOME, not the in-process
+    # `state_mod.STATE_FILE`, so the coverage key is read from where it landed.
+    persisted = json.loads((feeds / "scanner-state.json").read_text())
+    assert persisted["youtube_coverage"] == {"fetched": 3, "attempted": 3}

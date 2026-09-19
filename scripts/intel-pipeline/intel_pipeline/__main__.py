@@ -33,6 +33,7 @@ def main():
     date_str = args.date if args.date else today
     
     # Run scanners
+    youtube_coverage = None  # None until the YouTube scanner reports its feeds
     if run_all or args.scan:
         print("\n--- Running Scanners ---\n")
         
@@ -46,9 +47,10 @@ def main():
             github_items = []
         
         # Import and run YouTube scanner
+        youtube_items = []
         try:
             from .scanners.youtube_scanner import scan_youtube_channels
-            youtube_items = scan_youtube_channels()
+            youtube_items, youtube_coverage = scan_youtube_channels()
             print(f"YouTube scanner: {len(youtube_items)} items")
         except Exception as e:
             print(f"YouTube scanner error: {e}")
@@ -57,6 +59,9 @@ def main():
         # Combine all scanned items
         all_items = github_items + youtube_items
         print(f"\nTotal scanned items: {len(all_items)}")
+
+        if youtube_coverage is not None:
+            print(f"YouTube feed coverage: {youtube_coverage.describe()}")
         
         # NOTE: each scanner saves its own items to the raw JSONL already
         # (github_scanner / youtube_scanner call state.save_raw_items internally).
@@ -103,6 +108,16 @@ def main():
         count = write_all_to_vault(date_str)
         print(f"Vault writer: {count} items written")
     
+    # A run that could not reach most of the configured YouTube feeds must not
+    # finish saying `Pipeline Complete` at exit 0: on 2026-09-10 the scanner lost
+    # 55 of 64 feeds to upstream 404/500 and the run still reported success
+    # (backlog #739). Checked after scoring/writing so the GitHub half of the run
+    # still lands; only the success banner is withheld.
+    if youtube_coverage is not None and youtube_coverage.degraded:
+        print(f"\nYouTube stage DEGRADED: {youtube_coverage.describe()} "
+              f"(threshold: at least half of the feeds attempted)")
+        sys.exit(1)
+
     print("\n=== Pipeline Complete ===")
 
 
