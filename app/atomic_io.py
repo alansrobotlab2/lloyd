@@ -304,5 +304,12 @@ def hash_bytes(data: bytes) -> str:
     The extractor hashed the file again after processing it. If the file
     changed in between — a note being appended to while the run walked the
     vault — the new content was recorded as already extracted and never was.
+
+    That fixed the provenance hash on the facts. The gate half of the same
+    hazard — `_pipeline/content-hashes.json`, which decides what gets extracted
+    at all — is closed by threading this digest through to
+    `scripts/memory/content_hasher.py::update_hash` instead of re-reading at
+    checkpoint flush (#482), pinned by
+    `tests/test_fact_extractor.py::test_an_append_after_the_digest_is_recorded_still_reads_as_changed`.
     """
     return hashlib.sha256(data).hexdigest()

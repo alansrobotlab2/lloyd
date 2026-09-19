@@ -261,11 +261,17 @@ class NightlyExtraction:
             raise
     
     def _process_single_file(self, md_file, full_mode, index, total):
-        """Extract one file. Returns (processed, facts, ok).
+        """Extract one file. Returns (processed, facts, ok, source_hash).
 
         `ok=False` means the extraction failed and the caller must NOT save
         this file's content hash — otherwise a transient vLLM error marks the
-        document done and it is never revisited.
+        document done and it is never revisited. On a failure `source_hash` is
+        the empty string.
+
+        `source_hash` is returned as well as used, because the caller is the one
+        that records it in the content-hash gate. It has to be the digest of
+        THESE bytes, not of the file as it looks when the checkpoint flushes;
+        see the comment at its computation.
         """
         processed = 0
         facts_count = 0
@@ -274,11 +280,15 @@ class NightlyExtraction:
             raw = md_file.read_bytes()
         except OSError as e:
             print(f"Cannot read {md_file}: {e}")
-            return 0, 0, False
+            return 0, 0, False, ""
 
         # Hash the bytes we actually extracted from. Re-hashing the file
         # afterwards records whatever it looks like then, so a note appended
-        # to mid-run is marked extracted at content nobody read.
+        # to mid-run is marked extracted at content nobody read. That is the
+        # same hazard on both sides of this line: `source_hash` is the
+        # provenance hash on the facts (see `app/atomic_io.py::hash_bytes`) and
+        # the gate hash in `_pipeline/content-hashes.json` has to be it too
+        # (#482).
         source_hash = hash_bytes(raw)
         try:
             content = raw.decode("utf-8", errors="replace")
@@ -292,10 +302,10 @@ class NightlyExtraction:
             )
         except ExtractionFailed as e:
             print(f"[{index}/{total}] FAILED: {doc_path}: {e}")
-            return 0, 0, False
+            return 0, 0, False, ""
         except Exception as e:
             print(f"[{index}/{total}] ERROR: {doc_path}: {e}")
-            return 0, 0, False
+            return 0, 0, False, ""
 
         try:
             if result.get("facts"):
@@ -329,9 +339,9 @@ class NightlyExtraction:
                 processed = 1
         except Exception as e:
             print(f"Error writing facts for {md_file}: {e}")
-            return 0, 0, False
+            return 0, 0, False, ""
 
-        return processed, facts_count, True
+        return processed, facts_count, True, source_hash
 
     def _eligible_files(self, full_mode: bool) -> list:
         """The corpus, from `pipeline_config.yaml` `sources.paths`.
@@ -436,6 +446,10 @@ class NightlyExtraction:
 
         # Incremental checkpoint: persist hashes for already-processed files every
         # CHECKPOINT_EVERY files so a timeout/kill never loses the whole run's work.
+        # `pending` carries (path, digest) pairs, not paths: the flush at the end
+        # of a run can land 545-1666s after the file was read, so re-hashing at
+        # flush time would record whatever the note looks like NOW and mark an
+        # appended-to-during-the-run edit as already extracted (#482).
         CHECKPOINT_EVERY = 25
         pending: list = []
 
@@ -451,13 +465,14 @@ class NightlyExtraction:
         if workers == 1:
             # Sequential processing (default)
             for index, md_file in enumerate(eligible_files, 1):
-                p, f, ok = self._process_single_file(md_file, full_mode, index, total_files)
+                p, f, ok, source_hash = self._process_single_file(
+                    md_file, full_mode, index, total_files)
                 processed += p
                 total_facts += f
                 if ok:
                     # Only a file we actually extracted gets its hash saved.
                     # Hashing a failed file marks it done forever.
-                    pending.append(md_file)
+                    pending.append((md_file, source_hash))
                 else:
                     failed += 1
                 if len(pending) >= CHECKPOINT_EVERY:
@@ -476,11 +491,11 @@ class NightlyExtraction:
                 for future in as_completed(futures):
                     index, md_file = futures[future]
                     try:
-                        p, f, ok = future.result()
+                        p, f, ok, source_hash = future.result()
                         processed += p
                         total_facts += f
                         if ok:
-                            pending.append(md_file)
+                            pending.append((md_file, source_hash))
                         else:
                             failed += 1
                         if len(pending) >= CHECKPOINT_EVERY:

@@ -12,6 +12,9 @@ Usage:
     hasher = ContentHasher()
     changed_files = hasher.get_changed_files(list_of_paths)
     # ... process only changed_files ...
+    # Pass the digest of the bytes you read whenever you have one; a bare path
+    # is re-read here, and a re-read after processing records content nobody
+    # processed as processed (see update_hash).
     hasher.update_hashes(changed_files)
     hasher.save()
 """
@@ -22,7 +25,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional, Union
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -85,20 +88,44 @@ class ContentHasher:
         """Filter a list of paths to only those that have changed."""
         return [p for p in paths if self.has_changed(p)]
 
-    def update_hash(self, path: Path):
-        """Record current hash for a file."""
+    def update_hash(self, path: Path, sha256: Optional[str] = None):
+        """Record the digest of one file.
+
+        Pass `sha256` — the digest of the bytes the caller actually read — from
+        any code path that read the file itself. Re-hashing here instead records
+        whatever the file looks like at flush time, and a flush can be the end
+        of a run that takes 545-1666s (tests/test_extraction_single_instance.py:11-13),
+        so a note appended to during the run would be stored as extracted at
+        content nobody read and the appended lines would never be fact-extracted
+        (#482). This is the gate half of the hazard documented at
+        `app/atomic_io.py::hash_bytes`; the provenance half was fixed there, the
+        gate half was not.
+
+        With no digest — or an empty one, which is what a caller that read
+        nothing offers — the file on disk is hashed. That is the CLI `--update`
+        route at the bottom of this file, which hashes files it never extracted
+        and has nothing to carry.
+        """
         key = str(path)
-        current_hash = self._hash_file(path)
-        if current_hash:
+        digest = (sha256 or "").strip() or self._hash_file(path)
+        if digest:
             self._hashes[key] = {
-                "sha256": current_hash,
+                "sha256": digest,
                 "checked_at": datetime.now(timezone.utc).isoformat(),
             }
 
-    def update_hashes(self, paths: list[Path]):
-        """Record current hashes for multiple files."""
-        for p in paths:
-            self.update_hash(p)
+    def update_hashes(self, paths: Iterable[Union[Path, tuple[Path, str]]]):
+        """Record digests for several files.
+
+        An item is either a `(path, sha256)` pair — the nightly extraction
+        checkpoint, which still holds the digest of the bytes it extracted — or
+        a bare path, hashed from disk.
+        """
+        for item in paths:
+            if isinstance(item, tuple):
+                self.update_hash(item[0], item[1])
+            else:
+                self.update_hash(item)
 
     def stats(self) -> dict:
         return {

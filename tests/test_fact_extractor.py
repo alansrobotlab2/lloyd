@@ -6,8 +6,10 @@ extraction, a YAML error that wiped an entity's history, categories
 registered as entities, junk names registered before they were rejected, and
 edges that only ever appeared when someone ran a script by hand.
 """
+import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -195,12 +197,17 @@ def test_a_failed_file_is_not_hashed(tmp_path, monkeypatch):
     def fail(*a, **k):
         raise fx.ExtractionFailed("vLLM wedged")
     monkeypatch.setattr(x.extractor, "extract_from_document", fail)
-    assert x._process_single_file(doc, True, 1, 1) == (0, 0, False)
+    # The 4th element is the digest of the bytes read; there are none here, so
+    # it is "" and the caller's `ok=False` branch keeps it out of the index.
+    assert x._process_single_file(doc, True, 1, 1) == (0, 0, False, "")
 
-    # a successful, factless extraction IS recorded — it is genuinely done
+    # a successful, factless extraction IS recorded — it is genuinely done, and
+    # what it records is the digest of the bytes it read (#482 clause 4). The
+    # gate stores that digest instead of re-hashing the file at flush time.
+    read_digest = hashlib.sha256(doc.read_bytes()).hexdigest()
     monkeypatch.setattr(x.extractor, "extract_from_document",
                         lambda *a, **k: {"entity": "X", "category": "state", "facts": []})
-    assert x._process_single_file(doc, True, 1, 1) == (1, 0, True)
+    assert x._process_single_file(doc, True, 1, 1) == (1, 0, True, read_digest)
     kg_store.reset()
 
 
@@ -577,3 +584,229 @@ def test_content_hasher_honours_the_env_override(tmp_path, monkeypatch):
     h.update_hashes([doc]); h.save()
     assert not ch.ContentHasher().has_changed(doc)
     assert idx.exists()
+
+
+# ── the content-hash gate records the bytes that were extracted (#482) ──────
+#
+# `update_hash` re-read the file, so what the gate stored for a document was
+# the digest of whatever it looked like at FLUSH time — and for a run under
+# `CHECKPOINT_EVERY = 25` the only flush is the final one, so the window is the
+# whole run: 545-1666s, the durations quoted at
+# tests/test_extraction_single_instance.py:11-13. Anything appended to a note
+# inside that window was recorded as already extracted and never was. The
+# provenance half of the same hazard is fixed in `app/atomic_io.py::hash_bytes`;
+# these pin the gate half.
+#
+# Clause key (clause N of the four graded acceptance clauses of #482):
+#   1 digest-or-reread, CLI route unchanged →
+#     test_update_hash_records_the_digest_it_was_given,
+#     test_update_hashes_takes_path_digest_pairs_and_bare_paths,
+#     test_the_cli_update_route_still_hashes_files_it_never_extracted
+#   2 the swallow is closed →
+#     test_an_append_after_the_digest_is_recorded_still_reads_as_changed
+#   3 the index holds the digest read, workers=1 and workers=2 →
+#     test_the_gate_stores_the_digest_of_the_bytes_extracted[1] / [2]
+#   4 a raised ExtractionFailed gets no index entry, both branches, and the
+#     return shape is pinned →
+#     test_a_failed_extraction_still_gets_no_index_entry[1] / [2],
+#     test_a_failed_file_is_not_hashed
+#
+
+def _sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _gate_index(tmp_path, tag):
+    """The real ContentHasher, loaded fresh, over an index of the test's own.
+
+    `index_path` is passed explicitly rather than through LLOYD_CONTENT_HASHES
+    so no test can write `_pipeline/content-hashes.json`, which is the resume
+    point of a live extractor run.
+    """
+    ch = _load(f"content_hasher_{tag}", "scripts/memory/content_hasher.py")
+    return ch, tmp_path / f"gate-{tag}.json"
+
+
+def _extraction_run(tmp_path, monkeypatch, tag):
+    """A NightlyExtraction that never calls the model, gated on a tmp index.
+
+    `_eligible_files` takes its corpus from `pipeline_config.yaml`; the harness
+    points it at `docs/` under a patched `VAULT`, so the corpus is exactly the
+    files the test wrote and the flush path is the real one.
+    """
+    ne = _load(f"nightly_extraction_{tag}",
+               "scripts/memory/next-gen-memory/nightly_extraction.py")
+    kg_store.configure(tmp_path / "kg.sqlite")
+    facts = tmp_path / "facts"
+    facts.mkdir()
+    monkeypatch.setattr(fx, "FACTS_DIR", facts)
+    x = ne.NightlyExtraction()
+    x.extractor.facts_dir = facts
+    monkeypatch.setattr(ne, "VAULT", tmp_path)
+    monkeypatch.setattr(ne, "_load_pipeline_config",
+                        lambda: {"sources": {"paths": ["docs"]}})
+    ch, idx = _gate_index(tmp_path, tag)
+    monkeypatch.setattr(ne, "ContentHasher",
+                        lambda: ch.ContentHasher(index_path=idx))
+    (tmp_path / "docs").mkdir()
+    return x, ch, idx
+
+
+def _one_fact(md_file, *a, **k):
+    name = Path(md_file).name
+    return {"entity": "Gate", "category": "state",
+            "facts": [{"fact": f"{name} was extracted through the gate",
+                       "confidence": 0.9}]}
+
+
+def test_update_hash_records_the_digest_it_was_given(tmp_path):
+    """Clause 1: a caller that already hashed the bytes must not have them
+    re-read — and a caller with nothing to offer still gets the file hashed."""
+    ch, idx = _gate_index(tmp_path, "supplied")
+    h = ch.ContentHasher(index_path=idx)
+    doc = tmp_path / "note.md"
+    doc.write_bytes(b"the bytes that were read\n")
+    digest = _sha(doc)
+    doc.write_bytes(b"the bytes that were read\nplus a line appended mid-run\n")
+
+    h.update_hash(doc, digest)
+    h.save()
+    fresh = ch.ContentHasher(index_path=idx)
+    assert fresh._hashes[str(doc)]["sha256"] == digest, (
+        "the gate stored a re-read of the file, not the digest it was handed")
+    assert fresh.has_changed(doc), (
+        "the appended line is marked extracted and will never be fact-extracted")
+
+    # With no digest the file on disk is hashed. That is the CLI `--update`
+    # route (content_hasher.py:141), which hashes files it never extracted.
+    cli = tmp_path / "cli.md"
+    cli.write_bytes(b"hashed from disk, never extracted\n")
+    h.update_hash(cli)
+    h.save()
+    fresh = ch.ContentHasher(index_path=idx)
+    assert fresh._hashes[str(cli)]["sha256"] == _sha(cli)
+    assert not fresh.has_changed(cli)
+
+
+def test_update_hashes_takes_path_digest_pairs_and_bare_paths(tmp_path):
+    """Clause 1 again, one level up: `update_hashes` takes the `(path,
+    digest)` pairs the extraction checkpoint now carries, and a bare path still
+    means "hash this file as it is on disk", which is what the CLI route
+    passes."""
+    ch, idx = _gate_index(tmp_path, "pairs")
+    h = ch.ContentHasher(index_path=idx)
+    carried = tmp_path / "carried.md"
+    carried.write_bytes(b"v1\n")
+    digest_of_read = _sha(carried)
+    carried.write_bytes(b"v1\nv2 appended after the read\n")
+    bare = tmp_path / "bare.md"
+    bare.write_bytes(b"only ever hashed from disk\n")
+
+    h.update_hashes([(carried, digest_of_read), bare])
+    h.save()
+    fresh = ch.ContentHasher(index_path=idx)
+    assert fresh._hashes[str(carried)]["sha256"] == digest_of_read
+    assert fresh._hashes[str(bare)]["sha256"] == _sha(bare)
+    assert fresh.has_changed(carried)
+    assert not fresh.has_changed(bare)
+
+
+def test_an_append_after_the_digest_is_recorded_still_reads_as_changed(tmp_path):
+    """Clause 2: record, then append, then save and reload. Against the
+    pre-fix tree the digest is dropped and the appended-to file is what gets
+    recorded, so a fresh hasher reports it unchanged forever."""
+    ch, idx = _gate_index(tmp_path, "swallow")
+    h = ch.ContentHasher(index_path=idx)
+    doc = tmp_path / "daily.md"
+    doc.write_bytes(b"morning entry\n")
+    h.update_hash(doc, _sha(doc))
+    doc.write_bytes(b"morning entry\nevening entry, appended after the digest\n")
+    h.save()
+    assert ch.ContentHasher(index_path=idx).has_changed(doc), (
+        "the evening entry is permanently marked extracted")
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_the_gate_stores_the_digest_of_the_bytes_extracted(tmp_path, monkeypatch,
+                                                          workers):
+    """Clause 3: end to end through `_extract_all_facts`, in the sequential and
+    the parallel branch both, a note appended to while the run is still walking
+    the vault must leave the gate holding the digest of the bytes that were
+    read — and therefore must still read as changed on the next run."""
+    x, ch, idx = _extraction_run(tmp_path, monkeypatch, f"gate{workers}")
+    docs = []
+    for i in range(3):
+        d = tmp_path / "docs" / f"n{i}.md"
+        d.write_text(f"note {i} says something worth keeping\n", encoding="utf-8")
+        docs.append(d)
+    read = {d: _sha(d) for d in docs}
+
+    def append_mid_run(md_file, content, existing_facts=""):
+        # The vault is live: someone appends between the read and the flush.
+        Path(md_file).write_text(content + "\nappended mid-run\n", encoding="utf-8")
+        return _one_fact(md_file)
+
+    monkeypatch.setattr(x.extractor, "extract_from_document", append_mid_run)
+    x._extract_all_facts(full_mode=False, workers=workers)
+
+    stored = json.loads(idx.read_text())["hashes"]
+    fresh = ch.ContentHasher(index_path=idx)
+    for d in docs:
+        assert stored[str(d)]["sha256"] == read[d], (
+            f"{d}: the gate holds a re-read taken after the append, not the "
+            f"digest of the {read[d][:8]} bytes that were extracted")
+        assert fresh.has_changed(d), (
+            f"{d}: the mid-run append is marked extracted and never re-processed")
+    assert x.last_files_processed == 3
+    kg_store.reset()
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_failed_extraction_still_gets_no_index_entry(tmp_path, monkeypatch,
+                                                      workers):
+    """Clause 4: `ok=False` must keep a file out of `pending` whatever the new
+    signature is — hashing a document whose extraction raised marks a transient
+    vLLM error as done forever."""
+    x, ch, idx = _extraction_run(tmp_path, monkeypatch, f"fail{workers}")
+    good = tmp_path / "docs" / "good.md"
+    good.write_text("the model answered for this one\n", encoding="utf-8")
+    bad = tmp_path / "docs" / "bad.md"
+    bad.write_text("the model wedged on this one\n", encoding="utf-8")
+
+    def wedge(md_file, content, existing_facts=""):
+        if Path(md_file).name == "bad.md":
+            raise fx.ExtractionFailed("vLLM wedged")
+        return _one_fact(md_file)
+
+    monkeypatch.setattr(x.extractor, "extract_from_document", wedge)
+    x._extract_all_facts(full_mode=False, workers=workers)
+
+    stored = json.loads(idx.read_text())["hashes"]
+    assert str(good) in stored
+    assert str(bad) not in stored, (
+        "a failed extraction reached the index: bad.md is marked done forever")
+    assert x.last_failed_files == 1
+    kg_store.reset()
+
+
+def test_the_cli_update_route_still_hashes_files_it_never_extracted(tmp_path):
+    """The one caller with no digest to offer is the CLI, and it is a separate
+    process: `--update` walks a directory and hashes everything it finds. Run
+    as the process it is, so a signature change that broke it is caught at the
+    boundary rather than by re-calling the same Python function."""
+    idx = tmp_path / "cli-index.json"
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    note = scan / "a.md"
+    note.write_text("alpha\n", encoding="utf-8")
+
+    r = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "memory" / "content_hasher.py"),
+         str(scan), "--update"],
+        capture_output=True, text=True, timeout=120,
+        env=dict(os.environ, LLOYD_CONTENT_HASHES=str(idx)))
+    assert r.returncode == 0, r.stderr[-2000:]
+    stored = json.loads(idx.read_text())["hashes"]
+    assert stored[str(note)]["sha256"] == _sha(note), (
+        "`--update` recorded something other than the file on disk; it has no "
+        "digest to carry and must keep hashing")
