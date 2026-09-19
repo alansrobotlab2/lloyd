@@ -340,6 +340,114 @@ def test_unattributable_approved_proposal_does_not_land(store, cr):
     assert props[0].get("edge_id") is None
 
 
+# ── #773 clauses 1-4: an auto-accepted edge says it was never reviewed ───────
+
+def _aged_proposal(cr, **over):
+    """A Stage-2-classified pending proposal that clears the 48h age gate, so
+    `auto_approve_strong` is decided by its confidence alone."""
+    p = {"source": "knowledge/a.md", "target": "knowledge/b.md",
+         "status": "pending", "type": "related-to", "confidence": 0.95,
+         "reason": "read together in one session",
+         "evidence": {"sessions": ["20260910_010203_abc"], "aggregate_weight": 1.0},
+         "proposed_at": (cr.datetime.now(cr.timezone.utc)
+                         - cr.timedelta(days=3)).isoformat()}
+    p.update(over)
+    return p
+
+
+def _conversation_edge(store):
+    edge = store.edges.find_active("knowledge/a.md", "knowledge/b.md", "related-to")
+    assert edge, "the approved proposal did not land a related-to edge"
+    return edge
+
+
+def test_auto_approved_edge_says_its_acceptance_was_automatic_and_unreviewed(store, cr):
+    """Clauses 1 & 2. The gate that admitted the edge is the classifier's own
+    score against a threshold; nothing reads a proposal during the 48 h it waits,
+    so the landed row has to say so or it reads downstream like an accepted one.
+    The marker round-trips through both the row dict and the sqlite `extra`
+    column — `app/kg_store.py` persists non-column keys there, which is the
+    whole reason no migration is needed."""
+    weak = _aged_proposal(cr, target="knowledge/c.md", confidence=0.5)
+    props = [_aged_proposal(cr), weak]
+    assert cr.auto_approve_strong(props) == 1
+    assert props[0]["accepted_by"] == "auto", props[0]
+    assert "auto_approved@0.85" in props[0]["auto_acceptance"], props[0]
+    # The proposal it did not flip keeps both its status and its emptiness.
+    assert weak["status"] == "pending" and "accepted_by" not in weak
+
+    assert cr.land_approved_edges(props) == 1
+    edge = _conversation_edge(store)
+    assert edge["accepted_by"] == "auto", edge
+    assert edge["auto_acceptance"] == "auto_approved@0.85, unreviewed", edge
+
+    row = store.conn.execute(
+        "select extra from edges where origin='conversation'").fetchone()
+    assert row["extra"], "marker never reached the extra column"
+    assert json.loads(row["extra"])["accepted_by"] == "auto", row["extra"]
+    assert json.loads(row["extra"])["auto_acceptance"] == (
+        "auto_approved@0.85, unreviewed"), row["extra"]
+
+
+def test_the_marker_names_the_threshold_that_admitted_this_edge(store, cr):
+    """Clause 2, the derivation half: the threshold in the marker is the one
+    passed to this call, so an edge admits the gate that actually let it
+    through rather than quoting a literal that may no longer be the one in use."""
+    props = [_aged_proposal(cr)]
+    assert cr.auto_approve_strong(props, threshold=0.92) == 1
+    assert cr.land_approved_edges(props) == 1
+    marker = _conversation_edge(store)["auto_acceptance"]
+    assert marker == "auto_approved@0.92, unreviewed", marker
+    assert "0.85" not in marker, marker
+
+
+def test_proposal_approved_without_the_mark_lands_unmarked(store, cr):
+    """Clause 3, the discriminating half: a proposal already `status: approved`
+    that carries no auto mark lands with no marker at all. A field stamped on
+    every conversation edge distinguishes nothing, which is the difference
+    between this fix and a comment."""
+    props = [_aged_proposal(cr, status="approved")]
+    assert cr.land_approved_edges(props) == 1
+    edge = _conversation_edge(store)
+    assert "accepted_by" not in edge, edge
+    assert "auto_acceptance" not in edge, edge
+    row = store.conn.execute(
+        "select extra from edges where origin='conversation'").fetchone()
+    assert row["extra"] is None, f"unmarked edge carries extra: {row['extra']}"
+
+
+def test_the_edge_marker_is_derived_from_the_proposal_mark(store, cr):
+    """Clause 3's derivation half: the edge marker comes from the mark on the
+    proposal, not from re-running the gate at landing time. A proposal marked
+    `accepted_by: auto` with no gate text of its own is recorded against the
+    shipped default rather than left nameless — an edge whose row cannot say
+    which gate admitted it is the defect this item is about."""
+    props = [_aged_proposal(cr, status="approved", accepted_by=cr.AUTO_ACCEPTED_BY)]
+    assert "auto_acceptance" not in props[0]
+    assert cr.land_approved_edges(props) == 1
+    edge = _conversation_edge(store)
+    assert edge["accepted_by"] == "auto", edge
+    assert edge["auto_acceptance"] == cr.auto_acceptance_marker(
+        cr.DEFAULT_AUTO_APPROVE_THRESHOLD), edge
+    assert edge["auto_acceptance"] == "auto_approved@0.85, unreviewed", edge
+
+
+def test_the_field_is_the_discrimination_not_a_re_score(store, cr):
+    """Clause 4. The store has no human-verified band to sit below (0 rows at
+    `origin='manual'`; EXTRACTED edges average 0.917), and
+    `app/routers/entities.py` filters the entity graph on `min_confidence`, so
+    capping an auto-accepted edge below 0.85 would rank it under
+    machine-extracted edges and hide it from anyone who raised the slider. The
+    score is copied through untouched; the marker is what separates them."""
+    props = [_aged_proposal(cr, confidence=0.95)]
+    assert cr.auto_approve_strong(props) == 1
+    assert cr.land_approved_edges(props) == 1
+    edge = _conversation_edge(store)
+    assert edge["confidence"] == 0.95, edge
+    assert edge["provenance"] == "INFERRED", edge
+    assert edge["accepted_by"] == "auto", edge
+
+
 # ── Stage 2 endpoint/model come from config, not the constant ────────────────
 
 def _task_file(dir_path: Path, model: str) -> Path:

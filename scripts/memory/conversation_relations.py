@@ -637,8 +637,57 @@ def deduplicate_against_index(proposals: list[dict]) -> list[dict]:
     ]
 
 
-def auto_approve_strong(proposals: list[dict], threshold: float = 0.85) -> int:
-    """Auto-approve proposals above confidence threshold that are >48h old."""
+# ── Acceptance provenance (#773) ─────────────────────────────────────────────
+# Nothing reviews these proposals: `auto_approve_strong` accepts one on the
+# classifier's own score against a threshold, and the 48 h wait ages it without
+# adjudicating it. Until this, the landed edge carried only that same
+# self-reported score, so an auto-accepted row read downstream exactly like an
+# accepted one (114 such rows on 2026-09-16, 96 of them at one 0.95 mode). The
+# two fields below are what makes the difference enumerable from the edge itself.
+AUTO_ACCEPTED_BY = "auto"
+DEFAULT_AUTO_APPROVE_THRESHOLD = 0.85
+
+
+def auto_acceptance_marker(threshold: float) -> str:
+    """Text naming the gate that admitted an edge: its name, its number, and
+    that nobody reviewed it. Readable from the edge row alone."""
+    return f"auto_approved@{threshold:g}, unreviewed"
+
+
+def acceptance_fields(p: dict) -> dict:
+    """Edge fields recording *how* this proposal was accepted.
+
+    Derived from the mark `auto_approve_strong` leaves on the proposals it
+    flips. A proposal that reached `status: approved` any other way carries no
+    mark and lands with no fields at all — a marker stamped on every
+    conversation edge would distinguish nothing (#773).
+
+    Nothing here re-scores the edge. The store has no human-verified band to sit
+    below (0 rows at `origin='manual'` as of 2026-09-16; EXTRACTED edges average
+    0.917), and `app/routers/entities.py` filters the entity graph on
+    `min_confidence`, so lowering auto-accepted edges would hide them from the
+    graph rather than flag them.
+
+    A mark with no marker text can only come from a hand-edited proposals file;
+    it is recorded against the shipped default rather than left nameless.
+    """
+    if p.get("accepted_by") != AUTO_ACCEPTED_BY:
+        return {}
+    return {
+        "accepted_by": AUTO_ACCEPTED_BY,
+        "auto_acceptance": p.get("auto_acceptance")
+        or auto_acceptance_marker(DEFAULT_AUTO_APPROVE_THRESHOLD),
+    }
+
+
+def auto_approve_strong(proposals: list[dict],
+                        threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD) -> int:
+    """Auto-approve proposals above confidence threshold that are >48h old.
+
+    This is an automatic acceptance, not a review, so each flipped proposal is
+    marked as such (`accepted_by` + the threshold that admitted it) and
+    `land_approved_edges` carries the mark onto the edge (#773).
+    """
     now = datetime.now(timezone.utc)
     approved = 0
     for p in proposals:
@@ -655,6 +704,8 @@ def auto_approve_strong(proposals: list[dict], threshold: float = 0.85) -> int:
             except ValueError:
                 continue
         p["status"] = "approved"
+        p["accepted_by"] = AUTO_ACCEPTED_BY
+        p["auto_acceptance"] = auto_acceptance_marker(threshold)
         approved += 1
     return approved
 
@@ -693,13 +744,16 @@ def land_approved_edges(proposals: list[dict]) -> int:
     becomes an edge of the type Stage 2 classified — co_accessed only when
     nothing classified it — with provenance INFERRED and a pointer to the
     trajectory session that evidenced it, which is what makes it visible to
-    retrieval and auditable afterwards.
+    retrieval and auditable afterwards. Each row also carries how it was
+    accepted — see `acceptance_fields` — because most of what lands here was
+    never read by anyone (#773).
     """
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from app.kg_store import StoreUnavailable, store
 
     landed = 0
+    auto_marked = 0
     unattributed = 0
     try:
         st = store()
@@ -720,6 +774,7 @@ def land_approved_edges(proposals: list[dict]) -> int:
             if not source_doc:
                 unattributed += 1
                 continue
+            acceptance = acceptance_fields(p)
             edge_id = st.edges.add({
                 "source": src, "target": tgt,
                 # Proposals carry the Stage-2 verdict under `type`; the key read
@@ -728,13 +783,24 @@ def land_approved_edges(proposals: list[dict]) -> int:
                 # co_accessed (116 proposals carried a type, 33 edges landed,
                 # all co_accessed — #420).
                 "type": p.get("type") or p.get("relation_type") or "co_accessed",
+                # The classifier's own score, copied through untouched on
+                # purpose: the acceptance marker below is the discrimination,
+                # not a re-score (#773).
                 "confidence": float(p.get("confidence", 0.85)),
                 "provenance": "INFERRED",
                 "source_doc": source_doc,
                 "evidence": (p.get("reason") or "")[:500] or None,
+                **acceptance,
             }, origin="conversation")
             p["edge_id"] = edge_id
             landed += 1
+            if acceptance:
+                auto_marked += 1
+    if landed:
+        print(f"  [edges] {landed} landed — {auto_marked} auto-approved and "
+              f"stamped accepted_by={AUTO_ACCEPTED_BY} with the admitting "
+              f"threshold (unreviewed), {landed - auto_marked} accepted by "
+              f"another route and left unmarked")
     if unattributed:
         print(f"  [edges] {unattributed} approved proposal(s) carry no evidence "
               f"sessions or trajectory pointer — not landed")
