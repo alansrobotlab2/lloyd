@@ -743,6 +743,64 @@ def test_land_waits_for_the_window_then_refuses_if_it_never_settles(monkeypatch,
     assert ev["round_id"] == "SM_C" and ev["external_blocker"] is True and ev["waited_for_settle"]
 
 
+def _queued_wait(monkeypatch, tmp_path, timeline, *, settled, max_wait=0.25, cap=None):
+    """`wait_for_settle` against a clock-driven `current.json`: `timeline` is
+    `[(seconds_from_start, record_or_None), ...]`, the last entry holding."""
+    monkeypatch.setattr(S, "ROLLBACK_REQUEST_PATH", tmp_path / "rollback_request.json")
+    if cap is not None:
+        monkeypatch.setattr(P, "SETTLE_QUEUE_CAP", cap)
+    for c in settled:
+        S.append_event({"event": "settled", "commit": c}, path=S.LEDGER_PATH)
+    t0 = time.monotonic()
+
+    def current():
+        dt, rec = time.monotonic() - t0, timeline[0][1]
+        for at, r in timeline:
+            if dt >= at:
+                rec = r
+        return rec
+    monkeypatch.setattr(S, "read_current", current)
+    return lambda: P.wait_for_settle(max_wait, poll=0.01, round_id="SM_Q")
+
+
+A_, B_, C_ = ({"commit": ch * 40, "state": "observing"} for ch in "abc")
+
+
+def test_a_landing_that_lost_the_race_waits_out_the_winners_window_too(monkeypatch, tmp_path):
+    """2026-09-19: `854144ab` settled at 21:45:25, another queued landing
+    promoted `0c15ba3d` at 21:45:32, and at 21:47:22 a green, gated round was
+    refused "0c15ba3d is still under observation after waiting 17 min" — held
+    to what was left of the FIRST promotion's window — and reaped."""
+    wait = _queued_wait(monkeypatch, tmp_path, settled=[A_["commit"], B_["commit"]],
+                        timeline=[(0, A_), (0.20, B_), (0.40, None)])   # B outlives A's 0.25
+    assert wait() is None
+
+
+def test_every_promotion_queued_behind_must_have_settled(monkeypatch, tmp_path):
+    """The winner was rolled back: `current.json` clears for that too."""
+    wait = _queued_wait(monkeypatch, tmp_path, settled=[A_["commit"]],
+                        timeline=[(0, A_), (0.05, B_), (0.10, None)])
+    with pytest.raises(P.PromoteError, match=f"{B_['commit'][:8]} left observation without settling"):
+        wait()
+
+
+def test_the_queue_is_bounded(monkeypatch, tmp_path):
+    wait = _queued_wait(monkeypatch, tmp_path, settled=[], cap=2,
+                        timeline=[(0, A_), (0.05, B_), (0.10, C_)])
+    with pytest.raises(P.PromoteError, match="behind 2 promotion"):
+        wait()
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "land_failed"][-1]
+    assert ev["round_id"] == "SM_Q" and ev["external_blocker"] is True
+
+
+def test_one_promotion_that_never_settles_is_still_refused_on_one_window(monkeypatch, tmp_path):
+    wait = _queued_wait(monkeypatch, tmp_path, settled=[], timeline=[(0, A_)], max_wait=0.1)
+    t = time.monotonic()
+    with pytest.raises(P.PromoteError, match="still under observation"):
+        wait()
+    assert time.monotonic() - t < 0.5, "the same record does not restart the clock"
+
+
 def test_a_rollback_requested_during_the_wait_is_never_landed_over(monkeypatch, tmp_path):
     R, promoted = _chamber_land(monkeypatch, tmp_path, [OBSERVING, None])
     S.write_json(S.ROLLBACK_REQUEST_PATH, {"trigger": "errors", "commit": "c" * 40})

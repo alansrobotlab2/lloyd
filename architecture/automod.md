@@ -1286,6 +1286,16 @@ Four changes, each with its own switch or none needed:
    unreadable report, no paths, no head, or a verdict that raises all hold as
    before. `tests/test_loop_depth.py`.
 
+7. **A landing that lost the race for a settled window waits out the
+   winner's too** (`promote.wait_for_settle`, `SETTLE_QUEUE_CAP` 4). Landings
+   queue behind an observed promotion; when it settles one of them lands
+   within seconds, and the other used to be held to what was left of the
+   FIRST window: `854144ab` settled 21:45:25, `0c15ba3d` promoted 21:45:32,
+   and at 21:47:22 a green round was refused "still under observation after
+   waiting 17 min" and reaped. It first happened the day landings got fast
+   enough for two to queue. Each new promotion restarts the clock; every one
+   queued behind must have a `settled` row, not merely have cleared.
+
 Scorecard row 9 carries `gates_rescued`, `reviews_unavailable` (should fall to
 near zero) and `landed_without_restart`. `tests/test_landing_review_deadlock.py`
 and `tests/test_landing_without_restart.py` pin all four; `tests/conftest.py`

@@ -727,6 +727,9 @@ MAX_REBASES_PER_LANDING = 2
 # still be ahead of it.
 SETTLE_MAX_WAIT = ERRORS_WINDOW + 120.0
 SETTLE_POLL_SECONDS = 10.0
+# How many promotions in a row one landing will queue behind, each with a
+# full window. Four is an hour; past that something else is wrong.
+SETTLE_QUEUE_CAP = 4
 
 
 def _settled(commit: str) -> bool:
@@ -765,9 +768,25 @@ def wait_for_settle(max_wait: float | None = None, *, poll: float | None = None,
     waited_on = str((observed or {}).get("commit") or "")
     observed = S.read_current()
     waited_on = waited_on or str((observed or {}).get("commit") or "")
+    # Every promotion waited behind, in order. Landings queue: while this one
+    # waits for A, another gated round is waiting too, and when A settles one
+    # of them lands B within seconds. The one that lost that race is now
+    # behind B, which has its whole window ahead of it — and used to be held
+    # to what was left of A's. On 2026-09-19 `854144ab` settled at 21:45:25,
+    # `0c15ba3d` was promoted at 21:45:32, and at 21:47:22 a green, gated round
+    # was refused "0c15ba3d is still under observation after waiting 17 min"
+    # and reaped. Each new promotion restarts the clock, `SETTLE_QUEUE_CAP`
+    # times at most; every one of them must have settled, not merely cleared.
+    behind = [waited_on] if waited_on else []
     while observed and time.monotonic() < deadline:
         time.sleep(poll)
         observed = S.read_current()
+        now_on = str((observed or {}).get("commit") or "")
+        if now_on and now_on not in behind:
+            if len(behind) >= SETTLE_QUEUE_CAP:
+                break
+            behind.append(now_on)
+            deadline = time.monotonic() + max_wait
     why = ""
     if S.is_halted():
         why = f"promotions are halted: {S.HALTED_PATH}"
@@ -777,14 +796,17 @@ def wait_for_settle(max_wait: float | None = None, *, poll: float | None = None,
         why = "a rollback request is pending — not landing on top of a revert"
     elif observed:
         why = (f"{str(observed.get('commit'))[:8]} is still under observation "
-               f"({observed.get('state')}) after waiting {max_wait / 60:.0f} min for it to settle")
-    elif waited_on and not _settled(waited_on):
+               f"({observed.get('state')}) after waiting {max_wait / 60:.0f} min for it to settle"
+               + (f", behind {len(behind)} promotion(s) in a row" if len(behind) > 1 else ""))
+    else:
         # `current.json` also clears when the guardian ROLLS BACK: it deletes
         # a rollback request the moment it reads one, and its own error-window
         # rollbacks never write one, so an empty request file proves nothing.
-        # Only a `settled` row for the commit waited on says it survived.
-        why = (f"{waited_on[:8]} left observation without settling (rolled back?) — "
-               f"not landing a round that ran on top of it")
+        # Only a `settled` row for a commit waited on says it survived.
+        unsettled = [c for c in behind if not _settled(c)]
+        if unsettled:
+            why = (f"{unsettled[0][:8]} left observation without settling (rolled back?) — "
+                   f"not landing a round that ran on top of it")
     if why:
         if round_id:
             _land_failed(round_id, why, external=True, waited_for_settle=True)
