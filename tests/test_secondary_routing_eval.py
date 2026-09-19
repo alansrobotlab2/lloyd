@@ -526,8 +526,23 @@ def test_each_production_call_site_names_its_own_job():
             f"{fn.__name__} does not pass its own job name to _endpoint")
 
 
-def _router_call_sites() -> list[str]:
-    """Every call to `app.secondary_models._endpoint` in the checkout, as
+# Trees the scan is not about. `web` holds no Python; `_pipeline` holds the
+# generated layer, which is gitignored — and being gitignored is what let this
+# scan ship red: a gate runs in a clean worktree where `_pipeline` does not
+# exist, so only the live checkout ever walked it. It is skipped for two
+# independent reasons, both pinned below: it holds two *directories* named
+# `Router.py` (`_pipeline/vault-derived/facts/` and
+# `_pipeline/backups/preidrepair-20260909T012928Z/facts/`), and `Path.rglob`
+# matches directories, so reading every `*.py` match raised `IsADirectoryError`;
+# and it holds generated *copies* of real source files (`okf-check/<date>/skills/
+# system-health-check/system_health_check.py`), which would report an offence at
+# a path nobody can fix.
+_SCAN_SKIP_DIRS = frozenset({".venvs", "node_modules", ".git", ".worktrees",
+                             "_pipeline"})
+
+
+def _router_call_sites(root: Path = ROOT) -> list[str]:
+    """Every call to `app.secondary_models._endpoint` under `root`, as
     `path:lineno`, with the offence for any that names no job.
 
     Found syntactically, not by grep: a grep for `_endpoint(` also lands on
@@ -538,16 +553,29 @@ def _router_call_sites() -> list[str]:
     local `from app.secondary_models import _endpoint` or a qualified
     `secondary_models._endpoint(...)` — which is what makes the scan about this
     router rather than about a name.
+
+    `root` is a parameter so the scan can be pointed at a synthetic tree: the
+    live checkout has no offending call site to find, so a scan that can only be
+    aimed at the live tree is a check nobody can prove still checks. Every test
+    below runs the same code path the live assertion runs.
     """
     import ast
 
     offenders: list[str] = []
-    for path in sorted(ROOT.rglob("*.py")):
-        if {".venvs", "node_modules", ".git", ".worktrees"} & set(path.parts):
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
+        if _SCAN_SKIP_DIRS & set(rel.parts):
+            continue
+        # `is_file`, not just the skip set: `rglob("*.py")` yields directories
+        # too, and the live tree has two of them. `OSError` covers the rest —
+        # a generated tree that vanishes mid-scan between listing and reading —
+        # and the synthetic-offender test is what says skipping cannot make the
+        # scan quietly inert.
+        if not path.is_file():
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-        except SyntaxError:
+        except (SyntaxError, OSError):
             continue
         imports_it = any(
             isinstance(n, ast.ImportFrom)
@@ -568,7 +596,6 @@ def _router_call_sites() -> list[str]:
             names_a_job = (isinstance(first, ast.Constant) and isinstance(first.value, str)
                            and bool(first.value.strip()))
             if not names_a_job:
-                rel = path.relative_to(ROOT)
                 offenders.append(f"{rel}:{node.lineno}")
     return offenders
 
@@ -594,6 +621,103 @@ def test_no_caller_of_the_router_asks_it_to_guess_a_job():
         f"these call sites call app.secondary_models._endpoint without naming a job: "
         f"{offenders}. `_endpoint` has no default on purpose — pass the job the work "
         "is (`uptake`, `cluster_judge`, or one of the five routed jobs).")
+
+
+def test_the_caller_scan_neither_crashes_on_nor_reports_a_directory_named_py(tmp_path):
+    """The tree this scan walks is not only source. The live checkout holds two
+    *directories* whose names end in `.py` — `_pipeline/vault-derived/facts/Router.py`
+    and its twin under `_pipeline/backups/` — and `Path.rglob("*.py")` matches
+    directories, so `read_text` raised `IsADirectoryError` and the test that is
+    supposed to guard every future routing change was red at HEAD for a reason no
+    diff could fix. It shipped green because a gate runs in a clean worktree and
+    `_pipeline` is gitignored, so the worktree never had the directory to trip on.
+
+    A generated entity directory is not a call site, so the correct answer for
+    this tree is an empty list and no escaped OS error.
+    """
+    for d in (tmp_path / "facts" / "Router.py",
+              tmp_path / "_pipeline" / "backups" / "preidrepair-x" / "facts" / "Router.py"):
+        (d / "state").mkdir(parents=True)
+        (d / "state" / "note.md").write_text("# Router\n", encoding="utf-8")
+    # A source file beside the directory, so the walk has to get past the
+    # directory and keep reading to answer at all.
+    ok = tmp_path / "pkgs" / "ok.py"
+    ok.parent.mkdir()
+    ok.write_text("from app.secondary_models import _endpoint\n"
+                  "\n"
+                  "def route():\n"
+                  '    return _endpoint("title")\n', encoding="utf-8")
+    # And a call site inside the skipped generated tree, which is deliberately
+    # not reported: `_pipeline` holds copies of real scripts, so an offence there
+    # names a path nobody can edit.
+    stale = tmp_path / "_pipeline" / "reflection" / "stale-copy.py"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("from app.secondary_models import _endpoint\n"
+                     "\n"
+                     "def judge():\n"
+                     "    return _endpoint()\n", encoding="utf-8")
+
+    assert _router_call_sites(tmp_path) == []
+
+
+def test_the_caller_scan_survives_a_file_it_cannot_read(tmp_path):
+    """The `OSError` half, pinned on its own because a directory is stopped by
+    the `is_file` guard before it reaches the read: a file that exists but cannot
+    be opened — the shape of a generated tree being rewritten while this scan
+    walks it — must not raise out of the test either. `unreadable.py` holds a
+    compliant call site rather than an offence, so the assertion below means the
+    same thing whether the chmod took effect or the reader could open it anyway:
+    the scan got past it and still found the real offender.
+    """
+    unreadable = tmp_path / "unreadable.py"
+    unreadable.write_text("from app.secondary_models import _endpoint\n"
+                          "\n"
+                          "def route():\n"
+                          '    return _endpoint("uptake")\n', encoding="utf-8")
+    unreadable.chmod(0)
+    (tmp_path / "found.py").write_text(
+        "from app.secondary_models import _endpoint\n"
+        "\n"
+        "def judge():\n"
+        "    return _endpoint()\n", encoding="utf-8")
+
+    assert _router_call_sites(tmp_path) == ["found.py:4"]
+
+
+def test_the_caller_scan_finds_a_call_site_that_omits_the_job(tmp_path):
+    """The other half of the seam, and the reason `_router_call_sites` takes a
+    root: aimed at the live checkout it reports none, which is what it should do
+    and also indistinguishable from a scan that reads nothing. So the proof that
+    it still catches the offence it exists for has to be a tree built here, run
+    through the same function the live assertion above calls.
+
+    Three files, one directory named `Router.py`, and both spellings of the call
+    the scan recognises. The expectation is an exact list, so a scan that flags
+    the compliant file, misses the qualified-form offender, or reports the
+    directory is caught just as surely as one that finds nothing.
+    """
+    (tmp_path / "pkgs").mkdir()
+    (tmp_path / "facts" / "Router.py").mkdir(parents=True)
+    (tmp_path / "pkgs" / "bad.py").write_text(
+        "from app.secondary_models import _endpoint\n"
+        "\n"
+        "def judge(edge):\n"
+        "    return _endpoint()\n", encoding="utf-8")
+    (tmp_path / "pkgs" / "ok.py").write_text(
+        "from app.secondary_models import _endpoint\n"
+        "\n"
+        "def route():\n"
+        '    return _endpoint("title")\n', encoding="utf-8")
+    (tmp_path / "pkgs" / "qualified.py").write_text(
+        "import app.secondary_models as secondary_models\n"
+        "\n"
+        "def ask():\n"
+        "    return secondary_models._endpoint(None)\n"
+        "\n"
+        "def ask_ok():\n"
+        '    return secondary_models._endpoint("uptake")\n', encoding="utf-8")
+
+    assert _router_call_sites(tmp_path) == ["pkgs/bad.py:4", "pkgs/qualified.py:4"]
 
 
 def _router_copy(tmp_path):
