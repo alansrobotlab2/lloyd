@@ -263,3 +263,59 @@ def test_the_bench_script_uses_the_shared_definition():
     assert "vllm_metrics.wait_idle(" in text
     # and no second loop of its own
     assert "quiet_since = quiet_since or time.monotonic()" not in text
+
+
+# ── a landing is held for too ───────────────────────────────────────────────
+#
+# 2026-09-19: #608's landing waited 430 s for a sibling round's turn. The hold
+# ended with that turn, `youtube-digest`, `board-steward` and `bench-mine`
+# started at 17:00:23-25, the landing paused the pool at 17:00:48 — and spent
+# fourteen minutes waiting out jobs that had started seconds before it.
+
+def _landing(monkeypatch, rounds):
+    from scripts.automod import state as S
+    monkeypatch.setattr(S, "rounds_landing", lambda: list(rounds))
+
+
+def test_a_running_landing_keeps_the_hold_after_the_last_round_ends(pool, monkeypatch):
+    _landing(monkeypatch, ["SM_20260919_160709"])
+    held = pool._round_hold_held(REGISTRY)
+    assert "youtube-digest" in held and "scheduled-task" not in held
+    assert pool.round_hold_status()["engaged"] is True
+
+
+def test_the_hold_ends_with_the_landing(pool, monkeypatch):
+    _landing(monkeypatch, ["SM_20260919_160709"])
+    assert pool._round_hold_held(REGISTRY)
+    _landing(monkeypatch, [])
+    pool._landing_probe = (0.0, True)            # the cached answer has aged out
+    assert pool._round_hold_held(REGISTRY) == []
+    assert pool.round_hold_status()["engaged"] is False
+
+
+def test_the_state_dir_is_not_read_on_every_claim(pool, monkeypatch):
+    from scripts.automod import state as S
+    calls = []
+    monkeypatch.setattr(S, "rounds_landing", lambda: calls.append(1) or [])
+    for _ in range(50):
+        pool._round_hold_held(REGISTRY)
+    assert len(calls) == 1
+
+
+def test_an_unreadable_state_dir_is_not_a_landing(pool, monkeypatch):
+    from scripts.automod import state as S
+
+    def boom():
+        raise OSError("no")
+    monkeypatch.setattr(S, "rounds_landing", boom)
+    assert pool._round_hold_held(REGISTRY) == []
+
+
+def test_only_a_live_marker_counts(tmp_path, monkeypatch):
+    from scripts.automod import state as S
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path)
+    monkeypatch.setattr(S, "pid_alive", lambda pid: int(pid or 0) == 777)
+    S.write_land_marker("SM_LIVE", pid=777, by="round.land")
+    S.write_land_marker("SM_DEAD", pid=778, by="round.land")
+    (tmp_path / "SM_NONE").mkdir()
+    assert S.rounds_landing() == ["SM_LIVE"]

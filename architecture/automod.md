@@ -1265,6 +1265,15 @@ Four changes, each with its own switch or none needed:
    `bless` accepts a served commit that differs from HEAD only by such paths
    (`_served_code_is_head`), as it already did for `.md`.
 
+5. **What was held for the round stays held for its landing**
+   (`WorkerPool._landing_in_flight`, `state.rounds_landing`). The round hold
+   ended with the last round's turn, which is exactly when a waiting landing
+   proceeds: the first landing under the changes above (#608) waited 430 s for
+   a sibling turn, three held sources were released 25 s before it paused the
+   pool, and it then waited fourteen minutes for them. A live land marker now
+   keeps the hold engaged; exempt sources are unaffected. Asked at most every
+   5 s; fails open.
+
 Scorecard row 9 carries `gates_rescued`, `reviews_unavailable` (should fall to
 near zero) and `landed_without_restart`. `tests/test_landing_review_deadlock.py`
 and `tests/test_landing_without_restart.py` pin all four; `tests/conftest.py`

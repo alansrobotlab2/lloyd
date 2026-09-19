@@ -680,6 +680,25 @@ def land_in_progress(round_id: str) -> dict | None:
     return rec
 
 
+def rounds_landing() -> list[str]:
+    """Round ids with a LIVE land marker: a landing waiting for the other
+    rounds' turns, for the lock, for idle, or restarting. One glob over the
+    rounds directory, cheap enough for the worker pool to ask on a claim."""
+    out: list[str] = []
+    try:
+        markers = sorted(ROUNDS_DIR.glob("*/land.running"))
+    except OSError:
+        return out
+    for path in markers:
+        rid = path.parent.name
+        try:
+            if land_in_progress(rid):
+                out.append(rid)
+        except Exception:  # noqa: BLE001 — an unreadable marker is not a landing
+            continue
+    return out
+
+
 def update_run_spec_base(round_id: str, base: str) -> bool:
     """Move the round's recorded base after a rebase.
 

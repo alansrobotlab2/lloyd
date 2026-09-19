@@ -85,6 +85,9 @@ def kv_gate_config() -> dict[str, Any]:
 # time-sensitive and short, and a user-visible schedule slipping by an hour
 # is its own failure.
 ROUND_SOURCE = "autocode"
+# How stale the pool's answer to "is a landing running" may be. Claims come
+# every second or two from every idle slot; a landing lasts minutes.
+_LANDING_PROBE_SECONDS = 5.0
 DEFAULT_ROUND_HOLD_EXEMPT: tuple[str, ...] = ("scheduled-task",)
 
 
@@ -236,6 +239,7 @@ class WorkerPool:
         self._workers: list[asyncio.Task] = []
         self._scheduler_task: Optional[asyncio.Task] = None
         self._in_flight: dict[int, dict[str, Any]] = {}
+        self._landing_probe: tuple[float, bool] = (0.0, False)
         # KV gate state, reported by `status()`. See `_kv_gate_held`.
         self._kv_gate: dict[str, Any] = {
             "engaged": False,
@@ -361,6 +365,31 @@ class WorkerPool:
             "held_sources": list(self._round_hold["held_sources"]),
         }
 
+    def _landing_in_flight(self) -> bool:
+        """Whether a landing is running (`S.rounds_landing`), asked at most
+        every `_LANDING_PROBE_SECONDS`.
+
+        The hold used to end with the last round's turn — which is exactly
+        when a waiting landing proceeds. On 2026-09-19 #608's landing waited
+        430 s for a sibling turn; when it ended, `youtube-digest`,
+        `board-steward` and `bench-mine` were released at 17:00:23-25, the
+        landing paused the pool at 17:00:48, and then spent fourteen minutes
+        waiting out jobs that had started seconds before it. What was held for
+        the round stays held for the landing the round is waiting behind.
+        Fails open: an unreadable state dir is not a landing.
+        """
+        now = time.monotonic()
+        checked, value = getattr(self, "_landing_probe", (0.0, False))
+        if now - checked < _LANDING_PROBE_SECONDS:
+            return value
+        try:
+            from scripts.automod import state as S
+            value = bool(S.rounds_landing())
+        except Exception:  # noqa: BLE001
+            value = False
+        self._landing_probe = (now, value)
+        return value
+
     def _round_hold_held(self, registry: dict[str, Any]) -> list[str]:
         """Sources this claim must skip because an autocode round is running.
 
@@ -394,7 +423,7 @@ class WorkerPool:
         running = {
             str(v.get("source") or "") for v in self._in_flight.values()
         }
-        if ROUND_SOURCE not in running:
+        if ROUND_SOURCE not in running and not self._landing_in_flight():
             self._release_round_hold()
             return []
         exempt = set(cfg.get("exempt", DEFAULT_ROUND_HOLD_EXEMPT)) | {ROUND_SOURCE}
