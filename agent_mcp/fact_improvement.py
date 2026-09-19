@@ -40,7 +40,11 @@ fact file: three writers of `expired_at` would be the same drift bug
 
 Dry-run by default. `apply=True` is opt-in, and each run writes a record under
 `_pipeline/improvement/` with before/after active-fact counts so a run can be
-audited or its reasoning re-read afterwards.
+audited or its reasoning re-read afterwards. That record also names the fact
+tree, the store file and the code commit it acted on, and flags itself
+`isolated` when those are not the production locations — without them, a
+verification pass against a redirected copy and a real expiration are
+byte-shape identical in the same directory (#700).
 """
 
 from __future__ import annotations
@@ -51,6 +55,8 @@ import logging
 import re
 from pathlib import Path
 
+from app import paths as _paths
+from app.gitinfo import head_commit as _head_commit
 from app.paths import LLOYD_HOME, VAULT_FACTS_ROOT, VAULT_ROOT
 from agent_mcp._shared import _find_entity_dir
 from agent_mcp.facts import _apply_fact_marks, _detect_contradictions_sync
@@ -827,6 +833,45 @@ def _fact_entity_recall(limit: int = 20) -> float | None:
         return None
 
 
+# ── what a record has to say about itself (#700) ─────────────────────────────
+
+def run_provenance() -> dict:
+    """Which fact tree, which store and which commit this pass is acting on.
+
+    `RECORD_DIR` is code-relative, while the tree and the store are
+    env-overridable (`LLOYD_FACTS_ROOT`, `LLOYD_KG_DB` in `app.paths`). So code
+    aimed at a copy wrote a byte-shape-identical record into the live audit
+    trail: five `--apply` records from 2026-09-09 report 32 expirations that
+    never reached the live knowledge graph — all 32 condemned facts are still
+    active, and `facts_idx` holds no row stamped 09-09 — and nothing in the
+    JSON said which store they described. A deletion loop's audit trail must not
+    be able to look like a deletion that did not happen.
+
+    `isolated` is what separates the two readings, and it compares against the
+    BUILT-IN defaults (`VAULT_FACTS_ROOT_DEFAULT`, `VAULT_KG_DB_DEFAULT`), not
+    against `VAULT_FACTS_ROOT`/`VAULT_KG_DB`: those are precisely the constants
+    the environment moves, so a run checked against them would report a redirected
+    copy as production. The commit is read from the tree the CODE runs from
+    (`LLOYD_HOME`), which is also what distinguishes a worktree run from a live
+    one; `app.gitinfo.head_commit` returns None rather than raising, so the key
+    is stamped `"unknown"` rather than going missing.
+    """
+    facts_root = Path(FACTS_ROOT)
+    try:
+        kg_db = Path(_store().path)
+    except Exception:  # noqa: BLE001 - StoreUnavailable and anything the driver raises
+        # Name the file it would have written, rather than losing the key.
+        kg_db = Path(_paths.VAULT_KG_DB)
+    isolated = (facts_root.resolve() != Path(_paths.VAULT_FACTS_ROOT_DEFAULT).resolve()
+                or kg_db.resolve() != Path(_paths.VAULT_KG_DB_DEFAULT).resolve())
+    return {
+        "facts_root": str(facts_root),
+        "kg_db": str(kg_db),
+        "git_head": _head_commit(LLOYD_HOME) or "unknown",
+        "isolated": bool(isolated),
+    }
+
+
 # ── the operation ────────────────────────────────────────────────────────────
 
 def run_improvement(apply: bool = False, sources=("corrections", "drift"),
@@ -924,6 +969,9 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
     record_obj = {
         "ran_at": now_iso,
         "apply": bool(apply),
+        # `facts_root`, `kg_db`, `git_head`, `isolated` (#700): which tree and
+        # which store the counts below describe, and which code produced them.
+        **run_provenance(),
         "sources": list(sources) if not entities else ["explicit"],
         "days": days,
         "signals": len(signals),

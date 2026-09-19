@@ -26,14 +26,27 @@ SCREENSHOTS_DIR = LOGS_DIR / "screenshots"
 
 # The fact tree (one dir per entity, markdown fact files). LLOYD_FACTS_ROOT
 # lets a rebuild extract into a fresh tree without touching the live one.
+#
+# The `*_DEFAULT` pair below is the same location spelled WITHOUT the override,
+# and exists so a run can name what it actually acted on (#700): five
+# improve-pass `--apply` records from 2026-09-09 reported 32 fact expirations
+# that never reached the live store — all 32 facts are still active — and the
+# JSON could not say which tree or which store it described, because
+# `RECORD_DIR` is code-relative while these two paths are env-overridable. A
+# guard that compared a run against `VAULT_FACTS_ROOT` would be comparing it
+# against the override, which is how a copy certifies itself as production.
+VAULT_FACTS_ROOT_DEFAULT = VAULT_DERIVED_ROOT / "facts"
 VAULT_FACTS_ROOT = Path(os.environ["LLOYD_FACTS_ROOT"]) if os.environ.get("LLOYD_FACTS_ROOT") \
-    else VAULT_DERIVED_ROOT / "facts"
+    else VAULT_FACTS_ROOT_DEFAULT
 
 # The knowledge-graph store: edges, aliases, entity registry and the fact
 # index live in one SQLite file (app.kg_store). Nothing opens it except that
-# module. LLOYD_KG_DB overrides the location for rebuilds and tests.
+# module. LLOYD_KG_DB overrides the location for rebuilds and tests;
+# `VAULT_KG_DB_DEFAULT` is the built-in location, env-immune for the reason
+# above.
+VAULT_KG_DB_DEFAULT = VAULT_DERIVED_ROOT / "kg.sqlite"
 VAULT_KG_DB = Path(os.environ["LLOYD_KG_DB"]) if os.environ.get("LLOYD_KG_DB") \
-    else VAULT_DERIVED_ROOT / "kg.sqlite"
+    else VAULT_KG_DB_DEFAULT
 
 # The research topic registry: what to research, what came of it, and the
 # feedback that keeps a generator from re-proposing it (app.research_store).

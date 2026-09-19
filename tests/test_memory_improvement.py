@@ -26,6 +26,7 @@ Run: .venvs/lloyd/bin/python -m pytest tests/test_memory_improvement.py
 import asyncio
 import importlib.util
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +40,7 @@ sys.path.insert(0, str(ROOT))
 from agent_mcp import fact_improvement as fi          # noqa: E402
 from agent_mcp import memory_ops                       # noqa: E402
 from app import kg_store                               # noqa: E402
+from app import paths as app_paths                     # noqa: E402
 
 
 # ── fixture: a fact tree + store + vault, all in tmp_path ────────────────────
@@ -508,6 +510,118 @@ def test_run_record_carries_before_after_counts_and_is_persisted(world):
     assert on_disk["before_active"] == 2 and on_disk["after_active"] == 1
 
 
+# ── 2b. #700: a run record names the tree, the store and the commit ──────────
+#
+# Five `--apply` records from 2026-09-09 report 32 fact expirations that never
+# reached the live knowledge graph: all 32 condemned facts are still active and
+# `facts_idx` holds no row stamped 09-09. Nothing in those records said which
+# fact tree or which sqlite file the run had acted on, and because `RECORD_DIR`
+# is code-relative while `LLOYD_FACTS_ROOT`/`LLOYD_KG_DB` are env-overridable, a
+# run aimed at a copy lands in the same directory as a real one. A deletion
+# loop's audit trail must not be able to read as a deletion that did not
+# happen, so every record now describes itself. The four keys below are asserted
+# on the FILE, because the file is the artifact a reader actually opens.
+
+def _persisted_record(rec: dict) -> dict:
+    """The JSON this run wrote under RECORD_DIR, not the returned dict."""
+    path = Path(rec["record_path"])
+    assert path.parent == Path(fi.RECORD_DIR), "the record must live under RECORD_DIR"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_record_names_the_fact_tree_store_and_commit_it_acted_on(world, apply):
+    """The record is the only evidence of a deletion, so it has to name what it
+    deleted from — dry-run and apply alike."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "TTS", "state", [
+        {"fact": "TTS built-in voices are working and returning 200 OK.",
+         "created_at": _days_ago(30)},
+        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+         "created_at": _days_ago(2)},
+    ])
+    _reindex(st, facts_root)
+    rec = fi.run_improvement(apply=apply, sources=("drift",), days=3)
+    on_disk = _persisted_record(rec)
+    assert on_disk["apply"] is apply
+    # The tmp tree and the tmp store, never the live locations.
+    assert on_disk["facts_root"] == str(facts_root)
+    assert on_disk["kg_db"] == str(st.path)
+    assert on_disk["facts_root"] != str(app_paths.VAULT_FACTS_ROOT_DEFAULT)
+    assert on_disk["kg_db"] != str(app_paths.VAULT_KG_DB_DEFAULT)
+    assert re.fullmatch(r"[0-9a-f]{40}", on_disk["git_head"]), on_disk["git_head"]
+    assert on_disk["isolated"] is True, "a redirected run must say so"
+
+
+def test_record_stamps_git_head_unknown_when_git_cannot_answer(world, monkeypatch):
+    """`app.gitinfo.head_commit` returns None rather than raising; the key may
+    never be absent, or a reader cannot tell 'no commit' from 'no such field'."""
+    monkeypatch.setattr(fi, "_head_commit", lambda root: None)
+    rec = fi.run_improvement(sources=("drift",), days=3)
+    assert _persisted_record(rec)["git_head"] == "unknown"
+
+
+def test_a_run_on_the_production_locations_is_not_marked_isolated(world, monkeypatch,
+                                                                  tmp_path):
+    """The stamp has to be able to say False, or every future record reads as a
+    verification pass and the flag says nothing. Stands the production pair in
+    for a tmp pair: what binds here is that the resolved tree and store equal
+    the defaults the record compares against."""
+    prod_facts = tmp_path / "prod-facts"
+    prod_facts.mkdir()
+    prod_db = tmp_path / "prod-kg.sqlite"
+    monkeypatch.setattr(fi._paths, "VAULT_FACTS_ROOT_DEFAULT", prod_facts)
+    monkeypatch.setattr(fi._paths, "VAULT_KG_DB_DEFAULT", prod_db)
+    monkeypatch.setattr(fi, "FACTS_ROOT", prod_facts)
+    kg_store.configure(prod_db)
+    rec = fi.run_improvement(sources=("drift",), days=3)
+    on_disk = _persisted_record(rec)
+    assert on_disk["facts_root"] == str(prod_facts)
+    assert on_disk["kg_db"] == str(prod_db)
+    assert on_disk["isolated"] is False
+
+
+def test_an_environment_redirect_still_reads_as_isolated(world, monkeypatch):
+    """`LLOYD_FACTS_ROOT`/`LLOYD_KG_DB` move `app.paths.VAULT_FACTS_ROOT` and
+    `VAULT_KG_DB` along with them, so comparing a run against THOSE constants is
+    exactly how a copy certifies itself as production. The record compares
+    against the built-in defaults, which the env cannot move."""
+    facts_root, st, _ = world
+    monkeypatch.setattr(fi._paths, "VAULT_FACTS_ROOT", facts_root)
+    monkeypatch.setattr(fi._paths, "VAULT_KG_DB", st.path)
+    rec = fi.run_improvement(sources=("drift",), days=3)
+    assert _persisted_record(rec)["isolated"] is True
+
+
+def test_the_default_paths_cannot_be_moved_by_the_environment(tmp_path):
+    """The comparison target has to be env-immune or the flag is self-declared.
+    Reloaded under an override: the overridable paths move, the defaults do
+    not."""
+    import importlib
+    import os
+
+    from app import paths as paths_mod
+    expected = paths_mod.LLOYD_HOME / "_pipeline" / "vault-derived"
+    saved = {k: os.environ.get(k) for k in ("LLOYD_FACTS_ROOT", "LLOYD_KG_DB")}
+    try:
+        os.environ["LLOYD_FACTS_ROOT"] = str(tmp_path / "copy-facts")
+        os.environ["LLOYD_KG_DB"] = str(tmp_path / "copy-kg.sqlite")
+        moved = importlib.reload(paths_mod)
+        assert moved.VAULT_FACTS_ROOT == tmp_path / "copy-facts"
+        assert moved.VAULT_KG_DB == tmp_path / "copy-kg.sqlite"
+        assert moved.VAULT_FACTS_ROOT_DEFAULT == expected / "facts"
+        assert moved.VAULT_KG_DB_DEFAULT == expected / "kg.sqlite"
+        assert moved.VAULT_FACTS_ROOT != moved.VAULT_FACTS_ROOT_DEFAULT
+        assert moved.VAULT_KG_DB != moved.VAULT_KG_DB_DEFAULT
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        importlib.reload(paths_mod)
+
+
 def test_run_reports_the_metric_it_claims_to_move(world, monkeypatch):
     """The acceptance bar for #376: a change that cannot move
     `fact_entity_recall` is not this feature — so the run carries the number."""
@@ -742,6 +856,30 @@ def test_improve_tool_defaults_to_dry_run(world):
     res = memory_ops.improve({"sources": ["drift"], "days": 3})
     assert res["apply"] is False and res["actions_taken"] == 0
     assert _active(st) == 2
+
+
+def test_the_improve_tool_verb_records_what_it_acted_on(world):
+    """The seam the 09-09 records came through: an agent calls `improve` over
+    MCP with `apply=true`, and the file that lands in `_pipeline/improvement/`
+    is written by `run_improvement` two frames away. Self-description has to
+    survive that hop, or the one entry point that can delete facts is the one
+    whose record cannot say which store it deleted from."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "TTS", "state", [
+        {"fact": "TTS built-in voices are working and returning 200 OK.",
+         "created_at": _days_ago(30)},
+        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+         "created_at": _days_ago(2)},
+    ])
+    _reindex(st, facts_root)
+    res = memory_ops.improve({"sources": ["drift"], "days": 3, "apply": True})
+    assert res["actions_taken"] == 1 and _active(st) == 1
+    on_disk = _persisted_record(res)
+    assert on_disk["apply"] is True
+    assert on_disk["facts_root"] == str(facts_root)
+    assert on_disk["kg_db"] == str(st.path)
+    assert re.fullmatch(r"[0-9a-f]{40}", on_disk["git_head"]), on_disk["git_head"]
+    assert on_disk["isolated"] is True
 
 
 def test_annotation_tables_classify_the_new_verbs():
