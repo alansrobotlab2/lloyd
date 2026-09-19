@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -427,6 +428,143 @@ def test_the_real_09_07_to_09_08_query_swap_is_reported_as_unjoinable(capsys):
     assert "cannot evaluate" in out
 
 
+#: A window in which every night shares the same 20 ``records[].id`` values, so
+#: every one of its 4 transitions joins. The query set changed once in this
+#: series — between 09-07 and 09-08 — and never again through 09-14.
+JOINY_WINDOW = ("2026-09-09", "2026-09-14")
+
+
+def test_strict_makes_an_unjoinable_pair_a_non_zero_exit(capsys):
+    """Clause 1's *error*, at the level a caller can see it.
+
+    An unjoinable pair prints ``ERROR … cannot evaluate`` and, by default, still
+    exits 0: an audit that reports bad news has succeeded (``main``'s docstring,
+    the same rule as the withheld count). That is right for a human reading the
+    report and wrong for a caller that must not treat "no delta printed" as
+    "nothing wrong". ``--strict`` is the difference between exit 0 and exit 1 on
+    exactly this window — 13 nights, 12 transitions, one unjoinable pair
+    (09-07 -> 09-08) — and nothing else about the run changes.
+    """
+    argv = ["--since", AUDIT_WINDOW[0], "--until", AUDIT_WINDOW[1], "--no-claims"]
+    assert main(argv) == 0, "without --strict the same window exits 0"
+    capsys.readouterr()
+    assert main(argv + ["--strict"]) == 1, (
+        "with --strict the window holding one unjoinable pair must exit non-zero")
+    out = capsys.readouterr().out
+    assert "queries not joinable by records[].id" in out, \
+        "the non-zero exit must carry the report, not replace it"
+    assert "transitions in window:      12" in out
+    assert "transitions audited:        11  (1 unjoinable by records[].id)" in out
+
+
+def test_strict_exits_zero_when_every_transition_in_the_window_joins(capsys):
+    """The non-zero exit is about the data, not a default that always fires.
+
+    2026-09-09..2026-09-14 is 5 nights / 4 transitions, all joinable: the one
+    query-set change in this series happened earlier, between 09-07 and 09-08.
+    Without this the flag could be a constant 1 and no test here would notice.
+    """
+    argv = ["--since", JOINY_WINDOW[0], "--until", JOINY_WINDOW[1],
+            "--no-claims", "--strict"]
+    assert main(argv) == 0, "an all-joinable window must exit 0 under --strict"
+    out = capsys.readouterr().out
+    assert "transitions in window:      4" in out
+    assert "transitions audited:        4" in out
+    assert "ERROR" not in out
+
+
+# ── the process boundary the nightly job actually crosses ────────────────────
+#
+# Everything above calls ``main()`` in this process. That is the right shape for
+# asserting statistics, and it is the wrong shape for the clause the nightly job
+# depends on: the runner's Step 4 is a shell line, so what it sees is the
+# interpreter's exit status, not main()'s return value. The bridge between them —
+# ``if __name__ == "__main__": raise SystemExit(main())``, and argparse turning a
+# ``--strict`` on the command line into ``args.strict`` — is a separate artifact,
+# and dropping either one leaves the 30 in-process nodes green while the gate
+# still cannot see a broken join. These two run the shipped module as the job
+# runs it and assert on the process, not the function.
+
+def _run_module(*args: str) -> subprocess.CompletedProcess:
+    """Run the module the way the skill's Step 4 does: ``cd <repo> && python -m``.
+
+    ``-m`` resolves the ``scripts`` package off the CWD, so the checkout root is
+    both the import root and where ``default_baselines_dir()`` lands without
+    ``LLOYD_ROOT`` — the same two facts the nightly job relies on. The interpreter
+    is the one running pytest, not a hardcoded path, so the gate's candidate venv
+    is the thing under test.
+    """
+    return subprocess.run([sys.executable, "-m", "scripts.eval_trend_stats", *args],
+                          capture_output=True, text=True, cwd=ROOT, timeout=300)
+
+
+def test_the_module_exits_1_on_an_unjoinable_pair_under_strict():
+    """Clause 1's error, at the level the nightly gate reads it.
+
+    A fresh interpreter, the real command line, and the real shipped baselines:
+    the 2026-09-04..09-17 window carries the unjoinable 09-07 -> 09-08 pair, so
+    ``--strict`` must exit non-zero and name the ids on stdout, while the same
+    invocation without ``--strict`` reports and exits 0. Both arms get identical
+    arguments apart from the flag, and their stdout must be byte-identical:
+    ``--strict`` changes the exit status and nothing a human reads, so a change
+    that also altered the report would be caught here rather than in the morning.
+    """
+    proc = _run_module("--since", AUDIT_WINDOW[0], "--until", AUDIT_WINDOW[1],
+                       "--strict")
+    assert proc.returncode == 1, \
+        f"--strict over an unjoinable pair must exit 1; got {proc.returncode}\n{proc.stderr[-800:]}"
+    assert "queries not joinable by records[].id" in proc.stdout
+    assert "qwen35-users" in proc.stdout, "the named ids are the report's evidence"
+
+    lenient = _run_module("--since", AUDIT_WINDOW[0], "--until", AUDIT_WINDOW[1])
+    assert lenient.returncode == 0, \
+        f"without --strict the audit reports and succeeds; got {lenient.returncode}\n{lenient.stderr[-800:]}"
+    assert "cannot evaluate" in lenient.stdout
+    assert lenient.stdout == proc.stdout, \
+        "--strict changes the exit status, never what is printed"
+
+
+def test_the_module_exits_zero_under_strict_when_every_pair_in_the_window_joins():
+    """The other arm of the CLI contract above, at the same level.
+
+    2026-09-11 → 09-12 shares its 20 query ids on both sides, so the identical
+    command line minus the one-night gap must exit 0. Both arms asserted as
+    subprocesses is the point: argparse turned the flag on, and the pair is what
+    proves ``--strict`` discriminates. Either arm alone still passes with a
+    ``--strict`` that always fails, or never fails.
+    """
+    proc = _run_module("--since", "2026-09-11", "--until", "2026-09-12", "--strict")
+    assert proc.returncode == 0, (
+        f"--strict must pass where every pair joins; got {proc.returncode}\n"
+        f"stdout tail: {proc.stdout[-600:]}\nstderr tail: {proc.stderr[-600:]}")
+    assert "transitions in window:      1" in proc.stdout, \
+        "the window must really hold a transition, or a zero exit proves nothing"
+    assert "queries not joinable by records[].id" not in proc.stdout
+
+
+def test_the_module_fails_before_printing_a_report_on_a_bad_invocation():
+    """Two wrong invocations, both caught before any interval reaches stdout.
+
+    ``--since`` / ``--until`` / ``--strict`` are the command line the nightly skill
+    tells the runner to pass, so their parsing is shipped interface too. An unknown
+    flag is argparse's own contract: exit 2, usage on stderr. A malformed date is
+    not argparse's — it reaches ``load_window`` and raises — so this pins the part
+    that matters to a gate: the run fails, names the offending value, and prints
+    no report, rather than exiting 0 on an empty window that reads like
+    "nothing moved". The traceback shape itself is recorded as a finding on #608,
+    not asserted here, so this node does not lock in the worst of the two shapes.
+    """
+    unknown = _run_module("--mcmemar-please")
+    assert unknown.returncode == 2, f"argparse rejects an unknown flag with 2, got {unknown.returncode}"
+    assert "unrecognized arguments" in unknown.stderr
+
+    bad = _run_module("--since", "not-a-date")
+    assert bad.returncode != 0, "a malformed window may never exit 0"
+    assert "not-a-date" in bad.stderr, "the failure names the value it could not parse"
+    assert "transitions in window" not in bad.stdout, \
+        "a broken invocation prints no report; an empty window would, and reads as 'nothing moved'"
+
+
 def test_the_third_consecutive_entity_decline_claim_is_labelled_unsupported(capsys):
     """Test case #1 of backlog #608, answered in writing.
 
@@ -562,14 +700,27 @@ def test_the_contract_is_printed_with_the_audit_that_enforces_it(capsys):
 
 # ── the reporting contract the audit exists to enforce (clause 5) ─────────────
 #
-# These read the live vault, the same idiom tests/test_automod_hardening.py
-# :644-654 uses for `skills/autonomy-data-pipeline/SKILL.md`: the skill is the
-# artifact the nightly runner actually loads, so a contract that lives only in
-# the audit's docstring is a contract the runner never sees. The vault is not
-# pinned to the commit under test — that is the known limit of the idiom, and
-# the failure message says so rather than implying the code is at fault.
+# The skill is the artifact the nightly runner actually loads, so a contract that
+# lives only in the audit's docstring is a contract the runner never sees. That
+# makes it the one clause here whose subject is not in this repo — and the two
+# ways of getting at it are both wrong on their own:
+#
+#   * reading the working tree proves what the vault says *today*, which is not
+#     what this commit shipped: a concurrent session's uncommitted edit moves the
+#     target from under the assertion;
+#   * skipping when it is absent is the failure this whole file argues against at
+#     `test_the_real_series_...` above — a skipped acceptance check is a gate that
+#     reads green because nobody looked.
+#
+# So: read the vault's committed `HEAD`, via git, and fail loudly when that is
+# unreadable. Committed HEAD is the state a person can revert to and the state
+# `automod_vault_land` wrote, so a pass means the contract is landed, not merely
+# drafted. The residual limit — the vault is its own tree, so HEAD advances
+# independently of this commit — is named in each failure message rather than
+# implied away.
 
-SKILL_PATH = Path.home() / "obsidian" / "skills" / "retrieval-eval" / "SKILL.md"
+VAULT = Path.home() / "obsidian"
+SKILL_RELPATH = "skills/retrieval-eval/SKILL.md"
 
 # The exact instruction #608 retires. It is quoted here so that restoring it is
 # caught, while the new text may still *discuss* 0.05 — it must, to explain why
@@ -580,9 +731,15 @@ RETIRED_INSTRUCTION = re.compile(
 
 @pytest.fixture(scope="module")
 def skill_text() -> str:
-    if not SKILL_PATH.exists():
-        pytest.skip(f"{SKILL_PATH} is not on this box")
-    return SKILL_PATH.read_text()
+    proc = subprocess.run(["git", "-C", str(VAULT), "show", f"HEAD:{SKILL_RELPATH}"],
+                          capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        pytest.fail(
+            f"clause 5 is unverifiable: `git -C {VAULT} show HEAD:{SKILL_RELPATH}` "
+            f"failed ({proc.stderr.strip()[:200]}). The nightly reporting contract "
+            f"is this item's fifth clause; it must not read green because the "
+            f"artifact it grades could not be read.")
+    return proc.stdout
 
 
 def test_the_skill_points_the_nightly_runner_at_the_audit(skill_text):
@@ -637,6 +794,51 @@ def test_the_skill_does_not_send_the_nightly_job_to_the_pinned_corpus_arm(skill_
     assert "evalpin" in skill_text
     assert "GPU 0" in skill_text
     assert "No pinned-corpus drift arm runs in this job" in skill_text
+
+
+def test_the_skill_quotes_drift_figures_the_baselines_support(skill_text):
+    """Every drift number in the skill must be the number the data prints.
+
+    The skill's Step 4 tells the nightly runner to put a concrete `corpus` diff in
+    its sample sentence, and a worked example there is the one thing a runner
+    copies verbatim. The first version of that text quoted `facts` going
+    251,685 → 351,365 (+39.6 %) for 09-08 → 09-09 and a sample `drift facts
+    +587`; neither number is in any baseline on disk (251,685 is the 09-09 value,
+    the *later* night, and no transition in the series moves `facts` by 587). A
+    prose number nobody can re-measure is how an invented drift term gets into a
+    real report, so the figures are re-derived here from the two baseline files.
+    """
+    prev, cur = load_window(default_baselines_dir(), "2026-09-08", "2026-09-09")
+    assert (prev.label, cur.label) == ("nightly-20260908", "nightly-20260909")
+    facts_prev = prev.corpus["facts"]
+    facts_cur = cur.corpus["facts"]
+    edges_prev = prev.corpus["edges_active"]
+    edges_cur = cur.corpus["edges_active"]
+    delta = facts_cur - facts_prev
+    assert (facts_prev, facts_cur) == (205779, 251685), \
+        "the two baselines the skill quotes changed under this test"
+
+    # thousands separators allowed, trailing punctuation not: [\d,]+ would eat the
+    # comma of "32,373, so" and quietly int() it back to the right value anyway
+    num = r"\d+(?:,\d{3})*"
+    quoted = re.search(rf"`facts` went ({num}) → ({num}) "
+                       rf"\(\+({num}), \+([\d.]+) %\)", skill_text)
+    assert quoted, "Step 4 must quote the 09-08 -> 09-09 facts drift"
+    assert [int(g.replace(",", "")) for g in quoted.groups()[:3]] == \
+        [facts_prev, facts_cur, delta], \
+        "the skill's facts pair and its delta must be the baselines' own numbers"
+    assert float(quoted.group(4)) == pytest.approx(100.0 * delta / facts_prev, abs=0.05), \
+        "the percent has to be the ratio of those two numbers, not a remembered one"
+
+    edges = re.search(rf"`edges_active` ({num}) → ({num})", skill_text)
+    assert edges, "Step 4 names the edge leg too, and it must carry real values"
+    assert [int(g.replace(",", "")) for g in edges.groups()] == [edges_prev, edges_cur]
+
+    sample = re.search(rf"drift facts \+({num})", skill_text)
+    assert sample, "the sample sentence carries a drift figure"
+    assert int(sample.group(1).replace(",", "")) == corpus_diff(prev, cur)["facts"], \
+        ("the sentence a nightly runner copies must show the drift term the audit "
+         "actually prints for the transition it is drawn from")
 
 
 def test_the_audit_and_the_skill_hedge_in_the_same_words(skill_text):
