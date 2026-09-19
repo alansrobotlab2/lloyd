@@ -1,0 +1,699 @@
+what: 'Backlog #875 acceptance clause 2, pinned against the real engine. These are the artifacts `875noise-a`
+  and `875noise-b` as recorded on 2026-09-13: two runs of the SAME unmodified tree, 75 seconds apart (13:59:49Z
+  and 14:01:04Z), n=20, identical recorded `config`. They moved correct_rate 0.900 -> 0.850 (-0.050) and
+  http_tool_first_rate 0.857 -> 0.786 (-0.071) while control_correct_rate held at 1.000. #691 measured
+  the same instrument and the same two magnitudes 82 s apart on 2026-09-09, at the opposite sign.'
+proves: 'Comparing b against a must exit 0: no regression, no instrument failure. Nothing here is synthesised
+  — the overall block and every per-query scoring are byte-for-byte what the eval wrote, which is why
+  the file is big. Only prompt and response text was dropped, and neither is read by the comparison.'
+why_yaml_and_not_the_json_artifacts: '`*.json` is ignored repo-wide (.gitignore:33) and `eval/baselines/`
+  is ignored outright, so the live pair exists only on the box that ran it. A clause-2 check that reads
+  those files skips on every fresh clone and proves nothing on the machine grading it, which is the fence-blind
+  failure this item is about. YAML is the tracked form; the numbers inside are not a reconstruction of
+  the pair, they are it.'
+a:
+  label: 875noise-a
+  ran_at: '2026-09-13T20:59:49.530445+00:00'
+  n_queries: 20
+  config:
+    model: primary
+    base_url: http://127.0.0.1:8096
+    system_prompt_chars: 123308
+    tool_search_enabled: false
+    baseline_tools:
+    - Bash
+    - Edit
+    - Glob
+    - Grep
+    - Read
+    - SetGoal
+    - Task
+    - TodoWrite
+    - Write
+    - ambient_decide
+    - browser_navigate
+    - browser_snapshot
+    - graph_affected
+    - graph_explain
+    - http_fetch
+    - http_request
+    - http_search
+    - ide_close_tab
+    - ide_open_file
+    - ide_open_folder
+    - mc_close_modal
+    - mc_get_state
+    - mc_navigate
+    - skills_read
+    - skills_search
+    - vault_recall
+    - vault_search
+    - vault_write
+    http_tools_in_baseline:
+    - http_fetch
+    - http_request
+    - http_search
+    browser_tools_in_baseline:
+    - browser_navigate
+    - browser_snapshot
+    disallowed_tools:
+    - discord_get_home_channel
+    - discord_list_channels
+    - discord_send
+    - discord_send_embed
+    matches_chat_router: true
+  summary:
+    overall:
+      n_queries: 20
+      correct_rate: 0.9
+      http_tool_first_rate: 0.857
+      shelled_to_web_rate: 0.0
+      no_tool_call_rate: 0.0
+      control_correct_rate: 1.0
+      latency_ms_avg: 3649.6
+      errors: 0
+    by_category:
+      public-search:
+        n: 8
+        correct_rate: 0.75
+        http_tool_first_rate: 0.75
+        shelled_to_web_rate: 0.0
+      public-fetch:
+        n: 6
+        correct_rate: 1.0
+        http_tool_first_rate: 1.0
+        shelled_to_web_rate: 0.0
+      localhost:
+        n: 3
+        correct_rate: 1.0
+        http_tool_first_rate: 0.0
+        shelled_to_web_rate: 0.0
+      structured-api:
+        n: 3
+        correct_rate: 1.0
+        http_tool_first_rate: 0.333
+        shelled_to_web_rate: 0.667
+    first_tool_counts:
+      http_search: 6
+      Bash: 6
+      http_fetch: 6
+      vault_read: 1
+      http_request: 1
+    injected_skill_counts:
+      web-search-and-fetch: 6
+      vault-search-automate: 3
+      system-health-check: 2
+      service-health-check: 2
+      local-llm-gotchas: 2
+      mcp-transport-error-recovery: 2
+      youtube-content: 2
+      tool-call-args-truncation: 1
+      tool-parameter-validation: 1
+      find-nearby: 1
+      research-agent: 1
+      python-library-pipeline: 1
+      setup-llama-cpp-python-cuda: 1
+      huggingface-model-download: 1
+      file-read-error-handling: 1
+      browser-content-extraction: 1
+      documentation-digester: 1
+      github-auth: 1
+      restart-lloyd: 1
+      thunderbird-mcp-implementation: 1
+      minecraft-modpack-server: 1
+      arxiv: 1
+      ml-paper-writing: 1
+      github-repo-management: 1
+      github-watch: 1
+      youtube-transcript: 1
+  records:
+  - id: search-qwen-release
+    category: public-search
+    scoring:
+      first_tool: http_search
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: search-vllm-flag
+    category: public-search
+    scoring:
+      first_tool: http_search
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: search-trafilatura
+    category: public-search
+    scoring:
+      first_tool: http_search
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: search-price-compare
+    category: public-search
+    scoring:
+      first_tool: http_search
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: search-news-recent
+    category: public-search
+    scoring:
+      first_tool: Bash
+      correct: false
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: date -u +"%Y-%m-%d %H:%M UTC"
+  - id: search-obscure-term
+    category: public-search
+    scoring:
+      first_tool: vault_read
+      correct: false
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: search-docs-lookup
+    category: public-search
+    scoring:
+      first_tool: http_search
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: search-comparison
+    category: public-search
+    scoring:
+      first_tool: http_search
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: fetch-docs-page
+    category: public-fetch
+    scoring:
+      first_tool: http_fetch
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: fetch-bare-url
+    category: public-fetch
+    scoring:
+      first_tool: http_fetch
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: fetch-and-extract
+    category: public-fetch
+    scoring:
+      first_tool: http_fetch
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: fetch-blog-summary
+    category: public-fetch
+    scoring:
+      first_tool: http_fetch
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: fetch-follow-links
+    category: public-fetch
+    scoring:
+      first_tool: http_fetch
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: fetch-changelog
+    category: public-fetch
+    scoring:
+      first_tool: http_fetch
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: local-backend-health
+    category: localhost
+    scoring:
+      first_tool: Bash
+      correct: true
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: false
+      bash_command: echo "--- supervisor ---"; supervisorctl -c /home/alansrobotlab/lloyd/agent-services/supervisor/supervisord.conf
+        status lloyd-mc:lloyd-backend; echo "--- http :8080/health ---"; curl -s -m 10 -w "\nHT
+  - id: local-mcp-health
+    category: localhost
+    scoring:
+      first_tool: Bash
+      correct: true
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: false
+      bash_command: 'echo "=== listeners on 8500 ==="; ss -ltnp 2>/dev/null | grep -E '':8500\b'' || echo
+        "(no tcp listener matched on 8500)"; echo; echo "=== config: what is the mcp aggregator port/scheme
+        ==="; grep -nE ''8'
+  - id: local-vllm-models
+    category: localhost
+    scoring:
+      first_tool: Bash
+      correct: true
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: false
+      bash_command: curl -s --max-time 20 http://127.0.0.1:8096/v1/models; echo; echo "exit=$?"
+  - id: api-arxiv
+    category: structured-api
+    scoring:
+      first_tool: Bash
+      correct: true
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: true
+      no_tool_call: false
+      is_web_category: false
+      bash_command: curl -s "https://export.arxiv.org/api/query?search_query=all:%22speculative%20decoding%22%20AND%20cat:cs.AI&sortBy=submittedDate&sortOrder=descending&max_results=10"
+        -o /tmp/arxiv_spec.xml; wc -c /tmp
+  - id: api-github-releases
+    category: structured-api
+    scoring:
+      first_tool: Bash
+      correct: true
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: true
+      no_tool_call: false
+      is_web_category: false
+      bash_command: "curl -s -H \"Accept: application/vnd.github+json\" \"https://api.github.com/repos/vllm-project/vllm/releases?per_page=3\"\
+        \ | python3 -c \"\nimport sys, json\nd = json.load(sys.stdin)\nif isinstance(d, dict):\n "
+  - id: api-youtube-length
+    category: structured-api
+    scoring:
+      first_tool: http_request
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: false
+      bash_command: ''
+b:
+  label: 875noise-b
+  ran_at: '2026-09-13T21:01:04.232468+00:00'
+  n_queries: 20
+  config:
+    model: primary
+    base_url: http://127.0.0.1:8096
+    system_prompt_chars: 123308
+    tool_search_enabled: false
+    baseline_tools:
+    - Bash
+    - Edit
+    - Glob
+    - Grep
+    - Read
+    - SetGoal
+    - Task
+    - TodoWrite
+    - Write
+    - ambient_decide
+    - browser_navigate
+    - browser_snapshot
+    - graph_affected
+    - graph_explain
+    - http_fetch
+    - http_request
+    - http_search
+    - ide_close_tab
+    - ide_open_file
+    - ide_open_folder
+    - mc_close_modal
+    - mc_get_state
+    - mc_navigate
+    - skills_read
+    - skills_search
+    - vault_recall
+    - vault_search
+    - vault_write
+    http_tools_in_baseline:
+    - http_fetch
+    - http_request
+    - http_search
+    browser_tools_in_baseline:
+    - browser_navigate
+    - browser_snapshot
+    disallowed_tools:
+    - discord_get_home_channel
+    - discord_list_channels
+    - discord_send
+    - discord_send_embed
+    matches_chat_router: true
+  summary:
+    overall:
+      n_queries: 20
+      correct_rate: 0.85
+      http_tool_first_rate: 0.786
+      shelled_to_web_rate: 0.0
+      no_tool_call_rate: 0.0
+      control_correct_rate: 1.0
+      latency_ms_avg: 3131.9
+      errors: 0
+    by_category:
+      public-search:
+        n: 8
+        correct_rate: 0.625
+        http_tool_first_rate: 0.625
+        shelled_to_web_rate: 0.0
+      public-fetch:
+        n: 6
+        correct_rate: 1.0
+        http_tool_first_rate: 1.0
+        shelled_to_web_rate: 0.0
+      localhost:
+        n: 3
+        correct_rate: 1.0
+        http_tool_first_rate: 0.0
+        shelled_to_web_rate: 0.0
+      structured-api:
+        n: 3
+        correct_rate: 1.0
+        http_tool_first_rate: 0.667
+        shelled_to_web_rate: 0.333
+    first_tool_counts:
+      Bash: 6
+      http_fetch: 6
+      http_search: 5
+      http_request: 2
+      Read: 1
+    injected_skill_counts:
+      web-search-and-fetch: 6
+      vault-search-automate: 3
+      system-health-check: 2
+      service-health-check: 2
+      local-llm-gotchas: 2
+      mcp-transport-error-recovery: 2
+      youtube-content: 2
+      tool-call-args-truncation: 1
+      tool-parameter-validation: 1
+      find-nearby: 1
+      research-agent: 1
+      python-library-pipeline: 1
+      setup-llama-cpp-python-cuda: 1
+      huggingface-model-download: 1
+      file-read-error-handling: 1
+      browser-content-extraction: 1
+      documentation-digester: 1
+      github-auth: 1
+      restart-lloyd: 1
+      thunderbird-mcp-implementation: 1
+      minecraft-modpack-server: 1
+      arxiv: 1
+      ml-paper-writing: 1
+      github-repo-management: 1
+      github-watch: 1
+      youtube-transcript: 1
+  records:
+  - id: search-qwen-release
+    category: public-search
+    scoring:
+      first_tool: http_search
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: search-vllm-flag
+    category: public-search
+    scoring:
+      first_tool: http_search
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: search-trafilatura
+    category: public-search
+    scoring:
+      first_tool: Bash
+      correct: false
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: for p in /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python /usr/bin/python3 /usr/bin/python;
+        do [ -x "$p" ] || continue; echo "=== $p"; $p -c "import trafilatura,sys;print('version',trafilatura.__vers
+  - id: search-price-compare
+    category: public-search
+    scoring:
+      first_tool: http_search
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: search-news-recent
+    category: public-search
+    scoring:
+      first_tool: Bash
+      correct: false
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: date -u +"%Y-%m-%d %H:%M UTC (%A)"
+  - id: search-obscure-term
+    category: public-search
+    scoring:
+      first_tool: Read
+      correct: false
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: search-docs-lookup
+    category: public-search
+    scoring:
+      first_tool: http_search
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: search-comparison
+    category: public-search
+    scoring:
+      first_tool: http_search
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: fetch-docs-page
+    category: public-fetch
+    scoring:
+      first_tool: http_fetch
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: fetch-bare-url
+    category: public-fetch
+    scoring:
+      first_tool: http_fetch
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: fetch-and-extract
+    category: public-fetch
+    scoring:
+      first_tool: http_fetch
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: fetch-blog-summary
+    category: public-fetch
+    scoring:
+      first_tool: http_fetch
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: fetch-follow-links
+    category: public-fetch
+    scoring:
+      first_tool: http_fetch
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: fetch-changelog
+    category: public-fetch
+    scoring:
+      first_tool: http_fetch
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: true
+      bash_command: ''
+  - id: local-backend-health
+    category: localhost
+    scoring:
+      first_tool: Bash
+      correct: true
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: false
+      bash_command: echo "--- HTTP :8080/health ---"; curl -s -o /tmp/h.txt -w 'http_code=%{http_code}
+        time=%{time_total}s exit=%{exitcode}\n' http://localhost:8080/health; echo "--- body ---"; head
+        -c 600 /tmp/h.txt; ec
+  - id: local-mcp-health
+    category: localhost
+    scoring:
+      first_tool: Bash
+      correct: true
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: false
+      bash_command: 'echo "=== listening sockets on 8500 ==="; ss -ltnp 2>/dev/null | grep -E '':8500\b''
+        || echo "(no TCP listener found on 8500 via ss)"
+
+        echo; echo "=== plain HTTP GET ==="; curl -sS -m 5 -o /tmp/mcp8500.b'
+  - id: local-vllm-models
+    category: localhost
+    scoring:
+      first_tool: Bash
+      correct: true
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: false
+      bash_command: curl -s --max-time 10 http://127.0.0.1:8096/v1/models; echo "---exit:$?"
+  - id: api-arxiv
+    category: structured-api
+    scoring:
+      first_tool: Bash
+      correct: true
+      used_http_tool: false
+      used_browser_tool: false
+      shelled_to_web: true
+      no_tool_call: false
+      is_web_category: false
+      bash_command: 'curl -s "https://export.arxiv.org/api/query?search_query=cat:cs.AI+AND+all:%22speculative+decoding%22&sortBy=submittedDate&sortOrder=descending&max_results=15"
+        | python3 -c "
+
+        import sys,xml.etree.Elem'
+  - id: api-github-releases
+    category: structured-api
+    scoring:
+      first_tool: http_request
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: false
+      bash_command: ''
+  - id: api-youtube-length
+    category: structured-api
+    scoring:
+      first_tool: http_request
+      correct: true
+      used_http_tool: true
+      used_browser_tool: false
+      shelled_to_web: false
+      no_tool_call: false
+      is_web_category: false
+      bash_command: ''

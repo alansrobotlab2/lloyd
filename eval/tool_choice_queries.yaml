@@ -6,9 +6,28 @@
 # and 8 http_fetch calls.
 #
 # How it is scored: the runner stops at the FIRST tool_call event, which the
-# harness yields before dispatch (app/harness/loop.py:378-388). No tool is
-# ever executed — nothing is fetched, no shell command runs — so this set is
-# safe to run repeatedly and costs one model turn per prompt.
+# harness yields before dispatch. The single-call site is
+# app/harness/loop.py:746-757, where `tc_evt = events.tool_call(...)` is built,
+# `yield tc_evt` hands it out, and only then
+# `result_evt = await _dispatch_one_tool_call(...)` runs. The parallel-batch
+# site is the same shape: Phase 1 builds and yields `events.tool_call` for every
+# call, and only after that loop does Phase 2 dispatch them via
+# `_execute_tool_call`. So closing the generator at the first `tool_call`
+# (eval/run_tool_choice_eval.py, `_first_tool_call`) means no tool ever executes
+# on either path: nothing is fetched, no shell command runs, and the set is safe
+# to run repeatedly at one model turn per prompt.
+#
+# The line range is a convenience; the symbols are the claim, and the claim is
+# structural: no `events.tool_call` is emitted after its own dispatch. Numbers
+# rot — this file has been wrong twice, first citing the context-overflow
+# recovery block (378-388, the defect #748 fixed), then citing 737-748 which a
+# later loop.py edit slid nine lines down without touching the mechanism.
+# `grep -n "events.tool_call\|yield tc_evt\|_dispatch_one_tool_call"
+# app/harness/loop.py` re-derives them; tests/test_tool_choice_eval_cost.py
+# fails on a stale range AND on a real reordering, so a wrong number here is a
+# red test rather than a trusted lie. The one thing a green test cannot tell you
+# is that nobody re-checked the number after moving the code: update it in the
+# same commit that moves it.
 #
 # Schema:
 #   id: short slug

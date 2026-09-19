@@ -117,6 +117,31 @@ def test_an_unknown_nonzero_exit_also_fails(monkeypatch):
     assert data["compare_exit"] == 3
 
 
+def test_exit_3_is_named_as_instrument_failure_not_a_regression(monkeypatch):
+    """The message a round reads when the rung fails is the only place its exit
+    codes are explained, so an unnamed 3 reads as just another regression — and
+    a regression is what a round is trained to argue past.
+
+    #875 clause 4 gives the control-set movement its own exit reason; this is
+    the half of that which reaches the reader. `tests/test_compare_tool_choice.py`
+    runs the real script and checks the code; this checks the label.
+    """
+    def _fake_run(cmd, **kw):
+        rc = 0 if "run_tool_choice_eval.py" in " ".join(map(str, cmd)) else 3
+        return types.SimpleNamespace(returncode=rc,
+                                     stdout="control_correct_rate beyond floor",
+                                     stderr="")
+    monkeypatch.setattr(G, "_run", _fake_run)
+
+    ok, msg, _ = _gate(["prefetch.py"]).rung_prompt_surface()
+    assert ok is False
+    assert "3=INSTRUMENT FAILURE" in msg
+    assert "re-run both sides" in msg
+    # 1 stays the code that MEANS a regression, and the label must not blur it.
+    assert "1=regression of the change" in msg
+    assert "control" in msg.lower()
+
+
 def test_a_clean_comparison_passes(monkeypatch):
     def _fake_run(cmd, **kw):
         return types.SimpleNamespace(returncode=0, stdout="no regression vs item9",

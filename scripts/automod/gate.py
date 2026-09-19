@@ -964,9 +964,20 @@ class Gate:
         tail = "\n".join(text.splitlines()[-15:])
         data = {"label": label, "compare_exit": cmp_.returncode}
         if cmp_.returncode != 0:
-            return False, (f"tool-choice comparison exit {cmp_.returncode} "
-                           f"(0=pass, 1=regression, 2=nothing to compare "
-                           f"against, which is not a pass): {tail}"), data
+            # Name every code the live script can return. #875 added exit 3, and
+            # a round handed an unlabelled "exit 3" reads it as just another
+            # regression -- which is the one verdict it is trained to argue
+            # past. Exit 3 is not an argument to be had: the control rows moved,
+            # the comparison certified nothing, and both sides must be re-run.
+            # This rung is the only surface where a round reads these codes now
+            # (the copy #875's first round found in workers/sources/autocode.py
+            # is gone, its prompt no longer mentions the eval at all).
+            return False, (
+                f"tool-choice comparison exit {cmp_.returncode} "
+                f"(0=pass, 1=regression of the change, 2=nothing to compare "
+                f"against which is not a pass, 3=INSTRUMENT FAILURE: the control "
+                f"set moved so this comparison certified nothing; re-run both "
+                f"sides, this is not a regression to argue past): {tail}"), data
         return True, f"tool-choice eval: no regression. {tail[-300:]}", data
 
     def _tests_delta_only(self) -> list[str] | None:

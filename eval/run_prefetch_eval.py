@@ -18,6 +18,17 @@ expectations are ignored — the facts worker is a separate path.
 The queries are run as a *first turn* (a fresh SessionFocus updated with the
 query), which is the hardest case for the lex leg: no prior-turn context.
 
+NO TOKEN COST IS REPORTED, and this is the one line why (backlog #875 clause 8):
+this script calls the search legs directly — `_search_vault_lex`,
+`_search_vault_hybrid_and_stash`, `_merge_vault_results` — so it never renders a
+`<context>` block and never asks a model anything. There is no injected text to
+count and no completion to bill, so the honest field is `injected_tokens: null`
+on every record plus `cost_note` in the header, never a number invented for a
+block this eval does not build. The artifact that answers "was it correct AND
+how many tokens did it inject" per query is
+`eval/baselines/tool-choice/*.json`, which renders the block and spends the turn
+(`eval/run_tool_choice_eval.py`); #562's cost arm joins on THAT file.
+
 Usage:
     .venvs/lloyd/bin/python eval/run_prefetch_eval.py
     .venvs/lloyd/bin/python eval/run_prefetch_eval.py --label after-ladder --notes "..."
@@ -109,6 +120,11 @@ def run(queries: list[dict], skip_hybrid: bool = False) -> list[dict]:
                 "latency_ms": round(hybrid_ms, 1),
                 "paths": [_path(r) for r in hybrid], **_score(exp, hybrid)},
             "merged": {"paths": [_path(r) for r in merged], **_score(exp, merged)},
+            # Explicit null, not an absent key: a join on this file reads "no
+            # token figure, by design" instead of a KeyError or a 0 that looks
+            # like a free retrieval (#875 clause 8). The artifact answering
+            # "correct AND how many tokens" per query is the tool-choice one.
+            "injected_tokens": None,
         })
     return records
 
@@ -132,6 +148,12 @@ def summarize(records: list[dict]) -> dict:
         if lat:
             out[f"{leg}_p50_ms"] = round(statistics.median(lat), 1)
             out[f"{leg}_p90_ms"] = round(_pct(lat, 0.9), 1)
+    # One line, in the artifact itself, saying what it cannot answer.
+    out["cost_note"] = ("no token cost recorded: this eval calls the search legs "
+                        "directly, renders no <context> block and spends no model "
+                        "turn, so there is nothing to count; per-query token cost "
+                        "lives in eval/baselines/tool-choice/*.json (backlog #875 "
+                        "clause 8, #818)")
     out["lex_landed_rate"] = round(sum(1 for r in records if r["lex"]["landed"]) / n, 3) if n else 0.0
     by_cat: dict[str, list] = defaultdict(list)
     for r in records:
@@ -183,6 +205,7 @@ def main() -> int:
         "vault_min_score": prefetch.VAULT_MIN_SCORE,
         "lex_max_terms": prefetch.VAULT_LEX_MAX_TERMS,
         "lex_max_calls": prefetch.VAULT_LEX_MAX_CALLS,
+        "cost_note": summary["cost_note"],
         "summary": summary, "records": records,
     }
     out_path = HERE / "baselines" / f"{args.label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"

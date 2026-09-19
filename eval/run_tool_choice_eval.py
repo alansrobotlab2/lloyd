@@ -8,9 +8,32 @@ skills library pointed at tools that do not exist (`web_search`, `WebSearch`)
 and named Bash + curl as the recovery path.
 
 Nothing is executed. `run_query` yields the `tool_call` event *before*
-dispatching it (`app/harness/loop.py:378-388`), so closing the generator at
-the first tool call means no shell command runs and no URL is fetched. One
-model turn per prompt.
+dispatching it — `app/harness/loop.py` builds `tc_evt = events.tool_call(...)`
+and `yield`s it a line later, and only then awaits
+`_dispatch_one_tool_call`; grep `events.tool_call` for the site (backlog #748
+fixed a version of this comment that pointed at the context-overflow recovery
+block). Closing the generator at the first tool call therefore means no shell
+command runs and no URL is fetched. One model turn per prompt.
+
+Every query records what it cost. Two figures per record, deliberately kept
+apart because they measure different things and a reader must not conflate
+them:
+
+  injected_tokens  an ESTIMATE of the size of the `<context>` block the
+                   prefetcher added to that prompt, from
+                   `prompt_builder.prompt_token_estimate` — the same estimator
+                   behind the `PROMPT_BUDGET` line, imported rather than
+                   re-derived so the two sizes cannot drift apart (backlog #875
+                   clause 7). ~4 chars/token; labelled, never a count.
+  usage            the engine's OWN counts for the one completion this query
+                   made, read off the harness's `assistant_message` / `result`
+                   events: input/output tokens and `cache_read`.
+                   `uncached_prompt_tokens` is input minus cache_read, which is
+                   the number that says what the query re-prefilled.
+
+There is no session id here and no row in `usage.db`: the eval asks its own
+engine for its own cost and writes it into its own artifact, which is what
+#818 needed and what #562's cost arm joins on.
 
 The run is production-faithful in the two ways that matter for tool choice:
 the system prompt comes from `build_system_prompt()`, and the user message
@@ -40,6 +63,12 @@ HERE = Path(__file__).resolve().parent
 LLOYD_HOME = HERE.parent
 sys.path.insert(0, str(LLOYD_HOME))
 
+# The one estimator, imported not re-derived (backlog #875 clause 7). The other
+# copy of this arithmetic — a second `CHARS_PER_TOKEN = 4` living in the eval —
+# is what let an eval's size number and the `PROMPT_BUDGET` line drift apart
+# while both still printed "tokens".
+from prompt_builder import prompt_token_estimate  # noqa: E402
+
 HTTP_TOOLS = {"http_search", "http_fetch", "http_request"}
 BROWSER_PREFIX = "browser_"
 
@@ -58,17 +87,39 @@ def _injected_skills(prefetched: str) -> list[dict]:
     ]
 
 
+def _uncached_prompt_tokens(usage: dict) -> int | None:
+    """Tokens the engine had to prefill that it had not cached.
+
+    `None`, not 0, when the engine reported no prompt size at all: a zero here
+    would read as a perfectly warm cache, and the whole point of the column is
+    to tell warm from unmeasured.
+    """
+    inp = usage.get("input_tokens")
+    if not isinstance(inp, int) or inp <= 0:
+        return None
+    cached = usage.get("cache_read")
+    return max(0, inp - (cached if isinstance(cached, int) else 0))
+
+
 async def _first_tool_call(prompt: str, options, timeout: float) -> dict:
     """Run one turn and return the first tool call, without dispatching it.
 
     Breaking out of the async generator closes it before
     `_dispatch_one_tool_call` is awaited, so the tool never runs.
+
+    The loop yields `assistant_message` — carrying THAT iteration's usage —
+    before it yields the `tool_call`, so the cost of the completion that
+    produced the decision is already in hand at the moment we break. A query
+    that made no tool call instead reaches `result`, whose `usage` is the
+    turn's aggregate; that one is preferred when both were seen.
     """
     from app.harness import run_query
 
     first: dict | None = None
     text = ""
     error = None
+    iteration_usage: dict = {}
+    turn_usage: dict = {}
     try:
         async with asyncio.timeout(timeout):
             async for evt in run_query([{"role": "user", "content": prompt}], options):
@@ -77,13 +128,49 @@ async def _first_tool_call(prompt: str, options, timeout: float) -> dict:
                     break
                 if evt["type"] == "text_delta":
                     text += evt["text"]
+                elif evt["type"] == "assistant_message" and evt.get("usage"):
+                    iteration_usage = dict(evt["usage"])
                 elif evt["type"] == "result":
+                    if evt.get("usage"):
+                        turn_usage = dict(evt["usage"])
                     break
     except asyncio.TimeoutError:
         error = f"timeout after {timeout}s"
     except Exception as e:  # noqa: BLE001 — a failed query is a datapoint, not a crash
         error = f"{type(e).__name__}: {e}"
-    return {"first_tool": first, "text": text[:400], "error": error}
+    usage = turn_usage or iteration_usage
+    return {
+        "first_tool": first,
+        "text": text[:400],
+        "error": error,
+        "usage": usage,
+        "uncached_prompt_tokens": _uncached_prompt_tokens(usage),
+    }
+
+
+def _cost(prompt: str, prefetched: str, outcome: dict) -> dict:
+    """The per-query cost block: what the injection cost, and what the turn cost.
+
+    `injected_tokens` is the estimate for the `<context>` the prefetcher added
+    (`prefetched` minus the prompt verbatim), from the same
+    `prompt_builder.prompt_token_estimate` the prompt-budget path uses. It is
+    the number #562's cost arm joins 'correct' against: one artifact, per query,
+    "was it right" and "how many tokens did it take to be right".
+
+    `usage` is the engine's own report for this query's single completion, and
+    `uncached_prompt_tokens` is its prefill cost after the prefix cache. The
+    estimate and the measurement are both kept because they answer different
+    questions — the estimate is what a prompt change costs before you spend a
+    run on it, the measurement is what actually happened.
+    """
+    injected_chars = max(0, len(prefetched) - len(prompt))
+    return {
+        "injected_chars": injected_chars,
+        "injected_tokens": prompt_token_estimate(injected_chars),
+        "prompt_tokens_est": prompt_token_estimate(len(prefetched)),
+        "usage": outcome.get("usage") or {},
+        "uncached_prompt_tokens": outcome.get("uncached_prompt_tokens"),
+    }
 
 
 def _score(spec: dict, first_tool: dict | None) -> dict:
@@ -209,6 +296,10 @@ async def run_eval(queries: list[dict], *, timeout: float, model: str | None) ->
             "expect_tools": spec.get("expect_tools") or [],
             "injected_skills": _injected_skills(prefetched),
             "context_chars": len(prefetched) - len(prompt),
+            # Cost sits beside the score, in the same record, so "was it right"
+            # and "what did it cost" are a join on one file and not across two
+            # probes (#562's cost arm, #818).
+            "cost": _cost(prompt, prefetched, outcome),
             "scoring": scoring,
             "response_head": outcome["text"],
             "latency_ms": round(latency_ms, 1),
@@ -219,9 +310,54 @@ async def run_eval(queries: list[dict], *, timeout: float, model: str | None) ->
     return records, config_summary
 
 
+def _uncached(record: dict) -> int | None:
+    """This record's measured prefill cost, or None when it has none.
+
+    Reads defensively: a record written before the cost block existed, or one
+    whose completion reported no prompt size, returns None and is left out of
+    the average's denominator rather than counted as a zero.
+    """
+    cost = record.get("cost")
+    if not isinstance(cost, dict):
+        return None
+    v = cost.get("uncached_prompt_tokens")
+    return v if isinstance(v, int) else None
+
+
+def _mean_of(records: list[dict], field: str) -> float | None:
+    """Mean of `cost[field]` over the records that HAVE it.
+
+    Same denominator rule as `rate()` below: a record with no figure is absent
+    from the divisor, never counted as a zero. For a token count a zero is not
+    neutral — it reads as "that query injected nothing", which is the exact
+    thing a cost column is supposed to be able to distinguish.
+    """
+    vals = [r["cost"][field] for r in records
+            if isinstance(r.get("cost"), dict)
+            and isinstance(r["cost"].get(field), (int, float))]
+    return round(sum(vals) / len(vals), 1) if vals else None
+
+
+def _mean_uncached(records: list[dict]) -> float | None:
+    vals = [v for v in (_uncached(r) for r in records) if v is not None]
+    return round(sum(vals) / len(vals), 1) if vals else None
+
+
 def summarize(records: list[dict]) -> dict:
     def rate(rs, key):
-        return round(sum(1 for r in rs if r["scoring"][key]) / len(rs), 3) if rs else None
+        """Fraction of records that scored true on `key`, over the records that
+        were SCORED on it.
+
+        The denominator is the count carrying the key, not `len(rs)`. Today every
+        record carries every scoring key so the two are equal, but they must not
+        stay equal by luck: a future scoring key that is absent on some queries
+        would silently DILUTE the rate toward zero instead of failing, and a
+        diluted rate is precisely what the per-metric noise floor in
+        `compare_tool_choice.py` is computed against. A rate that quietly
+        changes meaning takes the whole floor calibration with it.
+        """
+        vals = [bool(r["scoring"][key]) for r in rs if key in (r.get("scoring") or {})]
+        return round(sum(vals) / len(vals), 3) if vals else None
 
     web = [r for r in records if r["scoring"]["is_web_category"]]
     controls = [r for r in records if not r["scoring"]["is_web_category"]]
@@ -237,6 +373,14 @@ def summarize(records: list[dict]) -> dict:
         "control_correct_rate": rate(controls, "correct"),
         "latency_ms_avg": round(sum(r["latency_ms"] for r in records) / len(records), 1) if records else None,
         "errors": sum(1 for r in records if r.get("error")),
+        # Cost, per #818. The estimate is of the injected `<context>`; the
+        # uncached figure is the engine's own prefill number. Averaged over the
+        # queries that actually HAVE one — a query whose engine reported no
+        # prompt size is absent from the denominator, not counted as zero,
+        # because zero would read as a perfect cache hit.
+        "injected_tokens_avg": _mean_of(records, "injected_tokens"),
+        "uncached_prompt_tokens_avg": _mean_uncached(records),
+        "queries_with_usage": sum(1 for r in records if _uncached(r) is not None),
     }
 
     by_cat = defaultdict(list)
@@ -254,11 +398,11 @@ def summarize(records: list[dict]) -> dict:
 
     tool_counts: dict[str, int] = defaultdict(int)
     for r in records:
-        tool_counts[r["scoring"]["first_tool"] or "(none)"] += 1
+        tool_counts[(r.get("scoring") or {}).get("first_tool") or "(none)"] += 1
 
     skill_counts: dict[str, int] = defaultdict(int)
     for r in records:
-        for s in r["injected_skills"]:
+        for s in r.get("injected_skills") or []:
             skill_counts[s["name"]] += 1
 
     return {
@@ -270,14 +414,22 @@ def summarize(records: list[dict]) -> dict:
 
 
 def print_table(records: list[dict], summary: dict) -> None:
-    print(f"\n{'id':<24} {'category':<16} {'first tool':<18} {'ok':<4} {'skills injected'}")
-    print("-" * 110)
+    # `tok` is the estimated tokens of injected <context>; `prefill` the tokens
+    # the engine actually had to read that it had not cached. Right answer and
+    # its price on one row is the point (#562).
+    print(f"\n{'id':<24} {'category':<16} {'first tool':<18} {'ok':<4} "
+          f"{'tok':>6} {'prefill':>8}  {'skills injected'}")
+    print("-" * 118)
     for r in records:
         s = r["scoring"]
         ok = "OK" if s["correct"] else "--"
         skills = ",".join(x["name"] for x in r["injected_skills"]) or "—"
+        cost = r.get("cost") or {}
+        prefill = _uncached(r)
         print(f"{(r['id'] or ''):<24} {(r['category'] or ''):<16} "
-              f"{(s['first_tool'] or '(none)'):<18} {ok:<4} {skills[:44]}")
+              f"{(s['first_tool'] or '(none)'):<18} {ok:<4} "
+              f"{(cost.get('injected_tokens') if cost.get('injected_tokens') is not None else 0):>6} "
+              f"{('-' if prefill is None else f'{prefill:,}'):>8}  {skills[:40]}")
 
     o = summary["overall"]
     print()
@@ -287,6 +439,12 @@ def print_table(records: list[dict], summary: dict) -> None:
     print(f"  shelled_to_web_rate  (public web) = {o['shelled_to_web_rate']}")
     print(f"  control_correct_rate (localhost + structured API) = {o['control_correct_rate']}")
     print(f"  no_tool_call_rate = {o['no_tool_call_rate']}")
+    # Estimated injected tokens, then the measured prefill — labelled apart
+    # because one is an estimate from chars and the other is the engine's count.
+    print(f"  cost: injected_tokens_avg={o['injected_tokens_avg']} (estimate, "
+          f"prompt_token_estimate)  uncached_prompt_tokens_avg="
+          f"{o['uncached_prompt_tokens_avg']} (engine-reported, "
+          f"{o['queries_with_usage']}/{o['n_queries']} queries)")
     print("\nFirst-tool counts:")
     for name, n in summary["first_tool_counts"].items():
         print(f"  {name:<22} {n}")

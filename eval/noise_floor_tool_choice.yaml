@@ -1,0 +1,38 @@
+measured_at: '2026-09-13T22:07:28+00:00'
+generated_by: eval/compare_tool_choice.py --measure-floor
+note: "Largest per-metric movement two runs of the SAME unmodified tree produced, from labelled a/b run\
+  \ pairs under eval/baselines/tool-choice with identical recorded config. Backlog #691 measured the same\
+  \ pair on 2026-09-09 82 s apart (correct_rate +0.050, http_tool_first_rate +0.071); the 875noise pair\
+  \ on 2026-09-13 reproduced both magnitudes at the opposite sign. These are floors, not budgets: compare_tool_choice\
+  \ decides against max(this, 2\u03C3 binomial at the metric's own denominator)."
+binomial_sigmas: 2.0
+pairs:
+- a: 875noise-a-20260913-135949.json
+  b: 875noise-b-20260913-140104.json
+  n_queries: 20
+  spread:
+    correct_rate: 0.05
+    http_tool_first_rate: 0.071
+    control_correct_rate: 0.0
+    shelled_to_web_rate: 0.0
+    no_tool_call_rate: 0.0
+- a: noise-a-20260911-205315.json
+  b: noise-b-20260911-205424.json
+  n_queries: 20
+  spread:
+    correct_rate: 0.0
+    http_tool_first_rate: 0.0
+    control_correct_rate: 0.0
+    shelled_to_web_rate: 0.0
+    no_tool_call_rate: 0.0
+metrics:
+  control_correct_rate:
+    observed_spread: 0.0
+  correct_rate:
+    observed_spread: 0.05
+  http_tool_first_rate:
+    observed_spread: 0.071
+  no_tool_call_rate:
+    observed_spread: 0.0
+  shelled_to_web_rate:
+    observed_spread: 0.0
