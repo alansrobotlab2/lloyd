@@ -542,6 +542,109 @@ def test_run_with_no_signals_changes_nothing(world):
     assert _active(st) == 1
 
 
+# ── 2b. #701: what may authorise an expiry, and what a reviewer can see ──────
+#
+# `REQUIRE_OPPOSING_TERMS` is the only gate between a detected pair and a
+# planned expiry, and until #701 the confidence basis beneath it was "the two
+# numbers differ". The 2026-09-15 nightly board shows what that cost: of 215
+# pairs scanned, the 2 that reached `opposing_terms` both became actions, both
+# were false positives, and neither action's `reason` said which pair had fired
+# — `plan_entity` dropped the detector's classification and rebuilt its own
+# sentence. So now: an admitted action names its trigger, and a confidence
+# difference smaller than MIN_CONFIDENCE_GAP condemns nothing.
+
+def test_every_admitted_action_names_the_opposing_pair_that_admitted_it(world):
+    """Both bases, one entity. The confidence action and the superseded action
+    each open with the detector's own classification of its pair, so a reviewer
+    reading a run record sees `opposing_terms:enabled/disabled` or
+    `opposing_terms:working/broken` and can reject that pair — not merely the
+    loser's text."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "Trig", "state", [
+        {"fact": "The gate is enabled.", "confidence": 0.9, "created_at": _days_ago(2)},
+        {"fact": "The gate is disabled.", "confidence": 0.3, "created_at": _days_ago(30)},
+    ])
+    _write_facts(facts_root, "Trig", "usage", [
+        {"fact": "The build is working.", "confidence": 0.9, "created_at": _days_ago(30)},
+        {"fact": "The build is broken.", "confidence": 0.9, "created_at": _days_ago(2)},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Trig")
+    assert len(plan["actions"]) == 2, plan["actions"]
+    by_kind = {a["kind"]: a for a in plan["actions"]}
+    assert sorted(by_kind) == ["confidence", "superseded"], by_kind
+    assert by_kind["confidence"]["reason"].startswith(
+        "opposing_terms:enabled/disabled;"), by_kind["confidence"]["reason"]
+    assert by_kind["confidence"]["loser_fact"] == "The gate is disabled."
+    assert by_kind["superseded"]["reason"].startswith(
+        "opposing_terms:working/broken;"), by_kind["superseded"]["reason"]
+
+
+def test_a_confidence_gap_below_the_floor_is_reported_not_condemned(world):
+    """The 2026-09-15 class, rebuilt with whole-word terms so that nothing but
+    the gap can save it: 0.95 against 0.9 on a success-rate claim and a
+    failure-cause claim — two compatible facts, one naming a rate, one naming a
+    cause. MIN_CONFIDENCE_GAP is 0.1, so a 0.05 gap is not evidence and no
+    action is planned."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "Subgap", "state", [
+        {"fact": "ALFWorld reached a 43% success rate on the tasks.",
+         "confidence": 0.95, "created_at": _days_ago(20)},
+        {"fact": "ALFWorld task failure is a rate the harness moves, not a "
+                 "property of the model.", "confidence": 0.9, "created_at": _days_ago(10)},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Subgap")
+    assert plan["contradictions"] == 1, plan["contradictions"]
+    assert plan["actions"] == [], plan["actions"]
+    # Declining for the floor is not the same as calling the pair a
+    # near-duplicate. The detector classified it as an opposition; the figure
+    # that reports that is the classification, not what this loop chose to do.
+    assert plan["near_duplicates"] == 0, plan["near_duplicates"]
+    assert _active(st) == 2
+
+
+def test_the_confidence_floor_admits_a_gap_of_exactly_its_value(world):
+    """The floor is `gap >= MIN_CONFIDENCE_GAP`, not `>`. The 2026-09-15
+    working/broken hit had 0.9 against 1.0 — exactly the floor — so it stays
+    admissible, and that is deliberate: whether it should be is the scope
+    ruling on the item, which no threshold answers."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "Floor", "state", [
+        {"fact": "ALFWorld reached a 43% success rate on the tasks.",
+         "confidence": 1.0, "created_at": _days_ago(20)},
+        {"fact": "ALFWorld task failure is a rate the harness moves, not a "
+                 "property of the model.", "confidence": 0.9, "created_at": _days_ago(10)},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Floor")
+    assert len(plan["actions"]) == 1, plan["actions"]
+    action = plan["actions"][0]
+    assert action["kind"] == "confidence"
+    assert action["loser_fact"].startswith("ALFWorld task failure"), action
+    assert action["reason"].startswith("opposing_terms:success/failure;"), action["reason"]
+
+
+def test_the_equal_confidence_age_basis_is_unmoved_by_the_floor(world):
+    """MIN_CONFIDENCE_GAP bounds the CONFIDENCE basis only. An equal-confidence
+    pair has a gap of 0.0 — below any floor — and its basis is write order, so
+    a 30-day gap still plans a `superseded` expiry exactly as it did before
+    #701. A pair of whole-word opposing terms, so `REQUIRE_OPPOSING_TERMS` lets
+    it through and only the basis is in question."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "Ageway", "state", [
+        {"fact": "The build is working.", "confidence": 0.9, "created_at": _days_ago(30)},
+        {"fact": "The build is broken.", "confidence": 0.9, "created_at": _days_ago(2)},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Ageway")
+    assert len(plan["actions"]) == 1, plan["actions"]
+    action = plan["actions"][0]
+    assert action["kind"] == "superseded"
+    assert action["loser_fact"] == "The build is working."
+    assert "created_at" in action["reason"], action["reason"]
+
+
 # ── 3. unified surface: remember / recall / forget ───────────────────────────
 
 def _tool_names(mod):

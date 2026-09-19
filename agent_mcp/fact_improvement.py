@@ -21,10 +21,17 @@ with extra steps.
 Every action here therefore needs an independent reason *on top of* the
 detector's pairing:
 
-  confidence    the two sides disagree on confidence → `fact_resolve`'s case
+  confidence    the two sides' confidence differs by ≥ MIN_CONFIDENCE_GAP →
+                `fact_resolve`'s case. A smaller gap is extraction noise, and
+                on extracted facts confidence encodes capture kind, not truth
+                (#701), so the 0.9 < 0.95 pair condemns nothing.
   created_at    one was written ≥ MIN_STALE_GAP_DAYS after the other, so the
                 older one is the one a later write superseded → expire it
   same day, same confidence → no basis. Reported, never acted on.
+
+Each admitted action also names the detector's own trigger — the
+`opposing_terms:<a>/<b>` the pair was classified by — so a reviewer reads the
+specific pair that fired and can reject it (#701).
 
 Writers are the existing tools, called as functions. This module never edits a
 fact file: three writers of `expired_at` would be the same drift bug
@@ -103,6 +110,24 @@ MIN_STALE_GAP_DAYS = 1.0
 # pairs is what moved `fact_entity_recall` 0.35 -> 0.30, i.e. it deleted useful
 # facts. Near-duplicate pairs are reported, never acted on.
 REQUIRE_OPPOSING_TERMS = True
+# The smallest confidence difference that counts as evidence (#701). On this
+# corpus a fact's confidence records *how it was captured*, not how true it is:
+# vault-maintenance notes carry 1.0 and extracted content 0.9/0.95, so a 0.05
+# gap is extraction noise — and the 2026-09-08 dry run condemned facts on
+# exactly `0.9 < 0.95` and `0.85 < 0.9`, the two smallest gaps on the board.
+# The pair worth acting on is the one where one side was confidently asserted
+# and the other was barely believed.
+#
+# This floors the CONFIDENCE basis only. The equal-confidence path rests on a
+# different basis — write order, via `_loser_by_age` and MIN_STALE_GAP_DAYS —
+# and a pair with identical confidences reaches it exactly as it did before.
+MIN_CONFIDENCE_GAP = 0.1
+# Sub-trillion slack so the floor is `>=` and not `>`. Confidence values are one-
+# and two-decimal, and `1.0 - 0.9` computes to 0.09999999999999998, which is
+# below the constant it is compared against. No confidence on this corpus is
+# specified finer than three decimals, so this cannot let a 0.0999999 pair
+# through; it only undoes representation error.
+_GAP_TOLERANCE = 1e-9
 # Cap per entity: a god-node's contradiction list is noise, and expiring 20
 # facts because a heuristic shrugged is not an improvement.
 MAX_ACTIONS_PER_ENTITY = 5
@@ -510,6 +535,15 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
     (`app.fact_ids.next_fact_id`), so one id is one fact in this view and
     several facts on disk. The detector is handed that same list instead of
     re-reading, so what gets judged and what gets written come from one read.
+
+    Two rules decide whether a classified pair becomes an action (#701). Only a
+    pair the detector classified as opposing terms is eligible —
+    `REQUIRE_OPPOSING_TERMS` — and that classification now means whole-word
+    agreement on one of the seven pairs, not bare substring containment. And a
+    pair whose sides differ in confidence needs a difference of at least
+    `MIN_CONFIDENCE_GAP` to be condemned; a smaller gap says the two facts were
+    captured differently, not that one is weaker. Each action's `reason` names
+    the trigger that admitted it, so a reviewer can reject the specific pair.
     """
     facts_view = _get_facts_sync(entity, with_source_file=True).get("facts", [])
     detection = _detect_contradictions_sync(entity, facts=facts_view)
@@ -534,20 +568,43 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
         f2 = item.get("fact2") or {}
         if not f1.get("fact") or not f2.get("fact"):
             continue
+        # The detector's own classification of THIS pair, verbatim:
+        # `opposing_terms:working/broken` (or `high_overlap_potential_update`
+        # when `REQUIRE_OPPOSING_TERMS` is off). Carried into the action's
+        # reason (#701): the 2026-09-15 planned actions read only
+        # "contradiction detector paired it with '…'; confidence 0.9 < 1.0", so
+        # nothing on the page said which of the seven opposing pairs fired, and
+        # a reviewer could not reject the one pair that was wrong.
+        trigger = str(item.get("reason") or "").strip()
         c1 = float(f1.get("confidence") or 0.5)
         c2 = float(f2.get("confidence") or 0.5)
         if c1 != c2:
+            # `+ _GAP_TOLERANCE`: confidences here are one- and two-decimal
+            # numbers, and `1.0 - 0.9` is 0.09999999999999998 in binary floating
+            # point. Without it a gap of exactly the floor is declined —
+            # including the 2026-09-15 working/broken hit at 0.9 against 1.0 —
+            # so the constant would enforce "strictly more than 0.1" while
+            # reading as "at least 0.1". The floor means what it says.
+            if abs(c1 - c2) + _GAP_TOLERANCE < MIN_CONFIDENCE_GAP:
+                # 0.9 vs 0.95 is two facts captured two ways, not two claims
+                # of differing strength. No basis, so no action — the pair
+                # stays in `contradictions` and is reported (#701).
+                continue
             loser, winner = (f2, f1) if c1 > c2 else (f1, f2)
             kind = "confidence"
-            reason = (f"contradiction detector paired it with "
+            reason = (f"{trigger}; contradiction detector paired it with "
                       f"{winner.get('fact', '')[:70]!r}; confidence "
                       f"{loser.get('confidence')} < {winner.get('confidence')}")
         else:
             ordered = _loser_by_age(f1, f2)
             if ordered is None:
                 continue          # equal confidence, no age basis → leave it
-            loser, winner, reason = ordered
+            loser, winner, age_reason = ordered
             kind = "superseded"
+            # Same rule on this basis: the trigger that admitted the pair is
+            # part of the record, and `MIN_CONFIDENCE_GAP` does not apply here
+            # — this pair's basis is write order, not a confidence gap.
+            reason = f"{trigger}; {age_reason}"
         action = {"kind": kind, "entity": entity,
                   "category": loser.get("category"),
                   "loser_fact": loser.get("fact", ""), "loser_id": loser.get("id"),
@@ -592,7 +649,18 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
             # auto-capture noise this loop declines to delete, and the reason
             # the metric does not move. A subset of `pairs_before`, never added
             # to it.
-            "near_duplicates": len(contradictions) - len(actable),
+            #
+            # Counted off the detector's CLASSIFICATION, not off `actable`.
+            # Those two sets stopped being the same in #701: an opposing-terms
+            # pair can now be declined for a confidence difference below
+            # `MIN_CONFIDENCE_GAP`, and such a pair is not a near-duplicate —
+            # it was classified as an opposition and left alone for a reason
+            # that is a property of the threshold, not of the pair. Deriving the
+            # figure from `actable` would have reported the loop's own floor as
+            # a count of auto-capture noise.
+            "near_duplicates": sum(
+                1 for c in contradictions
+                if not str(c.get("reason", "")).startswith("opposing_terms")),
             "actions": actions, "before_active": _active_count(entity)}
 
 

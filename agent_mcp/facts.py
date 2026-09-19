@@ -22,6 +22,7 @@ keep this module's call sites and external consumers stable.
 """
 
 import datetime
+import re
 from pathlib import Path
 
 from mcp.types import Tool
@@ -69,12 +70,62 @@ from agent_mcp.retrieval import (  # noqa: F401  (re-exported compat names)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-# Used by _detect_contradictions_sync.
+# Used by _detect_contradictions_sync, through _opposing_reason (#701).
+#
+# Each term is matched as a WHOLE WORD, which is what makes this list safe to
+# read at face value. Two of these pairs are self-collapsing as bare
+# substrings — `"active" in "inactive"` and `"supported" in "unsupported"` are
+# true by construction — so before #701 any two facts that both said
+# "unsupported", or both said "inactive", were classified as disagreeing. That
+# is the exact class the module docstring blames for 32,857 false positives on
+# `Lloyd`, and `REQUIRE_OPPOSING_TERMS` in `agent_mcp/fact_improvement.py`
+# makes this the one trigger allowed to authorise an expiry. Measured on the
+# 2026-09-15 nightly: 2 of 215 pairs fired `opposing_terms`, and both were
+# false — `opposing_terms:success/failure` paired a 43% success rate with a
+# sentence about the *cause* of failures.
+#
+# Keeping the self-collapsing pairs is deliberate: bounded matching does not
+# blunt a real opposition, so "is active" vs "is inactive" still fires while
+# "inactive" vs "inactive" does not.
 _OPPOSING_PAIRS = [
     ("yes", "no"), ("true", "false"), ("enabled", "disabled"),
     ("active", "inactive"), ("supported", "unsupported"),
     ("working", "broken"), ("success", "failure"),
 ]
+
+# Compiled `\b<term>\b`, one per term. `\b` on both sides is the boundary bare
+# `in` lacked: it is what stops "no" matching inside *another*, *notable*,
+# *denote*, and stops "supported" matching inside "unsupported".
+_OPPOSING_TERM_RE: dict[str, re.Pattern] = {}
+
+
+def _opposing_term_re(term: str) -> re.Pattern:
+    """Whole-word matcher for one opposing term, compiled once per term."""
+    rx = _OPPOSING_TERM_RE.get(term)
+    if rx is None:
+        rx = _OPPOSING_TERM_RE[term] = re.compile(rf"\b{re.escape(term)}\b")
+    return rx
+
+
+def _opposing_reason(t1: str, t2: str) -> str | None:
+    """`opposing_terms:<a>/<b>` if the two lowercased texts oppose by term.
+
+    Whole-word matching only (#701). Bare containment, which is what this
+    function replaced, matched a term inside its own opposite and inside
+    unrelated longer words, so the pairs it named were pairs phrased alike —
+    and the reason string it produced was the one thing downstream
+    (`REQUIRE_OPPOSING_TERMS`) trusted as evidence of disagreement.
+
+    Returns the matched pair rather than a boolean: the caller stores it as the
+    pair's `reason`, which `fact_improvement.plan_entity` then carries into the
+    action's reason. A reviewer who sees `opposing_terms:working/broken` can
+    reject that specific pair; a bare "opposing terms" cannot be rejected.
+    """
+    for a, b in _OPPOSING_PAIRS:
+        ra, rb = _opposing_term_re(a), _opposing_term_re(b)
+        if (ra.search(t1) and rb.search(t2)) or (rb.search(t1) and ra.search(t2)):
+            return f"opposing_terms:{a}/{b}"
+    return None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -348,11 +399,7 @@ def _detect_contradictions_sync(entity: str, category: str = None, *,
     for i, f1 in enumerate(facts):
         for f2 in facts[i + 1:]:
             t1, t2 = f1.get("fact", "").lower(), f2.get("fact", "").lower()
-            reason = None
-            for pair in _OPPOSING_PAIRS:
-                if (pair[0] in t1 and pair[1] in t2) or (pair[1] in t1 and pair[0] in t2):
-                    reason = f"opposing_terms:{pair[0]}/{pair[1]}"
-                    break
+            reason = _opposing_reason(t1, t2)
             if not reason and _token_overlap(t1, t2) > 0.6:
                 reason = "high_overlap_potential_update"
             if reason:
