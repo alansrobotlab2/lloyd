@@ -22,6 +22,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -154,11 +155,83 @@ def _resolve_entity_dir(name: str) -> Path | None:
     return None
 
 
+#: Parsed active-fact list per resolved entity directory. The classifier only
+#: reads the fact tree -- the sole writer in this checkout
+#: (`kg-pipeline.py:258-294`) does an open/write/replace on a path it builds
+#: itself and never goes through anything here -- and an autonomy run is a new
+#: process each time, so a run this long cannot observe a change that this cache
+#: would hide.
+#:
+#: Bounded, and the tally uses `sys.getsizeof` because that is the instrument
+#: that can be checked: `len(fact)` counts *code points*, while CPython stores 1,
+#: 2 or 4 bytes per character depending on the string's highest code point, so a
+#: length-based tally understates resident memory by up to 4x and is no RSS
+#: proxy at all. What is tallied is the cached value only -- the fact strings
+#: plus the `list` holding them -- so it excludes the frontmatter text that was
+#: parsed to produce them, and it estimates live strings rather than peak RSS.
+#:
+#: The entry cap and the byte cap are separate bounds, each pinned by its own
+#: test in tests/test_classify_entity_facts.py. The entry cap alone would be
+#: unbounded in bytes exactly where this cost is (hub entities are expensive
+#: *because* of how many facts one directory holds); a byte cap alone would let
+#: a run over hundreds of thousands of tiny directories hold unbounded keys.
+_FACTS_CACHE: "OrderedDict[str, list[str]]" = OrderedDict()
+#: The 512 most-fact-populated directories of the live tree hold 17.6 MiB of
+#: cached fact strings between them (whole-tree `sys.getsizeof` sweep, 2026-09-19:
+#: 26,107 directories, 315,918 active facts, 44.0 MiB in total; largest single
+#: directory `Lloyd` at 1.0 MiB). A run only touches directories its candidate
+#: queue names, so the entry cap is the bound that binds on today's tree.
+_FACTS_CACHE_MAX_ENTRIES = 512
+#: `sys.getsizeof` of an empty `list`; added per cached value so the list object
+#: is charged and not only its contents.
+_FACTS_CACHE_SLOT = 56
+#: 64 MiB is above the 44.0 MiB the *entire* live tree needs, so this cap cannot
+#: bind on today's data: it is the tail guard for a tree that grows by an order
+#: of magnitude, on a box that also pages a 95 GiB model.
+_FACTS_CACHE_MAX_BYTES = 64 * 1024 * 1024
+_FACTS_CACHE_BYTES = 0
+
+
+def _facts_cache_bytes(facts: list[str]) -> int:
+    """Resident bytes of one cached value, as `sys.getsizeof` measures them."""
+    return sum(map(sys.getsizeof, facts)) + _FACTS_CACHE_SLOT
+
+
+def _facts_cache_store(key: str, facts: list[str]) -> None:
+    """Memoize one directory's parsed facts, evicting oldest-first on both caps.
+
+    Keeps at least one entry whatever its size: dropping the last one would let
+    a single oversized entity directory disable the cache outright.
+    """
+    global _FACTS_CACHE_BYTES
+    _FACTS_CACHE[key] = facts
+    _FACTS_CACHE_BYTES += _facts_cache_bytes(facts)
+    while len(_FACTS_CACHE) > _FACTS_CACHE_MAX_ENTRIES or (
+            _FACTS_CACHE_BYTES > _FACTS_CACHE_MAX_BYTES and len(_FACTS_CACHE) > 1):
+        _, dropped = _FACTS_CACHE.popitem(last=False)
+        _FACTS_CACHE_BYTES -= _facts_cache_bytes(dropped)
+
+
 def _read_entity_facts(entity_dir: Path) -> list[str]:
-    """Read all active fact texts from an entity directory."""
+    """Read all active fact texts from an entity directory.
+
+    Parsed once per directory per process (see `_FACTS_CACHE`), and hands back a
+    copy so a caller that mutates the list it was given cannot change what every
+    later edge in the run sees — the one caller truncates and filters it, and the
+    strings it produces are hashed into the resume key.
+    """
+    key = str(entity_dir)
+    if key in _FACTS_CACHE:
+        return list(_FACTS_CACHE[key])
+
     facts: list[str] = []
+    # Resolved per directory, not at import: which loader exists is a property
+    # of the yaml install, and reading it here is what lets the fallback be
+    # exercised without restarting the process.
+    fm_loader = getattr(yaml, "CSafeLoader", None)
     if not entity_dir.is_dir():
-        return facts
+        _facts_cache_store(key, facts)
+        return list(facts)
     for fname in os.listdir(entity_dir):
         if not fname.endswith(".md"):
             continue
@@ -172,7 +245,13 @@ def _read_entity_facts(entity_dir: Path) -> list[str]:
         if len(parts) < 3:
             continue
         try:
-            fm = yaml.safe_load(parts[1])
+            # CSafeLoader is libyaml's C scanner. The pure-Python SafeLoader
+            # that `yaml.safe_load` binds measured 2,473 ms over facts/vLLM's
+            # 22 files / 2.90 MB against 370 ms for the same bytes here (6.7x),
+            # and both parse the same fact list — pinned by
+            # tests/test_classify_entity_facts.py.
+            fm = yaml.load(parts[1], Loader=fm_loader) if fm_loader is not None \
+                else yaml.safe_load(parts[1])
         except Exception:
             continue
         if not isinstance(fm, dict):
@@ -185,7 +264,9 @@ def _read_entity_facts(entity_dir: Path) -> list[str]:
             text = str(fact.get("fact", "")).strip()
             if text:
                 facts.append(text)
-    return facts
+    _facts_cache_store(key, facts)
+    # A copy, so the memoized list is never handed out live.
+    return list(facts)
 
 
 def _build_pattern(name: str) -> re.Pattern:
