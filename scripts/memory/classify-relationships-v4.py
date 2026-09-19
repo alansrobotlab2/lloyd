@@ -301,6 +301,56 @@ RELATION_VERB = {
 
 
 # ---------------------------------------------------------------------------
+# Direction-check rationale screen
+# ---------------------------------------------------------------------------
+#
+# The direction check's `verdict` is a label and its `reason` is free text, so
+# the two can disagree. Task #74's run at 2026-09-19T08Z contains 8 records
+# (of 2,052 with `verdict: "confirmed"`) whose reason argues B → A while the
+# verdict says A → B — e.g. for `Granite Models -[uses]-> OpenRAG`: "Granite
+# Models are used within the OpenRAG stack, implying OpenRAG uses them, not
+# vice versa." That sentence proves the reverse of the edge the record then
+# wrote, at confidence 0.95 against the applier's floor of 0.6, so the floor
+# filtered everything except these.
+#
+# The cue set is deliberately narrow, and every figure below is measured over
+# the 2,052 `confirmed` records of that one run unless the sentence says
+# otherwise:
+#   - These four phrases hit exactly the 8 contradictory direction-check
+#     rationales and nothing else.
+#   - The same four phrases occur in 0 *primary* reasons among those 2,052.
+#     Across the whole 4,020-record run 182 primary reasons do contain one, and
+#     none of those 182 carries an asymmetric `new_type`, so screening the
+#     classifier's own text could not catch an inverted verb it did not already
+#     catch elsewhere in the pipeline.
+#   - Loosening to `rather than` / `instead` costs precision instead of adding
+#     coverage: on the confirmed records they hit 4 edges whose direction is
+#     correct (`rather than` → ZD9-4fW2HhM-discusses->Code,
+#     Lloyd Backlog-depends_on->Git History; `instead` → Opus 4.5-uses->SQL,
+#     Transcript-discusses->NTU), plus one confirmed direction-check reason
+#     (ZD9-4fW2HhM) that is likewise correctly directed.
+# The screen therefore reads only the direction check's own text, with only
+# these four phrases (#1256 triage).
+REVERSAL_REASON_RE = re.compile(
+    r"not\s+vice\s+versa"
+    r"|in\s+reverse"
+    r"|the\s+opposite"
+    r"|not\s+the\s+other\s+way",
+    re.IGNORECASE,
+)
+
+
+def direction_rationale_is_reversed(reason: str) -> bool:
+    """True if a direction-check reason states the relation runs B → A.
+
+    Read only on `verdict: "confirmed"`, and only from the direction check's
+    own text — a confirmed label contradicted by its own rationale is not
+    confirmation.
+    """
+    return bool(REVERSAL_REASON_RE.search(reason or ""))
+
+
+# ---------------------------------------------------------------------------
 # Main classification pipeline
 # ---------------------------------------------------------------------------
 
@@ -438,6 +488,20 @@ def classify_edge_v4(
                 norm["type"] = "mentions"
                 norm["confidence"] = min(norm["confidence"], 0.5)
                 norm["reason"] = f"[dir-check] direction reversed: {reason}"
+            elif verdict == "confirmed" and direction_rationale_is_reversed(reason):
+                # The label says the direction is right; the sentence beside it
+                # says the relation runs the other way. Trust the sentence and
+                # take the same softening an explicit `reversed` verdict takes
+                # — `mentions` is the one type the applier never upgrades
+                # (apply-classifications-v4.py skips new_type == "mentions"),
+                # so an inverted asymmetric verb cannot reach the graph.
+                verdict_adjustment = "downgraded_reversed"
+                norm["type"] = "mentions"
+                norm["confidence"] = min(norm["confidence"], 0.5)
+                norm["reason"] = (
+                    f"[dir-check] verdict confirmed but rationale reverses the "
+                    f"direction: {reason}"
+                )
             elif verdict == "unclear":
                 verdict_adjustment = "downgraded_unclear"
                 norm["confidence"] = min(norm["confidence"], 0.55)
