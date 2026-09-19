@@ -1040,7 +1040,10 @@ workers:
   # waited 8-30 min on three nights' worth of rows whenever a scheduled task
   # and a triage held both slots. The engine, not the slot count, is the
   # bound on long-lived turns: see kv_gate. Back to 3 with depth 1 and 1.
-  slots: 5
+  # 6 since 2026-09-18: autocode went to 4 rounds (c130287) beside 1 triage,
+  # and the rule is rounds + triages + 1 — `tests/test_loop_depth.py` pins it,
+  # so at 5 every round's `tests` rung was red on a test no round had touched.
+  slots: 6
   # KV budget gate (workers/pool.py). A source that declares LONG_LIVED —
   # autocode, autotriage, deep-research: tens of iterations, each
   # re-submitting a 100-200k context — is not claimed while the primary's KV
