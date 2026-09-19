@@ -7,7 +7,7 @@
 #
 # How it is scored: the runner stops at the FIRST tool_call event, which the
 # harness yields before dispatch. The single-call site is
-# app/harness/loop.py:746-757, where `tc_evt = events.tool_call(...)` is built,
+# app/harness/loop.py:753-764, where `tc_evt = events.tool_call(...)` is built,
 # `yield tc_evt` hands it out, and only then
 # `result_evt = await _dispatch_one_tool_call(...)` runs. The parallel-batch
 # site is the same shape: Phase 1 builds and yields `events.tool_call` for every

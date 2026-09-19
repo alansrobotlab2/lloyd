@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 
 def _default_state_dirs_to_scratch() -> None:
-    """No pytest run reads or writes the machine's automod or guardian state.
+    """No pytest run reads or writes the machine's automod, guardian or request-manifest state.
 
     `scripts.automod.state` and the guardian's `policy` resolve their state
     dir from the environment **at import**, and default to the production
@@ -42,9 +42,22 @@ def _default_state_dirs_to_scratch() -> None:
     Set here, at conftest import, because that is the one moment that is
     before every test module's `from scripts.automod import state`. A caller
     that already chose a state dir (the gate, `review_tools`) keeps it.
+
+    `LLOYD_MANIFEST_STORE` joined that list on 2026-09-19, for the same reason in
+    a sharper form: `app/component_manifest.py` (#581) writes one NDJSON line per
+    model request to `~/.local/state/lloyd-request-manifests` by default, and the
+    first full-suite gate run that had the module in its tree put **48 fabricated
+    lines** from fixture strings into that directory (`app/harness/finalizer.py`
+    38, `app/secondary_models.py` 6, `app/harness/client.py` 4). The store is the
+    artifact #581 exists to produce, and the clause that closes it is read off it
+    — "24 h of mixed traffic read off the live store: zero manifest-write errors"
+    — so a suite that writes there is a suite that corrupts its own acceptance
+    evidence. Tests that own a store point the variable at their own `tmp_path`,
+    as the three `test_component_manifest*`/`test_prompt_diff` files already do.
     """
     scratch: Path | None = None
-    for var, sub in (("LLOYD_AUTOMOD_STATE", "automod"), ("LLOYD_GUARDIAN_STATE", "guardian")):
+    for var, sub in (("LLOYD_AUTOMOD_STATE", "automod"), ("LLOYD_GUARDIAN_STATE", "guardian"),
+                     ("LLOYD_MANIFEST_STORE", "request-manifests")):
         if os.environ.get(var):
             continue
         if scratch is None:

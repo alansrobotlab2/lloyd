@@ -439,6 +439,17 @@ def build_system_prompt(
     components["harness_hints"] = "\n\n".join(parts[len(components):])
     if session_id:
         log_prompt_size(components, session_id=session_id, platform=platform)
+        # #581: `log_prompt_size` reports each component's SIZE and then drops
+        # the dict. The manifest needs the same named parts to hash them, and
+        # this is the only place the complete dict exists — so this is the
+        # handoff. `app/component_manifest.py` keeps it keyed by session id and
+        # `app/harness/client.py` reads it back from inside the agent loop: one
+        # module writing, another reading, no call between them. Imported here
+        # rather than at module scope for the same reason `_load_non_user_platforms`
+        # imports `app.sessions_io` inside its body — this module is imported by
+        # CLI scripts that never bring up the app package. Never raises.
+        from app.component_manifest import note_components
+        note_components(session_id, components)
     return "\n\n".join(parts)
 
 

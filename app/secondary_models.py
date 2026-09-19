@@ -22,6 +22,26 @@ from typing import Optional
 
 logger = logging.getLogger("lloyd-server")
 
+def _record_manifest(url: str, payload: dict) -> None:
+    """#581: manifest one of this module's synchronous secondary-engine posts.
+
+    Five routed jobs, five `urllib` posts, one writer. `url` is the engine's
+    chat-completions endpoint, so this module hands over the engine *root* —
+    that is what the `models.*` config table is keyed on, hence what identifies
+    the provider slot. Never raises: a manifest that cannot be written must not
+    cost the call it describes, and this module's callers are background jobs
+    that would otherwise lose their summary to an instrumentation bug.
+    """
+    try:
+        from app.component_manifest import record_request
+        record_request(base_url=url.rsplit("/v1/", 1)[0],
+                       model=str(payload.get("model") or ""), payload=payload,
+                       send_site="app/secondary_models.py")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+
 #: Job names whose work goes to the primary even while the secondary is
 #: enabled. The five routable jobs are `title`, `capture`, `facts`, `focus`
 #: and `voice`.
@@ -114,6 +134,7 @@ def _sync_secondary_capture_call(transcript: str) -> Optional[str]:
     }
 
     try:
+        _record_manifest(url, payload)
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -143,6 +164,7 @@ def _sync_secondary_fact_extraction(transcript: str) -> list[dict]:
     }
 
     try:
+        _record_manifest(url, payload)
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -243,6 +265,7 @@ def _sync_secondary_voice_summary(primary_text: str, timeout: float = 15.0) -> O
     }
 
     try:
+        _record_manifest(url, payload)
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -272,6 +295,7 @@ def _sync_secondary_focus_extraction(transcript: str) -> list[str]:
     }
 
     try:
+        _record_manifest(url, payload)
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -326,6 +350,7 @@ def _sync_secondary_title(transcript: str, timeout: float = 30.0) -> Optional[st
     }
 
     try:
+        _record_manifest(url, payload)
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),

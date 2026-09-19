@@ -22,6 +22,7 @@ import httpx
 
 import re
 
+from app.component_manifest import record_request
 from app.harness.errors import ContextOverflowError, ParseError, StreamStalledError
 
 logger = logging.getLogger("lloyd-harness-client")
@@ -39,8 +40,15 @@ async def stream_chat(
     api_key: str = "no-key-required",
     priority: int | None = None,
     chunk_timeout_s: float = 0.0,
+    session_id: str = "",
+    iteration: int | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream raw OpenAI-format chunks from vLLM.
+
+    `session_id` and `iteration` exist only for the #581 component manifest:
+    this is the streaming send site every agent-loop iteration passes through,
+    and the manifest has to say which turn and which iteration a line
+    describes. Both are optional and nothing on the request path reads them.
 
     Yields decoded chunk dicts; on a malformed SSE line raises
     `ParseError` with the raw line attached so the caller can emit a
@@ -78,6 +86,16 @@ async def stream_chat(
         "Accept": "text/event-stream",
     }
     timeout = httpx.Timeout(timeout_s, read=None, connect=10.0)
+
+    # #581: describe this request by its parts before it goes out. Deliberately
+    # above the connection — the digests are of the payload built here, and
+    # `record_request` hashes inline and hands the LINE to a writer thread, so
+    # no disk I/O lands inside the token stream. It never raises: a manifest
+    # that cannot be written is counted in `component_manifest.stats()` and the
+    # stream proceeds untouched.
+    record_request(base_url=base_url, model=model, payload=payload,
+                   session_id=session_id, iteration=iteration,
+                   send_site="app/harness/client.py::stream_chat")
 
     async with httpx.AsyncClient(timeout=timeout) as cli:
         async with cli.stream("POST", url, headers=headers, json=payload) as resp:

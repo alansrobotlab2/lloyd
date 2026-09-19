@@ -31,6 +31,8 @@ from typing import Any
 
 import httpx
 
+from app.component_manifest import record_request
+
 from app.compaction import estimate_tokens, _message_text
 
 logger = logging.getLogger("lloyd-compaction-llm")
@@ -162,6 +164,12 @@ async def _post_chat_completion(
         # the critic uses.
         "chat_template_kwargs": {"enable_thinking": False},
     }
+
+    # #581: manifest this non-streaming send site too. Never raises and
+    # never delays: the digest is of the payload built above, and the file
+    # write happens on the manifest's writer thread.
+    record_request(base_url=base_url, model=model_name, payload=payload,
+                   send_site="app/compaction_llm.py::_post_chat_completion")
     async with httpx.AsyncClient(timeout=timeout_seconds) as cli:
         resp = await cli.post(
             url,

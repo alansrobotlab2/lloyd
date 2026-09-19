@@ -41,6 +41,8 @@ from typing import Any
 
 import httpx
 
+from app.component_manifest import record_request
+
 logger = logging.getLogger("lloyd-harness-finalizer")
 
 # Stop reasons that mean "the model chose to stop". Anything else — max_turns,
@@ -94,8 +96,17 @@ async def run_finalizer(
     priority: int | None = None,
     cancel_event: asyncio.Event | None = None,
     extra_body: dict[str, Any] | None = None,
+    session_id: str = "",
 ) -> tuple[dict | None, str, dict[str, int]]:
-    """Ask once more, under a schema. Returns (object, error, usage)."""
+    """Ask once more, under a schema. Returns (object, error, usage).
+
+    `session_id` is for the #581 manifest only (the same session the turn ran
+    in), and is what lets a prompt-diff compare this send against the last
+    streamed iteration of that turn — the pair the finalizer measurement is
+    about. Each spelling that is posted gets its own manifest line: one call
+    can legitimately emit two requests, and a record that folded them together
+    would hide the first one's 400.
+    """
     if cancel_event is not None and cancel_event.is_set():
         return None, "finalizer skipped: cancelled", {}
 
@@ -131,6 +142,17 @@ async def run_finalizer(
                             ("json_schema", _payload_llamacpp)):
         payload = dict(base)
         payload.update(build(schema))
+        # #581: the non-streaming send site, recorded per request rather than once
+        # per call. This loop tries two payload spellings, so a 4xx on the first
+        # means two requests reached the engine and a per-call line would describe
+        # the accepted one while the rejected one went unrecorded. Their only
+        # difference is the structured-output key, which is precisely what the diff
+        # then names in `params`. The `tools` hash here is the hash of the array
+        # that reached the wire — the same array the loop handed over through
+        # `RunOptions.visible_tools_capture`, which the send-sites test pins.
+        record_request(base_url=base_url, model=model, payload=payload,
+                       session_id=session_id, send_site=
+                       "app/harness/finalizer.py::run_finalizer")
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as cli:
                 resp = await cli.post(url, headers=headers, json=payload)

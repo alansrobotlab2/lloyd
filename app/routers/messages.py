@@ -1869,6 +1869,13 @@ async def post_message_stream(request: Request):
         prefetched_text, session_id=session_id,
         system_prompt_chars=len(system_prompt),
     )
+    # #581: the injected half of the turn, as its own hashed component. It
+    # rides in on the user message, so a message digest already moves when this
+    # moves — what the separate hash buys is WHICH of the two moved, which is
+    # the difference between "the retrieval changed" and "the user said
+    # something different". Never raises, and off by config like the rest.
+    from app.component_manifest import note_prefetch
+    note_prefetch(session_id, prefetched_text or "")
 
     meta_path = SESSIONS_DIR / f"{session_id}.json"
     session_turn_count = 0

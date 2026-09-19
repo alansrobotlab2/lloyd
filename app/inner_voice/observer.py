@@ -28,6 +28,7 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from app import event_log as _event_log
+from app.component_manifest import record_request
 from app.config import CONFIG, _get_model_cfg, resolve_model_alias
 from app.inner_voice import guards as _guards
 from app.inner_voice import observer_prompt as _prompt
@@ -354,6 +355,11 @@ async def _post_chat_completion_with_tools(
         "chat_template_kwargs": {"enable_thinking": False},
         "priority": priority,
     }
+    # #581: manifest this non-streaming send site too. Never raises and
+    # never delays: the digest is of the payload built above, and the file
+    # write happens on the manifest's writer thread.
+    record_request(base_url=base_url, model=model_name, payload=payload,
+                   send_site="app/inner_voice/observer.py::_post_chat_completion_with_tools")
     resp = await _client().post(url, json=payload, timeout=timeout_seconds)
     resp.raise_for_status()
     return resp.json()

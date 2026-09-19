@@ -366,6 +366,13 @@ async def run_query(
                     chunk_timeout_s=getattr(
                         options, "stream_chunk_timeout_s", 0.0
                     ),
+                    # #581: which turn and which iteration this line describes.
+                    # `num_turns` is the same value `_log` and
+                    # `prefix_miss.record_iteration` already use for the
+                    # iteration index, so a manifest line and that module's
+                    # per-iteration cache series name the same iteration.
+                    session_id=options.session_id,
+                    iteration=num_turns,
                 ):
                     # Usage chunk arrives as the last event when
                     # stream_options.include_usage=True. vLLM emits it
@@ -904,6 +911,7 @@ async def _maybe_finalize(
             timeout_s=options.finalizer_timeout_s,
             priority=options.priority,
             cancel_event=options.cancel_event,
+            session_id=options.session_id,
         )
     except asyncio.CancelledError:
         raise
