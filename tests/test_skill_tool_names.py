@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -292,9 +293,15 @@ def _command_blocks(body: str) -> list[str]:
     return blocks
 
 
-def _unresolved() -> set[str]:
-    """`<label>::<tree>:<path>` for every named path that is not on disk."""
-    bad: set[str] = set()
+def _unresolved_rows() -> dict[str, Path]:
+    """`<label>::<tree>:<path>` -> the doc file that names it, for every named
+    path that is not on disk.
+
+    The doc is kept alongside the row, not thrown away: to say *why* a
+    reference is missing, the diagnosis has to ask that file's own repo whether
+    the copy on disk is committed (item #1264).
+    """
+    bad: dict[str, Path] = {}
     for label, path in _doc_files():
         body = path.read_text(encoding="utf-8", errors="replace")
         skill_dir = path.parent if label.startswith("skills/") else None
@@ -308,8 +315,127 @@ def _unresolved() -> set[str]:
                 if skill_dir is not None:
                     roots.append(skill_dir / rel)
             if not any(r.exists() for r in roots):
-                bad.add(f"{label}::{tree}:{rel}")
+                bad[f"{label}::{tree}:{rel}"] = path
     return bad
+
+
+def _unresolved() -> set[str]:
+    """`<label>::<tree>:<path>` for every named path that is not on disk."""
+    return set(_unresolved_rows())
+
+
+_GIT_TIMEOUT_S = 20
+
+#: One `git status` per working tree per run, keyed by tree root. Only consulted
+#: on a violation, so a green suite never shells out.
+_DIRTY_CACHE: dict[str, frozenset[str]] = {}
+
+
+def _git_status(worktree: str) -> frozenset[str]:
+    """Repo-relative paths with uncommitted changes in `worktree` — index,
+    worktree, or untracked. Empty if git cannot be asked."""
+    if worktree not in _DIRTY_CACHE:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", worktree, "status", "--porcelain"],
+                capture_output=True, text=True, timeout=_GIT_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError):
+            proc = None
+        rows: set[str] = set()
+        if proc is not None and proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                if len(line) < 4:
+                    continue
+                p = line[3:].strip('"')
+                # A rename reports `old -> new`; the new path is the live one.
+                if " -> " in p:
+                    p = p.split(" -> ", 1)[1]
+                rows.add(p)
+        _DIRTY_CACHE[worktree] = frozenset(rows)
+    return _DIRTY_CACHE[worktree]
+
+
+def _uncommitted_edit(doc: Path) -> tuple[str, str] | None:
+    """(working-tree root, repo-relative path) if `doc` is an uncommitted edit.
+
+    Asked of the file's own tree rather than of `VAULT`, because uncommitted is
+    a property of the document's repo and `~/obsidian` is a live tree with no
+    worktree of its own. None means committed, outside any repo, or git
+    unaskable — the last deliberately falls in with committed, so a diagnosis
+    that cannot read git costs the check nothing in leniency (clause 2).
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(doc.parent), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    top = proc.stdout.strip() if proc.returncode == 0 else ""
+    if not top:
+        return None
+    try:
+        rel = str(Path(doc).resolve().relative_to(Path(top).resolve()))
+    except ValueError:
+        return None
+    dirty = _git_status(top)
+    if rel in dirty:
+        return (top, rel)
+    # An untracked *directory* is reported as `dir/`, not file by file, so a new
+    # skill's SKILL.md — the likeliest source of a doc-ahead-of-code skew — is
+    # under an entry here rather than an entry itself.
+    parts = rel.split("/")
+    for i in range(1, len(parts)):
+        if "/".join(parts[:i]) + "/" in dirty:
+            return (top, rel)
+    return None
+
+
+def _drift_report(drift: set[str]) -> str:
+    """Say why each unresolved reference is missing.
+
+    Two causes used to print identically, and they need opposite answers. "The
+    doc is committed and the file it names never landed" is item #1240's defect
+    — put the file in the repo or fix the doc. "The doc naming it is an
+    uncommitted edit in the vault working tree" is item #1264's: the instruction
+    was written ahead of anything committed, so the code gap may not exist at
+    all, and the vault edit is the thing to commit or revert. A red node in
+    `~/lloyd` cannot be attributed to or reverted by a commit if the second case
+    is reported as the first, which is how four rounds on 2026-09-19 were refused
+    for a skew no commit had produced.
+
+    This function only *explains*. The assertion it feeds still requires an
+    empty drift either way — the diagnosis adds no leniency.
+    """
+    rows = _unresolved_rows()
+    gaps: list[str] = []
+    skews: list[tuple[str, str, str]] = []
+    for row in sorted(drift):
+        doc = rows.get(row)
+        un = _uncommitted_edit(doc) if doc is not None else None
+        if un is None:
+            gaps.append(row)
+        else:
+            skews.append((row, un[1], un[0]))
+    parts: list[str] = []
+    if gaps:
+        parts.append(
+            "skills or autonomy tasks name paths that are not in this checkout: "
+            f"{gaps}. Either put the file in the repo, point the doc at where it "
+            "really lives, or — only for pre-existing drift this round did not "
+            "touch — add it to PATH_KNOWN_UNFIXED with a reason.")
+    for row, rel, top in skews:
+        # What the doc names, pulled out of the row itself (`label::tree:path`),
+        # so the command a reader pastes has no placeholder left in it.
+        named = row.split("::", 1)[1].split(":", 1)[1]
+        parts.append(
+            f"{row}: the naming file {rel} is an UNCOMMITTED EDIT in the working "
+            f"tree at {top} — a working-tree skew, so this row is not evidence "
+            "that the code never landed. The path may be named only by text no "
+            "commit has yet. Ask the committed copy first: "
+            f"`git -C {top} show HEAD:{rel} | grep -c '{named}'` — and if that "
+            "says 0, committing or reverting that one vault file is the fix, not "
+            "adding the path to PATH_KNOWN_UNFIXED.")
+    return "\n".join(parts)
 
 
 def test_no_active_skill_or_task_names_a_path_absent_from_the_checkout():
@@ -324,14 +450,15 @@ def test_no_active_skill_or_task_names_a_path_absent_from_the_checkout():
     it mirrors. That is the point of the ledger: without it, this assertion
     would block unrelated rounds for prose they did not write, and a check that
     blocks the wrong thing gets disabled.
+
+    The message is `_drift_report`, because on 2026-09-19 four rounds were
+    refused by a violation that no commit had produced: a skill edited in the
+    vault working tree and never committed, naming a script still on an
+    unmerged branch. Same red, opposite fix, and nothing in the text
+    distinguished them (item #1264).
     """
     drift = _unresolved() - PATH_KNOWN_UNFIXED
-    assert drift == set(), (
-        "skills or autonomy tasks name paths that are not in this checkout: "
-        f"{sorted(drift)}. Either put the file in the repo, point the doc at "
-        "where it really lives, or — only for pre-existing drift this round did "
-        "not touch — add it to PATH_KNOWN_UNFIXED with a reason."
-    )
+    assert drift == set(), _drift_report(drift)
 
 
 def test_the_path_check_anchored_to_a_path_that_really_exists():
@@ -369,6 +496,109 @@ def test_the_path_check_goes_red_on_a_reference_it_should_see(tmp_path, monkeypa
     drift = _unresolved() - PATH_KNOWN_UNFIXED
     assert drift == {"autonomy/9999-fake.md::repo:eval/a_script_that_does_not_exist_1240.py"}, (
         f"the scanner did not isolate the one planted violation: {sorted(drift)}")
+
+
+#: The script both controls below name. It is not in the checkout and never will be.
+_SKEW_SCRIPT = "scripts/a_script_only_a_vault_edit_names_1264.py"
+
+
+def _task_body(*, names_script: bool) -> str:
+    """An autonomy task file, optionally naming a script that is not in the checkout.
+
+    The indented command block is the shape task #85 actually used, and the
+    `~/lloyd` inside it is what makes the root claim unambiguous to the scanner.
+    """
+    head = "---\nname: skew\ntype: autonomy\n---\n# Skew Task\n\nStep 1.\n"
+    if not names_script:
+        return head + "\nNothing runnable here yet.\n"
+    return head + ("\n    cd ~/lloyd && .venvs/lloyd/bin/python "
+                   f"{_SKEW_SCRIPT} --window 30\n")
+
+
+def _git_repo_with_committed_task(tmp_path: Path) -> Path:
+    """A fresh git working tree standing in for `~/obsidian`, holding one clean
+    committed autonomy task. Returns the tree root; it is clean on return.
+
+    A real repo, not a mocked dirty-set: "is this file committed?" is answered by
+    a `git status` subprocess, so the control has to cross that boundary to prove
+    anything about the answer.
+    """
+    repo = tmp_path / "obsidian"
+    (repo / "autonomy").mkdir(parents=True)
+    (repo / "autonomy" / "9999-skew.md").write_text(
+        _task_body(names_script=False), encoding="utf-8")
+    for cmd in (["init", "-q"],
+                # A machine's global excludesfile must not decide the fixture.
+                ["-c", "core.excludesfile=/dev/null", "add", "autonomy/9999-skew.md"],
+                ["-c", "user.name=lloyd-test", "-c", "user.email=lloyd-test@invalid",
+                 "commit", "-q", "-m", "init"]):
+        subprocess.run(["git", *cmd], cwd=str(repo), check=True,
+                       capture_output=True, text=True)
+    return repo
+
+
+def test_an_uncommitted_vault_edit_is_diagnosed_as_a_skew_not_a_missing_file(tmp_path,
+                                                                            monkeypatch):
+    """Clause 1 (#1264). The exact state that made main red on 2026-09-19: a task
+    committed with no such instruction, then edited in the working tree to name a
+    script nothing has committed. The failure text must call that an uncommitted
+    edit and name the file — and must NOT also file the row under "not in this
+    checkout", because "the code never landed" is the conclusion that sent four
+    rounds to their deaths.
+
+    The decoy is planted alone rather than among the live corpus: the assertion
+    here is about which sentence the row is described by, and a stray
+    real-corpus violation would describe a *different* row, not this one.
+    """
+    repo = _git_repo_with_committed_task(tmp_path)
+    doc = repo / "autonomy" / "9999-skew.md"
+    doc.write_text(_task_body(names_script=True), encoding="utf-8")   # left uncommitted
+
+    label = "autonomy/9999-skew.md"
+    monkeypatch.setattr(sys.modules[__name__], "_doc_files", lambda: [(label, doc)])
+    drift = _unresolved() - PATH_KNOWN_UNFIXED
+    assert drift == {f"{label}::repo:{_SKEW_SCRIPT}"}, (
+        f"the planted uncommitted-edit violation was not seen: {sorted(drift)}")
+
+    msg = _drift_report(drift)
+    assert "UNCOMMITTED EDIT" in msg, f"the text never says the file is uncommitted: {msg}"
+    assert label in msg, f"the text never names the uncommitted file: {msg}"
+    assert str(repo) in msg, f"the text never says which working tree: {msg}"
+    assert "working-tree skew" in msg, f"the text never names the diagnosis: {msg}"
+    assert "not in this checkout" not in msg, (
+        f"a working-tree skew was still reported as a missing file: {msg}")
+
+
+def test_a_committed_doc_naming_an_absent_file_still_goes_red_alone(tmp_path, monkeypatch):
+    """Clause 2 (#1264): the same fixture one bit away from the control above —
+    here the instruction IS committed and the tree is clean — and the row is still
+    the sole isolated violation, reported as missing from the checkout, with no
+    mention of an uncommitted edit. This is what stops the diagnosis becoming a
+    leniency: `_uncommitted_edit` returning None is the committed case, the
+    not-a-repo case and the git-unaskable case at once, and all three keep the
+    teeth #1240 gave the check.
+    """
+    repo = _git_repo_with_committed_task(tmp_path)
+    doc = repo / "autonomy" / "9999-skew.md"
+    doc.write_text(_task_body(names_script=True), encoding="utf-8")
+    for cmd in (["add", "autonomy/9999-skew.md"],
+                ["-c", "user.name=lloyd-test", "-c", "user.email=lloyd-test@invalid",
+                 "commit", "-q", "-m", "the instruction"]):
+        subprocess.run(["git", *cmd], cwd=str(repo), check=True,
+                       capture_output=True, text=True)
+
+    label = "autonomy/9999-skew.md"
+    real = _doc_files()
+    monkeypatch.setattr(sys.modules[__name__], "_doc_files",
+                        lambda: real + [(label, doc)])
+    drift = _unresolved() - PATH_KNOWN_UNFIXED
+    assert drift == {f"{label}::repo:{_SKEW_SCRIPT}"}, (
+        f"a committed doc naming an absent file stopped being caught: {sorted(drift)}")
+
+    msg = _drift_report(drift)
+    assert "not in this checkout" in msg, f"the row lost its real diagnosis: {msg}"
+    assert "UNCOMMITTED EDIT" not in msg, (
+        f"a committed doc was excused as a working-tree skew: {msg}")
 
 
 def test_the_secondary_routing_nightly_docs_are_clean():
