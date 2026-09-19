@@ -1,5 +1,6 @@
 """Shared filesystem paths for the Lloyd backend."""
 
+import logging
 import os
 from pathlib import Path
 
@@ -78,3 +79,63 @@ VAULT_SESSIONS_DIR = VAULT_DERIVED_ROOT / "sessions"
 VAULT_BACKGROUND_SESSIONS_DIR = VAULT_DERIVED_ROOT / "sessions-background"
 VAULT_PENDING_RESEARCH_DIR = VAULT_DERIVED_ROOT / "pending-research"
 VAULT_FEEDS_DIR = VAULT_DERIVED_ROOT / "memory" / "feeds"
+
+# ---------------------------------------------------------------- which tree? --
+#
+# Everything above resolves inside the tree this module was imported from, and
+# that is deliberate: a self-modification canary boots from a worktree and MUST
+# get its own empty `sessions/` and `workers.db` rather than claim the live
+# one's (the block above `AUTONOMY_RUNS_DIR`), and the canary imports its own
+# tree on purpose — the `<round>/home/lloyd` layout exists precisely so that
+# `LLOYD_HOME` and `HOME=<round>/home` are the same directory
+# (`scripts/automod/worktree.py:1-10`). What was missing is a NAME for the fact,
+# which is what #733 is about: a script a round runs scans `SESSIONS_DIR`, finds
+# the worktree's empty one, and reports a clean, plausible, false result. The
+# #529 replay printed `no session file matching '20260909_155011_backlogi_32bb'
+# in …/SM_20260910_004029/home/lloyd/sessions` for a 500,934-byte file that is in
+# the live checkout, and an hour later silently reported
+# `cumulative_prompt_tokens: null` for a whole arm. `app/uptake.py:205-238` grew
+# a private copy of this same detection after a landing was refused on a corpus
+# of one canary turn (`bfa8bd1`), and `app/uptake.py:1413-1418` names a second
+# instance where the worktree's absent `kg.sqlite` produced a table reporting
+# `duplicate_rows: 0`. The name belongs here, one level up.
+#
+# The discriminator is on disk and is not an inference: `git worktree add` leaves
+# `.git` as a one-line FILE (`gitdir: /…/.git/worktrees/<name>`) where the main
+# checkout has a DIRECTORY. One `is_file()` answers it — no `$HOME` preference,
+# no live-root computation, nothing to guess wrong. It deliberately does NOT
+# retarget anything: the anchor stays exactly where it was, this only says where
+# it is.
+IS_WORKTREE = (LLOYD_HOME / ".git").is_file()
+
+
+def describe_tree() -> str:
+    """One line naming the tree these paths resolve in: `… tree=live` or `… tree=worktree`.
+
+    Put it in any aggregate artifact — a scan of `SESSIONS_DIR`, a row count, an
+    uptake table — so a measurement carries the corpus it was measured on and a
+    reader can tell "zero rows" from "zero rows because this is a worktree".
+    `tree` is `worktree` exactly when this checkout is a linked git worktree, and
+    `live` for every other tree, which in this repo means the main checkout: a
+    tree with no `.git` entry at all is not a worktree either, and this module
+    does not infer anything beyond that.
+    """
+    return f"LLOYD_HOME={LLOYD_HOME} tree={'worktree' if IS_WORKTREE else 'live'}"
+
+
+if IS_WORKTREE:
+    # Once per process, because the module body runs once — and this is the ONLY
+    # thing the detection changes: every constant above is untouched. A WARNING,
+    # not a raise: the canary boot legitimately imports its own tree and gates on
+    # the subprocess returncode and health polling
+    # (`scripts/automod/canary.py:104-113`), so refusing at import would break the
+    # boot the layout was designed for. Scripts that aggregate over the dirs
+    # below are what #733 asks to hear this, and they get it in their own log.
+    logging.getLogger(__name__).warning(
+        "app.paths is anchored to a git WORKTREE, not to the main checkout: %s."
+        " SESSIONS_DIR=%s VAULT_DERIVED_ROOT=%s AUTONOMY_RUNS_DIR=%s all"
+        " resolve inside it and are usually empty or partial, so scanning them is"
+        " a measurement of nothing, not a clean result. Name the tree in whatever"
+        " this prints: app.paths.describe_tree().",
+        LLOYD_HOME, SESSIONS_DIR, VAULT_DERIVED_ROOT, AUTONOMY_RUNS_DIR,
+    )
