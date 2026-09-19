@@ -297,6 +297,106 @@ def structured_error_body(content_text: str) -> bool:
     return False
 
 
+# ── Failure classification (backlog #500) ────────────────────────────────────
+#
+# `stats.is_error` is a dispatch marker, not a verdict about the call: it comes
+# off the harness tool-result event and fires on *any* non-zero shell exit and on
+# a SIGTERM-killed command. `error_source` only says which channel flagged the
+# step, and in practice there is one channel — measured over
+# `_pipeline/trajectories/*.jsonl` 2026-09-09→09-17, 2,330 error steps carried
+# `error_source` = {protocol: 2327, exit_code: 3}, so any gate keyed on that
+# field admits 2,330 of 2,330 and discriminates nothing. What decides whether a
+# failure is worth mining is its *shape*, so the shape is persisted per step as
+# `failure_class`.
+#
+# Precedence, most specific first. Counts are flagged tool messages in
+# `~/lloyd/sessions/*.json` read by payload shape at the time of writing:
+#
+#   timeout_or_signal  exit code < 0 — a signal death; SIGTERM (-15) is the
+#                      signature of a real Bash timeout (29 rows).
+#   harness_block      the harness refused or lost the call and said so in its
+#                      own short form: disabled-by-configuration, safety denial,
+#                      cancelled by user, no server claims the tool, transport
+#                      error, argument validation (39 + ~360).
+#   structured_error   the body is a JSON object reporting failure (1,586).
+#   nonzero_exit       the ONLY evidence is a positive `[exit code: N]`. A
+#                      `grep` with no match exits 1, `ls` on a missing path
+#                      exits 2, an intentionally failing `pytest` exits 1 —
+#                      1,732 rows, the largest class and the one the mining
+#                      chain has already ruled non-failure.
+#   protocol_flagged   the harness flagged it and the payload carries no shape
+#                      evidence either way.
+#
+# Exactly one class is dropped downstream: `nonzero_exit` (see
+# `mine-trajectories.py::is_corroborated_error`). Dropping everything the harness
+# flagged would repeat, in the other direction, the mistake the pre-#389 reading
+# made — the signal deaths and structured bodies above are real failures.
+FAILURE_CLASSES = ("timeout_or_signal", "harness_block", "structured_error",
+                   "nonzero_exit", "protocol_flagged")
+
+# Dropped by the mining gate; named here so the two sides name it once.
+NON_PROMOTABLE_FAILURE_CLASS = "nonzero_exit"
+
+# A harness refusal is one short line the harness itself wrote, never a tool's
+# multi-KB output that happens to contain the words. `.+?: no server claims tool`
+# is prefixed with the tool name (`name: no server claims tool 'name'`).
+HARNESS_BLOCK_MAX_LEN = 400
+HARNESS_BLOCK_RE = re.compile(
+    r"^(?:"
+    r"tool\s+'[^']+'\s+is\s+disabled\s+by\s+configuration"
+    r"|tool\s+call\s+denied:"
+    r"|tool\s+'[^']+'\s+cancelled\s+by\s+user"
+    r"|tool\s+call\s+arguments\s+could\s+not\s+be\s+parsed\s+as\s+json"
+    r"|input\s+validation\s+error:"
+    r"|.+?:\s*no\s+server\s+claims\s+tool"
+    r"|.+?:\s*transport\s+error:"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def classify_failure(content_text: str, exit_code: int | None) -> str:
+    """Class of a step the extractor already flagged as failed.
+
+    Derived from the payload's shape and the signed exit code, never from the
+    words in the output — the keyword sweep is `output_mentions_errors`, a
+    separate descriptive field that promotes nothing (#389).
+
+    Four questions, in the order they are answerable:
+
+    1. Was the process killed? A negative exit code is a signal, and it is the
+       only class here that says *how* the call ended. It is asked first because
+       the two signals genuinely co-occur — a killed call's body can itself read
+       as a JSON error — and "was it killed?" is the question a mitigation
+       answers.
+    2. Did the call ever run? A refusal or a lost dispatch has no tool behaviour
+       to mine; the harness wrote the whole body, so it is short and formulaic.
+       Asked before the JSON test because `name: no server claims tool 'name'`
+       arrives as a JSON body too, and `harness_block` says more about it than
+       `structured_error` does.
+    3. Did the tool report failure as data? A JSON object with a truthy `error`,
+       read with the exit trailer removed — `structured_error_body()` parses the
+       *whole* body, so a Bash-shaped `{"error": …}\n\n[exit code: 3]` would
+       otherwise fall through to the exit class on a formatting artifact.
+    4. Did it only exit non-zero? That is `nonzero_exit`, the one class the
+       mining gate rejects.
+
+    Anything else keeps `protocol_flagged`: a flag with no shape to argue with,
+    named instead of folded into a class that claims a mechanism.
+    """
+    if exit_code is not None and exit_code < 0:
+        return "timeout_or_signal"
+    # The exit trailer is tool output, not part of the payload's shape.
+    body = MENTION_EXCLUDE_EXIT_TRAILER.sub("", content_text).strip()
+    if len(body) <= HARNESS_BLOCK_MAX_LEN and HARNESS_BLOCK_RE.match(body):
+        return "harness_block"
+    if structured_error_body(body):
+        return "structured_error"
+    if exit_code is not None and exit_code > 0:
+        return NON_PROMOTABLE_FAILURE_CLASS
+    return "protocol_flagged"
+
+
 def categorize_error(text: str) -> str:
     for name, pattern in ERROR_CATEGORIES:
         if pattern.search(text):
@@ -494,12 +594,15 @@ def parse_session(path: Path) -> dict | None:
             content = msg.get("content", "")
             # Normalize content to string (lloyd sessions use [{type,text}] blocks)
             content_text = extract_result_text(content)
-            # `stats.is_error` is set by the harness at dispatch time — it is
-            # the authoritative answer to "did this call fail", present on every
-            # tool message in the current session format. It used to be ignored
-            # and re-derived by parsing the result body for an `error` key,
-            # which only reconstructs it for the minority of tools that return
-            # a JSON object (backlog #392).
+            # `stats.is_error` is set by the harness at dispatch time and is
+            # present on every tool message in the current session format, so it
+            # is the flag we read — but it is a *dispatch* marker, not a verdict
+            # about the call: it is true for any non-zero shell exit and for a
+            # SIGTERM-killed command, classes the mining chain has ruled
+            # non-failure. It says "the harness flagged this", never "this is
+            # worth mining"; `classify_failure()` below decides that from the
+            # payload shape. It replaced the old body-regex derivation (#392);
+            # it did not replace the need for a class.
             stats = msg.get("stats")
             stats_error = stats.get("is_error") if isinstance(stats, dict) else None
             result_map[call_id] = {
@@ -542,10 +645,16 @@ def parse_session(path: Path) -> dict | None:
                 error_source = "exit_code"
             else:
                 error_source = None
+            # `error_source` records the channel that flagged the step and is
+            # almost always "protocol"; `failure_class` records what the failure
+            # *is*, which is the only thing a downstream gate can grade (#500).
+            failure_class = (classify_failure(content_text, exit_code)
+                             if is_error else None)
         else:
             is_error = False
             res_summary = "OK: no result recorded"
             error_source = None
+            failure_class = None
             exit_code = None
             mentions = False
             content_text = ""
@@ -557,6 +666,7 @@ def parse_session(path: Path) -> dict | None:
             "result_summary": res_summary,
             "is_error": is_error,
             "error_source": error_source,
+            "failure_class": failure_class,
             "output_mentions_errors": mentions,
             "exit_code": exit_code,
             "call_id": call_id,
@@ -570,6 +680,7 @@ def parse_session(path: Path) -> dict | None:
                 "sequence": seq,
                 "error_type": categorize_error(content_text),
                 "error_source": error_source,
+                "failure_class": failure_class,
                 "exit_code": exit_code,
                 "params_summary": params,
             })
@@ -757,6 +868,7 @@ def print_stats() -> None:
     session_class_counts: dict[str, int] = {}
     error_type_counts: dict[str, int] = {}
     error_source_counts: dict[str, int] = {}
+    failure_class_counts: dict[str, int] = {}
     tool_name_counts: dict[str, int] = {}
     signal_counts: dict[str, int] = {}
 
@@ -788,6 +900,9 @@ def print_stats() -> None:
                     source = et.get("error_source")
                     if source:
                         error_source_counts[source] = error_source_counts.get(source, 0) + 1
+                    fclass = et.get("failure_class")
+                    if fclass:
+                        failure_class_counts[fclass] = failure_class_counts.get(fclass, 0) + 1
 
                 for tool in traj.get("tools", []):
                     tname = tool.get("name", "unknown")
@@ -834,6 +949,15 @@ def print_stats() -> None:
     print("Error sources:")
     for src, count in sorted(error_source_counts.items(), key=lambda x: -x[1]):
         print(f"  {src:<20} {count}")
+    # Counted from `error_tools` only, so it is one row per failed step — the
+    # source tally above counts every failed step twice, once from each list it
+    # appears in. `protocol` names the channel that flagged a step and is nearly
+    # always the same value; this histogram is the one that says what the failure
+    # was, which is what the post-landing over-count is measured on (#500).
+    print()
+    print("Failure classes:")
+    for cls, count in sorted(failure_class_counts.items(), key=lambda x: -x[1]):
+        print(f"  {cls:<20} {count}")
     print()
     print("Signals seen:")
     for sig, count in sorted(signal_counts.items(), key=lambda x: -x[1]):

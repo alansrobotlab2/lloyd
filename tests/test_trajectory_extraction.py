@@ -678,6 +678,146 @@ def test_error_count_counts_only_corroborated_failures(tmp_path):
     assert traj["has_errors"] is True
 
 
+# ── the class of a flagged step (#500) ───────────────────────────────────────
+#
+# `stats.is_error` answers "the harness flagged this", and it is set for any
+# non-zero shell exit. `error_source` records which channel flagged it, and there
+# is effectively one channel, so it cannot discriminate either. Measured over the
+# flagged tool messages in `~/lloyd/sessions/*.json` (read 2026-09-19, 3,752
+# rows): 1,732 carry a positive exit code and nothing else, 1,586 report failure
+# as a JSON body, 39 are harness refusals, 29 are signal deaths, and 366 are a
+# flag with no shape behind it. The first bucket contains a `grep` that matched
+# nothing (exit 1) and an `ls` of a missing path (exit 2) — outcomes, not
+# failures. `failure_class` is what separates them, and the miner's gate keys on
+# it, so the split below is the split that decides what reaches skill authoring.
+
+def flagged(tmp_path, calls, **kw):
+    """Parse one session and return its single flagged step in both shapes.
+
+    Returns `(tool_entry, error_tool_entry)` — the class must be persisted on
+    both, because the miner reads `error_tools[]` for error patterns and
+    `tools[]` for the error rate on a signature.
+    """
+    traj = first_tool(tmp_path, calls, **kw)
+    assert traj["error_count"] == 1
+    seq = traj["error_tools"][0]["sequence"]
+    tool = next(t for t in traj["tools"] if t["sequence"] == seq)
+    return tool, traj["error_tools"][0]
+
+
+def test_a_json_body_reporting_failure_is_classed_structured_error(tmp_path):
+    """Clause 1 (#500), first half: a body that reports failure as data, not as
+    prose, on a step the harness flagged."""
+    tool, err = flagged(tmp_path, [
+        ("mcp____tools_email_search", {"query": "invoice"},
+         '{"error": "goal is required"}', True),
+    ])
+    assert tool["failure_class"] == "structured_error"
+    assert err["failure_class"] == "structured_error"
+    assert err["exit_code"] is None
+
+
+def test_a_negative_exit_code_is_classed_timeout_or_signal(tmp_path):
+    """Clause 1 (#500), second half: the signed parse landed in #389, and the
+    class is what makes it mean something. A killed command is the real Bash
+    timeout signature — 29 such rows in the 8-day window read 2026-09-19."""
+    tool, err = flagged(tmp_path, [
+        ("Bash", {"command": "sleep 900"},
+         "command timed out after 120000ms\n\n[exit code: -15]", True),
+    ])
+    assert tool["exit_code"] == -15
+    assert tool["failure_class"] == "timeout_or_signal"
+    assert err["failure_class"] == "timeout_or_signal"
+
+
+def test_a_signal_death_outranks_the_error_body_it_carries(tmp_path):
+    """Precedence, because the two signals genuinely co-occur: a killed call's
+    body can itself read as a structured error, and `was the process killed?` is
+    the question a mitigation answers. Losing that flips the class into the one
+    the miner cannot distinguish from a `grep` no-match."""
+    _tool, err = flagged(tmp_path, [
+        ("Bash", {"command": "sleep 900"}, '{"error": "killed"}\n\n[exit code: -9]', True),
+    ])
+    assert err["failure_class"] == "timeout_or_signal"
+
+
+def test_a_flagged_step_with_only_an_exit_marker_is_classed_nonzero_exit(tmp_path):
+    """Clause 2 (#500): the class that has to appear in written rows for the
+    miner's narrowing to have anything to reject. Today the corpus carries 1,082
+    steps with a positive exit code and 3 whose `error_source` is `exit_code`,
+    because the harness flag takes precedence over the marker on every step that
+    has both — so an exit-derived class was invisible exactly when it mattered."""
+    tool, err = flagged(tmp_path, [
+        ("Bash", {"command": "grep -rn TODO scripts/"},
+         "no matches found\n\n[exit code: 1]", True),
+    ])
+    assert tool["exit_code"] == 1
+    assert tool["failure_class"] == "nonzero_exit"
+    assert err["failure_class"] == "nonzero_exit"
+    # The step is still flagged, and still flagged from the same channel — the
+    # class is a narrowing of what the gate promotes, not a suppression of the
+    # record.
+    assert tool["is_error"] is True
+    assert tool["error_source"] == "protocol"
+
+
+def test_a_structured_body_with_a_positive_exit_code_is_not_the_exit_class(tmp_path):
+    """The class is the payload's shape first: a tool that returned a JSON error
+    and a non-zero exit is reporting a failure, not exiting 1 on a search."""
+    _tool, err = flagged(tmp_path, [
+        ("Bash", {"command": "deploy --check"},
+         '{"error": "upstream unreachable", "code": 3}\n\n[exit code: 3]', True),
+    ])
+    assert err["exit_code"] == 3
+    assert err["failure_class"] == "structured_error"
+
+
+def test_a_harness_refusal_is_not_the_expected_nonzero_exit_class(tmp_path):
+    """A refusal, a bad dispatch or a lost connection: the call did not run.
+    39 such rows in the 8-day window read 2026-09-19 — dispatch failures
+    (`Tool 'Bash' is disabled by configuration.`), unkeyable dispatches
+    (`no server claims tool 'name'`), `Input validation error: ...`, and
+    transport errors."""
+    _tool, err = flagged(tmp_path, [
+        ("Bash", {"command": "ls"}, "Tool 'Bash' is disabled by configuration.", True),
+    ])
+    assert err["failure_class"] == "harness_block"
+    assert _tool["failure_class"] == "harness_block"
+
+
+def test_a_flag_with_no_shape_behind_it_is_classed_protocol_flagged(tmp_path):
+    """The residual, named rather than folded into a class with a claimed
+    mechanism: the harness lost the call and the body is a plain string. 366 rows
+    in the 8-day window read 2026-09-19."""
+    _tool, err = flagged(tmp_path, [
+        ("Bash", {"command": "ls"}, "total 11472\ndrwxr-xr-x 1 a a 4096 .", True),
+    ])
+    assert err["failure_class"] == "protocol_flagged"
+    assert err["exit_code"] is None
+
+
+def test_an_unflagged_step_carries_no_failure_class(tmp_path):
+    """The field describes a failure. A step that was not flagged says nothing
+    about a class, and a default of `nonzero_exit` here would put the whole
+    corpus into the class the miner rejects."""
+    traj = first_tool(tmp_path, [
+        ("Bash", {"command": "true"}, "done\n\n[exit code: 0]", False),
+        ("Read", {"file_path": "/a"}, "except Exception as e:", False),
+    ])
+    assert [t["failure_class"] for t in traj["tools"]] == [None, None]
+    assert traj["error_tools"] == []
+
+
+def test_a_pre_stats_session_gets_a_class_from_the_fallback_flag(tmp_path):
+    """A tool message predating `stats` is flagged only by the structured-body
+    fallback, and must still be classified — otherwise the miner's legacy
+    no-`error_source` branch is the only reading a historical row ever gets."""
+    _tool, err = flagged(tmp_path, [
+        ("Bash", {"command": "name"}, '{"error": "no server claims tool \'name\'"}', None),
+    ])
+    assert err["failure_class"] == "structured_error"
+
+
 # ── the miner must inherit the same contract ─────────────────────────────────
 
 def error_traj(session_key, name, error_type, source, params=None):

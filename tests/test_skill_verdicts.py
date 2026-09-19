@@ -943,3 +943,135 @@ def test_agreeing_trees_and_a_scratch_ledger_print_no_divergence(tmp_path, store
     assert not [ln for ln in silent if ln.startswith(("MIRROR_MISSING", "LEDGER_LOST",
                                                       "LEDGER_MIRROR_CONFLICT"))], silent
     assert silent[-1] == "checked: 0  skipped_by_verdict: 0"
+
+
+# ── the mining gate must not promote a bare non-zero exit (#500) ─────────────
+#
+# `stats.is_error` in the session store fires on any non-zero shell exit, so a
+# `grep` that found nothing and a command that actually broke arrive identical.
+# Keying the gate on `error_source` made it a no-op — over `_pipeline/trajectories/*.jsonl`
+# 2026-09-09→09-17, 2,330 error steps carried {protocol: 2327, exit_code: 3} and
+# `is_corroborated_error` admitted all 2,330. These pin the gate on
+# `failure_class` instead, which the extractor derives from payload shape.
+
+et500 = _load("extract_trajectories_500", "scripts/extract-trajectories.py")
+
+
+def flagged_step(**fields):
+    """An `error_tools[]` row as the extractor writes it: by construction an
+    error, so it carries no `is_error` key."""
+    step = {"name": "Bash", "sequence": 0, "error_type": "logic",
+            "error_source": "protocol", "params_summary": {"command": "true"}}
+    step.update(fields)
+    return step
+
+
+def test_the_gate_rejects_a_bare_nonzero_exit_but_keeps_signal_and_structured():
+    """Clause 3. The three shapes that decide the gate, as real payloads.
+
+    The `nonzero_exit` row is the one class that must stop reaching skill
+    authoring: a `grep` with no match exits 1 and an intentionally failing
+    `pytest` exits 1, and 1,732 flagged messages in an 8-day read of
+    `~/lloyd/sessions/*.json` were that class. The -15 row is a SIGTERM — the
+    signature of a real Bash timeout — and the structured row is a tool saying
+    it failed; both must stay promotable.
+    """
+    assert mt.is_corroborated_error(flagged_step(failure_class="nonzero_exit",
+                                                 exit_code=1)) is False
+    assert mt.is_corroborated_error(flagged_step(failure_class="timeout_or_signal",
+                                                 exit_code=-15)) is True
+    assert mt.is_corroborated_error(flagged_step(
+        failure_class="structured_error", exit_code=None,
+        params_summary={"query": "x"})) is True
+    assert mt.is_corroborated_error(flagged_step(failure_class="harness_block")) is True
+    assert mt.is_corroborated_error(flagged_step(failure_class="protocol_flagged")) is True
+
+
+def test_the_gate_still_falls_back_for_rows_written_before_the_class():
+    """Pre-#500 trajectory rows have no `failure_class`, and extraction is
+    incremental, so a gate that required the field would blank the 7-day window
+    the night before any backfill. The `error_source` reading survives as the
+    fallback; a row with no class and no source still needs an explicit exit code.
+    """
+    assert mt.is_corroborated_error(flagged_step()) is True          # protocol, legacy
+    assert mt.is_corroborated_error({**flagged_step(), "error_source": "semantic"}) is False
+    no_source = {k: v for k, v in flagged_step().items() if k != "error_source"}
+    assert mt.is_corroborated_error({**no_source, "exit_code": 2}) is True
+    assert mt.is_corroborated_error({**no_source, "exit_code": None}) is False
+    assert mt.is_corroborated_error({"name": "Bash", "is_error": False,
+                                     "error_source": "protocol"}) is False
+
+
+MIXED_CALLS = [
+    # (tool, args, result, stats.is_error)
+    ("Bash", {"command": "grep -rn failure_class scripts/"},
+     "no matches found\n\n[exit code: 1]", True),
+    ("Bash", {"command": "sleep 900"},
+     "Command timed out after 120000ms\n\n[exit code: -15]", True),
+    ("mcp____tools_email_search", {"query": "invoice"},
+     '{"error": "goal is required"}', True),
+]
+
+
+def mixed_session_rows(tmp_path, n=2):
+    """N sessions with the same three flagged steps, run through the real
+    extractor so the miner sees written rows, not hand-made dicts. The threshold
+    is distinct sessions, so one session would emit nothing for any class."""
+    rows = []
+    for i in range(n):
+        path = tmp_path / f"sess-mixed-{i}.json"
+        messages = []
+        for j, (tool, args, result, is_err) in enumerate(MIXED_CALLS):
+            messages.append({"role": "assistant", "tool_calls": [
+                {"id": f"call_{j}", "function": {"name": tool,
+                                                 "arguments": json.dumps(args)}}]})
+            messages.append({"role": "tool", "tool_call_id": f"call_{j}",
+                             "content": [{"type": "text", "text": result}],
+                             "stats": {"result_chars": len(result),
+                                       "is_error": is_err}})
+        path.write_text(json.dumps({"session_id": f"sess-mixed-{i}",
+                                    "messages": messages}), encoding="utf-8")
+        row = et500.parse_session(path)
+        assert row is not None
+        rows.append(row)
+    return rows
+
+
+def test_the_miner_emits_a_candidate_only_for_the_two_real_failures(tmp_path):
+    """Clause 4, end to end: extractor writes the class, miner gates on it.
+
+    Three flagged steps in the window — a `grep` no-match (exit 1), a
+    SIGTERM-killed `sleep` (exit -15), a structured tool error — and exactly two
+    candidates come out. Every example in every emitted candidate carries a
+    promotable class, and no example carries `nonzero_exit`: a candidate whose
+    examples are all bare exits is the artifact this item exists to stop.
+    """
+    rows = mixed_session_rows(tmp_path)
+    patterns = mt.mine_error_patterns(rows, threshold=2)
+
+    assert len(patterns) == 2, [p["tool_name"] for p in patterns]
+    promoted = {(p["tool_name"], p["error_type"]) for p in patterns}
+    assert promoted == {("Bash", "timeout"),
+                        ("mcp____tools_email_search", "logic")}, promoted
+    assert not any("grep" in str(p["examples"][0]["params_summary"]) for p in patterns)
+
+    classes = {ex["failure_class"] for p in patterns for ex in p["examples"]}
+    assert classes == {"timeout_or_signal", "structured_error"}, classes
+
+
+def test_the_emitted_candidate_files_carry_no_nonzero_exit_example(tmp_path):
+    """The same window through `write_candidate_file`, which is what the nightly
+    actually leaves on disk for a human to read. Two files, and the string
+    `nonzero_exit` appears in neither."""
+    rows = mixed_session_rows(tmp_path)
+    patterns = mt.mine_error_patterns(rows, threshold=2)
+    out = tmp_path / "candidates"
+    paths = [Path(mt.write_candidate_file(p, out, verdict_store=tmp_path / "v.jsonl"))
+             for p in patterns]
+    assert len(paths) == 2
+    names = sorted(p.name for p in paths)
+    assert not [n for n in names if "grep" in n], names
+    for p in paths:
+        text = p.read_text(encoding="utf-8")
+        assert "nonzero_exit" not in text, p.name
+        assert "timeout_or_signal" in text or "structured_error" in text, p.name

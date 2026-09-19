@@ -461,15 +461,53 @@ def normalize_tool_name(tool: dict) -> str:
 # uncorroborated rather than trusted.
 CORROBORATED_ERROR_SOURCES = {"protocol", "exit_code"}
 
+# ── What the gate actually rejects (backlog #500) ─────────────────────────────
+#
+# Keying the gate on `error_source` made it a no-op. That field says which
+# channel flagged the step, and there is effectively one channel — the harness
+# flag wins every step that has one, so the `elif exit_error` branch in the
+# extractor is nearly unreachable. Measured over `_pipeline/trajectories/*.jsonl`
+# 2026-09-09→09-17 (9 daily buckets, all written after the flag was wired up):
+# 2,330 error steps carried `error_source` = {protocol: 2327, exit_code: 3}, and
+# `is_corroborated_error` admitted 2,330 of them. A gate that admits 100% of what
+# it is handed is not a gate.
+#
+# The discriminating field is `failure_class`, which the extractor derives from
+# the payload's shape and the signed exit code. `stats.is_error` is a dispatch
+# marker: it is true for any non-zero shell exit, and `grep` finding nothing
+# (exit 1), `ls` on a missing path (exit 2) and an intentionally failing
+# `pytest` are all expected outcomes, not failures worth authoring a skill about.
+# Over the flagged messages in `~/lloyd/sessions/*.json` read the same way, that
+# class is 1,732 of 3,752 — the largest single bucket, and the one the mining
+# chain has already ruled non-failure.
+#
+# `nonzero_exit` is therefore the only class the gate rejects. Everything else
+# stays promotable, because each has an independent reason to be a failure:
+# `timeout_or_signal` is a negative exit code (SIGTERM = the real Bash-timeout
+# signature, 29 rows), `structured_error` is a body reporting failure as data,
+# `harness_block` is the harness refusing or losing the call, and
+# `protocol_flagged` is a harness flag with no shape to argue against it.
+# Rejecting all flagged steps would repeat, in the other direction, the mistake
+# the pre-#389 reading of the same field made.
+NON_PROMOTABLE_FAILURE_CLASSES = {"nonzero_exit"}
+
 
 def is_corroborated_error(step: dict) -> bool:
-    """True if this step's failure is backed by something other than the words
-    in its own output: the harness's dispatch-time flag, a non-zero exit state,
-    or a structured error body."""
+    """True if this step's failure is a class worth mining.
+
+    `failure_class` decides it when the row carries one. Rows written before
+    #500 do not, so the old `error_source` reading survives as the fallback for
+    them — and it is why the fallback is narrow: over those rows the same field
+    admits every step it is shown, so a re-extraction is what makes the gate
+    mean anything (#509).
+    """
     # `tools[]` rows carry an explicit `is_error`; `error_tools[]` rows are by
     # construction errors and omit the key.
     if step.get("is_error") is False:
         return False
+    fclass = step.get("failure_class")
+    if fclass is not None:
+        return fclass not in NON_PROMOTABLE_FAILURE_CLASSES
     source = step.get("error_source")
     if source is None:
         # Legacy row with no `error_source`: accept only an explicit non-zero
@@ -737,6 +775,10 @@ def mine_error_patterns(trajectories: list[dict], threshold: int = 2) -> list[di
                     "date": date_str,
                     "tool": tool_name,
                     "error_type": error_type,
+                    # The class travels into the candidate's examples so the
+                    # reader can see what kind of failure they are grading, not
+                    # only that the harness flagged it (#500).
+                    "failure_class": error_tool.get("failure_class"),
                     "params_summary": params_summary,
                     "sequence": error_tool.get("sequence", 0)
                 }
@@ -1207,6 +1249,7 @@ These errors occur across {len(pattern["sessions"])} distinct sessions, indicati
 - **Tool:** {example["tool"]}
 - **Input:** `{params_str}`
 - **Error Type:** {example["error_type"]}
+- **Failure Class:** {example.get("failure_class") or "uncoded"}
 
 """
         
