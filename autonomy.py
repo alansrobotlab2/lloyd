@@ -1318,6 +1318,22 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 logger.warning("Task #%s: could not attach the observer: %s",
                                task_id, exc)
         final_response = ""
+        # The run's TERMINAL assistant block: the text of the last
+        # `assistant_message` event that carried any. `final_response` is the
+        # join of every `text_delta` of every iteration, so a run that narrated
+        # while it worked ("Now let me classify the hits…") can never equal the
+        # `[SILENT]` sentinel however it signed off — the contract the harness
+        # prints in every autonomy prompt was unreachable for exactly the runs
+        # that did work. 65 of the 104 task-#68 records from Sep 14-16 that
+        # ended `## Response` on `[SILENT]` were written `silent: false`.
+        #
+        # `None` means "no block event arrived", which is what the pre-existing
+        # `text_delta`-only test fixtures and any stream that ends on a
+        # tool-call iteration produce; those fall back to the join rather than
+        # reading an empty terminal block. Only non-empty blocks count, so a
+        # run that signs off with a tool call and no prose is still judged on
+        # the last thing it said.
+        last_block: Optional[str] = None
         stop_reason = None
         usage = None
         num_turns = None
@@ -1334,6 +1350,13 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 async for evt in recorded:
                     if evt["type"] == "text_delta":
                         final_response += evt["text"]
+                    elif evt["type"] == "assistant_message":
+                        # One event per agent-loop iteration, carrying THAT
+                        # block's own text (`app/harness/events.py`, emitted at
+                        # `app/harness/loop.py` end-of-iteration). The last
+                        # non-empty one is how the run ended.
+                        if evt.get("text"):
+                            last_block = evt["text"]
                     elif evt["type"] == "tool_call":
                         saw_tool_call = True
                     elif evt["type"] == "result":
@@ -1416,8 +1439,21 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
 
         completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
+        # What the run's answer IS, as opposed to everything it said on the way
+        # to it. The transcript, the `## Response` body, the record's summary
+        # and `response_preview` all stay on the join (those are #642's and
+        # #832's to change); only the two readings below — a verdict about the
+        # run's terminal message — move to the last block. An indicator phrase
+        # in mid-run narration ("this probe failed because the port is closed")
+        # used to brand a run that signed off `[SILENT]` a silent failure. The
+        # mirror case — a run whose terminal block was the sentinel but which
+        # had narrated first — is the one that recorded `silent: false`. The
+        # substring form of the test lives in `workers/sources/scheduled_task.py`
+        # against `response_preview` and is #642's to change, not this one's.
+        terminal_text = final_response if last_block is None else last_block
+
         silent_failures = _detect_silent_failures(
-            final_response, task.get("expected_error_patterns"))
+            terminal_text, task.get("expected_error_patterns"))
         body_parts = [f"## Prompt\n\n{prompt[:500]}...", f"## Response\n\n{final_response}"]
         if tool_errors:
             errs_md = "\n\n".join(f"```\n{e}\n```" for e in tool_errors[:10])
@@ -1430,7 +1466,10 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 task_id, silent_failures[:3],
             )
 
-        is_silent = final_response.strip() == "[SILENT]"
+        # The whole terminal block, never a substring of anything: the sentinel
+        # is how a run declines to be surfaced, and a run that said the words
+        # mid-flight and then reported normally is not that.
+        is_silent = terminal_text.strip() == "[SILENT]"
         meta = {"stop_reason": stop_reason, "usage": usage, "num_turns": num_turns,
                 "tool_errors": len(tool_errors), "silent": is_silent,
                 "silent_failure_indicators": len(silent_failures),
