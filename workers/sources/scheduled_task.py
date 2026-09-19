@@ -431,7 +431,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # cooldown was ever consulted. run_task has already written the run record,
     # bumped failure_count and set the cooldown.
     status = result.get("status") or ("success" if result.get("success") else "failed")
-    return {
+    out = {
         "status": status,
         "summary": (result.get("response_preview") or result.get("error") or "")[:500],
         "task_id": str(task_id),
@@ -440,3 +440,21 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         "response": result.get("response_preview") or "",
         "meta": result.get("meta") or {},
     }
+    # #945 — this dict is a hand-written whitelist, and `claims` was not on it,
+    # which severed the pilot's evidence bundle one hop upstream of the verifier:
+    # `autonomy.run_task` sets `result["claims"]` for `EVIDENCE_PILOT_TASK_IDS`,
+    # `pool.normalize_result` carries the key through, and `pool` verifies and
+    # writes `claims_json` when it is present — but every autonomy run reached
+    # the pool with no `claims` at all, so 4,922 scheduled-task rows carry an
+    # empty bundle and `autonomy_health` has reported `runs_with_bundle: 0`
+    # since the pilot shipped.
+    #
+    # Presence is the copy, not `out["claims"] = result.get("claims")`: the key
+    # *being there* is the pool's pilot-scope switch (`normalize_result` maps an
+    # absent key to `claims is None` → no bundle, and an empty list to a bundle
+    # recording "the model emitted nothing" as a visible gap). Copying the key
+    # unconditionally would not change behaviour today, but it would make the
+    # adapter — not the model's output — decide which runs get scoped in.
+    if "claims" in result:
+        out["claims"] = result["claims"]
+    return out

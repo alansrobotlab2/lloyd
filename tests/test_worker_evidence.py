@@ -450,6 +450,203 @@ async def test_a_non_pilot_run_gets_no_bundle_rather_than_an_empty_one(
     assert q.list_runs(source="session-distill")[0]["claims_json"] is None
 
 
+# ── The source adapter: autonomy run → pool (backlog #945) ─────────────────
+#
+# Everything above this line builds the source's return dict by hand and hands
+# it straight to `normalize_result`, which is why the whole suite stayed green
+# while `scheduled_task.execute()` — the adapter that actually produces that
+# dict for every autonomy run — dropped `claims` on the floor: a hand-built
+# dict cannot demonstrate that a key survives a function it never passed
+# through. The tests below call the real `execute()`, and one of them the real
+# pool, over a real pilot artifact.
+
+# Byte-identical mirror of `autonomy-runs/38/run_38_20260916_050201.md`, which
+# is gitignored (`/autonomy-runs/`) and so is not part of the tree. Its fenced
+# ```evidence block carries the 7 claims that run emitted; every count asserted
+# below is measured from this file through the real parser, not quoted from a
+# report.
+PILOT_ARTIFACT = FIXTURES / "pilot-run-38-20260916_050201.md"
+
+
+def _pilot_artifact_text() -> str:
+    text = PILOT_ARTIFACT.read_text(encoding="utf-8")
+    # Positive control, because a 0-length parse reads the same two ways: "the
+    # block is gone" and "this is not the file this section thinks it is". If
+    # the fixture is ever swapped or truncated, the assertions below would
+    # quietly assert about zero claims instead of failing on the fixture.
+    assert f"```{evidence.FENCE_TAG}" in text
+    return text
+
+
+def _pilot_claims() -> list[dict]:
+    """The claims the fixture's run emitted, parsed by the real parser."""
+    return autonomy._evidence_claims(_pilot_artifact_text())
+
+
+def _fake_run_task(final_response: str, *, pilot: bool):
+    """Stand in for `autonomy.run_task` with its real success shape.
+
+    `claims` is attached the way `run_task` attaches it — by calling the real
+    `_evidence_claims` on the run's final text, and only when the task is in
+    `EVIDENCE_PILOT_TASK_IDS` — so `pilot=False` reproduces the non-pilot
+    return exactly: no `claims` key at all.
+    """
+    async def _run(task_id, max_duration=None):
+        result = {
+            "success": True, "status": "success", "task_id": int(task_id),
+            "run_id": f"run_{task_id}_20260916_050201",
+            "duration_seconds": 296.1,
+            "response_preview": final_response[:300],
+            "meta": {},
+        }
+        if pilot:
+            assert int(task_id) in autonomy.EVIDENCE_PILOT_TASK_IDS
+            result["claims"] = autonomy._evidence_claims(final_response)
+        else:
+            assert int(task_id) not in autonomy.EVIDENCE_PILOT_TASK_IDS
+        return result
+
+    return _run
+
+
+def _stub_adapter(monkeypatch, *, final_response: str, pilot: bool,
+                  task_id: int = 38) -> None:
+    """Replace everything `execute()` does around the dict it returns.
+
+    The vLLM health probe, the vault task-file read and Discord notify on the
+    success path, and the pool's per-source config. Nothing here patches the
+    return dict itself — that is the code under test. Leaves the real
+    `scheduled-task` entry in `SOURCE_REGISTRY`, so the pool dispatches to the
+    real adapter too.
+    """
+    import app.discord_notify as discord_notify
+    import workers.sources as sources
+    import workers.sources.scheduled_task as scheduled_task
+
+    monkeypatch.setattr(scheduled_task, "_vllm_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(autonomy, "_find_task_file", lambda tid: None)
+    monkeypatch.setattr(autonomy, "run_task",
+                        _fake_run_task(final_response, pilot=pilot))
+    monkeypatch.setattr(sources, "get_sources_config", lambda: {})
+
+    async def _no_notify(*a, **k):
+        return None
+
+    monkeypatch.setattr(discord_notify, "_discord_notify_task_complete", _no_notify)
+
+
+async def _drive_real_execute(monkeypatch, *, final_response: str, pilot: bool,
+                             task_id: int = 38) -> dict:
+    """Call the real `scheduled_task.execute()` and return what the pool receives."""
+    _stub_adapter(monkeypatch, final_response=final_response, pilot=pilot,
+                  task_id=task_id)
+    import workers.sources.scheduled_task as scheduled_task
+    return await scheduled_task.execute(
+        _item(payload={"task_id": task_id}, source="scheduled-task"))
+
+
+async def test_execute_forwards_the_claims_a_pilot_run_emitted(monkeypatch):
+    """#945 clause 1: `out["claims"]` is the list `run_task` attached."""
+    claims = _pilot_claims()
+    assert len(claims) == 7
+    out = await _drive_real_execute(monkeypatch,
+                                    final_response=_pilot_artifact_text(),
+                                    pilot=True)
+    assert out["claims"] == claims
+    # Same dict, not a replacement: the rest of the whitelist still behaves.
+    assert out["status"] == "success"
+    assert out["task_id"] == "38"
+    assert out["artifact_path"] == "autonomy-runs/38/run_38_20260916_050201.md"
+
+
+async def test_execute_adds_no_claims_key_for_a_task_outside_the_pilot(monkeypatch):
+    """#945 clause 1's other half. `run_task` omits the key for a non-pilot
+    task, and the adapter must not invent one: presence is the pool's scope
+    switch, so inventing it would score an un-piloted task as checked."""
+    out = await _drive_real_execute(monkeypatch,
+                                    final_response=_pilot_artifact_text(),
+                                    pilot=False, task_id=24)
+    assert "claims" not in out
+    assert out["task_id"] == "24"
+
+
+async def test_the_pilot_claims_survive_from_the_source_into_the_pool(monkeypatch):
+    """#945 clause 2: the key is still present, and intact, one hop later."""
+    claims = _pilot_claims()
+    out = await _drive_real_execute(monkeypatch,
+                                    final_response=_pilot_artifact_text(),
+                                    pilot=True)
+    norm = normalize_result(_item(payload={"task_id": 38}, source="scheduled-task"),
+                            out)
+    assert norm["claims"] == claims
+    assert len(norm["claims"]) == 7
+    assert {k for c in norm["claims"] for k in c} == {"claim", "check"}
+
+
+async def test_a_pilot_that_emitted_nothing_normalizes_to_a_list_not_none(monkeypatch):
+    """#945 clause 3. `[]` and `None` are different facts: an empty list is a
+    piloted run whose model asserted nothing — a visible gap, recorded as a
+    bundle — while `None` is a run outside the pilot, which must not be scored
+    as a clean check."""
+    report_without_block = _pilot_artifact_text().split(
+        f"\n```{evidence.FENCE_TAG}")[0]
+    assert autonomy._evidence_claims(report_without_block) == []   # the split bit
+
+    pilot_norm = normalize_result(
+        _item(payload={"task_id": 38}, source="scheduled-task"),
+        await _drive_real_execute(monkeypatch,
+                                  final_response=report_without_block, pilot=True))
+    assert pilot_norm["claims"] == []
+
+    other_norm = normalize_result(
+        _item(payload={"task_id": 24}, source="scheduled-task"),
+        await _drive_real_execute(monkeypatch,
+                                  final_response=report_without_block,
+                                  pilot=False, task_id=24))
+    assert other_norm["claims"] is None
+
+
+async def test_a_pilot_run_reaches_the_ledger_with_a_bundle(tmp_path, monkeypatch):
+    """The acceptance check for #945, read off the row the health view counts.
+
+    `verify_bundle` runs against `tmp_path`, which holds none of the artifacts
+    the fixture claims, so all 7 checks refute — the point is not the verdict
+    but that 7 claims reached the stdlib verifier and were written to the run
+    record at all, which no scheduled-task row had done in 4,900+ runs.
+    """
+    q = WorkQueue(tmp_path / "w.db")
+    monkeypatch.setattr(evidence, "default_root", lambda: tmp_path)
+    # Stubs only the adapter's I/O and `autonomy.run_task`; the pool looks
+    # `scheduled-task` up in the real registry, so `execute()` runs for real.
+    _stub_adapter(monkeypatch, final_response=_pilot_artifact_text(), pilot=True)
+    q.enqueue(source="scheduled-task", kind="run", payload={"task_id": 38})
+
+    pool = WorkerPool(q, slots=1)
+    pool._running = True
+    worker = asyncio.create_task(pool._worker_loop("worker-0"))
+    for _ in range(60):
+        await asyncio.sleep(0.1)
+        if q.list_runs(source="scheduled-task"):
+            break
+    pool._running = False
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+    row = q.list_runs(source="scheduled-task")[0]
+    bundle = json.loads(row["claims_json"])
+    assert bundle["counts"] == {"total": 7, "verified": 0, "refuted": 7,
+                                "insufficient": 0}
+    assert bundle["refuted_or_insufficient_rate"] == 1.0
+    assert row["summary"]                                   # prose survives too
+    # The side-signal #945 records: `_carry_gaps` only fires when a bundle is
+    # built, which is why the watermark table held only `last_enqueue_check`.
+    carried = parse_gap_list(q.wm_get("scheduled-task", gaps_key(38)))
+    assert len(carried) == 7
+
+
 # ── Pilot scoping and prompt carry-forward ─────────────────────────────────
 
 def test_the_pilot_is_the_reflection_chain_and_nothing_else():
