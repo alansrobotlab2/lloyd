@@ -707,15 +707,24 @@ Four properties worth knowing before touching any of it:
   skips it when the status is `done` or `skipped`. So a resolved item never comes
   back, anything re-emitted is always `pending`, and once something marks an item
   `skipped` no later survey raises it again however the vault changes.
-- **The write is atomic with a size check before the rename.** The queue goes to
-  a `.tmp`, is read back, and its item count compared against what was intended;
-  a mismatch deletes the temp file, leaves the previous queue in place, and
-  raises `Queue corruption detected: size mismatch`. This exists because of the
-  **2026-03-30 incident**: the fix loop processed four `BROKEN_LINK` items and
-  wrote *only those four* back over a queue holding ~2,700, destroying the
-  accumulated `done`/`skipped` status of everything else — which by the rule
-  above is unrecoverable. The guard lives in the scanner rather than in the skill
-  because a rule an LLM has to remember is not a rule.
+- **The write is atomic with an item-count check before the rename, and every
+  writer shares it.** Since 2026-09-19 (#899) the guard is one function,
+  `scripts/groundskeeper/queue_io.write_queue_atomic`: serialise to a `.tmp`,
+  re-read it, compare the re-read item count against what was intended, and
+  rename only when they match — on mismatch the temp goes, the live queue is
+  left byte-identical, and `QueueWriteError` is raised. The survey,
+  `scripts/memory/process-groundskeeper-queue.py` and
+  `scripts/memory/batch-process-orphans.py` all call it; the survey used to keep
+  the check inline, which is exactly how the two consumers came to re-dump a
+  9.3 MB queue nightly from outside it. Each write also appends one row to
+  `_pipeline/groundskeeper-writes.jsonl` naming the writing script, its pid, the
+  item count before and after, how many items that run stamped, and the
+  `generated_at` it read. All of this exists because of the **2026-03-30
+  incident**: the fix loop processed four `BROKEN_LINK` items and wrote *only
+  those four* back over a queue holding ~2,700, destroying the accumulated
+  `done`/`skipped` status of everything else — which by the rule above is
+  unrecoverable. The guard lives in code rather than in the skill because a rule
+  an LLM has to remember is not a rule.
 - **79% of the queue names a path that does not exist.** `check_thin_profiles`
   writes `source_file: memory/facts/<entity>/`, vault-relative;
   `~/obsidian/memory/facts/` is gone and the fact tree moved to
@@ -737,23 +746,28 @@ Four properties worth knowing before touching any of it:
 
 Two defects that are live and unowned:
 
-- **The orphan skipper is an unattributed daily write.** 3,867 of the queue's
-  3,892 `ORPHAN_FILE` items read `status: skipped`, reason
-  `hub-page-linked-survey-bug`, stamped 2026-09-11T10:37:04Z, eighteen minutes
-  after that night's survey finished; the other 25 carry a different reason
-  (`legitimate organized project file in folder hierarchy`) stamped one second
-  earlier, so either a second writer touched the file inside that minute or the
-  script ran twice with different text. `_pipeline/groundskeeper-log.jsonl` has
-  grown to 18,176 rows, every one an `ORPHAN_FILE` skip, and its last batch is
-  2026-09-11. That is
-  `scripts/memory/process-groundskeeper-queue.py`, a one-off written when the
-  survey had no hub-page awareness and every organised project file read as an
-  orphan. The survey has had hub-page detection since; the premise is gone and
-  the script is not. **What runs it nightly is unidentified** — no timer, no
-  autonomy task, no worker source, no skill, and no session transcript contains
-  the reason string. Until that is found the effect stands, and the idempotency
-  rule makes it compound: a category worth 10% of the health score is permanently
-  zeroed every night by a repair for a bug that was fixed.
+- **The orphan skipper still runs; it is no longer anonymous.** 253 of the
+  queue's 278 skipped `ORPHAN_FILE` items read reason `hub-page-linked-survey-bug`
+  and 25 read `legitimate organized project file in folder hierarchy` — the two
+  strings belong to two different scripts
+  (`scripts/memory/process-groundskeeper-queue.py` and
+  `scripts/memory/batch-process-orphans.py`), and only the first wrote a log row,
+  so one of the two writers was invisible to `_pipeline/groundskeeper-log.jsonl`
+  entirely. The population is still growing: 30,990 log rows on 2026-09-19, one
+  batch on every one of the 15 days 09-04→09-18, at run times drifting between
+  10:21 and 14:23 UTC — not a timer, consistent with an agent turn. **What runs
+  them is still unidentified** (no timer, no autonomy task, no worker source, no
+  skill names either script), and the scripts are deliberately left in place
+  because deleting an unattributed nightly job turns a silent write into a silent
+  failure. What changed on 2026-09-19 (#899) is that the next pass is nameable
+  from disk: both consumers now stamp a log row per item they touch — so the
+  second writer's reason finally appears in the log — and every queue write lands
+  a row in `_pipeline/groundskeeper-writes.jsonl` naming its script and pid.
+  Reading the caller off that file after two nightly passes is the open
+  needs-human step on #899. The compounding effect is unchanged and still needs
+  Alan's call on whether the auto-skip verdict should exist at all: a `skipped`
+  item is never re-raised, so a category worth 10% of the health score is
+  zeroed a little further every night by a repair for a bug that was fixed.
 - **Frontmatter is read in a 2,000-byte prefix.** `build_relation_inbound` and
   `check_stale_relations` both `read(2000)` and regex the front matter out of
   that prefix, so a `relations:` block starting past it is invisible twice over:

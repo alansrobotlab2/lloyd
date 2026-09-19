@@ -28,9 +28,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import VAULT_FACTS_ROOT
+from scripts.groundskeeper.queue_io import QueueWriteError, write_queue_atomic
 
 VAULT_ROOT = "/home/alansrobotlab/obsidian"
-QUEUE_OUTPUT = os.path.expanduser("~/lloyd/_pipeline/groundskeeper-queue.json")
+# Same seam the consumers use (#899): a queue path the test can point at a
+# fixture. Unset, the nightly timer's path is unchanged.
+QUEUE_OUTPUT = os.path.expanduser(os.environ.get(
+    'GROUNDKEEPER_QUEUE',
+    "~/lloyd/_pipeline/groundskeeper-queue.json"))
 FACTS_DIR = str(VAULT_FACTS_ROOT)
 MEMORY_MD = os.path.join(VAULT_ROOT, "lloyd/MEMORY.md")
 
@@ -1075,37 +1080,17 @@ def main():
         'health_score': health_score
     }
     
-    # Queue size verification guards to prevent partial writes
-    # Read expected size before writing
-    expected_size = len(all_items)
-    
-    # Write to temp file first, then atomically rename
-    temp_output = QUEUE_OUTPUT + '.tmp'
+    # One guarded writer for every queue write (backlog #899): serialise to
+    # .tmp, re-read it, and rename only when the item count reads back whole.
+    # The guard used to be inline here, which is how the two consumers under
+    # scripts/memory/ came to re-dump this file nightly from outside it.
     try:
-        with open(temp_output, 'w') as f:
-            json.dump(output, f, indent=2)
-        
-        # Verify written size matches expected
-        with open(temp_output, 'r') as f:
-            verify_data = json.load(f)
-        actual_size = len(verify_data.get('items', []))
-        
-        if actual_size != expected_size:
-            print(f"WARNING: Queue size mismatch! Expected {expected_size}, got {actual_size}")
-            print("Rolling back to previous queue if available...")
-            if os.path.exists(QUEUE_OUTPUT):
-                # Keep old file, delete temp
-                os.remove(temp_output)
-            raise RuntimeError(f"Queue corruption detected: size mismatch {expected_size} != {actual_size}")
-        
-        # Atomic rename
-        os.rename(temp_output, QUEUE_OUTPUT)
-        
-    except Exception as e:
-        # Clean up temp file on error
-        if os.path.exists(temp_output):
-            os.remove(temp_output)
-        raise e
+        write_queue_atomic(QUEUE_OUTPUT, output, stamped=0,
+                           writer='groundskeeper-survey.py')
+    except QueueWriteError as exc:
+        print(f"WARNING: {exc}")
+        print("Keeping the previous queue.")
+        raise
     
     # Print summary
     type_counts = defaultdict(int)
