@@ -1356,7 +1356,7 @@ workers:
       # under the automod lock, and a landing waits out the other round's
       # turn before it pauses the pool. 2 while the board is being caught up
       # (Alan, 2026-09-17); back to 1 afterwards. Needs a backend restart.
-      max_inflight: 3
+      max_inflight: 4
       max_duration_seconds: 3600
       # 150, not 100 — the code's own default and its reason
       # (workers/sources/autocode.py DEFAULT_MAX_TURNS): a round called
