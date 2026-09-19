@@ -1011,14 +1011,23 @@ async def get_active_session_endpoint():
     """Return the current "active" session ID for ambient producers.
 
     Resolution order (see `app.sessions_io.get_active_session_id`):
-      1. Last session that received a user turn in-memory
-      2. Most-recent `platform: mission-control` session by mtime (≤24h)
+      1. Last session that received a user turn in-memory, re-validated
+         against its session JSON
+      2. Most-recent user session by mtime (≤24h — the `max_age_hours` default)
       3. None
 
-    Explicitly excludes `platform: autonomy` sessions so an autonomy task
-    never gets its own session back. Returns `{"session_id": null}` if
-    no user session qualifies — producers should treat null as "user
-    has no active session, skip injection."
+    Which sessions are the user's is not decided here. Both rules apply
+    `app.sessions_io.is_user_session`, which rejects any platform in
+    `NON_USER_PLATFORMS` — `worker` as well as `autonomy`, because a worker
+    turn arrives through the chat path and is often the last session to take a
+    user-source turn. A platform absent from that deny-list stays eligible, so
+    a client this code has never heard of keeps receiving its briefs rather
+    than silently losing them. Which platforms are accepted is deliberately
+    not listed here: an enumeration in this docstring is how the rule gets
+    re-narrowed back to one client, and only the tests would notice.
+
+    Returns `{"session_id": null}` when nothing qualifies — producers should
+    treat null as "user has no active session, skip injection."
     """
     sid = get_active_session_id()
     return JSONResponse({"session_id": sid})

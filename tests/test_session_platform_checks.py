@@ -155,3 +155,85 @@ def test_no_user_session_creator_mints_a_background_shaped_id():
     # And the one mint that is supposed to be four parts, is.
     assert is_background_session_name(new_background_session_id("autocode"))
     assert is_background_session_name(new_background_session_id("autonomy"))
+
+
+# ── The one prose copy of the rule ─────────────────────────────────────
+
+#: The endpoint that answers "which session is the user looking at?" for every
+#: ambient producer (`agent_mcp/ambient.py` resolves through it).
+_ACTIVE_ROUTE = "app/routers/sessions.py"
+
+
+def _active_endpoint_doc():
+    from app.routers.sessions import get_active_session_endpoint
+
+    return get_active_session_endpoint.__doc__ or ""
+
+
+def _flat(text: str) -> str:
+    """Collapse runs of whitespace, so the prose is pinned but its wrapping is
+    not — re-indenting a docstring is not a finding."""
+    return " ".join(text.split())
+
+
+def test_the_active_session_doc_states_the_deny_list_not_an_allow_list():
+    """`/api/sessions/active` is the text an operator reads when a producer
+    reports "no active user session", and the text an editor edits against.
+
+    Its docstring described the pre-2026-09-07 rule — resolve to the most
+    recent `platform: mission-control` session, exclude only `platform:
+    autonomy` — while `app.sessions_io` had been a deny-list since `1a7d50e`
+    excluded `worker` as well. The contradiction outlived the change because
+    the commit that introduced the deny-list added a 409 guard to the inject
+    endpoint and never touched this prose, and it had already been extracted
+    verbatim into the knowledge graph. Editing to the doc would re-narrow the
+    rule to one client, and the behaviour tests would only catch it if they
+    were edited too. So what the docstring may NOT contain is pinned, in the
+    file that already owns "one definition of who is reading this session".
+    """
+    doc = _active_endpoint_doc()
+    source = (ROOT / _ACTIVE_ROUTE).read_text(encoding="utf-8")
+
+    # Clause 1: no allow-list is reconstructable — from the docstring, and
+    # from anywhere else in the module.
+    assert "platform: mission-control" not in source
+    assert "Explicitly excludes" not in source
+    assert "mission-control" not in doc, (
+        "the endpoint docstring names a platform again; it defers to "
+        "`is_user_session` / `NON_USER_PLATFORMS` instead"
+    )
+
+
+def test_the_active_session_doc_defers_to_the_one_definition():
+    """Clause 2: the prose says where the decision lives and that BOTH rules
+    run it — the in-memory hint and the mtime scan — so neither reads as an
+    unconditional shortcut to the last session that touched."""
+    doc = _flat(_active_endpoint_doc())
+    # Identifiers are matched as written; prose is matched case-insensitively,
+    # because "Both rules apply" and "both rules apply" are the same sentence.
+    low = doc.lower()
+
+    assert "is_user_session" in doc
+    assert "NON_USER_PLATFORMS" in doc
+    assert "both rules" in low
+    assert "in-memory" in low and "mtime" in low
+    # Both excluded platforms are named, so a reader who only skims the
+    # endpoint learns that `worker` is not the user either — that is the half
+    # the old prose got wrong and the half the 2026-09-07 brief missed.
+    assert "worker" in low and "autonomy" in low
+    # And the direction of the list, because "excluded platforms" alone reads
+    # the same as an allow-list to anyone typing the next edit.
+    assert "deny-list" in low
+    assert "eligible" in low
+
+
+def test_the_active_session_doc_keeps_the_operational_facts():
+    """Clause 3: what a producer actually needs from this text — how stale is
+    too stale, and what a null answer means. Rewriting prose about platforms
+    must not drop them with the platform names."""
+    doc = _flat(_active_endpoint_doc())
+    low = doc.lower()
+
+    assert "24h" in low, "the recency window on rule 2 went missing"
+    assert '{"session_id": null}' in low
+    assert "skip injection" in low
