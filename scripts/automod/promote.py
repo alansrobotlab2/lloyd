@@ -606,15 +606,16 @@ INERT_PREFIXES = ("tests/", "architecture/", "eval/")
 ALWAYS_RESTART_PREFIXES = ("agent-services/",)
 
 
-def _loaded_in(name: str, url: str, paths: list[str], headers: dict | None = None):
+def _loaded_in(name: str, url: str, paths: list[str], headers: dict | None = None,
+               timeout: float = 10.0):
     """The members of `paths` a server has loaded, or None when it cannot say."""
-    status, body = _post_json(url, {"paths": paths}, headers=headers)
+    status, body = _post_json(url, {"paths": paths}, headers=headers, timeout=timeout)
     if status != 200 or not isinstance(body, dict) or not isinstance(body.get("loaded"), list):
         return None
     return [str(p) for p in body["loaded"]]
 
 
-def restart_needed(changed: list[str]) -> tuple[bool, str]:
+def restart_needed(changed: list[str], *, in_backend: bool = False) -> tuple[bool, str]:
     """`(a landing of these paths must restart the services, why)`.
 
     A landing drains the backend, waits for every sibling round's turn to end
@@ -632,6 +633,12 @@ def restart_needed(changed: list[str]) -> tuple[bool, str]:
     — because a needless restart costs minutes and a skipped one that was
     needed leaves `main` and the running code disagreeing until someone
     notices.
+
+    `in_backend`: the caller IS the backend (the implement source, deciding
+    whether a gated round holds new rounds back), on its event loop. It reads
+    its own `sys.modules` instead of requesting itself over HTTP — a request
+    the blocked loop could never answer — and gives the aggregator two
+    seconds rather than ten.
     """
     if not bool(S.landing_cfg(LIVE_ROOT).get("skip_restart", True)):
         return True, "automod.landing.skip_restart is off"
@@ -654,7 +661,15 @@ def restart_needed(changed: list[str]) -> tuple[bool, str]:
         for name, url, headers in (
                 ("backend", f"{BACKEND}/api/automod/loaded", None),
                 ("aggregator", MCP_HEALTH.rsplit("/health", 1)[0] + "/loaded", mcp_headers)):
-            hits = _loaded_in(name, url, python, headers)
+            if in_backend and name == "backend":
+                try:
+                    from app.loaded_paths import loaded
+                    hits = loaded(python)
+                except Exception:  # noqa: BLE001
+                    hits = None
+            else:
+                hits = _loaded_in(name, url, python, headers,
+                                  timeout=2.0 if in_backend else 10.0)
             if hits is None:
                 return True, f"the {name} could not say which modules it has loaded"
             if hits:

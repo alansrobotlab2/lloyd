@@ -1274,6 +1274,18 @@ Four changes, each with its own switch or none needed:
    keeps the hold engaged; exempt sources are unaffected. Asked at most every
    5 s; fails open.
 
+6. **A gated round that will restart nothing holds no slot**
+   (`autocode._rounds_about_to_land`, `_landing_restarts`). The hold on new
+   rounds exists so a freed slot does not start a turn the landing's restart
+   would kill. A landing under 4 kills nothing, yet its passed gate kept every
+   slot empty until it landed — up to a whole observation window behind the
+   promotion before it. The verdict is `restart_needed(..., in_backend=True)`:
+   `_loop_is_free` runs on the backend's event loop, so it reads its own
+   `sys.modules` rather than requesting itself over HTTP, and gives the
+   aggregator two seconds. Cached per `(round, head)` for two minutes; an
+   unreadable report, no paths, no head, or a verdict that raises all hold as
+   before. `tests/test_loop_depth.py`.
+
 Scorecard row 9 carries `gates_rescued`, `reviews_unavailable` (should fall to
 near zero) and `landed_without_restart`. `tests/test_landing_review_deadlock.py`
 and `tests/test_landing_without_restart.py` pin all four; `tests/conftest.py`

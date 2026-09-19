@@ -951,23 +951,65 @@ def _loop_is_free(depth: int | None = None) -> tuple[bool, str]:
 
 
 def _rounds_about_to_land(worktrees: list[str]) -> list[str]:
-    """Open loop rounds whose last gate passed, or whose landing is running."""
+    """Open loop rounds whose last gate passed, or whose landing is running —
+    and whose landing will RESTART the services.
+
+    The hold exists so a freed slot does not start a turn the landing must
+    then wait out, because the restart would kill it. A landing that changes
+    nothing either service has loaded restarts nothing and waits for nobody
+    (`promote.restart_needed`), so it holds nobody back either: on the night
+    of 2026-09-18 that was 10 of 19 promotions, each of which kept every slot
+    empty from its gate's pass until it landed — up to a whole observation
+    window behind the promotion before it. A round whose report cannot be
+    read, or names no paths, holds as before.
+    """
     from scripts.automod import state as S
     out: list[str] = []
     for raw in worktrees:
         rid = next((part for part in Path(raw).parts if part.startswith("SM_")), "")
         if not rid:
             continue
-        if S.land_in_progress(rid):
-            out.append(rid)
-            continue
         try:
             report = json.loads((S.ROUNDS_DIR / rid / "gate.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            report = None
+        landing = bool(S.land_in_progress(rid))
+        if not landing and not (isinstance(report, dict) and report.get("ok") is True
+                                and not S.gate_in_progress(rid)):
             continue
-        if report.get("ok") is True and not S.gate_in_progress(rid):
-            out.append(rid)
+        if isinstance(report, dict) and report.get("ok") is True and not _landing_restarts(
+                rid, str(report.get("head") or ""), report.get("changed_paths")):
+            continue
+        out.append(rid)
     return out
+
+
+# `{(round, head): (asked at, restarts)}`. `_loop_is_free` runs on every
+# declined look, a minute apart, for as long as a gated round waits; the
+# answer for one commit changes only if a process imports one of its files
+# meanwhile, and the promoter asks again, under the lock, either way.
+_RESTART_VERDICTS: dict[tuple[str, str], tuple[float, bool]] = {}
+_RESTART_VERDICT_TTL = 120.0
+
+
+def _landing_restarts(rid: str, head: str, changed) -> bool:
+    """Whether landing this gated round will restart the services. Fails
+    closed: anything unreadable is a restart, and the round holds."""
+    if not head or not isinstance(changed, list) or not changed:
+        return True
+    now = time.time()
+    hit = _RESTART_VERDICTS.get((rid, head))
+    if hit and now - hit[0] < _RESTART_VERDICT_TTL:
+        return hit[1]
+    try:
+        from scripts.automod import promote as P
+        restarts, _ = P.restart_needed([str(p) for p in changed], in_backend=True)
+    except Exception:  # noqa: BLE001
+        restarts = True
+    if len(_RESTART_VERDICTS) > 64:
+        _RESTART_VERDICTS.clear()
+    _RESTART_VERDICTS[(rid, head)] = (now, bool(restarts))
+    return bool(restarts)
 
 
 _LOOP_WORKTREE_ROOT = Path.home() / "lloyd-work"

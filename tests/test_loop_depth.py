@@ -485,6 +485,97 @@ def test_a_round_that_passed_its_gate_holds_the_other_slot(monkeypatch, tmp_path
     assert I._loop_is_free(2)[0] is True, "re-gating after an edit: the old pass no longer speaks"
 
 
+def _gated(tmp_path, rid, changed, head="a" * 40):
+    import json as _json
+    (tmp_path / rid).mkdir(exist_ok=True)
+    (tmp_path / rid / "gate.json").write_text(_json.dumps(
+        {"ok": True, "head": head, "changed_paths": changed}))
+
+
+def test_a_gated_round_whose_landing_restarts_nothing_holds_nobody(monkeypatch, tmp_path):
+    """The hold exists so a freed slot does not start a turn the restart would
+    kill. 10 of the 19 promotions on the night of 2026-09-18 restarted nothing
+    — and each kept every slot empty from its gate's pass until it landed, up
+    to a whole observation window behind the promotion before it."""
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path)
+    monkeypatch.setattr(I, "_RESTART_VERDICTS", {})
+    wt = [str(I._LOOP_WORKTREE_ROOT / "SM_A" / "home" / "lloyd")]
+    _free_loop(monkeypatch, wt)
+    asked: list = []
+
+    def verdict(changed, *, in_backend=False):
+        asked.append((list(changed), in_backend))
+        return (any(p.startswith("app/") for p in changed), "stub")
+    monkeypatch.setattr(P, "restart_needed", verdict)
+
+    _gated(tmp_path, "SM_A", ["tests/test_x.py", "scripts/report.py"])
+    assert I._loop_is_free(2) == (True, "free")
+    assert asked == [(["tests/test_x.py", "scripts/report.py"], True)], \
+        "asked as the backend: a request to itself from its own event loop is never answered"
+    # ...and the same when its landing is already running, waiting for a settle.
+    monkeypatch.setattr(S, "land_in_progress", lambda rid: {"pid": 1})
+    assert I._loop_is_free(2)[0] is True
+    assert len(asked) == 1, "one commit, one question: this runs on every declined look"
+
+    _gated(tmp_path, "SM_A", ["app/paths.py"], head="b" * 40)
+    free, why = I._loop_is_free(2)
+    assert free is False and "SM_A passed its gate" in why
+
+
+@pytest.mark.parametrize("report", [
+    {"ok": True, "head": "a" * 40},                                   # names no paths
+    {"ok": True, "head": "a" * 40, "changed_paths": []},
+    {"ok": True, "changed_paths": ["tests/test_x.py"]},               # names no commit
+    {"ok": True, "head": "a" * 40, "changed_paths": "tests/x.py"},
+])
+def test_a_report_that_cannot_be_judged_holds_as_before(monkeypatch, tmp_path, report):
+    import json as _json
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path)
+    monkeypatch.setattr(I, "_RESTART_VERDICTS", {})
+    monkeypatch.setattr(P, "restart_needed", lambda changed, **k: (False, "stub"))
+    _free_loop(monkeypatch, [str(I._LOOP_WORKTREE_ROOT / "SM_A" / "home" / "lloyd")])
+    (tmp_path / "SM_A").mkdir()
+    (tmp_path / "SM_A" / "gate.json").write_text(_json.dumps(report))
+    assert I._loop_is_free(2)[0] is False
+
+
+def test_a_verdict_that_raises_holds(monkeypatch, tmp_path):
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path)
+    monkeypatch.setattr(I, "_RESTART_VERDICTS", {})
+
+    def boom(changed, **k):
+        raise RuntimeError("no")
+    monkeypatch.setattr(P, "restart_needed", boom)
+    _free_loop(monkeypatch, [str(I._LOOP_WORKTREE_ROOT / "SM_A" / "home" / "lloyd")])
+    _gated(tmp_path, "SM_A", ["tests/test_x.py"])
+    assert I._loop_is_free(2)[0] is False
+
+
+def test_a_landing_with_no_readable_report_holds(monkeypatch, tmp_path):
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path)
+    monkeypatch.setattr(I, "_RESTART_VERDICTS", {})
+    _free_loop(monkeypatch, [str(I._LOOP_WORKTREE_ROOT / "SM_A" / "home" / "lloyd")])
+    monkeypatch.setattr(S, "land_in_progress", lambda rid: {"pid": 1})
+    assert I._loop_is_free(2)[0] is False
+
+
+def test_in_the_backend_the_verdict_reads_its_own_modules(monkeypatch):
+    """No HTTP to itself, and the aggregator gets two seconds, not ten."""
+    import app.paths  # noqa: F401
+    calls: list = []
+
+    def post(url, payload, *, headers=None, timeout=10.0):
+        calls.append((url, timeout))
+        return 200, {"loaded": []}
+    monkeypatch.setattr(P, "_post_json", post)
+    monkeypatch.setattr(S, "landing_cfg", lambda repo=None: {})
+    assert P.restart_needed(["scripts/nope_not_a_module.py"], in_backend=True)[0] is False
+    assert [(u.rsplit("/", 1)[-1], t) for u, t in calls] == [("loaded", 2.0)]
+    assert calls[0][0].endswith(":9/loaded"), "only the aggregator was asked over HTTP"
+    restart, why = P.restart_needed(["app/paths.py"], in_backend=True)
+    assert restart is True and "the backend has loaded app/paths.py" in why
+
+
 # ── the landing lock: the one landing read that may not fail open (#1218) ──
 
 def _bare_repo(tmp_path: Path, name: str = "repo") -> Path:
