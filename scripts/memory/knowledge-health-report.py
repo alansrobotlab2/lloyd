@@ -203,8 +203,45 @@ def parse_date(date_str: str | None) -> datetime | None:
         return None
 
 
+def stale_age_reference(fact: dict) -> datetime | None:
+    """The date a fact's age is measured from, or None when it has no usable one.
+
+    `created_at` is when the row was recorded; `event_date` is when the claim was
+    true in the world. The oldest usable date wins, so a fact recorded last week
+    about an event 200 days ago ages at ~200 days. Reading only `created_at` was
+    the #841 defect: the 2026-09-03 rebuild stamped it on roughly a third of the
+    store and on nothing older than the rebuild itself, so the 60-day threshold
+    was unreachable by construction and the detector returned 0 on every run.
+
+    `valid_at` RE-BASES the clock rather than exempting the fact: a claim
+    re-affirmed inside the threshold is young again, but one whose `valid_at` is
+    itself older than the threshold stays reportable. The old code skipped every
+    fact carrying `valid_at`, which made the field a permanent amnesty — 19,916
+    active facts on 2026-09-16 were invisible for that reason alone.
+
+    A re-affirmation can only move the clock FORWARD: `created_at`/`event_date`
+    alone decide the base, and `valid_at` overrides it only when it is the newer
+    of the two. A fact recorded last week that asserts something which became
+    valid 250 days ago is a week old, not 250.
+    """
+    dates = [d for d in (parse_date(fact.get("created_at")),
+                         parse_date(fact.get("event_date"))) if d]
+    if not dates:
+        return None
+    reference = min(dates)
+    valid_at = parse_date(fact.get("valid_at"))
+    if valid_at and valid_at > reference:
+        return valid_at
+    return reference
+
+
 def find_stale_facts(entities: dict, now: datetime, threshold_days: int) -> list[dict]:
-    """Find facts older than threshold_days with no valid_at update."""
+    """Active facts whose oldest usable date is older than threshold_days.
+
+    A fact carrying no usable date is NOT returned: it is not fresh, it is
+    unmeasured. `stale_coverage` counts those so the report can name them
+    instead of printing a clean verdict over an unseen share of the store.
+    """
     stale = []
     for entity_name, category_entries in entities.items():
         for entry in category_entries:
@@ -213,15 +250,11 @@ def find_stale_facts(entities: dict, now: datetime, threshold_days: int) -> list
                 if not is_fact_active(fact):
                     continue
 
-                created = parse_date(fact.get("created_at"))
-                if not created:
+                reference = stale_age_reference(fact)
+                if reference is None:
                     continue
 
-                valid_at = fact.get("valid_at")
-                if valid_at:
-                    continue
-
-                age = (now - created).days
+                age = (now - reference).days
                 if age >= threshold_days:
                     fact_text = str(fact.get("fact", ""))
                     preview = fact_text[:60] + ("..." if len(fact_text) > 60 else "")
@@ -232,6 +265,28 @@ def find_stale_facts(entities: dict, now: datetime, threshold_days: int) -> list
                         "age_days": age,
                     })
     return stale
+
+
+def stale_coverage(entities: dict) -> tuple[int, int]:
+    """Return (active facts with no usable date, active facts) — the blind share.
+
+    The denominator the stale check cannot evaluate. A monitor that reports
+    "No stale facts found" while 45% of the store carries no date is reporting a
+    verdict on an input it could not read, which is the #841 defect class; this
+    is the number that makes that state visible instead of clean. Counted over
+    active facts, the same population `find_stale_facts` walks.
+    """
+    unevaluable = 0
+    active_total = 0
+    for _entity_name, category_entries in entities.items():
+        for entry in category_entries:
+            for fact in entry["facts"]:
+                if not is_fact_active(fact):
+                    continue
+                active_total += 1
+                if stale_age_reference(fact) is None:
+                    unevaluable += 1
+    return unevaluable, active_total
 
 
 def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7) -> dict:
@@ -332,8 +387,15 @@ def generate_report(
     now: datetime,
     hygiene: dict | None = None,
     fact_dups: dict | None = None,
+    stale_unevaluable: tuple[int, int] | None = None,
 ) -> str:
-    """Generate the markdown health report."""
+    """Generate the markdown health report.
+
+    `stale_unevaluable` is the `(n, m)` pair from `stale_coverage`: how many of
+    the m active facts carry no date the stale check can age them from. Omitting
+    it means the caller did not measure it, and the section says so rather than
+    claiming the store is clean.
+    """
     lines: list[str] = []
     date_str = now.strftime("%Y-%m-%d")
 
@@ -467,8 +529,23 @@ def generate_report(
     # --- Section 6: Stale Facts ---
     lines.append("## Stale Facts")
     lines.append("")
-    lines.append(f"Active facts with `created_at` older than {STALE_DAYS_THRESHOLD} days and no `valid_at` update.")
+    lines.append(f"Active facts whose oldest usable date — `created_at` or `event_date`, "
+                 f"re-based by `valid_at` — is older than {STALE_DAYS_THRESHOLD} days.")
     lines.append("")
+
+    # The clean verdict is earned only when both numbers are zero. An unmeasured
+    # or undatable share is a finding in its own right, not a pass (#841).
+    if stale_unevaluable is None:
+        lines.append("STALE_UNEVALUABLE: coverage not measured, so no clean verdict is available "
+                     "from this section.")
+        lines.append("")
+    else:
+        n_unevaluable, n_active = stale_unevaluable
+        if n_unevaluable:
+            pct = round(100.0 * n_unevaluable / n_active, 1) if n_active else 100.0
+            lines.append(f"STALE_UNEVALUABLE: {n_unevaluable:,} of {n_active:,} facts carry no usable "
+                         f"date ({pct}%). These are unmeasured, not fresh.")
+            lines.append("")
 
     if stale_facts:
         stale_sorted = sorted(stale_facts, key=lambda x: x["age_days"], reverse=True)
@@ -482,7 +559,10 @@ def generate_report(
             lines.append(f"| {sf['entity']} | {sf['category']} | {preview} | {sf['age_days']} |")
         if len(stale_sorted) > SECTION_ROW_CAP:
             lines.append(f"| … | | *{len(stale_sorted) - SECTION_ROW_CAP:,} more* | |")
-    else:
+    elif stale_unevaluable is not None and stale_unevaluable[0] == 0:
+        # Reached only with no stale facts AND nothing left unevaluable: every
+        # active fact was aged and none crossed the threshold. That is the whole
+        # of what this verdict is allowed to claim.
         lines.append("*No stale facts found.*")
     lines.append("")
 
@@ -616,6 +696,7 @@ def main():
     entity_stats = compute_entity_stats(entities)
     rel_stats = compute_relationship_stats(edges, entities)
     stale_facts = find_stale_facts(entities, now, STALE_DAYS_THRESHOLD)
+    stale_unevaluable = stale_coverage(entities)
 
     hygiene = compute_hygiene(entities, now)
     fact_dups = fact_duplicate_stats()
@@ -623,7 +704,7 @@ def main():
 
     # Generate report
     report = generate_report(entity_stats, rel_stats, edges, stale_facts, now, hygiene,
-                             fact_dups=fact_dups)
+                             fact_dups=fact_dups, stale_unevaluable=stale_unevaluable)
 
     # Write output
     output_dir = args.output_dir
@@ -637,6 +718,10 @@ def main():
     print(f"  Thin entities: {sum(1 for name, s in entity_stats.items() if s['active_facts'] < THIN_ENTITY_MAX_FACTS and rel_stats['entity_edge_counts'].get(name, 0) == 0)}")
     print(f"  Orphan entities: {sum(1 for name in entity_stats if name not in rel_stats['entities_in_graph'] and entity_stats[name]['total_facts'] > 0)}")
     print(f"  Stale facts: {len(stale_facts)}")
+    # On its own line because the count above is only a verdict on the dated
+    # share; this is the share it could not age (#841).
+    print(f"  Stale unevaluable: {stale_unevaluable[0]:,} of {stale_unevaluable[1]:,} active facts "
+          f"carry no usable date")
     print(f"  Contaminated dirs: {hygiene['contaminated_dirs']} ({hygiene['foreign_facts']} foreign facts)")
     print(f"  Near-dup clusters: {hygiene['near_dup_clusters']}; regrown in {hygiene['regrowth_days']}d: {len(hygiene['regrown'])}")
     # On its own line, right under the name-cluster line, because the two are
