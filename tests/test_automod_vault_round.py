@@ -446,3 +446,93 @@ def test_a_retirement_by_rename_lands_as_one_commit(livevalidatorvault):
     assert not (livevalidatorvault / "skills" / "foo" / "SKILL.md").exists()
     shown = git(livevalidatorvault, "show", "--name-only", "--format=", out["commit"]).stdout
     assert {"skills/foo/SKILL.md", "skills/.archived/foo/SKILL.md"} <= set(shown.splitlines()), shown
+
+
+# Two real gate-role sections with nothing but gate bytes beside them: the gate stack is
+# ~100% of the contract, so `check_contract` refuses it on the ceiling. The headings carry
+# their trigger text because `check_contract` demands the named tokens live under them —
+# a fixture that tripped only the ratio would be a fixture the ratio check could delete.
+CONTRACT_HEAVY_SOUL = """---
+type: note
+---
+# Heavy
+
+## ZERO PREAMBLE (never opens with a filler token)
+no prose before the first tool call or answer
+## BLOCK SIGNAL
+the whole response is the block signal with nothing after it
+""" + "\n".join(f"- never do this thing number {i}" for i in range(6))
+
+
+def _contract_errors_in_a_fresh_interpreter(paths, vault_dir):
+    """Run the vault route's contract check the way its sibling check is run: a separate
+    interpreter, cwd at the repo root, `LLOYD_VAULT` pointing at `vault_dir`."""
+    script = (
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path.cwd()))\n"
+        "from scripts.automod import vault_round as V\n"
+        "print(json.dumps(V.contract_errors(json.loads(sys.argv[1]))))\n"
+    )
+    import json as _json
+    import os
+    import sys as _sys
+    env = dict(os.environ, LLOYD_VAULT=str(vault_dir))
+    return subprocess.run(
+        [_sys.executable, "-c", script, _json.dumps(paths), str(vault_dir)],
+        cwd=str(V.LLOYD_HOME), capture_output=True, text=True, timeout=180, env=env)
+
+
+def test_the_contract_refusal_survives_the_vault_routes_fresh_interpreter(vault, monkeypatch):
+    """#789 widened `prompt_surface`, and the vault route is the one caller that would
+    swallow the widening going wrong.
+
+    The finding this answers said the route runs `check_contract` in a fresh interpreter.
+    Half true, and the false half matters: `contract_errors` imports `prompt_surface`
+    **in-process** (`vault_round.py:226-232`); the fresh interpreter in this module is
+    `loader_errors` (`:199-202`), whose script imports `prompt_builder`, the skills
+    loader and the autonomy parser and never reaches `prompt_surface`. So the coverage
+    the finding wanted is real but had no existing shape: `contract_errors` is wrapped in
+    `try/except Exception` that reports ANY failure as `prompt_surface unavailable`, so
+    an import error, a circular import, or a bug in the new `contract_shape`/`rising_run`
+    path all arrive as the same generic refusal — and a refusal whose text names the
+    wrong cause is the failure mode this loop keeps hitting. Run the route's own function
+    in a clean interpreter (nothing imported by pytest, nothing on `sys.path` but the repo
+    root, exactly how `loader_errors` spawns one) and require the *ceiling* refusal to come
+    back, with the swallow absent and the verdict identical to this process's.
+    """
+    import json
+
+    # The `vault` fixture mkdirs the trees `check_scope` lets a round write into; the
+    # contract's own file lives beside them, so its directory is made here.
+    soul = vault / "lloyd" / "SOUL.md"
+    soul.parent.mkdir(parents=True, exist_ok=True)
+    soul.write_text(CONTRACT_HEAVY_SOUL, encoding="utf-8")
+
+    fresh = _contract_errors_in_a_fresh_interpreter(["lloyd/SOUL.md"], vault)
+    assert fresh.returncode == 0, (fresh.stdout[-500:], fresh.stderr[-1500:])
+    assert "Traceback" not in fresh.stderr, fresh.stderr[-800:]
+    errs = json.loads(fresh.stdout.strip().splitlines()[-1])
+    assert any("over the 50% ceiling" in e for e in errs), (
+        f"a gate-stack-heavy SOUL.md was not refused across the boundary: {errs}")
+    assert not [e for e in errs if "prompt_surface unavailable" in e], (
+        f"the widened module failed to import in a clean interpreter and the route "
+        f"reported it as the generic swallow: {errs}")
+
+    # Same bytes, same verdict in this process: the two sides must not be running two
+    # copies of the arithmetic, which is what made the guardian's two file counts
+    # disagree by 2,000 and false-tripped a rollback.
+    monkeypatch.setattr(V, "VAULT", vault)
+    assert V.contract_errors(["lloyd/SOUL.md"]) == errs
+
+    # The ceiling refusal is a verdict about bytes, not this fixture refusing everything:
+    # the same route over a short SOUL.md whose gate stack is ~0 % comes back with a
+    # different complaint — the gate-role sections it is missing (`check_contract` also
+    # requires every role to survive, and this stub has none). Asserted as the absence of
+    # the ceiling refusal rather than an empty list, because writing a fully compliant
+    # contract here would be a second copy of the guard suite's `GOOD_CONTRACT`, and a
+    # copy that drifts is a control that quietly stops controlling.
+    soul.write_text("# Light\n\nBe useful, and say so plainly.\n", encoding="utf-8")
+    light = json.loads(_contract_errors_in_a_fresh_interpreter(["lloyd/SOUL.md"], vault)
+                       .stdout.strip().splitlines()[-1])
+    assert not [e for e in light if "over the 50% ceiling" in e], light

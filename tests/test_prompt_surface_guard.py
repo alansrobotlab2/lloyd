@@ -172,6 +172,32 @@ def test_a_fenced_memory_file_that_merely_quotes_the_contract_is_fine():
     assert ps.check_contract(SOUL_FM, memory) == []
 
 
+def test_the_shape_dict_carries_exactly_the_keys_the_readers_ask_for():
+    """`contract_shape` is a shared dictionary, so a renamed key is a production failure
+    that no caller-side test can see.
+
+    Six keys, and each one has a named reader outside this module: `gate_share` and
+    `prohibition_ratio` are what `promote.candidate_shape` records and what
+    `shape_ratchet_refusals` compares, and the four counts are what a refusal message is
+    built out of — `check_contract`'s ceiling text quotes them, and the round report and
+    the vault-route test do too. Every other assertion in this file reaches the numbers
+    through `check_contract`/`check_paths`, which reads the dict internally, so renaming
+    a key would leave this suite green and break `promote()` and `post_promotion` at the
+    first round that ran. Asserted as a set, so both a rename and a silently-added key
+    (which widens the ledger row) fail here.
+    """
+    assert set(ps.contract_shape(GOOD_CONTRACT)) == {
+        "gate_share", "prohibition_ratio",
+        "gate_bytes", "contract_bytes", "prohibition_lines", "nonblank_lines",
+    }
+    # And the two the ratchet actually consumes are floats in range, not strings that
+    # would sort against the ceilings instead of comparing: a ratio that arrives as text
+    # would make every ratchet comparison a TypeError at the first promotion.
+    shape = ps.contract_shape(GOOD_CONTRACT)
+    assert isinstance(shape["gate_share"], float) and 0.0 <= shape["gate_share"] <= 1.0
+    assert isinstance(shape["prohibition_ratio"], float) and 0.0 <= shape["prohibition_ratio"] <= 1.0
+
+
 def test_shared_front_matter_is_not_counted_as_a_pasted_line():
     """Five of this fixture's nine nonblank lines are the fence and its keys.
 
@@ -557,3 +583,176 @@ def test_both_writers_call_the_shared_invariants(path, fn):
     src = (Path(__file__).resolve().parent.parent / path).read_text(encoding="utf-8")
     assert "import prompt_surface" in src, f"{path} no longer imports the invariants"
     assert f"prompt_surface.{fn}" in src, f"{path} no longer calls prompt_surface.{fn}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# #789: one contract-shape measurement, and a MEMORY.md-only candidate's own
+# ratios. Triage 2026-09-17 found that `check_contract` computed both ratios and
+# handed the caller only error strings, so nothing recorded them, and that the
+# MEMORY.md blind spot is real: both ceilings are computed on the SOUL.md text
+# (`prompt_surface.py:168`, `:187` at triage), so a MEMORY-only overlay that
+# doubles its own gate stack trips nothing. Clause 5 closes the recording half;
+# ceiling-ing MEMORY.md is a scope call a person has to make.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_contract_shape_is_the_same_measurement_the_ratios_report():
+    """One measurement, not a second. `contract_shape` is what the per-round record
+    and the cross-round ratchet read, so if it ever disagreed with the two ratio
+    functions the refusal and the ledger would quote different numbers about the same
+    file — the defect class this item exists to close."""
+    shape = ps.contract_shape(GOOD_CONTRACT)
+    share, gate, total = ps.gate_share(GOOD_CONTRACT)
+    ratio, hits, nonblank = ps.prohibition_ratio(GOOD_CONTRACT)
+    assert shape["gate_share"] == share
+    assert shape["gate_bytes"] == gate
+    assert shape["contract_bytes"] == total
+    assert shape["prohibition_ratio"] == ratio
+    assert shape["prohibition_lines"] == hits
+    assert shape["nonblank_lines"] == nonblank
+
+
+def test_the_recorded_shape_and_the_refusing_shape_are_one_value():
+    """Same fixture, both readings: the numbers a round records are the numbers the
+    ceiling check compares against, read off the error string itself rather than
+    asserted from a constant someone could edit out of sync."""
+    heavy = ("## ZERO PREAMBLE (never opens with a filler token)\n"
+             "no prose before the first tool call or answer\n"
+             "## BLOCK SIGNAL\n"
+             "the whole response is the block signal with nothing after it\n"
+             + "\n".join(f"- never do this thing number {i}" for i in range(6)))
+    shape = ps.contract_shape(heavy)
+    errors = ps.check_contract(heavy)
+    gate_error = next(e for e in errors if "gate stack is" in e)
+    assert f"{shape['gate_bytes']} of {shape['contract_bytes']} bytes" in gate_error
+    assert f"{shape['gate_share']:.1%}" in gate_error
+
+
+def test_an_empty_body_records_no_shape_rather_than_a_zero():
+    """`gate_share('')` is 1.0 over a zero denominator, and a zero is what an empty
+    contract is *not*: the loader refuses an empty SOUL.md on the gate roles it lost,
+    while the shape block for it is entirely `None` — every field, counts included,
+    because a "0 bytes measured" beside a null ratio invites a reader to treat the null
+    as a zero measurement rather than as no measurement. The absolute refusals still
+    fire, unchanged."""
+    shape = ps.contract_shape("")
+    assert shape == {k: None for k in shape}, shape
+    errors = ps.check_contract("")
+    # Still refused, and by what it actually lacks. The ratio error is gone: with no
+    # denominator it could only ever read "0 of 0 bytes (100.0%), over the ceiling",
+    # which is the zero-denominator artifact this module's own header warns about, and
+    # it was the only sentence that ever fired on an empty file without naming a thing
+    # the file was missing.
+    assert any("gate roles survive" in e for e in errors), errors
+    assert any("removes behaviour the benches score" in e for e in errors), errors
+
+
+def test_rising_run_needs_strict_successive_rises():
+    """The primitive behind the ratchet: three recorded values, each strictly above
+    the one before, and nothing else counts."""
+    assert ps.rising_run([0.10, 0.11, 0.12]) == [0.10, 0.11, 0.12]
+    assert ps.rising_run([0.10, 0.11, 0.11]) == []      # last step flat
+    assert ps.rising_run([0.10, 0.12, 0.11]) == []      # last step fell
+    assert ps.rising_run([0.12, 0.12, 0.12]) == []      # wholly flat
+    assert ps.rising_run([0.10, 0.11]) == []            # too few to form a run
+    # A rise somewhere behind a fall is history, not a run: only the tail counts.
+    assert ps.rising_run([0.08, 0.09, 0.11, 0.10]) == []
+    # The run is reported at the length actually climbed, not padded to `run`: a
+    # refusal that says "risen across 4 recorded shapes" has to name four real
+    # values, and a longer climb than the threshold is more damning, not shorter.
+    assert ps.rising_run([0.08, 0.09, 0.11, 0.12]) == [0.08, 0.09, 0.11, 0.12]
+    assert ps.rising_run([0.09, 0.10, 0.11, 0.12], run=4) == [0.09, 0.10, 0.11, 0.12]
+    assert ps.rising_run([0.10, 0.11, 0.12], run=4) == []
+
+
+def test_a_plateau_neither_counts_as_a_rise_nor_resets_the_streak():
+    """Clause 3 at the primitive level. The 2026-09-04→05 run in the promotion
+    snapshots was 52.9 % → 63.0 % → 63.6 % → 63.6 %: repeated values in the middle of
+    a climb. Collapsing equals *after* walking back would break the run on the equal
+    pair, which is a plateau silently resetting the streak."""
+    assert ps.rising_run([0.10, 0.11, 0.11, 0.12]) == [0.10, 0.11, 0.12]
+    # A wholly flat series collapses to one value and cannot form a run at all,
+    # however long it is: a plateau is not three promotions that all climbed.
+    assert ps.rising_run([0.11] * 9) == []
+    # A plateau *before* the climbs is not part of the run either.
+    assert ps.rising_run([0.09, 0.09, 0.10, 0.11]) == [0.09, 0.10, 0.11]
+
+
+def test_a_memory_only_candidate_is_measured_on_its_own_text(tmp_path):
+    """Clause 5: an overlay that touches only MEMORY.md still gets its own two ratios.
+    `check_contract` ceilings SOUL.md alone, so this is the one file whose drift the
+    guard cannot see — and `candidate_shape` must not quietly substitute the live
+    SOUL.md for it, which would record a plateau and read as safety."""
+    from scripts.autoresearch import promote as promote_mod
+
+    mem = (
+        "# Experiment Memory\n\n"
+        "## STRICT OUTPUT SHAPE GATE\n"
+        "the block signal is the whole response with nothing appended\n"
+        + "\n".join(f"- never do this memory thing {i}" for i in range(6)) + "\n"
+    )
+    ov = tmp_path / "overlay"
+    ov.mkdir()
+    (ov / "MEMORY.md").write_text(mem, encoding="utf-8")
+
+    shape = promote_mod.candidate_shape(ov)
+    assert shape["surface"] == "MEMORY.md"
+    assert shape == {
+        "surface": "MEMORY.md",
+        "gate_share": ps.gate_share(mem)[0],
+        "prohibition_ratio": ps.prohibition_ratio(mem)[0],
+    }
+    # Both ratios are real numbers here even though no ceiling of `check_contract`
+    # would ever read them from this file — which is the point of recording them.
+    assert shape["gate_share"] > ps.GATE_STACK_CEILING
+
+
+def test_a_memory_only_candidate_is_recorded_without_being_ceiling_ed(tmp_path, monkeypatch):
+    """The scope half of clause 5, asserted as an absence: a MEMORY-only overlay whose
+    own text is past the SOUL ceilings is not refused, because the ceilings are on
+    SOUL.md and widening them is a decision for a person. The overlay is judged
+    against the SOUL.md it will sit beside, which is what `check_contract` has always
+    done and what this item does not change."""
+    from scripts.autoresearch import promote as promote_mod
+
+    live = tmp_path / "prompts"
+    live.mkdir()
+    (live / "SOUL.md").write_text(GOOD_CONTRACT, encoding="utf-8")
+    monkeypatch.setattr(
+        promote_mod, "CANONICAL_PROMPTS",
+        {"SOUL.md": live / "SOUL.md", "MEMORY.md": live / "MEMORY.md"},
+    )
+    ov = tmp_path / "overlay"
+    ov.mkdir()
+    (ov / "MEMORY.md").write_text(
+        "# Experiment Memory\n\n"
+        "## ZERO PREAMBLE (never opens with a filler token)\n"
+        "nothing precedes the first token of the message\n"
+        + "\n".join(f"- forbidden memory line {i}" for i in range(40)) + "\n",
+        encoding="utf-8",
+    )
+    memory_shape = promote_mod.candidate_shape(ov)
+    assert memory_shape["prohibition_ratio"] > ps.PROHIBITION_RATIO_CEILING
+    assert promote_mod.contract_refusals(ov) == []
+
+
+def test_the_recorded_block_labels_the_live_and_candidate_surfaces(tmp_path, monkeypatch):
+    """One dict, six fields, both sides labelled: the record has to say *which* file
+    each pair measured, since the two are not comparable and a pooled series would let
+    a MEMORY-only candidate's number refuse a SOUL.md one."""
+    from scripts.autoresearch import post_promotion, promote as promote_mod
+
+    live = tmp_path / "prompts"
+    live.mkdir()
+    (live / "SOUL.md").write_text(GOOD_CONTRACT, encoding="utf-8")
+    monkeypatch.setattr(
+        promote_mod, "CANONICAL_PROMPTS",
+        {"SOUL.md": live / "SOUL.md", "MEMORY.md": live / "MEMORY.md"},
+    )
+    fields = promote_mod.contract_shape_fields(tmp_path / "missing")
+    assert set(fields) == set(post_promotion.SHAPE_FIELDS)
+    assert fields["contract_surface"] == "SOUL.md"
+    assert fields["contract_gate_share"] == ps.gate_share(GOOD_CONTRACT)[0]
+    # No candidate this round: the candidate half is absent, not zero.
+    assert fields["candidate_surface"] is None
+    assert fields["candidate_gate_share"] is None
+    assert fields["candidate_prohibition_ratio"] is None

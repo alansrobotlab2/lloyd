@@ -127,7 +127,190 @@ def _prospective(overlay_dir: Path, name: str) -> str | None:
     return None
 
 
-def contract_refusals(overlay_dir: Path) -> list[str]:
+#: The two surfaces a candidate's own shape can be measured on, in the order the
+#: ceilings govern them. SOUL.md first: `check_contract` puts both ceilings on that
+#: file, so when an overlay carries both files the candidate ratio that means
+#: something to the ratchet is SOUL.md's, and a MEMORY.md number recorded beside it
+#: would enter a MEMORY ratio into a SOUL series — the cross-entity fragmentation
+#: failure in miniature, one measurement filed under the wrong system.
+SHAPE_SURFACES: tuple[str, ...] = ("SOUL.md", "MEMORY.md")
+
+
+def candidate_shape(overlay_dir: Path) -> dict[str, Any]:
+    """The shape a candidate's *own* file has, and which file that was.
+
+    `{surface, gate_share, prohibition_ratio}`, all-`None` when the overlay carries
+    neither measured surface. Deliberately the overlay's text rather than the
+    prospective merged contract: the live ratios answer "what is the contract now",
+    these answer "what is this candidate proposing", and the ratchet needs the
+    second one or a no-op overlay would inherit the live value as a plateau.
+
+    `surface` is recorded so the history can be filtered by it. A MEMORY.md-only
+    candidate is the case #789 names as the blind spot — `check_contract` puts both
+    ceilings on SOUL.md, so a MEMORY-only overlay that doubles its own gate stack
+    trips nothing. Recording it is the half this item can close; ceiling-ing
+    MEMORY.md is a scope call a person has to make.
+    """
+    try:
+        import prompt_surface
+    except ImportError:  # pragma: no cover - repo is always importable
+        return {"surface": None, "gate_share": None, "prohibition_ratio": None}
+    for name in SHAPE_SURFACES:
+        src = overlay_dir / name
+        if src.exists():
+            shape = prompt_surface.contract_shape(
+                src.read_text(encoding="utf-8")
+            )
+            return {
+                "surface": name,
+                "gate_share": shape["gate_share"],
+                "prohibition_ratio": shape["prohibition_ratio"],
+            }
+    return {"surface": None, "gate_share": None, "prohibition_ratio": None}
+
+
+def contract_shape_fields(overlay_dir: Path | None) -> dict[str, Any]:
+    """The #789 block one round records: the live contract, and this candidate.
+
+    `contract_*` is the SOUL.md the loop is running against right now — the file whose
+    two ratios the ceilings police. `candidate_*` is the overlay's own file, per
+    `candidate_shape`. A missing measurement is `None`, never `0.0`: a round with no
+    candidate and a contract with no gate stack are different facts, and a zero inside
+    a series reads as a fall and masks a real climb.
+
+    Here rather than in `post_promotion`, which writes the block to the ledger: reading
+    prompt text needs this module's `CANONICAL_PROMPTS`, and #429's separation test
+    pins the recorder's import list so it cannot reach this module.
+    """
+    fields: dict[str, Any] = {
+        "contract_surface": None, "contract_gate_share": None,
+        "contract_prohibition_ratio": None,
+    }
+    soul = CANONICAL_PROMPTS.get("SOUL.md")
+    if soul is not None:
+        try:
+            import prompt_surface
+
+            live = prompt_surface.contract_shape(
+                soul.read_text(encoding="utf-8", errors="replace")
+            )
+            fields = {
+                "contract_surface": "SOUL.md",
+                "contract_gate_share": live["gate_share"],
+                "contract_prohibition_ratio": live["prohibition_ratio"],
+            }
+        except (ImportError, OSError):  # pragma: no cover - always importable here
+            pass
+    cand = candidate_shape(overlay_dir) if overlay_dir is not None else {}
+    fields.update({
+        "candidate_surface": cand.get("surface"),
+        "candidate_gate_share": cand.get("gate_share"),
+        "candidate_prohibition_ratio": cand.get("prohibition_ratio"),
+    })
+    return fields
+
+
+def shape_ratchet_refusals(
+    shape: dict[str, Any],
+    history: list[dict[str, Any]],
+    run: int | None = None,
+) -> list[str]:
+    """Refuse a candidate that ratchets the contract's shape upward, #789.
+
+    The absolute ceilings in `prompt_surface.check_contract` are per-candidate and
+    cannot see this class: a climb that stays under 50% gate stack and under 25%
+    prohibitions passes every ceiling forever, one promotion at a time, and each
+    round's overlay only has to add a few hundred bytes to gain the ratchet. The
+    live record is exactly that shape — gate share over the 65 promotion snapshots
+    ran 39.0% (08-23) → 23.7% (09-02) → 39.4 → 52.9 → 63.0 → 63.6% (09-04/05), 7
+    rises over 28 changed values. By the third consecutive rise the absolute check
+    caught the 09-04 case, so this rule earns its keep only on climbs that stay
+    *under* the ceiling, which is where the loop has headroom today (live SOUL.md
+    measures 45.3% gate share and 19.3% prohibitions against ceilings of 50%/25%).
+
+    Refuses when the candidate's own value is higher than the last `run - 1`
+    recorded candidate values **in order** — three rises counting the candidate.
+    The refusal fires only while **both** ratios sit under their ceilings: once one
+    is past a ceiling, the absolute check has already refused this candidate and
+    named its bytes and line counts, and a second refusal on a trend adds nothing a
+    reader could act on.
+
+    A metric with too few recorded values to form a run is skipped rather than
+    guessed at: the first rounds after this ships have one row each, and a rule
+    that fired on one data point would refuse every candidate for a reason nobody
+    could check.
+    """
+    try:
+        import prompt_surface
+    except ImportError as exc:  # pragma: no cover - repo is always importable
+        return [f"prompt_surface unavailable, refusing to promote blind: {exc}"]
+
+    run = run or prompt_surface.CONTRACT_RISE_RUN
+    metrics = (
+        ("gate_share", "gate stack", prompt_surface.GATE_STACK_CEILING),
+        ("prohibition_ratio", "prohibition lines", prompt_surface.PROHIBITION_RATIO_CEILING),
+    )
+    values = {key: shape.get(key) for key, _, _ in metrics}
+    if any(values[key] is None for key, _, _ in metrics):
+        return []
+    if any(float(values[key]) > ceiling for key, _, ceiling in metrics):
+        return []
+
+    # Oldest first by the round's own timestamp, with file position as the tiebreak,
+    # so a ledger whose rows were replayed out of order — a restore, a backfill — still
+    # describes the series in the order it happened. A row whose `created_at` is missing
+    # or unparseable has no comparable timestamp and is dropped rather than defaulted:
+    # defaulting to "oldest" or "newest" would let an untrusted field put a value inside
+    # the window and forge a climb, or move one out and hide one. Dropping costs the run
+    # a value, and a short run refuses nothing — the safe direction. `post_promotion`
+    # stamps `created_at` on every row it writes, so in production this set is empty.
+    stamped: list[tuple[str, int, dict]] = []
+    for index, row in enumerate(history):
+        if not isinstance(row, dict):
+            continue
+        stamp = row.get("created_at")
+        if isinstance(stamp, str) and len(stamp) >= 10 and stamp[4:5] == "-":
+            stamped.append((stamp, index, row))
+    ordered = [row for _, _, row in sorted(stamped, key=lambda item: (item[0], item[1]))]
+
+    errors: list[str] = []
+    for key, label, ceiling in metrics:
+        # Recorded under the `candidate_` prefix, which is `SHAPE_FIELDS` and therefore
+        # also the row's own column name; a bare key is accepted too so a hand-built
+        # history in a test is one dict rather than a simulated ledger row. The window is
+        # taken over *usable* values, not over rows: a row that is None for this metric
+        # must not consume a window slot, or a series recorded 0.10, None, 0.11, 0.12
+        # against a candidate of 0.13 — three real rises — would be read as its last two
+        # rows, 0.12 then 0.13, and refuse nothing.
+        #
+        # The whole ordered series, not the last `run - 1` values, and no cheaper
+        # window will do: the run is walked back from the end through *changed* values,
+        # so a plateau inside the look-back is part of the climb rather than a break in
+        # it. A series recorded g-0.03, g-0.02, g-0.02 against a candidate of g is three
+        # rises, which is what the 2026-09-04→05 snapshot run actually looked like
+        # (52.9 % → 63.0 % → 63.6 % → 63.6 %); taking two rows positionally would see
+        # one rise and refuse nothing. Extra history cannot manufacture a run either —
+        # `rising_run` stops at the first non-rise, so a fall anywhere in the window
+        # ends the walk wherever it stands.
+        field = f"candidate_{key}"
+        prior = [
+            float(r.get(field, r.get(key))) for r in ordered
+            if r.get(field, r.get(key)) is not None
+        ]
+        series = prompt_surface.rising_run([*prior, float(values[key])], run)
+        if len(series) < run:
+            continue
+        errors.append(
+            f"{label} has risen across {len(series)} recorded shapes without crossing "
+            f"the {ceiling:.0%} ceiling — "
+            f"{' → '.join(f'{v:.1%}' for v in series)} — which no per-candidate "
+            f"ceiling can see (backlog #789). Refused as a ratchet; the series is in "
+            f"the ledger `round_summary` rows."
+        )
+    return errors
+
+
+def contract_refusals(overlay_dir: Path, shape_history: list[dict[str, Any]] | None = None) -> list[str]:
     """Why this variant must not be written over the live contract. [] = fine.
 
     This path is what produced #464 and #465. It writes Lloyd's identity files
@@ -142,6 +325,14 @@ def contract_refusals(overlay_dir: Path) -> list[str]:
     Checked against the *prospective* text — the overlay's file where it has
     one, the live file where it does not — so a variant that only rewrites
     MEMORY.md is still judged against the SOUL.md it will sit beside.
+
+    `shape_history` is the recorded candidate shapes from earlier rounds, oldest
+    first (see `post_promotion.contract_shape_history`). It defaults to `None`,
+    which means "no series to consult" and skips only the cross-round ratchet — the
+    absolute ceilings always run. The two callers that pass it (`promote()` reading
+    its own ledger, and the tests) are the only place the ratchet can be evaluated
+    at all, because it is the one check here that needs a fact about *other*
+    rounds; every other check in this function is answerable from the overlay.
     """
     try:
         import prompt_surface
@@ -150,7 +341,21 @@ def contract_refusals(overlay_dir: Path) -> list[str]:
     soul = _prospective(overlay_dir, "SOUL.md")
     if soul is None:
         return ["no SOUL.md to check, in the overlay or on disk"]
-    return prompt_surface.check_contract(soul, _prospective(overlay_dir, "MEMORY.md"))
+    errors = prompt_surface.check_contract(soul, _prospective(overlay_dir, "MEMORY.md"))
+    # The ratchet compares against a series of SOUL.md candidates (`surface="SOUL.md"`
+    # at the call site), so it may only be applied to an overlay that carries one. A
+    # MEMORY.md-only overlay has no SOUL.md of its own, so `soul` here is the live
+    # contract unchanged: the comparison would ask "is the live file higher than the last
+    # three candidates were?" — and since a refused promotion never changes the live
+    # file, that answer stays yes every hour thereafter, locking the loop into refusing
+    # on a series that is not the candidate's (the review of SM_20260919_074839 called
+    # exactly this: live 45 % against candidates 20 %/22 %, "a series that is not the
+    # candidate's and that repeats every round"). Clause 5 is the answer for that
+    # candidate — its own ratios are recorded — and the absolute ceilings above still
+    # judge the text that would actually be landed, since `apply_overlay` lands SOUL.md.
+    if shape_history is not None and (overlay_dir / "SOUL.md").is_file():
+        errors += shape_ratchet_refusals(prompt_surface.contract_shape(soul), shape_history)
+    return errors
 
 
 def write_experiment_fact(
@@ -251,7 +456,21 @@ def promote(
         "applied_files": [],
         "experiment_fact": None,
     }
-    refusals = contract_refusals(variant_overlay_dir)
+    # The ratchet is the only check here that needs a fact about *other* rounds, so
+    # `promote()` is the one caller that can supply it. Read from the same ledger
+    # the rounds write to — `record_round_summary` appends the shape row whether or
+    # not anything promoted, so the series exists by the second round of a loop that
+    # promotes nothing at all. The import is function-local because `post_promotion`
+    # reads `CANONICAL_PROMPTS` from this module at import time; the cycle only ever
+    # closes at call time, when both modules are already loaded.
+    from .post_promotion import contract_shape_history
+
+    # `cfg is None` is not a test convenience to accommodate: it is the shape of a
+    # caller that has a candidate and no config, and such a caller must still get the
+    # absolute ceilings rather than an unguarded write. What it cannot get is the
+    # ratchet, whose only input is a ledger no config was named to point at.
+    history = contract_shape_history(cfg.paths.ledger_path) if cfg else None
+    refusals = contract_refusals(variant_overlay_dir, shape_history=history)
     if refusals:
         # Not an exception: a refused promotion is a normal outcome of a search
         # that proposed something out of bounds, and the round must carry on

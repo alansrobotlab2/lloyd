@@ -95,6 +95,109 @@ def round_summary_rows(ledger_path: Path) -> list[dict[str, Any]]:
     return [r for r in _rows(ledger_path) if r.get("event") == ROUND_SUMMARY_EVENT]
 
 
+#: How many recorded shape pairs the round report prints. One more promotion than the
+#: ratchet needs to fire (`prompt_surface.CONTRACT_RISE_RUN`), so a person reading a
+#: round sees the trend a refusal just claimed.
+SHAPE_SERIES_LEN = 5
+
+#: The #789 shape fields a `round_summary` row carries, in report order. Computed by
+#: `promote.contract_shape_fields` and passed in: this module measures no prompt text
+#: itself, so it stays free of the promotion machinery it must not call (#429's
+#: separation test walks its import list for exactly that).
+SHAPE_FIELDS: tuple[str, ...] = (
+    "contract_surface", "contract_gate_share", "contract_prohibition_ratio",
+    "candidate_surface", "candidate_gate_share", "candidate_prohibition_ratio",
+)
+
+
+def contract_shape_history(
+    ledger_path: Path, surface: str = "SOUL.md", limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Recorded candidate shapes, oldest first, filtered to one surface (#789).
+
+    This is the series `promote.shape_ratchet_refusals` compares a candidate against.
+    Filtering by surface is what keeps a MEMORY.md candidate's ratios out of the
+    SOUL.md series: the two numbers are not comparable, and pooling them would let a
+    round refuse a SOUL candidate because some MEMORY-only variant measured long.
+    Rounds with no measured candidate contribute nothing rather than a zero, which
+    would read as a fall and mask a real run.
+
+    `limit` is the caller's cap on how far back to look; the default is the whole
+    recorded series, because the run check has to see every value that could belong
+    to it. Clamping to `CONTRACT_RISE_RUN - 1` here instead would cut a plateau out
+    of the middle of a climb — a series recorded 0.09 → 0.10 → 0.10 followed by a
+    candidate at 0.11 is three rises over changed values, but its last two rows alone
+    are one rise, and the refusal would go missing on the round that earned it. See
+    `prompt_surface.rising_run`.
+    """
+    out = [
+        row for row in round_summary_rows(ledger_path)
+        if row.get("candidate_surface") == surface
+        and row.get("candidate_gate_share") is not None
+    ]
+    return out[-limit:] if limit and limit > 0 else out
+
+
+def contract_shape_series(
+    ledger_path: Path, n: int = SHAPE_SERIES_LEN,
+) -> list[dict[str, Any]]:
+    """The last `n` rounds that recorded a contract shape, oldest first, for the report.
+
+    Unlike `contract_shape_history` this is not filtered by surface: the report shows
+    a human what the loop measured, including rounds whose candidate aimed at
+    MEMORY.md — the ones no ceiling currently covers.
+    """
+    out = [
+        row for row in round_summary_rows(ledger_path)
+        if row.get("contract_gate_share") is not None
+    ]
+    return out[-n:] if n > 0 else out
+
+
+def shape_report_lines(
+    series: list[dict[str, Any]],
+    gate_ceiling: float,
+    prohibition_ceiling: float,
+    rise_run: int,
+    series_len: int = SHAPE_SERIES_LEN,
+) -> list[str]:
+    """The contract-shape drift block for a round report (#789).
+
+    The three numbers in the header are arguments rather than imports on purpose: the
+    ceilings live in `prompt_surface`, and #429's separation test pins this module's
+    import list to the ones a recorder is allowed to have. The caller already resolves
+    both modules and passes the figures through.
+    """
+    lines = [
+        f"## Contract shape drift (last {series_len} recorded rounds)",
+        f"- ceilings: gate stack {gate_ceiling:.0%}, prohibitions "
+        f"{prohibition_ceiling:.0%}; a candidate whose ratio rises across "
+        f"{rise_run} recorded shapes is refused even with both still under their ceiling",
+    ]
+    if not series:
+        # Printed rather than omitted: a reader has to be able to tell "the record is
+        # new" from "the record is missing", and a section that vanishes cannot say
+        # which of the two it is.
+        lines.append(
+            "- no shape recorded yet — this is the first round that measures it"
+        )
+        return lines
+    for row in series:
+        cand = "no candidate measured"
+        if row.get("candidate_gate_share") is not None:
+            cand = (
+                f"{row.get('candidate_surface')} "
+                f"{float(row['candidate_gate_share']):.1%}/"
+                f"{float(row['candidate_prohibition_ratio']):.1%}"
+            )
+        lines.append(
+            f"- {row.get('round_id')}: contract "
+            f"{float(row['contract_gate_share']):.1%}/"
+            f"{float(row['contract_prohibition_ratio']):.1%} · candidate {cand}"
+        )
+    return lines
+
+
 def promoted_variant_mean(ledger_path: Path, variant_id: str) -> float | None:
     """The mean recorded for `variant_id` in the round that promoted it.
 
@@ -263,11 +366,21 @@ def record_round_summary(
     baseline_mean: float,
     promotion_result: dict[str, Any] | None,
     variant_summary: dict[str, Any] | None = None,
+    contract_shape: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Append this round's machine-readable comparison row and return it.
 
     Written every round, promotion or no: clause 1 is a *per-round* row, and a
     round that promoted nothing is the evidence that the check ran anyway.
+
+    The row also carries the contract shape (#789): the live contract's gate-stack
+    and prohibition ratios, and the winning candidate's own two with the surface they
+    were measured on. `candidate_overlay` is that candidate's overlay directory, or
+    `None` when the round had no candidate that reached the contract check — the
+    ratios are then `None`, not zero, because a round with nothing to measure and a
+    contract with no gate stack are different facts. This is the only append-only
+    series the cross-round ratchet reads; a second file would be a second series that
+    can silently diverge from this one.
     """
     landed = bool(
         promotion_result
@@ -278,6 +391,7 @@ def record_round_summary(
     mean = None
     if landed and variant_summary is not None:
         mean = variant_summary.get("mean_composite")
+    measured = contract_shape or {}
     row: dict[str, Any] = {
         "round_id": round_id,
         "event": ROUND_SUMMARY_EVENT,
@@ -286,6 +400,16 @@ def record_round_summary(
         "promoted_variant_mean": round(float(mean), 4) if mean is not None else None,
         "snapshot_dir": promotion_result.get("snapshot_dir") if landed else None,
         "noise_floor": round(float(cfg.promotion_noise_floor), 4),
+        # The variant whose shape is recorded below, named even when it was refused:
+        # `promoted_variant_id` above is None in exactly the rounds the shape series
+        # most needs to explain, and a ratio with no variant attached is a number a
+        # reader cannot go and look up.
+        "candidate_variant_id": (promotion_result or {}).get("variant_id"),
+        # Every shape key is present on every row, absent measurements included, so a
+        # reader of the series never has to distinguish "not measured" from "not
+        # recorded". Only the keys in SHAPE_FIELDS are taken from the caller; a stray
+        # key in `contract_shape` must not widen the row.
+        **{k: measured.get(k) for k in SHAPE_FIELDS},
         "created_at": now_iso(),
     }
     ledger_append(cfg.paths.ledger_path, row)

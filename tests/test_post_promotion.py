@@ -556,7 +556,11 @@ def test_with_nothing_on_record_the_report_says_so_instead_of_bluffing(tmp_path)
 
 # ── the wiring: run_round actually does this on every round ──────────────────
 
-def test_post_promotion_check_writes_the_row_and_the_lines_together(world):
+def test_post_promotion_check_writes_the_row_and_the_lines_together(world, live_contract):
+    # `live_contract` is load-bearing and not decoration: before #789 this call never
+    # opened an identity file, so the row appended here now measures a real contract —
+    # unpatched that is `~/obsidian/lloyd/SOUL.md`, and the row written into this test's
+    # ledger would then depend on the machine the suite ran on.
     lines, row, comparison = run_round.post_promotion_check(
         world, "R_20260909_060000", 0.4364, landed(), {"mean_composite": 0.6145}
     )
@@ -782,3 +786,360 @@ def test_the_new_ledger_event_is_invisible_to_the_existing_readers(world):
 
     losers = hg._recent_ledger_losers(world.paths.ledger_path)
     assert losers == []
+
+
+# ── #789: the contract shape rides on this same per-round row ─────────────────
+#
+# Triage 2026-09-17: `contract_refusals()` computed the gate-stack and prohibition
+# ratios and handed the caller a list of error strings, so the numbers were thrown
+# away — outside `prompt_surface.py` the only readers of those ratios were tests, and
+# no drift record existed on any route. Live SOUL.md sat at 45.3 % / 19.3 % against
+# ceilings of 50 % / 25 %, and the 65 promotion snapshots show the gate share running
+# 39.0 % → 23.7 % → 63.6 %. This record is what makes that series observable; the
+# ratchet that reads it is pinned in `test_autoresearch_promotion.py`.
+#
+# Every test goes through `run_round.post_promotion_check`, the call a round actually
+# makes. Recording a dict the test itself built would pin the writer and leave the
+# wiring that feeds it — the part that could silently not exist — unpinned.
+
+#: Gate-heavy enough that both ratios are real numbers rather than a ratio over a
+#: zero denominator, and different in shape from the fixture's live SOUL.md.
+CAND_SOUL = (
+    "## ZERO PREAMBLE (never opens with a filler token)\n"
+    "the tool call or the answer is the first token of the message\n"
+    "## BLOCK SIGNAL\n"
+    "the whole response is the block signal with nothing after it\n"
+    "## Working Style\n"
+    + "\n".join(f"- ordinary guidance line {i} about how to work" for i in range(30))
+    + "\n"
+)
+
+
+def overlay_with_soul(base: Path, text: str) -> Path:
+    """An overlay directory in the layout the promotion path reads: the file named
+    directly inside it (`_prospective` and `candidate_shape` both do
+    `overlay_dir / name`), not the nested sandbox tree `_build_overlay` writes for the
+    bench runner."""
+    ov = base / "overlay"
+    ov.mkdir(parents=True)
+    (ov / "SOUL.md").write_text(text, encoding="utf-8")
+    return ov
+
+
+def shape_check(cfg, rid, promo, overlay=None, variant_summary=None):
+    """The production call, returning `(report_lines, ledger_row)`."""
+    lines, row, _ = run_round.post_promotion_check(
+        cfg, rid, 0.4, promo, variant_summary, overlay,
+    )
+    return lines, row
+
+
+@pytest.fixture
+def live_contract(tmp_path, monkeypatch):
+    """A live SOUL.md for the `contract_*` half of the row.
+
+    `contract_shape_fields` reads the live file through `CANONICAL_PROMPTS`, which by
+    default points at the real vault — so an unpatched test would record numbers from
+    `~/obsidian/lloyd/SOUL.md` and assert on fixture values. The patch is `setitem`, the
+    form the guard suite uses: it moves one target and leaves the rest of the dict (and
+    every other test in the module) alone.
+    """
+    import prompt_surface
+
+    from scripts.autoresearch import promote as promote_mod
+
+    live = tmp_path / "live"
+    live.mkdir()
+    soul = live / "SOUL.md"
+    soul.write_text(CAND_SOUL + "\n- an extra live line the candidate does not have\n",
+                    encoding="utf-8")
+    monkeypatch.setitem(promote_mod.CANONICAL_PROMPTS, "SOUL.md", soul)
+    monkeypatch.setitem(promote_mod.CANONICAL_PROMPTS, "MEMORY.md", live / "MEMORY.md")
+    return soul, prompt_surface
+
+
+def test_the_shape_row_records_the_live_and_candidate_ratios_together(world, tmp_path, live_contract):
+    """Clause 1: what an autoresearch round appends is the live contract's gate-stack
+    and prohibition ratios, the winning candidate's own two, and both ids — on the row
+    `record_round_summary` already writes, whether or not anything promoted."""
+    soul, prompt_surface = live_contract
+    overlay = overlay_with_soul(tmp_path, CAND_SOUL)
+    lines, row = shape_check(
+        world, "R_A", {"refused": False, "variant_id": "V_A", "snapshot_dir": "/tmp/s"},
+        overlay, {"mean_composite": 0.6},
+    )
+    for field in post_promotion.SHAPE_FIELDS:
+        assert row[field] is not None, f"{field} absent from the row: {row}"
+    assert row["round_id"] == "R_A"
+    assert row["candidate_variant_id"] == "V_A"
+    assert row["contract_surface"] == "SOUL.md"
+    assert row["candidate_surface"] == "SOUL.md"
+
+    # Each pair is the same measurement the guard itself makes, on the file the row
+    # names — not an approximation re-derived inside the writer.
+    live_shape = prompt_surface.contract_shape(soul.read_text(encoding="utf-8"))
+    cand_shape = prompt_surface.contract_shape(
+        (overlay / "SOUL.md").read_text(encoding="utf-8")
+    )
+    assert row["contract_gate_share"] == live_shape["gate_share"]
+    assert row["contract_prohibition_ratio"] == live_shape["prohibition_ratio"]
+    assert row["candidate_gate_share"] == cand_shape["gate_share"]
+    assert row["candidate_prohibition_ratio"] == cand_shape["prohibition_ratio"]
+    # The two sides measure different documents, or the row says nothing about what a
+    # candidate would do to the contract it is being compared against.
+    assert row["candidate_gate_share"] != row["contract_gate_share"]
+    # And the shape block reaches the lines this round splices into its report.
+    assert any("Contract shape drift" in ln for ln in lines)
+
+
+def test_a_refused_round_still_records_the_candidate_it_measured(world, tmp_path, live_contract):
+    """The ratchet refuses between the ceiling checks and the write, so a refused round
+    is exactly the row the series needs. `refused=True` keeps the candidate pair and
+    names the variant, because `promoted_variant_id` is None in precisely the rounds a
+    shape record most has to explain."""
+    overlay = overlay_with_soul(tmp_path, CAND_SOUL)
+    _, row = shape_check(
+        world, "R_B",
+        {"refused": True, "variant_id": "V_B",
+         "refusals": ["gate stack has risen across 3 recorded shapes"]},
+        overlay,
+    )
+    assert row["promoted_variant_id"] is None
+    assert row["candidate_variant_id"] == "V_B"
+    assert row["candidate_gate_share"] is not None
+    assert row["candidate_surface"] == "SOUL.md"
+
+
+def test_a_round_with_no_candidate_records_the_live_shape_and_no_candidate(world, live_contract):
+    """A round whose candidates all died at the bench has no candidate shape. It records
+    the live pair and `None`s, never `0.0`: a zero inside a series reads as a fall and
+    would mask a real climb, and the ratchet's arithmetic depends on the difference."""
+    _, row = shape_check(world, "R_C", None)
+    assert row["contract_gate_share"] is not None
+    assert row["contract_prohibition_ratio"] is not None
+    assert row["candidate_surface"] is None
+    assert row["candidate_gate_share"] is None
+    assert row["candidate_prohibition_ratio"] is None
+    assert row["candidate_variant_id"] is None
+
+
+def test_the_shape_history_reads_back_rows_of_one_surface_oldest_first(world, tmp_path, live_contract):
+    """The ratchet's input is the ledger, not a test-built dict: rows written by earlier
+    rounds come back oldest-first and filtered to one surface, and a round that measured
+    no candidate contributes nothing rather than a zero the run would trip over."""
+    soul_one = overlay_with_soul(tmp_path / "c1", CAND_SOUL)
+    memory_only = overlay_with_soul(tmp_path / "c2", CAND_SOUL)
+    (memory_only / "SOUL.md").unlink()
+    # Deliberately NOT the SOUL candidate's text: the same body on both surfaces records
+    # identical ratios, so the test would pin the surface *label* while the numbers — the
+    # thing the ratchet actually compares — stayed indistinguishable, which is exactly
+    # where a cross-surface mix-up hides.
+    (memory_only / "MEMORY.md").write_text(
+        CAND_SOUL + "\n" + "\n".join(f"- memory guidance entry {i}" for i in range(10)),
+        encoding="utf-8")
+
+    shape_check(world, "R_1", {"refused": True, "variant_id": "V_1"}, soul_one)
+    shape_check(world, "R_2", None)                      # nothing reached the check
+    shape_check(world, "R_3", {"refused": True, "variant_id": "V_3"}, memory_only)
+    shape_check(world, "R_4", {"refused": True, "variant_id": "V_4"}, soul_one)
+
+    hist = post_promotion.contract_shape_history(world.paths.ledger_path, "SOUL.md")
+    assert [r["round_id"] for r in hist] == ["R_1", "R_4"]
+    assert [r["candidate_variant_id"] for r in hist] == ["V_1", "V_4"]
+    # The MEMORY.md round is absent, and so is the round that measured nothing. A pooled
+    # or zero-filled series would refuse SOUL.md candidates on neither.
+    assert all(r["candidate_surface"] == "SOUL.md" for r in hist)
+
+    # The MEMORY.md round recorded its OWN ratios, not SOUL.md's: R_3's overlay carries
+    # no SOUL.md, and its body is longer and less gate-dense than the SOUL candidate's,
+    # so its numbers must differ from R_1's. This is the assertion the clause-2
+    # cross-surface bug would have failed — the buggy read measured the live SOUL.md and
+    # filed it under MEMORY.md, which is neither candidate's shape.
+    rows = {r["round_id"]: r for r in rows_of(world.paths.ledger_path)}
+    r1, r3 = rows["R_1"], rows["R_3"]
+    assert r3["candidate_surface"] == "MEMORY.md"
+    assert r3["candidate_gate_share"] != r1["candidate_gate_share"], (
+        r1["candidate_gate_share"], r3["candidate_gate_share"])
+    assert r3["candidate_gate_share"] < r1["candidate_gate_share"], (
+        "the MEMORY body was meant to be less gate-dense than the SOUL candidate")
+    # And the live contract's own ratios are recorded on the same row regardless of the
+    # candidate's surface — that is the series the report prints, and it must not go
+    # missing just because the candidate touched the other file.
+    assert r3["contract_gate_share"] == r1["contract_gate_share"]
+
+    # Every shape key is on every row, absent measurements included, so reading the
+    # series never requires telling "not measured" from "not recorded".
+    last = json.loads(world.paths.ledger_path.read_text().splitlines()[-1])
+    assert set(post_promotion.SHAPE_FIELDS) <= set(last)
+
+
+def test_a_recorded_shape_cannot_widen_the_row_with_a_stray_key(world, live_contract):
+    """`SHAPE_FIELDS` is the row's contract. A caller handing over a richer dict — the
+    full `contract_shape` mapping, which also carries raw byte and line counts — has
+    those dropped, or the append-only file acquires columns nothing reads and every
+    later reader inherits them."""
+    row = post_promotion.record_round_summary(
+        world, "R_STRAY", 0.4, {"refused": True, "variant_id": "V_S"}, None,
+        {"gate_bytes": 204, "contract_bytes": 1000, "nonblank_lines": 40,
+         "contract_surface": "SOUL.md", "contract_gate_share": 0.30,
+         "contract_prohibition_ratio": 0.20, "candidate_surface": "SOUL.md",
+         "candidate_gate_share": 0.20, "candidate_prohibition_ratio": 0.10},
+    )
+    assert "gate_bytes" not in row and "nonblank_lines" not in row
+    assert row["candidate_gate_share"] == 0.20
+
+
+def test_the_shape_block_says_so_when_the_contract_cannot_be_measured(world, tmp_path, monkeypatch):
+    """The empty series, reached the way production reaches it, delivered through the
+    round's own report lines.
+
+    A round always writes its row before reading the series back, so an empty series
+    needs the row it just wrote to have measured nothing — which is exactly what happens
+    when the live SOUL.md cannot be read: `contract_shape_fields` swallows the `OSError`
+    (a clobbered or unmounted identity file, the 2026-09-10 class) and records nulls, so
+    nothing on the ledger has a `contract_gate_share` and the series is empty. Asserted
+    through `post_promotion_check`, not by calling `shape_report_lines` with `[]`: the
+    formatter can render any state, but only this call proves the round *ships* the
+    sentence. A section that vanished would make "the record is new", "the identity file
+    is unreadable" and "the record is missing" one invisible state, and the second is an
+    incident."""
+    import prompt_surface
+    from scripts.autoresearch import promote as promote_mod
+
+    gone = tmp_path / "prompts" / "SOUL.md"          # never created: unreadable
+    monkeypatch.setitem(promote_mod.CANONICAL_PROMPTS, "SOUL.md", gone)
+    monkeypatch.setitem(promote_mod.CANONICAL_PROMPTS, "MEMORY.md", tmp_path / "prompts" / "MEMORY.md")
+
+    lines, row = shape_check(world, "R_EMPTY", None)
+    assert row["contract_surface"] is None
+    assert row["contract_gate_share"] is None
+    body = "\n".join(lines)
+    assert "## Contract shape drift (last 5 recorded rounds)" in body
+    assert "no shape recorded yet" in body
+    # The ceilings and the rule are printed beside the emptiness, so a reader of an
+    # empty block still sees what the block would have been judged against.
+    assert "ceilings: gate stack 50%, prohibitions 25%" in body
+    assert f"across {prompt_surface.CONTRACT_RISE_RUN} recorded shapes" in body
+
+
+def test_the_first_round_prints_its_own_pair(world, live_contract):
+    """The round that creates the record appears in its own report: the ratchet that
+    refused a candidate read a history assembled *without* that candidate, so a reader
+    three promotions later has to be able to see the point that tripped it."""
+    lines, _ = shape_check(world, "R_FIRST", None)
+    body = "\n".join(lines)
+    assert "## Contract shape drift (last 5 recorded rounds)" in body
+    assert "- R_FIRST: contract " in body
+    assert "no shape recorded yet" not in body
+
+
+def test_the_report_run_writes_carries_the_shape_block_capped_at_five(world, monkeypatch, live_contract):
+    """Clause 4, on the file a human actually opens: `rounds_dir/<round_id>.md`.
+
+    The block is built inside `post_promotion_check`, spliced into the lines `run()`
+    writes, and read back here. Asserting only the returned list — which the previous
+    round did — would still pass if the splice ever dropped: the caller of
+    `post_promotion_check` in `run_round` picks specific indices out of that list
+    (`lines[0]`, then `lines[2:]`), so an off-by-one there yields a report with the
+    drift section silently absent while every returned-lines assertion stays green.
+    Seven seeded rounds plus this one's own row means the five-row cap drops two, so
+    the assertion pins the cap and the order in the same read, against the ledger it
+    was built from.
+    """
+    cfg = world
+    cfg.paths.bench_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.paths.bench_dir / "bench_a.md").write_text("---\nid: bench_a\ncategory: c\n---\nbody\n", encoding="utf-8")
+    soul, _ps = live_contract
+    overlay = cfg.paths.research_root / "overlay_V_new"
+    overlay.mkdir(parents=True, exist_ok=True)
+    (overlay / "SOUL.md").write_text("variant contract\n", encoding="utf-8")
+
+    # Seven earlier rounds on record, each measuring the contract as it stood: prose
+    # appended between them moves the gate share, so every row is distinguishable and
+    # the printed order is checkable rather than merely present.
+    for i in range(7):
+        shape_check(cfg, f"R_seed_{i}", None)
+        with open(soul, "a", encoding="utf-8") as fh:
+            fh.write(f"- ordinary guidance line {i}\n")
+
+    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel):
+        return [
+            {"variant_id": vid, "task_id": t["id"], "status": "ok", "task_category": "c",
+             "turns": 1, "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0}
+            for vid, _ in variant_pairs for t in tasks
+        ], []
+
+    monkeypatch.setattr(run_round, "load_config", lambda: cfg)
+    monkeypatch.setattr(run_round, "propose_variants", lambda *a, **kw: [
+        {"variant_id": "V_new", "description": "d", "hypothesis": "h"}])
+    monkeypatch.setattr(run_round, "_run_trials", fake_trials)
+    monkeypatch.setattr(run_round, "judge_trace", lambda task, t, rubric_model=None: {
+        "composite_score": 0.5, "objective_score": 1.0, "rubric_overall": 0.5,
+        "safety_critical": False, "safety_passed": True})
+    monkeypatch.setattr(run_round, "aggregate_variant", lambda vid, pairs: {
+        "mean_composite": 0.4364, "per_task": [], "task_count": len(pairs),
+        "safety_passed": True})
+    monkeypatch.setattr(run_round, "evaluate_promotion", lambda c, b, v: (False, "hold (win_frac 0.00)"))
+    monkeypatch.setattr(run_round, "materialize_baseline", lambda c: ("BASELINE_fixture", c.paths.variants_dir))
+    monkeypatch.setattr(run_round, "materialize", lambda c, v: overlay)
+
+    result = asyncio.run(run_round.run(bench_limit=1))
+    written = cfg.paths.rounds_dir / f"{result['round_id']}.md"
+    assert written.is_file()
+    report = written.read_text(encoding="utf-8")
+    block = report.split("## Contract shape drift (last 5 recorded rounds)", 1)
+    assert len(block) == 2, "the drift section is not in the report the round wrote"
+    # Only the per-round data rows: the section's blank line and its `- ceilings: …`
+    # footer (which names the thresholds, not a round) are excluded so the cap is
+    # counted in rounds, and the footer is asserted on its own below.
+    printed = [ln for ln in block[1].strip().splitlines()
+               if ln.startswith("- R_") or ln.startswith("- round ")]
+
+    rows = [r for r in rows_of(cfg.paths.ledger_path)
+            if r.get("event") == post_promotion.ROUND_SUMMARY_EVENT
+            and r.get("contract_gate_share") is not None]
+    assert len(rows) == 8, [r["round_id"] for r in rows]
+    # Oldest first, newest (this round's own row) last: a reader scans a climb
+    # left-to-right, the same direction the ratchet that consumes this series reads it.
+    assert printed[0].startswith(f"- {rows[-5]['round_id']}: contract "), printed[0]
+    for row, line in zip(rows[-5:], printed):
+        assert line.startswith(f"- {row['round_id']}: contract "), line
+        # The two percentages are the recorded floats rendered, not re-derived text: a
+        # line that printed a different number than the row carries would pass a
+        # presence-only assertion.
+        assert (f"contract {row['contract_gate_share']:.1%}/"
+                f"{row['contract_prohibition_ratio']:.1%}") in line, line
+    # The cap: the three oldest rounds are on the ledger and out of the report.
+    for row in rows[:-5]:
+        assert f"- {row['round_id']}: contract" not in report, row["round_id"]
+    assert len(printed) == 5, printed
+    assert "- ceilings: gate stack 50%, prohibitions 25%" in report
+
+
+def test_the_shape_fields_survive_the_mcp_ledger_query(world, monkeypatch, live_contract):
+    """The widened row read by the process that does not write it.
+
+    `autoresearch_ledger_query` is how a person or a worker sees a round's row, and it
+    runs in the MCP server with its own `_load_cfg` and its own import of the ledger —
+    the round's process never sees it. The six #789 fields exist only so that reader
+    can reconstruct the series, so the assertion goes through the production writer
+    (`post_promotion_check`, which is what puts them in the file) and out through the
+    handler, and compares the numbers that came back with the numbers the writer
+    recorded. A handler that whitelisted fields instead of returning the row would
+    return a row with the shape missing and every writer-side test still green.
+    """
+    from agent_mcp import autoresearch as mcp
+
+    _lines, row = shape_check(world, "R_SHAPE_MCP", None)
+    monkeypatch.setattr(mcp, "_load_cfg", lambda: world)
+    payload = json.loads(mcp._handle_ledger_query({"round_id": "R_SHAPE_MCP"}))
+    assert payload["count"] == 1, payload
+    got = payload["rows"][0]
+    assert got["event"] == post_promotion.ROUND_SUMMARY_EVENT
+    for field in post_promotion.SHAPE_FIELDS:
+        assert field in got, f"{field} did not survive the query"
+        assert got[field] == row[field], (field, got[field], row[field])
+    # The two ratios a human reads the drift off, non-null and in range: a null here
+    # would make the report and the query agree that nothing was measured.
+    assert 0.0 < got["contract_gate_share"] <= 1.0, got
+    assert 0.0 <= got["contract_prohibition_ratio"] <= 1.0, got

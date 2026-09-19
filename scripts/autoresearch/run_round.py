@@ -56,6 +56,7 @@ def post_promotion_check(
     baseline_mean: float,
     promotion_result: dict[str, Any] | None,
     variant_summary: dict[str, Any] | None = None,
+    candidate_overlay: Path | None = None,
 ) -> tuple[list[str], dict[str, Any], dict[str, Any] | None]:
     """Compare this round's fresh baseline against the last promotion (#429).
 
@@ -63,7 +64,20 @@ def post_promotion_check(
     happen in this one call so the per-round comparison row is a property of
     every round rather than a step a round has to remember to take. The lookup
     runs *before* the write: a round must never be compared against itself.
+
+    `candidate_overlay` is the winning candidate's overlay directory (None when the
+    round had no candidate). This is where the #789 contract shape is measured,
+    because this is the one caller that has both the live prompt files and the
+    overlay in hand: `post_promotion` records and renders it but must not read
+    prompt text or import the promote module (#429's separation test). The row is
+    written before the drift block is built, so the block names this round too — the
+    ratchet that refused a candidate read a history assembled *without* it, and a
+    reader three promotions later wants to see the point that tripped it.
     """
+    import prompt_surface
+
+    from .promote import contract_shape_fields
+
     prior = post_promotion.last_promotion(
         cfg.paths.ledger_path, cfg.paths.rounds_dir, exclude_round=round_id,
     )
@@ -71,6 +85,13 @@ def post_promotion_check(
     lines = post_promotion.report_section(comparison)
     row = post_promotion.record_round_summary(
         cfg, round_id, baseline_mean, promotion_result, variant_summary,
+        contract_shape_fields(candidate_overlay),
+    )
+    lines += post_promotion.shape_report_lines(
+        post_promotion.contract_shape_series(cfg.paths.ledger_path),
+        prompt_surface.GATE_STACK_CEILING,
+        prompt_surface.PROHIBITION_RATIO_CEILING,
+        prompt_surface.CONTRACT_RISE_RUN,
     )
     return lines, row, comparison
 
@@ -357,12 +378,16 @@ async def run(
     # this round's fresh baseline to the mean the previous promoted variant
     # recorded in its own round, record the row, and carry the verdict into the
     # report below. Record and surface only — nothing here restores a file.
+    # #789: the same row carries the contract shape — the live SOUL.md's two
+    # ratios and this round's candidate's own two, read from `best_overlay`, which
+    # is None whenever no candidate survived to the contract check.
     report_lines, summary_row, comparison = post_promotion_check(
         cfg,
         rid,
         float(baseline_summary.get("mean_composite", 0.0)),
         promotion_result,
         best_summary,
+        best_overlay,
     )
 
     # Write round summary markdown

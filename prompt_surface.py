@@ -162,6 +162,94 @@ def prohibition_ratio(text: str) -> tuple[float, int, int]:
     return (len(hits) / len(nonblank) if nonblank else 0.0), len(hits), len(nonblank)
 
 
+#: Consecutive recorded rises that make a climb a refusal, counting the
+#: candidate itself. Three is the shortest climb the live record contains and the
+#: longest run a plateau-tolerant rule can still call a trend: the census over the
+#: 65 `_pipeline/research/snapshots/*/SOUL.md` promotion snapshots (2026-09-17)
+#: found 28 distinct shape changes across 7 rises, longest consecutive-rise run 3
+#: deduped / 2 raw. Two would refuse ordinary round-to-round jitter; four has never
+#: occurred, so it would guard nothing that three does not.
+CONTRACT_RISE_RUN = 3
+
+
+def contract_shape(text: str) -> dict[str, float | None]:
+    """The contract's two growth ratios and their denominators, computed once.
+
+    `gate_share` and `prohibition_ratio` stay the single definition of each metric;
+    this is the aggregate view for the consumers that need the *pair*, so no caller
+    does its own arithmetic on the tuple. Three consumers read the pair now and two
+    of them disagree about what to do with it: `check_contract` refuses on the
+    absolute ceilings, `scripts/autoresearch/post_promotion.py` records it per
+    round, and `scripts/autoresearch/promote.py` refuses a *climb* across rounds.
+    A second copy of the arithmetic is how #1069 happened — the reporting side read
+    one text while the enforcing side read another, so one said healthy while every
+    writer-side gate was permanently red.
+
+    Ratios are unrounded, deliberately: rounding before a ceiling comparison lets a
+    value inside 5e-5 of the ceiling through. Rounding belongs to the record, which
+    is a display artifact.
+
+    A text whose body is empty measures as all-`None`, not as numbers.
+    `gate_share` returns 1.0 when its denominator is zero — defensible as a ratio
+    ("no contract at all is a maximally bloated contract"), but as a *recorded*
+    shape it would log a missing or empty file as a jump to 100% and hand the
+    cross-round ratchet a rise that never happened. That is the zero-denominator
+    class (instance 7 of the catalogue in
+    `knowledge/software/guardian-data-damage-false-trip.md`): a check whose
+    denominator can be zero is not a check, and here the zero is not merely vacuous
+    but wrong in the alarming direction. `check_contract` still refuses an empty
+    contract — through the gate-role and load-bearing markers, which is a true
+    statement about it, rather than through a ratio of nothing over nothing.
+    """
+    if not body(text).strip():
+        return {
+            "gate_share": None, "gate_bytes": None, "contract_bytes": None,
+            "prohibition_ratio": None, "prohibition_lines": None,
+            "nonblank_lines": None,
+        }
+    share, gate, total = gate_share(text)
+    ratio, hits, nonblank = prohibition_ratio(text)
+    return {
+        "gate_share": share, "gate_bytes": gate, "contract_bytes": total,
+        "prohibition_ratio": ratio, "prohibition_lines": hits,
+        "nonblank_lines": nonblank,
+    }
+
+
+def rising_run(values: list[float], run: int = CONTRACT_RISE_RUN) -> list[float]:
+    """The rising run ending at `values[-1]`, deduped, when it spans `run` values.
+
+    `values` is the recorded series oldest first with the candidate appended last,
+    so requiring the run to *end* at the last element is what keeps the verdict
+    about this candidate: a history that climbed and then fell back must not
+    refuse the round that fell back.
+
+    Plateau rule, the part a naive `a < b < c` misses: a value equal to its
+    predecessor neither counts as a rise nor resets the streak — it continues the
+    run its predecessor belongs to. The census this rule was fitted to counts rises
+    over *changed* values (28 distinct shape changes across 65 promotions, most of
+    them plateaus), so a repeated measurement has to be inert, or a contract that
+    did nothing for two rounds would "rise" twice on its own silence. A drop
+    restarts the run at the dropping value.
+
+    Returns the changed values of the run, so a caller can name the series in its
+    refusal, and [] when there is no run.
+    """
+    vals = [float(v) for v in values]
+    if run < 2 or len(vals) < run:
+        return []
+    start, rises = 0, 0
+    for i in range(1, len(vals)):
+        if vals[i] > vals[i - 1]:
+            rises += 1
+        elif vals[i] < vals[i - 1]:
+            start, rises = i, 0
+    if rises < run - 1:
+        return []
+    window = vals[start:]
+    return [v for i, v in enumerate(window) if i == 0 or v != window[i - 1]]
+
+
 def shared_line_share(memory: str, soul: str) -> float:
     """Share of MEMORY.md's nonblank body lines that are verbatim SOUL.md lines.
 
@@ -266,13 +354,19 @@ def check_contract(soul_text: str, memory_text: str | None = None) -> list[str]:
     `body()`, so a file's YAML fence is neither content nor a title. One body,
     one set of ratios: a check that counted the fence in the denominator while
     reading the title from line 1 was measuring two different documents (#1069).
+    Both ratios come from `contract_shape`, the same pair the per-round record and
+    the cross-round ratchet read, so the number that refuses a write is the number
+    a human later sees in the round report.
     """
     errors: list[str] = []
 
-    share, gate, total = gate_share(soul_text)
-    if share > GATE_STACK_CEILING:
+    shape = contract_shape(soul_text)
+    # None means the body was empty, which has no ratio to print; the gate-role
+    # and load-bearing checks below refuse that file on what it actually lacks.
+    if shape["gate_share"] is not None and shape["gate_share"] > GATE_STACK_CEILING:
         errors.append(
-            f"gate stack is {gate} of {total} bytes ({share:.1%}), over the "
+            f"gate stack is {shape['gate_bytes']} of {shape['contract_bytes']} bytes "
+            f"({shape['gate_share']:.1%}), over the "
             f"{GATE_STACK_CEILING:.0%} ceiling — this is the constraint bloat #377 "
             f"was filed on"
         )
@@ -288,10 +382,12 @@ def check_contract(soul_text: str, memory_text: str | None = None) -> list[str]:
     if missing:
         errors.append(f"removes behaviour the benches score: {missing}")
 
-    ratio, hits, nonblank = prohibition_ratio(soul_text)
-    if ratio > PROHIBITION_RATIO_CEILING:
+    if shape["prohibition_ratio"] is not None and (
+        shape["prohibition_ratio"] > PROHIBITION_RATIO_CEILING
+    ):
         errors.append(
-            f"{hits} of {nonblank} nonblank lines ({ratio:.0%}) are prohibitions, over "
+            f"{shape['prohibition_lines']} of {shape['nonblank_lines']} nonblank lines "
+            f"({shape['prohibition_ratio']:.0%}) are prohibitions, over "
             f"the {PROHIBITION_RATIO_CEILING:.0%} ceiling"
         )
 

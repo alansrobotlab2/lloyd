@@ -761,3 +761,450 @@ def test_unpatched_canonical_targets_point_at_the_live_vault():
     for name, path in targets.items():
         assert str(path).endswith(f"obsidian/lloyd/{name}"), path
         assert "tests" not in str(path) and "tmp" not in str(path)
+
+
+# ── #789 clause 2 + 3: the cross-round ratchet ────────────────────────────────
+#
+# `contract_refusals()` has always been an absolute ceiling on one candidate, so a
+# climb that stays under the ceiling passes every round and is invisible until it
+# isn't. Triage 2026-09-17 measured the drift it cannot see: across the 65 promotion
+# snapshots the gate share ran 39.0 % → 23.7 % → 63.6 %, and live SOUL.md sits at
+# 45.3 % / 19.3 % against ceilings of 50 % / 25 % — under five points of headroom,
+# which is precisely the regime where only a series rule says anything. These tests go
+# through `promote()`, not the helper, because the wiring that reads the ledger is the
+# thing that could silently not exist.
+CANDIDATE_PROSE = 200
+
+
+def contract_fixture(prose: int = CANDIDATE_PROSE) -> str:
+    """A SOUL.md that passes every absolute check, at a gate share of about 20 %.
+
+    Assembled from `GATE_HEADS` and `LOAD_BEARING` rather than transcribed, so it
+    cannot silently stop being a valid contract when the guard's requirements move; a
+    fixture that failed the load-bearing check would refuse for the wrong reason and
+    the ratchet's own words would still be in the list, unverifiable.
+    """
+    import prompt_surface
+
+    gate = "".join(
+        f"## {head}\n{label}: {marker}\n"
+        for head in prompt_surface.GATE_HEADS[:4]
+        for label, marker in prompt_surface.LOAD_BEARING.items()
+    )
+    prose_block = "\n".join(
+        f"- ordinary guidance line {i} about how to work" for i in range(prose)
+    )
+    return f"# Lloyd Operating Contract\n\n{gate}\n## Working Style\n{prose_block}\n"
+
+
+RATCHET_SOUL = contract_fixture()
+
+
+def _shape_candidate(tmp_path, name="ratchet", text=RATCHET_SOUL):
+    overlay = tmp_path / f"overlay-{name}"
+    overlay.mkdir()
+    (overlay / "SOUL.md").write_text(text, encoding="utf-8")
+    return overlay
+
+
+def _seed_shape_history(cfg, gate_shares, prohibition_ratio=None, surface="SOUL.md",
+                        first_day=10):
+    """Append the rows earlier rounds would have written, oldest first.
+
+    `prohibition_ratio` defaults to the candidate's own value, so the second metric is
+    a plateau and cannot form a run of its own: a test that asserts *which* series
+    refused has to hold the other one still. `first_day` lets a caller add a row that
+    predates rows already on the ledger, which appending alone cannot express.
+    """
+    import prompt_surface
+
+    if prohibition_ratio is None:
+        prohibition_ratio = prompt_surface.contract_shape(RATCHET_SOUL)["prohibition_ratio"]
+    cfg.paths.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cfg.paths.ledger_path, "a", encoding="utf-8") as fh:
+        for i, gate in enumerate(gate_shares):
+            fh.write(json.dumps({
+                "round_id": f"R_seed_{first_day}_{i}",
+                "event": "round_summary",
+                "candidate_surface": surface,
+                "candidate_gate_share": gate,
+                "candidate_prohibition_ratio": prohibition_ratio,
+                "created_at": f"2026-09-{first_day + i:02d}T00:00:00+00:00",
+            }) + "\n")
+
+
+def _shape_refusals(result):
+    """Only the shape refusals. `promote()` records every contract refusal under
+    `result.get("refused")`, so asserting on this subset is what separates a trend refusal
+    from a ceiling refusal in a test that claims one of them."""
+    return [r for r in (result.get("refused") or []) if "risen across" in r]
+
+
+def test_a_candidate_whose_gate_stack_rises_across_three_shapes_is_refused(isolated_prompts, tmp_path):
+    """Clause 2: three recorded rises in order, both still under their ceilings, is a
+    refusal — the case no absolute ceiling can reach."""
+    import prompt_surface
+
+    cfg = make_cfg(tmp_path)
+    gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
+    assert gate < prompt_surface.GATE_STACK_CEILING  # the regime this rule owns
+    assert prompt_surface.check_contract(RATCHET_SOUL) == []  # nothing else refuses it
+    _seed_shape_history(cfg, [gate - 0.02, gate - 0.01])
+
+    result = promote.promote(
+        cfg, VARIANT, _shape_candidate(tmp_path), summary(0.9), summary(0.1)
+    )
+    assert result, result
+    refusals = _shape_refusals(result)
+    assert len(refusals) == 1, result.get("refused")
+    # The refusal names the recorded series, not just the complaint: a person reading
+    # the round has to see the climb without opening the ledger.
+    for value in (gate - 0.02, gate - 0.01, gate):
+        assert f"{value:.1%}" in refusals[0], refusals[0]
+    assert "gate stack" in refusals[0]
+    assert result["applied_files"] == []
+
+
+def test_a_rising_prohibition_ratio_refuses_on_its_own_metric(isolated_prompts, tmp_path):
+    """The second ceiling is guarded by the same rule. Both metrics are named in one
+    refusal list, so a test that only ever climbed one would pass with the other
+    metric never wired."""
+    import prompt_surface
+
+    cfg = make_cfg(tmp_path)
+    shape = prompt_surface.contract_shape(RATCHET_SOUL)
+    assert shape["prohibition_ratio"] < prompt_surface.PROHIBITION_RATIO_CEILING
+    _seed_shape_history(
+        cfg, [shape["gate_share"]] * 4,
+        prohibition_ratio=shape["prohibition_ratio"] - 0.03,
+    )
+    _seed_shape_history(
+        cfg, [shape["gate_share"]] * 4,
+        prohibition_ratio=shape["prohibition_ratio"] - 0.02,
+    )
+
+    result = promote.promote(
+        cfg, VARIANT, _shape_candidate(tmp_path, "proh"), summary(0.9), summary(0.1)
+    )
+    refusals = _shape_refusals(result)
+    assert len(refusals) == 1, result.get("refused")
+    assert "prohibition lines" in refusals[0]
+    assert f"{shape['prohibition_ratio']:.1%}" in refusals[0]
+
+
+def test_a_plateau_between_two_rises_does_not_reset_the_streak(isolated_prompts, tmp_path):
+    """Clause 3 at the promotion boundary. The 2026-09-04→05 run in the snapshots was
+    52.9 % → 63.0 % → 63.6 % → 63.6 %: a repeated value inside a climb must contribute
+    neither a rise nor a reset, or the rule breaks on the most common real shape."""
+    import prompt_surface
+
+    cfg = make_cfg(tmp_path)
+    gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
+    _seed_shape_history(cfg, [gate - 0.03, gate - 0.02, gate - 0.02])
+
+    result = promote.promote(
+        cfg, VARIANT, _shape_candidate(tmp_path), summary(0.9), summary(0.1)
+    )
+    assert len(_shape_refusals(result)) == 1, result.get("refused")
+
+
+def test_a_flat_or_falling_series_produces_no_shape_refusal(isolated_prompts, tmp_path):
+    """Clause 3: a plateau is not a rise, and a fall is not a rise. The shape refusals
+    must be silent while the promotion still goes through — asserting their absence by
+    name, not by an empty list a broken check would also produce."""
+    import prompt_surface
+
+    cfg = make_cfg(tmp_path)
+    gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
+    overlay = _shape_candidate(tmp_path, "flat")
+
+    empty = promote.promote(cfg, VARIANT, overlay, summary(0.9), summary(0.1))
+    assert _shape_refusals(empty) == [], empty.get("refused")
+    assert not empty.get("refused"), empty.get("refused")
+
+    _seed_shape_history(cfg, [gate, gate])
+    equal = promote.promote(cfg, VARIANT, overlay, summary(0.9), summary(0.1))
+    assert _shape_refusals(equal) == [], equal.get("refused")
+    assert not equal.get("refused"), equal.get("refused")
+
+    _seed_shape_history(cfg, [gate + 0.05, gate + 0.02])
+    fell = promote.promote(cfg, VARIANT, overlay, summary(0.9), summary(0.1))
+    assert _shape_refusals(fell) == [], fell.get("refused")
+    assert not fell.get("refused"), fell.get("refused")
+
+
+def test_too_few_recorded_shapes_cannot_refuse_anything(isolated_prompts, tmp_path):
+    """The rule needs the run counting the candidate, so a ledger with one prior shape
+    is not evidence of a climb. A ratchet that fired on a single data point would
+    refuse every candidate from the second round onward."""
+    import prompt_surface
+
+    cfg = make_cfg(tmp_path)
+    gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
+    # One prior value and it is a genuine *rise* toward the candidate, so the only
+    # thing the run lacks is its length. Seeding a low number instead would pass this
+    # test for the wrong reason — a fall also refuses nothing, and then the assertion
+    # would not be about the count at all.
+    _seed_shape_history(cfg, [gate - 0.01])
+
+    result = promote.promote(
+        cfg, VARIANT, _shape_candidate(tmp_path, "one"), summary(0.9), summary(0.1)
+    )
+    assert _shape_refusals(result) == [], result.get("refused")
+    assert not result.get("refused"), result.get("refused")
+
+    # The same ledger plus one earlier rise refuses. That control is what makes the
+    # assertion above about the *number* of rows and not about the rule being inert.
+    _seed_shape_history(cfg, [gate - 0.02], first_day=9)
+    refused = promote.promote(
+        cfg, VARIANT, _shape_candidate(tmp_path, "two"), summary(0.9), summary(0.1)
+    )
+    assert len(_shape_refusals(refused)) == 1, refused.get("refused")
+
+
+def test_a_candidate_over_a_ceiling_is_refused_by_the_ceiling_and_not_also_the_ratchet(
+    isolated_prompts, tmp_path
+):
+    """The two refusals never both speak about one metric. Past the ceiling the
+    absolute refusal is the one that names bytes and line counts; layering a trend
+    complaint on top would let a reader think the series, not the size, was the
+    problem."""
+    import prompt_surface
+
+    cfg = make_cfg(tmp_path)
+    bloated_text = contract_fixture(prose=4)
+    assert (
+        prompt_surface.contract_shape(bloated_text)["gate_share"]
+        > prompt_surface.GATE_STACK_CEILING
+    )
+    bloated = _shape_candidate(tmp_path, "bloated", bloated_text)
+    _seed_shape_history(cfg, [0.10, 0.20, 0.30, 0.40])
+
+    result = promote.promote(cfg, VARIANT, bloated, summary(0.9), summary(0.1))
+    assert result.get("refused")
+    assert _shape_refusals(result) == []
+    assert any("over the 50% ceiling" in r for r in result.get("refused")), result.get("refused")
+
+
+def test_a_history_row_missing_the_metric_does_not_fabricate_a_rise(isolated_prompts, tmp_path):
+    """Rounds recorded before this field existed, and rounds that measured nothing,
+    carry no value for the metric. They are skipped rather than read as zero — a zero
+    would be a fall that masks a climb — and a run assembled from the usable rows alone
+    still refuses, because dropping a row must not require the neighbour rows to move."""
+    import prompt_surface
+
+    cfg = make_cfg(tmp_path)
+    gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
+    cfg.paths.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"round_id": "R_old", "event": "round_summary", "candidate_surface": "SOUL.md",
+         "created_at": "2026-09-08T00:00:00+00:00"},                       # no fields at all
+        {"round_id": "R_a", "event": "round_summary", "candidate_surface": "SOUL.md",
+         "candidate_gate_share": gate - 0.03,
+         "created_at": "2026-09-09T00:00:00+00:00"},
+        {"round_id": "R_none", "event": "round_summary", "candidate_surface": "SOUL.md",
+         "candidate_gate_share": None, "created_at": "2026-09-10T00:00:00+00:00"},
+        {"round_id": "R_b", "event": "round_summary", "candidate_surface": "SOUL.md",
+         "candidate_gate_share": gate - 0.01,
+         "created_at": "2026-09-11T00:00:00+00:00"},
+    ]
+    with open(cfg.paths.ledger_path, "a", encoding="utf-8") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in rows)
+
+    result = promote.promote(
+        cfg, VARIANT, _shape_candidate(tmp_path, "sparse"), summary(0.9), summary(0.1)
+    )
+    refusals = _shape_refusals(result)
+    assert len(refusals) == 1, result.get("refused")
+    # The two usable values and the candidate, not the absent ones, are what the
+    # refusal is allowed to quote.
+    assert f"{gate - 0.03:.1%}" in refusals[0]
+    assert "0.0%" not in refusals[0], refusals[0]
+
+
+def test_a_history_in_the_wrong_file_order_is_still_read_in_time_order(isolated_prompts, tmp_path):
+    """The ledger is append-only, so file order is usually time order — but the ratchet
+    compares a candidate against the *newest* recorded shapes, and a row replayed out of
+    order (a restore, a backfill) must not reorder the series into a climb. Sorting on
+    `created_at` is what makes the rule's answer independent of file position."""
+    import prompt_surface
+
+    cfg = make_cfg(tmp_path)
+    gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
+    cfg.paths.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    # Written newest-first: falling in file order, rising only once re-ordered by time.
+    rows = [
+        {"round_id": "R_new", "event": "round_summary", "candidate_surface": "SOUL.md",
+         "candidate_gate_share": gate - 0.01, "created_at": "2026-09-13T00:00:00+00:00"},
+        {"round_id": "R_mid", "event": "round_summary", "candidate_surface": "SOUL.md",
+         "candidate_gate_share": gate - 0.02, "created_at": "2026-09-12T00:00:00+00:00"},
+        {"round_id": "R_old", "event": "round_summary", "candidate_surface": "SOUL.md",
+         "candidate_gate_share": gate - 0.03, "created_at": "2026-09-11T00:00:00+00:00"},
+    ]
+    with open(cfg.paths.ledger_path, "a", encoding="utf-8") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in rows)
+
+    result = promote.promote(
+        cfg, VARIANT, _shape_candidate(tmp_path, "ordered"), summary(0.9), summary(0.1)
+    )
+    refusals = _shape_refusals(result)
+    assert len(refusals) == 1, result.get("refused")
+    # Quoted oldest-first by time, which is the opposite of the file's own order.
+    assert refusals[0].index(f"{gate - 0.03:.1%}") < refusals[0].index(f"{gate - 0.01:.1%}")
+
+
+def test_a_row_with_no_timestamp_cannot_place_itself_inside_the_run(isolated_prompts, tmp_path):
+    """A `created_at` that is missing or unparseable makes the row unorderable, and an
+    unorderable value that defaulted to "newest" or "oldest" would let an untrusted
+    field forge a climb. Dropping it instead costs the run a value, which refuses
+    nothing — the safe direction."""
+    import prompt_surface
+
+    cfg = make_cfg(tmp_path)
+    gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
+    cfg.paths.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    forged = gate - 0.01      # sits strictly between the usable prior and the candidate
+    inflated = gate + 0.30
+    rows = [
+        {"round_id": "R_a", "event": "round_summary", "candidate_surface": "SOUL.md",
+         "candidate_gate_share": gate - 0.02, "created_at": "2026-09-11T00:00:00+00:00"},
+        # Unorderable, and placed so that treating it as the NEWEST prior would be the
+        # third rise of a run: usable prior below it, candidate above it. Dropping it is
+        # what makes that impossible; the value is chosen relative to the candidate's own
+        # ratio, not arbitrarily large, so the assertion below can actually fail.
+        {"round_id": "R_ghost_between", "event": "round_summary", "candidate_surface": "SOUL.md",
+         "candidate_gate_share": forged, "created_at": ""},
+        # Unorderable and inflated: cannot form a rise into anything, but it must not
+        # reach the refusal text either — a refusal that quotes a number from a row no
+        # one can place is a refusal whose series a reader cannot reconstruct.
+        {"round_id": "R_ghost_high", "event": "round_summary", "candidate_surface": "SOUL.md",
+         "candidate_gate_share": inflated, "created_at": "not-a-timestamp"},
+    ]
+    with open(cfg.paths.ledger_path, "a", encoding="utf-8") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in rows)
+
+    result = promote.promote(
+        cfg, VARIANT, _shape_candidate(tmp_path, "ghost"), summary(0.9), summary(0.1)
+    )
+    # One usable prior value and no ghost: no run. This assertion is the discriminator —
+    # a `created_at` that defaulted to "newest" would have made these three numbers a
+    # climb and refused the round on a row that cannot be placed in time.
+    assert _shape_refusals(result) == [], result.get("refused")
+    # Both ghost values rendered from the seeded ratios, never typed: a literal here
+    # matches nothing at all once the fixture's gate share moves, and an assertion
+    # against an absent string passes whatever the code does.
+    for value in (forged, inflated):
+        rendered = f"{value:.1%}"
+        assert not any(rendered in r for r in (result.get("refused") or [])), (
+            rendered, result.get("refused"))
+
+
+def test_a_memory_only_history_cannot_refuse_a_soul_candidate(isolated_prompts, tmp_path):
+    """The two surfaces' ratios are not comparable, so the series is filtered by the
+    surface recorded. Pooling them would let a MEMORY.md-only round — the file the
+    nightly writers actually grow, and the one no ceiling covers — refuse a SOUL.md
+    candidate on numbers that never described it."""
+    import prompt_surface
+
+    cfg = make_cfg(tmp_path)
+    gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
+    _seed_shape_history(cfg, [gate - 0.02, gate - 0.01], surface="MEMORY.md")
+
+    result = promote.promote(
+        cfg, VARIANT, _shape_candidate(tmp_path, "surfaced"), summary(0.9), summary(0.1)
+    )
+    assert _shape_refusals(result) == [], result.get("refused")
+    assert not result.get("refused"), result.get("refused")
+
+
+def test_a_memory_only_candidate_is_never_ratcheted_on_the_soul_series(isolated_prompts, tmp_path, monkeypatch):
+    """The ratchet compares SOUL-shaped values, so an overlay carrying no SOUL.md must
+    not be run through it at all.
+
+    Without that guard the comparison is live-SOUL against the SOUL series: the
+    candidate contributes nothing to its own side of it, and since a refused promotion
+    never writes, the live value it is being compared against is frozen — the review of
+    SM_20260919_074839 reproduced it as live 45 % against candidates 20 %/22 % returning
+    "risen across 3 recorded shapes: 20.0% -> 22.0% -> 45.0%", a refusal that would then
+    recur every hour on a series the candidate is not part of. The same seeded history
+    with a SOUL-bearing candidate DOES refuse (the control below), which is what makes
+    the memory-only pass a verdict about the surface and not an absent check.
+    """
+    import prompt_surface
+
+    cfg = make_cfg(tmp_path)
+    gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
+    _seed_shape_history(cfg, [gate - 0.02, gate - 0.01])      # two SOUL-shaped priors
+    # The live contract sits ABOVE both priors, which is the state that produces the
+    # false ratchet: a memory-only candidate inherits it as its own shape.
+    live_soul = tmp_path / "live_SOUL.md"
+    live_soul.write_text(RATCHET_SOUL, encoding="utf-8")
+    monkeypatch.setitem(promote.CANONICAL_PROMPTS, "SOUL.md", live_soul)
+
+    # The candidate touches only MEMORY.md, so its prospective SOUL is the live file.
+    mem_only = tmp_path / "mem_only"
+    mem_only.mkdir()
+    (mem_only / "MEMORY.md").write_text("# memory\n\n- one ordinary line\n", encoding="utf-8")
+    result = promote.promote(
+        cfg, VARIANT, mem_only, summary(0.9), summary(0.1)
+    )
+    assert _shape_refusals(result) == [], result.get("refused")
+    assert not [r for r in (result.get("refused") or []) if "risen across" in r], result.get("refused")
+
+    # Control, same seeded history and same live file: give the overlay its own SOUL.md
+    # and the identical rule must refuse, naming the series. Deselect the guard by
+    # handing the candidate a SOUL and the refusal reappears, so the assertion above is
+    # about which surface the candidate carries and nothing else.
+    soul_only = tmp_path / "soul_only"
+    soul_only.mkdir()
+    (soul_only / "SOUL.md").write_text(RATCHET_SOUL, encoding="utf-8")
+    result2 = promote.promote(cfg, VARIANT, soul_only, summary(0.9), summary(0.1))
+    shape_refusals = _shape_refusals(result2)
+    assert len(shape_refusals) == 1, result2.get("refused")
+    assert "risen across" in shape_refusals[0], shape_refusals
+    assert f"{gate:.1%}" in shape_refusals[0], shape_refusals
+
+
+def test_the_manual_promote_route_refuses_the_same_ratchet(isolated_prompts, tmp_path, monkeypatch):
+    """Clause 2 across the second process boundary: the manual MCP promote.
+
+    `agent_mcp.autoresearch._handle_promote` is a promotion entry point that bypasses
+    `run_round` entirely — the rescue path a person or a worker calls with a variant id,
+    running in the MCP server with its own `_load_cfg` and its own import of the module.
+    The ratchet lives inside `promote()`, so this route is covered by construction *only*
+    for as long as the handler keeps handing `promote()` a config with a real
+    `paths.ledger_path`; a handler that built its own config, or passed a variant summary
+    through a wrapper that dropped the contract check, would open a ratchet-blind door to
+    the same write every round is refused. The candidate is therefore placed where that
+    handler looks for it (`paths.variants_dir/<variant_id>` plus `variant.json`), the
+    handler is called with no reference to `run_round`, and the assertion reads the
+    refusal out of the JSON string the MCP tool returns rather than the dict the
+    in-process tests read.
+    """
+    import prompt_surface
+
+    from agent_mcp import autoresearch as mcp
+
+    cfg = make_cfg(tmp_path)
+    gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
+    assert prompt_surface.check_contract(RATCHET_SOUL) == []  # no ceiling is being crossed
+    _seed_shape_history(cfg, [gate - 0.02, gate - 0.01])
+
+    overlay = cfg.paths.variants_dir / "V_manual"
+    overlay.mkdir(parents=True)
+    (overlay / "SOUL.md").write_text(RATCHET_SOUL, encoding="utf-8")
+    (overlay / "variant.json").write_text(
+        json.dumps({"variant_id": "V_manual", "description": "d", "hypothesis": "h"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mcp, "_load_cfg", lambda: cfg)
+
+    payload = json.loads(mcp._handle_promote({"variant_id": "V_manual", "dry_run": True}))
+    refusals = _shape_refusals(payload)
+    assert len(refusals) == 1, payload
+    assert "gate stack" in refusals[0], refusals[0]
+    for value in (gate - 0.02, gate - 0.01, gate):
+        assert f"{value:.1%}" in refusals[0], refusals[0]
+    # Nothing reached the identity files through this route.
+    assert isolated_prompts["SOUL.md"].read_text(
+        encoding="utf-8") == "canonical SOUL.md\n"
