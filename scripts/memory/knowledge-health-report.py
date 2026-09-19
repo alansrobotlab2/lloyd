@@ -15,6 +15,7 @@ Output:
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict, Counter
 from datetime import datetime, timezone
@@ -36,6 +37,60 @@ SECTION_ROW_CAP = 50
 GOD_ENTITY_THRESHOLD = 20
 THIN_ENTITY_MAX_FACTS = 2
 STALE_DAYS_THRESHOLD = 60
+
+# Questions, not a listing — 20 is plenty for the section a research worker
+# reads out of `## Suggested Research Questions`.
+RESEARCH_QUESTION_COUNT = 20
+
+# Below this many names that survive the artifact filter there is no ranking to
+# report, and the section says so instead of filling the slot with whatever the
+# extractor left behind (#954). 10 = half the section: fewer than that and the
+# questions would be dominated by whatever passed, not by what is thinnest.
+MIN_USABLE_RESEARCH_QUESTIONS = 10
+
+# Entity names that are an extraction artifact rather than a thing anyone can
+# research. On 2026-09-19 every one of the 20 questions in the live report
+# matched one of these: 20 of 20 were `#NNN` backlog ids that had been minted as
+# entities (`#160`, `#165`, `#222` …), each of which resolves to an existing
+# `~/obsidian/backlog/<id>-*.md`. `#` is byte 0x23 — the lowest printable
+# character — so under the old alphabetical-by-load order they were *always* at
+# the top of the section. Stopping the minting is #743; this filter is what
+# makes the section useless-to-useful before that gate lands and harmless after
+# it.
+EXTRACTION_ARTIFACT_NAME_RES = (
+    re.compile(r"^#\d"),                # '#441' — a backlog id, not an entity
+    re.compile(r"^--"),                 # '--continue' — a CLI flag
+    re.compile(r"\.md$"),               # '03-linear-representation-hypothesis.md' — a filename
+    re.compile(r"^\d{4}-\d{2}-\d{2}"),  # '2026-09-11' — a date
+)
+
+
+def is_extraction_artifact_name(name: str) -> bool:
+    """True when an entity name is a shape the extractor minted, not a concept.
+
+    Only the questions are filtered by this. The `## Thin Entities` table is not:
+    it is the surface on which a regrowth in `#NNN` minting becomes visible, so
+    hiding those rows would destroy the very signal #743 needs.
+    """
+    return any(pattern.search(name) for pattern in EXTRACTION_ARTIFACT_NAME_RES)
+
+
+def thin_entity_rank(item) -> tuple:
+    """Order thin entities by how thin they are, then by recency, then by name.
+
+    Every thin entity has the same `active_facts` (the section selects
+    `< THIN_ENTITY_MAX_FACTS`, so it is 0 or 1), which made the old key
+    `x[1]["active_facts"]` a total tie: the sort is stable, `load_entities` fills
+    its dict from `sorted(facts_dir.iterdir())`, and the surviving order — and so
+    the whole questions section — was alphabetical by entity directory name
+    (#954). `latest_created` is the fix: it is computed from facts already
+    loaded, so the tie now breaks on "newest fact first" with no extra I/O. An
+    entity with no dated fact sorts after every dated one, and the name is the
+    final key so the order never depends on dict insertion order.
+    """
+    name, stats = item
+    newest = stats.get("latest_created")
+    return (stats["active_facts"], -(newest.timestamp() if newest else float("-inf")), name)
 
 
 def parse_frontmatter(file_path: Path) -> dict | None:
@@ -136,11 +191,22 @@ def compute_entity_stats(entities: dict) -> dict:
 
         active = [f for f in all_facts if is_fact_active(f)]
         expired = [f for f in all_facts if not is_fact_active(f)]
+        # The newest `created_at` on the entity — when this entity was last
+        # touched. A max, not the first one found, and None when no fact carries
+        # a parseable date. Thin entities are all tied on `active_facts`, so this
+        # is the field that gives the ranking in `thin_entity_rank` anything to
+        # break a tie with (#954).
+        fact_dates = [
+            parse_date(fact.get("created_at"))
+            for fact in all_facts if isinstance(fact, dict)
+        ]
+        dated = [d for d in fact_dates if d]
 
         stats[entity_name] = {
             "total_facts": len(all_facts),
             "active_facts": len(active),
             "expired_facts": len(expired),
+            "latest_created": max(dated) if dated else None,
             "categories": sorted(categories),
             "facts": all_facts,
             "category_entries": category_entries,
@@ -463,7 +529,11 @@ def generate_report(
         if s["active_facts"] < THIN_ENTITY_MAX_FACTS
         and edge_counts.get(name, 0) == 0
     ]
-    thin_entities.sort(key=lambda x: x[1]["active_facts"])
+    # Not `key=active_facts`: that key was a total tie across every thin entity,
+    # which left the section ordered by entity name and rendered the same 20
+    # ASCII-first names — all of them `#NNN` backlog ids — every single night
+    # (#954). See `thin_entity_rank` for what the tie now breaks on.
+    thin_entities.sort(key=thin_entity_rank)
 
     lines.append("## Thin Entities")
     lines.append("")
@@ -595,12 +665,29 @@ def generate_report(
     lines.append("## Suggested Research Questions")
     lines.append("")
 
-    if thin_entities:
-        for name, s in thin_entities[:20]:  # questions, not a listing — 20 is plenty
-            lines.append(f"- What does **{name}** relate to?")
-            lines.append(f"- Is **{name}** still relevant?")
-    else:
+    if not thin_entities:
         lines.append("*No thin entities to generate questions for.*")
+    else:
+        usable = [(name, s) for name, s in thin_entities
+                  if not is_extraction_artifact_name(name)]
+        artifact_count = len(thin_entities) - len(usable)
+        if len(usable) < MIN_USABLE_RESEARCH_QUESTIONS:
+            # A missing usable input is a finding, not a pass — the same rule the
+            # stale section applies to an undatable store (#906 clause 11). Printing
+            # the survivors anyway would hand `research-queue-generator` a section
+            # that reads as a ranking and is not one.
+            lines.append(f"RESEARCH_QUESTIONS_UNEVALUABLE: {artifact_count} of "
+                         f"{len(thin_entities)} thin entities carry an artifact-shaped name")
+            lines.append("")
+            lines.append(f"*Only {len(usable)} of {len(thin_entities):,} thin entities carry a name "
+                         f"that survives the artifact filter, below the "
+                         f"{MIN_USABLE_RESEARCH_QUESTIONS} needed to call this a ranking. The "
+                         f"population is still listed in full above, and the minting that "
+                         f"produced these names is owned by #743.*")
+        else:
+            for name, s in usable[:RESEARCH_QUESTION_COUNT]:
+                lines.append(f"- What does **{name}** relate to?")
+                lines.append(f"- Is **{name}** still relevant?")
     lines.append("")
 
     # Footer
