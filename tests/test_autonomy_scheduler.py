@@ -8,6 +8,7 @@ import ast
 import datetime as dt
 import inspect
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -1340,3 +1341,450 @@ def test_health_distinguishes_a_never_run_overdue_task_from_a_weekly_one_not_due
     assert stalled == {"909"}, (
         f"stalled set {sorted(stalled)} does not separate an overdue never-run "
         "daily task from a weekly task that was never due")
+
+
+# ── #832: a declared output artifact is evidence for run status ───────────────
+#
+# Five recorded runs (2026-09-11 #38, 09-14 #57, 09-16 #39, 09-17 #39 twice)
+# share one shape: the agent loop ended on a tool call, so the
+# terminal assistant block was empty; run status was derived from that block
+# alone; and the deliverable the run had actually written disagreed. Advancing
+# `last_run` on a recorded failure never happened, so `_is_dependency_met` —
+# which consumes only `last_run` — saw a dead upstream, and the dependent waited
+# for a duplicate GPU run.
+
+
+def _query_ending_on_a_tool_call(artifact, nbytes):
+    """Stand-in agent loop: one tool call, the artifact landing on disk, then a
+    turn-capped result with NO text — the shape of all five instances:
+    `stop_reason: max_turns`, `empty: true`, `saw_tool_call: true`, work done.
+
+    The artifact is written *inside* the run, between the tool call and the
+    result, because the property under test is "this run wrote it": a file the
+    fixture stamped before the run started is the opposite property (clause 4's
+    stale case) and must be refused.
+    """
+    async def _rq(messages, options):
+        yield {"type": "tool_call", "id": "c1", "name": "Write", "input": {}}
+        if artifact is not None and nbytes:
+            # The run must not be instantaneous: with `started_at ==
+            # completed_at`, the assertions that `last_run` equals the run's
+            # COMPLETION and that it equals its START become one assertion, and
+            # a recorder that stamps the start would pass the completion test.
+            # 20 ms separates the two stamps by more than the clock's grain.
+            await asyncio.sleep(0.02)
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_bytes(b"x" * nbytes)
+        yield {"type": "tool_result", "call_id": "c1", "content": "written"}
+        yield {"type": "result", "stop_reason": "max_turns", "num_turns": 61,
+               "usage": {"output_tokens": 52579}}
+    return _rq
+
+
+async def _run_empty_terminal(aut, monkeypatch, tmp_path, *, task_id=39,
+                              declared=None, artifact=None, nbytes=4096,
+                              failure_count=0, **fm):
+    """Write task `task_id`, run it to an empty terminal text, return its result.
+
+    `declared` is the task's `output_artifact` front-matter value (None = it
+    declares nothing); `artifact` the file it actually leaves behind (None =
+    nothing); `nbytes` that file's size; `failure_count` the retry state the task
+    is in when the run starts — seeded non-zero wherever the assertion is about
+    the counter being RESET, because seeding 0 makes "it went to 0" undecidable.
+    """
+    monkeypatch.setattr("app.run_recorder.recording_enabled", lambda: False,
+                        raising=False)
+    monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", tmp_path / "sessions")
+    write_task(aut, task_id, timeout_seconds=300, failure_count=failure_count,
+               **({"output_artifact": str(declared)} if declared else {}), **fm)
+    monkeypatch.setattr("app.harness.run_query",
+                        _query_ending_on_a_tool_call(artifact, nbytes))
+    return await aut.run_task(task_id)
+
+
+def _one_record(aut, task_id):
+    """(front matter, whole file) for the single run record written."""
+    files = list((aut.AUTONOMY_RUNS_DIR / str(task_id)).glob("run_*.md"))
+    assert len(files) == 1, [p.name for p in files]
+    text = files[0].read_text(encoding="utf-8")
+    head, fm, body = text.split("---\n", 2)
+    assert head == ""
+    return yaml.safe_load(fm), body
+
+
+async def test_an_empty_terminal_run_with_a_fresh_artifact_advances_last_run(
+        aut, monkeypatch, tmp_path):
+    """Clause 1. The 2026-09-17 replay: #39 ran 615.7 s over 61 turns, wrote its
+    complete knowledge write (8,918 B), and ended with no terminal text. It was
+    recorded `failed`, `last_run` stayed a day old, and the chain waited on a
+    retry that happened to sign off with prose.
+    """
+    art = tmp_path / "artifacts" / "knowledge-write-2026-09-17.md"
+    # Seeded at 2 because `2 -> 0` is a fact about the recorder while `0 -> 0`
+    # is a fact about the fixture: the artifact path never increments the
+    # counter, so a task starting at 0 would still read 0 with the reset deleted.
+    # 2 is also the state that matters — two prior failures is two wasted GPU
+    # runs spent on the same phantom, which is what this clause stops spending.
+    out = await _run_empty_terminal(aut, monkeypatch, tmp_path, task_id=39,
+                                    declared=art, artifact=art, nbytes=8918,
+                                    failure_count=2)
+
+    assert out["success"] is True
+    task = read_task(aut, 39)
+    assert task["status"] == "up_next"
+    assert int(task["failure_count"]) == 0, (
+        "a run that produced its deliverable must not spend the retry budget; "
+        "the task came in at failure_count 2 and must leave at 0")
+    # `last_run` is the run's OWN completion stamp, byte for byte — not a
+    # timestamp bracketed around the call, which a wall-clock check cannot tell
+    # apart from a recorder that stamped the run's start instead.
+    fm, _body = _one_record(aut, 39)
+    assert task["last_run"] == fm["completed_at"], (
+        "the task file must carry the same completion instant the run record "
+        f"does: record completed_at={fm['completed_at']!r}, "
+        f"task last_run={task['last_run']!r}")
+    # Control for the line above: the fixture's run has a real duration, so
+    # `last_run == completed_at` is NOT also satisfied by stamping started_at.
+    assert fm["started_at"] != fm["completed_at"], (
+        "fixture is a zero-length run; equality with completed_at would prove "
+        "nothing about a recorder that stamped the start")
+    assert task["last_run"] != fm["started_at"], (
+        f"last_run carries the run's start {fm['started_at']!r}, not its end")
+    # The artifact the status rests on landed INSIDE that span, which is the
+    # property that makes it evidence for THIS run rather than for last night's.
+    modified = dt.datetime.fromisoformat(fm["output_artifact"]["modified_at"])
+    assert (dt.datetime.fromisoformat(fm["started_at"]) <= modified
+            <= dt.datetime.fromisoformat(fm["completed_at"])), (
+        f"artifact mtime {modified} is outside the run "
+        f"{fm['started_at']} .. {fm['completed_at']}")
+    # Cadence resumes from the completion, exactly as on a text-confirmed run.
+    last_run = dt.datetime.fromisoformat(task["last_run"])
+    nxt = dt.datetime.fromisoformat(task["next_run"])
+    assert (nxt - last_run).total_seconds() == pytest.approx(86400, abs=2)
+
+
+async def test_the_artifact_backed_record_names_its_evidence_and_the_text_path_does_not(
+        aut, monkeypatch, tmp_path):
+    """Clause 2. A status decided from an artifact has to say so — the artifact,
+    its size, and that the terminal text was empty — and it must stay
+    distinguishable from the ordinary text-confirmed success, which gains no
+    such field.
+    """
+    art = tmp_path / "artifacts" / "signals-latest.md"
+    out = await _run_empty_terminal(aut, monkeypatch, tmp_path, task_id=38,
+                                   declared=art, artifact=art, nbytes=31229)
+    fm, body = _one_record(aut, 38)
+
+    assert fm["status"] == "success"
+    assert fm["empty"] is True, "the empty terminal text stays on the record"
+    assert fm["status_basis"] == "artifact"
+    assert out["meta"]["status_basis"] == "artifact"
+    assert fm["output_artifact"]["path"] == str(art)
+    assert fm["output_artifact"]["bytes"] == 31229
+    assert "31229" in fm["summary"] and "signals-latest.md" in fm["summary"], fm["summary"]
+    assert "signals-latest.md" in body
+    assert "failure_kind" not in fm, "an artifact-backed run is not a failure row"
+
+    # The text-confirmed path is untouched, even for a task that declares an
+    # artifact: a run that says what it did needs no second witness.
+    art2 = tmp_path / "artifacts" / "knowledge-handoff-2026-09-18.md"
+    monkeypatch.setattr("app.run_recorder.recording_enabled", lambda: False,
+                        raising=False)
+    monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", tmp_path / "sessions")
+    write_task(aut, 42, timeout_seconds=300, output_artifact=str(art2))
+    monkeypatch.setattr("app.harness.run_query", fake_run_query([TEXT, RESULT]))
+    ok = await aut.run_task(42)
+    assert ok["success"] is True and ok["status"] == "success"
+    fm2, _ = _one_record(aut, 42)
+    assert "status_basis" not in fm2, fm2
+    assert "output_artifact" not in fm2, fm2
+    assert "empty" not in fm2 or fm2["empty"] is False
+
+
+async def test_the_dependent_is_due_in_the_same_cycle_as_an_artifact_backed_upstream(
+        aut, monkeypatch, tmp_path):
+    """Clause 3: the gate consumes `last_run` and nothing else, so the fix has to
+    reach it through the recorder. #40 depends on #39 and deliberately carries no
+    `stale_bypass_hours` — the pre-fix shape of #42 — so the only thing that can
+    make it due is an upstream stamp. The control below is the same run with a
+    stub artifact: the dependent must NOT be let through.
+    """
+    good = tmp_path / "artifacts" / "knowledge-write-2026-09-17.md"
+    out = await _run_empty_terminal(aut, monkeypatch, tmp_path, task_id=39,
+                                    declared=good, artifact=good, nbytes=8918)
+    assert out["status"] == "success"
+    write_task(aut, 40, depends_on=39, timeout_seconds=300)
+
+    board = list(aut.dependency_resolution_set())
+    dep = next(t for t in board if str(t["id"]) == "40")
+    assert aut._is_dependency_met(dep, board) is True, (
+        "an artifact-backed upstream left the dependent gated — the recorder "
+        "did not advance the field the gate reads")
+    assert aut._is_task_due(dep, board) is True, (
+        "the dependent would have waited for #39's duplicate retry, which is "
+        "the cost #832 was filed for")
+
+    # Control: an upstream whose declared artifact is the 69-byte 09-16 stub
+    # still fails, and its dependent still waits.
+    stub = tmp_path / "stub" / "knowledge-write-2026-09-16.md"
+    await _run_empty_terminal(aut, monkeypatch, tmp_path, task_id=41,
+                              declared=stub, artifact=stub, nbytes=69)
+    write_task(aut, 43, depends_on=41, timeout_seconds=300)
+    board = list(aut.dependency_resolution_set())
+    dep2 = next(t for t in board if str(t["id"]) == "43")
+    assert aut._is_dependency_met(dep2, board) is False
+    assert aut._is_task_due(dep2, board) is False
+
+
+@pytest.mark.parametrize("shape", ["none-declared", "missing", "stub", "stale"])
+async def test_an_empty_terminal_run_with_no_qualifying_artifact_still_fails(
+        aut, monkeypatch, tmp_path, shape):
+    """Clause 4 — what the gate exists to catch: the ~180 phantom successes of
+    2026-09-01 and #79's dark week, where an empty window was recorded a success
+    and `last_run` advanced for work that never happened. An empty-terminal run
+    with nothing declared, nothing on disk, a 69-byte stub
+    (`knowledge-write-2026-09-16.md` is exactly that size), or a file older than
+    the run's start is still `failure_kind: task` and still leaves `last_run`
+    absent, so the dependent waits for a real upstream.
+    """
+    declared = tmp_path / "artifacts" / "knowledge-write-2026-09-17.md"
+    artifact, nbytes = declared, 4096
+    if shape == "none-declared":
+        declared = None
+    elif shape == "missing":
+        artifact = None
+    elif shape == "stub":
+        nbytes = 69
+    elif shape == "stale":
+        # Yesterday's file, 4096 bytes and complete: the run wrote nothing, the
+        # mtime predates its start. Size is not the disqualifier here — age is,
+        # which is why the file has to exist and be full-size.
+        artifact = None
+        declared.parent.mkdir(parents=True, exist_ok=True)
+        declared.write_bytes(b"x" * 4096)
+        old = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=9)
+        os.utime(declared, (old.timestamp(), old.timestamp()))
+
+    out = await _run_empty_terminal(aut, monkeypatch, tmp_path, task_id=39,
+                                    declared=declared, artifact=artifact,
+                                    nbytes=nbytes)
+
+    assert out["success"] is False, shape
+    assert out["failure_kind"] == "task", shape
+    fm, _ = _one_record(aut, 39)
+    assert fm["status"] == "failed", shape
+    assert fm["empty"] is True, shape
+    assert "status_basis" not in fm, shape
+    task = read_task(aut, 39)
+    assert not task.get("last_run"), (
+        f"{shape}: last_run advanced on a run with no qualifying artifact")
+    assert int(task["failure_count"]) == 1, shape
+
+
+def test_the_declared_artifact_macro_resolves_to_the_local_or_utc_run_date(tmp_path):
+    """#39/#40/#42 declare `output_artifact` with `{date}`. #42's handoff lands at
+    ~22:15 local, which is already the NEXT day in UTC, so the resolver has to try
+    both dates of the run's start instant and take whichever file qualifies —
+    otherwise the mechanism exists and never fires on the chain it was built for.
+    """
+    started = dt.datetime(2026, 9, 17, 5, 14, tzinfo=dt.timezone.utc)  # 09-16 22:14 local
+    root = tmp_path / "reflection"
+    root.mkdir()
+    template = str(root / "knowledge-handoff-{date}.md")
+    task = {"output_artifact": template}
+
+    local_day = started.astimezone().strftime("%Y-%m-%d")
+    utc_day = started.strftime("%Y-%m-%d")
+
+    local = root / f"knowledge-handoff-{local_day}.md"
+    local.write_bytes(b"y" * 24027)
+    # Written at the instant the run started: qualifying, and dated by LOCAL day.
+    os.utime(local, (started.timestamp(), started.timestamp()))
+    ev = autonomy._declared_artifact_evidence(task, started)
+    assert ev is not None
+    assert ev["path"] == str(local) and ev["bytes"] == 24027
+
+    # And the UTC-dated form qualifies on its own, for a job that names that one.
+    local.unlink()
+    utc = root / f"knowledge-handoff-{utc_day}.md"
+    utc.write_bytes(b"z" * 30000)
+    os.utime(utc, (started.timestamp() + 60,) * 2)
+    ev2 = autonomy._declared_artifact_evidence(task, started)
+    assert ev2 is not None and ev2["path"] == str(utc), ev2
+
+    # No qualifying file at either date: no evidence, not a guess.
+    utc.unlink()
+    assert autonomy._declared_artifact_evidence(task, started) is None
+    # A task that declares nothing is never artifact-backed.
+    assert autonomy._declared_artifact_evidence({}, started) is None
+
+
+def test_an_artifact_backed_run_is_not_counted_as_a_failure_in_health(aut):
+    """The two surfaces must agree: `compute_health` reclassified every empty
+    response into a failure so the 2026-09-01 phantom successes could not read as
+    successes, and it reads run rows, not the task file. A run the scheduler now
+    counts as delivered must not be counted as a failure by the health report —
+    and every OTHER empty row, including the pre-meta_json phantoms, still is.
+    """
+    def row(task_id, **meta):
+        return {"task_id": task_id, "status": "success", "summary": "s",
+                "response_json": "text", "duration_seconds": 600.0,
+                "completed_at": _iso(hours=1),
+                "meta_json": json.dumps(meta) if meta else ""}
+
+    rows = [row("39", empty=True, status_basis="artifact",
+                output_artifact={"path": "/x/knowledge-write-2026-09-17.md",
+                                 "bytes": 8918}),
+            row("41", empty=True, failure_kind="task"),
+            {"task_id": "79", "status": "success", "summary": "(No response)",
+             "response_json": "(No response)", "duration_seconds": 0.6,
+             "completed_at": _iso(hours=2), "meta_json": ""}]
+    h = autonomy.compute_health(rows, [], 1, now=dt.datetime.now(dt.timezone.utc))
+    by = {t["task_id"]: t for t in h["tasks"]}
+
+    assert by["39"]["successes"] == 1 and by["39"]["failures"] == 0, (
+        "the scheduler recorded this run as delivered; the health report "
+        "calling the same row a failure is two surfaces disagreeing")
+    assert by["39"]["wasted_hours"] == 0.0, (
+        "a run that wrote its artifact is not GPU burned for nothing")
+    assert by["39"]["empty"] == 1, (
+        "`empty` stays the SHAPE signal — the terminal block really was empty — "
+        "only the verdict changed")
+    assert by["79"]["failures"] == 1 and by["79"]["empty"] == 1, (
+        "a pre-meta_json phantom success must stay classified as a failure")
+    assert by["41"]["failures"] == 1, (
+        "an empty row with no `status_basis` is untouched: 2026-09-18's "
+        "empty-terminal failure still counts as one")
+
+
+async def test_the_artifact_backed_result_survives_the_pool_status_boundary(
+        aut, monkeypatch, tmp_path):
+    """The status string is a process boundary, not a local label. `run_task`'s
+    dict reaches `workers/pool.normalize_result` (`workers/sources/
+    scheduled_task.py:413`, then the pool's own call), which validates `status`
+    against the closed set `RUN_STATUSES` and, for anything outside it, logs
+    "source scheduled-task returned unknown status" and rewrites the value
+    (`pool.py:135-141`). An invented `"artifact_success"` would therefore have
+    been renamed on its way into `workers/queue.runs`, leaving one run carrying
+    one status in `autonomy-runs/` and a different one in the queue table, and
+    logging a warning about a source that was reporting correctly. The status has
+    to arrive already valid; the basis rides along in `meta`, which
+    `normalize_result` copies verbatim. So the real pool function gets the real
+    result, not my summary of it.
+    """
+    from types import SimpleNamespace
+    from workers.pool import RUN_STATUSES, normalize_result
+
+    art = tmp_path / "artifacts" / "signals-latest.md"
+    out = await _run_empty_terminal(aut, monkeypatch, tmp_path, task_id=38,
+                                    declared=art, artifact=art, nbytes=31229)
+    assert out["meta"]["status_basis"] == "artifact"
+    assert out["status"] in RUN_STATUSES, (
+        f"status {out['status']!r} is outside the pool's closed set, so the pool "
+        "would rewrite it and the two tables would disagree about this run")
+
+    item = SimpleNamespace(source="scheduled-task", kind="task",
+                           payload={"task_id": "38"})
+    norm = normalize_result(item, out)
+    assert norm["status"] == "success", norm["status"]
+    assert norm["meta"]["status_basis"] == "artifact", (
+        "normalize_result copies meta, so the basis has to survive into the row")
+
+
+async def test_the_artifact_evidence_survives_the_queue_meta_json_round_trip(
+        aut, monkeypatch, tmp_path):
+    """The other boundary: `status_basis` and the NESTED `output_artifact` dict
+    are the only things the health exemption keys on, and they reach the health
+    report as a string. `pool.py:683` writes `json.dumps(meta, default=str)`,
+    `queue.list_runs_joined` returns that column, and `compute_health`
+    `json.loads` it (`autonomy.py:1904`). A nested dict serialising to a non-dict on
+    the far side would silently drop the exemption and reclassify the run back to
+    a failure, so the round trip is run for real with the bytes the recorder
+    actually produced.
+    """
+    art = tmp_path / "artifacts" / "knowledge-write-2026-09-18.md"
+    out = await _run_empty_terminal(aut, monkeypatch, tmp_path, task_id=39,
+                                    declared=art, artifact=art, nbytes=9000)
+
+    blob = json.dumps(out["meta"], default=str)        # pool.py:683
+    meta = json.loads(blob)                            # autonomy.py:1904
+    assert isinstance(meta.get("output_artifact"), dict), blob
+    assert meta["output_artifact"]["bytes"] == 9000, meta
+    assert meta["status_basis"] == "artifact"
+
+    row = {"task_id": "39", "status": "success", "summary": "s",
+           "response_json": "", "duration_seconds": 600.0,
+           "completed_at": _iso(hours=1), "meta_json": blob}
+    h = autonomy.compute_health([row], [], 1, now=dt.datetime.now(dt.timezone.utc))
+    t = {x["task_id"]: x for x in h["tasks"]}["39"]
+    assert t["failures"] == 0 and t["successes"] == 1, (
+        "the exemption died in serialisation: the row reads as a failure again")
+
+
+async def test_the_artifact_evidence_survives_the_real_execute_adapter(
+        aut, monkeypatch, tmp_path):
+    """Clause 2, across the boundary a hand-typed dict cannot reach.
+
+    `workers/sources/scheduled_task.execute()` (line 377) builds the dict the
+    queue stores from a HAND-WRITTEN whitelist — `status`, `summary`, `task_id`,
+    `artifact_path`, `response`, `meta`, and `claims` only when the result has it
+    — and that literal is exactly where the evidence pilot's `claims` was severed
+    for 4,922 runs (#945, whose own test file says the same thing at
+    tests/test_worker_evidence.py:456-460). `workers/pool.normalize_result` is the
+    hop AFTER it, so a test that hands `normalize_result` a dict shaped like
+    `execute()`'s output asserts on its own input and never touches the whitelist.
+
+    So this drives the real `execute()` on a real `run_task` result — the queue
+    row's `meta_json`, which is the surface a dashboard filtering on
+    `status_basis` actually reads, is written from that dict and from nothing
+    else. Stubbed: the model loop, the vllm probe, the Discord notifier, and the
+    second `run_task` call (its own record is already on disk from this test's
+    run, so re-running would add a file for no claim). Everything between
+    `execute()` and `run_task` is the shipped code.
+    """
+    import app.discord_notify as discord_notify
+    import workers.sources.scheduled_task as scheduled_task
+    from workers.queue import QueueItem
+
+    art = tmp_path / "artifacts" / "knowledge-handoff-2026-09-19.md"
+    real = await _run_empty_terminal(aut, monkeypatch, tmp_path, task_id=39,
+                                     declared=art, artifact=art, nbytes=30237)
+    assert real["meta"]["status_basis"] == "artifact", real["meta"]
+
+    async def _already_ran(task_id, **kw):
+        return real
+    monkeypatch.setattr(autonomy, "run_task", _already_ran)
+    monkeypatch.setattr(scheduled_task, "_vllm_healthy", lambda *a, **k: True)
+
+    async def _no_notify(*_a, **_k):
+        return None
+    monkeypatch.setattr(discord_notify, "_discord_notify_task_complete", _no_notify)
+
+    item = QueueItem(id=1, source="scheduled-task", kind="autonomy", priority=50,
+                     payload={"task_id": "39"}, dedup_key=None, state="running",
+                     attempts=1, enqueued_at="", claimed_at=None, claimed_by=None,
+                     completed_at=None, error=None)
+    out = await scheduled_task.execute(item)
+
+    assert out["status"] == "success", out
+    # Clause 2's two distinguishing fields survive the whitelist, with the byte
+    # count and not just the path: that number is half the evidence.
+    assert out["meta"]["status_basis"] == "artifact"
+    assert out["meta"]["output_artifact"] == real["meta"]["output_artifact"]
+    assert out["meta"]["output_artifact"]["bytes"] == 30237
+    assert out["meta"]["empty"] is True
+    assert out["task_id"] == "39"
+    assert out["artifact_path"].endswith(
+        f"autonomy-runs/39/{real['run_id']}.md"), out["artifact_path"]
+    # #39 is in EVIDENCE_PILOT_TASK_IDS and an empty-terminal run emits no
+    # claims, so `execute()` must still COPY the key: its presence is the pool's
+    # pilot-scope switch, and dropping it here would repeat #945 for precisely the
+    # runs this change makes newly classifiable.
+    assert "claims" in out, "execute() dropped the pilot's claims key again"
+    assert out["claims"] == []
+    # And through the NEXT hop as well, on the object the adapter really produced
+    # rather than one typed to match it: `meta` is unwhitelisted there.
+    from workers.pool import normalize_result
+    norm = normalize_result(item, out)
+    assert norm["status"] == "success"
+    assert norm["meta"]["output_artifact"]["bytes"] == 30237

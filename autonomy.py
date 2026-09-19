@@ -1039,6 +1039,189 @@ def _get_model_env(model_name: str) -> dict:
     return {}
 
 
+# ── Declared output artifact as evidence for run status (#832) ────────────────
+#
+# Run status used to be derived from one thing: whether the terminal assistant
+# block had any characters in it. That block does not always exist. When the
+# agent loop's last act is a tool call there is no text block after it, and five
+# recorded runs ended that way — 2026-09-11 #38 (248 s, 19 turns, `signals-latest.md`
+# written complete), 09-14 #57 (215 s, verdict ledger line landed), 09-16 #39,
+# and 09-17 #39 twice (615.7 s / 52,579 output tokens and a 439.4 s retry), each
+# of which committed a full nightly knowledge write under git. Every one was
+# recorded `failed`, because `"".strip()` is empty.
+#
+# The cost is not the wrong word in a log line. `_record_failure` writes
+# `last_attempt` and never `last_run`, and `_is_dependency_met` consumes only
+# `last_run` — so an upstream that WORKED was indistinguishable from one that
+# died, and the dependent in the nightly chain waited for a duplicate GPU run
+# that survived only because it happened to sign off with prose.
+#
+# The 2026-09-01 change that stopped recording an empty response as a SUCCESS
+# was correct and stays: this adds a second piece of evidence for the runs that
+# demonstrably produced their deliverable, it does not restore any leniency. A
+# run with no declared artifact, none on disk, a stub, or one older than its own
+# start is still `failure_kind: task` and still leaves `last_run` absent.
+_ARTIFACT_MIN_BYTES = 512
+# Measured on this box 2026-09-19 over the declared outputs of the four nightly
+# reflection tasks: the two truncated stubs are `knowledge-write-2026-09-14.md`
+# (68 B) and `knowledge-write-2026-09-16.md` (69 B, front matter still
+# `status: in-progress`, written by a 61-turn run scored `success` on non-empty
+# preamble text), while every complete write in the window is at least 5,741 B
+# (knowledge-write 5,741-14,153; knowledge-handoff 20,929-35,489; learnings
+# 9,141-13,143). 512 B therefore sits ~11x under the smallest complete
+# deliverable (5,741) and ~7x over the largest stub (69), which is the only place
+# a floor like this can live
+# without being either decorative or a coin flip. `wc -c` the two directories
+# above before moving the number.
+_DATE_MACRO = "{date}"
+
+
+def _artifact_candidates(declared: str,
+                         run_started: datetime.datetime) -> list[Path]:
+    """Path(s) the task's `output_artifact` template names for THIS run.
+
+    `{date}` resolves to the run's start date. Local (`America/Los_Angeles`)
+    first, because the fleet's date-keyed deliverables are local-dated —
+    `scripts/extract-trajectories.py:23-28` fixes that explicitly after UTC
+    bucketing misfiled sessions a day late. But #42's handoff lands ~22:15 local,
+    which is already the next UTC day, and #38/#39/#42 all declare `{date}`, so
+    the other date of the same instant is a candidate as well. That is not
+    leniency: the mtime test in `_declared_artifact_evidence` still has to pass,
+    so a candidate can only win by having been written DURING this run. Without
+    both spellings the mechanism exists and never fires on the chain it was
+    built for.
+    """
+    text = str(declared or "").strip()
+    if not text:
+        return []
+    if _DATE_MACRO not in text:
+        return [Path(text).expanduser()]
+    out: list[Path] = []
+    for day in {run_started.astimezone().strftime("%Y-%m-%d"),
+                run_started.strftime("%Y-%m-%d")}:
+        p = Path(text.replace(_DATE_MACRO, day)).expanduser()
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def _declared_artifact_evidence(task: dict,
+                                run_started: datetime.datetime) -> Optional[dict]:
+    """Qualifying evidence that this run wrote its declared output, else None.
+
+    Qualifying = the task declares `output_artifact`, the file exists, it is at
+    least `_ARTIFACT_MIN_BYTES` (512) bytes, and its mtime is at or after the
+    run's start. `>=` and not `>`: a deliverable whose last write lands on the
+    same microsecond the run began was written by this run as much as one a
+    microsecond later, and a boundary that depends on a coin flip is not a
+    gate. Returns the path, the byte count and the mtime so the run record can
+    name its own evidence instead of merely asserting a status.
+
+    `run_started` is when THIS run started, never the current time — "the file
+    exists" is not the property; "this run produced it" is. Yesterday's
+    8,918-byte knowledge write is real and says nothing about tonight.
+    """
+    declared = task.get("output_artifact")
+    if not declared:
+        return None
+    for path in _artifact_candidates(str(declared), run_started):
+        try:
+            st = path.stat()
+        except OSError:
+            continue  # missing, or an unreadable ancestor: no evidence either way
+        if st.st_size < _ARTIFACT_MIN_BYTES:
+            continue
+        modified = datetime.datetime.fromtimestamp(
+            st.st_mtime, tz=datetime.timezone.utc)
+        if modified < run_started:
+            continue
+        return {"path": str(path), "bytes": st.st_size,
+                "modified_at": modified.isoformat()}
+    return None
+
+
+async def _record_artifact_success(task: dict, task_id, run_id: str,
+                                   started_at: str,
+                                   started_dt: datetime.datetime, duration: float,
+                                   artifact: dict, *, stop_reason, usage,
+                                   num_turns, tool_errors: list,
+                                   session_id: str) -> dict:
+    """Record a run whose terminal text was empty but whose declared deliverable
+    is on disk and fresh. Single writer, so the run record, the activity line and
+    the task fields can never disagree about which basis decided the status.
+    """
+    completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    rel = artifact["path"]
+    summary = (f"empty terminal text; status from artifact "
+               f"{Path(rel).name} ({artifact['bytes']} B)")
+    # Deliberately absent: `silent` and `silent_failure_indicators` are written
+    # only when a terminal text block existed to scan, and #832's 4th instance is
+    # precisely a run whose `silent_failure_indicators: 0` read as "checked and
+    # clean" when there was nothing to scan. Absent means not evaluated; the
+    # health report counts it as zero either way (`meta.get(...) or 0`).
+    meta = {"stop_reason": stop_reason, "usage": usage, "num_turns": num_turns,
+            "tool_errors": len(tool_errors),
+            "session_id": session_id,
+            # `empty` stays: the terminal block WAS empty, and that is a fact
+            # worth querying for. `status_basis` is what makes the two kinds of
+            # success distinguishable — a text-confirmed success carries no
+            # `status_basis` at all.
+            "empty": True, "status_basis": "artifact",
+            "output_artifact": artifact}
+    _write_run_record(
+        task_id=task_id, run_id=run_id, status="success",
+        started_at=started_at, completed_at=completed_at,
+        duration_seconds=duration, summary=summary,
+        body=(f"## Response\n\n(empty — the loop's last block was a tool call, "
+              f"so there was no terminal text to read; #832)\n\n"
+              f"## Status evidence\n\nRecorded SUCCESS on its declared output "
+              f"artifact, not on terminal text:\n\n"
+              f"- path: `{artifact['path']}`\n"
+              f"- bytes: {artifact['bytes']} (floor {_ARTIFACT_MIN_BYTES})\n"
+              f"- modified_at: {artifact['modified_at']}\n"
+              f"- run started: {started_dt.isoformat()}\n"),
+        extra=meta,
+    )
+
+    interval = _frequency_interval_seconds(task)
+    completed_dt = datetime.datetime.fromisoformat(completed_at)
+    next_run_iso = (completed_dt + datetime.timedelta(seconds=interval)).isoformat() if interval else None
+    # Both stamps, exactly as on a text-confirmed success: `last_run` is what
+    # `_is_dependency_met` reads, and the cooldown gate reads
+    # "last_attempt newer than last_run" as "the most recent attempt failed".
+    _update_task_field(task_id, status="up_next", last_run=completed_at,
+                       last_attempt=completed_at, updated=completed_at,
+                       failure_count=0,
+                       **({"next_run": next_run_iso} if next_run_iso else {}))
+    _append_activity_log(
+        task_id,
+        f"Run {run_id} — SUCCESS ({duration:.0f}s) ⚠ empty terminal text; "
+        f"status from artifact {Path(rel).name} ({artifact['bytes']} B); see "
+        f"autonomy-runs/{task_id}/{run_id}.md")
+    logger.info("Task #%s completed in %.1fs on artifact evidence (%s, %d B, "
+                "stop_reason=%s)", task_id, duration, Path(rel).name,
+                artifact["bytes"], stop_reason)
+    # `status` is "success", NOT a new "artifact_success" value. This dict
+    # crosses into `workers/pool.normalize_result`, which validates it against
+    # the closed set `RUN_STATUSES` and coerces anything else — logging "source
+    # scheduled-task returned unknown status" and silently rewriting the value
+    # (pool.py:135-141). An invented status would therefore have been renamed on
+    # the way to the queue row anyway, so it buys nothing there, and it would
+    # cost a warning on every occurrence plus a status that disagrees between the
+    # two tables about what the same run was. The distinguishability clause 2
+    # asks for lives in `status_basis`/`output_artifact` here and on the run
+    # record's own front matter, which is the surface a human reads first, and
+    # the text-confirmed path writes neither.
+    result = {
+        "success": True, "status": "success", "task_id": task_id,
+        "run_id": run_id, "duration_seconds": round(duration, 1),
+        "response_preview": "", "meta": meta,
+    }
+    if _evidence_pilot(task_id):
+        result["claims"] = _evidence_claims("")
+    return result
+
+
 async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
                           started_dt: datetime.datetime, *, summary: str, body: str,
                           kind: str = "task", extra: Optional[dict] = None,
@@ -1477,6 +1660,19 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         # That is how #79 (retention) went dark for a week on 0.6s "successes",
         # and how ~180 phantom runs passed during the 2026-09-01 empty window.
         if not final_response.strip():
+            # First evidence, and it is not the text: a task that declares its
+            # deliverable and left it on disk, fresh, at 8,918 bytes, did the
+            # work whatever the loop's last block happened to be. See
+            # `_declared_artifact_evidence` for the five runs this is about and
+            # for why the 2026-09-01 "an empty response is not a success" rule
+            # is intact — with no qualifying artifact this falls straight
+            # through to the failure paths below, unchanged.
+            artifact = _declared_artifact_evidence(task, now)
+            if artifact:
+                return await _record_artifact_success(
+                    task, task_id, run_id, started_at, now, duration, artifact,
+                    stop_reason=stop_reason, usage=usage, num_turns=num_turns,
+                    tool_errors=tool_errors, session_id=session_id)
             infra = (not saw_tool_call) and duration < _INFRA_EMPTY_MAX_SECONDS
             kind = "infra" if infra else "task"
             summary = (f"empty response after {duration:.0f}s "
@@ -1721,9 +1917,21 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
         # as successes — reclassify them so the numbers reflect reality.
         empty = bool(meta.get("empty")) or response.strip() == "(No response)" \
             or summary.strip() == "(No response)"
+        # #832: a run whose empty terminal text was overruled by its declared
+        # artifact sitting fresh on disk is recorded `success` and advances
+        # `last_run`, so the health report has to agree with the scheduler or
+        # the two surfaces disagree about the same row — and this reclassification
+        # exists precisely to catch rows the scheduler got wrong, so a row it
+        # decided on evidence it could read has to count as the run it says it
+        # was. Every other empty row keeps its verdict, including the
+        # pre-meta_json phantoms of the 2026-09-01 window and #79's dark week,
+        # which carry no `status_basis` because no run record from that era has
+        # a meta block at all.
+        artifact_backed = (meta.get("status_basis") == "artifact"
+                           and bool(meta.get("output_artifact")))
         timeout = bool(meta.get("timeout")) or bool(meta.get("pool_timeout")) \
             or "timed out" in summary or summary.startswith("TimeoutError")
-        failed = status != "success" or empty
+        failed = status != "success" or (empty and not artifact_backed)
         silent = "[SILENT]" in response or bool(meta.get("silent"))
 
         e = by_task.setdefault(tid, {
