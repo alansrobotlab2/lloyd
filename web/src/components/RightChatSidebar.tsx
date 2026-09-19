@@ -15,6 +15,7 @@ import {
 import { cn } from '@/lib/utils'
 import { sessionLabel } from '@/lib/sessionLabel'
 import { voiceIndicator, type MicState, type VoiceIndicator } from '@/lib/voiceIndicator'
+import { isNativeShell, postToNative } from '@/lib/nativeShell'
 import { api } from '../api'
 import { useSessionMeta } from '../hooks/useSessionMeta'
 import { useVoiceMode } from '../contexts/VoiceModeContext'
@@ -217,8 +218,14 @@ export default function RightChatSidebar({ isMobile = false }: { isMobile?: bool
   // Collapsing the sidebar disengages voice (mic stops publishing, agent
   // track tears down) — re-expanding re-engages cleanly. Disengages on
   // unmount as well (Layout teardown).
+  // Inside the iOS shell voice is native (see lib/nativeShell): hand it the
+  // session instead of joining the room from the page.
   useEffect(() => {
-    if (!sessionKey || collapsed) return
+    if (!isNativeShell) return
+    postToNative({ type: 'session', sessionId: sessionKey })
+  }, [sessionKey])
+  useEffect(() => {
+    if (!sessionKey || collapsed || isNativeShell) return
     voice.engage(sessionKey)
     return () => voice.disengage()
     // eslint-disable-next-line react-hooks/exhaustive-deps

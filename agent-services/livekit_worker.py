@@ -581,11 +581,14 @@ class WakeState:
         self._anchor_embedding = embedding
         self._anchor_name = name
 
-    def extend(self, identity: Optional[str] = None) -> None:
+    def extend(self, identity: Optional[str] = None,
+               seconds: Optional[float] = None) -> None:
         """Reset the continuation window. If `identity` is given, lock to
         that identity; otherwise keep the existing lock (used for TTS-end
-        extensions where the speaker hasn't changed)."""
-        self._until = time.monotonic() + self.continuation_seconds
+        extensions where the speaker hasn't changed). `seconds` overrides
+        `continuation_seconds` for this one opening (a client-side wake)."""
+        window = self.continuation_seconds if seconds is None else seconds
+        self._until = time.monotonic() + window
         if identity is not None:
             self._locked_identity = identity
 
@@ -1404,10 +1407,21 @@ class RoomBridge:
         if task is not None and not task.done():
             task.cancel()
 
+    @staticmethod
+    def _packet_identity(packet) -> Optional[str]:
+        # Sender identity comes from the LiveKit packet's participant
+        # field; fall back to None if the SDK version doesn't expose it.
+        sender = getattr(packet, "participant", None)
+        identity = getattr(sender, "identity", None) if sender else None
+        if not identity:
+            # Some SDK versions put it on packet directly.
+            identity = getattr(packet, "participant_identity", None)
+        return identity or None
+
     def _on_data_received(self, packet) -> None:
         """Handle JSON control messages from a participant via the LiveKit
-        data channel. Understands {"type": "interrupt"} and
-        {"type": "client_info", ...}."""
+        data channel. Understands {"type": "interrupt"},
+        {"type": "wake", "seconds"?: float} and {"type": "client_info", ...}."""
         try:
             payload = packet.data.decode("utf-8")
             msg = json.loads(payload) if payload else {}
@@ -1421,14 +1435,28 @@ class RoomBridge:
             dropped = self.tts.interrupt()
             LOG.info("[%s] interrupt: dropped %d queued utterance(s)",
                      self.room_name, dropped)
-        elif kind == "client_info":
-            # Sender identity comes from the LiveKit packet's participant
-            # field; fall back to None if the SDK version doesn't expose it.
-            sender = getattr(packet, "participant", None)
-            identity = getattr(sender, "identity", None) if sender else None
+        elif kind == "wake":
+            # Push-to-talk: a client (the iOS app, on an earbud / Action
+            # Button press) opens the continuation window as if the wake
+            # word had fired. No voiceprint anchor — there is no wake-word
+            # audio to embed — so follow-ups gate on identity alone, the
+            # same fallback an unenrolled speaker already gets.
+            identity = self._packet_identity(packet)
             if not identity:
-                # Some SDK versions put it on packet directly.
-                identity = getattr(packet, "participant_identity", None)
+                LOG.warning("[%s] wake dropped (no identity on packet)",
+                            self.room_name)
+                return
+            seconds = None
+            raw = msg.get("seconds")
+            if isinstance(raw, (int, float)) and raw > 0:
+                seconds = min(float(raw), 30.0)
+            self.wake.set_anchor(None, None)
+            self.wake.extend(identity, seconds=seconds)
+            self._schedule_wake_state_publish()
+            LOG.info("[%s] client wake from %s — window open %.1fs",
+                     self.room_name, identity, self.wake.remaining_s())
+        elif kind == "client_info":
+            identity = self._packet_identity(packet)
             if identity:
                 info = {k: v for k, v in msg.items() if k != "type"}
                 self._client_meta[identity] = info
