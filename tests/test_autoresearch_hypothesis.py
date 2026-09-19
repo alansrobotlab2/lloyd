@@ -17,7 +17,12 @@ writes into `_pipeline`.
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import json
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -330,6 +335,25 @@ def test_the_prompt_states_the_exactly_once_anchor_rule(fake_surfaces, tmp_path)
     assert "EXACTLY ONE file" in prompt
 
 
+# `live_vault`, added for #797: this reads ~/obsidian/lloyd/SOUL.md and
+# MEMORY.md as they are right now, which no round under test controls. The
+# absolute path below is reached precisely so a worktree cannot dodge it, so it
+# still resolves when the gate runs its `tests` rung at `cwd=self.worktree` —
+# which is where a round that opened no prompt file used to be judged on it. The
+# hazard is the anchor: `verbatim_span` accepts only a single line of 20-160
+# chars, and this file is rewritten by the nightly reflection job. The count of
+# qualifying lines in `lloyd/MEMORY.md` has read 1 at a vault commit and 22 at
+# today's, and at 0 the anchor is `""`, `_parse_single_variant` refuses it (that
+# refusal is pinned by `test_an_empty_anchor_is_rejected`), and a hard promotion
+# rung fails on a prose rewrap. The gate runs `-m "not live_vault"`; the nightly
+# `live_vault` rung that `skills/nightly-skills-management/SKILL.md` runs still
+# runs this node, and `tests/test_prompt_surface_guard.py` pins that it runs
+# green there. What stayed on the hard rung: the tmp-surface node below, which
+# demonstrates the same bounded-edit-response contract against a surface the test
+# writes itself, plus `test_verbatim_span_bounds_a_single_line_of_20_to_160_chars`
+# and the two structural pins after this node. Assertions unchanged — only where
+# this runs moved.
+@pytest.mark.live_vault
 def test_the_live_surfaces_yield_a_bounded_parseable_response(tmp_path, monkeypatch):
     """Same check on the real SOUL.md and MEMORY.md rather than a stand-in,
     because they are the pair whose echo produced the 178 `Unterminated string`
@@ -386,6 +410,134 @@ def test_the_live_surfaces_yield_a_bounded_parseable_response(tmp_path, monkeypa
     old_shape = json.dumps({"overlay_files": {"MEMORY.md": memory}})
     v2, err2 = hg._parse_single_variant(old_shape)
     assert v2 is None and "edits missing/empty" in err2
+
+
+# ── what the `live_vault` mark above leaves on the hard rung (#797) ──────────
+#
+# The mark moves one node off the gate's `tests` rung. These pins keep that
+# honest without reading the vault, so they run under `-m "not live_vault"` on
+# every rung themselves: the bound the moved node's anchor is drawn from, the
+# structure of what stayed behind, and the gate's own selection over this file.
+
+LIVE_SURFACES_NODE = "test_the_live_surfaces_yield_a_bounded_parseable_response"
+TMP_SURFACE_NODE = "test_emitted_json_still_parses_at_max_tokens_8000_against_a_20kb_memory"
+# Root-relative, because that is the only form pytest resolves from `cwd=root`.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+THIS_FILE = str(Path(__file__).resolve().relative_to(REPO_ROOT))
+
+# The six assertions the moved node carried at base 8161a4e8, captured with
+# `ast.unparse`. This is what "no assertion was relaxed" means exactly: relaxing
+# one has to delete its entry here as well, in the same commit, in front of a
+# reader.
+LIVE_SURFACES_ASSERTIONS = [
+    "assert 'COMPLETE replacement text' not in prompt",
+    "assert soul[:400] in prompt, 'the prompt must show the surface being edited'",
+    "assert len(emitted) < 4096, f'legal response grew to {len(emitted)} chars'",
+    "assert len(emitted) < hg.CEILING_CHARS",
+    "assert err is None and len(v['edits']) == 2",
+    "assert v2 is None and 'edits missing/empty' in err2",
+]
+
+
+def _top_level_functions() -> dict:
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+
+def _normalized_asserts(nodes) -> list[str]:
+    """Asserts as text, whitespace- and quote-normalised.
+
+    Normalising makes this a check on *what* is asserted rather than on how
+    CPython formatted it that release: `ast.unparse` picks whichever quote style
+    does not clash with the literal's own content, and that is free to change
+    between versions while the assertion underneath does not.
+    """
+    return sorted(re.sub(r"['\"]", "'", re.sub(r"\s+", " ", ast.unparse(n)))
+                  for n in nodes)
+
+
+def test_verbatim_span_bounds_a_single_line_of_20_to_160_chars():
+    """The window the moved node's anchor comes from, pinned with no vault in it.
+
+    `verbatim_span` is the only reason that node is vault-sensitive at all: it
+    answers with the longest single line that is at least 20 and at most 160
+    characters, so a file whose lines all run longer than 160 — which is how the
+    nightly reflection job writes `lloyd/MEMORY.md` — yields the empty string, and
+    an empty anchor is a refused variant. Both bounds are pinned here against
+    synthetic text, so the bound itself stays enforced on a hermetic rung while
+    the number of live lines that happen to satisfy it today is reporting, which
+    is what the `live_vault` group is for.
+    """
+    assert verbatim_span("x" * 19) == "", "19 chars is under the floor"
+    assert verbatim_span("x" * 20) == "x" * 20, "20 chars is the floor"
+    assert verbatim_span("x" * 160) == "x" * 160, "160 chars is the ceiling"
+    assert verbatim_span("x" * 161) == "", "161 chars is over the ceiling"
+    assert verbatim_span("z" * 4_000) == "", "one unwrapped paragraph yields no anchor"
+    # Inside the window the answer is the longest single line, never two joined.
+    assert verbatim_span("a" * 30 + "\n" + "b" * 160 + "\n" + "c" * 40) == "b" * 160
+    # Surrounding whitespace is not part of the span: a real anchor has to be
+    # copyable out of the prompt character-for-character.
+    assert verbatim_span("   " + "d" * 25 + "  ") == "d" * 25
+    assert inspect.signature(verbatim_span).parameters["max_chars"].default == 160
+
+
+def test_marking_the_live_surfaces_node_left_the_hard_rung_enforcement_intact():
+    """Marking a node is allowed; leaving the mechanism unpinned on a code change is not.
+
+    #797's own instruction — move where the live-vault check runs, keep what it
+    checks. So the pin is structural. `TMP_SURFACE_NODE` demonstrates the same
+    bounded-edit-response contract against a 20 KB surface the test writes itself
+    and carries no marker of any kind, which is what keeps the mechanism on the
+    gate's `-m "not live_vault"` rung; and the marked node still asserts the six
+    checks it asserted before it was marked, with the mark as its only decorator —
+    no `skip`, no `xfail`, no `skipif` standing in for the deletion the nightly
+    `live_vault` rung forbids.
+    """
+    fns = _top_level_functions()
+    assert fns[TMP_SURFACE_NODE].decorator_list == [], (
+        f"{TMP_SURFACE_NODE} gained a decorator: with the live node deselected, the "
+        "bounded-edit-response contract would have no enforcement point on a code change"
+    )
+    assert [ast.unparse(d) for d in fns[LIVE_SURFACES_NODE].decorator_list] == [
+        "pytest.mark.live_vault"
+    ], "the moved node must carry exactly the mark and nothing that would skip it"
+    expected = _normalized_asserts([ast.parse(a).body[0]
+                                    for a in LIVE_SURFACES_ASSERTIONS])
+    actual = _normalized_asserts(n for n in ast.walk(fns[LIVE_SURFACES_NODE])
+                                 if isinstance(n, ast.Assert))
+    assert actual == expected, (
+        "the assertions of the node moved off the hard rung changed; #797 moves the "
+        "mark and nothing else — restore them, or change LIVE_SURFACES_ASSERTIONS "
+        "with the reason in the commit message"
+    )
+
+
+def test_the_gate_selection_over_this_file_keeps_the_tmp_surface_node():
+    """Clause 3 across the seam that matters: pytest's own selection, not a grep.
+
+    The gate's `tests` rung builds an argv, hands it to a child interpreter and
+    reads an exit code, so that is what gets asserted here — `-m "not live_vault"`
+    over this file must still collect the tmp-surface node and run it green. A
+    grep would prove the decorator was typed; this proves the deselection and the
+    surviving enforcement point, and it fails if either node's marker moves.
+    """
+    collect = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "--collect-only", "-m", "not live_vault", THIS_FILE],
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=180)
+    listed = collect.stdout + collect.stderr
+    assert f"::{TMP_SURFACE_NODE}" in listed, (
+        "the tmp-surface node left the hard rung:\n" + listed[-1200:])
+    assert f"::{LIVE_SURFACES_NODE}" not in listed, (
+        "the live-vault node is back on the hard rung:\n" + listed[-1200:])
+
+    ran = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-m", "not live_vault", f"{THIS_FILE}::{TMP_SURFACE_NODE}"],
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=180)
+    assert ran.returncode == 0 and "1 passed" in ran.stdout + ran.stderr, (
+        "the surviving enforcement point is not passing on the hard rung:\n"
+        + (ran.stdout + ran.stderr)[-1200:])
 
 
 def test_emitted_json_still_parses_at_max_tokens_8000_against_a_20kb_memory(

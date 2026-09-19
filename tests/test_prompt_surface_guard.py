@@ -19,6 +19,9 @@ the vault: a guard whose test data is the thing it guards cannot fail.
 """
 from __future__ import annotations
 
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -440,6 +443,88 @@ def test_gate_tests_rung_excludes_live_vault_assertions():
     src = (Path(__file__).resolve().parent.parent
            / "scripts" / "automod" / "gate.py").read_text(encoding="utf-8")
     assert '"-m", "not live_vault"' in src
+
+
+# ── #797: the mark that moved one node, pinned across the selection seam ─────
+#
+# `test_the_live_surfaces_yield_a_bounded_parseable_response` reads
+# `~/obsidian/lloyd/SOUL.md` and `MEMORY.md` by absolute path — deliberately,
+# because `hg.SOUL_PATH` resolves beside the checkout and a worktree has no vault
+# next to it, so the path still resolved on the gate's hard `tests` rung and the
+# node judged whatever the nightly reflection job last wrote to `MEMORY.md`. Its
+# anchor comes from `verbatim_span`, which accepts only a single line of 20-160
+# characters; the count of such lines in that file has read as low as 1 in the
+# last fifteen commits that touched it, and at 0 the node emits an empty anchor,
+# `_parse_single_variant` refuses it (that refusal is itself pinned by
+# `test_an_empty_anchor_is_rejected`), and a round whose diff never opened a
+# prompt file fails on somebody else's prose reflow.
+#
+# The claims below are about pytest's selection, which is a process boundary: the
+# gate builds an argv, hands it to a child interpreter, and reads an exit code. So
+# each one runs that command rather than reading the decorator off the source — a
+# grep proves the mark was typed, not that the deselection happens.
+
+LIVE_SURFACES_NODE = ("tests/test_autoresearch_hypothesis.py"
+                      "::test_the_live_surfaces_yield_a_bounded_parseable_response")
+
+
+def _run_selection(marker_expr: str, node: str = LIVE_SURFACES_NODE):
+    """Run pytest over one node id with a `-m` expression, as the rung does.
+
+    Exit codes are part of the assertion, so they are not swallowed: 0 ran and
+    passed, 1 ran and failed, 5 collected nothing.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-m", marker_expr, node],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True, text=True, timeout=180)
+
+
+def test_the_gate_selection_deselects_the_live_surfaces_node():
+    """Clause 1: `-m "not live_vault"` over that node id runs none of it.
+
+    The mark is on the node and not on the module — a module-level `pytestmark`
+    would have taken this file's other checks, which build a fake surface and are
+    the enforcement a code change still needs, off the rung with it. Exit code 5
+    is pytest's own "no tests were collected": the only shape that proves the
+    node ran zero assertions rather than running and passing on the live vault.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "tests" / "test_autoresearch_hypothesis.py").read_text(encoding="utf-8")
+    assert "@pytest.mark.live_vault\ndef test_the_live_surfaces_yield_a_bounded_parseable_response(" in src, (
+        "the mark must sit on the node that opens the live vault, so the file's "
+        "tmp-surface checks stay on the hard rung"
+    )
+    assert not re.search(r"^pytestmark\s*=", src, re.M), (
+        "the file gained a module-level pytestmark: that deselects every check in it, "
+        "including the ones a candidate must still fail on"
+    )
+    r = _run_selection("not live_vault")
+    out = r.stdout + r.stderr
+    assert "1 deselected" in out, out[-1500:]
+    assert "1 passed" not in out, "the rung still executed the live-vault node"
+    assert r.returncode == 5, f"expected pytest's exit 5 (nothing collected), got {r.returncode}\n{out[-1500:]}"
+
+
+@pytest.mark.live_vault
+def test_the_live_vault_subset_still_runs_the_deselected_node_green():
+    """Clause 2: deselected is not the same as gone — the node still runs and passes.
+
+    Marked `live_vault` itself because it shells out to a node that reads the live
+    vault: the two belong on the same side of the boundary, and the nightly
+    `live_vault` rung that runs this subset is where both are enforced. A skipped
+    node also exits 0 and prints no `1 passed`, so the assertion is on the summary
+    word, not the exit code alone — which is what stops a `skipif`, an `xfail`, or
+    a silent deletion being traded for the mark. `skills/nightly-skills-management`
+    forbids exactly those four as a repair, and forbids dropping the mark.
+    """
+    r = _run_selection("live_vault")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0 and "1 passed" in out, out[-1500:]
+    for substitute in ("skipped", "xfailed", "deselected"):
+        assert substitute not in out, f"the node became `{substitute}` instead of passing\n{out[-1500:]}"
+
 
 
 def test_the_reporting_copy_asserts_the_paste_through_the_module():
