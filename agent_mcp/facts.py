@@ -22,6 +22,7 @@ keep this module's call sites and external consumers stable.
 """
 
 import datetime
+from pathlib import Path
 
 from mcp.types import Tool
 
@@ -62,6 +63,7 @@ from agent_mcp.retrieval import (  # noqa: F401  (re-exported compat names)
     graph_expand_entities as _graph_expand_entities,
     graph_weighted_neighbors as _graph_weighted_neighbors,
     invalidate_relationships_cache as _invalidate_relationships_cache,
+    fact_source_file as _fact_source_file,
     load_relationships as _load_relationships,
 )
 
@@ -170,7 +172,153 @@ def _generate_fact_id(category: str, existing_ids=()) -> str:
     return next_fact_id(existing_ids, category_prefix(category))
 
 
-def _detect_contradictions_sync(entity: str, category: str = None) -> dict:
+# ── one fact, one file (#874) ────────────────────────────────────────────────
+#
+# `fact_resolve(auto_resolve=true)` used to collect the losers' ids into a dict
+# and then walk every `*.md` in the entity directory marking any entry whose
+# `id` matched. A fact id is a per-file counter (`app.fact_ids.next_fact_id`),
+# so that walk reaches every fact in the entity sharing the loser's number —
+# measured on the live `Assistant` entity 2026-09-08: 2 planned actions
+# invalidated 25 facts, 29 active down to 4. `apply_action` in
+# `agent_mcp/fact_improvement.py` works around it by aiming a substring at one
+# stored text and halting an entity when one action reports more than one
+# expiry, which made the loop safe and left `fact_resolve` as the live footgun.
+#
+# Both go through `_apply_fact_marks` now, keyed on (file, id) and refusing a
+# mark whose file is unknown. So a condemned fact that was read without a file
+# attribution cannot be marked at all — the failure lands closed, where the old
+# code failed open and retired the neighbours.
+
+def fact_identity(fact: dict):
+    """The key naming exactly one stored fact: `(source_file, id)`.
+
+    Never the id alone — ids collide across an entity's category files. Never
+    the text either: `facts_idx`'s dedupe key `(entity, text_hash)` (#499) is a
+    key for *refusing a write*, and ingestion can legitimately record one
+    sentence twice, in which case it is two facts with two lifetimes.
+
+    None for a fact read without `with_source_file`, which is every display and
+    ranking reader. A caller that means to act has to read it that way first,
+    and that read is the point: it is what makes the handle addressable.
+    """
+    if not isinstance(fact, dict) or not fact.get("id"):
+        return None
+    source = str(fact.get("source_file") or "").strip()
+    return (source, str(fact["id"])) if source else None
+
+
+def _apply_fact_marks(marks: dict, files_to_scan, *, field: str, stamp: str,
+                      reason_field: str, text_matches: dict | None = None,
+                      stop_after_first: bool = False) -> dict:
+    """Mark the facts named by `marks` {(file_name, fact_id): reason}. One route.
+
+    Both fact writers — `fact_resolve`, `fact_invalidate` and the improve
+    loop's `apply_action` — reached the same frontmatter through their own loop,
+    and the difference between the loops was the bug: one matched on
+    `f.get("id")` across every file of an entity, so one condemned fact marked
+    every fact that shared its id. Fact ids are a per-file counter
+    (`app.fact_ids.next_fact_id`), so a mark now names the file the fact is in,
+    and the one loop honours that scope.
+
+    `text_matches` is {lowercase substring: (kind, reason)} for the caller whose
+    handle is a phrase rather than a fact: the improve loop plans against a read
+    view and is not always given an id it can carry back. It is matched against
+    fact text only — never body prose, the rule `_fact_invalidate` already
+    enforced — and `stop_after_first` ends the scan at the first hit, so a
+    single action cannot mark two facts that happen to contain the same
+    sentence.
+
+    Returns the facts it marked, each with the file it came from, plus
+    `unapplied` (a requested mark that found nothing) and `already_marked` (a
+    candidate that already had `field` set). A caller that planned N actions and
+    applied fewer has to be able to say so: the planned count is not evidence of
+    the applied one.
+    """
+    matched: list[dict] = []
+    unapplied: list[dict] = []
+    already_marked: list[dict] = []
+    touched: list[Path] = []
+    wanted = dict(marks)
+    by_text = dict(text_matches or {})
+    seen_files: set[str] = set()
+
+    for fact_file in files_to_scan:
+        source = _fact_source_file(Path(fact_file))
+        seen_files.add(source)
+        keys_here = {k: v for k, v in wanted.items() if k[0] == source}
+        if not keys_here and not by_text:
+            continue
+        if not Path(fact_file).exists():
+            for key in keys_here:
+                unapplied.append({"id": key[1], "why": keys_here[key],
+                                  "reason": f"file absent: {source}"})
+            continue
+        # The lock covers the whole read-modify-write, as it does in `_fact_add`
+        # and `_fact_invalidate`: four extractor threads write these same files,
+        # and a writer that reads outside the lock and writes inside it drops
+        # whatever a concurrent `fact_add` added between the two. Advisory, so it
+        # only excludes writers that take it — which is why every writer of a
+        # fact file has to take it (`app.atomic_io.locked_file`).
+        with locked_file(fact_file):
+            content = Path(fact_file).read_text(encoding="utf-8")
+            frontmatter = _parse_fact_frontmatter(content)
+            if "facts" not in frontmatter:
+                continue
+            changed = False
+            for f in frontmatter["facts"]:
+                if not isinstance(f, dict):
+                    continue
+                want, how = None, "identity"
+                if f.get("id") and (source, f["id"]) in keys_here:
+                    want = keys_here[(source, f["id"])]
+                else:
+                    ftext = (f.get("fact") or "").lower()
+                    for sub, (kind, why) in by_text.items():
+                        if sub and sub in ftext and not ftext.startswith(("note:", "> ")):
+                            want = why or "manual invalidation"
+                            how = kind
+                            break
+                if want is None:
+                    continue
+                if f.get(field):
+                    already_marked.append({"id": f.get("id"), "file": source,
+                                           "fact": str(f.get("fact") or "")[:80]})
+                    if stop_after_first:
+                        break
+                    continue
+                f[field] = stamp
+                f[reason_field] = want
+                changed = True
+                matched.append({"id": f.get("id"), "file": source,
+                                "fact": str(f.get("fact") or "")[:80], "how": how})
+                if stop_after_first:
+                    break
+            if changed:
+                body_start = content.find("---", 3)
+                body = content[body_start + 3:] if body_start != -1 else ""
+                atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
+                touched.append(Path(fact_file))
+
+    hit = {(m["file"], m["id"]) for m in matched}
+    already = {(a["file"], a["id"]) for a in already_marked}
+    for key, why in wanted.items():
+        if key not in hit and key not in already:
+            unapplied.append({"id": key[1], "why": why,
+                              "reason": "no active fact with that id in that file"})
+    if by_text and not matched and not already_marked:
+        unapplied.append({"id": None, "why": "; ".join(sorted(by_text))[:120],
+                          "reason": "no fact text in the scanned files matched"})
+
+    if touched:
+        _reindex_files(touched)
+    return {"marked": len(matched), "matched_facts": matched,
+            "unapplied": unapplied, "already_marked": already_marked,
+            "files_touched": [str(t) for t in touched],
+            "files_scanned": sorted(seen_files)}
+
+
+def _detect_contradictions_sync(entity: str, category: str = None, *,
+                                facts: list = None) -> dict:
     """Pairwise contradiction scan. O(n²) in the entity's fact count.
 
     Refused above FACT_GODNODE_THRESHOLD facts. `Lloyd` has 5,489, which is
@@ -178,8 +326,15 @@ def _detect_contradictions_sync(entity: str, category: str = None) -> dict:
     through MCP, and it produced 32,857 "contradictions", almost all of them
     the high-overlap heuristic firing on two facts that are merely phrased
     alike. Narrow with `category` to scan a slice.
+
+    Pass `facts` to judge a list that was already read. The caller that does is
+    `fact_improvement.plan_entity`, which read the entity with
+    `with_source_file=True`; the pairs come back holding those same dicts, so
+    the loser the caller judged is a loser it can write, file attribution
+    included. The tool path reads for itself and behaves exactly as before.
     """
-    facts = _get_facts_sync(entity, category).get("facts", [])
+    if facts is None:
+        facts = _get_facts_sync(entity, category).get("facts", [])
     if len(facts) > FACT_GODNODE_THRESHOLD:
         return {"entity": entity, "category": category, "contradictions": [],
                 "checked": len(facts), "refused": True,
@@ -428,7 +583,13 @@ def _fact_resolve(params: dict) -> dict:
     auto_resolve = bool(params.get("auto_resolve", False))
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:
-        detection = _detect_contradictions_sync(entity, params.get("category"))
+        # Read with a file attribution, because a loser selected by id alone is
+        # a loser that cannot be written safely — see `fact_identity`. This read
+        # returns copies, so the cache's own entries stay unwritten.
+        judged = _get_facts_sync(entity, params.get("category"),
+                                 with_source_file=True).get("facts", [])
+        detection = _detect_contradictions_sync(entity, params.get("category"),
+                                                facts=judged)
         if detection.get("refused"):
             return _err(detection["hint"], ErrorCode.INVALID_PARAM,
                         resolved=0, remaining=0)
@@ -442,38 +603,44 @@ def _fact_resolve(params: dict) -> dict:
                              "to expire a specific fact.")}
 
         entity_dir = _find_entity_dir(entity)
+        marks: dict[tuple, str] = {}
+        unattributed = 0
+        for contradiction in contradictions:
+            f1, f2 = contradiction.get("fact1", {}), contradiction.get("fact2", {})
+            c1, c2 = f1.get("confidence", 0.5), f2.get("confidence", 0.5)
+            if c1 == c2:
+                continue     # no basis to pick a winner
+            loser = f2 if c1 > c2 else f1
+            key = fact_identity(loser)
+            if key is None:
+                unattributed += 1
+                continue
+            marks[key] = f"fact_resolve: {contradiction.get('reason', 'contradiction')}"
         resolved = 0
-        if entity_dir:
-            to_invalidate: dict[str, str] = {}
-            for contradiction in contradictions:
-                f1, f2 = contradiction.get("fact1", {}), contradiction.get("fact2", {})
-                c1, c2 = f1.get("confidence", 0.5), f2.get("confidence", 0.5)
-                if c1 == c2:
-                    continue     # no basis to pick a winner
-                loser = f2 if c1 > c2 else f1
-                if loser.get("id"):
-                    to_invalidate[loser["id"]] = contradiction.get("reason", "contradiction")
-            for fact_file in entity_dir.glob("*.md"):
-                content = fact_file.read_text(encoding="utf-8")
-                frontmatter = _parse_fact_frontmatter(content)
-                if "facts" not in frontmatter:
-                    continue
-                changed = False
-                for f in frontmatter["facts"]:
-                    reason = to_invalidate.get(f.get("id"))
-                    if reason and not f.get("invalid_at"):
-                        f["invalid_at"] = now_iso
-                        f["invalid_reason"] = f"fact_resolve: {reason}"
-                        changed = True
-                        resolved += 1
-                if changed:
-                    body_start = content.find("---", 3)
-                    body = content[body_start + 3:] if body_start != -1 else ""
-                    with locked_file(fact_file):
-                        atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
-                    _reindex_files([fact_file])
-        return {"entity": entity, "resolved": resolved,
-                "remaining": len(contradictions) - resolved}
+        applied: dict = {"marked": 0, "matched_facts": [], "applied": 0,
+                         "unapplied": [], "files_touched": []}
+        if entity_dir and (marks or unattributed):
+            applied = _apply_fact_marks(
+                marks, list(entity_dir.glob("*.md")),
+                field="invalid_at", stamp=now_iso, reason_field="invalid_reason")
+            resolved = applied["marked"]
+        unresolved_pairs = len(contradictions) - resolved - unattributed
+        out = {"entity": entity, "resolved": resolved,
+               "remaining": max(unresolved_pairs, 0),
+               # Which facts, in which files. A count without the list cannot be
+               # audited, and this change exists because a count was trusted.
+               "facts": applied["matched_facts"]}
+        if applied["unapplied"] or unattributed:
+            # Say what could not be marked instead of quietly marking less. A
+            # caller that reads `resolved` alone would otherwise report fewer
+            # contradictions than it saw and never learn why.
+            out["unapplied"] = [
+                *({"id": None, "why": "", "reason":
+                   "fact read without a file attribution; re-read it with "
+                   "with_source_file before acting"}
+                  for _ in range(unattributed)),
+                *applied["unapplied"]]
+        return out
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL)
 

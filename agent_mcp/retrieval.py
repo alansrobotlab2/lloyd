@@ -22,6 +22,7 @@ their signatures as cross-module breaking changes.
 import math
 import re
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal, Optional
 
 from app.entity_naming import _GENERIC_SINGLE
@@ -137,7 +138,17 @@ _FACT_FILE_CACHE_MAX = 3000
 
 
 def _read_facts_cached(fact_file) -> list:
-    """Parse one fact file's `facts:` list, memoised on (path, mtime_ns)."""
+    """Parse one fact file's `facts:` list, memoised on (path, mtime_ns).
+
+    Entries come back WITHOUT a file attribution on purpose: this list is the
+    cached one (see the mutation contract above) and its dicts are what
+    `_write_fact_frontmatter` re-serialises, so a `source_file` stamped here
+    would be written back into the YAML. A caller that needs to know which file
+    a fact came from passes `with_source_file=True` to `get_facts_sync`, which
+    returns copies carrying it. It needs one because a fact `id` cannot say:
+    `app.fact_ids.next_fact_id` counts within one file, so `fact-001` is a
+    handle inside a file and an alias for several facts across an entity.
+    """
     key = str(fact_file)
     try:
         mtime_ns = fact_file.stat().st_mtime_ns
@@ -157,27 +168,57 @@ def _read_facts_cached(fact_file) -> list:
     return facts
 
 
+def fact_source_file(fact_file) -> str:
+    """The fact file's path relative to `FACTS_ROOT`, as a fact can name it.
+
+    Relative, not absolute, so the value a reader stamps survives a tree move:
+    a rebuild runs against `LLOYD_FACTS_ROOT` pointing somewhere else, and an
+    id-keyed action whose handle changed with the tree is not a handle.
+    """
+    fact_file = Path(fact_file)
+    try:
+        return str(fact_file.relative_to(FACTS_ROOT))
+    except ValueError:
+        return str(fact_file)
+
+
 def invalidate_fact_file_cache() -> None:
     """Drop the parsed fact-file cache (used by writers and tests)."""
     _fact_file_cache.clear()
 
 
 def get_facts_sync(entity: str, category: str = None, as_of: str = None,
-                   include_expired: bool = False) -> dict:
+                   include_expired: bool = False,
+                   with_source_file: bool = False) -> dict:
+    """Read an entity's facts.
+
+    `with_source_file` puts a `source_file` — the fact file's path relative to
+    `FACTS_ROOT` — on every returned entry, as a COPY of it. It exists for
+    writers: an action that condemns one fact has to name the file that fact
+    lives in, because `app.fact_ids.next_fact_id` numbers within one file, so
+    `fact-001` identifies a fact inside a file and aliases several facts across
+    an entity. Display and ranking readers leave it off and keep the cached
+    entries, per the mutation contract on `_read_facts_cached`.
+    """
     resolved, _ = _resolve_entity(entity, mode="read")
     entity_dir = _find_entity_dir(resolved)
     if not entity_dir:
         return {"error": f"Entity not found: {entity}", "facts": []}
-    facts = []
+    entries: list[tuple] = []
     if category:
         fact_file = entity_dir / f"{resolved}-{category}.md"
         if not fact_file.exists():
             fact_file = entity_dir / f"{entity}-{category}.md"
         if fact_file.exists():
-            facts = list(_read_facts_cached(fact_file))
+            entries = [(f, fact_file) for f in _read_facts_cached(fact_file)]
     else:
         for fact_file in entity_dir.glob("*.md"):
-            facts.extend(_read_facts_cached(fact_file))
+            entries.extend((f, fact_file) for f in _read_facts_cached(fact_file))
+    if with_source_file:
+        facts = [dict(f, source_file=fact_source_file(ff)) if isinstance(f, dict) else f
+                 for f, ff in entries]
+    else:
+        facts = [f for f, _ in entries]
     if not include_expired:
         if as_of:
             # Return facts valid at a specific point in time

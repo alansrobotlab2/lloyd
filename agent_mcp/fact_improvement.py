@@ -44,8 +44,9 @@ import logging
 import re
 from pathlib import Path
 
-from app.paths import LLOYD_HOME, VAULT_FACTS_ROOT
-from agent_mcp.facts import _detect_contradictions_sync, _fact_invalidate
+from app.paths import LLOYD_HOME, VAULT_FACTS_ROOT, VAULT_ROOT
+from agent_mcp._shared import _find_entity_dir
+from agent_mcp.facts import _apply_fact_marks, _detect_contradictions_sync
 from agent_mcp.retrieval import get_facts_sync as _get_facts_sync
 from app.kg_store import store as _store
 
@@ -53,7 +54,36 @@ logger = logging.getLogger("lloyd.improvement")
 
 # Overridable module-level names: tests point these at a temp tree.
 FACTS_ROOT = VAULT_FACTS_ROOT
-CORRECTIONS_PATH = Path.home() / "obsidian" / "memory" / "corrections.md"
+# Two places a correction gets recorded, in two shapes. The compiled-in single
+# path could see only the first: `memory/corrections.md`, whose newest heading
+# was 2026-05-08 and whose file mtime was Aug 23, while the operator's live
+# corrections — `## corrections_log` bullets in `lloyd/USER.md`, dated
+# 09-07/08/09 — were invisible to the loop (no `.py` in the repo named
+# `corrections_log` at all). Both shapes now get a parser and both files get
+# read, because pointing the heading regex at a bullet list returns a silent
+# zero, which is the old blindness with a new filename in the record.
+CORRECTIONS_PATH = VAULT_ROOT / "memory" / "corrections.md"          # `## <date> — <text>`
+CORRECTIONS_BULLETS_PATH = VAULT_ROOT / "lloyd" / "USER.md"          # `- 2026-09-11: <text>`
+CORRECTIONS_BULLETS_SECTION = "corrections_log"
+# Overridable for tests, like FACTS_ROOT. None means "the two constants above",
+# read at CALL time rather than import time: a caller that repoints
+# `CORRECTIONS_PATH` — every test of this reader does — has to change what the
+# read sees, and a list assembled here at import would have frozen the real
+# paths before the first patch landed.
+CORRECTIONS_SOURCES: list[Path] | None = None
+
+
+def corrections_paths() -> list[Path]:
+    """The correction logs this reader will consult, in order."""
+    if CORRECTIONS_SOURCES is not None:
+        return list(CORRECTIONS_SOURCES)
+    # Read the module globals, so repointing either constant repoints the read.
+    return [CORRECTIONS_PATH, CORRECTIONS_BULLETS_PATH]
+# A correction is evidence about a *recent* mistake. Undated, a March heading fed
+# the nightly loop forever and its two entities outranked every fresh drift write
+# in every run, permanently. Entries outside the window are counted in the record
+# and contribute no entity.
+CORRECTIONS_WINDOW_DAYS = 30
 RECORD_DIR = LLOYD_HOME / "_pipeline" / "improvement"
 
 # Entity dirs whose mtime is inside this window count as "a writer has been
@@ -82,7 +112,6 @@ MAX_ACTIONS_PER_RUN = 25
 # on a case-insensitive substring, so a 60-char prefix is specific in practice.
 _SUBSTRING_LEN = 60
 
-_SECTION_RE = re.compile(r"^#{1,4}\s+(.+)$", re.M)
 # Entity-shaped token in a corrections heading: capitalized word-run that is
 # also a known entity, checked against the store — a heading alone is a guess.
 _TOKEN_RE = re.compile(r"\b[A-Z][A-Za-z0-9][A-Za-z0-9._-]{1,}\b")
@@ -104,41 +133,229 @@ def _known_entities() -> dict[str, str]:
         return {}
 
 
-def read_correction_signals(limit: int = 25) -> list[dict]:
-    """Entities named in the user's own corrections log.
+_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+_BULLET_DATE_RE = re.compile(
+    r"^\s*[-*]\s*(?:\*\*)?\s*(\d{4}-\d{2}-\d{2})\s*(?:\*\*)?\s*[:.\-—]?\s*(.*)$")
+_SECTION_HEAD_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.M)
+# `2026-09-11 02:41 PDT — ` between a heading's date and its text. Stripped so a
+# heading's entity is not competing with its own timestamp for the token scan.
+_TIME_IN_HEAD_RE = re.compile(r"^\s*\d{1,2}:\d{2}(:\d{2})?\s*[A-Za-z]{1,4}?\s*[—–-]?\s*")
 
-    `~/obsidian/memory/corrections.md` is a record of things Lloyd got wrong
-    and was told so. It is consumed today only by the behaviour/prompt loops
-    (nightly-reflection-signals, nightly-prompt-audit, nightly-behavior-test,
-    scripts/autonomy/self_improve.py) — nothing routes it into *fact* quality.
-    This is that route.
+# What the last corrections read saw, per file. `read_correction_signals` is a
+# pure list in, list out today, and a `[]` it returns means four different
+# things: no log, an empty log, a log whose format it cannot parse, a log whose
+# entries are all too old. The record has to say which, or a silent zero keeps
+# reading as "no corrections tonight" — see the run that reported exactly that
+# while reading a four-month-old file. Overwritten on every read; tests and the
+# run record read it through `last_corrections_read()`.
+# What a run record says when the corrections read never happened — a
+# `--sources drift` pass consults no log, and `corrections_status: null` would
+# read as "the log was empty", which is the same false verdict in a new costume.
+_NOT_READ: dict = {"status": "not_read", "sources": {}, "paths_yielding_signals": []}
+_LAST_CORRECTIONS_READ: dict = {}
 
-    An entry is credited to an entity only when a token in its heading is a
-    registered entity name. Dates and prose are stripped first, so
-    "2026-09-08 — TTS service status" yields `TTS` and nothing else does.
+# Every status the corrections read can report, best first. One vocabulary, so a
+# zero in the record is never ambiguous: `empty` means the log is empty,
+# `undated`/`no_section`/`unreadable`/`missing` mean the loop could not see the
+# log, and the two middle ones say whether there was anything to see inside the
+# window or inside the entity registry. `read_correction_signals` is where the
+# file-level status (`_corrections_entries`) is combined with the window and the
+# registry into one of these.
+CORRECTIONS_STATUSES = ("signals", "empty", "entries_no_entity", "no_entries_in_window",
+                        "undated", "no_section", "registry_unreadable", "unreadable",
+                        "missing", "not_read")
+
+
+def _entry_date(line: str) -> tuple[str | None, str]:
+    """(iso date or None, entry text) for a corrections line."""
+    m = _DATE_RE.match(line.strip().lstrip("#").strip())
+    if m:
+        rest = line.strip().lstrip("#").strip()[len(m.group(0)):].lstrip(" —–-\t")
+        return m.group(1), rest
+    m = _BULLET_DATE_RE.match(line)
+    if m:
+        return m.group(1), m.group(2)
+    return None, ""
+
+
+def _corrections_entries(path: Path) -> tuple[list[tuple[str | None, str]], str]:
+    """Parse one corrections log into (dated entries, status).
+
+    Two shapes, because the two live logs use two shapes:
+      * `memory/corrections.md` — one heading per entry, `## 2026-05-08 14:37 PDT
+        — Tool calls without ToolSearch schema loading`;
+      * `lloyd/USER.md` `## corrections_log` — bullets, `- 2026-09-11: …`, with
+        standing prose between them that is not an entry.
+    A heading-only parser pointed at the second returns zero, and zero from an
+    unparseable format is the exact failure this module is here to make visible.
+
+    Shape, not path, picks the parser: a file that carries a `## corrections_log`
+    section is read as a bullet log, everything else as dated headings. Keying on
+    the filename is the mistake one reversion made — it parses whatever the file
+    is called instead of what it contains.
+
+    Status meanings, so a zero in the record can be read:
+      `missing`     the file is not there
+      `unreadable`  it is there and cannot be read
+      `no_section`  a bullet log whose `## corrections_log` section is absent
+      `undated`     entries are present and none carries a date
+      `empty`       it parsed cleanly and holds no correction at all
+    Window-filtering happens in the caller, which knows the window; this reports
+    what the file *is*, not what the run chose to use.
     """
     try:
-        text = CORRECTIONS_PATH.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return [], "missing"
+    except OSError as exc:
+        logger.debug("corrections log %s unreadable: %s", path, exc)
+        return [], "unreadable"
+
+    start = None
+    for m in _SECTION_HEAD_RE.finditer(text):
+        if m.group(2).strip().strip(":").strip("`").lower() == CORRECTIONS_BULLETS_SECTION:
+            start = m.end()
+            break
+    if start is not None:
+        # Bullet log: entries are `- 2026-09-11: …` lines; anything else in the
+        # section (the `## corrections_log` header's own standing prose) is not an
+        # entry, and a run that counted those as corrections would be crediting
+        # the operator with a mistake they never made.
+        nxt = _SECTION_HEAD_RE.search(text, start)
+        body = text[start:nxt.start()] if nxt else text[start:]
+        entries, bullets = [], 0
+        for line in body.splitlines():
+            if not line.strip().startswith(("-", "*")):
+                continue
+            bullets += 1
+            date, rest = _entry_date(line)
+            entries.append((date, rest))
+        if not bullets:
+            return [], "empty"
+        return entries, ("undated" if not any(d for d, _ in entries) else "entries")
+
+    heads = list(_SECTION_HEAD_RE.finditer(text))
+    entries = []
+    for m in heads:
+        date, rest = _entry_date(m.group(2))
+        if date:
+            entries.append((date, _TIME_IN_HEAD_RE.sub("", rest) or m.group(2)))
+    if not entries:
+        # A file carrying only its own `# Title` is an empty log; one with real
+        # sections that name no date is a log the reader cannot parse. The two
+        # look identical to a caller that only sees `[]`, and they mean "nothing
+        # to correct" and "I could not read you" — which is the whole
+        # distinction this reader exists to make.
+        return [], ("empty" if len(heads) <= 1 else "undated")
+    return entries, "entries"
+
+
+def read_correction_signals(limit: int = 25, window_days: int = CORRECTIONS_WINDOW_DAYS,
+                            now: datetime.datetime | None = None) -> list[dict]:
+    """Entities named in the operator's own corrections logs.
+
+    Reads every path in `CORRECTIONS_SOURCES` — the compiled-in
+    `memory/corrections.md` *and* `lloyd/USER.md`'s `## corrections_log`, which
+    is where corrections have actually been written since the compiled-in file
+    stopped being. An entry is credited to an entity only when a token in it is
+    a registered entity name; dates and prose are stripped first, so
+    "2026-09-08 — TTS service status" yields `TTS` and nothing else does.
+
+    Entries older than `window_days` contribute nothing. Undated lines contribute
+    nothing either, and are counted: a correction that cannot say when it
+    happened cannot say whether it still applies.
+
+    The `[]` case is where the honesty lives — see `last_corrections_read()`.
+    """
     known = _known_entities()
-    if not known:
-        return []
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    read: dict[str, dict] = {}
     out: list[dict] = []
     seen: set[str] = set()
-    for match in _SECTION_RE.finditer(text):
-        heading = _DATE_IN_HEAD_RE.sub(" ", match.group(1))
-        for token in _TOKEN_RE.findall(heading):
-            canonical = known.get(token.lower())
-            if not canonical or canonical in seen:
+    for path in corrections_paths():
+        entries, status = _corrections_entries(Path(path))
+        in_window = 0
+        outside = 0
+        undated = 0
+        for date, text in entries:
+            if date is None:
+                undated += 1
                 continue
-            seen.add(canonical)
-            out.append({"entity": canonical, "source": "corrections",
-                        "evidence": match.group(1).strip()[:200]})
-            break
-        if len(out) >= limit:
-            break
+            try:
+                when = datetime.datetime.fromisoformat(date).replace(
+                    tzinfo=datetime.timezone.utc)
+            except ValueError:
+                undated += 1
+                continue
+            if abs((now - when).days) > window_days:
+                outside += 1
+                continue
+            in_window += 1
+            if not known or len(out) >= limit:
+                continue
+            head = _DATE_IN_HEAD_RE.sub(" ", text)
+            for token in _TOKEN_RE.findall(head):
+                canonical = known.get(token.lower())
+                if not canonical or canonical in seen:
+                    continue
+                seen.add(canonical)
+                out.append({"entity": canonical, "source": "corrections",
+                            "evidence": f"{date} {text}".strip()[:200],
+                            "corrections_path": str(path)})
+                break
+        signals_here = sum(1 for s in out if s.get("corrections_path") == str(path))
+        if status == "entries" and not in_window:
+            status = "no_entries_in_window"      # the log is fine; the window is not
+        elif status == "entries" and not signals_here:
+            status = "entries_no_entity"          # in-window entries name no entity
+        read[str(path)] = {"status": status, "entries": len(entries),
+                           "in_window": in_window, "outside_window": outside,
+                           "undated": undated, "signals": signals_here}
+    global _LAST_CORRECTIONS_READ
+    if not known and not out:
+        # No registry means every token is a guess. Say the store is why the read
+        # produced nothing, rather than reporting a log that is fine as empty.
+        for info in read.values():
+            if info["status"] in ("entries", "entries_no_entity", "empty",
+                                  "no_entries_in_window"):
+                info["status"] = "registry_unreadable"
+                info["why"] = "entity registry unreadable; no token can be resolved"
+    _LAST_CORRECTIONS_READ = {"sources": read,
+                              "paths_yielding_signals": sorted(
+                                  {s["corrections_path"] for s in out}),
+                              "status": _roll_up(read, bool(out), known)}
     return out
+
+
+def _roll_up(read: dict[str, dict], got_signals: bool, known: dict) -> str:
+    """One status for the whole read: signals beat everything, else the worst file."""
+    if got_signals:
+        return "signals"
+    if not known:
+        return "registry_unreadable"
+    worst = "empty"
+    for info in read.values():
+        st = info.get("status", "missing")
+        if st in CORRECTIONS_STATUSES and \
+                CORRECTIONS_STATUSES.index(st) > CORRECTIONS_STATUSES.index(worst):
+            worst = st
+    return worst
+
+
+def last_corrections_read() -> dict:
+    """What the most recent `read_correction_signals()` call actually saw.
+
+    `{status, sources: {path: {status, entries, in_window, outside_window,
+    undated, signals}}, paths_yielding_signals}`. The run record stores this and
+    stores `corrections_path` from `paths_yielding_signals`, so a zero in the
+    record can be told apart from an unread file — the distinction the compiled-in
+    constant destroyed by naming itself whether or not it had been read.
+
+    Before any read has happened it reports `not_read`: a pass that consulted no
+    log has to be able to say so, and it must not inherit the shape of a pass
+    that read one and found nothing.
+    """
+    return dict(_LAST_CORRECTIONS_READ) if _LAST_CORRECTIONS_READ else dict(_NOT_READ)
 
 
 def _drift_candidates(days: int = DRIFT_WINDOW_DAYS) -> list[dict]:
@@ -287,9 +504,15 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
     """Decide what — if anything — to change about one entity's facts.
 
     Reads through the same `_get_facts_sync` the recall path uses, so the plan
-    is made on the facts a query would actually have been answered with.
+    is made on the facts a query would actually have been answered with — and
+    read WITH a file attribution, because a plan that cannot name the file its
+    loser lives in cannot be executed safely: fact ids are a per-file counter
+    (`app.fact_ids.next_fact_id`), so one id is one fact in this view and
+    several facts on disk. The detector is handed that same list instead of
+    re-reading, so what gets judged and what gets written come from one read.
     """
-    detection = _detect_contradictions_sync(entity)
+    facts_view = _get_facts_sync(entity, with_source_file=True).get("facts", [])
+    detection = _detect_contradictions_sync(entity, facts=facts_view)
     if detection.get("refused"):
         return {"entity": entity, "refused": True, "checked": detection.get("checked", 0),
                 "contradictions": 0, "actions": [],
@@ -328,6 +551,12 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
         action = {"kind": kind, "entity": entity,
                   "category": loser.get("category"),
                   "loser_fact": loser.get("fact", ""), "loser_id": loser.get("id"),
+                  # Where the loser is, not only what it is called. The writer
+                  # marks inside this file, which is what turns "one action, one
+                  # fact" from an aim the scan may overshoot into a scope. An
+                  # action planned against a view that carried no attribution
+                  # gets "" and the writer says so rather than guessing.
+                  "loser_source_file": loser.get("source_file") or "",
                   "reason": reason}
         # Dedupe on the fact text, not the id: ids are per-file counters, so
         # `fact-001` in three category files is three different facts and one
@@ -340,9 +569,29 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
 
     return {"entity": entity, "refused": False, "checked": detection.get("checked", 0),
             "contradictions": len(contradictions),
+            # The number this mechanism can move, which `fact_entity_recall` is
+            # not. That metric scores whether an entity an eval query names wins
+            # one of ten ranked fact slots, so retiring one side of a pair leaves
+            # the claim retrievable through its twin and the number is
+            # bit-identical after a correction — while expiring an entity's
+            # best-scoring fact ejects it from the pool and the number drops for
+            # a reason that is blast radius, not quality. The pair count over the
+            # entities this pass scanned is the loop's own denominator: retiring
+            # a superseded claim takes a pair with it, and nothing else moves it.
+            #
+            # Exactly `len(contradictions)`: one pair, one count. An earlier
+            # revision of this line added the near-duplicate count again
+            # (`C + (C - actable)`), so a pair the loop declines to touch was
+            # counted twice — once as a pair and once as a near-duplicate — and
+            # the number named in the field's own comment was not the number in
+            # the field. `pairs_after` is computed from this same expression, so
+            # the inflation was invisible in the delta and visible only in the
+            # absolute count, which is the half anyone reads.
+            "pairs_before": len(contradictions),
             # Reported so the near-duplicate class stays visible: it is the
             # auto-capture noise this loop declines to delete, and the reason
-            # the metric does not move.
+            # the metric does not move. A subset of `pairs_before`, never added
+            # to it.
             "near_duplicates": len(contradictions) - len(actable),
             "actions": actions, "before_active": _active_count(entity)}
 
@@ -386,28 +635,57 @@ def _aim_substring(entity: str, action: dict) -> str | None:
 
 
 def apply_action(action: dict, now_iso: str) -> dict:
-    """Expire one condemned fact through `fact_invalidate`.
+    """Retire exactly one condemned fact. Returns the facts it marked.
 
-    Both evidence classes go through the same writer on purpose. The
-    confidence class is semantically `fact_resolve`'s — mark the weaker side
-    `invalid_at` rather than `expired_at` — but `fact_resolve(auto_resolve=true)`
-    selects losers by fact *id*, and ids repeat across an entity's category
-    files, so it invalidates every fact sharing the loser's id: measured on the
-    live `Assistant` entity, 2 planned actions became 25 invalidated facts
-    (29 active → 4). Until ids are entity-unique, a scoped expire is the only
-    writer this loop can trust with its blast radius. The `reason` string keeps
-    the distinction, so a later pass can re-tag them.
+    One action, one fact — by scope, not by aim. The mark names the FILE the
+    plan read the loser in and the writer scans that file only, so a phrase that
+    also appears in a sibling category file cannot reach it, and the scan stops
+    at the first hit inside the file it does scan.
+
+    What this replaced was a phrase aimed at the whole entity: `_aim_substring`
+    picked a prefix unique across the entity and `fact_invalidate` marked
+    whatever matched it, so the loop's idea of its own blast radius was the plan
+    (`expired_count` came back from a scan of every category file), and the
+    guard against over-reach was to halt the entity when `expired_count > 1` —
+    which stopped the damage while still reporting the wrong number for it.
+    `fact_resolve` selecting losers by bare id is what made that necessary: ids
+    count within one file, so 2 planned actions became 25 invalidated facts on
+    the live `Assistant` entity (29 active → 4). That selection is now scoped to
+    (file, id) too, so this loop's writer and that tool's share one loop again.
+
+    The field carries the reason, per the semantics `facts.py` documents: a
+    contradiction pair decided on stored confidence condemns a claim that should
+    never have been recorded, so its loser gets `invalid_at`; an ordering pair
+    retires a claim that was true and has since been replaced, so its loser gets
+    `expired_at`. The first round of this item wrote `expired_at` for both and
+    recorded the mismatch as a finding — which is the kind of thing a record can
+    say about itself while the code keeps doing the opposite.
     """
     aim = _aim_substring(action["entity"], action)
     if aim is None:
         return {"expired_count": 0, "skipped": "no unique match for the condemned fact"}
-    return _fact_invalidate({
-        "entity": action["entity"],
-        "category": action.get("category"),
-        "fact_substring": aim,
-        "ended": now_iso,
-        "reason": f"improve(#376) {action['kind']}: {action['reason']}",
-    })
+    entity_dir = _find_entity_dir(action["entity"])
+    if entity_dir is None:
+        return {"expired_count": 0, "skipped": "entity directory not found"}
+    if action["kind"] == "confidence":
+        field, reason_field = "invalid_at", "invalid_reason"
+    else:
+        field, reason_field = "expired_at", "expire_reason"
+    # The attribution is relative to FACTS_ROOT (`Entity/Entity-usage.md`), so
+    # it resolves against the root — joining it to the entity dir would name a
+    # path one level too deep and match nothing.
+    scope = ([FACTS_ROOT / action["loser_source_file"]]
+             if action.get("loser_source_file")
+             else list(entity_dir.glob("*.md")))
+    applied = _apply_fact_marks(
+        {}, scope, field=field, stamp=now_iso, reason_field=reason_field,
+        text_matches={aim.lower(): ("phrase",
+                                    f"improve {action['kind']}: {action['reason']}")},
+        stop_after_first=True)
+    if applied["marked"] == 0 and applied["unapplied"]:
+        return {"expired_count": 0, "error": str(applied["unapplied"][0]["reason"])}
+    return {"expired_count": applied["marked"], "field": field,
+            "marked": applied["matched_facts"]}
 
 
 def _fact_entity_recall(limit: int = 20) -> float | None:
@@ -500,6 +778,9 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
                  "contradictions": plan["contradictions"],
                  "near_duplicates": plan.get("near_duplicates", 0),
                  "refused": plan["refused"],
+                 # The loop's own denominator, before its writes. `pairs_after`
+                 # is measured the same way after them.
+                 "pairs_before": plan.get("pairs_before", 0),
                  "planned": len(plan["actions"]), "taken": 0, "actions": []}
         planned += len(plan["actions"])
         if apply:
@@ -530,6 +811,12 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
                     "skipped": result.get("skipped"),
                 })
             entry["taken"] = sum(a["changed"] for a in entry["actions"] if a.get("applied"))
+            # Re-measure the pair count with the same detector that produced
+            # `pairs_before`, after the writes. Only where something was applied:
+            # a pass that wrote nothing changed nothing, and re-planning every
+            # entity would double the pass for a number it can predict.
+            entry["pairs_after"] = (plan_entity(entity).get("pairs_before", 0)
+                                    if entry["taken"] else entry["pairs_before"])
         else:
             # A plan-mode pass that reports only a count is not a plan. List
             # what it would do, with the reason, so an operator can read the
@@ -537,6 +824,10 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
             entry["actions"] = [{"kind": a["kind"], "loser_fact": a["loser_fact"][:90],
                                  "reason": a["reason"], "planned": True, "applied": False}
                                 for a in plan["actions"]]
+            # Nothing was written, so nothing moved. Stated rather than absent,
+            # because a missing before/after field is how a flat metric first
+            # looked like an unchanged tree.
+            entry["pairs_after"] = entry["pairs_before"]
         entry["before_active"] = plan.get("before_active", -1)
         entry["after_active"] = _active_count(entity) if apply else entry["before_active"]
         per_entity.append(entry)
@@ -561,8 +852,28 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         "after_active": after,
         "delta_active": (after - before) if after >= 0 and before >= 0 else None,
         "per_entity": per_entity,
+        # The pass's acceptance number: contradiction+near-duplicate pairs over
+        # the entities it scanned, before and after its own writes. A retired
+        # superseded claim takes a pair with it, so this moves when the loop
+        # works — which is exactly what `fact_entity_recall`, kept below for
+        # continuity, does not: see the comment on `pairs_before` in plan_entity.
+        "pairs_before": sum(e.get("pairs_before", 0) for e in per_entity),
+        "pairs_after": sum(e.get("pairs_after", 0) for e in per_entity),
         "fact_entity_recall": _fact_entity_recall(eval_limit) if report_eval else None,
-        "corrections_path": str(CORRECTIONS_PATH),
+        # Name the file the signals came from, not the one that was compiled in
+        # first. Before this the field was `str(CORRECTIONS_PATH)` unconditionally,
+        # so a record that had read USER.md still reported `memory/corrections.md`
+        # and a reader could not tell a live log from a four-month-old one.
+        "corrections_path": (last_corrections_read()["paths_yielding_signals"][0]
+                             if last_corrections_read()["paths_yielding_signals"]
+                             else None),
+        "corrections_paths_read": sorted(last_corrections_read()["sources"]),
+        "corrections_status": last_corrections_read()["status"],
+        "corrections_sources": {p: {"status": i["status"], "entries": i["entries"],
+                                    "in_window": i["in_window"],
+                                    "outside_window": i["outside_window"],
+                                    "undated": i["undated"], "signals": i["signals"]}
+                                for p, i in last_corrections_read()["sources"].items()},
     }
     if record:
         try:

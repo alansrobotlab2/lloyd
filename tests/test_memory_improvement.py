@@ -53,6 +53,7 @@ def world(tmp_path, monkeypatch):
     facts_root.mkdir()
     vault_root = tmp_path / "vault"
     (vault_root / "memory").mkdir(parents=True)
+    (vault_root / "lloyd").mkdir()
 
     monkeypatch.setattr(shared, "FACTS_ROOT", facts_root)
     monkeypatch.setattr(retrieval, "FACTS_ROOT", facts_root)
@@ -60,6 +61,11 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(facts_mod, "FACTS_ROOT", facts_root)
     monkeypatch.setattr(fi, "FACTS_ROOT", facts_root)
     monkeypatch.setattr(fi, "CORRECTIONS_PATH", vault_root / "memory" / "corrections.md")
+    # The live log lives in `lloyd/USER.md`, and the reader consults both. Left
+    # as None, `corrections_paths()` resolves the two constants above at call
+    # time; pinning a list here would be a third path to keep in sync.
+    monkeypatch.setattr(fi, "CORRECTIONS_BULLETS_PATH", vault_root / "lloyd" / "USER.md")
+    monkeypatch.setattr(fi, "CORRECTIONS_SOURCES", None)
     monkeypatch.setattr(fi, "RECORD_DIR", tmp_path / "records")
     shared._invalidate_entity_dirs_cache()
     retrieval.invalidate_fact_file_cache()
@@ -81,7 +87,12 @@ def _write_facts(root, entity, category, facts):
     for i, f in enumerate(facts, start=1):
         prepared.append({
             "fact": f["fact"], "confidence": f.get("confidence", 0.9),
-            "category": category, "id": f"{category[:4]}-{i:03d}",
+            # An explicit id wins: ids are per-file counters, so a test that
+            # wants two category files to share `fact-001` — the collision the
+            # live corpus actually has — has to be able to say so. Without the
+            # override every helper-written id is category-prefixed and
+            # collision-free, which is why the collision went untested.
+            "category": category, "id": f.get("id") or f"{category[:4]}-{i:03d}",
             "created_at": f["created_at"], "valid_at": f["created_at"],
             "invalid_at": None, "expired_at": None, "provenance": "STATED",
             "source_doc": None,

@@ -298,11 +298,72 @@ def check_stale(skill_path: Path, fm: dict) -> tuple[bool, int]:
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
+# ── named repo scripts that no longer exist ─────────────────────────────────
+#
+# #376's vault half shipped a day without its code half: the skill named
+# `scripts/memory/fact-improvement.py` while that file was still in a round, and
+# nothing in the suite noticed, because the only check of its kind was
+# `tests/test_memory_improvement.py`, written for that one pair. This is the
+# generic version, and it is generic in the direction that matters: it reads the
+# skill's own text, so a skill cannot cite a script the tree does not have.
+#
+# Only the anchored form is a claim: `~/lloyd/scripts/foo.py` or
+# `$HOME/lloyd/scripts/foo.py`. A skill that says "write `tests/test_login.py`
+# for it" is describing work, not citing this checkout — 40-odd skills say that,
+# including Anthropic's own shipped ones — so an unanchored path is not checked.
+# The cost of that narrower rule is that a skill citing `scripts/foo.py` bare
+# slips through; the gain is that the rule can be ON, which the wide version
+# could not be. `tests/test_fact_identity_one_action_one_fact.py` pins both directions.
+_REPO_CODE_ROOTS = ("agent_mcp/", "app/", "workers/", "eval/", "scripts/",
+                    "tests/", "agent-services/", "web/")
+_SCRIPT_PATH_RE = re.compile(
+    r"(?:~/?lloyd/|\$HOME/lloyd/)"
+    r"((?:agent_mcp|app|workers|eval|scripts|tests|agent-services|web)/"
+    r"[\w.\-/]*\.(?:py|sh|js|ts|mjs))(?![\w.\-/])")
+_TEMPLATE_PATHS = re.compile(r"[<>{}*]|\.\.\.|path/to|exact/path|example|placeholder",
+                             re.I)
+
+# Documented-but-stale references, each one a real drift the rule found on the
+# day it was written. Listed so the rule can be enforced from the day it lands
+# without the whole suite turning red over findings that predate it — and an
+# entry here is a debt with a name, not a blind spot: a NEW absent path fails.
+KNOWN_ABSENT_SCRIPTS: dict[str, str] = {
+    "scripts/memory/extract-session-log.py":
+        "historical-knowledge-refresh; superseded by extract-transcript.py",
+    "scripts/memory/next-gen-memory/context_bundle.py":
+        "memory-path-scoping; directory removed with the next-gen-memory scripts",
+    "tests/test_health_skill_docs_live_fleet.py":
+        "system-health-check; test never landed",
+    "tests/test_system_health_check_frontend_endpoint.py":
+        "system-health-check; test never landed",
+}
+
+
+def check_script_paths(content: str, skill_dir: Path | None = None,
+                       repo_root: Path | None = None) -> list[dict]:
+    """Repo script paths the skill cites that are not in the tree."""
+    repo_root = repo_root or Path(__file__).resolve().parents[1]
+    out: list[dict] = []
+    for match in set(_SCRIPT_PATH_RE.findall(content)):
+        if _TEMPLATE_PATHS.search(match):
+            continue
+        if match.startswith(_REPO_CODE_ROOTS):
+            target = repo_root / match
+            found = target.exists()
+        else:
+            found = bool(skill_dir and (skill_dir / match).exists())
+        if not found:
+            out.append({"path": match,
+                        "known_stale": KNOWN_ABSENT_SCRIPTS.get(match, "")})
+    return sorted(out, key=lambda d: d["path"])
+
+
 def lint() -> dict:
     if not SKILLS_DIR.exists():
         return {
             "error": f"skills dir missing: {SKILLS_DIR}",
             "dead": [], "drift": [], "duplicates": [], "stale": [],
+            "missing_script": [],
             "total": 0, "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         }
 
@@ -311,6 +372,7 @@ def lint() -> dict:
     drift: list[dict] = []
     stale: list[dict] = []
     phantom: list[dict] = []
+    missing_script: list[dict] = []
     skills: list[tuple[str, str]] = []
     total = 0
 
@@ -373,6 +435,15 @@ def lint() -> dict:
                 "tools": bad_tools,
             })
 
+        bad_scripts = check_script_paths(content, skill_dir=entry)
+        live_scripts = [b for b in bad_scripts if not b["known_stale"]]
+        if live_scripts:
+            missing_script.append({
+                "name": entry.name,
+                "path": str(skill_file),
+                "scripts": live_scripts,
+            })
+
         is_stale, age = check_stale(skill_file, fm)
         if is_stale:
             stale.append({
@@ -393,6 +464,7 @@ def lint() -> dict:
         "duplicates": duplicates,
         "stale": stale,
         "phantom": phantom,
+        "missing_script": missing_script,
     }
 
 
@@ -408,6 +480,7 @@ def render_report(result: dict) -> str:
     n_dup = len(result["duplicates"])
     n_stale = len(result["stale"])
     n_phantom = len(result.get("phantom", []))
+    n_scripts = len(result.get("missing_script", []))
 
     lines.append(f"# Skill Lint Report — {ts}")
     lines.append("")
@@ -421,6 +494,7 @@ def render_report(result: dict) -> str:
     lines.append(f"| DUPLICATE (near-duplicate names) | **{n_dup}** | resolve ownership, merge, or rename |")
     lines.append(f"| STALE (>{STALE_DAYS}d mtime, status ≠ active) | **{n_stale}** | review for removal |")
     lines.append(f"| PHANTOM_TOOL (names a tool that does not exist) | **{n_phantom}** | replace with the real tool name |")
+    lines.append(f"| MISSING_SCRIPT (names a repo script absent from the tree) | **{n_scripts}** | land the script or drop the citation |")
     lines.append("")
     lines.append("This report is **advisory**. No automatic changes.")
     lines.append("")
@@ -535,7 +609,26 @@ def render_report(result: dict) -> str:
     # every web lookup on 2026-09-04. Found by task #70's own calibration pass
     # (2026-09-10, finding A1), which proved it by calling `render_report()`
     # with a phantom-only result.
-    if not (n_dead or n_missing or n_drift or n_dup or n_stale or n_phantom):
+    # MISSING_SCRIPT — #874. The corpus-wide assertion lives in the test suite
+    # (`test_no_shipped_skill_names_an_absent_repo_script`), so a row whose path is
+    # not listed in `KNOWN_ABSENT_SCRIPTS` has already turned the suite red; this
+    # section is where a reader sees WHICH skill and WHICH path, which a non-empty
+    # dict in an assert message says only once.
+    if n_scripts:
+        lines.append(f"## MISSING_SCRIPT — {n_scripts} skill(s) naming a repo script absent from the tree")
+        lines.append("")
+        lines.append("This is the gap that let a skill ship a day pointing at a script its")
+        lines.append("round never committed. Land the script, or drop the citation.")
+        lines.append("")
+        lines.append("| skill | absent path(s) |")
+        lines.append("|---|---|")
+        for item in result["missing_script"]:
+            paths = ", ".join(f"`{s['path']}`" for s in item["scripts"])
+            lines.append(f"| `{item['name']}` | {paths} |")
+        lines.append("")
+
+    if not (n_dead or n_missing or n_drift or n_dup or n_stale or n_phantom
+            or n_scripts):
         lines.append("## ✅ Clean")
         lines.append("")
         lines.append("All skills pass lint. No advisories.")
@@ -553,12 +646,19 @@ def main() -> int:
     json_path = REPORT_PATH.with_suffix(".json")
     json_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
 
+    # Counted here, not read out of `render_report`: that is a different
+    # function's local, and until this line was fixed the totals line raised
+    # NameError on every run that got this far — the one signal the new rule
+    # emits was the one that could not print.
+    n_scripts = len(result.get("missing_script", []))
+
     print(f"Wrote {REPORT_PATH}")
     print(f"Wrote {json_path}")
     print(f"Totals: total={result['total']}, dead={len(result.get('dead', []))}, "
           f"missing_desc={len(result.get('missing_desc', []))}, "
           f"drift={len(result.get('drift', []))}, dup={len(result.get('duplicates', []))}, "
-          f"stale={len(result.get('stale', []))}")
+          f"stale={len(result.get('stale', []))}, "
+          f"missing_script={n_scripts}")
     return 0
 
 

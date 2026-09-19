@@ -146,6 +146,18 @@ first version.
 An intermediate unguarded pass over the four entities that dominate the
 queries' fact pools moved the metric **0.35 → 0.30** — a regression, and the
 clearest evidence in this whole change that "delete more" is not "improve".
+Read it as a **blast-radius** number and not a quality one: that pass condemned
+2 facts and `fact_resolve(auto_resolve=true)` selected its losers by fact `id`,
+which `app/fact_ids.py` numbers *within one category file*, so each id matched
+every fact in the entity sharing it and 25 were invalidated where 2 were
+condemned (`Assistant` went 29 active → 4). The metric moved because the writer
+deleted the surviving twins that were making the expected entities retrievable,
+not because anything became more correct. The identity scoping is fixed at the
+writers (`agent_mcp/facts.py::_apply_fact_marks`; the live collision count is in
+`scripts/memory/measure_fact_id_collisions.py`), and the number that can show a
+correction working is the pass's own pair count, not this average — see
+`eval/run_eval.py::count_overreach_regressions` for the number that reads an
+over-reach as a regression.
 
 **Re-measured independently on 2026-09-09 (the promotion round), same method,
 fresh copies, and the flat result reproduced.** Baseline `fact_entity_recall`

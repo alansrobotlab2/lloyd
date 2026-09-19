@@ -183,6 +183,12 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
         "ndcg10": round(ndcg10, 4),
         "fact_entity_recall": fact_entity_recall,
         "entities_matched": entity_matches,
+        # Which of the query's expected entities came back through the FACT
+        # pool. `fact_entity_recall` is the average of this list's length, and an
+        # average cannot say which entity moved; this says which, so
+        # `count_overreach_regressions` below can name the query and the entity
+        # a fact-side write took out of the answer.
+        "fact_entities_matched": fact_matches,
         "docs_matched": doc_matches,
     }
 
@@ -197,6 +203,42 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
 # eval runs it on as a measurement choice, and #1000 owns that claim.
 # tests/test_eval_scorer.py pins both directions: the signature equals the
 # constants, and build_parser()'s defaults equal the signature.
+def count_overreach_regressions(before: list[dict], after: list[dict]) -> list[dict]:
+    """Queries whose expected entity was retrievable before and is not now.
+
+    The number that reads a fact-side deletion as the regression it may be.
+    `fact_entity_recall` cannot do this: it is an average over queries of the
+    same tree, so expiring one side of a pair leaves the claim retrievable
+    through its twin and reports no change, while expiring an entity's
+    best-scoring fact ejects it from the ten-slot fact pool and moves the
+    average — a movement that is blast radius, not quality. Averaging hides both
+    cases; this compares two runs of the SAME queries and names the queries
+    where an expected entity stopped being returned at all.
+
+    Expiring the older twin of a near-duplicate yields no entry here (the
+    surviving twin still carries the entity), which is the whole point: a
+    correction is not a regression, an over-reach is.
+
+    `before`/`after` are `run_eval()` return values, so this is testable over
+    records without a corpus, and is how the nightly comparison is meant to be
+    run against a snapshot copy via `LLOYD_FACTS_ROOT`/`LLOYD_KG_DB`.
+    """
+    after_by_query = {r["query"]: r for r in after}
+    out = []
+    for rec in before:
+        now = after_by_query.get(rec["query"])
+        if now is None:
+            continue
+        had = set(rec["scoring"].get("fact_entities_matched") or [])
+        if not had:
+            continue
+        gone = sorted(had - set(now["scoring"].get("fact_entities_matched") or []))
+        if gone:
+            out.append({"query": rec["query"], "category": rec.get("category"),
+                        "entities": gone})
+    return out
+
+
 def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
              graph_rerank: bool = RECALL_GRAPH_RERANK,
              rerank_alpha: float = RECALL_RERANK_ALPHA,
