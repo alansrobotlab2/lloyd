@@ -65,6 +65,29 @@ def _channel_on(var: str) -> bool:
         "0", "false", "no", "off", "")
 
 
+NEEDS_HUMAN_MARKER = "needs a human"
+
+
+def asks_for_a_human(title: str, body: str) -> bool:
+    """True when an alert's own message says the guardian cannot act on it.
+
+    A *declaration* in prose, not a severity: two sites end "Not rewriting
+    history — this needs a human" at `level="error"`, while the backlog gate used
+    to read level and trigger only — so the one channel that produces work a
+    human later sees in a queue was the one channel skipped.
+
+    Deliberately matched on `title` + `body` and not on `evidence`: evidence is
+    quoted logs and diff text, which can carry the phrase from a message the
+    guardian is quoting rather than one it is declaring.
+
+    This is the fallback route, not the primary one. `alert(needs_human=True)` is
+    the real flag — "Guardian self-test failed" is arguably the most
+    human-requiring alert in the family and never says the words, so prose
+    matching alone covers two of three members and breaks on every reword.
+    """
+    return NEEDS_HUMAN_MARKER in f"{title}\n{body}".lower()
+
+
 class Notifier:
     def __init__(self, *, ledger: Path, state_dir: Path, vault_root: str,
                  backend_url: str = "http://127.0.0.1:8080",
@@ -93,8 +116,26 @@ class Notifier:
         self.voice_window = voice_window
 
     def alert(self, level: str, title: str, body: str, *, evidence: str = "",
-              commit: str = "", trigger: str = "", tag: str = "") -> dict:
-        """Fan out one alert. Returns per-channel success for the heartbeat."""
+              commit: str = "", trigger: str = "", tag: str = "",
+              needs_human: bool = False) -> dict:
+        """Fan out one alert. Returns per-channel success for the heartbeat.
+
+        `needs_human=True` says the guardian has run out of actions: rollback is
+        not the right answer here, and only a person can make it one. It routes
+        to the backlog channel exactly like `critical` and `trigger` do, because
+        a message addressed to a human has to arrive somewhere a human reads.
+
+        Until #775 the backlog gate read `level == "critical" or trigger`, and all
+        three of these sites pass `level="error"` with no trigger. Fifteen
+        "Service down, but no promotion to revert" notices were recorded between
+        2026-09-06 and 2026-09-14 and not one became a task: each one appended a
+        ledger row, overwrote ALERT.md (single write, so only the last survives),
+        wrote a journal line, toasted, spoke where quiet hours allowed, and
+        appended a section to that day's daily note — the 2026-09-09 note stood at
+        167 KB and 341 sections. The prose fallback in `asks_for_a_human` catches
+        a future site that forgets the flag; the flag catches the sentence that
+        never says it.
+        """
         results: dict[str, bool] = {}
         text = f"{title}\n\n{body}".strip()
         if evidence:
@@ -108,7 +149,13 @@ class Notifier:
         results["desktop"] = self._desktop(level, title, body)
         results["voice"] = self._speak(level, title, body)
         results["vault"] = self._vault_note(title, text)
-        if level == "critical" or trigger:
+        # Four ways into the one channel that becomes work: a terminal state, a
+        # rollback's trigger, a site's explicit flag, and the prose that predates
+        # the flag. Everything above this line is either ephemeral, overwritten
+        # (ALERT.md is write_text — last-writer-wins), or buried in the daily
+        # note, so an alert that stops here has no owner.
+        if (level == "critical" or trigger or needs_human
+                or asks_for_a_human(title, body)):
             results["backlog"] = self._backlog_task(title, text, commit, tag)
         return results
 

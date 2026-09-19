@@ -11,6 +11,7 @@ including the `start`/`now`/`spawnerr`/`group` fields the predicate reads.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from pathlib import Path
 
@@ -323,9 +324,19 @@ def _guardian(tmp_path, monkeypatch, *, current, head, lkg):
     monkeypatch.setattr(g, "evaluate_liveness", lambda snap: (True, "backend FATAL"))
     monkeypatch.setattr(g, "heartbeat", lambda *a, **k: None)
 
+    # Each stub records its own call and nothing else. Every assertion below
+    # reads `rolled` / `alerts`; the bools are there only because the real
+    # methods return bool, and a truthy lambda tail (`append(x) or True`) reads
+    # like an assertion that cannot fail — it is neither, so the return is
+    # written out instead.
     rolled: list = []
-    monkeypatch.setattr(g, "do_rollback", lambda *a: rolled.append(a) or True)
     alerts: list = []
+
+    def _record_rollback(*a):
+        rolled.append(a)
+        return True
+
+    monkeypatch.setattr(g, "do_rollback", _record_rollback)
     monkeypatch.setattr(g, "alert", lambda *a, **k: alerts.append(a))
     return g, rolled, alerts
 
@@ -635,3 +646,391 @@ def test_repeated_identical_alerts_are_suppressed(tmp_path, monkeypatch):
     g._alert_seen["Service down, but no promotion to revert"] -= policy.ALERT_REPEAT_SECONDS + 1
     g.alert("error", "Service down, but no promotion to revert", "body")
     assert len(sent) == 3
+
+
+# ---------------------------------------------------------------------------
+# An alert that asks for a human must land in a queue (backlog #775)
+#
+# `Notifier.alert` filed a backlog task only on `level == "critical" or trigger`.
+# The guardian's three "cannot act on this" sites all fire `level="error"` with
+# no trigger — two of them ending in the words "this needs a human" — so the one
+# channel that becomes work a human later sees was skipped, while the four
+# surfaces that did fire (ALERT.md is last-writer-wins, the vault note lands in a
+# 300-section daily note, toast and voice are ephemeral) were none of them a
+# queue. Measured: 15 "Service down, but no promotion to revert" rows in
+# promotions.jsonl from 2026-09-06 to 2026-09-14, and no backlog item for any of
+# them. Every observable below is the *dict key*, not its bool: the POST goes to
+# a dead port, so `"backlog" in res` proves the routing decision while
+# `res["backlog"] is False` would only prove the backend was down.
+# ---------------------------------------------------------------------------
+
+# Hand-written, modelled on the sentence at guardian.py's unobserved-liveness
+# site — it is NOT read out of guardian.py, so rewording that call site would
+# leave clause 1's test green on its own. Two other tests are what actually
+# guard the prose: `test_the_three_sites_that_cannot_act_all_ask_for_a_human`
+# requires each of the three sites to pass the flag, and requires
+# `notify.asks_for_a_human` to still match text that is really in guardian.py, so
+# the fallback cannot rot into dead code while this constant keeps filing.
+NEEDS_HUMAN_BODY = (
+    "lloyd-mc:lloyd-backend: STOPPED without an intentional stop\n\n"
+    "HEAD is 1234abcd and no self-modification is being observed, so this is "
+    "infrastructure rather than a bad change. Not rewriting history — this needs "
+    "a human."
+)
+
+# Clause 2's no-spam fixture: title and body transcribed verbatim from the
+# `supervisord was unreachable` site in guardian.py — the one cannot-act-shaped
+# alert the guardian files at `level="error"` with no trigger and no declaration,
+# *after* it has already fixed the problem by restarting
+# `agent-supervisord.service`, and which fires again on every tick the supervisor
+# stays unreachable. It is the fixture that makes clause 2 bite: a route keyed on
+# severity alone would file a board item for this one every
+# `policy.ALERT_REPEAT_SECONDS` forever. `test_the_no_spam_fixture_is_live` keeps
+# the transcription honest.
+SUPERVISORD_RESTART = (
+    "supervisord was unreachable",
+    "Restarted agent-supervisord.service. No code was reverted — an unreachable "
+    "supervisor is infrastructure, not a bad promotion.",
+)
+
+
+def _routing_notifier(tmp_path):
+    """A Notifier that cannot deliver, so the returned keys carry no other
+    variable. `memory/` has to exist or the vault channel fails too and its
+    False reads as part of the result under test."""
+    import notify
+
+    (tmp_path / "obsidian" / "memory").mkdir(parents=True, exist_ok=True)
+    return notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                           vault_root=str(tmp_path / "obsidian"),
+                           backend_url="http://127.0.0.1:1")
+
+
+def test_needs_human_alert_is_routed_to_a_backlog_task(tmp_path):
+    """Clause 1. An error-level alert whose body declares it needs a human is
+    routed to `_backlog_task`. Before this change the gate read level and
+    trigger only, so this exact call returned ledger/journal/desktop/voice/vault
+    and no `backlog` key — which is why 15 real notices filed nothing."""
+    res = _routing_notifier(tmp_path).alert(
+        "error", "Service down, but no promotion to revert", NEEDS_HUMAN_BODY)
+
+    assert "backlog" in res, f"needs-a-human alert filed no task: {sorted(res)}"
+
+
+def test_plain_error_alert_still_files_no_backlog_task(tmp_path):
+    """Clause 2. The route is a declaration, not a severity, and the fixture is
+    the loudest self-healing alert the guardian owns: the `supervisord was
+    unreachable` site, which files at `level="error"` with no trigger and no
+    declaration *after* it has restarted `agent-supervisord.service` itself and
+    returns `infra_down`. It re-fires for as long as the supervisor stays
+    unreachable, so a gate keyed on severity alone would hand the board a new
+    item every `ALERT_REPEAT_SECONDS` for a condition the guardian already
+    fixed — which is the failure this clause exists to rule out."""
+    res = _routing_notifier(tmp_path).alert("error", *SUPERVISORD_RESTART)
+
+    assert "backlog" not in res, f"an unlabelled error alert reached the board: {res}"
+
+
+def test_the_no_spam_fixture_is_live():
+    """Clause 2's bite depends on its fixture being a live site. The title and
+    body above are transcribed from guardian.py, not read out of it, so a reword
+    would leave this file asserting about a sentence no longer in the tree. The
+    clause rules out a severity-only gate only while that site is still
+    error-level, still carries no `needs_human` flag, and still never says the
+    phrase — all four are checked here. Parsed rather than text-matched because
+    the claims are about argument *positions* (which argument is the level, which
+    the body), which a slice of source text cannot answer."""
+    import ast
+
+    import notify
+
+    src = (Path(__file__).resolve().parent.parent /
+           "agent-services" / "guardian" / "guardian.py").read_text()
+    site = None
+    for node in ast.walk(ast.parse(src)):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "alert"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "self"
+                and len(node.args) >= 3
+                and getattr(node.args[1], "value", None) == SUPERVISORD_RESTART[0]):
+            site = node
+    assert site is not None, "the `supervisord was unreachable` call site is gone"
+    assert ast.literal_eval(site.args[0]) == "error", (
+        "that site is no longer error-level, so it stops separating a "
+        "severity-only gate from a declaration-only one")
+    assert ast.literal_eval(site.args[2]) == SUPERVISORD_RESTART[1], (
+        "guardian.py reworded that alert; re-transcribe SUPERVISORD_RESTART "
+        "instead of editing this assert to match")
+    assert not any(k.arg == "needs_human" for k in site.keywords), (
+        "the site now declares itself, so it is no longer the unlabelled case")
+    assert not notify.asks_for_a_human(*SUPERVISORD_RESTART), (
+        "the fixture text now trips the prose fallback, so clause 2's negative "
+        "case has quietly become a positive one")
+
+
+def test_needs_human_flag_routes_an_alert_that_never_says_so(tmp_path):
+    """Clause 3. The family has three members and only two say the words.
+    "Guardian self-test failed" — fired 2026-09-10T13:26:58Z and
+    2026-09-15T20:34:52Z per the guardian ledger — contains no such phrase, so
+    prose matching alone covers two of three and breaks on every reword. The
+    explicit flag is what covers the whole family."""
+    res = _routing_notifier(tmp_path).alert(
+        "error", "Guardian self-test failed",
+        "The watchdog can no longer perform one of its own preconditions.",
+        needs_human=True)
+
+    assert "backlog" in res, f"needs_human=True did not route: {sorted(res)}"
+
+
+def test_critical_and_trigger_routing_is_unchanged(tmp_path):
+    """Clause 4. The two routes that already worked are untouched: `critical`
+    (every `escalate()`) and a `trigger`-carrying rollback still file."""
+    n = _routing_notifier(tmp_path)
+
+    assert "backlog" in n.alert("critical", "Rollback floor breached",
+                                "target predates the floor"), "critical stopped filing"
+    assert "backlog" in n.alert("error", "Rolled back to last known good",
+                                "reverted a1b2c3d4", trigger="crash"), \
+        "a triggered rollback stopped filing"
+
+
+def test_drill_alert_stays_local_even_while_asking_for_a_human(tmp_path):
+    """Clause 4, second half. `external=False` returns above every external
+    channel, and the new route must sit *behind* that return: on 2026-09-06 two
+    drill rollbacks landed in the live vault daily note naming commits that only
+    existed in a deleted scratch clone."""
+    import notify
+
+    vault = tmp_path / "obsidian" / "memory"
+    vault.mkdir(parents=True)
+    n = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                        vault_root=str(tmp_path / "obsidian"), external=False)
+
+    res = n.alert("error", "drill: service down", NEEDS_HUMAN_BODY, needs_human=True)
+
+    assert set(res) == {"ledger", "alert_file"}, res
+    assert list(vault.glob("*.md")) == [], "a drill wrote into the vault"
+
+
+def test_the_needs_human_route_is_covered_by_repeat_suppression(tmp_path, monkeypatch):
+    """Clause 5. Suppression lives in `Guardian.alert`, above the notifier, so a
+    route added inside `Notifier.alert` inherits it only if the flag survives the
+    wrapper's `**kw` forwarding — and the observable is filings, not fan-outs. A
+    condition that lasts days ticks every 5 s and re-announces once per
+    `policy.ALERT_REPEAT_SECONDS`; each of those must stay one board item.
+
+    The body carries no prose marker on purpose, and the title is the self-test
+    site's, which never says the words either: this is the one test that drives
+    the *flag* through the real wrapper, so a `Guardian.alert` that stopped
+    forwarding `**kw` would file nothing here and go red. Give it a marker in the
+    body and the prose fallback routes the alert, the assert still sees one
+    filing, and the flag becomes untested.
+
+    The real `Notifier.alert` runs here (journal, toast and voice are env-muted
+    for the suite by conftest; the vault root and the backend are pointed away
+    from production, and `_backlog_task` is the one channel counted instead of
+    POSTed)."""
+    import types
+
+    import guardian as G
+    import policy
+
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "s"),
+        guardian_state=str(tmp_path / "g"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0, no_external_alerts=True,
+    )
+    g = G.Guardian(args)
+    g.notifier.external = True
+    g.notifier.vault_root = tmp_path / "obsidian"
+    (tmp_path / "obsidian" / "memory").mkdir(parents=True)
+    filed: list = []
+
+    def _file(title, text, commit, tag):
+        """Counts the filing. The bool mirrors `_backlog_task`'s real return so
+        the stub cannot be the reason an assertion passes — `filed` is the
+        observable here, and it is what the asserts below read."""
+        filed.append(title)
+        return True
+
+    monkeypatch.setattr(g.notifier, "_backlog_task", _file)
+
+    for _ in range(3):
+        g.alert("error", "Guardian self-test failed",
+                "The watchdog can no longer perform one of its own preconditions.",
+                needs_human=True)
+    assert len(filed) == 1, (
+        f"{len(filed)} tasks filed: a repeat inside one ALERT_REPEAT_SECONDS "
+        "window re-files the board")
+
+    # The window expiring files the next one, so this is suppression, not a mute.
+    g._alert_seen["Guardian self-test failed"] -= policy.ALERT_REPEAT_SECONDS + 1
+    g.alert("error", "Guardian self-test failed",
+            "The watchdog can no longer perform one of its own preconditions.",
+            needs_human=True)
+    assert len(filed) == 2, f"an expired window must file again, got {len(filed)}"
+
+
+@contextlib.contextmanager
+def _stub_board(tmp_path, reply: dict):
+    """A loopback stand-in for the backend's task-create endpoint, yielding the
+    server and a `seen` dict holding the path and the decoded JSON body — the
+    bytes `backlog_task_create` would have written a task file from.
+
+    `reply` is what the caller says the backend answers, and the caller passes
+    the shape `app/routers/backlog.py::backlog_task_create` really returns,
+    `{"success": true, "id": N}`. It does **not** echo the request's `name`:
+    `_backlog_task` inspects `created["name"]` to catch a drifted payload, and the
+    real endpoint never sends one, so an echo would have the stub decide the
+    outcome the test exists to observe."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    seen: dict = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen["path"] = self.path
+            seen["body"] = json.loads(
+                self.rfile.read(int(self.headers["Content-Length"])).decode())
+            payload = json.dumps(reply).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        (tmp_path / "obsidian" / "memory").mkdir(parents=True)
+        yield server, seen
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _board_notifier(server, tmp_path):
+    import notify
+
+    return notify.Notifier(
+        ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+        vault_root=str(tmp_path / "obsidian"),
+        backend_url=f"http://127.0.0.1:{server.server_address[1]}")
+
+
+def test_the_needs_human_route_posts_the_payload_the_board_reads(tmp_path):
+    """Crosses the one process boundary this fix opens traffic to: the guardian
+    process POSTs to `/api/backlog/task-create`, and the board's task file is
+    written from that body's `name`/`description`/`status`. Keys are not
+    validated leniently in the caller's favour — a payload sending `title`/`body`
+    instead of `name`/`description` still gets 2xx, and the board keeps a task
+    called "New Task" that says nothing — so `"backlog" in res` is not evidence
+    across this seam. The evidence is `seen["body"]`.
+
+    `res["backlog"]` is asserted last, for what it can prove: the reply carries
+    the real endpoint's no-`name` shape, so the value comes from
+    `_backlog_task`'s no-name branch.
+    `test_a_defaulted_name_from_the_board_reads_as_a_failed_filing` is what shows
+    that branch is a decision and not a constant True."""
+    with _stub_board(tmp_path, {"success": True, "id": 999}) as (server, seen):
+        res = _board_notifier(server, tmp_path).alert(
+            "error", "Service down, but no promotion to revert", NEEDS_HUMAN_BODY)
+
+    assert seen.get("path") == "/api/backlog/task-create", seen
+    assert seen["body"]["name"] == ("[guardian] Service down, but no promotion "
+                                    "to revert"), "the `name` key drifted"
+    assert seen["body"]["status"] == "up_next", (
+        "`backlog_task_create` 400s a status outside _VALID_STATUSES, so any "
+        "other value means the task is never created")
+    assert seen["body"]["priority"] == "high"
+    assert "needs a human" in seen["body"]["description"], (
+        "the filed task lost the sentence that asked for the human")
+    assert res["backlog"] is True, f"a 2xx filing read as a failure: {res}"
+
+
+def test_a_defaulted_name_from_the_board_reads_as_a_failed_filing(tmp_path):
+    """The other side of that same seam. A drifted payload is not an error: the
+    endpoint answers 2xx and files a task called "New Task", which is how a
+    routing fix that posts the wrong keys would quietly report delivered forever.
+    `_backlog_task` reads the reply's `name` for exactly that, so a reply naming a
+    task that is not the guardian's must not come back True — without this, the
+    `is True` above could be the guard defaulting rather than deciding."""
+    with _stub_board(tmp_path, {"success": True, "name": "New Task"}) as (server, seen):
+        res = _board_notifier(server, tmp_path).alert(
+            "error", "Service down, but no promotion to revert", NEEDS_HUMAN_BODY)
+
+    assert seen["body"]["name"].startswith("[guardian] "), seen
+    assert res["backlog"] is False, (
+        "a board that answered with someone else's task was reported as a "
+        "delivered guardian filing")
+
+
+def test_the_three_sites_that_cannot_act_all_ask_for_a_human():
+    """Two things the unit tests cannot see. (1) The flag only routes if the call
+    sites send it: `Guardian.alert` forwards `**kw` unchanged, so a site that
+    omits it is routed by prose alone — and the self-test sentence has no prose
+    to route on. (2) The prose fallback still matches a live sentence, so it
+    cannot quietly become dead code while a hand-written body keeps clause 1
+    green. A call site is not reachable from a unit test without a live
+    supervisor and a promoted commit, so this reads guardian.py's source instead
+    of executing it — the same trade `test_the_drill_passes_no_external_alerts`
+    makes for the drill's flag, tightened to call nodes for the reason below.
+
+    The sites come from the AST, not from splitting the text on `self.alert(`.
+    Text splitting also yields a chunk for every *mention* of that string, and the
+    600 characters after the `escalate()` call run past its closing paren into the
+    repeat-suppression comment in the `def alert` wrapper below it — which quotes
+    the title `"Service down, but no promotion to revert"`. That phantom site
+    carries no flag, so an `any()` over chunks passed while telling the truth
+    about only one of two matches, and a filter on the level literal did not
+    remove it because `escalate` really does call with `"critical"`. A parsed call
+    node is the call site: `ast.get_source_segment` returns its own arguments and
+    nothing else. `self.notifier.alert(...)` is a different receiver and is
+    excluded, which is what we want — this is about the guardian's own sites."""
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent /
+           "agent-services" / "guardian" / "guardian.py").read_text()
+    sites = []
+    for node in ast.walk(ast.parse(src)):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "alert"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "self"):
+            sites.append(ast.get_source_segment(src, node))
+    # The denominator beside the count: guardian.py has 9 `self.alert(` call sites
+    # today. A drop means the extractor stopped matching a real shape — an alert
+    # reached through `self.alert` renamed or called off an alias would otherwise
+    # vanish from this test in silence, and a route nobody calls is exactly the
+    # defect this file exists to catch. Growth is normal, so this is a floor.
+    assert len(sites) >= 9, f"only {len(sites)} `self.alert(` call sites parsed"
+
+    for title in ("Failure with nothing to revert",
+                  "Guardian self-test failed",
+                  "Service down, but no promotion to revert"):
+        at_title = [s for s in sites if f'"{title}"' in s]
+        assert at_title, f"the {title!r} alert call site is gone"
+        assert all("needs_human=True" in s for s in at_title), (
+            f"{title!r} still asks for a human in prose only, so it files nothing")
+
+    # The prose fallback has to have something left to match. `NEEDS_HUMAN_BODY`
+    # is hand-written, so a test built only on it would keep passing after every
+    # sentence in guardian.py was reworded and the fallback route was matching
+    # nothing in the tree. This is the check that says the route is still live,
+    # and it runs on real call sites for the reason above.
+    import notify
+
+    assert any(notify.asks_for_a_human("", s) for s in sites), (
+        "`asks_for_a_human` matches no alert text in guardian.py: the prose was "
+        "reworded everywhere, so delete the fallback from `Notifier.alert` rather "
+        "than leave a route nothing can take")

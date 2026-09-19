@@ -415,7 +415,8 @@ class Guardian:
             # Invariant 1. Nothing was promoted; this is infrastructure.
             self.alert("error", "Failure with nothing to revert",
                        f"{reason}\nHEAD is already the last known good ({target[:8]}). "
-                       "Not rewriting history — this needs a human.")
+                       "Not rewriting history — this needs a human.",
+                       needs_human=True)
             return False
         if not rb.commit_exists(self.repo, target):
             self.escalate("rollback target missing", f"{target} is not in the object store")
@@ -783,7 +784,8 @@ class Guardian:
         if not self.selftest_ok:
             self.alert("error", "Guardian self-test failed",
                        "The watchdog can no longer perform one of its own preconditions. "
-                       "It is still running but may not be able to act.")
+                       "It is still running but may not be able to act.",
+                       needs_human=True)
 
     # ── main loop ──────────────────────────────────────────────────────
     def tick(self) -> str:
@@ -883,7 +885,8 @@ class Guardian:
                            f"{live_reason}\n\nHEAD is "
                            f"{(rb.head_commit(self.repo) or '?')[:8]} and no self-modification "
                            "is being observed, so this is infrastructure rather than a bad "
-                           "change. Not rewriting history — this needs a human.")
+                           "change. Not rewriting history — this needs a human.",
+                           needs_human=True)
                 return "down_unobserved"
             log(f"liveness failure: {live_reason}")
             self.do_rollback("crash", live_reason)
