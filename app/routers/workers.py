@@ -9,6 +9,8 @@ POST /api/workers/enable           — toggle workers.enabled in config.yaml
 GET  /api/workers/pending          — list pending-research artifacts
 GET  /api/workers/pending/read     — read one artifact's full content
 POST /api/workers/pending/promote  — move artifact to a canonical vault location
+     (a `bench-mine` artifact lands its bench-TASK block, validated, not its
+      staging block — see `_bench_task_block`)
 POST /api/workers/pending/reject   — move artifact to pending-research/_rejected/
 """
 
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 from datetime import datetime, timezone
 from functools import partial
@@ -310,6 +313,120 @@ def _parse_frontmatter(content: str) -> tuple[dict, str]:
     return fm, parts[2]
 
 
+# --- bench-mine promotion (#706) -------------------------------------------
+#
+# A staged bench-mine note is TWO documents in one file.
+# `workers/sources/_common.py::write_staging_note` writes the mining run's
+# metadata (`calibration`, `confidence`, `source_refs`, `generated_at`, …) as the
+# file's FIRST frontmatter block, and `bench_mine._stage_and_calibrate` puts the
+# mining turn's answer — the candidate's own bench-task block, fenced in ```
+# whenever the turn pasted a fence anyway; 4 of the 14 files under
+# `_pipeline/vault-derived/pending-research/bench-mine/` are fenced — into the
+# BODY. Promoting the file as it stands therefore puts the STAGING block on top
+# of `lloyd/bench/<file>.md`, and `load_bench_tasks`
+# (`scripts/autoresearch/common.py`) reads only that first block as the task: no
+# `id`, no `category`, no `prompt`, no `objective_checks`. `bench_runner` then
+# posts `task.get("prompt") or task.get("_body")` — the calibration YAML dump —
+# as the prompt, and `judge._score_objective` returns 1.0 for a task with no
+# checks ("no objective layer → full marks"). So the documented human route
+# could satisfy its own acceptance ("the bench goes 11 → >=15") while making the
+# bench strictly worse: four guaranteed-pass tasks. #706 moves the judgement the
+# human gate exists to make into code the gate can test.
+
+#: Frontmatter keys the staging block owns and a bench task must not carry.
+BENCH_STAGING_KEYS: tuple[str, ...] = (
+    "calibration", "confidence", "source_refs", "generated_at",
+)
+
+#: The same fence-stripping rule `bench_mine._candidate_frontmatter` applies to
+#: the raw mining answer, because that answer is what lands in the body verbatim.
+_FENCED_TASK_RE = re.compile(
+    r"^\s*```(?:markdown|md)?\s*\n(.*)\n```\s*$", re.DOTALL)
+
+#: A bench task id that is also safe as a filename.
+_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _bench_task_block(body: str) -> tuple[dict, str]:
+    """The candidate's bench-task frontmatter and its prose, out of a staging body.
+
+    Parsed by exactly the rule `load_bench_tasks` applies to a live bench file —
+    the text starts with `---` and the first ``\n---\n`` closes the block — so
+    what this returns is what the loader will see once it is on top of the
+    landed file. Returns ``({}, "")`` when the body carries no task block.
+    """
+    raw = (body or "").strip()
+    fenced = _FENCED_TASK_RE.match(raw)
+    if fenced:
+        raw = fenced.group(1).strip()
+    if not raw.startswith("---"):
+        return {}, ""
+    end = raw.find("\n---\n", 3)
+    if end < 0:
+        return {}, ""
+    try:
+        fm = yaml.safe_load(raw[3:end]) or {}
+    except Exception:
+        return {}, ""
+    if not isinstance(fm, dict):
+        return {}, ""
+    return fm, raw[end + 5:].strip()
+
+
+def _bench_task_defect(task_fm: dict) -> str:
+    """Why this candidate must not enter the graded bench, or "" when it may.
+
+    The same pair `bench_mine._rejection_reason` refuses to *stage*, applied at
+    the other end of the pipeline — a candidate can also reach here by a
+    hand-`cp` of a staged file, which bypasses the source's own gate. `prompt`
+    and `objective_checks` are what make a task gradeable at all; `category` is
+    what the runner records on every row.
+    """
+    if not task_fm:
+        return "no bench-task frontmatter block in the staging body"
+    if not str(task_fm.get("prompt") or "").strip():
+        return "no prompt to run"
+    checks = task_fm.get("objective_checks")
+    if not isinstance(checks, list) or not checks:
+        return ("no objective_checks — judge._score_objective gives that layer "
+                "full marks, so the landed task is a guaranteed pass")
+    if not str(task_fm.get("category") or "").strip():
+        return "no category — every bench row for it is recorded under 'unknown'"
+    return ""
+
+
+def _bench_default_filename(task_fm: dict, fallback: str) -> str:
+    """Default the destination to the candidate's own task id, as `<id>.md`.
+
+    The point is that the landed `id` equals the file's stem, so two candidates
+    staged under one id collide on the destination instead of landing as two
+    files that both declare it — `load_bench_tasks` keys a task on its
+    frontmatter `id`, so a duplicate id means one task graded twice and another
+    never at all, while the file count still goes up.
+    """
+    claimed = str(task_fm.get("id") or "").strip()
+    if claimed and _ID_SAFE_RE.match(claimed):
+        return f"{claimed}.md"
+    return fallback
+
+
+def _bench_ids_in(dest_dir: Path) -> set[str]:
+    """Every id the bench directory already declares, per the real loader."""
+    from scripts.autoresearch.common import load_bench_tasks
+
+    try:
+        return {str(t.get("id")) for t in load_bench_tasks(dest_dir)}
+    except Exception as exc:
+        # An unreadable bench must not be reported as an empty one: "no ids in
+        # use" is the verdict that lets a duplicate land, and a guard that
+        # cannot see its own input has no verdict to give.
+        logger.warning("promote: could not scan bench ids in %s: %s", dest_dir, exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"could not read the existing bench to check ids: {exc}",
+        )
+
+
 @router.get("/api/workers/pending")
 async def workers_pending(source: str = "", limit: int = 200):
     """List pending-research artifacts with frontmatter + short preview."""
@@ -380,7 +497,17 @@ async def workers_pending_promote(request: Request):
       - destination: directory under obsidian vault (absolute or relative).
         Defaults per-source — see _DEFAULT_DEST. Required for sources without
         a default (gap-fill, session-distill).
-      - filename: override destination filename (defaults to the artifact's name).
+      - filename: override destination filename. Defaults to the artifact's name,
+        except for a `bench-mine` artifact, which defaults to `<task id>.md` so
+        the landed id and the landed stem are the same string.
+
+    A `bench-mine` artifact is treated as the two documents it is (#706): the
+    candidate's bench-TASK block is what lands, the staging block does not, and a
+    candidate whose task block cannot be graded (no prompt, no objective_checks,
+    no category, no task block at all) is refused with 400 and nothing is
+    written — see `_bench_task_defect`. Its `id` is rewritten to the destination
+    stem and a stem the bench already declares is refused with 409, so several
+    candidates staged under one id cannot all land.
     """
     data = await request.json()
     src = _safe_pending_path(data.get("path", ""))
@@ -395,18 +522,60 @@ async def workers_pending_promote(request: Request):
             detail=f"no default destination for source '{src_name}' — provide 'destination'",
         )
     dest_dir = _safe_vault_dest(dest_dir_str)
-    dest_dir.mkdir(parents=True, exist_ok=True)
 
     filename = data.get("filename") or src.name
+    staging_only = src_name == "bench-mine"
+
+    # Read before the destination is resolved: for a bench-mine artifact the
+    # default filename comes from inside the file (its own task id).
+    try:
+        content = src.read_text(encoding="utf-8")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"read failed: {e}")
+    fm, body = _parse_frontmatter(content)
+
+    if staging_only:
+        task_fm, task_body = _bench_task_block(body)
+        defect = _bench_task_defect(task_fm)
+        if defect:
+            raise HTTPException(
+                status_code=400,
+                detail=f"bench-mine candidate is not a gradeable bench task: {defect}",
+            )
+        if not data.get("filename"):
+            filename = _bench_default_filename(task_fm, src.name)
+
     dest_path = _safe_vault_dest(str(dest_dir / filename))
 
     if dest_path.exists():
         raise HTTPException(status_code=409, detail=f"destination exists: {dest_path}")
 
-    # Update frontmatter review_status before move.
-    try:
-        content = src.read_text(encoding="utf-8")
-        fm, body = _parse_frontmatter(content)
+    if staging_only:
+        # `load_bench_tasks` keys on the frontmatter `id`, so an id already
+        # declared under a DIFFERENT filename (a hand-cp'd staged file, the case
+        # the human route also has to survive) is still a duplicate.
+        stem = dest_path.stem
+        if stem in _bench_ids_in(dest_path.parent):
+            raise HTTPException(
+                status_code=409,
+                detail=f"bench id '{stem}' is already declared under {dest_path.parent}",
+            )
+        # The landed file is the bench task and nothing else. Where the staging
+        # verdict lives after the move: the run record's `meta.calibration` and
+        # `artifact_path` (workers.db) already name it, and the source is
+        # consumed by this call.
+        task_fm["id"] = stem
+        task_fm["review_status"] = "promoted"
+        task_fm["promoted_at"] = datetime.now(timezone.utc).isoformat()
+        new_content = (
+            "---\n"
+            + yaml.dump(task_fm, default_flow_style=False, allow_unicode=True)
+            + "---\n\n"
+            + task_body
+            + "\n"
+        )
+    else:
+        # Update frontmatter review_status before move.
         if fm:
             fm["review_status"] = "promoted"
             fm["promoted_at"] = datetime.now(timezone.utc).isoformat()
@@ -418,6 +587,9 @@ async def workers_pending_promote(request: Request):
             )
         else:
             new_content = content
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
         dest_path.write_text(new_content, encoding="utf-8")
         src.unlink()
     except Exception as e:
