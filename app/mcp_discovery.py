@@ -14,6 +14,11 @@ bare MCP name. To disable any tool, add its bare name to
 import asyncio
 
 from app.config import CONFIG
+# The unwrapper is shared with tool dispatch in `app/harness/mcp_pool.py`,
+# which had the same opaque "unhandled errors in a TaskGroup" string in front
+# of the model and never unwrapped it (#936). One implementation, not one per
+# caller — see the module docstring for why it sits outside `app.harness`.
+from app.exception_text import root_cause
 
 _MCP_SERVER_META: dict[str, dict] = {
     "lloyd-mcp": {
@@ -301,18 +306,6 @@ def context_relief_kwargs() -> dict:
     return out
 
 
-def _root_cause(exc: BaseException) -> str:
-    """Innermost message from a (possibly nested) ExceptionGroup.
-
-    anyio task groups repackage a failure as an ExceptionGroup whose str()
-    is "unhandled errors in a TaskGroup (1 sub-exception)" — true, and
-    useless in a UI. Unwrap to the part a human can act on.
-    """
-    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
-        exc = exc.exceptions[0]
-    return str(exc) or exc.__class__.__name__
-
-
 async def _discover_mcp_tools(server_name: str, cfg: dict) -> tuple[list[dict], str | None]:
     """Discover tools from an MCP server. Supports SSE/HTTP and stdio.
 
@@ -392,4 +385,4 @@ async def _discover_mcp_tools(server_name: str, cfg: dict) -> tuple[list[dict], 
     except asyncio.TimeoutError:
         return [], f"Timeout querying {server_name}"
     except Exception as exc:
-        return [], _root_cause(exc)
+        return [], root_cause(exc)

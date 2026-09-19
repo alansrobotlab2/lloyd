@@ -35,6 +35,7 @@ except Exception:  # pragma: no cover - older SDK
     create_mcp_http_client = None
 
 from app.config import service_url
+from app.exception_text import root_cause
 from app.harness.errors import ToolDiscoveryError, ToolDispatchError
 
 # The aggregator's request credential (#1053). Stdlib-only module, and the one
@@ -524,21 +525,29 @@ class MCPPool:
             # still working — and a second copy of a mutating call is a
             # duplicated side effect the model never sees. Those are
             # surfaced as a tool error that says so, and not retried.
+            #
+            # The cause goes through `root_cause`, not the raw exception: a
+            # collapsed server-side TaskGroup stringifies to "unhandled errors
+            # in a TaskGroup (1 sub-exception)" and nothing else (#936), which
+            # tells the caller neither what failed nor whether "read its state
+            # back" has anything to look for. The group stays on the chain via
+            # `from exc`, so the traceback is still intact for the log.
+            cause = root_cause(exc)
             if not self._retry_safe(bare):
                 logger.warning(
                     "mcp_pool: %s on %s failed (%s); not retried — the tool is not "
                     "annotated read-only or idempotent and may have run",
-                    bare, server_name, exc,
+                    bare, server_name, cause,
                 )
                 raise ToolDispatchError(
                     name,
-                    f"transport error: {exc}. The call was NOT retried because {bare} "
+                    f"transport error: {cause}. The call was NOT retried because {bare} "
                     f"is not idempotent and the server may have run it — read its "
                     f"state back (status, log, marker file) before calling it again.",
                 ) from exc
             logger.warning(
                 "mcp_pool: %s on %s failed (%s); reconnecting and retrying once",
-                bare, server_name, exc,
+                bare, server_name, cause,
             )
             try:
                 await self._reopen()
@@ -554,15 +563,20 @@ class MCPPool:
                 # Still failing after a fresh connection: the server is
                 # genuinely down, not a blip. Evict so the next turn builds
                 # a new pool rather than reusing this one.
+                #
+                # Same unwrap as the site above (#936): this is the error that
+                # concludes the server is down, and a group summary here said
+                # both "down" and nothing about why.
                 self._poisoned = True
                 _evict_pool(self)
                 self._shutdown_event.set()
+                retry_cause = root_cause(retry_exc)
                 logger.warning(
                     "mcp_pool: %s on %s failed again after reconnect (%s); pool evicted",
-                    bare, server_name, retry_exc,
+                    bare, server_name, retry_cause,
                 )
                 raise ToolDispatchError(
-                    name, f"transport error: {retry_exc}"
+                    name, f"transport error: {retry_cause}"
                 ) from retry_exc
 
         # MCP CallToolResult.content is a list of TextContent /

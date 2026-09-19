@@ -23,6 +23,7 @@ import socket
 import sys
 from pathlib import Path
 
+import anyio
 import pytest
 import pytest_asyncio
 
@@ -310,6 +311,167 @@ async def test_persistent_transport_failure_still_gives_up(pool, monkeypatch):
     back = await pool.call_tool("Bash", {"command": "echo restored"},
                                 session_id="transport-probe")
     assert back["is_error"] is False
+
+
+#: The entire text a transport collapse used to report (#936): anyio's
+#: TaskGroup summary, with the exception that actually failed left one level
+#: down. 52 rows across `_pipeline/trajectories/2026-09-*.jsonl` through
+#: 2026-09-17 carried nothing but this, over 7 tools and 20 sessions.
+TASKGROUP_SUMMARY = "unhandled errors in a TaskGroup (1 sub-exception)"
+
+
+async def _taskgroup_error(message: str = "", *, nest: bool = False) -> BaseException:
+    """Hand back the ExceptionGroup anyio itself raises for a failing task.
+
+    Built, not spelled out: every assertion below is about the exact string a
+    collapsed group carries, so a hand-rolled `ExceptionGroup` could test
+    against a message production never sends. `nest` wraps the inner group in
+    a second task group — what a client that runs its own task group on top of
+    the MCP client's produces — and an empty `message` reproduces the inner
+    error that has no text at all.
+    """
+
+    async def boom() -> None:
+        raise ConnectionError(message)
+
+    async def wrap() -> None:
+        try:
+            async with anyio.create_task_group() as inner:
+                inner.start_soon(boom)
+        except BaseException as exc:      # re-raise: the outer group re-wraps it
+            raise exc
+
+    try:
+        async with anyio.create_task_group() as outer:
+            outer.start_soon(wrap if nest else boom)
+    except BaseException as exc:
+        return exc
+    raise AssertionError("the task group did not fail")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_a_taskgroup_collapse_surfaces_the_cause_it_swallowed(pool, monkeypatch):
+    """The tool error names the exception anyio swallowed, not the group.
+
+    The failure every one of those 52 trajectory rows describes: the
+    server-side TaskGroup dies before the handler's own error can surface, so
+    the caller was shown the group's summary and could not tell a read timeout
+    from a dead server — which is also what made "the server may have run it,
+    read its state back" impossible to act on.
+    """
+    from app.harness.errors import ToolDispatchError
+
+    sample = await _taskgroup_error("read timeout inside the handler")
+    assert str(sample) == TASKGROUP_SUMMARY, str(sample)   # anyio's real string
+
+    async def collapsed(*args, **kwargs):
+        cause = await _taskgroup_error("read timeout inside the handler")
+        raise cause
+
+    monkeypatch.setattr(pool, "_invoke", collapsed)
+    with pytest.raises(ToolDispatchError) as exc:
+        await pool.call_tool("Bash", {"command": "echo collapsed"},
+                             session_id="unwrap-probe")
+    msg = str(exc.value)
+    assert "read timeout inside the handler" in msg, msg
+    assert TASKGROUP_SUMMARY not in msg, msg
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_a_group_whose_inner_error_is_silent_names_that_class(pool, monkeypatch):
+    """An inner error can carry no text; then its class name is the most
+    anyone can say — and it is still more than the group summary said."""
+    from app.harness.errors import ToolDispatchError
+
+    sample = await _taskgroup_error("")
+    assert str(sample.exceptions[0]) == "", str(sample.exceptions[0])
+
+    async def collapsed(*args, **kwargs):
+        cause = await _taskgroup_error("")
+        raise cause
+
+    monkeypatch.setattr(pool, "_invoke", collapsed)
+    with pytest.raises(ToolDispatchError) as exc:
+        await pool.call_tool("Bash", {"command": "echo silent"},
+                             session_id="unwrap-probe")
+    msg = str(exc.value)
+    assert "ConnectionError" in msg, msg
+    assert TASKGROUP_SUMMARY not in msg, msg
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_giving_up_after_reconnect_names_the_inner_cause(pool, monkeypatch):
+    """The give-up path is the one that concludes "the server is genuinely
+    down", so a group summary there is the worst case of all: the one
+    sentence the model acts on carried no reason."""
+    from app.harness.errors import ToolDispatchError
+
+    async def collapsed(*args, **kwargs):
+        cause = await _taskgroup_error("connection reset by peer mid-response")
+        raise cause
+
+    monkeypatch.setattr(pool, "_invoke", collapsed)
+    with pytest.raises(ToolDispatchError) as exc:
+        await pool.call_tool("_BackgroundTaskDrain", {},
+                             session_id="unwrap-down-probe")
+    msg = str(exc.value)
+    assert "connection reset by peer mid-response" in msg, msg
+    assert TASKGROUP_SUMMARY not in msg, msg
+    assert pool._poisoned is True
+
+    monkeypatch.undo()
+    await pool._reopen()
+    back = await pool.call_tool("Bash", {"command": "echo restored-again"},
+                                session_id="unwrap-probe")
+    assert back["is_error"] is False
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_a_group_wrapping_a_group_unwraps_to_the_deepest_message(pool, monkeypatch):
+    """Two layers of task group is two summaries deep from the cause, so
+    unwrapping one level is not enough — and each layer adds its own copy of
+    the same useless line."""
+    from app.harness.errors import ToolDispatchError
+
+    sample = await _taskgroup_error("handler died two layers down", nest=True)
+    assert isinstance(sample.exceptions[0], BaseExceptionGroup), repr(sample)
+    assert str(sample) == TASKGROUP_SUMMARY, str(sample)
+
+    async def collapsed(*args, **kwargs):
+        cause = await _taskgroup_error("handler died two layers down", nest=True)
+        raise cause
+
+    monkeypatch.setattr(pool, "_invoke", collapsed)
+    with pytest.raises(ToolDispatchError) as exc:
+        await pool.call_tool("Bash", {"command": "echo nested"},
+                             session_id="unwrap-probe")
+    msg = str(exc.value)
+    assert "handler died two layers down" in msg, msg
+    assert TASKGROUP_SUMMARY not in msg, msg
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_a_plain_transport_error_is_still_passed_through_verbatim(pool, monkeypatch):
+    """An error that was never opaque is not reformatted (#936 clause 3).
+
+    Pinned by equality rather than containment on purpose: "unwrap the group"
+    must not become "rewrite every transport message", and the retry guidance
+    from `ae63032` is part of what the model reads on this path.
+    """
+    from app.harness.errors import ToolDispatchError
+
+    async def hangup(*args, **kwargs):
+        raise ConnectionError("plain socket hangup")
+
+    monkeypatch.setattr(pool, "_invoke", hangup)
+    with pytest.raises(ToolDispatchError) as exc:
+        await pool.call_tool("Bash", {"command": "echo plain"},
+                             session_id="unwrap-probe")
+    assert str(exc.value) == (
+        "Bash: transport error: plain socket hangup. The call was NOT retried "
+        "because Bash is not idempotent and the server may have run it — read "
+        "its state back (status, log, marker file) before calling it again."
+    )
 
 
 @pytest.mark.asyncio(loop_scope="module")

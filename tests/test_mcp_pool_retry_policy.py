@@ -16,12 +16,35 @@ from __future__ import annotations
 
 import asyncio
 
+import anyio
 import pytest
 
 from app.harness import mcp_pool as M
 from app.harness.errors import ToolDispatchError
 
 SERVER = next(iter(M.DEFAULT_LLOYD_MCP_SERVERS))
+
+
+def _taskgroup_error(message: str) -> BaseException:
+    """The ExceptionGroup anyio actually raises for a failing task.
+
+    `_failing_invoke` below stands in for a transport collapse with a plain
+    error that carries the group's text; this builds the real nested shape, so
+    the file covers both the error that needs unwrapping and the one that does
+    not.
+    """
+
+    async def build():
+        try:
+            async with anyio.create_task_group() as tg:
+                async def boom():
+                    raise ConnectionError(message)
+                tg.start_soon(boom)
+        except BaseException as exc:
+            return exc
+        raise AssertionError("the task group did not fail")
+
+    return asyncio.run(build())
 
 
 def _pool(monkeypatch, annotations: dict[str, dict]):
@@ -71,6 +94,34 @@ def test_a_mutating_tool_is_not_resent_after_a_transport_error(monkeypatch):
     assert calls == ["automod_gate"], "one attempt, never a second gate"
     assert "NOT retried" in str(exc.value) and "may have run" in str(exc.value)
     assert pool._poisoned is False, "one unretried failure does not evict the pool"
+
+
+def test_the_unwrapped_cause_travels_with_the_may_have_run_warning(monkeypatch):
+    """#936: unwrapping the group must not cost the caller the guidance.
+
+    `ae63032` added "the server may have run it — read its state back" because
+    a transport error says nothing about whether the side effect landed. That
+    instruction is only actionable if the error also says WHAT failed, so the
+    two halves belong in one message: the innermost exception from a real anyio
+    group, and the retry guidance word for word as it stands today.
+    """
+    pool = _pool(monkeypatch, {"automod_gate": {}})
+    group = _taskgroup_error("read timeout inside the handler")
+    attempts: list[str] = []
+
+    async def collapsed(server_name, bare, args, budget, meta):
+        attempts.append(bare)
+        raise group
+
+    monkeypatch.setattr(pool, "_invoke", collapsed)
+    with pytest.raises(ToolDispatchError) as exc:
+        asyncio.run(pool.call_tool("automod_gate", {"round_id": "SM_x"}))
+    assert attempts == ["automod_gate"], "unwrapping changes nothing about retry"
+    message = str(exc.value)
+    assert "read timeout inside the handler" in message, message
+    assert "unhandled errors in a TaskGroup" not in message, message
+    assert "NOT retried" in message and "may have run" in message, message
+    assert "read its state back" in message, message
 
 
 def test_a_read_only_tool_is_still_retried_once(monkeypatch):
