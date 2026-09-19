@@ -28,9 +28,12 @@ code under test.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 _VENV = ROOT / ".venvs" / "lloyd" / "bin" / "python"
@@ -79,8 +82,16 @@ def _provision_store(db: Path, env: dict) -> None:
 
 
 def _run(tmp_path: Path, *args: str,
-         kg_db: Path | None = None) -> subprocess.CompletedProcess:
-    facts = tmp_path / "facts"
+         kg_db: Path | None = None,
+         facts_root: Path | None = None) -> subprocess.CompletedProcess:
+    """Run the eval against an empty facts root unless one is named.
+
+    `facts_root` exists for the #1250 tests below, which need the readable fact
+    tree and the store's index of it to DISAGREE — the index is what
+    `corpus.facts` counts, and the read path is what produced the six zeroed
+    arms. Same env either way.
+    """
+    facts = facts_root if facts_root is not None else tmp_path / "facts"
     facts.mkdir(exist_ok=True)
     db = kg_db if kg_db is not None else tmp_path / "kg.sqlite"
     env = dict(os.environ)
@@ -329,5 +340,203 @@ def test_the_nightly_artifact_and_stdout_carry_the_latency_verdict(tmp_path):
         assert f"{budget:,.0f} ms" in printed, printed
         assert ("OVER BUDGET" if verdict["over"] else "inside budget") in printed, printed
         assert f"{avg:,.0f} ms" in printed, printed
+    finally:
+        _cleanup(label)
+
+
+# ---------------------------------------------------------------------------
+# The fact leg (#1250)
+# ---------------------------------------------------------------------------
+
+def _provision_fact_tree(tmp_path: Path) -> tuple[Path, Path]:
+    """A real fact tree AND a store that indexes it — then the tree is emptied.
+
+    Returns (facts_root, kg_db) with the index holding one fact and the readable
+    tree holding none, which is the exact disagreement that hid the six zeroed
+    arms of 2026-09-18: `corpus.facts` is the store's index count and stays
+    non-zero, while the read path the eval exercises returns nothing. Built
+    through the named routes (`KGStore`, `facts_idx.reindex`) rather than by
+    hand-writing sqlite, so the index is what a real rebuild would have written.
+
+    The file shape is the one `agent_mcp/retrieval.py` parses: YAML frontmatter
+    with a `facts:` list, under `<facts_root>/<entity-slug>/<Entity>-<category>.md`.
+    """
+    facts = tmp_path / "fact-tree"
+    (facts / "lloyd").mkdir(parents=True, exist_ok=True)
+    (facts / "lloyd" / "Lloyd-state.md").write_text(
+        "---\n"
+        "entity: Lloyd\n"
+        "facts:\n"
+        "- fact: Lloyd is the agent that runs this box\n"
+        "  confidence: 0.9\n"
+        "  provenance: STATED\n"
+        "  created_at: '2026-09-01T00:00:00'\n"
+        "---\n"
+        "\n"
+        "# Lloyd\n",
+        encoding="utf-8")
+    db = tmp_path / "kg-indexed.sqlite"
+    env = dict(os.environ)
+    env["LLOYD_FACTS_ROOT"] = str(facts)
+    env["LLOYD_KG_DB"] = str(db)
+    _provision_store(db, env)
+    subprocess.run(
+        [str(PY), "-c",
+         "import sys, pathlib\n"
+         "from app.kg_store import KGStore\n"
+         "s = KGStore(sys.argv[1])\n"
+         "s.entities.register('Lloyd', kind='system')\n"
+         "s.edges.add({'source': 'Lloyd', 'target': 'Mission Control',"
+         " 'type': 'documents', 'origin': 'test'})\n"
+         "s.facts_idx.reindex(root=pathlib.Path(sys.argv[2]))\n"
+         "assert s.stats()['facts'] == 1, s.stats()\n"
+         "s.close()\n",
+         str(db), str(facts)],
+        cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=180, check=True)
+    # The index now claims a fact the readable tree no longer holds. Same shape
+    # as the gate arm: the corpus is populated, the read path is not.
+    shutil.rmtree(facts / "lloyd")
+    (facts / "lloyd").mkdir()
+    return facts, db
+
+
+def test_a_zeroed_fact_leg_is_recorded_as_unscoreable_not_as_zero(tmp_path):
+    """Every fact leg empty while the store indexes facts = no measurement (#1250).
+
+    Six `automod-check` arms on 2026-09-18 recorded `fact_entity_recall_avg:
+    0.0` — a number, non-null, scored — with per-query `n_facts: 0`,
+    `error: null` on all 20 queries, `errors: 0` and `corpus_ok: true`, against
+    a corpus naming 315,462 facts. `corpus_ok` could not catch that because it is
+    `bool(corpus["edges_active"]) and bool(corpus["entities"])`: the graph half
+    only. And the paired check's `evaluate()` has no zero-guard, so the 0.0
+    became a regression and a rollback reason for a commit that touched nothing
+    in the fact path. This drives the real CLI over a world where the index and
+    the read path disagree, and asserts the artifact cannot be mistaken for a
+    measurement: null metric, `corpus_ok: false`, and the resolved facts root
+    printed — the line that lets a reader see WHICH root read nothing.
+    """
+    label = "pytest-zeroed-fact-leg"
+    _cleanup(label)
+    facts, db = _provision_fact_tree(tmp_path)
+    try:
+        proc = _run(tmp_path, "--label", label, kg_db=db, facts_root=facts)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = list(BASELINES.glob(f"{label}-*.json"))
+        assert len(written) == 1, "the run wrote no artifact"
+        rec = json.loads(written[0].read_text())
+
+        assert rec["corpus"]["facts"] > 0, (
+            "the world this test needs is a NON-EMPTY fact index beside an "
+            "unreadable fact tree; a zero here means the fixture did not index")
+        assert rec["summary"]["overall"]["fact_entity_recall_avg"] is None, (
+            "a fact leg that read nothing was recorded as a scored number — "
+            "the exact defect: 'did not measure' and 'measured zero' read alike")
+        assert rec["corpus_ok"] is False, (
+            "an arm that scored nothing must not report a corpus it could read; "
+            "this is the flag the paired check refuses on")
+        assert rec["fact_leg"]["empty"] is True
+        assert rec["fact_leg"]["n_facts_total"] == 0
+        assert rec["fact_leg"]["facts_in_corpus"] == rec["corpus"]["facts"]
+
+        per_query = [r["result_summary"] for r in rec["records"]]
+        assert all(q["n_facts"] == 0 for q in per_query), per_query
+        # The two new per-query fields exist on a leg that read nothing, so a
+        # reader can tell "0 read" from "0 matched" from the artifact alone.
+        assert all("n_fact_reads_failed" in q and "fact_read_first_error" in q
+                   for q in per_query), per_query
+
+        assert "facts_root =" in proc.stderr, (
+            f"the refusal must name the root it read:\n{proc.stderr}")
+        assert str(facts) in proc.stderr, (
+            f"the printed facts root is not the one this run was given:\n{proc.stderr}")
+        # The refusal adds a verdict, it does not remove anything: a reader who
+        # already depends on the `corpus` block and the `corpus_ok` flag still
+        # finds both, which is what this file's shape helper checks.
+        _assert_corpus_shape(rec)
+    finally:
+        _cleanup(label)
+
+
+def test_one_query_with_a_legitimate_zero_fact_leg_keeps_its_number(tmp_path):
+    """A per-query zero is a real score; only an all-zero leg is not (#1250).
+
+    The healthy arm's per-query fact counts are nineteen 10s and one 1 — zero
+    queries at 0 — so a guard keyed per-query would null a legitimate result.
+    This world has two queries: one whose entity has facts, one whose entity
+    directory exists but holds no fact files (an entity-resolution miss, a real
+    0.0 for that query). The run must keep its numeric average — 1.0 and 0.0
+    over two queries — with `corpus_ok` true and the empty query NAMED in
+    `empty_fact_queries` rather than the leg declared unscorable.
+    """
+    label = "pytest-partial-fact-leg"
+    _cleanup(label)
+    facts = tmp_path / "fact-tree-partial"
+    (facts / "lloyd").mkdir(parents=True, exist_ok=True)
+    (facts / "lloyd" / "Lloyd-state.md").write_text(
+        "---\nentity: Lloyd\nfacts:\n"
+        "- fact: Lloyd is the agent that runs this box\n  confidence: 0.9\n"
+        "  provenance: STATED\n  created_at: '2026-09-01T00:00:00'\n---\n\n# Lloyd\n",
+        encoding="utf-8")
+    (facts / "Zzzghost").mkdir()  # seedable entity, genuinely no facts: a real 0
+    db = tmp_path / "kg-partial.sqlite"
+    env = dict(os.environ)
+    env.update({"LLOYD_FACTS_ROOT": str(facts), "LLOYD_KG_DB": str(db)})
+    _provision_store(db, env)
+    subprocess.run(
+        [str(PY), "-c",
+         "import sys, pathlib\n"
+         "from app.kg_store import KGStore\n"
+         "s = KGStore(sys.argv[1])\n"
+         "s.entities.register('Lloyd', kind='system')\n"
+         "s.entities.register('Zzzghost', kind='system')\n"
+         "s.edges.add({'source': 'Lloyd', 'target': 'Mission Control',"
+         " 'type': 'documents', 'origin': 'test'})\n"
+         "s.facts_idx.reindex(root=pathlib.Path(sys.argv[2]))\n"
+         "assert s.stats()['facts'] == 1, s.stats()\n"
+         "s.close()\n",
+         str(db), str(facts)],
+        cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=180, check=True)
+    queries = tmp_path / "queries-mixed.yaml"
+    queries.write_text(
+        "queries:\n"
+        "  - id: has-facts\n"
+        "    query: what is lloyd\n"
+        "    category: single\n"
+        "    expect_entities: [Lloyd]\n"
+        "    expect_docs: [lloyd]\n"
+        "  - id: no-facts\n"
+        "    query: what is zzzghost\n"
+        "    category: single\n"
+        "    expect_entities: [Zzzghost]\n"
+        "    expect_docs: [lloyd]\n"
+    )
+    try:
+        proc = _run(tmp_path, "--queries", str(queries), "--label", label,
+                    kg_db=db, facts_root=facts)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = list(BASELINES.glob(f"{label}-*.json"))
+        assert len(written) == 1, "the run wrote no artifact"
+        rec = json.loads(written[0].read_text())
+
+        per_query = {r["id"]: r for r in rec["records"]}
+        assert {r["result_summary"]["n_facts"] > 0 for r in rec["records"]} == {True, False}, (
+            "this test needs one query with facts and one without; the world "
+            f"produced {[(k, v['result_summary']['n_facts']) for k, v in per_query.items()]}")
+        scored = [r["scoring"]["fact_entity_recall"] for r in rec["records"]
+                  if r["scoring"]["fact_entity_recall"] is not None]
+        expected = sum(scored) / len(scored)
+        assert rec["summary"]["overall"]["fact_entity_recall_avg"] == pytest.approx(expected), (
+            "a run where SOME queries returned facts had its real number taken "
+            "away — the guard must be total-across-queries, not per-query")
+        assert rec["corpus_ok"] is True, (
+            "a partial fact leg is a score, and `corpus_ok: false` would refuse "
+            "a legitimately imperfect run")
+        assert rec["fact_leg"]["empty"] is False
+        assert rec["fact_leg"]["n_facts_total"] > 0
+        assert "no-facts" in rec["fact_leg"]["empty_fact_queries"], rec["fact_leg"]
+        assert rec["fact_leg"]["n_fact_reads_failed_total"] == 0, (
+            "an entity that simply has no fact files is not a failed read; "
+            "counting it would make every healthy arm look broken")
+        assert "fact leg read NOTHING" not in proc.stderr, proc.stderr
     finally:
         _cleanup(label)

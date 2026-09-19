@@ -302,7 +302,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
 
 
 def _load_run(baselines: Path, label: str) -> dict | None:
-    """Newest run record for `label` as {overall, corpus_ok, corpus}.
+    """Newest run record for `label` as {overall, corpus_ok, corpus, fact_coverage}.
 
     `corpus_ok` is what `eval/run_eval.py` records about the DATA it scored.
     An arm that measured an empty graph is not a low score, it is a
@@ -310,16 +310,26 @@ def _load_run(baselines: Path, label: str) -> dict | None:
     identically with the graph deleted, it looks like a perfectly ordinary
     result. Older records predate the field; absent is treated as unknown
     rather than as False, so a stale baseline cannot fabricate a regression.
+
+    `corpus_ok` cannot see the FACT tree, so `fact_coverage` is derived here
+    from the run's own records (#1250): the six arms of 2026-09-18 recorded
+    `fact_entity_recall_avg: 0.0` with `corpus_ok: true` against a corpus
+    naming 315,462 facts, and nothing else in the artifact says the fact leg
+    read nothing. It is coverage evidence about the read path, never a restated
+    metric — no metric in `overall` is reinterpreted here, no null is filled,
+    no missing metric defaults to 0. See `evaluate`.
     """
     runs = sorted(Path(baselines).glob(f"*{label}*.json"), key=lambda p: p.stat().st_mtime)
     if not runs:
         return None
     try:
         blob = json.loads(runs[-1].read_text())
+        records = blob.get("records") or []
         return {"overall": blob["summary"]["overall"],
                 "corpus_ok": blob.get("corpus_ok"),
                 "corpus": blob.get("corpus") or {},
-                **_doc_coverage(blob.get("records") or [])}
+                "fact_coverage": fact_read_coverage(records),
+                **_doc_coverage(records)}
     except (OSError, ValueError, KeyError):
         return None
 
@@ -357,6 +367,93 @@ def unanswered_doc_queries(arm: dict) -> list[str]:
     if empty and len(empty) < total:
         return empty
     return []
+
+
+def fact_read_coverage(records: list) -> dict:
+    """How much of the fact tree a run's fact leg actually READ, per run.
+
+    The ONE implementation: `eval/run_eval.py` imports this rather than keeping
+    its own copy, and `workers` reads it off the loaded artifact. Two copies of
+    a guard is how a guard ends up disagreeing with itself across a process
+    boundary, which is the defect class #1250 is filed under.
+
+    `result_summary.n_facts` is the only per-query record of the fact leg's
+    yield, so it is the only evidence separating "the fact leg read nothing"
+    from "the fact leg read everything and matched nothing". Records predating
+    `result_summary` report nothing, so a stale artifact cannot refuse a
+    promotion it never measured.
+
+    The failed-read counter is aggregated defensively and never required:
+    artifacts written before #1250 lack `n_fact_reads_failed` entirely, and a
+    coverage block that demanded the key would read a healthy old baseline as an
+    outage — the inverse of the bug this exists to catch.
+    """
+    reported = [r for r in records
+                if isinstance(r.get("result_summary"), dict)
+                and isinstance(r["result_summary"].get("n_facts"), int)]
+    empty = [str(r.get("id") or r.get("query")) for r in reported
+             if r["result_summary"]["n_facts"] == 0 and not r.get("error")]
+    failed = 0
+    first_error: str | None = None
+    for r in reported:
+        rs = r["result_summary"]
+        try:
+            failed += int(rs.get("n_fact_reads_failed") or 0)
+        except (TypeError, ValueError):
+            pass
+        first_error = first_error or rs.get("fact_read_first_error")
+    return {
+        "n_records": len(records),
+        "n_facts_reports": len(reported),
+        "n_facts_total": sum(int(r["result_summary"]["n_facts"]) for r in reported),
+        "empty_fact_queries": empty,
+        "n_fact_reads_failed_total": failed,
+        "fact_read_first_error": first_error,
+    }
+
+
+def fact_leg_empty(cov: dict, n_corpus_facts: int) -> bool:
+    """True when this run's fact leg read NOTHING on a corpus that has facts.
+
+    `corpus_ok` cannot see this and never could: it is
+    `bool(corpus["edges_active"]) and bool(corpus["entities"])`, the graph half
+    only, and `corpus["facts"]` is the store's index count — what the index
+    holds, not what recall could read. So from 2026-09-18T18:03Z six paired
+    check arms recorded `fact_entity_recall_avg: 0.0` with `corpus_ok: true` and
+    `errors: 0` against `corpus.facts: 315462`, because every per-entity fact
+    read was being discarded by a bare `except Exception: continue`.
+
+    Total-across-queries, never per query. A per-query fact count of 0 is a
+    legitimate score — the last healthy arm's distribution is nineteen 10s and
+    one 1, with no query at 0 — so only the whole run reading nothing is a
+    non-measurement. Every query must also have REPORTED its count: a run whose
+    records predate `result_summary` is silent, and silence is not evidence.
+    """
+    reported = int(cov.get("n_facts_reports") or 0)
+    if reported <= 0 or reported != int(cov.get("n_records") or 0):
+        return False
+    return int(cov.get("n_facts_total") or 0) == 0 and int(n_corpus_facts or 0) > 0
+
+
+def empty_fact_leg(arm: dict) -> bool:
+    """Whether `arm`'s fact leg read nothing while the fact tree is not empty.
+
+    The fact-leg mirror of `unanswered_doc_queries`, sitting beside it for a
+    reason: the document guard refuses an arm the DAEMON failed (a strict
+    subset of queries), while this one refuses an arm whose EVERY query read
+    nothing. That is deliberately the opposite strictness, because the two
+    failures have opposite shapes — the daemon drops some requests, a broken
+    fact path drops all of them and records them as zeros.
+
+    Unlike `unanswered_doc_queries` this returns a verdict and not a list:
+    there is no per-query subset to name, only the run total. What the leg
+    actually hit, when the artifact carries it, is
+    `arm["fact_coverage"]["fact_read_first_error"]`.
+    """
+    cov = arm.get("fact_coverage")
+    if not isinstance(cov, dict):
+        return False
+    return fact_leg_empty(cov, int(((arm.get("corpus") or {}).get("facts")) or 0))
 
 
 @contextmanager
@@ -513,6 +610,21 @@ def evaluate(current: dict, baseline: dict, noise: dict,
 
     for key in ARMED_METRICS:
         if key not in current or key not in baseline:
+            continue
+        if current[key] is None or baseline[key] is None:
+            # A null armed metric is a non-measurement, and #1250 is what makes
+            # one exist: `run_eval` now records `fact_entity_recall_avg: null`
+            # instead of a scored 0.0 when every query's fact leg read nothing on
+            # a corpus that indexes facts. Comparing it is not possible — the
+            # `float()` below raised `TypeError: float() argument must be a string
+            # or a real number, not 'NoneType'`, which `_would_regress`'s blanket
+            # handler turned into `return False` and the caller's into a skip that
+            # named a crash rather than the dead leg. Skipping it here is the same
+            # answer as a key that is absent, and the entry says WHY, so the
+            # detail written to the ledger can never be read as "this metric was
+            # compared and moved nothing".
+            detail[key] = {"before": baseline[key], "after": current[key],
+                           "armed": True, "not_measured": True}
             continue
         now, was = float(current[key]), float(baseline[key])
         sigma = max(float(metrics.get(key, {}).get("stdev", 0.0)), MIN_SIGMA)
@@ -915,7 +1027,12 @@ def _would_regress(current: dict | None, baseline: dict | None, noise: dict) -> 
     if not baseline or not current or all_queries_empty(baseline):
         return False
     for blob in (baseline, current):
-        if blob.get("corpus_ok") is False or unanswered_doc_queries(blob):
+        # `empty_fact_leg` (#1250) belongs in this pre-check for the same reason
+        # the other two guards do: an arm whose fact leg read nothing is refused
+        # below as a non-measurement, so spending a second arm to "confirm" the
+        # 0.0 it produced would buy nothing.
+        if (blob.get("corpus_ok") is False or unanswered_doc_queries(blob)
+                or empty_fact_leg(blob)):
             return False
     try:
         return bool(evaluate(current["overall"], baseline["overall"], noise,
@@ -1033,6 +1150,29 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
             return _skip(commit, f"{arm} arm got zero documents for {len(unanswered)} of "
                                  f"{blob.get('n_records')} queries ({', '.join(unanswered)}) — "
                                  "the pinned daemon did not answer, cannot evaluate")
+        # The fact-leg mirror of the two guards above (#1250), and the one that
+        # was missing while six arms on 2026-09-18 recorded
+        # `fact_entity_recall_avg: 0.0` against `corpus.facts: 315462`.
+        # `fact_entity_recall_avg` is ARMED, and under a pinned corpus the
+        # measured stdev is 0.0 so the tolerance is the MIN_SIGMA floor: 0.375 →
+        # 0.0 is therefore reported as a regression and becomes a ROLLBACK
+        # REASON for a commit that touched nothing in the fact path. The doc
+        # guards above cannot catch it — a zeroed fact leg answers every query
+        # with documents as normal, so `corpus_ok` stays true,
+        # `unanswered_doc_queries` is empty and `all_queries_empty` is False.
+        # The failed-read count and the first failure's repr go into the reason:
+        # the swallow that hid this discarded the traceback, so whatever the
+        # gate arm hits is only nameable from what the arm now records.
+        if empty_fact_leg(blob):
+            cov = blob.get("fact_coverage") or {}
+            first = cov.get("fact_read_first_error")
+            return _skip(commit,
+                         f"{arm} arm's fact leg read nothing on any of its "
+                         f"{cov.get('n_records')} queries while the corpus names "
+                         f"{((blob.get('corpus') or {}).get('facts'))} facts "
+                         f"({cov.get('n_fact_reads_failed_total')} failed fact reads"
+                         f"{f', first: {first}' if first else ', no failure reported'}) — "
+                         "cannot evaluate")
 
     # Provenance, not a gate. Under a pinned corpus every armed metric is
     # deterministic (re-measured 2026-09-17: five trials agree to 0.0000), so
@@ -1054,10 +1194,30 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
         if not confirm:
             return _skip(commit, "the run that would have confirmed a regression failed — "
                                  "cannot evaluate: " + "; ".join(reasons)[:300])
-        if confirm.get("corpus_ok") is False or unanswered_doc_queries(confirm):
-            return _skip(commit, "the run that would have confirmed a regression did not get "
-                                 "an answer to every query — cannot evaluate: "
-                                 + "; ".join(reasons)[:300])
+        # #1250, same hole the paired arms got a guard for and this arm did not:
+        # `unanswered_doc_queries` keys on `n_docs` alone, so a confirm arm whose
+        # FACT leg read nothing — `n_docs` populated, `n_facts` 0, `corpus_ok`
+        # true because the index answers — reached `evaluate` and was accepted as
+        # the second independent observation. That is the arm that decides
+        # "rollback confirmed" for the commit under review, and with the pinned
+        # corpus's stdev of 0.0 its `fact_entity_recall_avg` delta (0.375 → 0.0
+        # was measured, 6 arms on 2026-09-18) was the reason. `corpus_ok is
+        # False` cannot cover it either: it is the graph half only, and
+        # `empty_fact_leg` recomputes from records, so an older `run_eval`
+        # artifact with no `fact_leg` block is still caught here.
+        if (confirm.get("corpus_ok") is False or unanswered_doc_queries(confirm)
+                or empty_fact_leg(confirm)):
+            fact_cov = confirm.get("fact_coverage") or {}
+            return _skip(
+                commit,
+                "the run that would have confirmed a regression did not get an answer to "
+                "every query — cannot evaluate: " + "; ".join(reasons)[:300]
+                + (" [fact leg]" if empty_fact_leg(confirm) else "")
+                + (f" {fact_cov.get('n_facts_reports', 0)}/{fact_cov.get('n_records', 0)} "
+                   f"queries returned no facts at all; {fact_cov.get('empty_fact_queries') or []}"
+                   if empty_fact_leg(confirm) else "")
+                + (f", {fact_cov['n_fact_reads_failed_total']} entity fact read(s) failed"
+                   if fact_cov.get("n_fact_reads_failed_total") else "no fact read failed"))
         again, confirmed_by, detail_again = evaluate(confirm["overall"], baseline["overall"],
                                                      noise, CONTEXT_PAIRED_CHECK)
         if not again:

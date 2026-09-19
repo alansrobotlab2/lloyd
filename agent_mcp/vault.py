@@ -1209,24 +1209,57 @@ def _vault_recall(params: dict) -> dict:
         return list(canonical.values())
 
     def _do_facts():
+        # Returns (facts, graph_facts, fact_reads). `fact_reads` is the
+        # accounting #1250 added: how many of the per-entity fact reads this
+        # call attempted produced no facts because the READ failed, plus the
+        # first failure's repr. Before this the loop's only exit on a bad read
+        # was `continue`, so a leg that read nothing at all — every read
+        # raising, or the read path answering every entity with an error —
+        # returned `[]` and was indistinguishable from a leg that read
+        # everything and matched nothing. The eval then scored that 0.0, the
+        # paired promotion check compared 0.0 against a healthy arm's 0.375,
+        # and an unrelated commit became a rollback reason. "Read nothing" is a
+        # different answer from "matched nothing", and to be one it has to be
+        # carried out of here.
+        fact_reads: dict = {"n_failed": 0, "first_error": None}
         if not include_facts:
-            return [], []
+            return [], [], fact_reads
         # Query-aware fact ranking (Fix A, #322).
         qtoks = fact_query_tokens(query)
+
+        def _note_failed_read(repr_text: str) -> None:
+            fact_reads["n_failed"] += 1
+            if fact_reads["first_error"] is None:
+                fact_reads["first_error"] = repr_text
 
         def _collect(entity_names: list[str], godnode_threshold: int) -> list[dict]:
             """Pull facts from entities, applying god-node guardrail (Fix C).
             Tags each fact with its source `entity` so downstream consumers
             (re-ranking, eval, UI) can attribute facts back to a node.
+
+            A read that failed is counted, never discarded. Two shapes count
+            (#1250): a raised exception, repr'd `<Type>: <message>`, and a
+            `get_facts_sync` reply that carries an `error` key with no facts
+            (`{"error": "Entity not found: X", "facts": []}`,
+            `agent_mcp/retrieval.py:169-171`), repr'd `error: <message>`. The
+            second is the one the old `if not ef: continue` swallowed as
+            though entity resolution had simply found nothing to return.
             """
             out: list[dict] = []
             for ent in entity_names:
                 try:
                     entity_data = get_facts_sync(ent)
-                except Exception:
+                except Exception as exc:
+                    _note_failed_read(f"{type(exc).__name__}: {exc}")
+                    continue
+                if not isinstance(entity_data, dict):
+                    _note_failed_read(f"{type(entity_data).__name__}: fact read "
+                                      f"returned {type(entity_data).__name__}, not a mapping")
                     continue
                 ef = entity_data.get("facts") or []
                 if not ef:
+                    if entity_data.get("error"):
+                        _note_failed_read(f"error: {entity_data['error']}")
                     continue
                 if len(ef) > godnode_threshold and qtoks:
                     kept = [f for f in ef if fact_matches_tokens(f, qtoks)]
@@ -1256,7 +1289,10 @@ def _vault_recall(params: dict) -> dict:
             graph_pool = _collect(neighbor_names, FACT_GODNODE_THRESHOLD)
             graph_facts = _rank(graph_pool, FACT_RANK_CAP_GRAPH)
 
-        return facts, graph_facts
+        # The accounting leaves this function with the facts, or it is worth
+        # nothing: the failures happened inside `_collect`, two loops up from the
+        # caller that has to report them.
+        return facts, graph_facts, fact_reads
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
@@ -1265,7 +1301,7 @@ def _vault_recall(params: dict) -> dict:
             grep_fut = pool.submit(_do_code_grep)
             graph_lookup_fut = pool.submit(_do_graph_lookup)
             raw_results = search_fut.result()
-            facts, graph_facts = facts_fut.result()
+            facts, graph_facts, fact_reads = facts_fut.result()
             grep_results = grep_fut.result()
             graph_lookup_results = graph_lookup_fut.result()
         # Merge alternate-retrieval sources: dedupe by file path; first
@@ -1316,6 +1352,17 @@ def _vault_recall(params: dict) -> dict:
         else:
             documents = documents[:limit]
         result = {"documents": documents, "facts": facts, "query": query}
+        # Fact-leg provenance (#1250). Always present, including when it is 0:
+        # a consumer that has to distinguish "the fact leg read nothing" from
+        # "the fact leg read everything and matched nothing" cannot do it from
+        # an absent key, which would read the same as a version of this
+        # function that never counted. `fact_read_first_error` is the first
+        # failure's repr — `Type: message` for a raise, `error: <message>` for
+        # a read path that answered with an error instead of facts — and is
+        # None only when nothing failed. One repr, not a list: the point is to
+        # name WHAT raised, and the count says how widespread it was.
+        result["n_fact_reads_failed"] = int(fact_reads["n_failed"])
+        result["fact_read_first_error"] = fact_reads["first_error"]
         if graph_facts:
             result["graph_expanded_facts"] = graph_facts
         if weighted_neighbors:

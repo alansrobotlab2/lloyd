@@ -733,6 +733,26 @@ def _fact_entity_recall(limit: int = 20) -> float | None:
             logger.warning("improve: %d eval queries errored; not reporting the metric",
                            summary["overall"]["errors"])
             return None
+        if summary["overall"]["fact_entity_recall_avg"] is None:
+            # #1250 clause 3, and the reason this is not the last consumer to
+            # teach: clause 3 makes `run_eval`'s OWN WRITER record null instead of
+            # 0.0, and a `round()` of that raises `TypeError: type NoneType
+            # doesn't define __round__` — which this function's blanket handler
+            # below reported as "fact_entity_recall could not be measured: …",
+            # discarding the real reason (the leg read nothing) inside a message
+            # that reads like a broken harness. Testing for null before the
+            # `round()`, and asking the shared `fact_leg_read_nothing` why, names
+            # the real condition in the log — the same words the eval artifact's
+            # own warning uses. A null metric is a non-measurement, and this
+            # function returns null for one; a null it cannot explain is raised
+            # rather than rounded, so it cannot silently become a 0.0.
+            if module.fact_leg_read_nothing(records, module._corpus_provenance()):
+                logger.warning(
+                    "improve: the fact leg read nothing while the store indexes facts; "
+                    "fact_entity_recall is not a measurement here — reporting None, not 0.0")
+                return None
+            raise TypeError("fact_entity_recall_avg is null but the fact leg measured "
+                            "facts — run_eval nulled it for a reason this reader cannot see")
         return round(summary["overall"]["fact_entity_recall_avg"], 4)
     except Exception as exc:  # noqa: BLE001 - a metric that cannot run is not a zero
         logger.warning("improve: fact_entity_recall could not be measured: %s", exc)

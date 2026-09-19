@@ -626,3 +626,330 @@ def test_measure_noise_drops_a_trial_the_daemon_did_not_answer(monkeypatch, tmp_
     assert noise["metrics"]["doc_hit_rate"]["n"] == 2
     assert noise["metrics"]["doc_hit_rate"]["stdev"] == 0.0
     assert noise["dropped_trials"] == ["trial 1: q1"]
+
+
+# ---------------------------------------------------------------------------
+# The fact leg (#1250): a leg that read nothing is not a zero and not a score
+# ---------------------------------------------------------------------------
+
+# Measured on the live arms of 2026-09-18, copied into this fixture so the test
+# names the real numbers: the last healthy arm averaged fact_entity_recall_avg
+# 0.375 with 191 facts across its 20 queries; the six arms from
+# ran_at 2026-09-18T18:03:25Z onward averaged 0.0 with 0 facts, `error: null` on
+# every query, `errors: 0` and `corpus_ok: true`, against a corpus naming
+# 315,462 facts and 26,146 entities.
+HEALTHY_FACT_COV = {"n_records": 20, "n_facts_reports": 20, "n_facts_total": 191,
+                    "empty_fact_queries": [], "n_fact_reads_failed_total": 0,
+                    "fact_read_first_error": None}
+ZEROED_FACT_COV = {"n_records": 20, "n_facts_reports": 20, "n_facts_total": 0,
+                   "empty_fact_queries": [f"q{i}" for i in range(20)],
+                   "n_fact_reads_failed_total": 20,
+                   "fact_read_first_error": "StoreUnavailable: kg.sqlite is not readable"}
+CORPUS_WITH_FACTS = {"facts": 315462, "entities": 26146, "edges_active": 53416}
+
+
+def _fact_arm(coverage, *, fact_metric=0.0, corpus_ok=True, corpus=CORPUS_WITH_FACTS):
+    """An arm whose ONLY defect is its fact leg: doc metrics normal, corpus
+    flagged readable, no query errored. Every existing guard passes it."""
+    overall = base(**{"fact_entity_recall_avg": fact_metric})
+    return {"overall": overall, "corpus_ok": corpus_ok, "corpus": dict(corpus),
+            "n_records": coverage["n_records"],
+            "empty_doc_queries": [], "fact_coverage": dict(coverage)}
+
+
+def _arms_by_label(baseline: dict, current: dict, on_call=None):
+    """`_run_arm` by arm label — the check's two arms come from one function, so
+    a test that wants different defects on each side dispatches on the label."""
+    def run(_tree, label, _env):
+        if on_call is not None:
+            on_call(label)
+        if "lkg" in label:
+            return baseline
+        return current
+    return run
+
+
+def _fact_check_env(monkeypatch, tmp_path):
+    """The paired check with everything but its two arms stubbed (#1250 tests).
+
+    Reuses this file's existing harness: `_pin_ok` for the pinned corpus and the
+    two worktrees, `_observing()` for the promotion under watch, and a noise
+    floor of stdev 0.0 — which is the MEASURED value for a pinned corpus, not a
+    convenience (the module docstring: five consecutive runs on an unchanged
+    vault produced identical quality metrics). Returns the list a rollback
+    request would be appended to, so a test can assert the channel stayed shut.
+    """
+    import scripts.automod.state as S
+    noise = tmp_path / "noise.json"
+    noise.write_text(json.dumps(ZERO_NOISE))
+    monkeypatch.setattr(R, "NOISE_PATH", noise)
+    monkeypatch.setattr(S, "read_current", lambda: _observing())
+    monkeypatch.setattr(S, "read_lkg", lambda: {"commit": "a" * 40})
+    monkeypatch.setattr(S, "read_events", lambda **k: [])
+    monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
+    requested: list = []
+    monkeypatch.setattr(S, "request_rollback", lambda *a, **k: requested.append(a))
+    _pin_ok(monkeypatch)
+    return requested
+
+
+def test_a_zeroed_fact_leg_is_a_skip_and_not_a_regression(monkeypatch, tmp_path):
+    """The fact-leg mirror of the doc-leg refusals (#1250).
+
+    `fact_entity_recall_avg` is ARMED, and under a pinned corpus the measured
+    stdev is 0.0, so the tolerance is the MIN_SIGMA floor: 0.375 -> 0.0 is a
+    regression by any arithmetic, and it becomes a ROLLBACK REASON for a commit
+    that touched nothing in the fact path. That false rollback — not the "graded
+    seven runs" line in the item — is the live exposure, so the claim here is
+    both halves: the paired check does not report `no regressions`, and it does
+    not report a regression either. It says `cannot evaluate`, no rollback is
+    requested, and no verdict row is written as a success.
+
+    The CURRENT arm is the only defective one: doc metrics normal, `corpus_ok`
+    true, no query errored — so `corpus_ok`, `unanswered_doc_queries` and
+    `all_queries_empty` all pass it. That is why this needed its own guard.
+    """
+    requested = _fact_check_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(R, "_run_arm", _arms_by_label(
+        current=_fact_arm(ZEROED_FACT_COV),
+        baseline=_fact_arm(HEALTHY_FACT_COV, fact_metric=0.375)))
+
+    out = R._execute_blocking()
+    assert out["status"] == "skipped", out
+    assert out.get("regressed") is not True, out
+    assert requested == [], f"a zeroed fact leg reached the rollback channel: {requested}"
+    assert "current arm's fact leg read nothing" in out["skipped"], out
+    assert "cannot evaluate" in out["skipped"], out
+    # The evidence that makes the skip actionable. The swallow that hid this
+    # destroyed the traceback, so the failed-read count and the first failure's
+    # repr are the only things a person can act on.
+    assert "20 failed fact reads" in out["skipped"], out
+    assert "StoreUnavailable" in out["skipped"], out
+    assert "315462" in out["skipped"], out
+
+
+def test_a_zeroed_fact_leg_refuses_on_the_baseline_side_too(monkeypatch, tmp_path):
+    """Either arm. The baseline tree is a commit checked out and measured by
+    whatever code was current then, so a zeroed baseline manufactures a false
+    verdict as readily as a zeroed current arm: 0.0 -> 0.375 reads as an
+    improvement, and two zeroed arms read as perfect stability."""
+    requested = _fact_check_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(R, "_run_arm", _arms_by_label(
+        baseline=_fact_arm(ZEROED_FACT_COV),
+        current=_fact_arm(HEALTHY_FACT_COV, fact_metric=0.375)))
+
+    out = R._execute_blocking()
+    assert out["status"] == "skipped", out
+    assert out.get("regressed") is not True, out
+    assert requested == [], requested
+    assert "baseline arm's fact leg read nothing" in out["skipped"], out
+
+
+def test_a_zeroed_fact_leg_costs_no_confirm_run(monkeypatch, tmp_path):
+    """The confirm arm is not spent "confirming" a 0.0 (#1250).
+
+    A regression has to reproduce before anyone acts on it, so the paired check
+    normally runs a third arm. An arm whose fact leg read nothing is refused as a
+    non-measurement, so that third run could only re-measure the same nothing —
+    `_would_regress` says False and the check stops after the two arms it needs.
+    """
+    assert R._would_regress(_fact_arm(HEALTHY_FACT_COV, fact_metric=0.375),
+                            _fact_arm(ZEROED_FACT_COV), ZERO_NOISE) is False, (
+        "a zeroed fact leg told the checker a confirm arm was worth spending")
+
+    arms: list = []
+    _fact_check_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(R, "_run_arm", _arms_by_label(
+        baseline=_fact_arm(HEALTHY_FACT_COV, fact_metric=0.375),
+        current=_fact_arm(ZEROED_FACT_COV),
+        on_call=arms.append))
+
+    out = R._execute_blocking()
+    assert out["status"] == "skipped", out
+    assert "automod-check-confirm" not in arms, (
+        f"the refusal still spent a confirm arm: {arms}")
+    assert arms == ["automod-paired-lkg", "automod-check"], arms
+
+
+def test_a_zeroed_fact_leg_on_the_confirm_arm_refuses_the_rollback(monkeypatch, tmp_path):
+    """A fact leg that read nothing cannot CONFIRM a rollback either (#1250).
+
+    The refusal on the two paired arms is not enough: the confirm arm is the one
+    whose agreement turns a suspected regression into a rollback request, and it
+    was gated on `corpus_ok is False or unanswered_doc_queries(confirm)` only.
+    Neither sees this state — `corpus_ok` is the graph half of the store, and
+    `unanswered_doc_queries` keys on `n_docs`, which a zeroed FACT leg leaves
+    populated — so the arm reached `evaluate` and counted as the second
+    independent observation of a regression whose stated cause was
+    `fact_entity_recall_avg`.
+
+    Here the DOCUMENT regression is real and its arm is scoreable, so the confirm
+    run is genuinely consulted; only the confirm arm's fact leg read nothing (0
+    facts on 20 queries against a corpus indexing 315,462 — the shape of the six
+    arms on 2026-09-18). The check must refuse rather than roll back, and its
+    reason must name the FACT leg: a skip reading "did not get an answer to every
+    query" when every query got its documents sends the next reader looking at the
+    retrieval daemon instead of the fact tree.
+    """
+    requested = _fact_check_env(monkeypatch, tmp_path)
+    calls: list = []
+
+    def run_by_label(_tree, label, _env):
+        calls.append(label)
+        if "lkg" in label:
+            return _fact_arm(HEALTHY_FACT_COV, fact_metric=0.375)
+        if "confirm" in label:
+            # Documents answered, facts none: the paired arms' doc guard is green
+            # on this artifact, which is exactly why it needs its own check.
+            return _fact_arm(ZEROED_FACT_COV, fact_metric=0.0)
+        # The candidate: an ARMED document metric regressed (doc_hit_rate 0.6 ->
+        # 0.3 against a noise floor of stdev 0.0 — `base()` puts every armed
+        # metric at 0.6) on a HEALTHY fact leg, so the paired refusal does not
+        # fire and a confirm arm is legitimately spent.
+        candidate = _fact_arm(HEALTHY_FACT_COV, fact_metric=0.375)
+        candidate["overall"]["doc_hit_rate"] = 0.3
+        return candidate
+
+    monkeypatch.setattr(R, "_run_arm", run_by_label)
+
+    out = R._execute_blocking()
+
+    assert "automod-check-confirm" in calls, (
+        f"precondition: the confirm arm never ran, so this proves nothing about it: {calls}")
+    assert requested == [], (
+        f"a confirm arm whose fact leg read nothing requested a rollback: {requested}")
+    assert out["status"] == "skipped", (
+        f"a confirm leg that read nothing became a verdict instead of a refusal: {out}")
+    assert "cannot evaluate" in out["skipped"], out["skipped"]
+    assert "fact leg" in out["skipped"], (
+        "the refusal must name which leg died; the document leg answered every query "
+        f"here: {out['skipped']}")
+
+
+def test_a_fact_leg_that_returned_something_keeps_its_real_score():
+    """A per-query zero is legitimate; only an all-zero leg is not (#1250).
+
+    The healthy arm's own distribution is nineteen 10s and one 1 — zero queries
+    at 0 — so the guard is total-across-queries. A run with some empty queries
+    and a real total is a measurement and gets judged as one.
+    """
+    partial = dict(HEALTHY_FACT_COV, n_facts_total=3, empty_fact_queries=["q7", "q13"])
+    assert R.empty_fact_leg(_fact_arm(partial)) is False
+    assert R.empty_fact_leg(_fact_arm(HEALTHY_FACT_COV)) is False
+    assert R.empty_fact_leg(_fact_arm(ZEROED_FACT_COV)) is True
+
+
+def test_a_zeroed_fact_leg_over_an_empty_fact_tree_is_not_a_refusal():
+    """The other half of the distinction: no facts to read IS a measurement.
+
+    An arm over a corpus with no fact tree scores 0.0 legitimately — that is a
+    fact about the corpus, and `corpus_ok` already refuses the empty-graph case.
+    Refusing here would turn a real baseline into an unmeasurable one.
+    """
+    arm = _fact_arm(ZEROED_FACT_COV, corpus={"facts": 0, "entities": 0, "edges_active": 0})
+    assert R.empty_fact_leg(arm) is False
+
+
+def test_a_zeroed_fact_leg_without_a_known_corpus_is_not_a_refusal():
+    """Unknown is not evidence of a non-empty tree.
+
+    The corpus block can be missing from the arm's own artifact; with nothing to
+    say the tree was populated, 0 facts is not enough to call the run a
+    non-measurement — a guard that fires on silence would refuse every old
+    baseline.
+    """
+    arm = _fact_arm(ZEROED_FACT_COV)
+    arm.pop("corpus")
+    assert R.empty_fact_leg(arm) is False
+
+
+def test_the_fact_guard_reads_a_baseline_arm_written_by_older_code(tmp_path):
+    """A baseline artifact predating the per-query counter still gets judged.
+
+    The baseline arm is a file some other checkout wrote, so the guard may NOT
+    require the `n_fact_reads_failed` keys #1250 adds to each record: it keys on
+    the per-query `n_facts` that has been recorded all along. The six broken arms
+    of 2026-09-18 are exactly these files — `n_facts: 0` on every query,
+    `error: null`, a non-empty corpus block.
+    """
+    def rec(nfacts):
+        return {"id": f"q{nfacts}", "error": None, "result_summary": {"n_facts": nfacts},
+                "scoring": {"fact_entity_recall": 0.0}}
+
+    blob = {"summary": {"overall": base(**{"fact_entity_recall_avg": 0.0})},
+            "corpus_ok": True, "corpus": dict(CORPUS_WITH_FACTS),
+            "records": [rec(0) for _ in range(4)]}
+    (tmp_path / "automod-check-20260918-170645.json").write_text(json.dumps(blob))
+    arm = R._load_run(tmp_path, "automod-check")
+    assert arm is not None
+    assert arm["fact_coverage"]["n_facts_total"] == 0
+    assert arm["fact_coverage"]["n_fact_reads_failed_total"] == 0, (
+        "an older artifact has no failure counter; reading its absence as "
+        "failures would refuse every historical baseline")
+    assert R.empty_fact_leg(arm) is True, (
+        "the historical broken arm is still not recognised as a non-measurement")
+
+    healthy = dict(blob, records=[rec(10) for _ in range(3)] + [rec(1)])
+    (tmp_path / "automod-check-20260918-080311.json").write_text(json.dumps(healthy))
+    ok = R._load_run(tmp_path, "automod-check")
+    assert ok["fact_coverage"]["n_facts_total"] == 31
+    assert R.empty_fact_leg(ok) is False
+
+
+def test_evaluate_would_call_a_zeroed_fact_leg_a_rollback_reason():
+    """Why the refusal has to happen before `evaluate`, not inside it.
+
+    Pinned-corpus noise is stdev 0.0, so the tolerance is the MIN_SIGMA floor and
+    0.375 -> 0.0 on an ARMED metric is a regression by any arithmetic. This is
+    the false-rollback path the item names as the live exposure: an arm that read
+    nothing becomes a rollback reason for an unrelated commit. The paired check
+    must catch it upstream — `evaluate` is a comparator and has no idea whether
+    the zero was read or measured.
+    """
+    assert "fact_entity_recall_avg" in R.FACT_LAYER_METRICS
+    regressed, reasons, _ = R.evaluate(
+        base(**{"fact_entity_recall_avg": 0.0}),
+        base(**{"fact_entity_recall_avg": 0.375}), ZERO_NOISE)
+    assert regressed and any("fact_entity_recall_avg" in r for r in reasons), reasons
+
+
+def test_a_null_armed_metric_is_never_compared_and_never_crashes():
+    """`evaluate` must survive the null clause 3 makes it read (#1250).
+
+    Clause 3 changes what `run_eval` RECORDS: a run whose every fact leg was
+    empty gets `fact_entity_recall_avg: null` where it used to get a scored 0.0.
+    `evaluate` is downstream of that writer and does its comparison with
+    `float(current[key])`, which on a null raises `TypeError: float() argument
+    must be a string or a real number, not 'NoneType'`. In `_would_regress` the
+    blanket handler swallowed that into `return False`; anywhere else it is an
+    exception out of the check. Either way the check stops reporting WHY the leg
+    was empty and starts reporting a crash — the same class of defect this item
+    is filed under, moved from the fact read into the comparator.
+
+    A null is treated exactly like an absent key: no verdict on that metric, and
+    an explicit `not_measured` entry in the detail, so the ledger can never read
+    the metric as compared-and-flat. A run that nulls one metric still gets its
+    real verdict on the others.
+    """
+    null_current = base(**{"fact_entity_recall_avg": None})
+
+    detail = R.evaluate(null_current, base(**{"fact_entity_recall_avg": 0.375}),
+                        ZERO_NOISE)[2]
+    assert detail["fact_entity_recall_avg"] == {
+        "before": 0.375, "after": None, "armed": True, "not_measured": True}, detail
+    assert R.evaluate(null_current, base(**{"fact_entity_recall_avg": 0.375}),
+                      ZERO_NOISE)[0] is False, (
+        "a metric that was not measured was reported as a regression")
+
+    # The null is one metric's condition, not the run's: an ARMED document metric
+    # that moved past the tolerance still fires with the fact metric null.
+    regressed, reasons, _ = R.evaluate(
+        dict(null_current, doc_hit_rate=0.3),
+        base(**{"fact_entity_recall_avg": 0.375}), ZERO_NOISE)
+    assert regressed and any("doc_hit_rate" in r for r in reasons), reasons
+
+    # And a null on the BASELINE side, which is the arm written by the pinned
+    # older commit — the direction that would otherwise read as an improvement
+    # out of nowhere.
+    assert R.evaluate(base(**{"fact_entity_recall_avg": 0.375}), null_current,
+                      ZERO_NOISE)[0] is False

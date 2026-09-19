@@ -41,7 +41,8 @@ from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB
 # artifact and nothing anywhere read it, which is how a 708 ms → 4,230 ms step
 # landed silently. Reading it here, at the moment the number is produced, is what
 # makes the nightly budget a live check instead of a constant with a test.
-from workers.sources.automod_regression import CONTEXT_NIGHTLY, over_budget
+from workers.sources.automod_regression import (CONTEXT_NIGHTLY, fact_leg_empty,
+                                                fact_read_coverage, over_budget)
 # This file runs both as `python eval/run_eval.py` (script dir on sys.path) and
 # as `import eval.run_eval` from the tests; the second form needs the package
 # spelling.
@@ -89,6 +90,29 @@ def _corpus_line(corpus: dict) -> str:
             f"entity_dirs={corpus['entity_dirs']} kg_db={corpus['kg_db']} "
             f"entities={corpus['entities']} edges_active={corpus['edges_active']} "
             f"aliases={corpus['aliases']} facts={corpus['facts']}")
+
+
+# The fact-leg guard is IMPORTED, never restated here (#1250).
+# `workers/sources/automod_regression.py` owns it, because that side has to ask
+# the same question of a BASELINE artifact written by unknown code while it
+# compares two arms; this side asks it of the run it just produced. Two copies
+# of a guard is how the two sides come to disagree about whether an arm measured
+# anything at all, across a subprocess boundary no test can see from one side —
+# which is the defect class this item is filed under.
+def fact_leg_read_nothing(records: list[dict], corpus: dict) -> bool:
+    """Whether this run's fact leg read NOTHING while the fact tree is not empty.
+
+    `fact_leg_empty` over this run's records and its own corpus block. The half
+    `corpus_ok` cannot see: `corpus_ok` is
+    `bool(corpus["edges_active"]) and bool(corpus["entities"])`, the graph half
+    only, and `corpus["facts"]` comes from the store index — what the index
+    holds, not what recall could read. So an arm whose every fact read failed
+    (the `except Exception: continue` in `agent_mcp/vault.py:_collect` discarded
+    every one of them, with no log and no counter, until #1250) passed
+    `corpus_ok` and was recorded with a real-looking 0.0.
+    """
+    return fact_leg_empty(fact_read_coverage(records),
+                          int((corpus or {}).get("facts") or 0))
 
 
 def _entities_in_result(result: dict, seeds: list[str] | None = None) -> list[str]:
@@ -295,6 +319,15 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
                 "n_facts": len(result.get("facts") or []),
                 "n_graph_facts": len(result.get("graph_expanded_facts") or []),
                 "n_neighbors": len(result.get("graph_neighbors_used") or []),
+                # #1250: what the fact leg FAILED to read, and the first
+                # failure's repr. `n_facts: 0` alone cannot say whether the
+                # tree was empty, every read failed, or nothing matched — and
+                # the six zeroed arms of 2026-09-18 proved a reader cannot tell
+                # those apart after the fact. Older artifacts simply lack these
+                # keys, which is why the guard in `fact_read_coverage` reads
+                # `n_facts` and never these.
+                "n_fact_reads_failed": int(result.get("n_fact_reads_failed") or 0),
+                "fact_read_first_error": result.get("fact_read_first_error"),
                 "doc_paths_top10": _doc_paths(result)[:10],
                 "fact_entities_top10": _entities_in_result(result, seeds)[:10],
                 "neighbors": [
@@ -419,6 +452,13 @@ def _fmt_rate(value) -> str:
     return "null" if value is None else f"{value:.2f}"
 
 
+def _fmt_rate3(value) -> str:
+    """`_fmt_rate` at the three decimals the fact metric is reported at. Same
+    rule: `fact_entity_recall_avg` is null on a run whose fact leg read nothing
+    (#1250), and a null must not print as 0.000."""
+    return "null" if value is None else f"{value:.3f}"
+
+
 def print_failures(failures: list[dict]) -> None:
     """The labelled defect list #541 asks for. Printed, not just filed in the
     JSON, because the nightly report is read by a person in chat."""
@@ -461,8 +501,11 @@ def print_table(records: list[dict], summary: dict) -> None:
     # fact_entity_recall sits next to MRR because it is the metric the fact
     # side of recall actually moves: MRR and NDCG score documents, and a
     # graph change can lift the facts returned without touching either.
+    # `_fmt_rate`, not `or 0`: a null fact metric (the guard's "the fact leg read
+    # nothing", #1250) and a measured 0.000 are different facts, and printing
+    # both as 0.000 is how the zeroed arms read as ordinary results in the log.
     print(f"Overall: n={o['n_queries']}  MRR={o['mrr_doc']:.3f}  NDCG10={o['ndcg10']:.3f}  "
-          f"fact_entity_recall={o['fact_entity_recall_avg'] or 0:.3f}")
+          f"fact_entity_recall={_fmt_rate3(o['fact_entity_recall_avg'])}")
     print(f"         entity_hit={o['entity_hit_rate']:.2f}  doc_hit={o['doc_hit_rate']:.2f}  "
           f"ent_recall={o['entity_recall_avg']:.2f}  doc_recall={o['doc_recall_avg']:.2f}  "
           f"avg_lat={o['latency_ms_avg']:.0f}ms  errors={o['errors']}")
@@ -476,7 +519,8 @@ def print_table(records: list[dict], summary: dict) -> None:
     for cat, s in summary["by_category"].items():
         print(f"  {cat:<10} n={s['n']:<3} entity_hit={s['entity_hit_rate']:.2f}  "
               f"doc_hit={s['doc_hit_rate']:.2f}  ent_recall={s['entity_recall_avg']:.2f}  "
-              f"MRR={s['mrr_doc']:.3f}  NDCG10={s['ndcg10']:.3f}  fER={s['fact_entity_recall_avg'] or 0:.3f}")
+              f"MRR={s['mrr_doc']:.3f}  NDCG10={s['ndcg10']:.3f}  "
+              f"fER={_fmt_rate3(s['fact_entity_recall_avg'])}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -582,6 +626,34 @@ def main() -> int:
         counterfactual=args.counterfactual,
     )
     summary = summarize(records)
+    # #1250: a fact leg that read NOTHING is not a fact score of zero. Every
+    # per-entity read can fail — `agent_mcp/vault.py:_collect` used to discard
+    # each failure with `except Exception: continue`, no log, no counter — and
+    # the run then recorded `fact_entity_recall_avg: 0.0` beside `corpus_ok:
+    # true` and `errors: 0`, against a corpus naming 315,462 facts. `corpus_ok`
+    # could not catch it because it is `bool(edges_active) and bool(entities)`:
+    # the graph half only, and `corpus.facts` is the store's index count, not
+    # what recall could read. Nulling the metric and flipping `corpus_ok` is
+    # what moves it from "a real 0.0 that the paired check turns into a
+    # rollback reason for an unrelated commit" to "this arm did not measure".
+    # The guard is TOTAL-across-queries on purpose: the healthy arm's per-query
+    # fact counts are nineteen 10s and one 1, so a single query at 0 is a
+    # legitimate score and must keep its number.
+    fact_cov = fact_read_coverage(records)
+    fact_leg_vacuous = fact_leg_read_nothing(records, corpus)
+    if fact_leg_vacuous:
+        summary["overall"]["fact_entity_recall_avg"] = None
+        for cat_summary in summary["by_category"].values():
+            cat_summary["fact_entity_recall_avg"] = None
+        corpus_ok = False
+        sys.stdout.flush()
+        print("[warn] the fact leg read NOTHING on every query while the store "
+              f"indexes {corpus['facts']} facts — fact_entity_recall_avg is "
+              "recorded as null, not 0.0, and this run records corpus_ok: false. "
+              "A zeroed fact leg and an empty fact tree are the same reading, "
+              "and neither is a measurement of retrieval quality.", file=sys.stderr)
+        print(f"        facts_root = {VAULT_FACTS_ROOT}", file=sys.stderr)
+        print(f"        kg_db      = {VAULT_KG_DB}", file=sys.stderr)
     # The labelled defect list is a deliverable of #541, not a debug aid: the
     # item's own step 5 is "decide which fix the taxonomy argues for", and that
     # decision needs the labels where the numbers are.
@@ -607,6 +679,12 @@ def main() -> int:
         ),
         "corpus": corpus,
         "corpus_ok": corpus_ok,
+        # What the fact leg read (#1250), recorded on EVERY run — including the
+        # healthy ones, where `n_facts_total` is what lets a later "was this arm
+        # zeroed?" question be answered without re-running anything. `empty` is
+        # the named verdict; the counts are its evidence.
+        "fact_leg": {**fact_cov, "empty": fact_leg_vacuous,
+                     "facts_in_corpus": int(corpus.get("facts") or 0)},
         # Which frozen record set produced the variants. A selfmod round diffs
         # these two files against each other; recording the path (not just the
         # numbers) is what tells a reader whether two baselines are comparable.
