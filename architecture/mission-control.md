@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, frontend, dashboard]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-09-19
 ---
 
 # Mission Control
@@ -43,6 +43,13 @@ back. A tab absent from it is not an error either: `_summarize_tab` returns
 `{}` and the agent learns nothing about where it just sent the user, which is
 why `architecture`, `settings` and `graph` register an explicit `lambda: {}`
 rather than being left out.
+A sixth list names a tab and is pinned by none of the five: `const PAGES` in
+`web/src/components/Layout.tsx:79`, the map `PageComponent = PAGES[page]`
+(`:315`) renders from. `chat`, `ide` and `memory` are deliberately absent from
+it — they are mounted sticky elsewhere in that file — so today the map plus
+that trio covers all sixteen tabs, and a tab added to the five lists above but
+not to `PAGES` passes every assertion while rendering an empty pane: the
+navigate succeeds, the brief comes back, nothing appears. Filed as #1274.
 
 ## The dashboard
 
@@ -75,13 +82,27 @@ it. Rules that keep the endpoint honest:
 - a section can be *missing*, not merely failed, after a backend restart:
   test with `sectionOk(section)` and render `sectionError(section)` from
   `api.ts`, never `section.error`, which throws on an undefined section and
-  blanks the very page this design exists to keep up.
+  blanks the very page this design exists to keep up. **The rule is not held
+  yet:** nine `ErrorPanel` sites in `DashboardPage.tsx` (1275, 1340, 1374,
+  1426, 1489, 1504, 1507, 1510, 1526) still read `x.error` in the
+  not-`sectionOk` branch, which is precisely the missing-section case — filed
+  as #1273. The newest section, `automod`, is the only one done right.
+- the state the agent reads is now credentialed: `GET :8500/state` and
+  `POST :8500/browser/navigate` refuse a request without the aggregator's
+  boot credential, and both the URL and the header come from
+  `app/aggregator_config.py` (`route` / `auth_headers_for`) rather than from
+  a hand-written origin (#1053).
 
 ## Sessions, titles, activity
 
-`app/sessions_io.py` is the one writer for every session (`create_session`)
-and the one definition of "is a human reading this" (`is_user_session`;
-`NON_USER_PLATFORMS = {autonomy, worker}`). Titles come from the secondary
+`app/sessions_io.py` is the writer for every session that goes through it
+(`create_session`) and the one definition of "is a human reading this"
+(`is_user_session`;
+`NON_USER_PLATFORMS = {autonomy, worker}`). It is not quite the *only* writer:
+`POST /api/sessions/create` mints its stub JSON itself (`app/routers/sessions.py:612`)
+with a bare `write_text` and a field set missing `id`, `title` and `source`, so
+a pre-created Inner Voice session is the third session shape on disk — filed as
+#1275. Titles come from the secondary
 on a geometric schedule (`app/session_titles.py`) and every surface shares
 the fallback chain in `web/src/lib/sessionLabel.ts`. The live activity line is
 six kinds — `starting → prefill → thinking`/`responding` → `tool` →
@@ -161,3 +182,13 @@ all. See [[infrastructure]].
 ## Related
 
 [[harness]], [[background-runs]], [[workers]], [[inner-voice]].
+
+## Review log
+
+- 2026-09-19 — **current.** Checked every path, line number, route, count and
+  cadence against `c55a501` and the live `:8080` routes; the tab lists, the
+  dashboard TTLs and section set, the `hold_reason`/`_is_task_due` mirror and
+  the whole SSRF section (including navigate's remaining landing hole) hold.
+  Corrected three things the prose asserted that the tree does not: that
+  `sessions_io` is the only session writer, that no sixth tab list exists, and
+  that the `sectionOk` rule is in force. Filed #1273 #1274 #1275.
