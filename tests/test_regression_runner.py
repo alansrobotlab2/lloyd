@@ -507,6 +507,79 @@ def test_the_runner_measures_the_queue_in_order_and_picks_up_what_lands_meanwhil
     assert [d["commit"][0] for d in done] == ["b", "c", "d"] and R.pending_promotions() == []
 
 
+def test_each_verdict_is_logged_when_it_lands_not_when_the_queue_is_done(ledger, monkeypatch, caplog):
+    """The first production run had seventeen promotions queued, and its log
+    said only "measuring …" for two hours: the rows `main` prints arrive at the
+    end, and the log is the one live trace of a process nobody is attached to."""
+    _promoted("b", "a", 600)
+    _promoted("c", "b", 300)
+    seen_at_second_check: list[str] = []
+
+    def check(subject, stage):
+        if subject["commit"][0] == "c":
+            seen_at_second_check.extend(r.getMessage() for r in caplog.records)
+        S.append_event({"event": "regression_check", "commit": subject["commit"], "regressed": False},
+                       path=S.LEDGER_PATH)
+        return {"status": "success", "regressed": False, "summary": f"no regression after {subject['commit'][:8]}"}
+    monkeypatch.setattr(R, "check_promotion", check)
+    with caplog.at_level("INFO", logger=R.logger.name):
+        R.run_pending()
+    assert any("bbbbbbbb: success — no regression after bbbbbbbb" in m for m in seen_at_second_check), \
+        "the first verdict was not in the log while the second check ran"
+
+
+WEDGED = textwrap.dedent("""
+    import subprocess, sys
+    from workers.sources import automod_regression as R
+    R._arm_watchdog("b" * 40, seconds=1)
+    subprocess.run(["sleep", "300"])         # a step with no timeout of its own, wedged
+    print("the wedge outlived its watchdog")
+""")
+
+
+def test_a_wedged_check_ends_the_runner_and_says_which_promotion(tmp_path):
+    """A runner stuck in `git` or the snapshot — the two steps with no timeout
+    of their own — would hold `regression.lock` for ever: no later runner could
+    start, nothing would be measured, and nothing would say so. A dead runner is
+    recoverable by construction; the watchdog turns a wedged one into a dead
+    one, and the skip row keeps that promotion from wedging the queue again
+    and again. A real process, a real SIGALRM."""
+    env = {**os.environ, "LLOYD_AUTOMOD_STATE": str(tmp_path), "LLOYD_VOICE_ALERTS": "0",
+           "PYTHONPATH": str(ROOT)}
+    started = time.time()
+    # Its own session, as `spawn_detached` starts the real one. The wedged child
+    # inherits these pipes, so this call returns only when the CHILD is gone
+    # too: a watchdog that ended the runner and left what it was wedged in
+    # would hold them for the full 300 s.
+    r = subprocess.run([sys.executable, "-c", WEDGED], cwd=ROOT, env=env, start_new_session=True,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 3 and "outlived" not in r.stdout, (r.returncode, r.stdout, r.stderr[-400:])
+    assert time.time() - started < 60, "the runner ended and left what it was wedged in running"
+    rows = [json.loads(line) for line in (tmp_path / "promotions.jsonl").read_text().splitlines()]
+    assert [(e["event"], e["commit"]) for e in rows] == [("regression_skipped", "b" * 40)]
+    assert "did not finish" in rows[0]["reason"] and "cannot evaluate" in rows[0]["reason"]
+
+
+def test_the_watchdog_is_armed_for_every_check_and_disarmed_after(ledger, monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(R, "_arm_watchdog", lambda commit, seconds=None: calls.append(("arm", commit[0])))
+    monkeypatch.setattr(R, "_disarm_watchdog", lambda: calls.append(("disarm",)))
+    _promoted("b", "a", 600)
+    _promoted("c", "b", 300)
+
+    def check(subject, stage):
+        if subject["commit"][0] == "c":
+            raise RuntimeError("boom")          # disarmed on the crash path too
+        S.append_event({"event": "regression_check", "commit": subject["commit"], "regressed": False},
+                       path=S.LEDGER_PATH)
+        return {"status": "success", "regressed": False, "summary": "ok"}
+    monkeypatch.setattr(R, "check_promotion", check)
+    R.run_pending(max_checks=2)
+    assert calls == [("arm", "b"), ("disarm",), ("arm", "c"), ("disarm",)]
+    assert R.CHECK_WATCHDOG_S > 3 * 900 + evalpin.STARTUP_TIMEOUT + evalpin.WARM_TRIES * evalpin.WARM_TIMEOUT, \
+        "shorter than a check that is still making progress"
+
+
 def test_one_runner_at_a_time_and_a_crashed_check_does_not_stop_the_queue(ledger, monkeypatch):
     _promoted("b", "a", 3000)
     _promoted("c", "b", 2000)
@@ -591,6 +664,36 @@ def test_a_sweep_that_fails_never_costs_a_measurement(ledger, monkeypatch):
         S.append_event({"event": "regression_check", "commit": subject["commit"], "regressed": False},
                        path=S.LEDGER_PATH) or {"status": "success", "regressed": False, "summary": "ok"}))
     assert [row["commit"] for row in R.run_pending()] == ["b" * 40]
+
+
+class _Offers:
+    def __init__(self):
+        self.rows: list = []
+
+    def enqueue(self, **kw):
+        self.rows.append(kw)
+        return len(self.rows)
+
+
+async def test_the_safety_net_is_offered_only_when_it_would_do_something(ledger, monkeypatch):
+    """Polled every fifteen minutes, and its job is a spawn: offered
+    unconditionally that is ninety-six "nothing to measure" rows a day over the
+    one row worth reading — a runner that had to be started from here."""
+    queue = _Offers()
+    await R.enqueue_if_due(queue, {})
+    assert queue.rows == [], "nothing is owed a measurement"
+    _promoted("b", "a", 600)
+    await R.enqueue_if_due(queue, {})
+    assert len(queue.rows) == 1 and queue.rows[0]["source"] == R.NAME
+    held = S.Lock(S.STATE_DIR / R.REGRESSION_LOCK, owner="a-runner").acquire()
+    try:
+        await R.enqueue_if_due(queue, {})
+        assert len(queue.rows) == 1, "a runner is already working through the queue"
+    finally:
+        held.release()
+    monkeypatch.setattr(R, "pending_promotions", lambda now=None: 1 / 0)
+    await R.enqueue_if_due(queue, {})
+    assert len(queue.rows) == 2, "an unreadable ledger is for the job to report, not to hide"
 
 
 def test_the_pool_job_spawns_the_detached_runner_and_measures_nothing_itself(ledger, monkeypatch):

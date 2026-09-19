@@ -271,7 +271,27 @@ def over_budget(current: dict, context: str) -> dict | None:
             "ratio": (now / budget if budget else None)}
 
 
+def _runner_needed() -> bool:
+    """A promotion is owed a measurement and no runner is working on the queue."""
+    return bool(pending_promotions()) and not runner_alive()
+
+
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
+    """Offer the job only when it would do something.
+
+    This source is the safety net under the promoter's own spawn, polled every
+    fifteen minutes, and its job is a spawn: offered unconditionally it writes
+    ninety-six run rows a day that say "nothing to measure", over the handful
+    that say a runner had to be started from here — which is the row worth
+    reading. The ledger read is ~150 ms on 8 MB, so it leaves the event loop.
+    Fails open: a ledger nobody can read is `execute`'s to report.
+    """
+    import asyncio
+    try:
+        if not await asyncio.to_thread(_runner_needed):
+            return
+    except Exception:  # noqa: BLE001
+        logger.debug("could not tell whether a runner is needed; offering the job", exc_info=True)
     new_id = queue.enqueue(
         source=NAME, kind="check", payload={},
         priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
@@ -753,6 +773,60 @@ def sweep_stale_scratch(now: float | None = None) -> list[str]:
     return removed
 
 
+# Longer than any check that is still making progress: the pin's start-up and
+# four warm-up tries, then three arms at `_run_arm`'s 900 s each, is 59 minutes.
+CHECK_WATCHDOG_S = 75 * 60
+
+
+def _arm_watchdog(commit: str, seconds: int | None = None) -> None:
+    """End the runner if one check outlives `seconds`, saying which.
+
+    Every long step inside a check has its own timeout except `git` and the
+    snapshot, and a runner wedged in one of those would hold `regression.lock`
+    for ever: no later runner could start, nothing would be measured, and
+    nothing would say so — the failure this whole module was rebuilt around. A
+    dead runner is recoverable by construction (the kernel drops the flock and
+    ends the pin, `sweep_stale_scratch` takes the rest, the next landing starts
+    another), so the watchdog's whole job is to turn a wedged one into a dead
+    one, after recording a skip so the same promotion cannot wedge the queue
+    more than `MAX_SKIPS_PER_COMMIT` times. Main thread only; a no-op elsewhere.
+    """
+    import signal
+    import threading
+    if threading.current_thread() is not threading.main_thread():
+        return
+    seconds = int(seconds if seconds is not None else CHECK_WATCHDOG_S)
+
+    def _expired(signum, frame):
+        try:
+            from scripts.automod import state as S
+            S.append_event({"event": "regression_skipped", "commit": commit,
+                            "reason": f"the check did not finish in {seconds} s; the runner ended "
+                                      "itself so the queue is not held — cannot evaluate"})
+        finally:
+            # Whatever the check was wedged IN goes too — a hung `git`, an arm
+            # mid-run — or it outlives the runner holding its pipes and its
+            # worktree. Only a group of our own making: `spawn_detached` makes
+            # the runner a session leader, and a runner started any other way
+            # shares its group with whoever started it. The pin has its own
+            # group and is ended by the kernel when this process is.
+            try:
+                if os.getpgrp() == os.getpid():
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    os.killpg(os.getpgrp(), signal.SIGTERM)
+            finally:
+                os._exit(3)
+    signal.signal(signal.SIGALRM, _expired)
+    signal.alarm(max(1, seconds))
+
+
+def _disarm_watchdog() -> None:
+    import signal
+    import threading
+    if threading.current_thread() is threading.main_thread():
+        signal.alarm(0)
+
+
 def run_pending(max_checks: int | None = None) -> list[dict]:
     """Measure every pending promotion, oldest first. One runner at a time.
 
@@ -780,6 +854,7 @@ def run_pending(max_checks: int | None = None) -> list[dict]:
             subject = pending[0]
             logger.info("measuring %s against %s (%d pending)", subject["commit"][:8],
                         str(subject.get("parent"))[:8], len(pending))
+            _arm_watchdog(subject["commit"])
             try:
                 result = check_promotion(subject, "detached")
             except Exception as exc:  # noqa: BLE001 — one bad check never stops the queue
@@ -787,8 +862,15 @@ def run_pending(max_checks: int | None = None) -> list[dict]:
                 S.append_event({"event": "regression_skipped", "commit": subject["commit"],
                                 "reason": f"the check crashed: {exc!r}"[:400]})
                 result = _skipped(f"the check crashed: {exc!r}")
+            finally:
+                _disarm_watchdog()
             done.append({"commit": subject["commit"], **{k: result.get(k) for k in
                                                          ("status", "summary", "regressed")}})
+            # Said as it happens. The rows `main` prints arrive when the whole
+            # queue is done — seventeen checks and two hours later, the first
+            # time this ran — and until then this log is the only live trace.
+            logger.info("%s: %s — %s", subject["commit"][:8], result.get("status"),
+                        str(result.get("summary") or result.get("skipped") or "")[:300])
             if result.get("regressed"):
                 break       # a rollback has been requested; let the guardian act first
     finally:
