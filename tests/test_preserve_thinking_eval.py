@@ -15,6 +15,16 @@ put an older assistant message's reasoning on the wire in one arm and not in
 the other. Two positive values is the whole point — `keep=0` against `keep=6`
 differs by every reasoning block in the turn, so it never showed the window.
 
+Two layers, because the clause is about the run whose numbers get quoted:
+`_drive` covers one `_one_run` (the mechanism), and `_drive_cli` covers
+`main()` — one `--trials` invocation, the arms in the order the script prints
+them, compared at one request index. The falsifier node
+(`test_the_arms_collapse_when_the_turn_entry_cap_is_disabled`) disables the
+turn-entry cap and requires the `window=N` and `all` arms to become
+indistinguishable, so the two positive-value tests can only pass because of the
+mechanism the eval claims to price, not because of anything the fixture itself
+happens to drop.
+
 Everything runs against a scripted engine: no `agent-llm-primary`, no GPU, and
 no operator scheduling decision. What is NOT pinned here is any token figure
 — those need a live re-run (see `eval/measurements/`).
@@ -85,16 +95,52 @@ class _ScriptedEngine:
     more or fewer than the script would leave the next arm reading a script
     that had already advanced — the arms would be measured against different
     sessions and the summary table would still print three tidy rows.
+
+    `reset()` files each finished arm away, so `arms()` can hand back one
+    request list per arm and a test can say `arms()[i][k]` — request *k* of arm
+    *i* — which is the only way to assert that two arms were compared at the
+    same request index rather than at whichever index each happened to reach.
     """
 
     def __init__(self, turns: list[tuple[str, str, list[dict[str, Any]]]]):
         self.turns = turns
         self.requests: list[list[dict]] = []
+        self.finished: list[list[list[dict]]] = []
         self.calls = 0
         self.trials = 0
 
+    def arms(self) -> list[list[list[dict]]]:
+        """Per-arm request snapshots, in run order, index-aligned across arms.
+
+        Refuses unless every arm replayed the whole script. `arms()[i][k]`
+        meaning the same request in both arms is a claim about the fixture, not
+        about the harness, and it is exactly the premise a cross-arm "same
+        request index" comparison rests on — an arm that issued one request
+        more or fewer would otherwise be compared against a different session
+        while every figure still looked plausible.
+        """
+        out = list(self.finished)
+        if self.requests:
+            out.append(self.requests)
+        counts = {len(a) for a in out}
+        if counts != {len(self.turns)}:
+            raise AssertionError(
+                f"arms issued {sorted(counts)} requests but the script has "
+                f"{len(self.turns)} turns, so the arms did not replay the same "
+                "session and request index k means a different request in each"
+            )
+        return out
+
     def reset(self) -> None:
-        """Rewind to the top of the script for the next arm."""
+        """Rewind to the top of the script for the next arm.
+
+        An arm that issued no request at all is not filed away, which would
+        silently drop it from `arms()`; `arms()`'s count check then fails on
+        the missing arm rather than comparing the surviving ones.
+        """
+        if self.requests:
+            self.finished.append(self.requests)
+            self.requests = []
         self.calls = 0
         self.trials += 1
 
@@ -201,11 +247,29 @@ def _first_measured_request(row: dict) -> list[dict]:
     return row["_engine_requests"][idx]
 
 
-def _reasoning_by_content(msgs: list[dict], content: str) -> Any:
+def _msg_with_content(msgs: list[dict], content: str) -> dict:
+    """The assistant message that answers with `content`.
+
+    Keyed on the visible text rather than on position because the window acts
+    on a message's `reasoning` field, not on where the message sits: an
+    assertion that names WHICH turn survived (`step one` -> `T1`) says the
+    window kept the recent turns and dropped the old one, where an index would
+    only say some message changed.
+    """
     for m in msgs:
         if m.get("role") == "assistant" and m.get("content") == content:
-            return m.get("reasoning")
+            return m
     raise AssertionError(f"no assistant message with content {content!r}: {msgs}")
+
+
+def _reasoning_by_content(msgs: list[dict], content: str) -> Any:
+    return _msg_with_content(msgs, content).get("reasoning")
+
+
+def _carried(msgs: list[dict]) -> list[str]:
+    """The reasoning strings actually on the wire, oldest first."""
+    return [m["reasoning"] for m in msgs
+            if m.get("role") == "assistant" and m.get("reasoning")]
 
 
 # ── clause 1: the session reaches the turn-entry cap ────────────────────────
@@ -340,6 +404,148 @@ def test_run_turn_refuses_a_buffer_that_never_crossed_a_boundary(monkeypatch):
     with pytest.raises(RuntimeError, match="appended nothing"):
         asyncio.run(pt._run_turn(_fake_run_query, opts2,
                                  expect_user_message="this turn"))
+
+
+# ── clauses 1 and 2 on the path an operator runs: one `--trials` invocation ──
+
+def _drive_cli(monkeypatch, capsys, *, keep: int = 2,
+               carry_all: int = 999) -> tuple[list[list[list[dict]]], list[str]]:
+    """Run the CLI (`main`) over the scripted engine; return (per-arm requests, labels).
+
+    `arms[i][k]` is request *k* of arm *i*, and `labels[i]` is that arm's
+    printed label, so a test can compare two arms at one request index — which
+    is the comparison clauses 1 and 2 are written as, and which `_drive` (a
+    single `_one_run`) cannot make.
+
+    The labels are read back out of the script's own `arms:` banner rather than
+    restated here: the banner is what an operator reads when choosing which
+    column is which, so if it ever names the arms in a different order the test
+    follows it instead of quietly asserting against the wrong column.
+    """
+    engine = _script_engine(monkeypatch, per_trial=True)
+    monkeypatch.setattr(sys, "argv", [
+        "run_preserve_thinking_eval.py", "--trials", "1",
+        "--keep", str(keep), "--carry-all", str(carry_all)])
+
+    assert asyncio.run(pt.main()) == 0, "the CLI exited non-zero"
+
+    printed = capsys.readouterr().out
+    banner = next((line for line in printed.splitlines()
+                   if line.startswith("arms: ")), None)
+    assert banner, f"the run never printed its arm banner: {printed[:400]}"
+    labels = [seg.split(" = ")[0].strip()
+              for seg in banner[len("arms: "):].split(" | ")]
+    arms = engine.arms()
+    assert len(arms) == len(labels), (
+        f"{len(arms)} arm(s) reached the engine but the banner named "
+        f"{len(labels)} ({labels}): an arm that never ran still gets a column "
+        "in the summary table"
+    )
+    return arms, labels
+
+
+def test_a_trials_run_puts_prior_turn_reasoning_on_the_engine_s_wire(monkeypatch,
+                                                                     capsys):
+    """Clause 1, through `--trials` — the invocation whose numbers get quoted.
+
+    `_drive` covers the mechanism; this covers the script an operator actually
+    runs. It asserts on the engine's own snapshot of the request, not on the
+    `prior_*`/`carried_*` fields, because the probe that computes those lives
+    inside the code under test: agreement between two readings of the same
+    buffer is the only thing that makes the published figure a measurement.
+
+    The `off` arm is asserted EMPTY for the same reason. Without it, "at least
+    one assistant message carries reasoning" would be satisfied by any session
+    that ever sent reasoning anywhere, which is not the boundary clause 1 is
+    about.
+    """
+    arms, labels = _drive_cli(monkeypatch, capsys)
+    idx = len(TURN1)  # turn 1 issues one request per phase, so this is turn 2's first
+
+    for label in ("window=2", "all"):
+        msgs = arms[labels.index(label)][idx]
+        assert msgs[-1] == {"role": "user", "content": pt.FOLLOWUP}, (
+            f"arm {label}: request {idx} is not turn 2's opening request, so "
+            "the index this file calls 'the measured one' is not the request "
+            "the turn-entry window acted on"
+        )
+        assert _carried(msgs), (
+            f"arm {label}: turn 2's first request carried no prior-turn "
+            "reasoning, so the window had nothing to window and every arm of "
+            "this run would report the same figure — the #617 defect, back"
+        )
+
+    off_msgs = arms[labels.index("off")][idx]
+    assert _carried(off_msgs) == [], (
+        "the keep=0 arm carried reasoning into turn 2, so `off` is no longer "
+        f"the control arm and the table's baseline column is not zero: {_carried(off_msgs)}"
+    )
+
+
+def test_the_two_windowed_cli_arms_differ_at_the_same_request_index(monkeypatch,
+                                                                    capsys):
+    """Clause 2, through `--trials`: one session, one index, two verdicts on T1.
+
+    `window=2` and `all` replay the identical scripted session and are compared
+    at the identical request index (pinned by `_drive_cli` -> `engine.arms()`,
+    which refuses mis-aligned arms). The oldest of turn 1's four reasoning
+    blocks is on the wire for `all` and not on it for `window=2`: that
+    difference is the turn-entry window, and it is the only gap in this eval
+    that prices the window's *width* rather than preserved thinking itself.
+    """
+    arms, labels = _drive_cli(monkeypatch, capsys)
+    idx = len(TURN1)
+    narrow = arms[labels.index("window=2")][idx]
+    wide = arms[labels.index("all")][idx]
+
+    assert _reasoning_by_content(wide, "step one") == "T1", (
+        "the `all` arm did not carry the oldest turn-1 reasoning, so the "
+        "window is binding somewhere the item does not believe it binds and "
+        "the two arms are measuring two unknowns"
+    )
+    assert "reasoning" not in _msg_with_content(narrow, "step one"), (
+        "keep=2 left the oldest of four reasoning blocks on the wire, so the "
+        "window is not being applied at this turn boundary and the eval's "
+        "`window=N` column is the `all` column under another label"
+    )
+    # Named, not merely counted: which blocks survived is the claim.
+    assert _carried(narrow) == ["T3", "T4"], _carried(narrow)
+    assert _carried(wide) == ["T1", "T2", "T3", "T4"], _carried(wide)
+
+
+def test_the_arms_collapse_when_the_turn_entry_cap_is_disabled(monkeypatch,
+                                                               capsys):
+    """The falsifier for clauses 1 and 2, kept in the tree instead of in a note.
+
+    `_cap_history_reasoning` (`app/harness/loop.py:1561`, called at turn entry
+    from `app/harness/loop.py:236`) is the only place the shipped mechanism
+    enforces the window. Neutralise it and `window=2` must become
+    indistinguishable from `all` — same blocks, same request index — because
+    inside a turn the knob is a bare boolean (`app/harness/loop.py:532`) and
+    there is no second enforcement point to blame for the difference.
+
+    Without this, the two tests above only show the arms differ; they do not
+    show the cap is what makes them differ. That is the exact shape of the
+    #617 defect: a script whose two columns were assumed to measure a window
+    that no longer existed anywhere in the code, published as if it did.
+    """
+    import app.harness.loop as loop_mod
+
+    def _no_cap(_chat_messages, *, keep):
+        return None
+
+    monkeypatch.setattr(loop_mod, "_cap_history_reasoning", _no_cap)
+    arms, labels = _drive_cli(monkeypatch, capsys)
+    idx = len(TURN1)
+
+    narrow = _carried(arms[labels.index("window=2")][idx])
+    wide = _carried(arms[labels.index("all")][idx])
+    assert narrow == wide == ["T1", "T2", "T3", "T4"], (
+        f"with the turn-entry cap disabled the arms did not both carry every "
+        f"prior-turn block (window=2: {narrow}, all: {wide}) — reasoning is "
+        "being removed somewhere other than the cap, so this A/B is not "
+        "pricing the turn-entry window"
+    )
 
 
 # ── clause 5: the shipped mechanism is the one being measured ───────────────
