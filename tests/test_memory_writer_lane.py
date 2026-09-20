@@ -957,6 +957,14 @@ SITES = [
 ]
 
 
+def _commit_lock_lanes(fn) -> list[ast.With]:
+    """The `with commit_lock(...)` blocks in a function body."""
+    return [w for w in ast.walk(fn)
+            if isinstance(w, ast.With)
+            and isinstance(w.items[0].context_expr, ast.Call)
+            and getattr(w.items[0].context_expr.func, "id", "") == "commit_lock"]
+
+
 def _func_source(rel: str, name: str) -> ast.FunctionDef:
     tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
     for node in ast.walk(tree):
@@ -990,10 +998,7 @@ def test_commit_site_writes_atomically_under_the_shared_lock(rel, name):
         f"not in place (found: {sorted(calls)})"
     )
     assert "commit_lock" in calls, f"{rel} {name} must commit under commit_lock()"
-    withs = [w for w in ast.walk(fn) if isinstance(w, ast.With)]
-    lanes = [w for w in withs
-             if isinstance(w.items[0].context_expr, ast.Call)
-             and getattr(w.items[0].context_expr.func, "id", "") == "commit_lock"]
+    lanes = _commit_lock_lanes(fn)
     assert lanes, f"{rel} {name} does not hold the lock across its read and replace"
     _assert_reads_inside_the_lock(fn, lanes, rel, name)
 
@@ -1004,26 +1009,167 @@ def _lock_span(lanes: list[ast.With]) -> tuple[int, int]:
     return lo, hi
 
 
+# What "reads the file" looks like from the parse. Deliberately the method names
+# a target read takes, and nothing wider: `open` is how `_audit_write` opens the
+# audit log, which is not the file being committed, so folding it in would make
+# every commit site look like it reads a second file outside its own lock.
+_TARGET_READS = {"read_text", "read_bytes"}
+
+
+def _module_funcs(rel: str) -> dict[str, ast.FunctionDef]:
+    tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+    return {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+
 def _assert_reads_inside_the_lock(fn, lanes, rel, name) -> None:
-    """The read has to happen inside the lock, not before it.
+    """The read has to happen inside the lock, not before it — and it has to be findable.
 
     `scripts/memory/repair_fact_ids.py:66` records exactly this corollary, and it
     is the half that a reviewer skims: lock the write and a lost update becomes a
     slightly later lost update, because both writers still read the same stale
     bytes. Parsing the line range is how that gets caught instead of agreed to.
+
+    Two things this used to get wrong, both found at review of #962.
+
+    * It only looked at calls written *directly* in the commit site's body, and
+      that read was extracted into a helper on this item's first round, so the
+      matched set went empty and the assertion passed on nothing — a green guard
+      checking no file at all. So a helper the site calls is followed one hop into
+      this same module, and its own reads are attributed to the line that calls it.
+    * An assertion over a set that can be empty is not an assertion. Hence the
+      non-empty check below: a commit site with no findable read is reported, not
+      waved through, because "I found no read outside the lock" and "I found no
+      read" must never print the same verdict.
     """
     lo, hi = _lock_span(lanes)
-    outside = []
+    funcs = _module_funcs(rel)
+    inside, outside = [], []
     for n in ast.walk(fn):
         if not isinstance(n, ast.Call):
             continue
-        attr = getattr(n.func, "attr", "")
-        if attr in {"read_text", "read_bytes"} and not (lo <= n.lineno <= hi):
-            outside.append(f"{rel}:{n.lineno} {attr}()")
+        attr = getattr(n.func, "attr", "") or getattr(n.func, "id", "")
+        where = f"{rel}:{n.lineno}"
+        if attr in _TARGET_READS:
+            (inside if lo <= n.lineno <= hi else outside).append(f"{where} {attr}()")
+        elif attr in funcs and attr != name:
+            reached = _TARGET_READS & {
+                getattr(m.func, "attr", "")
+                for m in ast.walk(funcs[attr]) if isinstance(m, ast.Call)}
+            if reached:
+                tag = f"{where} {attr}() -> {'/'.join(sorted(reached))}"
+                (inside if lo <= n.lineno <= hi else outside).append(tag)
+    # Outside first: a read that is findable and misplaced is the more specific
+    # diagnosis, and reporting "I found no read" when one sits a line above the
+    # lock would send the next reader hunting for a helper that is right there.
     assert not outside, (
         f"{rel} {name} reads the file outside commit_lock — the read is half the "
         f"critical section: {outside}"
     )
+    assert inside, (
+        f"{rel} {name} holds commit_lock but has no read of the file inside it — "
+        "neither directly nor through a helper of this module it calls from the "
+        "locked block. A commit site reads the bytes it is about to replace inside "
+        "the lock, so an empty denominator here means the read moved somewhere this "
+        "parse cannot follow (a rename is a change to this guard, not a reason for "
+        "it to go quiet) — it is not evidence that the read is in place."
+    )
+
+
+def _lanes_and_verdict(src: str, fname: str, rel: str = "fake/mod.py"):
+    """Run the guard over a synthetic function, and say which way it went.
+
+    `rel` is deliberately fake: the module-function lookup inside the guard is
+    monkeypatched to the synthetic tree below, so nothing reads a real file.
+    """
+    funcs = {n.name: n for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.FunctionDef)}
+    fn = funcs[fname]
+    lanes = _commit_lock_lanes(fn)
+    assert lanes, "fixture bug: synthetic function must hold commit_lock"
+    try:
+        _assert_reads_inside_the_lock(fn, lanes, rel, fname)
+    except AssertionError as exc:
+        return f"fail: {exc}"
+    return "pass"
+
+
+# The read the guard looks for, in three spellings, plus the two shapes that must
+# not read as green. `helper_read_in_lock` is what `_vault_write` looks like after
+# #962 extracted the pre-image read: the only `read_bytes()` in the parse is one
+# function away from the commit site, inside the locked block that calls it.
+_GUARD_SHAPES = {
+    "read_directly_in_lock": """
+def read_directly_in_lock(p):
+    with commit_lock(p):
+        pre = p.read_bytes()
+        write_text_durable(p, "x")
+    return pre
+""",
+    "helper_read_in_lock": """
+def _read_pre_bytes(p):
+    return p.read_bytes()
+
+def helper_read_in_lock(p):
+    with commit_lock(p):
+        pre = _read_pre_bytes(p)
+        write_text_durable(p, "x")
+    return pre
+""",
+    "read_before_the_lock": """
+def read_before_the_lock(p):
+    pre = p.read_bytes()
+    with commit_lock(p):
+        write_text_durable(p, "x")
+    return pre
+""",
+    "no_read_at_all": """
+def no_read_at_all(p):
+    with commit_lock(p):
+        write_text_durable(p, "x")
+""",
+    "helper_read_before_the_lock": """
+def _read_pre_bytes(p):
+    return p.read_bytes()
+
+def helper_read_before_the_lock(p):
+    pre = _read_pre_bytes(p)
+    with commit_lock(p):
+        write_text_durable(p, "x")
+    return pre
+""",
+}
+
+
+@pytest.mark.parametrize("fname,expected", [
+    ("read_directly_in_lock", "pass"),
+    ("helper_read_in_lock", "pass"),
+    ("read_before_the_lock", "fail"),
+    ("helper_read_before_the_lock", "fail"),
+    ("no_read_at_all", "fail"),
+])
+def test_the_read_inside_the_lock_guard_itself_can_fail(fname, expected, monkeypatch):
+    """A guard that cannot fail is not guarding, so here is the guard's own test.
+
+    This is the test whose absence let the #962 round disarm the guard above: the
+    pre-image read moved into a helper named `_read_pre_bytes`, the set of matched
+    calls went empty, and the assertion passed on an empty denominator while still
+    reporting green for six commit sites. A `pass` here is only meaningful because
+    these three shapes `fail`.
+    """
+    monkeypatch.setattr(sys.modules[__name__], "_module_funcs",
+                        lambda rel: {n.name: n for n in ast.walk(ast.parse(_GUARD_SHAPES[fname]))
+                                     if isinstance(n, ast.FunctionDef)})
+    got = _lanes_and_verdict(_GUARD_SHAPES[fname], fname)
+    if expected == "pass":
+        assert got == "pass", got
+    else:
+        assert got.startswith("fail"), got
+        if fname == "no_read_at_all":
+            # The empty-denominator branch must say so in so many words, or a
+            # future reader cannot tell "no read found" from "no read outside".
+            assert "no read of the file inside it" in got, got
+        else:
+            assert "outside commit_lock" in got, got
 
 
 def test_the_durable_writer_is_the_atomic_one():

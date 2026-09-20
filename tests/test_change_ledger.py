@@ -14,9 +14,14 @@ name rather than skip quietly.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import subprocess
+import sys
+import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +32,7 @@ from agent_mcp import (
     builtin_fs as FS,
 )
 
+_ROOT = Path(__file__).resolve().parent.parent
 SID = "20260908_150000_led"
 TURN = "turn-aaaa"
 
@@ -407,3 +413,437 @@ async def test_the_changes_route_needs_both_params():
     ok = await M.changes(_Req({"session": SID, "turn": TURN}))
     assert ok.status_code == 200
     assert json.loads(ok.body)["files"] == []
+
+
+# ── the vault_write route (#962) ─────────────────────────────────────────────
+#
+# `vault_write` is the whole-file route every nightly, reflection and digest job
+# is told to use, and it was the one such route that recorded nothing: an
+# overwrite that truncated a note left no pre-image to restore from and no index
+# row saying it happened. Two clobbers are on the record — `lloyd/MEMORY.md` on
+# 2026-09-10 (45 lines recovered from one) and a 192-line note on 2026-09-12,
+# self-reported in the run record of the run that did it.
+#
+# The tests below cross the boundary those jobs actually cross: the aggregator's
+# own `main.call_tool`, which binds the caller's session from the request `_meta`,
+# hands the handler to a worker thread (`asyncio.to_thread` in `vault.py`, which
+# copies the contextvars), and serialises the result dict through `_wrap`. Nothing
+# here sets a contextvar by hand, so the recorded scope can only have come from
+# that route. A recording that worked only on a direct in-process call to
+# `_vault_write` — same thread, ambient variables already in place — would not
+# have undone a single real clobber.
+
+PRE_CONTENT = "# Note as it came in\n\ncarriage return in it\r\nunicode ✓\n"
+POST_CONTENT = "# Note after the overwrite\n"
+# What a *second process* commits to the note while this turn's write is queued on
+# the lock. Used only by the cross-process test below.
+CHILD_CONTENT = "# Committed by another process while this turn waited\n"
+NOTE_PATH = "notes/a-note.md"
+
+
+@pytest.fixture
+def vault_route(tmp_path, monkeypatch):
+    """A scratch vault, and `vault_write` pointed at it. No session bound.
+
+    Every root is patched on the module that *reads* it. `app.paths.VAULT_ROOT`
+    and `atomic_io.SCRATCH_DIR` matter as much as `vault.VAULT` does: without them
+    a target in the scratch tree takes the sibling-temp branch instead of the
+    off-tree one production takes, and the locks land in the checkout running the
+    suite.
+    """
+    from types import SimpleNamespace
+
+    from agent_mcp import vault as VT
+    from app import atomic_io
+    from app import paths as app_paths
+
+    vault = tmp_path / "vault"
+    note = vault / NOTE_PATH
+    note.parent.mkdir(parents=True)
+    note.write_bytes(PRE_CONTENT.encode("utf-8"))
+    audit = vault / "memory" / "audit"
+
+    monkeypatch.setattr(VT, "VAULT", vault)
+    monkeypatch.setattr(VT, "AUDIT_LOG_DIR", audit)
+    monkeypatch.setattr(VT, "AUDIT_LOG_FILE", audit / "writes.jsonl")
+    monkeypatch.setattr(app_paths, "VAULT_ROOT", vault)
+    monkeypatch.setattr(atomic_io, "LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setattr(atomic_io, "SCRATCH_DIR", tmp_path / "locks" / "tmp")
+    yield SimpleNamespace(mod=VT, vault=vault, note=note,
+                          audit=audit / "writes.jsonl",
+                          locks=tmp_path / "locks")
+
+
+async def _vault_write(vr, path: str, content: str, *,
+                       session: str = SID, turn: str = TURN,
+                       call_id: str = "call-1") -> dict:
+    """One `vault_write` as a client sends it: args plus the `_meta` envelope."""
+    from agent_mcp import main as M
+
+    res = await M.call_tool("vault_write", {"path": path, "content": content}, {
+        M.META_SESSION_ID: session, M.META_TURN_ID: turn, M.META_CALL_ID: call_id,
+    })
+    text = res.content[0].text
+    assert not res.is_error, text
+    return json.loads(text)
+
+
+def _audit_rows(vr) -> list[dict]:
+    return [json.loads(line) for line in
+            vr.audit.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+async def test_a_vault_write_overwrite_is_recorded_with_its_pre_image(vault_route):
+    """One entry, both hashes, `snapshot: ok` — what a `Write` already gave you."""
+    out = await _vault_write(vault_route, NOTE_PATH, POST_CONTENT)
+    assert out["success"] and out["path"] == NOTE_PATH
+
+    files = _files()
+    assert len(files) == 1, f"expected exactly one ledger entry, got {files}"
+    e = files[0]
+    assert e["op"] == "write"
+    assert e["path"] == NOTE_PATH
+    assert e["real"] == os.path.realpath(vault_route.note)
+    assert e["call_id"] == "call-1"     # the aggregator's id, verbatim, unprefixed
+    assert e["snapshot"] == "ok", e
+    assert e["pre_sha256"] == CL.sha256_bytes(PRE_CONTENT.encode("utf-8"))
+    assert e["post_sha256"] == CL.sha256_bytes(POST_CONTENT.encode("utf-8"))
+    assert CL._pre_path(SID, TURN, e["real"]).read_bytes() == PRE_CONTENT.encode("utf-8")
+    assert vault_route.note.read_bytes() == POST_CONTENT.encode("utf-8")
+
+
+async def test_reverting_a_vault_write_restores_the_note_byte_for_byte(vault_route):
+    """The undo the two recorded clobbers did not have."""
+    await _vault_write(vault_route, NOTE_PATH, POST_CONTENT)
+
+    results = CL.revert(SID, TURN, [NOTE_PATH])
+    assert [r["status"] for r in results] == ["restored"], results
+    assert vault_route.note.read_bytes() == PRE_CONTENT.encode("utf-8")
+
+
+async def test_a_vault_write_that_creates_a_note_deletes_on_revert(vault_route):
+    """A create is `op="create"`, snapshotted as nothing, and undo removes the file."""
+    fresh = "notes/fresh.md"
+    await _vault_write(vault_route, fresh, POST_CONTENT)
+
+    e = _files()[0]
+    assert e["op"] == "create" and e["snapshot"] == "none", e
+    assert (vault_route.vault / fresh).read_bytes() == POST_CONTENT.encode("utf-8")
+
+    results = CL.revert(SID, TURN, [fresh])
+    assert [r["status"] for r in results] == ["deleted"], results
+    assert not (vault_route.vault / fresh).exists()
+
+
+async def test_two_writes_to_one_note_revert_to_where_it_came_in(vault_route):
+    """A turn that overwrites twice still undoes to the bytes it came in with.
+
+    The 2026-09-10 truncation was followed two hours later by an append, so a
+    revert that landed the intermediate version would have restored the 1-line
+    remnant and called it recovered.
+    """
+    await _vault_write(vault_route, NOTE_PATH, "v1\n")
+    await _vault_write(vault_route, NOTE_PATH, "v2\n")
+
+    files = _files()
+    assert len(files) == 1 and files[0]["writes"] == 2, files
+    assert files[0]["post_sha256"] == CL.sha256_bytes(b"v2\n")
+    CL.revert(SID, TURN, [NOTE_PATH])
+    assert vault_route.note.read_bytes() == PRE_CONTENT.encode("utf-8")
+
+
+async def test_an_unattributable_vault_write_still_writes_the_note(vault_route):
+    """A call the ledger cannot key: today's behaviour, and the write still lands.
+
+    No turn id is the shape that occurs — a worker turn (`run_in_background`) or a
+    subagent turn shares its session's ambient turn id, which is empty there, so
+    `begin` could never be found again by `revert`. Nothing raises and nothing is
+    recorded, yet the row keeps both content hashes and the session it does know: a
+    call whose *session* id is missing never gets this far at all, since the
+    aggregator refuses a state-changing call that arrives with no session (#1053).
+    """
+    out = await _vault_write(vault_route, NOTE_PATH, POST_CONTENT, turn="")
+    assert out["success"], out
+    assert vault_route.note.read_bytes() == POST_CONTENT.encode("utf-8")
+    assert _files() == []
+
+    row = _audit_rows(vault_route)[-1]
+    assert row["session"] == SID and row["turn"] == ""
+    assert row["post_sha256"] == CL.sha256_bytes(POST_CONTENT.encode("utf-8"))
+    assert row["pre_sha256"] == CL.sha256_bytes(PRE_CONTENT.encode("utf-8"))
+
+
+async def test_a_failed_snapshot_never_fails_the_vault_write(vault_route, monkeypatch):
+    """Undo bookkeeping that blows up mid-record costs a pre-image, not the write.
+
+    The rule `builtin_fs._ledger_begin` already documents: an edit that fails
+    because the undo bookkeeping failed is strictly worse than an edit with no
+    undo.
+    """
+    def boom(*a, **k):
+        raise RuntimeError("snapshot target went away")
+
+    monkeypatch.setattr(CL, "snapshot_pre", boom)
+    out = await _vault_write(vault_route, NOTE_PATH, POST_CONTENT)
+    assert out["success"], out
+    assert vault_route.note.read_bytes() == POST_CONTENT.encode("utf-8")
+    # Nothing durable claims a restorable pre-image, so nothing may claim to restore.
+    # The review of round SM_20260920_084122 read the previous line
+    # (`all(r["status"] != "restored" for r in CL.revert(...))`) as vacuous on the
+    # grounds that `revert` returns an empty list with no index on disk. It does not:
+    # `_load` is an in-memory LRU that `begin` already populated, so the call returns
+    # one result. What the review caught is real but one level softer — the old line
+    # passed on both `[]` and `[refused]`, so it could not tell "one refusal" from
+    # "nothing to revert". Pinned to the exact refusal, with the reason it must name,
+    # and the observable half of the degrade: the note keeps the new bytes, because
+    # the pre-image that would have undone them was never snapshotted.
+    assert not CL._index_path(SID, TURN).exists(), \
+        "a failed snapshot still wrote an index claiming a restorable pre-image"
+    backed = CL.revert(SID, TURN, [NOTE_PATH])
+    assert len(backed) == 1, f"expected one refusal naming the missing snapshot: {backed}"
+    assert backed[0]["status"] == "refused", backed
+    assert backed[0]["reason"] == "no snapshot (none)", backed
+    assert vault_route.note.read_bytes() == POST_CONTENT.encode("utf-8")
+
+
+async def test_a_write_that_cannot_take_the_lock_records_nothing(vault_route, monkeypatch):
+    """The one attributable call that returns without writing records nothing either.
+
+    `_vault_write` resolves the scope *before* taking `commit_lock`, so the lock
+    timeout is the branch where an attributable call reaches neither `_ledger_record`
+    nor `_audit_write`. That is the right order and this pins it: had the entry been
+    opened before the lock, a turn whose write was refused would carry an index entry
+    whose revert reports a restore that never happened.
+    """
+    from app import atomic_io as AI
+
+    ready, release = threading.Event(), threading.Event()
+
+    def _hold():
+        with AI.commit_lock(vault_route.note):
+            ready.set()
+            release.wait(20)
+
+    holder = threading.Thread(target=_hold, daemon=True)
+    holder.start()
+    assert ready.wait(5), "the other writer never took the lock"
+    try:
+        monkeypatch.setattr(AI, "DEFAULT_LOCK_WAIT", 0.3)   # read at call time
+        from agent_mcp import main as M
+        res = await M.call_tool("vault_write",
+                               {"path": NOTE_PATH, "content": POST_CONTENT},
+                               {M.META_SESSION_ID: SID, M.META_TURN_ID: TURN,
+                                M.META_CALL_ID: "call-timeout"})
+        text = res.content[0].text
+        assert res.is_error, f"a write blocked by another writer reported success: {text}"
+        assert "could not lock" in text, text
+    finally:
+        release.set()
+        holder.join(5)
+
+    assert vault_route.note.read_bytes() == PRE_CONTENT.encode("utf-8")
+    assert _files() == []
+    assert not vault_route.audit.exists(), "a refused write left an audit row"
+
+
+# ── the two seams the first round left untested ──────────────────────────────
+#
+# Both were named by the review of round SM_20260920_084122. They are process
+# boundaries, so the assertions below are built to go red on their own: the child
+# writes and the parent reads a different process's bytes, and a subagent call
+# arrives over the aggregator with nothing in the parent's context.
+
+_CHILD_PREIMAGE_WRITER = '''"""Another process, holding the vault writer's lock and changing the note under it.
+
+Roots arrive by argument and are echoed back before any work, so the parent can
+assert the child used the tree it was handed rather than a module default.
+"""
+import sys
+from pathlib import Path
+
+ROOT, VAULT, LOCKS, TARGET, NEW_BYTES = sys.argv[1:6]
+sys.path.insert(0, ROOT)
+
+from app import atomic_io                      # noqa: E402
+from app import paths as _paths                # noqa: E402
+
+_paths.VAULT_ROOT = Path(VAULT)
+atomic_io.LOCK_DIR = Path(LOCKS)
+atomic_io.SCRATCH_DIR = Path(LOCKS) / "tmp"
+
+target = Path(TARGET)
+print("LOCK", str(atomic_io.lock_file_for(target)), str(atomic_io.LOCK_DIR), flush=True)
+with atomic_io.commit_lock(target, timeout=20):
+    print("HELD", flush=True)
+    sys.stdin.readline()          # the parent is queued on this lock
+    atomic_io.write_text_durable(target, NEW_BYTES)
+    print("WROTE", flush=True)
+    sys.stdin.readline()          # release
+print("RELEASED", flush=True)
+'''
+
+
+async def test_the_pre_image_is_what_a_write_from_another_process_left(
+        vault_route, tmp_path):
+    """The lock the pre-image read sits inside is a real cross-process lock.
+
+    Round SM_20260920_084122 pinned this only with a holder in another *thread* of
+    the pytest process. `flock` excludes processes, and the writers that matter
+    here are separate processes — a nightly job, the other MCP module, a script —
+    so a same-process holder could not say whether the lock is shared at all.
+
+    The ordering is what makes this an assertion rather than a description, so it is
+    spelled out in the awaits. A child takes `commit_lock` on the note; the parent's
+    `vault_write` is then started and given the event loop (`await asyncio.sleep`,
+    not `time.sleep` — a blocking sleep in the loop thread would start nothing and
+    the write would land after the child had already committed, which is a test that
+    passes for the wrong reason and was the first draft of this test). Only once the
+    parent is demonstrably queued on the lock does the child replace the note's
+    bytes. So:
+
+    * if the parent read the file *before* taking the lock, the pre-image would be
+      the note's ORIGINAL bytes — the ones that were there when the read happened,
+      not the ones this write displaced — and reverting it would silently erase the
+      child's change;
+    * reading inside the lock makes the pre-image the child's bytes, which is what
+      the write actually displaced, and the revert below puts exactly those back.
+
+    The child also prints the lock path it resolved: equal to the parent's, which is
+    the claim that this is one lock and not two that happen to agree today.
+    """
+    from app import atomic_io as AI
+
+    script = tmp_path / "child_preimage_writer.py"
+    script.write_text(_CHILD_PREIMAGE_WRITER, encoding="utf-8")
+    env = {k: os.environ[k] for k in ("PATH", "USER", "LANG", "LC_ALL") if k in os.environ}
+    env["PYTHONPATH"] = str(_ROOT)
+    child = subprocess.Popen(
+        [sys.executable, str(script), str(_ROOT), str(vault_route.vault),
+         str(vault_route.locks), str(vault_route.note), CHILD_CONTENT],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        cwd=str(_ROOT), env=env)
+    try:
+        lock_line = child.stdout.readline().split()
+        assert lock_line[:1] == ["LOCK"], f"child died early: {lock_line}"
+        assert lock_line[1] == str(AI.lock_file_for(vault_route.note)), (
+            f"child locks {lock_line[1]}, the parent locks "
+            f"{AI.lock_file_for(vault_route.note)}: two locks is the same lost "
+            "update with extra steps")
+        assert child.stdout.readline().strip() == "HELD", "child never took the lock"
+
+        # The parent queues behind it. `await`, not `time.sleep`: the handler runs
+        # in a worker thread, so the loop has to be yielded for the call to reach
+        # commit_lock at all — with a blocking sleep here the coroutine never starts,
+        # the child commits first, and both the lock-mutation below and any lost
+        # pre-image read go unnoticed.
+        task = asyncio.create_task(_vault_write(vault_route, NOTE_PATH, POST_CONTENT))
+        await asyncio.sleep(0.4)
+        assert not task.done(), (
+            "the write did not wait for the other process's lock — with the lock "
+            "shared, this call cannot have got past commit_lock while the child "
+            "still holds it")
+        assert vault_route.note.read_bytes() == PRE_CONTENT.encode("utf-8"), \
+            "the parent wrote before the child released the lock"
+
+        child.stdin.write("go\n")
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == "WROTE", "child never wrote"
+        assert vault_route.note.read_bytes() == CHILD_CONTENT.encode("utf-8")
+
+        child.stdin.write("release\n")
+        child.stdin.flush()
+        out = await asyncio.wait_for(task, timeout=20)
+        assert child.wait(10) == 0
+        assert child.stdout.readline().strip() == "RELEASED"
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(5)
+
+    assert out["success"], out
+    files = _files()
+    assert len(files) == 1, files
+    assert files[0]["pre_sha256"] == CL.sha256_bytes(CHILD_CONTENT.encode("utf-8")), (
+        "the recorded pre-image is the content that was on disk before the other "
+        "process wrote, not the content this write displaced — the read is not "
+        "inside the lock")
+    assert files[0]["post_sha256"] == CL.sha256_bytes(POST_CONTENT.encode("utf-8"))
+
+    backed = CL.revert(SID, TURN, [NOTE_PATH])
+    assert [r["status"] for r in backed] == ["restored"], backed
+    assert vault_route.note.read_bytes() == CHILD_CONTENT.encode("utf-8"), (
+        "revert restored the wrong pre-image: it would have discarded a change "
+        "that another process committed while this turn was queued")
+
+
+async def test_a_subagent_vault_write_lands_on_the_parents_ledger_over_the_pool(
+        vault_route):
+    """A Task child's note reaches the parent turn's index through the aggregator.
+
+    The first round pinned this by calling `_change_ledger.scope` with a
+    `task:*` id — a unit assertion on a pure function, which is not the boundary.
+    A subagent re-enters `main.call_tool` over loopback `/mcp` from a fresh ASGI
+    task, so the parent's turn context does NOT travel: the only thing crossing is
+    `_meta`, whose session id is the child's own `task:*` and whose turn key is
+    absent, because `loop.py` stamps a turn id only when one is set.
+
+    So the test drives that call — child session id, no turn key — with the child
+    registered against a parent (session, turn). Everything the parent's contextvar
+    would have supplied is missing here, and the entry still has to arrive on the
+    PARENT's index: a human reverts the turn they were watching, and a per-child
+    index would be read by nobody. `via_session` is what keeps the child's authorship
+    visible inside that entry rather than lost to the redirect.
+    """
+    from agent_mcp import main as M
+
+    child_sid = "task:general-purpose:abcd1234"
+    rec = SR.register(subagent_type="general-purpose", description="d", prompt="p",
+                      parent_session_id=SID, parent_turn_id=TURN,
+                      session_id=child_sid, model="primary", max_turns=5)
+    res = await M.call_tool(
+        "vault_write", {"path": NOTE_PATH, "content": POST_CONTENT},
+        {M.META_SESSION_ID: child_sid, M.META_CALL_ID: "call-child"})
+    assert not res.is_error, res.content[0].text
+    SR.finish(rec, status="completed")
+
+    # The parent's index, not the child's: no turn id of its own, and the redirect
+    # is the whole point. Asserted from the index path, not from `_files()`, so a
+    # stray entry written under the child's own key cannot satisfy it.
+    assert not CL._index_path(child_sid, "").exists(), (
+        "the child got its own ledger, which nothing reads after the Task returns")
+    files = _files()
+    assert len(files) == 1, files
+    assert files[0]["via_session"] == child_sid, files[0]
+    assert files[0]["pre_sha256"] == CL.sha256_bytes(PRE_CONTENT.encode("utf-8"))
+    assert files[0]["post_sha256"] == CL.sha256_bytes(POST_CONTENT.encode("utf-8"))
+    assert files[0]["call_id"] == "call-child", files[0]
+
+    row = _audit_rows(vault_route)[-1]
+    assert (row["session"], row["turn"]) == (SID, TURN), row
+
+    backed = CL.revert(SID, TURN, [NOTE_PATH])
+    assert [r["status"] for r in backed] == ["restored"], backed
+    assert vault_route.note.read_bytes() == PRE_CONTENT.encode("utf-8")
+
+
+async def test_the_audit_row_names_the_turn_and_both_hashes(vault_route):
+    """The join key: the audit row's hashes are the ledger entry's hashes.
+
+    Before this the row carried `timestamp`/`agent_id`/`path`/`bytes`/`action`
+    only, so the log that saw the overwrite named neither the turn that wrote it
+    nor whether anything was restorable — given "a note changed at 09:04:12Z"
+    there was no way to reach the pre-image that did or did not exist.
+    """
+    await _vault_write(vault_route, NOTE_PATH, POST_CONTENT)
+
+    row = _audit_rows(vault_route)[-1]
+    for key in ("timestamp", "agent_id", "path", "bytes", "action",
+                "session", "turn", "pre_sha256", "post_sha256"):
+        assert key in row, f"audit row missing {key}: {row}"
+    assert (row["session"], row["turn"]) == (SID, TURN)
+    assert row["path"] == NOTE_PATH and row["action"] == "write"
+    assert row["bytes"] == len(POST_CONTENT.encode("utf-8"))
+
+    e = _files()[0]
+    assert row["pre_sha256"] == e["pre_sha256"] == CL.sha256_bytes(PRE_CONTENT.encode("utf-8"))
+    assert row["post_sha256"] == e["post_sha256"] == CL.sha256_bytes(POST_CONTENT.encode("utf-8"))

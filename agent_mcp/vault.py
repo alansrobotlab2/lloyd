@@ -22,7 +22,9 @@ also used by agent_mcp.facts.
 import asyncio
 import concurrent.futures
 import datetime
+import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -42,6 +44,7 @@ from agent_mcp._shared import (
     _QUERY_STOPWORDS,
     _err,
     _wrap,
+    get_bound_session,
 )
 from agent_mcp.retrieval import (
     FACT_GODNODE_THRESHOLD,
@@ -56,6 +59,8 @@ from agent_mcp.retrieval import (
     graph_weighted_neighbors,
 )
 import math
+
+logger = logging.getLogger("lloyd-vault")
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -944,10 +949,116 @@ def _normalize_vault_path(path: str) -> tuple[str | None, str | None]:
     return p, None
 
 
-def _audit_write(path: str, byte_count: int) -> None:
+def _sha256_bytes(data: bytes) -> str:
+    """The digest the change ledger records, called through the ledger itself.
+
+    One hashing rule across the two records matters: the audit row's
+    ``pre_sha256`` is only a join key if it is the same number the ledger index
+    carries for the same bytes.
+    """
+    try:
+        from agent_mcp import _change_ledger
+        return _change_ledger.sha256_bytes(data)
+    except Exception:  # noqa: BLE001 — hashlib is the same function, inlined
+        return hashlib.sha256(data).hexdigest()
+
+
+def _ledger_scope() -> "tuple[str, str] | None":
+    """The (session, turn) this write belongs to, or None for no ledger.
+
+    Delegates to the lookup ``Write``/``Edit`` use rather than restating it: one
+    rule decides which calls are attributable, so this route cannot quietly end
+    up outside the ledger by keeping its own copy of the predicate. Returns None
+    for a call with no bound session or no turn id — a worker turn, a direct
+    in-process caller — which is the degrade path, not an error.
+    """
+    try:
+        from agent_mcp.builtin_fs import _ledger_scope as _fs_ledger_scope
+        return _fs_ledger_scope(get_bound_session())
+    except Exception:  # noqa: BLE001
+        logger.warning("change ledger: scope lookup failed for a vault write",
+                       exc_info=True)
+        return None
+
+
+def _audit_keys(scope: "tuple[str, str] | None") -> "tuple[str, str]":
+    """The `(session, turn)` to put in the audit row, known halves only.
+
+    The ledger needs both or nothing (`_ledger_scope` returns None), but the log
+    should still say which session wrote the file. A turn-less call — a worker turn,
+    whose session's ambient turn id is empty — is the common shape, and an empty
+    session means an in-process caller, since an aggregator call that omitted its
+    session id is refused before it gets here (#1053).
+    """
+    if scope:
+        return scope
+    return (get_bound_session(), "")
+
+
+def _read_pre_bytes(target: Path) -> "bytes | None":
+    """The bytes about to be replaced, or None for a create / an unreadable file.
+
+    Read inside ``commit_lock`` on purpose: a pre-image is only an undo point if
+    it is what this write actually displaced, and the lock is what makes "nothing
+    else wrote between the read and the replace" true. Unreadable degrades to a
+    write with no pre-image rather than to a failed write.
+    """
+    try:
+        return target.read_bytes() if target.is_file() else None
+    except OSError:
+        return None
+
+
+def _ledger_record(scope: "tuple[str, str] | None", *, target: Path, path: str,
+                   pre_bytes: "bytes | None", post_sha: str) -> None:
+    """Open this turn's entry for `target`, snapshot the pre-image, commit it.
+
+    Same three ledger calls `Write`/`Edit` make (`begin`, `snapshot_pre`,
+    `commit`), so a `vault_write` lands in the one index a turn's `Write`s
+    land in and reverts through the one revert that reads it.
+
+    Called after the bytes are on disk — `pre_bytes` was read under the writer
+    lock, so the snapshot carries the content this write displaced while the
+    file-lock section stays read-plus-write. Every failure is logged and
+    swallowed: a write that fails because the undo bookkeeping failed is
+    strictly worse than a write with no undo.
+    """
+    if scope is None:
+        return
+    try:
+        from agent_mcp import _change_ledger, _task_registry
+        session_id = get_bound_session()
+        entry = _change_ledger.begin(
+            scope, real=os.path.realpath(target), path=path,
+            op="write" if pre_bytes is not None else "create",
+            call_id=_task_registry.current_call_id.get(),
+            # Set only when a subagent made the change, so a footer can say
+            # which of a turn's writes came from a Task rather than the turn.
+            via_session=session_id if session_id.startswith("task:") else "",
+        )
+        _change_ledger.snapshot_pre(scope, entry, pre_bytes)
+        _change_ledger.commit(scope, entry, post_sha)
+    except Exception:
+        logger.warning("change ledger: record failed for %s", path, exc_info=True)
+
+
+def _audit_write(path: str, byte_count: int, *, session: str = "", turn: str = "",
+                 pre_sha256: str = "", post_sha256: str = "") -> None:
+    """Append the write's row to the vault audit log.
+
+    `session`/`turn`/`pre_sha256`/`post_sha256` are the join keys. Without them
+    the row was the only record that a whole-file overwrite happened at all and
+    named neither the turn that wrote it nor whether anything is restorable, so
+    the log that sees the write could not reach the ledger that holds the
+    pre-image — given "a note changed at 09:04:12Z" there was no way to answer
+    either question. Empty strings mean the write was unattributable (no bound
+    session/turn); the hashes are about the bytes and are recorded regardless.
+    """
     try:
         AUDIT_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        entry = {"timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(), "agent_id": "lloyd", "path": path, "bytes": byte_count, "action": "write"}
+        entry = {"timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(), "agent_id": "lloyd", "path": path, "bytes": byte_count, "action": "write",
+                 "session": session, "turn": turn,
+                 "pre_sha256": pre_sha256, "post_sha256": post_sha256}
         with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception:
@@ -1042,13 +1153,21 @@ def _vault_write(params: dict) -> dict:
         # other lane had appended. The lock is off-tree (`lock_file_for`) — a
         # sibling `<name>.lock` here would be a new file in the vault, and
         # `lloyd/.research-queue.lock` is that precedent, tracked in git.
+        scope = _ledger_scope()
         try:
             with commit_lock(target):
+                pre_bytes = _read_pre_bytes(target)
                 write_text_durable(target, content)
         except TimeoutError as exc:
             return _err(str(exc), ErrorCode.LOCK_TIMEOUT, path=path)
         byte_count = len(content.encode("utf-8"))
-        _audit_write(path, byte_count)
+        post_sha = _sha256_bytes(content.encode("utf-8"))
+        pre_sha = _sha256_bytes(pre_bytes) if pre_bytes is not None else ""
+        _ledger_record(scope, target=target, path=path, pre_bytes=pre_bytes,
+                       post_sha=post_sha)
+        audit_session, audit_turn = _audit_keys(scope)
+        _audit_write(path, byte_count, session=audit_session, turn=audit_turn,
+                     pre_sha256=pre_sha, post_sha256=post_sha)
         result = {"success": True, "path": path, "bytes": byte_count}
         if replaced:
             # Say so: a writer that asked for one spelling and got another needs
