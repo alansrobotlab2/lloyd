@@ -1572,3 +1572,291 @@ def test_a_healthy_run_still_exits_zero_and_still_prints_complete(tmp_path, feed
     # `state_mod.STATE_FILE`, so the coverage key is read from where it landed.
     persisted = json.loads((feeds / "scanner-state.json").read_text())
     assert persisted["youtube_coverage"] == {"fetched": 3, "attempted": 3}
+
+
+# --- Backlog #856: a keyword matches whole words, not substrings --------------
+
+# The live `interests.md` topic lines verbatim (vault interests.md, 2026-09-20),
+# duplicates included, loaded by the real loader. `PROFILE_MD` above cannot
+# express this defect: none of its keywords is short enough to hide inside an
+# English word, and the defect is exactly that — the robotics keyword `DOF`
+# matched the `dof` inside "handoff", which admitted an openclaw Linux-update
+# commit, filed it under `robotics`, and scored it 10/10 urgent on the keyword
+# path.
+INTERESTS_LIVE_MD = """---
+title: Interests
+---
+# Interests
+
+## Robotics
+humanoid,actuator,servo,DOF,gait,locomotion,bipedal,quadruped,legged,robot dog,\
+unitree,go2,gripper,compliant mechanism,3d printed robot,ros2,gr00t,isaac lab,\
+sim to real,imitation learning,behavior cloning,whole-body control,\
+dexterous manipulation,gr00t,unitree,nvidia omniverse,nvidia isaacsim,\
+unitree go2,unitree r1,unitree g1
+
+## AI & LLMs
+qwen,vllm,quantization,gguf,inference,speculative decoding,mixture of experts,\
+moe,local llm,llama.cpp,mcp protocol,agent framework,tool use,function calling,\
+agentic,orchestration,foundation model,reinforcement learning,embodied ai,\
+openclaw
+
+## Voice & TTS
+text to speech,tts,voice cloning,voice synthesis,qwen-tts,speech synthesis,\
+speech recognition,asr
+
+## Hardware
+3d printing,PETG,planetary gear,actuator design,printed robotics,inmoov
+"""
+
+# Frozen 2026-09-14/15/16 raw corpus: the items the containment rule admitted,
+# with `provenance` and the counts it was cut to. It is a file rather than the
+# live `_pipeline` tree because that tree keeps growing — triage counted 21
+# admits over the same three dates on 09-16, mid-write, while the settled files
+# admit 36 of 267. JSONL, not JSON: `.gitignore` ignores `*.json` and is a
+# denied path, so a `.json` fixture would sit untracked and the test would only
+# pass in the worktree that generated it.
+KEYWORD_ADMITS_FIXTURE = (REPO_ROOT / "tests" / "fixtures" / "intel_pipeline"
+                          / "keyword_admits_2026-09-14_16.jsonl")
+
+# The two items that reached the pipeline *only* because a keyword was a
+# substring of a bigger word, plus the one true positive that must survive.
+HANDOFF_CRON_ITEM = "github:openclaw/openclaw:commit:eec1712a"
+HANDOFF_UI_ITEM = "github:openclaw/openclaw:commit:ead35525"
+OPENCLAW_ENV_KEYS_ITEM = "github:openclaw/openclaw:issue:146645"
+AGIBOT_DOF_ITEM = "github:isaac-sim/IsaacLab:issue:7789"
+
+AGIBOT_TITLE = "Agibot/g2 ik7d teleop"
+AGIBOT_SUMMARY = ("Integrates AgiBot's `ik_7d` 7-DoF redundant-arm IK solver as an "
+                  "out-of-tree Isaac Lab teleoperation environment "
+                  "(`Isaac-Teleop-G2-Ik7d-v0`).")
+HANDOFF_CRON_SUMMARY = (
+    "* fix(cron): honor tool allowlists across harnesses\n"
+    "* test(update): simplify managed handoff fixture\n"
+    "* test(update): preserve timeout narrowing in fixture cleanup")
+
+
+def _live_profile(tmp_path):
+    """The live keyword lists, through the real loader, from a redirected HOME."""
+    (tmp_path / "obsidian" / "interests.md").write_text(INTERESTS_LIVE_MD)
+    return profile_mod.load_profile()
+
+
+def _fixture_corpus():
+    """Header record first, then one item per line — see the fixture's own comment."""
+    lines = KEYWORD_ADMITS_FIXTURE.read_text().splitlines()
+    header = json.loads(lines[0])
+    header["items"] = [json.loads(l) for l in lines[1:] if l.strip()]
+    return header, [FeedItem.from_dict(r) for r in header["items"]]
+
+
+def _containment_admits(items, profile):
+    """The pre-fix rule, restated so the delta is measured and not remembered."""
+    keywords = profile_mod.get_all_keywords(profile)
+    return [it for it in items
+            if any(k.lower() in f"{it.title} {it.summary}".lower() for k in keywords)]
+
+
+def test_a_short_keyword_buried_in_a_bigger_word_stops_matching(redirect_paths):
+    """Clause 1: the commit message that fired the defect matches nothing.
+
+    Pre-fix this returned the robotics topic with `matched_keywords: ['DOF']`,
+    which is what made an openclaw update look like a robotics item.
+    """
+    profile = _live_profile(redirect_paths)
+
+    matched = profile_mod.keyword_match(
+        "fix(update): allow config and service locks before handoff storage "
+        "is initiated", profile)
+
+    assert matched == [], (
+        "a keyword embedded inside the word 'handoff' still matched: "
+        f"{[(t['name'], t['matched_keywords']) for t in matched]}")
+
+
+def test_a_whole_word_dof_still_matches_the_robotics_topic(redirect_paths):
+    """Clause 2: the boundary rule must cost no true positive.
+
+    Both texts are live. `AGIBOT_TITLE`/`AGIBOT_SUMMARY` is the corpus's one
+    genuine `DoF` hit (2026-09-15, written as `7-DoF`), and the hyphenated
+    `6-DoF` is the spelling the field writes the spec in.
+    """
+    profile = _live_profile(redirect_paths)
+
+    matched = profile_mod.keyword_match(f"{AGIBOT_TITLE} {AGIBOT_SUMMARY}", profile)
+    robotics = [t for t in matched if t["name"] == "robotics"]
+    hyphenated = profile_mod.keyword_match("a 6-DoF redundant arm", profile)
+
+    assert robotics, f"the genuine DoF item stopped matching: {matched}"
+    assert "DOF" in robotics[0]["matched_keywords"]
+    assert [t["matched_keywords"] for t in hyphenated] == [["DOF"]], (
+        "the hyphenated spelling must match the robotics topic and nothing else")
+
+
+def test_a_multi_word_phrase_still_matches_without_a_boundary(redirect_paths):
+    """Clause 3: phrases keep plain containment, so prose inflection is not a miss.
+
+    `\\brobot dog\\b` cannot match "robot dogs"; the space is already the
+    boundary, and a phrase split by a hyphen ("sim-to-real") is prose too.
+    """
+    profile = _live_profile(redirect_paths)
+
+    matched = profile_mod.keyword_match(
+        "everything we know about robot dogs in 2026", profile)
+
+    assert [t["name"] for t in matched] == ["robotics"]
+    assert matched[0]["matched_keywords"] == ["robot dog"]
+
+
+def test_a_punctuation_bearing_keyword_still_matches(redirect_paths):
+    """`llama.cpp` and `qwen-tts` are the profile's keywords with punctuation
+    inside. Their edge characters are word characters, so a `\\b` at each end
+    bounds the whole keyword — the shape the boundary rule is claimed for.
+    """
+    profile = _live_profile(redirect_paths)
+    keywords = profile_mod.get_all_keywords(profile)
+
+    assert "llama.cpp" in profile_mod.match_keywords(
+        "quantising llama.cpp models for the desktop", keywords)
+    assert "qwen-tts" in profile_mod.match_keywords(
+        "qwen-tts finished the clone in 2.3s", keywords)
+
+
+def test_stage1_filter_admits_every_item_that_matched_on_a_whole_word(redirect_paths):
+    """Clause 4: over the frozen 09-14→09-16 corpus, admission drops from 36 to
+    33 and the three losses are the substring-only items — no more, no less.
+
+    The denominator is the fixture's own count, re-measured against the pre-fix
+    rule in the same call, so a fixture that quietly changed size cannot leave
+    this test green.
+    """
+    profile = _live_profile(redirect_paths)
+    payload, items = _fixture_corpus()
+
+    kept = scoring_mod.stage1_filter(items, profile)
+    contained = _containment_admits(items, profile)
+    lost = {it.id for it in items} - {it.id for it in kept}
+
+    assert payload["matched_keywords"] == profile_mod.get_all_keywords(profile), (
+        "the keyword list the corpus was frozen against and the keyword list "
+        "INTERESTS_LIVE_MD loads are no longer the same list, so the counts "
+        "below describe a different profile")
+    assert payload["counts"]["containment_admits"] == 36 == len(contained), (
+        f"the pre-fix rule admits {len(contained)} of {len(items)} fixture items, "
+        f"not the 36 the fixture records")
+    assert len(kept) == 33, (
+        f"admission must drop 36 → 33, losing only substring-only items; "
+        f"{len(kept)} kept, lost {sorted(lost)}")
+    assert lost == {HANDOFF_CRON_ITEM, HANDOFF_UI_ITEM, OPENCLAW_ENV_KEYS_ITEM}, (
+        f"the three substring-only admits must be the only losses: {sorted(lost)}")
+    assert AGIBOT_DOF_ITEM in {it.id for it in kept}, (
+        "the genuine 7-DoF item must still be admitted")
+
+
+def test_a_substring_only_item_scores_below_the_vault_floor_without_the_model(
+        redirect_paths, monkeypatch):
+    """Clause 5: on the keyword-fallback path the fabricated match *was* the score.
+
+    Pre-fix, with `INTEL_DISABLE_LLM=1`, this item came back `relevance 10 |
+    urgency urgent | category robotics | why 'Matches: DOF'` — above
+    `RELEVANCE_FLOOR = 4`, so it would have been written to the vault under
+    `knowledge/robotics/`. The model overwrites these fields when it answers
+    (clause 5 is about the path where it does not).
+    """
+    profile = _live_profile(redirect_paths)
+    monkeypatch.setenv("INTEL_DISABLE_LLM", "1")
+    item = _item(HANDOFF_CRON_ITEM, source="github",
+                 title="fix(cron): honor tool allowlists across harnesses (#149375)",
+                 summary=HANDOFF_CRON_SUMMARY)
+
+    scored = scoring_mod.stage2_score([item], profile)[0]
+
+    assert vw_mod.below_floor(scored), (
+        f"a substring-only match still clears the floor: {scored.relevance}/10 "
+        f"{scored.urgency} {scored.category} — {scored.why}")
+    assert scored.relevance < vw_mod.RELEVANCE_FLOOR
+    assert scored.urgency == "low"
+    assert scored.category == "general"
+    assert "DOF" not in scored.why
+
+
+def test_a_whole_word_item_still_scores_urgent_on_the_keyword_path(redirect_paths,
+                                                                   monkeypatch):
+    """The control clause 5 needs: below-floor must not mean everything-scores-1.
+
+    The same env-disabled path, on the real robotics item: robotics has no
+    declared weight, so the keyword fallback is weight 1.0 × 10 = 10, urgent,
+    category robotics, and it is written.
+    """
+    profile = _live_profile(redirect_paths)
+    monkeypatch.setenv("INTEL_DISABLE_LLM", "1")
+    item = _item(AGIBOT_DOF_ITEM, source="github",
+                 title=AGIBOT_TITLE, summary=AGIBOT_SUMMARY)
+
+    scored = scoring_mod.stage2_score([item], profile)[0]
+
+    assert scored.relevance == 10 and not vw_mod.below_floor(scored)
+    assert scored.urgency == "urgent" and scored.category == "robotics"
+    # generate_why emits `list(set(...))`, whose order varies with the process
+    # hash seed, so the set is what is pinned — this item's text carries both
+    # `DOF` and `Isaac Lab`.
+    assert scored.why.startswith("Matches: ")
+    assert set(scored.why[len("Matches: "):].split(", ")) == {"isaac lab", "DOF"}
+
+
+def test_a_vault_path_no_longer_files_a_substring_only_item_under_robotics(redirect_paths):
+    """The other route a fabricated match took: `determine_vault_path` also
+    consults `keyword_match`, so a false robotics match misfiles an unrelated
+    YouTube note into `knowledge/robotics/`."""
+    profile = _live_profile(redirect_paths)
+    substring_item = ScoredItem(
+        id="yt-handoff", source="youtube",
+        title="Fixing handoff storage locks in the update service",
+        url="https://example.com/yt-handoff",
+        summary="why managed updates fail during service activation",
+        discovered_at="2026-09-11T00:00:00Z", relevance=6, urgency="morning",
+        why="Matches: DOF", category="robotics")
+    whole_word_item = ScoredItem(
+        id="yt-dof", source="youtube", title="A 6-DoF arm teleop session",
+        url="https://example.com/yt-dof", summary="teleop retargeting",
+        discovered_at="2026-09-11T00:00:00Z", relevance=6, urgency="morning",
+        why="Matches: DOF", category="robotics")
+
+    substring_path = vw_mod.determine_vault_path(substring_item, profile)
+    whole_word_path = vw_mod.determine_vault_path(whole_word_item, profile)
+
+    assert substring_path.parts[-2:] == ("feeds", "youtube-uncategorized.md"), (
+        f"a substring-only match still routes to {substring_path}")
+    assert whole_word_path.parts[-2:] == ("robotics", "youtube-digest.md"), (
+        f"the genuine match must keep its topic note, got {whole_word_path}")
+
+
+def test_the_cli_drops_a_substring_only_item_before_the_day_file(tmp_path):
+    """The process boundary the unit tests cannot cross: the `python -m
+    intel_pipeline` subprocess autonomy task #30 spawns, its own HOME, the
+    interests file read from disk by the real loader, and the keyword-fallback
+    path with the engine off. One raw day, two items — only the genuine 7-DoF
+    one may reach the day file.
+    """
+    home, feeds = _cli_home(tmp_path)
+    (home / "obsidian" / "interests.md").write_text(INTERESTS_LIVE_MD)
+    today = __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d")
+    (feeds / "raw" / f"{today}.jsonl").write_text("\n".join([
+        _item(HANDOFF_CRON_ITEM, source="github",
+              title="fix(cron): honor tool allowlists across harnesses (#149375)",
+              summary=HANDOFF_CRON_SUMMARY).to_json(),
+        _item(AGIBOT_DOF_ITEM, source="github",
+              title=AGIBOT_TITLE, summary=AGIBOT_SUMMARY).to_json(),
+    ]) + "\n")
+
+    day, proc = _run_cli(home, 6, "--score", extra_env={"INTEL_DISABLE_LLM": "1"})
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    rows = [json.loads(l) for l in
+            (feeds / f"intel-{day}.jsonl").read_text().splitlines() if l.strip()]
+
+    assert [r["id"] for r in rows] == [AGIBOT_DOF_ITEM], (
+        "the handoff-substring item must be dropped before scoring, and the "
+        f"genuine DoF item must survive: {rows}\n{proc.stdout[-2000:]}")
+    assert (rows[0]["relevance"], rows[0]["category"]) == (10, "robotics"), (
+        f"the surviving item keeps its keyword-fallback grade: {rows[0]}")

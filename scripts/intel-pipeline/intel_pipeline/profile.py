@@ -140,12 +140,52 @@ def get_topics(profile: dict) -> List[dict]:
     return profile.get("topics", [])
 
 
+# One compiled whole-word pattern per lowercased keyword. The set is the
+# interest profile's keywords — tens of entries, stable across a run — and
+# `re`'s own cache would hold them anyway; naming it keeps the cost visible.
+_WORD_PATTERN_CACHE: Dict[str, "re.Pattern[str]"] = {}
+
+
+def _keyword_occurs(keyword: str, text_lower: str) -> bool:
+    """True when the keyword occurs in the text as a word, or as a phrase.
+
+    A keyword containing a space is a phrase: plain containment, because the
+    space is already the boundary and a phrase spanning a hyphen ("sim-to-real
+    results", "robot dogs") is prose, not a miss. A keyword without one must
+    match a whole word — bare containment made every 2-3 letter keyword a
+    wildcard over English prose (backlog #856: the robotics keyword `DOF`
+    matched the `dof` inside "handoff", and an openclaw Linux-update commit was
+    admitted, filed under `robotics`, and scored 10/10 urgent on the keyword
+    path).
+
+    Both edge characters of every keyword in `interests.md` are word
+    characters, so `\b` bounds the whole keyword. A keyword shaped like `c++`
+    would need the boundary trimmed to its word-character end; there is no such
+    keyword today, and `test_a_punctuation_bearing_keyword_still_matches`
+    pins the shapes that do exist.
+    """
+    kw_lower = keyword.lower()
+    if " " in kw_lower:
+        return kw_lower in text_lower
+    pattern = _WORD_PATTERN_CACHE.get(kw_lower)
+    if pattern is None:
+        pattern = re.compile(r"\b" + re.escape(kw_lower) + r"\b")
+        _WORD_PATTERN_CACHE[kw_lower] = pattern
+    return pattern.search(text_lower) is not None
+
+
 def match_keywords(text: str, keywords: List[str]) -> List[str]:
-    """Match keywords against text, return matching keywords."""
+    """Match keywords against text, return matching keywords.
+
+    Whole-word for a single-word keyword, containment for a phrase — see
+    `_keyword_occurs`. Every caller (`keyword_match`, and through it
+    `keyword_score`, `stage1_filter`, `stage2_score`, `_keyword_fallback`,
+    `determine_category` and `determine_vault_path`) inherits the rule.
+    """
     if not text or not keywords:
         return []
     text_lower = text.lower()
-    return [kw for kw in keywords if kw.lower() in text_lower]
+    return [kw for kw in keywords if _keyword_occurs(kw, text_lower)]
 
 
 def keyword_match(text: str, profile: dict) -> List[Dict[str, Any]]:
