@@ -217,7 +217,38 @@ class TurnResult:
                 f"turns={self.num_turns}) — nothing written")
 
 
-def _worker_run_options(max_turns: int, *, extra_disallowed: Sequence[str] = (),
+def _worker_state_anchor(max_turns: int, source: str | None):
+    """The one `state_anchor` a direct worker turn gets, carrying both its clocks.
+
+    `max_turns` must be the value handed to `RunOptions` and `turn_timeout_for(
+    source)` the number the turn's own timer receives — each warning is a
+    fraction of one of those, and a fraction of a budget the run does not have
+    arrives either after the kill or too late to act on. The same rule
+    `autonomy._build_task_anchor` states for the scheduled path.
+
+    A source with no configured wall clock still has a turn cap and still dies on
+    it, so this returns an iteration-only anchor rather than `None`; the
+    iteration half is the load-bearing one here anyway — bench-mine 97 failures
+    and session-distill 173 in 30 days all ended `stop_reason=max_turns`, against
+    2 wall-clock timeouts.
+
+    `app.deadline_anchor` is imported lazily because this module is imported by
+    the worker pool and by the sources alike, and every other helper here keeps
+    its harness imports inside the function for exactly that reason.
+    """
+    from app.deadline_anchor import (
+        build_deadline_anchor, build_iteration_anchor, compose_state_anchors,
+    )
+
+    deadline = turn_timeout_for(source, default=0.0) if source else 0.0
+    return compose_state_anchors(
+        build_iteration_anchor(max_turns),
+        build_deadline_anchor(int(deadline), what="turn"),
+    )
+
+
+def _worker_run_options(max_turns: int, *, source: str | None = None,
+                        extra_disallowed: Sequence[str] = (),
                         priority: int = 1):
     """Build the `RunOptions` every in-process worker turn runs under, in one place.
 
@@ -229,6 +260,14 @@ def _worker_run_options(max_turns: int, *, extra_disallowed: Sequence[str] = (),
     already been missing once (see the comment below and
     `tests/test_automod_hardening.py`, which is the only reason it is not
     missing now).
+
+    `source` is the worker source name, and it is here for one reason: the
+    budget anchor has to warn against the wall clock the pool will actually
+    enforce, which is that source's `max_duration_seconds`. It is optional and
+    `None` means "iterate without a wall-clock warning", so every caller that
+    only cares about tool policy keeps working — but a caller that has a source
+    name and does not pass it is silently asking for its turn to die at a
+    deadline it was never told about (#1050).
     """
     from app.harness import RunOptions
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
@@ -310,6 +349,15 @@ def _worker_run_options(max_turns: int, *, extra_disallowed: Sequence[str] = (),
         env=model_env,
         priority=priority,
         hooks=hooks,
+        # The budget warning, at the seam BOTH direct shapes share. Left at its
+        # `None` default this path had no anchor at all while the other three
+        # turn paths had one, and inner voice is off here by design
+        # (`source_inner_voice`), so there was no observer to say it instead:
+        # bench-mine's 97 and session-distill's 173 `max_turns` deaths in the
+        # 30 days before this landed were each first told about their cap by the
+        # cap (#1050). Appended, never written into position 0 — the loop's own
+        # comment is the record of why that would cost the prefix cache.
+        state_anchor=_worker_state_anchor(max_turns, source),
         # The compaction wall, from the config the chat path reads. This
         # constructor takes no `_get_harness_kwargs()` at all — see
         # architecture/vllm.md, "Found on the way" — so
@@ -345,7 +393,7 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20, *,
     from app.run_recorder import record_events
     from app.sessions_io import create_session, new_background_session_id
 
-    options = _worker_run_options(max_turns)
+    options = _worker_run_options(max_turns, source=source)
     session_id = new_background_session_id(source)
     run_id = uuid.uuid4().hex[:12]
     try:
@@ -391,6 +439,7 @@ async def run_prompt_with_run_state(
     skill_text: str = "",
     max_steps: int = 6,
     iterations_per_step: int = 4,
+    source: str = "",
     extra_disallowed: Sequence[str] = (),
     priority: int = 1,
 ) -> TurnResult:
@@ -421,6 +470,14 @@ async def run_prompt_with_run_state(
     Raises `RunStateStepError` when a step's patch is invalid on both attempts.
     Deliberate: a caller that wants today's behaviour as a fallback has to catch
     it and say so in code, rather than inherit the transcript by silence.
+
+    `source` names the worker source whose `max_duration_seconds` bounds this
+    turn, and it is what the wall-clock anchor warns against — the same value
+    `workers/pool.py` reads for its own `wait_for`. Omit it and the job name is
+    tried, which is the convention every source already follows; a job name that
+    is not a configured source resolves to no wall clock, and the turn then gets
+    the iteration anchor alone rather than a warning about a deadline nobody
+    enforces.
     """
     result = await run_state_turn(
         job=job,
@@ -429,7 +486,8 @@ async def run_prompt_with_run_state(
         state=state,
         run_dir=run_dir,
         template=_worker_run_options(
-            iterations_per_step, extra_disallowed=extra_disallowed,
+            iterations_per_step, source=(source or job),
+            extra_disallowed=extra_disallowed,
             priority=priority),
         max_steps=max_steps,
         iterations_per_step=iterations_per_step,

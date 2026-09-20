@@ -654,6 +654,27 @@ is the known self-grading failure mode, and this is where it is stopped.
   nothing is written and the candidate is retired after repeats. That is the
   budget being wrong for the job, not the input being unreachable — and it is
   the same failure `TurnResult` exists to make visible, working.
+
+  **The same ceiling kills `session-distill` more often than it kills
+  `bench-mine`, and this section named only the smaller instance.** 30 days to
+  2026-09-20: `bench-mine` 123 failures of 146 runs, **120 of them
+  `stop_reason=max_turns`**; `session-distill` 238 failures of 632, **209 the
+  same string** — 209 deaths against 394 successes, on a source whose remaining
+  failures are 21 `ConnectError` (engine-side) and 3 wall-clock
+  `TimeoutError`s. Exclude those two buckets from any before/after count on the
+  ceiling: they are different mechanisms, and mixing them moves the number
+  without moving anything. `session-distill` runs `iterations_per_step=15`
+  (`workers/sources/session_distill.py`) against `bench-mine`'s `max_turns=8`
+  (`workers/sources/bench_mine.py`) and dies identically — it reads a whole
+  transcript and runs out of iterations before it writes a note. Raising either
+  ceiling is #980/#896's decision. What #1050 changed is that the turn was never
+  told: `_worker_run_options` set no `state_anchor`, so this path had the kill
+  and no warning while the chat, session-backed-worker and autonomy paths all had
+  the warning, and inner voice is off for these sources by design, so no observer
+  could say it instead. Both clocks now ride every direct worker turn — 75 %/90 %
+  of `max_turns`, 70 %/90 % of `turn_timeout_for(source)` — pinned in
+  `tests/test_worker_budget_anchor.py`. Whether the warning changes what those
+  turns do is a post-landing traffic question, and this line does not claim it.
 - **`gap-fill` is idle and still untested in production.** Three
   `label: gap` occurrences across two fact files today, and **zero rows in
   `runs` for its entire life** — not "few", none. Correct and idle, not broken,
