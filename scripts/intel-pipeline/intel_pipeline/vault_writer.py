@@ -1,6 +1,8 @@
 """Vault writer module for storing scored items to Obsidian vault."""
 
 import json
+import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -10,6 +12,25 @@ from .profile import load_profile, get_all_keywords, keyword_match
 
 
 from ._paths import VAULT_ROOT, KNOWLEDGE_DIR, FEEDS_DIR as SCORED_FEEDS_DIR, VAULT_WRITTEN_STATE
+
+
+# ── the channel monitor's note tree (backlog #1269) ─────────────────────────
+#
+# `scripts/youtube_channel_monitor.py` writes one real note per video under
+# `knowledge/youtube/{Channel}/YYYYMMDD-slug.md`: `type: video-note` (on newer
+# notes; older ones carry `type: notes` above a second front-matter block), an
+# 8-14 KB Executive Summary, and the video's id in front matter as `video_id:`.
+# That tree is the canonical copy of a YouTube video: it is the one with the
+# transcript in it. This writer's digest is an index, not a second copy — until
+# 2026-09-20 it wrote a title + `(No description)` stub beside a `watch?v=` link
+# for a video it had no idea was already noted. On 2026-09-19 that was 5 of the 5
+# videos the run wrote; since RELEVANCE_FLOOR landed, 7 of the 8 that cleared it.
+YOUTUBE_NOTE_TREE_DIRNAME = "youtube"
+_HEAD_BYTES = 4000  # same window workers/sources/youtube_digest.py matches on
+_WATCH_RE = re.compile(r"[?&]v=([A-Za-z0-9_-]{6,})")
+_VIDEO_ID_RE = re.compile(r"^video_id:\s*(\S+)\s*$", re.MULTILINE)
+# video_id -> note path, per knowledge dir, for the life of the process.
+_NOTE_INDEX: Dict[str, Dict[str, Path]] = {}
 
 
 # Items scoring below this are not written anywhere.
@@ -144,6 +165,133 @@ def determine_vault_path(item: ScoredItem, profile: dict) -> Path:
         return KNOWLEDGE_DIR / "feeds" / "uncategorized.md"
 
 
+def youtube_video_id(item: ScoredItem) -> Optional[str]:
+    """The item's YouTube video id: from `watch?v=` in the URL, else the item id tail.
+
+    `item.id` is `youtube:{channel_id}:{video_id}` (scanners/youtube_scanner.py), so
+    a record whose URL carries no `watch?v=` — a feed URL, a rewriter — still
+    resolves instead of silently falling through to the duplicate path.
+    """
+    match = _WATCH_RE.search(item.url or "")
+    if match:
+        return match.group(1)
+    item_id = item.id or ""
+    if item_id.startswith("youtube:") and ":" in item_id[len("youtube:"):]:
+        tail = item_id.rsplit(":", 1)[1].strip()
+        return tail or None
+    return None
+
+
+def _scan_note_tree(notes_dir: Path) -> Dict[str, Path]:
+    """Map every `video_id:` declared under the note tree to the note that declares it.
+
+    Keyed on front matter, never the filename: an id in a slug is not evidence that
+    the note is *for* that video (25 ids here are declared by two files at once, and
+    103 of the 756 declaring files carry a `type:` other than `video-note`, so
+    neither the name nor the type can be the key). On a collision the
+    note with the most bytes wins — that is the one with the transcript in it — with
+    mtime and path as deterministic tie-breaks.
+    """
+    candidates: Dict[str, List[tuple]] = {}
+    try:
+        paths = [p for p in notes_dir.rglob("*.md") if p.is_file()]
+    except OSError:
+        return {}
+    for path in paths:
+        try:
+            head = path.read_bytes()[:_HEAD_BYTES].decode("utf-8", "replace")
+        except OSError:
+            continue
+        match = _VIDEO_ID_RE.search(head)
+        if not match:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        candidates.setdefault(match.group(1), []).append(
+            (stat.st_size, stat.st_mtime, str(path), path))
+    return {video_id: max(entries)[3] for video_id, entries in candidates.items()}
+
+
+def _note_index(notes_dir: Path, refresh: bool = False) -> Dict[str, Path]:
+    """The note tree's video_id index, built once per process per knowledge dir.
+
+    A miss re-scans once before it is believed: the channel monitor writes notes from
+    another process, so "not indexed yet" must not be reported as "no note" — that
+    would write the duplicate this exists to prevent.
+    """
+    key = str(notes_dir)
+    if refresh or key not in _NOTE_INDEX:
+        _NOTE_INDEX[key] = _scan_note_tree(notes_dir)
+    return _NOTE_INDEX[key]
+
+
+def resolve_video_note(item: ScoredItem) -> Optional[Path]:
+    """The canonical per-video note for a scored YouTube item, or None."""
+    if (item.source or "").lower() != "youtube":
+        return None
+    video_id = youtube_video_id(item)
+    if not video_id:
+        return None
+    notes_dir = KNOWLEDGE_DIR / YOUTUBE_NOTE_TREE_DIRNAME
+    index = _note_index(notes_dir)
+    if video_id not in index:
+        index = _note_index(notes_dir, refresh=True)
+    return index.get(video_id)
+
+
+def _inside_note_tree(path: Path) -> bool:
+    """True when a computed target lands in the canonical note tree."""
+    notes_dir = KNOWLEDGE_DIR / YOUTUBE_NOTE_TREE_DIRNAME
+    try:
+        target = Path(os.path.realpath(path))
+        root = Path(os.path.realpath(notes_dir))
+    except OSError:
+        return False
+    return target == root or root in target.parents
+
+
+def _entry_body(item: ScoredItem) -> str:
+    """What goes under the Source/Relevance line: the summary, then the scorer's reason.
+
+    `(No description)` used to be the whole body whenever `summary` was empty — and
+    stage 1 leaves `summary` empty for every YouTube item (backlog #1155), while
+    stage 2 fills `why`. So the placeholder was the default, not the exception: all 8
+    post-floor YouTube records since 2026-09-11 carry an empty `summary` and a
+    populated `why`, which the writer never read.
+    """
+    summary = (item.summary or "").strip()
+    if summary:
+        return summary
+    why = (getattr(item, "why", "") or "").strip()
+    if why:
+        return why
+    return "(No description)"
+
+
+def _note_pointer(item: ScoredItem, note: Path, digest_path: Path) -> str:
+    """The body for a video that already has a note: a pointer, never a stub.
+
+    The vault-relative path is named in prose so a reader (and this item's
+    verification grep) can find the canonical note, and linked relatively so Obsidian
+    resolves it from the digest it is written into.
+    """
+    try:
+        display = note.resolve().relative_to(VAULT_ROOT.resolve()).as_posix()
+    except (ValueError, OSError):
+        display = note.as_posix()
+    try:
+        link = os.path.relpath(note.resolve(), digest_path.parent.resolve())
+    except (ValueError, OSError):
+        link = display
+    why = (getattr(item, "why", "") or "").strip()
+    reason = f" — {why}" if why else ""
+    return (f"**Already noted:** [{display}]({link}){reason}\n\n"
+            f"The YouTube channel monitor holds the full note for this video; this "
+            f"digest indexes it instead of restating it.")
+
+
 def url_exists_in_file(url: str, file_path: Path) -> bool:
     """Check if a URL already exists in the file (simple dedup)."""
     if not file_path.exists():
@@ -157,10 +305,24 @@ def url_exists_in_file(url: str, file_path: Path) -> bool:
         return False
 
 
+def _digest_target(item: ScoredItem, vault_path: Path) -> Path:
+    """Never let a digest land inside the canonical note tree.
+
+    `determine_vault_path` derives the directory from a profile topic slug, and the
+    topic name is free text: a topic named `YouTube` slugifies to `youtube`, the note
+    tree's own directory name, and the writer would create a `youtube-digest.md` in
+    among the notes it is supposed to be indexing. Such an entry goes to the no-match
+    feed file instead, which is where an unrouted item already goes.
+    """
+    if _inside_note_tree(vault_path):
+        return KNOWLEDGE_DIR / "feeds" / f"{item.source.lower()}-uncategorized.md"
+    return vault_path
+
+
 def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
     """Write a single scored item to the vault."""
-    vault_path = determine_vault_path(item, profile)
-    
+    vault_path = _digest_target(item, determine_vault_path(item, profile))
+
     # Ensure parent directory exists
     vault_path.parent.mkdir(parents=True, exist_ok=True)
     
@@ -168,7 +330,12 @@ def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
     if url_exists_in_file(item.url, vault_path):
         print(f"  Skipping (already exists): {item.url}")
         return False
-    
+
+    # The other dedup layer, which the two checks above cannot see: both inspect
+    # only this item's own id and this one target file, so neither knows that a
+    # different writer already put this video in `knowledge/youtube/**`.
+    note = resolve_video_note(item)
+
     # Prepare content
     today = datetime.utcnow().strftime("%Y-%m-%d")
     source = item.source
@@ -179,15 +346,15 @@ def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
     tags = ["intel-pipeline", source, category]
     
     # Format content - just the entry, not the full file
-    summary = item.summary if item.summary else "(No description)"
-    
+    body = _note_pointer(item, note, vault_path) if note else _entry_body(item)
+
     content = f"""## {today}
 
 ### {item.title}
 
 **Source:** {source} | **Relevance:** {relevance}/10
 
-{summary}
+{body}
 
 [Link]({item.url})
 
