@@ -76,7 +76,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-QMD_CLI = Path.home() / ".bun/install/global/node_modules/@tobilu/qmd/dist/cli/qmd.js"
+# The fallback for a daemon conf that cannot be read: the fork, which is the
+# only qmd installed since 2026-09-19. It named the published bun-global package
+# until then -- a retriever 57x slower on the fan-out and deaf to `rerank`, so a
+# pin that fell back compared two arms of something production never runs.
+QMD_CLI = Path.home() / "lloyd/qmd/dist/cli/qmd.js"
 QMD_CACHE = Path.home() / ".cache" / "qmd"
 LIVE_INDEX = QMD_CACHE / "index.sqlite"
 # The pin serves production's retriever or it measures somebody else's. Which

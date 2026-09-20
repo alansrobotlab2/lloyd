@@ -19,9 +19,17 @@ embedded. 406 such documents had accumulated because embedding silently stalled
 while the vec leg was crash-looping.
 
 SAFETY CONTRACT — this runs unattended:
-  * The daemon is stopped ONLY when there is real work to do.
-  * The daemon restart is in a `finally` block. Leaving qmd down would take
-    vault retrieval offline entirely, which is far worse than a bloated index.
+  * The daemon is NOT stopped. It was, until 2026-09-19: published 2.8.3's
+    cleanup wanted the index to itself, and the stop stayed after the daemon
+    moved to the fork, whose `cleanup` and `embed` are safe beside a running
+    daemon (the watcher embeds under it all day, and
+    `lloyd-qmd-cleanup.timer` cleans under it every night). Pending embeddings
+    are never zero while the automod loop is writing, so "only when there is
+    real work" meant every run: eight of the last eight took retrieval down
+    and brought it back cold -- models reloaded, vector index rebuilt -- to
+    embed one to four documents the watcher would have reached anyway.
+  * A daemon found unhealthy afterwards is still restarted, and still the one
+    thing that makes the exit code non-zero.
   * Every subprocess has a timeout.
   * Exit code is non-zero only when the daemon is left unhealthy — a failed
     prune with a healthy daemon is a warning, not a page.
@@ -41,16 +49,23 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-QMD_CLI = Path.home() / ".bun/install/global/node_modules/@tobilu/qmd/dist/cli/qmd.js"
+# The fork in ~/lloyd/qmd -- the build the daemon serves this index with, and
+# since 2026-09-19 the only qmd on the machine. Until then this was the
+# published @tobilu/qmd under ~/.bun: same version string (2.8.3), different
+# commit, so the index had two writers that were not the reader.
+# tests/test_qmd_single_build.py pins every caller to this one path.
+QMD_CLI = Path.home() / "lloyd/qmd/dist/cli/qmd.js"
 INDEX = Path.home() / ".cache/qmd/index.sqlite"
 SUPERVISORCTL = Path.home() / ".local/share/uv/tools/supervisor/bin/supervisorctl"
 SUPERVISOR_CONF = Path.home() / "lloyd/agent-services/supervisor/supervisord.conf"
 SERVICE = "agent-qmd-daemon"
 REPORT_DIR = Path.home() / "lloyd/_pipeline/reflection"
 
-# Prune when orphans exceed this share of all vectors. Cleanup takes an
-# exclusive lock and the daemon must be down for it, so don't pay that for a
-# handful of rows. At the observed accumulation rate this trips every few days.
+# Prune when orphans exceed this share of all vectors. The threshold was set
+# when a cleanup cost a daemon stop; it no longer does, and the nightly
+# `lloyd-qmd-cleanup.timer` prunes unconditionally, so this is the backstop for
+# a day that outruns it (2026-09-19: 17% by evening, fifteen hours after the
+# 04:45 cleanup) rather than the primary.
 ORPHAN_RATIO_TRIGGER = 0.20
 # Floor, in absolute rows, so a nearly-empty index doesn't trip the ratio on
 # noise. It is a floor and not a second gate: the two were ANDed at 50,000,
@@ -169,9 +184,7 @@ def main() -> int:
         _emit(report, args.json)
         return 0
 
-    # ---- Mutating section. The daemon MUST come back up. ----
-    rc, out = supervisor("stop")
-    report["actions"].append(f"stop daemon rc={rc}")
+    # ---- Mutating section. The daemon stays up throughout (see the contract). ----
     try:
         if need_prune:
             t = time.time()
@@ -186,9 +199,13 @@ def main() -> int:
             report["actions"].append(f"embed rc={rc} in {time.time()-t:.0f}s")
             report["embed_ok"] = rc == 0
     finally:
-        rc, _ = supervisor("start")
-        report["actions"].append(f"start daemon rc={rc}")
         healthy = daemon_healthy()
+        if not healthy:
+            # Not something this run did to it -- but leaving retrieval down is
+            # the one outcome worse than a bloated index, whoever caused it.
+            rc, _ = supervisor("restart")
+            report["actions"].append(f"daemon unhealthy -> restart rc={rc}")
+            healthy = daemon_healthy()
         report["daemon_healthy"] = healthy
 
     report["after"] = inspect_index()

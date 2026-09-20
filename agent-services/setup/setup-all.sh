@@ -167,20 +167,43 @@ fi
 
 # ── 7. qmd ──────────────────────────────────────────────────────────
 step "7/9  qmd search"
-if [[ -x "$HOME/.bun/bin/qmd" ]]; then
-    ok "$("$HOME/.bun/bin/qmd" --version 2>/dev/null || echo 'qmd (version unknown)')"
+# ONE qmd on this machine: the fork in ~/lloyd/qmd. The daemon, the watcher,
+# the nightly cleanup timer, the index-maintenance task and the automod eval pin
+# all run its dist/cli/qmd.js, and the `qmd` on PATH is a symlink to its
+# launcher. The published @tobilu/qmd used to be installed beside it (bun
+# global) and the watcher and this script ran THAT one -- same version string,
+# different commit, against an index the fork serves. SETUP.md Part 6.
+QMD_FORK="$HOME/lloyd/qmd"
+QMD_JS="$QMD_FORK/dist/cli/qmd.js"
+if command -v bun >/dev/null 2>&1 && bun pm ls -g 2>/dev/null | grep -q "@tobilu/qmd"; then
+    todo "Published qmd is still installed: bun remove -g @tobilu/qmd   (it shadows the fork on PATH)"
+fi
+if [[ -f "$QMD_JS" ]]; then
+    ok "$(/usr/bin/node "$QMD_JS" --version 2>/dev/null || echo 'qmd fork (version unknown)')"
+    if grep -q -- '-dirty' "$QMD_FORK/dist/cli/build-info.json" 2>/dev/null; then
+        todo "qmd fork was built from a dirty tree: cd $QMD_FORK && git status, then npm run build"
+    fi
+elif [[ -d "$QMD_FORK/.git" ]]; then
+    run bash -c "cd '$QMD_FORK' && bun install && npm run build"
 else
-    run bun install -g @tobilu/qmd
+    todo "Clone the fork: git clone https://github.com/alansrobotlab2/qmd.git $QMD_FORK && cd $QMD_FORK && git checkout lloyd && bun install && npm run build"
+fi
+if [[ -f "$QMD_JS" ]]; then
+    if [[ "$(readlink -f "$HOME/.local/bin/qmd" 2>/dev/null)" == "$QMD_FORK/bin/qmd" ]]; then
+        ok "qmd on PATH is the fork"
+    else
+        run ln -sfn "$QMD_FORK/bin/qmd" "$HOME/.local/bin/qmd"
+    fi
 fi
 if [[ -f "$HOME/.config/qmd/index.yml" ]]; then
     ok "qmd collections configured"
-    if [[ -d "$HOME/obsidian/lloyd" ]]; then
-        run "$HOME/.bun/bin/qmd" update
-        run "$HOME/.bun/bin/qmd" embed
+    if [[ -d "$HOME/obsidian/lloyd" && -f "$QMD_JS" ]]; then
+        run /usr/bin/node "$QMD_JS" update
+        run /usr/bin/node "$QMD_JS" embed
         (( CHECK_ONLY )) || ok "index updated"
     fi
 else
-    todo "Restore ~/.config/qmd/index.yml from backup (defines the 15 collections), then: qmd update && qmd embed"
+    todo "Restore ~/.config/qmd/index.yml from backup (defines the collections), then: qmd update && qmd embed"
 fi
 
 # ── 8. Models ───────────────────────────────────────────────────────

@@ -153,7 +153,6 @@ re-run. The ones that matter for a rebuild:
 | `setup-vllm-qwen3.8.sh` | Builds `.venvs/vllm-qwen3.8`; pins via `vllm-qwen3.8.versions.txt` |
 | `setup-qwen3.8-27b-nvfp4.sh` | Downloads the live primary model (22 GB) |
 | `setup-vllm-experimental.sh` | Builds `.venvs/vllm-experimental` |
-| `setup-qmd.sh` | Installs qmd via bun, creates collections, indexes, embeds |
 
 `setup-all.sh`, `install-services.sh`, and the llama.cpp / Orpheus / CosyVoice
 scripts target the retired systemd-and-llama.cpp stack. **Do not run them** —

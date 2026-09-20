@@ -527,31 +527,39 @@ backend — there is no production build step in the service path.
 
 ## Part 6 — qmd (vault search)
 
-qmd is the retrieval backbone. **Two installs, and the split is deliberate:**
+qmd is the retrieval backbone. **One install: the fork in `~/lloyd/qmd`.**
 
-| | what | used by |
-|---|---|---|
-| published `@tobilu/qmd` 2.8.3 | bun global install | `agent-qmd-watcher` (`qmd update` / `qmd embed`), the `qmd` on your PATH, and the **revert path** for the daemon |
-| **the fork, `~/lloyd/qmd` branch `lloyd`** | git clone, built with `npm run build` | `agent-qmd-daemon` (port 8181 — every `vault_recall`/`vault_search`) and `lloyd-qmd-cleanup.timer` |
+| caller | how it reaches the fork |
+|---|---|
+| `agent-qmd-daemon` (port 8181 — every `vault_recall`/`vault_search`) | `command=` in its supervisord conf |
+| `agent-qmd-watcher` (`update` / `embed` on vault changes) | `QMD_CLI` in `agent-services/scripts/qmd-watcher.sh` |
+| `lloyd-qmd-cleanup.timer` (04:45) | `ExecStart=` in `agent-services/systemd/lloyd-qmd-cleanup.service` |
+| autonomy task #81 | `QMD_CLI` in `scripts/maintenance/qmd_index_maintenance.py` |
+| the automod regression pin | reads the daemon's conf (`evalpin.production_daemon`) |
+| the `qmd` on your PATH | `~/.local/bin/qmd` → `~/lloyd/qmd/bin/qmd` (its launcher resolves its own realpath) |
 
-Both are **run by system node** — the supervisord config invokes
-`/usr/bin/node .../dist/cli/qmd.js`, never the bun shim. They share the one
-index file; the daemon reloads its in-memory vector index on the next search
-after the watcher writes (~0.5 s), so mixing versions is fine as long as the
-daemon is the fork.
+All of them run `/usr/bin/node ~/lloyd/qmd/dist/cli/qmd.js`, and
+`tests/test_qmd_single_build.py` fails if one stops doing so.
 
-**Published package first** (the watcher needs it, and the daemon falls back
-to it):
+**The published `@tobilu/qmd` must not be installed.** Until 2026-09-19 it was
+(bun global), on purpose, as the watcher's binary, the PATH's `qmd` and the
+"revert path". Same version string as the fork (2.8.3), different commit
+(`facd35e` against `a7b5425`), so the index had two writers that were not its
+reader, and a bare `qmd` typed by a person or by Lloyd's Bash reached the wrong
+one. Nothing had gone wrong yet — the fork's changes are serve-side, so the
+published build wrote a compatible index — but it was a second definition of
+how this index is built, waiting for the first fork commit that touches
+chunking or embedding. It was never a usable revert either: published 2.8.3
+takes 9.3 s for the fan-out the fork does in 162 ms and ignores the `rerank`
+flag the client depends on. **The revert path is git:** `git -C ~/lloyd/qmd
+checkout <known-good> && npm run build`, then restart the daemon.
 
 ```bash
-npm install -g node-gyp            # better-sqlite3 builds against it; without it the install fails
-export BUN_INSTALL="$HOME/.bun"   # REQUIRED — see below
-bun install -g @tobilu/qmd
-bun pm -g trust node-llama-cpp    # runs the blocked postinstall; without it `qmd embed` has no backend
-/usr/bin/node ~/.bun/install/global/node_modules/@tobilu/qmd/dist/cli/qmd.js --version
+bun remove -g @tobilu/qmd 2>/dev/null   # if a previous setup installed it
+npm install -g node-gyp                 # better-sqlite3 builds against it; without it `bun install` aborts
 ```
 
-**Then the fork.** Why it exists: published 2.8.3 brute-forces every stored
+**Install the fork.** Why it exists: published 2.8.3 brute-forces every stored
 vector once *per collection* through sqlite-vec, so the twelve-collection
 fan-out took 9.3 s; it also ignores the `skipRerank` key the client sent, so
 `vault_recall` was being reranked without anyone knowing. The fork keeps a
@@ -578,8 +586,10 @@ documented in that conf with its measured cost.
 
 **To deploy a change to the fork:** edit, `npm run build`, then
 `supervisorctl ... restart agent-qmd-daemon`. Editing `src/` alone changes
-nothing — the daemon runs `dist/`. **To revert to the published package:**
-swap the `command=` line back to the bun path and restart.
+nothing — the daemon runs `dist/`, and so do the watcher, the timer and task
+#81, which pick a new build up on their next invocation without a restart.
+**To revert:** `git checkout` the last good commit in `~/lloyd/qmd`, `npm run
+build`, restart the daemon.
 
 **The client side of this is not optional.** `agent_mcp/vault.py` sends
 `rerank: true` by default (`RECALL_QMD_RERANK`). With the fork honouring
@@ -587,16 +597,14 @@ swap the `command=` line back to the bun path and restart.
 comment carries the measurement. `prefetch.py` skips the reranker on purpose,
 inside its latency budget.
 
-Three traps here, all verified on a clean 2026-08-22 rebuild:
+Two traps here, both verified on a clean 2026-08-22 rebuild:
 
-- **`BUN_INSTALL` must be exported.** Without it bun installs to
-  `~/.cache/.bun/install/global/...`, but `agent-qmd-daemon.conf` hardcodes
-  `~/.bun/install/global/node_modules/@tobilu/qmd/dist/cli/qmd.js`. The daemon
-  then fails with no obvious cause.
 - **`node-gyp` must be on PATH first**, or `better-sqlite3`'s install script
   exits 127 and the whole `bun install` aborts.
-- **bun blocks postinstalls by default.** `node-llama-cpp` needs its one to run
-  (`bun pm -g trust`); the four `tree-sitter-*` ones can stay blocked.
+- **bun blocks postinstalls by default.** `node-llama-cpp` needs its one to
+  run; the fork's `package.json` lists it under `trustedDependencies`, so a
+  plain `bun install` in `~/lloyd/qmd` covers it. The four `tree-sitter-*` ones
+  can stay blocked.
 
 Published version is **2.8.3**, not 2.0.1. The fork is 2.8.3 plus the `lloyd`
 branch; `qmd --version` from its `dist/` prints the commit it was built from.
