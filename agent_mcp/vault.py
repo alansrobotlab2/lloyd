@@ -132,6 +132,57 @@ QMD_POOL_MAX = 240
 # pre-rank slice are one number stated once.
 RECALL_DOC_POOL = QMD_POOL_MAX
 
+# ── Global fusion (2026-09-19): rank 40 well-chosen rows instead of 240 ───────
+#
+# Why the pool above had to be 240 is a fusion artefact, not a property of the
+# corpus. qmd handed RRF one list per search per collection, and RRF reads ranks
+# only: every collection's #1 ties with every other's, so a document ranked fifth
+# in the one relevant collection lands near fused position 50 of an eleven-
+# collection request. #504 kept it by ranking everything, and the cross-encoder
+# is compute-bound on the 3090 (~56 rows/s; 4, 8 and 16 ranking contexts measure
+# 4.03 / 3.98 / 4.16 s) — so a recall cost ~4.2 s alone, and at loop depth 4
+# several of them queue on one daemon: 20-60 s each, past the 15 s client timeout
+# (p99 20.4 s over 13,852 recalls; 1.3% timed out).
+#
+# The fork's `fusion: "global"` runs each search ONCE across the named
+# collections and merges by score (BM25 and cosine are comparable inside one
+# index), so the fused head is the best documents anywhere. What a global ranking
+# costs is a small collection outscored wholesale: `autonomy` (36 task files —
+# front matter and an activity log, poor lexical AND semantic matches for a
+# natural question) lost every expected file, ranks 116-352. `collectionFloor`
+# guarantees that collection's best five per search a look from the reranker.
+#
+# Pinned eval, 20 queries, full `_vault_recall`, rerank cache cleared per arm
+# (qmd/WORKLOG.md 7.4 has every arm):
+#
+#     fusion      pool  floor        doc_hit  doc_recall  MRR    NDCG@10  recall
+#     collection  240   -            1.00     0.610       0.497  0.582    ~4.7 s   <- was
+#     collection   40   -            0.80     0.525       0.477  0.515
+#     global       40   -            0.95     0.558       0.512  0.588    ~1.3 s
+#     global       40   autonomy=5   1.00     0.578       0.532  0.603    ~1.4 s   <- deployed
+#     global       60   autonomy=5   1.00     0.546 MRR, 0.602 NDCG — inside the noise of 40
+#
+# n=20, so read 0.02 as noise: hit rate is at parity, MRR and NDCG are up, and
+# doc_recall is down 0.03 (about one expected document across the set). The
+# floor was chosen by reading this eval's misses, which is a fitting risk stated
+# here rather than hidden; what justifies it is the structure of that collection,
+# and the durable fix is making task files retrievable (index their
+# `description`), after which the floor can go.
+#
+# `RECALL_QMD_FUSION = "collection"` is the kill switch: it restores the old
+# request exactly, 240-row pool included. An older daemon ignores the two new
+# keys, which would mean per-collection fusion at a 40-row pool — the worst arm
+# above — so `recall_doc_pool()` is what the doc leg asks for, never the
+# constant directly.
+RECALL_QMD_FUSION = "global"
+RECALL_GLOBAL_DOC_POOL = 40
+RECALL_COLLECTION_FLOOR = {"autonomy": 5}
+
+
+def recall_doc_pool() -> int:
+    """Rows the recall doc leg asks qmd to fetch AND rerank."""
+    return RECALL_GLOBAL_DOC_POOL if RECALL_QMD_FUSION == "global" else RECALL_DOC_POOL
+
 VAULT_EXCLUDE_DIRS = {"templates", "images"}
 VAULT_EXCLUDE_FILES = {"tags.md"}
 
@@ -498,7 +549,8 @@ def _qmd_normalize_global(rows: list, allowed: set) -> list:
 def _qmd_daemon_search(query: str, limit: int, collections: list,
                       skip_rerank: bool = not RECALL_QMD_RERANK,
                       legs: tuple[str, ...] = ("lex", "vec"),
-                      lex_query: Optional[str] = None) -> list:
+                      lex_query: Optional[str] = None,
+                      exact_pool: Optional[int] = None) -> list:
     """Send a lex and/or vec query to the qmd daemon.
 
     **Returns a list, or raises `QmdUnavailable`.** An empty list means the
@@ -615,6 +667,10 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
     # restricted path keeps pool == limit — it gets `[:limit]` back with no fold,
     # so a wider ask there buys nothing and prefetch is on a latency budget.
     pool = min(limit * QMD_POOL_FACTOR, QMD_POOL_MAX) if unrestricted else limit
+    # The recall doc leg names its pool outright (`recall_doc_pool`): under global
+    # fusion the number was measured, and the factor would turn its 40 into 120.
+    if exact_pool is not None and unrestricted:
+        pool = max(1, min(int(exact_pool), QMD_POOL_MAX))
     payload = {
         "searches": [{"type": leg, "query": lex_q if leg == "lex" else stripped}
                      for leg in legs],
@@ -634,6 +690,13 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
         # change.
         "rerank": not skip_rerank,
     }
+    # Only where several collections are named: one collection has nothing to
+    # fuse across, and the prefetch lex leg is restricted and budgeted.
+    if RECALL_QMD_FUSION == "global" and len(payload["collections"] or []) > 1:
+        payload["fusion"] = "global"
+        floor = {c: n for c, n in RECALL_COLLECTION_FLOOR.items() if c in payload["collections"]}
+        if floor:
+            payload["collectionFloor"] = floor
 
     def _finish(rows: list) -> list:
         if not unrestricted:
@@ -1385,7 +1448,7 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None) -> dict:
         # `_qmd_daemon_search` slices its folded reply at the same `pool`, so nothing
         # here re-cuts it; the list gets smaller further down only at the `[:limit]`
         # that hands the answer over.
-        return _qmd_daemon_search(query, RECALL_DOC_POOL, VAULT_SEGMENTS)
+        return _qmd_daemon_search(query, recall_doc_pool(), VAULT_SEGMENTS, exact_pool=recall_doc_pool())
 
     def _do_code_grep():
         if not params.get("grep_code", True):
@@ -1592,7 +1655,7 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None) -> dict:
         # unconditional: `demote_daily_logs` re-sorts the pool by *path shape* alone,
         # so its slice is not a quality order and narrowing it is a quality decision
         # made by a path regex.
-        pool_size = max(RECALL_DOC_POOL, limit)
+        pool_size = max(recall_doc_pool(), limit)
         prerank_pool = raw_results[:pool_size]
         for r in prerank_pool:
             path = r.get("file", "").removeprefix("qmd://")

@@ -300,7 +300,7 @@ def test_the_warm_up_asks_what_production_asks_and_never_the_same_thing_twice(tm
     bodies = seen["bodies"]
     assert len(bodies) == 4
     for body in bodies:
-        assert body["limit"] == body["candidateLimit"] == V.RECALL_DOC_POOL
+        assert body["limit"] == body["candidateLimit"] == V.recall_doc_pool()
         assert body["collections"] == list(V.VAULT_SEGMENTS) and body["rerank"] is True
         assert [leg["type"] for leg in body["searches"]] == ["lex", "vec"]
     asked = [body["searches"][1]["query"] for body in bodies]
@@ -313,12 +313,20 @@ def test_the_warm_up_request_is_the_one_the_recall_sends(monkeypatch):
     from agent_mcp import vault as V
     sent: list[dict] = []
     monkeypatch.setattr(V, "_qmd_post", lambda payload: sent.append(payload) or [])
-    V._qmd_daemon_search("which autonomy tasks maintain the knowledge graph",
-                         V.RECALL_DOC_POOL, V.VAULT_SEGMENTS)
-    assert len(sent) == 1
+    # Through `_vault_recall`, not a hand-built call: the doc leg is the request
+    # being mirrored, and how it sizes its pool is part of what can drift.
+    V._vault_recall({"query": "which autonomy tasks maintain the knowledge graph",
+                     "limit": 20, "grep_code": False, "include_facts": False,
+                     "expand_graph": False})
+    doc_leg = [b for b in sent if len(b["searches"]) == 2]
+    assert len(doc_leg) == 1
+    sent = doc_leg
     ours = evalpin.production_payload("anything")
-    for key in ("limit", "candidateLimit", "collections", "rerank"):
-        assert ours[key] == sent[0][key], f"warm-up {key} drifted from the recall's"
+    # `fusion` and `collectionFloor` decide which rows get reranked as much as
+    # the pool does (2026-09-19): a pin warmed without them times a different
+    # retriever, which is the failure this pin exists for.
+    for key in ("limit", "candidateLimit", "collections", "rerank", "fusion", "collectionFloor"):
+        assert ours.get(key) == sent[0].get(key), f"warm-up {key} drifted from the recall's"
     assert [l["type"] for l in ours["searches"]] == [l["type"] for l in sent[0]["searches"]]
 
 

@@ -3266,6 +3266,35 @@ still works as an operator fallback.
   `backlog_write_task` stay because they are the job, and vault writes
   outside `knowledge/`, `backlog/` and the report directory are reported.
 
+## qmd (vault retrieval)
+
+One build on the machine: the fork in `~/lloyd/qmd` (daemon, watcher, cleanup
+timer, task #81, the regression pin and the `qmd` on PATH all run its
+`dist/cli/qmd.js`; the published package must not be installed, and
+`tests/test_qmd_single_build.py` pins that). SETUP.md Part 6 is how to build and
+revert it; `qmd/WORKLOG.md` section 7 is the long version of everything below.
+
+- **The cross-encoder is compute-bound on the 3090** (~56 rows/s; 4, 8 and 16
+  ranking contexts measure the same). A rerank costs rows x window, so at loop
+  depth 4 several 240-row recalls queued on one daemon for 20-60 s each, past
+  the 15 s client timeout. `QMD_RERANK_PARALLELISM` is not a speed knob.
+- **The recall asks for global fusion over a 40-row pool** with a floor of 5
+  for the `autonomy` collection (`RECALL_QMD_FUSION` in `agent_mcp/vault.py`,
+  with the pinned eval: hit rate at parity, MRR and NDCG up, ~1.4 s against
+  ~4.7 s). `"collection"` is the kill switch and restores #504's 240-row request
+  exactly. The floor was chosen by reading that eval's misses; the durable fix
+  is making autonomy task files retrievable.
+- **A rerank that could not run says so.** No VRAM for a ranking context used
+  to be an HTTP 200 with fusion-order results. The daemon now returns
+  `meta.reranked`, never caches a fallback score, and `app/qmd_health.py`
+  counts, logs and announces it (`/state.qmd`, `curl localhost:8181/health`).
+- **Any write to the index used to cost the next query a full vector-index
+  rebuild** (~1 s at 37k vectors); the index now refreshes incrementally, and
+  the watcher walks at most once a minute.
+- **Do not time qmd while something else owns GPU 0**: a TTS restart compiles
+  for ~4 minutes and the regression pin is a second daemon on the same card.
+  Read `meta.phases` and `nvidia-smi` before believing a number.
+
 ## Knowledge graph
 
 Two layers, and the distinction matters:

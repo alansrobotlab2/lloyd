@@ -202,10 +202,18 @@ def production_payload(text: str) -> dict:
     what a recall costs — the cross-encoder scores every row of it — and it has
     moved once already (40 to 240, #504) without the pin's probe following."""
     from agent_mcp import vault as V
-    pool = int(V.RECALL_DOC_POOL)
-    return {"searches": [{"type": "lex", "query": text}, {"type": "vec", "query": text}],
-            "limit": pool, "candidateLimit": pool,
-            "collections": list(V.VAULT_SEGMENTS), "rerank": True}
+    # `recall_doc_pool` where the tree has it (global fusion, 2026-09-19); the
+    # baseline arm may be an older tree, whose pool is the constant.
+    pool = int(V.recall_doc_pool()) if hasattr(V, "recall_doc_pool") else int(V.RECALL_DOC_POOL)
+    payload = {"searches": [{"type": "lex", "query": text}, {"type": "vec", "query": text}],
+               "limit": pool, "candidateLimit": pool,
+               "collections": list(V.VAULT_SEGMENTS), "rerank": True}
+    if getattr(V, "RECALL_QMD_FUSION", "collection") == "global":
+        payload["fusion"] = "global"
+        floor = {c: n for c, n in getattr(V, "RECALL_COLLECTION_FLOOR", {}).items() if c in payload["collections"]}
+        if floor:
+            payload["collectionFloor"] = floor
+    return payload
 
 
 # "Nobody is there", as opposed to "somebody is there and busy" (a timeout, a

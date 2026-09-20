@@ -98,6 +98,22 @@ def _snapshot_reply(depth=RECORDED_REPLY_DEPTH):
     return rows
 
 
+
+@pytest.fixture
+def collection_fusion(monkeypatch):
+    """The request #504 measured: one ranked list per collection, a 240-row pool.
+
+    Since 2026-09-19 the recall's default is global fusion over a 40-row pool
+    (`vault.RECALL_QMD_FUSION`, with the eval that moved it), and
+    `RECALL_QMD_FUSION = "collection"` is the kill switch that restores this
+    request exactly. The recorded ranks below are per-collection fusion's — 30 to
+    227 — and mean nothing under a global ranking, so the tests that replay them
+    pin the path they were recorded on: the switch has to keep delivering what
+    #504 bought, or it is not a way back. tests/test_recall_global_fusion.py pins
+    the default.
+    """
+    monkeypatch.setattr(vault, "RECALL_QMD_FUSION", "collection")
+
 @pytest.fixture
 def wire(monkeypatch):
     """Capture every payload the client sends; answer with the recorded reply."""
@@ -244,7 +260,7 @@ def test_scope_restricted_search_keeps_its_own_shape(wire):
         "widened ask")
 
 
-def test_the_recall_doc_leg_asks_for_the_whole_pool(wire):
+def test_the_recall_doc_leg_asks_for_the_whole_pool(wire, collection_fusion):
     """The leg that feeds the final ranker is the one that must ask deep.
 
     `QMD_POOL_FACTOR` on `limit` alone would give this query a 60-row pool, which the
@@ -261,7 +277,7 @@ def test_the_recall_doc_leg_asks_for_the_whole_pool(wire):
 
 # ── The pool: what the final ranker is actually handed ────────────────────────
 
-def test_the_five_task_files_reach_the_pre_rank_candidate_pool(wire, monkeypatch):
+def test_the_five_task_files_reach_the_pre_rank_candidate_pool(wire, monkeypatch, collection_fusion):
     """Clause 5 of #504, asserted one stage before the ranking that hides it.
 
     The returned top-10 is the wrong place to assert: `_graph_rerank` can hoist a
@@ -305,7 +321,7 @@ def test_the_five_task_files_reach_the_pre_rank_candidate_pool(wire, monkeypatch
 
 
 def test_the_production_config_hands_the_same_pool_to_its_final_slice(
-        wire, monkeypatch):
+        wire, monkeypatch, collection_fusion):
     """The same property in the config the eval runs, where nothing is called
     `_graph_rerank`.
 
@@ -377,7 +393,7 @@ EVAL_DOC_PREFIXES = ("autonomy/24-", "autonomy/48-", "autonomy/51-",
 
 
 @pytest.mark.live_vault
-def test_the_live_daemon_hands_the_five_task_files_to_the_pre_rank_pool(monkeypatch):
+def test_the_live_daemon_hands_the_five_task_files_to_the_pre_rank_pool(monkeypatch, collection_fusion):
     """The half every test above cannot check: the daemon, over the real seam.
 
     Each assertion above answers a reply this file wrote, so the only failure they can
