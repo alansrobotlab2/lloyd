@@ -2486,14 +2486,25 @@ outcomes:
 An error matching neither is treated as structural. Retrying an unclassified
 error spends GPU-hours on a guess; quarantining it costs a line in a report.
 
-Three things veto a revive, all for the reason task #76's activity log already
-records — *"a weekly reset that does not fix the cause just re-poisons"*: the
-item's `max_revives` budget is spent (tracked in the row's own `triage_json`, so
-it survives a re-poisoning); the `(source, signature)` pair has poisoned
-`repeat_threshold` times across sweeps (tallied in `watermarks`, pruned after
-`tally_retention_days`); or an equivalent item is already open, because
-`mark_failed` NULLs `dedup_key` on poison and a revive therefore cannot
-coalesce against what the source re-enqueued.
+Two things veto a revive, both about the item in front of the sweep, for the
+reason task #76's activity log already records — *"a weekly reset that does not
+fix the cause just re-poisons"*: the item's `max_revives` budget is spent
+(tracked in the row's own `triage_json`, so it survives a re-poisoning); or an
+equivalent item is already open, because `mark_failed` NULLs `dedup_key` on
+poison and a revive therefore cannot coalesce against what the source
+re-enqueued.
+
+The `(source, signature)` tally — poisonings across sweeps, kept in
+`watermarks`, pruned after `tally_retention_days` — **escalates but does not
+veto** (#1295). It counts how often a cause fired, which says nothing about the
+row being triaged, and one fleet-wide event stamps the same error string on
+every row it catches: on 2026-09-20, 13 self-mod landings restarted the backend
+between 00:35Z and 05:57Z, three `bench-mine` claims died inside two of those
+windows, and the shared tally quarantined all three with `class: transient`
+printed beside a reason denying transience. A recurring signature still produces
+one `escalations` entry per sweep — `logger.error`, the report's `## Escalations`
+section, `runs.meta_json` — which is the only surface that says a source is
+churning once its items are being revived instead of quarantined.
 
 Three design choices that are load-bearing:
 

@@ -32,14 +32,25 @@ An unrecognised error is treated as structural. Retrying an error nobody has
 classified spends GPU-hours on a guess; quarantining it costs a line in a
 report.
 
-Three things override a revive, all for the same reason — #76's own log records
-it as "a weekly reset that does not fix the cause just re-poisons":
+Two things override a revive, both about *this item*, for the same reason —
+#76's own log records it as "a weekly reset that does not fix the cause just
+re-poisons":
 
   - the item's revive budget (`max_revives`) is spent,
-  - the (source, signature) pair has poisoned `repeat_threshold` times across
-    sweeps, which is a broken cause rather than a transient one,
   - an equivalent item is already open, because a poisoned row has lost its
     dedup_key and reviving it would duplicate work the source has re-enqueued.
+
+A (source, signature) pair that has poisoned `repeat_threshold` times across
+sweeps does **not** override a revive — it only escalates. The tally counts a
+cause, not an item, and one benign fleet-wide event puts the same error string
+on every row it touches. On the night of 2026-09-20 the fleet landed 13 self-mod
+promotions between 00:35Z and 05:57Z; three `bench-mine` claims died inside two
+of those restart windows, their shared tally reached 3, 4 and 5, and each row
+was quarantined with `class: transient` recorded in the same JSON as a reason
+denying transience. An item can still only be revived `max_revives` times, so
+bounded work is the item budget's job; the recurrence still reaches a human
+through `escalations`, and what the tally no longer does is destroy the work
+(#1295).
 
 `quarantined` is a distinct terminal state rather than a flag on `poisoned`, so
 the dashboard's `poisoned_total` keeps meaning "needs a human" instead of
@@ -222,6 +233,7 @@ def sweep(
 
     actions: list[dict] = []
     escalations: list[dict] = []
+    escalated: set[str] = set()
     revived = quarantined = 0
 
     for item in items:
@@ -243,14 +255,16 @@ def sweep(
         revives = int((item.triage or {}).get("revives", 0))
         repeat = tally["count"] >= repeat_threshold
 
-        # Reasons not to revive, most informative first.
+        # Reasons not to revive, most informative first. The signature tally is
+        # deliberately not one of them: it counts how often a *cause* has fired
+        # fleet-wide, which is evidence about the cause and no evidence about
+        # this item. Claims that die while a self-mod landing restarts MCP then
+        # the backend all share one error string, and this fleet landed 13 times
+        # in one night, so a count that outranks `classify()` quarantines
+        # innocent work permanently while the counter that condemned it only
+        # ever grows (#1295). The tally still escalates, below.
         if failure_class == "structural":
             reason = "not retryable — the item reproduces this failure"
-        elif repeat:
-            reason = (
-                f"{tally['count']} poisonings on this signature in "
-                f"{tally_retention_days}d — the cause is not transient"
-            )
         elif revives >= max_revives:
             reason = f"transient, but already revived {revives}x"
         elif queue.has_open_sibling(item.source, item.kind, item.payload, item.id):
@@ -297,16 +311,21 @@ def sweep(
             revived += 1
         else:
             quarantined += 1
-            if repeat:
-                # Either class: a transient cause recurring is not transient,
-                # and a structural one recurring is a source producing broken
-                # items. Both want a human, neither wants another retry.
-                escalations.append({
-                    "source": item.source,
-                    "signature": sig,
-                    "count": tally["count"],
-                    "class": failure_class,
-                })
+
+        if repeat and key not in escalated:
+            # One entry per (source, signature) per sweep, whatever the per-item
+            # decision was. A structural cause recurring is a source producing
+            # broken items; a transient one recurring is a fleet-wide collision
+            # no revive fixes — and once a transient item is revived, nothing
+            # else in the queue records that the cause is still firing, so this
+            # entry is the only alert that surface has (#1295).
+            escalated.add(key)
+            escalations.append({
+                "source": item.source,
+                "signature": sig,
+                "count": tally["count"],
+                "class": failure_class,
+            })
 
         actions.append({
             "item_id": item.id,
@@ -446,9 +465,14 @@ def run_sweep(queue: WorkQueue, cfg: dict[str, Any], max_attempts: int = 3) -> d
             ),
         )
         for esc in report["escalations"]:
+            # Names the evidence, not an action: one entry stands for every item
+            # that poisoned this signature in the sweep, and since #1295 they may
+            # have been revived rather than quarantined. A line that reported a
+            # quarantine the sweep did not perform is the same defect that put
+            # "the cause is not transient" beside `class: transient`.
             logger.error(
                 "Poison sweep escalation: %s has poisoned %dx on a %s failure "
-                "`%s` — quarantined rather than retried; the cause needs fixing",
+                "`%s` — the recurrence is the finding; fix the cause",
                 esc["source"], esc["count"], esc.get("class", "?"), esc["signature"],
             )
         logger.info("Poison sweep: %s", summary)
