@@ -237,7 +237,18 @@ async def autonomy_tasks(status: str = "", tag: str = ""):
 async def autonomy_task_write(request: Request):
     """Create or update an autonomy task."""
     data = await request.json()
-    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    # `timezone.utc`, not the bare `datetime.now()` this line used: the latter is
+    # naive — the host's wall clock, `America/Los_Angeles (PDT, -0700)` — while
+    # the `Z` it was formatted with asserts UTC. Every write through the
+    # autonomy page therefore recorded an instant 7.00 h behind the one it
+    # happened at (#1128). That is load-bearing, not cosmetic: `_parse_iso` reads
+    # a trailing `Z` as UTC, and `recover_stuck_tasks` plus `run_task`'s
+    # double-run guard compare the result against a real UTC now — so a task
+    # claimed from the UI read as 25,200 s old on the tick it was written, past
+    # its own 1,800 s timeout, and was flipped back to `up_next` with a
+    # fabricated `Recovered from in_progress after 25200s` in its log. Pinned by
+    # tests/test_autonomy_task_write_timestamp.py.
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     task_id = data.get("id", 0)
     if not task_id:
         name = data.get("name", "")
@@ -293,10 +304,12 @@ async def autonomy_task_write(request: Request):
         # The write is NOT blocked: a legitimate claim (`up_next` -> `in_progress`)
         # is an ordinary write, so the rung is a record, not a gate.
         #
-        # The stamp here is true UTC, not the `now` above: `now` is naive local
-        # time labelled `Z` on this PDT box (its own defect, #1128), and an audit
-        # line naming a dispatch-killing change cannot carry a timestamp that is
-        # eight hours off. Fixing `updated:` is #1128's, not this round's.
+        # Read from the clock again rather than reusing `now`: this line is what
+        # dates an audit entry, and it was already passing
+        # `datetime.now(timezone.utc)` when `now` above was the naive host clock
+        # (#1128) — the two stamps were correct and wrong in the same request.
+        # `now` is true UTC too now, so the two agree; the separate read stays
+        # because an audit stamp should be the moment the note is written.
         from autonomy import append_activity_line, status_change_note
         status_note = status_change_note(prior_status, task.get("status"))
         if status_note:

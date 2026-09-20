@@ -22,6 +22,7 @@ module global, so patching it isolates all three.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -217,3 +218,140 @@ def test_recovery_only_touches_the_task_it_flagged(autonomy_dir):
     autonomy.recover_stuck_tasks()
     assert "up_next" in (autonomy_dir / "18-some-task.md").read_text()
     assert "in_progress" in (autonomy_dir / "19-some-task.md").read_text()
+
+
+# ── the same pass, over what the HTTP endpoint actually wrote (#1128) ────────
+#
+# Everything above hand-builds the front matter, so every `updated` in it is
+# already honest UTC. That is exactly why none of it could catch #1128: the
+# writer that produced the field was `POST /api/autonomy/task-write`, which
+# stamped `datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")` — the host's naive
+# local clock (PDT, -0700) wearing a UTC label — 25,200 s behind the true
+# instant. `recover_stuck_tasks` parses that field as UTC and compares it to a
+# real UTC `now`, so a task set `in_progress` from the Mission Control autonomy
+# page read as 7 h old at the moment it was written: past its own
+# `timeout_seconds`, flipped back to `up_next`, and logged as a recovery that
+# never happened. The test below therefore crosses the boundary the bug lived
+# behind — HTTP in, task file out, scheduler reading it back — instead of
+# constructing the input.
+
+@pytest.fixture
+def endpoint_dir(tmp_path, monkeypatch):
+    """Both globals: the router writes through its own `_AUTONOMY_DIR`, the
+    recovery pass reads through `autonomy.AUTONOMY_DIR`. One directory, so the
+    write and the read are the same file — which is the point."""
+    from app.routers import autonomy as router_module
+
+    d = tmp_path / "autonomy"
+    d.mkdir()
+    monkeypatch.setattr(router_module, "_AUTONOMY_DIR", d)
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", d)
+    return d
+
+
+@pytest.fixture
+def endpoint_client(endpoint_dir):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.routers import autonomy as router_module
+
+    app = FastAPI()
+    app.include_router(router_module.router)
+    with TestClient(app) as c:
+        yield c
+
+
+def test_claiming_a_task_from_the_ui_is_not_reported_stuck(endpoint_dir,
+                                                           endpoint_client):
+    """Clause 3. A real POST sets `status: in_progress` and stamps `updated`;
+    the very next recovery pass must leave the task alone.
+
+    Pre-fix, `stuck_seconds` for that file was 25,200 s against a 1,800 s
+    timeout, so the pass returned `["20"]`, rewrote it to `up_next`, and wrote
+    `Recovered from in_progress after 25200s` — a fabricated incident in the
+    task's own log. Both halves are asserted: the returned list, and the absence
+    of the line, because the line is what a human reads."""
+    (endpoint_dir / "20-ui-claimed.md").write_text(
+        "---\ntype: autonomy\nid: 20\nname: ui-claimed\nstatus: up_next\n"
+        "timeout_seconds: 1800\n---\n\n# Body\n", encoding="utf-8")
+
+    r = endpoint_client.post("/api/autonomy/task-write",
+                             json={"id": 20, "status": "in_progress"})
+    assert r.status_code == 200, r.text
+    text = (endpoint_dir / "20-ui-claimed.md").read_text()
+    assert "status: in_progress" in text, "the claim itself must have landed"
+
+    assert autonomy.recover_stuck_tasks() == []
+    text = (endpoint_dir / "20-ui-claimed.md").read_text()
+    assert "Recovered from in_progress" not in text
+    assert "status: in_progress" in text, "the recovery pass moved a task it " \
+                                          "should not have seen"
+
+
+def test_the_elapsed_reading_the_recovery_pass_computes_is_under_the_timeout(
+        endpoint_dir, endpoint_client):
+    """The same claim as clause 3, measured rather than observed: the number the
+    guard compares is the one that was wrong. Pre-fix this read 25,200 s."""
+    (endpoint_dir / "21-ui-claimed.md").write_text(
+        "---\ntype: autonomy\nid: 21\nname: ui-claimed\nstatus: up_next\n"
+        "timeout_seconds: 1800\n---\n\n# Body\n", encoding="utf-8")
+    endpoint_client.post("/api/autonomy/task-write",
+                         json={"id": 21, "status": "in_progress"})
+
+    task = autonomy._parse_task_file(endpoint_dir / "21-ui-claimed.md")
+    updated = autonomy._parse_iso(task.get("updated"))
+    assert updated is not None, f"unreadable: {task.get('updated')!r}"
+    timeout = int(task.get("timeout_seconds") or 1800)
+    now = datetime.now(timezone.utc)
+    elapsed = (now - updated).total_seconds()
+    assert 0 <= elapsed < timeout, (
+        f"recovery would read this task as {elapsed:.0f}s old against a "
+        f"{timeout}s timeout")
+
+
+def test_a_task_written_through_the_endpoint_is_not_allowed_to_double_run(
+        endpoint_dir, endpoint_client, monkeypatch, tmp_path):
+    """The other half of the same acceptance check: the double-run guard.
+
+    `run_task` refuses a second copy of an `in_progress` task while its
+    `updated` is inside `timeout_seconds`. Pre-fix a UI claim put `updated`
+    25,200 s in the past, so that comparison was false on arrival and the guard
+    could never trip for a hand-claimed task — the interleaving of two runs of
+    #38 the guard was written for. Post-fix the claim is fresh, the guard
+    fires, and `run_query` is never reached.
+    """
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("# test skill\nDo the thing.\n", encoding="utf-8")
+    (endpoint_dir / "23-ui-claimed.md").write_text(
+        "---\ntype: autonomy\nid: 23\nname: ui-claimed\nstatus: up_next\n"
+        f"timeout_seconds: 1800\nskill_name: {skill}\n---\n\n# Body\n",
+        encoding="utf-8")
+    endpoint_client.post("/api/autonomy/task-write",
+                         json={"id": 23, "status": "in_progress"})
+
+    monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "runs")
+
+    async def must_not_run(messages, options):
+        raise AssertionError(
+            "run_query was reached for a task the UI claimed seconds ago: the "
+            "double-run guard read its `updated` as stale and let a second copy start")
+
+    monkeypatch.setattr("app.harness.run_query", must_not_run)
+    result = asyncio.run(autonomy.run_task(23))
+    assert result.get("skipped") is True, result
+    assert "already in_progress" in result.get("error", ""), result
+    assert not (tmp_path / "runs" / "23").exists()
+
+
+def test_a_genuinely_stuck_task_is_still_recovered_after_the_fix(endpoint_dir,
+                                                                 endpoint_client):
+    """The guard against over-correction. A task whose `updated` really is older
+    than its timeout must still be reset — otherwise this change would have
+    traded a false recovery for a task that hangs in `in_progress` forever,
+    which is the failure mode the pass exists to clear."""
+    (endpoint_dir / "22-really-stuck.md").write_text(
+        "---\ntype: autonomy\nid: 22\nname: really-stuck\nstatus: in_progress\n"
+        f"updated: {iso(7200)}\ntimeout_seconds: 1800\n---\n\n# Body\n",
+        encoding="utf-8")
+    assert "22" in [str(t) for t in autonomy.recover_stuck_tasks()]
+    assert "Recovered from in_progress" in (endpoint_dir / "22-really-stuck.md").read_text()
