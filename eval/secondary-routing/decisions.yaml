@@ -4,7 +4,7 @@
 # `app/secondary_models.py`; a test asserts it. Written by
 # `eval/secondary_routing_eval.py`, edited by nobody — to change
 # a routing decision you re-run the eval, not this file.
-generated_at: '2026-09-19T12:03:02+00:00'
+generated_at: '2026-09-20T12:00:10+00:00'
 repeats: 3
 repeats_at_floor: true
 arms_separate: true
@@ -17,10 +17,10 @@ jobs:
   title:
     job: title
     decision: flip_to_primary
-    reason: "outside tolerance: +15.4 pts (margin 5.0) \u2014 the 0.4x latency cost is not buying parity"
-    score_gap_primary_minus_secondary: 15.42
+    reason: "outside tolerance: +8.8 pts (margin 5.0) \u2014 the 0.7x latency cost is not buying parity"
+    score_gap_primary_minus_secondary: 8.75
     defect_gap_secondary_minus_primary: 0.0
-    latency_ratio_secondary_over_primary: 0.4
+    latency_ratio_secondary_over_primary: 0.7
     margin_points: 5.0
     defect_margin: 0.05
     repeats_per_input:
@@ -32,11 +32,11 @@ jobs:
   capture:
     job: capture
     decision: keep_secondary
-    reason: 'within tolerance: -0.4 pts vs a 5.0-pt margin, defect +0.000 vs a +0.050 margin, at 0.5x
+    reason: 'within tolerance: -6.2 pts vs a 5.0-pt margin, defect +0.000 vs a +0.050 margin, at 0.9x
       the primary''s wall time'
-    score_gap_primary_minus_secondary: -0.41
+    score_gap_primary_minus_secondary: -6.25
     defect_gap_secondary_minus_primary: 0.0
-    latency_ratio_secondary_over_primary: 0.5
+    latency_ratio_secondary_over_primary: 0.9
     margin_points: 5.0
     defect_margin: 0.05
     repeats_per_input:
@@ -48,11 +48,11 @@ jobs:
   facts:
     job: facts
     decision: keep_secondary
-    reason: 'within tolerance: +5.0 pts vs a 5.0-pt margin, defect +0.000 vs a +0.050 margin, at 0.9x
+    reason: 'within tolerance: +1.7 pts vs a 5.0-pt margin, defect +0.000 vs a +0.050 margin, at 0.7x
       the primary''s wall time'
-    score_gap_primary_minus_secondary: 5.0
+    score_gap_primary_minus_secondary: 1.66
     defect_gap_secondary_minus_primary: 0.0
-    latency_ratio_secondary_over_primary: 0.9
+    latency_ratio_secondary_over_primary: 0.7
     margin_points: 5.0
     defect_margin: 0.05
     repeats_per_input:
@@ -64,11 +64,11 @@ jobs:
   focus:
     job: focus
     decision: keep_secondary
-    reason: 'within tolerance: -5.0 pts vs a 5.0-pt margin, defect +0.000 vs a +0.050 margin, at 1.1x
+    reason: 'within tolerance: -3.8 pts vs a 5.0-pt margin, defect +0.000 vs a +0.050 margin, at 0.6x
       the primary''s wall time'
-    score_gap_primary_minus_secondary: -5.0
+    score_gap_primary_minus_secondary: -3.75
     defect_gap_secondary_minus_primary: 0.0
-    latency_ratio_secondary_over_primary: 1.1
+    latency_ratio_secondary_over_primary: 0.6
     margin_points: 5.0
     defect_margin: 0.05
     repeats_per_input:
@@ -80,11 +80,11 @@ jobs:
   voice:
     job: voice
     decision: keep_secondary
-    reason: 'within tolerance: -3.7 pts vs a 5.0-pt margin, defect +0.000 vs a +0.050 margin, at 0.9x
+    reason: 'within tolerance: -3.3 pts vs a 5.0-pt margin, defect +0.000 vs a +0.050 margin, at 1.1x
       the primary''s wall time'
-    score_gap_primary_minus_secondary: -3.74
+    score_gap_primary_minus_secondary: -3.33
     defect_gap_secondary_minus_primary: 0.0
-    latency_ratio_secondary_over_primary: 0.9
+    latency_ratio_secondary_over_primary: 1.1
     margin_points: 5.0
     defect_margin: 0.05
     repeats_per_input:
