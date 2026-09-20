@@ -801,19 +801,45 @@ def chamber_enabled(repo=None) -> bool:
     return bool((raw.get("automod") or {}).get("chamber", False))
 
 
+_landing_cfg_cache: dict[str, tuple[tuple, dict]] = {}
+
+
 def landing_cfg(repo=None) -> dict:
     """`automod.landing` straight from config.yaml, `{}` when unreadable.
 
     Read raw like `is_enabled`: the promoter runs detached from the backend
-    and must not pull `app.config` in behind it."""
+    and must not pull `app.config` in behind it.
+
+    Decoded at most once per change to the file, on the `ledger_rows` pattern
+    and for the same reason: config.yaml is 89 KB and `yaml.safe_load` on the
+    pure-Python loader costs **45 ms** a call, while the promoter's settings
+    are read one scalar at a time — the idle budget alone took two, before the
+    window keys added four more per landing. Keyed on the resolved path so a
+    worktree's config and the live one never share an entry, and on
+    `(mtime_ns, size)` so a hand edit is picked up by the next landing without
+    a restart. A fresh `dict` is returned each call: the promoter mutates
+    nothing here today, and a shared mutable settings dict is a trap to leave
+    lying around.
+    """
     root = Path(repo) if repo else Path(__file__).resolve().parent.parent.parent
+    path = root / "config.yaml"
+    try:
+        st = path.stat()
+    except OSError:
+        return {}
+    version = (st.st_mtime_ns, st.st_size)
+    cached = _landing_cfg_cache.get(str(path))
+    if cached is not None and cached[0] == version:
+        return dict(cached[1])
     try:
         import yaml
-        raw = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8")) or {}
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception:
         return {}
     cfg = (raw.get("automod") or {}).get("landing")
-    return dict(cfg) if isinstance(cfg, dict) else {}
+    cfg = dict(cfg) if isinstance(cfg, dict) else {}
+    _landing_cfg_cache[str(path)] = (version, cfg)
+    return dict(cfg)
 
 
 def require_enabled(action: str, repo=None) -> None:

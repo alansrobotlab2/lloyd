@@ -803,10 +803,12 @@ turn and gate touch the worktree and the canary ports, and triage and digest
 turns already run on the live backend during observation. With the switch on
 an `observing` promotion is free; `landing`, a rollback request, halt and
 BROKEN are not. The next round's turn and gate (~33 min median) then hide the
-15-minute window entirely, and only its landing waits:
+observation window entirely (7a; 15 min until 2026-09-20), and only its
+landing waits:
 `promote.wait_for_settle`, called by `round.land` *outside* the automod lock
 (round starts and arch-review commits take it) and before `wait_idle` pauses
-the pool, polls `current.json` every 10 s for up to `ERRORS_WINDOW` + 120 s,
+the pool, polls `current.json` every 10 s for up to `settle_max_wait()` (the
+larger observation window + 120 s slack; see 7a),
 then asks halt, BROKEN and the rollback request again. Each way it ends
 without a landing is an external `land_failed` (`waited_for_settle: true`),
 so the item keeps its attempt; `promote`'s "still under observation" refusal
@@ -1286,6 +1288,78 @@ Four changes, each with its own switch or none needed:
    unreadable report, no paths, no head, or a verdict that raises all hold as
    before. `tests/test_loop_depth.py`.
 
+7a. **The observation window is two numbers, and both come from config**
+   (2026-09-20, `promote.errors_window`, `automod.landing.errors_window_s` /
+   `.errors_window_unrestarted_s`, defaults 450 / 120). It was a flat 900 s
+   constant, and on 2026-09-20 that was **13.5 h of a 24 h window** across 54
+   promotions — while every rollback the window has EVER caused fired within
+   5.5 minutes of the landing:
+
+   | trigger | when | fired after landing | verdict |
+   |---|---|---|---|
+   | `error_rate` | 09-07 | 4 s | false positive (the landing's own restart) |
+   | `crash` | 09-06 | 147 s | false positive |
+   | `data_damage` | 09-10 | 262 s | the `bench_010` vault wipe, blamed on whichever promotion was observing |
+   | `data_damage` | 09-17 | 327 s | a `.git` repack the file counter did not skip |
+
+   The other five rollbacks in the ledger's history came from `promote_failed`
+   (4, the promoter's own inline failure) and `regression` (1, detached since
+   `a54ccda`) — neither needs a window. So 450 clears the longest signal ever
+   observed with margin, at half the serialization, and a landing that
+   restarted nothing gets 120: the guardian already skips liveness and the
+   error rate for such a promotion (5 above), and what it still judges — data
+   damage from a changed script a job runs — is a guard weak enough by
+   construction (a nightly changed at 14:00 runs at 02:00) that shortening it
+   costs nothing the window was really providing. Both are clamped to
+   `[60, 3600]`: a window under a minute settles a promotion nothing judged and
+   advances the LKG anyway, quietly turning "last known good" into "last
+   landed", while above the ceiling the loop stops landing.
+
+   `errors_window_s` had sat in `automod.landing` unread since that block was
+   written — the same defect as the two idle keys found dead on 2026-09-17 —
+   and `liveness_window_s` beside it named a `LIVENESS_WINDOW` constant already
+   deleted as dead, so it is gone. `idle_quiet_polls` and `drain_ttl_s` are
+   read now too. `S.landing_cfg` gained the `ledger_rows` mtime cache in the
+   same change: config.yaml is 89 KB and `yaml.safe_load` costs **45 ms** a
+   call, which the idle budget was already paying twice per landing and the
+   window keys would have made six. The promotion record and the `promoted` row
+   both carry `errors_window_s`, and `promotion_announcement` states the window
+   it was given rather than formatting the constant.
+
+   **The guardian is untouched by design.** It is a pinned stdlib-only snapshot
+   that never imports from `scripts/`, so a shorter window reaches it only as a
+   smaller `errors_until_ts` on the record; `tests/test_observation_window.py`
+   asserts `ERRORS_WINDOW` appears nowhere in `guardian.py`, because a second
+   copy of the number would move the promoter and leave the watchdog on the old
+   one. No restage, no protected path, no drill.
+
+   **Known and accepted: the LKG's `eval` slot goes staler.** `maybe_settle`
+   folds `eval_last.json` into the LKG record only when it names the commit
+   settling right then, and the regression check takes a **median 368 s** after
+   the promotion (n=103 over the three days to 2026-09-20; min 339 s). At 900 s
+   71 of those 103 landed inside their window and at 450 s 69 — the
+   distribution is bimodal, so the restarted window costs almost nothing — but
+   **none finished inside 120 s**, so an unrestarted promotion will not carry
+   its own measurement onto the LKG. It carries the previous record's instead
+   (`set_lkg` keeps `existing["eval"]` when handed None), so this is staleness,
+   not loss: the check still runs, still writes `eval_last.json`, still records
+   its `regression_check` row and still raises a rollback request if it finds
+   one. Nothing reads the LKG's `eval` as a control input — the runner
+   baselines each commit against `subject["parent"]`, never against LKG — it is
+   a record shown by `round status` and `/api/automod`. The obvious fix, letting
+   the runner write LKG itself, is what `maybe_settle`'s docstring refuses: the
+   guardian being the only writer of `last_known_good.json` is what makes LKG
+   mean *observed healthy in production*.
+
+   The settle wait derives from the **larger** of the two windows
+   (`settle_max_wait`), never the waiting round's own: what it waits on is
+   somebody else's promotion. And it now records — `land_wait_settle`, with
+   `waited_s` and `behind`, mirroring `land_wait_rounds`. A successful settle
+   wait wrote nothing at all before, so the cost this change is about was
+   invisible; scorecard row 14 carries both waits, because they have different
+   fixes (the window's length, and depth) and the `landing` idle class cannot
+   tell them apart.
+
 7. **A landing that lost the race for a settled window waits out the
    winner's too** (`promote.wait_for_settle`, `SETTLE_QUEUE_CAP` 4). Landings
    queue behind an observed promotion; when it settles one of them lands
@@ -1693,7 +1767,8 @@ refusals on their own grader output named the causes, heaviest first:
    fifty rounds. A source may now return `DECLINED`; with `retry_seconds`
    (autocode: 60) the pool looks again that much sooner, and autocode's four
    board passes keep the 900 s clock on their own `last_housekeeping`
-   watermark. The 900 s observation window is untouched.
+   watermark. The observation window is a separate clock and was untouched by
+   that change; 7a is where it moved.
 6. **The implementer was never told what the grader checks,** and a
    re-offered round's grader saw no history. The implement prompt now names
    seams, the suite-run evidence, graded test prose and the two-attempt cap;
@@ -2233,8 +2308,8 @@ promotions are halted is excused; `EXITED` never is.
 
 **Reset when HEAD is still the promotion; revert in place when it is not.**
 `reset --hard` to the promotion's parent is only correct while HEAD *is* the
-promotion. Nightly jobs commit straight to live `main`, so a 15-minute window
-can legitimately close over work the loop never touched, and resetting past it
+promotion. Nightly jobs commit straight to live `main`, so an observation
+window can legitimately close over work the loop never touched, and resetting past it
 destroys commits nobody asked the guardian to judge. That is the 26-commit
 incident one level down: there the wrong *target* was chosen, here the right
 target is reached by the wrong *route*. When HEAD has moved on, the guardian

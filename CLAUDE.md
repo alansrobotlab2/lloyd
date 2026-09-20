@@ -241,7 +241,7 @@ Things worth knowing before touching any of it:
   nothing promoted is infrastructure, not a bad change.
 - **A rollback reverts in place when HEAD has moved past the promotion.**
   `reset --hard` to the parent is right only while HEAD *is* the promotion.
-  Nightly jobs commit straight to live `main`, so a 15-minute window can close
+  Nightly jobs commit straight to live `main`, so an observation window can close
   over work the loop never touched, and resetting past it destroys commits
   nobody asked the guardian to judge. The route is chosen per rollback; a
   conflicting revert escalates rather than guessing.
@@ -1179,6 +1179,57 @@ waited on gates, whose review rung needed a grader turn the drain refused.
   `restart: false`, and the guardian does not blame a crash or an error spike
   on it (data damage still is). `/health.commit` stays at the boot commit
   after such a landing; `bless` accepts that difference.
+
+### The observation window is two numbers, and it is read from config
+
+A promotion is judged for `errors_until_ts - landed_ts`, and every other
+landing queues behind that window, so the one constant sets both how much a bad
+build is caught and how much of the day is spent serialized. It was a flat
+900 s until 2026-09-20, when it cost **13.5 h of a 24 h window** across 54
+promotions — while every rollback the window has EVER caused fired within 5.5
+minutes of the landing (`error_rate` 4 s, `crash` 147 s, `data_damage` 262 s
+and 327 s) and all four were false positives or misattributions. The other five
+rollbacks in the ledger's history came from `promote_failed` and the detached
+`regression` check, neither of which needs a window.
+`architecture/automod.md` §3.2h.7a is the long version.
+
+- **450 s restarted, 120 s not** (`automod.landing.errors_window_s` /
+  `.errors_window_unrestarted_s`, read by `promote.errors_window`). The
+  guardian already skips liveness and the error rate for a promotion that
+  replaced no process; what it still judges there is data damage, a guard weak
+  enough by construction — a nightly changed at 14:00 runs at 02:00 — that
+  shortening it costs nothing the window was really providing.
+- **Both are clamped to `[60, 3600]`.** A window under a minute still settles
+  and still advances the LKG, quietly turning "last known good" into "last
+  landed"; above the ceiling the loop stops landing. A typo costs the default,
+  never the landing.
+- **`errors_window_s` had been read by nothing** since the `landing` block was
+  written, like the two idle keys found dead on 2026-09-17. `liveness_window_s`
+  named a constant already deleted as dead and is gone; `idle_quiet_polls` and
+  `drain_ttl_s` are wired. `S.landing_cfg` gained the `ledger_rows` mtime cache
+  in the same change — config.yaml is 89 KB and `yaml.safe_load` is **45 ms** a
+  call, which the idle budget was already paying twice per landing.
+- **The guardian is untouched on purpose.** It is a pinned stdlib-only snapshot
+  that never imports from `scripts/`, so a shorter window reaches it only as a
+  smaller `errors_until_ts`; a test asserts `ERRORS_WINDOW` appears nowhere in
+  `guardian.py`, because a second copy would move the promoter and leave the
+  watchdog on the old number. No restage, no drill.
+- **Accepted cost: the LKG's `eval` slot goes staler.** The guardian folds
+  `eval_last.json` into the LKG only if it names the commit settling right
+  then, and the regression check takes a median 368 s after the promotion —
+  0 of 103 finished inside 120 s, so an unrestarted promotion carries the
+  previous record's measurement forward rather than its own. Staleness, not
+  loss: the check still runs, still records, still can request a rollback, and
+  nothing reads LKG's `eval` as a control input (the runner baselines on
+  `subject["parent"]`). Letting the runner write LKG instead would break the
+  guardian being its only writer, which is what makes LKG mean *observed
+  healthy in production*.
+- **A settle wait is recorded now** (`land_wait_settle`, `waited_s`, `behind`).
+  A successful one wrote nothing at all before, so the cost this change is
+  about was invisible. Scorecard row 14 carries both landing waits, because
+  they have different fixes — the window's length, and depth — and the
+  `landing` idle class cannot tell them apart. `settle_max_wait` derives from
+  the **larger** window: what a landing waits on is somebody else's promotion.
 
 ### Every promotion is measured, by a check a landing cannot kill
 

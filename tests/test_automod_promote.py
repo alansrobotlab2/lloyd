@@ -642,12 +642,27 @@ def test_the_announcement_carries_the_title_and_never_the_round_id():
     """"Promoted SM_20260909_160856" read aloud is a date one digit at a time.
     The round id is in the ledger row; the toast and the spoken line get the
     item's name."""
-    head, body = P.promotion_announcement("Give deferred tool descriptions trigger conditions", 8)
+    head, body = P.promotion_announcement(
+        "Give deferred tool descriptions trigger conditions", 8, 900)
     assert head == "Landed: Give deferred tool descriptions trigger conditions"
     assert body == "8 files changed. Watching for 15 minutes."
     assert "SM_" not in head + body
-    head, body = P.promotion_announcement("", 1)
+    head, body = P.promotion_announcement("", 1, 900)
     assert head == "Landed a change" and body.startswith("1 file changed.")
+
+
+def test_the_announcement_states_the_window_this_promotion_actually_got():
+    """Two windows since 2026-09-20, and the toast must name the one in force.
+
+    Formatting `ERRORS_WINDOW` regardless is how an announcement comes to state
+    a number nothing used — the same defect as `errors_window_s` sitting unread
+    in config.yaml for as long as it did.
+    """
+    assert P.promotion_announcement("x", 1, 450)[1].endswith("Watching for 7.5 minutes.")
+    assert P.promotion_announcement("x", 1, 120)[1].endswith("Watching for 2 minutes.")
+    assert P.promotion_announcement("x", 1, 600)[1].endswith("Watching for 10 minutes.")
+    # No argument falls back to the restarted default rather than to silence.
+    assert "Watching for" in P.promotion_announcement("x", 1)[1]
 
 
 def test_the_promotion_record_and_result_carry_the_title(monkeypatch, tmp_path):
@@ -710,7 +725,7 @@ def _chamber_land(monkeypatch, tmp_path, currents, *, chamber=True):
     from scripts.automod import round as R
     monkeypatch.setattr(S, "ROLLBACK_REQUEST_PATH", tmp_path / "rollback_request.json")
     monkeypatch.setattr(P, "SETTLE_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(P, "SETTLE_MAX_WAIT", 0.2)
+    monkeypatch.setattr(P, "settle_max_wait", lambda: 0.2)
     monkeypatch.setattr(S, "chamber_enabled", lambda repo=None: chamber)
     monkeypatch.setattr(S, "require_enabled", lambda *a, **k: None)
     seq = list(currents)

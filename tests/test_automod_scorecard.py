@@ -427,6 +427,10 @@ def test_row_12_renders_for_a_row_recorded_before_it_existed():
     text = SC.render(old)
     assert "| 12 | arch review | 0 units |" in text
     assert "no verdicts" in text
+    # Row 14 gained a landing-wait breakdown on 2026-09-20; a row older than it
+    # carries no `waits` key and must say so rather than render a zero it never
+    # measured — the `fail_rate` null rule, one panel over.
+    assert "landings waited: unrecorded" in text
 
 
 def test_triage_appends_are_counted_apart_and_row_13_reads_the_board(tmp_path, repo):
@@ -713,3 +717,36 @@ def test_the_tallies_count_the_listed_rows_when_the_cap_bites(tmp_path, repo, mo
     assert ov["found"] == 3 and ov["count"] == 2 == len(ov["rows"]) and ov["cap"] == 2
     assert sum(ov["by_event"].values()) == ov["count"] == sum(ov["fields"].values()), (
         "the tallies follow the cap, so the count is the rows and found is the window")
+
+
+def test_row_14_splits_the_two_waits_a_landing_makes(tmp_path, repo):
+    """Landings wait twice and the fixes are different.
+
+    `wait_for_settle` waits out the previous promotion's observation window —
+    shortened by changing the window; `wait_for_rounds` waits for a sibling
+    round's turn to end so the restart does not kill it — shortened only by
+    changing depth. The duty-cycle row's `landing` idle class cannot tell them
+    apart: it says a gap had a `promoted` row near it. On 2026-09-20 that put
+    7.7 h under one label and the first read of it attributed the whole lot to
+    the window.
+
+    `waited` counts rows that actually blocked, `n` counts rows: a landing that
+    skipped a wait records ~0 rather than nothing, and averaging those in would
+    make a queue of real waits look short.
+    """
+    ledger = _ledger(tmp_path, [
+        _ev("land_wait_settle", 0.5, round_id="SM_A", ok=True, waited_s=600.0, behind=1),
+        _ev("land_wait_settle", 0.4, round_id="SM_B", ok=True, waited_s=300.0, behind=1),
+        _ev("land_wait_settle", 0.3, round_id="SM_C", ok=True, waited_s=0.1, behind=0),
+        _ev("land_wait_rounds", 0.5, round_id="SM_A", ok=True, waited_s=120.0),
+        _ev("land_wait_rounds", 0.4, round_id="SM_B", ok=True, waited_s=0.1),
+    ])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "none",
+                     repo=repo, now=NOW)
+    waits = row["duty_cycle"]["waits"]
+    assert waits["settle"] == {"n": 3, "waited": 2, "minutes": 15.0,
+                               "median_s": 450.0, "max_s": 600.0}
+    assert waits["rounds"] == {"n": 2, "waited": 1, "minutes": 2.0,
+                               "median_s": 120.0, "max_s": 120.0}
+    assert "settle 15 min (2/3)" in SC.render(row)
+    assert "rounds 2 min (1/2)" in SC.render(row)

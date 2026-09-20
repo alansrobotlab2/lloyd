@@ -991,8 +991,30 @@ automod:
     skip_restart: true
     idle_quiet_polls: 3
     drain_ttl_s: 180
-    liveness_window_s: 120
-    errors_window_s: 900
+    # The observation window: how long the guardian judges a promotion before
+    # it settles and becomes the last-known-good. It is also what every other
+    # landing queues behind (promote.wait_for_settle), which is what makes it
+    # the loop's throughput knob as much as its safety one.
+    #
+    # 900 until 2026-09-20, when it cost 13.5 h of a 24 h day across 54
+    # promotions while every rollback it has EVER caused fired within 5.5 min
+    # of the landing (4 s, 147 s, 262 s, 327 s — all four false positives or
+    # misattributions). 450 clears the longest of those with margin.
+    #
+    # The unrestarted window is for a landing that replaced no process
+    # (`skip_restart` above). The guardian already skips liveness and the
+    # error rate for one: the code that could crash is the code that was
+    # already running. It still judges data damage, because a script the
+    # landing changed can be run by a job inside the window, so this is
+    # shortened rather than removed. 24 of the 55 promotions on 09-20
+    # restarted nothing.
+    #
+    # promote.py clamps both to [60, 3600]: a window under a minute cannot
+    # judge anything (the guardian ticks at 5 s and `crash` needs three failed
+    # probes) yet still settles and advances the LKG, which would quietly turn
+    # "last known good" into "last landed".
+    errors_window_s: 450
+    errors_window_unrestarted_s: 120
 
 # Write-time dedupe for backlog_write_task (agent_mcp/backlog_similar.py).
 # Every create is checked against the board: the qmd daemon's reranked vector

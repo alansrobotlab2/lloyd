@@ -43,14 +43,45 @@ IDLE_MAX_WAIT = 900.0
 IDLE_HARD_MAX_WAIT = 4500.0
 DRAIN_TTL = 180.0
 DRAIN_REFRESH_SECONDS = 60.0   # re-arm well inside the TTL while waiting for idle
-# The observation window. Liveness is watched for ALL of it, not for some
-# shorter sub-window: a build that crashes at minute ten is exactly as bad as
-# one that crashes at minute one. There was a `LIVENESS_WINDOW = 120.0` here
-# and a `liveness_until_ts` written into every promotion record, and nothing
-# ever read either — the guardian applies liveness whenever a promotion is
-# under observation. A constant that looks like a bound and bounds nothing is
-# worse than no constant.
-ERRORS_WINDOW = 900.0
+# The observation window, and the number that decides how much of the loop's
+# day is spent serialized behind it. Liveness and the error rate are watched
+# for ALL of it, not for some shorter sub-window: a build that crashes at
+# minute ten is exactly as bad as one that crashes at minute one. There was a
+# `LIVENESS_WINDOW = 120.0` here and a `liveness_until_ts` written into every
+# promotion record, and nothing ever read either — the guardian applies
+# liveness whenever a promotion is under observation. A constant that looks
+# like a bound and bounds nothing is worse than no constant, which is also why
+# `errors_window_s` is *read* below: it has sat in `automod.landing` since that
+# block was written and nothing has ever read it, exactly like the two idle
+# keys found dead on 2026-09-17.
+#
+# 900 until 2026-09-20. Every rollback the window has ever caused fired within
+# 5.5 minutes of the landing — 09-07 `error_rate` at 4 s, 09-06 `crash` at
+# 147 s, 09-10 `data_damage` at 262 s, 09-17 `data_damage` at 327 s — and all
+# four were false positives or misattributions (the 09-10 one blamed the
+# `bench_010` vault wipe on whichever promotion happened to be observing, the
+# 09-17 one a `.git` repack the file counter did not skip). Against that, on a
+# 54-promotion day the window cost 13.5 h of the 24, and it is what every
+# landing queues behind. 450 clears the longest signal ever observed with
+# margin, at half the serialization.
+ERRORS_WINDOW = 450.0
+# A landing that restarted no service gets a shorter one. The guardian already
+# skips liveness and the error rate for such a promotion (`unrestarted` in
+# `guardian.tick`): the code that could crash is the code that was already
+# running, and the error log belongs to a build that never booted. What it
+# still judges is data damage, because a script the landing changed can be run
+# by a job inside the window. That is a weak guard by construction — a nightly
+# changed at 14:00 runs at 02:00, outside any window this loop would tolerate —
+# so the window is shortened here rather than removed. 24 of the 55 promotions
+# on 2026-09-20 restarted nothing.
+ERRORS_WINDOW_UNRESTARTED = 120.0
+# Bounds on what config.yaml may set. A window under the floor cannot judge
+# anything — the guardian ticks every 5 s and `crash` needs three consecutive
+# failed probes — and one that settles with nothing observed still advances the
+# LKG, quietly turning "last known good" into "last landed". Above the ceiling
+# the loop stops landing. A value outside either is clamped, not obeyed.
+ERRORS_WINDOW_FLOOR = 60.0
+ERRORS_WINDOW_CEILING = 3600.0
 RESTART_LEASE = 120.0
 
 SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
@@ -202,17 +233,56 @@ def pool_in_flight() -> list[dict] | None:
     return [dict(v) for v in jobs.values() if isinstance(v, dict)]
 
 
+def _landing_num(key: str, default: float) -> float:
+    """One scalar out of `automod.landing`, `default` on anything unreadable.
+
+    Read per call rather than bound as a default argument: `round.land`
+    imports this module once per process, so a default would freeze the value
+    at import time. `landing_cfg` caches on the file's mtime, so the call is
+    ~0.03 ms and an edit is still picked up by the next landing.
+    """
+    try:
+        return float(S.landing_cfg(LIVE_ROOT).get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def drain_ttl() -> float:
+    """`automod.landing.drain_ttl_s` — how long a drain stays armed."""
+    return _landing_num("drain_ttl_s", DRAIN_TTL)
+
+
+def idle_quiet_polls() -> float:
+    """`automod.landing.idle_quiet_polls` — consecutive quiet polls = idle."""
+    return _landing_num("idle_quiet_polls", IDLE_QUIET_POLLS)
+
+
 def _idle_budget(max_wait: float | None) -> tuple[float, float]:
     """`(quiet budget, hard ceiling)` from `automod.landing`, arguments first."""
-    cfg = S.landing_cfg(LIVE_ROOT)
+    budget = (float(max_wait) if max_wait is not None
+              else _landing_num("idle_max_wait_s", IDLE_MAX_WAIT))
+    return budget, max(budget, _landing_num("idle_hard_max_wait_s", IDLE_HARD_MAX_WAIT))
 
-    def _num(key: str, default: float) -> float:
-        try:
-            return float(cfg.get(key, default))
-        except (TypeError, ValueError):
-            return default
-    budget = float(max_wait) if max_wait is not None else _num("idle_max_wait_s", IDLE_MAX_WAIT)
-    return budget, max(budget, _num("idle_hard_max_wait_s", IDLE_HARD_MAX_WAIT))
+
+def errors_window(restart: bool = True) -> float:
+    """How long this promotion is observed, by whether it restarted anything.
+
+    `automod.landing.errors_window_s` and `.errors_window_unrestarted_s`, each
+    falling back to its constant on anything unreadable and clamped to
+    `[ERRORS_WINDOW_FLOOR, ERRORS_WINDOW_CEILING]`. Clamped rather than obeyed
+    because both ends fail silently in the same direction the guardian cannot
+    see: a zero-length window settles a promotion nothing ever judged and
+    advances the LKG anyway, so `last_known_good` would come to mean "last
+    landed" while every record still looked healthy.
+
+    `restart` is the promotion's own `restart_needed` verdict, not the
+    caller's preference. Read at stamp time rather than at import, so a change
+    to config.yaml reaches the next landing without a restart — the promoter
+    runs fresh per landing, but `land` imports this module once per process.
+    """
+    value = _landing_num("errors_window_s" if restart else "errors_window_unrestarted_s",
+                         ERRORS_WINDOW if restart else ERRORS_WINDOW_UNRESTARTED)
+    return max(ERRORS_WINDOW_FLOOR, min(ERRORS_WINDOW_CEILING, value))
 
 
 # How many polls in a row must fail to read the pool before `wait_for_rounds`
@@ -310,11 +380,16 @@ def wait_idle(max_wait: float | None = None, *, drain: bool = True,
     started = time.time()
     deadline = started + max_wait
     quiet = 0
+    # Both read once, before the loop, so a config.yaml edit cannot change the
+    # rules underneath a wait already in progress: this polls every 2 s for up
+    # to 75 minutes, and `landing_cfg` picks an edit up on its next stat.
+    quiet_needed = idle_quiet_polls()
+    ttl = drain_ttl()
     busiest = ""
     armed_at = 0.0
     while time.time() < min(deadline, started + hard_max):
         if drain and time.time() - armed_at >= DRAIN_REFRESH_SECONDS:
-            set_drain(True, DRAIN_TTL)
+            set_drain(True, ttl)
             armed_at = time.time()
         status, body = _get(f"{BACKEND}/health")
         if status == 200 and body:
@@ -337,7 +412,7 @@ def wait_idle(max_wait: float | None = None, *, drain: bool = True,
                     sorted({str(j.get("source")) for j in jobs_quiet}))
             elif not busy:
                 quiet += 1
-                if quiet >= IDLE_QUIET_POLLS:
+                if quiet >= quiet_needed:
                     return True, f"idle for {quiet} consecutive polls"
             else:
                 quiet = 0  # a turn appearing resets the counter
@@ -483,19 +558,32 @@ def _start_regression_runner() -> str:
         return f"not started: {exc!r}"[:200]
 
 
-def promotion_announcement(title: str, n_files: int) -> tuple[str, str]:
+def promotion_announcement(title: str, n_files: int,
+                           window_s: float | None = None) -> tuple[str, str]:
     """The toast head and body for a landing. Pure, so it can be pinned.
 
     Never the round id: it is in the `promoted` ledger row for anyone who
     needs it, and read aloud it is a date one digit at a time. The title is
     the item's name — the one thing a person in the room can act on.
+
+    `window_s` is the window this promotion actually got, which since
+    2026-09-20 is one of two and is read from config. Formatting the constant
+    instead is how the announcement comes to state a number nothing used —
+    the same defect as the `errors_window_s` key that sat unread in
+    config.yaml. Always minutes, one decimal only when it does not divide
+    evenly: this line is read aloud as well as shown, and mixed units across
+    consecutive landings are worse to listen to than a fraction.
     """
+    seconds = float(ERRORS_WINDOW if window_s is None else window_s)
+    watching = (f"{int(seconds // 60)} minutes" if seconds % 60 == 0
+                else f"{seconds / 60:.1f} minutes")
     head = f"Landed: {title}" if title else "Landed a change"
-    body = f"{n_files} file{'' if n_files == 1 else 's'} changed. Watching for {int(ERRORS_WINDOW // 60)} minutes."
+    body = f"{n_files} file{'' if n_files == 1 else 's'} changed. Watching for {watching}."
     return head, body
 
 
-def _announce_promoted(round_id: str, commit: str, changed: list, title: str = "") -> None:
+def _announce_promoted(round_id: str, commit: str, changed: list, title: str = "",
+                       window_s: float | None = None) -> None:
     """Say out loud that the loop just landed code on itself.
 
     Until now the self-modification loop only ever spoke when it *failed*:
@@ -509,7 +597,7 @@ def _announce_promoted(round_id: str, commit: str, changed: list, title: str = "
     announcement must never be able to fail a promotion that already
     succeeded and is being observed.
     """
-    head, body = promotion_announcement(title, len(changed))
+    head, body = promotion_announcement(title, len(changed), window_s)
     announce(head, body)
 
 
@@ -725,11 +813,23 @@ MAX_REBASES_PER_LANDING = 2
 # and throwing away a gated round. A landing is written `current.json` with
 # its own window only after the restart verifies, so the whole window can
 # still be ahead of it.
-SETTLE_MAX_WAIT = ERRORS_WINDOW + 120.0
+SETTLE_SLACK = 120.0
 SETTLE_POLL_SECONDS = 10.0
 # How many promotions in a row one landing will queue behind, each with a
 # full window. Four is an hour; past that something else is wrong.
 SETTLE_QUEUE_CAP = 4
+
+
+def settle_max_wait() -> float:
+    """The longest one landing waits for the promotion ahead of it to settle.
+
+    The *larger* of the two windows, never the waiting round's own: what it is
+    waiting on is somebody else's promotion, and the window belongs to that
+    one. A landing that changes no loaded file would otherwise be held to the
+    120 s of its own window while waiting out a restarted promotion's 450, and
+    be refused with six minutes still to run.
+    """
+    return max(errors_window(True), errors_window(False)) + SETTLE_SLACK
 
 
 def _settled(commit: str) -> bool:
@@ -758,9 +858,10 @@ def wait_for_settle(max_wait: float | None = None, *, poll: float | None = None,
     wait must never end in. A moved `main` needs nothing here: `promote`
     compares live HEAD with the gated base and re-gates (`_regate_after_move`).
     """
-    max_wait = SETTLE_MAX_WAIT if max_wait is None else float(max_wait)
+    max_wait = settle_max_wait() if max_wait is None else float(max_wait)
     poll = SETTLE_POLL_SECONDS if poll is None else float(poll)
-    deadline = time.monotonic() + max_wait
+    started = time.monotonic()
+    deadline = started + max_wait
     # `observed` is the record the caller decided to wait on. Read again here
     # regardless, and remember the commit from whichever saw it: a promotion
     # that clears between the caller's read and this one must still be proved
@@ -807,10 +908,25 @@ def wait_for_settle(max_wait: float | None = None, *, poll: float | None = None,
         if unsettled:
             why = (f"{unsettled[0][:8]} left observation without settling (rolled back?) — "
                    f"not landing a round that ran on top of it")
+    waited_s = round(time.monotonic() - started, 1)
     if why:
         if round_id:
-            _land_failed(round_id, why, external=True, waited_for_settle=True)
+            _land_failed(round_id, why, external=True, waited_for_settle=True,
+                         waited_s=waited_s, behind=len(behind))
         raise PromoteError(why)
+    # A successful settle wait recorded NOTHING until 2026-09-20, so the cost
+    # this whole change is about was invisible: `land_wait_rounds` has its own
+    # row and `wait_for_settle` had none, and the only way to see the window
+    # serializing landings was to difference `promoted` stamps by hand. Mirrors
+    # that row's shape so the scorecard can read them side by side.
+    if round_id:
+        S.append_event({
+            "event": "land_wait_settle", "round_id": round_id, "ok": True,
+            "waited_s": waited_s, "behind": len(behind),
+            "windows": {"restarted": errors_window(True),
+                        "unrestarted": errors_window(False)},
+            "detail": (f"waited {waited_s:.0f}s for {len(behind)} promotion(s) to settle"
+                       if behind else "nothing under observation by the first read")})
     return None
 
 
@@ -1007,7 +1123,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
         # `external_blocker`, the item keeps its attempt and its branch.
         _land_failed(round_id, why, external=True, waited_idle=True)
     if restart:
-        set_drain(True, DRAIN_TTL)
+        set_drain(True, drain_ttl())
     merged = False
     try:
         status, body = _get(f"{BACKEND}/health")
@@ -1025,7 +1141,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
             base, head, gate_report = _regate_after_move(round_id, Path(worktree), live,
                                                          base, live_now)
             if restart:
-                set_drain(True, DRAIN_TTL)
+                set_drain(True, drain_ttl())
             live_head = live_now
             changed = W.changed_paths(Path(worktree), base)
             tree_hash = S.changed_tree_hash(worktree, head, changed)
@@ -1083,7 +1199,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
                 ok, why = wait_idle()
                 if not ok:
                     raise PromoteError(f"{again_why}, and {why}")
-                set_drain(True, DRAIN_TTL)
+                set_drain(True, drain_ttl())
                 S.set_pause(RESTART_LEASE)
 
         venv_clone = Path(worktree) / ".venvs" / "lloyd"
@@ -1153,7 +1269,8 @@ def promote(round_id: str, worktree: Path, base: str, *,
         current["state"] = "observing"
         current["landed_at"] = S.now_iso()
         current["landed_ts"] = landed
-        current["errors_until_ts"] = landed + ERRORS_WINDOW
+        window = errors_window(restart)
+        current["errors_until_ts"] = landed + window
         current["boot_id"] = (body or {}).get("boot_id")
         current["service_changes"] = service_notes
         S.write_verified(S.CURRENT_PATH, current)
@@ -1163,10 +1280,15 @@ def promote(round_id: str, worktree: Path, base: str, *,
                         "vault_commits": current.get("vault_commits") or [],
                         "tree_hash": tree_hash, "service_changes": service_notes,
                         "errors_until": current["errors_until_ts"],
+                        # The window this promotion actually got, beside the
+                        # flag that chose it — a landing is judged for as long
+                        # as this says and the scorecard should not have to
+                        # re-derive it from a constant that has since moved.
+                        "errors_window_s": window,
                         # False: the merge was the landing, nothing was drained
                         # or restarted (`restart_needed`).
                         "restarted": restart, "restart_why": result.get("restart_why", "")})
-        _announce_promoted(round_id, head, changed, title)
+        _announce_promoted(round_id, head, changed, title, window)
         result["regression_runner"] = _start_regression_runner()
         result["promoted"] = True
         return result

@@ -245,6 +245,46 @@ def test_a_loaded_file_lands_the_way_it_always_has(tree, monkeypatch):
     assert json.loads(S.CURRENT_PATH.read_text())["restart"] is True
 
 
+@pytest.mark.parametrize("loaded,restart,window", [
+    ((), False, 120.0),
+    (("tests/test_a.py",), True, 450.0),
+])
+def test_the_window_follows_the_restart_decision(tree, monkeypatch, loaded, restart, window):
+    """A landing that replaced no process is observed for the shorter window.
+
+    The same `restart_needed` verdict that decides the drain and the restart
+    decides how long the guardian judges the result, because what liveness and
+    the error rate are watching for is a process this landing replaced — and
+    for an unrestarted one, `guardian.tick` already skips both. The rest of the
+    window's cost is real: it is what every other landing queues behind
+    (`promote.wait_for_settle`), 13.5 h of a 24 h day across 54 promotions on
+    2026-09-20.
+
+    Driven through the real `promote` rather than a hand-written record: a
+    round-trip through `write_verified` passes with the stamping hard-coded to
+    one constant, which is the behaviour under test. The unit-level rules for
+    the two windows are in `tests/test_observation_window.py`.
+    """
+    _servers(monkeypatch, backend=loaded)
+    monkeypatch.setattr(S, "landing_cfg",
+                        lambda repo=None: {"errors_window_s": 450,
+                                           "errors_window_unrestarted_s": 120})
+    if restart:
+        tree["turns"].update(active=0, harness_runs=0)
+        monkeypatch.setattr(P, "_wait_health", lambda url, budget: True)
+        monkeypatch.setattr(P, "_wait_for_commit", lambda url, budget: {
+            "commit": _git(tree["live"], "rev-parse", "HEAD").stdout.strip(),
+            "boot_id": "boot-2"})
+
+    out = P.promote("SM_COLD", tree["wt"], tree["base"], gate_report={"head": tree["head"]})
+
+    assert out["promoted"] is True and out["restart"] is restart
+    current = json.loads(S.CURRENT_PATH.read_text())
+    assert current["errors_until_ts"] - current["landed_ts"] == pytest.approx(window, abs=1)
+    row = [e for e in S.read_events(path=S.LEDGER_PATH) if e["event"] == "promoted"][-1]
+    assert row["errors_window_s"] == window and row["restarted"] is restart
+
+
 def test_an_import_that_raced_the_merge_turns_it_into_an_ordinary_landing(tree, monkeypatch):
     """Not loaded when first asked, loaded when asked again after the merge:
     the process may hold the OLD file. Drain and restart, late."""
@@ -257,10 +297,18 @@ def test_an_import_that_raced_the_merge_turns_it_into_an_ordinary_landing(tree, 
     monkeypatch.setattr(P, "_wait_health", lambda url, budget: True)
     monkeypatch.setattr(P, "_wait_for_commit", lambda url, budget: {
         "commit": _git(tree["live"], "rev-parse", "HEAD").stdout.strip(), "boot_id": "boot-2"})
+    monkeypatch.setattr(S, "landing_cfg",
+                        lambda repo=None: {"errors_window_s": 450,
+                                           "errors_window_unrestarted_s": 120})
     out = P.promote("SM_COLD", tree["wt"], tree["base"], gate_report={"head": tree["head"]})
     c = tree["calls"]
     assert out["restart"] is True and out["restart_why"].startswith("after the merge:")
     assert c["wait_idle"] == 1 and c["restart"] == ["lloyd-mcp", "lloyd-backend"]
+    # ...and the late flip reaches the window, which is stamped after it. A
+    # process was replaced after all, so this is judged for the full restarted
+    # window rather than the 120 s the first answer would have bought.
+    current = json.loads(S.CURRENT_PATH.read_text())
+    assert current["errors_until_ts"] - current["landed_ts"] == pytest.approx(450.0, abs=1)
 
 
 def test_a_tree_that_did_not_move_is_a_failed_landing(tree, monkeypatch):

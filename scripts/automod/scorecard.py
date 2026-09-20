@@ -344,7 +344,31 @@ def _duty_cycle(ev: list[dict], since: float, now: float) -> dict[str, Any]:
             "turns": len(merged), "gaps": sum(gaps.values()),
             "idle_minutes": {k: round(v / 60, 1) for k, v in sorted(idle.items())},
             "gap_counts": dict(sorted(gaps.items())),
-            "largest_gap_minutes": round(largest / 60, 1)}
+            "largest_gap_minutes": round(largest / 60, 1),
+            "waits": _landing_waits(ev)}
+
+
+def _landing_waits(ev: list[dict]) -> dict[str, Any]:
+    """What the landings spent waiting, split by which wait it was.
+
+    The `landing` idle class above says a gap had a `promoted` row near it; it
+    cannot say whether the loop was waiting out an observation window
+    (`wait_for_settle`) or a sibling round's turn (`wait_for_rounds`). Those
+    have different fixes — one is the window's length, the other is depth — and
+    conflating them is how the 2026-09-20 read of this row first attributed the
+    whole 7.7 h to the window. Both rows carry `waited_s`; a landing that
+    skipped a wait records it as ~0 rather than not at all, so `n` counts rows
+    and `waited` counts only the ones that actually blocked.
+    """
+    out: dict[str, Any] = {}
+    for key, event in (("settle", "land_wait_settle"), ("rounds", "land_wait_rounds")):
+        secs = [float(e.get("waited_s") or 0) for e in ev if e.get("event") == event]
+        real = [s for s in secs if s > 1]
+        out[key] = {"n": len(secs), "waited": len(real),
+                    "minutes": round(sum(real) / 60, 1),
+                    "median_s": round(statistics.median(real), 1) if real else None,
+                    "max_s": round(max(secs), 1) if secs else None}
+    return out
 
 
 def _iso_of(event: dict) -> str:
@@ -757,11 +781,16 @@ def render(row: dict) -> str:
     idle = d.get("idle_minutes") or {}
     counts = d.get("gap_counts") or {}
     by_class = ", ".join(f"{k} {idle[k]:g} min ({counts.get(k, 0)})" for k in idle) or "none"
+    waits = d.get("waits") or {}
+    by_wait = ", ".join(
+        f"{k} {w.get('minutes', 0):g} min ({w.get('waited', 0)}/{w.get('n', 0)})"
+        for k, w in waits.items()) or "unrecorded"
     lines.append(
         f"| 14 | autocode duty cycle | {_pct(d.get('rate'))} | "
         f"{d.get('busy_hours', 0)} h of {d.get('window_hours', 0)} h with an implement turn in flight, "
         f"{d.get('turns', 0)} turns; {d.get('gaps', 0)} gaps: {by_class}; "
-        f"largest {d.get('largest_gap_minutes', 0):g} min |")
+        f"largest {d.get('largest_gap_minutes', 0):g} min; "
+        f"landings waited: {by_wait} |")
     lines.append(_render_overrides(row))
     return "\n".join(lines)
 
