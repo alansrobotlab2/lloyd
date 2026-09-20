@@ -42,6 +42,68 @@ def _require_inner_voice() -> bool:
         return True
 
 
+#: Session-file key holding the turn ids this session has been refused on.
+#:
+#: A refusal has to outlive the call that issued it, and the session file is
+#: the only store both the refusing call and the retry can see: `call_tool`
+#: runs its body through `asyncio.to_thread`, so a module-level set is not
+#: shared with the dispatch, and the retry can equally well arrive after
+#: `lloyd-mcp` restarted. Same file the flag lives in, same write.
+IV_REFUSAL_KEY = "inner_voice_refused_turns"
+
+#: How many refused turns to keep. The marker only has to outlive *one* turn,
+#: so anything past a handful is bookkeeping nothing reads; the bound is what
+#: stops a long-lived session's file growing forever in the case that does
+#: accumulate — `inner_voice` cleared and re-refused by a later turn.
+IV_REFUSAL_HISTORY = 8
+
+
+def _current_turn_id() -> str:
+    """The turn this dispatch belongs to, or "" for a caller that has none.
+
+    `agent_mcp.main.call_tool` sets it from the harness's `lloyd/turn_id`
+    `_meta` (`app/harness/mcp_pool.py` stamps it from `options.turn_id`, which
+    `app/routers/messages.py` mints per turn). The CLI, the detached promoter
+    and a direct `run_query` caller leave it empty.
+
+    Empty means there is nothing to key a marker on, so the gate keeps today's
+    behaviour for those callers instead of locking them out of ever opening a
+    round. A sessionless call that can change state never reaches here at all:
+    `main.call_tool` refuses it first (#1053).
+    """
+    from agent_mcp import _task_registry
+    try:
+        return str(_task_registry.current_turn_id.get() or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _iv_refusal(action: str, *, enabled_for_next_turn: bool,
+                already_refused_this_turn: bool = False) -> dict:
+    """The payload handed back for one refusal, first call or repeat.
+
+    `next` stays "end your turn" on the repeat path too. Rewriting it to say
+    "call again" is what #837 proposed and #989 rejected: the gate's whole
+    claim is that an observer cannot be attached mid-turn, so a payload that
+    invited a same-turn retry would formalise the bypass this closes rather
+    than the refusal being ignored.
+    """
+    payload = {
+        "error": f"inner voice is not attached to this turn — refusing to {action}",
+        "inner_voice_enabled_for_next_turn": enabled_for_next_turn,
+        "why": ("A round rewrites production code, and the observer is what catches "
+                "the loop drifting. It attaches at turn start, so switching it on "
+                "now cannot cover this turn."),
+        "next": ("End your turn and open the round again; the retry runs observed."
+                 if enabled_for_next_turn else
+                 "Could not write the session file — enable Inner Voice on this "
+                 "session and retry."),
+    }
+    if already_refused_this_turn:
+        payload["already_refused_this_turn"] = True
+    return payload
+
+
 def _inner_voice_gate(action: str) -> dict | None:
     """Refuse to drive the loop from a turn with no observer attached.
 
@@ -59,6 +121,16 @@ def _inner_voice_gate(action: str) -> dict | None:
     So: enable it, then refuse once. The retry runs observed, and the property
     is real rather than aspirational.
 
+    **The refusal is sticky for the turn that issued it (#1226).** The flag the
+    refusing call writes is read by every later call, so checking it first made
+    the refusal advice a retry could ignore — on 2026-09-17 the retry came 71
+    seconds later in the same turn (`sessions/20260917_104306_autocode_f9fe.json`:
+    refused at msg39, `round_id SM_20260917_174742` at msg76, then four gates and
+    two land attempts, none of them observed). So the refused-turn marker is
+    consulted before the flag: same turn id, same refusal, however many times it
+    is asked; a later turn id proceeds, because by then the flag is true and the
+    observer really is attached.
+
     Worth the friction for two independent reasons, and the second is the one
     that survives a quiet round.
 
@@ -75,6 +147,9 @@ def _inner_voice_gate(action: str) -> dict | None:
 
     No bound session means this is not a chat turn: the CLI, or the detached
     promoter. A human at a terminal is their own observer, so that path passes.
+    A caller with a session but no turn id is in the same class for the sticky
+    half: nothing keys the marker, so it is refused once and today's behaviour
+    is left intact — see `_current_turn_id`.
 
     **A worker or autonomy session passes too, since 2026-09-12.** Both
     reasons above were written for a *chat* turn, and neither holds for an
@@ -103,34 +178,39 @@ def _inner_voice_gate(action: str) -> dict | None:
         # Fail closed on the observer, not on the round: an unreadable session
         # file should not be able to block self-modification entirely.
         return None
-    if data.get("inner_voice"):
+    if not isinstance(data, dict):
         return None
+    turn_id = _current_turn_id()
+    refused_turns = [t for t in (data.get(IV_REFUSAL_KEY) or []) if isinstance(t, str)]
     try:
         from app.sessions_io import NON_USER_PLATFORMS
     except Exception:  # noqa: BLE001
         NON_USER_PLATFORMS = frozenset()
+    # The exemption is checked before both the marker and the flag, so a worker
+    # or autonomy session that somehow carries a stale refusal is still exempt:
+    # those platforms need no observer at all, and a marker left by an earlier
+    # platform value must not act as a switch that stops every round opening.
     if str(data.get("platform") or "") in NON_USER_PLATFORMS:
+        return None
+    if turn_id and turn_id in refused_turns:
+        # The flag is true by now — this turn's own refusal wrote it — so a gate
+        # that read the flag first returned None here and the round opened.
+        return _iv_refusal(action, enabled_for_next_turn=bool(data.get("inner_voice")),
+                           already_refused_this_turn=True)
+    if data.get("inner_voice"):
         return None
 
     data["inner_voice"] = True
     data["inner_voice_evaluate_user_turns"] = True
+    if turn_id:
+        data[IV_REFUSAL_KEY] = (refused_turns + [turn_id])[-IV_REFUSAL_HISTORY:]
     try:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         enabled = True
     except OSError:
         enabled = False
 
-    return {
-        "error": f"inner voice is not attached to this turn — refusing to {action}",
-        "inner_voice_enabled_for_next_turn": enabled,
-        "why": ("A round rewrites production code, and the observer is what catches "
-                "the loop drifting. It attaches at turn start, so switching it on "
-                "now cannot cover this turn."),
-        "next": ("End your turn and open the round again; the retry runs observed."
-                 if enabled else
-                 "Could not write the session file — enable Inner Voice on this "
-                 "session and retry."),
-    }
+    return _iv_refusal(action, enabled_for_next_turn=enabled)
 
 
 def _err(message: str) -> str:

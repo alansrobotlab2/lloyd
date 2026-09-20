@@ -964,8 +964,17 @@ def test_a_noise_floor_records_the_questions_it_was_measured_against():
 # 13. A round must be observed
 # ===========================================================================
 
-def _iv_gate(monkeypatch, tmp_path, session_id, session_data=None, require=True):
-    """Drive `_inner_voice_gate` with a scratch sessions dir."""
+def _iv_gate(monkeypatch, tmp_path, session_id, session_data=None, require=True,
+             turn_id=None):
+    """Drive `_inner_voice_gate` with a scratch sessions dir.
+
+    `turn_id` is the turn this call belongs to. Left as None the context var is
+    not touched at all, which is what a CLI, a detached promoter or a direct
+    `run_query` caller looks like to the gate; `""` and a real id are the two
+    harness shapes. It is a separate control from `session_id` on purpose: the
+    refused-turn marker is keyed on the turn, so a test has to be able to move
+    the turn under one session file. `_restore_turn_id` puts the var back.
+    """
     import json
 
     import agent_mcp.automod as M
@@ -974,9 +983,25 @@ def _iv_gate(monkeypatch, tmp_path, session_id, session_data=None, require=True)
                                                      encoding="utf-8")
     monkeypatch.setattr(M, "get_bound_session", lambda: session_id)
     monkeypatch.setattr(M, "_require_inner_voice", lambda: require)
+    if turn_id is not None:
+        import agent_mcp._task_registry as TR
+        TR.current_turn_id.set(turn_id)
     import app.paths
     monkeypatch.setattr(app.paths, "SESSIONS_DIR", tmp_path)
     return M._inner_voice_gate("open a round")
+
+
+@pytest.fixture(autouse=True)
+def _restore_turn_id():
+    """`current_turn_id` is a context var and tests here bind it, so hand the
+    next test the value it started with — a leaked id would otherwise make a
+    later test's second call look sticky."""
+    import agent_mcp._task_registry as TR
+    tok = TR.current_turn_id.set(TR.current_turn_id.get())
+    try:
+        yield
+    finally:
+        TR.current_turn_id.reset(tok)
 
 
 def test_a_worker_session_opens_a_round_without_the_observer(monkeypatch, tmp_path):
@@ -1049,6 +1074,235 @@ def test_an_unreadable_session_does_not_block_self_modification(monkeypatch, tmp
 def test_the_requirement_is_switchable(monkeypatch, tmp_path):
     assert _iv_gate(monkeypatch, tmp_path, "s3", {"id": "s3", "inner_voice": False},
                     require=False) is None
+
+
+def _iv_session(tmp_path, session_id):
+    import json
+    return json.loads((tmp_path / f"{session_id}.json").read_text(encoding="utf-8"))
+
+
+CHAT = {"id": "s", "inner_voice": False, "platform": "mission-control"}
+
+
+def test_a_refusal_is_sticky_for_the_turn_that_issued_it(monkeypatch, tmp_path):
+    """#1226: a second call inside the refused turn must not get a pass.
+
+    The refusing call writes `inner_voice: true` into the session file, and the
+    flag was the first thing every later call read — so one retry, with no turn
+    boundary and therefore no observer, walked straight through. This happened
+    on 2026-09-17: refused at msg39, `round_id SM_20260917_174742` returned 71
+    seconds later at msg76 of the same turn
+    (`sessions/20260917_104306_autocode_f9fe.json`, 366 messages, exactly one
+    `role:"user"`), and the round it opened ran four gates and two land attempts
+    with nothing attached to any of them.
+
+    The first call in this test is the one `test_a_round_is_refused_from_an_
+    unobserved_turn` already pins; the second and third are the bug. Asserting
+    them against the file that call 1 rewrote is the point — a marker that only
+    lived in the refusing call's own memory would pass a test like this one and
+    still leak in production, where the retry is a fresh call and can even be a
+    restarted process.
+    """
+    for call in (1, 2, 3):
+        gate = _iv_gate(monkeypatch, tmp_path, "s-sticky",
+                        dict(CHAT, id="s-sticky") if call == 1 else None,
+                        turn_id="turn-a")
+        assert gate is not None, f"call {call} opened a round after a refusal"
+        assert "refusing to open a round" in gate["error"]
+        assert gate["next"].startswith("End your turn"), (
+            "the retry copy must still send the caller to the next turn, not "
+            "invite another call in this one")
+
+    written = _iv_session(tmp_path, "s-sticky")
+    assert "turn-a" in written["inner_voice_refused_turns"]
+    # Refusing the rest of the turn does not undo the enabling: the two flags the
+    # first call wrote are what make the NEXT turn observed — `inner_voice`
+    # attaches the observer and `inner_voice_evaluate_user_turns` is what lets it
+    # judge a turn that arrives without the human typing. Staying silent for the
+    # rest of the turn must not cost the session the enabling it was promised.
+    assert written["inner_voice"] is True
+    assert written["inner_voice_evaluate_user_turns"] is True
+
+
+def test_a_later_turn_under_the_same_session_file_is_not_locked_out(monkeypatch,
+                                                                    tmp_path):
+    """The marker is turn-scoped. Refusing every later call too would be the
+    safer-looking patch and would stop the session ever opening a round: the
+    flag the refusal writes is exactly what makes the next turn observed, so
+    the next turn has to pass. That is the whole design — refuse once, and the
+    retry that crosses a turn boundary runs with an observer."""
+    first = _iv_gate(monkeypatch, tmp_path, "s-next",
+                     dict(CHAT, id="s-next"), turn_id="turn-a")
+    assert first is not None
+    assert _iv_gate(monkeypatch, tmp_path, "s-next", turn_id="turn-b") is None
+
+
+def test_a_turn_id_that_was_never_refused_proceeds_once_the_flag_is_on(monkeypatch,
+                                                                       tmp_path):
+    """A marker left by an earlier turn must not act as a session-wide ban.
+
+    Same file, marker present, different turn id, flag true: the observer is
+    attached by definition (the flag was set for that turn), so proceeding is
+    correct — and the marker list having a stale entry is normal, not a state
+    to honour.
+    """
+    assert _iv_gate(monkeypatch, tmp_path, "s-stale",
+                    dict(CHAT, id="s-stale", inner_voice=True,
+                         inner_voice_refused_turns=["turn-a"]),
+                    turn_id="turn-z") is None
+
+
+def test_a_call_with_no_turn_id_keeps_todays_behaviour(monkeypatch, tmp_path):
+    """Nothing keys the marker, so nothing is sticky — deliberately.
+
+    The turn id defaults to `""` for the CLI, the detached promoter and a
+    direct `run_query` caller (`app/harness/options.py:110`), and the marker
+    lives in the *session* file: a refusal recorded against `""` would refuse
+    every later turn of that session and lock a real operator out of the loop.
+    So the no-turn-id path is exactly what it was before #1226 — refused once,
+    then proceeds because the flag is on.
+    """
+    assert _iv_gate(monkeypatch, tmp_path, "s-empty",
+                    dict(CHAT, id="s-empty"), turn_id="") is not None
+    assert _iv_gate(monkeypatch, tmp_path, "s-empty", turn_id="") is None
+    # The other no-turn-id shape: the context var never set (its default).
+    assert _iv_gate(monkeypatch, tmp_path, "s-plain",
+                    dict(CHAT, id="s-plain")) is not None
+    assert _iv_gate(monkeypatch, tmp_path, "s-plain") is None
+    assert "inner_voice_refused_turns" not in _iv_session(tmp_path, "s-empty"), (
+        "a marker keyed on nothing is a ban, not a turn marker")
+
+
+def test_an_exempt_session_with_a_stale_marker_is_still_exempt(monkeypatch, tmp_path):
+    """The platform exemption is read before the marker, so a session that
+    changed platform (or an autonomy session minted a file by #1064's
+    hard-coded default and later rewritten) cannot be refused by a marker the
+    exempt platform never needed. The exemption is a statement that no observer
+    is required, which a refusal cannot answer."""
+    for platform in ("worker", "autonomy"):
+        gate = _iv_gate(monkeypatch, tmp_path, f"s-{platform}",
+                        {"id": f"s-{platform}", "inner_voice": False,
+                         "platform": platform,
+                         "inner_voice_refused_turns": ["turn-a"]},
+                        turn_id="turn-a")
+        assert gate is None, platform
+
+
+def test_the_refused_turn_list_stays_bounded(monkeypatch, tmp_path):
+    """One marker per refused turn is unbounded on its own: a session whose
+    `inner_voice` is cleared and re-refused accumulates forever. The marker only
+    has to outlive the turn that wrote it, so the kept list is capped and keeps
+    the most recent ids — the only ones a live turn can carry."""
+    old = [f"turn-{i}" for i in range(12)]
+    gate = _iv_gate(monkeypatch, tmp_path, "s-bound",
+                    dict(CHAT, id="s-bound", inner_voice_refused_turns=old),
+                    turn_id="turn-new")
+    assert gate is not None
+    kept = _iv_session(tmp_path, "s-bound")["inner_voice_refused_turns"]
+    assert len(kept) == 8
+    assert kept[-1] == "turn-new"
+    assert kept[0] == "turn-5", kept
+
+
+def _dispatch_automod(monkeypatch, tmp_path, session_id):
+    """Send automod calls the way the harness sends them, through the aggregator.
+
+    `agent_mcp.main.call_tool` is the only place a turn id crosses from the
+    client's `_meta` into `current_turn_id`, so the sticky marker has to be
+    proven there: the gate reads a context var that only that dispatch sets, and
+    `automod.call_tool` runs its body in `asyncio.to_thread`, so the seam is
+    invisible from the gate side. The returned helper takes
+    `(tool, arguments, turn_id)` and answers with the payload plus `isError`.
+
+    The effect ledger is stubbed out. It is not the seam under test, and its
+    duplicate-call guard answers a repeat with the same arguments before the
+    module handler is ever reached — which would refuse the retry for the wrong
+    reason and write a test row into the live ledger.
+    """
+    import json
+
+    import agent_mcp.main as M
+    import app.paths
+
+    (tmp_path / f"{session_id}.json").write_text(
+        json.dumps(dict(CHAT, id=session_id)), encoding="utf-8")
+    monkeypatch.setattr(app.paths, "SESSIONS_DIR", tmp_path)
+
+    async def _claim(*a, **k):
+        # An unledgered claim: dispatch proceeds, and with no key the dispatcher
+        # never writes a result row, so the suite stays out of the live ledger.
+        return M._tool_effects.Claim()
+
+    monkeypatch.setattr(M._tool_effects, "claim", _claim)
+
+    async def _call(tool, args, turn_id):
+        res = await M.call_tool(tool, args, {
+            M.META_SESSION_ID: session_id, M.META_TURN_ID: turn_id})
+        return json.loads(res.content[0].text), res.is_error
+
+    return _call
+
+
+async def test_a_same_turn_retry_is_refused_across_the_mcp_dispatch_seam(
+        monkeypatch, tmp_path):
+    """Clause 1 where it actually bites: two real dispatches, one turn id.
+
+    Each dispatch is its own request whose body runs in its own thread, which is
+    the shape the 2026-09-17 retry had 71 seconds after the refusal. A marker
+    held in the refusing call's memory would pass the in-process tests above and
+    still leak here; the payload has to come back from the *file*.
+
+    `automod_start` is never allowed through the gate in this test — the round
+    it would open is a real worktree off the live tree — so the next-turn half
+    of the property is proven on the vault route, below.
+    """
+    call = _dispatch_automod(monkeypatch, tmp_path, "s-seam")
+
+    first, is_error = await call("automod_start", {"goal": "x"}, "turn-1")
+    assert is_error
+    assert "inner voice is not attached" in first["error"]
+    assert "already_refused_this_turn" not in first
+
+    retry, is_error = await call("automod_start", {"goal": "x"}, "turn-1")
+    assert is_error, "a same-turn retry opened a round"
+    assert "inner voice is not attached" in retry["error"]
+    assert retry["already_refused_this_turn"] is True
+    assert "round_id" not in retry
+
+
+async def test_a_same_turn_retry_of_the_vault_route_is_refused_and_writes_nothing(
+        monkeypatch, tmp_path):
+    """Clause 5. `automod_vault_land` commits straight to the live vault, so a
+    bypass there is an unobserved commit rather than a worktree — and all ten
+    refusals counted before the autonomy exemption happened on this route.
+
+    The lander is replaced with a recorder, so the retry reaching it fails here
+    on the spot and no real vault is in reach. The last leg is clause 2 across
+    the same seam: a different turn id on that same session file, marker still
+    present, proceeds — the refusal must not become a ban.
+    """
+    import agent_mcp.automod as AM
+    from scripts.automod import vault_round as VR
+
+    landed = []
+    monkeypatch.setattr(VR, "land",
+                        lambda *a, **k: landed.append(a) or {"sha": "not-landed"})
+    args = {"paths": ["knowledge/x.md"], "message": "m"}
+    call = _dispatch_automod(monkeypatch, tmp_path, "s-vault")
+
+    first, is_error = await call("automod_vault_land", args, "turn-1")
+    assert is_error and "land a vault change" in first["error"]
+
+    retry, is_error = await call("automod_vault_land", args, "turn-1")
+    assert is_error, "a same-turn retry landed a vault commit unobserved"
+    assert "land a vault change" in retry["error"]
+    assert retry["already_refused_this_turn"] is True
+    assert not landed, "the refusal still reached the vault lander"
+
+    out, is_error = await call("automod_vault_land", args, "turn-2")
+    assert not is_error, out
+    assert landed, "the next turn never reached the vault route"
+    assert AM.IV_REFUSAL_KEY in _iv_session(tmp_path, "s-vault")
 
 
 def test_the_gate_is_actually_wired_into_automod_start():
