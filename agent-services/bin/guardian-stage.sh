@@ -14,6 +14,17 @@
 #
 # Note the ordering dependency: the pinned snapshot must never be replaced by
 # a copy that has not proved it can still perform its own preconditions.
+#
+# "Its own preconditions" means the STAGING profile, not all eight checks. This
+# runs as ExecStartPre 2-3 s into the boot, and agent-supervisord.service is
+# Type=simple — so lloyd-guardian.service's After=/Wants= buy ordering, not
+# readiness, and /tmp/agent-supervisor.sock does not exist yet here. Judging
+# supervisord and the health endpoints at this point asked the candidate to
+# prove something about the machine's boot order, and refused a healthy
+# candidate on both boots of 2026-09-19 (backlog #1302). A REFUSING line from
+# here can now only mean the candidate itself is broken: compile, rollback
+# target, repo, state dir, vault tripwire, PSI. Whether the stack is answering
+# is still judged — daily, by the running guardian, where it can be answered.
 set -uo pipefail
 
 SRC="/home/alansrobotlab/lloyd/agent-services/guardian"
@@ -36,9 +47,11 @@ if ! /usr/bin/python3 -m compileall -q "$STAGE" >/dev/null 2>&1; then
     exit 1
 fi
 
-# 2. Does it still pass its own self-check?
-if ! ( cd "$STAGE" && /usr/bin/python3 selftest.py >/dev/null 2>&1 ); then
-    log "REFUSING: candidate guardian failed selftest — keeping existing snapshot"
+# 2. Does it still pass the self-check that a cold boot is able to pass? See
+#    the header: the stack-dependent checks are excluded here and judged by the
+#    running guardian's daily run instead.
+if ! ( cd "$STAGE" && /usr/bin/python3 selftest.py --profile staging >/dev/null 2>&1 ); then
+    log "REFUSING: candidate guardian failed its stack-independent selftest — keeping existing snapshot"
     exit 1
 fi
 
