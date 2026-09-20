@@ -21,6 +21,7 @@ import logging
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 from app.atomic_io import atomic_write_text
@@ -166,14 +167,32 @@ def note_run_session(session_id: str) -> None:
 
 def create_session(session_id: str, *, platform: str, model: str = "",
                    title: str = "", source: str = "",
-                   inner_voice: bool = False, preview: str = "") -> str:
+                   inner_voice: bool = False, preview: str = "",
+                   inner_voice_evaluate_user_turns: Optional[bool] = None,
+                   experiment_id: Optional[str] = None,
+                   exist_ok: bool = True,
+                   sessions_dir: Optional[Path] = None) -> str:
     """Create a session file for a run that is about to start.
 
-    One writer for every non-chat session — the background recorder and
-    `workers.sources._common.new_worker_session` both come through here. The
-    chat path keeps `_save_session_meta`, which has to merge into an existing
-    file on every turn; this one is a create, and a create is the only thing a
-    background run needs.
+    One writer for every *create* — the background recorder,
+    `workers.sources._common.new_worker_session`, and `POST
+    /api/sessions/create` (the Inner Voice "+ new chat" pre-creator) all come
+    through here. The chat path keeps `_save_session_meta`, which has to merge
+    into an existing file on every turn; this one is a create, and a create is
+    the only thing a background run and a pre-created stub both need. Until
+    2026-09-20 the endpoint did not come through here: it built its own dict
+    and wrote it with a bare `write_text`, so every session it had minted
+    carried no `id` and no `source`, and it was the only create path that wrote
+    non-atomically — a torn file there makes one live chat vanish from one
+    dashboard poll. One field set, one atomic write, is the point of this
+    helper.
+
+    `sessions_dir` is for the one caller that owns the directory it reads back
+    — the sessions router keeps its own module-level `SESSIONS_DIR` and the
+    collision check, the write and the listing have to be about the same file.
+    `exist_ok=False` raises `FileExistsError` instead of returning quietly,
+    which is what lets that endpoint answer 409 rather than adopt a stranger's
+    session.
 
     **The title is set here, at creation**, for two reasons that apply to
     different sessions. A direct-path run (autonomy, `run_prompt_on_primary`)
@@ -188,14 +207,26 @@ def create_session(session_id: str, *, platform: str, model: str = "",
     Both `session_id` and `id` are written. `/api/sessions` reads
     `session_id` and falls back to the filename; the worker sessions that
     predate this helper wrote only `id`, and something may yet read it.
+    `source` is the *producer* attribution — a session the web UI created has
+    no producer, so it is written empty rather than invented: `_session_identity`
+    in the message router feeds it to the grant gate, and a made-up value there
+    is a policy change. `inner_voice_evaluate_user_turns` defaults to the master
+    flag (`None`) but a caller that collected the two flags separately passes
+    them separately — that is the difference between a critic that fires on
+    chat turns and one that does not.
     Existing files are left alone — a multi-call job lands in one transcript.
     """
     note_run_session(session_id)
-    path = SESSIONS_DIR / f"{session_id}.json"
+    directory = sessions_dir or SESSIONS_DIR
+    path = directory / f"{session_id}.json"
     if path.exists():
+        if not exist_ok:
+            raise FileExistsError(f"session {session_id} already exists")
         return session_id
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(parents=True, exist_ok=True)
     now = datetime.now().isoformat()
+    evaluate_user_turns = (bool(inner_voice) if inner_voice_evaluate_user_turns is None
+                           else bool(inner_voice_evaluate_user_turns))
     data = {
         "session_id": session_id,
         "id": session_id,
@@ -208,9 +239,9 @@ def create_session(session_id: str, *, platform: str, model: str = "",
         "preview": preview[:60],
         "message_count": 0,
         "messages": [],
-        "experiment_id": None,
+        "experiment_id": experiment_id,
         "inner_voice": bool(inner_voice),
-        "inner_voice_evaluate_user_turns": bool(inner_voice),
+        "inner_voice_evaluate_user_turns": evaluate_user_turns,
     }
     atomic_write_text(path, json.dumps(data, indent=2))
     return session_id

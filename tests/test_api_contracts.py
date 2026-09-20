@@ -147,6 +147,175 @@ async def test_created_sessions_are_never_background_shaped(client, tmp_path,
     assert sid in listed
 
 
+#: The exact 200 body `web/src/api.ts` reads back after a create. Asserted as
+#: an equality, not a superset: a renamed or dropped key breaks the chat tab at
+#: click-time, which is the reason this file exists.
+CREATE_RESPONSE_KEYS = {
+    "session_key", "session_id", "model", "platform", "inner_voice",
+    "inner_voice_evaluate_user_turns", "experiment_id",
+}
+
+
+async def test_a_created_session_lands_with_the_helper_field_set(client, tmp_path,
+                                                                monkeypatch):
+    """#1275 clause 2: the file `POST /api/sessions/create` leaves behind is the
+    file `sessions_io.create_session` writes, not a stub-shaped subset of it.
+
+    Before 2026-09-20 this endpoint built its own dict and wrote it with a bare
+    `write_text`, so every `*_iv*.json` session on disk carried neither `id`
+    nor `source` — the two keys the helper's own docstring says it keeps for
+    readers, and the shape divergence it warns about. Compared by equality
+    against a file the helper wrote directly in the same directory: that is
+    what "one field set" means. A hand-copied key list would keep passing when
+    the helper grows a field and an inline dict does not.
+    """
+    from app.sessions_io import create_session
+
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
+    r = await client.post("/api/sessions/create", json={"model": "primary"})
+    assert r.status_code == 200, r.text
+    sid = r.json()["session_id"]
+
+    written = json.loads((tmp_path / f"{sid}.json").read_text())
+    assert set(written) >= {
+        "id", "source", "title", "platform", "model", "created_at",
+        "last_active", "preview", "message_count", "messages",
+        "experiment_id", "inner_voice",
+    }, "a field the helper guarantees is missing from the created file"
+    assert written["id"] == written["session_id"] == sid
+    assert written["model"] == "primary"
+    assert written["platform"] == "mission-control", "the endpoint's own default"
+    assert written["messages"] == [] and written["message_count"] == 0
+
+    helper_sid = "20260919_120000_abcdef"
+    create_session(helper_sid, platform="mission-control", sessions_dir=tmp_path)
+    helper_keys = set(json.loads((tmp_path / f"{helper_sid}.json").read_text()))
+    assert helper_keys == set(written), (
+        f"endpoint wrote {sorted(set(written) - helper_keys)} more / "
+        f"{sorted(helper_keys - set(written))} less than the helper")
+
+
+async def test_a_stub_session_keeps_the_two_inner_voice_flags_apart(client,
+                                                                   tmp_path,
+                                                                   monkeypatch):
+    """Routing the write through the helper must not make the second flag a
+    copy of the first.
+
+    `create_session` derives `inner_voice_evaluate_user_turns` from the master
+    flag when the caller does not say, which is right for a background run and
+    wrong here: this endpoint exists to collect the two separately (the Inner
+    Voice tab wants the critic on chat turns, the sidebar wants the critic
+    only). A routing that lost the difference would widen the critic to every
+    turn of every pre-created chat, silently.
+    """
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
+    r = await client.post("/api/sessions/create", json={"inner_voice": True})
+    assert r.status_code == 200, r.text
+    sid = r.json()["session_id"]
+    assert r.json()["inner_voice_evaluate_user_turns"] is False
+
+    written = json.loads((tmp_path / f"{sid}.json").read_text())
+    assert written["inner_voice"] is True
+    assert written["inner_voice_evaluate_user_turns"] is False, (
+        "the critic's user-turn reach widened to the master flag")
+
+
+async def test_create_persists_the_flags_and_the_experiment_id(client, tmp_path,
+                                                              monkeypatch):
+    """#1275 clause 3, persistence half: the values the caller asked for are the
+    values in the file, not the defaults the helper would have used."""
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
+    r = await client.post("/api/sessions/create", json={
+        "model": "haiku", "platform": "mission-control",
+        "inner_voice": True, "inner_voice_evaluate_user_turns": True,
+        "experiment_id": "stage5-bench-001"})
+    assert r.status_code == 200, r.text
+    sid = r.json()["session_id"]
+    assert set(r.json()) == CREATE_RESPONSE_KEYS, "the 200 body keys moved"
+
+    written = json.loads((tmp_path / f"{sid}.json").read_text())
+    assert written["model"] == "haiku"
+    assert written["platform"] == "mission-control"
+    assert written["inner_voice"] is True
+    assert written["inner_voice_evaluate_user_turns"] is True
+    assert written["experiment_id"] == "stage5-bench-001", (
+        "the A/B tag went missing; the helper wrote its hardcoded None")
+
+
+async def test_create_validations_reject_before_writing_anything(client, tmp_path,
+                                                                monkeypatch):
+    """#1275 clause 3, validation half: each 400 still answers, and none of them
+    leaves a session file behind — a validation that fires after the write would
+    still return the right status and litter the directory with a 0-message
+    session the listings then show."""
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
+    bad = [
+        ({"inner_voice_evaluate_user_turns": True}, "inner_voice"),
+        ({"model": 7}, "model"),
+        ({"platform": 7}, "platform"),
+        ({"experiment_id": 7}, "experiment_id"),
+    ]
+    for body, names in bad:
+        r = await client.post("/api/sessions/create", json=body)
+        assert r.status_code == 400, f"{body} -> {r.status_code}"
+        assert any(name in r.json()["detail"] for name in (names,)), r.json()
+    assert list(tmp_path.iterdir()) == [], "a rejected create wrote a session"
+
+
+async def test_an_existing_session_file_is_a_conflict_not_an_overwrite(client,
+                                                                      tmp_path,
+                                                                      monkeypatch):
+    """#1275 clause 3, collision half: `POST /api/sessions/create` answers 409
+    for an id whose file already exists, and leaves that file alone.
+
+    The id is minted from a timestamp plus `secrets.token_hex(2)`, so the only
+    condition the endpoint can be tested against is one the filesystem already
+    satisfies: pin the token, pre-create the file for every timestamp the mint
+    can produce in the next few seconds, and the response has to be the
+    collision — with the stranger's bytes still in place.
+    """
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr("secrets.token_hex", lambda n: "ab12")
+    sentinel = json.dumps({"session_id": "someone-elses-run", "messages": [{"x": 1}]})
+    now = datetime.datetime.utcnow()
+    for offset in range(-1, 5):
+        stamp = (now + datetime.timedelta(seconds=offset)).strftime("%Y%m%d_%H%M%S")
+        (tmp_path / f"{stamp}_ivab12.json").write_text(sentinel)
+
+    r = await client.post("/api/sessions/create", json={})
+    assert r.status_code == 409, r.text
+    for path in tmp_path.glob("*.json"):
+        assert path.read_text() == sentinel, f"{path.name} was overwritten"
+
+
+async def test_the_create_endpoint_writes_through_the_shared_helper(client,
+                                                                   tmp_path,
+                                                                   monkeypatch):
+    """The other half of "one atomic write": the file the endpoint creates lands
+    through `sessions_io.atomic_write_text`, and nothing else.
+
+    A bare write truncates in place, so a reader mid-write — the dashboard's 2 s
+    poll, the Inner Voice observer — sees an empty file or a prefix and silently
+    drops that chat for one tick. The assertion is on the writer that actually
+    ran, because the bytes on disk look identical either way.
+    """
+    import app.sessions_io as sessions_io_module
+
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
+    written: list[Path] = []
+    real_atomic = sessions_io_module.atomic_write_text
+
+    def spy(path, *args, **kwargs):
+        written.append(Path(path))
+        return real_atomic(path, *args, **kwargs)
+
+    monkeypatch.setattr(sessions_io_module, "atomic_write_text", spy)
+    r = await client.post("/api/sessions/create", json={})
+    assert r.status_code == 200, r.text
+    assert written == [tmp_path / f"{r.json()['session_id']}.json"], (
+        "the session file did not land through the shared atomic writer")
+
+
 async def test_session_todos_shape(client, fixture_session):
     r = await client.get(f"/api/sessions/{fixture_session}/todos")
     assert r.status_code == 200

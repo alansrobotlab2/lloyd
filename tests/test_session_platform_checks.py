@@ -146,8 +146,10 @@ def test_no_user_session_creator_mints_a_background_shaped_id():
         f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}")
 
     # POST /api/sessions/create — the Inner Voice "+ new chat" button and the
-    # right-hand chat sidebar: `<ts>_iv<4 hex>`, three parts. Pinned end to
-    # end in tests/test_api_contracts.py.
+    # right-hand chat sidebar: `<ts>_iv<4 hex>`, three parts. Pinned against the
+    # running endpoint by
+    # `test_the_create_endpoint_still_mints_a_three_part_id` below, and its
+    # written file by tests/test_api_contracts.py.
     create = (ROOT / "app" / "routers" / "sessions.py").read_text()
     assert 'suffix = "iv" + secrets.token_hex(2)' in create
     assert 'session_id = f"{ts}_{suffix}"' in create
@@ -155,6 +157,91 @@ def test_no_user_session_creator_mints_a_background_shaped_id():
     # And the one mint that is supposed to be four parts, is.
     assert is_background_session_name(new_background_session_id("autocode"))
     assert is_background_session_name(new_background_session_id("autonomy"))
+
+
+async def test_the_create_endpoint_still_mints_a_three_part_id(tmp_path,
+                                                              monkeypatch):
+    """The shape rule, checked against the endpoint rather than its source text.
+
+    The scan above pins the literal; this one crosses the HTTP boundary, because
+    a mint that only looks right in the file is the failure that matters —
+    `is_background_session_name` is decided from the *filename* before the JSON
+    is opened, so a four-part id minted here would hide a live user conversation
+    from `/api/sessions` entirely. Written file, response body, the name rule and
+    the listing all have to agree on the same id.
+    """
+    import json
+
+    import httpx
+
+    import server
+    from app.routers import sessions as sessions_router
+    from app.sessions_io import is_background_session_name
+
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
+    transport = httpx.ASGITransport(app=server.app, client=("127.0.0.1", 9999))
+    async with httpx.AsyncClient(transport=transport,
+                                 base_url="http://lloyd-test") as client:
+        created = await client.post("/api/sessions/create",
+                                    json={"inner_voice": True})
+        assert created.status_code == 200, created.text
+        body = created.json()
+        listed = {s["id"] for s in
+                  (await client.get("/api/sessions")).json()["sessions"]}
+
+    session_id = body["session_key"]
+    assert session_id == body["session_id"]
+    assert re.fullmatch(r"\d{8}_\d{6}_iv[0-9a-f]{4}", session_id), session_id
+    assert not is_background_session_name(session_id + ".json")
+    assert session_id in listed, "a chat created here vanished from the history"
+    written = json.loads((tmp_path / f"{session_id}.json").read_text())
+    assert written["session_id"] == written["id"] == session_id
+    assert written["platform"] == "mission-control", (
+        "a stub that is not a user session would be listed by name and then "
+        "classified away by its platform")
+
+
+# ── One writer, one write path ───────────────────────────────────────────
+
+#: The router that serves `/api/sessions*`, and the two things a second writer
+#: needs in order to exist: a write of its own, and no call to the helper.
+_SESSIONS_ROUTER = ROOT / "app" / "routers" / "sessions.py"
+
+#: Every way this module could put bytes on disk. `write_text`/`write_bytes`
+#: truncate in place, `atomic_write_text` is the one allowed form and lives in
+#: `sessions_io`, and an `open(..., "w")` is the same truncate with more steps.
+_WRITE_CALL = re.compile(
+    r"\.(?:write_text|write_bytes|atomic_write_text)\s*\("
+    r"|\bopen\([^)]*[\"'][wax]")
+
+
+def test_the_sessions_router_writes_no_session_file_itself():
+    """#1275 clause 1: `POST /api/sessions/create` creates through `sessions_io`.
+
+    Until 2026-09-20 that endpoint built its own dict and wrote it with a bare
+    `write_text`, so the sessions it minted — ~150 of them on 2026-09-19 —
+    carried no `id` and no `source`, while `sessions_io.create_session`, the
+    helper whose own docstring opens "one writer for every session", guaranteed
+    both. A second writer leaves no other trace: the file simply looks slightly
+    different, and each reader that trusts a guaranteed key misjudges those
+    sessions quietly. Hence a source scan — it fails at the shape, not one poll
+    after a torn write.
+
+    The scan is whole-module on purpose. `app/routers/sessions.py` answers
+    questions about sessions and delegates every write; a write appearing here
+    at all is the thing to notice, and there were none before the endpoint was
+    added. Creation must still be reachable: the module has to name the helper.
+    """
+    source = _SESSIONS_ROUTER.read_text(encoding="utf-8")
+    offenders = [f"{_SESSIONS_ROUTER.relative_to(ROOT)}:{i}"
+                 for i, line in enumerate(source.splitlines(), 1)
+                 if _WRITE_CALL.search(line)]
+    assert not offenders, (
+        "the sessions router writes a file itself; create through "
+        "sessions_io.create_session so one field set and one atomic write "
+        "decide what a session JSON holds: " + ", ".join(offenders))
+    assert "sessions_io.create_session(" in source, (
+        "nothing in this module creates a session through the shared helper")
 
 
 # ── The one prose copy of the rule ─────────────────────────────────────

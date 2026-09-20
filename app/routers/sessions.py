@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from datetime import datetime, timezone
 
+from app import sessions_io
 from app.date_fidelity import refusal_detail
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
@@ -527,11 +528,12 @@ async def create_session(request: Request):
         "experiment_id": "stage5-bench-001"           — A/B tag
       }
 
-    Returns:
+    Returns (200):
       {
         "session_key": "20260501_213044_iva3b1",
         "session_id":  "20260501_213044_iva3b1",
         "model":       "primary",
+        "platform":    "mission-control",
         "inner_voice": true,
         "inner_voice_evaluate_user_turns": true,
         "experiment_id": null,
@@ -539,7 +541,14 @@ async def create_session(request: Request):
 
     The session JSON file is created with empty messages list; the next
     `post_message_stream` call will use the existing session_id and
-    append turns to it.
+    append turns to it. The file itself is written by
+    `sessions_io.create_session` — the one create-path writer — so it carries
+    that helper's whole field set (`id`, `source` and `title` included) rather
+    than a stub-shaped subset, and it lands atomically. The id keeps the
+    three-part `<ts>_iv<4hex>` shape, which is what keeps this session out of
+    the Background tab's four-part-name fast path; the shape is pinned by
+    test_session_platform_checks.py and the written keys by
+    test_api_contracts.py.
     """
     try:
         body = await request.json() if request.headers.get("content-length") else {}
@@ -556,7 +565,6 @@ async def create_session(request: Request):
     ts = _dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     suffix = "iv" + secrets.token_hex(2)
     session_id = f"{ts}_{suffix}"
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
 
     # Validate optional fields.
     model = body.get("model")
@@ -583,39 +591,30 @@ async def create_session(request: Request):
     if experiment_id is not None and not isinstance(experiment_id, str):
         raise HTTPException(status_code=400, detail="experiment_id must be string or null")
 
-    # Build the stub. Schema mirrors the lazy-create path in messages.py
-    # (session_id, model, created_at, last_active, preview, message_count,
-    # messages, platform) plus the optional Inner Voice flags.
-    now_iso = _dt.datetime.utcnow().isoformat() + "Z"
-    stub = {
-        "session_id": session_id,
-        "model": model or "",
-        "created_at": now_iso,
-        "last_active": now_iso,
-        "preview": "",
-        "message_count": 0,
-        "messages": [],
-        "platform": platform,
-    }
-    if iv:
-        stub["inner_voice"] = True
-    if iv_user:
-        stub["inner_voice_evaluate_user_turns"] = True
-    if experiment_id is not None:
-        stub["experiment_id"] = experiment_id
-
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    if meta_path.exists():
+    # Write through the shared create helper — the same one the background
+    # recorder and `workers.sources._common.new_worker_session` use — so this
+    # session has every field they guarantee (`id`, `source`, `title`) and
+    # lands in one atomic write, not a truncate-and-fill a 2 s dashboard poll
+    # can read half-way through. `sessions_dir` is this module's binding, not
+    # the one `sessions_io` resolved at import: the listings that answer for
+    # this endpoint read `SESSIONS_DIR` as imported here, and the collision
+    # check, the write and the listing have to be about one file.
+    try:
+        sessions_io.create_session(
+            session_id, platform=platform, model=model or "",
+            inner_voice=iv, inner_voice_evaluate_user_turns=iv_user,
+            experiment_id=experiment_id, exist_ok=False,
+            sessions_dir=SESSIONS_DIR)
+    except FileExistsError:
         # Astronomically unlikely with the timestamp+token shape, but
         # surface rather than overwrite if it ever fires.
         raise HTTPException(status_code=409, detail="session_id collision; retry")
-    meta_path.write_text(json.dumps(stub, indent=2))
 
     return JSONResponse({
         "session_key": session_id,
         "session_id": session_id,
-        "model": stub["model"],
-        "platform": stub["platform"],
+        "model": model or "",
+        "platform": platform,
         "inner_voice": iv,
         "inner_voice_evaluate_user_turns": iv_user,
         "experiment_id": experiment_id,
