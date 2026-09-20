@@ -531,6 +531,89 @@ def _loser_by_age(f1: dict, f2: dict) -> tuple[dict, dict, str] | None:
         f"written {gap:.1f} days later; created_at order makes the older claim the superseded one")
 
 
+#: How a plan's pair counts were produced. `entity` is one whole-entity
+#: pairwise scan, which is the only scope that can pair two facts living in
+#: different category files. `by_category` is the retry below, reached only by an
+#: entity the whole-entity scan refused: it covers every fact in every
+#: category-sized piece, and it cannot cross a category boundary.
+SCAN_ENTITY = "entity"
+SCAN_BY_CATEGORY = "by_category"
+
+#: The category a fact row lands in when it carries none. Same default
+#: `facts.py::_get_all_facts` gives a row it groups for display, so the
+#: partition the scan uses and the profile an operator reads agree.
+_NO_CATEGORY = "general"
+
+
+def _facts_by_category(facts: list[dict]) -> dict[str, list[dict]]:
+    """One entity's fact rows, grouped by the `category` each row carries.
+
+    There is no category listing to call. `fact_profile` gets its per-category
+    view by grouping the rows it already fetched (`facts.py::_get_all_facts`), and
+    a retry that instead enumerated `FACTS_ROOT/<entity>/*.md` would judge a
+    different set of rows than the read that produced the refusal — the one
+    situation in this module where the facts being planned against and the facts
+    that were scanned could disagree. So the partition comes from the refusal's own
+    input list, and a row with no category is grouped under `_NO_CATEGORY` exactly
+    as the display path groups it.
+    """
+    groups: dict[str, list[dict]] = {}
+    for fact in facts:
+        groups.setdefault(str(fact.get("category") or _NO_CATEGORY), []).append(fact)
+    return groups
+
+
+def _rescan_by_category(entity: str, facts_view: list[dict]) -> dict:
+    """Apply the remedy the refusal itself names, once per category.
+
+    `_detect_contradictions_sync` ends its refusal with "Pass a narrower
+    `category`" (#1251). No caller ever had: `plan_entity` scanned at the coarsest
+    possible scope, took the refusal, and returned the entity with zero actions —
+    so the entities this pass most wants were the ones it was structurally blind
+    to. A big entity is big *across* its category files, not inside each one:
+    measured on the live tree 2026-09-20, `Assistant` is 55 facts over 5 files
+    (largest 26) and `code4AI` is 109 over 4 (largest 39), and both were dropped
+    whole while every file in them sat under the bound.
+
+    The bound still holds, because it is applied by the same check in the same
+    place rather than re-derived here: each piece goes through the detector, which
+    refuses a piece larger than `FACT_GODNODE_THRESHOLD`, so a category over the
+    bound is skipped and named instead of scanned. The cost follows: the
+    whole-entity scan is n² comparisons, the partition is Σn_c² ≤
+    `FACT_GODNODE_THRESHOLD` × n — linear in the entity, not quadratic. `QMD`
+    (3,321 live facts, 5 of its 13 categories over the bound) goes from 5.5 M
+    comparisons to a few hundred, against the 15 M that took 113 seconds on
+    `Lloyd` measured in `facts.py`.
+
+    What the partition cannot do is pair a fact with one in a *different*
+    category, so this is a coverage change and not only a cost change. That is why
+    it runs only on the refusal path: an entity at or under the bound is still
+    scanned whole and keeps its cross-category pairs, and an entity that reaches
+    here had nothing scanned at all before — it loses no pair it ever had.
+
+    Returns a detection-shaped dict so the pair-handling in `plan_entity` below is
+    untouched, plus the two lists that make the result readable:
+    `categories_scanned` (what the numbers cover) and `categories_skipped` (what
+    they do not). `refused` is True only when nothing at all could be scanned.
+    """
+    groups = _facts_by_category(facts_view)
+    scanned: list[str] = []
+    skipped: list[str] = []
+    contradictions: list[dict] = []
+    checked = 0
+    for category in sorted(groups):
+        piece = _detect_contradictions_sync(entity, category, facts=groups[category])
+        if piece.get("refused"):
+            skipped.append(category)
+            continue
+        contradictions.extend(piece.get("contradictions", []))
+        checked += piece.get("checked", 0)
+        scanned.append(category)
+    return {"entity": entity, "category": None, "contradictions": contradictions,
+            "checked": checked, "refused": not scanned,
+            "categories_scanned": scanned, "categories_skipped": skipped}
+
+
 def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
     """Decide what — if anything — to change about one entity's facts.
 
@@ -550,14 +633,38 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
     `MIN_CONFIDENCE_GAP` to be condemned; a smaller gap says the two facts were
     captured differently, not that one is weaker. Each action's `reason` names
     the trigger that admitted it, so a reviewer can reject the specific pair.
+
+    An entity too big for one pairwise scan is not skipped: it is scanned in
+    category-sized pieces, which is what the detector's own refusal tells the
+    caller to do. See `_rescan_by_category` for why that is a coverage fix and not
+    a cost fix, and for what it cannot see.
     """
     facts_view = _get_facts_sync(entity, with_source_file=True).get("facts", [])
     detection = _detect_contradictions_sync(entity, facts=facts_view)
+    scan_scope = SCAN_ENTITY
+    categories_scanned: list[str] = []
+    categories_skipped: list[str] = []
     if detection.get("refused"):
-        return {"entity": entity, "refused": True, "checked": detection.get("checked", 0),
-                "contradictions": 0, "actions": [],
-                "before_active": _active_count(entity),
-                "skipped_reason": detection.get("hint", "entity too large to scan")}
+        retry = _rescan_by_category(entity, facts_view)
+        if not retry["categories_scanned"]:
+            # Every category is itself above the bound: the godnode shape the
+            # threshold exists for. The entity-level refusal stands exactly as it
+            # was — nothing about this entity is scanable, so there is no partial
+            # coverage to report and no scope to name beyond the refusal.
+            return {"entity": entity, "refused": True, "checked": detection.get("checked", 0),
+                    "contradictions": 0, "actions": [],
+                    "scan_scope": SCAN_ENTITY,
+                    "categories_scanned": [], "categories_skipped": [],
+                    "before_active": _active_count(entity),
+                    "skipped_reason": detection.get("hint", "entity too large to scan")}
+        # Some part of the entity was scanned. `refused` stays False for it and
+        # `categories_skipped` names what was not, so a partial scan reads as
+        # partial — never as the whole-entity refusal it replaced, and never as a
+        # complete scan whose pair count is a coverage claim.
+        detection = retry
+        scan_scope = SCAN_BY_CATEGORY
+        categories_scanned = retry["categories_scanned"]
+        categories_skipped = retry["categories_skipped"]
 
     contradictions = detection.get("contradictions", [])
     if REQUIRE_OPPOSING_TERMS:
@@ -667,7 +774,16 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
             "near_duplicates": sum(
                 1 for c in contradictions
                 if not str(c.get("reason", "")).startswith("opposing_terms")),
-            "actions": actions, "before_active": _active_count(entity)}
+            "actions": actions, "before_active": _active_count(entity),
+            # Coverage, stated. `pairs_before` on a `by_category` plan counts the
+            # pairs inside each scanned category and nothing across one, and
+            # `categories_skipped` names the files that were too large even for a
+            # piece of the scan — so an entity scanned in pieces cannot be read as
+            # one scanned whole, and neither can be mistaken for the whole-entity
+            # refusal, which reports `refused: True` with no scope to name.
+            "scan_scope": scan_scope,
+            "categories_scanned": categories_scanned,
+            "categories_skipped": categories_skipped}
 
 
 # ── applying a plan (through the existing writers) ───────────────────────────
@@ -911,6 +1027,15 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
                  "contradictions": plan["contradictions"],
                  "near_duplicates": plan.get("near_duplicates", 0),
                  "refused": plan["refused"],
+                 # Coverage, carried from the plan. `refused: False` stopped
+                 # meaning "scanned whole" the moment an over-bound entity could
+                 # be scanned in category-sized pieces, so the record has to say
+                 # which it got — `scan_scope` is `entity` or `by_category`, and
+                 # `categories_skipped` names the categories too large even for a
+                 # piece. Without these two the record's own refusal flag becomes
+                 # ambiguous, which is the one thing it cannot afford.
+                 "scan_scope": plan.get("scan_scope"),
+                 "categories_skipped": plan.get("categories_skipped", []),
                  # The loop's own denominator, before its writes. `pairs_after`
                  # is measured the same way after them.
                  "pairs_before": plan.get("pairs_before", 0),

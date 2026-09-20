@@ -65,15 +65,32 @@ pass this changed 749 candidate actions into 17.
 The `Lloyd` measurement above is now itself history, and worth keeping as the
 reason for the bound rather than deleting as out of date: that 113-second,
 15-million-comparison scan is why `_detect_contradictions_sync` refuses any
-entity holding more than `FACT_GODNODE_THRESHOLD` (50, `agent_mcp/retrieval.py:112`)
+entity holding more than `FACT_GODNODE_THRESHOLD` (50, `agent_mcp/retrieval.py:114`)
 facts at all. So the entity that produced the 32,857 false positives can no
 longer be scanned, and `plan_entity` propagates that as `refused` rather than
-as "nothing found" — the two must never read alike. It bites harder than it
-sounds: in the 09-09 pass restricted to the eval's own expected entities,
-**18 of 30 were refused as god-nodes**, so most of the entities the metric
-depends on are ones this loop is structurally unable to examine. The nightly
-shape is milder (1–5 refused of 40) because drift selects on recent writes,
-not on size.
+as "nothing found" — the two must never read alike. It used to bite harder than
+that: the refusal was the end of the entity, so a 55-fact entity spread over five
+category files — `Assistant`, live, largest file 26 — was dropped with zero
+actions while not one of its files was large enough to refuse on its own. In the
+09-09 pass restricted to the eval's own expected entities, **18 of 30 were refused
+as god-nodes**; that is the pre-#1251 shape and it overstates today's, because an
+entity is now refused only when *every* one of its category files is over the bound.
+
+What an entity over the bound gets instead is the retry the refusal string itself
+names: one scan per category (`plan_entity` → `_rescan_by_category`), the categories
+taken from the rows of the refused read rather than from a file listing, so the
+facts planned against and the facts scanned cannot disagree. The bound is not
+raised — each piece goes through the same check, and a category over 50 is skipped
+and named in `categories_skipped`. Cost falls with the coverage: Σn_c² ≤ 50·n
+comparisons against n², which is what took 113 seconds on `Lloyd` — live, `QMD`
+is 5.5 million whole-entity pairs against 208 once partitioned, 39 of its 3,321
+facts scanned and 5 of its 13 files named as skipped. What the
+partition cannot do is pair a fact with one in a *different* category, which is why
+it runs only on the refusal path: an entity at or under the bound is still scanned
+whole, and an entity that reaches the retry had nothing scanned at all before. The
+plan and the record therefore carry `scan_scope` (`entity` / `by_category`) and
+`categories_skipped` — after #1251, `refused: false` no longer means "scanned
+whole", and only those two fields say which it was.
 
 Two bounds sit under the evidence rules, and they are what the CLI's exit 3
 is checking: `MAX_ACTIONS_PER_ENTITY = 5` and `MAX_ACTIONS_PER_RUN = 25`.
@@ -225,5 +242,5 @@ a day before its code half).
 | `agent_mcp/fact_improvement.py` | the loop: signals → plan → apply → record |
 | `agent_mcp/memory_ops.py` | `remember` / `recall` / `forget` / `improve` |
 | `scripts/memory/fact-improvement.py` | CLI; exits 2 on failure, 3 on blast-radius overrun |
-| `tests/test_memory_improvement.py` | 27 tests, incl. the one-fact-per-action and near-duplicate guards, and the schedule wiring (task armed + script named by the skill exists) |
+| `tests/test_memory_improvement.py` | 47 tests, incl. the one-fact-per-action and near-duplicate guards, the per-category rescan's scope rules (#1251), and the schedule wiring (task armed + script named by the skill exists) |
 | `skills/fact-improvement/SKILL.md` + `autonomy/84-fact-improvement.md` | the scheduled consumer — armed `up_next`, daily, window 14:00 local, plan mode only |

@@ -116,6 +116,25 @@ def _days_ago(n, hours=0):
     return (datetime.now(timezone.utc) - timedelta(days=n, hours=hours)).isoformat()
 
 
+def _filler(prefix, n, days=20, confidence=0.9):
+    """`n` facts that pair with nothing — not each other, not an opposing term.
+
+    Size a scan up to the bound without the size coming from claims the scan would
+    flag. The detector pairs two facts above 0.6 token overlap, so 50 rows phrased
+    alike are C(50,2) = 1,225 near-duplicate pairs in one category and a test that
+    then asserted a pair count would be asserting nothing about the pair it was
+    built for. Each row here carries the entity prefix and the word `marker`, and
+    six tokens unique to itself, so the Jaccard overlap the detector computes
+    between any two rows is 2/14 = 0.14 against its 0.6 trigger. The six are
+    coinages and none is a member of `_OPPOSING_PAIRS`, so a filler row cannot
+    become an opposing-terms pair either — nor pair with a test's real pair, which
+    sits 0.083 from a filler row.
+    """
+    return [{"fact": f"{prefix} marker zts{i} qlu{i} vex{i} wray{i} yron{i} zura{i}",
+             "created_at": _days_ago(days), "confidence": confidence}
+            for i in range(n)]
+
+
 # ── 1. signals: a real source, not an invented one ───────────────────────────
 
 def test_correction_signal_names_the_entity_the_user_contested(world):
@@ -458,6 +477,131 @@ def test_godnode_entity_is_refused_not_rescanned(world):
     plan = fi.plan_entity("QMD")
     assert plan.get("refused") is True
     assert plan["actions"] == []
+    # The per-category retry (#1251) must not rescue THIS shape: every one of the
+    # entity's facts sits in one category that is itself above the bound, so the
+    # retry has nothing to scan and the entity-level refusal stands. `scan_scope`
+    # says which scan answered — the entity-level one — and no category is
+    # reported as scanned, so a wholly-refused entity cannot be read as a
+    # partially-scanned one.
+    assert plan["scan_scope"] == "entity", plan
+    assert plan["categories_scanned"] == [], plan
+
+
+def test_entity_over_bound_with_small_categories_is_scanned_by_category(world):
+    """#1251 clause 1: an entity the entity-level scan refuses is not discarded
+    when each of its category files sits under the bound.
+
+    The live shape this replaces: `Assistant` is 55 facts across 5 files, largest
+    26, and `plan_entity` returned it with zero actions because the refusal says
+    "Pass a narrower `category`" and no caller ever had. Here 55 facts sit in 3
+    files, and the pair to act on is inside one of them."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "MULTI", "state", _filler("MULTI", 26))
+    _write_facts(facts_root, "MULTI", "event", _filler("MULTI", 23))
+    _write_facts(facts_root, "MULTI", "preference", [
+        {"fact": "MULTI cache eviction is enabled.", "created_at": _days_ago(20)},
+        {"fact": "MULTI cache eviction is disabled.", "created_at": _days_ago(2)},
+        *_filler("MULTI", 4),
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("MULTI")
+    assert plan["refused"] is False, plan
+    assert plan["scan_scope"] == "by_category", plan
+    # `checked` covers exactly the facts in the scanned categories — all 55 here,
+    # since no category of this entity is over the bound.
+    assert plan["checked"] == 55, plan
+    assert plan["categories_scanned"] == ["event", "preference", "state"], plan
+    assert plan["categories_skipped"] == [], plan
+    # And the recovered scan finds what the discarded one would have: the older
+    # side of a pair the detector classified as opposing terms.
+    assert plan["contradictions"] >= 1, plan
+    assert len(plan["actions"]) == 1, plan
+    act = plan["actions"][0]
+    assert act["category"] == "preference", act
+    assert act["kind"] == "superseded", act
+    assert act["loser_fact"] == "MULTI cache eviction is enabled.", act
+
+
+def test_category_over_bound_is_skipped_and_named_in_the_plan(world):
+    """#1251 clause 2: the retry still honours the bound per category, and the
+    plan names what it did not scan.
+
+    Without the name, a partial scan is indistinguishable from a full one: the
+    pair count and `checked` are simply smaller, and the next reader has no way to
+    tell "nothing opposed in the other 51 facts" from "those 51 were never read".
+    """
+    facts_root, st, _ = world
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD
+    _write_facts(facts_root, "MIXED", "state",
+                 _filler("MIXED", FACT_GODNODE_THRESHOLD + 1))       # 51: unscanable
+    _write_facts(facts_root, "MIXED", "event", [
+        {"fact": "MIXED tailnet relay is working.", "created_at": _days_ago(18)},
+        {"fact": "MIXED tailnet relay is broken.", "created_at": _days_ago(3)},
+        *_filler("MIXED", 8),
+    ])
+    _write_facts(facts_root, "MIXED", "preference", _filler("MIXED", 5))
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("MIXED")
+    assert plan["refused"] is False, plan                 # partial coverage, not a refusal
+    assert plan["scan_scope"] == "by_category", plan
+    assert plan["categories_skipped"] == ["state"], plan
+    assert plan["categories_scanned"] == ["event", "preference"], plan
+    assert plan["checked"] == 15, plan                    # 10 + 5; the 51 never read
+    assert len(plan["actions"]) == 1, plan
+    assert plan["actions"][0]["loser_fact"] == "MIXED tailnet relay is working.", plan
+
+    # Distinguishability, asserted on the record FILE and with all three shapes in
+    # one run side by side — that is what clause 2 actually claims, and it is the
+    # artifact the nightly refusal count is read from (`per_entity[]` in
+    # `_pipeline/improvement/*-dryrun.json`). Asserted on disk rather than on the
+    # returned dict because a scope that survived only in memory would be exactly
+    # as invisible there as the discarded refusal this change replaced.
+    #
+    # GODNODE: every fact in one 51-fact category — nothing scanable, so the
+    # whole-entity refusal stands. ALLSMALL: over the bound in total, no category
+    # over it, so the retry covers everything. MIXED: covered above.
+    _write_facts(facts_root, "GODNODE", "state",
+                 _filler("GODNODE", FACT_GODNODE_THRESHOLD + 1))
+    _write_facts(facts_root, "ALLSMALL", "state", _filler("ALLSMALL", 26))
+    _write_facts(facts_root, "ALLSMALL", "event", _filler("ALLSMALL", 23))
+    _write_facts(facts_root, "ALLSMALL", "preference", _filler("ALLSMALL", 4))
+    _reindex(st, facts_root)
+    rec = fi.run_improvement(entities=["MIXED", "GODNODE", "ALLSMALL"])
+    entries = {e["entity"]: e for e in _persisted_record(rec)["per_entity"]}
+    # (refused, scan_scope, categories_skipped) — the triple the record exposes.
+    triples = {name: (e["refused"], e["scan_scope"], tuple(e["categories_skipped"]))
+               for name, e in entries.items()}
+    assert triples["GODNODE"] == (True, "entity", ()), triples
+    assert triples["MIXED"] == (False, "by_category", ("state",)), triples
+    assert triples["ALLSMALL"] == (False, "by_category", ()), triples
+    # Three distinct rows: a partial scan reads as neither a full scan nor a
+    # refusal, and no two of the three collapse onto the same triple.
+    assert len(set(triples.values())) == 3, triples
+
+
+def test_entity_under_bound_is_still_scanned_whole_across_categories(world):
+    """#1251 clause 4: the partition is a refusal-path fallback, not the scan.
+
+    An entity at or under the bound keeps its cross-category pairs, which a
+    category-partitioned scan structurally cannot find. Pair split across two
+    categories: if the retry ran here the plan would come back empty, so the
+    action below is the assertion that the entity-level scan answered."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "SPLIT", "state", [
+        {"fact": "SPLIT ingestion watcher is enabled.", "created_at": _days_ago(21)},
+        *_filler("SPLIT", 19),
+    ])
+    _write_facts(facts_root, "SPLIT", "event", [
+        {"fact": "SPLIT ingestion watcher is disabled.", "created_at": _days_ago(4)},
+        *_filler("SPLIT", 19),
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("SPLIT")
+    assert plan["refused"] is False, plan
+    assert plan["scan_scope"] == "entity", plan
+    assert plan["checked"] == 40, plan                    # both categories, one scan
+    assert len(plan["actions"]) == 1, plan                # the cross-category pair
+    assert plan["actions"][0]["loser_fact"] == "SPLIT ingestion watcher is enabled.", plan
 
 
 def test_run_is_dry_run_by_default_and_acts_on_request(world):
