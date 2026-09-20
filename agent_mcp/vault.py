@@ -422,6 +422,14 @@ def _qmd_post(payload: dict) -> list:
     )
     with urllib.request.urlopen(req, timeout=_qmd_timeout()) as resp:
         data = json.loads(resp.read())
+    # The daemon says whether the rerank this request asked for actually ran
+    # (`app/qmd_health.py`). It never raises and never blocks the recall: an
+    # unreranked answer is a worse answer, not a missing one.
+    try:
+        from app import qmd_health
+        qmd_health.note_response(payload.get("rerank") is True, data.get("meta"))
+    except Exception:  # noqa: BLE001
+        pass
     return [
         {
             "file": r.get("file", ""),

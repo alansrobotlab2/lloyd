@@ -697,6 +697,15 @@ def _task_row(r) -> dict:
     }
 
 
+def _qmd_client_stats() -> dict:
+    """What the qmd daemon has told this process about its own answers."""
+    try:
+        from app import qmd_health
+        return qmd_health.stats()
+    except Exception as exc:  # noqa: BLE001
+        return {"error": repr(exc)}
+
+
 async def state(request):
     """Live agent-side state for the Mission Control dashboard.
 
@@ -719,6 +728,7 @@ async def state(request):
             "recent": recent_tasks,
         },
         "tsc": _tsc_runner.stats(),
+        "qmd": _qmd_client_stats(),
         "changes": _change_ledger.stats(),
         "tools": len(_dispatch),
         # Read by the bench runner before it starts a trial: a runner that
