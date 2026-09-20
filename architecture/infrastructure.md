@@ -452,27 +452,70 @@ provisioned for the MagicDNS name (`tailscale cert <name>`) Vite prefers it,
 because it is trusted by every device with no CA to install; today none is on
 disk, so the private server cert is what is served.
 
-**mTLS itself was dropped on 2026-06-14** and the doc should not be read as
-describing it. iOS Chrome and every other third-party iOS browser cannot
-present keychain identities for mutual TLS — only Safari can — so Vite no
-longer requests or requires a client cert, and any browser on the tailnet
-works. Tailscale is the front door now rather than the certificate — but it
-is not yet the boundary of the API: `config.yaml` binds the backend to
-`server.host: 0.0.0.0`, so anything routable to the machine reaches `:8080`
-directly, and a request with no fingerprint header is not refused. Vite
-proxies `/api` to `http://localhost:8080`, so loopback would cover every real
-caller; closing the bind is #683.
+**mTLS itself was dropped on 2026-06-14.** iOS Chrome and every other
+third-party iOS browser cannot present keychain identities for mutual TLS —
+only Safari can — so Vite no longer requests or requires a client cert, and any
+browser on the tailnet works. Tailscale is the front door rather than the
+certificate, and since 2026-09-20 the backend *checks* that instead of assuming
+it: `server.py::ApiPeerGate` refuses `/api/*` with 403 unless the
+request's ASGI peer is loopback or inside `server.trusted_networks`
+(`_trusted_networks`, default Tailscale's CGNAT range `100.64.0.0/10`), which is
+the address a tailnet browser presents after Vite's `xfwd` rewrite. The peer is
+the only evidence, and no header is consulted: uvicorn runs `proxy_headers` with
+`forwarded_allow_ips` defaulting to loopback and Vite proxies `/api` with
+`xfwd: true`, so a client-supplied `X-Forwarded-For` *rewrites* `request.client`
+rather than proving anything (uvicorn scans that list right-to-left for the
+first address it does not trust, so a client cannot prepend a trusted hop).
+`/health` and `/health/deep` are the entire
+pre-auth surface, as exact paths (`PRE_AUTH_PATHS`), because a watchdog has to
+be able to ask "is it alive" from a peer the gate refuses; a watchdog asking
+`/api/health` gets the gate, not a 404. A CORS preflight is let through from any
+peer — a browser sends one with no custom headers, so refusing it breaks a
+trusted client and proves nothing — but only a real preflight, recognised by
+`Access-Control-Request-Method` the same way starlette's own CORS middleware
+recognises one (`middlewares/cors.py:91`). A bare `OPTIONS`, which no browser
+sends, is gated: passed through it reaches the router and its 405-vs-404 answer
+would tell an untrusted peer which API paths exist.
 
-The allowlist did not go away, it became conditional, and the distinction
-matters when reading `server.py::_require_client_cert`. Vite still injects
-the peer cert's CN and fingerprint as request headers when one *is* presented
-— trusted input, because Vite is the only path — and the backend still
-refuses an unknown or revoked fingerprint on `/api/*`, re-reading
-`clients.json` per request so a revocation takes effect without a restart. It
-simply no longer refuses a request that carries no fingerprint at all.
-Loopback (`127.0.0.1`, `::1`) bypasses the check entirely, because same-host
-callers — the LiveKit worker, the autonomy ticker, every worker source —
-POST straight to `:8080` and never cross Vite's TLS layer.
+`ApiPeerGate` is a plain ASGI middleware rather than
+`@app.middleware("http")`, and that is load-bearing: `/api/*` is not HTTP-only.
+`app/routers/lsp.py` serves `@router.websocket("/api/lsp/{language}")`, and each
+accepted connection spawns a language-server subprocess rooted at a
+caller-supplied `workspace`. The `http` decorator wraps its handler in
+starlette's `BaseHTTPMiddleware`, whose `__call__` returns before dispatching
+any scope that is not `http` (`starlette/middleware/base.py:101-104`), so an
+HTTP-only gate leaves that upgrade path entirely unenforced — measured on #683's
+first commit, with the HTTP gate in place a LAN peer's LSP socket was accepted
+and reached the spawn while the same peer's `GET /api/sessions` was refused. The
+gate now decides on `scope["client"]` for both `http` and `websocket` scopes and
+answers a refused upgrade by closing before accepting
+(`REFUSAL_CLOSE_CODE`), which is the ASGI form of a 403 handshake.
+
+What is **not** closed: `config.yaml` still binds the backend to
+`server.host: 0.0.0.0`, so the port is reachable from anywhere routable — what
+arrives there now meets a 403 instead of session data. Binding to `127.0.0.1`
+outright, which would make Vite's stated trust model true by construction since
+it proxies `/api` to `http://localhost:8080`, is #683's open half and needs a
+person: `config.yaml` is boot-read-only and tracked. A LAN-only client would
+need `server.trusted_networks` widened to the LAN subnet, which is a number only
+a person should choose.
+
+The allowlist did not go away either, and the order matters when reading
+`server.py::ApiPeerGate`. The network rule runs first; then, for a peer
+already inside it, Vite's injected `x-client-fingerprint` (the peer cert's
+sha256, with `x-client-cn` its CN) is checked against `clients.json`, re-read per
+request so a revocation takes effect without a restart, and an unknown or revoked
+fingerprint is refused. A fingerprint is not proof of possession — it is
+copyable out of `clients.json` — so it can take access away but cannot buy
+network reach an untrusted peer does not already have. Loopback
+(`127.0.0.1`, `::1`) is trusted outright, because same-host callers — the
+LiveKit worker, the autonomy ticker, every worker source, the self-mod promoter
+— POST straight to `:8080` and never cross Vite's TLS layer. The self-mod drain
+keeps its own loopback-only guard on top of all this
+(`app/routers/automod.py::_is_loopback`), so arming the drain from a browser tab
+stays impossible even from the tailnet.
+`tests/test_api_client_gating.py` is the differential that pins every sentence
+above.
 
 LiveKit advertises the Tailscale address when Tailscale is up and falls back
 to the default route. That resolution happens at boot and is never hardcoded:
@@ -490,6 +533,20 @@ triage and implementation ([[automod]]), research, digests and session
 mining. The systemd timers above are the only wall-clock schedules.
 
 ## Review log
+
+- **2026-09-20 — current for the access-boundary section.** #683 closed the
+  hole the previous entry recorded as open, so the prose around it is rewritten
+  instead of left describing a defect that no longer exists. Re-read, not
+  inherited: `ApiPeerGate` — the gate is a plain-ASGI class since round 3, so
+  the `@app.middleware("http")` handler `_require_client_cert` it replaced is
+  gone from the tree — with `_cert_fingerprint`, `_is_trusted_peer`,
+  `_trusted_networks`, `PRE_AUTH_PATHS` and `REFUSAL_CLOSE_CODE` in `server.py`;
+  uvicorn 0.44.0 defaults
+  `proxy_headers=True` with `forwarded_allow_ips="127.0.0.1"`, which is how
+  Vite's `xfwd: true` reaches `request.client`; `config.yaml` still
+  `server.host: 0.0.0.0`, so the bind half of #683 stays open and says so above.
+  Every listener row and port table below is untouched by this round and still
+  carries the 2026-09-14 date.
 
 - **2026-09-14 — stale.** Checked every path, port, cadence, `startsecs`
   value and model/venv row against the tree and the live box; most held, and

@@ -5,12 +5,13 @@ Creates the FastAPI app, mounts every router under app/routers/, wires the
 autonomy startup ticker, and starts uvicorn. All business logic lives in app/.
 """
 
+import ipaddress
 import json
 import logging
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -67,7 +68,101 @@ def _load_allowlist() -> dict[str, str]:
     return out
 
 
+# Tailscale's CGNAT range: every address on this tailnet sits inside it, and
+# nothing else on this host does. That is what makes it a usable default for
+# the trusted set — the tailnet was always meant to be the boundary (mTLS was
+# dropped 2026-06-14 because iOS Chrome cannot present a keychain identity);
+# what never happened was *checking* it on the backend. Widen it with
+# `server.trusted_networks: [100.64.0.0/10, 192.168.50.0/24]` if a LAN-only
+# device has to keep working.
+DEFAULT_TRUSTED_NETWORKS = "100.64.0.0/10"
+
+# The whole of the pre-auth surface, as exact paths rather than a prefix: a
+# watchdog has to be able to ask "is it alive" from a peer the gate refuses,
+# and `/health` (root-mounted, not `/api/health`) is what both the guardian and
+# the promoter's idle gate poll. `/health/deep` is the gate-only sibling on the
+# same handler. Anything under `/api/` — including a future `/api/health` — is
+# gated by construction, never by an exemption list nobody keeps current.
+PRE_AUTH_PATHS = frozenset({"/health", "/health/deep"})
+
+_trusted_nets_cache: list | None = None
+
+
+def _parse_networks(raw) -> list:
+    """Parse a config value (comma-separated string or list) into networks.
+
+    Returns [] when nothing usable was configured; the caller then falls back
+    to the default rather than to an empty set, because an empty trusted set
+    over a typo in config.yaml would lock every browser out of Mission Control.
+    An unparseable entry is logged and dropped — it must not silently widen or
+    silently vanish.
+    """
+    if isinstance(raw, str):
+        items: list = raw.split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    else:
+        items = []
+    nets: list = []
+    for item in items:
+        text = str(item).strip()
+        if not text:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(text, strict=False))
+        except ValueError:
+            logger.error("server.trusted_networks: ignoring unparseable entry %r", text)
+    return nets
+
+
+def _trusted_networks() -> list:
+    """The configured networks, parsed once and cached.
+
+    Cached because the middleware asks on every request and `CONFIG` is
+    boot-read-only by contract — unlike `clients.json`, which is re-read so a
+    revocation lands without a restart, this value cannot change until reboot.
+    """
+    global _trusted_nets_cache
+    if _trusted_nets_cache is None:
+        raw = (CONFIG.get("server") or {}).get("trusted_networks")
+        nets = _parse_networks(raw)
+        if not nets:
+            nets = _parse_networks(DEFAULT_TRUSTED_NETWORKS)
+        _trusted_nets_cache = nets
+    return _trusted_nets_cache
+
+
+def _is_trusted_peer(host: str) -> bool:
+    """Whether `host` — the ASGI peer address and nothing else — may call /api/*.
+
+    Never a `Host`, `X-Forwarded-For` or `X-Real-IP` header. uvicorn runs
+    `proxy_headers` by default with `forwarded_allow_ips="127.0.0.1"`, and
+    `web/vite.config.ts` proxies `/api` with `xfwd: true`, so for a request
+    arriving from Vite those headers *replace* `scope["client"]` with the
+    browser's own address rather than evidencing it — `proxy_headers.py:32`
+    honours them only from an address already in `forwarded_allow_ips`. Reading
+    the header would both let any client name the peer it wanted and lock the
+    UI out, because the real browser arrives as `100.93.123.77`, not as
+    `127.0.0.1`. An unparseable address (starlette's literal `testclient`, an
+    address that is simply malformed) is refused, not passed: fail closed means
+    the case the code cannot read is a refusal.
+    """
+    text = (host or "").strip()
+    if not text:
+        return False
+    if "%" in text:  # IPv6 link-local scope id, e.g. fe80::1%eth0
+        text = text.split("%", 1)[0]
+    try:
+        addr = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    if addr.is_loopback:
+        return True
+    return any(addr in net for net in _trusted_networks())
+
+
 app = FastAPI(title="Lloyd Mission Control")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -77,45 +172,144 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def _require_client_cert(request: Request, call_next):
-    """Per-device client-cert allowlist on /api/* routes — now optional.
+# The refusal, in one place: the HTTP body and the WebSocket close reason are
+# the same claim, and they must not be able to drift apart.
+REFUSAL_DETAIL = "peer not permitted: /api/* requires a loopback or trusted-network client"
 
-    mTLS was dropped 2026-06-14: iOS Chrome (and other third-party iOS
-    browsers) can't present keychain identities for mutual TLS, so Vite no
-    longer requests a client cert. Tailscale is the access boundary now —
-    only tailnet devices can reach the frontend.
+# ASGI close code for a refused upgrade. 4000-4999 are reserved for libraries
+# and applications (RFC 6455 §7.4.2), and 4403 mirrors the HTTP status the same
+# decision produces, so a client that logs the code says the same thing a
+# browser's 403 body would.
+REFUSAL_CLOSE_CODE = 4403
 
-    We still honor the allowlist when a fingerprint IS forwarded (e.g. a
-    browser with the Lloyd client cert installed, or if Vite mTLS is
-    re-enabled), but no longer reject requests that lack one.
+
+class ApiPeerGate:
+    """Fail closed on /api/*: the peer must be verified, not merely present.
+
+    Until 2026-09-20 this middleware enforced the per-device allowlist **only
+    when a `x-client-fingerprint` header arrived** and called `call_next` for
+    everyone else — so it vetted the clients who volunteered identity and
+    passed the ones who did not. `config.yaml` binds the backend on
+    `0.0.0.0:8080`, and `curl http://192.168.50.108:8080/api/sessions` answered
+    200 with real session data from the office LAN with no cert, no token and
+    no tailnet. Backlog #683, measured there twice.
+
+    The decision is the peer address: loopback (same-host daemons — the
+    autonomy ticker, the LiveKit worker, the self-mod promoter) or a network in
+    `server.trusted_networks`, default Tailscale's CGNAT range, which is what a
+    tailnet browser presents after Vite's `xfwd` rewrite. See
+    `_is_trusted_peer` for why a header can never be the evidence, and
+    `PRE_AUTH_PATHS` for the two health probes that stay reachable.
+
+    The allowlist still runs for cert-bearing clients, *after* the network
+    rule, so revocation keeps working while a fingerprint copied out of
+    `clients.json` — which is not proof of possession — buys nothing on its own.
+
+    Why a pure ASGI middleware instead of `@app.middleware("http")`. That
+    decorator wraps the handler in starlette's `BaseHTTPMiddleware`, whose
+    `__call__` returns early for every scope that is not `http`
+    (`starlette/middleware/base.py:101-104`) — an HTTP-only gate therefore
+    passed WebSocket scopes through untouched. `app/routers/lsp.py:102` serves
+    `@router.websocket("/api/lsp/{language}")` and each accepted connection
+    spawns a language-server subprocess rooted at a caller-supplied `workspace`
+    path, so leaving the upgrade path ungated would have kept a `/api/*`
+    control reachable from exactly the peers this class exists to refuse
+    (measured on #683's round: a LAN peer was accepted and asked to spawn while
+    the HTTP sibling of the same route answered 403). One middleware, both
+    scope types, one decision — and the pass-through to non-`/api/` scopes
+    stays on the same one field.
     """
-    if request.method == "OPTIONS":
-        return await call_next(request)
-    path = request.url.path
-    if not path.startswith("/api/"):
-        return await call_next(request)
 
-    # Loopback bypass: same-host services (LiveKit worker, autonomy ticker)
-    # POST directly to 127.0.0.1:8080 without going through Vite's TLS layer.
-    client_host = request.client.host if request.client else ""
-    if client_host in ("127.0.0.1", "::1"):
-        return await call_next(request)
+    def __init__(self, app):
+        self.app = app
 
-    fp = (request.headers.get("x-client-fingerprint") or "").upper().replace(":", "")
-    if fp:
-        # A cert was presented — keep enforcing the allowlist so revocation
-        # still works for cert-bearing clients.
-        allowlist = _load_allowlist()
-        if fp not in allowlist:
-            return JSONResponse(
-                {"detail": "client cert revoked or unknown"},
-                status_code=403,
-            )
-        # Stash the cert identity for handlers that want to log/use it.
-        request.state.client_name = allowlist[fp]
-        request.state.client_fingerprint = fp
-    return await call_next(request)
+    async def __call__(self, scope, receive, send):
+        scope_type = scope.get("type")
+        if scope_type not in ("http", "websocket"):  # lifespan and anything else
+            await self.app(scope, receive, send)
+            return
+
+        # A CORS preflight carries no identity by design — browsers send it
+        # without custom headers — so refusing it would break a trusted
+        # cross-origin client while proving nothing. Only a *real* preflight
+        # gets the pass: a bare `OPTIONS /api/...`, which no browser sends, is
+        # gated like any other request, because letting it through reaches the
+        # router and hands an untrusted peer a 405-vs-403 oracle for which API
+        # paths exist. `access-control-request-method` is the field that
+        # distinguishes the two, and it is what starlette's own CORS middleware
+        # keys on (`middlewares/cors.py`, `is_preflight`).
+        if scope_type == "http" and scope.get("method") == "OPTIONS" \
+                and b"access-control-request-method" in {
+                    name for name, _ in scope.get("headers") or []}:
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path in PRE_AUTH_PATHS or not path.startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        # Peer address only — never a Host or forwarded header. Same-host
+        # services (LiveKit worker, autonomy ticker) POST directly to
+        # 127.0.0.1:8080 without Vite's TLS layer and are the loopback case.
+        client = scope.get("client")
+        client_host = client[0] if client else ""
+        if not _is_trusted_peer(client_host):
+            logger.warning("api-gate: refused %s %s from peer %r",
+                           scope_type, path, client_host or "<unknown>")
+            if scope_type == "websocket":
+                # Closing before accepting is the ASGI rejection: uvicorn
+                # answers the handshake with an HTTP 403 and the route — and so
+                # the language-server spawn — is never entered.
+                await send({"type": "websocket.close",
+                            "code": REFUSAL_CLOSE_CODE,
+                            "reason": REFUSAL_DETAIL})
+                return
+            await JSONResponse({"detail": REFUSAL_DETAIL},
+                               status_code=403)(scope, receive, send)
+            return
+
+        fp = ""
+        if scope_type == "http":
+            fp = _cert_fingerprint(scope)
+            if fp:
+                allowlist = _load_allowlist()
+                if fp not in allowlist:
+                    # A cert was presented — keep enforcing the allowlist so
+                    # revocation still works for cert-bearing clients.
+                    await JSONResponse({"detail": "client cert revoked or unknown"},
+                                       status_code=403)(scope, receive, send)
+                    return
+                # Stash the cert identity in the scope for handlers that want
+                # to log/use it (`app/routers/system.py` reads it off
+                # `request.state`, which is this dict).
+                scope.setdefault("state", {})
+                scope["state"]["client_name"] = allowlist[fp]
+                scope["state"]["client_fingerprint"] = fp
+
+        await self.app(scope, receive, send)
+
+
+# Added after CORSMiddleware, and starlette's `add_middleware` inserts at the
+# head of the user list (`starlette/applications.py:101`), so this gate is the
+# outermost of the app's own middleware — only starlette's ServerErrorMiddleware
+# is outside it — and it sees a request before CORS or any router can answer.
+# That is the position `@app.middleware("http")` occupied before it was replaced
+# (#683), so the ordering is unchanged by the swap.
+app.add_middleware(ApiPeerGate)
+
+
+def _cert_fingerprint(scope) -> str:
+    """The normalised `x-client-fingerprint` from a raw ASGI header list.
+
+    Same normalisation the old `Request`-based code did (upper-case, colons
+    stripped) — `clients.json` stores `AA:BB:…` while Vite forwards the hex
+    either way.
+    """
+    for name, value in scope.get("headers") or []:
+        if name == b"x-client-fingerprint":
+            return value.decode("latin-1").upper().replace(":", "")
+    return ""
 
 app.include_router(_messages_router.router)
 app.include_router(_sessions_router.router)

@@ -168,18 +168,33 @@ and falling back to the private `lloyd.crt` signed by the CA that
 `scripts/gen-cert.sh` makes once; `scripts/mint-client-cert.sh <device>`
 enrolls a device into `clients.json`.
 
-**mTLS was dropped on 2026-06-14** and Tailscale is the access boundary now:
-iOS Chrome and the other third-party iOS browsers cannot present keychain
-identities for mutual TLS — only Safari can — so Vite no longer requests a
-client cert, and any browser on the tailnet works. The per-device allowlist
-did not go away, it went optional. Vite still injects the peer cert's CN and
-sha256 fingerprint as `x-client-cn` / `x-client-fingerprint` when a cert *is*
-presented, and `server._require_client_cert` still refuses an unknown
-fingerprint on `/api/*` so revocation keeps working for cert-bearing clients;
-it simply no longer rejects a request that carries none. Loopback
-(`127.0.0.1`, `::1`) bypasses it outright, because the LiveKit worker and the
-autonomy ticker POST straight to `:8080` without crossing Vite's TLS layer at
-all. See [[infrastructure]].
+**mTLS was dropped on 2026-06-14** because iOS Chrome and the other
+third-party iOS browsers cannot present keychain identities for mutual TLS —
+only Safari can — so Vite no longer requests a client cert and any browser on
+the tailnet works. Tailscale was then documented as the access boundary while
+nothing on the backend enforced it: `server._require_client_cert` checked the
+per-device allowlist *only* when `x-client-fingerprint` was present, so a
+request that carried nothing — the whole LAN, since the backend binds
+`0.0.0.0:8080` — went straight through. Since 2026-09-20 it fails closed. The
+middleware now refuses every `/api/*` request with 403 unless the ASGI peer is
+loopback or inside `server.trusted_networks` (default Tailscale's CGNAT
+`100.64.0.0/10`), and reads no header to decide, because uvicorn's
+`proxy_headers` plus Vite's `xfwd: true` mean `X-Forwarded-For` rewrites the
+peer rather than evidencing it. `/health` and `/health/deep` are the only
+pre-auth paths, matched exactly. The allowlist still runs after that for a peer
+already inside the gate, so an unknown or revoked fingerprint is still refused
+and revocation still works; what a fingerprint can no longer do is buy a client
+network reach it did not have. Loopback (`127.0.0.1`, `::1`) stays trusted —
+the LiveKit worker, the autonomy ticker and the self-mod promoter POST straight
+to `:8080` without crossing Vite's TLS layer at all — and the self-mod drain
+keeps its own loopback-only guard on top of the network rule, so a tailnet
+browser still cannot arm a drain. Binding the backend to `127.0.0.1` as well
+(#683's open half) remains a person's edit: `config.yaml` is boot-read-only.
+`ApiPeerGate` is a plain ASGI middleware rather than
+`@app.middleware("http")`, so the IDE tab's language-server socket is covered
+too: `@router.websocket("/api/lsp/{language}")` is an `/api/*` path an
+HTTP-scope decorator cannot see at all, and a refused upgrade is closed before
+it is accepted. See [[infrastructure]].
 
 ## Related
 
@@ -187,6 +202,17 @@ all. See [[infrastructure]].
 
 ## Review log
 
+- 2026-09-20 — **current for Remote access.** #683 closed the fail-open that
+  section described, so its prose is rewritten rather than annotated. What was
+  re-read rather than inherited: `clientCertHeaders()` still injects
+  `x-client-cn`/`x-client-fingerprint` from the verified TLS peer and still
+  proxies `/api` with `xfwd: true` (`web/vite.config.ts`); uvicorn 0.44.0
+  defaults `proxy_headers=True` and `forwarded_allow_ips="127.0.0.1"`, which is
+  the mechanism by which the rewrite reaches `request.client`; the drain's
+  loopback-only guard is `app/routers/automod.py::_is_loopback`, asserted
+  present by `tests/test_automod_hardening.py`. `config.yaml` still binds
+  `0.0.0.0` — unchanged by this round, still Alan's to set. The 2026-09-19 pass
+  below holds for every other section.
 - 2026-09-19 — **current.** Checked every path, line number, route, count and
   cadence against `c55a501` and the live `:8080` routes; the tab lists, the
   dashboard TTLs and section set, the `hold_reason`/`_is_task_due` mirror and
