@@ -658,7 +658,8 @@ first blocker is that `eval/secondary_routing_eval.py` exists only on an aborted
 round's branch — the vault half of a mixed-surface change landed immediately by
 design while the code half waited behind a gate that refused it, and whoever
 noticed set #85 back to `draft` so the nightly failure was not queued (backlog
-**#827**). The second bites after that branch lands: it pins `model: eco`, and
+**#827**). The second bit after that branch lands, and is what the check below now
+stops before dispatch: `85-secondary-routing-eval.md` pinned `model: eco`, and
 `models:` in config.yaml defines only `primary` and `secondary`. Nothing rejects
 an unknown alias — `resolve_model_alias` rewrites only `secondary` → `primary`,
 `_get_model_env` returns `{}`, and the run then goes to the *primary's* endpoint
@@ -666,9 +667,15 @@ an unknown alias — `resolve_model_alias` rewrites only `secondary` → `primar
 engine answers `404 The model 'eco' does not exist.` A 404 is shaped like an
 engine being down, which is the class `_record_failure(kind="infra")`
 deliberately keeps off the retry budget — so a permanently misconfigured task can
-look like a transient outage indefinitely. `validate_tasks.py` checks `status`,
-skill *presence* and `depends_on` resolution, and neither `model:` nor whether
-`skill_name` resolves to a directory (backlog **#811**).
+look like a transient outage indefinitely. `validate_tasks.py` now checks that
+each of those values *resolves*, not merely that the field is present: a
+`depends_on` whose upstream parses but is parked at any status other than
+`up_next`/`in_progress`, a `model:` that is neither a key of `models:` nor one of
+its declared `alias` values, and a `skill_name`/`skill_path` with no `SKILL.md`
+(or, for a path-valued reference, no file) behind it — the three that used to
+validate clean and fail only at dispatch (backlog **#811**). #85's own `model:`
+was changed `eco` → `primary` on 2026-09-17, so on today's board these checks are
+regression guards rather than alarms: all 33 task files pass them.
 
 ### #36 and the groundskeeper queue
 
