@@ -17,14 +17,24 @@
 #      the staged tree (see the autonomy-status block below). That step reports
 #      and never blocks: it exists so a dispatch-killing `status` flip cannot be
 #      certified by a commit message that talks about something else.
+#   6. With LLOYD_JOB set, commits as the job rather than as whoever `user.name`
+#      says, and adds a `Job:` trailer (see the job-identity block below). Unset
+#      means no change of any kind to what this wrapper used to do.
 #
 # Usage:
 #   ~/lloyd/scripts/util/vault-commit.sh "autonomy-data-pipeline: $(date +%Y-%m-%d)"
+#   LLOYD_JOB=nightly-knowledge-write ~/lloyd/scripts/util/vault-commit.sh "nightly: knowledge write 2026-09-20"
+#
+# Environment:
+#   VAULT_DIR   vault to commit (default ~/obsidian)
+#   LLOYD_JOB   job name; when set, this commit is authored as lloyd-<job>
+#               <<job>@jobs.lloyd.local> and carries `Job: <job>`. The one place
+#               to change that spelling is the identity block below.
 #
 # Exit codes:
 #   0 — committed successfully OR nothing to commit
 #   2 — git operation failed (logged to stderr)
-#   3 — invocation error (missing message arg)
+#   3 — invocation error (missing message arg, or LLOYD_JOB is not a usable name)
 
 set -euo pipefail
 
@@ -35,6 +45,29 @@ fi
 
 MSG="$1"
 VAULT="${VAULT_DIR:-$HOME/obsidian}"
+
+# Job identity (#668). A commit is attributed to the job that wrote it —
+# `lloyd-<job> <<job>@jobs.lloyd.local>` plus a `Job: <job>` trailer — so
+# `git log` can answer "which job wrote this" without reading the subject.
+# Without LLOYD_JOB nothing here happens: the ambient identity and the message
+# are exactly what they were, which is what leaves the human path and the
+# automod-round path untouched. Refuses (exit 3) on a name that could not form
+# a git identity, rather than committing a machine write under Alan by accident.
+# The canonical spelling of both strings also lives in
+# scripts/util/vault_commit_identity.py, which is the query side; tests/
+# test_vault_commit_identity.py pins the two spellings against each other.
+JOB="${LLOYD_JOB:-}"
+if [ -n "$JOB" ]; then
+    if ! [[ "$JOB" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+        echo "vault-commit.sh: LLOYD_JOB='$JOB' is not a usable job name (want [A-Za-z0-9][A-Za-z0-9._+-]*)" >&2
+        exit 3
+    fi
+    GIT_ARGS=(-c "user.name=lloyd-$JOB" -c "user.email=$JOB@jobs.lloyd.local")
+    TRAILER_ARGS=(--trailer "Job: $JOB")
+else
+    GIT_ARGS=()
+    TRAILER_ARGS=()
+fi
 
 if [ ! -d "$VAULT/.git" ]; then
     echo "vault-commit.sh: $VAULT is not a git repo" >&2
@@ -81,4 +114,8 @@ else
     "$PY" "$RUNG" --repo "$VAULT" || echo "vault-commit.sh: autonomy-status rung exited nonzero; committing anyway" >&2
 fi
 
-git commit -m "$MSG"
+# The `-c` overrides go BEFORE the subcommand: after it, git parses `-c` as
+# `git commit -c` (reuse the message and open an editor) and refuses the whole
+# command with "options '-m' and '-c' cannot be used together" — the same trap
+# `git log -1 -g` is. `--trailer` is a commit option, so it stays after.
+git "${GIT_ARGS[@]+"${GIT_ARGS[@]}"}" commit -m "$MSG" "${TRAILER_ARGS[@]+"${TRAILER_ARGS[@]}"}"
