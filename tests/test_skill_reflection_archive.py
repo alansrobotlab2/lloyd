@@ -216,10 +216,16 @@ EXPECTED_BOUND_WRITERS: dict[str, tuple[str, set[str]]] = {
 #: (`autonomy-reflection-pipeline` names prompt-audit-latest and test-results-latest
 #: only inside Step 6.1's *read* list, so they classify as reads; it prescribes
 #: producing them by bare filename, which no path-shaped check can attribute.)
+#: Two entries were dropped on 2026-09-20 (backlog #1270): `nightly-prompt-audit`
+#: and `nightly-behavior-test` are `status: archived` since vault commit `978aa34b`
+#: (backlog #900), so `_load_skill` returns None for them, the discovery loop can
+#: never produce them, and the assert below — an equality, not a subset — was red at
+#: the checkout while the gate's `-m "not live_vault"` deselected it. A retired
+#: skill cannot hold an exemption: there is no instruction left to exempt.
+#: tests/test_archived_skill_artifacts.py pins that rule for both tiers, so the
+#: recurrence guard no longer depends on anyone remembering to prune this dict.
 EXPECTED_VAULT_WRITE_WRITERS: dict[str, set[str]] = {
     "autonomy-reflection-pipeline": {"signals-latest", "day-end-synthesis-latest"},
-    "nightly-prompt-audit": {"prompt-audit-latest"},
-    "nightly-behavior-test": {"test-results-latest"},
     "nightly-day-end-synthesis": {"day-end-synthesis-latest"},
 }
 
