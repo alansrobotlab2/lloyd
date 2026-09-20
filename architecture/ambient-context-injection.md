@@ -200,14 +200,22 @@ If the user sends a message while an ambient turn is running or queued:
   `DELETE /api/sessions/{id}`, a `dedup_key` collision, or the
   `AMBIENT_QUEUE_CAP` eviction.
 
-User turns always win, and `drain_pending` never drops one: `source=None` means
-"ambient only" (`app/sessions_io.py:671-698`) and its `source == "user"` branch
-has no caller anywhere. This page previously named `DELETE /api/sessions/{id}`
-as the exception that "really does want both" — it does not. That handler passes
-`source=None` under a `# drain all queued turns` comment the code does not
-honour (`app/routers/sessions.py:767`), so a queued **user** turn survives the
-wipe, still runs, and writes nothing: `_append_messages` goes through
-`mutate_session`, which no-ops once the session JSON is gone. Backlog #909.
+User turns always win, and `/cancel` never drops one: `drain_pending`'s
+`source=None` default means "ambient only" (`app/sessions_io.py:739-783`), which
+is what `drain_pending=true` on that route relies on. Draining the user tier is
+the explicit `source="all"` sentinel — both tiers, ambient then user, summed
+count — and `DELETE /api/sessions/{id}` is its only caller
+(`app/routers/sessions.py:756-785`). That route wipes the session outright, so a
+queued **user** turn it left behind would still run and still write nothing:
+`_append_messages` goes through `mutate_session`, which no-ops once the session
+JSON is gone — a full model turn spent on a transcript nobody will read again.
+
+This paragraph read the other way until 2026-09-20: it said the delete handler
+asked for the ambient-only default under a comment claiming it drained every
+queued turn, that the `source == "user"` branch had no caller at all, and that
+this route was therefore *not* the exception that "really does want both". All
+three were true of the tree that page reviewed, and all three are false now —
+the branch is reachable, through `"all"`. Fixed by #909.
 
 ## Components
 
@@ -311,7 +319,23 @@ mode has no reason to block it.
 
 ## Review log
 
-- 2026-09-12 — **stale**. Both mechanisms verified live against the tree and
+- 2026-09-20 — **#909 landed**, which makes the 2026-09-12 entry's first
+  correction historical rather than current. `DELETE /api/sessions/{id}` now
+  drains both tiers through `drain_pending(source="all")`, so a queued user
+  turn can no longer run into a deleted transcript; the ambient-only
+  `source=None` default and `POST /api/sessions/{id}/cancel?drain_pending=true`
+  are unchanged. Pinned by seven new tests in `tests/test_session_queue.py` (16
+  in that file now) — one per branch that reaches the queues: the both-tiers
+  delete, the drained turn that must not run, the `"all"` sentinel, the
+  `source=None` default, the `user`-only drain, flag-less `/cancel`, and
+  `/cancel?drain_pending=true` — plus six in the new
+  `tests/test_session_doc_claims.py`, including the caller grep itself and what
+  keeps this page's drain paragraph from re-staling. Verified 2026-09-20: `pytest
+  tests/test_session_queue.py tests/test_session_doc_claims.py` → 22 passed,
+  and four mutations of the fix — revert the delete call to `source=None`, cut
+  the `"all"` arm off the `pending_user` pop, widen `/cancel` to `"all"`, flip
+  `drain_pending`'s default to `"all"` — each failed the test that owns it.
+ Both mechanisms verified live against the tree and
   still accurate: drain order and caller-thread rule, the 5 / 3 / 3 caps,
   800-char truncation, the envelope text and its one-verb `urgent` variant, the
   deferred 0.5 s cancel, the `worker`/`autonomy` deny-list and the `/inject` 409,

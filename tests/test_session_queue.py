@@ -6,17 +6,25 @@ Covers Phases 1–3:
            drain_pending clears ambient only; ambient cancel marker
 - Phase 3: ambient queue cap drops oldest; dedup_key collapses duplicates;
            queue_state event emitted on enqueue/drain
+- #909: the two-tier drain — `DELETE /api/sessions/{id}` empties both
+        queues and a queued user turn never reaches `_run_turn`, while
+        `/cancel?drain_pending=true` stays ambient-only
 
 Run: .venvs/lloyd/bin/python -m tests.test_session_queue
 """
 import asyncio
+import json
+import shutil
 import sys
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import sessions_io  # noqa: E402
 from app.sessions_io import (  # noqa: E402
     SessionTurn,
     _session_queues,
@@ -28,6 +36,7 @@ from app.sessions_io import (  # noqa: E402
     AMBIENT_QUEUE_CAP,
 )
 from app.routers import messages as msg_mod  # noqa: E402
+from app.routers import sessions as sess_mod  # noqa: E402
 
 
 async def _fake_run_turn(session_id: str, turn: SessionTurn, q):
@@ -333,6 +342,299 @@ async def test_queue_state_event_emitted():
     print("OK queue_state: event broadcast to running turn on enqueue")
 
 
+# ── #909: the delete route has to drain BOTH tiers ───────────────────────────
+#
+# `drain_pending` pops `q.pending_user` only under `source == "user"`, and
+# nothing in production ever passed that, so `DELETE /api/sessions/{id}` —
+# the caller whose comment claimed "drain all queued turns" — left a queued
+# user turn sitting in the queue. The consumer then ran it to completion for
+# a session whose JSON was already unlinked, and its writes no-op'd, because
+# `_append_messages` goes through `mutate_session`, which returns False once
+# the file is gone. A turn spent on a transcript nobody will read again.
+#
+# None of the tests above could have caught that: every drain call there
+# passes `source="ambient"` explicitly, so nothing pinned the `source=None`
+# default at all, and nothing drove the two HTTP handlers. These do.
+
+
+class _FakeRequest:
+    """Stand-in for the `Request` the cancel route only reads query params from."""
+
+    def __init__(self, query_params: dict):
+        self.query_params = query_params
+
+
+def _blocking_run_stub():
+    """A `_run_turn` stub that records what reaches it and stays in flight.
+
+    Returns (stub, started, release). `started` is the id of every turn that
+    actually reached `_run_turn`, which is the only assertion that matters for
+    a drain: a dropped turn is one the consumer never popped. The stub ignores
+    `cancel_event` on purpose — the running turn has to still be in flight
+    while the handler runs, which is what a real turn does between checks.
+    """
+    started: list[str] = []
+    release = asyncio.Event()
+
+    async def stub(session_id: str, turn: SessionTurn, q):
+        started.append(turn.turn_id)
+        await release.wait()
+        await turn.events.put({"event": "done", "data": {}})
+
+    return stub, started, release
+
+
+async def _queue_both_tiers(session_id: str):
+    """Put the queue in the state the clauses name: running ambient, one
+    queued ambient, one queued user turn.
+
+    Returns (running, queued_ambient, queued_user, started, release). The
+    setup itself is asserted, so a test cannot pass against an empty queue.
+    """
+    stub, started, release = _blocking_run_stub()
+    msg_mod._run_turn = stub
+    _session_queues.pop(session_id, None)
+
+    running = _make_turn("running", source="ambient")
+    queued_ambient = _make_turn("q-ambient", source="ambient")
+    queued_user = _make_turn("q-user", source="user")
+    await _enqueue(session_id, running)
+    await asyncio.sleep(0.05)  # it becomes q.current
+    await _enqueue(session_id, queued_ambient)
+    await _enqueue(session_id, queued_user)
+
+    state = get_queue_state(session_id)
+    assert state["current"] and state["current"]["source"] == "ambient", f"setup: {state}"
+    assert state["pending_ambient"] == 1, f"setup: {state}"
+    assert state["pending_user"] == 1, f"setup: {state}"
+    return running, queued_ambient, queued_user, started, release
+
+
+async def _run_delete_handler(session_id: str):
+    """Drive the real delete route with `SESSIONS_DIR` aimed at a temp dir.
+
+    Both modules get patched: the handler resolves `SESSIONS_DIR` through
+    `app.routers.sessions`, while `mutate_session` — the write path a
+    surviving queued turn would take — reads `app.sessions_io.SESSIONS_DIR`.
+    Returns (parsed body, file still on disk after the call).
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="lloyd-909-"))
+    (tmp / f"{session_id}.json").write_text(
+        json.dumps({"session_id": session_id, "messages": []})
+    )
+    try:
+        with patch.object(sessions_io, "SESSIONS_DIR", tmp), patch.object(
+            sess_mod, "SESSIONS_DIR", tmp
+        ):
+            response = await sess_mod.delete_session(session_id)
+        await asyncio.sleep(0)  # one pass for the consumer to react
+        return json.loads(response.body), (tmp / f"{session_id}.json").exists()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+async def _release_and_join(release, *turns):
+    """Let the in-flight turns finish so no consumer task outlives the test."""
+    release.set()
+    for turn in turns:
+        await asyncio.wait_for(turn.done.wait(), timeout=3)
+
+
+async def test_delete_session_leaves_nothing_queued_in_either_tier():
+    """#909 clause 1: after DELETE, the queue reports zero in both tiers."""
+    sid = "test-session-delete-both"
+    running, _qa, _qu, _started, release = await _queue_both_tiers(sid)
+    try:
+        body, still_on_disk = await _run_delete_handler(sid)
+        assert body["deleted"] is True, f"handler did not remove the JSON: {body}"
+        assert not still_on_disk, "the session file survived the handler it targets"
+        state = get_queue_state(sid)
+        assert state["pending_ambient"] == 0, f"queued ambient survived: {state}"
+        assert state["pending_user"] == 0, f"queued user turn survived: {state}"
+        assert state["depth"] == 0, f"something is still queued: {state}"
+    finally:
+        await _release_and_join(release, running)
+    print("OK delete: both tiers emptied, session JSON removed")
+
+
+async def test_a_queued_user_turn_never_reaches_run_turn_after_delete():
+    """#909 clause 2: the drained user turn is never executed.
+
+    Three observations, and only two of them can fail, so the file is explicit
+    about which is which. The stub **is** the step the consumer awaits, so while
+    the running turn is in flight the consumer is suspended inside
+    `_run_turn(running)` and cannot reach a second pop — `started` naming only
+    the running turn is an invariant of that seam, not evidence about the
+    handler, and it is checked only as the ordering it must never break. What
+    the handler does change, and what pre-fix code left wrong, is the queue:
+    `pending_user` is 0 by the time it returns instead of 1. The observation
+    that proves the pop mattered is the one made *after* the running turn is
+    released, because a survivor surfaces exactly then, as a second
+    `_run_turn` call.
+    """
+    sid = "test-session-delete-no-run"
+    running, queued_ambient, queued_user, started, release = await _queue_both_tiers(sid)
+    body, _still = await _run_delete_handler(sid)
+    assert body["deleted"] is True, f"setup: {body}"
+    state = get_queue_state(sid)
+    assert state["pending_user"] == 0, (
+        f"the handler returned with the queued user turn still queued: {state}"
+    )
+    assert started == [running.turn_id], (
+        f"the consumer reached a pop outside the running turn: {started}"
+    )
+    await _release_and_join(release, running)
+    assert started == [running.turn_id], (
+        f"turns reached _run_turn beyond the running one: {started} "
+        f"(queued_user={queued_user.turn_id} queued_ambient={queued_ambient.turn_id})"
+    )
+    print("OK delete: queued user turn never reached _run_turn")
+
+
+async def test_drain_pending_all_clears_both_tiers_in_one_call():
+    """#909 clause 3: one call with source="all" pops both tiers and returns
+    the summed count — the call the delete route makes, and what gives the
+    `pending_user` pop a production caller.
+    """
+    stub, started, release = _blocking_run_stub()
+    msg_mod._run_turn = stub
+    sid = "test-session-drain-all"
+    _session_queues.pop(sid, None)
+
+    running = _make_turn("running", source="ambient")
+    await _enqueue(sid, running)
+    await asyncio.sleep(0.05)
+    ambients = [_make_turn(f"a{i}", source="ambient") for i in range(2)]
+    users = [_make_turn(f"u{i}", source="user") for i in range(2)]
+    for turn in ambients + users:
+        await _enqueue(sid, turn)
+
+    before = get_queue_state(sid)
+    assert (before["pending_ambient"], before["pending_user"]) == (2, 2), f"setup: {before}"
+
+    drained = await drain_pending(sid, source="all")
+    after = get_queue_state(sid)
+    assert drained == 4, f"expected the 2+2 queued turns summed, got {drained}"
+    assert (after["pending_ambient"], after["pending_user"]) == (0, 0), f"after: {after}"
+    # Same drop signature as the ambient tier: marked preempted and released,
+    # so nothing waits on a turn that will never run.
+    assert all(t.preempted for t in ambients + users), "a drained turn was not marked preempted"
+    assert all(t.done.is_set() for t in ambients + users), "a drained turn was left awaited"
+
+    await _release_and_join(release, running)
+    assert started == [running.turn_id], f"drained turns still ran: {started}"
+    print(f"OK drain all: {drained} turns across both tiers, none ran")
+
+
+async def test_drain_pending_without_a_source_is_ambient_only():
+    """The `source=None` default — what `/cancel?drain_pending=true` relies
+    on and what the delete route used to *believe* it had.
+
+    No test pinned this before #909, which is how a comment saying "drain all
+    queued turns" survived next to a one-tier call. Clause 5 requires the
+    default stay exactly as documented; this is the pin.
+    """
+    sid = "test-session-drain-default"
+    running, _qa, queued_user, started, release = await _queue_both_tiers(sid)
+    try:
+        drained = await drain_pending(sid)
+        assert drained == 1, f"expected the one queued ambient, got {drained}"
+        state = get_queue_state(sid)
+        assert state["pending_ambient"] == 0, f"ambient tier not drained: {state}"
+        assert state["pending_user"] == 1, f"default touched the user tier: {state}"
+        assert not queued_user.done.is_set(), "default dropped a user turn"
+    finally:
+        await _release_and_join(release, running, queued_user)
+    assert queued_user.turn_id in started, "the surviving user turn never ran"
+    print("OK default: drain_pending() is ambient-only, user turn kept")
+
+
+async def test_drain_pending_user_only_clears_the_user_tier():
+    """`source="user"` exercises the user-tier arm on its own.
+
+    `"all"` is what reaches that arm in production, but a one-tier request is
+    the call that shows which arm did the work: the ambient count has to be
+    untouched here, and the turns cleared have to be exactly the user ones.
+    """
+    sid = "test-session-drain-user-only"
+    running, queued_ambient, queued_user, started, release = await _queue_both_tiers(sid)
+    try:
+        drained = await drain_pending(sid, source="user")
+        assert drained == 1, f"expected the one queued user turn, got {drained}"
+        state = get_queue_state(sid)
+        assert state["pending_user"] == 0, f"user tier survived: {state}"
+        assert state["pending_ambient"] == 1, f"ambient tier was cleared too: {state}"
+        assert queued_user.preempted is True, "the dropped user turn was not marked preempted"
+        assert queued_user.done.is_set(), "the dropped user turn was left awaited"
+        assert not queued_ambient.done.is_set(), "the queued ambient was released by a user drain"
+    finally:
+        await _release_and_join(release, running, queued_ambient)
+    assert queued_user.turn_id not in started, "the drained user turn ran anyway"
+    assert queued_ambient.turn_id in started, "the untouched ambient never ran"
+    print("OK drain user: user tier cleared alone, ambient kept and ran")
+
+
+async def test_cancel_without_drain_pending_clears_nothing():
+    """The route's other branch: `drain_pending` absent or false.
+
+    `/cancel` with no query flag cancels the running turn and leaves **both**
+    queues exactly as they were — nothing drained, no `done` set, every queued
+    turn still waiting on its own turn with the consumer. The ambient-only test
+    above drives only the draining arm, so without this one the route could
+    start dropping the user tier on the flag-less path, the behaviour voice and
+    the dashboard actually use, and every test here would stay green.
+    """
+    sid = "test-session-cancel-no-drain"
+    running, queued_ambient, queued_user, started, release = await _queue_both_tiers(sid)
+
+    response = await sess_mod.cancel_session(sid, _FakeRequest({}))
+    body = json.loads(response.body)
+    assert body["cancelled"] is True, f"running turn not cancelled: {body}"
+    assert body["drained"] == 0, f"flag-less cancel drained something: {body}"
+
+    state = get_queue_state(sid)
+    assert (state["pending_ambient"], state["pending_user"]) == (1, 1), (
+        f"a queue changed on the flag-less path: {state}"
+    )
+    assert not queued_ambient.done.is_set(), "flag-less cancel released the queued ambient"
+    assert not queued_user.done.is_set(), "flag-less cancel released the queued user turn"
+
+    await _release_and_join(release, running, queued_ambient, queued_user)
+    assert started == [running.turn_id, queued_user.turn_id, queued_ambient.turn_id], (
+        f"queue order changed: {started}"
+    )
+    print("OK cancel (no flag): nothing drained, both queued turns ran in order")
+
+
+async def test_cancel_with_drain_pending_leaves_the_queued_user_turn():
+    """#909 clause 4: `/cancel?drain_pending=true` stays ambient-only.
+
+    The queued user turn keeps its place in `pending_user`, its `done` stays
+    unset, and it still runs once the in-flight turn finishes. Dropping it
+    here would defeat the whole point of the ambient-only default: user turns
+    are never silently dropped by cancel.
+    """
+    sid = "test-session-cancel-keeps-user"
+    running, queued_ambient, queued_user, started, release = await _queue_both_tiers(sid)
+
+    response = await sess_mod.cancel_session(sid, _FakeRequest({"drain_pending": "true"}))
+    body = json.loads(response.body)
+    assert body["cancelled"] is True, f"running turn not cancelled: {body}"
+    assert body["drained"] == 1, f"expected the one queued ambient drained, got {body}"
+
+    state = get_queue_state(sid)
+    assert state["pending_user"] == 1, f"cancel dropped the user turn: {state}"
+    q = _session_queues[sid]
+    assert q.pending_user[0].turn_id == queued_user.turn_id, "cancel reordered the user tier"
+    assert not queued_user.done.is_set(), "cancel released a waiter on a turn it did not run"
+    assert queued_user.preempted is False, "cancel marked the queued user turn preempted"
+
+    await _release_and_join(release, running, queued_user)
+    assert queued_user.turn_id in started, "the surviving user turn never ran"
+    assert queued_ambient.turn_id not in started, "the drained ambient ran anyway"
+    print("OK cancel: drain_pending=true cleared ambient, user turn survived and ran")
+
+
 async def main():
     await test_serial_execution()
     await test_cancel_current()
@@ -343,6 +645,13 @@ async def main():
     await test_ambient_queue_cap()
     await test_ambient_dedup_collapse()
     await test_queue_state_event_emitted()
+    await test_delete_session_leaves_nothing_queued_in_either_tier()
+    await test_a_queued_user_turn_never_reaches_run_turn_after_delete()
+    await test_drain_pending_all_clears_both_tiers_in_one_call()
+    await test_drain_pending_without_a_source_is_ambient_only()
+    await test_drain_pending_user_only_clears_the_user_tier()
+    await test_cancel_without_drain_pending_clears_nothing()
+    await test_cancel_with_drain_pending_leaves_the_queued_user_turn()
     print("\nAll tests passed.")
 
 

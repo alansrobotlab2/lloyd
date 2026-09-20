@@ -730,17 +730,31 @@ async def _broadcast_queue_state(session_id: str) -> None:
         pass
 
 
-async def drain_pending(session_id: str, source: Optional[TurnSource] = None) -> int:
+#: What `drain_pending` may be asked to clear. `"all"` is the one value here
+#: that is not a `TurnSource`: it names both tiers at once, for a caller that
+#: is destroying the session and must leave nothing queued (#909).
+DrainSource = Literal["user", "ambient", "system", "all"]
+
+
+async def drain_pending(session_id: str, source: Optional[DrainSource] = None) -> int:
     """Remove queued turns. If source is None, drains ambient only
     (the documented behavior for /cancel?drain_pending=true — user turns
     are never silently dropped). Returns number drained.
+
+    Pass `source="all"` for both tiers in one call: it drains the ambient
+    queue then the user queue and returns the summed count. The pop is
+    permanent — a drained turn never runs — so only a caller that discards
+    the session outright may ask for it. `DELETE /api/sessions/{id}` does: a
+    queued user turn it left behind would run to completion for a transcript
+    whose file is already unlinked, and every write it made would no-op in
+    `mutate_session`.
     """
     q = _session_queues.get(session_id)
     if q is None:
         return 0
     drained = 0
     async with q.lock:
-        if source is None or source == "ambient":
+        if source is None or source == "ambient" or source == "all":
             while q.pending_ambient:
                 t = q.pending_ambient.popleft()
                 t.preempted = True
@@ -750,9 +764,14 @@ async def drain_pending(session_id: str, source: Optional[TurnSource] = None) ->
                     pass
                 t.done.set()
                 drained += 1
-        if source == "user":
+        if source == "user" or source == "all":
             while q.pending_user:
                 t = q.pending_user.popleft()
+                # Same drop signature as the ambient tier. `preempted` is what
+                # the dashboard snapshot reports and what the ambient-cancel
+                # breadcrumb reads, so a dropped turn has to carry it or the
+                # panel shows a queue that is empty and nothing saying why.
+                t.preempted = True
                 try:
                     t.events.put_nowait(None)
                 except Exception:

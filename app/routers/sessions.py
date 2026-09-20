@@ -757,14 +757,24 @@ async def get_session_status(session_id: str):
 async def delete_session(session_id: str):
     """Wipe a session's history.
 
-    Cancels the current turn (if any), drains queued ambient turns, and
-    removes the session JSON. The next message lands in a fresh session
-    at the same id. Used by the voice preview page's reset button.
+    Cancels the current turn (if any), drains the queued turns in **both**
+    tiers — ambient then user — and removes the session JSON. The next
+    message lands in a fresh session at the same id.
+
+    The user tier has to be drained here even though `/cancel` deliberately
+    leaves it alone: a queued user turn that survives this delete still runs
+    (the consumer pops it and spends a full model turn), and every write it
+    makes no-ops, because `_append_messages` goes through `mutate_session`,
+    which returns False once the JSON is gone — a turn spent on a transcript
+    nobody will read again. Reachable over HTTP; the shipped Mission Control
+    UI does not call this route today (the voice page's reset button posts
+    `/api/sessions/{id}/cancel?drain_pending=true`, which is ambient-only by
+    design). See #909.
     """
     cancel_event = get_cancel_event(session_id)
     if cancel_event is not None:
         cancel_event.set()
-    await drain_pending(session_id, source=None)  # drain all queued turns
+    await drain_pending(session_id, source="all")
     meta_path = SESSIONS_DIR / f"{session_id}.json"
     removed = False
     try:
