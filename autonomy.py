@@ -595,18 +595,75 @@ def _utcnow() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-def _dependency_bypassed(task: dict, dep_task: dict,
+_never_ran_bypass_warned: dict = {}
+
+
+def _warn_never_ran_bypass(dependent: dict, dep_task: dict,
+                           bypass_hours: float) -> None:
+    """Warn once per (dependent, upstream) that a bypass forwards on nothing.
+
+    The verdict on this branch is deliberately unchanged by #814 — fail-forward
+    is what the field exists to do — so the only way anyone learns that a
+    dependent is consuming an artifact nobody has ever produced is this line.
+    `hold_reason` cannot carry it: it is binary held/not-held, a bypassed
+    dependent IS due, and `test_board_and_scheduler_agree_for_every_upstream_status`
+    pins that board and scheduler agree on exactly that.
+
+    Deduplicated on the (dependent, upstream) pair for the same reason
+    `_warn_fail_closed` dedupes: dispatch re-answers this every 60 s tick, and a
+    warning that prints 1,440 times a day is read by nobody. Unlike that one, the
+    ledger here is dropped as soon as the upstream has ANY `last_run`, so a chain
+    that recovers and then loses its upstream again warns again — the recurrence
+    is the news.
+    """
+    key = (str(dependent.get("id", "")), str(dep_task.get("id", "")))
+    if _never_ran_bypass_warned.get(key):
+        return
+    _never_ran_bypass_warned[key] = True
+    logger.warning(
+        "Task #%s bypasses its depends_on upstream #%s, which has NEVER RUN: "
+        "stale_bypass_hours=%s on the dependent forwards on an artifact that "
+        "has never been produced. This branch has no elapsed-time condition — "
+        "there is no upstream last_run to measure the window against — so any "
+        "window at all lets the dependent dispatch.",
+        dependent.get("id"), dep_task.get("id"), bypass_hours)
+
+
+def _dependency_bypassed(dependent: dict, dep_task: dict,
                          dep_last_run: Optional[datetime.datetime],
                          now: datetime.datetime) -> bool:
     """Implement `stale_bypass_hours` — the documented "fail forward" rule.
 
-    The field was set on #38/#40 and described in the architecture doc as
-    letting a dependent run with stale input rather than blocking the chain,
-    but nothing ever read it. Bypass only when the upstream is not actively
-    running, so a merely-late upstream is still waited for.
+    WHOSE FIELD THIS IS: `stale_bypass_hours` is read from the DEPENDENT — the
+    task whose `depends_on` is being gated — never from the upstream. The
+    parameter used to be called `task` while this docstring talked about #38 and
+    #40, which are UPSTREAMS; `stale_bypass_hours: 36` written on #38, a root
+    whose own `depends_on` is null, is read by nothing, which is why the
+    #38→#42 edge had no fail-forward path at all and a completed 12,700-byte
+    report stalled the nightly chain ~10 h on 2026-09-10/11.
+
+    TWO BRANCHES THAT ARE DELIBERATELY DIFFERENT. An upstream that HAS RUN is
+    bypassed only once `now` sits further past its `last_run` than the
+    dependent's window: there the field is a real elapsed-time condition. An
+    upstream that has NEVER RUN (`last_run` empty — brand new, renamed, or never
+    succeeded; or no task file answering the id at all) bypasses IMMEDIATELY,
+    with no elapsed-time condition of any kind, because there is no timestamp to
+    compare and any window at all forwards. #814 considered the alternative —
+    treat never-ran as infinitely stale and hold the first cycle — and rejected
+    it: the field exists to stop exactly the stall described above, a fresh or
+    renamed chain is at its most fragile on its first cycle, and #870 already
+    pinned the fail-forward verdict
+    (`test_both_gate_branches_under_one_pinned_instant`, `assert met[6] is True`),
+    so flipping it means editing a done item's assertion, not this function. What
+    #814 does change is that this branch is no longer silent: it logs one WARNING
+    naming the upstream and saying it has never run.
+
+    The upstream being `in_progress` holds the dependent from BOTH branches, and
+    the check sits above them on purpose: an upstream running its first-ever run
+    is an artifact in progress, not a missing one.
     """
     try:
-        bypass_hours = float(task.get("stale_bypass_hours") or 0)
+        bypass_hours = float(dependent.get("stale_bypass_hours") or 0)
     except (TypeError, ValueError):
         return False
     if bypass_hours <= 0:
@@ -614,7 +671,10 @@ def _dependency_bypassed(task: dict, dep_task: dict,
     if str(dep_task.get("status", "")).strip() == "in_progress":
         return False
     if dep_last_run is None:
+        _warn_never_ran_bypass(dependent, dep_task, bypass_hours)
         return True
+    key = (str(dependent.get("id", "")), str(dep_task.get("id", "")))
+    _never_ran_bypass_warned.pop(key, None)
     return (now - dep_last_run).total_seconds() > bypass_hours * 3600
 
 

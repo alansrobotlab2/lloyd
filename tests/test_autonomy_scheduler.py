@@ -8,6 +8,7 @@ import ast
 import datetime as dt
 import inspect
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -275,6 +276,133 @@ async def test_stale_bypass_waits_for_a_running_upstream(aut):
     write_task(aut, 2, depends_on=1, last_run=_iso(days=2), stale_bypass_hours=36)
     tasks = [read_task(aut, 1), read_task(aut, 2)]
     assert aut._is_dependency_met(tasks[1], tasks) is False
+
+
+# ── The never-ran bypass (#814) ──────────────────────────────────────────────
+
+def _never_ran_bypass_lines(caplog) -> list[str]:
+    """Every WARNING on `lloyd-autonomy` reporting the never-ran bypass.
+
+    Filtered on the phrase rather than counted off `caplog.records`, so a test
+    cannot be greened by some unrelated warning the fixture happens to raise. The
+    filter is also its own positive control: `_warn_fail_closed`'s text ("…which
+    dispatch does not run") shares no substring with "never run", so a zero here
+    means the bypass did not speak, not that the pattern was wrong.
+    """
+    return [r.getMessage() for r in caplog.records
+            if r.name == "lloyd-autonomy"
+            and r.levelno >= logging.WARNING
+            and "never run" in r.getMessage().lower()]
+
+
+def test_a_bypass_past_an_upstream_that_never_run_still_dispatches_and_says_so(
+        aut, monkeypatch, caplog):
+    """Clause 1. The verdict is unchanged; the silence is what goes.
+
+    Upstream #1 exists and has NEVER run (`last_run` empty — a fresh, renamed or
+    never-succeeded task); dependent #2 carries `stale_bypass_hours: 36`. This
+    branch compares the window against nothing, so it forwards and dispatch
+    proceeds — the documented purpose of the field, and what #870 pinned with
+    `assert met[6] is True`. What #814 adds is that the pass is now announced
+    exactly once, naming the upstream and saying it has never run: the dependent
+    was consuming an artifact nobody had ever produced and no surface said so —
+    `hold_reason` answers None for this pair, which clause 2 pins.
+
+    The gate is asked twice on purpose. Dispatch re-answers it every 60 s tick,
+    and a warning that prints 1,440 times a day is read by nobody, so "exactly
+    one" here is one per (dependent, upstream) episode, not one per call.
+    """
+    _pin(aut, monkeypatch)
+    monkeypatch.setattr(autonomy, "_never_ran_bypass_warned", {})
+    caplog.set_level("WARNING", logger="lloyd-autonomy")
+    write_task(aut, 1, last_run="")                             # never ran
+    write_task(aut, 2, depends_on=1, stale_bypass_hours=36,
+               last_run=(PIN - dt.timedelta(days=2)).isoformat())
+    board = [read_task(aut, 1), read_task(aut, 2)]
+    assert aut._is_dependency_met(board[1], board, now=PIN) is True, (
+        "the never-ran fail-forward moved: #814 chose to keep the verdict and "
+        "make it visible, not to change it")
+    assert aut._is_task_due(board[1], board, now=PIN) is True, (
+        "the gate says met but dispatch still will not run the dependent")
+    lines = _never_ran_bypass_lines(caplog)
+    assert len(lines) == 1, (
+        f"expected exactly one never-ran bypass warning across two gate "
+        f"evaluations of the same pair, got {lines}")
+    assert "#1" in lines[0], f"the warning must name the upstream: {lines[0]}"
+    assert "#2" in lines[0], f"the warning must name the dependent: {lines[0]}"
+
+
+def test_a_never_run_upstream_without_a_bypass_holds_and_names_itself(
+        aut, monkeypatch, caplog):
+    """Clause 2. Same board minus the window: held, said out loud, and silent.
+
+    This is the control for clause 1 — without it, `len(lines) == 1` would also
+    pass on a fixture that warns for the bare "my upstream is new" reason. No
+    `stale_bypass_hours` means no bypass and no bypass warning; the hold is
+    visible where a bypass cannot be, because `hold_reason` is exactly for the
+    case that IS held.
+    """
+    _pin(aut, monkeypatch)
+    monkeypatch.setattr(autonomy, "_never_ran_bypass_warned", {})
+    caplog.set_level("WARNING", logger="lloyd-autonomy")
+    write_task(aut, 1, last_run="")                             # never ran
+    write_task(aut, 2, depends_on=1,
+               last_run=(PIN - dt.timedelta(days=2)).isoformat())
+    board = [read_task(aut, 1), read_task(aut, 2)]
+    assert aut._is_dependency_met(board[1], board, now=PIN) is False
+    assert aut.hold_reason(board[1], board, now=PIN) == "waiting on #1"
+    assert _never_ran_bypass_lines(caplog) == [], (
+        "a dependent that is held must not also be reported as bypassing")
+
+
+def test_a_never_run_upstream_that_is_in_progress_still_holds_its_dependent(
+        aut, monkeypatch):
+    """Clause 3. The ORDER of two checks in `_dependency_bypassed` is load-bearing.
+
+    `test_stale_bypass_waits_for_a_running_upstream` above gives its upstream a
+    `last_run` three days back, so it exercises the elapsed-time branch. The
+    combination pinned here — running AND never-ran, the state an upstream is in
+    while it runs its FIRST cycle — was unpinned, and holds only because the
+    `in_progress` check sits above the `dep_last_run is None` return. Swap those
+    two lines and every dependent of a first-time-running upstream dispatches
+    against an artifact being written right now, with a green suite.
+    """
+    _pin(aut, monkeypatch)
+    write_task(aut, 1, status="in_progress", last_run="", updated=_iso(minutes=1))
+    write_task(aut, 2, depends_on=1, stale_bypass_hours=36,
+               last_run=(PIN - dt.timedelta(days=2)).isoformat())
+    board = [read_task(aut, 1), read_task(aut, 2)]
+    assert aut._is_dependency_met(board[1], board, now=PIN) is False, (
+        "an upstream running its first-ever run is an artifact in progress, not "
+        "a missing one; the in_progress guard has to stay above the never-ran "
+        "bypass")
+
+
+def test_the_bypass_helper_names_the_dependent_and_states_the_never_ran_rule():
+    """Clause 4. Whose field is this — in the signature and in the prose.
+
+    `stale_bypass_hours: 36` sat on #38, an upstream root whose own `depends_on`
+    is null and which is therefore read by nothing, while the code read the
+    DEPENDENT — because the first parameter was named `task` and this docstring
+    named upstreams. The #38→#42 edge had no fail-forward path at all, and a
+    completed 12,700-byte report blocked the nightly chain ~10 h on
+    2026-09-10/11. Both halves of the ambiguity are pinned: the parameter is
+    `dependent`, and the docstring says in words that the window is the
+    dependent's field and that the never-ran branch has no elapsed-time
+    condition — the sentence the next reader needs before "bypass" reads as
+    "it waited its turn".
+    """
+    params = list(inspect.signature(autonomy._dependency_bypassed).parameters)
+    assert params[0] == "dependent", (
+        f"the first parameter reads as the upstream again ({params[0]!r}); the "
+        "2026-09-10/11 stall was caused by exactly that ambiguity")
+    doc = (autonomy._dependency_bypassed.__doc__ or "").lower()
+    assert "read from the dependent" in doc, (
+        "the docstring stopped saying whose field this is")
+    assert "never from the upstream" in doc, doc
+    assert "no elapsed-time condition" in doc, (
+        "the docstring stopped saying the never-ran branch measures nothing")
+    assert "has never run" in doc, doc
 
 
 # ── Schedule windows ─────────────────────────────────────────────────────────
