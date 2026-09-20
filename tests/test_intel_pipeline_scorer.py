@@ -1576,8 +1576,14 @@ def test_a_healthy_run_still_exits_zero_and_still_prints_complete(tmp_path, feed
 
 # --- Backlog #856: a keyword matches whole words, not substrings --------------
 
-# The live `interests.md` topic lines verbatim (vault interests.md, 2026-09-20),
-# duplicates included, loaded by the real loader. `PROFILE_MD` above cannot
+# The `interests.md` topic lines verbatim as of vault commit `752b85e6^` — the
+# document one commit *before* #852 appended five bare AI words to `## AI & LLMs`
+# — so 64 keywords, duplicates included, loaded by the real loader. It is pinned
+# at that shape rather than re-synchronised with today's vault file: every count in
+# this section (36 containment admits → 33 whole-word keeps) was measured against
+# it, and the #852 section below compares its own copy against it, so the two
+# documents differ by exactly the change #852 landed and by nothing else.
+# `PROFILE_MD` above cannot
 # express this defect: none of its keywords is short enough to hide inside an
 # English word, and the defect is exactly that — the robotics keyword `DOF`
 # matched the `dof` inside "handoff", which admitted an openclaw Linux-update
@@ -1860,3 +1866,241 @@ def test_the_cli_drops_a_substring_only_item_before_the_day_file(tmp_path):
         f"genuine DoF item must survive: {rows}\n{proc.stdout[-2000:]}")
     assert (rows[0]["relevance"], rows[0]["category"]) == (10, "robotics"), (
         f"the surviving item keeps its keyword-fallback grade: {rows[0]}")
+
+
+# --- Backlog #852: the keyword list has to reach AI-aggregate titles -----------
+#
+# `## AI & LLMs` in `~/obsidian/interests.md` listed only compound phrases ("agent
+# framework", "mcp protocol", "local llm"), and `keyword_match` tests each listed
+# phrase literally, so a well-formed AI headline that never spelled a phrase out
+# was dropped by `stage1_filter` before `stage2_score` — the model #570 exists to
+# add — could ever see it. Measured on the settled raw day files beforehand: stage 1
+# kept 0 of 35 YouTube items on 09-10 and 0 of 9 on 09-17, and all 18 YouTube
+# titles carrying an AI word across 09-10/09-13/09-16 matched zero keywords — on the
+# title alone *and* on title + summary, which is the text `stage1_filter` tests.
+# YouTube is where it bites hardest, because #1155 leaves those rows with an empty
+# summary, so the title is the only thing that can match.
+#
+# Vault commit `752b85e6` (2026-09-20) appended `agent`, `llm`, `mcp`, `openai`,
+# `ai` to that line — 69 keywords, 67 distinct — and the whole-word rule #856
+# landed is what makes listing a two-letter keyword like `ai` safe at all. The same
+# probes afterwards: YouTube kept 8 of 24 on 09-16 (was 3) and 4 of 9 on 09-17
+# (was 0), and the 8 AI-titled 09-09 items that printed False all print True.
+#
+# What is pinned below is the code half the vault edit depends on: the loader
+# reading the real file, the gate's keep/drop on the two titles the acceptance
+# names, and the `python -m intel_pipeline` process autonomy task #30 spawns. No
+# `**Weight:**` is set anywhere here — a weight below 0.4 skips the stage-2 model
+# call *and* cannot clear `vault_writer.RELEVANCE_FLOOR`, so it is an off switch,
+# and relative weighting is Alan's call (#570 defect 3 says the same about the
+# vocabulary itself, which is why the needs-human half of this item stays open
+# after these tests land).
+
+# INTERESTS_LIVE_MD plus the five words. Building the widened document as a
+# substitution on the narrower one — rather than pasting a second interests.md —
+# is what makes each comparison below one vocabulary against its own predecessor.
+INTERESTS_852_MD = INTERESTS_LIVE_MD.replace(
+    "reinforcement learning,embodied ai,openclaw\n",
+    "reinforcement learning,embodied ai,openclaw,agent,llm,mcp,openai,ai\n")
+
+# The five, and nothing more. `agi` and `skill` were deliberately not added: #570
+# defect 3 warns that a broad AI vocabulary admits AI-headline noise, so widening
+# this list further is a decision about what the pipeline cares about, not a
+# recall fix.
+NEW_AI_WORDS = ("agent", "llm", "mcp", "openai", "ai")
+
+# The three titles the acceptance names, each one a real feed row with the
+# `id`, empty `summary` (#1155) and channel-derived `source_tags` the scanner
+# wrote. "Explains" and "Training" both contain `ai` inside a word — they are the
+# two junk items the triage measured when it warned that the cheap half of this fix
+# was unsafe without a boundary rule. "Why green rebar?" (2026-09-09, a YouTube
+# Short about concrete reinforcement) matches no keyword under either vocabulary,
+# and it arrives carrying a `source_tag`, which is the field #570 found opening the
+# gate for every item a scanner emitted.
+MCP_APPS_ITEM = "youtube:UCLKPca3kwwd-B59HNr-_lvA:waI44NP1abk"
+MCP_APPS_TITLE = "Rebuilding the web for agents — Liad Yosef, MCP Apps"
+LANTERN_ITEM = "youtube:UCTAgbu2l6_rBKdbTvEodEDw:coGsFZBfFz4"
+LANTERN_TITLE = "LANTERNS Explains Why Guy Gardner Is the Green Lantern"
+GREEN_REBAR_ITEM = "youtube:UCKqKiBDpq9j29bXbBx0cfOw:H-3SHxqsXlQ"
+GREEN_REBAR_TITLE = "Why green rebar?"
+
+# All 8 titles the item's probe names — every 2026-09-09 YouTube title carrying an
+# AI word that matched zero keywords, verbatim from
+# `_pipeline/.../feeds/intel-2026-09-09.jsonl`. Each row's `summary` is empty
+# (#1155), so the title is the whole match text.
+PROBE_09_09_TITLES = [
+    "AI Just Did the Impossible: Reversed Human Aging",
+    "Should you ask Astra to do this? #AGI #thisisAGI #openai #astra",
+    "OpenAI JUST solved math....",
+    "Abstraction Agent: LLM Engineers New State Space Geometry",
+    "The Universal Remote Control for AI — Alex Hancock, Block",
+    "MCP Apps: Give the Model Data, Give the User a UI — Dustin Mihalik, Indeed",
+    "How long can your skills be before your agent forgets what you told it? "
+    "— Laurie Voss, Arize AI",
+    "500 Skills, Zero Fine-Tuning: LinkedIn's Playbook for AI Agents "
+    "— Ajay Prakash, LinkedIn",
+]
+
+
+def _ai852_profile(tmp_path):
+    """`load_profile()` on the interests.md #852 landed, from a redirected HOME."""
+    (tmp_path / "obsidian" / "interests.md").write_text(INTERESTS_852_MD)
+    return profile_mod.load_profile()
+
+
+def _feed_video(item_id, title, tags):
+    """One of the three real rows above, reconstructed with the fields the feed
+    row actually carries: no summary, and the channel's own source tag."""
+    return _item(item_id, source="youtube", title=title, summary="", tags=[tags])
+
+
+@pytest.mark.live_vault
+def test_the_interests_md_the_pipeline_loads_carries_the_bare_ai_words():
+    """Clause 1, through the real loader from the real vault file.
+
+    Not from a copy in this file: the defect was that the vocabulary *on disk*
+    could not reach an AI-aggregate title, so the assertion has to run against the
+    file `load_profile()` reads. Marked `live_vault` because the gate's hard
+    `tests` rung deselects it — interests.md is under a person's pen between
+    rounds, and this is the one assertion here that is not closed under the diff.
+    Each of the five must also sit on the `## AI & LLMs` topic specifically: a bare
+    word listed only under another topic files an AI item in the wrong note.
+    """
+    profile = profile_mod.load_profile()
+    keywords = {k.lower() for k in profile_mod.get_all_keywords(profile)}
+    ai_line = {k.lower() for k in
+               [t["keywords"] for t in profile["topics"]
+                if t["name"] == "ai-llms"][0]}
+
+    missing = [w for w in NEW_AI_WORDS if w not in keywords]
+    assert not missing, (
+        f"interests.md loads without {missing}, so a title like "
+        f"{MCP_APPS_TITLE!r} is dropped by stage1_filter before stage2_score ever "
+        "sees it")
+    off_topic = [w for w in NEW_AI_WORDS if w not in ai_line]
+    assert not off_topic, (
+        f"{off_topic} must belong to the `## AI & LLMs` topic, not merely to some "
+        f"topic, or the item is filed under the wrong note: {sorted(ai_line)[-8:]}")
+
+
+def test_the_five_bare_ai_words_match_their_own_words_and_nobody_elses(
+        redirect_paths):
+    """Clause 2 under the widened vocabulary: `ai` is a keyword now, and the
+    whole-word rule is the only reason that is not a substring wildcard.
+
+    `ai` (2 characters) and `mcp` (3) are the shapes the clause names. The two junk
+    titles both contain `ai` inside a word and must match nothing; `local llm` must
+    still match as a phrase, so the boundary rule was not bought by breaking every
+    multi-word keyword.
+    """
+    profile = _ai852_profile(redirect_paths)
+    keywords = profile_mod.get_all_keywords(profile)
+
+    assert len(keywords) == 69, (
+        "this file's copy of interests.md must hold INTERESTS_LIVE_MD's 64 "
+        f"keywords plus the five, or it is not the vocabulary #852 landed: {len(keywords)}")
+
+    on_topic = profile_mod.keyword_match(
+        "Connect AI to Billions of Legal Documents", profile)
+    assert [t["matched_keywords"] for t in on_topic] == [["ai"]], (
+        f"the two-letter keyword must match its own word and no other topic: {on_topic}")
+    assert on_topic[0]["name"] == "ai-llms"
+    assert profile_mod.keyword_match("MCP Apps for the browser", profile)[0][
+        "matched_keywords"] == ["mcp"], (
+        "the three-letter keyword must match its own word")
+
+    for junk, item_id in ((GREEN_REBAR_TITLE, GREEN_REBAR_ITEM),
+                          (LANTERN_TITLE, LANTERN_ITEM),
+                          ("Training Taste", "training-taste")):
+        assert profile_mod.keyword_match(junk, profile) == [], (
+            f"{junk!r} is the item the containment rule admitted via `ai` inside a "
+            f"word ({item_id}); it must still match nothing")
+
+    phrase = profile_mod.keyword_match(
+        "quantising a local llm for the desktop", profile)
+    assert [t["matched_keywords"] for t in phrase] == [["local llm", "llm"]], (
+        "the existing phrase must still match verbatim — joined here by the new "
+        f"bare `llm` inside it, which is the expected overlap: {phrase}")
+
+
+def test_the_item_probe_titles_that_printed_false_now_all_match(redirect_paths):
+    """The 8-item probe this item was filed on, re-run against the widened list.
+
+    These are the titles from `feeds/intel-2026-09-09.jsonl` whose `False` the item
+    recorded ("all 21 YouTube items scored 1/10, and 8 of those 21 titles contain an
+    obvious AI/agent word while matching zero keywords"). Re-running the item's own
+    command against today's vault prints True for all 8; this pins the same claim
+    without reaching for `_pipeline`, which keeps moving.
+    """
+    profile = _ai852_profile(redirect_paths)
+
+    unmatched = [t for t in PROBE_09_09_TITLES
+                 if not profile_mod.keyword_match(t, profile)]
+    assert not unmatched, (
+        f"these on-topic AI titles still match no keyword: {unmatched}")
+
+
+def test_the_loaded_profile_keeps_the_ai_video_and_still_drops_the_rebar(
+        redirect_paths):
+    """Clause 3 and the surviving half of clause 4, across the gate.
+
+    `load_profile()` on the interests.md #852 landed, then `stage1_filter` on the
+    three real feed rows. The MCP Apps title spells "agents" with an s and never
+    says "agent framework" or "mcp protocol", so under INTERESTS_LIVE_MD's 64
+    keywords it is dropped — the premise leg below is what stops this test passing
+    if the hole ever closes somewhere else. The rebar Short is the item the gate
+    exists to catch, and it carries a `source_tag`: an item whose title and summary
+    match no keyword must be dropped even so.
+    """
+    after = _ai852_profile(redirect_paths)
+    before = _live_profile(redirect_paths)
+    videos = [_feed_video(MCP_APPS_ITEM, MCP_APPS_TITLE, "aiDotEngineer"),
+              _feed_video(LANTERN_ITEM, LANTERN_TITLE, "Nerdist"),
+              _feed_video(GREEN_REBAR_ITEM, GREEN_REBAR_TITLE, "buildwitt")]
+
+    kept_before = {it.id for it in scoring_mod.stage1_filter(videos, before)}
+    kept_after = {it.id for it in scoring_mod.stage1_filter(videos, after)}
+
+    assert MCP_APPS_ITEM not in kept_before, (
+        "the premise stopped holding: the 64-keyword vocabulary already keeps this "
+        "item, so the recall hole this section pins is closed elsewhere")
+    assert kept_after == {MCP_APPS_ITEM}, (
+        f"only the AI video may survive stage 1; the rebar Short and the "
+        f"substring-only `ai` titles must not: {sorted(kept_after)}")
+    assert kept_before <= kept_after, (
+        "widening a keyword list may only add admits — every new word is ANDed "
+        f"with a whole-word test, never ORed with a wider match; lost "
+        f"{sorted(kept_before - kept_after)}")
+
+
+def test_the_cli_keeps_the_ai_video_into_the_day_file(tmp_path):
+    """The process boundary the unit tests cannot cross.
+
+    `python -m intel_pipeline --score`: the subprocess autonomy task #30 spawns,
+    its own HOME, the interests file read from disk by the real loader, and the
+    keyword-fallback path with the engine off. One raw day, the three real feed
+    rows — only the AI video may reach the day file, and it must keep the grade the
+    keyword path gives it rather than being silently down-rated on its way to the
+    writer.
+    """
+    home, feeds = _cli_home(tmp_path)
+    (home / "obsidian" / "interests.md").write_text(INTERESTS_852_MD)
+    (feeds / "raw" / f"{__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d')}.jsonl"
+     ).write_text("\n".join([
+         _feed_video(MCP_APPS_ITEM, MCP_APPS_TITLE, "aiDotEngineer").to_json(),
+         _feed_video(LANTERN_ITEM, LANTERN_TITLE, "Nerdist").to_json(),
+         _feed_video(GREEN_REBAR_ITEM, GREEN_REBAR_TITLE, "buildwitt").to_json(),
+     ]) + "\n")
+
+    day, proc = _run_cli(home, 6, "--score", extra_env={"INTEL_DISABLE_LLM": "1"})
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    rows = [json.loads(line) for line in
+            (feeds / f"intel-{day}.jsonl").read_text().splitlines() if line.strip()]
+
+    assert [r["id"] for r in rows] == [MCP_APPS_ITEM], (
+        f"the AI video must reach the day file and the two junk-shaped ones must "
+        f"be dropped before scoring: {rows}\n{proc.stdout[-2000:]}")
+    assert (rows[0]["relevance"], rows[0]["category"]) == (10, "ai-llms"), (
+        f"the surviving item keeps the keyword-fallback grade, filed under its own "
+        f"topic: {rows[0]}")
