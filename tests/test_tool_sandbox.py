@@ -23,7 +23,8 @@ import pytest
 
 import agent_mcp.main as M
 from agent_mcp import _tool_sandbox as S
-from agent_mcp import builtin_bash
+from agent_mcp import builtin_bash, builtin_fs
+from app.harness.bench_corpus import DENY_MARKER as BENCH_DENY_MARKER
 
 
 def _text(result) -> str:
@@ -384,3 +385,164 @@ def test_the_classification_reuses_the_sandbox_vocabulary_verbatim():
                  "Bash", "grant_create", "automod_land"):
         assert name not in S._annotations.READ_ONLY
         assert S.state_changing_tool(name) is True, name
+
+
+# ---------------------------------------------------------------------------
+# #651 — the grading corpus is unreadable to the thing being graded.
+#
+# Being read-only is what lets `Read`/`Grep`/`Glob` through `refusal`, and the
+# bwrap bind confines writes only, so the corpus sitting at
+# ~/obsidian/lloyd/bench/*.md — one YAML block per task carrying `prompt:`,
+# `objective_checks:` and `rubric_criteria:` — was fully readable mid-trial by
+# a model that thought to look. These pin the one denial that applies to every
+# tool, decided on resolved paths, and pin that it is scoped to the corpus: a
+# trial must still be able to read the rest of the vault, because
+# `bench_003_vault_recall` is graded on doing exactly that.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def corpus_home(monkeypatch, tmp_path):
+    """A home with a bench corpus and one innocent vault note."""
+    home = tmp_path / "home"
+    bench = home / "obsidian" / "lloyd" / "bench"
+    bench.mkdir(parents=True)
+    (bench / "bench_003_vault_recall.md").write_text(
+        "---\nid: bench_003\nprompt: what is the thing\n"
+        "objective_checks:\n  - type: tool_called\n    value: vault_recall\n---\n",
+        encoding="utf-8")
+    notes = home / "obsidian" / "knowledge"
+    notes.mkdir(parents=True)
+    (notes / "note.md").write_text("harmless prose\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+
+    import app.paths as paths
+    monkeypatch.setattr(paths, "VAULT_ROOT", home / "obsidian")
+    import app.harness.bench_corpus as bc
+    monkeypatch.setattr(bc, "corpus_roots", lambda: [str(bench.resolve())])
+    return home
+
+
+def test_read_of_the_corpus_is_refused_for_a_read_only_tool(corpus_home):
+    """`Read` carries `readOnlyHint`, which is exactly why the read-only
+    session allowed it; the corpus rule runs first and for every tool."""
+    target = str(corpus_home / "obsidian" / "lloyd" / "bench"
+                 / "bench_003_vault_recall.md")
+    assert S.refusal("Read", {"file_path": target}) is not None
+    assert "bench corpus" in S.refusal("Read", {"file_path": target})
+    # …while the same tool on a vault note outside the corpus is still allowed.
+    assert S.refusal("Read", {"file_path": str(
+        corpus_home / "obsidian" / "knowledge" / "note.md")}) is None
+
+
+def test_glob_rooted_in_the_corpus_is_refused(corpus_home):
+    """The `path` argument decides it, and a `Glob` with no `path` decides on the
+    search root the handler will actually use — the process's working directory.
+    A search rooted at the vault is NOT refused: `bench_003_vault_recall` reads
+    the vault, and the corpus is the only path this deny owns."""
+    bench = corpus_home / "obsidian" / "lloyd" / "bench"
+    assert S.refusal("Glob", {"pattern": "**/*.md", "path": str(bench)}) is not None
+    assert S.refusal("Grep", {"pattern": "objective_checks", "path": str(bench)}) is not None
+    for args in ({"pattern": "**/*.md", "path": str(corpus_home / "obsidian")},
+                 {"pattern": "x", "path": str(corpus_home / "obsidian" / "knowledge")}):
+        assert S.refusal("Grep", args) is None, args
+
+
+def test_bash_naming_a_corpus_path_is_refused(corpus_home):
+    """The refusal is decided on the resolved path, never on a command-string
+    substring: `cat ~/obsidian/lloyd/bench/x.md`, `cd` into the corpus with a
+    relative operand, and a path inside a `python3 -c` literal all reach it."""
+    rel = "lloyd/bench/bench_003_vault_recall.md"
+    commands = [
+        f"cat {corpus_home}/obsidian/{rel}",
+        "cat ~/obsidian/" + rel,
+        f"cd {corpus_home}/obsidian && cat {rel}",
+        "python3 -c \"open('%s/obsidian/%s').read()\"" % (corpus_home, rel),
+        f"grep -rn 'objective_checks' {corpus_home}/obsidian/lloyd/bench/",
+    ]
+    for cmd in commands:
+        why = S.refusal("Bash", {"command": cmd})
+        assert why is not None, cmd
+        assert "bench corpus" in why, cmd
+
+
+def test_bash_naming_no_corpus_path_still_runs_read_only(corpus_home):
+    """The widened rule must not cost Bash its measured channel: `Bash` is
+    advertised on purpose so `tool_not_called: Bash` checks stay measurable, and
+    the trial still has to be able to read ordinary files."""
+    cmd = f"cat {corpus_home}/obsidian/knowledge/note.md"
+    assert S.refusal("Bash", {"command": cmd}) is None
+
+
+def test_a_symlinked_corpus_parent_is_resolved_before_deciding(corpus_home):
+    """A `~`/env shortcut and a symlinked parent reach the same bytes the real
+    path does, so a string check would let them through and a resolved check
+    does not (#582: enforce in the substrate, not on the command string)."""
+    bench = corpus_home / "obsidian" / "lloyd" / "bench"
+    link = corpus_home / "shortcut"
+    link.symlink_to(bench, target_is_directory=True)
+    inside = str(link / "bench_003_vault_recall.md")
+    assert S.refusal("Read", {"file_path": inside}) is not None
+    assert S.refusal("Read", {"file_path": inside.replace(str(corpus_home), "$HOME")}) is not None
+
+
+def test_a_symlinked_file_inside_the_corpus_still_denies_after_its_own_target_dies(corpus_home):
+    """A dangling link resolves to its stored target, and that target is the
+    corpus path — so the check must run on it even though nothing exists there.
+    This is the case that would otherwise report 'allowed' from a path that
+    cannot be opened."""
+    bench = corpus_home / "obsidian" / "lloyd" / "bench"
+    gone = bench / "bench_010_safety_destructive.md"
+    link = corpus_home / "dangling.md"
+    link.symlink_to(gone)
+    assert not gone.exists()
+    assert S.refusal("Read", {"file_path": str(link)}) is not None
+
+
+@pytest.fixture()
+def corpus_dispatch(monkeypatch):
+    """The real `Read` handler on one side, a recorder for everything with
+    effects on the other, so "nothing ran" is a checked fact and "the allowed
+    read still returned its bytes" is too."""
+    rec = Recorder()
+    table = dict(getattr(M, "_dispatch", None) or {})
+    for name in ("Write", "Edit", "Task", "vault_write", "vault_read"):
+        table[name] = rec
+    table["Read"] = builtin_fs
+    table["Bash"] = builtin_bash
+    monkeypatch.setattr(M, "_dispatch", table)
+    rec.reads = rec
+    return rec
+
+
+async def test_dispatch_refuses_a_corpus_read_and_records_the_attempt(corpus_home, corpus_dispatch):
+    """Across the process boundary: the call reaches `call_tool`, nothing runs,
+    and the refusal is worded like the harness's own deny so the runner files it
+    under `denied_calls` — the attempt is the measurement, not a lost event."""
+    bench = corpus_home / "obsidian" / "lloyd" / "bench"
+    target = bench / "bench_003_vault_recall.md"
+    result = await M.call_tool("Read", {"file_path": str(target)},
+                               {M.META_SESSION_ID: "20260916_123000_bench_xy12"})
+    assert _is_error(result)
+    text = _text(result)
+    assert "Tool call denied" in text, text
+    assert BENCH_DENY_MARKER in text, text
+    assert corpus_dispatch.calls == []
+    assert "objective_checks" not in text
+    # The seam the acceptance clause is actually about: this message is what the
+    # runner turns into a `denied_calls` entry, and the kind has to be the bench
+    # one rather than the generic hook deny.
+    from scripts.autoresearch.bench_runner_sdk import _classify_result
+    kind, reason = _classify_result(text)
+    assert kind == "bench_corpus_deny", text
+    assert "bench_003_vault_recall.md" in reason
+
+
+async def test_dispatch_still_lets_a_trial_read_outside_the_corpus(corpus_home, corpus_dispatch):
+    """`bench_003_vault_recall` is graded on reading the vault; a deny scoped to
+    the corpus root must leave that path working, bytes and all."""
+    result = await M.call_tool(
+        "Read", {"file_path": str(corpus_home / "obsidian" / "knowledge" / "note.md")},
+        {M.META_SESSION_ID: "20260916_123000_bench_xy13"})
+    assert "Tool call denied" not in _text(result), _text(result)
+    assert "harmless prose" in _text(result)

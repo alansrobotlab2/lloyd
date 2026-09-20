@@ -177,7 +177,19 @@ def sandbox_available() -> tuple[bool, str]:
 
 
 def refusal(name: str, arguments: dict | None) -> str | None:
-    """Why a sandboxed session may not make this call, or None."""
+    """Why a sandboxed session may not make this call, or None.
+
+    Three rules, in this order. The bench grading corpus comes first and
+    applies to every tool, because being read-only is exactly what lets
+    `Read`/`Grep`/`Glob` through the second rule and the read-only bwrap bind of
+    the third confines writes only — the corpus is the one thing a trial must
+    not read (see `app.harness.bench_corpus`). It is decided on resolved paths,
+    never on the command string.
+    """
+    from app.harness.bench_corpus import deny_reason
+    bench_why = deny_reason(name, arguments)
+    if bench_why:
+        return bench_why
     if name == "Bash":
         if isinstance(arguments, dict) and arguments.get("run_in_background"):
             return ("background Bash is not available in a read-only session: a "

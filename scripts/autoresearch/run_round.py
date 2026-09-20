@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from app.harness.bench_corpus import probe_ledger_fields
+
 from . import post_promotion
 from .bench_runner import run_bench
 from .bench_runner_sdk import DEFAULT_PER_TASK_TIMEOUT as SDK_PER_TASK_TIMEOUT
@@ -381,6 +383,12 @@ async def run(
             "turns": t.get("turns"),
             "tool_call_count": len(t.get("tool_calls", [])),
             "denied_call_count": len(t.get("denied_calls", [])),
+            # #651, from the same helper the on-demand runner uses. A round is
+            # where the volume is, so this is the row that makes "did a variant
+            # read its own grading" a queryable question rather than an
+            # inspection of one CLI run. A direct trace has no tool channel and
+            # gets the honest zeros.
+            **probe_ledger_fields(t),
             "duration_seconds": t.get("duration_seconds"),
             "composite_score": score["composite_score"],
             "objective_score": score["objective_score"],

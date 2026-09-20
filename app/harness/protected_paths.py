@@ -404,6 +404,98 @@ def _scan(command: str, cwd: str | None, home: str, roots: list[Root], depth: in
     return _interpreter_delete(command, cwd, home, roots, depth)
 
 
+def _start_cwd(cwd: str | None, home: str) -> str | None:
+    """Where a command begins, the same reading `check_protected_delete` uses:
+    the tool's `cwd` argument, else the aggregator's own directory."""
+    if cwd:
+        return _resolve(cwd, None, home) or cwd
+    try:
+        from app.paths import LLOYD_HOME
+        return str(LLOYD_HOME)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+_PATHISH = re.compile(r"(/|^\*|\.(md|py|json|yaml|yml|txt|sh)$)")
+
+#: Commands whose whole job is to run another command string, so their quoted
+#: operand has to be re-scanned rather than resolved as a filename.
+_RESCAN = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish", "python",
+                     "python3", "perl", "ruby", "node", "xargs", "env"})
+
+
+def _looks_like_path(tok: str) -> bool:
+    """A token worth trying to resolve. Skipping bare words keeps a `grep`
+    pattern like `bench` or a variable name from being read as an operand; a
+    token with a slash, a glob root or a known extension is worth resolving."""
+    return bool(_PATHISH.search(tok))
+
+
+def referenced_paths(command: str, cwd: str | None = None, _depth: int = 0) -> list[str]:
+    """Every path a command's operands name, resolved as of each `cd`.
+
+    The tokenizer and `~`/`$HOME`/relative resolution of
+    `check_protected_delete`, pointed at a different question: not "would this
+    delete a protected tree" but "which files does this command name". Used by
+    the bench-corpus read gate (`app.harness.bench_corpus`), which has to deny
+    `cat ~/obsidian/lloyd/bench/bench_010_*.md`, `cd ~/obsidian && cat
+    lloyd/bench/x.md`, and the same path inside an interpreter's quoted
+    literal, because a read gate that only matches the whole command string is
+    bypassed by the first `/bin/cat` (backlog #582's lesson).
+
+    Deliberately over-inclusive — every operand, not only the ones after a
+    reader command, because the caller denies only when a resolved operand is
+    inside the corpus, and a false candidate that resolves elsewhere is
+    harmless. Unexpandable tokens (`$VAR`, `~user`) are not returned: the
+    caller cannot decide about a path whose value is not in the string.
+    """
+    if not command or not isinstance(command, str):
+        return []
+    home = os.path.normpath(os.path.expanduser("~"))
+    start = _start_cwd(cwd, home)
+    out: list[str] = []
+
+    def add(tok: str, base: str | None) -> None:
+        if not tok or not _looks_like_path(tok):
+            return
+        p = _resolve(tok, base, home)
+        if p and p not in out:
+            out.append(p)
+
+    try:
+        cur = start
+        segments = [_strip_wrappers(a)[0] for a in _segments(_tokens(command))]
+        for argv in segments:
+            cmd = os.path.basename(argv[0]) if argv else ""
+            if cmd in ("cd", "pushd"):
+                # Track the directory the rest of the command runs in, the same
+                # reading the delete check takes: `cd ~/obsidian && cat
+                # lloyd/bench/x` names the file only relative to the directory
+                # the previous segment entered.
+                _, cur = _check_segment(argv, cur, home, [], command, 0)
+                continue
+            for tok in argv:
+                add(tok, cur)
+        # `bash -c "cat ~/obsidian/lloyd/bench/x.md"`, `python3 -c
+        # "open('…').read()"`: a path carried inside a quoted operand, which
+        # `shlex` has already unwrapped into one token. Scan the raw command's
+        # quoted literals and read each one as a command of its own — the same
+        # single-/double-quote split as `_interpreter_delete`, for the same
+        # reason: a nested literal stops a single alternation. Resolved against
+        # the directory the command ended up in, which is the reading that
+        # catches `cd ~/obsidian/lloyd/bench && python3 -c "cat x.md"`.
+        cmds = {os.path.basename(a[0]) for a in segments if a}
+        if cmds & _RESCAN and _depth < _MAX_DEPTH:
+            for pat in (r"'([^'\n]{2,400})'", r'"([^"\n]{2,400})"'):
+                for m in re.finditer(pat, command):
+                    for p in referenced_paths(m.group(1), cur, _depth + 1):
+                        if p not in out:
+                            out.append(p)
+    except Exception:  # noqa: BLE001 — a parser bug must not become a crash
+        return out
+    return out
+
+
 def check_protected_delete(command: str, cwd: str | None = None) -> str | None:
     """Why `command` would delete a protected tree wholesale, or None.
 
@@ -415,15 +507,7 @@ def check_protected_delete(command: str, cwd: str | None = None) -> str | None:
         return None
     home = os.path.normpath(os.path.expanduser("~"))
     roots = protected_roots()
-    start = cwd
-    if start is None:
-        try:
-            from app.paths import LLOYD_HOME
-            start = str(LLOYD_HOME)
-        except Exception:  # noqa: BLE001
-            start = None
-    elif start:
-        start = _resolve(start, None, home) or start
+    start = _start_cwd(cwd, home)
     try:
         return _scan(command, start, home, roots, 0)
     except Exception:  # noqa: BLE001 — a parser bug must not become a crash
