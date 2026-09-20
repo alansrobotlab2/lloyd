@@ -24,7 +24,7 @@ tuning loop actually needs.
 Usage:
     python scripts/iv_grade.py                    # all sessions
     python scripts/iv_grade.py --session <id>
-    python scripts/iv_grade.py --since 2026-08-01
+    python scripts/iv_grade.py --since '2026-09-16 04:00:00'   # LOCAL wall clock
     python scripts/iv_grade.py --json             # machine-readable
 """
 
@@ -260,10 +260,48 @@ def _cost(rows: list[dict]) -> dict[str, Any]:
     }
 
 
+#: The `--since` predicate, kept as one SQL expression so the query cannot drift
+#: from the text `--help` describes.
+#:
+#: Backlog #835. `created_at` is written local-naive ISO with a `T`
+#: (`usage_store.record_inner_voice_observation`), while a bound produced by
+#: SQLite's `datetime('now', …)` or by `date '+%Y-%m-%d %H:%M:%S'` renders with a
+#: SPACE. SQLite compares TEXT with BINARY collation, so
+#: `'2026-09-16T00:16:07' >= '2026-09-16 04:00:00'` is decided at the separator —
+#: `T` (0x54) sorts above space (0x20) — and never reaches the time digits. A
+#: space-form bound therefore kept every row of the bound's own day and everything
+#: after it: 170 rows where the honest count was 119 on the day #835 was triaged.
+#: Normalising both sides to the space form makes the comparison a clock
+#: comparison, and makes the two separator forms of one instant agree — which is
+#: the acceptance check.
+#:
+#: The function blocks index use, so the read is a full scan. Accepted: 58,455 rows
+#: (measured 2026-09-20) scan in ~25 ms, in a read-only, off-critical-path grader
+#: (the module docstring and `scripts/iv_metrics_record.py:19-23` are why it stays
+#: off the chat path).
+#:
+#: Only `T` is replaced, and a `%Y`-rendered date never contains one. A NULL
+#: `created_at` comes back NULL from `replace()` and is excluded by the
+#: comparison — which is what a row with no timestamp should do.
+WINDOW_CLAUSE = "replace(created_at, 'T', ' ') >= replace(?, 'T', ' ')"
+
+#: Names the clock, which is the part that was missing: `--since` is the only
+#: time-bounded query on this table, and an unqualified "ISO date lower bound"
+#: made `date -u` look like the natural choice on a box whose rows run hours
+#: behind UTC.
+_SINCE_HELP = (
+    "Lower bound on created_at, compared in LOCAL wall clock — the clock "
+    "created_at is written in (local-naive ISO). Not UTC: UTC runs hours ahead "
+    "of these rows here, so a `date -u` or datetime('now') bound silently drops "
+    "the oldest hours of the window. Both separator forms of one instant "
+    "('YYYY-MM-DD HH:MM:SS' and 'YYYY-MM-DDTHH:MM:SS') select the same rows."
+)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--session", help="restrict to one session id")
-    ap.add_argument("--since", help="ISO date lower bound on created_at")
+    ap.add_argument("--since", help=_SINCE_HELP)
     ap.add_argument("--json", action="store_true", help="emit JSON")
     args = ap.parse_args()
 
@@ -276,7 +314,7 @@ def main() -> int:
         where.append("session_id = ?")
         params.append(args.session)
     if args.since:
-        where.append("created_at >= ?")
+        where.append(WINDOW_CLAUSE)
         params.append(args.since)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
 

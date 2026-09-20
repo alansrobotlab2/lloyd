@@ -26,17 +26,23 @@ writer on `usage.db`.
 destination is never hardcoded — the tests run this against a fixture root.
 
 Window bounds. `inner_voice_observations.created_at` is written **local-naive**, while
-UTC runs hours ahead of it, and #835 documents what that does to a bound: it is
-compared **lexically** against the stored ISO `T`, so a bound authored in a different
-clock does not shift the window — it moves one end of it, silently. On this box
-(UTC−7) a `date -u` bound names a local instant 7 hours later than intended, and the
-window loses its **oldest** 7 hours: measured 2026-09-13 on one fixed 26-hour window,
-182 LLM calls with the local bound against 130 with `date -u`, `last` identical both
-ways. The query succeeds either way, so the wrong one looks like a quiet night.
-(#835's other face: a date-only bound or SQLite's `datetime('now')` renders with a
-*space*, which sorts below the stored `T`, so every row of that day compares "greater
-than the bound" regardless of hour and a 3-hour window reported 3,634 rows whose
-honest count was 0.)
+UTC runs hours ahead of it, so a bound authored in a different clock does not shift the
+window — it moves one end of it, silently. On this box (UTC−7) a `date -u` bound names a
+local instant 7 hours later than intended, and the window loses its **oldest** 7 hours:
+measured 2026-09-13 on one fixed 26-hour window, 182 LLM calls with the local bound
+against 130 with `date -u`, `last` identical both ways. The query succeeds either way, so
+the wrong one looks like a quiet night. That hazard is still here and is still this
+script's reason for taking the bound as a string.
+
+What is no longer here is #835's second, worse face. A date-only bound or SQLite's
+`datetime('now')` renders with a *space*, and the stored rows carry a `T`; a raw
+comparison of the two was decided by the separator (`T` 0x54 above space 0x20), so every
+row of the bound's own day counted as "after the bound" whatever its hour — a 3-hour
+window once reported 3,634 rows whose honest count was 0, and the two separator forms of
+one instant disagreed 170 vs 4. `iv_grade.py`'s `WINDOW_CLAUSE` now normalises both sides
+with `replace(..., 'T', ' ')` before comparing, so the window is decided by the clock and
+the two forms cannot disagree. Local authorship is still mandatory: normalising the
+separator does nothing about an instant that was wrong to begin with.
 
 This script stores the bound it was handed verbatim and stamps `until` from the same
 local clock the rows use, so the window in the row is the window that was asked for,

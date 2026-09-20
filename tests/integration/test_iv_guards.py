@@ -501,6 +501,77 @@ def test_event_prompt_carries_cross_turn_memory_and_pressure():
     print("test_event_prompt_carries_cross_turn_memory_and_pressure: OK")
 
 
+def test_observation_rows_keep_the_local_naive_writer_clock():
+    """#835 clause 5: the window fix stays in the QUERY and the prose.
+
+    `scripts/iv_grade.py`'s `--since` now normalises both sides of the comparison with
+    `replace(..., 'T', ' ')`, which makes the window a clock comparison. That fix is
+    only sufficient while `created_at` keeps the shape the writer gives it, so this
+    pins the shape and the clock: a row inserted by the real writer must land within
+    seconds of LOCAL `datetime.now()`, carrying no UTC offset.
+
+    The durable half of #835 — stamping the column in UTC — is deliberately NOT taken.
+    `usage_store.py:339-342` records that SQLite's UTC-naive `CURRENT_TIMESTAMP` would
+    "be mis-parse[d] as local time and shift observations into the future by the local
+    TZ offset" in the frontend timeline merge, so moving the writer is a `web/src`
+    change and belongs to another item. If this test fails, that merge is already
+    putting observations hours ahead of the messages beside them — widen nothing here;
+    fix the writer together with the frontend.
+
+    Runs against a scratch `usage.db` (this module's own isolation rule: `_persist`
+    and its writer must never append to the table the grader is judging).
+    """
+    import sqlite3
+    from datetime import datetime, timedelta
+
+    import usage_store
+
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td) / "usage.db"
+        with patch.object(usage_store, "DB_PATH", scratch):
+            usage_store.record_inner_voice_observation(
+                session_id="writer_clock_sess", turn_id="t1", sequence_in_turn=1,
+                trigger="result", action="noop", reason="fixture")
+            rows = usage_store.list_inner_voice_observations(
+                session_id="writer_clock_sess")
+            # The seam clause 5 depends on: the row the WRITER produces has to be the
+            # row the GRADER's clause can still select. Both halves are the shipped
+            # code — one real insert, one real predicate — not two hand-written strings.
+            # Loaded by path: `scripts/` holds modules that shadow stdlib names, and
+            # putting it on sys.path to import one file can break unrelated tests.
+            import importlib.util
+
+            _gv = importlib.util.spec_from_file_location(
+                "iv_grade_writer_clock", LLOYD_HOME / "scripts" / "iv_grade.py")
+            iv_grade = importlib.util.module_from_spec(_gv)
+            _gv.loader.exec_module(iv_grade)
+            conn = sqlite3.connect(str(scratch))
+            kept = conn.execute(
+                f"SELECT COUNT(*) FROM inner_voice_observations "
+                f"WHERE {iv_grade.WINDOW_CLAUSE}",
+                ((datetime.now() - timedelta(hours=1))
+                 .strftime("%Y-%m-%d %H:%M:%S"),),   # the SPACE form
+            ).fetchone()[0]
+            conn.close()
+
+    assert len(rows) == 1, rows
+    stored = rows[0]["created_at"]
+    parsed = datetime.fromisoformat(stored)
+    assert parsed.tzinfo is None, (
+        f"created_at={stored!r} now carries an offset; the frontend timeline merge "
+        "reads this column as local time (usage_store.py:339-342)")
+    skew = abs((datetime.now() - parsed).total_seconds())
+    assert skew < 120, (
+        f"created_at={stored!r} is {skew:.0f}s from local datetime.now(): the writer "
+        "has moved off the local clock, which shifts every observation relative to "
+        "the messages the frontend timeline puts it next to")
+    assert kept == 1, (
+        f"a row the live writer just stamped was excluded by a space-form bound one "
+        f"hour earlier (iv_grade.WINDOW_CLAUSE={iv_grade.WINDOW_CLAUSE!r}) — the "
+        "writer's format and the grader's window have drifted apart")
+    print("test_observation_rows_keep_the_local_naive_writer_clock: OK")
+
+
 def test_observation_rows_record_the_observer_model():
     """The `model` column recorded the PRIMARY's alias, which made every
     row useless for "what served the observer?" — the exact question you
@@ -589,6 +660,7 @@ TESTS = [
     test_goal_card_block_for_primary,
     test_event_prompt_carries_cross_turn_memory_and_pressure,
     test_observation_rows_record_the_observer_model,
+    test_observation_rows_keep_the_local_naive_writer_clock,
 ]
 
 
