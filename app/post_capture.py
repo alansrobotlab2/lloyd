@@ -2,12 +2,19 @@
 
 Runs in the background after a turn completes:
   1. Export the session as searchable markdown to the vault (immediate — for QMD index).
-  2. Call the secondary model for a 2-4 sentence summary; append to today's daily note.
-  3. If the session is substantive (≥3 user turns), extract durable facts.
+  2. Once per session: call the secondary model for a 2-4 sentence summary and
+     append it to today's daily note.
+  3. Every time the session gains ≥3 user messages since the last extraction:
+     extract durable facts from the messages after the watermark.
+
+Steps 2 and 3 have separate gates, which is the fix for #1159: they used to
+share the `captured` boolean, the summary half won it on turn 1, and nothing
+extracted a fact again. Step 1 and the summary run for every platform; step 3
+runs only for sessions a human reads.
 
 Also handles the focus-topic extraction invoked mid-session by prefetch.
-Facts are NOT written here for trivial sessions — inline fact_add during
-conversation and nightly extraction handle structured facts.
+Trivial sessions still get no facts — inline fact_add during conversation and
+nightly extraction handle structured facts.
 """
 
 import asyncio
@@ -33,41 +40,263 @@ logger = logging.getLogger("lloyd-server")
 from app.paths import VAULT_BACKGROUND_SESSIONS_DIR, VAULT_SESSIONS_DIR
 
 
+def _transcript_line(msg: dict) -> Optional[str]:
+    """The transcript line for one message, or None if it is not transcript content.
+
+    Dropped: any role other than `user`/`assistant` — which is what keeps a
+    `thinking` row carrying a whole chain of thought out of every secondary-model
+    prompt — and Claude Code's control blocks and envelope prefixes. Both
+    transcript builders render through here so their bytes cannot drift;
+    `eval/secondary_routing_eval.py` pins a hash over one of them.
+    """
+    role = msg.get("role", "")
+    if role not in ("user", "assistant"):
+        return None
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        text = "\n".join(
+            t for t in (
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ) if t
+        )
+    elif isinstance(content, str):
+        text = content
+    else:
+        return None
+    if not text.strip():
+        return None
+    stripped = text.strip()
+    if any(stripped.startswith(pfx) for pfx in (
+        "<daily_notes>", "<memory>", "<context>", "<system-reminder>",
+        "[cron:", "[System Message]", "[autonomy:",
+    )):
+        return None
+    return f"{'USER' if role == 'user' else 'ASSISTANT'}: {text[:600]}"
+
+
 def _build_capture_transcript(messages: list, max_chars: int = 4000) -> str:
-    """Extract user/assistant text from messages, truncate to max_chars."""
+    """Extract user/assistant text from messages, truncated to max_chars.
+
+    Whole-session shape, spent head-and-tail: the first `max_chars/2` and last
+    `max_chars/2` characters, so a session longer than one budget loses its
+    middle and keeps its opening. That is the right shape for the capture
+    summary — a 2-4 sentence recap wants the premise and the latest state — and
+    it is the shape `eval/secondary_routing_eval.py` hashes, so its bytes are
+    pinned here and by that file's own input hash.
+
+    The fact extractor does not use it. A window that silently drops its own
+    middle cannot say which messages it stands for, and advancing a watermark
+    off a guess is how #1159's loss would come back under a new name; see
+    `_build_fact_transcript`.
+    """
     lines: list[str] = []
     for msg in messages:
-        role = msg.get("role", "")
-        if role not in ("user", "assistant"):
-            continue
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            text_parts = [
-                b.get("text", "")
-                for b in content
-                if isinstance(b, dict) and b.get("type") == "text"
-            ]
-            text = "\n".join(t for t in text_parts if t)
-        elif isinstance(content, str):
-            text = content
-        else:
-            continue
-        if not text.strip():
-            continue
-        stripped = text.strip()
-        if any(stripped.startswith(p) for p in (
-            "<daily_notes>", "<memory>", "<context>", "<system-reminder>",
-            "[cron:", "[System Message]", "[autonomy:",
-        )):
-            continue
-        label = "USER" if role == "user" else "ASSISTANT"
-        lines.append(f"{label}: {text[:600]}")
+        line = _transcript_line(msg)
+        if line is not None:
+            lines.append(line)
 
     result = "\n".join(lines)
     if len(result) > max_chars:
         half = max_chars // 2
         result = result[:half] + "\n[...truncated...]\n" + result[-half:]
     return result
+
+#: Same budget the summary path spends, and deliberately the same number: it is
+#: the size the secondary engine's prompt budget was tuned against, and this
+#: shares the engine with the summary and the title.
+FACT_TRANSCRIPT_BUDGET = 4000
+
+
+def _build_fact_transcript(messages: list, *, start: int = 0,
+                           max_chars: int = FACT_TRANSCRIPT_BUDGET) -> tuple[str, int]:
+    """Transcript of the messages from `start` on, plus how far it reaches.
+
+    Returns `(transcript, covered)` where every message at index `< covered` is
+    inside the returned text — so a caller may safely advance a watermark to
+    `covered` and mean it.
+
+    Two properties `_build_capture_transcript` cannot offer, and which the
+    summary path does not need because it has no watermark to advance. It spends
+    its budget head-and-tail over the whole slice, so (a) the middle is invisible
+    and (b) nothing in the returned string says which messages it stands for.
+    Asking the extraction question from that shape is what #1159 is about, and
+    guessing the covered count from a trimmed string is how a fix would end up
+    advancing past messages nobody read: they would then never be extracted,
+    which is the same loss with a new name.
+
+    So it fills forward from `start` and stops at the last message that fits
+    whole. A session longer than one budget drains across successive passes —
+    the gate is "≥3 user messages past the watermark", and after a pass that
+    covered part of a backlog there are still ≥3 unseen ones, so the next
+    turn-end pass takes the next slice. One call per turn while a backlog exists
+    is as fast as the single-slot engine allows anyway. The cost is honest and
+    stated: the oldest unseen turns are extracted first, so the newest fact
+    lands a pass or two later than it would with a tail-first fill.
+    """
+    chunks: list[str] = []
+    used = 0
+    covered = start
+    for idx in range(max(0, start), len(messages)):
+        msg = messages[idx]
+        line = _transcript_line(msg)
+        if line is None:
+            # A `thinking` row, a blank block, or a control/envelope prefix: the
+            # extractor has no use for it, and passing one over is not skipping
+            # content, so `covered` still counts it.
+            covered = idx + 1
+            continue
+        cost = len(line) + (1 if chunks else 0)
+        if used + cost > max_chars:
+            if not chunks:
+                # Nothing rendered fit — the first rendered line is longer than
+                # the whole budget. Reporting `covered` rather than `start` keeps
+                # the rows already passed over (skipped `thinking` rows, control
+                # prefixes) marked as seen: dropping them here would re-walk them
+                # on every future pass without ever advancing.
+                return "", covered
+            return "\n".join(chunks), covered
+        chunks.append(line)
+        used += cost
+        covered = idx + 1
+    return "\n".join(chunks), covered
+
+
+#: Session-file key holding the message index the last extraction pass covered.
+#: Separate from `captured` on purpose: `captured` means "this session's summary
+#: is in the daily note", which is a once-per-session thing; extraction is not.
+#: The single boolean did double duty and the summary half won — see #1159.
+FACT_WATERMARK_KEY = "fact_watermark"
+
+#: New user messages required before another extraction call fires.
+#:
+#: Event-gated rather than per turn because the secondary engine is
+#: single-tenant (`llama.cpp --parallel 1`, llm/CLAUDE.md): extraction shares
+#: that queue with session titling and the capture summary, and a call per turn
+#: would sit in front of the user's own work. Same reasoning that made titling
+#: geometric at `app/session_titles.py:11-21`; the number 3 is the threshold the
+#: old `user_msg_count >= 3` gate used, kept so the first pass after three user
+#: messages behaves exactly as the old code did on its last pass.
+FACT_EXTRACT_MIN_NEW_USER_MSGS = 3
+
+#: Below this the slice is a greeting, not a conversation. Same floor the
+#: summary path uses at `_post_session_capture`.
+_MIN_FACT_TRANSCRIPT_CHARS = 50
+
+
+def _fact_watermark(data: dict) -> int:
+    """The message index the last extraction pass covered (0 if never).
+
+    Defensively non-negative: the field is written by this module and read from
+    a JSON file a person can edit, and a negative start would make
+    `messages[start:]` hand the extractor the *tail* of the session while the
+    watermark still claimed otherwise.
+
+    And a watermark the file cannot vouch for reads as *never extracted*, which is
+    the load-bearing half. The message list is shared mutable state that a whole
+    other request path replaces wholesale: manual `/compact` assigns
+    `data["messages"] = new_messages` under `mutate_session`
+    (`app/routers/messages.py:1723-1742`) and never touches this key, so a 20- or
+    30-message session compacted to 10 leaves a stamp of 20 or 30 counting against
+    a list that no longer exists. Read raw on a 16-message file, `messages[20:]`
+    is empty — forever, however many turns arrive. That is #1159's silence again,
+    reinstated by the fix.
+
+    Neither reading of a stale stamp is *true*, so the choice here is a stated
+    loss, not a fact:
+
+      - clamping to `len(messages)` claims the compacted tail was extracted. It
+        may have been — but it claims that about the turns appended *after* the
+        compaction too, which were never in any transcript, so the session stays
+        silent until enough new turns push the list past the old number. Wrong in
+        the direction this item exists to close.
+      - reading 0 re-extracts the surviving turns, which spends the single
+        engine slot on a window that was already answered. The store refuses a
+        byte-identical re-add — `(entity, text_hash)` across categories, landed
+        as #499, which is also what covers this file's direct write — but it
+        cannot see a paraphrase, and the secondary model paraphrases, so the
+        re-extraction returns near-duplicates the guard lets through.
+
+    Duplicates win because they are the recoverable half: a dream pass or
+    `fact_resolve` can expire a duplicate, and `forget` can expire it; a fact the
+    window silently skipped leaves no trace that it was ever owed. The cost is
+    bounded and self-limiting too — one re-extraction per wholesale replacement,
+    since the next pass re-stamps the real coverage and the gate closes again.
+
+    Clamping here rather than patching the compaction route is also the only
+    place that covers every wholesale writer, including a restore over a session
+    file, not just the one route someone happened to think of.
+    """
+    raw = data.get(FACT_WATERMARK_KEY)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        return 0
+    messages = data.get("messages")
+    if isinstance(messages, list) and raw > len(messages):
+        return 0
+    return raw
+
+
+#: Sessions with an extraction pass inside the model call, in this process.
+#:
+#: The watermark decides from state read *before* the call and applies after it,
+#: so on its own it closes neither half of the #1159 hazard: two passes that read
+#: the same watermark both spend a call on a single-slot engine, and then both
+#: write. The store's `(entity, text_hash)` guard (#499) refuses the byte-identical
+#: re-add, but a refusal is not an idempotent run: the engine call is already
+#: spent by the time it happens, and the model's second answer is a paraphrase
+#: the key cannot see. So the gate is this set — a pass that finds its session
+#: already in it returns without calling.
+#:
+#: Process-local, which is the honest scope: every turn's capture pass is
+#: dispatched by the backend process (`app/routers/messages.py:1309, :1395`), so
+#: the passes that can interleave are in one process. The compare-before-write in
+#: `_set_fact_watermark` is what covers a second writer, or a restart between the
+#: call and the write, at the price of a redundant call rather than of a
+#: duplicated fact or an unread stretch of conversation.
+_in_flight: set[str] = set()
+
+
+def _set_fact_watermark(covered: int, expect: int):
+    """A `mutate_session` callback advancing the watermark, or refusing to.
+
+    `covered` is the count of messages the transcript actually contained, so a
+    turn appended during the 10+ second model call stays ahead of the watermark
+    and the next pass picks it up instead of skipping it.
+
+    `expect` is the watermark this pass read before it called the model. The
+    write happens only if the file still says `expect`, and only if `covered` is
+    inside the file it is being written into. Each refusal is a case where
+    `covered` is not a true statement about that file — another pass in this
+    process already advanced it, another process grew the list so `covered` was
+    counted against a different one, or the file shaken under a roll or a restore
+    — and in every one of them writing would advance the watermark past messages
+    nobody extracted. A refusal costs a redundant call on the next pass; a wrong
+    advance costs a stretch of conversation never extracted, which is the bug
+    this module exists to fix.
+    """
+    def _apply(data: dict) -> None:
+        current = _fact_watermark(data)
+        # The compare-before-write alone is not enough: a caller whose `covered`
+        # fell below the stored value would pass the compare (nothing raced it)
+        # and rewind the window, which re-extracts the same turns: the store
+        # refuses the byte-identical re-add (#499) but the engine slot is already
+        # spent and the model's second answer is a paraphrase it cannot see. So
+        # monotonic is checked on its own, and each refusal gets its own name.
+        if covered < current:
+            _apply.result = "lowered"
+            return
+        if current != expect:
+            _apply.result = "already-advanced"
+            return
+        in_file = len(data.get("messages", []))
+        if covered > in_file:
+            _apply.result = "shrink"
+            return
+        data[FACT_WATERMARK_KEY] = covered
+        _apply.result = "advanced"
+
+    _apply.result = "not-run"
+    return _apply
 
 
 def _write_extracted_facts(facts: list[dict], session_id: str):
@@ -332,12 +561,25 @@ def _export_session_markdown(session_id: str, data: dict) -> Optional[Path]:
 
 
 async def _post_session_capture(session_id: str):
-    """Background task: extract summary from completed session via secondary model.
+    """Background task: summarise a session and extract facts as it grows.
+
+    Two halves with two independent gates, and the separation is the whole of
+    #1159. The summary + daily note runs once per session and is guarded by
+    `captured`. Fact extraction is guarded by `fact_watermark` and is *not*
+    suppressed by `captured` — because one boolean could only mean one thing,
+    and the summary half wrote it on turn 1 (turn 1 nearly always produces a
+    non-trivial summary), so the old `user_msg_count >= 3` extraction branch
+    below it was unreachable by construction. The retained server logs
+    (`logs/server.err` … `server.err.10`, 2026-09-16 → 09-20) carry the string
+    `facts extracted` exactly once, and its three surrounding lines put the
+    export, the extraction and the summary in the same pass: the only session
+    that ever got facts was one whose first capture pass did not arrive until it
+    already held 4 user messages. No session has extracted on a second pass.
 
     Must never write a stale snapshot back to the session file — the
     secondary-model call can take 10+ seconds, during which new turns
     may append messages. Use `mutate_session` to apply the `captured`
-    flag atomically against current on-disk state.
+    flag and the fact watermark atomically against current on-disk state.
     """
     try:
         meta_path = SESSIONS_DIR / f"{session_id}.json"
@@ -348,9 +590,6 @@ async def _post_session_capture(session_id: str):
         # transcript build). We never write this dict back.
         data = json.loads(meta_path.read_text())
 
-        if data.get("captured"):
-            return
-
         user_msgs = [
             m for m in data.get("messages", [])
             if m.get("role") == "user"
@@ -358,6 +597,33 @@ async def _post_session_capture(session_id: str):
         if not user_msgs:
             return
 
+        if not data.get("captured"):
+            await _capture_summary_once(session_id, data)
+
+        # Export and summary above run for every platform; writing facts into
+        # the knowledge graph does not — see the platform note inside
+        # `_capture_summary_once` for why a worker's notes to itself are not
+        # things the user said.
+        if is_user_session(data):
+            await _extract_facts_past_watermark(session_id)
+
+    except Exception as e:
+        logger.warning(f"Post-session capture failed for {session_id}: {e}")
+
+
+async def _capture_summary_once(session_id: str, data: dict):
+    """Export the session, summarise it into today's daily note, latch `captured`.
+
+    At most once per session — the caller skips this entirely when `captured` is
+    set — and it writes that latch itself on every path that consumed the
+    summary: a non-user platform, a `TRIVIAL` verdict, or a summary appended.
+    The one path that does not latch is the sub-50-character transcript, where
+    there was nothing to summarise *yet*, so a later pass is still free to try.
+
+    Owns its exception handler so a failing summary cannot also eat the fact
+    pass that runs after it.
+    """
+    try:
         try:
             md_path = _export_session_markdown(session_id, data)
             if md_path:
@@ -392,21 +658,122 @@ async def _post_session_capture(session_id: str):
 
         _append_daily_note(session_id, summary)
 
-        user_msg_count = len([m for m in data.get("messages", []) if m.get("role") == "user"])
-        if user_msg_count >= 3:
-            try:
-                facts = await asyncio.get_event_loop().run_in_executor(
-                    None, _sync_secondary_fact_extraction, transcript
-                )
-                if facts:
-                    _write_extracted_facts(facts, session_id)
-                    logger.info(f"Post-session capture: {session_id} — {len(facts)} facts extracted")
-            except Exception as fe:
-                logger.warning(f"Post-session fact extraction failed for {session_id}: {fe}")
-
         await mutate_session(session_id, lambda d: d.__setitem__("captured", True))
 
         logger.info(f"Post-session capture: {session_id} — summary written to daily note")
 
     except Exception as e:
         logger.warning(f"Post-session capture failed for {session_id}: {e}")
+
+
+async def _extract_facts_past_watermark(session_id: str) -> int:
+    """Extract durable facts from the messages this session has not shown us yet.
+
+    Returns the number of facts written (also the signal a test asserts on: zero
+    return value with a non-zero call count means the model found nothing durable,
+    which is a different outcome from the gate declining to ask it).
+
+    Re-reads the session file rather than trusting the caller's snapshot: the
+    pass that reached here may have spent 10+ seconds in the summary call, and
+    the turns appended since are precisely the ones #1159 is about — a spoken
+    conversation keeps arriving over `/api/voice/inject` while the first pass is
+    still in flight.
+
+    The gate is `>= FACT_EXTRACT_MIN_NEW_USER_MSGS` user messages *past the
+    watermark*, so the call is event-gated and not per turn: the secondary
+    engine is single-tenant, and a pass with nothing new must issue zero calls.
+    Re-running this with no new messages therefore writes nothing.
+
+    The watermark advances on any completed attempt, including one that returned
+    no facts, so the same messages are never sent twice. The store refuses a
+    byte-identical re-add (#499's `(entity, text_hash)` key) but is blind to a
+    paraphrase, and this prompt asks the model to restate, so idempotence lives
+    here rather than at the store. A raised call does not advance it: a transient engine
+    refusal gets retried by the next pass instead of being consumed.
+    """
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        return 0
+
+    data = json.loads(meta_path.read_text())
+    messages = data.get("messages", [])
+    watermark = _fact_watermark(data)
+    new_user = [m for m in messages[watermark:] if m.get("role") == "user"]
+    if len(new_user) < FACT_EXTRACT_MIN_NEW_USER_MSGS:
+        return 0
+
+    # The budget covers the unseen part, filled forward from the watermark
+    # rather than head-and-tail, so `covered` can be the number of messages the
+    # model actually read — see `_build_fact_transcript`. The count comes off the
+    # returned slice and never off `len(messages)`: a turn appended during the
+    # model call below has to stay ahead of the watermark for the next pass to
+    # catch it, and a slice trimmed for length must not be reported as full
+    # coverage, or the trimmed middle is lost with the file stamped as read.
+    transcript, covered = _build_fact_transcript(messages, start=watermark)
+    if covered <= watermark:
+        # Not one rendered line fit inside the budget, which given the 600-char
+        # per-line cap means the unseen rows are all `thinking` rows and control
+        # prefixes. Advancing past them here would be right in spirit but is
+        # already handled below by the too-short transcript, which does advance;
+        # this branch is only the case where the builder refused at the first
+        # line, and it must not spend the single engine slot on an empty prompt.
+        logger.info(
+            f"Post-session capture: {session_id} — nothing extractable in "
+            f"messages {watermark}..{len(messages)} within the "
+            f"{FACT_TRANSCRIPT_BUDGET}-char budget"
+        )
+        return 0
+
+    # Claim the session with no `await` between the test and the add, so two
+    # dispatches for one session cannot both decide they may call: the event loop
+    # runs this much without yielding. The `finally` below is the only release,
+    # which is why nothing between the add and the `try` returns early.
+    if session_id in _in_flight:
+        logger.info(
+            f"Post-session capture: {session_id} — an extraction pass is already "
+            f"running; this pass leaves the window to it"
+        )
+        return 0
+    _in_flight.add(session_id)
+
+    try:
+        if len(transcript.strip()) < _MIN_FACT_TRANSCRIPT_CHARS:
+            # Seen, and nothing in it. Advance so the same three-word turn does
+            # not reopen the window on every future pass.
+            apply = _set_fact_watermark(covered, expect=watermark)
+            await mutate_session(session_id, apply)
+            return 0
+
+        facts = await asyncio.get_event_loop().run_in_executor(
+            None, _sync_secondary_fact_extraction, transcript
+        )
+    except Exception as fe:
+        logger.warning(f"Post-session fact extraction failed for {session_id}: {fe}")
+        return 0
+    finally:
+        # If the call raised, the watermark stays where it was and the next pass
+        # retries the same window: a refused call is not a consumed window, which
+        # is the difference between a retry and a silently dropped stretch of
+        # conversation. Same for a cancellation that lands mid-await.
+        _in_flight.discard(session_id)
+
+    if facts:
+        _write_extracted_facts(facts, session_id)
+        logger.info(
+            f"Post-session capture: {session_id} — {len(facts)} facts extracted "
+            f"(messages {watermark}..{covered})"
+        )
+    else:
+        logger.info(
+            f"Post-session capture: {session_id} — no durable facts in "
+            f"{len(new_user)} new user messages past message {watermark}"
+        )
+
+    apply = _set_fact_watermark(covered, expect=watermark)
+    await mutate_session(session_id, apply)
+    if apply.result != "advanced":
+        logger.info(
+            f"Post-session capture: {session_id} — watermark write refused "
+            f"({apply.result}): was {watermark}, target {covered}"
+        )
+    return len(facts or [])

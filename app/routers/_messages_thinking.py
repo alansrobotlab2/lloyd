@@ -16,8 +16,10 @@ Two properties of the shape are load-bearing:
 
   - **The role is what keeps reasoning out of the transcripts, and it is
     the only thing that does.** Every transcript generated from a session
-    log dispatches on role first — the vault exporter and
-    `_build_capture_transcript` in `app/post_capture.py`,
+    log dispatches on role first — the vault exporter and the two
+    `app/post_capture.py` builders (`_build_capture_transcript` for the
+    summary, `_build_fact_transcript` for extraction, both rendering through
+    `_transcript_line`),
     `app/session_titles.py::build_transcript`, the `scripts/memory/*`
     renderers, `scripts/extract-trajectories.py`, and the `session_recall`
     corpus in `agent_mcp/session.py` — and none of them has a branch for

@@ -11,9 +11,11 @@ These tests pin the emitted header against the same strict frontmatter form the
 conformance gate uses (`^---\\n(.*?)\\n---\\n`, DOTALL), so a regression fails in
 the suite rather than at the next midnight.
 """
+import json
 import re
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -206,4 +208,117 @@ def test_live_heading_shape_and_single_clock_reading(memory_dir):
     )
     assert _frontmatter(note)["timestamp"].startswith(live.strftime("%Y-%m-%d")), (
         "fresh-file timestamp and LA-date filename came from different readings"
+    )
+
+
+# --- item #1159: re-arming fact extraction must not re-open the daily note -----
+#
+# The daily-note half of post_capture is once-per-session; the fact half now
+# re-arms on a per-session watermark. Both live in `_post_session_capture`, and
+# the whole point of splitting their gates is that extraction runs again on a
+# session whose summary is already written. So the regression this pins is the
+# obvious one: a second extraction pass that also re-summarises would put a
+# second `### Session HH:MM ZONE — Auto-captured` section in the user's daily
+# note — an OKF-shape change to the file daily notes are grepped by, and a
+# duplicate recap of the same conversation. `tests/test_post_capture_fact_rearm.py`
+# pins the extraction half; this pins that it costs the note nothing.
+
+from app import sessions_io as _sio
+
+_OKF_SID = "20260920_120000_bbbbbb"
+
+
+def _okf_user_turn(n: int) -> dict:
+    return {
+        "id": f"u{n}",
+        "role": "user",
+        "content": [{"type": "text", "text": f"Turn {n}: the tts service listens on port 8090."}],
+        "timestamp": "2026-09-20T12:00:00",
+    }
+
+
+def _okf_assistant_turn(n: int) -> dict:
+    return {
+        "id": f"a{n}",
+        "role": "assistant",
+        "content": [{"type": "text", "text": f"Noted turn {n}, port 8090 recorded."}],
+        "timestamp": "2026-09-20T12:00:01",
+    }
+
+
+@pytest.fixture
+def session_dir(memory_dir, tmp_path, monkeypatch):
+    """A session file plus temp `~`, with both secondary engines and fact_add replaced.
+
+    The real ones are HTTP to a single-slot llama.cpp, and `_fact_add` appends to
+    the live fact store, so neither belongs in a suite run.
+    """
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(post_capture, "SESSIONS_DIR", sessions)
+    monkeypatch.setattr(_sio, "SESSIONS_DIR", sessions)
+    monkeypatch.setattr(post_capture, "VAULT_SESSIONS_DIR", tmp_path / "vault-sessions")
+    monkeypatch.setattr(post_capture, "VAULT_BACKGROUND_SESSIONS_DIR",
+                        tmp_path / "vault-background")
+
+    calls: dict = {"summary": [], "facts": []}
+    monkeypatch.setattr(
+        post_capture, "_sync_secondary_capture_call",
+        lambda t: calls["summary"].append(t) or "Talked through the tts port.",
+    )
+    monkeypatch.setattr(
+        post_capture, "_sync_secondary_fact_extraction",
+        lambda t: calls["facts"].append(t) or [],
+    )
+
+    import agent_mcp.facts as facts_mod
+    monkeypatch.setattr(facts_mod, "_fact_add", lambda payload: {"success": True})
+
+    def write(messages: list[dict]) -> None:
+        path = sessions / f"{_OKF_SID}.json"
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        data.update({
+            "session_id": _OKF_SID,
+            "created_at": "2026-09-20T12:00:00",
+            "model": "primary",
+            "messages": messages,
+        })
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    def read() -> dict:
+        return json.loads((sessions / f"{_OKF_SID}.json").read_text(encoding="utf-8"))
+
+    return SimpleNamespace(calls=calls, write=write, read=read)
+
+
+async def test_rearming_extraction_adds_no_second_auto_captured_section(
+        memory_dir, session_dir):
+    """Clause 4: one `Auto-captured` section per session, however often facts re-arm."""
+    session_dir.write([_okf_user_turn(1), _okf_assistant_turn(1)])
+    await post_capture._post_session_capture(_OKF_SID)
+
+    note = _today_note(memory_dir)
+    assert note.exists(), "the first non-trivial pass wrote no daily note"
+    first = note.read_text(encoding="utf-8")
+    assert first.count("— Auto-captured") == 1, f"first pass wrote more than one section:\n{first[:600]}"
+    assert session_dir.read()["captured"] is True, "the summary half must latch `captured`"
+    assert len(session_dir.calls["summary"]) == 1
+    assert session_dir.calls["facts"] == [], "two user turns is below the ≥3 gate"
+
+    # Now grow the session past the extraction gate and run the pass again: this
+    # is the state #1159 is about — `captured` already latched by turn 1.
+    grown = ([_okf_user_turn(1), _okf_assistant_turn(1)]
+             + [_okf_user_turn(n) for n in (2, 3)]
+             + [_okf_assistant_turn(2), _okf_assistant_turn(3)])
+    session_dir.write(grown)
+    await post_capture._post_session_capture(_OKF_SID)
+
+    after = note.read_text(encoding="utf-8")
+    assert after.count("— Auto-captured") == 1, (
+        "re-arming fact extraction appended a second summary section to the daily note"
+    )
+    assert len(session_dir.calls["summary"]) == 1, "the session was summarised twice"
+    assert len(session_dir.calls["facts"]) == 1, (
+        "three new user messages past a zero watermark must spend exactly one "
+        "extraction call"
     )
