@@ -279,6 +279,55 @@ def _in_failure_cooldown(task: dict, now: datetime.datetime) -> bool:
     return (now - last_attempt).total_seconds() < _failure_cooldown_seconds(task)
 
 
+# ── The run-summary seam (#642) ───────────────────────────────────────────────
+# Both ledger summaries — `runs.summary` in `workers.db` and the front-matter
+# `summary:` of `autonomy-runs/<task_id>/<run_id>.md` — used to be the LEADING
+# edge of the model's final message, at two lengths (200 and 300) that disagreed
+# with each other and with the 500-char caps downstream. The consequence is a
+# ledger of opening narration: over the 92 `scheduled-task` rows completed since
+# 2026-09-18, 82 sit at the cap and the join to their own artifacts puts 10/10 of
+# them at the head of the response and 0/10 at its closing — rows ending
+# `…Per job (gap = primary − seco` and `…scored (`primary` = Qwen3.8-Flash-Next-nvfp4 `.
+# The full text is already persisted in the run record, so the closing is free.
+#
+# One cap, then, and one named slice per kind. The direction differs by kind on
+# purpose, and the difference is the thing a caller cannot infer:
+#
+#   success  → the CLOSING. A report's outcome is its last line, and a run whose
+#              response ends in a markdown table kept only the header row before
+#              this existed (`| Check | Result |\n|---|---|\n| Bro`), so the
+#              verdict a person comes to the ledger for was the part cut away.
+#   failure  → the OPENING. The identity of a failure is its first token —
+#              `TimeoutError: exceeded max_duration_seconds=...` — and both the
+#              activity-log note and `compute_health`'s fallback for pre-`meta_json`
+#              rows read exactly that prefix. Tail-slicing an error would delete
+#              the only signal those rows carry.
+RUN_SUMMARY_CAP = 300
+
+
+def _outcome_summary(final_response: str) -> str:
+    """The ledger summary of a completed run: the CLOSING of its response.
+
+    Suffix, not prefix — see the seam note on `RUN_SUMMARY_CAP`. A run that
+    signs off with a table keeps the row that answered the question instead of
+    the header that opened it. This is the ONLY slice of `final_response` in the
+    module; both summary call sites go through here.
+    """
+    final_response = final_response or ""
+    return final_response[-RUN_SUMMARY_CAP:]
+
+
+def _failure_summary(summary: str) -> str:
+    """The ledger summary of a failed run: the OPENING of its error.
+
+    Head-sliced deliberately, the one place the direction is reversed. The
+    exception name is at the front, and it is what the activity log and the
+    health classifier key on.
+    """
+    summary = summary or ""
+    return summary[:RUN_SUMMARY_CAP]
+
+
 def _write_run_record(task_id: int, run_id: str, status: str,
                       started_at: str, completed_at: str,
                       duration_seconds: float, summary: str, body: str,
@@ -1418,7 +1467,7 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
     _write_run_record(
         task_id=task_id, run_id=run_id, status="failed",
         started_at=started_at, completed_at=completed_at,
-        duration_seconds=duration, summary=summary[:200], body=body,
+        duration_seconds=duration, summary=_failure_summary(summary), body=body,
         extra={**(extra or {}), "failure_kind": kind},
     )
 
@@ -1453,13 +1502,13 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
             from app.discord_notify import discord_alert
             await discord_alert(
                 f"Autonomy task #{task_id} ({task.get('name')}) disabled after "
-                f"{failures} consecutive failures. Last: {summary[:300]}"
+                f"{failures} consecutive failures. Last: {_failure_summary(summary)}"
             )
         except Exception as e:
             logger.warning("Alert dispatch failed for task #%s: %s", task_id, e)
 
     logger.error("Task #%s failed (%s, %d/%d): %s", task_id, kind, failures,
-                 max_retries, summary[:200])
+                 max_retries, _failure_summary(summary))
     failed = {
         "success": False, "status": "failed", "task_id": task_id, "run_id": run_id,
         "error": summary, "duration_seconds": round(duration, 1),
@@ -1912,7 +1961,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         _write_run_record(
             task_id=task_id, run_id=run_id, status="success",
             started_at=started_at, completed_at=completed_at,
-            duration_seconds=duration, summary=final_response[:200],
+            duration_seconds=duration, summary=_outcome_summary(final_response),
             body="\n\n".join(body_parts), extra=meta,
         )
 
@@ -1946,7 +1995,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         result = {
             "success": True, "status": "success", "task_id": task_id, "run_id": run_id,
             "duration_seconds": round(duration, 1),
-            "response_preview": final_response[:300],
+            "response_preview": _outcome_summary(final_response),
             "meta": meta,
         }
         # Out unverified on purpose: the pool runs the checks when it writes the
@@ -2112,9 +2161,24 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
         # they spent the wall clock, wrote no row, and the fleet reported zero
         # timeouts while items were re-queued from scratch. The status is the
         # fact; the summary is prose and is not consulted for it.
+        # #642: the text fallback now needs a row that is actually not a success.
+        # It matched `runs.summary`, which since this round is the CLOSING of the
+        # model's response rather than its opening — so it reads ordinary report
+        # prose, and prose about timeouts is what a report that recovered from one
+        # contains. `run_scheduled-task_20260909_084821_30159b` is `status='success'`
+        # with no timeout in its meta and was counted as a timeout because its
+        # summary says "already retrying the CV files that timed out last run"; the
+        # same sentence arriving inside the last 300 characters is now the common
+        # case, not the accident. So narrative decides only for a row that is not a
+        # success, which is every row the fallback was written for: 143 of the 163
+        # `TimeoutError`-prefixed rows in `workers.db` are `status='failed'` with no
+        # `meta_json` at all, and a head-sliced `TimeoutError: ...` prefix is the only
+        # evidence they carry. A `success` row states its own verdict, and prose
+        # cannot overturn it.
+        narrative_timeout = bool(status) and status != "success" and (
+            "timed out" in summary or summary.startswith("TimeoutError"))
         timeout = bool(meta.get("timeout")) or bool(meta.get("pool_timeout")) \
-            or status == "interrupted" \
-            or "timed out" in summary or summary.startswith("TimeoutError")
+            or status == "interrupted" or narrative_timeout
         # An interrupted row is a failure too — the work did not complete — so
         # its `duration_seconds` lands in `wasted_hours` below and a restart
         # shows up in the number that exists to catch wasted GPU.
