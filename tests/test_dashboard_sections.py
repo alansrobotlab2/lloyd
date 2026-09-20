@@ -407,7 +407,13 @@ def _retry_then_recover(q, source, failures):
     and completes it. The queue row therefore ends `completed` with no `failed`
     row anywhere, while `runs` holds `failures` failed outcomes — exactly the
     state the old counter could not see.
+
+    The ceiling is stated on the queue, not only at the `mark_failed` call:
+    #765 made `WorkQueue` own it, so a scenario needing `failures + 1` claims
+    has to raise the number the claim itself enforces. This is what
+    `start_pool(..., max_attempts=…)` does in production.
     """
+    q.set_max_attempts(failures + 1)
     q.enqueue(source, "prompt")
     for _ in range(failures):
         item = q.claim_next("w1")

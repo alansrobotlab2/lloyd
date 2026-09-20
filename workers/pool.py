@@ -232,6 +232,14 @@ class WorkerPool:
         self.queue = queue
         self.slots = slots
         self.max_attempts = max_attempts
+        # Hand the ceiling to the queue, which is what enforces it. `claim_next`
+        # and `recover_claimed` are where a row actually gets stopped, and both
+        # live on the queue — which `get_queue()` builds before this pool exists,
+        # and which the aggregator process builds without ever building a pool.
+        # Without this line the configured `workers.max_attempts` would reach
+        # `mark_failed` only and the crash-recovery path would enforce a default
+        # rather than the number in the config.
+        queue.set_max_attempts(max_attempts)
         self.poll_idle_seconds = poll_idle_seconds
 
         self._running = False

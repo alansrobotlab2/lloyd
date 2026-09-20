@@ -102,6 +102,25 @@ CREATE TABLE IF NOT EXISTS watermarks (
 """ + GRANT_DDL
 
 
+# The retry ceiling this queue enforces when no caller has supplied one. The
+# worker pool always supplies the configured `workers.max_attempts`; this
+# constant exists so a bare `WorkQueue` — a test, a script, the maintenance
+# sweep's own default — agrees with `mark_failed` instead of carrying a second
+# copy of the number that can drift from the first.
+DEFAULT_MAX_ATTEMPTS = 3
+
+# How many lost claim races one `claim_next` call tolerates before it reports
+# "nothing claimable". Counted separately from the cap sweep below: poisoning
+# an exhausted row is progress, not a loss, and must not eat a race retry.
+_CLAIM_RACE_RETRIES = 5
+
+# Bound on rows one claim call will sweep past because they are at the cap.
+# Every successful poison removes its row from the candidate set, so this only
+# stops a pathological pile from spinning; rows left over are still capped at
+# their next claim, they are not exempt.
+_CLAIM_CAP_SCAN_LIMIT = 64
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -186,13 +205,90 @@ class WorkQueue:
 
     Use a single instance per process — connections are short-lived and
     opened inside a _lock for writes. Reads use fresh connections.
+
+    **The queue owns the retry ceiling.** `max_attempts` is enforced at every
+    path that can raise `attempts` — the claim itself and the crash-recovery
+    sweep — not only inside `mark_failed`. That distinction is the whole
+    point: the counter is bumped at claim time, so a path that hands a row
+    back to `queued` without failing it (a process that died mid-run, which
+    `recover_claimed` exists to mop up) used to climb past the cap without
+    ever meeting the code that tested it. Row 3946 reached `attempts=9`
+    against a cap of 3 that way, and `deep_research` reads that count as a
+    topic's real retry budget.
     """
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path,
+                 max_attempts: int = DEFAULT_MAX_ATTEMPTS):
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self.max_attempts = self._valid_cap(max_attempts)
         self._init_db()
+
+    # ── The retry ceiling ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _valid_cap(max_attempts: int) -> int:
+        """Coerce a supplied cap to something the enforcement can use.
+
+        A cap below 1 is not honoured: it would mean "nothing is ever
+        claimable", and the one caller that genuinely wants a row terminal
+        without a run (`mark_failed(item, err, 0)` for an unknown source)
+        states it at the call site, once, rather than setting the whole queue
+        to zero at boot and disabling the pool.
+        """
+        try:
+            cap = int(max_attempts)
+        except (TypeError, ValueError):
+            logger.warning("max_attempts %r is not a number — using %d",
+                           max_attempts, DEFAULT_MAX_ATTEMPTS)
+            return DEFAULT_MAX_ATTEMPTS
+        if cap < 1:
+            logger.warning("max_attempts=%d is below 1 — clamped to 1", cap)
+            return 1
+        return cap
+
+    def set_max_attempts(self, max_attempts: int) -> int:
+        """Adopt the ceiling a caller owns and return the effective value.
+
+        The worker pool calls this from its constructor with the
+        `workers.max_attempts` it was started with, so the configured number
+        reaches enforcement without the queue having to read config — the
+        queue is constructed by `get_queue()` long before the pool exists, and
+        the aggregator process that also claims from this file never builds a
+        pool at all.
+        """
+        self.max_attempts = self._valid_cap(max_attempts)
+        return self.max_attempts
+
+    @staticmethod
+    def _cap_error(attempts: int, cap: int, action: str) -> str:
+        """The `error` text recorded when the ceiling stops a row.
+
+        Names the cap, because the row is the only record a person reading
+        the Background tab will have of *why* this work stopped, and
+        "max_attempts=3" is the thing they need to be able to grep.
+        """
+        return (f"max_attempts={cap} reached: {action} refused because the row "
+                f"already carries {attempts} attempt(s), which is the cap on "
+                f"claims. Poisoned instead of persisting attempts above the cap.")
+
+    def _poison_at_cap(self, conn: sqlite3.Connection, row: sqlite3.Row,
+                       cap: int, action: str) -> None:
+        """Terminate a row whose attempt count has met the cap.
+
+        Mirrors `mark_failed`'s terminal branch exactly — `completed_at`, the
+        bounded error, and the released `dedup_key` — so a row stopped by the
+        ceiling looks the same as one stopped by failure and the poison sweep
+        triages it like any other poisoned item.
+        """
+        attempts = int(row["attempts"])
+        conn.execute(
+            "UPDATE queue SET state='poisoned', completed_at=?, error=?, dedup_key=NULL "
+            "WHERE id=? AND state=?",
+            (_now_iso(), self._cap_error(attempts, cap, action)[:2000],
+             row["id"], row["state"]),
+        )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=30.0)
@@ -316,6 +412,16 @@ class WorkQueue:
         KV cache is over budget. They join the same `NOT IN` as the saturated
         sources, for the same reason — a held source's queued rows must not
         hide a claimable row behind them.
+
+        **A row already at the ceiling is not handed to a worker; it is
+        poisoned, with the cap named in its `error`.** The claim is where the
+        ceiling has to live because this method's own UPDATE is what raises
+        `attempts`. `mark_failed` can only see rows that reached it through a
+        failure, and the paths that do not — the crash-recovery sweep, or a
+        revive parked one short of the cap that then dies again — used to
+        inflate the count with nothing behind it. A row left `queued` but
+        unclaimable would be the starvation bug this file already documents
+        for the inflight quota, so the sweep terminates it and moves on.
         """
         max_inflight_per_source = max_inflight_per_source or {}
         with self._lock, self._connect() as conn:
@@ -339,14 +445,39 @@ class WorkQueue:
                 args.extend(excluded)
             sql += " ORDER BY priority ASC, enqueued_at ASC LIMIT 1"
 
+            cap = self.max_attempts
             # Re-read after the UPDATE rather than trusting rowcount: the lock
             # is per-process and the aggregator writes to the same file, so a
             # row can be claimed out from under this SELECT. A lost race is a
-            # retry, not an empty queue.
-            for _ in range(5):
+            # retry, not an empty queue — and it is counted apart from the cap
+            # sweep below, because terminating an exhausted row is progress and
+            # must not spend one of the race retries.
+            losses = 0
+            cap_sweeps = 0
+            while losses < _CLAIM_RACE_RETRIES:
                 row = conn.execute(sql, args).fetchone()
                 if not row:
                     return None
+                # The ceiling, enforced here rather than only in `mark_failed`,
+                # because this UPDATE is what raises `attempts`: a row that got
+                # back to `queued` without ever being failed — crash recovery,
+                # or a revive that parked it one short of the cap and then died
+                # again — would otherwise be handed out for attempt cap+1 and
+                # every design that reads that number as a budget would be
+                # reading a fiction. Terminate it and keep looking: leaving it
+                # `queued` and unselectable is the starvation bug this file
+                # already documents for the inflight quota.
+                if int(row["attempts"]) >= cap:
+                    if cap_sweeps >= _CLAIM_CAP_SCAN_LIMIT:
+                        logger.warning(
+                            "claim_next reached its %d-row cap-sweep bound; the rows "
+                            "it passed are still refused at their next claim",
+                            _CLAIM_CAP_SCAN_LIMIT)
+                        return None
+                    cap_sweeps += 1
+                    self._poison_at_cap(conn, row, cap, "claim")
+                    conn.commit()
+                    continue
                 conn.execute(
                     "UPDATE queue SET state='claimed', claimed_at=?, claimed_by=?, attempts=attempts+1 "
                     "WHERE id=? AND state='queued'",
@@ -359,6 +490,7 @@ class WorkQueue:
                 if refreshed and refreshed["state"] == "claimed" \
                         and refreshed["claimed_by"] == worker_id:
                     return QueueItem.from_row(refreshed)
+                losses += 1
         return None
 
     def mark_running(self, item_id: int) -> None:
@@ -395,12 +527,20 @@ class WorkQueue:
         self,
         item_id: int,
         error: str,
-        max_attempts: int = 3,
+        max_attempts: Optional[int] = None,
     ) -> str:
-        """Mark failed. If attempts >= max_attempts, state=poisoned; else requeue.
+        """Mark failed. If attempts >= the cap, state=poisoned; else requeue.
+
+        `max_attempts` defaults to the ceiling this queue already owns instead
+        of a second literal 3, so the failure branch and the claim-time and
+        recovery-time enforcement cannot drift apart. A caller that means
+        something else says so at the call site: the pool passes its configured
+        value, and the unknown-source path passes 0 to make a row terminal
+        without ever running it.
 
         Returns the new state.
         """
+        cap = self.max_attempts if max_attempts is None else int(max_attempts)
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 "SELECT attempts, dedup_key FROM queue WHERE id=?", (item_id,)
@@ -408,7 +548,7 @@ class WorkQueue:
             if not row:
                 return "missing"
             attempts = row["attempts"]
-            if attempts >= max_attempts:
+            if attempts >= cap:
                 conn.execute(
                     "UPDATE queue SET state='poisoned', completed_at=?, error=?, dedup_key=NULL WHERE id=?",
                     (_now_iso(), error[:2000], item_id),
@@ -447,23 +587,48 @@ class WorkQueue:
         in flight when a pool starts, so the unfiltered sweep is the correct
         one; the filtered form stays for a caller that really is retiring one
         live worker among others.
+
+        **This sweep enforces the same ceiling `claim_next` does, in both
+        directions.** It is the path that produced the `attempts=9` against a
+        cap of 3 recorded in backlog item #765: a process dies mid-run, the row
+        comes back with its count intact, the next boot claims it and raises the
+        count again, and no `mark_failed` call was ever involved — so nothing
+        that tests the cap ever ran. A row that met the cap while in flight is
+        terminated here rather than rejoined to the queue, and is not counted in
+        the returned number. A row *below* the cap is recovered exactly as
+        before: that is what a crash is for, and poisoning a first attempt
+        because the machine was rebooted would turn an outage into lost work.
         """
         with self._lock, self._connect() as conn:
+            owner_sql = ""
+            owner_args: list[Any] = []
             if worker_ids:
                 placeholders = ",".join("?" * len(worker_ids))
-                result = conn.execute(
-                    f"UPDATE queue SET state='queued', claimed_at=NULL, claimed_by=NULL "
-                    f"WHERE state IN ('claimed','running') AND claimed_by IN ({placeholders})",
-                    worker_ids,
-                )
-            else:
-                result = conn.execute(
-                    "UPDATE queue SET state='queued', claimed_at=NULL, claimed_by=NULL "
-                    "WHERE state IN ('claimed','running')"
-                )
+                owner_sql = f" AND claimed_by IN ({placeholders})"
+                owner_args = list(worker_ids)
+            cap = self.max_attempts
+
+            exhausted = conn.execute(
+                f"SELECT id, state, attempts FROM queue "
+                f"WHERE state IN ('claimed','running') AND attempts >= ?{owner_sql}",
+                [cap, *owner_args],
+            ).fetchall()
+            for row in exhausted:
+                self._poison_at_cap(conn, row, cap, "crash recovery")
+
+            result = conn.execute(
+                f"UPDATE queue SET state='queued', claimed_at=NULL, claimed_by=NULL "
+                f"WHERE state IN ('claimed','running') AND attempts < ?{owner_sql}",
+                [cap, *owner_args],
+            )
             conn.commit()
             n = result.rowcount or 0
-            if n:
+            if exhausted:
+                logger.warning(
+                    "Recovered %d claimed/running item(s); %d at max_attempts=%d "
+                    "were poisoned rather than requeued",
+                    n, len(exhausted), cap)
+            elif n:
                 logger.info("Recovered %d claimed/running items to queued", n)
             return n
 
@@ -757,6 +922,27 @@ def configured_db_path() -> Path:
     return Path(str(raw)).expanduser()
 
 
+def configured_max_attempts() -> int:
+    """The `workers.max_attempts` the live config names, defaulting as the code always did.
+
+    The ceiling arrives at the queue by two routes and both are needed. The
+    backend's `WorkerPool.__init__` calls `set_max_attempts` with the value
+    `start_worker_pool` was handed; this covers every *other* process, because
+    the aggregator never builds a pool — the same reason `configured_db_path`
+    exists. Without it the aggregator enforces this module's default while the
+    backend enforces the config, on one shared file, which is the two-numbers
+    problem #765 is about.
+    """
+    try:
+        from app.config import CONFIG
+        raw = (CONFIG.get("workers") or {}).get("max_attempts")
+    except (ImportError, AttributeError, TypeError, ValueError):
+        # A cap that cannot be read must not make the shared queue
+        # unconstructible. The default is a ceiling, not a licence.
+        return DEFAULT_MAX_ATTEMPTS
+    return DEFAULT_MAX_ATTEMPTS if raw is None else max(1, int(raw))
+
+
 def get_queue(db_path: str | Path | None = None) -> WorkQueue:
     """Get or create the process-wide WorkQueue singleton.
 
@@ -765,12 +951,18 @@ def get_queue(db_path: str | Path | None = None) -> WorkQueue:
     running and empty", and auto-creating the database here would make a
     disabled pool report itself initialised. Callers outside the backend pass
     `configured_db_path()`.
+
+    The singleton takes the configured ceiling with it. In the backend the pool
+    overwrites it a moment later with the same number; in the aggregator, which
+    never builds a pool and only ever reaches the queue this way, this is the
+    only thing that makes its enforcement match the backend's on the shared
+    file. See `configured_max_attempts`.
     """
     global _queue_instance
     if _queue_instance is None:
         if db_path is None:
             raise RuntimeError("First call to get_queue() must pass db_path")
-        _queue_instance = WorkQueue(db_path)
+        _queue_instance = WorkQueue(db_path, max_attempts=configured_max_attempts())
     return _queue_instance
 
 
