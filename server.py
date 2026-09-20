@@ -360,17 +360,6 @@ async def _start_file_watcher() -> None:
         file_watcher.bind(folder)
 
 
-# The GPU 2 slots, as (config flag, supervisord program, reader). Both occupy
-# the same 24 GiB RTX 3090 and only one may be on at a time; see the guard in
-# `_sync_llm_slots`.
-_LLM_SLOTS = (
-    ("secondary_enabled", "agent-llm-secondary",
-     lambda c: bool(c.get("secondary_enabled", False))),
-    ("djev.enabled", "agent-djev",
-     lambda c: bool((c.get("djev") or {}).get("enabled", False))),
-)
-
-
 @app.on_event("startup")
 async def _sync_llm_slots() -> None:
     """Reconcile each optional LLM slot's supervisord process against its
@@ -395,7 +384,9 @@ async def _sync_llm_slots() -> None:
         log.info("services.sync_secondary_llm=false → skipping LLM slot reconcile")
         return
 
-    wanted = [(flag, proc) for flag, proc, on in _LLM_SLOTS if on(CONFIG)]
+    from app import llm_slots
+
+    wanted = llm_slots.enabled_slots(CONFIG)
     if len(wanted) > 1:
         # Both flags true is a config error, not a request. GPU 2 holds either
         # 21.7 GiB of llama.cpp or 17.6 GiB of DiffusionGemma plus its KV, so
@@ -407,13 +398,13 @@ async def _sync_llm_slots() -> None:
             "Set exactly one to true.",
             " and ".join(flag for flag, _ in wanted),
         )
-        for _, proc, _on in _LLM_SLOTS:
+        for _flag, proc, _on in llm_slots.slots(CONFIG):
             ok, msg = stop_process(proc)
             log.error("conflict → stop %s: %s (ok=%s)", proc, msg, ok)
         return
 
-    for flag, proc, on in _LLM_SLOTS:
-        if on(CONFIG):
+    for flag, proc, on in llm_slots.slots(CONFIG):
+        if on:
             ok, msg = start_process(proc)
             log.info("%s=true → start %s: %s (ok=%s)", flag, proc, msg, ok)
         else:

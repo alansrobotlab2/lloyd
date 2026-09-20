@@ -503,20 +503,21 @@ def configured_engines() -> dict[str, str]:
     return engines
 
 
+# `models:` alias -> the supervisord program whose switch governs it. Only the
+# secondary has one; every other alias is always on.
+_ALIAS_PROGRAM = {"secondary": "agent-llm-secondary"}
+
+
 def _slot_enabled(alias: str) -> bool:
     """Is this `models:` slot switched on?
 
-    Only `secondary` has a switch today, and it is a top-level key rather than
-    something under the slot because every other reader of it
-    (`resolve_model_alias`, the model dropdown, server.py's reconcile) predates
-    the idea of a per-slot `enabled`. Keep that one definition rather than
-    adding a second spelling under `models.secondary` that could disagree.
+    Delegates to `app/llm_slots.py` rather than reading `secondary_enabled`
+    here, so the dashboard's engine cards and its services panel cannot come to
+    disagree about whether the same engine is supposed to be running.
     """
-    from app.config import CONFIG
+    from app import llm_slots
 
-    if alias == "secondary":
-        return bool(CONFIG.get("secondary_enabled", False))
-    return True
+    return llm_slots.is_enabled(_ALIAS_PROGRAM.get(alias, alias))
 
 
 # ── Stateless readers ─────────────────────────────────────────────────

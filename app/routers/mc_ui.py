@@ -468,15 +468,17 @@ def _summarize_services() -> dict:
     try:
         from app.supervisor_client import (
             _supervisor_all_lenient,
-            _INFRA_SERVICES,
-            _LLOYD_SERVICES,
+            all_services,
             _sup_state,
         )
     except Exception:
         return {}
     procs = _supervisor_all_lenient()
     counts = {"running": 0, "stopped": 0, "other": 0}
-    for sid in (*_INFRA_SERVICES.keys(), *_LLOYD_SERVICES.keys()):
+    # Filtered: a slot config.yaml has switched off must not be counted as
+    # `stopped`, or the agent's own view of the machine carries a permanent
+    # fault that no action can clear.
+    for sid in all_services():
         proc = procs.get(sid, {})
         active, _sub = _sup_state(proc)
         if active == "active":
@@ -531,12 +533,14 @@ def _summarize_dashboard() -> dict:
         pass
     try:
         from app.supervisor_client import (
-            _INFRA_SERVICES, _LLOYD_SERVICES, _health, _port_open,
+            all_services, _health, _port_open,
             _sup_state, _supervisor_all_lenient,
         )
         procs = _supervisor_all_lenient()
         unhealthy = []
-        for sid, (_name, port) in {**_INFRA_SERVICES, **_LLOYD_SERVICES}.items():
+        # Same filter, and this is the one that mattered most: an engine
+        # stopped on purpose was named in `unhealthy_services` on every poll.
+        for sid, (_name, port) in all_services().items():
             active_state, _sub = _sup_state(procs.get(sid))
             if _health(active_state, _port_open(port) if port else None) != "healthy":
                 unhealthy.append(sid)

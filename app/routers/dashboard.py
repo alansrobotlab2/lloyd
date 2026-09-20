@@ -374,8 +374,8 @@ def _count_todos(todos: list) -> dict[str, int]:
 def _services() -> dict[str, Any]:
     """supervisord health for infra + lloyd processes."""
     from app.supervisor_client import (
-        _INFRA_SERVICES,
-        _LLOYD_SERVICES,
+        infra_services,
+        lloyd_services,
         _health,
         _port_open,
         _sup_state,
@@ -384,7 +384,7 @@ def _services() -> dict[str, Any]:
 
     procs = _supervisor_all_lenient()
     out: list[dict[str, Any]] = []
-    for group, table in (("infra", _INFRA_SERVICES), ("lloyd", _LLOYD_SERVICES)):
+    for group, table in (("infra", infra_services()), ("lloyd", lloyd_services())):
         for sid, (name, port) in table.items():
             proc = procs.get(sid)
             active, sub = _sup_state(proc)

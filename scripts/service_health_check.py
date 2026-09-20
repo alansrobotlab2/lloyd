@@ -23,6 +23,11 @@ SERVICES = {
     # LLM inference servers — status via supervisorctl, no HTTP check
     "agent-llm-primary": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-llm-primary"], "category": "supervisor"},
     "agent-llm-secondary": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-llm-secondary"], "category": "supervisor"},
+    # djev shares GPU 2 with the secondary, so at most one of these two is ever
+    # enabled. Port 8011 is the structured decision API, which start-djev.sh
+    # only launches once vLLM on 8010 answers — so an open 8011 means the whole
+    # stack is serving, while an open 8010 during a cold boot does not.
+    "agent-djev": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-djev"], "category": "supervisor", "port": 8011},
 
     # QMD retrieval daemon — the path every vault_search/vault_recall needs,
     # and until #406 this check could not see it at all. Port is the one
@@ -36,8 +41,29 @@ SERVICES = {
     "agent-qmd-daemon": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-qmd-daemon"], "category": "retrieval", "port": 8181},
 }
 
+def _switched_off() -> set:
+    """Supervisord programs config.yaml has deliberately switched off.
+
+    The optional LLM slots share GPU 2, so one of them is always stopped on
+    purpose, and reporting it as an unhealthy service every time this skill runs
+    trains the reader past the one line that would matter. `app/llm_slots.py` is
+    the single definition; this is a consumer of it, not a second copy.
+
+    Fails OPEN — an unreadable config reports everything. Under-reporting hides
+    a service that really is down, which is the failure this skill exists to
+    catch; over-reporting only costs a line.
+    """
+    try:
+        import sys
+        sys.path.insert(0, "/home/alansrobotlab/lloyd")
+        from app import llm_slots
+        return {program for _flag, program, on in llm_slots.slots() if not on}
+    except Exception:
+        return set()
+
+
 CATEGORIES = {
-    "llm": ["agent-llm-primary", "agent-llm-secondary"],
+    "llm": ["agent-llm-primary", "agent-llm-secondary", "agent-djev"],
     "lloyd": ["lloyd-backend", "lloyd-frontend", "lloyd-mcp"],
     "retrieval": ["agent-qmd-daemon"],
     "all": list(SERVICES.keys()),
@@ -240,12 +266,13 @@ def main():
 
     # Determine which services to check
     if args.services:
+        # An explicit ask is answered whatever the config says: someone naming a
+        # slot by hand wants to know about that slot, including that it is off.
         service_names = args.services
-    elif args.category:
-        service_names = CATEGORIES[args.category]
     else:
-        # Default: check all services
-        service_names = CATEGORIES["all"]
+        service_names = CATEGORIES[args.category] if args.category else CATEGORIES["all"]
+        off = _switched_off()
+        service_names = [n for n in service_names if n not in off]
 
     # Run checks
     results = []

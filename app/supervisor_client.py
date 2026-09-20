@@ -37,9 +37,19 @@ import socket as _socket
 _SUPERVISOR_SOCK = os.environ.get("LLOYD_SUPERVISOR_SOCK", "/tmp/agent-supervisor.sock")
 
 # service_id → (display_name, port_or_None)
+#
+# THIS IS THE FULL REGISTRY, including slots that are switched off. Read it
+# through `infra_services()` / `lloyd_services()` below, which drop the slots
+# config.yaml has disabled — a raw read reports a deliberately-stopped engine
+# as a stopped service forever.
 _INFRA_SERVICES = {
     "agent-llm-primary":    ("LLM Primary",     8096),
     "agent-llm-secondary":  ("LLM Secondary",   8091),
+    # djev serves vLLM on 8010 and the structured decision API on 8011, and
+    # 8011 is the health signal: start-djev.sh only launches it after vLLM
+    # answers /health, so an open 8011 implies both are up, while an open 8010
+    # during the ~2 minute cold boot does not.
+    "agent-djev":           ("djev (DiffusionGemma)", 8011),
     "agent-qmd-daemon":     ("QMD Daemon",      8181),
     "agent-qmd-watcher":    ("QMD Watcher",     None),
     "agent-tts":            ("TTS",             None),
@@ -52,6 +62,31 @@ _LLOYD_SERVICES = {
     "lloyd-frontend":   ("Lloyd Frontend", 5173),
     "lloyd-mcp":        ("Lloyd MCP",      8500),
 }
+
+
+def infra_services() -> dict:
+    """`_INFRA_SERVICES` minus the LLM slots config.yaml has switched off.
+
+    Every surface that LISTS, COUNTS or AUDITS services goes through this.
+    `app/llm_slots.py` says why there is one definition rather than six.
+    """
+    from app import llm_slots
+
+    return llm_slots.visible(_INFRA_SERVICES)
+
+
+def lloyd_services() -> dict:
+    """The lloyd process table. Nothing in it is optional today, but callers
+    pair it with `infra_services()` and should not have to know which of the
+    two can hide a row."""
+    from app import llm_slots
+
+    return llm_slots.visible(_LLOYD_SERVICES)
+
+
+def all_services() -> dict:
+    """Both tables, filtered — what a caller may act on or report."""
+    return {**infra_services(), **lloyd_services()}
 
 # Fallback used only when supervisord cannot be reached to ask. Kept in sync
 # with conf.d/lloyd-mc.conf by `tests/test_supervisor_client.py`.

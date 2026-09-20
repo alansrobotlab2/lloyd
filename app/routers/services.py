@@ -6,8 +6,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.supervisor_client import (
-    _INFRA_SERVICES,
-    _LLOYD_SERVICES,
+    all_services,
+    infra_services,
+    lloyd_services,
     _supervisor_all_lenient,
     _port_open,
     _sup_state,
@@ -27,7 +28,7 @@ async def get_services():
     procs = _supervisor_all_lenient()
     now = datetime.now().isoformat()
     services = []
-    for sid, (name, port) in _INFRA_SERVICES.items():
+    for sid, (name, port) in infra_services().items():
         proc = procs.get(sid)
         active, sub = _sup_state(proc)
         port_healthy = _port_open(port) if port else None
@@ -45,9 +46,10 @@ async def get_services():
 
 @router.get("/api/services/detail")
 async def get_service_detail(id: str = ""):
-    if not id or id not in _INFRA_SERVICES:
+    infra = infra_services()
+    if not id or id not in infra:
         raise HTTPException(status_code=404, detail=f"Service not found: {id}")
-    name, port = _INFRA_SERVICES[id]
+    name, port = infra[id]
     procs = _supervisor_all_lenient()
     proc = procs.get(id, {})
     active, sub = _sup_state(proc)
@@ -75,8 +77,19 @@ async def service_action(request: Request):
     data = await request.json()
     service_id = data.get("serviceId", "")
     action = data.get("action", "")
-    all_services = {**_INFRA_SERVICES, **_LLOYD_SERVICES}
-    if service_id not in all_services:
+    known = all_services()
+    if service_id not in known:
+        # A slot switched off in config.yaml is not "unknown" — saying so sends
+        # someone looking for a typo. Name the flag instead, because starting it
+        # from here would be undone by the backend's next boot reconcile and,
+        # for the two GPU 2 slots, would fight the other one for the card.
+        from app import llm_slots
+        if llm_slots.is_slot(service_id):
+            raise HTTPException(
+                status_code=409,
+                detail=(f"{service_id} is switched off: `{llm_slots.slot_flag(service_id)}` "
+                        "is false in config.yaml. Set it to true and restart the "
+                        "backend; the boot reconcile starts the program."))
         raise HTTPException(status_code=404, detail=f"Unknown service: {service_id}")
     if action not in ("start", "stop", "restart"):
         raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
@@ -99,7 +112,7 @@ async def get_agent_services():
     procs = _supervisor_all_lenient()
     now = datetime.now().isoformat()
     services = []
-    for sid, (name, port) in _LLOYD_SERVICES.items():
+    for sid, (name, port) in lloyd_services().items():
         proc = procs.get(sid)
         active, sub = _sup_state(proc)
         port_healthy = _port_open(port) if port else None
@@ -122,9 +135,10 @@ async def get_agent_services():
 
 @router.get("/api/agent-services/detail")
 async def get_agent_service_detail(unit: str = ""):
-    if not unit or unit not in _LLOYD_SERVICES:
+    _lloyd = lloyd_services()
+    if not unit or unit not in _lloyd:
         raise HTTPException(status_code=404, detail=f"Service not found: {unit}")
-    name, port = _LLOYD_SERVICES[unit]
+    name, port = _lloyd[unit]
     procs = _supervisor_all_lenient()
     proc = procs.get(unit, {})
     pid = proc.get("pid") or None
