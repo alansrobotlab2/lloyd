@@ -204,9 +204,266 @@ def test_non_html_content_type_is_passed_through(served):
 
 
 def test_http_error_status_is_reported(served):
+    """A failing fetch names its status, its retry class and where it landed.
+
+    This node used to assert `out["error"] == "HTTP 404"` — the entire payload,
+    one field, no way to tell a gone page from a rate limit from an auth wall.
+    Item #850's acceptance makes that shape wrong on purpose: the clause reads
+    "a result for 401, 403, 404, 429 and 5xx carries a retry-class field" and
+    "a result with status >=400 also carries up to 200 characters of the
+    response body text beside the status code", so a payload that is only
+    `HTTP 404` can no longer satisfy it.
+    """
     served(status_code=404)
     out = json.loads(http_tools._http_fetch("https://example.com/missing"))
-    assert out["error"] == "HTTP 404"
+    assert out["error"].startswith("HTTP 404"), out["error"]
+    assert out["retry_class"] == http_tools.RETRY_CLASS_GONE
+    assert "body" in out
+    # `_FakeResponse` lands on /guide while the request asked for /missing:
+    # the result must report the destination, not the request.
+    assert out["final_url"] == "https://example.com/guide"
+
+
+# ---------------------------------------------------------------------------
+# Retry classes (clause 1: 401/403 vs 404 vs 429 vs 5xx must not collide)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status,expected", [
+    (401, http_tools.RETRY_CLASS_AUTH),
+    (403, http_tools.RETRY_CLASS_AUTH),
+    (404, http_tools.RETRY_CLASS_GONE),
+    (410, http_tools.RETRY_CLASS_GONE),
+    (429, http_tools.RETRY_CLASS_BACKOFF),
+    (500, http_tools.RETRY_CLASS_SERVER),
+    (502, http_tools.RETRY_CLASS_SERVER),
+    (503, http_tools.RETRY_CLASS_SERVER),
+])
+def test_error_status_carries_its_retry_class(served, status, expected):
+    served(status_code=status)
+    out = json.loads(http_tools._http_fetch("https://example.com/x"))
+    assert out["retry_class"] == expected, (status, out)
+
+
+def test_retry_classes_are_four_distinct_values(served):
+    """Auth, gone, backoff and server-error must read as four different values.
+
+    One shared "retryable: false" flag would leave the model exactly where
+    `HTTP 404` left it: unable to tell a Cloudflare interstitial (retrying
+    never helps) from a 429 (retrying after a delay does).
+    """
+    seen = {}
+    for status in (401, 404, 429, 500):
+        served(status_code=status)
+        seen[status] = json.loads(http_tools._http_fetch("https://example.com/x"))["retry_class"]
+    assert len(set(seen.values())) == 4, seen
+    assert seen[401] != seen[404] != seen[429] != seen[500]
+
+
+# ---------------------------------------------------------------------------
+# Body snippet (clause 2: up to 200 chars beside the status; empty body ok)
+# ---------------------------------------------------------------------------
+
+def test_error_status_carries_a_body_snippet(served):
+    """Enough of the response to decide, without shipping the whole error page."""
+    body = ("<html><body><h1>404 Not Found</h1><p>The page you requested "
+            "was moved or deleted. Check the URL and try a search instead.</p>"
+            "</body></html>")
+    served(text=body, status_code=404)
+    out = json.loads(http_tools._http_fetch("https://example.com/missing"))
+    assert "404 Not Found" in out["body"]
+    assert "moved or deleted" in out["body"]
+    assert len(out["body"]) <= 200
+    # One line: a raw HTML body would otherwise arrive as tags and newlines.
+    assert "\n" not in out["body"]
+
+
+# Verbatim shape of a live 404 body (example.com, 2026-09-20): the explanation
+# sits in a <body> that follows a <link> and a <meta> in <head>.
+REAL_404 = ('<!doctype html><html lang="en"><head><title>Example Domain</title>'
+            '<link rel="icon" href="data:,"><meta name="viewport" content="width=device-width">'
+            '<style>body{background:#eee;width:60vw;margin:15vh auto}</style></head>'
+            '<body><div><h1>Example Domain</h1><p>This domain is for use in documentation '
+            'examples without needing permission.</p></div></body></html>')
+
+
+def test_error_snippet_is_prose_not_markup_on_a_real_error_page(served):
+    """The excerpt has to be readable, not the first 200 bytes of the response.
+
+    Routing the excerpt through the module's own `_TextExtractor` returns an
+    empty string on this document: its skip tags include the void elements
+    `<link>` and `<meta>`, which the parser never closes, so the skip depth is
+    still positive at `</body>` and the `<body>` prose below is never emitted —
+    the same document with those two tags cut extracts the heading and the
+    sentence intact. Stripping tags here instead keeps that sentence in the
+    payload and keeps the markup out of it.
+    """
+    served(text=REAL_404, content_type="text/html", status_code=404)
+    out = json.loads(http_tools._http_fetch("https://example.com/nope"))
+    assert "documentation examples" in out["body"], out["body"]
+    assert "<" not in out["body"], "an excerpt of raw markup is not a snippet"
+
+
+def test_error_snippet_survives_a_content_type_that_lies(served):
+    """Servers send text/plain for HTML error pages; the strip keys off the bytes."""
+    served(text=REAL_404, content_type="text/plain", status_code=503)
+    out = json.loads(http_tools._http_fetch("https://example.com/nope"))
+    assert "documentation examples" in out["body"], out["body"]
+    assert "<style>" not in out["body"]
+
+
+def test_error_snippet_drops_a_tag_longer_than_any_small_attribute_bound(served):
+    """A tag wider than the pattern's inner bound is not a tag to the pattern.
+
+    Defensive rather than observed: the first version of this strip bounded the
+    pattern to 400 inner characters, and a 700-char tag — the length a
+    theme/state data-attribute pair reaches on a modern app shell — passes
+    straight through it as literal markup. The live case that first showed raw
+    markup in this field was github.com/nope/nope on 2026-09-20, and its cause
+    was the extractor fallback, not this bound (see
+    test_error_snippet_is_prose_not_markup_on_a_real_error_page).
+    """
+    long_tag = '<link data-color-theme="' + "x" * 700 + '">'
+    served(text=f"<html><body>{long_tag}<p>404 - page not found</p></body></html>",
+            content_type="text/html", status_code=404)
+    out = json.loads(http_tools._http_fetch("https://example.com/nope"))
+    assert out["body"] == "404 - page not found", out["body"]
+
+
+def test_error_snippet_drops_a_comment_block(served):
+    """A Cloudflare challenge page is mostly comment and script; the prose that
+    is left has to be what survives, not the comment's contents."""
+    served(text="<html><body><!-- wait a few moments and refresh -->"
+                "<p>Attention Required! | Cloudflare</p></body></html>",
+           content_type="text/html", status_code=403)
+    out = json.loads(http_tools._http_fetch("https://example.com/blocked"))
+    assert "Attention Required" in out["body"], out["body"]
+    assert "wait a few moments" not in out["body"], out["body"]
+
+
+def test_error_status_snips_a_body_longer_than_the_limit(served):
+    served(text="E" * 5000, content_type="text/plain", status_code=500)
+    out = json.loads(http_tools._http_fetch("https://example.com/boom"))
+    assert len(out["body"]) == 200
+
+
+def test_error_status_with_an_empty_body_yields_an_empty_snippet(served):
+    """An empty body is the common case for a HEAD-ish 403 and must not raise."""
+    served(text="", status_code=403)
+    out = json.loads(http_tools._http_fetch("https://example.com/forbidden"))
+    assert out["body"] == ""
+    assert out["retry_class"] == http_tools.RETRY_CLASS_AUTH
+
+
+# ---------------------------------------------------------------------------
+# JS-rendered pages (clause 3: the hint must be in the result, not only the
+# tool description, which is the only place it lived before)
+# ---------------------------------------------------------------------------
+
+SPA_SHELL = ("<html><head><title>Acme Console</title></head>"
+             "<body><div id=\"root\"></div>"
+             "<script>window.__env={};fetch('/api/bootstrap')</script>"
+             "</body></html>")
+
+
+def test_thin_html_extraction_says_the_page_is_js_rendered(served):
+    served(text=SPA_SHELL)
+    out = json.loads(http_tools._http_fetch("https://app.example.com/console"))
+    assert len(out["content"]) < http_tools.EMPTY_CONTENT_HINT_CHARS
+    hint = out["js_rendered_hint"]
+    # The two things the model needs: what happened, and the tool that works.
+    assert "browser_navigate" in hint and "browser_snapshot" in hint
+    assert "JavaScript" in hint
+    # The hint is the one field a successful fetch adds beyond `final_url`, and
+    # it appears only on a page whose content is under 400 chars — so bounding
+    # it bounds worst-case growth on a success: 400 chars of content + hint +
+    # final_url still costs less than any real article this tool returns.
+    assert len(hint) <= 300, len(hint)
+
+
+def test_a_real_page_gets_no_js_render_hint(served):
+    served()
+    out = json.loads(http_tools._http_fetch("https://example.com/guide"))
+    assert "js_rendered_hint" not in out
+    assert len(out["content"]) > http_tools.EMPTY_CONTENT_HINT_CHARS
+
+
+def test_short_non_html_body_gets_no_js_render_hint(served):
+    """A 40-char JSON API answer is short and correct; only HTML gets the hint."""
+    served(text='{"ok": true}', content_type="application/json")
+    out = json.loads(http_tools._http_fetch("https://example.com/api.json"))
+    assert "js_rendered_hint" not in out
+
+
+# ---------------------------------------------------------------------------
+# final_url (clause 4: all three success returns and the >=400 path)
+# ---------------------------------------------------------------------------
+
+def test_final_url_reports_the_redirect_destination(served):
+    """A redirected fetch must report where it landed, not what was asked for.
+
+    `follow_redirects=True` was on and `response.url` was already read at
+    private scope to absolutize links, then discarded: a page that moved was
+    reported under the URL that moved away, so "the content is stale" and "I
+    fetched something else" were indistinguishable.
+    """
+    served()
+    out = json.loads(http_tools._http_fetch("https://short.example/old-page"))
+    assert out["final_url"] == "https://example.com/guide"
+    assert "url" not in out, "the requested URL is the model's own input; the result reports the destination"
+
+
+def test_final_url_on_every_success_path(monkeypatch):
+    """pdf, non-HTML and HTML all report the destination."""
+    pymupdf = pytest.importorskip("pymupdf")
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "paper body")
+    raw = doc.tobytes()
+    doc.close()
+    for text, ctype, needle in [
+        (raw, "application/pdf", "paper body"),
+        ('{"ok": true}', "application/json", '"ok"'),
+        (PAGE, "text/html", "Installing Foo"),
+    ]:
+        resp = _FakeResponse(text=text, content=raw if isinstance(text, bytes) else "",
+                             content_type=ctype, url="https://cdn.example.net/landed")
+        monkeypatch.setattr(http_tools, "make_sync_http_client", lambda **kw: _FakeClient(resp))
+        out = json.loads(http_tools._http_fetch("https://short.example/x"))
+        assert needle in out["content"], ctype
+        assert out["final_url"] == "https://cdn.example.net/landed", ctype
+
+
+# ---------------------------------------------------------------------------
+# Payload growth caps (clause 5)
+# ---------------------------------------------------------------------------
+
+def test_error_payload_growth_over_the_old_shape_is_capped(monkeypatch):
+    """>=400 payloads grew by at most 300 chars over `{"error": "HTTP 404"}`."""
+    resp = _FakeResponse(text="x" * 20000, content_type="text/plain", status_code=500,
+                         url="https://example.com/" + "a" * 400)
+    monkeypatch.setattr(http_tools, "make_sync_http_client", lambda **kw: _FakeClient(resp))
+    raw = http_tools._http_fetch("https://example.com/boom")
+    assert len(raw) <= 19 + 300, len(raw)
+    assert len(raw) <= http_tools.HTTP_ERROR_MAX_PAYLOAD_CHARS
+    assert http_tools.HTTP_ERROR_MAX_PAYLOAD_CHARS == 19 + 300
+
+
+def test_error_payload_keeps_the_snippet_when_it_fits(monkeypatch):
+    """The cap must not silently delete the body it was asked to carry."""
+    resp = _FakeResponse(text="y" * 20000, content_type="text/plain", status_code=500,
+                         url="https://example.com/boom")
+    monkeypatch.setattr(http_tools, "make_sync_http_client", lambda **kw: _FakeClient(resp))
+    out = json.loads(http_tools._http_fetch("https://example.com/boom"))
+    assert len(out["body"]) >= 150, out["body"]
+
+
+def test_success_payload_grows_only_by_final_url(served):
+    """A known-good markdown fetch costs at most 200 extra characters."""
+    out = json.loads(http_tools._http_fetch("https://example.com/guide", "markdown"))
+    old_shape = {k: v for k, v in out.items() if k not in ("final_url", "js_rendered_hint")}
+    growth = len(json.dumps(out)) - len(json.dumps(old_shape))
+    assert growth <= 200, growth
+    assert "js_rendered_hint" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +479,28 @@ async def test_error_payload_sets_is_error():
         "a blocked fetch must surface as a tool error, not a success whose "
         "text happens to contain an error key"
     )
+
+
+@pytest.mark.asyncio
+async def test_the_text_the_model_receives_carries_the_retry_class(monkeypatch):
+    """The payload survives the MCP seam, not just the in-process call.
+
+    `_http_fetch` returns a string that `text_result` wraps into a
+    `CallToolResult` and ships across the process boundary to the aggregator,
+    which replays `content[0].text` to the model verbatim. A field that only
+    exists on the dict inside this module is worth nothing to the model, so the
+    contract is asserted on the serialized content on the far side of
+    `call_tool` — the same bytes the model reads.
+    """
+    resp = _FakeResponse(text="<html><body>Forbidden: rate limit exceeded for token</body></html>",
+                         status_code=403)
+    monkeypatch.setattr(http_tools, "make_sync_http_client", lambda **kw: _FakeClient(resp))
+    result = await http_tools.call_tool("http_fetch", {"url": "https://example.com/private"})
+    assert result.is_error is True, "an HTTP error must still read as a tool error"
+    out = json.loads(result.content[0].text)
+    assert out["retry_class"] == http_tools.RETRY_CLASS_AUTH
+    assert "rate limit exceeded" in out["body"]
+    assert out["final_url"] == "https://example.com/guide"
 
 
 @pytest.mark.asyncio

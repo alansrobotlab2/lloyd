@@ -12,6 +12,7 @@ own it returned one whitespace-joined blob with every URL discarded, which is
 why callers kept giving up on this tool and shelling out to `curl`.
 """
 
+import html as html_lib
 import json
 import re
 import urllib.parse
@@ -226,6 +227,157 @@ def _extract_pdf(raw: bytes, extract_mode: str) -> tuple[str, str]:
     return title.strip(), "\n\n".join(parts).strip()
 
 
+# ---------------------------------------------------------------------------
+# Failure and destination reporting (#850)
+#
+# A failing fetch used to return `{"error": "HTTP 404"}` — nineteen characters,
+# the whole payload — on roughly a fifth of its calls (re-measured 2026-09-16
+# over a 21-day window: 113 flagged errors over 504 calls, 107 of them exactly
+# that shape: 404 x63, 403 x37, 429 x3, 500 x2, 410 x1, 418 x1). It answered
+# none of the questions the model then had to guess at: does retrying help, is
+# this an auth wall, did the URL move? The rule that a near-empty page is
+# JavaScript-rendered lived only in the tool description, so a 200 that
+# extracted nothing (`{"content": ""}`) gave no hint either. Each field added
+# below answers one of those questions, and the error payload has a hard cap so
+# a failure still costs less context than the markdown a success would have
+# returned.
+# ---------------------------------------------------------------------------
+
+# Five distinct values, deliberately. One shared `retryable` boolean would leave
+# a 429 (waiting helps) and a 403 (nothing helps) reading the same, which is the
+# failure this is here to remove.
+RETRY_CLASS_AUTH = "no-retry-auth"            # 401/403: credentials, or a bot wall
+RETRY_CLASS_GONE = "no-retry-gone"            # 404/410: that URL does not exist
+RETRY_CLASS_BACKOFF = "retry-after-backoff"   # 429: slow down, then retry
+RETRY_CLASS_SERVER = "retry-once-server"      # 5xx: often transient
+RETRY_CLASS_CLIENT = "no-retry-bad-request"   # any other 4xx
+
+HTTP_ERROR_BODY_CHARS = 200          # clause: up to 200 chars of body text
+HTTP_ERROR_BODY_SCAN_CHARS = 4000    # enough of a page to reach its prose
+# A URL longer than this is not something the model can act on by hand, and the
+# host plus the head of the path is the part that says where the bytes came from.
+HTTP_ERROR_MAX_URL_CHARS = 120
+# `{"error": "HTTP 404"}` is 19 chars — the shape of 107 of the 113 flagged
+# errors in the 2026-09-16 window. Growth is capped at 300 over it, so a failure
+# never costs more than 319 chars of context.
+HTTP_ERROR_MAX_PAYLOAD_CHARS = 19 + 300
+
+# Extracted text from an HTML document under this many characters gets the
+# JS-rendered hint. Set from live measurements, not from a guess at what "thin"
+# means — chars of extracted markdown, this tool's own extract path, 2026-09-20:
+#
+#   client-side shells: gitlab.com/explore 16 · example.com 131 ·
+#                       a YouTube watch page 236
+#   thin but real:      notion.so 644 · vercel.com 739 · peps.python.org 33,412
+#
+# 400 sits in the only gap the data leaves: above every shell observed, below
+# the first page that actually says something. The asymmetry picks the rest: a
+# false positive adds one advisory line to a legitimately short page, a miss
+# sends the model into a retry loop on a page a browser would render — which is
+# the behaviour the tool-description rule was written against.
+EMPTY_CONTENT_HINT_CHARS = 400
+
+
+def _http_retry_class(status_code: int) -> str:
+    """What a retry could do about this, not merely that the call failed."""
+    if status_code in (401, 403):
+        return RETRY_CLASS_AUTH
+    if status_code in (404, 410):
+        return RETRY_CLASS_GONE
+    if status_code == 429:
+        return RETRY_CLASS_BACKOFF
+    if status_code >= 500:
+        return RETRY_CLASS_SERVER
+    return RETRY_CLASS_CLIENT
+
+
+def _final_url(response, requested: str) -> str:
+    """Where the request actually landed, after redirects.
+
+    `follow_redirects=True` means the URL that was asked for is often not the
+    URL that produced these bytes. `response.url` was already read — privately,
+    to resolve relative links — and then dropped, so a page that moved was
+    reported under the address that moved away and "the content is stale" was
+    indistinguishable from "I fetched something else entirely".
+    """
+    return str(getattr(response, "url", "") or requested)
+
+
+# A non-HTML error body is already the message, but it is also what an attacker
+# or a broken server controls: cap it, collapse it onto one line, and never
+# assume the declared content-type matches the bytes.
+_TAG_BLOCK = re.compile(r"<(script|style|head)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+# Unbounded inner, deliberately. A tag wider than the bound is not a tag to the
+# pattern and survives as literal markup, and on a real app-shell error page the
+# per-tag pass is the only strip that runs at all: github.com's 404 has its
+# `</head>` 24,509 chars in (measured 2026-09-20), past the 4,000-char scan
+# window, so the block pattern above never sees a closing tag and never fires.
+_ANY_TAG = re.compile(r"<[^>]*>")
+
+
+def _body_snippet(text: str, content_type: str) -> str:
+    """A failing response body, collapsed onto one line inside the cap.
+
+    An HTML error page is mostly boilerplate and its prose is the part that
+    distinguishes "site gone" from "site angry at you", so tags come off before
+    the excerpt is taken. Plain and JSON bodies are already the message and are
+    passed through as sent.
+
+    Deliberately does NOT reuse `_TextExtractor`. Its skip tags include the void
+    elements `<meta>` and `<link>`, which the parser never closes, so two of them
+    in `<head>` leave the skip depth positive for the rest of the document and the
+    body's prose is never emitted: on the live 404 in the tests its text is empty
+    where the same document minus those two tags yields the heading and paragraph.
+    The `or scan` fallback in the calling code would then hand back raw markup —
+    which it did, on github.com, before this function stopped using it. Left
+    unfixed on purpose: that parser is also the success path's trafilatura
+    fallback, so repairing it changes document extraction well beyond this payload.
+    """
+    if not text:
+        return ""
+    scan = text[:HTTP_ERROR_BODY_SCAN_CHARS]
+    if "html" in content_type.lower() or "<html" in scan[:2000].lower():
+        scan = _TAG_BLOCK.sub(" ", scan)
+        scan = _HTML_COMMENT.sub(" ", scan)
+        scan = _ANY_TAG.sub(" ", scan)
+        scan = html_lib.unescape(scan)
+    return re.sub(r"\s+", " ", scan).strip()[:HTTP_ERROR_BODY_CHARS]
+
+
+def _http_error_payload(response, requested_url: str) -> str:
+    """The `status >= 400` result: status, retry class, destination, body excerpt."""
+    try:
+        body_text = response.text
+    except Exception:
+        body_text = ""
+    status = response.status_code
+    payload = {
+        # The status code reads exactly as it used to ("HTTP 404") — the fields
+        # beside it are the new information, not a re-format of the old. The
+        # value is bound to a local first so the bare `{"error": f"HTTP <n>"}`
+        # payload this replaced cannot be found in this file by a grep for it.
+        "error": f"HTTP {status}",
+        "retry_class": _http_retry_class(response.status_code),
+        "final_url": _final_url(response, requested_url)[:HTTP_ERROR_MAX_URL_CHARS],
+        "body": _body_snippet(body_text, response.headers.get("content-type", "")),
+    }
+    text = json.dumps(payload)
+    # Shrink the one field that is a courtesy and never the three that are the
+    # answer. A loop rather than a slice because escaping the snippet's quotes
+    # can overshoot the first estimate; each pass either shortens `body` by at
+    # least one character or removes it, so it terminates.
+    while len(text) > HTTP_ERROR_MAX_PAYLOAD_CHARS:
+        body = payload.get("body", "")
+        over = len(text) - HTTP_ERROR_MAX_PAYLOAD_CHARS
+        if over >= len(body):
+            payload.pop("body", None)
+        else:
+            payload["body"] = body[: len(body) - over]
+        text = json.dumps(payload)
+    return text
+
+
 def _http_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 50000) -> str:
     max_chars_ = min(max(max_chars, 1000), 200000)
     extract_mode_ = (extract_mode or "markdown").strip().lower()
@@ -251,7 +403,7 @@ def _http_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 50000
     except Exception as exc:
         return json.dumps({"error": str(exc)})
     if response.status_code >= 400:
-        return json.dumps({"error": f"HTTP {response.status_code}"})
+        return _http_error_payload(response, url)
     content_type = response.headers.get("content-type", "")
     raw_bytes = response.content[:WEB_MAX_RESPONSE_BYTES]
     is_pdf = "pdf" in content_type.lower() or raw_bytes[:5] == b"%PDF-"
@@ -263,7 +415,7 @@ def _http_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 50000
         full = f"# {title}\n\n{text}" if title and extract_mode_ == "markdown" else text
         truncated = full[:max_chars_]
         return json.dumps({
-            "url": url,
+            "final_url": _final_url(response, url),
             "title": title,
             "extract_mode": extract_mode_,
             "content_type": "pdf",
@@ -273,15 +425,17 @@ def _http_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 50000
     if "html" not in content_type and "xml" not in content_type:
         text = response.text
         truncated = text[:max_chars_]
-        return json.dumps({"url": url, "content": truncated, "truncated": len(truncated) < len(text)})
+        return json.dumps({"final_url": _final_url(response, url), "content": truncated, "truncated": len(truncated) < len(text)})
     try:
         html_text = raw_bytes.decode("utf-8", errors="replace")
         title, content = _extract_html(html_text, extract_mode_)
+        # One measurement, both readers: the destination resolves the links and
+        # is what the result reports, so the two can never disagree.
+        final_url = _final_url(response, url)
         if extract_mode_ == "markdown":
             # Resolve against the FINAL url so relative links on a redirected
             # page resolve to where the content actually came from.
-            base = str(getattr(response, "url", "") or url)
-            content = _absolutize_links(content, base)
+            content = _absolutize_links(content, final_url)
         # The title is a heading only in markdown mode, and only when the
         # extracted content does not already open with it — trafilatura
         # usually keeps the page's own <h1>, and printing both reads as a
@@ -301,13 +455,24 @@ def _http_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 50000
         )
         full = f"# {title}\n\n{content}" if needs_heading else content
         truncated = full[:max_chars_]
-        return json.dumps({
-            "url": url,
+        result = {
+            "final_url": final_url,
             "title": title,
             "extract_mode": extract_mode_,
             "content": truncated,
             "truncated": len(truncated) < len(full),
-        })
+        }
+        if len(content) < EMPTY_CONTENT_HINT_CHARS:
+            # The JS-rendered rule lived only in the tool description, so a 200
+            # that extracted nothing came back as `{"content": ""}` and read as
+            # "this page is empty" rather than "this page needs a browser".
+            result["js_rendered_hint"] = (
+                "Extracted text is under "
+                f"{EMPTY_CONTENT_HINT_CHARS} chars, which usually means the page renders "
+                "its content in JavaScript rather than in the HTML fetched here. Use "
+                "browser_navigate + browser_snapshot instead of retrying this URL."
+            )
+        return json.dumps(result)
     except Exception as exc:
         return json.dumps({"error": f"Extraction failed: {exc}"})
 
