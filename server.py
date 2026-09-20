@@ -360,10 +360,26 @@ async def _start_file_watcher() -> None:
         file_watcher.bind(folder)
 
 
+# The GPU 2 slots, as (config flag, supervisord program, reader). Both occupy
+# the same 24 GiB RTX 3090 and only one may be on at a time; see the guard in
+# `_sync_llm_slots`.
+_LLM_SLOTS = (
+    ("secondary_enabled", "agent-llm-secondary",
+     lambda c: bool(c.get("secondary_enabled", False))),
+    ("djev.enabled", "agent-djev",
+     lambda c: bool((c.get("djev") or {}).get("enabled", False))),
+)
+
+
 @app.on_event("startup")
-async def _sync_secondary_llm_state() -> None:
-    """Reconcile the secondary vLLM supervisord process with config.yaml's
-    `secondary_enabled` flag. Idempotent — safe to call on every boot."""
+async def _sync_llm_slots() -> None:
+    """Reconcile each optional LLM slot's supervisord process against its
+    config.yaml flag. Idempotent — safe to call on every boot.
+
+    One hook for both slots rather than one per slot, because the canary guard
+    below, the "only one may run" rule and the start/stop call are identical
+    for each and a second copy is how the two come to disagree.
+    """
     import logging
     from app.config import CONFIG
     from app.supervisor_client import start_process, stop_process
@@ -371,19 +387,38 @@ async def _sync_secondary_llm_state() -> None:
     log = logging.getLogger("lloyd-server")
     # A canary boots from a worktree but the supervisord socket path is a
     # process-wide constant, so without this flag a gate run would reach the
-    # LIVE supervisord and stop the live secondary vLLM. Canary configs set
-    # `services.sync_secondary_llm: false`.
+    # LIVE supervisord and stop the live engines. Canary configs set
+    # `services.sync_secondary_llm: false`. The key keeps its old name: it
+    # has always meant "may this process drive supervisord's engine slots",
+    # and renaming it would silently un-guard every canary already on disk.
     if not (CONFIG.get("services") or {}).get("sync_secondary_llm", True):
-        log.info("services.sync_secondary_llm=false → skipping secondary reconcile")
+        log.info("services.sync_secondary_llm=false → skipping LLM slot reconcile")
         return
-    enabled = bool(CONFIG.get("secondary_enabled", False))
-    proc = "agent-llm-secondary"
-    if enabled:
-        ok, msg = start_process(proc)
-        log.info("secondary_enabled=true → start %s: %s (ok=%s)", proc, msg, ok)
-    else:
-        ok, msg = stop_process(proc)
-        log.info("secondary_enabled=false → stop %s: %s (ok=%s)", proc, msg, ok)
+
+    wanted = [(flag, proc) for flag, proc, on in _LLM_SLOTS if on(CONFIG)]
+    if len(wanted) > 1:
+        # Both flags true is a config error, not a request. GPU 2 holds either
+        # 21.7 GiB of llama.cpp or 17.6 GiB of DiffusionGemma plus its KV, so
+        # starting the second one OOMs the card — and an OOM on this box has
+        # twice cost the whole supervisord unit. Start neither and say so:
+        # picking a winner here would look like the flag being ignored.
+        log.error(
+            "both %s are enabled and they share GPU 2; starting neither. "
+            "Set exactly one to true.",
+            " and ".join(flag for flag, _ in wanted),
+        )
+        for _, proc, _on in _LLM_SLOTS:
+            ok, msg = stop_process(proc)
+            log.error("conflict → stop %s: %s (ok=%s)", proc, msg, ok)
+        return
+
+    for flag, proc, on in _LLM_SLOTS:
+        if on(CONFIG):
+            ok, msg = start_process(proc)
+            log.info("%s=true → start %s: %s (ok=%s)", flag, proc, msg, ok)
+        else:
+            ok, msg = stop_process(proc)
+            log.info("%s=false → stop %s: %s (ok=%s)", flag, proc, msg, ok)
 
 
 @app.on_event("startup")

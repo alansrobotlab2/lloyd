@@ -1256,6 +1256,30 @@ def test_live_engine_scores_the_corpus_and_reports_every_way_precision_was_measu
                        table's lower-bound note is computed from.
     """
     import scripts.uptake_probe as probe
+    from app.config import CONFIG
+
+    # THREE states, not two, and this one is checked first.
+    #
+    # `secondary_enabled: false` does not merely stop the engine — it makes
+    # `resolve_model_alias` rewrite secondary -> primary, so `secondary_endpoint()`
+    # returns :8096 and every assertion below would be measured against the
+    # PRIMARY and reported under a test named for the secondary. That is not a
+    # missing measurement, it is a confidently wrong one, and it is strictly
+    # worse than the red this replaces: on 2026-09-20, with the slot switched
+    # off, this test went GREEN on the live tree in 15s having scored the wrong
+    # engine, while the worktrees the gate cuts still read `true` from the
+    # committed config.yaml and hard-failed on :8091.
+    #
+    # So a retired slot skips, and the skip is not the escape hatch the comment
+    # below rejects: that one hid a silent engine the deployment still expected
+    # to be up. This one records that the subject of the measurement has been
+    # taken out of service, which is a fact about the tree, read from the same
+    # tracked switch the gate's worktree reads.
+    if not CONFIG.get("secondary_enabled", False):
+        pytest.skip(
+            "secondary_enabled is false: the slot this measures is retired and "
+            "the alias now resolves to primary, so a run here would score the "
+            "wrong engine. Re-enable the slot to re-take Step 2's measurement.")
 
     # No skip, and no environment opt-out. An earlier shape asserted whichever
     # branch it landed in and recorded nothing about which, so a gate run that

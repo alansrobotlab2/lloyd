@@ -42,7 +42,7 @@ def build_overlay(live_raw: dict, *, backend_port: int = BACKEND_PORT,
     """Return the config overlay for a canary. Pure — no I/O.
 
     Note what is deliberately NOT overridden: `secondary_enabled`. It must
-    equal the live value so `_sync_secondary_llm_state` is a no-op by
+    equal the live value so `_sync_llm_slots` is a no-op by
     construction, in addition to being unreachable via the bogus supervisord
     socket. Overriding it to false would make booting a canary *stop the live
     secondary vLLM*.

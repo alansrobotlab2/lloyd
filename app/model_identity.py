@@ -4,7 +4,7 @@ Why this exists: a slot's identity lives in three places that can drift
 apart — `models.<alias>` in config.yaml (the endpoint), the supervisord
 program's `environment=MODEL=...` (which launcher branch runs), and the
 process actually listening on the port. Nothing reconciled the third
-against the first two. `server.py::_sync_secondary_llm_state` only ever
+against the first two. `server.py::_sync_llm_slots` only ever
 decided whether the secondary should be *running*, never *what* it is.
 
 On 2026-09-06 a `git reset` from the automod/guardian machinery reverted

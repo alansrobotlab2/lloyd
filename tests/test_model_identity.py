@@ -9,7 +9,7 @@ the 35B survived, but any restart in that window would have answered to
 caller would have gone on logging `model: secondary` as though nothing
 had happened.
 
-`server.py::_sync_secondary_llm_state` only ever decided whether the
+`server.py::_sync_llm_slots` only ever decided whether the
 secondary should be running, never what it is.
 """
 

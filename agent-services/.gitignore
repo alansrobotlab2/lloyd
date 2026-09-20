@@ -102,3 +102,8 @@ supervisor/*.log
 supervisor/*.err
 
 /agent-services/benchmarks
+
+# The djev-spark checkout and the vLLM fork it overlays (setup/setup-djev.sh).
+# Upstream sources pinned by commit, not our code.
+llm/djev-spark/
+llm/djev-vllm-fork/

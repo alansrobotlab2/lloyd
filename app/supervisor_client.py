@@ -32,7 +32,7 @@ import socket as _socket
 
 
 # Overridable so a canary can be pointed at a throwaway supervisord (or at a
-# path that does not exist, which is how `_sync_secondary_llm_state` is kept
+# path that does not exist, which is how `_sync_llm_slots` is kept
 # from reaching the live socket during a gate run).
 _SUPERVISOR_SOCK = os.environ.get("LLOYD_SUPERVISOR_SOCK", "/tmp/agent-supervisor.sock")
 

@@ -14,7 +14,7 @@ Lloyd is a fully local AI agent. It runs its own in-process agent loop (`app/har
 ## Setup
 
 Rebuilding on a fresh OS: **[SETUP.md](SETUP.md)** is the authority — system
-packages, the uv/bun/npm-global toolchain, all four venvs, supervisord + the
+packages, the uv/bun/npm-global toolchain, all five venvs, supervisord + the
 systemd unit, and what must be backed up first (several runtime assets are
 untracked and not re-downloadable). `agent-services/setup/setup-all.sh --check`
 reports what's missing without changing anything.

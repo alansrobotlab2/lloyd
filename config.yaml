@@ -26,7 +26,48 @@ agent:
 # rather than `vllm:` ones (app/vllm_metrics.py translates them) and it renders
 # preserved thinking from `reasoning_content`, not `reasoning`
 # (app/harness/loop.py sends both).
-secondary_enabled: true
+#
+# OFF since 2026-09-20. Nothing needed the 35B: Inner Voice was pinned to
+# primary from the start, and `app/secondary_models.py` routes the post-session
+# jobs back to primary the moment this is false, which is the designed
+# behaviour and not a degradation. GPU 2 is reassigned to the `djev:` slot
+# below — a 24 GiB card is single-tenant for either of them, so this is an
+# either/or, not a pair of flags. Flipping this back to true while
+# `djev.enabled` is also true will OOM GPU 2; `start-djev.sh` refuses on the
+# VRAM check rather than fighting for it.
+secondary_enabled: false
+
+# The djev slot (:8010 vLLM, :8011 structured) — DiffusionGemma 26B-A4B NVFP4
+# on GPU 2's RTX 3090, from github.com/mmastrac/djev-spark. It answers
+# structured decisions through Jev's `POST /v1/systemone`: typed questions
+# (yes/no, choice, ordered scale) read off one diffusion canvas, with
+# calibrated probabilities rather than sampled prose.
+#
+# It is NOT a chat slot and deliberately absent from `models:`. Nothing routes
+# a turn here yet; `resolve_model_alias`, the model dropdown and the harness
+# have never heard of it. Wiring it into Lloyd is a separate piece of work.
+# What `enabled` does today is exactly two things: server.py reconciles the
+# supervisord process against it on boot (the same treatment
+# `secondary_enabled` gets), and the Mission Control dashboard shows its
+# engine card while it is true and hides it while it is false.
+#
+# GPU 2 holds this OR the secondary, never both — 17.6 GiB of weights plus KV
+# leaves no room beside a 21.7 GiB llama.cpp process.
+#
+# HOW IT RUNS is not here. Every tuning knob (context, canvas, concurrency,
+# KV pool, GPU) lives in `agent-services/supervisor/conf.d/agent-djev.conf`
+# as `environment=`, the way agent-llm-primary.conf carries the primary's.
+# Two files that both claim to set the engine's context length is how the
+# secondary's model and its config drifted apart on 2026-09-06.
+djev:
+  enabled: true
+  # vLLM's OpenAI-compatible API and /metrics. This is what the dashboard
+  # scrapes; the card renders off the standard `vllm:` Prometheus names with
+  # no translation, unlike the llama.cpp secondary.
+  base_url: http://127.0.0.1:8010
+  # The structured decision server in front of it. Not an OpenAI endpoint —
+  # POST /v1/systemone, GET /health.
+  structured_url: http://127.0.0.1:8011
 inner_voice:
   # Pinned to primary deliberately. `secondary_enabled: true` (2026-09-03,
   # de893d7) made resolve_model_alias stop rewriting secondary -> primary,

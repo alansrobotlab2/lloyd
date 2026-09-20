@@ -468,17 +468,55 @@ async def collect(engines: dict[str, str]) -> list[dict[str, Any]]:
 
 
 def configured_engines() -> dict[str, str]:
-    """{alias: base_url} for every model defined in config.yaml."""
+    """{alias: base_url} for every engine Mission Control should show.
+
+    Not simply "every model in config.yaml", and the difference is the point:
+    a slot that is switched *off* is left out entirely, while a slot that is
+    on and unreachable is kept and rendered offline.
+
+    Those two states look identical to the scraper and mean opposite things.
+    The primary failing to answer is the single most important thing this page
+    can tell anyone, so an engine that is *supposed* to be up keeps its card
+    and goes grey. The secondary with `secondary_enabled: false` is not news —
+    it is stopped because someone asked for it to be stopped — and a permanent
+    "offline" card trains the eye to skip exactly the colour that matters.
+
+    `djev` is not in `models:` at all (it is not a chat slot; see config.yaml)
+    but it is a vLLM server with the standard `vllm:` metrics, so it gets a
+    card on the same terms as the rest while `djev.enabled` is true.
+    """
     from app.config import CONFIG
 
     engines: dict[str, str] = {}
     for alias, cfg in (CONFIG.get("models") or {}).items():
+        if not _slot_enabled(alias):
+            continue
         base = (cfg or {}).get("base_url") or (cfg or {}).get("env", {}).get(
             "ANTHROPIC_BASE_URL", ""
         )
         if base:
             engines[alias] = base
+
+    djev = CONFIG.get("djev") or {}
+    if djev.get("enabled") and djev.get("base_url"):
+        engines["djev"] = djev["base_url"]
     return engines
+
+
+def _slot_enabled(alias: str) -> bool:
+    """Is this `models:` slot switched on?
+
+    Only `secondary` has a switch today, and it is a top-level key rather than
+    something under the slot because every other reader of it
+    (`resolve_model_alias`, the model dropdown, server.py's reconcile) predates
+    the idea of a per-slot `enabled`. Keep that one definition rather than
+    adding a second spelling under `models.secondary` that could disagree.
+    """
+    from app.config import CONFIG
+
+    if alias == "secondary":
+        return bool(CONFIG.get("secondary_enabled", False))
+    return True
 
 
 # ── Stateless readers ─────────────────────────────────────────────────

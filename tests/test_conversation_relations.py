@@ -481,6 +481,17 @@ def _config_endpoint(alias: str) -> str:
 
 def test_endpoint_follows_the_task_model_declaration(cr, tmp_path, monkeypatch):
     """#51's frontmatter is the decision; the constant at :41 ignored it."""
+    # Pin the slot ON. This test is about alias resolution WHILE the secondary
+    # is enabled, and `resolve_model_alias` rewrites secondary -> primary when
+    # it is not — so inheriting the live `secondary_enabled` makes the test's
+    # subject depend on production config. It read true for as long as the slot
+    # was in use and both assertions below went red the day it was switched off
+    # (2026-09-20), with nothing about this code changed. Its sibling
+    # `test_disabled_secondary_alias_moves_with_the_switch` already pins the
+    # false case; this is the other half of the same contract.
+    from app import config as app_config
+    monkeypatch.setitem(app_config.CONFIG, "secondary_enabled", True)
+    monkeypatch.setattr(app_config, "_ALIAS_REWRITES_LOGGED", set(), raising=True)
     adir = tmp_path / "autonomy"
     _task_file(adir, "secondary")
     monkeypatch.setattr(cr, "AUTONOMY_DIR", adir)
@@ -534,6 +545,17 @@ def test_stage2_posts_to_the_resolved_endpoint(cr, tmp_path, monkeypatch):
         captured["body"] = json.loads(req.data.decode())
         return FakeResp()
 
+    # Pin the slot ON. This test is about alias resolution WHILE the secondary
+    # is enabled, and `resolve_model_alias` rewrites secondary -> primary when
+    # it is not — so inheriting the live `secondary_enabled` makes the test's
+    # subject depend on production config. It read true for as long as the slot
+    # was in use and both assertions below went red the day it was switched off
+    # (2026-09-20), with nothing about this code changed. Its sibling
+    # `test_disabled_secondary_alias_moves_with_the_switch` already pins the
+    # false case; this is the other half of the same contract.
+    from app import config as app_config
+    monkeypatch.setitem(app_config.CONFIG, "secondary_enabled", True)
+    monkeypatch.setattr(app_config, "_ALIAS_REWRITES_LOGGED", set(), raising=True)
     adir = tmp_path / "autonomy"
     _task_file(adir, "secondary")
     monkeypatch.setattr(cr, "AUTONOMY_DIR", adir)

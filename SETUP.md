@@ -254,7 +254,7 @@ cert**. Don't use it on a restore.
 
 ## Part 4 — Python virtual environments
 
-Four venvs under `~/lloyd/.venvs/`. All are Python 3.12 from uv.
+Five venvs under `~/lloyd/.venvs/`. All are Python 3.12 from uv.
 
 ### `lloyd` — backend, MCP aggregator, LiveKit voice worker
 
@@ -319,6 +319,35 @@ Two other model-specific venvs exist and are only needed if you run those models
 | `vllm-qwen3.8` | nightly | **Qwen3.8-27B-NVFP4 (live primary)** |
 | `vllm-qwen38-flash-next` | 0.28.1rc1.dev188 + patches | Qwen3.8-Flash-Next-NVFP4 (125B MoE, PLE offload worker) |
 | `vllm-flash-next-main` | main @ `dff1bde84dd6` + PDL patch | **live primary** since 2026-09-10 (rebuilt 09-17): the same checkpoint on vLLM main, UVA PLE offload, FP8 KV cache |
+| `vllm-djev` | `0.29.1rc1.dev347+gdee37d891` + a 9-file overlay | **djev** since 2026-09-20: DiffusionGemma 26B-A4B NVFP4 structured reads on GPU 2 |
+
+### `vllm-djev` — DiffusionGemma structured decisions (GPU 2)
+
+```bash
+bash agent-services/setup/setup-djev.sh          # venv + overlay + 17.6 GiB checkpoint
+bash agent-services/setup/setup-djev.sh --check  # report without changing anything
+```
+
+Built from a stock vLLM nightly wheel plus nine python files copied over
+site-packages from `mmastrac/vllm` — the structured-reads branch behind
+[djev-spark](https://github.com/mmastrac/djev-spark). Nothing compiles. The
+script pins the wheel, the fork ref and the base commit **together** and
+refuses to overlay onto a vLLM that is not that base; bump the three as a set.
+
+It replaces the Qwen3.6 secondary on GPU 2 rather than joining it — a 24 GiB
+card holds one of them. `secondary_enabled` and `djev.enabled` in config.yaml
+are an either/or that `server.py::_sync_llm_slots` enforces.
+
+Serving it is `agent-services/bin/start-djev.sh`, run by the `agent-djev`
+supervisord program, which is where its tuning lives. The header of that
+script explains the five settings that differ from upstream's DGX Spark
+defaults — most importantly `GPU_UTIL`, which means something entirely
+different on a discrete card, and `KV_CACHE_DTYPE`, because Ampere has no FP8
+and the checkpoint asks for an FP8 KV cache.
+
+Context is **131072**, not the model's full 262144: bf16 KV costs ~24
+KiB/token, so the full window is 5.98 GiB on top of 17.53 GiB of weights and
+does not fit in 24 GiB. vLLM's own measured ceiling on this box is 154,976.
 
 `vllm-experimental` is built by `setup-vllm-experimental.sh`, pinned by
 `setup/vllm-experimental.versions.txt`. **`vllm-laguna` has no setup script** — it was built by hand. If you need Laguna S 2.1 back, adapt

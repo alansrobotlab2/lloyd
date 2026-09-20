@@ -108,6 +108,17 @@ def test_primary_arm_really_reaches_the_primary_engine(monkeypatch):
     resolver, so this asserts that the per-job pin is what actually moves the
     endpoint. A `JOBS_ON_PRIMARY` that production stopped reading would fail
     here rather than produce a run where both arms answer from :8091."""
+    # Pin the slot ON. The whole premise here is that the two arms reach
+    # DIFFERENT engines, and `resolve_model_alias` collapses secondary ->
+    # primary whenever `secondary_enabled` is false — so without this the
+    # subject of the test disappears and both arms answer from :8096. That is
+    # not hypothetical: it went red the day the slot was switched off
+    # (2026-09-20) with nothing about the router changed. The eval's own module
+    # docstring already notes that the flag "outranks this in both arms"; this
+    # makes the test say so too.
+    from app import config as app_config
+    monkeypatch.setitem(app_config.CONFIG, "secondary_enabled", True)
+    monkeypatch.setattr(app_config, "_ALIAS_REWRITES_LOGGED", set(), raising=False)
     seen = _fake_transport(monkeypatch)
     item = {"id": "voice-1", "input": "some reply with `code` in it", "anchors": []}
 
