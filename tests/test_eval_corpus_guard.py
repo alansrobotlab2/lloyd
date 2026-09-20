@@ -540,3 +540,321 @@ def test_one_query_with_a_legitimate_zero_fact_leg_keeps_its_number(tmp_path):
         assert "fact leg read NOTHING" not in proc.stderr, proc.stderr
     finally:
         _cleanup(label)
+
+
+# ── #878: the ENTITY leg of the corpus is satisfiable ─────────────────────────
+#
+# `entity_hit` is containment: `eval/run_eval.py:_score` scores an expectation by
+# `exp in got` over the entities the run actually returned, and every entity name
+# a run can return exists in the entity store. So an `expect_entities` entry that
+# NO entity name contains can never be true — no retrieval improvement can score
+# it, and the query silently lowers `entity_hit_rate` and `entity_recall_avg`,
+# which then gets read as a seed-identification defect. It did: #513's
+# `Backlog Item #363` — a real vault PATH that is not a real ENTITY NAME — was 1/8
+# of the measured defect behind #400, was "retargeted" on 2026-08-06 without
+# landing, and by 2026-09-16 was armed in TWO queries (`backlog-363`,
+# `tgs-rag-state`).
+#
+# The doc leg has had a satisfiability guard since #399/#504, and it covers ONE
+# query (`test_the_retargeted_eval_query_is_satisfiable`, in
+# `tests/test_automod_hardening.py`). Nothing guarded the entity leg for ANY
+# query, which is exactly why the entity-side instance slipped through a guard
+# written for the doc side. So the check below is a loop over every query, and no
+# query id appears in it — naming one query is the hole this closes.
+#
+# Unlike the rest of this file, these tests read the store IN PROCESS. The
+# subprocess rule above exists because `app.paths` reads LLOYD_FACTS_ROOT /
+# LLOYD_KG_DB at import time and the CLI contract is what protects an operator;
+# here the thing under test is a corpus-vs-store invariant with no CLI, and the
+# store must be read through `app.kg_store` — the module that owns the one
+# connection, because six programs rewriting the same JSON is what produced the
+# 2026-08-22 wipe. So: `app.kg_store` only, never a sqlite handle.
+
+import inspect  # noqa: E402
+
+import yaml  # noqa: E402
+
+CORPUS = ROOT / "eval" / "vault_recall_queries.yaml"
+# `_pipeline/` is gitignored (.gitignore:25), so a git worktree — including the
+# automod round the gate runs this suite in — has no `kg.sqlite` at all. The
+# fallback is `app/uptake.py:lloyd_root`'s rule for the same fact: measure the
+# live tree, because the transcripts and the store live there and the worktree's
+# absence of them is not a measurement of anything. Without it this file's entity
+# guard would refuse in every worktree, which is a red suite that tells you
+# nothing about the corpus.
+LIVE_KG_DB = Path.home() / "lloyd" / "_pipeline" / "vault-derived" / "kg.sqlite"
+
+
+def _entity_store_names(getter=None, *, allow_live_fallback: bool = True) -> tuple[list[str], str]:
+    """Every entity name in the store the eval scores against, plus where it came from.
+
+    Every open is `app.kg_store`'s — `KGStore(path)` for a path this function
+    resolved, `store()` for the refusal — so a store that will not open surfaces as
+    `StoreUnavailable` rather than as an empty list. That distinction is the whole
+    of clause 5: "this expectation is unreachable" and "I could not look" must not
+    arrive at the same place. A test passes its own getter — one that raises, or
+    one holding zero rows — to pin either side of it, and a named getter NEVER
+    falls back, or the test would read the real graph behind its own fake and pass
+    for the wrong reason.
+
+    The fallback opens `KGStore(path)` rather than `configure(path)`: the latter
+    repoints the process-wide default, and a test must not swap the knowledge
+    graph out from under the rest of the suite. What it must not do, in either
+    branch, is open the file itself — `kg.sqlite` has one opener, and the six that
+    used to share it produced the 2026-08-22 wipe.
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    import app.kg_store as ks
+
+    from app.paths import VAULT_KG_DB
+
+    if getter is not None:
+        st = getter()
+        return list(st.entities.all()), str(getattr(st, "path", "?"))
+
+    # No getter: read the store THIS TREE'S eval resolves against, and nothing
+    # else. Going through `store()` directly would be wrong here for a reason worth
+    # naming: the rest of this file provisions throwaway stores with
+    # `kg_store.configure(...)`, which repoints the process-wide default, so by the
+    # time this runs the "default" store may be some closed tmp_path database from
+    # another test. The path is resolved from `app.paths` — which honours
+    # LLOYD_KG_DB — and opened through `KGStore`, one connection, closed here.
+    # `is_file()` before opening is `kg_store._require_database`'s own rule:
+    # `KGStore` CREATES an absent file, and a created-empty store is the false
+    # clean bill, so an absent path is never opened, it is refused below.
+    if allow_live_fallback:
+        for path in (Path(VAULT_KG_DB), LIVE_KG_DB):
+            if path.is_file():
+                st = ks.KGStore(path)
+                try:
+                    return list(st.entities.all()), str(st.path)
+                finally:
+                    st.close()
+
+    # Nothing readable on either path (or a caller switched the fallback off):
+    # the sanctioned reader produces the refusal, and it names the path it looked
+    # for. Deciding "absent" here instead would be the very substitution clause 5
+    # forbids — an unavailable store must not become an unsatisfiable corpus.
+    st = ks.store()
+    return list(st.entities.all()), str(st.path)
+
+
+def _entity_satisfiability_report(corpus: Path = CORPUS, getter=None, *,
+                                  allow_live_fallback: bool = True) -> dict:
+    """Which expectations no entity name CONTAINS — the scorer's own rule.
+
+    Containment, not equality: `_score` matches a normalized expectation as a
+    substring of a normalized returned name, so `TGS-RAG Implementation` is
+    reachable through the row `#363 TGS-RAG Implementation` even though no entity
+    is named exactly that. A guard written as an equality lookup would alarm on
+    satisfiable expectations and force a needless corpus edit — and the retargets
+    it demanded would be substitutions of an easier target, which the 2026-08-06
+    audit rule at the top of the corpus file forbids.
+
+    Returns the report rather than asserting, so a caller can assert on the shape
+    (`entity_names`, `expectations`) as well as the verdict: a 0-hit loop over a
+    corpus that was never read is indistinguishable from a clean corpus unless the
+    denominator is printed beside it.
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from eval.run_eval import _norm  # the scorer's own normalization, not a copy
+
+    names, where = _entity_store_names(getter, allow_live_fallback=allow_live_fallback)
+    specs = yaml.safe_load(Path(corpus).read_text())["queries"]
+    expectations = [(str(s["id"]), str(e))
+                    for s in specs for e in (s.get("expect_entities") or [])]
+    if not names:
+        raise AssertionError(
+            f"the entity store at {where} returned 0 entity rows while the corpus at "
+            f"{corpus} carries {len(expectations)} expectations. Reporting every "
+            "expectation absent from a store with no rows is not a verdict — it is "
+            "the same false finding an unreadable store would produce, and #878 "
+            "exists to remove that class.")
+    normed = [_norm(n) for n in names]
+    dead = [{"query": qid, "expect": exp} for qid, exp in expectations
+            if not any(_norm(exp) in n for n in normed)]
+    return {"store": where, "corpus": str(corpus), "queries": len(specs),
+            "entity_names": len(names), "expectations": len(expectations), "dead": dead}
+
+
+def _assert_entity_expectations_satisfiable(report: dict) -> None:
+    """Name the query AND the expectation, or the failure is not actionable."""
+    dead = report["dead"]
+    assert not dead, (
+        f"{len(dead)} of {report['expectations']} `expect_entities` entries across "
+        f"{report['queries']} queries of {report['corpus']} are contained in no "
+        f"entity name in {report['store']} ({report['entity_names']} rows), so the "
+        "scorer can never report them as matched: they lower `entity_hit_rate` and "
+        "`entity_recall_avg` no matter how retrieval improves, and the movement "
+        "reads as a retrieval regression. Re-point each at a name the store "
+        "resolves, or delete it if it is factually wrong — never at an easier "
+        "target. Offenders: "
+        + "; ".join(f"{d['query']} -> {d['expect']!r}" for d in dead))
+
+
+def test_every_expect_entities_name_is_contained_in_a_store_entity_name():
+    """#878: the corpus is checked against the store for its ENTITY leg, entirely.
+
+    The failure this pins is the one that already happened twice: an expectation
+    naming an entity that does not exist is armed forever, is scored as a
+    retrieval failure, and the number is read as a seed-identification defect.
+    `entity_recall` is halved as well as `entity_hit` lost — `backlog-363` sat at
+    0.5 with `entities_matched: ["task #363"]` while reporting a pass.
+    """
+    report = _entity_satisfiability_report()
+    assert report["queries"] >= 20, report          # the loop read the whole corpus
+    assert report["expectations"] >= 40, report     # not one query, not one expectation
+    _assert_entity_expectations_satisfiable(report)
+
+
+def test_the_guard_loops_the_whole_corpus_and_names_no_query_id():
+    """A guard naming one query id is the hole #878 exists to close.
+
+    `test_the_retargeted_eval_query_is_satisfiable` is the doc-side precedent and
+    it is a single-query assertion: the entity-side variant of the same defect
+    (#513, then #878's second armed query) walked straight past it. So this pins
+    the shape — every expectation examined, no corpus query id written into the
+    checker's source — not just the current verdict.
+    """
+    report = _entity_satisfiability_report()
+    specs = yaml.safe_load(CORPUS.read_text())["queries"]
+    per_query = {str(s["id"]): len(s.get("expect_entities") or []) for s in specs}
+    assert report["expectations"] == sum(per_query.values()), (
+        "the guard examined a different number of expectations than the corpus "
+        f"holds: {report['expectations']} vs {sum(per_query.values())}")
+
+    src = inspect.getsource(_entity_satisfiability_report) + inspect.getsource(
+        _assert_entity_expectations_satisfiable) + inspect.getsource(_entity_store_names)
+    named = [qid for qid in per_query if qid in src]
+    assert not named, f"the checker names corpus query id(s) {named}; it must loop"
+
+
+def test_the_guard_fails_on_a_synthetic_query_no_entity_can_satisfy(tmp_path):
+    """Non-vacuity: the checker actually fails, and says which query and which name.
+
+    The expectation is the real historical offender, and the query id is a slug
+    that exists nowhere in the corpus — so a pass here can only mean the checker
+    is not looking.
+    """
+    corpus = tmp_path / "dead-expectation.yaml"
+    corpus.write_text(
+        "queries:\n"
+        "  - id: unsatisfiable-probe\n"
+        "    query: tell me about the thing that is not in the graph\n"
+        "    category: single\n"
+        "    expect_entities: [\"Backlog Item #363\"]\n"
+        "    expect_docs: [lloyd]\n"
+    )
+    report = _entity_satisfiability_report(corpus)
+    assert report["expectations"] == 1, report
+    with pytest.raises(AssertionError) as exc:
+        _assert_entity_expectations_satisfiable(report)
+    msg = str(exc.value)
+    assert "unsatisfiable-probe" in msg, msg
+    assert "Backlog Item #363" in msg, msg
+
+
+def test_a_containment_reachable_expectation_is_not_reported_unsatisfiable():
+    """The guard is containment, or it alarms on expectations retrieval can meet.
+
+    `TGS-RAG Implementation` is no entity's name — the store's row is
+    `#363 TGS-RAG Implementation` — yet the scorer reaches it, because `_score`
+    matches `exp in got`. An equality-based guard would have demanded this
+    expectation be retargeted too, which is a substitution of a different target
+    for no reason and would have made the query weaker.
+    """
+    names, _ = _entity_store_names()
+    target = "TGS-RAG Implementation"
+    assert target not in names, (
+        "the premise of this test is the store's, not mine: if an exact row now "
+        "exists, containment and equality agree and the case is gone — re-pick a "
+        "name that is a substring of some row but is no row itself")
+    assert any(target.lower() in n.lower() for n in names), (
+        f"no entity name contains {target!r}, so it IS unsatisfiable and belongs "
+        "in the corpus failure, not here")
+    report = _entity_satisfiability_report()
+    assert not [d for d in report["dead"] if d["expect"] == target], report["dead"]
+
+
+def test_an_unreadable_store_raises_rather_than_reporting_every_name_absent(monkeypatch):
+    """Clause: a store that will not open must not read as an unsatisfiable corpus.
+
+    The failure this removes is the one a naive guard would add: an empty entity
+    list makes every expectation in the corpus look dead at once, a far bigger and
+    far less true alarm than the names it exists to catch. Same shape as
+    `test_unreadable_store_is_its_own_failure_and_ignores_the_flag` above, one
+    level down: `StoreUnavailable` means "I could not read it".
+
+    Three spellings of the sanctioned route are exercised, and the third is the one
+    the shipped corpus test uses: the DEFAULT route with the worktree fallback still
+    switched ON. Patching `store` alone could not prove that route, because the
+    fallback opens `KGStore(path)` — so both names in `app.kg_store` are patched,
+    which is exactly the pair the checker is allowed to touch. A guard that quietly
+    re-opened the live graph behind a refusing store — reaching for a path instead of
+    admitting it could not read one — fails here rather than passing and reporting a
+    verdict it cannot justify.
+    """
+    import app.kg_store as ks
+
+    def refusing(*_args, **_kwargs):
+        raise ks.StoreUnavailable("no database at /nowhere/kg.sqlite")
+
+    monkeypatch.setattr(ks, "store", refusing)
+    monkeypatch.delenv("LLOYD_KG_DB", raising=False)
+
+    with pytest.raises(ks.StoreUnavailable):
+        _entity_satisfiability_report(getter=ks.store)
+    with pytest.raises(ks.StoreUnavailable):
+        _entity_satisfiability_report(allow_live_fallback=False)
+
+    monkeypatch.setattr(ks, "KGStore", refusing)
+    with pytest.raises(ks.StoreUnavailable):
+        _entity_satisfiability_report()          # shipped default: no escape hatch
+
+    # The route is `app.kg_store`, never a handle of its own: no sqlite import,
+    # no `.conn`, no `execute(` anywhere in the checker, and the default really is
+    # `ks.store()` rather than some second opener.
+    src = (inspect.getsource(_entity_store_names)
+           + inspect.getsource(_entity_satisfiability_report))
+    assert "sqlite3" not in src, src
+    assert ".conn" not in src and ".execute(" not in src, src
+    assert "ks.store()" in src, src
+
+
+def test_the_default_route_is_the_live_store_the_eval_scores_against():
+    """The guard reads a real store with real rows, or it guards nothing.
+
+    A checker whose default silently resolved to an empty or synthetic store would
+    report 0 expectations dead and look exactly like a healthy corpus — the
+    denominator assertions in the corpus test are here for that reason, and this
+    one names the store it read so the figure is attributable.
+    """
+    names, where = _entity_store_names()
+    assert len(names) > 1000, f"{where} returned {len(names)} entity names"
+    assert "kg.sqlite" in where, where
+    assert yaml.safe_load(CORPUS.read_text())["queries"], CORPUS
+
+
+def test_a_store_that_opens_with_no_entity_rows_is_refused_as_a_verdict(monkeypatch):
+    """Zero rows is a different fact from zero matches, and must not become one.
+
+    `KGStore(path)` CREATES an absent database, which is how a worktree run once
+    reported `duplicate_rows: 0` about a store that was not there
+    (`app/uptake.py:1413-1418`). An empty `entities` table would otherwise arrive
+    as "every expectation is unsatisfiable" — 43 findings, all of them about the
+    reader — so the refusal is on the row count as well as on the open.
+    """
+    class EmptyStore:
+        path = Path("empty-kg.sqlite")
+
+        class entities:  # noqa: N801 - mirrors the store's attribute spelling
+            @staticmethod
+            def all():
+                return []
+
+    with pytest.raises(AssertionError) as exc:
+        _entity_satisfiability_report(getter=EmptyStore)
+    assert "0 entity rows" in str(exc.value), exc.value
+    assert "not a verdict" in str(exc.value), exc.value

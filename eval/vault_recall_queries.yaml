@@ -35,9 +35,26 @@ queries:
   - id: backlog-363
     query: "tell me about backlog item 363"
     category: single
-    # 2026-08-06: "Backlog Item 363" → "Backlog Item #363" (real dir; the
-    # expectation was missing the '#' and could never match).
-    expect_entities: ["Backlog Item #363", "Task #363"]
+    # ENTITY-NAME satisfiability is what this comment is about, not vault paths and
+    # not where the answer file lives. 2026-08-06 retargeted "Backlog Item 363" →
+    # "Backlog Item #363" on the grounds that the name was a real DIR NAME. It is a
+    # real fact-tree dir and NOT a real entity name — no entity row contains that
+    # string — so the retarget moved the query from one unsatisfiable expectation to
+    # another, and the query kept scoring a retrieval failure no retrieval change
+    # could clear. `entity_hit` was false and `entity_recall` capped at 0.5 forever;
+    # the movement got read as a seed-identification defect (#400, #513, #878).
+    # 2026-09-20 (#878): re-pointed at rows the entity table holds for item 363.
+    # `Task #363` was already reachable and is KEPT — dropping it would be exactly
+    # the easier-target substitution the audit rule at the top of this file forbids.
+    # `#363 TGS-RAG Implementation` replaces the dead name: item 363 IS the TGS-RAG
+    # implementation task, so it is the correct second hop rather than a softer one.
+    # Neither string contains the other, so no single returned entity can satisfy
+    # both — the query got harder, not easier. The doc leg keeps expecting the vault
+    # path, which is right there: `expect_docs` matches paths, not entity names.
+    # `tests/test_eval_corpus_guard.py` now fails CI when any expectation in this
+    # file is contained in no entity name, so re-breaking it is a red test rather
+    # than a nightly number that quietly reads as a retrieval regression.
+    expect_entities: ["Task #363", "#363 TGS-RAG Implementation"]
     expect_docs: ["backlog/363-implement-tgs-rag", "Backlog Item 363"]
 
   - id: entity-resolution-sweep
@@ -124,7 +141,17 @@ queries:
   - id: qwen38-local-serving
     query: "how do we serve a hybrid linear-attention model on a single 24GB GPU?"
     category: multi-hop
-    expect_entities: ["Qwen3.8-Flash-Next", "Qwen3.8-27B"]
+    # 2026-09-20 (#878): `Qwen3.8-27B` names no entity and is contained in no
+    # entity name — the store writes this model with spaces (`Qwen 3.8 27B`) and
+    # `_norm` folds only case and `-`/`_`, never spaces, so `qwen3_8_27b` matches
+    # nothing and the query scored a permanent entity-leg failure beside a healthy
+    # doc leg. Third dead name in this file and the one the 2026-09-11 item could
+    # not see; the corpus-wide guard now catches it, which is the guard earning its
+    # keep on day one rather than only on the name it was written for. Re-pointed at
+    # `Qwen 3.8 27B`, the same model, spelled the way the entity table spells it —
+    # the correct answer to the question, not an easier one. `Qwen3.8-Flash-Next` is
+    # reachable and stays.
+    expect_entities: ["Qwen3.8-Flash-Next", "Qwen 3.8 27B"]
     expect_docs: ["hybrid-gdn-qsa-inference-serving", "qwen38-27b-local-24gb",
                   "qwen38-flash-next-engram"]
 
@@ -133,8 +160,28 @@ queries:
     query: "what's the current state of TGS-RAG research?"
     category: recent
     # 2026-08-06: both were unsatisfiable, leaving no scorable entity target.
-    # → real dirs "Backlog Item #363" and "TGS-RAG Implementation".
-    expect_entities: ["Backlog Item #363", "TGS-RAG Implementation"]
+    # → "real dirs" "Backlog Item #363" and "TGS-RAG Implementation" — a claim
+    # about DIRECTORY names, which is not what an `expect_entities` entry has to
+    # satisfy. ENTITY-NAME satisfiability is the subject of this comment, and the
+    # two names went two different ways: neither is an entity row, but `_score`
+    # matches an expectation as a substring of a returned name, so
+    # `TGS-RAG Implementation` is reached through the row `#363 TGS-RAG
+    # Implementation` and stayed satisfiable, while `Backlog Item #363` is contained
+    # in no entity name at all (`Backlog Task #363`, `Issue #363`, `Task #363` are
+    # the nearest rows and none CONTAINS it). So this query — the one #513 was filed
+    # to fix — still carried an unreachable target, and still reported
+    # `entity_hit: false` / `entity_recall: 0.0` against `doc_hit: true` /
+    # `rr_doc: 1.0`: retrieval worked, the target could not be hit.
+    # 2026-09-20 (#878): only the unreachable name moves, to
+    # `Task #363 (TGS-RAG Multi-Hop Reasoning)` — the entity that holds this
+    # project's implementation status. `TGS-RAG Implementation` is deliberately
+    # KEPT rather than re-pointed at the exact row: an equality-based reading would
+    # have "fixed" it too, and substituting a target for no reason is what the audit
+    # rule at the top of this file forbids. Neither string contains the other, so
+    # one returned entity cannot satisfy both. Re-breaking this is now a CI red, not
+    # a nightly number that reads as a retrieval regression
+    # (`tests/test_eval_corpus_guard.py`).
+    expect_entities: ["Task #363 (TGS-RAG Multi-Hop Reasoning)", "TGS-RAG Implementation"]
     expect_docs: ["tgs-rag", "neuro-symbolic-rag", "363-implement-tgs-rag"]
 
   - id: graph-quality
