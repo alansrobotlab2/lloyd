@@ -2,7 +2,7 @@
 segment: architecture
 tags: [architecture,subliminal,memory,prefetch]
 type: architecture
-updated: 2026-09-11
+updated: 2026-09-20
 ---
 
 # Context Injection & Prefetch System
@@ -115,17 +115,18 @@ The pool is deliberately **not** used as a context manager — `with` blocks on
 `pool.shutdown(wait=False)` lets stragglers finish detached; Python GCs the pool
 once their threads return.
 
-Measured 2026-09-03 on this host (warm process, 283 skills, 328 backlog files,
+Measured 2026-09-03 on this host (warm process, 189 retrievable skills from
+208 dirs / 192 on disk, 1,235 backlog files,
 QMD daemon on GPU 0):
 
 | Worker | Before | After | Note |
 |---|---|---|---|
-| skills | ~83 ms | ~0.2 ms | token sets memoized on the cached skill dicts |
-| backlog (index refresh) | ~216 ms every 60 s | ~1.2 ms | incremental mtime scan |
+| skills | ~83 ms | ~0.2 ms | token sets memoized on the cached skill dicts (re-counted 2026-09-20: 189 retrievable skills from 192 dirs in `~/obsidian/skills` — `~/lloyd/skills` does not exist) |
+| backlog (index refresh) | ~216 ms every 60 s | ~1.2 ms | incremental mtime scan (re-counted 2026-09-20: 1,235 board files, ids spanning 9–1297, not 328/498 — the per-file cost is what moved the cold refresh off ~216 ms) |
 | facts | ~5 ms warm | ~5 ms | ~150 ms once per process (entity index) |
 | sessions | <5 ms | <5 ms | temporal queries only |
 | vault lex leg | — | 6–50 ms warm; 0.5–1.3 s per cold term | 1–4 short calls; soft-waited 150 ms, then carried over |
-| vault lex+vec | 1.1–2.6 s | 1.1–2.6 s | never lands; carried to the next turn |
+| vault lex+vec | 1.1–2.6 s at 456 docs; ~2.5–3.0 s at the 2026-09-20 corpus (see the QMD daemon row) | same | never lands; carried to the next turn |
 
 Before the fix every one of the last 20 logged turns hit the wall (301–348 ms):
 vault was dropped 20/20 and facts 12/20. The vault number was structural — the
@@ -663,7 +664,7 @@ Tier-2 topic extraction (above).
 
 | Service | Port | GPU | Purpose |
 |---------|------|-----|---------|
-| QMD daemon | 8181 | GPU 0 | Hybrid BM25 + vector search, embedding model. Single node process — serializes requests; vec leg 1.1–2.6 s, lex leg 10–80 ms and AND-only |
+| QMD daemon | 8181 | GPU 0 | Hybrid BM25 + vector search, embedding model (`embeddinggemma-300M-Q8_0`, deployed qmd 2.8.3). Single node process — serializes requests. **Vec-leg timing is corpus-proportional, not a constant: measured 2.5–3.0 s at the 2026-09-20 index (15,850 files / 38,907 chunks) — 2.6 s was a 456-doc world.** The one thing that does NOT scale with corpus is the *fixed startup tax*: `embed ≈ vec ≈ chunk+1` ms on every query, warm, any text, any leg (39 ms on a 6-char word). 3.0 s is the worst case for a straggler, so a 500 ms carry-over is safe; lex leg 10–80 ms and AND-only |
 | vLLM primary (Qwen3.8-Flash-Next) | 8096 | GPU 1 (RTX PRO 6000, `--gpu-memory-utilization 0.9345`) | Main agent model. Served capture/fact/focus extraction too while `secondary_enabled` was false |
 | llama.cpp secondary (Qwen3.6-35B-A3B UD-Q3_K_XL) | 8091 | GPU 2 (RTX 3090) | Capture / fact / focus / title extraction. Running, `secondary_enabled: true`. Single-tenant (`--parallel 1`) — these jobs queue behind each other. **Not** Inner Voice: the observer is pinned to `primary` in config.yaml after a 4B briefly landed in this slot and intervened on 40% of judged events |
 | Qwen3-TTS | 8090 | GPU 0 | Voice output |
@@ -676,22 +677,34 @@ the live personal vault, scored for `entity_hit` / `doc_hit` / `topk_overlap`
 against expected entities and documents. Written to baseline retrieval before and
 after graph-vote re-ranking changes.
 
-Current official baseline (2026-08-06; all prior baselines void for entity-side
+Current official baseline (`eval/baselines/baseline-20260920-005445.json`,
+rerun 2026-09-20; all prior baselines void for entity-side
 metrics after the #380 Phase 0b expectation audit):
 
 | Metric | Value |
 |---|---|
-| Overall MRR | 0.359 |
-| entity_hit | 0.65 |
-| ent_recall | 0.47 |
-| fER | 0.392 |
-| **multi-hop MRR** | **0.022** |
-| Latency | 5,063 ms |
+| Overall MRR | 0.497 |
+| entity_hit | 0.50 |
+| ent_recall | 0.40 |
+| fER | 0.375 |
+| multi-hop MRR | 0.513 (4th of 6 categories — the weakest is `technical` at 0.237) |
+| Latency | 4,281 ms |
 
 Two things to be honest about:
 
-1. **Multi-hop retrieval effectively does not work** (MRR 0.022). This is the
-   largest known quality gap in the subsystem.
+1. **Both headline claims this table carried from 2026-08-06 were measurement
+   bugs, and neither is a quality finding any more.** The 0.022 multi-hop figure
+   came from `eval/run_eval.py` bucketing those queries under `"multi-hop"` while
+   `eval/vault_recall_queries.yaml` labels them `multi_hop` (underscore), so the
+   category was scored out of a bucket nothing read; measured correctly it is
+   0.513, mid-pack, and the real weakest category is `technical` (0.237) for the
+   source-file reason above. And `entity_hit`/`ent_recall`/`fER` sat pinned at
+   0.50/0.40/0.375 across all 16 nightly artifacts 2026-09-03→09-20 because 9 of
+   46 `expect_entities` named entity directories that do not exist —
+   unsatisfiable-by-construction expectations, the same defect the corpus-census
+   bullet describes. The #878 guard (`997a244`, 2026-09-20) landed *after* this
+   reading, so the entity trio is pre-fix and moves on the next nightly: re-read
+   the newest artifact rather than these four lines.
 2. This measures `_vault_recall`, the *explicit tool path* with reranking on — not
    the prefetch path, which uses `skip_rerank=True`, a 300 ms budget, and
    focus-enriched queries. The prefetch path has its own eval (below); the two
@@ -724,7 +737,8 @@ collections and the per-leg hybrid queries; the latency gain is the soft wait
 remaining misses: expectations under `skills/` (excluded by design — the
 skills worker covers them), `technical` queries whose expected docs are source
 files (`agent_mcp/…`, `app/…` — the vault leg does not grep code; the explicit
-tool does), and multi-hop questions.
+tool does), and `technical`-style entity misses. Multi-hop is no longer on
+this list: the 0.022 that justified it was a bucket-name bug (see Evaluation).
 
 The #380 Phase 0b audit is worth remembering as a methodology note: 9 of 46
 `expect_entities` were *unsatisfiable* — no entity directory contained the string —
@@ -784,3 +798,7 @@ with the genuinely correct answer, never an easier target.
   after it is written (both role filters, and the hard compaction that
   destroys it), the `role="thinking"` sibling, worker turns being prefetched
   exactly like chat turns, and why prefetch keeps qmd's per-collection path
+
+## Review log
+
+- **2026-09-20 — stale.** Corrected in place: the eval baseline table had drifted a full point on every row it printed (MRR 0.359→0.497, entity_hit 0.65→0.50, ent_recall 0.47→0.40, fER 0.392→0.375, latency 5,063→4,281 ms) and its headline "multi-hop MRR 0.022 / retrieval effectively does not work" was a bucket-name bug in `run_eval.py` (`"multi-hop"` vs the query set's `multi_hop`) — measured correctly it is 0.513, and the entity trio is itself pinned by unsatisfiable `expect_entities` until the #878 guard's next run. Also: the QMD vector leg's 1.1–2.6 s was a 456-doc world and reads ~2.5–3.0 s on the current 15,850-file index (it is corpus-proportional; only the ~39 ms startup tax is constant); the corpus sizes in the latency section (283 skills / 328 backlog) are roughly half- and quarter-true (189 retrievable, 1,235). Filed #1298 (committed qmd template drifts from the live `~/.config/qmd/index.yml`, two collections point at non-existent paths), #1299 (`sessions-background/` exports are indexed by nothing while the indexed session corpus runs 21 user files against 1,593 background files per week), #1300 (the nightly retrieval-eval reader averages baselines across a query-set change with no corpus gate). Activity notes left on #407 and #1064, where auto-dedupe merged two unrelated findings.
