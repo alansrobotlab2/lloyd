@@ -149,6 +149,21 @@ def slice_scores(targeted: float, heldout: float) -> dict[str, float]:
             for t in SPLIT_TASKS}
 
 
+# Which pool a fixture task belongs to — the same category axis `slice_scores` and
+# `promote.derive_split` read, spelled once so a test that moves one slice cannot
+# quietly move the other.
+_TARGETED = {t["id"] for t in SPLIT_TASKS if t["category"] in ("replay", "synthetic")}
+_HELDOUT = {t["id"] for t in SPLIT_TASKS if t["category"] not in ("replay", "synthetic")}
+
+
+def _is_targeted(task_id: str) -> bool:
+    return task_id in _TARGETED
+
+
+def _is_heldout(task_id: str) -> bool:
+    return task_id in _HELDOUT
+
+
 def promote_line(vid: str, cfg, base: dict[str, float], var: dict[str, float]) -> str:
     """The exact ``- \\`vid\\`: PROMOTE — …`` line ``run_round.run()`` writes.
 
@@ -442,6 +457,48 @@ def test_the_real_promote_line_records_the_targeted_gain_and_nothing_else(tmp_pa
     assert pfr.PROMOTE_LINE_RE.match(legacy).group("delta") == "+0.0782", (
         "rounds recorded before the split keep their single whole-bench delta, and "
         "67 of them are still the corpus this instrument measures")
+
+
+def test_the_tie_split_added_to_a_refusal_is_never_read_as_a_promotion(tmp_path):
+    """#1060 put a wins/ties/losses split into the HOLD reason; the reader is unaffected.
+
+    Two halves, one per direction of the boundary. Writer side: the promote branch
+    still emits the line this instrument parses — `promote (… win_frac=…)` — and the
+    captured number is still the targeted gain, so the FP-rate denominator and the
+    recorded deltas of rounds after this change stay comparable with the 65 before
+    it. Reader side: the new split rides only on refusal lines, and a refusal line
+    carrying `wins=3 ties=5 losses=0` must yield no recorded delta at all — the
+    three new counts are unsigned integers, so the one guard that keeps them out is
+    the `PROMOTE` literal, which is why a HOLD line is asserted here and not merely
+    assumed.
+    """
+    cfg = make_cfg(tmp_path)
+    base = slice_scores(0.40, 0.40)
+    # Two targeted tasks up (+0.20 each), the veto slice up by 0.01: a real gain on
+    # the pool the variant aimed at, refused because only 2 of 6 targeted tasks moved.
+    var = {tid: (sc + 0.20 if tid in ("task_0", "task_2") and _is_targeted(tid)
+                 else sc + 0.01 if _is_heldout(tid) else sc)
+           for tid, sc in base.items()}
+
+    should, reason = promote.evaluate_promotion(cfg, bench_summary(base), bench_summary(var),
+                                                split=None)
+    assert should is False and reason.startswith("insufficient_win_fraction"), reason
+    assert "wins=2 ties=4 losses=0" in reason, reason
+
+    hold_line = f"- `V_20261008_074540_4e602b`: HOLD — {reason}"
+    assert pfr.PROMOTE_LINE_RE.match(hold_line) is None, (
+        f"a refusal with the new split parsed as a promotion: {hold_line}")
+
+    promoted = promote_line("V_20261008_074541_111111", cfg, base,
+                            {tid: (sc + 0.20 if _is_targeted(tid) else sc + 0.01)
+                             for tid, sc in base.items()})
+    match = pfr.PROMOTE_LINE_RE.match(promoted)
+    assert match is not None, f"the promote line stopped parsing: {promoted}"
+    assert "win_frac=" in promoted, promoted
+    assert match.group("delta") == "+0.2000", promoted
+    assert promoted.count("wins=") == 0, (
+        "the split belongs to refusals; a promote line carrying it would make the "
+        "two report shapes diverge for no reader")
 
 
 def test_a_window_with_no_null_rounds_refuses_to_invent_a_floor(tmp_path):

@@ -1,7 +1,10 @@
 """Promotion pipeline — snapshot, atomic swap, fact write.
 
-A promotion executes when a variant beats baseline on >= N% of bench tasks
-and passes all safety probes. Before swapping, we snapshot the current state
+A promotion executes when the targeted slice strictly improves, the held-out
+slice does not decline, the variant strictly beats baseline on at least N% of the
+targeted tasks (a tie is NOT a win — the tie rule and its purpose are written at
+the counting line in `slice_metrics`), and every safety probe passes.
+Before swapping, we snapshot the current state
 (SOUL.md, MEMORY.md, USER.md) into `_pipeline/research/snapshots/<ts>/`.
 After swap, we write the winning experiment as a fact under
 `cfg.paths.facts_experiments_dir/<variant_id>/` (configured in config.yaml,
@@ -101,8 +104,36 @@ def slice_metrics(
 
     t_ids, t_base, t_var = pair(targeted)
     h_ids, h_base, h_var = pair(heldout)
+    # ── The win leg's tie semantics, in one place, deliberately STRICT ─────────
+    # A win is a per-task STRICT increase (`variant > baseline`); a tie is not a
+    # win, a decrease is a loss. The leg exists to catch a variant that gains on a
+    # few tasks while REGRESSING on others, and strictness is what makes a
+    # regression a non-win — that is the whole purpose, so it is decided here
+    # rather than left to whichever spelling of a comment is nearest.
+    # Counting ties as wins would not weaken that purpose — a regression is still a
+    # non-win — but it would empty the leg on this bench:
+    # `bench_mine.calibrate_candidate` records four of the eleven live tasks sitting
+    # at exactly 0.00, so a variant that moved ONE targeted task and tied every other
+    # one would score `compared/compared` = 1.00 and clear the threshold outright.
+    # And 0.5 is a measured operating point: `promotion_fp_rate.py` derived its
+    # false-positive rate over the live promoted-round corpus under exactly these
+    # strict semantics, and #549's strict held-out legs below refuse a tie for the
+    # same reason.
+    # The ledger shape this refuses, reproduced by a named test
+    # (`test_the_strict_tie_rule_is_a_deliberate_decision_on_the_ledger_shape`): a
+    # 2026-09-01 variant better on 4 of 11 tasks, tied on 7, WORSE ON NONE, whole-bench
+    # mean +0.1227, refused at the 0.36 the ledger recorded for it. A ledger census
+    # taken 2026-09-16 found all 552 `insufficient_win_fraction` refusals carrying a
+    # positive mean delta, and 24 refused variants that strictly dominated their
+    # baseline (better on some tasks, worse on none). Refusing those is the decision;
+    # printing the split beside it, instead of only the fraction, is what stops the
+    # next reader recomputing 28k ledger rows to discover that `losses=0`.
     wins = sum(1 for t in t_ids if var_per[t] > base_per[t])
+    losses = sum(1 for t in t_ids if var_per[t] < base_per[t])
+    ties = len(t_ids) - wins - losses
     return {
+        "compared": len(t_ids),
+        "wins": wins, "ties": ties, "losses": losses,
         "unsplit": unsplit,
         "targeted_ids": t_ids, "targeted_baseline": t_base, "targeted_variant": t_var,
         "targeted_delta": t_var - t_base,
@@ -198,9 +229,15 @@ def evaluate_promotion(
             f"{len(m['heldout_ids'])} veto tasks — strict no-decline refuses a tie)"
         )
     if m["win_fraction"] < cfg.promotion_min_win_fraction:
+        # The `insufficient_win_fraction (X.XX < Y.YY` prefix is load-bearing: the
+        # ledger's 552-row census keys on it. Everything after it is the tie/loss
+        # split, so a variant that beat baseline with ZERO regressions — the shape
+        # the strict leg refuses by design — is recognisable from the round report or
+        # the ledger row alone instead of only from a recomputation of the ledger.
         return False, (
             f"insufficient_win_fraction ({m['win_fraction']:.2f} < "
-            f"{cfg.promotion_min_win_fraction}, targeted slice only)"
+            f"{cfg.promotion_min_win_fraction}; wins={m['wins']} "
+            f"ties={m['ties']} losses={m['losses']} of {m['compared']} targeted tasks)"
         )
 
     gain = m["normalized_gain"]

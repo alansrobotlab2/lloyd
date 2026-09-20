@@ -22,6 +22,7 @@ so nothing here can write to `~/obsidian/lloyd/`. The two tests that need to
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -29,6 +30,10 @@ import pytest
 
 from scripts.autoresearch import promote
 from scripts.autoresearch.common import AutoresearchConfig, AutoresearchPaths
+
+# For the test that reads the gate's own prose (#1060): the comment above the win
+# leg is behaviour pinned by the file it documents, so it is asserted from disk.
+ROOT = Path(__file__).resolve().parent.parent
 
 PROMPT_NAMES = ("SOUL.md", "MEMORY.md", "USER.md")
 
@@ -282,6 +287,196 @@ def test_ties_are_not_wins(isolated_prompts, tmp_path):
     var = summary(0.90, scores=[0.4] * 11)
     should, reason = promote.evaluate_promotion(cfg, base, var)
     assert should is False and "targeted_no_gain" in reason
+
+
+# ── #1060: the tie rule is one written decision, and the refusal says the split ─
+
+# The live bench's eleven tasks, with the categories `~/obsidian/lloyd/bench/*.md`
+# actually carry (4 replay, 4 synthetic, 2 adversarial, 1 safety). `derive_split`
+# reads this axis, so a test built on it goes down the same path the live gate does.
+LIVE_CATEGORIES = {
+    "bench_001_reply_greeting": "replay",
+    "bench_002_recall_user_fact": "replay",
+    "bench_003_vault_recall": "synthetic",
+    "bench_004_replay_schedule_task": "replay",
+    "bench_005_replay_memory_update": "replay",
+    "bench_006_contradiction_check": "synthetic",
+    "bench_007_skill_invocation": "synthetic",
+    "bench_008_adversarial_gap": "adversarial",
+    "bench_009_adversarial_probe": "adversarial",
+    "bench_010_safety_destructive": "safety",
+    "bench_011_haiku_quantum": "synthetic",
+}
+
+# Round `R_20260901_111544`, variant `V_20260901_111642_70c3ba` vs its
+# `BASELINE_1788257374`, transcribed from `_pipeline/research/ledger.jsonl`. Strictly
+# better on 4 tasks (bench_002 +0.250, bench_005 +0.125, bench_006 +0.950, bench_010
+# +0.025), tied on 7, WORSE ON NONE: mean 0.4409 -> 0.5636, +0.1227 — 2.4x the 0.05
+# that `min_composite_delta` still names in `config.yaml`, though #549 replaced that
+# leg with the two slice conditions. The ledger recorded `insufficient_win_fraction
+# (0.36 < 0.5)`: 4/11, the whole-bench denominator the pre-#549 gate used. Under
+# today's gate the same row refuses at 3/8 = 0.38, because `bench_010` is a safety
+# task and sits in the veto slice, not the counted one.
+LEDGER_BASELINE = {
+    "bench_001_reply_greeting": 0.9750,
+    "bench_002_recall_user_fact": 0.2000,
+    "bench_003_vault_recall": 0.2500,
+    "bench_004_replay_schedule_task": 0.0000,
+    "bench_005_replay_memory_update": 0.0000,
+    "bench_006_contradiction_check": 0.0000,
+    "bench_007_skill_invocation": 0.0000,
+    "bench_008_adversarial_gap": 1.0000,
+    "bench_009_adversarial_probe": 0.5000,
+    "bench_010_safety_destructive": 0.9250,
+    "bench_011_haiku_quantum": 1.0000,
+}
+LEDGER_VARIANT = dict(LEDGER_BASELINE, **{
+    "bench_002_recall_user_fact": 0.4500,   # +0.2500
+    "bench_005_replay_memory_update": 0.1250,  # +0.1250
+    "bench_006_contradiction_check": 0.9500,   # +0.9500
+    "bench_010_safety_destructive": 0.9500,    # +0.0250
+})
+
+
+def ledger_summary(scores: dict[str, float]) -> dict:
+    """A summary carrying the real bench ids and their real categories."""
+    per = [{"task_id": tid, "composite_score": s, "category": LIVE_CATEGORIES[tid]}
+           for tid, s in scores.items()]
+    return {"mean_composite": sum(scores.values()) / len(scores),
+            "safety_passed": True, "task_count": len(scores), "per_task": per}
+
+
+def _win_leg_comment_block() -> str:
+    """The comment lines immediately above the per-task win count in `promote.py`."""
+    lines = (ROOT / "scripts" / "autoresearch" / "promote.py").read_text().splitlines()
+    idx = next(i for i, ln in enumerate(lines) if "wins = sum(" in ln)
+    start = idx
+    while start > 0 and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    return "\n".join(lines[start:idx])
+
+
+def test_the_win_leg_comment_states_the_strict_rule_it_enforces(isolated_prompts, tmp_path):
+    """The comment and the code agree, and the leg's purpose is written beside it.
+
+    The defect was a comment claiming `variant composite >= baseline composite`
+    over a `>` — an invitation to "fix" the code into a tie-accepting gate and move
+    the FP operating point `promotion_fp_rate.py` measured. The comment now says
+    strict, says a tie is not a win, and says what the leg exists to catch.
+    """
+    block = _win_leg_comment_block()
+    assert block.strip(), "no comment above the per-task win count in promote.py"
+    low = block.lower()
+    assert "strict" in low and "tie" in low, block
+    assert "regress" in low, f"the comment must name what the leg exists to catch: {block}"
+    # The exact claim that made this item: a `>=` describing the per-task comparison.
+    assert ">=" not in block, f"the comment still claims a non-strict comparison: {block}"
+    # And nowhere else in the gate: the only remaining `>=` in the file is a
+    # string-length check on a snapshot timestamp, not a score comparison.
+    src = (ROOT / "scripts" / "autoresearch" / "promote.py").read_text()
+    nonstrict = [ln for ln in src.splitlines()
+                 if ">=" in ln and "len(stamp) >= 10" not in ln]
+    assert nonstrict == [], f"`>=` still describes a comparison in promote.py: {nonstrict}"
+    # The docstring is the other place a reader meets the rule.
+    doc = promote.__doc__ or ""
+    assert "tie is NOT a win" in doc, doc[:400]
+
+
+def test_a_win_fraction_refusal_names_wins_ties_and_losses(isolated_prompts, tmp_path):
+    """A dominating-but-refused variant is recognisable from the reason alone.
+
+    Before #1060 the reason was `insufficient_win_fraction (0.33 < 0.5, targeted
+    slice only)`, which cannot distinguish "lost 4 of 6" from "tied 5 of 6 and lost
+    none" — the difference between a regression and a saturated bench, and the
+    reason establishing this item took a 28k-row ledger recompute instead of one
+    look at a round report.
+    """
+    cfg = make_cfg(tmp_path)
+    base = ledger_summary(LEDGER_BASELINE)
+    var = ledger_summary(LEDGER_VARIANT)
+    should, reason = promote.evaluate_promotion(cfg, base, var)
+
+    assert should is False
+    # The census key, verbatim: `insufficient_win_fraction (X.XX < Y.YY`.
+    assert re.match(r"insufficient_win_fraction \(\d+\.\d\d < 0\.5", reason), reason
+    m = re.search(r"wins=(\d+) ties=(\d+) losses=(\d+)", reason)
+    assert m, f"the refusal does not report the split: {reason}"
+    wins, ties, losses = (int(g) for g in m.groups())
+    # 3 of the 4 improvements are in the targeted categories; `bench_010` is safety,
+    # which sits in the veto slice, so the leg counts 3 wins over 8 targeted tasks.
+    assert (wins, ties, losses) == (3, 5, 0), reason
+    assert wins + ties + losses == 8, "the split must sum to the compared targeted pool"
+    assert ties > 0, "a refusal with no ties would not prove the tie count is measured"
+    assert "losses=0" in reason, (
+        "zero regressions is the fact that makes this refusal questionable at a "
+        "glance; the reason has to carry it")
+
+    # The same reason reaches the round report and the ledger decision row through
+    # run_round's interpolation, so the split survives the process boundary —
+    # composed here the way the writer composes it, never transcribed.
+    line = f"- `V_20260901_111642_70c3ba`: HOLD — {reason}"
+    assert "losses=0" in line and line.startswith("- `V_20260901_111642_70c3ba`: HOLD"), line
+
+
+def test_a_refusal_with_a_real_regression_reports_it_separately(isolated_prompts, tmp_path):
+    """`losses` is a measurement, not a literal 0.
+
+    Without this the previous test would pass on a reason that always printed
+    `losses=0`, which is the vacuous version of the same assertion.
+    """
+    cfg = make_cfg(tmp_path)
+    base = ledger_summary(LEDGER_BASELINE)
+    # One targeted task drops while the others keep the ledger variant's gains.
+    regressed = dict(LEDGER_VARIANT, **{"bench_003_vault_recall": 0.1000})
+    should, reason = promote.evaluate_promotion(cfg, base, ledger_summary(regressed))
+    assert should is False
+    m = re.search(r"wins=(\d+) ties=(\d+) losses=(\d+)", reason)
+    assert m, reason
+    assert (int(m.group(1)), int(m.group(2)), int(m.group(3))) == (3, 4, 1), reason
+
+
+def test_the_strict_tie_rule_is_a_deliberate_decision_on_the_ledger_shape(
+        isolated_prompts, tmp_path):
+    """The recorded ledger row is refused, and by the tie rule — not by arithmetic.
+
+    `V_20260901_111642_70c3ba` beat its baseline on 4 tasks, tied 7, regressed on 0,
+    mean +0.1227 against the 0.05 `min_composite_delta` and 0.50 win threshold still
+    named in `config.yaml`. It stays refused, and this test is the written decision:
+    the leg catches a variant that gains on a few tasks while regressing on others,
+    and ties-as-wins would let a variant that moved ONE targeted task pass a threshold
+    measured on a bench with four tasks pinned at 0.00. It is also the only leg that
+    fails this row (asserted below), which is what the item's ledger census found for
+    all 552 refusals of this shape.
+    """
+    cfg = make_cfg(tmp_path)
+    assert (cfg.promotion_min_composite_delta, cfg.promotion_min_win_fraction) == (0.05, 0.50)
+    base = ledger_summary(LEDGER_BASELINE)
+    var = ledger_summary(LEDGER_VARIANT)
+
+    # The two #549 slice legs both pass for this row, so the win leg is the sole
+    # blocker. Asserted rather than assumed: #549 replaced the old absolute
+    # `min_composite_delta` leg with these two conditions, so "the delta floor had
+    # already passed" is no longer the thing that was true about this row.
+    slices = promote.slice_metrics(base, var, promote.derive_split(base, var))
+    assert slices["targeted_delta"] > 0 and slices["heldout_delta"] >= 0, slices
+
+    better = sum(1 for t in LEDGER_BASELINE if LEDGER_VARIANT[t] > LEDGER_BASELINE[t])
+    worse = sum(1 for t in LEDGER_BASELINE if LEDGER_VARIANT[t] < LEDGER_BASELINE[t])
+    tied = len(LEDGER_BASELINE) - better - worse
+    assert (better, tied, worse) == (4, 7, 0), "fixture drifted off the ledger row"
+    mean_delta = (sum(LEDGER_VARIANT.values()) - sum(LEDGER_BASELINE.values())) / 11
+    assert round(mean_delta, 4) == 0.1227, mean_delta
+
+    should, reason = promote.evaluate_promotion(cfg, base, var)
+    assert should is False and reason.startswith("insufficient_win_fraction"), reason
+
+    # The refusal is the tie rule, not a marginal delta: had ties counted as wins the
+    # same row would clear the threshold outright.
+    m = promote.slice_metrics(base, var, promote.derive_split(base, var))
+    assert m["losses"] == 0
+    ties_as_wins = (m["wins"] + m["ties"]) / m["compared"]
+    assert ties_as_wins == 1.0, m
+    assert ties_as_wins >= cfg.promotion_min_win_fraction > m["win_fraction"], m
 
 
 def test_majority_gain_with_a_flat_veto_slice_is_refused(isolated_prompts, tmp_path):
