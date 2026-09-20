@@ -73,17 +73,29 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-#: Dropped verdicts / LLM calls. Provisional: the measured baseline for
-#: 2026-09-01..09-12 was 0.039 (353 drops over 9,027 LLM calls — 234 at the 12 s
-#: deadline, 118 at 5 s), so this is ~2.5x today's rate and is meant to catch a
-#: step change, not normal wobble. Alan sets the real value and the channel a
-#: breach reaches; that is a person-decision left open on #460, and the test
-#: (`tests/test_iv_metrics_series.py`) pins that this default and the number in
-#: the task file agree rather than pinning the magnitude.
-DEFAULT_THRESHOLD = 0.10
+#: Dropped verdicts / LLM calls. **0.05 is Alan's ruling (#460), applied to this
+#: constant by #1288 on 2026-09-20; the task file had said 0.05 since vault
+#: 1eb0735e.** The measured baseline is 0.039 over 2026-09-01..09-12 — 353 drops over
+#: 9,027 LLM calls: 234 at the 12 s deadline, 118 at 5 s; re-measured off `usage.db`
+#: on 2026-09-20 at 0.0386 over the same local days. The retired 0.10 could not have
+#: caught the one history that mattered: the degraded 2026-09-05..09-11 stretch ran
+#: .0548 · .118 · .0341 · .0856 · .0526 · .0137 · .0086 per local day (320 drops over
+#: 7,530 calls), so its 7-row median of 0.0526 was under 0.10 and 09-06's 0.118 was
+#: the only night over it — one night, where `MIN_BREACH_ROWS` needs three. #458 was
+#: written off a single hand-run inside that week. 0.05 sits between the two: above
+#: the healthy weeks — 0.014 since, and the 9 rows recorded up to 2026-09-20 run
+#: 0.0..0.0203 — and below that median, so it fires on a run of bad nights and stays
+#: quiet otherwise. What is still a person-decision is the *channel* a breach reaches
+#: (#1145): until that
+#: lands, the only automated surface is the exit-code prose at `EXIT_BREACH`. The
+#: tests pin this default both to the number stated in `~/obsidian/autonomy/86-*.md`
+#: and to 0.05 itself, so neither can drift back silently.
+DEFAULT_THRESHOLD = 0.05
 #: Rows the median is taken over: 7 nights at one row a night. A threshold on a
-#: single night is a coin flip — the fleet's own history is one bad night at 2.5x
-#: the baseline followed by a clean one.
+#: single night is a coin flip — the fleet's own history is one night at 0.118
+#: followed by nights back at 0.014 and 0.009, which is a spike to read, not a week
+#: to announce. Seven nights is also the window the ruled 0.05 was measured against:
+#: that stretch's median is over it, every healthy week's median is under it.
 DEFAULT_WINDOW_ROWS = 7
 #: Rates below this many can flag but cannot breach. Three nights is the smallest set
 #: that is a trend rather than a reading — and a first night, alone in the file, would

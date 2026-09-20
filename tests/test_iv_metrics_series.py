@@ -197,8 +197,8 @@ def test_the_alert_reaches_the_autonomy_runner(tmp_path):
 
     since = _iso(NOW_LOCAL - datetime.timedelta(hours=26))
     # 10 observations each, one of them carrying an `error`, so dropped/llm_calls is
-    # 1/10 = 0.1 against the default bound; the breach case adds three prior rows at
-    # 0.20 so the median of the window is over it too. `healthy` has no error row.
+    # 1/10 = 0.1, over the 0.05 default bound; the breach case adds three prior rows
+    # at 0.20 so the median of the window is over it too. `healthy` has no error row.
     scenarios = {
         "breach": ({"error": "timeout after 5.0s"}, [0.20, 0.20, 0.20]),
         "flagged": ({"error": "timeout after 5.0s"}, []),
@@ -408,7 +408,10 @@ def test_row_carries_rates_as_numbers_when_the_grader_scored_something():
                          "terminal_noops_with_a_following_user_message": 6400},
     }
 
-    row = iv_metrics_record._row(report, window_hours=26.0, threshold=0.10,
+    # `RULED_BOUND`, not a retired number: 353/9027 is the measured baseline, and the
+    # assert on `flagged` below only means something while the baseline is compared
+    # against the bound that is actually in force.
+    row = iv_metrics_record._row(report, window_hours=26.0, threshold=RULED_BOUND,
                                 threshold_source="default", window_rows=7)
 
     assert row["landed_rate"] == pytest.approx(0.955)
@@ -512,7 +515,7 @@ def test_breach_exits_2_when_the_recent_median_is_over_the_bound(tmp_path):
 
     Clause 5: "flag the row when the last N rows exceed it, with the comparison
     expressed over JSONL fields rather than prose". Four prior rows at 0.20 plus
-    this run's 1.0: median 0.20 > 0.10, so exit 2. Exit status rather than a
+    this run's 1.0: median 0.20 > the 0.05 bound, so exit 2. Exit status rather than a
     sentence because the autonomy runner consumes exit codes reliably —
     `scripts/skill_verdicts.py:320` and `scripts/validate_handoff.py:70` use 2 for a
     refusal for the same reason, and `_detect_silent_failures` (`autonomy.py:26-32`) only catches
@@ -830,13 +833,16 @@ def test_task_file_threshold_matches_the_code_default():
 
     Clause 5 requires a *stated* threshold. A number in a prompt and a different
     number in the script is worse than no number: the run report quotes the prose
-    while the exit code follows the code. The measured baseline (0.039) is also
-    required, because that is what makes the bound legible as "about 2.5x what we
-    measure today" rather than an arbitrary 0.10.
+    while the exit code follows the code. That is exactly what happened on
+    2026-09-20: vault `1eb0735e` put 0.05 into the task file and the constant stayed
+    0.10, so the nightly read one number and enforced another. The measured baseline
+    (0.039) is also required, because that is what makes the bound legible as a
+    margin over what is actually measured rather than an arbitrary number.
 
-    Alan has not chosen the final value or the alert channel — an open
-    person-decision on #460 — so this pins the two copies agreeing, not the
-    magnitude. Retune both together and it stays green.
+    This node pins the two copies *agreeing*; it cannot pin the magnitude — moving
+    both together stays green here, which is why `test_the_code_default_is_the_ruled_bound`
+    asserts the value itself. The channel a breach reaches is still an open
+    person-decision (#1145).
     """
     text = _task_file().read_text()
     frontmatter, body = text.split("---\n", 2)[1], text.split("---\n", 2)[2]
@@ -849,18 +855,91 @@ def test_task_file_threshold_matches_the_code_default():
     # `body` is the markdown after the closing fence, not the whole file. Passed the
     # whole file, `re.search` returns the *frontmatter* match again — the first
     # iteration of this test did exactly that, so both iterations graded the same
-    # string and the body's own "**Bound: 0.10**" was never located. Anchored on the
+    # string and the body's own bound line was never located. Anchored on the
     # word `Bound:` at the start of a line so a stray "bound" in prose can't stand in.
     for label, chunk in (("description", desc), ("body", body)):
         stated = (re.search(r"[Bb]ound\D{0,24}?(\d\.\d+)", chunk) if label == "description"
                   else re.search(r"Bound:\s*(\d\.\d+)", chunk))
-        assert stated, (f'the {label} must state the bound, e.g. "Bound: 0.10" — '
+        assert stated, (f'the {label} must state the bound, e.g. "Bound: '
+                        f'{iv_metrics_record.DEFAULT_THRESHOLD}" — '
                         f"searched {len(chunk)} chars of the {label}")
         assert float(stated.group(1)) == pytest.approx(
             iv_metrics_record.DEFAULT_THRESHOLD), (
             f"{label} says {stated.group(1)}, DEFAULT_THRESHOLD is "
             f"{iv_metrics_record.DEFAULT_THRESHOLD}")
     assert "0.039" in text, "the measured baseline belongs next to the bound"
+
+
+#: The bound Alan ruled on #460. Named here rather than inlined so a failure names
+#: the ruling that moved, not a number.
+RULED_BOUND = 0.05
+#: Per-local-day dropped-verdict rates measured off `usage.db` (2026-09-20), as the
+#: ruling saw them: the healthy weeks sit at the first, the degraded week's 7-day
+#: median at the second. 0.05 between them is what makes it an alert and not a
+#: re-statement of the weather.
+HEALTHY_WEEK_RATE = 0.014
+DEGRADED_STRETCH_MEDIAN = 0.0526
+
+
+def _constant_comment(name: str) -> str:
+    """The `#:` block directly above a module-level constant, read off the source.
+
+    The reason a bound was chosen lives in that comment and nowhere else — not in a
+    docstring `--help` prints, not in the task file the agent reads — so a reader
+    editing the number meets the reason or meets nothing. Returning the empty string
+    when there is no block is deliberate: callers assert on it, so a constant that
+    loses its comment is a failure and not a silent pass.
+    """
+    lines = RECORDER.read_text(encoding="utf-8").splitlines()
+    anchor = next((i for i, ln in enumerate(lines)
+                   if ln.startswith(f"{name} =")), None)
+    assert anchor is not None, f"{name} is no longer a module-level constant"
+    start = anchor
+    while start > 0 and lines[start - 1].lstrip().startswith("#:"):
+        start -= 1
+    return "\n".join(lines[start:anchor])
+
+
+def test_the_code_default_is_the_ruled_bound():
+    """The magnitude is pinned, and so is the reason written beside it.
+
+    `test_task_file_threshold_matches_the_code_default` can only say the prose and the
+    code agree; move both to 0.20 and it stays green, which lets an un-ruling arrive
+    dressed as a retune. So this asserts the ruled value itself — 0.05 — and then
+    asserts the constant's own comment still carries what justifies it: Alan's ruling
+    (#460), the measured baseline 0.039 over 2026-09-01..09-12, the degraded
+    2026-09-05..09-11 stretch whose 7-day median (0.0526) sat under the retired 0.10
+    and never alerted, and the healthy-week rate the bound must stay above.
+
+    The arithmetic of the ruling is asserted too, because it is the whole reason the
+    value is 0.05: healthy below it, the degraded median above it. A retune that
+    breaks that ordering is a different guard, not a retuned one.
+    """
+    assert iv_metrics_record.DEFAULT_THRESHOLD == pytest.approx(RULED_BOUND), (
+        f"DEFAULT_THRESHOLD is {iv_metrics_record.DEFAULT_THRESHOLD}, not the "
+        f"{RULED_BOUND} Alan ruled on #460 — re-tuning it is a person-decision, and "
+        "the task file in ~/obsidian/autonomy has to move in the same change")
+    assert HEALTHY_WEEK_RATE < RULED_BOUND < DEGRADED_STRETCH_MEDIAN, (
+        "the bound only means 'fires on a run of bad nights, quiet otherwise' while "
+        "it sits between the healthy-week rate and the degraded stretch's median")
+
+    comment = _constant_comment("DEFAULT_THRESHOLD")
+    assert comment, "the constant lost its comment; the reason for a bound has to " \
+                    "travel with the number"
+    for token, why in (
+            ("#460", "whose ruling it is"),
+            ("0.039", "the measured baseline the bound is a margin over"),
+            ("2026-09-01..09-12", "the window that baseline was measured over"),
+            ("2026-09-05..09-11", "the degraded stretch the bound exists to catch"),
+            ("0.0526", "that stretch's 7-row median, which 0.10 let pass"),
+            ("0.10", "the retired bound, so the next reader knows it was retired")):
+        assert token in comment, f"the comment beside the constant must state {why}"
+    # The retired number must not come back as a live claim about today's traffic:
+    # at 0.05 the "about 2.5x what we measure now" sentence is false (0.05 is ~1.3x
+    # the 0.039 baseline), and a reader who believes it under-alarms.
+    assert "2.5x" not in comment, (
+        "the comment still scales the bound off the retired 0.10; 0.05 is ~1.3x the "
+        "0.039 baseline, so the multiplier has to go or be re-measured")
 
 
 def test_the_live_series_has_two_dated_rows_and_a_computable_delta():
@@ -917,26 +996,38 @@ def test_a_consumer_compares_the_timeout_count_against_the_bound():
     comprehension, not that the comparison discriminates.
 
     So: hand `over_bound` four rows whose answers are known independently of the
-    code — under the bound, over it, exactly on it, and one with no calls — and
+    code — over the bound, under it, exactly on it, and one with no calls — and
     require exact membership. Then check the live rows agree with their own stored
     `flagged` field, so the shipped nightly decision and the consumer are the same
     function rather than two readings of the same number.
     """
+    # Every row below is 1,000 LLM calls, so the counts are the rates times a
+    # thousand and each one is a real night rather than an arbitrary number: the
+    # degraded 2026-09-05..09-11 median (0.0526 -> 53 calls), a healthy week
+    # (0.014 -> 14), and the bound itself (0.05 -> 50). Against RULED_BOUND the bound
+    # on 1,000 calls is 50 calls, so 53 is over and 50 is exactly on it — the three
+    # answers a reader can compute without running anything. Retuning the bound moves
+    # RULED_BOUND and these rows together; leaving the bound at 0.05 and editing a
+    # `flagged` expectation here is the failure mode this file exists to catch.
     rows = [
-        # under: 5 of 100 against 0.10 -> bound is 10 calls, 5 < 10
-        {"llm_calls": 100, "threshold": 0.10, "dropped_verdicts": 5, "flagged": False},
-        # over: 20 of 100 -> 20 > 10
-        {"llm_calls": 100, "threshold": 0.10, "dropped_verdicts": 20, "flagged": True},
-        # exactly on the bound: 10 of 100 -> 10 > 10 is False
-        {"llm_calls": 100, "threshold": 0.10, "dropped_verdicts": 10, "flagged": False},
+        # the degraded stretch's median: 53 of 1000 -> 53 > 50
+        {"llm_calls": 1000, "threshold": RULED_BOUND,
+         "dropped_verdicts": round(DEGRADED_STRETCH_MEDIAN * 1000), "flagged": True},
+        # a healthy week: 14 of 1000 -> 14 < 50
+        {"llm_calls": 1000, "threshold": RULED_BOUND,
+         "dropped_verdicts": round(HEALTHY_WEEK_RATE * 1000), "flagged": False},
+        # exactly on the bound: 50 of 1000 -> 50 > 50 is False
+        {"llm_calls": 1000, "threshold": RULED_BOUND,
+         "dropped_verdicts": round(RULED_BOUND * 1000), "flagged": False},
         # no traffic: no rate, so nothing to breach
-        {"llm_calls": 0, "threshold": 0.10, "dropped_verdicts": 0, "flagged": False},
+        {"llm_calls": 0, "threshold": RULED_BOUND,
+         "dropped_verdicts": 0, "flagged": False},
     ]
     for row in rows:
         assert iv_metrics_record.over_bound(row) is row["flagged"], row
 
     over = [r for r in rows if iv_metrics_record.over_bound(r)]
-    assert [r["dropped_verdicts"] for r in over] == [20], (
+    assert [r["dropped_verdicts"] for r in over] == [53], (
         f"exactly one of the four rows is over the bound, got {over}")
 
     # The four constructed rows above are the check that discriminates. This half

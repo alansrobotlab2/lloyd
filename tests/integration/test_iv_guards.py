@@ -13,7 +13,12 @@ got wrong or could not see. Run:
 from __future__ import annotations
 
 import asyncio
+import datetime
+import importlib.util
 import json
+import shutil
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -637,6 +642,184 @@ def test_attach_appends_goal_card_to_the_harness_user_message():
     print("test_attach_appends_goal_card_to_the_harness_user_message: OK")
 
 
+# ---------------------------------------------------------------------------
+# The IV-metrics recorder's sustained-breach path, at the bound Alan ruled on
+# #460 (0.05; applied to the code by #1288).
+#
+# These are the only nodes here that cross a *process* boundary on purpose, and
+# the boundary is the point: the nightly is
+#   cd ~/lloyd && python3 scripts/iv_grade.py --json --since X | python3 scripts/iv_metrics_record.py --out Y
+# run through an agent's Bash tool, so the scheduler can act on nothing but the
+# exit status and the prose the run reports. The margin the bound exists for is
+# equally specific: it has to fire on a series whose median sits at the degraded
+# 2026-09-05..09-11 week and stay silent on the history recorded since.
+# `tests/test_iv_metrics_series.py` pins the recorder in general and the bound's
+# magnitude; these two pin that margin end-to-end, through the exit code.
+# ---------------------------------------------------------------------------
+
+RECORDER_SCRIPTS = ("iv_grade.py", "iv_metrics_record.py")
+
+#: Loaded by path, never by putting `scripts/` on sys.path: that directory holds
+#: 40+ modules, several of which shadow stdlib names.
+_recorder_spec = importlib.util.spec_from_file_location(
+    "iv_metrics_record_for_guards", LLOYD_HOME / "scripts" / "iv_metrics_record.py")
+IV_METRICS = importlib.util.module_from_spec(_recorder_spec)
+_recorder_spec.loader.exec_module(IV_METRICS)  # type: ignore[attr-defined]
+
+#: Per-local-day dropped rates across the degraded 2026-09-05..09-11 stretch,
+#: measured off `usage.db` on 2026-09-20 (221 drops over 4,630 calls). The median
+#: of these seven is 0.0526: under the retired 0.10 for every night of that week,
+#: over the 0.05 that replaced it. These are the six prior nights; the seventh
+#: (the night being recorded) is built into the fixture below at the same rate.
+IV_DEGRADED_PRIOR_RATES = [0.0548, 0.118, 0.0341, 0.0856, 0.0137, 0.0086]
+
+#: The `dropped_rate` of every row in `_pipeline/reflection/iv-metrics.jsonl`
+#: written 2026-09-12..09-19 — the healthy history the bound must not mistake for
+#: a bad week (max 0.0203).
+IV_RECORDED_HEALTHY_RATES = [0.0203, 0.017, 0.0111, 0.0, 0.0062, 0.0061, 0.0, 0.0091]
+
+#: What the newest live row (window 2026-09-18..09-20) carries: 1 drop / 67 calls.
+IV_RECORDED_HEALTHY_LATEST = 1 / 67
+
+
+def _iv_repo(root: str) -> Path:
+    """A throwaway repo root `root/lloyd` holding copies of both scripts.
+
+    Copied, not symlinked: `iv_grade.py` anchors its database at
+    `Path(__file__).resolve().parents[1]`, and a symlink resolves back to the real
+    checkout — the run would read the production `usage.db`.
+    """
+    repo = Path(root) / "lloyd"
+    (repo / "scripts").mkdir(parents=True)
+    for name in RECORDER_SCRIPTS:
+        shutil.copy2(LLOYD_HOME / "scripts" / name, repo / "scripts" / name)
+    return repo
+
+
+def _iv_db(path: Path, *, healthy: int, dropped: int) -> None:
+    """`healthy` graded observer calls plus `dropped` deadline misses, local-naive.
+
+    The dropped rows carry `error` set with `action='noop'`, which is how
+    `app/inner_voice/observer.py` records a verdict that never landed and what makes
+    `iv_grade.py`'s `cost.errors` counter count them as drops. A `noop` with no
+    `error` is the healthy majority and must not reach that numerator.
+    """
+    now = datetime.datetime.now() - datetime.timedelta(hours=1)
+    with sqlite3.connect(path) as con:
+        con.execute("""CREATE TABLE inner_voice_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL, sequence_in_turn INTEGER NOT NULL,
+            trigger TEXT NOT NULL, action TEXT NOT NULL, reason TEXT,
+            content TEXT, related_tool TEXT, input_tokens INTEGER,
+            output_tokens INTEGER, cache_read INTEGER, cache_create INTEGER,
+            latency_ms INTEGER, model TEXT, error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+        is_drops = [False] * healthy + [True] * dropped
+        for i, is_drop in enumerate(is_drops, start=1):
+            con.execute(
+                "INSERT INTO inner_voice_observations (id, session_id, turn_id,"
+                " sequence_in_turn, trigger, action, reason, content, related_tool,"
+                " input_tokens, output_tokens, cache_read, cache_create,"
+                " latency_ms, model, error, created_at) VALUES (?,?,?,?,?,?,?,?,?,"
+                "?,?,?,?,?,?,?,?)",
+                (i, "iv_sess_guard", f"t{i}", i, "assistant_message", "noop", "",
+                 None, None, 1000, 5, 0, 0,
+                 12000 if is_drop else 400, "eco",
+                 "timeout after 12.0s: x" if is_drop else None,
+                 now.isoformat(timespec="microseconds")))
+        con.commit()
+
+
+def _iv_series(path: Path, rates) -> None:
+    """The prior nights, written straight to the series file.
+
+    Only the newest night's exit code is in question; these are read back through
+    `_prior_rates`, which reads `dropped_rate` and nothing else, so each line is
+    one night's rate rather than a replay of a whole grader report.
+    """
+    with path.open("w", encoding="utf-8") as fh:
+        for i, rate in enumerate(rates):
+            fh.write(json.dumps({
+                "since": (datetime.datetime.now()
+                          - datetime.timedelta(days=len(rates) - i)).isoformat(
+                              timespec="seconds"),
+                "llm_calls": 200, "dropped_verdicts": round(rate * 200),
+                "dropped_rate": rate,
+            }) + "\n")
+
+
+def _iv_record(repo: Path, series: Path) -> subprocess.CompletedProcess:
+    """The documented pipeline, verbatim, as one bash process substitution-free pipe.
+
+    `HOME` is the fixture root so `cd ~/lloyd` lands in `repo`, and the recorder's
+    exit status is the returned status: bash reports the last command in a pipeline,
+    which is the recorder — the same thing the nightly's Bash tool sees.
+    """
+    since = (datetime.datetime.now() - datetime.timedelta(days=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S")
+    script = (f"cd ~/lloyd && python3 scripts/iv_grade.py --json --since '{since}'"
+              f" | python3 scripts/iv_metrics_record.py --out '{series}'")
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False,
+        cwd=str(repo.parent),
+        env={"HOME": str(repo.parent), "PATH": "/usr/bin:/bin:/usr/local/bin"})
+
+
+def test_the_recorder_breaches_a_sustained_00526_median():
+    """A week whose median is the degraded stretch's 0.0526 exits 2 — what 0.10 could not.
+
+    The night being recorded dropped 1 verdict over 19 LLM calls (0.0526) on top of
+    six prior nights from 2026-09-05..09-11, so the median of the 7-row window is
+    0.0526: over the 0.05 bound, on at least 3 nights, which is the sustained
+    condition only the recorder can see. `flagged` is true on the night itself —
+    `flagged` is the per-night field, `breach` is the exit code, and the two are
+    different decisions.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        repo, series = _iv_repo(td), Path(td) / "lloyd" / "iv-metrics.jsonl"
+        _iv_db(repo / "usage.db", healthy=18, dropped=1)
+        _iv_series(series, IV_DEGRADED_PRIOR_RATES)
+        p = _iv_record(repo, series)
+        assert p.returncode == 2, (
+            f"a 7-row median of 0.0526 must exit 2; got {p.returncode}, "
+            f"stdout {p.stdout[:200]!r} stderr {p.stderr[-300:]!r}")
+        row = json.loads(series.read_text().splitlines()[-1])
+        assert row["breach"] is True and row["flagged"] is True, row
+        assert abs(row["dropped_rate"] - 1 / 19) < 1e-3, row
+        assert abs(row["threshold"] - IV_METRICS.DEFAULT_THRESHOLD) < 1e-9, row
+        # The token the autonomy runner's failure detector actually matches on.
+        assert "exit code 2" in p.stdout, p.stdout[:200]
+        assert "BREACH" in p.stderr, p.stderr[-200:]
+    print("test_the_recorder_breaches_a_sustained_00526_median: OK")
+
+
+def test_the_recorder_stays_quiet_on_the_recorded_healthy_history():
+    """Tightening the bound must not make a clean week look like a bad one.
+
+    Same recorder, same 7-row window, the eight nights actually recorded since
+    2026-09-12 (max 0.0203) plus a newest night of 1 drop over 67 calls — the 0.0149
+    the live file carries for 2026-09-18..09-20. Window median 0.0076, well under
+    0.05: not flagged, not a breach, exit 0. A nightly that trips on healthy history
+    is how an alert gets muted, and the runner's detector matches the literal
+    "exit code" in the output, so its absence is asserted rather than inferred from
+    the status.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        repo, series = _iv_repo(td), Path(td) / "lloyd" / "iv-metrics.jsonl"
+        _iv_db(repo / "usage.db", healthy=66, dropped=1)
+        _iv_series(series, IV_RECORDED_HEALTHY_RATES)
+        p = _iv_record(repo, series)
+        assert p.returncode == 0, (
+            f"the recorded healthy history must exit 0; got {p.returncode}, "
+            f"stdout {p.stdout[:200]!r} stderr {p.stderr[-300:]!r}")
+        row = json.loads(series.read_text().splitlines()[-1])
+        assert row["breach"] is False and row["flagged"] is False, row
+        assert abs(row["dropped_rate"] - IV_RECORDED_HEALTHY_LATEST) < 1e-3, row
+        assert "exit code" not in p.stdout, p.stdout[:200]
+        assert "BREACH" not in p.stderr, p.stderr[-200:]
+    print("test_the_recorder_stays_quiet_on_the_recorded_healthy_history: OK")
+
+
 TESTS = [
     test_attach_appends_goal_card_to_the_harness_user_message,
     test_stall_detects_real_stalls,
@@ -661,6 +844,8 @@ TESTS = [
     test_event_prompt_carries_cross_turn_memory_and_pressure,
     test_observation_rows_record_the_observer_model,
     test_observation_rows_keep_the_local_naive_writer_clock,
+    test_the_recorder_breaches_a_sustained_00526_median,
+    test_the_recorder_stays_quiet_on_the_recorded_healthy_history,
 ]
 
 
