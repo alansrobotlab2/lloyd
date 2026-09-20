@@ -975,3 +975,86 @@ async def test_the_tools_page_discovery_carries_the_credential(aggregator, monke
     monkeypatch.setattr(A, "read_token", lambda publish=False, **kw: "")
     found, err = await _discover_mcp_tools("lloyd-mcp", cfg)
     assert found == [] and err, "an uncredentialed discovery was served"
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_a_chat_sessions_background_completion_keeps_its_own_key(pool,
+                                                                       monkeypatch):
+    """A background command started from a *chat* session is still queued,
+    drained and persisted under that chat session id.
+
+    #929 gave a Task subagent its own drain and re-keyed its undrained
+    completions onto its parent at close, because a `task:*` queue has no
+    reader once the run returns. A chat session has the opposite problem: it
+    IS the reader, so re-keying it would move the notification somewhere
+    nobody is waiting. This is the unchanged half of that change, driven over
+    the real wire rather than in-process: the record must land under the chat
+    id, the chat turn's own drain must pop it from there, and the parallel
+    session message must be saved under `source: "bg_task_notification"`.
+    """
+    import agent_mcp._task_registry as TR
+    from app.routers import messages as R
+
+    chat_session = "test-chat-session-929"
+    spawn = await pool.call_tool(
+        "Bash", {"command": "echo chat-routed", "run_in_background": True},
+        session_id=chat_session,
+    )
+    assert spawn["is_error"] is False, spawn["content"][:200]
+
+    # Queued under the chat id — and not under anything `task:`-prefixed,
+    # which is the shape #929's re-keying takes.
+    def _queued():
+        # `notified` is set on a *diagnostics* record at completion; a finished
+        # bash record keeps it False until the drain pops it, so the wait is on
+        # the record being here at all.
+        return [r for sid, rows in TR._pending_by_session.items()
+                if sid == chat_session for r in rows
+                if r.status != "running"]
+
+    for _ in range(60):
+        await asyncio.sleep(0.1)
+        if _queued():
+            break
+    else:
+        pytest.fail("background completion was not queued under the chat session id")
+
+    keys = sorted(TR._pending_by_session)
+    assert chat_session in keys, keys
+    assert not [k for k in keys if k.startswith("task:")], keys
+    assert not TR._close_handoff, TR._close_handoff
+
+    persisted: list[tuple[str, list[dict]]] = []
+
+    async def _capture(sid, msgs):
+        persisted.append((sid, list(msgs)))
+
+    monkeypatch.setattr(R, "_append_messages", _capture)
+    # The builder opens its own pool to the configured aggregator; this test's
+    # registry lives in the server this file booted, so point it here.
+    import app.harness.mcp_pool as MP
+    monkeypatch.setattr(MP, "get_or_open_pool", lambda _cfg: _already(pool))
+    drain = R._build_notification_drain(chat_session, "turn-929")
+    harness_msgs = await drain()
+
+    bodies = [m["content"] for m in harness_msgs]
+    assert len(bodies) == 1, bodies
+    assert "<task_notification>" in bodies[0]
+    assert "exit code 0" in bodies[0], bodies[0]
+
+    assert len(persisted) == 1, persisted  # the background record, once
+    target, msgs = persisted[0]
+    assert target == chat_session, target
+    assert len(msgs) == 1, msgs
+    assert msgs[0]["source"] == "bg_task_notification", msgs[0]
+    assert "<task_notification>" in msgs[0]["content"][0]["text"], msgs[0]
+
+    # Drained once: the same queue does not hand the notification out twice,
+    # and nothing is left behind under any key.
+    assert await drain() == []
+    assert chat_session not in TR._pending_by_session
+
+
+async def _already(value):
+    """Awaitable stand-in for `get_or_open_pool`, which is async."""
+    return value

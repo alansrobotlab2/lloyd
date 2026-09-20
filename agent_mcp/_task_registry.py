@@ -115,9 +115,78 @@ _records: dict[str, TaskRecord] = {}
 _pending_by_session: dict[str, list[Any]] = {}
 _lock = asyncio.Lock()
 
+# #929: the parent a CLOSED subagent's completions belong to, keyed by the
+# child's `task:*` session id.
+#
+# A `task:*` queue key has no reader once its run is over — nothing drains a
+# subagent's queue after `Task` returns — so a completion that lands afterwards
+# sat here for the life of this long-lived process, promised to a model that had
+# already finished. The entry is recorded when a child closes (in the same call
+# that hands over whatever was already queued, `hand_off_to_parent`) and
+# consulted by `_enqueue`, so a late arrival is written under the parent's key
+# from the start: the key the parent's chat-turn drain pops.
+# `_subagent_registry.parent_scope` is the authority on who that parent is; this
+# map is only the part that has to outlive the run. Bounded, because a child
+# session id is reused by nobody except a resumed run, which clears its own
+# route (`unhand_off`) before it starts; an entry only needs to survive long
+# enough for the child's subprocesses to exit.
+_close_handoff: dict[str, str] = {}
+_MAX_CLOSE_HANDOFF = 200
+
+
+def unhand_off(child_session_id: str) -> None:
+    """Drop the parent route for a child session that is running again. (#929)
+
+    A resumed `Task` reuses the child's `task:*` session id, and while that run
+    is live it IS the reader of the key. Leaving the route in place would send
+    the resumed child's completions to the parent's queue instead of to the
+    child that was told to expect them, so the route exists only while no run
+    names the key. Records already handed off stay with the parent — they belong
+    to the run that closed.
+    """
+    _close_handoff.pop(child_session_id, None)
+
+
+def hand_off_to_parent(child_session_id: str, parent_session_id: str) -> list[Any]:
+    """Move a closed child's queued completions onto the parent's queue.
+
+    Returns the records moved. `notified` is left exactly as found — the
+    parent's own chat-turn drain is what emits them, so they must stay
+    unclaimed. Idempotent for the same pair.
+
+    Deliberately synchronous: it mutates the same dict `_enqueue` writes under
+    `_lock`, and a call that never suspends cannot interleave inside that
+    critical section on a single-threaded loop.
+    """
+    _close_handoff[child_session_id] = parent_session_id
+    while len(_close_handoff) > _MAX_CLOSE_HANDOFF:
+        # Oldest first, skipping the key just written: a child that closed
+        # longest ago has had the most time for its subprocesses to exit, so its
+        # entry is the least likely still to be consulted. Dropping one only
+        # reverts that session to the pre-#929 shape; it cannot misroute a
+        # record, because the map is consulted only for the key it holds.
+        for stale in list(_close_handoff):
+            if stale != child_session_id:
+                _close_handoff.pop(stale, None)
+                break
+        else:
+            break
+    moved: list[Any] = []
+    for record in _pending_by_session.pop(child_session_id, []):
+        record.session_id = parent_session_id
+        _pending_by_session.setdefault(parent_session_id, []).append(record)
+        moved.append(record)
+    return moved
+
 
 async def enqueue_diagnostics(record: DiagnosticsRecord) -> None:
-    """Queue a diagnostics result for its session's next drain."""
+    """Queue a diagnostics result for its session's next drain.
+
+    Not re-keyed by `_close_handoff`: the tsc runner already routes a subagent's
+    result through `_subagent_registry.parent_scope` before it builds the record
+    (`_tsc_runner._notify_target`), so this queue has had a reader for the child
+    case since then. #929 covers the producer that did not.
+    """
     async with _lock:
         _pending_by_session.setdefault(record.session_id, []).append(record)
 
@@ -233,11 +302,20 @@ async def _await_and_complete(record: TaskRecord) -> None:
     else:
         record.status = "failed"
 
+    # #929: the child that started this may have finished since. Its `task:*`
+    # queue key has no reader then, so the completion is written under the
+    # parent the close hand-off named — the key the parent's chat-turn drain
+    # pops. Decided here rather than only swept at close because a subprocess
+    # routinely exits after the run that spawned it returned, and decided under
+    # the lock so a hand-off running alongside cannot leave this record on a key
+    # the hand-off has just abandoned.
     async with _lock:
-        _pending_by_session.setdefault(record.session_id, []).append(record)
+        session_id = _close_handoff.get(record.session_id, record.session_id)
+        record.session_id = session_id
+        _pending_by_session.setdefault(session_id, []).append(record)
     logger.info(
         "bg task %s status=%s rc=%s session=%s",
-        record.task_id, record.status, rc, record.session_id,
+        record.task_id, record.status, rc, session_id,
     )
 
 

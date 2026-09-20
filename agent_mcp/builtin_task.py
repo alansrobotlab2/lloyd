@@ -113,6 +113,63 @@ def _call_summary() -> str:
     return (_task_registry.current_call_summary.get() or "").strip()
 
 
+def _child_notification_drain(child_session_id: str):
+    """Splice the child's own background completions into its next iteration. (#929)
+
+    Same shape as the chat turn's drain in `app.routers.messages`, minus the
+    session-message persistence: a subagent transcript is in-process (the
+    registry row and the resume ring), not a `~/lloyd/sessions/<id>.json` file,
+    so there is no home to persist a `bg_task_notification` message to. The
+    record still reaches the model, the transcript and a resumed run — that is
+    what the Bash tool's own wording promises ("a `<task_notification>` will
+    appear on a later turn"), which before this was true only for a chat turn.
+
+    The loop awaits the callback and extends `chat_messages` with what comes
+    back (app/harness/loop.py), so this is a coroutine like the chat turn's.
+    Only the child's own key is read: a record the close sweep already moved
+    lives under the parent's key, where the parent's turn serves it.
+    """
+    async def drain() -> list[dict[str, Any]]:
+        mine = await _task_registry.drain_completed_for_session(child_session_id)
+        return [
+            {"role": "user",
+             "content": (_task_registry.format_notification(rec)
+                         if isinstance(rec, _task_registry.TaskRecord)
+                         else _task_registry.format_diagnostics_notification(rec))}
+            for rec in mine
+        ]
+
+    return drain
+
+
+def _hand_off_background_tasks(record: Any) -> None:
+    """Route a closed child's background completions to its parent. (#929)
+
+    Called while the run is still in `_subagent_registry`'s active table, so
+    `parent_scope` resolves it. It also teaches `_task_registry` to re-key
+    anything that arrives later for this child session, which is the common
+    case: a subprocess routinely exits after the run that spawned it returned,
+    and a `task:*` queue has no reader by then.
+    """
+    scope = _subagent_registry.parent_scope(record.session_id)
+    parent_session_id = scope[0] if scope else ""
+    if not parent_session_id:
+        # Nothing to hand off to: a Task whose parent turn carried no session,
+        # or a row the ring already evicted. Leaving the records queued is the
+        # pre-#929 shape, so this loses nothing — but it says so rather than
+        # reporting a hand-off that did not happen.
+        logger.warning(
+            "bg tasks for subagent %s have no parent session to hand off to",
+            record.session_id)
+        return
+    moved = _task_registry.hand_off_to_parent(record.session_id, parent_session_id)
+    if moved:
+        logger.info(
+            "bg tasks for closed subagent %s handed to parent %s: %s",
+            record.session_id, parent_session_id,
+            ",".join(r.task_id for r in moved if isinstance(r, _task_registry.TaskRecord)))
+
+
 async def _task(args: dict[str, Any]) -> str:
     # The subagent row's label. Comes from the caption the model already
     # wrote for this call (request `_meta`; see main.META_SUMMARY) rather
@@ -238,6 +295,11 @@ async def _task(args: dict[str, Any]) -> str:
     # LoadedToolSet and its spill directory.
     sub_session_id = (history.session_id if history is not None
                       else f"task:{subagent_type}:{uuid.uuid4().hex[:8]}")
+    # #929: a resume reuses the id, so this run IS the reader of that key again.
+    # The parent route recorded when the previous run closed has to go, or a
+    # completion this child is told to expect would be written to the parent's
+    # queue instead of the queue this run drains.
+    _task_registry.unhand_off(sub_session_id)
 
     # The child's stop request (#411). ONE object, shared three ways: the
     # loop checks it between iterations, between SSE chunks and before every
@@ -277,6 +339,16 @@ async def _task(args: dict[str, Any]) -> str:
             ((CONFIG.get("harness") or {}).get("parallel_tool_calls") or {})
             .get("enabled", False)
         ),
+        # #929: the child's own background completions, drained against the
+        # child's own session id. Nothing else ever reads a `task:*` queue —
+        # the chat-turn drain is wired only for chat turns — so without this a
+        # child that ran `Bash` with run_in_background=true was told a
+        # `<task_notification>` would appear on a later turn and never saw one.
+        # Deliberately NOT the chat builder in app.routers.messages: that one
+        # also appends a session message to the session it is handed, and a
+        # subagent transcript lives in this process, not in
+        # `~/lloyd/sessions/<id>.json`.
+        notification_drain=_child_notification_drain(sub_session_id),
         parallel_tool_calls_max_concurrency=max(1, int(
             ((CONFIG.get("harness") or {}).get("parallel_tool_calls") or {})
             .get("max_concurrency", 4)
@@ -352,6 +424,13 @@ async def _task(args: dict[str, Any]) -> str:
         a run that closed its row but stored nothing is a task_id the model
         is told about and cannot resume.
         """
+        # #929: first thing, while the row still resolves to its parent via
+        # `_subagent_registry.parent_scope` — `finish` below is what moves it out
+        # of the active table. Whatever this child queued but never drained goes
+        # to the parent's queue now, and whatever completes after this point is
+        # re-keyed there too, because a `task:*` queue has no reader once `Task`
+        # has returned.
+        _hand_off_background_tasks(record)
         _subagent_registry.finish(record, status=status, **kw)
         try:
             _subagent_registry.store_history(
