@@ -253,3 +253,28 @@ def test_the_doc_names_the_states_the_store_has():
     text = DOC.read_text(encoding="utf-8")
     for status in research_store.STATUSES:
         assert status in text, f"{status} is undocumented"
+
+
+def test_the_written_row_names_finish_as_the_verifier():
+    """§2's `written` row claimed the disk check lives in the worker and *not*
+    in `finish` (#1276). It was true when written; #1276 moved the check into
+    the store, so the sentence that says it is absent is now the defect — the
+    next reader would trust it and go looking for the hole in the wrong place.
+
+    Pinned in both directions: the row must name `finish` as the verifier, and
+    no sentence may still assert `finish` does not check disk.
+    """
+    from app import research_store
+
+    text = DOC.read_text(encoding="utf-8")
+    row = next(line for line in text.splitlines()
+               if line.startswith("| `written` |"))
+    assert "`finish`" in row, "the row must name the method that verifies"
+    assert "_require_real_note" in row, "and the helper that does it"
+    assert str(research_store.MIN_NOTE_BYTES) in row, (
+        "the byte floor the row quotes must be the one the code enforces")
+    for line in text.splitlines():
+        if re.search(r"finish`? itself does not", line) or \
+           re.search(r"not in `finish`", line):
+            raise AssertionError(
+                f"a sentence still says finish does no disk check: {line.strip()[:100]}")

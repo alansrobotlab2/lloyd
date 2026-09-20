@@ -136,7 +136,13 @@ async def list_tools() -> list[Tool]:
                     },
                     "artifact_path": {
                         "type": "string",
-                        "description": "Path of the note that was written, for status=written.",
+                        "description": (
+                            "Path of the note that was written, for status=written. "
+                            "Required for that status: the registry checks the file is "
+                            "really on disk and holds at least 400 bytes, and refuses "
+                            "the call otherwise, leaving the topic researching. The "
+                            "other statuses take no path."
+                        ),
                     },
                     "note": {
                         "type": "string",

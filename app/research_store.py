@@ -63,6 +63,16 @@ MAX_QUEUED = 40
 #: reported by `stats()`, so the decision stays a human's.
 STALE_QUEUED_DAYS = 60
 
+#: How substantial a file must be before `finish` accepts it as the note a
+#: `written` outcome points at (#1276). The retired markdown source left 90 of
+#: its 142 notes with no body at all (architecture/research-pipeline.md §1),
+#: and the worker has held this bar since the cutover as
+#: `deep_research._MIN_NOTE_BYTES` — the same 400, deliberately repeated rather
+#: than imported: the store must not import a worker module. `tests/
+#: test_research_store.py` pins the worker's copy to this one so the two cannot
+#: drift apart.
+MIN_NOTE_BYTES = 400
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS topics (
@@ -417,10 +427,55 @@ class ResearchStore:
             conn.commit()
             return self.get(int(topic_id))
 
+    def _require_real_note(self, status: str, artifact_path: str) -> None:
+        """Gate the one terminal status that claims a file exists (#1276).
+
+        `written` is a claim about disk, and before this it was a claim about a
+        string: the MCP tool `research_complete` — reachable from any chat turn,
+        and denied to the research worker's own turn — settled a topic from the
+        caller's `artifact_path` with no stat at all, which re-creates the exact
+        failure the registry replaced (architecture/research-pipeline.md §1: 90
+        of the retired source's 142 notes had no body). A phantom `written` row
+        also poisons the topic forever: `propose` keys on the topic line, so the
+        next generator run is answered "already known as #N (written)" and the
+        topic is never researched for real.
+
+        Refusing raises rather than downgrading to `nothing_found`, because that
+        would be the store inventing an outcome. The row stays `researching`, so
+        `reclaim_stale` returns it to the queue and it gets researched again.
+        """
+        raw = str(artifact_path or "")
+        if status != "written":
+            # nothing_found, duplicate, rejected and archived claim no note, and
+            # the legacy import path stores an `archived` artifact that has been
+            # gone for months. None of them may start failing on a missing file.
+            return
+        given = raw.strip()
+        size: Optional[int]
+        try:
+            # One read, and the same measurement `deep_research._note_is_real`
+            # makes, so the two gates cannot disagree about a borderline note.
+            size = len(Path(given).read_bytes()) if given else None
+        except (OSError, ValueError):
+            # OSError: absent, a directory, unreadable. ValueError: a path no
+            # syscall accepts (an embedded NUL), which is also "no note".
+            size = None
+        if size is None or size < MIN_NOTE_BYTES:
+            raise ValueError(
+                f"status 'written' needs artifact_path naming a note of at least "
+                f"{MIN_NOTE_BYTES} bytes, and {given!r} is not one"
+                + (" — the file is not on disk" if size is None
+                   else f" (it holds {size})"))
+
     def finish(self, topic_id: int, status: str, *, artifact_path: str = "",
                note: str = "", duplicate_of: Optional[int] = None,
                session_id: str = "", extra: Optional[dict] = None) -> dict:
-        """Record a terminal outcome."""
+        """Record a terminal outcome.
+
+        `written` is checked against disk before the row moves (see
+        `_require_real_note`); the other terminal statuses are path-free and
+        stay that way.
+        """
         if status not in TERMINAL:
             raise ValueError(f"{status!r} is not a terminal status ({sorted(TERMINAL)})")
         with self._lock, self._connect() as conn:
@@ -432,6 +487,12 @@ class ResearchStore:
                 raise ValueError(
                     f"topic {topic_id} is already {row['status']}; "
                     f"a settled outcome is not rewritten")
+            # After the row guards, so a caller that re-settles a settled topic
+            # hears why that is impossible before it hears that its path was
+            # also not a note. Raising here leaves the UPDATE unrun: the row
+            # stays wherever it was, so a refused `written` on a `researching`
+            # topic is still reclaimable.
+            self._require_real_note(status, artifact_path)
             merged = dict(self._row(row)["extra"])
             if extra:
                 merged.update(extra)

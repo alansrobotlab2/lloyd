@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +26,20 @@ def registry(tmp_path):
     store = R.configure(tmp_path / "research.db")
     yield store
     R.reset()
+
+
+@pytest.fixture
+def note(tmp_path):
+    """Factory for a note really on disk: `finish` requires one for `written`
+    (#1276), so a test that settles a topic as written needs a file, not a
+    plausible string. Pass `size` to test the floor itself."""
+    def make(name: str = "a-note.md", size: int = R.MIN_NOTE_BYTES) -> Path:
+        path = tmp_path / "knowledge" / "research" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * size)
+        return path
+
+    return make
 
 
 async def call(name: str, args: dict | None = None):
@@ -162,15 +177,78 @@ async def test_next_peeks_without_claiming(registry):
     assert registry.get(topic)["status"] == "queued", "peeking claimed it"
 
 
-async def test_completing_a_topic_records_the_outcome(registry):
+async def test_completing_a_topic_records_the_outcome(registry, note):
     topic = registry.propose("a topic researched by hand")["id"]
     registry.claim(topic, by="human")
+    path = note("a.md")
     result, payload = await call("research_complete", {
         "topic_id": topic, "status": "written",
-        "artifact_path": "/home/x/knowledge/research/a.md", "note": "facts=6"})
+        "artifact_path": str(path), "note": "facts=6"})
     assert result.is_error is False
     assert payload["topic"]["status"] == "written"
-    assert payload["topic"]["artifact_path"].endswith("a.md")
+    assert payload["topic"]["artifact_path"] == str(path)
+
+
+async def test_a_written_outcome_with_no_note_on_disk_is_a_tool_error(registry):
+    """The whole point of moving the check into the store (#1276).
+
+    `research_complete` is reachable from any chat turn and is denied to the
+    research worker's own turn, so this MCP path was the one writer with no disk
+    check — it re-created the failure the registry replaced: a tick with no
+    evidence behind it. The refusal has to cross the process boundary as a
+    readable error and must leave the topic retryable.
+    """
+    topic = registry.propose("a topic someone claimed to have written")["id"]
+    registry.claim(topic, by="chat")
+
+    for artifact_path in (None, "/nonexistent/phantom-note.md"):
+        args = {"topic_id": topic, "status": "written"}
+        if artifact_path is not None:
+            args["artifact_path"] = artifact_path
+        result, payload = await call("research_complete", args)
+        assert result.is_error is True, "a refusal must be visible to the caller"
+        assert "error" in payload and "topic" not in payload, "not a settled topic"
+        assert "400 bytes" in payload["error"], "name the bar, not just 'failed'"
+        assert registry.get(topic)["status"] == "researching", (
+            "still reclaimable, never settled on a phantom")
+
+    _, stats = await call("research_stats")
+    assert stats["by_status"].get("written", 0) == 0
+    assert stats["last_written"] is None, (
+        "the two fields that would have reported a note that was never written")
+
+
+async def test_a_note_under_the_substantiality_bar_is_refused_over_mcp(registry, note):
+    """A file that exists and holds only a heading is the failure the retired
+    checklist actually had (90 of its 142 notes had no body), so existence
+    alone would not have caught it."""
+    topic = registry.propose("a topic with a stub behind it")["id"]
+    registry.claim(topic, by="chat")
+    result, payload = await call("research_complete", {
+        "topic_id": topic, "status": "written",
+        "artifact_path": str(note("thin.md", size=R.MIN_NOTE_BYTES - 1))})
+    assert result.is_error is True
+    assert "(it holds 399)" in payload["error"], "the message names the measured size"
+    assert registry.get(topic)["status"] == "researching"
+
+
+async def test_the_other_terminal_statuses_stay_path_free_over_mcp(registry):
+    """The refusal above must not become a requirement on outcomes that claim no
+    note: `nothing_found` with no artifact is a real answer, and `exhaust()`
+    settles the same status from inside the store."""
+    for status in ("nothing_found", "duplicate", "rejected"):
+        _, payload = await call("research_propose", {"topic": f"a {status} topic here"})
+        tid = payload["id"]
+        registry.claim(tid, by="chat")
+        assert registry.get(tid)["status"] == "researching", "the refusal above"
+        result, body = await call("research_complete", {"topic_id": tid, "status": status})
+        assert result.is_error is False, f"{status} must not need an artifact_path"
+        assert body["topic"]["status"] == status
+        assert body["topic"]["artifact_path"] is None
+    exhausted = registry.propose("a topic that ran out of attempts")["id"]
+    registry.claim(exhausted, by="worker")
+    registry.exhaust(exhausted, "abandoned after 3 failed attempts: empty response")
+    assert registry.get(exhausted)["status"] == "nothing_found"
 
 
 async def test_nothing_found_is_a_recordable_outcome(registry):
@@ -203,10 +281,10 @@ async def test_a_settled_topic_is_not_rewritten_through_the_tool(registry):
     assert result.is_error is True and "already" in payload["error"]
 
 
-async def test_listing_filters_by_status_and_recency(registry):
+async def test_listing_filters_by_status_and_recency(registry, note):
     written = registry.propose("a written topic")["id"]
     registry.claim(written, by="w")
-    registry.finish(written, "written", artifact_path="/tmp/a.md")
+    registry.finish(written, "written", artifact_path=str(note("a.md")))
     registry.propose("a queued topic")
 
     _, payload = await call("research_list", {"status": "written"})

@@ -97,7 +97,7 @@ from the lock, which only one process holds.
 |---|---|
 | `queued` | proposed, waiting. `not_before` may hold it back after a failure |
 | `researching` | a worker has it. `reclaim_stale` returns what a crashed turn left stuck here, swept at twice the source's `max_duration_seconds` |
-| `written` | a note exists on disk, verified — the verification lives in the worker (`deep_research._note_is_real`), not in `finish`, which takes any path the caller passes (#1276) |
+| `written` | a note exists on disk, verified by `finish` itself: `_require_real_note` refuses any `artifact_path` that is not a file holding at least `MIN_NOTE_BYTES` (400) bytes, raising `ValueError` before the `UPDATE` so the row stays `researching` and `reclaim_stale` can retry it. The worker's `deep_research._note_is_real` applies the same bar and is now belt-and-braces (#1276) |
 | `nothing_found` | searched, found nothing — a real answer, and the one that stops it coming back |
 | `duplicate` | the vault already covers it; names what does |
 | `archived` | imported from the retired checklist; dedup corpus only |
@@ -204,7 +204,21 @@ passes its `run_id` into `execute`, so the queue id is the link.
 
 ## Review log
 
-- **2026-09-19 — `current`.** Every mechanism in the unit is live and the
+- **2026-09-20 — `current`.** §2's `written` row moved the verification into the
+  store: `ResearchStore.finish` now refuses a `written` whose `artifact_path` is
+  not a real file of at least `MIN_NOTE_BYTES` bytes, before it writes, so the
+  topic stays `researching` and retryable. That closes #1276 from the other side
+  to how it was filed: the worker had always checked disk, and the caller that
+  did not was this tool surface — `research_complete` is denied to the research
+  turn itself (`deep_research._DENY`), so the only unverified way to settle a
+  topic was a chat turn naming a path nothing had opened, which is the
+  tick-without-evidence §1 says the registry exists to end. What the refusal
+  also protects is `propose`: it keys on the topic line and returns "already
+  known as #N (written)" for a settled row, so one phantom note suppressed a
+  topic permanently. The two sentences that recorded the old state are corrected
+  above and in the 09-19 entry below, which was true when written and is now
+  superseded.
+- **2026-09-19.** Every mechanism in the unit is live and the
   registry is doing its job (391 topics, 33 `written` since the 09-08 cutover,
   last note 09-19 05:20Z, #65 succeeding nightly). Corrections: the retired
   source's staging root is `~/lloyd/_pipeline/...`, not vault-relative; the
@@ -212,7 +226,8 @@ passes its `run_id` into `execute`, so the queue id is the link.
   the retry ladder's real numbers; §4's `compute_health` analogy is stated as
   the joined-row task-id recovery it actually is; the shell read path is
   `python -m app.research_store stats`, not `sqlite3` on a file §2 says nothing
-  else opens; and the `written` row now says where the disk check lives, since
-  `finish` itself does not do it (#1276). Filed: #1276 (store accepts an
-  unverified `written`), #1277 (a queue pinned at `MAX_QUEUED` reads healthy),
-  #1278 (142 untriaged leftovers hold a retired source's router entry).
+  else opens; and the `written` row said where the disk check lived, the worker
+  rather than `finish`, which was true when written and is superseded by the
+  09-20 entry above (#1276 closed from the store side). Filed: #1276 (store
+  accepts an unverified `written`), #1277 (a queue pinned at `MAX_QUEUED` reads
+  healthy), #1278 (142 untriaged leftovers hold a retired source's router entry).

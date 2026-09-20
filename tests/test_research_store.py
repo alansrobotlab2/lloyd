@@ -31,6 +31,24 @@ def s(tmp_path) -> ResearchStore:
     return ResearchStore(tmp_path / "research.db")
 
 
+@pytest.fixture
+def note(tmp_path):
+    """Factory for a note that is really on disk.
+
+    `finish` refuses a `written` whose artifact is not a real file of
+    `MIN_NOTE_BYTES` (#1276), so any test that settles one now needs a file
+    rather than a plausible string. Tests that assert the refusal itself pass
+    the path size explicitly.
+    """
+    def make(name: str = "a-note.md", size: int = R.MIN_NOTE_BYTES) -> Path:
+        path = tmp_path / "knowledge" / "research" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * size)
+        return path
+
+    return make
+
+
 # ---------------------------------------------------------------------------
 # Schema and lifecycle of the store object
 # ---------------------------------------------------------------------------
@@ -117,10 +135,10 @@ def test_similar_finds_a_reworded_neighbour_and_ignores_a_stranger(s):
     assert not any("tokenizer" in t for t in topics), topics
 
 
-def test_similar_reports_the_status_so_a_generator_can_act_on_it(s):
+def test_similar_reports_the_status_so_a_generator_can_act_on_it(s, note):
     first = s.propose("Diffusion policy priors for sim-to-real transfer")
     s.claim(first["id"], by="test")
-    s.finish(first["id"], "written", artifact_path="/tmp/x.md")
+    s.finish(first["id"], "written", artifact_path=str(note("diffusion.md")))
     out = s.propose("Diffusion policy priors for sim to real transfer of manipulation")
     assert out["similar"] and out["similar"][0]["status"] == "written"
 
@@ -198,23 +216,26 @@ def test_a_released_topic_returns_once_its_backoff_expires(s):
     assert [t["id"] for t in s.next(5)] == [topic]
 
 
-def test_finishing_records_the_artifact_and_the_session(s):
+def test_finishing_records_the_artifact_and_the_session(s, note):
     topic = s.propose("a topic that got written up")["id"]
     s.claim(topic, by="worker", queue_id=4)
-    row = s.finish(topic, "written", artifact_path="/home/x/knowledge/research/a.md",
+    path = note("a.md")
+    row = s.finish(topic, "written", artifact_path=str(path),
                    note="facts=7 sources=4", session_id="20260908_x")
     assert row["status"] == "written"
-    assert row["artifact_path"].endswith("a.md")
+    assert row["artifact_path"] == str(path)
     assert row["session_id"] == "20260908_x" and row["finished_at"]
     assert row["queue_id"] == 4, "the link back to the workers.db run is kept"
 
 
-def test_a_settled_outcome_is_not_rewritten(s):
+def test_a_settled_outcome_is_not_rewritten(s, note):
     topic = s.propose("a settled topic")["id"]
     s.claim(topic, by="worker")
     s.finish(topic, "nothing_found", note="three searches, nothing")
     with pytest.raises(ValueError, match="already"):
-        s.finish(topic, "written", artifact_path="/tmp/y.md")
+        # A real note, so this reaches the settled-row guard and not the disk
+        # gate in front of it — the two refusals say different things.
+        s.finish(topic, "written", artifact_path=str(note("y.md")))
 
 
 def test_only_a_terminal_status_may_finish(s):
@@ -244,12 +265,12 @@ def test_a_crashed_turn_is_reclaimed(s):
     assert s.get(topic)["status"] == "queued"
 
 
-def test_every_transition_leaves_a_trace(s):
+def test_every_transition_leaves_a_trace(s, note):
     topic = s.propose("a topic", proposed_by="65", signal="health-report")["id"]
     s.claim(topic, by="worker", queue_id=1)
     s.release(topic, error="nope", backoff_seconds=1)
     s.claim(topic, by="worker", queue_id=2)
-    s.finish(topic, "written", artifact_path="/tmp/a.md")
+    s.finish(topic, "written", artifact_path=str(note("a.md")))
     with s._connect() as conn:
         events = [r["event"] for r in conn.execute(
             "SELECT event FROM events WHERE topic_id=? ORDER BY id", (topic,)).fetchall()]
@@ -261,10 +282,10 @@ def test_every_transition_leaves_a_trace(s):
 # ---------------------------------------------------------------------------
 
 
-def test_listing_filters_and_recent_excludes_the_legacy_import(s):
+def test_listing_filters_and_recent_excludes_the_legacy_import(s, note):
     live = s.propose("a live topic")["id"]
     s.claim(live, by="w")
-    s.finish(live, "written", artifact_path="/tmp/a.md")
+    s.finish(live, "written", artifact_path=str(note("a.md")))
     with s._connect() as conn:  # stand in for an imported row
         conn.execute(
             "INSERT INTO topics (topic, key, status, proposed_at, finished_at) "
@@ -302,6 +323,106 @@ def test_stale_queued_topics_are_reported_not_deleted(s):
         conn.execute("UPDATE topics SET proposed_at=? WHERE id=?", (ancient, old))
     assert s.stats()["stale_queued"] == 1
     assert s.get(old)["status"] == "queued"
+
+
+# ---------------------------------------------------------------------------
+# The `written` disk gate (#1276)
+# ---------------------------------------------------------------------------
+
+
+def _researched(s: ResearchStore, topic: str = "a topic a turn is working on",
+                **kw) -> int:
+    """A topic a live turn holds, which is the only state `finish` acts on."""
+    tid = s.propose(topic, **kw)["id"]
+    s.claim(tid, by="tester")
+    assert s.get(tid)["status"] == "researching"
+    return tid
+
+
+@pytest.mark.parametrize("artifact_path", [None, "", "/nonexistent/x.md"])
+def test_written_refuses_a_path_that_is_not_a_note_and_leaves_it_retryable(
+        s: ResearchStore, artifact_path):
+    """The hole this closes: `research_complete(status="written")` settled a
+    topic from the caller's string alone, re-creating the tick-without-evidence
+    the registry replaced. The row must stay `researching` so `reclaim_stale`
+    returns it to the queue — a refusal that settled it would be a worse bug."""
+    tid = _researched(s)
+    kwargs = {} if artifact_path is None else {"artifact_path": artifact_path}
+
+    with pytest.raises(ValueError, match="written"):
+        s.finish(tid, "written", **kwargs)
+
+    row = s.get(tid)
+    assert row["status"] == "researching", "refused, not settled"
+    assert row["artifact_path"] is None
+    assert row["finished_at"] is None, "stats() must not count a refused settle"
+    stats = s.stats()
+    assert stats["by_status"].get("written", 0) == 0
+    assert stats["last_written"] is None, (
+        "the two fields that would have reported a phantom note")
+
+    recovered = s.reclaim_stale(older_than_seconds=-1)
+    assert recovered == 1, "the refused topic is the retryable kind"
+    assert s.get(tid)["status"] == "queued"
+
+
+def test_written_requires_the_workers_own_substantiality_bar(
+        s: ResearchStore, note):
+    """A file that exists but holds only a heading is the 90-of-142 failure.
+    `MIN_NOTE_BYTES` is inclusive: a note of exactly the floor settles."""
+    thin = note("thin.md", size=R.MIN_NOTE_BYTES - 1)
+    fat = note("fat.md", size=R.MIN_NOTE_BYTES)
+    assert thin.stat().st_size == 399 and fat.stat().st_size == 400
+
+    thin_tid = _researched(s, "a topic whose note came out a stub")
+    with pytest.raises(ValueError, match=str(R.MIN_NOTE_BYTES)):
+        s.finish(thin_tid, "written", artifact_path=str(thin))
+    assert s.get(thin_tid)["status"] == "researching"
+
+    fat_tid = _researched(s, "a topic whose note came out whole")
+    row = s.finish(fat_tid, "written", artifact_path=str(fat))
+    assert row["status"] == "written"
+    assert row["artifact_path"] == str(fat), "stored verbatim, not normalised"
+
+
+def test_a_refused_written_does_not_suppress_the_topic(s: ResearchStore):
+    """The permanent half of the damage. `propose` keys on the topic line, so a
+    phantom `written` row answers every later generator with "already known as
+    #N (written)" and the topic is never researched for real. Refusing must keep
+    it proposable."""
+    tid = _researched(s, "Qwen3 engram embedding table at inference")
+    with pytest.raises(ValueError):
+        s.finish(tid, "written", artifact_path="/nonexistent/x.md")
+
+    out = s.propose("Qwen3 engram embedding table at inference")
+    assert out["created"] is False and out["id"] == tid
+    assert out["status"] == "researching", "not 'written': the topic is still owed"
+
+
+@pytest.mark.parametrize("status", ["nothing_found", "duplicate", "rejected"])
+def test_only_written_needs_a_path(s: ResearchStore, status):
+    """The other terminal statuses claim no file. Making them check disk would
+    turn "searched, found nothing" into an error."""
+    tid = _researched(s, f"a topic settling as {status}")
+    out = s.finish(tid, status, note="no artifact for this outcome")
+    assert out["status"] == status
+    assert out["artifact_path"] is None
+
+
+def test_exhaust_still_settles_nothing_found_without_a_path(s: ResearchStore):
+    """`exhaust` is the give-up path; the check must not reach through it."""
+    tid = _researched(s, "a topic that keeps failing")
+    row = s.exhaust(tid, "abandoned after 3 attempts")
+    assert row["status"] == "nothing_found"
+    assert row["artifact_path"] is None
+
+
+def test_the_store_and_the_worker_hold_the_same_note_floor():
+    """The worker checked this bar first; the store now checks it too, and two
+    gates that disagree about 400 bytes would bounce a real note forever."""
+    from workers.sources import deep_research as D
+
+    assert D._MIN_NOTE_BYTES == R.MIN_NOTE_BYTES == 400
 
 
 # ---------------------------------------------------------------------------

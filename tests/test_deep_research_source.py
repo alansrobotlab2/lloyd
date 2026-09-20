@@ -169,12 +169,35 @@ async def test_the_same_topic_is_not_enqueued_twice(registry, queue, notes):
     assert len(queue.list_items(source=D.NAME)) == 1
 
 
-async def test_the_daily_budget_stops_the_source(registry, queue, notes):
+def _real_note(tmp_path, name: str) -> Path:
+    """A note the store will accept for `written`.
+
+    Since #1276 `finish` refuses a `written` whose artifact is not a real file
+    of at least `MIN_NOTE_BYTES`, so a test that settles two topics today to
+    exercise the daily budget needs two files, not two made-up paths.
+    """
+    path = tmp_path / "registry-notes" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * 400)
+    return path
+
+
+def test_the_source_and_the_store_hold_the_same_note_bar():
+    """Two gates on one property (`_note_is_real` here, `finish` in the store)
+    are only an asset while they agree — the store's refusal would otherwise
+    arrive for a note the source already certified, and the source would pre-
+    check a file the registry then rejects. The store cannot import this module,
+    so the number is written twice and pinned here."""
+    assert D._MIN_NOTE_BYTES == R.MIN_NOTE_BYTES == 400
+
+
+async def test_the_daily_budget_stops_the_source(registry, queue, notes, tmp_path):
     for i in range(4):
         row = registry.propose(f"topic number {i}")
         if i < 2:
             registry.claim(row["id"], by="w")
-            registry.finish(row["id"], "written", artifact_path=f"/tmp/{i}.md")
+            registry.finish(row["id"], "written",
+                            artifact_path=str(_real_note(tmp_path, f"{i}.md")))
     await D.enqueue_if_due(queue, {"daily_max": 2})
     assert queue.list_items(source=D.NAME) == [], "two settled today is the budget"
 
