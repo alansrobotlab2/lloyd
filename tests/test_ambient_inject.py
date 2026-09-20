@@ -509,8 +509,15 @@ def test_day_headings_come_from_converting_the_source_instant():
     assert "### 4b — Today / Tonight / Tomorrow are converted, never labelled" \
         in _skill()
     assert "Convert it to local time, `America/Los_Angeles`, in this run:" in flat
-    assert "Compare the **converted calendar day** with `TODAY` measured in that " \
-        "same run" in flat
+    # The literal is the Step 4b.3 sentence as it stands in the skill after vault
+    # commit `fd5d7eb6` (#1177) rewrote it: `TODAY` is now named as the clock
+    # re-read at Step 4 rather than "measured in that same run" — the same
+    # requirement, stated with the instant that answers it. The claim this pins
+    # (the converted day is compared against a TODAY this run obtained) is
+    # unchanged; only its wording moved, and the file's own header says why the
+    # pin reads the live vault unmarked. (#1313)
+    assert "Compare the **converted calendar day** with `TODAY` from the clock " \
+        "**re-read at Step 4**" in flat
 
 
 def test_an_entry_whose_converted_day_differs_is_filed_truly_or_dropped():

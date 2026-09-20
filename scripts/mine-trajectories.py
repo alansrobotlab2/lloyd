@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+from bisect import insort
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -753,13 +754,62 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker",
 
 # ── Pattern mining ───────────────────────────────────────────────────────────
 
+# How many instances of one pattern key are printed as examples. The number is a
+# *sample*, not the key's evidence, which is why `write_candidate_file` emits
+# `examples_shown:` beside the key's own denominator (#1231 clause 2). The caps
+# are unchanged from the first-N-wins code they replace — the change is which
+# instances they select, not how many.
+EXAMPLE_CAP_ERROR = 5
+EXAMPLE_CAP_SUCCESS = 3
+EXAMPLE_CAP_SEQUENCE = 3
+
+
+def pool_offer(pool: list, cap: int, entry, order_key) -> None:
+    """Keep the newest `cap` instances of a pattern, whatever the scan order.
+
+    `pool` holds `(order_key, entry)` pairs kept sorted oldest-first, so an
+    instance arriving past the cap evicts the *oldest* held one and the sample
+    rolls forward. The old shape gated the append on the pool's own length and
+    stopped appending once N was reached, so the printed payload was the first N
+    instances in scan order forever. (This prose deliberately does not quote that
+    old statement: the item proves the caps are gone by grepping the file for it,
+    and a docstring match would read as a cap left in place.) Scan order on the
+    live corpus is
+    chronological ascending (`load_trajectories` iterates a sorted glob), so
+    first-N-wins meant the *oldest* N in the window: measured over the 901 keys
+    with 2+ dated snapshots in `_pipeline/skills/candidates/`, 625 carried a
+    byte-identical evidence section first-to-last while `sessions` grew up to
+    22.2x, and `seq-2-read-write` held one sha across 5 snapshots from 38
+    sessions to 275 (#1231 clause 1).
+
+    `order_key` must be unique within one mining run — every caller passes
+    `(date_str, <per-run counter>)` — because the pool is sorted by tuple
+    comparison and a tie would compare the example dicts, which are not
+    orderable.
+    """
+    if len(pool) < cap:
+        insort(pool, (order_key, entry))
+        return
+    if order_key > pool[0][0]:
+        pool.pop(0)
+        insort(pool, (order_key, entry))
+
+
+def pool_sample(pool: list) -> list:
+    """The held instances, oldest-first — the same order the printed examples
+    have always had, so only the *selection* changes, not the reading order."""
+    return [entry for _order_key, entry in pool]
+
+
 def mine_error_patterns(trajectories: list[dict], threshold: int = 2) -> list[dict]:
     """
     Mine error patterns from trajectories.
     Groups errors by (tool_name, error_category, params_signature).
     Returns patterns that appear in >= threshold distinct sessions.
     """
-    # Structure: {(tool_name, error_category, params_sig): {session_keys: set, examples: list, dates: set}}
+    # Structure: {(tool_name, error_category, params_sig): {session_keys: set, examples: pool, dates: set}}
+    # `examples` is a `pool_offer` pool of (order_key, example) pairs, unwrapped
+    # into a plain list of examples only when the pattern qualifies (#1231).
     pattern_data = defaultdict(lambda: {
         "sessions": set(),
         "examples": [],
@@ -798,21 +848,23 @@ def mine_error_patterns(trajectories: list[dict], threshold: int = 2) -> list[di
             pattern_data[key]["dates"].add(date_str)
             pattern_data[key]["total_calls"] += 1
             
-            # Store example (limit per pattern)
-            if len(pattern_data[key]["examples"]) < 5:
-                example = {
-                    "session_key": session_key,
-                    "date": date_str,
-                    "tool": tool_name,
-                    "error_type": error_type,
-                    # The class travels into the candidate's examples so the
-                    # reader can see what kind of failure they are grading, not
-                    # only that the harness flagged it (#500).
-                    "failure_class": error_tool.get("failure_class"),
-                    "params_summary": params_summary,
-                    "sequence": error_tool.get("sequence", 0)
-                }
-                pattern_data[key]["examples"].append(example)
+            # Sample the newest 5 instances instead of the first 5 seen.
+            # `total_calls` just incremented, so it is this offer's position in
+            # the key's scan order and makes the order key unique (#1231).
+            example = {
+                "session_key": session_key,
+                "date": date_str,
+                "tool": tool_name,
+                "error_type": error_type,
+                # The class travels into the candidate's examples so the
+                # reader can see what kind of failure they are grading, not
+                # only that the harness flagged it (#500).
+                "failure_class": error_tool.get("failure_class"),
+                "params_summary": params_summary,
+                "sequence": error_tool.get("sequence", 0)
+            }
+            pool_offer(pattern_data[key]["examples"], EXAMPLE_CAP_ERROR,
+                       example, (date_str, pattern_data[key]["total_calls"]))
     
     # Filter by threshold
     qualifying_patterns = []
@@ -825,7 +877,7 @@ def mine_error_patterns(trajectories: list[dict], threshold: int = 2) -> list[di
                 "error_type": error_type,
                 "params_signature": params_sig,
                 "sessions": data["sessions"],
-                "examples": data["examples"],
+                "examples": pool_sample(data["examples"]),
                 "dates": data["dates"],
                 "total_calls": data["total_calls"],
                 "first_seen": min(data["dates"]) if data["dates"] else datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
@@ -886,18 +938,20 @@ def mine_success_patterns(trajectories: list[dict], threshold: int = 2) -> list[
             if is_error and is_corroborated_error(tool):
                 pattern_data[key]["error_count"] += 1
             
-            # Store example (limit per pattern)
-            if len(pattern_data[key]["examples"]) < 3:
-                example = {
-                    "session_key": session_key,
-                    "date": date_str,
-                    "tool": tool_name,
-                    "params_summary": params_summary,
-                    "result_summary": tool.get("result_summary", ""),
-                    "is_error": is_error,
-                    "sequence": tool.get("sequence", 0)
-                }
-                pattern_data[key]["examples"].append(example)
+            # Sample the newest 3 instances instead of the first 3 seen;
+            # `total_calls` is this offer's position in the key's scan order
+            # (#1231).
+            example = {
+                "session_key": session_key,
+                "date": date_str,
+                "tool": tool_name,
+                "params_summary": params_summary,
+                "result_summary": tool.get("result_summary", ""),
+                "is_error": is_error,
+                "sequence": tool.get("sequence", 0)
+            }
+            pool_offer(pattern_data[key]["examples"], EXAMPLE_CAP_SUCCESS,
+                       example, (date_str, pattern_data[key]["total_calls"]))
     
     # Filter by threshold and focus on high-frequency patterns
     qualifying_patterns = []
@@ -913,7 +967,7 @@ def mine_success_patterns(trajectories: list[dict], threshold: int = 2) -> list[
                     "tool_name": tool_name,
                     "params_signature": params_sig,
                     "sessions": data["sessions"],
-                    "examples": data["examples"],
+                    "examples": pool_sample(data["examples"]),
                     "dates": data["dates"],
                     "total_calls": data["total_calls"],
                     "error_count": data["error_count"],
@@ -982,26 +1036,36 @@ def mine_sequence_patterns(trajectories: list[dict], threshold: int = 2) -> list
                 seen_in_session.add(ngram)
 
                 pd = pattern_data[ngram]
+                # A sequence key has no instance counter distinct from its
+                # sessions: `seen_in_session` above dedups the n-gram within one
+                # row, and this keeps one offer per session even if the same
+                # `session_key` arrives in two rows. So offers == len(sessions)
+                # exactly, and `examples_shown` is comparable to `sessions`
+                # without inventing an instance tally (#1231).
+                first_from_session = session_key not in pd["sessions"]
                 pd["sessions"].add(session_key)
                 pd["dates"].add(date_str)
 
-                # Store up to 3 concrete examples
-                if len(pd["examples"]) < 3:
-                    example_steps = []
-                    for j in range(n):
-                        t = collapsed_tools[i + j]
-                        example_steps.append({
-                            "tool": t.get("name", "unknown"),
-                            "label": collapsed_labels[i + j],
-                            "params_summary": t.get("params_summary", {}),
-                            "result_summary": t.get("result_summary", ""),
-                            "is_error": t.get("is_error", False),
-                        })
-                    pd["examples"].append({
-                        "session_key": session_key,
-                        "date": date_str,
-                        "steps": example_steps,
+                # Sample up to 3 concrete examples, newest-first rather than
+                # first-wins.
+                if not first_from_session:
+                    continue
+                example_steps = []
+                for j in range(n):
+                    t = collapsed_tools[i + j]
+                    example_steps.append({
+                        "tool": t.get("name", "unknown"),
+                        "label": collapsed_labels[i + j],
+                        "params_summary": t.get("params_summary", {}),
+                        "result_summary": t.get("result_summary", ""),
+                        "is_error": t.get("is_error", False),
                     })
+                pd["offers"] = pd.get("offers", 0) + 1
+                pool_offer(pd["examples"], EXAMPLE_CAP_SEQUENCE, {
+                    "session_key": session_key,
+                    "date": date_str,
+                    "steps": example_steps,
+                }, (date_str, pd["offers"]))
 
     # Boring sequences that every agent session produces — filter these out
     # to focus on genuinely interesting multi-step patterns
@@ -1030,7 +1094,7 @@ def mine_sequence_patterns(trajectories: list[dict], threshold: int = 2) -> list
             "sequence_str": " → ".join(ngram),
             "ngram_size": len(ngram),
             "sessions": data["sessions"],
-            "examples": data["examples"],
+            "examples": pool_sample(data["examples"]),
             "dates": data["dates"],
             "has_error_recovery": has_error_recovery,
             "first_seen": min(data["dates"]) if data["dates"] else datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
@@ -1248,6 +1312,14 @@ def write_candidate_file(pattern: dict, output_dir: Path, verdict_store: str | P
     # Generate content
     title = generate_title(pattern)
 
+    # The printed examples are a SAMPLE whose size is a cap, not the key's
+    # evidence: `examples_shown: 3` beside `sessions: 111` says "3 of 111", and
+    # `examples_shown: 3` beside `sessions: 3` says "all of them". Without the
+    # numerator the two are indistinguishable, and consolidation's Phase 1.3
+    # persistence test ("2+ dated snapshots — persistent, not a one-off") was
+    # comparing copies of one sample across snapshots (#1231, clause 2).
+    examples_shown = len(pattern["examples"])
+
     if pattern["type"] == "error":
         error_rate = pattern["total_calls"] / len(pattern["sessions"]) if pattern["sessions"] else 0
         content = f"""---
@@ -1255,6 +1327,7 @@ candidate: true
 pattern: {pattern_slug}
 type: error
 occurrences: {pattern["total_calls"]}
+examples_shown: {examples_shown}
 sessions: {len(pattern["sessions"])}
 first_seen: {pattern["first_seen"]}
 last_seen: {pattern["last_seen"]}
@@ -1299,6 +1372,7 @@ pattern: {pattern_slug}
 type: sequence
 ngram_size: {pattern["ngram_size"]}
 sessions: {len(pattern["sessions"])}
+examples_shown: {examples_shown}
 first_seen: {pattern["first_seen"]}
 last_seen: {pattern["last_seen"]}
 has_error_recovery: {recovery_flag}
@@ -1350,6 +1424,7 @@ candidate: true
 pattern: {pattern_slug}
 type: success
 occurrences: {pattern["total_calls"]}
+examples_shown: {examples_shown}
 sessions: {len(pattern["sessions"])}
 first_seen: {pattern["first_seen"]}
 last_seen: {pattern["last_seen"]}
