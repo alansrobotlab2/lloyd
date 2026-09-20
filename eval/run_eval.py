@@ -149,6 +149,32 @@ def _norm(s: str) -> str:
     return str(s or "").lower().replace("-", "_")
 
 
+def _entity_canonical(name: str) -> str:
+    """The store's canonical form of an entity name, or the name itself.
+
+    The scorer compared two spellings and nothing else (#1260): `entity_matches`
+    asked whether the gold string is a substring of a retrieved string, so an
+    answer that names the SAME entity under its alias reads as a miss, and one
+    whose canonical is *shorter* than the gold can never match at all — the 09-18
+    record returned `Task #363` against a gold of `Backlog Item #363` and was
+    scored a miss. Resolution runs on both sides through the one route that owns
+    the question, `app.kg_store`'s alias table and entity registry.
+
+    A name that does not resolve keeps its own spelling, and an unreadable store
+    leaves the whole comparison exactly as it was. A scorer that degraded to
+    "nothing resolves" on a broken store would report the resulting misses as a
+    retrieval regression; the failure to look has to be invisible in the numbers,
+    which is why it is not also reported as a zero here.
+    """
+    text = str(name or "").strip()
+    if not text:
+        return text
+    try:
+        return store().resolve(text) or text
+    except StoreUnavailable:
+        return text
+
+
 def _ndcg_at_k(got_docs: list[str], expected_docs: list[str], k: int = 10) -> float:
     """Binary-relevance NDCG@k. Each got_docs[i] (i<k) scores 1 if it
     matches any expected substring, else 0. IDCG is computed against the
@@ -168,12 +194,37 @@ def _ndcg_at_k(got_docs: list[str], expected_docs: list[str], k: int = 10) -> fl
 
 
 def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> dict:
-    expected_entities = [_norm(e) for e in (query_spec.get("expect_entities") or [])]
+    expected_raw = [str(e) for e in (query_spec.get("expect_entities") or [])]
+    expected_entities = [_norm(e) for e in expected_raw]
     expected_docs = [_norm(d) for d in (query_spec.get("expect_docs") or [])]
-    got_entities = [_norm(e) for e in _entities_in_result(result, seeds)]
+    got_raw = _entities_in_result(result, seeds)
+    got_entities = [_norm(e) for e in got_raw]
     got_docs = [_norm(p) for p in _doc_paths(result)]
 
-    entity_matches = [exp for exp in expected_entities if any(exp in got for got in got_entities)]
+    # An expected entity counts when a returned name either contains it as before,
+    # or IS it once both go through the store (#1260). Canonical forms are compared
+    # for *equality*, never substring, because resolution answers "is this the same
+    # entity", a question substring could not ask: the alias table maps `KG` and
+    # `Relationship Graph` onto `Knowledge Graph` and pointedly does NOT map `Graph`
+    # onto it, so a returned `Graph` must stay unsatisfied by a gold `Knowledge
+    # Graph` even though the two share a word. The substring rule stays as the
+    # additive half rather than being replaced: it is what carries an expectation
+    # written as a partial surface (`TGS-RAG Implementation` against the row `#363
+    # TGS-RAG Implementation`), and dropping it would retire a satisfiability route
+    # `tests/test_eval_corpus_guard.py` exists to defend.
+    # The fact leg keeps substring alone. Not an oversight: `fact_entity_recall` is
+    # the number #1164's acceptance is written against, so redefining it here would
+    # move a metric another item is measured on. The matched value stays the
+    # expected string, so `entities_matched` remains comparable across two runs.
+    expected_canon = [_norm(_entity_canonical(e)) for e in expected_raw]
+    got_canon = [_norm(_entity_canonical(e)) for e in got_raw]
+
+    def _entity_satisfied(exp: str, exp_canon: str) -> bool:
+        return any(exp in got or (exp_canon == got_canon)
+                   for got, got_canon in zip(got_entities, got_canon))
+
+    entity_matches = [exp for exp, exp_canon in zip(expected_entities, expected_canon)
+                      if _entity_satisfied(exp, exp_canon)]
     doc_matches = [exp for exp in expected_docs if any(exp in got for got in got_docs)]
 
     # Rank of FIRST matching expected doc in returned list (1-indexed; None if none).
@@ -442,9 +493,16 @@ def summarize(records: list[dict]) -> dict:
     # that a low number here is a finding rather than a malfunction.
     moved_vals = [_cf(r, "counterfactual_moved_rate") for r in records]
     pinned_vals = [_cf(r, "counterfactual_pinned_rate") for r in records]
+    anchorless = anchorless_queries(records)
 
     overall = {
         "n_queries": len(records),
+        # The seed-side ceiling, beside the number it bounds. `entity_hit_rate`
+        # cannot exceed (n - anchorless)/n until the residue has a recall arm to
+        # reach it with (#1164); a run whose count moved is a run whose extractor
+        # changed, not one whose search got better.
+        "anchorless_query_count": len(anchorless),
+        "anchorless_query_ids": anchorless,
         "entity_hit_rate": avg([1.0 if r["scoring"]["entity_hit"] else 0.0 for r in records]),
         "doc_hit_rate": avg([1.0 if r["scoring"]["doc_hit"] else 0.0 for r in records]),
         "entity_recall_avg": avg([r["scoring"]["entity_recall"] for r in records]),
@@ -481,6 +539,41 @@ def _fmt_rate(value) -> str:
     no perturbation block reads 'null'; a run where nothing moved reads '0.00',
     and only one of those is a finding about retrieval."""
     return "null" if value is None else f"{value:.2f}"
+
+
+def anchorless_queries(records: list[dict]) -> list[str]:
+    """The ids of queries the seed extractor anchored on NOTHING the gold names.
+
+    A query is anchorless when no expected entity appears among its extracted
+    seeds — neither as the seed itself nor as a substring of it — so no fact-leg
+    read, doc-leg search or graph traversal has anywhere to start. It is a
+    property of the seeds, not of the answer: this reads `seeds_extracted`, which
+    the run recorded from the same extractor production uses, never the returned
+    entities.
+
+    #1260. The harness has always measured the entity leg without saying how
+    much of it was scorable, which is why three families of knob-proposing items
+    (#569 seed scoring, #633/#634 graph arms, #843 seed width) could each look
+    viable against a 0.5 that no knob of theirs could move. The count travels in
+    `summary.overall`, so the ceiling is in every baseline artifact rather than
+    in whoever last re-derived it by hand.
+    """
+    out = []
+    for rec in records:
+        expected = [_norm(e) for e in ((rec.get("expected") or {}).get("entities") or [])]
+        if not expected:
+            continue
+        if rec.get("seeds_extracted") is None:
+            # No seeds were RECORDED for this record (a synthetic record, or a
+            # baseline written before the field existed). Zero recorded seeds and
+            # no recorded seeds are different observations, and reporting the
+            # second as the first is a verdict from a missing input — the count
+            # would then measure which artifacts have the key.
+            continue
+        seeds = [_norm(s) for s in rec["seeds_extracted"]]
+        if not any(exp in seed or seed in exp for exp in expected for seed in seeds):
+            out.append(rec.get("id", "?"))
+    return out
 
 
 def _fmt_rate3(value) -> str:

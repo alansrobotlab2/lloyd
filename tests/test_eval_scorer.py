@@ -487,3 +487,183 @@ def test_a_run_record_declares_whether_it_matched_production(tmp_path):
     rec = json.loads(latest[-1].read_text())
     assert "matches_production_defaults" in rec
     assert {"graph_rerank", "rerank_alpha", "graph_top_k", "graph_hops"} <= set(rec)
+
+
+# ── #1260 clause 2: the entity leg resolves before it compares ───────────────
+
+def _resolving_store(tmp_path):
+    """A real KGStore carrying the alias rows these tests are about.
+
+    Built through `KGStore` + `entities.register` + `aliases.set` rather than a stub
+    with a hand-written `resolve`, because the property under test is exactly that
+    the scorer defers to the STORE's notion of alias-equivalence. A stub answering
+    "yes, those two are the same entity" would have the test assert its own
+    assumption; here the scorer is only as alias-aware as a real table makes it.
+    """
+    import app.kg_store as ks
+
+    db = tmp_path / "kg.sqlite"
+    st = ks.KGStore(db)
+    for name in ("Autonomy Data Pipeline", "Knowledge Graph", "Task #363",
+                 "TGS-RAG", "Backlog System"):
+        st.entities.register(name, kind="system")
+    st.aliases.set("Autonomy Pipeline", "Autonomy Data Pipeline",
+                   kind="semantic", origin="test")
+    st.aliases.set("KG", "Knowledge Graph", kind="semantic", origin="test")
+    return st
+
+
+def test_a_retrieved_alias_satisfies_the_gold_canonical(tmp_path, monkeypatch):
+    """Gold `Autonomy Data Pipeline` is satisfied by a returned `Autonomy Pipeline`.
+
+    `entity_matches` asked only `exp in got`, so a name that IS the gold entity under
+    a different spelling could never satisfy it — and a canonical SHORTER than the
+    gold can never be a substring of it, so no amount of better retrieval could close
+    those. The 09-18 baseline returned `Task #363` where gold said `Backlog Item #363`
+    and scored the pair a miss.
+    """
+    monkeypatch.setattr(ev, "store", lambda: _resolving_store(tmp_path))
+    out = ev._score({"query": "q", "expect_entities": ["Autonomy Data Pipeline"]},
+                    {"documents": [], "facts": []}, seeds=["Autonomy Pipeline"])
+    assert out["entity_hit"] is True and out["entity_recall"] == 1.0, out
+    assert out["entities_matched"] == ["autonomy data pipeline"], (
+        "the matched value stays the EXPECTED string, so `entities_matched` remains "
+        "comparable with a baseline written before resolution existed: "
+        f"{out['entities_matched']}")
+
+
+def test_a_name_the_alias_table_does_not_map_still_fails_the_gold(tmp_path, monkeypatch):
+    """Gold `Knowledge Graph` is NOT satisfied by a returned `Graph`.
+
+    Resolution is not fuzziness. The table maps `KG` onto `Knowledge Graph` and
+    pointedly has no row for `Graph`, so a returned `Graph` must stay a miss —
+    otherwise the scorer would grade any string sharing a word as the same entity and
+    the entity leg would stop measuring anything.
+    """
+    st = _resolving_store(tmp_path)
+    monkeypatch.setattr(ev, "store", lambda: st)
+    assert st.resolve("Graph") is None, "the table must stay silent on `Graph`"
+    assert st.resolve("KG") == "Knowledge Graph", "and answer on the row it does have"
+    miss = ev._score({"query": "q", "expect_entities": ["Knowledge Graph"]},
+                     {"documents": [], "facts": []}, seeds=["Graph"])
+    assert miss["entity_hit"] is False and miss["entity_recall"] == 0.0, miss
+    hit = ev._score({"query": "q", "expect_entities": ["Knowledge Graph"]},
+                    {"documents": [], "facts": []}, seeds=["KG"])
+    assert hit["entity_hit"] is True, "same scorer, the alias the table actually holds"
+
+
+def test_resolution_does_not_replace_the_substring_rule(tmp_path, monkeypatch):
+    """Containment stays as the additive half, or the corpus loses a target.
+
+    `TGS-RAG Implementation` is no entity row, and `tests/test_eval_corpus_guard.py`
+    defends it precisely because containment through the row `#363 TGS-RAG
+    Implementation` is what reaches it. An equality-only reading would have demanded
+    that expectation be retargeted, which is a substitution for no reason.
+    """
+    st = _resolving_store(tmp_path)
+    monkeypatch.setattr(ev, "store", lambda: st)
+    assert st.resolve("TGS-RAG Implementation") is None
+    got = ev._score({"query": "q", "expect_entities": ["TGS-RAG Implementation"]},
+                    {"documents": [], "facts": []}, seeds=["#363 TGS-RAG Implementation"])
+    assert got["entity_hit"] is True, got
+
+
+def test_the_fact_leg_keeps_its_pre_resolution_definition(tmp_path, monkeypatch):
+    """`fact_entity_recall` stays substring-only, deliberately.
+
+    #1164's acceptance is written as `fact_entity_recall_avg >= 0.475`; redefining
+    the fact leg here would move the ground under a clause this round does not own.
+    So the entity leg resolves and the fact leg does not — an asymmetry with a
+    reason, not an oversight, and this test is what keeps it a decision.
+    """
+    monkeypatch.setattr(ev, "store", lambda: _resolving_store(tmp_path))
+    out = ev._score(
+        {"query": "q", "expect_entities": ["Knowledge Graph"]},
+        {"documents": [], "facts": [{"entity": "KG", "fact": "edges"}]}, seeds=[])
+    assert out["entity_hit"] is True, "the entity leg got the resolution"
+    assert out["fact_entity_recall"] == 0.0, (
+        "the fact leg now resolves too, which moves #1164's acceptance metric: "
+        f"{out['fact_entity_recall']}")
+
+
+def test_an_unreadable_store_leaves_the_comparison_unchanged(tmp_path, monkeypatch):
+    """A store that will not open must not turn alias-equivalent names into misses.
+
+    With no resolution the scorer falls back to the substring rule it has always
+    used, so a worktree run prints the numbers the pre-#1260 tree printed. The other
+    available fallback — resolving every unknown name to one shared bucket — would
+    report a storage fault as a retrieval collapse, the shape this file's neighbours
+    keep meeting.
+    """
+    import app.kg_store as ks
+
+    def _refuse():
+        raise ks.StoreUnavailable("no kg.sqlite on this path")
+
+    monkeypatch.setattr(ev, "store", _refuse)
+    out = ev._score({"query": "q", "expect_entities": ["Autonomy Data Pipeline"]},
+                    {"documents": [], "facts": []}, seeds=["Autonomy Pipeline"])
+    assert out["entity_hit"] is False, "no store, no resolution — and no false hit"
+    kept = ev._score({"query": "q", "expect_entities": ["TGS-RAG Implementation"]},
+                     {"documents": [], "facts": []}, seeds=["#363 TGS-RAG Implementation"])
+    assert kept["entity_hit"] is True, "containment still works without a store"
+
+
+# ── #1260 clause 4: the harness reports its own seed-side ceiling ────────────
+
+def _anchor_record(qid, seeds, expects):
+    return {"id": qid, "query": qid, "category": "single",
+            "seeds_extracted": list(seeds),
+            "expected": {"entities": list(expects), "docs": ["x"]},
+            "scoring": {"entity_hit": False, "doc_hit": True, "entity_recall": 0.0,
+                        "doc_recall": 1.0, "rr_doc": 1.0, "ndcg10": 0.5,
+                        "fact_entity_recall": 0.0},
+            "latency_ms": 100.0, "error": None}
+
+
+def test_summarize_reports_the_anchorless_query_count_and_ids():
+    """`summary.overall` carries the residue, so the ceiling travels with every
+    baseline artifact instead of living in a triage comment.
+
+    Three item families (#569 seed scoring, #633/#634 graph arms, #843 seed width)
+    each proposed a knob against a 0.5 entity hit rate that no knob of theirs could
+    move, because nothing in the artifact said how many queries had no seed to start
+    an entity search from.
+    """
+    recs = [_anchor_record("anchored", ["Knowledge Graph"], ["Knowledge Graph"]),
+            _anchor_record("alias-anchorless", ["Relationship Graph"], ["Knowledge Graph"]),
+            _anchor_record("no-gold-entity", ["Index"], [])]
+    out = ev.summarize(recs)
+    assert out["overall"]["anchorless_query_count"] == 1, out["overall"]
+    assert out["overall"]["anchorless_query_ids"] == ["alias-anchorless"], out["overall"]
+    # A query with no gold entity is not scorable on the entity leg, so it is not
+    # anchorless either; counting it would inflate the residue by the corpus's shape
+    # rather than by the extractor's reach.
+    assert "no-gold-entity" not in out["overall"]["anchorless_query_ids"]
+
+
+def test_anchorless_reads_the_seeds_and_not_the_answer():
+    """The residue is a property of the seeds, so a good answer cannot hide it.
+
+    Reading the returned entities instead would report the ceiling as zero whenever
+    retrieval reached the entity by some other route — which is how this stayed
+    invisible: `doc_hit` is 1.0 on all twenty queries while half of them cannot start
+    an entity search at all.
+    """
+    rec = _anchor_record("reached-anyway", ["Index"], ["Knowledge Graph"])
+    rec["scoring"] = dict(rec["scoring"], entity_hit=True, entity_recall=1.0)
+    assert ev.anchorless_queries([rec]) == ["reached-anyway"]
+
+
+def test_a_record_with_no_recorded_seeds_is_not_counted_anchorless():
+    """Zero recorded seeds and no recorded seeds are different observations.
+
+    A synthetic record, or a baseline written before the field existed, carries
+    `None`. Reporting that as anchorless is a verdict from a missing input — the
+    count would then measure which artifacts happen to have the key, the same shape
+    as every other guard on this box that read its own absent input and reported a
+    finding it could not justify.
+    """
+    rec = _anchor_record("unseeded", ["Index"], ["Knowledge Graph"])
+    rec["seeds_extracted"] = None
+    assert ev.anchorless_queries([rec]) == []

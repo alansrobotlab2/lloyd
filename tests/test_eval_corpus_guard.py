@@ -756,27 +756,68 @@ def test_the_guard_fails_on_a_synthetic_query_no_entity_can_satisfy(tmp_path):
     assert "Backlog Item #363" in msg, msg
 
 
-def test_a_containment_reachable_expectation_is_not_reported_unsatisfiable():
+def test_a_containment_reachable_expectation_is_not_reported_unsatisfiable(tmp_path):
     """The guard is containment, or it alarms on expectations retrieval can meet.
 
-    `TGS-RAG Implementation` is no entity's name — the store's row is
-    `#363 TGS-RAG Implementation` — yet the scorer reaches it, because `_score`
-    matches `exp in got`. An equality-based guard would have demanded this
-    expectation be retargeted too, which is a substitution of a different target
-    for no reason and would have made the query weaker.
-    """
-    names, _ = _entity_store_names()
-    target = "TGS-RAG Implementation"
-    assert target not in names, (
-        "the premise of this test is the store's, not mine: if an exact row now "
-        "exists, containment and equality agree and the case is gone — re-pick a "
-        "name that is a substring of some row but is no row itself")
-    assert any(target.lower() in n.lower() for n in names), (
-        f"no entity name contains {target!r}, so it IS unsatisfiable and belongs "
-        "in the corpus failure, not here")
-    report = _entity_satisfiability_report()
-    assert not [d for d in report["dead"] if d["expect"] == target], report["dead"]
+    #513 was filed to delete a whole class of these, and a guard on strict names would
+    re-file it every night against names that are not defects.
 
+    Synthetic, with one reachable-only-by-containment gold and one reachable by no
+    route, in the same report. The shipped corpus used to supply the first case
+    (`TGS-RAG Implementation`, contained in the row `#363 TGS-RAG Implementation`) and
+    the test read its target out of that corpus, which meant the assertion could not
+    go red: once #1260 re-pointed the gold to a real row the target was simply not
+    there and the test returned early. Here the assertion always runs, and one report
+    proves both directions — containment is admitted, an unreachable name is still
+    caught.
+    """
+    corpus = tmp_path / "containment.yaml"
+    corpus.write_text(
+        "queries:\n"
+        "  - id: containment-probe\n"
+        "    query: tell me about the backlog\n"
+        "    category: single\n"
+        '    expect_entities: ["Lloyd Backlog"]\n'
+        "    expect_docs: [lloyd]\n"
+        "  - id: unreachable-probe\n"
+        "    query: tell me about the thing that is not in the graph\n"
+        "    category: single\n"
+        '    expect_entities: ["Backlog Item #363"]\n'
+        "    expect_docs: [lloyd]\n"
+    )
+
+    class ContainmentOnlyStore:
+        """One entity whose NAME CONTAINS the gold, and nothing else.
+
+        `Lloyd Backlog` is neither an entity row nor an alias surface, so only the
+        scorer's own containment rule reaches it — `run_eval._score` tests the
+        expectation as a substring of a returned name, and `Lloyd Backlog System` is
+        such a name.
+        """
+        class _A:
+            @staticmethod
+            def lookup(name):
+                return None
+        class _E:
+            @staticmethod
+            def all():
+                return ["Lloyd Backlog System", "Knowledge Graph"]
+        aliases = _A()
+        entities = _E()
+        version = 1
+
+    report = _entity_satisfiability_report(corpus, getter=lambda: ContainmentOnlyStore)
+    assert report["expectations"] == 2, report
+    # A list of dicts: the report is JSON-shaped so it can travel into a run record.
+    assert report["dead"] == [{"query": "unreachable-probe",
+                               "expect": "Backlog Item #363"}], report
+    with pytest.raises(AssertionError) as exc:
+        _assert_entity_expectations_satisfiable(report)
+    msg = str(exc.value)
+    assert "unreachable-probe -> 'Backlog Item #363'" in msg, msg
+    assert "containment-probe" not in msg, (
+        f"the guard flagged a containment-reachable expectation, which is the "
+        f"#513 false-positive class: {msg}")
 
 def test_an_unreadable_store_raises_rather_than_reporting_every_name_absent(monkeypatch):
     """Clause: a store that will not open must not read as an unsatisfiable corpus.

@@ -377,6 +377,20 @@ def _is_generic_seed_name(e_lower: str) -> bool:
     return all(t in generic for t in toks)
 
 
+def _alias_surface_map() -> dict:
+    """lowercased surface → canonical, for every surface and entity the store knows.
+
+    `aliases.all_lower()` is already the store's own cached hot lookup map (it
+    includes every entity mapped to itself, and invalidates on store version), so
+    this adds only the unreadable-store tolerance: `{}` folds nothing, and an
+    extractor without a store seeds lexically, as it did before #1260.
+    """
+    try:
+        return store().aliases.all_lower()
+    except StoreUnavailable:
+        return {}
+
+
 def extract_entities_from_query(query: str) -> list:
     """Rank known entities by how well they match the query.
 
@@ -409,6 +423,23 @@ def extract_entities_from_query(query: str) -> list:
 
     scores: dict[str, float] = {}
 
+    # Store canonical for a scored surface, and only when the canonical is itself
+    # a readable entity directory. #1260: this ranked directory names lexically and
+    # never asked the store what a name IS, so a query phrased as an alias —
+    # `Relationship Graph`, `Autonomy Pipeline` — seeded on the alias and left the
+    # entity its facts, edges and documents actually live under unreachable at any
+    # seed budget. The store holds 4,026 alias rows saying exactly that, and
+    # `store.resolve` was never called on this path. The directory-name check is
+    # what keeps the fold honest: an alias routing to a name with no facts under it
+    # would replace a seed that reads with one that reads nothing.
+    alias_map = _alias_surface_map()
+
+    def _seed_canonical(name: str) -> str:
+        target = alias_map.get(name.lower())
+        if not target or target == name:
+            return name
+        return entity_lookup.get(target.lower(), name)
+
     # Does the query name one record? `#363`, `task 363`, `backlog item 363` all
     # match; a bare number does not, because every alternative here requires the
     # `#`/`task`/`backlog` prefix. That prefix requirement is what makes this a
@@ -430,6 +461,30 @@ def extract_entities_from_query(query: str) -> list:
             return
         if scores.get(canonical, 0.0) < score:
             scores[canonical] = score
+        # The alias surface stays in the list — its own directory holds facts, and
+        # replacing it would take the doc leg's hit down to pay for the entity leg —
+        # but the entity it is an alias FOR is scored identically, so the canonical
+        # reaches the seed budget too.
+        #
+        # What the fold can cost at a width, stated exactly, because every reader
+        # downstream cuts this list at one (`RECALL_SEED_TOP_K` in `vault.py`,
+        # `FACT_MAX_ENTITIES` in `prefetch.py`) and the tie-break then orders equal
+        # scores by name length and edge count. The canonical is scored *identically
+        # to the alias surface that earned it*, never above it, so the fold cannot
+        # seat a canonical over a better-matched seed: the name it displaces, when it
+        # displaces one, is one scoring no higher than the canonical that replaced it.
+        # On the shipped corpus at production width that happens once: the width holds
+        # `Autonomy Data Pipeline` at 0.5 after the fold against 0.3333 before it (the
+        # fold raises it to its alias surface `Pipeline`'s score) and the name it drops
+        # is `Lloyd's autonomy pipeline` at 0.3333 — a lower-scoring tail name giving
+        # way to a higher-scoring one, the ordering doing its job, not a new harm.
+        # Both halves
+        # — the additive case and the displacing case — are pinned through
+        # `vault._vault_recall`, the real consumer of the width, by
+        # `tests/test_retrieval_seed_anchoring.py`.
+        seed = _seed_canonical(canonical)
+        if seed != canonical and scores.get(seed, 0.0) < score:
+            scores[seed] = score
 
     # 1. Task-ID direct dispatch (highest-priority signal).
     for m in _TASK_ID_RE.finditer(q_lower):
