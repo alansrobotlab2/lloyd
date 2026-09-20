@@ -386,6 +386,40 @@ def test_the_autocode_prompt_sends_findings_to_the_parent_and_files_only_blocker
     assert "SPAWNED: <ids of blocker items" in impl
 
 
+def test_a_blocker_must_quote_an_artifact_it_re_read():
+    """A blocker is the one thing an implement round files, and three of them
+    carried evidence the artifact they named contradicted — each was trusted,
+    and each became a fake blocker for another item:
+
+      * #1091 quoted `FAIL review … (2 graded refusals, both blocking)`, a
+        string `gate.py` has never contained in any commit, over a report
+        showing attempt 1 of 2 and a ledger row saying the same;
+      * #1169 read the *first* gate run's refusal as the current one and
+        aborted a round whose `gate.json`, 20 s old, said `ok: true` with 5 of
+        5 clauses met;
+      * #1200 quoted `2 failed, 4969 passed … in 372.87s` for a `tests` rung
+        that never ran — the round failed `frontend`, which precedes it — in a
+        file that exists in no tree, after pytest had already answered
+        `file or directory not found` in both trees.
+
+    So the rule has to be the thing a reader holding only the item can check:
+    the line copied out of the named artifact, the artifact re-read for the
+    head it names, and any named file seen in the tree that ran.
+    """
+    impl = " ".join(_impl_prompt().split())
+    # a quoted gate/ledger line is copied from the artifact, re-read from disk
+    # for the round's current head, and the reader is told which path
+    assert "re-read from disk" in impl
+    assert "for the round's current head" in impl
+    assert "name the path you copied from" in impl
+    # no assertion that a rung produced output, and no named file, except from
+    # that rung's own detail in the round's gate.json and from its tree
+    assert "unless you read that rung's detail out of the round's `gate.json`" in impl
+    assert "saw the file in the tree that rung ran in" in impl
+    # the same re-read guards the abort, whose reason is stored unverified
+    assert "re-read that report before filing a blocker or calling `automod_abort`" in impl
+
+
 def test_the_triage_prompt_tells_the_model_what_a_merge_means():
     """`backlog_tasks` has no text search; the check it used to ask for was a
     ritual. The tool does it now, and the prompt says how to read the answer."""

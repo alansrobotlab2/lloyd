@@ -111,9 +111,8 @@ PROMPT = """\
 Backlog item #{item_id} on your own board was triaged {triaged_ago} and \
 **confirmed**: the premise still holds and there is real work here. Implement \
 it through the self-modification loop, following the skill \
-`automod-change-own-code` exactly — it holds the procedure for a `code`, \
-`frontend`, `vault` or `mixed` surface, each gate rung, the `review` rung, and \
-what to do when an existing test fails. Read it first; this message is the \
+`automod-change-own-code` exactly — it holds the procedure for every surface, \
+every gate rung and the `review` rung. Read it first; this message is the \
 contract, not the procedure.
 
 <item id="{item_id}" status="{status}" priority="{priority}">
@@ -141,8 +140,8 @@ your finalizer reports each one:
 The round is done when every clause has become true and a test pins each. If \
 you cannot make them true with one small, well-tested change, do not land a \
 larger one — abort the round, say why, and the item goes back to a human. \
-Open the round with `automod_start(goal, item_id={item_id})` — the `item_id` \
-is what lets the review rung find these clauses.
+Open the round with `automod_start(goal, item_id={item_id})` — that is what \
+lets the review rung find these clauses.
 
 **What the review grades.** Name each process boundary your change crosses \
 and put a test across it. Every clause needs a test node in a file this diff \
@@ -152,32 +151,36 @@ claims exact. You get two review attempts per round; each refused commit \
 spends one.
 
 **Scope you discover is not scope you take — and it is not a new item \
-either.** A second bug beside the first, a refactor the fix wants, a missing \
-test: each goes **onto this item**, once, as a section: \
+either.** A second bug, a refactor the fix wants, a missing test: each goes \
+**onto this item**, once, as a section: \
 `backlog_write_task(task_id={item_id}, description_mode="append", \
 description="## Findings (round <round id>)\\n\\n- <what is wrong, where \
-(file:line), how to verify>", activity="findings appended by round <round id>")`. \
-One bullet per finding; do not leave them only in your report: it is read \
-once, the item until it is done. One change per round is what makes a \
-rollback mean something.
+(file:line), how to verify>")`. \
+One bullet per finding; do not leave them only in your report.
 
 **The one thing that becomes a new item is a blocker**: a finding that stops \
 one of this round's clauses from becoming true. File it with \
 `backlog_write_task` (board `lloyd`, no `task_id`, tags `spawned-by-autocode` \
 and `blocker`, first line "Blocks #{item_id}"), as a handoff a fresh session \
-can execute alone, and name its id as what the deferred clause waits on. If \
+can execute alone; name the id the deferred clause waits on. If \
 the tool answers `merged_into: N`, cite N instead. **File at most \
 {spawn_cap}.** A second blocker means the item needs a human: stop and report. \
-Nothing else becomes an item; everything else is a finding on this item.
+Nothing else becomes an item. A blocker's evidence must be checkable by a \
+reader holding only the item: copy any gate or ledger line you quote out of \
+that artifact **re-read from disk** for the round's current head, and name the \
+path you copied from. Never assert a rung produced output, or name a file, \
+unless you read that rung's detail out of the round's `gate.json` and saw the \
+file in the tree that rung ran in — and re-read that report before filing a \
+blocker or calling `automod_abort`.
 
-{reoffer}**The triage evidence above was measured today, on this tree.** File sizes,
-line counts, git shas and grep results in it are current: read them, do not
-re-derive them. Re-measure exactly one thing — the acceptance check, which you
-must confirm fails before you start and passes when you finish.
+{reoffer}**The triage evidence above was measured today, on this tree.** File
+sizes, git shas and grep results in it are current: read them, do not re-derive
+them. Re-measure only the acceptance check: confirm it fails before you start
+and passes when you finish.
 
 **Pacing.** You have {max_turns} iterations and a wall clock. A full gate
 takes about {gate_minutes} minutes now (measured), so: `automod_start` by
-iteration 6 or minute 8; the failing test by iteration 25; the first
+iteration 6; the failing test by iteration 25; the first
 `automod_gate` by minute {first_gate_by}. Run the tests you changed, never the
 whole suite — the gate runs it. Commit before every gate: re-gating the same
 commit is answered from the ledger without a review. If a `<context>` or
@@ -201,19 +204,18 @@ recorded as `not_met`. `not_met` re-offers it once for those clauses. Two verdic
 it with no landing: `unnecessary` means the work is not needed after all — the \
 premise no longer holds, or the acceptance is already true; `rejected` means \
 you built or measured it and the evidence says it does not improve things (an \
-eval no better, cost above the gain) — put the measurement in `summary`. A rejection with evidence is a good outcome; a \
-landing that improves nothing is the failure. A closed item is never \
-re-triaged, so `met`, `unnecessary` or `rejected` on evidence you did not \
-actually gather is the one claim this loop cannot recover from.
+eval no better, cost above the gain) — put the measurement in `summary`. A \
+rejection with evidence beats a landing that improves nothing. A closed item \
+is never re-triaged, so `met`, `unnecessary` or `rejected` on evidence you did \
+not actually gather is the one claim this loop cannot recover from.
 
 If your change needed a path the loop may never write — anything the gate's \
 scope check denies — leave it out, land the rest, and report it under \
-`human_paths` with one sentence saying what needed to change there. Never \
-`git add -f`.
+`human_paths`. Never `git add -f`.
 
 Report what you did, quoting the gate line rather than saying "it passed", \
 and end with one line `SPAWNED: <ids of blocker items you filed or were merged \
-into, or the word none>`. Work autonomously; do not ask for confirmation.
+into, or the word none>`. Work autonomously.
 """
 
 

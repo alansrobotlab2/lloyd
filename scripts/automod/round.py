@@ -420,13 +420,39 @@ def gate_detached(round_id: str, *, by: str, skip_smoke: bool = False) -> dict:
     return {"pid": pid, "log": str(log)}
 
 
+def _gate_verdict(round_id: str) -> dict:
+    """The round's own `gate.json` verdict, as `{"gate_ok", "gate_head"}` —
+    `""` for both when no gate report exists.
+
+    Read here, off disk, and never from the caller: `abort` is the only writer
+    of `round_aborted`, and the reason it stores is the caller's narrative,
+    which has been wrong about the very gate it names. On 2026-09-15 a round
+    was aborted as "Both review attempts spent … the review refused twice on
+    clause 4/5 test honesty" twenty seconds after its report said `ok: true`
+    with "review: 5 met of 5 clause(s)"; the narrative described the *first*
+    gate run. `W.remove` then deleted the round dir, so the artifact that
+    disproved it was gone by the time anyone read the row.
+    """
+    try:
+        report = json.loads((S.ROUNDS_DIR / round_id / "gate.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):   # absent, unreadable or truncated: no verdict to carry
+        return {"gate_ok": "", "gate_head": ""}
+    return {"gate_ok": report.get("ok", ""), "gate_head": report.get("head", "")}
+
+
 def abort(round_id: str, reason: str = "") -> dict:
     """Close a round, branch kept. `reason` rides the event: seventeen of the
-    first seventeen `round_aborted` rows carried nothing but the id."""
+    first seventeen `round_aborted` rows carried nothing but the id.
+
+    The row also carries the gate verdict the round actually had, beside the
+    caller's reason, so a narrative that contradicts the artifact is visible
+    without opening `gate.json` — which by then is gone (see `_gate_verdict`).
+    """
+    verdict = _gate_verdict(round_id)     # before the removal, which deletes the round dir
     W.remove(round_id, keep_branch=True, repo=LIVE_ROOT)
     S.append_event({"event": "round_aborted", "round_id": round_id,
-                    "reason": " ".join(str(reason or "").split())[:500]})
-    return {"aborted": round_id, "branch_kept": f"automod/{round_id}"}
+                    "reason": " ".join(str(reason or "").split())[:500], **verdict})
+    return {"aborted": round_id, "branch_kept": f"automod/{round_id}", **verdict}
 
 
 def _unit_drift() -> list[str]:

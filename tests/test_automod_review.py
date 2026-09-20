@@ -718,6 +718,48 @@ def test_a_round_can_resume_the_branch_review_sent_back(scratch, monkeypatch):
         W.remove(second["round_id"], repo=scratch)
 
 
+def test_an_abort_row_carries_the_gate_verdict_beside_the_reason(scratch, monkeypatch):
+    """A reason that contradicts the artifact has to be visible in the row.
+
+    #1169's round was aborted with the reason "Both review attempts spent …
+    the review refused twice on clause 4/5 test honesty" 20 seconds after its
+    `gate.json` reported `ok: true` with "review: 5 met of 5 clause(s)" — the
+    narrative described the *first* gate run, and `abort()` then deleted the
+    artifact that disproved it. Three implement-filed blockers (#1091, #1169,
+    #1200) are the same shape. So the row carries the report's own verdict and
+    head, read off disk before the round dir goes, and a reader needs no
+    `gate.json` to spot the disagreement.
+    """
+    ids = iter(("SM_G1", "SM_G2"))
+    monkeypatch.setattr(R, "_round_id", lambda: next(ids))
+
+    gated = R.start("graded green", force=True, item_id=77)
+    rid = gated["round_id"]
+    (S.ROUNDS_DIR / rid).mkdir(parents=True, exist_ok=True)
+    # A head no git command could answer for this round, so the row can only
+    # have come from the file.
+    (S.ROUNDS_DIR / rid / "gate.json").write_text(json.dumps(
+        {"round_id": rid, "head": "deadbeefcafe1234", "ok": True,
+         "rungs": [{"name": "review", "ok": True, "detail": "5 met of 5 clause(s)"}]}),
+        encoding="utf-8")
+    out = R.abort(rid, reason="the review refused twice on clause 4")
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+          if e.get("event") == "round_aborted"][-1]
+    assert ev["gate_ok"] is True
+    assert ev["gate_head"] == "deadbeefcafe1234"
+    assert "refused twice" in ev["reason"]
+    # and back to the caller that wrote the reason, at the moment it wrote it
+    assert out["gate_ok"] is True and out["gate_head"] == "deadbeefcafe1234"
+
+    # A round that never gated: the keys are present and empty, so the absence
+    # of an artifact is a distinct answer from a gate that said no.
+    dry = R.start("never gated", force=True, item_id=78)
+    R.abort(dry["round_id"], reason="out of clock")
+    ev2 = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "round_aborted"][-1]
+    assert ev2["gate_ok"] == "" and ev2["gate_head"] == ""
+
+
 def test_a_missing_resume_branch_falls_back_to_a_fresh_worktree(scratch):
     out = R.start("go", force=True, from_branch="automod/SM_NOPE")
     try:
