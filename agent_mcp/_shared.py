@@ -247,6 +247,52 @@ def _fold_orphaned_tag_items(fm_text: str) -> str:
     return "\n".join(out)
 
 
+# ── The autonomy task-field list ─────────────────────────────────────────────
+#
+# `fallback_fields` is not a display hint: the regex layer below recovers the
+# listed names and ONLY the listed names, so on a YAML-broken file a field
+# missing from this tuple is silently absent from the record. That makes this
+# tuple the actual statement of the architecture invariant "the parser can
+# never drop a task" (architecture/autonomy.md) — and until #1014 there were
+# three different tuples answering that one question: the scheduler's 25 names,
+# `agent_mcp/autonomy.py`'s 13, and the Mission Control board passing none at
+# all.
+#
+# The 13 was the dangerous one because that reader feeds a read-modify-write:
+# `agent_mcp/autonomy._write_task_file` starts from the file's prior parse, so
+# 13 recovered fields followed by a write rebuilt the file from 13 fields and
+# destroyed the rest of its frontmatter — `preferred_hours: []`, `model: ''`,
+# `depends_on` gone — on a task the scheduler was still dispatching off its own
+# richer read (#1014).
+#
+# So it is ONE tuple, here, beside the parser that consumes it, imported by all
+# three readers. It is the union of the two old lists plus the keys the two
+# display readers surface, minus `board_id`: that name appeared only in the MCP
+# list, in 0 of the live task files, and in no scheduler code path — it is the
+# tell that the lists were never one thing, and `_parse_task_file` invented
+# `board_id: 4` for every task it read.
+#
+# It does NOT claim to be every frontmatter key in use. The live fleet also
+# carries `category`, `segment`, `timestamp`, `paused_reason` and others; those
+# are outside the regex recovery on purpose, which is precisely why a degraded
+# file must never be rewritten from a recovered record (see
+# `agent_mcp/backlog.py::save_task` and `_write_task_file` below).
+AUTONOMY_TASK_FIELDS: tuple[str, ...] = (
+    # Dispatch-critical: what the scheduler reads to decide whether and how to
+    # run a task. These 25 are the scheduler's original list, verbatim.
+    "id", "name", "description", "status", "priority", "frequency",
+    "scheduled_at", "next_run", "last_run", "last_attempt", "agent_id",
+    "skill_name", "timeout_seconds", "max_turns", "preemptible", "auto_advance",
+    "depends_on", "max_retries", "failure_count", "runs_per_day",
+    "preferred_hours", "model", "stale_bypass_hours",
+    "expected_error_patterns", "inner_voice",
+    # Read by the MCP tool reader and the board reader, and carried by real task
+    # files, so a degraded file should present them too rather than blanks.
+    "skill_path", "pipeline", "pipeline_mode", "notify_on_complete",
+    "cron_id", "run_count", "tags", "type", "created", "updated", "title",
+)
+
+
 def parse_frontmatter_text(
     fm_text: str,
     *,

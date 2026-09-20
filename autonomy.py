@@ -69,7 +69,7 @@ def _detect_silent_failures(text: str, expected: Optional[list] = None) -> list[
 
 import yaml
 
-from agent_mcp._shared import parse_frontmatter_text
+from agent_mcp._shared import AUTONOMY_TASK_FIELDS, parse_frontmatter_text
 
 logger = logging.getLogger("lloyd-autonomy")
 
@@ -110,7 +110,16 @@ def _parse_task_file(path: Path) -> Optional[dict]:
     can never silently vanish from the scheduler — that failure mode
     dormant-killed 34/40 tasks on 2026-05-28 (see
     project_autonomy_silent_task_drop memory). The next yaml.dump write
-    (e.g. _update_task_field) normalizes a repaired file on disk."""
+    (e.g. _update_task_field) normalizes a repaired file on disk.
+
+    The field list is `AUTONOMY_TASK_FIELDS`, imported, not a local tuple: the
+    MCP tool reader and the Mission Control board read the SAME files, and this
+    tuple is what each of them recovers from a degraded one. When it was a
+    private 25-field tuple here and a private 13-field tuple there, a broken
+    file read by the MCP reader came back window-less/chain-less/model-less and
+    — because that reader writes from its own read — got rewritten that way,
+    while the scheduler kept dispatching the task on values only it could still
+    see (#1014)."""
     try:
         content = path.read_text(encoding="utf-8")
         parts = content.split("---\n", 2)
@@ -118,14 +127,7 @@ def _parse_task_file(path: Path) -> Optional[dict]:
             return None
         fm = parse_frontmatter_text(
             parts[1],
-            fallback_fields=(
-                "id", "name", "description", "status", "priority", "frequency",
-                "scheduled_at", "next_run", "last_run", "last_attempt", "agent_id",
-                "skill_name", "timeout_seconds", "max_turns", "preemptible", "auto_advance",
-                "depends_on", "max_retries", "failure_count", "runs_per_day",
-                "preferred_hours", "model", "stale_bypass_hours",
-                "expected_error_patterns", "inner_voice",
-            ),
+            fallback_fields=AUTONOMY_TASK_FIELDS,
             log_label=f"scheduler:{path.name}",
         )
         fm["body"] = parts[2] if len(parts) > 2 else ""

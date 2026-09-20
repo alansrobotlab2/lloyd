@@ -19,7 +19,8 @@ from pathlib import Path
 import yaml
 from mcp.types import Tool
 
-from agent_mcp._shared import parse_frontmatter_text, text_result
+from agent_mcp._shared import (
+    AUTONOMY_TASK_FIELDS, parse_frontmatter_text, text_result)
 
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 
@@ -41,13 +42,18 @@ def _parse_task_file(path: Path) -> dict | None:
         # Resilient parse: bad YAML degrades to regex extraction instead of
         # returning None (a None here silently drops the task from listings —
         # the same failure mode that dormant-killed 34/40 scheduler tasks).
+        #
+        # `AUTONOMY_TASK_FIELDS` is the scheduler's list, imported rather than
+        # re-typed: this reader used to carry 13 of its own names, so a broken
+        # file came back here with no `preferred_hours`, `depends_on`, `model`,
+        # `stale_bypass_hours`, `inner_voice`, `auto_advance`, `preemptible`,
+        # `max_retries`, `failure_count`, `runs_per_day`, `last_attempt` or
+        # `expected_error_patterns` — and since `_write_task_file` below writes
+        # from this read, those 12 got written away. One file, one field list
+        # (#1014).
         frontmatter = parse_frontmatter_text(
             parts[1],
-            fallback_fields=(
-                "id", "name", "description", "status", "priority", "frequency",
-                "scheduled_at", "next_run", "last_run", "agent_id", "skill_name",
-                "timeout_seconds", "board_id",
-            ),
+            fallback_fields=AUTONOMY_TASK_FIELDS,
             log_label=f"autonomy:{path.name}",
         )
 
@@ -70,7 +76,12 @@ def _parse_task_file(path: Path) -> dict | None:
             "next_run": _to_iso(frontmatter.get("next_run")),
             "auto_advance": bool(frontmatter.get("auto_advance", False)),
             "preemptible": bool(frontmatter.get("preemptible", True)),
-            "board_id": frontmatter.get("board_id", 4),
+            # `board_id` used to be emitted here, defaulted to 4 for every task.
+            # It is in no task file (0 of 33 at triage), read by no scheduler
+            # path, and named by no board: the phantom was the tell that this
+            # reader's field list had drifted from the scheduler's, so it goes
+            # with the list (#1014).
+            "inner_voice": frontmatter.get("inner_voice"),
             "created_at": _to_iso(frontmatter.get("created", frontmatter.get("created_at", ""))),
             "updated_at": _to_iso(frontmatter.get("updated", frontmatter.get("updated_at", ""))),
             "skill_name": frontmatter.get("skill_name", frontmatter.get("skill_path", "")),
@@ -90,13 +101,47 @@ def _parse_task_file(path: Path) -> dict | None:
             "expected_error_patterns": frontmatter.get("expected_error_patterns") or [],
             "cron_id": frontmatter.get("cron_id"),
             "type": frontmatter.get("type", "autonomy"),
+            # Carried through deliberately, not incidental: `_write_task_file`
+            # refuses a record that only reached us by regex fallback, and the
+            # only way it can know is if the read says so.
+            "_yaml_broken": bool(frontmatter.get("_yaml_broken")),
             "body": parts[2] if len(parts) > 2 else "",
         }
     except Exception:
         return None
 
 
+class BrokenFrontmatterError(Exception):
+    """Refusal to round-trip a file that only parsed by regex fallback.
+
+    This module is a read-modify-write path: `_write_task_file` starts from the
+    file's existing frontmatter so unmodelled keys survive. That is exactly what
+    makes a degraded read fatal — on a YAML-broken file the prior parse is a
+    regex recovery over `AUTONOMY_TASK_FIELDS` and nothing else, so dumping it
+    back rewrites the file from that subset. `AUTONOMY_TASK_FIELDS` is now the
+    scheduler's full list, so a round-trip no longer destroys `preferred_hours`,
+    `depends_on` or `model`; it would still drop every key outside the list
+    (`category`, `segment`, `timestamp`, `paused_reason`, and anything added
+    later) and would silently re-dump a file whose YAML is genuinely broken.
+
+    A degraded record is fine to show; it is not fine to round-trip — the same
+    rule `agent_mcp/backlog.py::save_task` and
+    `app/routers/backlog.py::_reject_broken_fm` already enforce, and the reason
+    the scheduler prefers to report an uninterpretable task rather than drop it
+    (#1014)."""
+
+
+def _refuse_broken(exc: Exception) -> str:
+    """The tool-protocol shape of the refusal: an `error` the caller can read,
+    not a traceback out of the dispatcher."""
+    return json.dumps({"error": str(exc), "yaml_broken": True})
+
+
 def _write_task_file(task_dict: dict) -> Path:
+    if task_dict.get("_yaml_broken"):
+        raise BrokenFrontmatterError(
+            f"task #{task_dict.get('id')} frontmatter only parsed by regex fallback; "
+            "refusing to rewrite it (fix the file's YAML first)")
     task_id = task_dict.get("id", 0)
     name = task_dict.get("name", "unnamed")
     slug = _slugify(name)
@@ -409,6 +454,16 @@ def _handle_write(params: dict) -> str:
         task_dict = _parse_task_file(existing_path)
         if task_dict is None:
             return json.dumps({"error": f"Failed to parse task #{task_id}"})
+        if task_dict.get("_yaml_broken"):
+            # An update here is a read-modify-write of a file we could only
+            # regex-recover: it would rewrite the frontmatter from the recovered
+            # field list alone and drop every other key, on a task the scheduler
+            # is still dispatching. Refuse and leave the file for a human, which
+            # is what `agent_mcp/backlog.py::save_task` and the board's own
+            # task-write endpoint already do (#1014).
+            return _refuse_broken(BrokenFrontmatterError(
+                f"task #{task_id} frontmatter only parsed by regex fallback; "
+                "refusing to rewrite it (fix the file's YAML first)"))
         prior_status = task_dict.get("status")
         for key in ("status", "priority", "frequency", "skill_name", "agent_id", "model",
                      "scheduled_at", "pipeline", "description"):
@@ -478,6 +533,14 @@ def _handle_delete(params: dict) -> str:
     if archive:
         task = _parse_task_file(path)
         if task:
+            if task.get("_yaml_broken"):
+                # Archiving is a write, and `draft` is a dispatch kill. Doing it
+                # to a file we could only regex-recover would rewrite the
+                # frontmatter from the recovered subset and drop every other key
+                # — so the recovery path would itself be the clobber (#1014).
+                return _refuse_broken(BrokenFrontmatterError(
+                    f"task #{task_id} frontmatter only parsed by regex fallback; "
+                    "refusing to rewrite it (fix the file's YAML first)"))
             from autonomy import append_activity_line, status_change_note
             prior_status = task.get("status")
             now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

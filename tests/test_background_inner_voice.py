@@ -74,10 +74,18 @@ def test_a_yaml_string_is_read_as_the_boolean_it_looks_like(fleet_off):
 def test_the_frontmatter_key_survives_the_degraded_parser():
     """`_parse_task_file` falls back to regex field extraction when the YAML
     is broken, and only listed fields survive. A task whose file needed that
-    repair must not silently lose its opt-in."""
-    src = (autonomy.__file__)
-    text = open(src).read()
-    assert '"expected_error_patterns", "inner_voice",' in text
+    repair must not silently lose its opt-in.
+
+    This used to grep the field tuple out of autonomy.py's source. #1014 moved
+    the list into `agent_mcp._shared.AUTONOMY_TASK_FIELDS`, the one list all
+    three readers pass, so the assertion is on that constant — the object the
+    extractor actually receives — plus that the scheduler still passes it."""
+    from agent_mcp._shared import AUTONOMY_TASK_FIELDS
+
+    assert "inner_voice" in AUTONOMY_TASK_FIELDS, \
+        "a task file whose YAML is broken would lose its IV opt-in"
+    assert "fallback_fields=AUTONOMY_TASK_FIELDS" in open(autonomy.__file__).read(), \
+        "the scheduler must pass the shared constant, not a list of its own"
 
 
 # ── The observer on the direct path ────────────────────────────────────

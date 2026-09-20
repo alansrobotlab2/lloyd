@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.discord_notify import _discord_notify_task_complete
+from agent_mcp._shared import AUTONOMY_TASK_FIELDS, parse_frontmatter_text
 
 
 router = APIRouter()
@@ -46,15 +47,33 @@ async def autonomy_run(request: Request):
 
 
 def _autonomy_parse(path: Path) -> dict | None:
-    """Parse an autonomy task markdown file into a normalized dict."""
+    """Parse an autonomy task markdown file into a normalized dict.
+
+    Graduated recovery, same as the scheduler and the MCP reader, over the SAME
+    field list (`agent_mcp._shared.AUTONOMY_TASK_FIELDS`). This reader used to
+    `yaml.safe_load` and `except Exception: return None`, and its caller does
+    `if task is None: continue` — so a YAML-broken task was simply absent from
+    Mission Control while the scheduler loaded and dispatched it. The degraded
+    fleet this protects against (2026-05-28, 34 of 40 files) therefore presented
+    as "N tasks, none broken": board and scheduler disagreed about the fleet in
+    the direction that looks healthy, with no signal anywhere (#1014).
+
+    A file that comes back from the regex fallback is LISTED, flagged
+    `yaml_broken: True`, and refused by the write endpoint below — visible, not
+    rewritable in place."""
     try:
         content = path.read_text(encoding="utf-8")
         parts = content.split("---\n", 2)
         if len(parts) < 3:
             return None
-        fm = yaml.safe_load(parts[1])
+        fm = parse_frontmatter_text(
+            parts[1],
+            fallback_fields=AUTONOMY_TASK_FIELDS,
+            log_label=f"autonomy-api:{path.name}",
+        )
         if not isinstance(fm, dict):
             return None
+        degraded = bool(fm.get("_yaml_broken"))
 
         def _to_iso(val):
             if val is None:
@@ -99,6 +118,13 @@ def _autonomy_parse(path: Path) -> dict | None:
             "expected_error_patterns": fm.get("expected_error_patterns") or [],
             "preferred_hours": fm.get("preferred_hours") or None,
             "cron_id": fm.get("cron_id"),
+            # The flag is the point of the whole change: a row that looks
+            # healthy next to 31 healthy rows is how a degraded fleet hides.
+            # Same name the scheduler's own dict, `agent_mcp/backlog.py` and
+            # `_reject_broken_fm` use, and underscore-prefixed like them: every
+            # writer here strips `_`-prefixed keys before dumping, so a degraded
+            # flag can never be written into a task file.
+            "_yaml_broken": degraded,
             "body": parts[2] if len(parts) > 2 else "",
         }
     except Exception:
@@ -288,6 +314,19 @@ async def autonomy_task_write(request: Request):
         task = _autonomy_parse(path)
         if not task:
             raise HTTPException(status_code=500, detail=f"Failed to parse task {task_id}")
+        if task.get("_yaml_broken"):
+            # Listing a degraded task (#1014) must not make it rewritable in
+            # place: `_autonomy_write_file` rebuilds the file from what it could
+            # read, so saving here would write the recovered fields back over the
+            # file and drop every key the regex fallback could not see — turning a
+            # visible defect into a lost schedule. The backlog board refuses the
+            # same way (`_reject_broken_fm`), and the MCP writer now agrees.
+            raise HTTPException(
+                status_code=409,
+                detail=f"{path.name} has malformed YAML frontmatter; fix it by hand "
+                       "before editing it here (rewriting would drop the fields the "
+                       "fallback parse could not read).",
+            )
         prior_status = task.get("status")
         for key in ("name", "description", "status", "priority", "frequency", "skill_name",
                      "agent_id", "model", "scheduled_at", "pipeline", "auto_advance",

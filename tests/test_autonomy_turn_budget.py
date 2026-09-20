@@ -249,11 +249,24 @@ def test_an_unusable_declaration_falls_back_to_the_global(caplog, declared):
 def test_max_turns_is_in_the_scheduler_fallback_field_list():
     """The regex extractor recovers listed fields and only listed fields, so an
     unlisted key is silently lost from exactly the task files that are already in
-    trouble. Pinned against the source text the way the `inner_voice` entry in
-    the same tuple already is."""
+    trouble.
+
+    This used to grep the tuple out of autonomy.py's source. #1014 moved the
+    list into `agent_mcp._shared.AUTONOMY_TASK_FIELDS`, shared by all three
+    readers, so the assertion is on the constant itself — the real object the
+    parser is handed — plus that the scheduler still passes that constant rather
+    than a private tuple. Grepping the prose of a call site was always the
+    weaker pin; a constant cannot drift from itself."""
+    from agent_mcp._shared import AUTONOMY_TASK_FIELDS
+
+    for field in ("skill_name", "timeout_seconds", "max_turns", "preemptible",
+                  "auto_advance"):
+        assert field in AUTONOMY_TASK_FIELDS, (
+            f"the regex fallback cannot recover {field}: a task file whose YAML "
+            "is broken loses it, and with it its declared turn budget (#1255)")
     src = Path(autonomy.__file__).read_text()
-    assert ('"skill_name", "timeout_seconds", "max_turns", "preemptible", '
-            '"auto_advance",') in src
+    assert "fallback_fields=AUTONOMY_TASK_FIELDS" in src, \
+        "the scheduler must pass the shared constant, not its own list"
 
 
 def test_a_task_file_with_broken_yaml_still_yields_its_declared_budget(store,
