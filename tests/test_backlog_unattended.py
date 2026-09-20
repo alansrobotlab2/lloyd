@@ -2413,6 +2413,97 @@ def test_a_string_tags_field_survives_the_writers(isolated):
     assert fm["tags"] == ["youtube-eval", B.RETRIAGE_TAG] and fm["status"] == "up_next"
 
 
+def _set_tags(path: Path, tags: list) -> None:
+    """Give the item exactly these tags, through the module's own writer, so the
+    fixture starts from a shape the loop really produces."""
+    assert B.update_frontmatter(path, {"tags": list(tags)})
+    assert B._split_frontmatter(path.read_text(encoding="utf-8"))[0]["tags"] == list(tags)
+
+
+def _retag_as_a_string(path: Path) -> None:
+    """Rewrite the item so its `tags` is the *string* that looks like a list — the
+    shape `youtube_digest` shipped four of, and the reason `app/backlog_tags.py`
+    exists. Same content, wrong YAML shape: the way a model answers the schema's
+    array with prose."""
+    fm, body = B._split_frontmatter(path.read_text(encoding="utf-8"))
+    fm["tags"] = "[" + ", ".join(str(t) for t in fm["tags"]) + "]"
+    _rewrite(path, fm, body)
+
+
+def _untag(path: Path) -> None:
+    """Drop the item's `tags` key entirely — the common shape for an item nobody
+    has tagged, which a closer must not turn into `tags: []`."""
+    fm, body = B._split_frontmatter(path.read_text(encoding="utf-8"))
+    fm.pop("tags", None)
+    _rewrite(path, fm, body)
+
+
+def _rewrite(path: Path, fm: dict, body: str) -> None:
+    """Re-dump front matter over the body, the way the module's own writers do —
+    so these fixtures exercise the real YAML round trip, not a hand-rolled one."""
+    path.write_text("---\n" + yaml.dump(fm, default_flow_style=False, allow_unicode=True,
+                                        sort_keys=False) + "---\n" + body, encoding="utf-8")
+
+
+def test_the_two_closers_normalise_a_string_tags_field_before_subtracting(isolated):
+    """#1146 put a tag REMOVAL into `close_landed` and `record_verdict`, and a
+    removal is the louder half of the `normalize_tags` rule: iterating a `tags`
+    field YAML handed back as a string yields one character per tag, so subtracting
+    `needs-human` from `tags: '[youtube-eval, needs-human]'` writes back a run of
+    one-letter tags over the item's real ones. `tag_item` and `set_status` already
+    observe the rule (`test_a_string_tags_field_survives_the_writers`); these two
+    writers did not need to until this round made them edit tags. Both closers must
+    land the item `done` with `needs-human` gone and the other tags intact as words.
+    """
+    # --- close_landed(close=True) -------------------------------------------
+    p = write_item(isolated, 944, status="draft")
+    _set_tags(p, ["youtube-eval", B.NEEDS_HUMAN_TAG, "spawned-by-autocode"])
+    _retag_as_a_string(p)
+    item = B.item_by_id(944)
+    assert B.NEEDS_HUMAN_TAG in item.tags, "fixture starts tagged"
+    B.close_landed(item, commit="c" * 40, round_id="SM_944", settled_at="s",
+                   close=True, why="acceptance check met")
+    fm = _fm(p)
+    assert fm["status"] == "done"
+    assert B.NEEDS_HUMAN_TAG not in fm["tags"], "the close removed the tag"
+    assert fm["tags"] == ["youtube-eval", "spawned-by-autocode"], \
+        f"the surviving tags must be words, not characters: {fm['tags']}"
+    # --- record_verdict(close=True) -----------------------------------------
+    p2 = write_item(isolated, 945, status="draft")
+    _set_tags(p2, ["youtube-eval", B.NEEDS_HUMAN_TAG])
+    _retag_as_a_string(p2)
+    item2 = B.item_by_id(945)
+    assert B.NEEDS_HUMAN_TAG in item2.tags, "fixture starts tagged"
+    B.record_verdict(item2, "stale", "no live instance reproduces", close=True)
+    fm2 = _fm(p2)
+    assert fm2["status"] == "done" and B.NEEDS_HUMAN_TAG not in fm2["tags"]
+    assert fm2["tags"] == ["youtube-eval"], \
+        f"the close must subtract, not shred: {fm2['tags']}"
+
+
+def test_a_close_never_invents_a_tags_field(isolated):
+    """The removal has to stay a subtraction. An item with no `tags` key is the
+    common shape, and a closer that wrote the list it computed unconditionally
+    would add `tags: []` to every file it closed — the `changed` rule
+    `update_frontmatter` enforces for exactly that reason. An ADD still creates the
+    key: that is what `tags=(NEEDS_HUMAN_TAG,)` from `_close_settled_items` means,
+    and dropping it would silently lose the check a person owes."""
+    p = write_item(isolated, 946, status="draft")
+    _untag(p)
+    assert "tags" not in _fm(p), "fixture carries no tags field"
+    B.close_landed(B.item_by_id(946), commit="d" * 40, round_id="SM_946", settled_at="s",
+                   close=True, why="acceptance check met")
+    fm = _fm(p)
+    assert fm["status"] == "done"
+    assert "tags" not in fm, f"a plain close must not invent a tags field: {fm.get('tags')}"
+    p2 = write_item(isolated, 947, status="draft")
+    _untag(p2)
+    B.close_landed(B.item_by_id(947), commit="e" * 40, round_id="SM_947", settled_at="s",
+                   close=True, why="met, and a person owes a check",
+                   tags=(B.NEEDS_HUMAN_TAG,))
+    assert _fm(p2)["tags"] == [B.NEEDS_HUMAN_TAG]
+
+
 # ===========================================================================
 # An orphan round: opened by a tool, named by no implement row (2026-09-17)
 # ===========================================================================
@@ -2665,3 +2756,166 @@ def test_the_unparsed_write_guard_costs_a_parseable_item_nothing(isolated):
     assert after["updated"], "the move stamps `updated`"
     assert after["board"] == "lloyd" and after["priority"] == "medium"
     assert "Do the thing." in path.read_text(), "the body survives the rewrite"
+
+
+# ===========================================================================
+# A close takes `needs-human` off the item it closes (#1146 claim 2)
+# ===========================================================================
+#
+# The tag rides the *move* into `draft` that a spent attempt makes, and until
+# #1146 no path removed it on the way back out. So an item whose round landed
+# clean and closed stayed `done` **and** needing a human, indefinitely: #392,
+# #399 and #413 for days apiece until the human sweep commit `52ed4e99` cleared
+# them by hand, then #498 (closed 2026-09-16T17:59Z by a `close=True` landing)
+# and #1194 (closed 2026-09-17T15:38Z) inside the two days after the item was
+# filed. Every needs-human count and every sweep then had to exclude closed items
+# by hand before it could say anything about what a person actually owes.
+#
+# What the tag must survive is the other half, pinned below too: a landing that
+# still owes a person's check keeps it, which is #1210's ruling — a met landing
+# with human clauses *closes* rather than parking in `draft`, and the tag is the
+# only thing on the item saying what is owed. So the rule is neither "a close
+# strips the tag" nor "a close keeps it"; it is "a close strips the tag unless
+# something is still owed", where what is owed is read from the caller's tags and
+# from the item's own `human_clauses`, never guessed.
+
+def _spent_item(isolated, item_id: int) -> Path:
+    """An item parked by a spent attempt: tagged, and nothing owed but a close."""
+    p = write_item(isolated, item_id, status="draft")
+    assert B.update_frontmatter(p, {"tags": [B.NEEDS_HUMAN_TAG, "spawned-by-autocode"]})
+    return p
+
+
+def test_close_landed_takes_the_needs_human_tag_off_the_item_it_closes(isolated):
+    """#1146 clause 3. A landing that settled with nobody owed anything.
+
+    This is #498 and #1194: the item was tagged when its attempt spent itself,
+    the landing then settled clean, `close_landed(close=True)` set `done` — and
+    left the tag, because this writer only ever added tags. `done` + needs-human
+    is the state that made every needs-human number on the board wrong.
+    """
+    p = _spent_item(isolated, 700)
+    item = B.item_by_id(700)
+    assert B.NEEDS_HUMAN_TAG in item.tags, "fixture starts tagged"
+
+    out = B.close_landed(item, commit="aa700aa650aa", round_id="SM_700",
+                         settled_at="2026-09-20T00:00:00+00:00", close=True,
+                         why="every clause met; the code is live")
+    assert out is not None and out.exists()
+    fm = _fm(p)
+    assert fm["status"] == "done"
+    assert fm.get("completed"), "closing still stamps completed"
+    assert B.NEEDS_HUMAN_TAG not in (fm.get("tags") or []), \
+        "a clean close left the item needing a human that nothing needs"
+    assert "spawned-by-autocode" in (fm.get("tags") or []), \
+        "only the tag that is no longer owed goes; the provenance tags stay"
+
+
+def test_a_close_that_still_owes_a_check_keeps_the_needs_human_tag(isolated):
+    """#1146 clause 3, the half that must not regress: the owed check survives.
+
+    `close_settled_items` closes a met landing that has human clauses and passes
+    `tags=(NEEDS_HUMAN_TAG,)` to say so (#1210 — it used to park the item in
+    `draft`, which is the pool single-item triage reads, and six landed items sat
+    there on 2026-09-17). A strip keyed on the close alone would erase exactly the
+    signal that ruling added, so a tag the caller brings with it is kept.
+    """
+    p = _spent_item(isolated, 701)
+    B.update_frontmatter(p, {"human_clauses": ["Alan confirms the dashboard shows it"]})
+    item = B.item_by_id(701)
+
+    out = B.close_landed(item, commit="aa701aa650aa", round_id="SM_701",
+                         settled_at="2026-09-20T00:00:00+00:00", close=True,
+                         why="every clause met; a person still owes the check",
+                         tags=(B.NEEDS_HUMAN_TAG,))
+    assert out is not None
+    fm = _fm(p)
+    assert fm["status"] == "done"
+    assert B.NEEDS_HUMAN_TAG in fm["tags"], "the check a person owes survived the close"
+    assert fm["human_clauses"] == ["Alan confirms the dashboard shows it"]
+
+
+def test_a_close_on_an_item_carrying_human_clauses_keeps_the_tag_unasked(isolated):
+    """The other owed-check source: what the item records, not what the caller passes.
+
+    A caller may close without saying "a human owes this", and the tag must still
+    stay if the item itself carries `human_clauses` — otherwise the survival of
+    that signal depends on every caller remembering to pass a tag, which is the
+    same fragility that let the tag outlive its purpose to begin with.
+    """
+    p = _spent_item(isolated, 702)
+    B.update_frontmatter(p, {"human_clauses": ["run the probe against live traffic"]})
+    item = B.item_by_id(702)
+
+    assert B.close_landed(item, commit="aa702aa650aa", round_id="SM_702",
+                          settled_at="2026-09-20T00:00:00+00:00", close=True,
+                          why="landed; the owed check is on the item") is not None
+    fm = _fm(p)
+    assert fm["status"] == "done"
+    assert B.NEEDS_HUMAN_TAG in fm["tags"], "the item's own owed check held the tag"
+
+
+def test_close_settled_items_closes_a_spent_attempt_without_the_stale_tag(isolated):
+    """The production path, not just the writer.
+
+    A spent attempt parks the item `draft` + needs-human; the landing later
+    settles `met` with no human clauses; the closer is `close_settled_items`,
+    which decides the close and the tags and calls `close_landed`. Both of #1146's
+    live instances arrived this way, so this is the sequence the board actually
+    runs — and the assertion is the acceptance probe's own second condition: an
+    item whose status is `done` carries `needs-human` only while it owes a check.
+    """
+    p = _spent_item(isolated, 703)
+    assert B.update_frontmatter(p, {"status": "in_progress"}) is True
+    _landed(703, "SM_703", "aa703aa650aa", outcome=MET_OUTCOME)
+
+    out = B.close_settled_items(S.LEDGER_PATH, boards=("lloyd",))
+    assert {"item_id": 703, "closed": True, "acceptance": "met"} in out
+    fm = _fm(p)
+    assert fm["status"] == "done"
+    assert B.NEEDS_HUMAN_TAG not in (fm.get("tags") or []), \
+        "the sweep left a closed item in the pile a person has to walk"
+
+
+def test_record_verdict_takes_the_needs_human_tag_off_the_item_it_closes(isolated):
+    """#1146 clause 4. The triage close, which is where #399 arrived.
+
+    `already_done` is the verdict that says the work already shipped, and #399
+    carried `needs-human` from its spent attempt straight through that close into
+    `done`. A retiring verdict is the judgement that there is no work here, which
+    is the opposite of an owed check, so this branch drops the tag outright:
+    `human_clauses` is written only by a `confirmed` verdict, and a `confirmed`
+    verdict does not close here.
+    """
+    p = write_item(isolated, 704, status="up_next")
+    assert B.update_frontmatter(p, {"tags": [B.NEEDS_HUMAN_TAG, "spawned-by-triage"]})
+    item = B.item_by_id(704)
+
+    out = B.record_verdict(item, "already_done",
+                           "the same check already landed in #690", close=True)
+    assert out is not None
+    fm = _fm(p)
+    assert fm["status"] == "done" and fm.get("completed")
+    assert fm["autotriage_retired"] == "already_done"
+    assert B.NEEDS_HUMAN_TAG not in (fm.get("tags") or []), \
+        "a verdict that retires the item left it needing a human"
+    assert "spawned-by-triage" in (fm.get("tags") or []), "provenance stays"
+
+
+def test_a_confirmed_verdict_leaves_the_needs_human_tag_on(isolated):
+    """The control: a verdict that does not close must not touch the tag.
+
+    Otherwise the strip above could be satisfied by "clear the tag whenever this
+    function runs", which would erase the spent-attempt signal on the very items
+    that still need it: a `confirmed` verdict moves the item into the implement
+    pool, and an owed check recorded earlier has to outlive that move.
+    """
+    p = write_item(isolated, 705, status="draft")
+    assert B.update_frontmatter(p, {"tags": [B.NEEDS_HUMAN_TAG]})
+    item = B.item_by_id(705)
+
+    assert B.record_verdict(item, "confirmed", "the premise still holds",
+                            acceptance_clauses=["the probe reports zero"]) is not None
+    fm = _fm(p)
+    assert fm["status"] != "done", "a confirmed verdict does not close the item"
+    assert B.NEEDS_HUMAN_TAG in (fm.get("tags") or [])

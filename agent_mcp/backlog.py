@@ -19,23 +19,34 @@ from agent_mcp._shared import parse_frontmatter_text, text_result
 from agent_mcp import backlog_similar as SIM
 from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import SPAWN_TAG_PREFIX, normalize_tags
+from app import frontmatter as FM
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 VALID_STATUSES = frozenset(PIPELINE_STATUSES)
 
 
 def parse_frontmatter(content: str) -> tuple:
-    if not content.startswith("---"):
-        return {}, content
-    parts = content.split("---", 2)
-    if len(parts) < 3:
+    """Split one backlog file into (front matter, body).
+
+    The block is bounded by `app.frontmatter.split_frontmatter`: the first line
+    that is *exactly* `---` after the opening one, not the first `---` anywhere
+    in the text. The old `content.split("---", 2)` cut an item whose own text
+    quotes that expression — an activity-log entry carrying
+    `text.split('---\\n',2)` is a YAML scalar with a fence-looking substring —
+    truncated the quoted scalar mid-scalar, failed the parse, and left the
+    record marked `_yaml_broken`, which `save_task` and `_handle_write` then
+    refused to write ("fix the file by hand") for YAML that `yaml.safe_load`
+    reads fine. #1146.
+    """
+    block = FM.split_frontmatter(content)
+    if block is None:
         return {}, content
     frontmatter = parse_frontmatter_text(
-        parts[1],
+        block[0],
         fallback_fields=("board", "status", "priority", "tags", "blocked", "assigned"),
         log_label="backlog",
     )
-    return frontmatter, parts[2].strip()
+    return frontmatter, block[1].strip()
 
 
 def load_task(task_id: int) -> dict | None:

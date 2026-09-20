@@ -60,6 +60,9 @@ from app.backlog_status import (
     is_off_vocabulary,
 )
 from app.backlog_tags import is_spawn_tag, normalize_tags
+# Standard-library-only by design (see its docstring): this module is the light
+# one the automod CLI loads, so the shared fence rule must not drag in `mcp`.
+from app import frontmatter as FM
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
 
@@ -1039,6 +1042,18 @@ class Item:
 def _split_frontmatter(text: str) -> tuple[dict, str]:
     """Split a markdown file into (front matter, body).
 
+    The block is bounded by `app.frontmatter.split_frontmatter` — the first line
+    that is exactly `---` — the same rule the MCP writer and the board API now
+    use, so the three programs that read and rewrite these files agree on where
+    an item ends. The old `text.split("---\\n", 2)` cut at any line that *began*
+    with the fence, which a quoted scalar or a markdown rule inside the front
+    matter satisfies; and because `update_frontmatter`'s only guard is that an
+    empty parse refuses (#1146's triage measured 0 live mis-parses, since
+    `yaml.dump` quotes a value holding a fence line rather than emitting one at
+    column 0), the exposure here was latent rather than active. It is the shape
+    that makes `update_frontmatter`'s re-dump lossy, so it is fixed on the same
+    rule as the two readers, not on a fresh one.
+
     Parses through `_YamlLoader` — libyaml's `CSafeLoader` where libyaml is
     importable, `SafeLoader` where it is not (see the import at the top of the
     file). `yaml.YAMLError` still catches both: the C scanner raises
@@ -1046,16 +1061,14 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
     pins, because a loader swap that turned a malformed item into an
     exception instead of an empty dict would take the whole board walk down.
     """
-    if not text.startswith("---"):
-        return {}, text
-    parts = text.split("---\n", 2)
-    if len(parts) < 3:
+    block = FM.split_frontmatter(text)
+    if block is None:
         return {}, text
     try:
-        fm = yaml.load(parts[1], Loader=_YamlLoader) or {}
+        fm = yaml.load(block[0], Loader=_YamlLoader) or {}
     except yaml.YAMLError:
         fm = {}
-    return (fm if isinstance(fm, dict) else {}), parts[2]
+    return (fm if isinstance(fm, dict) else {}), block[1]
 
 
 def _unparsed_guard(path: Path, text: str, fm: dict, writer: str) -> bool:
@@ -2309,12 +2322,48 @@ def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
     fm["activity_log"] = log
     fm["updated"] = stamp
     fm[LANDED_MARKER] = commit
+    # `normalize_tags`, never a bare iteration — the rule `_apply_status` states
+    # and `app/backlog_tags.py` exists to enforce: a `tags` field that YAML gave
+    # back as a *string* (a model answering the schema's array with prose, which
+    # `youtube_digest` shipped four of) iterates one tag per character, and a
+    # writer that iterates it and re-dumps the result writes 47 one-letter tags
+    # over the item's real ones. Until this close began removing tags, only the
+    # additive branch here read the field; now both do, and the one that subtracts
+    # corrupts just as loudly.
+    raw_tags = fm.get("tags")
+    stored = normalize_tags(raw_tags)
+    have = list(stored)
     if tags:
-        have = [str(t) for t in (fm.get("tags") or [])]
-        fm["tags"] = have + [t for t in tags if t not in have]
+        have = have + [t for t in tags if t not in have]
     if close:
         fm["status"] = "done"
         fm["completed"] = stamp
+        # A close that owes nobody anything takes `needs-human` off on the way
+        # out (#1146). The tag rides the *move* into `draft` when an attempt
+        # spends itself, and until now nothing removed it on the way to `done`,
+        # so an item that landed clean sat `done` + needs-human for a person to
+        # notice — #392/#399/#413 for days, #498 and #1194 within two days of
+        # the item being filed, and every needs-human sweep then had to exclude
+        # closed items by hand to get a usable number out of it.
+        #
+        # What keeps the tag is a decision the caller already made and the item
+        # itself records, not a guess made here: a landing that still owes a
+        # person's check arrives with `tags=(NEEDS_HUMAN_TAG,)` — the caller in
+        # `_close_settled_items` passes it for a met landing that has human
+        # clauses, deliberately closing rather than parking in the triage pool
+        # (#1210) — and an item carrying `human_clauses` has an owed check
+        # whatever the caller passed. Both survive; a met landing with nothing
+        # owed does not. Removal only ever subtracts, so a tag list the caller
+        # wrote in some other order comes back in that order.
+        if NEEDS_HUMAN_TAG in have and NEEDS_HUMAN_TAG not in tags \
+                and not fm.get("human_clauses"):
+            have = [t for t in have if t != NEEDS_HUMAN_TAG]
+    # Write the field back only when this call changed the list or repaired its
+    # shape — `update_frontmatter`'s `changed` rule, for the same reason: an item
+    # with no `tags` key must not gain an empty one from a writer that merely
+    # closed it.
+    if have != stored or (raw_tags is not None and not isinstance(raw_tags, list)):
+        fm["tags"] = have
     section = (f"\n\n## Automod landed — {stamp[:10]}\n\n`{commit[:8]}`, {where}, "
                f"{'settled' if round_id else 'committed'} {settled_at}.\n\n"
                + ("**Closed.** " if close else "**Left open.** ") + why + "\n")
@@ -4016,6 +4065,27 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         # triage retirements dated from whatever next touched the file.
         fm["completed"] = stamp
         fm["autotriage_retired"] = verdict
+        # ...and every other closer now also takes `needs-human` off (#1146),
+        # for the same reason: #399 reached `done` through exactly this branch —
+        # an `already_done` close, on top of the spent-attempt move that had
+        # tagged it — and stayed needing a human that nothing needed. A retiring
+        # verdict is the judgement that there is no work here, which is the
+        # opposite of an owed check; `human_clauses` is written only by a
+        # `confirmed` verdict, and a confirmed verdict never closes here. So the
+        # owed-check survivors belong to the landing path, and this close drops
+        # the tag unconditionally.
+        # `normalize_tags` for the same reason as `close_landed`: iterating a
+        # `tags` field YAML returned as a string shreds it into one-character
+        # tags, and a *removal* that re-dumps the result destroys the item just
+        # as hard as an addition would. Only subtracts, and only writes the key
+        # when there was one to subtract from.
+        raw_tags = fm.get("tags")
+        stored = normalize_tags(raw_tags)
+        if NEEDS_HUMAN_TAG in stored:
+            kept = [t for t in stored if t != NEEDS_HUMAN_TAG]
+            fm["tags"] = kept
+        elif raw_tags is not None and not isinstance(raw_tags, list):
+            fm["tags"] = stored
     elif verdict == "confirmed" and fm.get("status") != "done":
         if hold:
             # The pool is full: judged real, parked until a slot opens.

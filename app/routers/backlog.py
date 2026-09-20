@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse
 from agent_mcp._shared import parse_frontmatter_text
 from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import normalize_tags
+from app import frontmatter as FM
 
 
 logger = logging.getLogger(__name__)
@@ -113,26 +114,38 @@ def _backlog_parse_fm(path: Path) -> tuple:
     call.
 
     Uses the same graduated recovery as `agent_mcp/backlog.py` rather than a bare
-    `yaml.safe_load`. Twenty items on the lloyd board (counted 2026-09-16, with
-    stamps running to that day, so the set is growing; tracked as #918) have an
-    activity_log entry with an unterminated quote; a strict parse raises, the
-    callers here skip what they cannot parse, and those items vanish from the
-    listing *and* from the board's task count with nothing logged. A degraded
-    record beats an invisible one — which is the whole point of
-    `parse_frontmatter_text`.
+    `yaml.safe_load`, over the same line-anchored block. A strict parse raises on a
+    malformed block, the callers here skip what they cannot parse, and those items
+    vanish from the listing *and* from the board's task count with nothing logged.
+    A degraded record beats an invisible one — which is the whole point of
+    `parse_frontmatter_text`. Held against the board as it stands on 2026-09-20 the
+    fallback has no live instance here: all 1231 backlog files parse their
+    line-anchored block, and the 31 that read as broken at that date were all
+    manufactured by the split below, not by their YAML. It stays because a
+    hand-edited item can still arrive with a real unterminated quote, which is the
+    corruption `#918` measured on 2026-09-16 — a count taken through the unanchored
+    split, so it counted this defect and not that one.
+
+    The block itself is bounded by `app.frontmatter.split_frontmatter`, the same
+    rule the MCP writer uses. Until #1146 this was `content.split("---", 2)`,
+    which cut at a `---` *inside* the front matter — an activity-log scalar that
+    quotes that very expression, for instance — and so manufactured
+    `_yaml_broken` on YAML that is valid, on which `_reject_broken_fm` then
+    answered HTTP 409 to every board edit. Bounding the block at a fence line
+    rather than at a substring means the items still marked broken here are the
+    ones whose YAML really is broken, which is what makes the 409 mean something.
 
     The recovered dict carries `_yaml_broken`; `_reject_broken_fm` keeps it out of
     the writers, because the regex fallback only recovers `_FALLBACK_FIELDS` and
     rewriting a file from it would drop every key it did not extract.
     """
     content = path.read_text(encoding="utf-8")
-    if content.startswith("---"):
-        parts = content.split("---", 2)
-        if len(parts) >= 3:
-            fm = parse_frontmatter_text(
-                parts[1], fallback_fields=_FALLBACK_FIELDS, log_label="backlog-api",
-            )
-            return fm, parts[2].strip()
+    block = FM.split_frontmatter(content)
+    if block is not None:
+        fm = parse_frontmatter_text(
+            block[0], fallback_fields=_FALLBACK_FIELDS, log_label="backlog-api",
+        )
+        return fm, block[1].strip()
     return {}, content
 
 
