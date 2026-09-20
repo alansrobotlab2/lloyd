@@ -33,6 +33,10 @@ SAFETY CONTRACT — this runs unattended:
   * Every subprocess has a timeout.
   * Exit code is non-zero only when the daemon is left unhealthy — a failed
     prune with a healthy daemon is a warning, not a page.
+  * Every run also compares the tracked qmd collection template with the config
+    the daemon actually reads, and records it as `config_drift` in the dated
+    report (#1298). Drift is a report entry and never an exit code: the job that
+    fixes embeddings must not start failing over a stale tracked copy.
 
 Usage:
   python scripts/maintenance/qmd_index_maintenance.py            # act if needed
@@ -49,6 +53,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 # The fork in ~/lloyd/qmd -- the build the daemon serves this index with, and
 # since 2026-09-19 the only qmd on the machine. Until then this was the
 # published @tobilu/qmd under ~/.bun: same version string (2.8.3), different
@@ -60,6 +66,24 @@ SUPERVISORCTL = Path.home() / ".local/share/uv/tools/supervisor/bin/supervisorct
 SUPERVISOR_CONF = Path.home() / "lloyd/agent-services/supervisor/supervisord.conf"
 SERVICE = "agent-qmd-daemon"
 REPORT_DIR = Path.home() / "lloyd/_pipeline/reflection"
+
+# The two qmd collection definitions. `LIVE_CONFIG` is the one the daemon reads
+# and serves; `TEMPLATE_CONFIG` is the tracked copy an operator, a restore or a
+# new host reads (SETUP.md "Collections"). They are separate files with no
+# installer between them — nothing at runtime opens the template — so the only
+# thing keeping them agreeing is the manual re-sync SETUP.md:631-635 prescribes,
+# and between 2026-09-07 and 2026-09-19 nobody ran it: the template kept a
+# `facts` collection the live file dropped and pointed `sessions` at
+# ~/obsidian/sessions while the daemon had been indexing
+# ~/lloyd/_pipeline/vault-derived/sessions the whole time (#1298).
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TEMPLATE_CONFIG = REPO_ROOT / "agent-services/conf/qmd-index.yml"
+LIVE_CONFIG = Path.home() / ".config/qmd/index.yml"
+# The documented re-sync, in the direction that reconciles a diverged template:
+# the daemon's file is what is true, so it is copied *onto* the template
+# (SETUP.md:631-635). Run from the repo root.
+RESYNC_COMMAND = "cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml"
+RESYNC_DIRECTION = "live -> template (the file the daemon reads is the truth)"
 
 # Prune when orphans exceed this share of all vectors. The threshold was set
 # when a cleanup cost a daemon stop; it no longer does, and the nightly
@@ -153,6 +177,140 @@ def daemon_healthy(retries: int = 10) -> bool:
     return False
 
 
+def _qmd_collections(
+    path: Path,
+) -> tuple[dict[str, dict] | None, str | None, list[str]]:
+    """Read a qmd config's `collections:` block.
+
+    Returns `(collections, note, malformed)`. `collections` is None when there is
+    nothing to compare — the file is absent, or it could not be parsed — with the
+    reason in `note`; a dict (possibly empty) when it read. An absent file and an
+    empty collections block are different answers, so they do not come back the
+    same. `malformed` names the collections whose body is not a mapping: they are
+    carried with no path, so the caller has to say it skipped them rather than
+    let two of them read as an agreement.
+    """
+    if not path.exists():
+        return None, f"no qmd config at {path}", []
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except Exception as e:  # noqa: BLE001 — a broken config is reported, never raised here
+        return None, f"unparsable qmd config at {path}: {e!r}", []
+    if not isinstance(data, dict):
+        return None, f"qmd config at {path} is not a mapping", []
+    colls = data.get("collections") or {}
+    if not isinstance(colls, dict):
+        return None, f"qmd config at {path} has no collections mapping", []
+    # A collection whose body is not a mapping — `vault: qmd` where
+    # `vault:\n    path: ...` belongs — is a shape this has to survive (found in
+    # review, 2026-09-20): `dict(spec)` raises ValueError on a string, so one
+    # mistyped line took the whole nightly job down. Keep the collection with no
+    # known path and name it, rather than raising or quietly dropping it.
+    out: dict[str, dict] = {}
+    malformed: list[str] = []
+    for name, spec in colls.items():
+        if isinstance(spec, dict):
+            out[name] = dict(spec)
+        else:
+            out[name] = {}
+            malformed.append(str(name))
+    return out, None, malformed
+
+
+def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG) -> dict:
+    """Compare the committed template with the config the daemon actually reads.
+
+    Both files define the same set of qmd collections by hand, and only by hand:
+    SETUP.md:619 installs template -> live and SETUP.md:631-635 re-syncs live ->
+    template, and no code enforces either. So the failure mode is silent — the
+    2026-09-19 live edit retargeted `sessions` onto the real export directory
+    (~650 indexed documents) and deleted `facts`, and the tracked copy still
+    described the 2026-09-07 world. A reindex from the stale template drops that
+    collection from both the FTS and the vector legs.
+
+    Compared: which collections exist, and each one's `path`.
+    Deliberately NOT compared: collection *order* and comments — a re-sync
+    copies whole files, so those reconcile themselves and calling them drift
+    would cry wolf every time the block is re-sorted — nor `pattern`/`ignore`,
+    which this check has never claimed to cover.
+
+    Never raises and never changes the job's exit code: with either file missing
+    there is nothing to compare, and that is a note in the report, not a failure.
+    A malformed file — unparseable, or a `collections:` block that is not a
+    mapping — is the same kind of answer, and so is a single collection whose
+    body will not read: it is named in `malformed` and skipped, never scored as
+    agreement.
+    """
+    out: dict = {
+        "template": str(template),
+        "live": str(live),
+        "drift": [],
+        "drift_count": 0,
+        "resync_command": RESYNC_COMMAND,
+        "resync_direction": RESYNC_DIRECTION,
+    }
+    tmpl, tmpl_note, tmpl_bad = _qmd_collections(template)
+    livec, live_note, live_bad = _qmd_collections(live)
+    if tmpl_note:
+        out["note"] = tmpl_note
+        return out
+    if live_note:
+        out["note"] = live_note
+        return out
+    out["comparable"] = True
+    if tmpl_bad or live_bad:
+        out["malformed"] = {"template": tmpl_bad, "live": live_bad}
+
+    for name in sorted(set(tmpl) | set(livec)):
+        # Order matters. Which collections exist is answerable even when one
+        # body will not read, so presence is judged first; only a collection
+        # declared on both sides with an unreadable body is genuinely
+        # uncomparable, and that is never scored as agreement.
+        if name not in livec:
+            out["drift"].append(
+                {"collection": name, "kind": "template_only",
+                 "template_path": tmpl[name].get("path"), "live_path": None}
+            )
+        elif name not in tmpl:
+            out["drift"].append(
+                {"collection": name, "kind": "live_only",
+                 "template_path": None, "live_path": livec[name].get("path")}
+            )
+        elif name in tmpl_bad or name in live_bad:
+            # Declared on both sides, but one side's path is unknown, so no
+            # comparison of it means anything. Name it rather than reporting
+            # either "no drift" or a path change that was never made.
+            out["drift"].append(
+                {"collection": name, "kind": "uncomparable_body",
+                 "template_path": tmpl[name].get("path"),
+                 "live_path": livec[name].get("path")}
+            )
+        elif tmpl[name].get("path") != livec[name].get("path"):
+            out["drift"].append(
+                {"collection": name, "kind": "path_differs",
+                 "template_path": tmpl[name].get("path"),
+                 "live_path": livec[name].get("path")}
+            )
+
+    out["drift_count"] = len(out["drift"])
+    out["in_sync"] = out["drift_count"] == 0
+    return out
+
+
+def _write_report(report: dict, started: datetime) -> Path:
+    """Land the dated JSON report, on every run that did something or nothing.
+
+    It used to be written only when a prune or an embed actually ran, which is a
+    handful of nights a month — enough that a reader looking for the nightly
+    drift verdict mostly found no file at all. The config comparison is only
+    worth running nightly if its answer is on disk nightly.
+    """
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    out = REPORT_DIR / f"qmd-index-maintenance-{started:%Y-%m-%d}.json"
+    out.write_text(json.dumps(report, indent=2))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="qmd index maintenance (#380)")
     ap.add_argument("--dry-run", action="store_true", help="report only, change nothing")
@@ -167,6 +325,9 @@ def main() -> int:
     report["before"] = before
     pend = pending_embeddings()
     report["pending_embeddings"] = pend
+    # Read the two collection definitions fresh, from the module-level paths, so
+    # a caller (or a test) that moves those moves this check with them.
+    report["config_drift"] = config_drift(TEMPLATE_CONFIG, LIVE_CONFIG)
 
     need_prune = args.force or (
         before.get("orphan_ratio", 0) >= ORPHAN_RATIO_TRIGGER
@@ -181,6 +342,11 @@ def main() -> int:
 
     if args.dry_run or not (need_prune or need_embed):
         report["actions"].append("none — nothing to do" if not args.dry_run else "dry-run")
+        # --dry-run promises to change nothing, so it only prints. Everything
+        # else that runs leaves a report, drift included, whether or not it
+        # needed the index.
+        if not args.dry_run:
+            _write_report(report, started)
         _emit(report, args.json)
         return 0
 
@@ -211,10 +377,7 @@ def main() -> int:
     report["after"] = inspect_index()
     report["elapsed_s"] = round((datetime.now() - started).total_seconds(), 1)
 
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    (REPORT_DIR / f"qmd-index-maintenance-{started:%Y-%m-%d}.json").write_text(
-        json.dumps(report, indent=2)
-    )
+    _write_report(report, started)
 
     _emit(report, args.json)
     # Only fail loudly if retrieval is actually down.
@@ -237,6 +400,19 @@ def _emit(r: dict, as_json: bool) -> None:
           + (f"  →  {a.get('vectors_orphaned', 0):,}" if a else ""))
     print(f"  pending embeds    {r.get('pending_embeddings')}")
     print(f"  prune needed      {r.get('need_prune')}   embed needed {r.get('need_embed')}")
+    cd = r.get("config_drift")
+    if cd:
+        if cd.get("note"):
+            print(f"  qmd config        not compared: {cd['note']}")
+        elif cd.get("drift_count"):
+            print(f"  qmd config drift  {cd['drift_count']} collection difference(s)")
+            for d in cd["drift"]:
+                print(f"    · {d['collection']} [{d['kind']}] "
+                      f"template={d.get('template_path')} live={d.get('live_path')}")
+            print(f"    re-sync ({cd.get('resync_direction')}):")
+            print(f"      {cd.get('resync_command')}")
+        else:
+            print("  qmd config        template and live collections agree")
     for act in r["actions"]:
         print(f"    · {act}")
     if "daemon_healthy" in r:

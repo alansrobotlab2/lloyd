@@ -1,0 +1,80 @@
+diff --git a/SETUP.md b/SETUP.md
+index c80b31eb..60ad2618 100644
+--- a/SETUP.md
++++ b/SETUP.md
+@@ -619,13 +619,29 @@ mkdir -p ~/.config/qmd
+ cp agent-services/conf/qmd-index.yml ~/.config/qmd/index.yml
+ ```
+ 
+-It defines 15 collections: 14 rooted under `~/obsidian` (`facts`, `memory`,
+-`knowledge`, `projects`, `lloyd`, `personal`, `work`, `skills`, `people`,
+-`subliminal`, `backlog`, `autonomy`, `sessions`, `architecture`) plus
+-`autonomy-runs`, which points into `~/lloyd/autonomy-runs`. Two of them —
+-`facts` and `sessions` — are **empty** on disk; the real fact tree is
+-`_pipeline/vault-derived/facts` and reaches retrieval through the knowledge
+-graph, not qmd. The `models:` block pins the embed/expand/rerank GGUFs.
++That direction is for a **fresh host**. On a machine that has been running, the
++live config is the one that is true — copying the tracked copy onto it retargets
++whole collections — so check the nightly `config_drift` entry in
++`_pipeline/reflection/qmd-index-maintenance-<date>.json` first, and re-sync the
++other way (below) if it reports a difference.
++
++It defines **14 collections**, every one of which is live: 12 rooted under
++`~/obsidian` (`memory`, `knowledge`, `projects`, `lloyd`, `personal`, `work`,
++`skills`, `people`, `subliminal`, `backlog`, `autonomy`, `architecture`) plus
++two that point into the checkout —
++
++| collection | path | what it is |
++|---|---|---|
++| `autonomy-runs` | `~/lloyd/autonomy-runs` | task run records, `*/run_*.md` |
++| `sessions` | `~/lloyd/_pipeline/vault-derived/sessions` | the session-recall corpus: `app/post_capture.py` writes each finished session there through `app.paths.VAULT_SESSIONS_DIR`, which is why qmd indexes that path and not `~/obsidian/sessions` (a directory that exists but is empty) |
++
++The `models:` block pins the embed/expand/rerank GGUFs.
++
++The tracked copy also still lists `facts` at `~/obsidian/facts`, an empty
++directory; the daemon dropped that collection in the 2026-09-19 edit, and the
++real fact tree is `_pipeline/vault-derived/facts`, which reaches retrieval
++through the knowledge graph rather than qmd. Dropping it from the template is
++open in #1298 — until then the nightly drift report names it.
+ 
+ If you change collections later, re-sync the tracked copy:
+ 
+diff --git a/agent-services/conf/qmd-index.yml b/agent-services/conf/qmd-index.yml
+index 7b8ebecc..bb8a716a 100644
+--- a/agent-services/conf/qmd-index.yml
++++ b/agent-services/conf/qmd-index.yml
+@@ -1,3 +1,20 @@
++# qmd collection definitions — TRACKED REFERENCE COPY.
++#
++# The file the qmd daemon actually reads is ~/.config/qmd/index.yml. Nothing at
++# runtime opens this one — there is no installer (git grep -n qmd-index HEAD
++# finds only SETUP.md, architecture/subliminal.md and a report filename), so the
++# only thing keeping the two files agreeing is the manual re-sync SETUP.md
++# prescribes, in this direction, from the repo root, AFTER editing the live file:
++#
++#   cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml
++#
++# scripts/maintenance/qmd_index_maintenance.py compares them nightly and writes
++# the verdict into _pipeline/reflection/qmd-index-maintenance-<date>.json as
++# `config_drift` (#1298). Between 2026-09-07 and 2026-09-19 nobody ran the
++# re-sync: two hand-edits to the live file retargeted `sessions` onto the real
++# export directory and dropped `facts`, and neither was recorded here, so the
++# one file a restore or a new host reads described a collection set the daemon
++# had stopped serving.
+ collections:
+   facts:
+     path: /home/alansrobotlab/obsidian/facts
+@@ -46,7 +63,12 @@ collections:
+     path: /home/alansrobotlab/lloyd/autonomy-runs
+     pattern: "*/run_*.md"
+   sessions:
+-    path: /home/alansrobotlab/obsidian/sessions
++    # The real session-recall export target: app/post_capture.py writes records
++    # under app.paths.VAULT_SESSIONS_DIR (app/paths.py:71), which is here — not
++    # ~/obsidian/sessions, which exists but is empty. ~650 indexed documents
++    # live on this path; pointing the collection at the vault directory drops
++    # every one of them from both the FTS and the vector legs (#1298).
++    path: /home/alansrobotlab/lloyd/_pipeline/vault-derived/sessions
+     pattern: "**/*.md"
+   architecture:
+     path: /home/alansrobotlab/obsidian/architecture
