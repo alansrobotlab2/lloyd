@@ -480,6 +480,71 @@ def result_summary(content, is_error: bool) -> str:
 
 SIGNAL_RE = re.compile(r"SIGNAL:([A-Z_]+)")
 
+# The only role whose text counts as the run emitting a signal. Skills instruct
+# the emission in prose ("stop and SIGNAL:BLOCKED"), so what a run does when it
+# blocks is write that token in one of its own messages. Every other role is
+# text the run was handed rather than authored: in an autonomy run the first
+# `user` message IS the dispatched SKILL.md body, so a skill that documents
+# `SIGNAL:BLOCKED` in its error-handling section handed that token to every one
+# of its runs forever, whatever happened — measured on 2026-09-17, 9 of 9
+# `BLOCKED` rows were inherited this way and none was emitted (#1238). A `tool`
+# result is a subprocess's stdout, which the run merely carried: that is a real
+# emission channel (`scripts/memory/process-groundskeeper-queue.py` prints
+# `SIGNAL:TASK_COMPLETE`) and it is dropped here by choice, with a person
+# deciding whether to keep it — which is why the excluded hits are returned
+# rather than discarded.
+EMITTED_SIGNAL_ROLES = frozenset({"assistant"})
+
+
+def collect_signals(messages: list[dict]) -> tuple[list[str], dict[str, list[str]]]:
+    """Split `SIGNAL:<X>` hits by the role whose text carried them.
+
+    Returns `(signals, inherited)`, both in first-seen order and de-duplicated:
+
+    * `signals` — tokens found in a role listed in `EMITTED_SIGNAL_ROLES`. The
+      only field a consumer may read as an outcome of this run.
+    * `inherited` — `{role: [tokens]}` for the hits that rule excluded, so a run
+      that inherited three `BLOCKED`s from its own skill body reads as
+      `signals: []` plus `inherited_signals: {"user": ["BLOCKED"]}`, never as
+      silently empty. A token the run *did* emit is not also reported as
+      inherited, even when a skill body or a tool result said it too.
+
+    Only a message's `content` is read. A `SIGNAL:` string inside an assistant
+    `tool_calls` argument (a shell command that echoes the token) is not an
+    emission: the emission is what the command printed, which lands in the tool
+    result, and counting the command would hand the field back to any skill that
+    documents such a command.
+
+    `SIGNAL_RE`'s capture group stops at the next colon, so the checkpoint form
+    in `skills/.archived/python-library-dev/SKILL.md` — `SIGNAL:CHECKPOINT:
+    PLAN_COMPLETE` — is collected as `CHECKPOINT` and loses the specific
+    checkpoint. That is pre-existing and deliberate here: #1238 changed which
+    roles are read, not what one hit captures. A test pins it.
+    """
+    signals: list[str] = []
+    emitted: set[str] = set()
+    inherited: dict[str, list[str]] = {}
+    inherited_seen: dict[str, set[str]] = {}
+
+    for msg in messages:
+        role = str(msg.get("role") or "unknown")
+        text = extract_result_text(msg.get("content", ""))
+        for match in SIGNAL_RE.finditer(text):
+            sig = match.group(1)
+            if role in EMITTED_SIGNAL_ROLES:
+                if sig not in emitted:
+                    emitted.add(sig)
+                    signals.append(sig)
+                continue
+            seen = inherited_seen.setdefault(role, set())
+            if sig not in seen:
+                seen.add(sig)
+                inherited.setdefault(role, []).append(sig)
+
+    for role in [r for r, sigs in inherited.items() if all(s in emitted for s in sigs)]:
+        del inherited[role]
+    return signals, inherited
+
 
 # ── Session classification ───────────────────────────────────────────────────
 
@@ -692,17 +757,10 @@ def parse_session(path: Path) -> dict | None:
         mtime = os.path.getmtime(path)
         session_ts = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
-    # Extract signals from all message text
-    signals: list[str] = []
-    seen: set[str] = set()
-    for msg in messages:
-        content = msg.get("content", "")
-        text = extract_result_text(content)
-        for match in SIGNAL_RE.finditer(text):
-            sig = match.group(1)
-            if sig not in seen:
-                signals.append(sig)
-                seen.add(sig)
+    # Signals, split by who said them: `signals` is the run's own emission,
+    # `inherited_signals` the vocabulary it was handed (the dispatched skill body
+    # in the first `user` message, tool results). See `collect_signals`.
+    signals, inherited_signals = collect_signals(messages)
 
     return {
         "session_key": session_id,
@@ -719,6 +777,11 @@ def parse_session(path: Path) -> dict | None:
         "tools": tools,
         "error_tools": error_tools,
         "signals": signals,
+        # `{role: [tokens]}` for the hits `signals` refused, so an inherited
+        # token is recoverable from the row instead of lost. Named per role
+        # because the role is the whole finding: `user` here means the skill body
+        # that was dispatched to this run, `tool` a subprocess's stdout.
+        "inherited_signals": inherited_signals,
     }
 
 
@@ -911,6 +974,13 @@ def print_stats() -> None:
                     if source:
                         error_source_counts[source] = error_source_counts.get(source, 0) + 1
 
+                # Emitted tokens only, because `signals` now holds only those.
+                # The histogram reported 9 `BLOCKED` for 2026-09-17, a day with no
+                # genuine emission at all, because it was counting what the skill
+                # body said (#1238). Rows written before that change still carry
+                # inherited tokens in `signals` and are counted as written: the
+                # role is not recoverable from a row that never recorded it, so a
+                # historical bucket is not directly comparable to a fresh one.
                 for sig in traj.get("signals", []):
                     signal_counts[sig] = signal_counts.get(sig, 0) + 1
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -2572,3 +2573,259 @@ def test_the_architecture_page_attributes_browser_sessions_to_the_extension():
     assert "inner voice bench harness" not in text.lower()
     block = [b for b in text.split("- **") if "platform: browser" in b]
     assert block and "extension" in block[0].lower(), block
+
+
+# ── #1238: a signal is what the run emitted, not what its skill said ──────────
+#
+# `SIGNAL_RE` used to run over every message's content with no role filter. In an
+# autonomy run the first `user` message IS the dispatched SKILL.md body, so a skill
+# documenting `SIGNAL:BLOCKED` in prose handed that token to every one of its runs
+# whatever happened: measured on 2026-09-17, all 9 `BLOCKED` rows in the corpus were
+# inherited (6 from `autonomy-task:24`'s dispatched body, 3 from tool results quoting
+# the skill file the autotriage run was reading) and no session emitted one — while
+# `TASK_COMPLETE`, the same field on the success axis, appeared once in a day holding
+# 249 runs. `collect_signals` now splits hits by role: `signals` holds only what an
+# `EMITTED_SIGNAL_ROLES` message said, `inherited_signals` keeps the rest with the
+# role that carried them.
+
+# The instruction half of an autonomy run: `skills/autonomy-data-pipeline/SKILL.md`
+# documents this token three times (its lines 154, 396, 397) and the run is handed
+# the file as its first `user` message.
+DISPATCHED_BODY = (
+    "# SKILL: autonomy-data-pipeline\n"
+    "- HARD RULE - NEVER modify `~/lloyd/.venvs/`. If a dep is missing, "
+    "SIGNAL:BLOCKED and exit.\n"
+    "- If the script fails, log the error and SIGNAL:BLOCKED - missing dep.\n"
+    "SIGNAL:BLOCKED - missing dep\n"
+)
+
+
+def call_pair(result_text, i=0):
+    """One assistant tool_call plus its tool result.
+
+    `parse_session` returns None for a session with no tool calls, so every signal
+    fixture needs at least one pair before its prose; it is also the source of the
+    `tool`-role text the rule must exclude.
+    """
+    return [
+        {"role": "assistant",
+         "tool_calls": [{"id": f"call_{i}",
+                         "function": {"name": "Bash",
+                                      "arguments": json.dumps(
+                                          {"command": "pytest tests/"})}}]},
+        {"role": "tool", "tool_call_id": f"call_{i}",
+         "content": [{"type": "text", "text": result_text}]},
+    ]
+
+
+def signal_row(tmp_path, messages, name="sess-signals"):
+    """Parse a hand-authored session into a trajectory row."""
+    path = tmp_path / f"{name}.json"
+    path.write_text(json.dumps({
+        "session_id": name,
+        "session_start": "2026-09-17T03:34:17Z",
+        "messages": messages,
+    }), encoding="utf-8")
+    traj = et.parse_session(path)
+    assert traj is not None, f"fixture {name} produced no row (needs a tool call)"
+    return traj
+
+
+def inherited_only_session(tmp_path, name):
+    """The 2026-09-17 shape: `SIGNAL:BLOCKED` twice in the dispatched body and once
+    in a tool result, and the run's own last message reporting a clean finish."""
+    return signal_row(tmp_path, [
+        {"role": "user", "content": DISPATCHED_BODY},
+        *call_pair("skills/autonomy-data-pipeline/SKILL.md:154: If the script fails, "
+                   "log the error and SIGNAL:BLOCKED - missing dep"),
+        {"role": "assistant",
+         "content": "All four steps ran, failed=0. Loaded-memory shrink guard passed."},
+    ], name=name)
+
+
+def stats_signal_counts(out):
+    """The `Signals seen:` block of `--stats` output as a dict.
+
+    A token with zero genuine emissions prints no row, which is how "0 BLOCKED"
+    appears: absence, not a zero.
+    """
+    assert "Signals seen:\n" in out, out
+    block = out.split("Signals seen:\n", 1)[1].split("\n\n")[0]
+    return {name: int(n)
+            for name, n in re.findall(r"^  (\S+) +(\d+)$", block, re.MULTILINE)}
+
+
+# clause 1: an assistant-role token is collected
+def test_a_signal_in_assistant_text_is_collected(tmp_path):
+    traj = signal_row(tmp_path, [
+        {"role": "user", "content": DISPATCHED_BODY},
+        *call_pair("42 passed"),
+        {"role": "assistant",
+         "content": [{"type": "text", "text": "Done. SIGNAL:TASK_COMPLETE"}]},
+    ])
+    assert traj["signals"] == ["TASK_COMPLETE"]
+
+
+# clause 2: injected body + tool results alone yield nothing ...
+def test_a_token_only_in_the_skill_body_and_tool_results_is_not_collected(tmp_path):
+    traj = inherited_only_session(tmp_path, "sess-inherited")
+    assert traj["signals"] == [], (
+        "an inherited skill-body token must not enter `signals` on any axis")
+
+
+# ... and the same fixture with the token moved into assistant text yields it
+def test_the_same_session_with_the_token_in_assistant_text_yields_it(tmp_path):
+    traj = signal_row(tmp_path, [
+        {"role": "user", "content": "Run the autonomy data pipeline."},
+        *call_pair("42 passed"),
+        {"role": "assistant", "content": "Step 2 died on ImportError. SIGNAL:BLOCKED"},
+    ])
+    assert traj["signals"] == ["BLOCKED"]
+
+
+# clause 3: excluded hits stay on the row, naming the role that carried them
+def test_excluded_hits_stay_on_the_row_naming_their_role(tmp_path):
+    """Three `BLOCKED` hits, none of them the run's: the point is that the row says
+    so instead of reading as a session with no signal at all."""
+    traj = inherited_only_session(tmp_path, "sess-inherited-roles")
+    assert traj["signals"] == []
+    assert traj["inherited_signals"] == {"user": ["BLOCKED"], "tool": ["BLOCKED"]}
+
+
+def test_an_emitted_token_is_not_also_reported_as_inherited(tmp_path):
+    """The body said `BLOCKED` and the run said it too: `inherited` is for what the
+    rule dropped, and this one was not dropped."""
+    traj = signal_row(tmp_path, [
+        {"role": "user", "content": DISPATCHED_BODY},
+        *call_pair("42 passed"),
+        {"role": "assistant", "content": "Dependency missing. SIGNAL:BLOCKED"},
+    ], name="sess-both")
+    assert traj["signals"] == ["BLOCKED"]
+    assert traj["inherited_signals"] == {}
+
+
+def test_a_token_in_an_assistant_tool_call_argument_is_not_an_emission(tmp_path):
+    """The dropped real channel, kept recoverable. A dispatched subprocess that
+    prints `SIGNAL:TASK_COMPLETE` to stdout (`scripts/memory/process-groundskeeper-queue.py`)
+    reaches the row as tool-role text, so an assistant-only rule loses it - and the
+    `echo` command that prints it is assistant text whose *argument* carries the
+    token, which is not an emission either. Both stay inspectable."""
+    traj = signal_row(tmp_path, [
+        {"role": "user", "content": "Drain the groundskeeper queue."},
+        {"role": "assistant", "tool_calls": [{"id": "call_0", "function": {
+            "name": "Bash",
+            "arguments": json.dumps({"command": 'echo "SIGNAL:TASK_COMPLETE"'})}}]},
+        {"role": "tool", "tool_call_id": "call_0",
+         "content": [{"type": "text", "text": "SIGNAL:TASK_COMPLETE\n"}]},
+    ], name="sess-echoed")
+    assert traj["signals"] == []
+    assert traj["inherited_signals"] == {"tool": ["TASK_COMPLETE"]}
+
+
+def test_the_checkpoint_form_is_collected_as_its_outer_token(tmp_path):
+    """`SIGNAL_RE`'s capture stops at the next colon, so the checkpoint form
+    documented in `skills/.archived/python-library-dev/SKILL.md` is collected as
+    `CHECKPOINT` and the specific checkpoint is lost. #1238 changed which roles are
+    read, not what one hit captures, so this pins the quirk rather than silently
+    moving it."""
+    traj = signal_row(tmp_path, [
+        {"role": "user", "content": "Build the library."},
+        *call_pair("ok"),
+        {"role": "assistant",
+         "content": "SIGNAL:CHECKPOINT:PLAN_COMPLETE and SIGNAL:TASK_COMPLETE"},
+    ], name="sess-checkpoint")
+    assert traj["signals"] == ["CHECKPOINT", "TASK_COMPLETE"]
+
+
+# clause 4: the extractor's own histogram reports emissions only
+def test_stats_signal_histogram_counts_only_run_emitted_tokens(tmp_path, capsys):
+    et.append_trajectories([
+        inherited_only_session(tmp_path, "sess-hist-inherited"),
+        signal_row(tmp_path, [
+            {"role": "user", "content": DISPATCHED_BODY},
+            *call_pair("42 passed"),
+            {"role": "assistant", "content": "Finished. SIGNAL:TASK_COMPLETE"},
+        ], name="sess-hist-emitted"),
+    ])
+    et.print_stats()
+    counts = stats_signal_counts(capsys.readouterr().out)
+    assert counts.get("TASK_COMPLETE") == 1, counts
+    assert "BLOCKED" not in counts, (
+        "the bucket holds one session that inherited BLOCKED and none that emitted "
+        f"it, so the histogram must not report it: {counts}")
+
+
+def test_the_new_field_survives_the_bucket_write(tmp_path):
+    """`inherited_signals` is a dict of lists, and the row is written and read back
+    as one JSON line by both `--stats` and any skill reading the corpus."""
+    et.append_trajectories([inherited_only_session(tmp_path, "sess-roundtrip")])
+    bucket = next(et.OUTPUT_DIR.glob("*.jsonl"))
+    row = json.loads(bucket.read_text(encoding="utf-8").splitlines()[0])
+    assert row["signals"] == []
+    assert row["inherited_signals"] == {"user": ["BLOCKED"], "tool": ["BLOCKED"]}
+
+
+# ── #1238 seams: the row is written here and read over there ──────────────────
+#
+# Two boundaries the fix crosses as a process, not as a call. The `--stats`
+# histogram is read by whoever runs the command (`nightly-skills-management` among
+# them), and the bucket file is the miner's input, so the schema gaining a field is
+# an output-format change for both.
+
+EXTRACTOR_PATH = _ROOT / "scripts" / "extract-trajectories.py"
+SIGNAL_BUCKET = "2026-09-17.jsonl"
+
+
+def test_the_stats_command_prints_only_run_emitted_tokens(tmp_path, monkeypatch):
+    """The real command line, in a real process, over a bucket the real parser wrote.
+
+    Both halves are the code under test: the rows come from `parse_session` over two
+    hand-authored sessions (one that inherited `BLOCKED` from its dispatched skill
+    body, one that emitted `TASK_COMPLETE` in assistant text), and `--stats` runs as
+    a subprocess. `OUTPUT_DIR` derives from `Path.home()`, so `HOME` is redirected to
+    a directory holding what the extractor wrote. Expected histogram: 1
+    `TASK_COMPLETE`, and no `BLOCKED` row at all — which is how "0 BLOCKED" prints.
+    """
+    home = tmp_path / "home"
+    bucket_dir = home / "lloyd" / "_pipeline" / "trajectories"
+    bucket_dir.mkdir(parents=True)
+    monkeypatch.setattr(et, "OUTPUT_DIR", bucket_dir)
+    et.append_trajectories([
+        inherited_only_session(tmp_path, "sess-cli-inherited"),
+        signal_row(tmp_path, [
+            {"role": "user", "content": DISPATCHED_BODY},
+            *call_pair("42 passed", i=1),
+            {"role": "assistant", "content": "Finished. SIGNAL:TASK_COMPLETE"},
+        ], name="sess-cli-emitted"),
+    ])
+    assert list(bucket_dir.glob("*.jsonl")), "extractor wrote no bucket"
+
+    proc = subprocess.run(
+        [sys.executable, str(EXTRACTOR_PATH), "--stats"],
+        capture_output=True, text=True, timeout=180, cwd=tmp_path,
+        env={**os.environ, "HOME": str(home)})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    counts = stats_signal_counts(proc.stdout)
+    assert counts.get("TASK_COMPLETE") == 1, counts
+    assert "BLOCKED" not in counts, counts
+
+
+def test_the_miner_still_mines_rows_that_carry_the_new_field(tmp_path):
+    """`mine-trajectories.py` reads the same JSONL rows and ignores both signal
+    fields (its only mention of either is a prose comment), so the schema addition
+    must pass through it: the same two interactive failures, now carrying
+    `inherited_signals`, still mine one candidate reporting 2 sessions."""
+    corpus = write_traj_corpus(tmp_path / "corpus", [])
+    rows = []
+    for key in ("i1", "i2"):
+        row = miner_row(key, "interactive")
+        row["signals"] = []
+        row["inherited_signals"] = {"user": ["BLOCKED"], "tool": ["BLOCKED"]}
+        rows.append(row)
+    (corpus / SIGNAL_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    out = tmp_path / "cands"
+    proc = run_miner(corpus, out)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    fm = graphex_candidate(out)
+    assert re.search(r"^sessions: 2$", fm, re.MULTILINE), fm
