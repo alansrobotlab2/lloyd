@@ -75,9 +75,25 @@ _STALL_ALERT_INTERVAL_SECONDS = 6 * 3600
 # streak is a separate counter so neither alarm can reset the other's.
 _STALL_NEXTRUN_TICKS = 5
 _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS = 24 * 3600
+# How long the model server can stay down before the outage itself is an alert
+# (not one `logger.warning` line deduped for the whole outage). The gate in
+# `enqueue_if_due` pauses dispatch, and until #938 that one line was the only
+# thing an outage produced: `agent-services/guardian/policy.py` watches only
+# `lloyd-backend`/`lloyd-mcp`, never the model server, and the vault tasks that
+# do probe it are autonomy tasks dispatched through this gate, so they die with
+# it. At `tick_interval: 60` a 3-day outage was ~4300 ticks and one log line.
+# 45 min is long enough to sit past a vLLM restart (the n-gram table alone takes
+# minutes to load) and short enough that a person hears about it within an hour.
+_VLLM_DOWN_ALERT_SECONDS = 45 * 60
 _state = {"vllm_down_logged": False, "startup_checked": False,
           "stall_streak": 0, "stall_alerted_at": None,
-          "nextrun_streak": 0, "nextrun_alerted_at": None}
+          "nextrun_streak": 0, "nextrun_alerted_at": None,
+          # Outage accounting: `_vllm_down_since` is the instant the current
+          # uninterrupted run of unhealthy ticks began, and `_vllm_down_alerted`
+          # says whether THIS outage has already raised its alert. Both reset on
+          # the first healthy tick, so the next outage gets one alert of its own
+          # rather than inheriting the last one's silence.
+          "vllm_down_since": None, "vllm_down_alerted": False}
 
 
 def _vllm_healthy(timeout: float = 4.0, url: str | None = None) -> bool:
@@ -172,7 +188,12 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
     `hold_reason`, the same function the dispatch loop's "Holding #" line uses —
     so the alert says WHY it has not run rather than only THAT it has not. A task
     with no hold reason was skipped below this loop: a per-task model-server
-    health check, or the vLLM gate that #938 tracks separately.
+    health check, or the model-server gate. Since #938 that gate sits BELOW this
+    scan rather than above it, so an `up_next` task past its own period with no
+    queue row is flagged while the engine is down too, and reads as a task
+    nothing holds: dispatch skipped it because the model server was
+    unreachable, which is the outage alert's own sentence, and the two arrive
+    together.
 
     The bound is unchanged and strict (> one interval), and it comes from
     `autonomy.next_run_gap`, the same predicate `compute_health` reads, so the
@@ -271,6 +292,41 @@ async def _alert(message: str) -> None:
         logger.error("alert dispatch failed: %s", e)
 
 
+async def _note_vllm_outage() -> None:
+    """Account for one unhealthy tick: log the transition, and alert once if the
+    outage has run past `_VLLM_DOWN_ALERT_SECONDS`.
+
+    Called on every unhealthy tick and on nothing else, so the elapsed time it
+    measures is the length of ONE uninterrupted run of them — the healthy tick
+    clears `_vllm_down_since`, which is what makes a later outage alert again
+    instead of inheriting this one's `vllm_down_alerted`.
+
+    The alert is exactly one per outage and the log line stays transition-only:
+    at `tick_interval: 60` an alert-per-tick would be 1440 a day, and the
+    single deduped `logger.warning` this replaced was 0 a day where a person
+    reads it — `logger` output goes to the unit log, `_alert` goes to discord,
+    and no other watcher covers the model server (#938)."""
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    if not _state["vllm_down_logged"]:
+        logger.warning("scheduled-task: vLLM unhealthy — pausing enqueue until it recovers")
+        _state["vllm_down_logged"] = True
+        _state["vllm_down_since"] = now
+        _state["vllm_down_alerted"] = False
+    if _state.get("vllm_down_alerted"):
+        return
+    since = _state.get("vllm_down_since") or now
+    down_for = (now - since).total_seconds()
+    if down_for >= _VLLM_DOWN_ALERT_SECONDS:
+        _state["vllm_down_alerted"] = True
+        msg = (f"primary model server {_VLLM_HEALTH_URL} has been unreachable for "
+               f"{down_for / 60:.0f} min (since {since.isoformat()}): autonomy "
+               f"dispatch is PAUSED until it recovers, so every stall alert from "
+               f"here on is describing a paused fleet, not a broken one")
+        logger.error("%s", msg)
+        await _alert(msg)
+
+
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     from autonomy import get_due_tasks
 
@@ -294,15 +350,16 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     if recovered:
         logger.warning("Recovered %d stuck task(s): %s", len(recovered), recovered)
 
-    # vLLM health gate — skip this tick entirely if the model server is down.
-    if not await loop.run_in_executor(None, _vllm_healthy):
-        if not _state["vllm_down_logged"]:
-            logger.warning("scheduled-task: vLLM unhealthy — pausing enqueue until it recovers")
-            _state["vllm_down_logged"] = True
-        return
-    if _state["vllm_down_logged"]:
-        logger.info("scheduled-task: vLLM healthy again — resuming enqueue")
-        _state["vllm_down_logged"] = False
+    # vLLM health gate — pause DISPATCH when the model server is down. It yields
+    # a verdict here and acts on it below, after both stall detectors have run:
+    # they read only task files and the queue, so neither needs the model server,
+    # exactly like the startup scan and `recover_stuck_tasks` above. Returning at
+    # this line is what made a multi-day outage invisible — it silenced dispatch
+    # AND the detectors together, and left one deduped log line behind (#938).
+    # The detectors' own exclusions are untouched, so an outage does not turn
+    # every paused or queue-waiting task into noise: only a task that dispatch
+    # would have enqueued and did not is flagged.
+    vllm_ok = await loop.run_in_executor(None, _vllm_healthy)
 
     # Stall alarm — due, grossly overdue, and NOT waiting in the queue.
     import datetime as _dt
@@ -347,6 +404,20 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
             msg = _nextrun_alert_message(stalled)
             logger.error("%s", msg)
             await _alert(msg)
+
+    # The gate pauses dispatch here, once the watching above has run: the outage
+    # stops work, it does not stop watching. Returning before `get_due_tasks`
+    # preserves the gate's own purpose — a fleet pinned to a dead model server is
+    # skipped, not enqueued into a ConnectError retry loop (see the per-task
+    # `_model_health_url` check below, which is the same rule one level down).
+    if not vllm_ok:
+        await _note_vllm_outage()
+        return
+    if _state["vllm_down_logged"]:
+        logger.info("scheduled-task: vLLM healthy again — resuming enqueue")
+        _state["vllm_down_logged"] = False
+        _state["vllm_down_since"] = None
+        _state["vllm_down_alerted"] = False
 
     due = await loop.run_in_executor(None, get_due_tasks)
 

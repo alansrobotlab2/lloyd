@@ -1992,3 +1992,350 @@ async def test_a_parked_upstream_keeps_its_dependent_out_of_the_queue(
     assert "2" in enqueued, (
         f"nothing enqueued even with a runnable upstream ({enqueued}): the fixture "
         "was never due, so the assertion above proves nothing")
+
+
+# ── #938: a model-server outage pauses dispatch, it does not pause watching ───
+#
+# `enqueue_if_due` probed the primary model server first and `return`ed on a
+# failure, which put the vLLM gate ABOVE both stall detectors. With the engine
+# down, `_grossly_overdue`, `_queue_starving` and `_next_run_stalled` were each
+# called ZERO times — measured over 8 consecutive ticks on 2026-09-20 — with 0
+# `_alert` calls and exactly one `logger.warning` line total, deduped for the
+# whole outage by `_state["vllm_down_logged"]`. No other watcher covered the
+# gap: `agent-services/guardian/policy.py` WATCHED names only
+# `lloyd-backend`/`lloyd-mcp`, and the vault tasks that do probe the model
+# server are autonomy tasks dispatched through this very gate, so the monitor
+# died with the thing it monitors. At `tick_interval: 60` a 3-day outage is
+# ~4300 ticks and one log line.
+#
+# Every other stall test in this file forces the gate OPEN
+# (`_vllm_healthy` → True), so the outage path had no coverage and the suite
+# could not see the detectors going un-called. These tests are the inverse: the
+# gate is CLOSED, and the assertion is that the detectors are still CALLED.
+
+def _outage_fleet(aut):
+    """Four `daily` tasks, read at the pinned `PIN`, that tell the four shapes
+    apart with an outage in progress. Ids in the 900s so nothing collides.
+
+    912 is the control and the only one worth an alert: `up_next`,
+    dependency-free, 5 days since `last_run` against a 1-day interval — past
+    the 2.5x bound — 5 days past its own `next_run`, and no queue row. Dispatch
+    had a job to do here and did not do it, which is the shape the noisy alarm
+    was built for and still must return with the model server down.
+    913 is the healthy on-cadence task: `up_next`, 2 days since `last_run`
+    against a 1-day interval, so it IS due (past the half-interval freshness
+    bound) and yet inside the 2.5x multiple, and its `next_run` is exactly one
+    period behind `last_run`, so it is exactly one period past it and the strict
+    `> one interval` bound leaves it alone too. It is excluded by the multiple
+    and by the period, by nothing else — an outage must not make a task that ran
+    on schedule look stalled.
+    914 is `draft` and 5 days stale — grossly overdue in every other respect,
+    and excluded by status, because a deliberate stop is not a stall.
+    915 is `up_next` and 5 days stale and gets a live queue row from the caller:
+    starved for capacity, not stalled, and excluded by the queue-row rule.
+    """
+    day = dt.timedelta(days=1)
+    write_task(aut, 912, last_run=(PIN - 5 * day).isoformat(),
+               next_run=(PIN - 5 * day).isoformat())
+    write_task(aut, 913,
+               last_run=(PIN - 2 * day).isoformat(),
+               next_run=(PIN - day).isoformat())
+    write_task(aut, 914, status="draft",
+               last_run=(PIN - 5 * day).isoformat(),
+               next_run=(PIN - 5 * day).isoformat())
+    write_task(aut, 915, last_run=(PIN - 5 * day).isoformat(),
+               next_run=(PIN - 5 * day).isoformat())
+
+
+def _seed_queue_row(q, task_id):
+    """A live `queued` row for one task, fresh enough that `_queue_starving`
+    reads 0.0 and cannot add its own clause to the alert text."""
+    q.enqueue(source="scheduled-task", kind="run",
+              payload={"task_id": task_id, "name": f"task{task_id}"},
+              priority=30, dedup_key=f"scheduled-task:{task_id}")
+
+
+def _clean_outage_state(monkeypatch, st, **over):
+    """Swap in a `_state` with both stall streaks and all outage accounting at
+    zero, so no tick here inherits another test's streak, cooldown or outage, and
+    nothing here leaks into the module copy afterwards."""
+    fresh = {**st._state, "startup_checked": True,
+             "stall_streak": 0, "stall_alerted_at": None,
+             "nextrun_streak": 0, "nextrun_alerted_at": None,
+             "vllm_down_logged": False, "vllm_down_since": None,
+             "vllm_down_alerted": False}
+    fresh.update(over)
+    monkeypatch.setattr(st, "_state", fresh)
+    return fresh
+
+
+async def test_a_closed_health_gate_still_evaluates_every_stall_detector(
+        aut, monkeypatch, tmp_path):
+    """Clause 1, across the executor seam: ONE tick with the model server down.
+
+    The health probe is the only thing stubbed besides the alert, so the tick is
+    the real coroutine, the real `WorkQueue`, the real detector bodies run on
+    executor threads. Each detector is wrapped rather than replaced, so the call
+    count is the assertion and the returned verdict is still the real one. Pre-fix
+    this fails on the first assertion: the gate returned before all three.
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    _pin(aut, monkeypatch)
+    _outage_fleet(aut)
+
+    q = WorkQueue(tmp_path / "closed-gate.db")
+    _seed_queue_row(q, 915)
+
+    calls = {"grossly": 0, "starving": 0, "nextrun": 0}
+    real = (st._grossly_overdue, st._queue_starving, st._next_run_stalled)
+
+    def _spy_grossly(queue):
+        calls["grossly"] += 1
+        return real[0](queue)
+
+    def _spy_starving(queue, max_duration):
+        calls["starving"] += 1
+        return real[1](queue, max_duration)
+
+    def _spy_nextrun(queue):
+        calls["nextrun"] += 1
+        return real[2](queue)
+
+    monkeypatch.setattr(st, "_grossly_overdue", _spy_grossly)
+    monkeypatch.setattr(st, "_queue_starving", _spy_starving)
+    monkeypatch.setattr(st, "_next_run_stalled", _spy_nextrun)
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: False)
+    _clean_outage_state(monkeypatch, st)
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture)
+
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+
+    assert calls["grossly"] >= 1, (
+        "the due-ness stall detector was never called on a tick with the model "
+        "server down: the outage silenced the alarm built for the 2026-05-28 "
+        "silent stall, which is the whole defect")
+    assert calls["nextrun"] >= 1, (
+        "the next_run stall detector was never called on a tick with the model "
+        "server down — it is the quieter alarm built for the 41 h and 60 h "
+        "stalls, so its blindness is the costly half")
+    assert calls["starving"] >= 1, (
+        "`_queue_starving` was never called, so a dead worker pool is invisible "
+        "for the length of an outage")
+    # The verdicts themselves still come from the real detectors, on the pinned
+    # instant, with the gate shut: 912 grossly overdue, and nothing new reached
+    # the queue.
+    assert real[0](q) == [912], "the control fleet stopped being the noisy alarm's case"
+    assert {str(i.payload.get("task_id")) for i in
+            q.list_items(source="scheduled-task", limit=500)} == {"915"}, (
+        "a closed health gate still enqueued work; clause 4 is about exactly this")
+    # One tick is 0 s of outage, so nothing is due an alert yet: neither a stall
+    # streak of 1 nor the transition itself may shout.
+    assert alerts == [], f"the first down tick alerted: {alerts}"
+
+
+async def test_the_stall_alarm_alerts_through_an_outage_and_keeps_its_exclusions(
+        aut, monkeypatch, tmp_path):
+    """Clauses 2 and 3: the noisy alarm fires with the engine DOWN, and the three
+    exclusions survive the move.
+
+    `_STALL_NEXTRUN_TICKS` equals `_STALL_ALARM_TICKS`, so on tick 5 the
+    next_run alarm would otherwise alert on the same tick and the count would be
+    about two alarms. Its cooldown is seeded as just-fired — its real clock, not
+    the pinned one, since that alarm measures wall time — which is the same
+    state production is in whenever it has alerted in the last day. What is
+    measured here is the alarm #938 moved, and the assertion below that no
+    message mentions `next_run` is what proves the count stayed about one.
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    _pin(aut, monkeypatch)
+    _outage_fleet(aut)
+
+    q = WorkQueue(tmp_path / "outage-stall.db")
+    _seed_queue_row(q, 915)
+
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: False)
+    _clean_outage_state(
+        monkeypatch, st,
+        nextrun_alerted_at=dt.datetime.now(dt.timezone.utc))
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture)
+
+    ticks = st._STALL_ALARM_TICKS
+    for _ in range(ticks - 1):
+        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert alerts == [], (
+        f"alerted on tick {len(alerts)} of {ticks}: the moved alarm stopped "
+        "confirming across consecutive ticks")
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+
+    stalled_alerts = [m for m in alerts if "autonomy scheduler may be stalled" in m]
+    assert len(stalled_alerts) == 1, (
+        f"no stall alert after {ticks} ticks with the model server down: {alerts}")
+    assert len(alerts) == 1, f"a second alert came in on the same tick: {alerts}"
+    assert all("next_run" not in m for m in alerts), (
+        "the count above is not about one alarm: " + repr(alerts))
+
+    msg = stalled_alerts[0]
+    # Clause 2: the id dispatch skipped is named.
+    assert "912" in msg, f"the grossly overdue task is not named: {msg}"
+    # Clause 3, as the alarm's own three exclusions.
+    assert "913" not in msg, (
+        f"flagged a task inside {st._STALL_INTERVAL_MULT}x its interval: {msg}")
+    assert "914" not in msg, f"flagged the deliberately stopped task: {msg}"
+    assert "915" not in msg, f"flagged the task with a live queue row: {msg}"
+    board = list(aut.dependency_resolution_set())
+    t913 = next(t for t in board if int(t["id"]) == 913)
+    assert aut._is_task_due(t913, board, now=PIN) is True, (
+        "the fixture is no longer a due-but-within-2.5x case, so the exclusion "
+        "above is not testing the multiple")
+    assert "915" in {str(t) for t in st._active_task_ids(q)}, (
+        "the queue-row fixture lost its live row, so that exclusion tested nothing")
+    assert st._grossly_overdue(q) == [912], (
+        "the detector's own exclusions drifted from the message's")
+
+    # And it stays one alert: the 6 h cooldown is load-bearing, since this alarm
+    # alerted 100 times in 6 days before it was added.
+    for _ in range(ticks):
+        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, (
+        f"re-alerted inside the cooldown: {len(alerts)} alerts — that noise is "
+        "why the cooldown exists")
+
+
+async def test_dispatch_stays_paused_while_the_outage_is_being_watched(
+        aut, monkeypatch, tmp_path):
+    """Clause 4: with the model server unhealthy, `enqueue_if_due` enqueues
+    NOTHING for a due task, so the gate keeps its skip-rather-than-retry-loop
+    purpose. The control on the next tick flips only the health probe, which is
+    what turns the empty list into a verdict instead of an artifact of a tick
+    that never reached the enqueue loop.
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    _pin(aut, monkeypatch)
+    day = dt.timedelta(days=1)
+    write_task(aut, 912, last_run=(PIN - 3 * day).isoformat(),
+               next_run=(PIN - 2 * day).isoformat())
+
+    enqueued: list[str] = []
+
+    def _capture(_self, **kw):
+        enqueued.append(str(kw["payload"]["task_id"]))
+        return 1
+
+    monkeypatch.setattr(st.WorkQueue, "enqueue", _capture)
+    health = {"ok": False}
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: health["ok"])
+    _clean_outage_state(monkeypatch, st)
+    alerts: list[str] = []
+
+    async def _capture_alert(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture_alert)
+
+    q = WorkQueue(tmp_path / "paused.db")
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert enqueued == [], (
+        f"the queue was handed {enqueued} with the model server down: the gate "
+        "moved below the detectors must still stop dispatch, or every due task "
+        "becomes a ConnectError retry loop")
+
+    health["ok"] = True
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert enqueued == ["912"], (
+        f"control tick enqueued {enqueued} with the model server healthy: the "
+        "fixture is not the shape this clause is about, so the empty list above "
+        "says nothing about the gate. Nothing but the probe result differs "
+        "between the two ticks, and the assertion below says so in dispatch's "
+        "own words.")
+    board = list(aut.dependency_resolution_set())
+    t912 = next(t for t in board if int(t["id"]) == 912)
+    assert aut.hold_reason(t912, board, now=PIN) is None, (
+        "the control's meaning is inverted: `hold_reason` says something holds "
+        "this task, so an empty queue on the first tick would be correct "
+        "behaviour and clause 4 would be vacuous")
+    assert alerts == [], (
+        f"recovery alerted: {alerts} — only a sustained outage is an alert")
+
+
+async def test_a_sustained_outage_alerts_once_and_a_later_outage_alerts_again(
+        aut, monkeypatch, tmp_path):
+    """Clause 5, on an empty board so the only possible alert is the outage's.
+
+    The elapsed time is driven through `_state["vllm_down_since"]` rather than by
+    sleeping: the quantity under test is "how long has this uninterrupted run of
+    unhealthy ticks been going", and the tick that crosses the constant is the
+    tick that must alert. The constant itself is asserted inside the contract
+    band the clause states, so a threshold drift fails here and not in review.
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    assert 30 * 60 <= st._VLLM_DOWN_ALERT_SECONDS <= 6 * 3600, (
+        f"outage alert threshold is {st._VLLM_DOWN_ALERT_SECONDS}s, outside the "
+        "30 min to 6 h the clause allows")
+
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: False)
+    _clean_outage_state(monkeypatch, st)
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture)
+    q = WorkQueue(tmp_path / "outage-alert.db")
+    threshold = st._VLLM_DOWN_ALERT_SECONDS
+
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert alerts == [], "the first unhealthy tick alerted, before any downtime elapsed"
+    assert st._state["vllm_down_since"] is not None, (
+        "the outage has no start instant, so its duration can never be measured")
+
+    # Cross the threshold on the next tick: the outage began before it.
+    st._state["vllm_down_since"] = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=threshold + 120))
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, f"no outage alert past {threshold}s: {alerts}"
+    msg = alerts[0]
+    assert "model server" in msg and st._VLLM_HEALTH_URL in msg, (
+        f"the outage alert does not name the model server: {msg}")
+
+    for _ in range(3):
+        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, (
+        f"a 3-day outage at `tick_interval: 60` would produce {len(alerts)} "
+        "alerts — one per outage is the contract")
+
+    # Recovery clears the accounting, so the NEXT outage is its own incident.
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, f"recovery alerted: {alerts}"
+    assert st._state["vllm_down_since"] is None and (
+        st._state["vllm_down_alerted"] is False), (
+        "recovery left the outage accounting behind, so a later outage inherits "
+        "this one's silence")
+
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: False)
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, "a fresh outage alerted immediately"
+    st._state["vllm_down_since"] = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=threshold + 120))
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 2, (
+        f"the second outage never alerted: {alerts} — a fleet that has been "
+        "through one outage must not be deaf to the next")

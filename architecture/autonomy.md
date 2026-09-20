@@ -485,8 +485,16 @@ impatient human and two interleaved copies of #38.
 because a wedged engine turns every due task into a ConnectError flood:
 
 - **Before enqueuing at all**, a `/health` probe of the primary (`:8096`).
-  Down, the whole tick is skipped, logged once on the way down and once on the
-  way back up.
+  Down, nothing is enqueued and no task is executed — but the tick is not
+  abandoned there. The probe's verdict is taken first and acted on only after
+  both stall alarms and the outage's own alert have run. Returning at the probe
+  used to silence dispatch AND the watchdogs together, and left one deduped
+  `logger.warning` line behind (#938): an outage stops work, it does not stop
+  watching. An outage continuous past `_VLLM_DOWN_ALERT_SECONDS` raises one
+  Discord alert of its own, which is the only route that names the model server
+  at all — `agent-services/guardian/policy.py` watches `lloyd-backend` and
+  `lloyd-mcp`, never `:8096`, and the vault tasks that probe it are autonomy
+  tasks dispatched through this gate, so they go down with it.
 - **Per task**, a probe of the engine that task actually runs on.
   `_model_health_url` resolves `model:` through `resolve_model_alias` and
   `_get_model_env`, so a dead secondary skips only its own tasks instead of
