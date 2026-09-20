@@ -572,6 +572,7 @@ _EXTRACTOR_MOD: Any = None
 INTERACTIVE_CLASS = _extractor_module().INTERACTIVE_CLASS
 HUMAN_CLASSES = _extractor_module().HUMAN_CLASSES
 UNCODED_CLASS = "uncoded"   # no emitted class and no session JSON to join to
+NO_AGENT_ID = "(no agent_id)"   # agent-dropped tally label for a row with no agent
 
 
 def effective_session_class(traj: dict, cache: dict) -> str:
@@ -624,7 +625,8 @@ def effective_session_class(traj: dict, cache: dict) -> str:
 
 def load_trajectories(days: int = 7, agent_filter: str = "worker",
                       exclude_machine: bool = True,
-                      class_counts: dict | None = None) -> list[dict]:
+                      class_counts: dict | None = None,
+                      window: dict | None = None) -> list[dict]:
     """Load trajectory JSONL files with optional filters.
 
     `exclude_machine` (default True) keeps only the classes in `HUMAN_CLASSES` —
@@ -636,7 +638,14 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker",
     `extract-trajectories.py` cannot disagree about what a person's work is.
     `class_counts`, when given a dict, is filled
     with `{"kept": {class: n}, "dropped": {class: n}}` so the caller can report what
-    the exclusion removed; the exclusion is never silent.
+    the exclusion removed; the exclusion is never silent. It also carries
+    `{"agent-dropped": {agent_id: n}}` — the rows the session class admitted and
+    `agent_filter` then rejected, the half of the selection that used to be silent.
+    `window`, when given a dict, is filled with `{"files": n, "rows": n}`: how many
+    dated JSONL buckets fell in the window and how many rows they held. That is what
+    lets a caller tell an empty window from a filter that selected nothing (#998) —
+    without it the two empties print identically, and a mis-set filter exits 0 while
+    `write_index` rewrites the live candidate index to `Total candidates: 0`.
     """
     trajectories = []
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
@@ -644,12 +653,17 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker",
 
     if not TRAJECTORY_DIR.exists():
         print(f"Warning: Trajectory directory not found: {TRAJECTORY_DIR}")
+        if window is not None:
+            window.update(files=0, rows=0)
         return trajectories
 
     def tally(bucket: str, cls: str) -> None:
         if class_counts is not None:
             class_counts.setdefault(bucket, {})
             class_counts[bucket][cls] = class_counts[bucket].get(cls, 0) + 1
+
+    if window is not None:
+        window.update(files=0, rows=0)
 
     for jsonl_file in sorted(TRAJECTORY_DIR.glob("*.jsonl")):
         # Skip non-date files
@@ -664,7 +678,10 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker",
                 continue
         except ValueError:
             continue
-        
+
+        if window is not None:
+            window["files"] += 1
+
         try:
             with open(jsonl_file, 'r', encoding='utf-8', errors='replace') as f:
                 for line_num, line in enumerate(f, 1):
@@ -673,6 +690,13 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker",
                         continue
                     try:
                         traj = json.loads(line)
+                        # Counted before either selector runs, so `rows` answers
+                        # "was there anything in the window to select from" and
+                        # cannot read as 0 for the case it exists to detect —
+                        # machine-class rows that the exclusion removes before the
+                        # agent filter ever sees them (#998).
+                        if window is not None:
+                            window["rows"] += 1
                         # Session-class exclusion (#493). `agent_id` cannot do
                         # this work: the extractor derives it from the filename
                         # and 0 of the live session files carry its one prefix, so
@@ -702,14 +726,20 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker",
                         if agent_filter != "all":
                             aid = traj.get("agent_id", "")
                             if agent_filter in ("worker", "autonomy"):
-                                if aid not in ("worker", "autonomy"):
-                                    continue
+                                selected = aid in ("worker", "autonomy")
                             elif agent_filter in ("main", "lloyd"):
-                                if aid not in ("main", "lloyd"):
-                                    continue
+                                selected = aid in ("main", "lloyd")
                             else:
-                                if aid != agent_filter:
-                                    continue
+                                selected = aid == agent_filter
+                            if not selected:
+                                # Counted, not swallowed. This is the selection the
+                                # documented `--agent worker` default fails on every
+                                # live row — 0 of 1,306 carry `agent_id` worker or
+                                # autonomy (#494) — and the number a non-zero exit
+                                # has to name so a zero run says which filter did it
+                                # instead of printing a SUMMARY (#998).
+                                tally("agent-dropped", aid or NO_AGENT_ID)
+                                continue
                         trajectories.append(traj)
                     except json.JSONDecodeError:
                         # Skip malformed lines
@@ -1524,7 +1554,73 @@ def print_stats(trajectories: list[dict],
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def main() -> None:
+# ── What a zero-trajectory run means (backlog #998) ──────────────────────────
+#
+# A run that loads nothing used to be indistinguishable from a productive one in
+# three ways at once: it printed an ordinary SUMMARY, it exited 0, and it
+# rewrote `INDEX.md` to `Total candidates: 0`. The third is the damaging one —
+# `write_index` lists only what the current run emitted, so a zero run replaces
+# the index a reader or downstream agent consults, and `_pipeline/` is
+# gitignored (`.gitignore:25`), so no diff ever shows it. Measured 2026-09-16:
+# the live index read `Total candidates: 0` while 3,920 `candidate-*.md` files
+# sat in the same directory.
+#
+# The two empties are different events and must not share an exit status:
+#   * no trajectory rows in the window at all — a legitimately quiet day. Exit 0,
+#     said out loud in one line.
+#   * rows were in the window and the session-class exclusion plus `--agent`
+#     selected none of them — a filter/config error. Exit non-zero naming the
+#     filter and every count it excluded, and leave the index alone.
+# `--agent worker` is the standing instance of the second: #493 reclassified
+# `worker` as machine class, so the documented default selects nothing by design.
+
+EMPTY_WINDOW_MESSAGE = ("Window empty: no trajectory rows in the period read; "
+                        "nothing to mine, no index written.")
+FILTER_SELECTED_NOTHING_EXIT = 2
+
+
+def empty_corpus_exit_code(trajectories: list[dict], window: dict,
+                           class_counts: dict, agent: str,
+                           exclude_machine: bool) -> int | None:
+    """Decide what a load that selected nothing means, and say it.
+
+    Returns `None` when anything was loaded — the ordinary path. Otherwise
+    returns the process exit status: 0 for a window that held no rows at all,
+    `FILTER_SELECTED_NOTHING_EXIT` when rows existed and the selectors admitted
+    none of them. The caller must not write the index in either zero case, which
+    is why this runs before `emit_candidates` rather than after it.
+
+    The two messages are deliberately different strings: a reader grepping the
+    nightly log for one must not find the other, because "nothing happened today"
+    and "your filter is wrong" want opposite responses.
+    """
+    if trajectories:
+        return None
+
+    rows_seen = window.get("rows", 0)
+    if rows_seen == 0:
+        print(f"  {EMPTY_WINDOW_MESSAGE}", file=sys.stderr)
+        return 0
+
+    class_dropped = class_counts.get("dropped", {})
+    agent_dropped = class_counts.get("agent-dropped", {})
+    n_class = sum(class_dropped.values())
+    n_agent = sum(agent_dropped.values())
+    exclusion = "on" if exclude_machine else "off"
+    print(f"  ERROR: --agent {agent} selected 0 of {rows_seen} row(s) in the "
+          f"window; no candidates written and INDEX.md untouched.",
+          file=sys.stderr)
+    print(f"    excluded by --agent {agent}: {n_agent} row(s)", file=sys.stderr)
+    for aid, count in sorted(agent_dropped.items(), key=lambda x: -x[1]):
+        print(f"      agent-excluded {aid}: {count}", file=sys.stderr)
+    print(f"    excluded by the session-class exclusion ({exclusion}): "
+          f"{n_class} row(s)", file=sys.stderr)
+    for cls, count in sorted(class_dropped.items(), key=lambda x: -x[1]):
+        print(f"      dropped {cls}: {count}", file=sys.stderr)
+    return FILTER_SELECTED_NOTHING_EXIT
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Mine trajectory JSONL files for skill candidates."
     )
@@ -1579,9 +1675,11 @@ def main() -> None:
     # Load trajectories
     print(f"Loading trajectories from last {args.days} days...", file=sys.stderr)
     class_counts: dict = {}
+    window: dict = {}
     trajectories = load_trajectories(days=args.days, agent_filter=args.agent,
                                      exclude_machine=not args.include_machine,
-                                     class_counts=class_counts)
+                                     class_counts=class_counts,
+                                     window=window)
     print(f"  Loaded {len(trajectories)} trajectory(ies)", file=sys.stderr)
     dropped = sum(class_counts.get("dropped", {}).values())
     # The label is what `skills/trajectory-skill-mining/SKILL.md` quotes, so it
@@ -1593,9 +1691,19 @@ def main() -> None:
                              key=lambda x: -x[1]):
         print(f"    dropped {cls}: {count}", file=sys.stderr)
 
+    # Decide before anything is written whether a zero-load run is a quiet day or
+    # a filter that selected nothing (#998). Both print; only the first exits 0;
+    # neither reaches `write_index`.
+    zero_exit = empty_corpus_exit_code(trajectories, window, class_counts,
+                                       agent=args.agent,
+                                       exclude_machine=not args.include_machine)
+
     if args.stats:
         print_stats(trajectories, class_counts=class_counts)
-        return
+        return zero_exit if zero_exit is not None else 0
+
+    if zero_exit is not None:
+        return zero_exit
     
     # Mine patterns
     print("Mining error patterns...", file=sys.stderr)
@@ -1664,4 +1772,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

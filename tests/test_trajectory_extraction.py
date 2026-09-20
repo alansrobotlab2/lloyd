@@ -2263,7 +2263,7 @@ def miner_row(key, cls, tool="Graphex493"):
     return row
 
 
-def run_miner(corpus, out_dir, extra_args=(), sessions_dir=None):
+def run_miner(corpus, out_dir, extra_args=(), sessions_dir=None, agent=None):
     """Run the real command line the nightly runs.
 
     `--sessions-dir` defaults to an empty directory, not the live
@@ -2271,12 +2271,17 @@ def run_miner(corpus, out_dir, extra_args=(), sessions_dir=None):
     store, so a subprocess test that left it alone would take its expected counts
     from whatever happened to be on the machine. Pass `sessions_dir` to say where
     the sessions came from.
+
+    `agent` overrides `--agent`, which defaults to the nightly skill's value. It
+    is a real flag of the command line, not a shortcut: #998 is about what the
+    exit status does when a filter is mis-set, so the mis-set filter has to be
+    the flag the operator typed.
     """
     store = sessions_dir if sessions_dir is not None else (corpus.parent / "store")
     store.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, str(MINER_PATH), "--trajectory-dir", str(corpus),
            "--sessions-dir", str(store),
-           "--agent", NIGHTLY_AGENT, "--days", "9999", "--threshold", "2",
+           "--agent", agent or NIGHTLY_AGENT, "--days", "9999", "--threshold", "2",
            "--output-dir", str(out_dir), *extra_args]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
 
@@ -2290,7 +2295,13 @@ def graphex_candidate(out_dir):
 def test_the_nightly_mining_run_excludes_machine_sessions_by_default(tmp_path):
     """Two interactive sessions and three machine sessions carry the SAME
     failure. The candidate must report 2 sessions, not 5 — the loop's cadence is
-    the thing that used to push patterns over the threshold."""
+    the thing that used to push patterns over the threshold.
+
+    The second half is #998: the same corpus with the two human rows removed is a
+    window that holds rows and selects none of them. Silence in the *log* on a
+    machine-only window is fine — the per-class tally is the log — but exiting 0
+    while rewriting the candidate index is not, so that run must fail.
+    """
     corpus = write_traj_corpus(tmp_path / "corpus", [])
     rows = ([miner_row("i1", "interactive"), miner_row("i2", "interactive"),
              miner_row("w1", "worker"), miner_row("w2", "worker"),
@@ -2306,6 +2317,142 @@ def test_the_nightly_mining_run_excludes_machine_sessions_by_default(tmp_path):
     assert re.search(r"^sessions: 2$", fm, re.MULTILINE), fm
     assert re.search(r"^occurrences: 2$", fm, re.MULTILINE), fm
     assert "- i1" in fm and "- i2" in fm and "- w1" not in fm
+
+    machine_only = write_traj_corpus(tmp_path / "machine-only", [])
+    (machine_only / CORPUS_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows[2:]) + "\n", encoding="utf-8")
+    mo_out = tmp_path / "machine-only-cands"
+    mo_proc = run_miner(machine_only, mo_out)
+    mo_report = mo_proc.stdout + mo_proc.stderr
+    assert mo_proc.returncode != 0, mo_report
+    # The tallies the passing run prints are still printed by the failing one:
+    # the exit status is added, the diagnosis is not replaced by it.
+    assert "Machine-class sessions dropped: 3" in mo_report, mo_report
+    assert "dropped worker: 2" in mo_report, mo_report
+    assert "dropped autonomy: 1" in mo_report, mo_report
+    assert not (mo_out / "INDEX.md").exists(), (
+        "a run that selected nothing still rewrote the candidate index")
+
+
+def test_a_filter_that_selects_nothing_from_a_non_empty_window_fails_loudly(
+        tmp_path):
+    """#998 clause 1, across the real command line.
+
+    Three human sessions, all written by the extractor with `agent_id: lloyd`, and
+    the documented `--agent worker` filter: the session-class exclusion admits all
+    three rows and the agent filter then rejects every one of them. That is a
+    mis-set selector, not a quiet day, so the run must exit non-zero and name both
+    the filter it was given and the number it excluded — which is the case the
+    live nightly hits, since #493 made `worker` a machine class and no live row
+    carries `agent_id` worker at all (#494).
+    """
+    corpus = write_traj_corpus(tmp_path / "corpus", [])
+    rows = [miner_row(f"i{n}", "interactive") for n in (1, 2, 3)]
+    (corpus / CORPUS_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    out = tmp_path / "cands"
+    proc = run_miner(corpus, out, agent="worker")
+    report = proc.stdout + proc.stderr
+    assert proc.returncode == mt.FILTER_SELECTED_NOTHING_EXIT, report
+    # Names the filter value...
+    assert "--agent worker" in report, report
+    # ...and the count it excluded, in both halves of the selection: the rows the
+    # agent filter rejected and the rows the session-class rule rejected.
+    assert "selected 0 of 3 row(s)" in report, report
+    assert "excluded by --agent worker: 3 row(s)" in report, report
+    assert "agent-excluded lloyd: 3" in report, report
+    # Not the empty-window verdict, which would tell the reader to wait for data.
+    assert "Window empty" not in report, report
+    assert "SUMMARY" not in report, (
+        "a dead run still printed the ordinary SUMMARY")
+
+
+def test_an_empty_window_is_a_quiet_day_and_not_a_failure(tmp_path):
+    """#998 clause 2: a window with no trajectory rows at all exits 0 and says so
+    in one line that is unmistakably different from the filter-selected-nothing
+    message, so a reader can tell 'nothing happened' from 'your filter is wrong'."""
+    corpus = tmp_path / "corpus"          # exists, holds no bucket file at all
+    corpus.mkdir()
+    out = tmp_path / "cands"
+    proc = run_miner(corpus, out)
+    report = proc.stdout + proc.stderr
+    assert proc.returncode == 0, report
+    empty_lines = [l for l in report.splitlines() if "Window empty" in l]
+    assert len(empty_lines) == 1, report
+    assert "no trajectory rows" in empty_lines[0], empty_lines[0]
+    assert "ERROR" not in report, report
+    assert "--agent" not in report, report
+
+
+def test_a_failed_selection_leaves_the_index_byte_identical(tmp_path):
+    """#998 clause 3: `INDEX.md` is neither created nor modified by a run that
+    exits under the filter-selected-nothing verdict.
+
+    Both halves matter. The live index at
+    `_pipeline/skills/candidates/INDEX.md` is gitignored (`.gitignore:25`), so a
+    rewrite that drops 3,920 rows to `Total candidates: 0` is invisible to `git
+    status` and to any diff-based review — the only guard possible is that the run
+    does not write it. And a scratch `--output-dir` must not gain an index it did
+    not have, because `write_index` is what a downstream agent reads next.
+    """
+    corpus = write_traj_corpus(tmp_path / "corpus", [])
+    rows = [miner_row("i1", "interactive"), miner_row("i2", "interactive")]
+    (corpus / CORPUS_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    out = tmp_path / "cands"
+    out.mkdir()
+    sentinel = "---\ntype: index\n---\n\n- **Total candidates:** 2\n"
+    index = out / "INDEX.md"
+    index.write_text(sentinel, encoding="utf-8")
+
+    proc = run_miner(corpus, out, agent="worker")
+    assert proc.returncode == mt.FILTER_SELECTED_NOTHING_EXIT, (
+        proc.stdout + proc.stderr)
+    assert index.read_text(encoding="utf-8") == sentinel, (
+        "the index was rewritten by a run that loaded nothing")
+
+    fresh = tmp_path / "fresh"
+    proc2 = run_miner(corpus, fresh, agent="worker")
+    assert proc2.returncode == mt.FILTER_SELECTED_NOTHING_EXIT, (
+        proc2.stdout + proc2.stderr)
+    assert not (fresh / "INDEX.md").exists(), "INDEX.md was created by a dead run"
+    assert not list(fresh.glob("candidate-*.md")), (
+        "a dead run emitted candidate files")
+
+
+def test_stats_gives_the_same_verdict_as_mining_for_both_empties(tmp_path):
+    """#998 clause 4: `--stats` is a read-only mode, not a mute button.
+
+    Before this it exited 0 on both empties, so the one mode an operator runs to
+    ask 'is the pipeline alive' answered the question exactly as a productive run
+    would. The mining path and the stats path must agree on both cases.
+    """
+    corpus = write_traj_corpus(tmp_path / "corpus", [])
+    rows = [miner_row("i1", "interactive"), miner_row("i2", "interactive")]
+    (corpus / CORPUS_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    # Non-empty window, filter selected nothing -> same failure as mining.
+    stats_dead = run_miner(corpus, tmp_path / "stats-dead",
+                           agent="worker", extra_args=("--stats",))
+    mining_dead = run_miner(corpus, tmp_path / "mine-dead", agent="worker")
+    report = stats_dead.stdout + stats_dead.stderr
+    assert stats_dead.returncode == mining_dead.returncode, report
+    assert stats_dead.returncode == mt.FILTER_SELECTED_NOTHING_EXIT, report
+    assert "--agent worker" in report, report
+    assert "excluded by --agent worker: 2 row(s)" in report, report
+
+    # Genuinely empty window -> exit 0 on both paths, with the quiet-day line.
+    empty_corpus = tmp_path / "empty-corpus"
+    empty_corpus.mkdir()
+    stats_empty = run_miner(empty_corpus, tmp_path / "stats-empty",
+                            extra_args=("--stats",))
+    mining_empty = run_miner(empty_corpus, tmp_path / "mine-empty")
+    assert stats_empty.returncode == 0, stats_empty.stdout + stats_empty.stderr
+    assert mining_empty.returncode == 0, mining_empty.stdout + mining_empty.stderr
+    assert "Window empty" in stats_empty.stdout + stats_empty.stderr
+    assert "ERROR" not in stats_empty.stdout + stats_empty.stderr
 
 
 def test_the_inner_voice_chats_are_the_corpus_the_default_nightly_run_mines(
