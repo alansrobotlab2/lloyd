@@ -329,12 +329,21 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
     # Every non-interactive turn is built here, and until #534 every one of
     # them ran with `hooks=None` — no safety hook, no grant gate, so
     # `safety.py`'s Bash-only patterns never even got a chance to run and
-    # nothing at all gated the durable-external surface. The gate takes its
-    # scope from `policy.current_scope`, which the pool binds per job.
+    # nothing at all gated the durable-external surface. The grant gate takes
+    # its scope from `policy.current_scope`, which the pool binds per job.
+    #
+    # The outbound content gate (#1136) is armed on the same registry, and like
+    # the grant gate above it takes its scope from `policy.current_scope`, which
+    # the pool binds to `grant_scope_for(item)` around every job
+    # (`workers/pool.py:681`). Passing a scope here would invent a second
+    # spelling of the same string and could only drift from the one the grant
+    # gate is already using.
     from app.harness import HookRegistry
+    from app.harness.outbound_content import install_outbound_content_gate
     from app.harness.policy import install_policy_hook
     hooks = HookRegistry()
     install_policy_hook(hooks)
+    install_outbound_content_gate(hooks)
 
     model_env = _get_model_env("primary")
 

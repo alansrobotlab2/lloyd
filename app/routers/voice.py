@@ -30,7 +30,7 @@ from app.config import (
     _model_base_url,
     _resolve_model_name,
 )
-from app.harness import RunOptions
+from app.harness import HookRegistry, RunOptions, install_default_safety_hook
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
     SessionTurn,
@@ -233,6 +233,17 @@ def _voice_turn_setup(session_id: str) -> dict:
             live = False
         return _get_disallowed_tools(plan_mode=live)
 
+    # #1136. A spoken turn has the same tool surface a chat turn has — the same
+    # MCP servers, hence the same tier-2 senders — and until this line it had no
+    # PreToolUse hook of any kind: the options were built with no `hooks`
+    # argument, `RunOptions.hooks` defaults to None, and the SessionTurn ran them
+    # verbatim. The cross-file finder added in this same round is what saw it; a
+    # per-file grep asks "does this file install hooks", and a file that installs
+    # nothing is never asked. The registry is built here so the turn and its
+    # prewarm (`_prewarm` reuses this dict) arm identically.
+    turn_hooks = HookRegistry()
+    install_default_safety_hook(turn_hooks)
+
     options = RunOptions(
         model=model,
         base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
@@ -248,6 +259,7 @@ def _voice_turn_setup(session_id: str) -> dict:
         session_id=session_id,
         priority=0,
         extra_body=_voice_extra_body(),
+        hooks=turn_hooks,
         **_get_harness_kwargs(),
     )
     return {"model": model, "meta_path": meta_path, "options": options,

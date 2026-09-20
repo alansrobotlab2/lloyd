@@ -23,6 +23,7 @@ import re
 from typing import Any
 
 from app.harness.hooks import HookRegistry
+from app.harness.outbound_content import install_outbound_content_gate
 
 logger = logging.getLogger("lloyd-harness-safety")
 
@@ -217,5 +218,16 @@ def install_default_safety_hook(hooks: HookRegistry) -> None:
 
     Call this for every primary turn (IV-on or IV-off). Idempotent in
     practice because each turn builds a fresh `HookRegistry`.
+
+    Also arms the outbound content gate (#1136) on the same registry, because
+    this is the one installer every production turn already calls and the gate
+    is a sibling guard, not a fourth convention: Bash shape and payload
+    content are the two halves of "should this call happen", and a path that
+    installs one and not the other is what #869 is about. The gate takes no
+    scope here — it falls back to `policy.current_scope`, which the worker
+    pool and the autonomy runner bind per job, and it is armed explicitly
+    with a scope at the two dispatch paths that build a registry without this
+    floor (`autonomy.run_task`, `workers/sources/_common.py`).
     """
     hooks.add_pre_tool_use(None, _safety_pretool_cb)
+    install_outbound_content_gate(hooks)

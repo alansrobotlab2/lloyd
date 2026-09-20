@@ -246,7 +246,7 @@ async def _one_run(*, keep: int, max_turns: int,
     is what `tests/test_preserve_thinking_eval.py` asserts on.
     """
     import yaml as _yaml
-    from app.harness import RunOptions
+    from app.harness import HookRegistry, RunOptions, install_default_safety_hook
     from app.harness.loop import run_query
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
@@ -266,6 +266,13 @@ async def _one_run(*, keep: int, max_turns: int,
     state = {"turn": 1}
     session_id = f"pt-eval-{keep}-{int(time.time())}"
 
+    # #1136: this eval registers the real Lloyd MCP servers, so its trial can
+    # call a tier-2 sender exactly as a production turn can, and it ran with
+    # `hooks=None` until now. One registry for both turns of the trial — the two
+    # turns share one chat buffer, so they are one job.
+    hooks = HookRegistry()
+    install_default_safety_hook(hooks)
+
     def _options(turn_max: int) -> RunOptions:
         return RunOptions(
             model=alias,
@@ -277,6 +284,7 @@ async def _one_run(*, keep: int, max_turns: int,
             session_id=session_id,
             priority=1,                    # yield to real user traffic
             chat_messages_handle=chat,     # one buffer, two turns
+            hooks=hooks,
             **kwargs,
         )
 

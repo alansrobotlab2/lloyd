@@ -1676,6 +1676,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         # here matters because the manual and HTTP entry points skip the
         # scheduler's load-time check entirely.
         from app.harness import HookRegistry
+        from app.harness.outbound_content import install_outbound_content_gate
         from app.harness.policy import (
             GRANT_MINT_TOOL, GrantError, default_store, install_policy_hook,
             sync_task_grants, validate_task_grants,
@@ -1705,6 +1706,12 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
 
         task_hooks = HookRegistry()
         install_policy_hook(task_hooks, scope=grant_scope)
+        # #1136 — the sibling guard on the same registry. Armed with the task's
+        # own scope rather than the contextvar default, because a scheduled
+        # task is the path where a leak has no reviewer: the grant gate is
+        # already armed with `grant_scope` two lines above, and a content gate
+        # that read a different scope would be a second convention.
+        install_outbound_content_gate(task_hooks, scope=grant_scope)
 
         # ONE number for the cap and for the warning about the cap. The harness
         # stops the run at `max_turns` (`app/harness/loop.py`), and the anchor

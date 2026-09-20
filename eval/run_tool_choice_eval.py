@@ -260,6 +260,13 @@ async def run_eval(queries: list[dict], *, timeout: float, model: str | None) ->
         "matches_chat_router": True,
     }
 
+    # #1136: the eval registers the real Lloyd MCP servers, so a query here can
+    # reach a tier-2 sender the way a production turn can; the turn ran with
+    # `hooks=None` until this round's cross-file dispatch finder said so.
+    from app.harness import HookRegistry, install_default_safety_hook
+    hooks = HookRegistry()
+    install_default_safety_hook(hooks)
+
     records = []
     for spec in queries:
         prompt = spec.get("prompt") or ""
@@ -281,6 +288,7 @@ async def run_eval(queries: list[dict], *, timeout: float, model: str | None) ->
             # other way round. A measurement is repeatable and an implement
             # round is not.
             priority=3,
+            hooks=hooks,
             **tool_search_kwargs,
         )
 

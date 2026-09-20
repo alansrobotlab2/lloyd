@@ -183,3 +183,27 @@ def test_every_registry_the_router_builds_arms_the_gate():
     text = open(M.__file__).read()
     assert text.count("install_default_safety_hook(iv_hooks)") == 3
     assert text.count("install_policy_hook(iv_hooks, scope=") == 3
+
+
+def test_the_same_registry_set_also_arms_the_outbound_content_gate():
+    """The pin-count convention, applied one guard over (#1136).
+
+    The test above pins three router sites for the Bash floor and the grant
+    gate. A fourth guard that only ever got installed on some of those paths is
+    the same bug wearing a new name, so the content gate is pinned here in the
+    same idiom — and, unlike a per-file count, through a finder that walks every
+    dispatch site in the tree, because the hole this closes is a path nobody
+    thought to count.
+    """
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "app" / "routers" / "messages.py").read_text(encoding="utf-8")
+    assert text.count("install_default_safety_hook(iv_hooks)") == 3
+    assert text.count("install_policy_hook(iv_hooks, scope=") == 3
+
+    from app.harness.outbound_content import (
+        GATE_ARM_POINTS, find_unarmed_dispatch_paths, stale_gate_arm_points,
+    )
+    assert find_unarmed_dispatch_paths() == [], find_unarmed_dispatch_paths()
+    assert stale_gate_arm_points() == [], stale_gate_arm_points()
+    assert len(GATE_ARM_POINTS) == 9, GATE_ARM_POINTS
