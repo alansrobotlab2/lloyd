@@ -453,7 +453,8 @@ INTEL_PAIR = {"intel-pipeline-config", "intel-agent-pipeline-config"}
 QWEN_PAIR = {"qwen3-tts-voice", "qwen3-tts-voice cloning"}
 
 
-def _drive_main(tmp_path, monkeypatch, argv, confidence=0.93):
+def _drive_main(tmp_path, monkeypatch, argv, confidence=0.93,
+                entities=None, neighbors=None):
     """Run the real main() against tmp_path. Returns the pairs it judged."""
     monkeypatch.setattr(ser, "PIPELINE_ROOT", tmp_path)
     monkeypatch.setattr(ser, "CANDIDATE_LOG", tmp_path / "semantic-entity-candidates-2099-01-01.jsonl")
@@ -463,10 +464,11 @@ def _drive_main(tmp_path, monkeypatch, argv, confidence=0.93):
     monkeypatch.setattr(ser, "PROPOSAL_LATEST", tmp_path / "semantic-proposals-latest.jsonl")
     # Store, facts and verdicts are the outside world; the run under test must
     # not read or write any of them.
-    monkeypatch.setattr(ser, "list_entities", lambda: list(RUN_ENTITIES))
+    monkeypatch.setattr(ser, "list_entities", lambda: list(entities or RUN_ENTITIES))
     monkeypatch.setattr(ser, "load_aliases", lambda: {})
     monkeypatch.setattr(ser, "load_graph", lambda: {"edges": []})
-    monkeypatch.setattr(ser, "build_neighbors", lambda graph: dict(RUN_NEIGHBORS))
+    monkeypatch.setattr(ser, "build_neighbors",
+                        lambda graph: dict(neighbors if neighbors is not None else RUN_NEIGHBORS))
     # `already_aliased` is nested inside generate_candidates and reaches for the
     # KG store through this global; with no store it falls back to name equality,
     # which keeps the run off the live database entirely.
@@ -578,3 +580,155 @@ def test_verdict_cache_comment_no_longer_claims_a_shrinking_pool():
     block = m.group(0)
     assert "65k" not in block.lower()
     assert "shrink" not in block.lower()
+
+
+# ---------------------------------------------------------------------------
+# #1175 — the suffix-asymmetry merge guard
+#
+# A `same` verdict at merge confidence on a BARE concept paired with its ROLE-
+# SUFFIXED instance (`Browser` <-> `Browser Tool`, `alfie_vr` <-> `Alfie VR
+# System`) cleared every guard in `merge_allowed`, because all six existing ones
+# are count/shape tests on facts, edges, numbers or possessives — none compares
+# the two NAMES to each other. Measured on the 2026-09-16 run's proposals: 39 of
+# 183 merge rows (21 %) have that shape with `guard_reason: null`; 6 of the 39
+# carry a role noun on the short side too and are genuine aliases, so 33 are
+# guardable. Reproduced on 2026-09-08 at 41 of 156 (26 %).
+#
+# What the guard changes is the row the human reviewer is shown: no code reads
+# `action` out of the proposals file (the sweep loads it into
+# `plan["semantic_proposals"]` for display, and `apply_merges` walks the sweep's
+# own clusters), so the job here is to hand that reviewer `alias_only` with a
+# reason instead of an unguarded `merge`.
+# ---------------------------------------------------------------------------
+
+# The three bare↔role-suffixed pairs #1175 names off the live proposals.
+BARE_SUFFIXED = [
+    ("Browser", "Browser Tool"),
+    ("alfie_vr", "Alfie VR System"),
+    ("OpenClaw Cron", "OpenClaw Cron System"),
+]
+
+# Genuine aliases from the same proposals file whose SHORT side also carries a
+# role noun — the six the item's own exclusion rule removes from the 39, and the
+# reason the guard must not fire when both names carry a suffix.
+BOTH_SUFFICED = [
+    ("Claude SDK Hooks", "Claude Agent SDK Hooks"),
+    ("Tool MCP", "Tool MCP Service"),
+    ("Autonomy System", "Autonomy Task System"),
+    ("agent_mcp", "agent-tool-mcp"),
+    ("Current System", "Current Agent System"),
+    ("Claude SDK TypeScript", "Claude Agent SDK (TypeScript)"),
+]
+
+# The six reasons `merge_allowed` returned before #1175, plus the one its caller
+# supplies itself when confidence lands between the two thresholds. Clause 3
+# allows any of these for a both-suffixed pair; only `suffix_asymmetry` is
+# forbidden.
+PRE_EXISTING_GUARD_REASONS = {
+    "task_number_in_name", "timestamp_id_in_name", "possessive_artifact",
+    "combined_facts_over_cap", "variant_too_many_facts", "variant_too_many_edges",
+    "below_merge_threshold",
+}
+
+
+def test_suffix_asymmetry_downgrades_bare_vs_role_suffixed_pairs():
+    """clause 1 — the pairs #1175 names come back guard-reasoned, not merged."""
+    for a, b in BARE_SUFFIXED:
+        assert ser.merge_allowed(a, b, {}) == (False, "suffix_asymmetry"), (a, b)
+
+
+def test_suffix_asymmetry_is_direction_independent():
+    """clause 2 — the downgrade cannot depend on which name is listed first."""
+    for a, b in BARE_SUFFIXED:
+        assert ser.merge_allowed(b, a, {}) == (False, "suffix_asymmetry"), (b, a)
+
+
+def test_suffix_asymmetry_spares_pairs_whose_short_side_is_suffixed_too():
+    """clause 3 — those six are real aliases; the guard must leave them alone."""
+    for a, b in BOTH_SUFFICED:
+        for pair in ((a, b), (b, a)):
+            allowed, reason = ser.merge_allowed(pair[0], pair[1], {})
+            assert reason != "suffix_asymmetry", pair
+            assert allowed or reason in PRE_EXISTING_GUARD_REASONS, (pair, reason)
+
+
+def test_suffix_asymmetry_spares_a_non_role_remainder_and_an_identical_pair():
+    """clause 4 — nothing outside the role list may trigger a downgrade."""
+    for a, b in [("Voice Mode", "Voice Mode Alpha"),     # the clause's own example
+                 ("Knowledge", "Knowledge Library"),     # this script's own good duplicate
+                 ("RAG", "RAG Notes")]:
+        for pair in ((a, b), (b, a)):
+            assert ser.merge_allowed(pair[0], pair[1], {})[1] != "suffix_asymmetry", pair
+    # Names that normalize to the same thing are not a proper containment.
+    for a, b in [("Browser Tool", "browser-tool"), ("Browser", "Browser")]:
+        assert ser.is_suffix_asymmetric(a, b) is False, (a, b)
+        assert ser.merge_allowed(a, b, {})[1] != "suffix_asymmetry", (a, b)
+
+
+def test_role_noun_list_is_the_one_the_item_names():
+    """clause 1 — the guard's vocabulary, pinned rather than implied.
+
+    Containment is only as tight as this set: widened and ordinary pairs start
+    coming back alias-only, narrowed and `Browser`/`Browser Tool` ships as a
+    destructive merge candidate.
+    """
+    assert ser.MERGE_ROLE_TOKENS == {
+        "system", "service", "agent", "sdk", "pipeline", "task", "loop", "app",
+        "tool", "toolkit", "framework", "module", "component", "version",
+    }
+
+
+def test_name_tokens_keeps_the_role_words_that_tokenize_drops():
+    """The guard reads the words `tokenize` throws away, so it has its own.
+
+    `system`/`tool`/`task` are in `NAME_STOPWORDS` for Jaccard, so reusing
+    `tokenize` here would make `Browser` and `Browser Tool` tokenize identically
+    and the guard could never see the suffix — a green test either way.
+    """
+    assert ser.name_tokens("Browser Tool") == {"browser", "tool"}
+    assert "tool" not in ser.tokenize("Browser Tool"), "Jaccard still drops role words"
+
+
+# Pairs for the whole-run seam test. `Browser`/`Browser Tool` is the guardable
+# shape; `Tool MCP`/`Tool MCP Service` is the both-suffixed control that must
+# survive as a merge candidate. Both score exactly 4.0 — jaccard 1.0 × 3 once
+# the role words drop out of `tokenize`, plus 1.0 for a shared 5-char stem — so
+# the default `--min-score 4.0` floor lets the run judge them, and disjoint
+# neighbor sets hold `shared_neighbors` at 0.
+GUARD_RUN_ENTITIES = ["Browser", "Browser Tool", "Tool MCP", "Tool MCP Service"]
+GUARD_RUN_NEIGHBORS = {
+    "Browser": {"nb1"}, "Browser Tool": {"nb2"},
+    "Tool MCP": {"nb3"}, "Tool MCP Service": {"nb4"},
+}
+
+
+def test_run_downgrades_the_bare_suffix_pair_before_the_sweep_sees_it(
+        tmp_path, monkeypatch, capsys):
+    """The seam #1175 is about: main() → proposals file → the sweep's real loader.
+
+    No code consumes the proposals' `action` field except a person reading the
+    sweep's plan, which is precisely why the guard belongs in `merge_allowed`
+    and not in the emitter — so this asserts on the row the sweep is handed.
+    """
+    judged = _drive_main(tmp_path, monkeypatch, [], confidence=0.93,
+                         entities=GUARD_RUN_ENTITIES, neighbors=GUARD_RUN_NEIGHBORS)
+    out = capsys.readouterr().out
+    assert len(judged) == 2, judged
+    assert "suffix_asymmetry" in out, f"guard missing from the run report: {out}"
+
+    run_log = tmp_path / "semantic-proposals-2099-01-01.jsonl"
+    rows = {(r["canonical"], r["variant"]): r
+            for r in (json.loads(l) for l in run_log.read_text().splitlines() if l.strip())}
+    guardable = rows[("Browser", "Browser Tool")]
+    assert guardable["action"] == "alias_only", guardable
+    assert guardable["guard_reason"] == "suffix_asymmetry", guardable
+
+    control = rows[("Tool MCP", "Tool MCP Service")]
+    assert control["action"] == "merge", control
+    assert control["guard_reason"] is None, control
+
+    # And the sweep, through its own loader, is shown the downgrade.
+    by_pair = {(p["canonical"], p["variant"]): p
+               for p in sweep.load_semantic_proposals(tmp_path)}
+    assert by_pair[("Browser", "Browser Tool")]["action"] == "alias_only"
+    assert by_pair[("Tool MCP", "Tool MCP Service")]["action"] == "merge"

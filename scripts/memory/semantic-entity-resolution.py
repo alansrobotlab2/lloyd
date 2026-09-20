@@ -131,6 +131,23 @@ TASK_NUMBER_PATTERN = re.compile(
 ID_PATTERN = re.compile(r"\d{8}[T_]\d{4,}", re.IGNORECASE)
 # Possessive/descriptive artifact names that shouldn't merge into a person/project entity
 ARTIFACT_PATTERN = re.compile(r"'s\s|'s\b", re.IGNORECASE)
+# Role nouns a suffixed instance hangs off a bare concept (#1175): `Browser` vs
+# `Browser Tool`, `OpenClaw Cron` vs `OpenClaw Cron System`, `alfie_vr` vs
+# `Alfie VR System`. A `same` verdict at merge confidence on such a pair is the
+# conflation this guard list exists for even with no task number and no
+# possessive in either name: one row is a recurring system, the other one of
+# its task instances. `pick_canonical` breaks a facts+degree tie on the SHORTER
+# name, so a merge here silently adopts whichever row happens to be terser —
+# usually the bare concept absorbing the instance, and the reverse whenever the
+# instance row carries more facts.
+# Measured on the 2026-09-16 run's own proposals (183 merge rows): 39 (21 %)
+# have this shape with `guard_reason: null`; 6 of those carry a role noun on the
+# short side as well and are genuine aliases (`Tool MCP` vs `Tool MCP Service`),
+# so 33 are guardable. Reproduced on 2026-09-08 at 41 of 156 (26 %).
+MERGE_ROLE_TOKENS = {
+    "system", "service", "agent", "sdk", "pipeline", "task", "loop", "app",
+    "tool", "toolkit", "framework", "module", "component", "version",
+}
 
 # Stopwords in entity names — skip during tokenization for Jaccard
 NAME_STOPWORDS = {
@@ -543,6 +560,43 @@ def judge_pair(pair: dict, endpoint: str, model: str, timeout: int) -> dict | No
 # ---------------------------------------------------------------------------
 
 
+def name_tokens(name: str) -> set[str]:
+    """Every alphanumeric token, ROLE WORDS INCLUDED.
+
+    Deliberately NOT `tokenize`: that one drops `NAME_STOPWORDS` — which is
+    exactly where `system`/`tool`/`task` live — because Jaccard must not be
+    diluted by them. This guard reads those words, so it needs its own
+    tokenizer; sharing `tokenize` would make both names tokenize identically
+    and the guard could never see the suffix it exists to catch.
+    """
+    return set(re.findall(r"[a-z0-9]+", (name or "").lower()))
+
+
+def is_suffix_asymmetric(a: str, b: str) -> bool:
+    """Is one name just the other plus role nouns? (#1175)
+
+    Token-set containment, not `str.find`: the item's examples cross separators
+    (`alfie_vr` vs `Alfie VR System`, `trajectory-extraction` vs
+    `trajectory-extraction-system`), which no substring test normalises. Both
+    orientations are tested, so the answer never depends on which name the
+    proposal lists first; equal token sets are not a proper containment, so an
+    identical pair is not asymmetric.
+    """
+    ta, tb = name_tokens(a), name_tokens(b)
+    for small, big in ((ta, tb), (tb, ta)):
+        if not small or not small < big:
+            continue
+        # The short side carries a role noun too → the suffix is part of BOTH
+        # names' identity (`Tool MCP` vs `Tool MCP Service`, `Claude SDK Hooks`
+        # vs `Claude Agent SDK Hooks`): a genuine alias, and the six rows the
+        # non-fire clause of #1175 exists to protect.
+        if small & MERGE_ROLE_TOKENS:
+            continue
+        if (big - small) <= MERGE_ROLE_TOKENS:
+            return True
+    return False
+
+
 def merge_allowed(a: str, b: str, neighbors: dict[str, set[str]]) -> tuple[bool, str]:
     """Return (allow_merge, reason). False → downgrade to alias-only."""
     # Task/issue number in either name → never merge, alias only
@@ -554,6 +608,13 @@ def merge_allowed(a: str, b: str, neighbors: dict[str, set[str]]) -> tuple[bool,
     # Possessive form ("Alan's X") is an artifact, not the entity itself
     if ARTIFACT_PATTERN.search(a) or ARTIFACT_PATTERN.search(b):
         return False, "possessive_artifact"
+    # Bare concept vs its role-suffixed instance (#1175): `Browser` vs
+    # `Browser Tool`. The two NAMES are the only evidence — no number, no
+    # possessive, and facts/edges on both sides can be tiny — so this sits with
+    # the other name-shape guards and ahead of the store reads below, which
+    # makes the downgrade independent of what the facts root holds today.
+    if is_suffix_asymmetric(a, b):
+        return False, "suffix_asymmetry"
 
     facts_a = count_facts(a)
     facts_b = count_facts(b)
