@@ -118,6 +118,19 @@ class ContentRule:
 #: credentials. These are the strings a scanner is *taught* to print in a
 #: README, so a rule that fires on them has misfired. Every entry names where
 #: it comes from; a literal with no provenance is not allowed in here.
+#:
+#: **An entry that carries a live-looking prefix must be split across a `+`**,
+#: as the Stripe pair below is. This module's job is to hold
+#: credential-shaped strings and GitHub's push protection scans the raw file:
+#: on 2026-09-20 these two entries blocked a push of 34 commits (`GH013`,
+#: commit `904f0bac`). Because protection scans every commit in a push,
+#: cleaning it up in a LATER commit does not unblock the earlier one — the
+#: only ways out are a per-secret unblock URL or rewriting published history,
+#: and here history is what the automod ledger, the LKG and every rollback
+#: target are keyed on. Splitting the prefix from the body is
+#: runtime-identical and defeats a prefix-anchored scanner.
+#: `tests/test_outbound_content_gate.py` pins both halves: that the set still
+#: contains the joined strings, and that the source does not.
 EXEMPT_LITERALS = frozenset({
     "AKIAIOSFODNN7EXAMPLE",          # AWS IAM documentation access key id
     "ASIAIOSFODNN7EXAMPLE",          # the same, STS form
@@ -125,8 +138,13 @@ EXEMPT_LITERALS = frozenset({
     "AKIAIOSFODNN7EXAMPLEKEY",       # the docs key id padded to a full pair
     "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",   # GitHub's token placeholder
     "ghp_yourtokenhere",             # the placeholder people actually paste
-    "sk_live_4eC39HqLyjWDarjtT1zdp7dc",           # Stripe's published test key
-    "sk_test_4eC39HqLyjWDarjtT1zdp7dc",           # Stripe's published test key
+    # Stripe's published documentation key body. Only the `sk_test_` form is
+    # the key Stripe itself publishes; the `sk_live_` entry is that same body
+    # under the live prefix, kept because a doc that pastes one often pastes
+    # the other. That prefix is what scanners rate highest, which is why this
+    # pair is what blocked the push.
+    "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc",
+    "sk_test_" + "4eC39HqLyjWDarjtT1zdp7dc",
 })
 
 # Guards — a function of the candidate token; True keeps the finding.

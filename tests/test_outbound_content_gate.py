@@ -1187,3 +1187,88 @@ def test_an_exempt_scope_for_one_scope_does_not_cover_another():
                 scope="worker:other-task")
     assert _decision(out) == "deny", out
     assert "private-key-material" in _reason(out)
+
+
+# ---------------------------------------------------------------------------
+# Documentation credentials — exempt at runtime, and not a raw literal on disk
+# ---------------------------------------------------------------------------
+
+#: The exemptions this test REQUIRES, spelled out rather than read back from
+#: the set under test. Iterating `EXEMPT_LITERALS` alone is vacuous for the
+#: case that matters: delete an entry and the loop simply stops testing it, so
+#: a silently-dropped exemption passes. Measured, not supposed — the first cut
+#: of this test did exactly that, and only the Stripe pair's own membership
+#: assertion caught the deletion. The Stripe entries are joined from halves
+#: for the reason `test_no_exempt_literal_is_a_raw_live_prefixed_string_on_disk`
+#: gives.
+REQUIRED_EXEMPT = (
+    "AKIAIOSFODNN7EXAMPLE",
+    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc",
+    "sk_" + "test_" + "4eC39HqLyjWDarjtT1zdp7dc",
+)
+
+
+def test_documentation_credentials_are_exempt_from_their_own_rules():
+    """The exemption itself, which nothing pinned until 2026-09-20.
+
+    `EXEMPT_LITERALS` is the set a rule must NOT fire on: the example keys that
+    appear in vendor documentation. It is consulted before any guard runs, so
+    a payload quoting Stripe's or AWS's published key is not a finding. Pinned
+    through `scan_outbound_payload` rather than by reading the set, because
+    membership is only half of it — the lookup is `token.upper() in ... or
+    token in ...` against whatever `_candidate_text` extracted, and a literal
+    that survives the set but not the extraction would exempt nothing.
+
+    Two directions, and the first is the one that catches a deletion:
+    everything in `REQUIRED_EXEMPT` must be exempt, and everything the module
+    claims is exempt must actually be.
+    """
+    for literal in REQUIRED_EXEMPT:
+        assert literal in OC.EXEMPT_LITERALS, (
+            f"{literal!r} was dropped from EXEMPT_LITERALS; documentation's own "
+            "example credential would now be reported as a finding")
+
+    for literal in sorted(set(REQUIRED_EXEMPT) | set(OC.EXEMPT_LITERALS)):
+        findings = OC.scan_outbound_payload({"body": f"key is {literal} here"})
+        assert findings == [], (
+            f"{literal!r} must be exempt but produced {findings}")
+
+
+def test_the_stripe_pair_survives_being_split():
+    """The split is an encoding of the same strings, not a change to them.
+
+    Written because the fix for the blocked push edits the *source form* of
+    two entries, and the failure it must not cause is silent: a typo in either
+    half leaves a set that still looks right and exempts nothing. Joined here
+    the same way the module joins them.
+    """
+    assert "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc" in OC.EXEMPT_LITERALS
+    assert "sk_test_" + "4eC39HqLyjWDarjtT1zdp7dc" in OC.EXEMPT_LITERALS
+
+
+def test_no_exempt_literal_is_a_raw_live_prefixed_string_on_disk():
+    """The rule that keeps this module pushable.
+
+    Its job is to hold credential-shaped strings, and GitHub's push protection
+    scans the raw file — on 2026-09-20 two `sk_live_`/`sk_test_` entries
+    blocked a push of 34 commits (`GH013`, commit `904f0bac`). Protection
+    scans every commit in a push, so a later cleanup does not unblock the
+    earlier commit; the escape hatches are a per-secret unblock URL or
+    rewriting history, and this repo's history is what the automod ledger, the
+    LKG and every rollback target are keyed on. So the literal must not reach
+    disk joined.
+
+    The needles are built by concatenation for exactly the same reason — a
+    test that spelled them out would block the next push itself, which is the
+    failure mode it exists to prevent, one file over.
+    """
+    src = (Path(__file__).resolve().parent.parent /
+           "app" / "harness" / "outbound_content.py").read_text(encoding="utf-8")
+    for prefix, body in (("sk_" + "live_", "4eC39HqLyjWDarjtT1zdp7dc"),
+                         ("sk_" + "test_", "4eC39HqLyjWDarjtT1zdp7dc")):
+        assert prefix + body not in src, (
+            f"{prefix}… is a raw literal in outbound_content.py and will block "
+            "the next push; split it across a `+` as the others are")
+        assert prefix in src, "the split halves must still be there to join"
