@@ -2249,6 +2249,7 @@ Where each section comes from:
 | `workers` | `workers.queue` + `workers.pool` — pool slots, per-source depth, recent runs |
 | `autonomy` | `~/obsidian/autonomy/*.md` frontmatter + the pool's in-flight `scheduled-task` jobs |
 | `backlog` | `~/obsidian/backlog/*.md` frontmatter |
+| `automod` | `app/routers/dashboard.py::_automod` — the loop's scorecard (`scripts/automod/scorecard.py`) over the last 7 days plus its live round state, cached at `_SCORECARD_TTL_S` |
 | `usage` | `usage_store` |
 
 Sections that walk the vault (`autonomy`, `backlog`) are TTL-cached for

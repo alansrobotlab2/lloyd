@@ -55,9 +55,11 @@ navigate succeeds, the brief comes back, nothing appears. Filed as #1274.
 
 One endpoint rather than one per panel, because the page is open all day, and
 `DashboardPage` polls it every `POLL_MS` (2 s). Sections and their sources are
-tabled in `CLAUDE.md` § "Mission Control dashboard" — eleven of them today;
-that table predates the `automod` scorecard section and still does not list
-it. Rules that keep the endpoint honest:
+tabled in `CLAUDE.md` § "Mission Control dashboard" — eleven of them, and
+`tests/test_dashboard_doc_claims.py` asserts that table's section names
+against the `_gather(...)` call in `app/routers/dashboard.py`, so the count
+here and the table are one fact a run can re-measure. Rules that keep the
+endpoint honest:
 
 - the expensive sections are cached and the live ones never are: the vault
   walks (`autonomy`, `backlog`) at `_VAULT_SCAN_TTL_S` 10 s, the
@@ -82,11 +84,11 @@ it. Rules that keep the endpoint honest:
 - a section can be *missing*, not merely failed, after a backend restart:
   test with `sectionOk(section)` and render `sectionError(section)` from
   `api.ts`, never `section.error`, which throws on an undefined section and
-  blanks the very page this design exists to keep up. **The rule is not held
-  yet:** nine `ErrorPanel` sites in `DashboardPage.tsx` (1275, 1340, 1374,
-  1426, 1489, 1504, 1507, 1510, 1526) still read `x.error` in the
-  not-`sectionOk` branch, which is precisely the missing-section case — filed
-  as #1273. The newest section, `automod`, is the only one done right.
+  blanks the very page this design exists to keep up. Every `ErrorPanel` in
+  `DashboardPage.tsx` derives its message that way, and
+  `tests/test_dashboard_doc_claims.py` fails if a raw `error={x.error}`
+  dereference or a `!== undefined` wrapper around a section comes back —
+  the rule is held by that test, not by prose.
 - the state the agent reads is now credentialed: `GET :8500/state` and
   `POST :8500/browser/navigate` refuse a request without the aggregator's
   boot credential, and both the URL and the header come from

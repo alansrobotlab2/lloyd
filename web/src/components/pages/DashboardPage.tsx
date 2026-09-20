@@ -1272,7 +1272,7 @@ export default function DashboardPage() {
             {vllm.map(e => <EngineCard key={e.alias} engine={e} />)}
           </div>
         ) : (
-          <ErrorPanel what="Engine telemetry" error={vllm.error} />
+          <ErrorPanel what="Engine telemetry" error={sectionError(vllm)} />
         )}
       </Section>
 
@@ -1337,7 +1337,7 @@ export default function DashboardPage() {
               </div>
             </Panel>
           ) : (
-            <ErrorPanel what="Primary state" error={primary.error} />
+            <ErrorPanel what="Primary state" error={sectionError(primary)} />
           )}
 
           {/* The chats that just stopped talking */}
@@ -1371,7 +1371,7 @@ export default function DashboardPage() {
         }
       >
         {!sectionOk(agents) ? (
-          <ErrorPanel what="Agent registry" error={agents.error} />
+          <ErrorPanel what="Agent registry" error={sectionError(agents)} />
         ) : (
           <div className="grid gap-3 lg:grid-cols-2">
             <Panel>
@@ -1423,7 +1423,7 @@ export default function DashboardPage() {
       {/* System */}
       <Section title="System" icon={Cpu}>
         {!sectionOk(host) ? (
-          <ErrorPanel what="Host metrics" error={host.error} />
+          <ErrorPanel what="Host metrics" error={sectionError(host)} />
         ) : (
           <div className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -1486,7 +1486,7 @@ export default function DashboardPage() {
         }
       >
         {!sectionOk(services) ? (
-          <ErrorPanel what="Service health" error={services.error} />
+          <ErrorPanel what="Service health" error={sectionError(services)} />
         ) : (
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             {services.services.map(s => (
@@ -1501,29 +1501,29 @@ export default function DashboardPage() {
         <div className="grid gap-3 lg:grid-cols-3">
           {sectionOk(autonomy)
             ? <AutonomyPanel autonomy={autonomy} />
-            : <ErrorPanel what="Autonomy tasks" error={autonomy.error} />}
+            : <ErrorPanel what="Autonomy tasks" error={sectionError(autonomy)} />}
           {sectionOk(workers)
             ? <WorkersPanel workers={workers} />
-            : <ErrorPanel what="Worker pool" error={workers.error} />}
+            : <ErrorPanel what="Worker pool" error={sectionError(workers)} />}
           {sectionOk(backlog)
             ? <BacklogPanel backlog={backlog} />
-            : <ErrorPanel what="Backlog" error={backlog.error} />}
+            : <ErrorPanel what="Backlog" error={sectionError(backlog)} />}
         </div>
-        {/* The loop's report card. `automod` is absent on an older backend;
-            a tab left open across a restart must not blank the page. */}
-        {automod !== undefined && (
-          <div className="mt-3">
-            {sectionOk(automod)
-              ? <AutomodPanel automod={automod} />
-              : <ErrorPanel what="Automod scorecard" error={sectionError(automod)} />}
-          </div>
-        )}
+        {/* The loop's report card. An older backend does not send `automod`
+            at all; it goes through the same sectionOk ternary as its
+            siblings, so a missing section degrades to a visible amber row
+            reading sectionError's own message rather than vanishing. */}
+        <div className="mt-3">
+          {sectionOk(automod)
+            ? <AutomodPanel automod={automod} />
+            : <ErrorPanel what="Automod scorecard" error={sectionError(automod)} />}
+        </div>
       </Section>
 
       {/* Local token accounting */}
       <Section title="Tokens" icon={Gauge}>
         {!sectionOk(usage) ? (
-          <ErrorPanel what="Token usage" error={usage.error} />
+          <ErrorPanel what="Token usage" error={sectionError(usage)} />
         ) : (
           <Panel>
             <div className="mb-2 flex items-baseline justify-between">
