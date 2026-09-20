@@ -11,6 +11,7 @@ summary: 'Skill system: SKILL.md procedures in ~/obsidian/skills/, the four surf
   that read them (prompt index, turn-start injector, dispatch-time deliverer, vault-round
   loader), and the phantom-tool gate.'
 type: reference
+date: '2026-09-20'
 
 ---
 
@@ -30,8 +31,8 @@ into the system prompt (`maxSkillsInPrompt=0`). None of that is true of Lloyd.
 Neither path exists on this box, no marketplace or installer code exists in the
 tree, and the skills index **is** in the system prompt on every turn. The doc
 also named `skills_get` and `file_read` as the way to read a skill; both are on
-the phantom-tool ban list (`scripts/skill_lint.py:214`,
-`tests/test_skill_tool_names.py:38`) — this file was itself an instance of the
+the phantom-tool ban list (`scripts/skill_lint.py:211`,
+`tests/test_skill_tool_names.py:39`) — this file was itself an instance of the
 defect described under "Phantom tool names" below. Its skill inventory listed
 34 skills, of which 8 have since been archived and 3 no longer exist at all.
 The history is kept here rather than deleted because the OpenClaw vocabulary
@@ -41,15 +42,15 @@ still turns up in the vault, in old skills and in `nightly-skills-management`.
 
 | Location | What it is |
 |----------|------------|
-| `~/obsidian/skills/` | the library — 191 active skills |
-| `~/obsidian/skills/.archived/` | 192 retired skills, kept on disk and in git |
+| `~/obsidian/skills/` | the library — 194 skills on disk, **189 advertised** |
+| `~/obsidian/skills/.archived/` | 193 retired skills, kept on disk and in git |
 | `~/lloyd/skills/` | second root, configured everywhere, **does not exist** |
 
 **Three separate definitions of "where skills live", and they do not agree.**
-`agent_mcp/skills.py:27` hardcodes `SKILLS_DIRS`; `prompt_builder.py:100`
+`agent_mcp/skills.py:27` hardcodes `SKILLS_DIRS`; `prompt_builder.py:108`
 hardcodes `_CANON_SKILLS_DIRS`, anchored to the *repo* location rather than
 `Path.home()` so it resolves the same whoever runs the process; and
-`config.yaml:685` `skills.directories` is read by only three call sites
+`config.yaml:1037` `skills.directories` is read by only three call sites
 (`app/routers/skills.py:19`, `:60` and `app/routers/mc_ui.py:457`) — the two
 HTTP routes and the Mission Control tab summary. Nothing the *model* touches
 reads the config key. All three currently list the same two paths, so the
@@ -59,12 +60,17 @@ the tab summary and changes nothing about what reaches a turn.
 `~/lloyd/skills/` has never existed on this box. It is harmless — every reader
 skips a missing directory — but it means the second root is not a tested path.
 
-**Retirement is by directory, not by frontmatter.** Both loaders skip
-dot-prefixed directories (`prompt_builder.py:559`, `agent_mcp/skills.py:90`),
-so moving a skill into `.archived/` removes it from every surface at once
+**Retirement is by directory, or by frontmatter.** Both loaders skip
+dot-prefixed directories (`prompt_builder.py:639`, `agent_mcp/skills.py:124`),
+so moving a skill into `.archived/` removes it from every model-facing surface
 while keeping it on disk and in git history. The `status:` quarantine below is
-the other lever, and in practice it is the unused one: all 191 live skills read
-`status: active`, and the archive is where the mixed values sit.
+the other lever, and it is **not** the unused one the 2026-09-04 pass found:
+189 of the 194 skills on disk read `status: active`, and five
+(`groundskeeper-loop`, `groundskeeper-research`, `nightly-behavior-test`,
+`nightly-morning-briefing`, `nightly-prompt-audit`) read `status: archived`
+while still sitting in the live directory. Those five are absent from the
+advertised index and unreadable through the MCP tools, and still reported as
+`enabled: True` by the Skills page (#1292, #1294).
 
 ## The four surfaces that read a skill
 
@@ -73,10 +79,15 @@ mechanisms rather than one with options.
 
 ### 1. The index, in the system prompt
 
-`prompt_builder._load_skills_index` (`prompt_builder.py:546`) walks both roots,
+`prompt_builder._load_skills_index` (`prompt_builder.py:626`) walks an optional
+overlay root (`<overlay>/skills`, when `LLOYD_OVERLAY_DIR` is set — the
+autoresearch bench runner passes one; what it may put there is bounded by
+`_canonical_prompt_paths()` in `scripts/autoresearch/common.py`, today
+SOUL.md / MEMORY.md / USER.md, so no variant has ever carried a skill)
+plus both canonical roots,
 dedupes by directory name (first root wins) and emits one line —
 `Available skills: ai-engineer-monitor, alfie-monitoring, …` — wrapped by
-`build_system_prompt` (`:314`) as:
+`build_system_prompt` (`:274`) as:
 
 ```
 <available_skills>
@@ -86,7 +97,7 @@ Note: relevant skill content is automatically injected into each
 user message as <context> when matched.
 ```
 
-It is names only: 191 of them, 4,066 chars, ~1k tokens. That is measured, not
+It is names only: 189 of them, 4,028 chars, ~1k tokens. That is measured, not
 estimated — the skills index is one of the named components in the
 `PROMPT_BUDGET` line `log_prompt_size` writes once per build (`:73`), against
 an 80,000-char tripwire. The note at the end exists because the index alone
@@ -94,19 +105,19 @@ would read as "call something to load these"; what actually happens is surface
 2.
 
 `include_skills_index` defaults to `True` and every production caller takes the
-default (`app/routers/messages.py:1736`, `:1908`, `:2032`,
-`app/routers/voice.py:104`, `autonomy.py:943`). The `False` branch is for tests
+default (`app/routers/messages.py:1850`, `:2036`, `:2181`,
+`app/routers/voice.py:222`, `autonomy.py:1605`). The `False` branch is for tests
 that assert on the rest of the prompt.
 
 **A quarantined skill is excluded from the index, and that is not cosmetic.**
-`_is_quarantined_skill` (`:523`) reads the frontmatter `status:` and drops
+`_is_quarantined_skill` (`:603`) reads the frontmatter `status:` and drops
 anything in `_QUARANTINE_STATUSES` — `inactive`, `archived`, `disabled`,
 `retired`, `quarantined`. The vocabulary is **imported from
-`agent_mcp.skills`** (`:109`) rather than restated, with a hardcoded fallback
+`agent_mcp.skills`** (`:117`) rather than restated, with a hardcoded fallback
 only for the case where MCP cannot be imported at all, because advertising a
 skill the reader then declines is the same failure as naming a tool that does
 not exist: the prompt promises something that does not work.
-`tests/test_prompt_builder_overlay.py:193` pins the two lists together.
+`tests/test_prompt_builder_overlay.py:196` pins the two lists together.
 
 The parse is deliberately cheap — a 2,000-char head read and a line scan, not
 YAML — because this runs for every skill on every prompt build.
@@ -115,7 +126,7 @@ YAML — because this runs for every skill on every prompt build.
 
 `prefetch.py` scores the *user's message* against every skill and injects the
 winner's body into a `<context>` block ahead of the turn. Thresholds
-(`prefetch.py:40-43`):
+(`prefetch.py:41-44`):
 
 | | value |
 |---|---|
@@ -125,13 +136,13 @@ winner's body into a `<context>` block ahead of the turn. Thresholds
 | `SKILL_EXCERPT_MAX` | 500 chars |
 
 Rendered as `<skill name="…" score="…">` and, for the runner-up,
-`<skill name="…" score="…" excerpt="true">` (`:903`, `:911`). When nothing
+`<skill name="…" score="…" excerpt="true">` (`:930`, `:941`). When nothing
 matches *and* the message is a genuine new task rather than a continuation, a
-`<skill-hint>` nudges toward `skills_search` (`:961`) — the low-confidence
+`<skill-hint>` nudges toward `skills_search` (`:1002`) — the low-confidence
 branch was dropped as pure noise, because the model trusts a low-scoring
 auto-pick ~95% of the time regardless.
 
-Scoring lives in `agent_mcp/skills._score_skill` (`:203`), shared with the MCP
+Scoring lives in `agent_mcp/skills._score_skill` (`:237`), shared with the MCP
 tool so the two cannot drift: name hits ×3, description ×2, tags ×1.5, body
 ×0.3 capped at `_BODY_HITS_CAP` = 4. **A body hit can never qualify a skill on
 its own** — `require_metadata_hit=True` scores zero without a name/desc/tag
@@ -148,13 +159,13 @@ neither of its own trigger verbs in its name and lost to `youtube-content`,
 7.2 vs 5.6, on "fetch <url> and summarize it"; it now wins at 8.6).
 
 Two performance properties are load-bearing. Token sets are memoized on the
-cached skill dict (`_skill_token_sets`, `:175`) — re-tokenizing ~1.5 MB of
+cached skill dict (`_skill_token_sets`, `:209`) — re-tokenizing ~1.5 MB of
 bodies cost ~83 ms of GIL-held CPU on *every* turn and starved the other
 prefetch legs; it is ~1 ms now. And the skill list is rebuilt only when a
 `SKILL.md` mtime changes, checked at most every 15 s (`_skills_signature`,
-`:396`).
+`:397`).
 
-`_stem` (`:105`) is a single-suffix plural collapse, not a real stemmer, and
+`_stem` (`:139`) is a single-suffix plural collapse, not a real stemmer, and
 exists for one logged failure: "full systems check" picked `claude-sdk-check`
 over `system-health-check` because "systems" ≠ "system".
 
@@ -177,18 +188,23 @@ carrying the matched `SKILL.md`, and the model re-issues the call informed.
 
 **`is_error=False` is the entire point of the second outcome.** The same
 intercept expressed as a deny comes back `is_error=True` and is booked into
-`tool_errors` (`autonomy.py:912`, `:927`) — the very number this feature exists
-to improve, so a deny would make the fleet look sicker exactly where it is
-being taught something. `HookRegistry.fire_pre_tool_use` recognises
-`skillDeliver` alongside `deny` (`app/harness/hooks.py:148`) and `loop.py:1543`
+`tool_errors` (appended at `autonomy.py:1792`, reported at `:1807`) — the very
+number this feature exists to improve, so a deny would make the fleet look
+sicker exactly where it is being taught something.
+`HookRegistry.fire_pre_tool_use` recognises
+`skillDeliver` alongside `deny` (`app/harness/hooks.py:148`) and `loop.py:1943`
 renders it, in the same shape as the synthetic `ToolSearch` result above it.
 
 **A deny beats a deliver regardless of registration order.** The walk holds a
-deliver as provisional and keeps going (`hooks.py:132`, `:146-150`), so a catastrophic
+deliver as provisional and keeps going (`hooks.py:133`, `:146-148`), so a catastrophic
 `Bash` is blocked rather than answered with a protocol card by a deliverer that
 happened to register first. `install_skill_dispatch_hook` is still called after
-`install_default_safety_hook` (`app/routers/messages.py:1808`) — not because
+`install_default_safety_hook` (`app/routers/messages.py:1929`) — not because
 order decides the outcome, but so the walk reads in the order that matters.
+That is also its **only** call site: `build_ambient_turn` (`:2057`) and the
+sync `post_message` (`:2208`) install the safety hook without the deliverer,
+as does the Task subagent path (`agent_mcp/builtin_task.py:231`), so flipping
+the flag teaches the streaming chat route and nothing else (#750).
 
 Three rules ship (`:112`), ordered so the specific protocol precedes the
 general one that also describes it:
@@ -234,14 +250,14 @@ a deliver in both registration orders.
 ### 4. Autonomy, by name
 
 A scheduled task binds its skill in frontmatter: `skill_name` (a slug) or
-`skill_path`. `autonomy._load_skill_content` (`autonomy.py:545`) resolves a
+`skill_path`. `autonomy._load_skill_content` (`autonomy.py:931`) resolves a
 value containing `/` or ending `.md` as a path, and anything else as
 `~/obsidian/skills/<slug>/SKILL.md`; the body is pasted into the task prompt
-under "Follow the skill instructions below" (`:577`).
+under "Follow the skill instructions below" (`:976`).
 
 A task with neither is unrunnable, and says so once per task id rather than
-silently dead-lettering (`:428-439`). `hold_reason` reports it as `"no skill"`.
-Both fields are in `_parse_task_file`'s `fallback_fields` (`:124`), so a task
+silently dead-lettering (`:806-815`). `hold_reason` reports it as `"no skill"`
+(`:882`). Both fields are in `_parse_task_file`'s `fallback_fields` (`:121`), so a task
 file that needed the degraded parser does not lose its skill binding.
 
 Note this path reads the file directly — it does **not** go through
@@ -251,14 +267,14 @@ does not reach.
 ## The MCP tools
 
 Two, both read-only (`agent_mcp/annotations.py:49`), both served by the
-`skills` module inside the lloyd-mcp aggregator (`agent_mcp/main.py:82`,
-`:146`):
+`skills` module inside the lloyd-mcp aggregator (`agent_mcp/main.py:84`,
+`:149`):
 
 - **`skills_search(query, max_results=10)`** — ranked over name, description,
   tags and body, using the same `_score_skill` prefetch uses.
 - **`skills_read(name)`** — the full raw `SKILL.md` for a directory name.
 
-Both are in the ToolSearch baseline (`config.yaml:404-405`), so they are
+Both are in the ToolSearch baseline (`config.yaml:498-499`), so they are
 advertised on every request rather than needing discovery.
 
 There is no install tool, no catalog, no remote source, and no `skills_get` or
@@ -274,8 +290,8 @@ empty mapping and a body, never an exception. Fields the loaders actually read:
 |---|---|---|
 | `description` | scorer (×2), `/api/skills` | required by `skill_lint` |
 | `tags` | scorer (×1.5) | required by `skill_lint` |
-| `category` | scorer (not weighted), `/api/skills` | on 136 of 191 |
-| `status` | both loaders | quarantine; all 191 live read `active` |
+| `category` | scorer (not weighted), `/api/skills` | on 139 of 194 |
+| `status` | both loaders | quarantine; 189 of 194 read `active`, 5 `archived` |
 
 The directory name is the skill's `name` for every purpose that matters — the
 scorer's ×3 weight is on the directory name, not the frontmatter `name:` field
@@ -342,7 +358,7 @@ are not real: `web-search-and-fetch`, `nightly-skills-management`,
 `~/obsidian/autonomy/skill-lint-report.md`. Six categories: DEAD (unparseable
 frontmatter, or description *and* tags both empty — the live scorer would
 return 0 for any query), MISSING_DESC, DRIFT (description is output-framed
-rather than trigger-framed), DUPLICATE (difflib ratio ≥ 0.85), STALE (mtime
+rather than trigger-framed), DUPLICATE (difflib name ratio ≥ 0.85 **and** description ratio ≥ 0.60), STALE (mtime
 > 90 days and `status != active`), PHANTOM_TOOL.
 
 Advisory only — no automatic deletion or rewrites, and it exits 0 always so the
@@ -357,25 +373,28 @@ SOUL.md and the skills straight from it, so a self-modification round touching
 saved. `scripts/automod/vault_round.py` therefore validates, commits exactly
 the named paths, and reverts on failure.
 
-`skills/**` is one of three `VALIDATED_GLOBS` (`:57`, with `lloyd/**` and
+`skills/**` is one of three `VALIDATED_GLOBS` (`:60`, with `lloyd/**` and
 `autonomy/**`) — the paths that feed a prompt or the scheduler, where the
 loaders are actually run against the change:
 
 1. Every changed `.md` opening with `---` must parse to a mapping. A skill
    whose front matter broke is a skill nobody can find.
 2. The system prompt must still build (`build_system_prompt()` returning ≥ 500
-   chars), and **each touched skill must still load through
-   `agent_mcp.skills._load_skill`** (`:119-123`).
+   chars), and **each touched skill must still load** — through
+   `agent_mcp.skills.skill_load_defect` (`:180-186`), not `_load_skill`.
 
 Scoped to the diff on purpose: a pre-existing broken file elsewhere in the
 vault must not block every round — the same delta principle as pyflakes and tsc
 in the code gate. A loader failure reverts the round's paths; success commits
 exactly those paths on `main` and records a `vault_land` ledger event.
 
-Note the interaction with quarantine: `_load_skill` returns `None` for a
-quarantined skill, so setting `status: retired` on a skill *in the same round
-that edits it* fails validation as "does not load". Archive by moving to
-`.archived/` instead.
+Quarantine used to make this gate refuse both ways the skills lifecycle retires
+a skill: the validator asked `_load_skill` whether each touched skill loads,
+and `None` is also what a *quarantined* skill returns, so setting
+`status: archived`, or renaming a skill into `.archived/`, was reported as
+damage and the whole batch reverted. Fixed 2026-09-19 (`d49f6fd`): the mover
+into a dot-tree is recognised as a retirement, and the question asked is now
+"is this skill damaged", which a quarantine is not (#777).
 
 ## The Skills page
 
@@ -384,15 +403,23 @@ that edits it* fails validation as "does not load". Archive by moving to
 `metadata.openclaw` fallback for description and category — the last live
 remnant of the old vocabulary) and `/api/skill-content?name=` (raw text).
 
-**Three of the page's five API calls hit routes that do not exist.**
+**The list route does not apply the quarantine rule**, so it reports the
+on-disk count (194) where the index advertises 189, and it hardcodes
+`enabled: True` for skills the loaders refuse (#1292, #1294). It is also the
+only reader that re-implements the frontmatter split instead of calling
+`agent_mcp.skills._parse_frontmatter` (`agent_mcp/skills.py:42`), so its
+description and category can come back empty on a file the loaders parse
+cleanly.
+
+**Three of the page's API calls hit routes that do not exist.**
 `api.skillToggle` → `POST /api/skill-toggle`, `api.skillContentSave` →
 `POST /api/skill-content`, and `api.skillsRefresh` → `POST /api/skills/refresh`
-are all defined in `web/src/api.ts:1074-1095` and called from the page
+are all defined in `web/src/api.ts:1094-1120` and called from the page
 (`SkillsPage.tsx:96`, `:109`, `:120`), but only the two GETs are registered
 (`server.py:124` includes a router carrying `@router.get` twice and nothing
 else). The toggle, the in-place editor's save, and the refresh button are
-therefore dead: `enabled: True` and `configured: True` are hardcoded in the
-list response, so there is no toggle state to write anyway. Recorded, not
+therefore dead, and there is no toggle state to write anyway — see the
+hardcoded `enabled` above. Recorded, not
 fixed — the page is read-useful as it stands, and a skill is edited in the
 vault.
 
@@ -408,3 +435,7 @@ transcripts for procedural knowledge and creates or updates skills;
 every tool name against the live aggregator, never restate a tool's parameter
 contract, and discard pre-2026-09-04 tool-failure candidates from the era when
 no tool set `isError`.
+
+## Review log
+
+- 2026-09-20 — **stale.** Counts and line references had drifted wholesale: 194 skills on disk / 189 advertised, not "191 active", and five live-directory skills do carry `status: archived`, so quarantine is not the unused lever this doc claimed. Refreshed ~25 drifted `file:line` refs (`prompt_builder`, `prefetch`, `agent_mcp/skills`, `autonomy`, `vault_round`, `config.yaml`), corrected the DUPLICATE lint threshold to its two-threshold form, and rewrote the vault-route loader clause — `skill_load_defect` replaced the `_load_skill`-is-None check on 2026-09-19, which is what had made retirement unlandable (#777). Filed #1292 (`/api/skills` ignores quarantine and re-parses front matter itself), #1293 (three SkillsPage POSTs hit unregistered routes), #1294 (five independent walks over the skill dirs, only two apply quarantine); appended a re-verification to #750 (deliverer installed on one route only).
