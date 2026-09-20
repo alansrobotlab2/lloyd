@@ -1667,11 +1667,13 @@ def gate_passed_unlanded_rounds(ledger: Path) -> set[str]:
 def externally_blocked_rounds(ledger: Path) -> set[str]:
     """Rounds whose final gate attempt failed on a condition they did not cause.
 
-    Two rungs set the flag, and both are about the state of the *live tree*
-    rather than the diff: `tests` when every failure reproduces at the round's
-    base, `preflight` when the live tree is dirty or HEAD has moved under it.
-    An empty diff ("no changes to promote") is a preflight failure that IS the
-    round's own, and deliberately does not carry the flag.
+    Two rungs set the flag, and every case is about something other than the
+    diff: `tests` when every failure reproduces at the round's base, or when the
+    ones that did not reproduce pass a repeat run and are flaky (#1196 — one
+    sample used to blame a flickering test on whichever round tripped it, and
+    spend that item's attempt); `preflight` when the live tree is dirty or HEAD
+    has moved under it. An empty diff ("no changes to promote") is a preflight
+    failure that IS the round's own, and deliberately does not carry the flag.
     """
     return {rid for rid, ev in _last_gate_per_round(ledger).items()
             if not ev.get("ok") and ev.get("external_blocker")}

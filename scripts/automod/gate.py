@@ -289,6 +289,96 @@ def _name_ids(ids: list[str], cap: int = 20) -> str:
                     if len(ids) > cap else "")
 
 
+# How many times a candidate failure that the base probe did NOT reproduce is
+# re-run before it is called the round's own. Three, so a node that fails every
+# repeat has been asked four times in total counting the suite run — enough to
+# separate "this change broke it" from "this run flickered", and seconds of
+# wall clock for the handful of node ids a round typically fails.
+REPEAT_RUNS = 3
+# Above this many new failures the tree is broken, not fickle, and the repeats
+# would only spend minutes proving what `failed` already says.
+REPEAT_MAX_NODES = 40
+REPEAT_TIMEOUT = 300.0
+
+
+def _reconfirm_candidate_failures(python: Path, root: Path,
+                                  node_ids: list[str], *,
+                                  repeats: int = REPEAT_RUNS,
+                                  timeout: float = REPEAT_TIMEOUT,
+                                  env: dict | None = None) -> tuple[list[str], str]:
+    """`(flaky_ids, note)` — the nodes among `node_ids` that pass a repeat run.
+
+    The `tests` rung used to decide "pre-existing vs new in this round" from one
+    pytest invocation on each side: one candidate run, one base probe of the
+    failing files. A node that flickers therefore belonged to whichever round
+    happened to trip it, and because `backlog.implemented_ids` counts any
+    finished round as the item's one attempt, the item was spent by a coin toss.
+    Round SM_20260916_042752 was refused for `all 1 failure(s) are new in this
+    round` on a node that failed 1 run in 5 at the base it branched from, where
+    the base probe's single run came back green.
+
+    So a node that was not reproduced at base is asked again, up to `repeats`
+    times. One pass and it is flaky — an intermittent red is a fact about the
+    box or about test order, not about this diff. Failing every repeat keeps the
+    old verdict verbatim.
+
+    Called only with the nodes the base probe did NOT already reproduce, and
+    only by node id: a node whose file the base probe already runs is attributed
+    by that probe, and re-running whole files here would spend the suite a
+    second time to learn nothing new.
+
+    Fails closed the same way the base probe does. `pytest rc == 0` is a pass,
+    and `pytest rc != 0 with the node absent from the summary` is a pass only
+    when pytest actually ran — a missing interpreter, a usage error or a crash
+    all come back naming nothing, and granting flaky on those would hand every
+    environment break an exemption. No exception escapes: an attribution that
+    cannot be earned is the round's, which is the status quo.
+    """
+    k = int(repeats)
+    if k <= 0:
+        return [], f"repeats off (k={k}); attribution from one run"
+    if not node_ids:
+        return [], "no node ids to re-run"
+    if len(node_ids) > REPEAT_MAX_NODES:
+        return [], (f"{len(node_ids)} new failures (>{REPEAT_MAX_NODES}) is a broken "
+                    "tree, not a flake: repeats skipped")
+    flaky: list[str] = []
+    pending = list(node_ids)
+    try:
+        for _ in range(k):
+            if not pending:
+                break
+            r = _run([str(python), "-m", "pytest", "-q", "--no-header",
+                      "-p", "no:cacheprovider", "-m", "not live_vault", *pending],
+                     cwd=root, env=env or None, timeout=timeout)
+            text = r.stdout + r.stderr
+            if not _parse_pytest_summary(text)["collected"]:
+                tail = " | ".join(text.strip().splitlines()[-3:])[:200]
+                return flaky, (f"reconfirm INCONCLUSIVE after {len(flaky)} flaky — "
+                               f"pytest produced no summary (rc={r.returncode}): {tail}")
+            named = set(_failed_node_ids(text))
+            # A node "passed" only if the run named neither the node nor its
+            # file: a collection failure comes back as `ERROR tests/x.py`, which
+            # names the file and means nothing inside it ran.
+            passed = [n for n in pending
+                      if n not in named and n.split("::", 1)[0] not in named]
+            flaky.extend(passed)
+            # Anything that did not clearly pass stays in the batch — including a
+            # node the run never named because its file failed to collect, which
+            # is neither a pass nor a named failure.
+            pending = [n for n in pending if n not in passed]
+    except subprocess.TimeoutExpired:
+        return flaky, (f"reconfirm timed out after {timeout:.0f}s with "
+                       f"{len(pending)} node(s) still failing")
+    except Exception as exc:
+        return flaky, f"reconfirm failed: {type(exc).__name__}: {exc}"
+    if not pending:
+        return flaky, (f"{len(flaky)} failure(s) passed a repeat run of {k} and are "
+                       f"recorded as flaky")
+    return flaky, (f"{len(flaky)} of {len(node_ids)} passed a repeat run; "
+                   f"{len(pending)} failed all {k}")
+
+
 def _failures_at_base(python: Path, live_root: Path, base: str,
                       node_ids: list[str], scratch: Path,
                       env: dict | None = None) -> tuple[set[str], str]:
@@ -1145,8 +1235,33 @@ class Gate:
                 self.python, self.live, self.base, node_ids,
                 W.round_dir(self.round_id), self._child_env())
             external, new = _classify_test_failure(node_ids, base_failed)
+            # One run is one sample. The base probe above is a single
+            # invocation, so a node that flickers clears it often enough to
+            # matter and lands in `new` — attributed to whichever round happened
+            # to trip it, which then spent its one attempt on the item. Ask
+            # those nodes again before the wording commits to that. Nodes the
+            # base probe DID reproduce never come here: their attribution
+            # already exists, and re-running them spends minutes to repeat it.
+            flaky: list[str] = []
+            flaky_note = ""
+            # Node ids only. An id with no `::` is a file pytest could not even
+            # collect: repeating it re-runs a whole file to ask one question, and
+            # an import or syntax error is deterministic far more often than an
+            # assertion is. Such a failure stays the round's on the first sample.
+            to_reconfirm = [n for n in new if "::" in n]
+            if to_reconfirm:
+                flaky, flaky_note = _reconfirm_candidate_failures(
+                    self.python, self.worktree, to_reconfirm,
+                    repeats=int(_gate_cfg("test_repeat_runs", REPEAT_RUNS) or 0),
+                    env=self._child_env())
             data = {**counts, "failed_node_ids": node_ids,
                     "base_probe": probe_note}
+            if flaky:
+                # What was actually asked again, not everything that failed: a
+                # node the base probe reproduced was never in the repeat batch.
+                data["retried_node_ids"] = list(to_reconfirm)
+                data["flaky_node_ids"] = list(flaky)
+                new = [n for n in new if n not in flaky]
             if external:
                 # The rung still fails: a red tree is not a tree to land onto,
                 # and the guardian would judge the promotion against a broken
@@ -1160,6 +1275,34 @@ class Gate:
                                f"not caused by this change: {node_ids}. "
                                f"{probe_note}. Blocking the promotion; the item "
                                f"keeps its attempt."), data
+            if flaky and not new:
+                # Every failure is now explained by something other than this
+                # diff: it either reproduces at base, or it passed a repeat run.
+                # The rung still fails — a red tree is not a tree to land onto —
+                # but the item keeps its attempt, which is the whole point: the
+                # cost of a flake used to fall on whichever round tripped it.
+                data["external_blocker"] = True
+                data["external_failures"] = node_ids
+                data["external_reason"] = "a test that flickers, not this change"
+                data["retry_after_s"] = 120
+                return False, (f"pytest failed ({counts}), but "
+                               f"{len(flaky)} failure(s) the base probe did not "
+                               f"reproduce PASSED a repeat run — FLAKY, not caused "
+                               f"by this change: {_name_ids(flaky)}. {probe_note}. "
+                               f"{flaky_note}. Blocking the promotion; the item "
+                               f"keeps its attempt."), data
+            if flaky:
+                # Some failures flickered and some did not: the round still owns
+                # the ones that failed every repeat, so no exemption and the
+                # attempt is spent as it always was. Only the flaky ones come out
+                # of the count, so the number the round reads is the number it
+                # caused.
+                data["new_failures"] = new
+                return False, (f"pytest failed ({counts}): {len(new)} of "
+                               f"{len(node_ids)} failures are new in this round "
+                               f"({_name_ids(new)}); {len(flaky)} passed a repeat run "
+                               f"and are FLAKY ({_name_ids(flaky)}). {probe_note}. "
+                               f"{flaky_note}\n{tail[-600:]}"), data
             if node_ids and base_failed:
                 data["new_failures"] = new
                 return False, (f"pytest failed ({counts}): {len(new)} of "

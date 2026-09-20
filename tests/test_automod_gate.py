@@ -527,6 +527,287 @@ def test_rung_tests_blames_the_round_for_a_failure_it_introduced(tmp_path, monke
     git(repo, "worktree", "remove", "--force", str(wt))
 
 
+# ---------------------------------------------------------------------------
+# Flaky attribution: one run is one sample (#1196)
+#
+# `pytest failed (…): all 1 failure(s) are new in this round` was decided from
+# a single invocation on each side — one candidate run, one base probe. Round
+# SM_20260916_042752 was refused that way on a node whose own file failed 1 run
+# in 5 at base, and because `backlog.implemented_ids` counts any finished round
+# as the item's one attempt, the item was spent by a coin toss. These tests are
+# the counterfactuals: the same one-run failure, on a tree where asking again
+# settles it.
+# ---------------------------------------------------------------------------
+
+FLAKY_NODE = "tests/test_flaky.py::test_fails_the_first_time_only"
+BROKEN_NODE = "tests/test_broken.py::test_fails_every_time"
+
+# The intermittent half exists at the BASE, so the base probe sees it and (this
+# is the point) passes on its one run. The deterministic half is added by the
+# round, so it cannot reproduce at base by construction. Each test counts its
+# own executions into `$FLAKE_RUNS_FILE.<name>`, outside both trees, so a test
+# here can assert how many times the gate really ran it.
+_FLAKY_SRC = (
+    "import os\n"
+    "from pathlib import Path\n\n"
+    "def _runs(name):\n"
+    "    p = Path(os.environ['FLAKE_RUNS_FILE'] + '.' + name)\n"
+    "    n = int(p.read_text()) if p.exists() else 0\n"
+    "    p.write_text(str(n + 1))\n"
+    "    return n\n\n"
+    "def test_fails_the_first_time_only():\n"
+    "    assert _runs('first') > 0, 'the first run of this test always fails'\n\n"
+    "def test_steady():\n"
+    "    assert True\n")
+
+_BROKEN_SRC = (
+    "import os\n"
+    "from pathlib import Path\n\n"
+    "def _runs(name):\n"
+    "    p = Path(os.environ['FLAKE_RUNS_FILE'] + '.' + name)\n"
+    "    n = int(p.read_text()) if p.exists() else 0\n"
+    "    p.write_text(str(n + 1))\n"
+    "    return n\n\n"
+    "def test_fails_every_time():\n"
+    "    _runs('always')\n"
+    "    assert False, 'deterministic: re-running this changes nothing'\n")
+
+
+def _counted_repo(tmp_path):
+    """Base: one test that fails only on its first-ever run, plus a green one."""
+    r = tmp_path / "live"
+    (r / "tests").mkdir(parents=True)
+    git(tmp_path, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@e.com")
+    git(r, "config", "user.name", "t")
+    (r / "tests" / "test_flaky.py").write_text(_FLAKY_SRC, encoding="utf-8")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "base")
+    return r, git(r, "rev-parse", "HEAD").stdout.strip()
+
+
+def _counted_gate(tmp_path, monkeypatch, *, add_broken: bool):
+    """A round over that repo, run serially so a flake cannot be the
+    parallel-load kind the rung already re-asks for itself.
+
+    The diff also touches a file outside `tests/`, which is what makes the rung
+    run the whole suite: a partial run of the round's own test files alone would
+    never execute the flake that exists at base.
+    """
+    repo, base = _counted_repo(tmp_path)
+    counter = tmp_path / "runs"
+    monkeypatch.setattr(G, "_gate_cfg",
+                        lambda key, default: 1 if key == "test_workers" else default)
+    monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
+    wt = tmp_path / "work" / "SM_FLK" / "home" / "lloyd"
+    wt.parent.mkdir(parents=True)
+    git(repo, "worktree", "add", "-q", "-b", "automod/SM_FLK", str(wt), base)
+    (wt / "unrelated.py").write_text("X = 1\n", encoding="utf-8")
+    if add_broken:
+        (wt / "tests" / "test_broken.py").write_text(_BROKEN_SRC, encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "an unrelated change")
+    g = _gate_for(repo, wt, base, monkeypatch)
+    g.python = Path(sys.executable)
+    real_env = g._child_env
+    monkeypatch.setattr(g, "_child_env",
+                        lambda root=None: {**real_env(root),
+                                           "FLAKE_RUNS_FILE": str(counter)})
+    return g, counter, repo, wt
+
+
+def test_a_failure_that_passes_its_repeat_runs_is_flaky_not_the_rounds(tmp_path, monkeypatch):
+    """The #1196 case. One suite run saw the failure, the base probe saw a pass,
+    and the round that happened to trip it used to be blamed and spend its
+    attempt."""
+    g, counter, repo, wt = _counted_gate(tmp_path, monkeypatch, add_broken=False)
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    assert ok is False, "a red tree is not landable, flake or no flake"
+    assert data.get("external_blocker") is True, "one sample is not this round's fault"
+    assert data["retried_node_ids"] == [FLAKY_NODE]
+    assert data["flaky_node_ids"] == [FLAKY_NODE]
+    assert data["external_failures"] == [FLAKY_NODE]
+    assert "flaky" in detail.lower(), detail
+    assert "are new in this round" not in detail, detail
+    # suite run + base probe + ONE repeat, then the node left the batch
+    assert int((Path(str(counter) + ".first")).read_text()) == 3, detail
+
+
+def test_a_flaky_attribution_never_passes_the_rung(tmp_path, monkeypatch):
+    """The exemption is attribution and attempt-spending only. No skip, no
+    xfail, no node dropped from the run: the rung's own counts still say the
+    suite ran everything and came back red."""
+    g, _counter, repo, wt = _counted_gate(tmp_path, monkeypatch, add_broken=False)
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    assert ok is False
+    assert data["failed"] == 1, "the failure is still counted, not excised"
+    assert data["collected"] == 2, "the flaky node was run, not skipped out of it"
+    assert data["tests_skipped"] == 0 and data["xfailed"] == 0
+    assert "Blocking the promotion" in detail, detail
+
+
+def test_a_failure_that_fails_every_repeat_run_is_still_the_rounds(tmp_path, monkeypatch):
+    """The counterfactual that keeps the mechanism honest: re-running must not
+    become a get-out clause for a round that really did break something."""
+    g, counter, repo, wt = _counted_gate(tmp_path, monkeypatch, add_broken=True)
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    assert ok is False
+    assert not data.get("external_blocker"), "it failed every repeat; it is theirs"
+    assert BROKEN_NODE in data["new_failures"]
+    assert FLAKY_NODE in data["flaky_node_ids"]
+    assert "1 of 2 failures are new" in detail, detail
+    assert "are new in this round" in detail, detail
+    # suite run + k=3 repeats and no more for the deterministic one; the flaky
+    # node drops out of the batch as soon as it passes one.
+    assert int((Path(str(counter) + ".always")).read_text()) == 4, detail
+    assert int((Path(str(counter) + ".first")).read_text()) == 3, detail
+
+
+def test_only_the_nodes_that_are_new_get_re_run(tmp_path, monkeypatch):
+    """A node the base probe already reproduced is already attributed; re-asking
+    it is minutes spent on a verdict that already exists. Only the new node ids
+    are re-run, at most 3 times each, and never the whole suite again."""
+    g, _counter, repo, wt = _counted_gate(tmp_path, monkeypatch, add_broken=True)
+    argv: list[list[str]] = []
+    real_run = G._run
+
+    def spy(cmd, cwd=None, env=None, timeout=900.0):
+        argv.append([str(c) for c in cmd])
+        return real_run(cmd, cwd=cwd, env=env, timeout=timeout)
+
+    monkeypatch.setattr(G, "_run", spy)
+    try:
+        g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    suite = [c for c in argv if c[1:3] == ["-m", "pytest"] and c[-1] == "not live_vault"]
+    repeats = [c for c in argv
+               if c[1:3] == ["-m", "pytest"] and "--continue-on-collection-errors" not in c
+               and c != suite[0]]
+    assert repeats, "the candidate failures were not re-run at all"
+    assert len(repeats) <= 3, f"unbounded repeats: {len(repeats)}"
+    assert len(suite) == 1, "the whole suite was run more than once"
+    for c in repeats:
+        nodes = [a for a in c if "::" in a]
+        assert nodes, f"a repeat run named no node: {c}"
+        assert not [a for a in c if a.endswith(".py")], f"a repeat run took files: {c}"
+        assert set(nodes) <= {FLAKY_NODE, BROKEN_NODE}, c
+    # The first repeat names both new nodes; every later one drops the node that
+    # already passed.
+    assert set(a for a in repeats[0] if "::" in a) == {FLAKY_NODE, BROKEN_NODE}
+    if len(repeats) > 1:
+        assert set(a for a in repeats[1] if "::" in a) == {BROKEN_NODE}
+
+
+def test_a_file_that_will_not_collect_is_the_rounds_without_a_repeat(tmp_path, monkeypatch):
+    """An id with no `::` is a file pytest could not collect, and repeating it
+    would re-run a whole file to ask one question — of a failure that is an import
+    or syntax error far more often than an assertion is. It stays the round's on
+    the first sample, with no repeat batch at all."""
+    r = tmp_path / "live"
+    (r / "tests").mkdir(parents=True)
+    git(tmp_path, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@e.com")
+    git(r, "config", "user.name", "t")
+    (r / "tests" / "test_green.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "base")
+    base = git(r, "rev-parse", "HEAD").stdout.strip()
+    monkeypatch.setattr(G, "_gate_cfg",
+                        lambda key, default: 1 if key == "test_workers" else default)
+    monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
+    wt = tmp_path / "work" / "SM_UNC" / "home" / "lloyd"
+    wt.parent.mkdir(parents=True)
+    git(r, "worktree", "add", "-q", "-b", "automod/SM_UNC", str(wt), base)
+    (wt / "tests" / "test_uncollectable.py").write_text(
+        "this is not python\n", encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "a module that cannot be imported")
+    argv: list[list[str]] = []
+    real_run = G._run
+
+    def spy(cmd, cwd=None, env=None, timeout=900.0):
+        argv.append([str(c) for c in cmd])
+        return real_run(cmd, cwd=cwd, env=env, timeout=timeout)
+
+    monkeypatch.setattr(G, "_run", spy)
+    g = _gate_for(r, wt, base, monkeypatch)
+    g.python = Path(sys.executable)
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(r, "worktree", "remove", "--force", str(wt))
+    assert ok is False and not data.get("external_blocker")
+    assert "tests/test_uncollectable.py" in data["new_failures"], data
+    assert "retried_node_ids" not in data, data
+    assert "are new in this round" in detail, detail
+    # One pytest invocation: the candidate suite. The file is new in this round,
+    # so the base probe skips it (it cannot exist there), and a repeat run would
+    # have been the second.
+    assert len([c for c in argv if c[1:3] == ["-m", "pytest"]]) == 1, argv
+
+
+def test_a_repeat_run_that_cannot_run_pytest_grants_no_pass(tmp_path):
+    """`pytest did not name it as failing` is only evidence when pytest ran. A
+    missing interpreter, a usage error or an empty summary stays inconclusive."""
+    stub = tmp_path / "py.sh"
+    stub.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ARGV_LOG\"\n"
+                    "echo 'no tests ran in 0.00s'\nexit 5\n", encoding="utf-8")
+    stub.chmod(0o755)
+    log = tmp_path / "argv.log"
+    flaky, note = G._reconfirm_candidate_failures(
+        stub, tmp_path, ["tests/a.py::t"],
+        env={"ARGV_LOG": str(log), "PATH": "/usr/bin:/bin"})
+    assert flaky == [], "an empty summary is not a pass"
+    assert "INCONCLUSIVE" in note, note
+    assert len(log.read_text().splitlines()) == 1, "an inconclusive repeat stops the loop"
+
+
+def test_a_collection_error_on_a_repeat_is_not_a_pass(tmp_path):
+    """`ERROR tests/x.py` names the file, not the node inside it. A node whose
+    file cannot even be collected has not passed."""
+    stub = tmp_path / "py.sh"
+    stub.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ARGV_LOG\"\n"
+                    "echo 'collected 1 item'\n"
+                    "echo 'ERROR tests/x.py - SyntaxError: invalid syntax'\n"
+                    "echo '1 error in 0.10s'\nexit 1\n", encoding="utf-8")
+    stub.chmod(0o755)
+    log = tmp_path / "argv.log"
+    flaky, note = G._reconfirm_candidate_failures(
+        stub, tmp_path, ["tests/x.py::test_y"],
+        env={"ARGV_LOG": str(log), "PATH": "/usr/bin:/bin"})
+    assert flaky == [], note
+    assert "INCONCLUSIVE" not in note, note
+    assert len(log.read_text().splitlines()) == 3, "it kept asking; it just never passed"
+
+
+def test_the_repeats_are_bounded_by_a_broken_tree(tmp_path):
+    """More failing nodes than `REPEAT_MAX_NODES` is a broken tree, not a flake,
+    and re-running that many nodes 3 times is minutes spent proving what the
+    counts already say."""
+    many = [f"tests/a.py::t{i}" for i in range(G.REPEAT_MAX_NODES + 1)]
+    flaky, note = G._reconfirm_candidate_failures(
+        tmp_path / "never-called", tmp_path, many, env={})
+    assert flaky == [] and "broken tree" in note, note
+
+
+def test_repeats_can_be_turned_off_by_config(tmp_path):
+    """k=0 restores the old attribution exactly — the mechanism must be
+    switchable off without a code round."""
+    flaky, note = G._reconfirm_candidate_failures(
+        tmp_path / "never-called", tmp_path, ["tests/a.py::t"], repeats=0, env={})
+    assert flaky == [] and "off" in note, note
+
+
 def test_a_round_that_breaks_a_green_tree_is_told_which_tests_by_name(tmp_path, monkeypatch):
     """#1093: this branch used to return only the last 900 characters of
     pytest's output, which began mid-name. The round that read it invented a
