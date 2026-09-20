@@ -15,6 +15,7 @@ import re
 import subprocess
 import logging
 import os
+import threading
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -78,7 +79,16 @@ from app.paths import AUTONOMY_RUNS_DIR  # anchored to LLOYD_HOME
 LLOYD_HOME = Path(__file__).parent
 
 def recover_stuck_tasks() -> list:
-    """Reset any tasks stuck in_progress longer than their timeout."""
+    """Reset tasks stuck in_progress past their timeout, and rearms retired ones.
+
+    Two recovery paths share this scan because they are the same shape — a task
+    in a resting state with nothing that ever leaves it — and because the pool's
+    tick and the startup hook already call exactly this one function
+    (`workers/sources/scheduled_task.py`, `app/routers/autonomy.py`). A second
+    scan would be a second place for the same predicate to drift.
+
+    Returns the ids recovered by EITHER path.
+    """
     recovered = []
     if not AUTONOMY_DIR.exists():
         return recovered
@@ -87,7 +97,15 @@ def recover_stuck_tasks() -> list:
         if not re.match(r"\d+-", path.name):
             continue  # only NN-name.md task files; skip _config.md, reports, notes
         task = _parse_task_file(path)
-        if not task or str(task.get("status", "")).strip() != "in_progress":
+        if not task:
+            continue
+        status = str(task.get("status", "")).strip()
+        if status == "failed":
+            # A task retired at max_retries has no other way back (#1086).
+            if _rearm_after_one_period(task, now):
+                recovered.append(task.get("id"))
+            continue
+        if status != "in_progress":
             continue
         timeout = int(task.get("timeout_seconds") or 1800)
         updated = _parse_iso(task.get("updated") or task.get("last_run"))
@@ -240,8 +258,13 @@ def append_activity_line(body: str, note: str, now_str: str) -> str:
 # and ~130 on #69 over two days (~21 GPU-hours on a task whose script was gone).
 # `failure_count` and `max_retries` were parsed, stored and displayed, but no
 # scheduling decision read either.
-_FAILURE_BACKOFF_BASE = 600          # 10 min, doubling per consecutive failure
-_FAILURE_BACKOFF_CAP_SECONDS = 21600  # 6h floor for the cap
+_FAILURE_BACKOFF_BASE = 600          # 10 min floor for one retry step
+_FAILURE_BACKOFF_CAP_SECONDS = 21600  # 6h ceiling for one retry step
+# One retry step is this fraction of the task's OWN declared period, doubling
+# per consecutive failure and bounded by the period and by the 6h ceiling.
+_FAILURE_BACKOFF_PERIOD_FRACTION = 4.0
+# How long a task stays retired before the scheduler brings it back on its own.
+_FAILURE_REARM_PERIODS = 1.0
 _DEFAULT_MAX_RETRIES = 5
 # An empty response this fast, with no tool call, is the model server hiccuping
 # (a thinking-only turn or a 200 with no content), not the task failing.
@@ -256,12 +279,155 @@ _INFRA_EXC_NAMES = frozenset({
 
 
 def _failure_cooldown_seconds(task: dict) -> float:
-    """Exponential backoff keyed on consecutive failures: 10m, 20m, 40m, ...
-    capped at the task's own interval or 6h, whichever is larger."""
+    """One retry step: a fraction of the task's OWN period, doubling per
+    consecutive failure, bounded by the period itself and by a 6h ceiling.
+
+    Before #1086 the step was `10m * 2**(n-1)` with the cap taken as the
+    LARGER of the task's interval and 6h, which made the interval a term that
+    could not bind until failure_count 11 (640 min is the first step that
+    reaches the 6h floor; a weekly 604800 s needs 17 doublings). With 30 of 31
+    task files declaring `max_retries: 3`, the largest step any task ever
+    computed was 20 minutes — so `frequency` contributed nothing to retry
+    spacing, and a weekly job's entire retry budget was spent inside half an
+    hour (measured on the old code: 600.0 s at failure_count 1 for weekly,
+    daily and hourly alike).
+
+    The bounds, so both failure modes are pinned: never below the 10-minute
+    floor, never above the task's own period (a retry may not outlive the
+    schedule it is retrying), and the FIRST step never above 6h — a later step
+    may double past 6h, since applying the ceiling to every step would clamp
+    every period of a day or more to a flat 6h and stop the doubling this is
+    here to restore. Weekly therefore runs 6h/12h/24h where it used to run
+    10m/20m, hourly runs 15m/30m/60m. A frequency the parser cannot read gets
+    the OLD ladder, because inventing a period for it would be a guess with a
+    long tail: `6x-daily` (task #24) and the spaced `every 15 min` both yield
+    no period, and treating either as daily would space their retries 6h apart,
+    well past their own cadence. An unknown period is not the same fact as a
+    daily one, so it must not be coerced into it.
+    """
     n = max(1, int(task.get("failure_count") or 0))
-    interval = _frequency_interval_seconds(task) or 86400.0
-    cap = max(interval, _FAILURE_BACKOFF_CAP_SECONDS)
-    return float(min(_FAILURE_BACKOFF_BASE * (2 ** (n - 1)), cap))
+    interval = _frequency_interval_seconds(task)
+    if interval is None:
+        # No period, so no period may be a term: this is the pre-#1086 ladder
+        # (10m doubling, 6h ceiling), kept deliberately. Falling back to a daily
+        # period would hand a 15-minute or 6x-daily task a 6h first retry —
+        # longer than the schedule it is retrying — because the parser cannot
+        # read its spelling. Unknown must not be allowed to imply daily.
+        return float(min(_FAILURE_BACKOFF_BASE * (2 ** (n - 1)),
+                         _FAILURE_BACKOFF_CAP_SECONDS))
+    first = interval / _FAILURE_BACKOFF_PERIOD_FRACTION
+    first = min(max(first, _FAILURE_BACKOFF_BASE),
+                _FAILURE_BACKOFF_CAP_SECONDS, interval)
+    return float(min(first * (2 ** (n - 1)), interval))
+
+
+_REARM_ALERT_TITLE = "✅ Autonomy task re-armed"
+
+
+def _rearm_alert_id(stem: str) -> str:
+    """The id that names one task file's rearm, in the log line and the alert.
+
+    The disable and the rearm travel to the same channel with different titles,
+    so this id is what lets a reader pair the two messages — and its absence
+    from a rearm alert is what distinguishes "the rearm fired and the post
+    failed" from "nothing was ever retired"."""
+    return f"AUTOREARM {stem}"
+
+
+def _notify_alert_channel(title: str, message: str):
+    """Send one `discord_alert` from a synchronous caller. Returns the Thread.
+
+    `app.discord_notify.discord_alert` is async and the recovery scan that
+    rearms a task is sync, running inside the worker pool's own event loop via
+    `run_in_executor` — so `asyncio.run` cannot be called on this stack and the
+    post goes to a detached daemon loop. The Thread is returned so a caller that
+    cares (a test) can join it; the scheduler does not, because a rearm that
+    cannot post is still a rearm and the task's Activity Log carries the same
+    line whatever the transport does.
+    """
+    try:
+        from app.discord_notify import discord_alert
+
+        def _run():
+            try:
+                asyncio.run(discord_alert(message, title=title))
+            except Exception as exc:   # pragma: no cover - transport, not fatal
+                logger.debug("rearm alert post failed: %s", exc)
+
+        thread = threading.Thread(target=_run, daemon=True, name="alert-notify")
+        thread.start()
+        return thread
+    except Exception as exc:  # pragma: no cover - import failure is not fatal
+        logger.debug("rearm alert skipped (%s): %s", title, exc)
+        return None
+
+
+def _rearm_after_one_period(task: dict, now: datetime.datetime) -> Optional[str]:
+    """Bring one retired task back on its own; return its rearm note, or None.
+
+    A task disabled at `max_retries` used to have exactly one way out: a human
+    editing its file. `_is_task_due` refuses `failed`, `_hold_reason` reports
+    it, and both stall alarms skip it twice over — once on the status, once on
+    the `next_run: None` the disable deliberately writes — so a transient
+    half-hour of trouble retired a `weekly` schedule permanently with no alert
+    saying so. #78 lost a run and its slot on 2026-09-09 and was revived by a
+    manual run that made the schedule look like it had healed itself; #85 lost
+    ~21 h on 2026-09-16 and was revived by another job editing the file.
+
+    The clock this measures is `last_attempt`: the disable is itself a failure
+    record, so `last_attempt` is the instant of the retirement for every task
+    this path can select (the success write moves both stamps together). One
+    declared period of silence is the evidence the outage has passed, and it
+    costs the fleet at most one extra cycle per retirement.
+
+    The rearm does four things at once, and the third is the one a fix that
+    "just resets the status" would silently skip: `next_run` is rewritten,
+    because a disabled task with no `next_run` is invisible to both stall
+    alarms, so rearming without it re-creates the blind spot. `failure_count`
+    resets, so a re-armed task has to spend a whole retry budget before it is
+    retired again — and the disable alert therefore fires once per retirement
+    rather than every period.
+
+    `failed` is the ONLY status this touches, and that is the boundary with
+    human intent: a person who means a task to stop uses `paused` or `draft`,
+    the dispatch-stopping statuses named in `DISPATCH_STOPPING_STATUSES`, and
+    those are left exactly as they were found. `failed` has no human-meaning
+    writer — it is set in one place, `_record_failure`'s escalation — so
+    rearming it cannot undo an instruction.
+    """
+    task_id = task.get("id")
+    interval = _frequency_interval_seconds(task)
+    if not task_id or not interval:
+        return None
+    last_attempt = _parse_iso(task.get("last_attempt"))
+    if not last_attempt:
+        return None
+    idle = (now - last_attempt).total_seconds()
+    if idle < interval * _FAILURE_REARM_PERIODS:
+        return None
+
+    path = _find_task_file(task_id)
+    stem = path.stem if path else str(task_id)
+    next_run = (now + datetime.timedelta(seconds=interval)).isoformat()
+    _update_task_field(task_id, status="up_next", failure_count=0,
+                       next_run=next_run, updated=now.isoformat())
+    alert_id = _rearm_alert_id(stem)
+    hours = idle / 3600.0
+    period_hours = interval / 3600.0
+    note = (f"AUTO-REARMED after {hours:.1f}h at status failed (>= its own "
+            f"{period_hours:.1f}h period): status back to up_next, "
+            f"failure_count reset, next_run set. Retire-by-failure is not "
+            f"permanent; alert id {alert_id}.")
+    _append_activity_log(task_id, note)
+    logger.warning("Auto-rearmed retired task #%s (%s) after %.1fh idle",
+                   task_id, task.get("name"), hours)
+    _notify_alert_channel(
+        _REARM_ALERT_TITLE,
+        f"task #{task_id} ({task.get('name')}) auto-rearmed to up_next after "
+        f"{hours:.1f}h retired — {period_hours:.1f}h period elapsed since it "
+        f"hit max_retries. It alerts once per retirement, not per period. "
+        f"[{alert_id}]")
+    return note
 
 
 def _in_failure_cooldown(task: dict, now: datetime.datetime) -> bool:
@@ -1466,20 +1632,26 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
     completed_at = now.isoformat()
     duration = (now - started_dt).total_seconds()
 
+    # The count this run is charged under, computed BEFORE the record is
+    # written so the record can carry it. Zero of 4,800 run records carried an
+    # attempt number before #1086, so reading one file could not tell the 1st
+    # try from the 3rd: #78's five runs on 2026-09-08/09 had to be reconstructed
+    # by hand from five timestamps. An infra failure does not spend the budget
+    # (see below), so it carries the unchanged count — the number the next task
+    # failure will be counted against either way.
+    failures = int(task.get("failure_count") or 0) + (1 if kind == "task" else 0)
     _write_run_record(
         task_id=task_id, run_id=run_id, status="failed",
         started_at=started_at, completed_at=completed_at,
         duration_seconds=duration, summary=_failure_summary(summary), body=body,
-        extra={**(extra or {}), "failure_kind": kind},
+        extra={**(extra or {}), "failure_kind": kind, "failure_count": failures},
     )
 
-    failures = int(task.get("failure_count") or 0)
     max_retries = int(task.get("max_retries") or _DEFAULT_MAX_RETRIES)
     fields: dict = {"status": "up_next", "last_attempt": completed_at,
                     "updated": completed_at}
     disabled = False
     if kind == "task":
-        failures += 1
         fields["failure_count"] = failures
         if failures >= max_retries:
             fields["status"] = "failed"

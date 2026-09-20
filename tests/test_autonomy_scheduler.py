@@ -10,6 +10,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -93,16 +94,24 @@ async def test_timeout_records_failure_and_stops_immediate_retry(aut, monkeypatc
 
 
 async def test_cooldown_grows_and_expires(aut):
-    write_task(aut, 1, failure_count=1)
-    t = read_task(aut, 1)
-    assert aut._failure_cooldown_seconds(t) == 600
-    t["failure_count"] = 3
-    assert aut._failure_cooldown_seconds(t) == 2400
-    t["failure_count"] = 99  # capped
-    assert aut._failure_cooldown_seconds(t) == max(86400, 21600)
+    """The ladder doubles per consecutive failure up to one declared period.
 
-    # An old failure no longer holds the task back.
-    write_task(aut, 2, failure_count=1, last_attempt=_iso(hours=3))
+    #1086 reshaped the numbers: a step is a fraction of the task's own period,
+    so an hourly ladder is 900/1800/3600 where it used to be 600/2400/capped-at
+    86400. Written against the frequency-blind ladder this test certified a
+    term (`max(interval, 21600)`) that no task could reach at max_retries 3.
+    """
+    write_task(aut, 1, frequency="hourly", failure_count=1)
+    t = read_task(aut, 1)
+    assert aut._failure_cooldown_seconds(t) == 900
+    t["failure_count"] = 2
+    assert aut._failure_cooldown_seconds(t) == 1800
+    t["failure_count"] = 99  # capped at one declared period (hourly)
+    assert aut._failure_cooldown_seconds(t) == 3600
+
+    # An old failure no longer holds the task back. A daily step is 6h, so the
+    # gap has to clear that — 3h would now still be inside the cooldown.
+    write_task(aut, 2, failure_count=1, last_attempt=_iso(hours=8))
     t2 = read_task(aut, 2)
     assert aut._in_failure_cooldown(t2, dt.datetime.now(dt.timezone.utc)) is False
 
@@ -140,6 +149,336 @@ async def test_max_retries_disables_task_and_alerts_once(aut, monkeypatch):
     # A disabled task is not dispatched, but stays visible for dependency lookups.
     assert aut._is_task_due(t, [t]) is False
     assert 1 in [int(x["id"]) for x in aut._all_runnable_tasks()]
+
+
+# ── Frequency-aware retry spacing, and the way out of `failed` (#1086) ───────
+#
+# Two claims held here:
+#   * one retry step is a fraction of the task's OWN declared period, so a
+#     weekly job's permitted retries do not all land inside one coffee break;
+#   * `status: failed` is a resting state with a way out — one declared period
+#     after the disable the scheduler returns the task to `up_next` by itself,
+#     writes a `next_run`, and logs the rearm, so a bad half hour costs one
+#     cycle instead of ending the schedule until a human edits the file.
+#
+# The pre-change behaviour is re-readable at commit a7bb8744 (`git show
+# a7bb8744:autonomy.py`): `_failure_cooldown_seconds` returned 600.0 s at
+# failure_count 1 for `weekly`, `daily` and `hourly` alike, and
+# `_write_run_record` was never handed the failure count, so no record could
+# say which attempt it was. Both claims name that commit rather than a corpus
+# this file cannot measure.
+
+
+def _step(aut, frequency, failure_count):
+    return aut._failure_cooldown_seconds(
+        {"frequency": frequency, "failure_count": failure_count})
+
+
+async def test_one_queue_tick_rearms_a_retired_task(aut, monkeypatch, tmp_path):
+    """Clause 2 across the process boundary the rearm actually lives behind.
+
+    The rearm is only automatic if the queue source's own tick reaches the scan,
+    so this calls the tick — `workers.sources.scheduled_task.enqueue_if_due`, the
+    function the pool runs every `tick_interval` seconds — over an isolated task
+    dir, and reads the answer off the task files on disk. Nothing here greps
+    source text, nothing here calls `recover_stuck_tasks` by hand.
+
+    Before #1086 this tick looked at a `failed` task and walked past it: the
+    scan it already called handled only `in_progress`, so the retired schedule
+    stayed retired until a human edited the file, and both stall alarms skipped
+    it (once for the status, once for the `next_run` the disable clears).
+
+    Task 2 is the non-vacuity half: retired, but its own period has not elapsed,
+    so a tick that rearmed everything indiscrimately would fail here instead of
+    passing on a rule that is really "always rearm".
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    notices: list[tuple[str, str]] = []
+    monkeypatch.setattr(aut, "_notify_alert_channel",
+                        lambda title, message: notices.append((title, message)))
+
+    # `recover_stuck_tasks` reads the wall clock, so the ages are relative to
+    # now: one daily period plus, versus six hours of a daily period.
+    write_task(aut, 1, frequency="daily", status="failed", failure_count=3,
+               last_run=_iso(hours=30), last_attempt=_iso(hours=30))
+    write_task(aut, 2, frequency="daily", status="failed", failure_count=3,
+               last_run=_iso(hours=30), last_attempt=_iso(hours=6))
+
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    # Both stall streaks are seeded AT the alerting threshold, not below it, so
+    # the `alerts == []` assertion below has a firing condition: on this seed a
+    # tick that finds any task grossly overdue or the queue starving alerts on
+    # its first pass. Seeded at 0 the counter needed five ticks and the
+    # assertion could not fail inside one tick at all — the #1086 review called
+    # that documenting intent rather than discriminating, and it was right.
+    # The seed was checked by mutation, not by reading: with the rearm writing
+    # `next_run` one period in the PAST instead of the future, this assertion
+    # fails on the real nextrun stall alarm ("#1 (task1) is 24.0h past its
+    # next_run"), so it is a live check on the rearm's next_run and not a
+    # tautology about an empty list.
+    monkeypatch.setattr(st, "_state", {**st._state, "startup_checked": True,
+                                       "stall_streak": st._STALL_ALARM_TICKS,
+                                       "nextrun_streak": st._STALL_NEXTRUN_TICKS,
+                                       "stall_alerted_at": None,
+                                       "nextrun_alerted_at": None})
+    alerts: list[str] = []
+
+    async def _record_alert(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _record_alert)
+
+    q = WorkQueue(tmp_path / "rearm-tick.db")
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+
+    t1, t2 = read_task(aut, 1), read_task(aut, 2)
+    assert t1["status"] == "up_next", (
+        "the tick must return a retired task to the schedule by itself")
+    assert int(t1["failure_count"]) == 0
+    assert t1.get("next_run"), (
+        "a rearm without next_run is invisible to both stall alarms")
+    assert t2["status"] == "failed" and int(t2["failure_count"]) == 3, (
+        "one declared period of idleness is the whole rule; a task still inside "
+        "its own period must stay resting")
+
+    enqueued = {int(i.payload["task_id"]) for i in
+                q.list_items(source="scheduled-task", limit=500)
+                if i.state == "queued" and i.payload.get("task_id") is not None}
+    assert 1 in enqueued, "the rearmed task is dispatchable on the same tick"
+    assert 2 not in enqueued
+
+    assert alerts == [], f"the tick that rearms must not also alarm: {alerts}"
+    assert any(aut._rearm_alert_id("1-task1") in m for _t, m in notices), (
+        "the rearm reaches the alert channel from inside the tick, so a healed "
+        "schedule is distinguishable from an edited one")
+    text = (aut.AUTONOMY_DIR / "1-task1.md").read_text()
+    assert "AUTO-REARMED" in text, "the tick's rearm is in the Activity Log"
+    # Clause 3 asks for a DATED line, so the stamp is pinned and not just the
+    # words: one line, written in the task's own Activity Log, carrying the ISO
+    # instant `_append_activity_log` puts on every entry. A reworded note keeps
+    # this passing; an undated or duplicated one does not.
+    rearm_lines = [ln for ln in text.splitlines() if "AUTO-REARMED" in ln]
+    assert len(rearm_lines) == 1, f"exactly one rearm line: {rearm_lines}"
+    assert re.match(r"^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z: AUTO-REARMED",
+                    rearm_lines[0]), rearm_lines[0]
+
+
+def test_first_retry_step_is_a_fraction_of_the_declared_period(aut):
+    """`frequency` reached the ladder only through a cap that could not bind
+    below failure_count 11, so the period was dead code (#607's spacing half)."""
+    weekly = _step(aut, "weekly", 1)
+    assert 3600 <= weekly <= 21600, weekly
+    hourly = _step(aut, "hourly", 1)
+    assert hourly < 3600, hourly
+    assert weekly > hourly, "the declared period must reach the ladder"
+
+    # A step never exceeds the task's own period (a retry may not outlive the
+    # schedule it is retrying) and never falls below the 10-minute floor. The 6h
+    # ceiling bounds the FIRST step only: a later step may double past it (a
+    # daily task's second is 12h) because capping every step at 6h would stop
+    # the ladder doubling for any task with a period of a day or more, which is
+    # the property clause 1 asks to keep.
+    for frequency, period in (("hourly", 3600.0), ("every-15min", 900.0),
+                              ("daily", 86400.0), ("weekly", 604800.0)):
+        for n in (1, 2, 3):
+            step = _step(aut, frequency, n)
+            assert step <= period, (frequency, n, step)
+            assert step >= 600.0, (frequency, n, step)
+        assert _step(aut, frequency, 1) <= min(period, 21600.0)
+
+    # Still exponential while there is room below the ceiling.
+    assert _step(aut, "hourly", 2) == 2 * _step(aut, "hourly", 1)
+    assert _step(aut, "hourly", 3) == 2 * _step(aut, "hourly", 2)
+    for n in (1, 2, 3, 4):
+        assert _step(aut, "weekly", n + 1) >= _step(aut, "weekly", n)
+
+    # A frequency the parser cannot read yields no period, and with no period
+    # the ladder keeps the PRE-#1086 shape (10m doubling under a 6h ceiling)
+    # rather than inheriting a daily period it was never given: coercing unknown
+    # into daily would hand a `6x-daily` task a 6h first retry, longer than its
+    # own cadence. Two live spellings land here: `cron: 0 4 * * *` and
+    # `6x-daily` (task #24). Widening the parser is a separate change; what this
+    # pins is the two properties that must hold whatever the fallback is: the
+    # step is bounded and spaced, and a task that just failed is still HELD
+    # BACK. `_in_failure_cooldown` has no "no period ⇒ no cooldown" branch, and
+    # that is the storm shape #607 killed — so this is asserted through the gate,
+    # not just through the scalar.
+    cron = {"frequency": "cron: 0 4 * * *", "failure_count": 1}
+    assert aut._frequency_interval_seconds(cron) is None
+    # No period ⇒ the pre-#1086 ladder (10m doubling under a 6h ceiling), NOT
+    # daily's 6h: an unknown period is not the same fact as a daily one, and
+    # `6x-daily` (task #24) plus the spaced `every 15 min` both land here.
+    assert _step(aut, "cron: 0 4 * * *", 1) == 600.0
+    assert _step(aut, "cron: 0 4 * * *", 2) == 1200.0
+    assert _step(aut, "cron: 0 4 * * *", 99) == 21600.0
+    assert _step(aut, "cron: 0 4 * * *", 1) < _step(aut, "daily", 1)
+    assert _step(aut, "6x-daily", 1) == 600.0
+    fired = dt.datetime.now(dt.timezone.utc)
+    held = dict(cron, last_attempt=fired.isoformat(),
+                last_run=(fired - dt.timedelta(hours=9)).isoformat())
+    assert aut._in_failure_cooldown(
+        held, fired + dt.timedelta(seconds=30)) is True
+    assert aut._in_failure_cooldown(
+        held, fired + dt.timedelta(hours=7)) is False
+
+    # The one sub-hour spelling the parser DOES read must not land on the hourly
+    # ladder: `every-15min` has a 900 s period, so its step is capped there.
+    assert _step(aut, "every-15min", 1) == 600.0
+    assert _step(aut, "every-15min", 3) == 900.0
+
+
+def test_the_declared_period_survives_the_task_file_round_trip(aut):
+    """The ladder is computed from a parsed task file, not a literal dict, so
+    what a task declares on disk is what must reach it."""
+    write_task(aut, 1, frequency="weekly")
+    write_task(aut, 2, frequency="hourly")
+    weekly = aut._failure_cooldown_seconds(read_task(aut, 1))
+    hourly = aut._failure_cooldown_seconds(read_task(aut, 2))
+    assert 3600 <= weekly <= 21600, weekly
+    assert hourly < 3600, hourly
+    assert weekly > hourly
+
+
+async def test_disabled_task_rearms_itself_at_the_next_declared_period(aut):
+    """#78 burned 3 attempts inside ~30 min on 2026-09-09 and stayed `failed`
+    until a human edited the file; #85 lost ~21 h the same way on 2026-09-16."""
+    write_task(aut, 1, frequency="weekly", status="failed", failure_count=3,
+               last_attempt=_iso(hours=6))    # weekly: one period has not passed
+    write_task(aut, 2, frequency="daily", status="failed", failure_count=3,
+               last_attempt=_iso(hours=30))   # daily: 1.25 periods have passed
+
+    assert sorted(aut.recover_stuck_tasks()) == [2]
+
+    t1, t2 = read_task(aut, 1), read_task(aut, 2)
+    assert t1["status"] == "failed"
+    assert int(t1["failure_count"]) == 3
+    assert t2["status"] == "up_next"
+    assert int(t2["failure_count"]) == 0
+    # The rearm must write a next_run: a disabled task with no next_run is
+    # invisible to both stall alarms (`_next_run_stalled` skips a missing one).
+    assert t2.get("next_run")
+    # And the rearm is a real return to the schedule: `up_next` is the only
+    # status the queue source enqueues, and this is the gate it then passes.
+    assert aut._is_task_due(t2, [t2]) is True
+    assert aut._is_task_due(t1, [t1]) is False
+    assert aut.hold_reason(t1, [t1], now=aut._utcnow()) is not None
+
+
+async def test_the_rearm_is_logged_and_the_disable_alerts_exactly_once(aut, monkeypatch):
+    """The alert is the point of retiring a task; the rearm is the point of not
+    retiring it forever. A rearmed task must not start alerting every period."""
+    calls = []
+
+    async def fake_alert(msg, *a, **k):
+        calls.append(msg)
+
+    notices = []
+    # The first positional is the alert TITLE, not a subsystem — `autonomy
+    # ._notify_alert_channel(title, message)` — and naming it anything else made
+    # the recorded tuple read as if the rearm were routed by subsystem (#1086
+    # review advisory).
+    monkeypatch.setattr(autonomy, "_notify_alert_channel",
+                        lambda title, message: notices.append((title, message)))
+    monkeypatch.setattr("app.discord_notify.discord_alert", fake_alert, raising=False)
+    write_task(aut, 1, frequency="daily", max_retries=2, failure_count=1,
+               timeout_seconds=1)
+    monkeypatch.setattr("app.harness.run_query", fake_run_query([TEXT], delay=5))
+
+    result = await aut.run_task(1)
+    assert result["disabled"] is True
+    assert read_task(aut, 1)["status"] == "failed"
+    assert len(calls) == 1, "the disable alerts once"
+    notices.clear()
+
+    # Age it one declared period and let the ticker do what the ticker does.
+    aut._update_task_field(1, last_attempt=_iso(hours=30))
+    assert aut.recover_stuck_tasks() == [1]
+
+    text = (aut.AUTONOMY_DIR / "1-task1.md").read_text()
+    # The exact marker the rearm writes, not a loose `REARMED` substring that a
+    # reworded note could satisfy (#1086 review advisory).
+    assert "AUTO-REARMED" in text, "the rearm is recorded in the task's Activity Log"
+    # The pairing id is pinned through the message the rearm actually passed to
+    # the channel, not by comparing the formatter against a literal: the same
+    # string has to appear in the Activity Log line as well, which is what lets a
+    # reader pair this rearm with the DISABLED alert that retired the task.
+    assert any(aut._rearm_alert_id("1-task1") in m for _s, m in notices), (
+        "the rearm reaches the alert channel, so a healed schedule is not "
+        "confused with an edited one")
+    assert aut._rearm_alert_id("1-task1") in text, (
+        "the Activity Log names the same id the alert carries, so the rearm can "
+        "be paired with the DISABLED alert that retired the task")
+    assert len(calls) == 1, "the rearm sends no DISABLED alert"
+    # A re-armed task alerts again only by being disabled again — and for that
+    # it must spend a whole retry budget, because the count was reset.
+    result2 = await aut.run_task(1)
+    assert result2["disabled"] is False
+    assert read_task(aut, 1)["status"] == "up_next"
+    assert int(read_task(aut, 1)["failure_count"]) == 1
+    assert len(calls) == 1, "one alert per retirement, not one per period"
+
+
+async def test_the_rearm_alert_actually_reaches_the_async_post(aut, monkeypatch):
+    """The seam the alert tests above step over, walked end to end.
+
+    The recovery scan that rearms a task is synchronous and
+    `app.discord_notify.discord_alert` is async, and the scan runs inside the
+    worker pool's own event loop via `run_in_executor` — so it cannot call
+    `asyncio.run` on that stack and posts from a detached daemon loop
+    (`autonomy._notify_alert_channel`). Patching the notifier, as
+    `test_the_rearm_is_logged_and_the_disable_alerts_exactly_once` does, replaces
+    that whole boundary: a coroutine that was created and never awaited would post
+    nothing and still satisfy it. Here only the transport at the far side is
+    replaced, the notifier itself runs, and the started thread is joined — so this
+    fails if the post is never awaited, if it is awaited on a loop that is already
+    running, or if the title is dropped. The Discord webhook beyond
+    `discord_alert` is out of scope here; the seam this pins is sync scan → thread
+    → `asyncio.run` → `discord_alert`.
+    """
+    posted = []
+
+    async def fake_discord_alert(message, title=""):
+        posted.append((message, title))
+
+    monkeypatch.setattr("app.discord_notify.discord_alert", fake_discord_alert)
+
+    thread = aut._notify_alert_channel("TITLE", "the rearm message")
+    assert thread is not None, "the notifier hands back the Thread it started"
+    await asyncio.to_thread(thread.join, 5.0)
+    assert not thread.is_alive(), "the detached loop never finished the post"
+    assert posted == [("the rearm message", "TITLE")], (
+        "the alert must be awaited in that loop with its title intact")
+
+
+async def test_a_failed_run_record_carries_the_attempt_number(aut, monkeypatch):
+    """A record used to say nothing about which attempt it was. `_record_failure`
+    already had the count in hand but handed `_write_run_record` only
+    `failure_kind` (`git show a7bb8744:autonomy.py`, the extra dict in that call),
+    which is why #78's five runs on 2026-09-08/09 had to be reassembled by hand
+    from five timestamps."""
+    started = dt.datetime.now(dt.timezone.utc)
+    for n in (1, 2, 3):
+        await aut._record_failure(
+            {"id": 1, "name": "task1", "frequency": "weekly",
+             "max_retries": 5, "failure_count": n - 1},
+            1, f"run_1_probe{n}", started.isoformat(), started,
+            summary="boom", body="body")
+
+    counts = []
+    for n in (1, 2, 3):
+        run = (aut.AUTONOMY_RUNS_DIR / "1" / f"run_1_probe{n}.md").read_text()
+        fm = yaml.safe_load(run.split("---\n", 2)[1])
+        counts.append(fm["failure_count"])
+    assert counts == [1, 2, 3], counts
+
+    # And through the real path: one timed-out run records itself as attempt 1.
+    write_task(aut, 2, frequency="weekly", timeout_seconds=1)
+    monkeypatch.setattr("app.harness.run_query", fake_run_query([TEXT], delay=5))
+    await aut.run_task(2)
+    run = next((aut.AUTONOMY_RUNS_DIR / "2").glob("run_*.md")).read_text()
+    assert yaml.safe_load(run.split("---\n", 2)[1])["failure_count"] == 1
 
 
 # ── Empty responses ──────────────────────────────────────────────────────────
