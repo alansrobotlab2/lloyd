@@ -125,6 +125,81 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _iso_or_none(raw: Any) -> Optional[datetime]:
+    """Parse one of this module's ISO stamps, or say it cannot be parsed.
+
+    Split out of `_iso_seconds_between` because the double-count guard has to
+    ORDER two stamps, and `runs.started_at` is a plain TEXT column: a stamp this
+    module did not write is any shape the writer chose. Comparing those as bytes
+    compares their SPELLING, not the instants — SQLite's own `CURRENT_TIMESTAMP`
+    renders `2026-09-20 09:00:05.123456`, and the space at position 10 (0x20)
+    sorts it below every `2026-09-20T…` string no matter what time it names, so a
+    run that genuinely recorded itself reads as predating the claim and gets
+    billed a second time. Stamps with no offset are read as UTC, the same
+    assumption `_iso_seconds_between` already makes about them.
+    """
+    try:
+        parsed = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+# The one INSERT for the `runs` table. `record_run` and the crash-recovery sweep
+# both write run rows, and the column list drifts (it gained `meta_json`, then
+# `claims_json`, by ALTER TABLE): two copies of it is how one of them stops
+# writing a column the other fills, and a row missing `completed_at` is invisible
+# to every window query this table has.
+_RUN_INSERT_SQL = """INSERT INTO runs (run_id, queue_id, source, task_id, status,
+                                     started_at, completed_at, duration_seconds,
+                                     summary, artifact_path, response_json, meta_json,
+                                     claims_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+
+
+def _insert_run(conn: sqlite3.Connection, *, run_id: str, queue_id: Optional[int],
+                source: str, status: str, started_at: str, completed_at: str,
+                duration_seconds: float, summary: str = "", artifact_path: str = "",
+                response_json: str = "", task_id: Optional[str] = None,
+                meta_json: str = "", claims_json: str = "") -> None:
+    """Insert one run row on `conn`, without committing.
+
+    No commit here on purpose: the crash-recovery sweep writes its rows inside
+    the same transaction as the queue UPDATE that reclaims them, so a sweep
+    cannot be half-applied — a run recorded while its queue row is still
+    `running`, or a row reclaimed with no run behind it, are both the reading
+    this item exists to prevent.
+    """
+    conn.execute(
+        _RUN_INSERT_SQL,
+        (
+            run_id, queue_id, source, task_id, status,
+            started_at, completed_at, float(duration_seconds),
+            summary[:500], artifact_path, response_json[:50000],
+            meta_json[:20000] if meta_json else None,
+            claims_json[:20000] if claims_json else None,
+        ),
+    )
+
+
+def _iso_seconds_between(start_iso: str, end_iso: str) -> float:
+    """Elapsed seconds between two ISO timestamps, floored at 0.
+
+    A wall-clock difference, not a monotonic one: the process that measured the
+    run is gone, so the only two stamps left are the ones in the row. Timestamps
+    that cannot be parsed return 0.0 rather than raising — a sweep that throws
+    would leave every remaining row `running` and switch its source off for
+    good, which is the #765 starvation bug wearing this fix's hat.
+    """
+    start = _iso_or_none(start_iso)
+    end = _iso_or_none(end_iso)
+    if start is None or end is None:
+        return 0.0
+    return max(0.0, (end - start).total_seconds())
+
+
 def _loads_or_none(raw: Any) -> Optional[dict]:
     """Parse a JSON column, tolerating NULL and anything unparseable.
 
@@ -321,6 +396,14 @@ class WorkQueue:
             # `runs_without_bundle` rather than as a clean sheet.
             if "claims_json" not in run_cols:
                 conn.execute("ALTER TABLE runs ADD COLUMN claims_json TEXT")
+            # The `run_id` the pool minted for the attempt now holding the row
+            # (#1137). The log names it the moment the attempt starts; this is
+            # what lets the recovery sweep write the interrupted row under the
+            # SAME id, so a run the log says started is a run the table can be
+            # queried for. NULL on rows predating the column and on rows never
+            # marked running.
+            if "current_run_id" not in cols:
+                conn.execute("ALTER TABLE queue ADD COLUMN current_run_id TEXT")
             # Additive migration: poison-sweep bookkeeping. `triage_json` carries
             # the revive budget across a re-poisoning — mark_failed rewrites
             # state and error but leaves these alone, which is what stops a
@@ -478,8 +561,19 @@ class WorkQueue:
                     self._poison_at_cap(conn, row, cap, "claim")
                     conn.commit()
                     continue
+                # `current_run_id` is cleared here, not only by the sweep: the
+                # column means "the attempt NOW holding this row", and a row
+                # coming off a prior attempt still carries that attempt's id.
+                # Nothing between this UPDATE and `mark_running` re-stamps it, so
+                # a death in that window would leave the recovery sweep holding a
+                # DEAD attempt's id — which already has a `runs` row, and
+                # `runs.run_id` is a PRIMARY KEY: the sweep's INSERT would raise
+                # and take the whole boot-time recovery with it. Minting the new
+                # id at `mark_running` is the other half; this half makes the
+                # gap between them carry no id at all, which is the truth.
                 conn.execute(
-                    "UPDATE queue SET state='claimed', claimed_at=?, claimed_by=?, attempts=attempts+1 "
+                    "UPDATE queue SET state='claimed', claimed_at=?, claimed_by=?, attempts=attempts+1, "
+                    "current_run_id=NULL "
                     "WHERE id=? AND state='queued'",
                     (_now_iso(), worker_id, row["id"]),
                 )
@@ -493,11 +587,26 @@ class WorkQueue:
                 losses += 1
         return None
 
-    def mark_running(self, item_id: int) -> None:
+    def mark_running(self, item_id: int, run_id: "str | None" = None) -> None:
+        """Move the row to `running`, stamping the id this attempt was minted.
+
+        `run_id` is optional so a caller with no id to record keeps working, but
+        the pool always passes one: it is the only thing that survives an
+        unhandled `CancelledError`, and therefore the only way the next boot's
+        sweep can report the killed attempt under the id the log already names.
+
+        A call with no id CLEARS the column rather than leaving whatever the
+        previous attempt stamped. The column means "the attempt now holding this
+        row", and the pool mints a fresh id per attempt, so a stale value is a
+        lie: the sweep would write this death under an id that already has a
+        recorded run, and the second attempt's wall clock would be billed to the
+        first attempt's transcript.
+        """
         with self._lock, self._connect() as conn:
             conn.execute(
-                "UPDATE queue SET state='running' WHERE id=? AND state='claimed'",
-                (item_id,),
+                "UPDATE queue SET state='running', current_run_id=? "
+                "WHERE id=? AND state='claimed'",
+                (run_id, item_id),
             )
             conn.commit()
 
@@ -598,6 +707,29 @@ class WorkQueue:
         the returned number. A row *below* the cap is recovered exactly as
         before: that is what a crash is for, and poisoning a first attempt
         because the machine was rebooted would turn an outage into lost work.
+
+        **Every row this sweeps is recorded as an interrupted run.** A run that
+        ends because the process died or the pool cancelled it passes through
+        neither of `WorkerPool._run_item`'s two recording arms — `CancelledError`
+        is a `BaseException`, and a `SIGKILL` records nothing either — so before
+        this the only trace of a killed run was a line in a 10 MB rotating log,
+        and every timeout and wasted-hours metric that reads `runs` reported a
+        clean fleet while items were being re-queued from scratch (#1137). The
+        sweep is the writer that survives every kind of death, so it is the
+        writer: one `status='interrupted'` row per swept row, sharing the
+        requeue's transaction. See `_record_interrupted_run` for the row's shape
+        and for the one case where a run is already recorded and is skipped.
+
+        Two interactions with the ceiling above that the tests pin, because they
+        are where a second writer meets the first. **A row poisoned here is
+        recorded as well as poisoned** — its attempt died in flight like any
+        other and spent wall clock doing it — which means `return n` (the number
+        *requeued*) can be smaller than the number of `runs` rows written; the
+        log line reports both so the difference is visible rather than
+        mysterious. And **every read precedes every write**: the SELECT above is
+        the single snapshot that decides what gets recorded, and the poison
+        UPDATE, the requeue and the INSERTs all follow it, so the recorded set
+        cannot shift underneath the loop that writes it.
         """
         with self._lock, self._connect() as conn:
             owner_sql = ""
@@ -608,21 +740,32 @@ class WorkQueue:
                 owner_args = list(worker_ids)
             cap = self.max_attempts
 
-            exhausted = conn.execute(
-                f"SELECT id, state, attempts FROM queue "
-                f"WHERE state IN ('claimed','running') AND attempts >= ?{owner_sql}",
-                [cap, *owner_args],
+            swept = conn.execute(
+                f"SELECT id, state, attempts, source, claimed_at, enqueued_at, "
+                f"payload_json, current_run_id FROM queue "
+                f"WHERE state IN ('claimed','running'){owner_sql}",
+                owner_args,
             ).fetchall()
+            exhausted = [r for r in swept if int(r["attempts"]) >= cap]
             for row in exhausted:
                 self._poison_at_cap(conn, row, cap, "crash recovery")
 
             result = conn.execute(
-                f"UPDATE queue SET state='queued', claimed_at=NULL, claimed_by=NULL "
+                f"UPDATE queue SET state='queued', claimed_at=NULL, claimed_by=NULL, "
+                f"current_run_id=NULL "
                 f"WHERE state IN ('claimed','running') AND attempts < ?{owner_sql}",
                 [cap, *owner_args],
             )
+            swept_at = _now_iso()
+            recorded = 0
+            for row in swept:
+                recorded += self._record_interrupted_run(conn, row, swept_at)
             conn.commit()
             n = result.rowcount or 0
+            if recorded:
+                logger.info(
+                    "Recorded %d interrupted run(s) for runs with no live owner",
+                    recorded)
             if exhausted:
                 logger.warning(
                     "Recovered %d claimed/running item(s); %d at max_attempts=%d "
@@ -631,6 +774,97 @@ class WorkQueue:
             elif n:
                 logger.info("Recovered %d claimed/running items to queued", n)
             return n
+
+    #: Summary on a run row the sweep writes for a run that had no live owner.
+    #: Matched by `autonomy.compute_health` only through `status`, never by
+    #: text — a metric that reads a sentence can be broken by editing prose.
+    INTERRUPTED_SUMMARY = "recovered: no live owner at pool start"
+
+    def _record_interrupted_run(self, conn: sqlite3.Connection,
+                                row: sqlite3.Row, swept_at: str) -> int:
+        """Write the one `runs` row for a swept row, or skip it. Returns 0/1.
+
+        The shape is fixed by what the row has to answer afterwards: "how much
+        wall clock did the fleet burn on runs that never finished".
+
+        - `queue_id` is the queue row's id, so `list_runs_joined` can still name
+          the task through its LEFT JOIN and its payload.
+        - `source` is the queue row's own, so the per-source rollup attributes
+          the interruption instead of dropping it.
+        - `started_at` is the row's `claimed_at` — the instant the attempt began.
+          A row left `claimed` with no stamp (a writer that died between the two
+          UPDATEs) falls back to `enqueued_at`: `started_at` is NOT NULL, and a
+          NULL would lose the run rather than date it early.
+        - `completed_at` is the sweep instant, because `list_runs_joined` and
+          `run_rollup_by_source` both window on it. A row carrying only
+          `started_at` is invisible to the very health report this exists to
+          correct.
+        - `duration_seconds` is that span measured, not rounded up. A run that
+          spans no measurable time is rare enough that reporting 0.0 for it is
+          more truthful than inventing a floor.
+
+        Skipped when the run already has a row: `record_run` happens BEFORE
+        `mark_completed` in the pool, so a death in that gap leaves the queue row
+        `running` with its run already recorded, and an unconditional sweep row
+        would bill that run twice. The test is the pool's own `started_at`
+        (taken just after the claim) against this row's `claimed_at`: any run
+        this process could have recorded for this claim started at or after it,
+        and a retry from an earlier boot always started before it, so a genuine
+        second attempt still gets its row.
+
+        That ordering is decided on parsed timestamps, deliberately not in SQL.
+        `started_at` is an unconstrained TEXT column, so `started_at >= ?`
+        compares a spelling rather than an instant and can rank a run that
+        recorded itself BELOW the claim it belongs to — see `_iso_or_none`. A
+        prior row whose stamp cannot be parsed is treated as not recorded: a
+        corrupt legacy stamp must not silence a live one.
+        """
+        claimed_at = row["claimed_at"] or row["enqueued_at"]
+        if not claimed_at:
+            # No start at all: a row cannot be dated, and a fabricated timestamp
+            # would put a duration into a metric that has to be believed.
+            return 0
+        claim = _iso_or_none(claimed_at)
+        if claim is not None:
+            prior = conn.execute(
+                "SELECT started_at FROM runs WHERE queue_id=?", (row["id"],)
+            ).fetchall()
+            if any((st := _iso_or_none(r[0])) is not None and st >= claim
+                   for r in prior):
+                return 0
+        payload = _loads_or_none(row["payload_json"]) or {}
+        task_id = payload.get("task_id")
+        stamped = row["current_run_id"]
+        if stamped and conn.execute(
+                "SELECT 1 FROM runs WHERE run_id=? LIMIT 1", (stamped,)
+        ).fetchone():
+            # A DEAD attempt's id left on the row — a build that predates the
+            # claim-time clear, or a claim that died before `mark_running` after
+            # an earlier attempt had already recorded itself. `runs.run_id` is a
+            # PRIMARY KEY, so writing under it would raise IntegrityError inside
+            # the sweep's transaction and abort boot-time recovery for EVERY
+            # stranded row, not just this one. Minting instead costs the cross-
+            # check one id it cannot resolve; failing the sweep costs the fleet
+            # every run it was about to reclaim.
+            stamped = None
+        _insert_run(
+            conn,
+            # The id the pool minted and logged for this attempt when the row
+            # carries one; a freshly minted one only when it does not — a row
+            # stranded before `mark_running`, or one claimed by a build that
+            # predates this column.
+            run_id=stamped or new_run_id(str(row["source"])),
+            queue_id=row["id"],
+            source=str(row["source"]),
+            task_id=None if task_id is None else str(task_id),
+            status="interrupted",
+            started_at=str(claimed_at),
+            completed_at=swept_at,
+            duration_seconds=_iso_seconds_between(str(claimed_at), swept_at),
+            summary=self.INTERRUPTED_SUMMARY,
+            meta_json=json.dumps({"interrupted": True}),
+        )
+        return 1
 
     # ── Poison triage (see workers/maintenance.py) ────────────────────────
 
@@ -755,19 +989,12 @@ class WorkQueue:
         claims_json: str = "",
     ) -> None:
         with self._lock, self._connect() as conn:
-            conn.execute(
-                """INSERT INTO runs (run_id, queue_id, source, task_id, status,
-                                     started_at, completed_at, duration_seconds,
-                                     summary, artifact_path, response_json, meta_json,
-                                     claims_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    run_id, queue_id, source, task_id, status,
-                    started_at, completed_at, float(duration_seconds),
-                    summary[:500], artifact_path, response_json[:50000],
-                    meta_json[:20000] if meta_json else None,
-                    claims_json[:20000] if claims_json else None,
-                ),
+            _insert_run(
+                conn, run_id=run_id, queue_id=queue_id, source=source,
+                status=status, started_at=started_at, completed_at=completed_at,
+                duration_seconds=duration_seconds, summary=summary,
+                artifact_path=artifact_path, response_json=response_json,
+                task_id=task_id, meta_json=meta_json, claims_json=claims_json,
             )
             conn.commit()
 
@@ -803,10 +1030,15 @@ class WorkQueue:
         Background tab polls this beside everything else and `runs` is the
         table that grows fastest.
         """
+        # `interrupted` is billed as a failure here, not as a fourth bucket:
+        # #1137's rows are runs whose process died, and a rollup that left them
+        # outside ok/failed/skipped would report a source whose runs keep being
+        # killed as though it never ran them at all — depressing `fail_rate`
+        # exactly when the panel most needs it to rise.
         q = """SELECT source,
                       COUNT(*)                                   AS total,
                       SUM(status = 'success')                     AS ok,
-                      SUM(status = 'failed')                      AS failed,
+                      SUM(status IN ('failed','interrupted'))     AS failed,
                       SUM(status = 'skipped')                     AS skipped,
                       SUM(COALESCE(duration_seconds, 0))          AS seconds,
                       MAX(completed_at)                           AS last_completed

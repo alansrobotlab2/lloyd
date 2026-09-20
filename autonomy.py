@@ -2105,8 +2105,19 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
         # a meta block at all.
         artifact_backed = (meta.get("status_basis") == "artifact"
                            and bool(meta.get("output_artifact")))
+        # #1137: a run killed by a restart or a pool cancel is recorded by the
+        # boot-time sweep as `status='interrupted'` and carries no timeout meta
+        # — it never reached a timeout, the process holding it died. Reading
+        # only the meta and the summary text is what made those runs invisible:
+        # they spent the wall clock, wrote no row, and the fleet reported zero
+        # timeouts while items were re-queued from scratch. The status is the
+        # fact; the summary is prose and is not consulted for it.
         timeout = bool(meta.get("timeout")) or bool(meta.get("pool_timeout")) \
+            or status == "interrupted" \
             or "timed out" in summary or summary.startswith("TimeoutError")
+        # An interrupted row is a failure too — the work did not complete — so
+        # its `duration_seconds` lands in `wasted_hours` below and a restart
+        # shows up in the number that exists to catch wasted GPU.
         failed = status != "success" or (empty and not artifact_backed)
         silent = "[SILENT]" in response or bool(meta.get("silent"))
 

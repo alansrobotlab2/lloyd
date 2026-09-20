@@ -510,6 +510,39 @@ def test_compute_health_reclassifies_historical_phantom_successes():
     assert h["fleet"]["runs"] == 3 and h["fleet"]["failures"] == 2
 
 
+def test_compute_health_counts_an_interrupted_run_as_a_timeout():
+    """#1137 clause 4. A run killed by a restart or a pool cancel is written by
+    the boot-time recovery sweep with `status='interrupted'` and no timeout meta
+    — it never reached a timeout, the process holding it died. Classifying
+    timeouts only from `meta.timeout`/`pool_timeout`/summary text is what made
+    every one of them invisible: the fleet reported zero timeouts and zero
+    wasted hours while items were re-queued from scratch.
+
+    The interrupted row is a failure as well as a timeout, so its wall clock
+    lands in `wasted_hours`, which is the field that exists to catch it."""
+    rows = [
+        {"task_id": "39", "status": "interrupted", "duration_seconds": 900.0,
+         "summary": "recovered: no live owner at pool start", "response_json": "",
+         "meta_json": None, "completed_at": "2026-09-20T00:00:00+00:00"},
+        {"task_id": "39", "status": "success", "duration_seconds": 100.0,
+         "summary": "ok", "response_json": "did work", "meta_json": None,
+         "completed_at": "2026-09-20T01:00:00+00:00"},
+    ]
+    tasks = [{"id": 39, "name": "t39", "status": "up_next"}]
+    h = autonomy.compute_health(rows, tasks, 7)
+    t = h["tasks"][0]
+
+    assert t["timeouts"] == 1, "the killed run is not counted as a timeout"
+    assert t["wasted_hours"] == pytest.approx(0.25, abs=0.01), (
+        "the killed run's 900 s is not in wasted_hours")
+    assert t["runs"] == 2 and t["successes"] == 1 and t["failures"] == 1
+    assert t["fail_rate"] == pytest.approx(0.5)
+    # The timeout is visible at fleet level too — that is the number the report
+    # and the autonomy_health tool answer with.
+    assert h["fleet"]["timeout_runs"] == 1
+    assert h["fleet"]["wasted_hours"] == pytest.approx(0.25, abs=0.01)
+
+
 def test_compute_health_counts_silent_and_lists_disabled_tasks():
     rows = [{"task_id": "5", "status": "success", "duration_seconds": 8.0,
              "summary": "[SILENT]", "response_json": "[SILENT]",

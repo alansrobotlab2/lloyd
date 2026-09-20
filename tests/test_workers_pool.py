@@ -9,6 +9,8 @@ nothing, and the rule that keeps a worker from freezing the backend.
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 import inspect
 from types import SimpleNamespace
 
@@ -474,3 +476,61 @@ def test_the_pool_and_its_startup_hook_agree_on_the_default_slot_count():
 
     class_default = inspect.signature(WorkerPool.__init__).parameters["slots"].default
     assert f'cfg.get("slots", {class_default})' in inspect.getsource(router.start_worker_pool)
+
+
+# ---------------------------------------------------------------------------
+# A run killed by a restart (#1137)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_run_killed_by_a_pool_restart_is_recorded_under_its_logged_run_id(
+        q, monkeypatch, caplog):
+    """The death this item is about, through the real pool. `stop()` calls
+    `task.cancel()` on the worker, `CancelledError` is a `BaseException`, and
+    neither of `_run_item`'s two recording arms catches a `BaseException` — so
+    the attempt ends with the queue row left `running` and no `runs` row at all.
+    The next pool's startup sweep is the only thing that still knows it happened,
+    and from that moment on the killed attempt is a queryable fact."""
+    import workers.sources as sources
+
+    started = asyncio.Event()
+
+    async def execute(item):
+        started.set()
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(sources, "SOURCE_REGISTRY",
+                        {"s": SimpleNamespace(NAME="s", execute=execute)}, raising=False)
+    monkeypatch.setattr(sources, "get_sources_config",
+                        lambda: {"s": {"max_duration_seconds": 300}}, raising=False)
+    q.enqueue("s", "k")
+
+    caplog.set_level(logging.INFO, logger="lloyd-workers.pool")
+    first = WorkerPool(q, slots=1, poll_idle_seconds=0.01)
+    await first.start()
+    await asyncio.wait_for(started.wait(), timeout=10)
+    await first.stop()
+
+    assert q.list_runs() == [], "the killed attempt wrote a run row after all"
+    assert q.get(1).state == "running", "the row was not left stranded"
+
+    second = WorkerPool(q, slots=1, poll_idle_seconds=0.01)
+    await second.start()
+    try:
+        rows = [r for r in q.list_runs() if r["status"] == "interrupted"]
+    finally:
+        await second.stop()
+
+    assert len(rows) == 1, "the startup sweep did not record the killed attempt"
+    assert rows[0]["queue_id"] == 1
+    assert rows[0]["duration_seconds"] > 0
+
+    # The seam this item is actually about: the log named a run_id, and the row
+    # is written under THAT id — so the logged-run_id-vs-`SELECT run_id FROM
+    # runs` cross-check stops producing new logged-but-unrecorded runs. Before
+    # the row carried its id, the sweep minted a fresh one and the run in the log
+    # stayed missing from the table forever.
+    logged = re.findall(r"run_id=(\S+)", caplog.text)
+    assert logged, "the pool never logged the attempt starting"
+    assert logged[0] == rows[0]["run_id"], (
+        f"log named {logged[0]}, the table recorded {rows[0]['run_id']}")

@@ -36,6 +36,11 @@ _DEFAULT_MAX_DURATION_SECONDS = 900
 
 # The statuses a run record may carry. `skipped` is not a failure and not a
 # success: it means the source looked and there was nothing to do.
+# What a source is allowed to declare. `interrupted` is deliberately absent: it
+# is the one status the recovery sweep writes (#1137), and a status that names
+# "the process holding this died" cannot be self-declared by the code whose run
+# died — the whitelist exists so the terminal verdict of a run stays forgeable
+# only by the side that actually observed the death.
 RUN_STATUSES = ("success", "failed", "skipped")
 
 # ── KV budget gate ────────────────────────────────────────────────────
@@ -645,7 +650,14 @@ class WorkerPool:
                                         f"unknown source {item.source}", 0)
                 continue
 
-            await asyncio.to_thread(self.queue.mark_running, item.id)
+            # The id is minted BEFORE the claim is stamped running, and stamped
+            # onto the row with it, so it outlives this attempt: when a cancel
+            # or a SIGKILL leaves no `runs` row, the recovery sweep writes the row
+            # under THIS id (#1137) — the same one the `[worker-N] running …
+            # run_id=…` line below already put in the log, so the run the log
+            # names is a run the table can be queried for.
+            run_id = new_run_id(item.source)
+            await asyncio.to_thread(self.queue.mark_running, item.id, run_id)
             started_at_iso = datetime.now(timezone.utc).isoformat()
             started_perf = time.monotonic()
             self._in_flight[item.id] = {
@@ -655,7 +667,6 @@ class WorkerPool:
                 "worker": worker_id,
             }
 
-            run_id = new_run_id(item.source)
             cfg_all = get_sources_config()
             src_cfg_item = cfg_all.get(item.source, {}) if isinstance(cfg_all, dict) else {}
             max_duration = int(src_cfg_item.get("max_duration_seconds", _DEFAULT_MAX_DURATION_SECONDS))
