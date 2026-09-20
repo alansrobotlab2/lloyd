@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, research]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-09-19
 ---
 
 # The research registry
@@ -11,7 +11,10 @@ date: 2026-09-11
 How a question Lloyd cannot answer becomes a note in the vault. The registry in
 the middle is what this document is about — the store, its seven states, and the
 two producers that fill it. The consumer at the bottom is a worker job and its
-entry is in [[workers-jobs]].
+entry is in [[workers-jobs]]. Despite the shared name, the `autoresearch` source
+is not part of this loop: it runs prompt-variant rounds and never opens this
+registry — `workers/sources/deep_research.py` is the only job that claims a
+topic.
 
 ```
   nightly task #65            a chat turn
@@ -65,8 +68,10 @@ Bounding the file would have fixed that and left the real problems:
   `(no response)`, and every one of those topics is now closed on disk. The
   source was retired with this change on 2026-09-08 and is gone from both
   `config.yaml` and `SOURCE_REGISTRY`, but its notes are not: all 142 are still
-  staged under `_pipeline/vault-derived/pending-research/domain-research/`,
-  unpromoted. That is why `app/routers/workers.py::_DEFAULT_DEST` still maps
+  staged under `~/lloyd/_pipeline/vault-derived/pending-research/domain-research/`
+  — `app/paths.py::VAULT_PENDING_RESEARCH_DIR`, under `LLOYD_HOME` and not in the
+  vault — unpromoted, and untriaged since 09-08 (#1278). That is why
+  `app/routers/workers.py::_DEFAULT_DEST` still maps
   `domain-research` to `knowledge` — the source is history, the leftovers are
   not, and deleting the entry makes them unpromotable from the Review tab.
 - **Four writers, whole-file read-modify-write, no lock.** The same shape that
@@ -92,7 +97,7 @@ from the lock, which only one process holds.
 |---|---|
 | `queued` | proposed, waiting. `not_before` may hold it back after a failure |
 | `researching` | a worker has it. `reclaim_stale` returns what a crashed turn left stuck here, swept at twice the source's `max_duration_seconds` |
-| `written` | a note exists on disk, verified |
+| `written` | a note exists on disk, verified — the verification lives in the worker (`deep_research._note_is_real`), not in `finish`, which takes any path the caller passes (#1276) |
 | `nothing_found` | searched, found nothing — a real answer, and the one that stops it coming back |
 | `duplicate` | the vault already covers it; names what does |
 | `archived` | imported from the retired checklist; dedup corpus only |
@@ -151,10 +156,14 @@ pages, and why its retries live **here** rather than in `workers.db` — is
 
 The one rule worth repeating on this side of the seam, because it is what the
 registry exists to carry: `workers/pool.py` records an in-band
-`{"status": "failed"}` and then calls `mark_completed` on the queue item
-regardless. Only a *raised* exception reaches the queue's backoff. So a source
-that returns `failed` and expects a retry does not get one, and `release()` /
-`exhaust()` here are the retry ladder.
+`{"status": "failed"}` as a **completed** run (`mark_completed` at `:717`,
+immediately after the `run_status == "failed"` branch decides the log level) and
+then reports the outcome. Only a *raised* exception — a timeout or a drain —
+takes the `status="failed"` run-record path at `:744` / `:773`. So a source that
+returns `failed` and expects a queue retry does not get one, and `release()` /
+`exhaust()` here are the retry ladder: `max_attempts` from `workers.max_attempts`
+(3), backoff of one `interval_seconds` (3600 s), and a
+`DrainActive` that releases with no backoff at all.
 
 ---
 
@@ -162,8 +171,11 @@ that returns `failed` and expects a retry does not get one, and `release()` /
 
 A topic row carries `queue_id` (the `workers.db` item that researched it) and
 `session_id` (the transcript). `runs.queue_id` is the join back to the run
-record, which is the same recovery `autonomy.compute_health` uses. The pool
-never passes its `run_id` into `execute`, so the queue id is the link.
+record, and it is what `autonomy` leans on too: `/api/autonomy/health` reads
+`WorkQueue.list_runs_joined` (`workers/queue.py:677`, a `LEFT JOIN` on
+`r.queue_id = q.id`) and `_row_task_id` (`autonomy.py:1953`) recovers the task
+id from the joined queue payload when the run row carries none. The pool never
+passes its `run_id` into `execute`, so the queue id is the link.
 
 ---
 
@@ -173,11 +185,34 @@ never passes its `run_id` into `execute`, so the queue id is the link.
   same question will both be researched. The skill's rule to act on `similar`
   is what closes most of that gap, and it is a prompt, not a guarantee.
 - **A `queued` topic is never expired automatically.** `stats()` reports
-  `stale_queued` past 60 days; retiring one stays a human's decision.
+  `stale_queued` past 60 days (`STALE_QUEUED_DAYS`); retiring one stays a
+  human's decision. That threshold is also loose enough to hide the ordinary
+  state: at 40 queued against a `daily_max` of 3, the head can sit for nearly
+  two weeks with `stale_queued: 0`, and nothing compares `queued` to
+  `MAX_QUEUED` (#1277).
 - **The generator is still an autonomy task**, so it inherits that path's
   timeout semantics rather than the pool's — #65 at `timeout_seconds: 1500`,
   under `scheduled-task`'s 3600 s pool cap so the task's own timer is the one
-  that fires. [[autonomy-jobs]] § inbound signal.
-- **No UI.** `research_stats` and `research_list` from a chat, or `sqlite3`.
-  The Workers page's Recent Runs shows what the source did, because the run
+  that fires. [[autonomy-jobs]] § inbound signal. Its product is whatever the
+  cap allows: the 09-19 run took 300 s and reported success after proposing 3
+  topics and being refused at the 4th.
+- **No UI.** `research_stats` and `research_list` from a chat, or
+  `python -m app.research_store stats` for a shell. Not `sqlite3` on
+  `research.db`, whatever else section 2 says about who opens that file. The
+  Workers page's Recent Runs shows what the source did, because the run
   summary names the topic and its outcome.
+
+## Review log
+
+- **2026-09-19 — `current`.** Every mechanism in the unit is live and the
+  registry is doing its job (391 topics, 33 `written` since the 09-08 cutover,
+  last note 09-19 05:20Z, #65 succeeding nightly). Corrections: the retired
+  source's staging root is `~/lloyd/_pipeline/...`, not vault-relative; the
+  pool's inversion now cites `workers/pool.py:717` / `:744` / `:773` and names
+  the retry ladder's real numbers; §4's `compute_health` analogy is stated as
+  the joined-row task-id recovery it actually is; the shell read path is
+  `python -m app.research_store stats`, not `sqlite3` on a file §2 says nothing
+  else opens; and the `written` row now says where the disk check lives, since
+  `finish` itself does not do it (#1276). Filed: #1276 (store accepts an
+  unverified `written`), #1277 (a queue pinned at `MAX_QUEUED` reads healthy),
+  #1278 (142 untriaged leftovers hold a retired source's router entry).
