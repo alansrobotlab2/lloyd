@@ -1293,6 +1293,223 @@ def test_the_run_persists_fetched_versus_attempted_counts_to_state(
         "the failing channel must be retried on the wire, not just in intent")
 
 
+# --- Backlog #1281: one cumulative backoff budget per scan ---------------------
+#
+# Measured 2026-09-20T03:36Z with the feed endpoint blacked out: two dead
+# channels cost 100 s, so ~50 s per dead channel — 35 s of sleeping at 5/10/20 s
+# plus 4 fast 404 round-trips plus the 0.2 s inter-channel pace. Across the 64
+# channels in config/youtube-channels.yml the sleeping alone is 64 × 35 = 2240 s,
+# already past the 1800 s `timeout_seconds` of autonomy task #30, the only job
+# that runs this pipeline, so a blackout killed the run mid-stage and it wrote
+# nothing to the vault. These tests pin the bound, not the hand lever
+# (`INTEL_YOUTUBE_RETRY_WAIT_SECONDS`) that was being set per-run to dodge it.
+
+
+def _shipped_channel_count() -> int:
+    """How many channels the shipped config declares, counted as triage counted it.
+
+    `load_youtube_channels_config` is monkeypatched in the scan tests and resolves
+    from `Path.home()` in production, so a bound over "the full config" has to
+    count the file the scheduled run actually reads: 64 lines carry `channel_id:`.
+    """
+    cfg = INTEL_DIR / "config" / "youtube-channels.yml"
+    return sum(1 for line in cfg.read_text().splitlines() if "channel_id:" in line)
+
+
+def _dead_channels_scan(monkeypatch, feed_stub, n, budget):
+    """Arm a scan over `n` unreachable channels with `budget` seconds to sleep in.
+
+    Waits are captured on the module-level `sleep` so the ladder is observable
+    without wall clock; the retry-wait and budget env overrides are removed so the
+    scenario is the default ladder under a declared budget, and the stub's `hits`
+    are the record of how many requests each channel really got.
+    """
+    monkeypatch.setattr(yt_mod, "RSS_FEED_URL", _stub_rss_url(feed_stub))
+    monkeypatch.delenv(yt_mod.RETRY_WAIT_ENV, raising=False)
+    monkeypatch.delenv(yt_mod.BACKOFF_BUDGET_ENV, raising=False)
+    monkeypatch.setattr(yt_mod, "BACKOFF_BUDGET_SECONDS", budget)
+    waits = []
+    monkeypatch.setattr(yt_mod, "sleep", waits.append)
+    ids = tuple(f"UCdead{n}" for n in range(n))
+    monkeypatch.setattr(yt_mod, "load_youtube_channels_config", lambda: _channels(*ids))
+    feed_stub.outcomes = {i: 404 for i in ids}
+    return ids, waits
+
+
+def test_the_default_backoff_budget_keeps_a_full_blackout_under_the_task_timeout(monkeypatch):
+    """Clause 2: the worst case is now a declared number, and it fits in 1800 s.
+
+    A scan stops sleeping once cumulative waiting reaches the module budget, so
+    the most it can sleep over the whole shipped config is
+    `min(channels × per-channel ladder, BACKOFF_BUDGET_SECONDS)` — 240 s today,
+    against the 64 × 35 = 2240 s the unbounded ladder would spend.
+    """
+    monkeypatch.delenv(yt_mod.RETRY_WAIT_ENV, raising=False)
+    monkeypatch.delenv(yt_mod.BACKOFF_BUDGET_ENV, raising=False)
+
+    channels = _shipped_channel_count()
+    assert channels >= 64, f"expected the 64-channel config, counted {channels}"
+    ladder_per_dead_channel = sum(
+        yt_mod.RETRY_BASE_WAIT_SECONDS * (2 ** n) for n in range(yt_mod.FETCH_ATTEMPTS - 1))
+    assert ladder_per_dead_channel == 35.0, (
+        f"a dead channel's ladder is the 5/10/20 s the comments measure, got "
+        f"{ladder_per_dead_channel} s")
+    unbounded = channels * ladder_per_dead_channel
+    assert unbounded > 1800, (
+        f"{unbounded} s of unbounded sleeping no longer exceeds task #30's timeout, so "
+        "the budget is no longer what bounds a blackout — re-derive this clause")
+    bounded = min(unbounded, yt_mod.BACKOFF_BUDGET_SECONDS)
+    assert bounded < 1800, (
+        f"max sleeping across a scan is {bounded} s, not under the 1800 s that a "
+        "scheduled run of #30 is allowed")
+
+    comment = Path(yt_mod.__file__).read_text()
+    assert "37 minutes" not in comment, (
+        "the module still states the unbounded ladder as the cost a blackout pays")
+    assert f"{yt_mod.BACKOFF_BUDGET_SECONDS:g} s" in comment, (
+        "the module comment must state the bounded figure this test just computed")
+
+
+def test_a_blackout_stops_backing_off_once_the_cumulative_budget_is_spent(
+        redirect_paths, monkeypatch, feed_stub):
+    """Clause 1: sleeping is bounded by the budget, not by the channel count.
+
+    Twelve unreachable channels at the default ladder would sleep 12 × 35 = 420 s.
+    With a 20 s budget the scan may sleep at most 20 s in total — 5 s and 10 s
+    still fit, so the ladder runs while it fits, and the 20 s wait that would
+    breach the bound is refused instead of taken. Every channel after the refusal
+    is asked once on the wire, which is the count the stub recorded, not one the
+    scanner asserts about itself.
+    """
+    ids, waits = _dead_channels_scan(monkeypatch, feed_stub, 12, budget=20.0)
+
+    items, coverage = yt_mod.scan_youtube_channels()
+
+    assert sum(waits) <= 20.0, (
+        f"the scan slept {sum(waits)} s against a 20 s budget: {waits}")
+    backoff_waits = [w for w in waits if w >= yt_mod.RETRY_BASE_WAIT_SECONDS]
+    assert backoff_waits == [5.0, 10.0], (
+        f"backoff must run while the budget lasts and stop at the wait that will not "
+        f"fit it, got {backoff_waits}")
+    assert feed_stub.hits.count(ids[0]) == 3, (
+        f"the first dead channel gets the attempts the budget still allowed, got "
+        f"{feed_stub.hits.count(ids[0])} of {yt_mod.FETCH_ATTEMPTS}")
+    one_attempt = [i for i in ids[1:] if feed_stub.hits.count(i) == 1]
+    assert len(one_attempt) == 11, (
+        f"channels after the budget fired must each be tried once, got {one_attempt}")
+    assert len(feed_stub.hits) == 14, (
+        f"3 + 11 single-attempt requests, not 12 × 4: {len(feed_stub.hits)} requests")
+    assert items == []
+    assert (coverage.fetched, coverage.attempted) == (0, 12)
+
+
+def test_firing_the_budget_says_which_channels_it_reduced_and_keeps_the_denominator(
+        redirect_paths, monkeypatch, feed_stub, capsys):
+    """Clause 3: the bound is legible in the run and coverage keeps every channel.
+
+    A reader of the run record has to be able to tell "we stopped asking" from
+    "the endpoint is dead", and the degraded signal still needs the full
+    denominator — a budget that quietly dropped channels from `attempted` would
+    turn a blackout into a healthy-looking 0 of 1.
+    """
+    ids, _waits = _dead_channels_scan(monkeypatch, feed_stub, 12, budget=20.0)
+
+    _items, coverage = yt_mod.scan_youtube_channels()
+
+    out = capsys.readouterr().out
+    reduced = sum(1 for i in ids if feed_stub.hits.count(i) == 1)
+    assert reduced == 11, "the wire must show 11 channels reduced to one attempt"
+    assert "stopped backing off" in out, out[-1500:]
+    assert f"{reduced} remaining channel" in out, (
+        f"the budget line must name how many channels it reduced; expected {reduced}\n"
+        + out[-1500:])
+    assert coverage.describe() == "fetched 0 feeds of 12 attempted", (
+        "every tried channel stays in the denominator, so the CLI's degraded line "
+        "still sees a blackout and not a 0-of-1 quiet night")
+
+
+def test_a_scan_that_stays_inside_the_budget_retries_exactly_as_before(
+        redirect_paths, monkeypatch, capsys):
+    """Clause 4: the budget bounds the cumulative wait, never a channel inside it.
+
+    Triage measured 8/12 channels recovering on one attempt and 10/12 within four
+    (youtube_scanner.py:66-68), so recovery is the thing the budget must not
+    touch. Here a dead channel burns 35 s of the default 240 s budget and a second
+    channel still recovers on its 3rd attempt with the untouched 5/10 s waits —
+    and nothing prints about the budget, because nothing reached it.
+    """
+    monkeypatch.delenv(yt_mod.RETRY_WAIT_ENV, raising=False)
+    monkeypatch.delenv(yt_mod.BACKOFF_BUDGET_ENV, raising=False)
+    waits = []
+    monkeypatch.setattr(yt_mod, "sleep", waits.append)
+    hits = {}
+
+    def flaky_get(url, headers=None, timeout=None):
+        channel = url.split("channel_id=")[-1]
+        hits[channel] = hits.get(channel, 0) + 1
+        if channel == "UCflaky" and hits[channel] < 3:
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        if channel == "UCflaky":
+            return _atom_body(["abc123"])
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(yt_mod, "_http_get", flaky_get)
+    monkeypatch.setattr(yt_mod, "load_youtube_channels_config",
+                        lambda: _channels("UCdead", "UCflaky"))
+
+    items, coverage = yt_mod.scan_youtube_channels()
+
+    out = capsys.readouterr().out
+    assert hits == {"UCdead": 4, "UCflaky": 3}, (
+        f"a dead channel still gets all four attempts and a flaky one still gets "
+        f"three inside an unspent budget, got {hits}")
+    assert waits == [5.0, 10.0, 20.0, yt_mod.CHANNEL_PACING_SECONDS, 5.0, 10.0], (
+        f"the ladder and the pace must be unchanged while the budget lasts, got {waits}")
+    assert sum(waits) == pytest.approx(50.2), (
+        "35 s of the dead channel plus one pace plus 15 s of the flaky channel")
+    assert [i.title for i in items] == ["Video abc123"], (
+        "a feed that recovers on the 3rd attempt must still yield its video")
+    assert (coverage.fetched, coverage.attempted) == (1, 2)
+    assert "stopped backing off" not in out, (
+        "an unspent budget must not print a reduction line")
+
+
+def test_a_blackout_run_over_the_cli_fires_the_budget_and_still_fails_on_coverage(
+        tmp_path, feed_stub):
+    """Clause 3 and 5 across the process seam: the bound, then the degraded exit.
+
+    Five channels, none reachable, and a 0.3 s budget: the budget has to fire
+    inside the run, and firing it must not soften the #739 signal — the run still
+    prints `YouTube stage DEGRADED` with both counts after the writer and exits
+    non-zero (it is deliberately exit 1, so the skill forbids wrapping this
+    command as `a || b || c`).
+    """
+    home, _feeds = _cli_home(tmp_path)
+    _cli_channels(home, "UCa", "UCb", "UCc", "UCd", "UCe")
+    feed_stub.outcomes = {i: 404 for i in ("UCa", "UCb", "UCc", "UCd", "UCe")}
+    env = _cli_feed_env(feed_stub)
+    env["INTEL_YOUTUBE_BACKOFF_BUDGET_SECONDS"] = "0.3"
+
+    _day, proc = _run_cli(home, 6, "--scan", extra_env=env)
+
+    assert "stopped backing off" in proc.stdout, proc.stdout[-2500:]
+    assert "4 remaining channel" in proc.stdout, (
+        "the first channel spent the budget, the other four are one-attempt each\n"
+        + proc.stdout[-2500:])
+    assert proc.returncode != 0, (
+        f"firing the budget must not rescue a blackout run into exit 0\n{proc.stdout[-2500:]}")
+    assert "Pipeline Complete" not in proc.stdout, proc.stdout[-2500:]
+    lowered = proc.stdout.lower()
+    assert "degraded" in lowered, proc.stdout[-2500:]
+    assert "0 feeds of 5 attempted" in lowered, (
+        f"the degraded line must still name both counts\n{proc.stdout[-2500:]}")
+    assert feed_stub.hits.count("UCa") == 3, (
+        "the budget fires after the waits that fit, on the wire as well as in the "
+        f"printout; UCa got {feed_stub.hits.count('UCa')} requests")
+    assert all(feed_stub.hits.count(i) == 1 for i in ("UCb", "UCc", "UCd", "UCe")), (
+        f"later channels are one attempt each: {[feed_stub.hits.count(i) for i in ('UCb', 'UCc', 'UCd', 'UCe')]}")
+
+
 def _cli_channels(home, *ids):
     """Write the channels config where the scanner looks for it, under scratch HOME."""
     cfg = home / "lloyd" / "scripts" / "intel-pipeline" / "config" / "youtube-channels.yml"

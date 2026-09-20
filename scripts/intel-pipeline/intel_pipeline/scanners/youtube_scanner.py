@@ -68,13 +68,32 @@ RSS_FEED_URL = os.environ.get(
 # attempt, 10/12 with up to 4 attempts at 5/10/20 s.
 FETCH_ATTEMPTS = 4
 
-# Wait before the 2nd attempt; each following wait doubles, so a channel gets
-# 5 s, 10 s, 20 s — 35 s of waiting per dead feed. The env override is
-# operational, not a test hook: a blackout across all 64 configured channels
-# would cost 64 × 35 s ≈ 37 minutes of retrying, past the 1800 s
-# `timeout_seconds` on autonomy task #30, which runs this pipeline.
+# Wait before the 2nd attempt; each following wait doubles, so a dead channel
+# costs 5 s + 10 s + 20 s = 35 s of sleeping plus four requests. The env override
+# is operational, not a test hook: it shortens the ladder by hand when the
+# endpoint is already known dead (the run of 2026-09-20 needed it to finish at
+# all). What it does not do is bound the ladder — BACKOFF_BUDGET_SECONDS below
+# does that, because unbounded it is 64 channels x 35 s = 2240 s of sleeping
+# across config/youtube-channels.yml before a single request is counted, which
+# alone is past the 1800 s `timeout_seconds` of autonomy task #30, the only job
+# that runs this pipeline, and a run killed mid-stage writes nothing to the vault.
 RETRY_BASE_WAIT_SECONDS = 5.0
 RETRY_WAIT_ENV = "INTEL_YOUTUBE_RETRY_WAIT_SECONDS"
+
+# Ceiling on sleeping inside ONE scan, drawn on by retry backoff and by the
+# inter-channel pace alike. A backoff wait that no longer fits stops the scan
+# backing off for good and every later channel is asked once, so the most any
+# scan can spend asleep is 240 s whatever the channel count — where the unbounded
+# ladder above would spend 2240 s. That bound is what keeps a full blackout
+# inside task #30's 1800 s: 240 s of sleeping plus 64 single requests, instead of
+# a run killed during this stage that reaches neither scoring nor the vault writer
+# (backlog #1281, measured 2026-09-20 at ~50 s per dead channel).
+# Arithmetic pinned by tests/test_intel_pipeline_scorer.py.
+BACKOFF_BUDGET_SECONDS = 240.0
+BACKOFF_BUDGET_ENV = "INTEL_YOUTUBE_BACKOFF_BUDGET_SECONDS"
+
+# Rate-limit pause between channels, also counted against the budget above.
+CHANNEL_PACING_SECONDS = 0.2
 
 # Fetched-below-this-fraction-of-attempted is a degraded YouTube stage: more
 # feeds were unreachable than reachable.
@@ -108,6 +127,79 @@ class FeedCoverage(NamedTuple):
 def sleep(seconds: float) -> None:
     """Sleep, at module level so a test can drive the retry ladder without wall clock."""
     time.sleep(seconds)
+
+
+def _backoff_budget_seconds() -> float:
+    """The scan's sleeping ceiling, with the operational env override applied.
+
+    Read per scan rather than at import, like `_retry_wait_before` reads its own
+    override, so a caller can set it for one run without editing the module.
+    """
+    override = os.environ.get(BACKOFF_BUDGET_ENV, "").strip()
+    if override:
+        return float(override)
+    return BACKOFF_BUDGET_SECONDS
+
+
+class SleepBudget:
+    """Cumulative ceiling on sleeping inside one scan (backlog #1281).
+
+    Every sleep the scan issues asks this first: retry backoff, and the
+    inter-channel pace. That is what makes the bound hold regardless of how many
+    channels are configured — 64 or 640, the scan cannot sleep past
+    `budget_seconds`.
+
+    A refused backoff is a decision, not just a skipped wait: it flips
+    `backoff_exhausted`, which reduces that channel and every later one to a
+    single attempt. Refusing per-channel instead would abandon a feed halfway up
+    its ladder, and intermittent feeds are the normal case here (8/12 recovered on
+    one attempt, 10/12 within four). So the ladder runs normally while the
+    cumulative wait fits, and only the channel that would breach the bound is cut
+    short. A refused pace only skips a pause; it never shortens anyone's ladder.
+    """
+
+    def __init__(self, budget_seconds: float):
+        self.budget_seconds = float(budget_seconds)
+        self.slept_seconds = 0.0
+        self.backoff_exhausted = False
+        self.channels_reduced = 0
+
+    def allow_backoff(self, seconds: float) -> bool:
+        """Grant `seconds` of retry sleeping, or refuse it and stop retrying.
+
+        Firing is sticky: once the budget is spent the answer is no for the rest of
+        the scan, so the channels after it are asked once each — and only those are
+        counted, since the channel that spent the last of the budget still got the
+        attempts that fit inside it.
+        """
+        if self.backoff_exhausted:
+            self.channels_reduced += 1
+            return False
+        if self._grant(seconds):
+            return True
+        self.backoff_exhausted = True
+        return False
+
+    def allow_pace(self) -> bool:
+        """Grant one inter-channel pause, or skip it once the budget is spent."""
+        return self._grant(CHANNEL_PACING_SECONDS)
+
+    def describe_reduction(self) -> str:
+        """The line the scan prints when the budget fired, naming the reduction.
+
+        A reader of the run record has to be able to tell "we stopped asking" from
+        "the endpoint is dead", and the coverage line alone cannot say it: the
+        denominator still holds every channel.
+        """
+        return (f"  Backoff budget of {self.budget_seconds:g} s spent "
+                f"({self.slept_seconds:.1f} s slept): stopped backing off and tried "
+                f"{self.channels_reduced} remaining channel(s) once each")
+
+    def _grant(self, seconds: float) -> bool:
+        if self.slept_seconds + seconds > self.budget_seconds:
+            return False
+        self.slept_seconds += seconds
+        return True
 
 
 def _retry_wait_before(attempt: int) -> float:
@@ -160,7 +252,8 @@ def _parse_feed_entries(content: str) -> List[Dict]:
     return videos
 
 
-def fetch_channel_rss(channel_id: str) -> Tuple[List[Dict], bool]:
+def fetch_channel_rss(channel_id: str,
+                      budget: Optional[SleepBudget] = None) -> Tuple[List[Dict], bool]:
     """Fetch the RSS feed of one channel, retrying transient upstream failures.
 
     Returns ``(videos, fetched)``. ``fetched`` is False only when every attempt
@@ -171,13 +264,24 @@ def fetch_channel_rss(channel_id: str) -> Tuple[List[Dict], bool]:
 
     A body that arrives but does not parse counts as a failed attempt too (an
     empty or truncated 200 is not a feed we read), and so is retried.
+
+    Pass ``budget`` (the per-scan ``SleepBudget``, backlog #1281) to bound the
+    sleeping this fetch may add to the scan: a backoff wait that no longer fits
+    ends the ladder here and marks the budget exhausted, so later channels are
+    asked once. With no budget the ladder is the full ``FETCH_ATTEMPTS``, which is
+    what a caller outside a scan gets.
     """
     rss_url = f"{RSS_FEED_URL}?channel_id={channel_id}"
     last_error: Optional[BaseException] = None
+    attempts_made = 0
 
     for attempt in range(1, FETCH_ATTEMPTS + 1):
         if attempt > 1:
-            sleep(_retry_wait_before(attempt))
+            wait = _retry_wait_before(attempt)
+            if budget is not None and not budget.allow_backoff(wait):
+                break
+            sleep(wait)
+        attempts_made = attempt
         try:
             content = _http_get(
                 rss_url,
@@ -188,8 +292,8 @@ def fetch_channel_rss(channel_id: str) -> Tuple[List[Dict], bool]:
         except Exception as e:
             last_error = e
 
-    print(f"  Error fetching RSS for channel {channel_id} after {FETCH_ATTEMPTS} "
-          f"attempts: {type(last_error).__name__}: {last_error}")
+    print(f"  Error fetching RSS for channel {channel_id} after {attempts_made} "
+          f"of {FETCH_ATTEMPTS} attempts: {type(last_error).__name__}: {last_error}")
     return [], False
 
 
@@ -218,7 +322,13 @@ def scan_youtube_channels() -> Tuple[List[FeedItem], FeedCoverage]:
     today = datetime.utcnow().strftime("%Y-%m-%d")
     feeds_fetched = 0
     feeds_attempted = 0
-    
+    # One sleeping ceiling for the whole scan (backlog #1281): the retry ladder is
+    # bounded by cumulative waiting, not per channel, so a blackout costs at most
+    # the budget and the run still reaches scoring and the vault writer inside the
+    # 1800 s of autonomy task #30. Every channel is still tried and still counted,
+    # so the coverage signal below fires on a blackout exactly as it did before.
+    budget = SleepBudget(_backoff_budget_seconds())
+
     print(f"\nScanning {len(channels)} YouTube channels...")
     
     for i, channel in enumerate(channels):
@@ -229,17 +339,20 @@ def scan_youtube_channels() -> Tuple[List[FeedItem], FeedCoverage]:
         if not channel_id:
             continue
         
-        # Rate limiting: 0.2s between requests
-        if i > 0:
-            sleep(0.2)
-        
+        # Rate limiting between channels, paid from the same budget the backoff
+        # spends: past the budget the pause is skipped rather than the channel.
+        if i > 0 and budget.allow_pace():
+            sleep(CHANNEL_PACING_SECONDS)
+
         print(f"  [{i+1}/{len(channels)}] {name} ({handle})...")
-        
+
         # Get stored state for this channel
         stored_last_video = channel_state.get(channel_id, "")
-        
-        # Fetch RSS feed
-        videos, fetched = fetch_channel_rss(channel_id)
+
+        # Fetch RSS feed under the scan's sleeping budget. Each channel the
+        # budget refuses to back off for is counted there, and the count is
+        # reported once, after the loop, where the total is known.
+        videos, fetched = fetch_channel_rss(channel_id, budget=budget)
 
         # Counted before the empty-feed branch below: that branch is where
         # "unreachable" and "idle" used to become the same thing, and a counter
@@ -293,6 +406,13 @@ def scan_youtube_channels() -> Tuple[List[FeedItem], FeedCoverage]:
         if videos:
             channel_state[channel_id] = videos[0].get("id", "")
     
+    # Say out loud when the bound was what ended the retrying, and how many
+    # channels it ended up asking only once. Coverage counts below are unaffected:
+    # every channel the budget shortened is still in the denominator, so a
+    # blackout still reads as a blackout (backlog #1281).
+    if budget.channels_reduced:
+        print(budget.describe_reduction())
+
     # Save updated state, including this run's feed coverage
     coverage = FeedCoverage(fetched=feeds_fetched, attempted=feeds_attempted)
     current_state[YOUTUBE_STATE_KEY] = channel_state
