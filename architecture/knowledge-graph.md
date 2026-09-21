@@ -54,8 +54,13 @@ a pass. Two comments in `agent_mcp/facts.py` still tell a reader to run
 `kg reindex`; they mean that call.
 
 Derived and rebuildable at any time: `facts_idx`, `_pipeline/relations-index.json`
-(document co-occurrence), `_pipeline/content-hashes.json`, entity overview files,
-QMD vector collections.
+(document co-occurrence — written by `scripts/memory/rebuild_index.py` and by nothing
+else, #1148), `_pipeline/relations-index-typed.json` (typed frontmatter relations —
+written and read by `scripts/memory/next-gen-memory/relations_index.py`),
+`_pipeline/content-hashes.json`, entity overview files, QMD vector collections.
+The two relation indexes are separate files on purpose: until 2026-09-21 both
+writers wrote the same path with different schemas inside scheduled task #24, and
+the second overwrote the first every cycle.
 
 Not derivable, and therefore backed up: the edge graph, the alias table, merge
 history and hand-review state. Fact *content* can be re-extracted from the vault;

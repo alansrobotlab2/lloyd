@@ -95,11 +95,59 @@ INVERSE_RELATIONS = {
 VALID_RELATION_TYPES = set(INVERSE_RELATIONS.keys())
 
 
+# ── One file, one owner, one schema (backlog #1148) ─────────────────────────
+# Two scripts used to write the *same* path with two different schemas: this
+# module's :meth:`RelationsIndexGenerator.rebuild` wrote
+# ``{edges, stale, built_at}`` while
+# ``scripts/memory/rebuild_index.py::rebuild_relations_index()`` wrote
+# ``{relationships, total_relationships, documents_indexed, last_updated}``.
+# Both run inside scheduled task #24 (Data Pipeline, 6x-daily) in a fixed
+# order — this module from ``nightly_extraction.py`` Step 1, ``rebuild_index.py``
+# as Step 2 — so the file was not raced, it was deterministically overwritten by
+# the last step of every cycle. This module's own readers then found neither
+# shape they were written for: the no-arg CLI summary printed ``Index loaded: 0
+# edges`` against a ~100 MB file, and ``--query`` raised ``KeyError: 'edges'``.
+#
+# Ownership, one writer each:
+#   ``relations-index.json``        — written ONLY by ``scripts/memory/rebuild_index.py``.
+#       ``relationships`` rows: wiki-link / tag-cluster co-occurrence.
+#       Read-only from this module.
+#   ``relations-index-typed.json``  — written ONLY by this module.
+#       ``edges`` rows: the typed frontmatter relations, plus merged
+#       conversation proposals.
+#
+# Which script owns which path is pinned by
+# ``tests/test_relations_index_read_only.py::test_exactly_one_writer_per_index``
+# (a checkout-wide scan), and what this module may write is pinned statically in
+# the same file — so pointing a write back at the derived path fails a test
+# instead of quietly re-opening the clobber. Consolidating the two schemas into
+# one index is a retrieval design call and is deliberately NOT made here.
+PIPELINE_DIR = Path.home() / "lloyd" / "_pipeline"
+DERIVED_INDEX_FILE = PIPELINE_DIR / "relations-index.json"
+TYPED_INDEX_FILE = PIPELINE_DIR / "relations-index-typed.json"
+
+
+def index_rows(index_data: Any) -> List[dict]:
+    """Relation rows out of either schema, without a KeyError on either.
+
+    ``edges`` is this module's typed shape; ``relationships`` is the shape
+    ``rebuild_index.py`` leaves at the derived path. Before #1148 the readers
+    here picked one key each — ``.get('edges', [])`` in the summary,
+    ``index_data["edges"]`` in the query — so the same file read as a silently
+    empty graph from one method and raised from the other, depending on which
+    got there first.
+    """
+    if not isinstance(index_data, dict):
+        return []
+    rows = index_data.get("edges") or index_data.get("relationships") or []
+    return rows if isinstance(rows, list) else []
+
+
 class RelationsIndexGenerator:
     """Generate and maintain document relationships index.
 
     READ-ONLY with respect to the vault: every path here reads vault ``.md``
-    files and the only thing it writes is ``self.index_file``. Relations are
+    files and the only thing it writes is ``self.typed_index_file``. Relations are
     authored in vault frontmatter by hand (or, for conversation-derived ones,
     land as ``relations:`` frontmatter through the normal vault route) and are
     *read* from here by :meth:`rebuild`; nothing in this module mutates a vault
@@ -133,21 +181,39 @@ class RelationsIndexGenerator:
 
     def __init__(self):
         self.vault = Path.home() / "obsidian"
-        self.index_file = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
-        self.proposals_file = Path.home() / "lloyd" / "_pipeline" / "conversation-relation-proposals.json"
+        # Read-only: the derived index owned by scripts/memory/rebuild_index.py
+        # (#1148). Kept under its original attribute name because it is the file
+        # this module's readers consult; the module's own write target below is
+        # what `rebuild()` may put bytes on.
+        self.index_file = DERIVED_INDEX_FILE
+        self.typed_index_file = TYPED_INDEX_FILE
+        self.proposals_file = PIPELINE_DIR / "conversation-relation-proposals.json"
         self.index_data: Dict[str, Any] = {
             "edges": [],
             "stale": [],
             "built_at": None
         }
+        # Rows read from `self.index_file`, whatever schema that file carries.
+        self.derived_rows: List[dict] = []
         self._doc_cache: Dict[str, dict] = {}  # Cache for parsed documents
     
     def rebuild(self) -> dict:
-        """Rebuild the relationships index from scratch.
-        
+        """Rebuild this module's typed index and write it to ``typed_index_file``.
+
         Scans all vault markdown files for relations: frontmatter blocks,
-        parses typed relations, and compiles into relations-index.json.
-        
+        parses typed relations, and compiles them — plus any approved
+        conversation proposals — into ``_pipeline/relations-index-typed.json``.
+
+        That file is the only thing this method writes (#1148). It used to write
+        ``_pipeline/relations-index.json``, which
+        ``scripts/memory/rebuild_index.py::rebuild_relations_index()`` also
+        writes with a different schema, both inside scheduled task #24; the
+        second writer won every cycle and this module's readers then could not
+        read the file they had just been handed. The derived file is now read
+        only (:meth:`load_index`), which is also what keeps merged conversation
+        proposals from being dead on arrival: they are rows in a file nothing
+        else rebuilds.
+
         Returns:
             Index summary with relationship counts
         """
@@ -235,12 +301,15 @@ class RelationsIndexGenerator:
         # Merge approved conversation-derived proposals
         merged = self._merge_approved_proposals(edge_set)
 
-        # Write index file
-        self.index_file.parent.mkdir(parents=True, exist_ok=True)
-        self.index_file.write_text(json.dumps(self.index_data, indent=2))
+        # Write THIS module's index file. `self.index_file` — the derived
+        # relations-index.json owned by scripts/memory/rebuild_index.py — is
+        # never a write target here (#1148); `self.typed_index_file` is.
+        self.typed_index_file.parent.mkdir(parents=True, exist_ok=True)
+        self.typed_index_file.write_text(json.dumps(self.index_data, indent=2))
 
         total_edges = len(self.index_data["edges"])
-        print(f"  → Built index with {total_edges} edges ({len(stale_set)} stale docs, {merged} from conversation proposals)")
+        print(f"  → Built index with {total_edges} edges ({len(stale_set)} stale docs, "
+              f"{merged} from conversation proposals) → {self.typed_index_file}")
 
         return {
             "total_relationships": total_edges,
@@ -540,35 +609,66 @@ class RelationsIndexGenerator:
         
         return normalized
     
+    def all_rows(self) -> List[dict]:
+        """Every relation row this module can see: typed edges + derived rows."""
+        return list(index_rows(self.index_data)) + list(self.derived_rows)
+
     def get_relations_for_doc(self, doc_path: str) -> List[dict]:
         """Get all relations for a specific document.
-        
+
         Args:
             doc_path: Document path (vault-relative)
-            
+
         Returns:
-            List of relation dicts with source, target, type
+            List of relation dicts with source, target, type. Rows from both
+            index files, whichever schema each one carries.
+
+        This is a pure read (#1148). It used to open with
+        ``if not self.index_data["edges"]: self.rebuild()``, so querying from a
+        generator that had not called :meth:`load_index` — which is exactly what
+        ``--test`` builds — scanned the live vault and rewrote the ~100 MB
+        production index: a read path that could put bytes on production state.
+        An empty index is now simply an empty answer.
         """
-        # Reload index if needed
-        if not self.index_data["edges"]:
-            self.rebuild()
-        
         return [
-            edge for edge in self.index_data["edges"]
-            if edge["source"] == doc_path or edge["target"] == doc_path
+            row for row in self.all_rows()
+            if doc_path in (row.get("source"), row.get("target"))
         ]
-    
+
+    @staticmethod
+    def _read_json_dict(path: Path) -> dict:
+        """Parse a JSON object, or ``{}`` when the file is missing or unreadable."""
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  ⚠️ Could not read {path}: {exc}")
+            return {}
+        return data if isinstance(data, dict) else {}
+
     def load_index(self) -> dict:
-        """Load index from disk.
-        
+        """Load both index files into the read views. Writes nothing (#1148).
+
+        ``self.index_data``    <- this module's typed index (``edges`` shape).
+        ``self.derived_rows``  <- rows from the derived index owned by
+        ``scripts/memory/rebuild_index.py``, whose rows live under
+        ``relationships``; :func:`index_rows` reads either key, so a file in
+        either shape loads with its real count instead of reading as empty.
+
         Returns:
-            Index data dictionary
+            The typed index data dictionary
         """
-        if self.index_file.exists():
-            try:
-                self.index_data = json.loads(self.index_file.read_text())
-            except:
-                pass
+        self.index_data = {
+            "edges": [],
+            "stale": [],
+            "built_at": None,
+            **self._read_json_dict(self.typed_index_file),
+        }
+        self.derived_rows = index_rows(self._read_json_dict(self.index_file))
+        print(f"Loaded {len(index_rows(self.index_data))} typed edges "
+              f"({self.typed_index_file.name}), {len(self.derived_rows)} derived rows "
+              f"({self.index_file.name})")
         return self.index_data
 
 
@@ -598,18 +698,55 @@ def main():
         print(f"\nRelations for {args.query}:")
         print(json.dumps(relations, indent=2))
     else:
-        # Default: just load and show summary
+        # Default: just load and show summary. Both counts are printed under
+        # the name of the file they came from (#1148): reading only `edges` out
+        # of one merged number is what made a 331,977-row index print
+        # `Index loaded: 0 edges`.
         generator.load_index()
-        print(f"Index loaded: {len(generator.index_data.get('edges', []))} edges")
+        typed = index_rows(generator.index_data)
+        print(f"Typed edges ({generator.typed_index_file}): {len(typed)}")
+        print(f"Derived rows ({generator.index_file}): {len(generator.derived_rows)}")
         print(f"Stale docs: {len(generator.index_data.get('stale', []))}")
 
 
-def _run_tests():
-    """Run basic tests to validate implementation."""
-    print("\n=== Relations Index Tests ===\n")
-    
+def _sandbox_generator(root: Path) -> RelationsIndexGenerator:
+    """A generator whose every file lives under ``root``: scratch vault, derived
+    index, typed index and proposals sidecar.
+
+    #1148: the self-test used to build a bare ``RelationsIndexGenerator()``,
+    whose default paths are the real vault and ``_pipeline/relations-index.json``,
+    so ``python relations_index.py --test`` was a developer command that scanned
+    the live vault and overwrote the production index. Every path it can reach
+    now goes through here, and
+    ``tests/test_relations_index_read_only.py::test_test_flag_leaves_the_live_index_alone``
+    runs ``--test`` under a scratch HOME and requires the ``_pipeline`` files
+    there not to move.
+    """
     generator = RelationsIndexGenerator()
-    
+    generator.vault = root / "vault"
+    generator.index_file = root / "pipeline" / DERIVED_INDEX_FILE.name
+    generator.typed_index_file = root / "pipeline" / TYPED_INDEX_FILE.name
+    generator.proposals_file = (
+        root / "pipeline" / "conversation-relation-proposals.json"
+    )
+    return generator
+
+
+def _run_tests():
+    """Run basic tests to validate implementation.
+
+    Everything with a filesystem side effect happens in a temp dir under a
+    ``relations-index-selftest-`` prefix, never against ``~/obsidian`` or
+    ``_pipeline`` (#1148). ``tempfile`` is imported here rather than at module
+    top because ``tests/test_yaml_fix_skill_claims.py`` pins the line the
+    fallback ``class yaml`` sits at, and the skill prose cites it by number.
+    """
+    import tempfile
+    root = Path(tempfile.mkdtemp(prefix="relations-index-selftest-"))
+    print(f"\n=== Relations Index Tests ===\nSandbox: {root}\n")
+
+    generator = _sandbox_generator(root)
+
     # Test 1: Path normalization
     print("Test 1: Path normalization...")
     assert generator._normalize_path("test.md", "") == "test.md"
@@ -656,20 +793,68 @@ Content here
     assert 0.0 <= similarity <= 1.0
     print(f"  ✓ Similarity calculation works (score: {similarity:.3f})")
     
-    # Test 4: Rebuild index
-    print("\nTest 4: Index rebuild...")
+    # Test 4: Rebuild index — the write-boundary check, so the sandbox vault is
+    # deliberately EMPTY: this command's job here is to prove rebuild() puts
+    # bytes on exactly one file and it is the typed one. Creating fixture notes
+    # would make the self-test a writer of vault notes, which #484 forbids this
+    # module from being at all. Edge production from frontmatter is pinned by
+    # tests/test_relations_index_read_only.py::test_rebuild_edge_count_is_the_document_relations.
+    print("\nTest 4: Index rebuild (empty sandbox vault)...")
+    generator.vault.mkdir(parents=True, exist_ok=True)
     result = generator.rebuild()
     assert "total_relationships" in result
     assert result["status"] == "rebuilt"
-    print(f"  ✓ Index rebuilt with {result['total_relationships']} relationships")
-    
-    # Test 5: Load index
+    assert result["total_relationships"] == 0, (
+        f"rebuild over an empty sandbox vault produced "
+        f"{result['total_relationships']} edges; the sandbox is not as empty as "
+        "the self-test assumes"
+    )
+    assert generator.typed_index_file.exists(), "rebuild() did not write the typed index"
+    assert not generator.index_file.exists(), (
+        f"the self-test wrote {generator.index_file.name}, the derived index owned "
+        "by scripts/memory/rebuild_index.py (#1148)"
+    )
+    print(f"  ✓ Index rebuilt into {generator.typed_index_file.name}, "
+          f"{generator.index_file.name} untouched")
+
+    # Test 5: Load index — a fresh sandbox generator reading what Test 4 wrote.
     print("\nTest 5: Index load...")
-    generator2 = RelationsIndexGenerator()
-    loaded = generator2.load_index()
-    assert "edges" in loaded
-    print(f"  ✓ Index loaded with {len(loaded['edges'])} edges")
-    
+    reader = _sandbox_generator(root)
+    loaded = reader.load_index()
+    assert "edges" in loaded, "load_index() returned a payload with no edges key"
+    assert len(index_rows(loaded)) == result["total_relationships"], (
+        "the index that was written and the index that was read back disagree"
+    )
+    assert reader.get_relations_for_doc("knowledge/a.md") == []
+    print(f"  ✓ Index round-tripped: {len(index_rows(loaded))} edges written, "
+          f"{len(index_rows(loaded))} read back")
+
+    # Test 6: rows from either schema are readable, and a read puts nothing on
+    # disk. The `relationships` shape is what scripts/memory/rebuild_index.py
+    # leaves at the derived path; before #1148 the query path raised
+    # KeyError: 'edges' against exactly that file. The shape is exercised in
+    # memory here so the self-test writes no file it does not own — the
+    # file-level version of the same read is pinned by
+    # tests/test_relations_index_read_only.py.
+    print("\nTest 6: Schema-agnostic read, and a read that writes nothing...")
+    derived_rows = index_rows({
+        "relationships": [{"source": "a.md", "target": "b.md", "type": "wiki-link"}],
+        "total_relationships": 1,
+    })
+    assert len(derived_rows) == 1, "a relationships-shaped index yielded no rows"
+    assert not index_rows({"edges": [], "stale": [], "built_at": None})
+    assert index_rows("not a dict") == []
+
+    empty = _sandbox_generator(root / "empty")
+    assert empty.get_relations_for_doc("knowledge/a.md") == [], (
+        "a generator that loaded nothing should answer with nothing, not rebuild"
+    )
+    assert not empty.typed_index_file.exists(), (
+        "get_relations_for_doc rebuilt and wrote an index: a read must not put "
+        "bytes on production state (#1148)"
+    )
+    print(f"  ✓ Read {len(derived_rows)} derived row(s); an empty read wrote nothing")
+
     print("\n=== All tests passed ===\n")
 
 

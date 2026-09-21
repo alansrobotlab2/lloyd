@@ -58,12 +58,40 @@ VAULT = HOME / "obsidian"
 MEMORY_DIR = VAULT / "memory"
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
+# RELATIONS_INDEX is written by THIS script and by nothing else in the checkout
+# (#1148). It used to have a second writer: `RelationsIndexGenerator.rebuild()`
+# in `scripts/memory/next-gen-memory/relations_index.py` wrote the same path with
+# an `{edges, stale, built_at}` schema, while this one writes
+# `{relationships, total_relationships, documents_indexed, last_updated}` —
+# wiki-link and tag-cluster co-occurrence. Both run inside scheduled task #24
+# (Data Pipeline, 6x-daily) in a fixed order, relations_index.py from
+# `nightly_extraction.py` Step 1 and this script as Step 2, so the last step of
+# every cycle replaced the first one's file. Not a race: a deterministic daily
+# clobber, and afterwards relations_index.py's own CLI could not read what the
+# cycle had left — its no-arg summary printed `Index loaded: 0 edges` against a
+# file holding 341,373 rows, and `--query` raised `KeyError: 'edges'`.
+#
+# That module now writes its typed frontmatter relations to a distinct path,
+# `_pipeline/relations-index-typed.json`, which it alone reads and writes; nothing
+# here touches it, and it needs nothing from here — an approved conversation
+# relation that used to be merged into `edges` by relations_index.py and then
+# erased by this script now survives in the file it was merged into. Which script
+# owns which path is pinned by
+# `tests/test_relations_index_read_only.py::test_exactly_one_writer_per_index`.
+# Consolidating the two schemas into one index is a retrieval design call that
+# backlog #1148 leaves to a person; this change only ends the collision.
+#
+# The ownership text starts here rather than in the module docstring because
+# `tests/test_yaml_fix_skill_claims.py` pins the line the fallback `class yaml`
+# sits at, and the skill prose cites that line by number.
 RELATIONS_INDEX = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "relations-index.json"
 FACTS_INDEX = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "facts-index.json"
 
 
 def rebuild_relations_index() -> dict:
-    """Rebuild the relations index using semantic relationships."""
+    """Rebuild the relations index using semantic relationships.
+
+    Sole writer of ``RELATIONS_INDEX``; see the ownership block above it."""
     print("Rebuilding relations-index.json...")
     
     # Scan documents

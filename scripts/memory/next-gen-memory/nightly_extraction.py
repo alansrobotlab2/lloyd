@@ -33,7 +33,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 VAULT = Path.home() / "obsidian"
 MEMORY_DIR = VAULT / "memory"
-INDEX_FILE = Path(__file__).resolve().parent.parent.parent.parent / "_pipeline" / "relations-index.json"
+# No index path belongs here (#1148). This module reaches both indexes through
+# `self.rel_generator`: `rebuild()` writes that module's own
+# `_pipeline/relations-index-typed.json`, and the derived
+# `_pipeline/relations-index.json` is written by scripts/memory/rebuild_index.py
+# (the skill's Step 2). A dead `INDEX_FILE` constant naming the derived file sat
+# here while two scripts still wrote it, which is exactly the kind of pointer
+# that re-arms a clobber.
 
 # Import local modules
 sys.path.insert(0, str(VAULT / "agents" / "memory" / "scripts" / "next-gen-memory"))

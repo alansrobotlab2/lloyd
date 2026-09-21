@@ -22,12 +22,37 @@ Each test below names the clause it pins. Nothing here touches ``~/obsidian``
 or the live ``~/lloyd/_pipeline/relations-index.json``: the generator's
 ``vault``, ``index_file`` and ``proposals_file`` are all redirected into
 ``tmp_path``, and the recorded write targets are asserted, not assumed.
+
+Backlog #1148 added five clauses to this file, on the other half of the same
+boundary — writes to the *index* rather than to the vault.
+``_pipeline/relations-index.json`` had two writers with two schemas: this
+module's ``rebuild()`` wrote ``{edges, stale, built_at}`` and
+``scripts/memory/rebuild_index.py`` wrote ``{relationships, total_relationships,
+documents_indexed, last_updated}`` (341,373 rows over 3,524 docs on 2026-09-21).
+Both run inside scheduled task #24 (Data Pipeline, 6x-daily) in a fixed order,
+so the clobber was deterministic, not a race, and this module's own CLI could not
+read what the cycle left behind: the no-arg summary printed ``Index loaded: 0
+edges`` and ``--query`` raised ``KeyError: 'edges'``. The module also wrote
+production state from two read-side paths — its ``--test`` flag built a bare
+generator and rebuilt into the live index, and ``get_relations_for_doc`` called
+``rebuild()`` whenever ``edges`` was empty, which is exactly what a
+``relationships`` file loads as. One file, one owner, one schema now; the five
+clauses are pinned below, in ``test_test_flag_leaves_the_live_index_alone``,
+``test_get_relations_for_doc_reads_the_relationships_key``,
+``test_get_relations_for_doc_performs_no_write``,
+``test_no_arg_summary_reports_the_rows_in_the_derived_file`` and
+``test_exactly_one_writer_per_index``. Consolidating the two schemas into one
+index is left to a person (see the item's needs-human clause); these tests pin
+that the collision is gone.
 """
 import ast
 import hashlib
 import importlib.util
 import inspect
 import json
+import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -127,14 +152,51 @@ def vault(tmp_path):
     return root
 
 
+REBUILD_SCRIPT = ROOT / "scripts" / "memory" / "rebuild_index.py"
+DERIVED_NAME = "relations-index.json"        # the file rebuild_index.py owns
+TYPED_NAME = "relations-index-typed.json"    # the file relations_index.py owns
+INDEX_NAMES = (DERIVED_NAME, TYPED_NAME)
+LIVE_TYPED_INDEX = LIVE_INDEX.parent / TYPED_NAME
+# The two modules whose write targets the clause-5 scan resolves fail-closed: a
+# blind spot in one of them is exactly how the second writer stayed invisible.
+_INDEX_OWNER_PATHS = {
+    "scripts/memory/rebuild_index.py",
+    "scripts/memory/next-gen-memory/relations_index.py",
+}
+
+# What `rebuild_index.py` leaves at the derived path: `relationships`, never
+# `edges`. The shape is the live file's (341,373 rows over 3,524 docs on
+# 2026-09-21), reduced to three rows so a test can name the ones it expects.
+DERIVED_SHAPED = {
+    "relationships": [
+        {"source": "memory/2026-09-12.md", "target": "knowledge/a.md",
+         "type": "wiki-link", "reason": "Both link to [[c]]", "score": 100},
+        {"source": "knowledge/b.md", "target": "memory/2026-09-12.md",
+         "type": "tag-cluster", "reason": "Share tags: memory, daily-notes",
+         "score": 80},
+        {"source": "knowledge/c.md", "target": "knowledge/d.md",
+         "type": "tag-cluster", "reason": "Share tags: memory", "score": 80},
+    ],
+    "total_relationships": 3,
+    "documents_indexed": 4,
+    "last_updated": "2026-09-21T00:00:00",
+    "SENTINEL": "derived index — must not move",
+}
+
+
 @pytest.fixture
 def generator(ri, vault, tmp_path):
     """A generator pointed entirely at tmp_path — tmp vault, tmp index, no
     proposals file. The live index is ``~/lloyd/_pipeline/relations-index.json``
-    and is asserted untouched by every test that rebuilds."""
+    and is asserted untouched by every test that rebuilds.
+
+    ``typed_index_file`` (#1148 — the one file this module may write) is
+    redirected here as well: a fixture that left it at its default would let any
+    test in this file write the real typed index."""
     g = ri.RelationsIndexGenerator()
     g.vault = vault
-    g.index_file = tmp_path / "pipeline" / "relations-index.json"
+    g.index_file = tmp_path / "pipeline" / DERIVED_NAME
+    g.typed_index_file = tmp_path / "pipeline" / TYPED_NAME
     g.proposals_file = tmp_path / "pipeline" / "no-proposals.json"
     return g
 
@@ -193,8 +255,14 @@ def test_deletion_leaves_no_frontmatter_rewriter(ri):
 def test_module_imports_and_is_read_only_by_construction(ri):
     """#484 clause 1 (module still imports) plus a static pin of the boundary
     the deletion is supposed to leave behind: the only file the module writes
-    is `self.index_file`. A future `doc_file.write_text(...)` in here fails
-    this test even if it comes back under a different name."""
+    is `self.typed_index_file`. A future `doc_file.write_text(...)` in here fails
+    this test even if it comes back under a different name.
+
+    The allowed attribute was `index_file` until #1148, which moved this module's
+    write to a file it owns: `index_file` is the derived
+    `_pipeline/relations-index.json` that `scripts/memory/rebuild_index.py` owns,
+    so a write to it is now exactly as forbidden as a write to a vault note —
+    it is the second writer that clobbered the first one every cycle."""
     tree = ast.parse(SCRIPT.read_text())
 
     # Every way this module can put bytes on disk, and what each one's
@@ -206,6 +274,12 @@ def test_module_imports_and_is_read_only_by_construction(ri):
     # statically. Same reasoning for the os/shutil renames below: they move a
     # file into place without any call the spy or the digest test would see as
     # a write to a note.
+    # No exemption here: after #1148 the self-test writes nothing at all outside
+    # the temp dir `rebuild()` lands in, so every write call in this module —
+    # whoever makes it — has to be the typed index. The reachability asserts
+    # after the loop keep the self-test's two sandbox functions off every
+    # production path, which is the other half of "`--test` cannot touch
+    # `_pipeline`".
     write_calls = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -218,11 +292,32 @@ def test_module_imports_and_is_read_only_by_construction(ri):
 
     assert write_calls, "the module stopped writing anything at all — the index write moved?"
     for call, destination in write_calls:
-        ok = isinstance(destination, ast.Attribute) and destination.attr == "index_file"
+        ok = isinstance(destination, ast.Attribute) and destination.attr == "typed_index_file"
         assert ok, (
             f"relations_index.py line {call.lineno} writes something other than "
-            f"self.index_file; a vault-note writer is back (#484)"
+            f"self.typed_index_file; a vault-note writer, or a second writer for "
+            f"the derived relations-index.json, is back (#484, #1148)"
         )
+
+    callers = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        for call in ast.walk(fn):
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name):
+                callers.setdefault(call.func.id, set()).add(fn.name)
+    assert callers.get("_run_tests") == {"main"}, (
+        f"_run_tests is called from {sorted(callers.get('_run_tests', []))}, not only "
+        "from main(): the write exemption above would then cover a production path (#1148)"
+    )
+    # Equality, not a subset: an empty caller set would mean the sandbox helper
+    # is dead code, which is exactly how the self-test goes back to building a
+    # bare generator.
+    assert callers.get("_sandbox_generator", set()) == {"_run_tests"}, (
+        f"_sandbox_generator is called from {sorted(callers.get('_sandbox_generator', []))}, "
+        "not from _run_tests: either the self-test no longer sandboxes its writes, "
+        "or something else builds a sandbox (#1148)"
+    )
 
     renamed = sorted({
         node.func.attr for node in ast.walk(tree)
@@ -309,17 +404,25 @@ def test_rebuild_leaves_every_note_byte_identical(ri, generator, vault):
 
 def test_no_write_target_falls_under_the_vault_or_the_live_index(generator, vault, write_targets):
     """#484 clause 4: no `write_text` / `atomic_write_text` target lands under
-    `self.vault`, or at the live `_pipeline/relations-index.json`."""
+    `self.vault`, or at the live `_pipeline/relations-index.json`.
+
+    The live derived index is now forbidden twice over — as a vault note is
+    forbidden, and because #1148 gave it a single owner in
+    `scripts/memory/rebuild_index.py`. The live *typed* index is checked here too
+    so a fixture path that failed to redirect it cannot pass this file."""
     write_targets.clear()
     generator.rebuild()
     assert write_targets, "nothing was written at all — the spy is not on the write path"
     vault_resolved = vault.resolve()
+    forbidden = {LIVE_INDEX.resolve(), LIVE_TYPED_INDEX.resolve()}
     for target in write_targets:
         t = target.resolve()
         assert vault_resolved not in t.parents and t != vault_resolved, (
             f"rebuild() wrote a vault note: {t} (#484)"
         )
-        assert t != LIVE_INDEX.resolve(), f"rebuild() wrote the live index: {t} (#484)"
+        assert t not in forbidden, (
+            f"rebuild() wrote live pipeline state outside its own tmp fixture: {t} (#484, #1148)"
+        )
 
 
 # --- clause 5: the nightly path ---------------------------------------------
@@ -439,15 +542,20 @@ def test_nightly_reaches_the_generator_only_through_rebuild(nightly_module, ri):
     )
 
 
-def test_write_text_during_rebuild_records_only_the_index_file(generator, write_targets):
-    """#484 clause 5: with `write_text` monkeypatched, a rebuild records only
-    `self.index_file` — no vault note. The generator's index is the tmp one the
-    fixture set, so this also cannot write the live index from under the run."""
+def test_write_text_during_rebuild_records_only_the_typed_index_file(generator, write_targets):
+    """#484 clause 5, as amended by #1148: with `write_text` monkeypatched, a
+    rebuild records only `self.typed_index_file` — no vault note, and no write
+    to `self.index_file`, the derived index `rebuild_index.py` owns. Before
+    #1148 this recorded `self.index_file`, which is how the two writers stayed
+    invisible to each other: each one's own write looked legitimate here."""
     write_targets.clear()
     generator.rebuild()
     recorded = sorted(t.resolve() for t in write_targets)
-    assert recorded == [generator.index_file.resolve()], (
-        f"rebuild() wrote {recorded}, expected only {generator.index_file}"
+    assert recorded == [generator.typed_index_file.resolve()], (
+        f"rebuild() wrote {recorded}, expected only {generator.typed_index_file}"
+    )
+    assert generator.index_file.resolve() not in recorded, (
+        "rebuild() wrote the derived relations-index.json (#1148: one owner)"
     )
 
 
@@ -474,4 +582,430 @@ def test_rebuild_merges_approved_proposals_without_touching_the_vault(
     assert result["conversation_proposals_merged"] == 1
     assert result["total_relationships"] == 7
     assert _digests(vault) == before
-    assert write_targets == [generator.index_file]
+    assert write_targets == [generator.typed_index_file], (
+        "merging proposals wrote somewhere other than the typed index (#1148)"
+    )
+
+
+# --- #1148 clauses 1-5: one file, one owner, one schema ----------------------
+
+def _gen_at(tmp_path, ri, derived_payload=None, typed_payload=None):
+    """A generator with every path under ``tmp_path``, optionally seeded with the
+    two index shapes. Separate from the ``generator`` fixture because these
+    clauses start from file contents rather than from a rebuild."""
+    g = ri.RelationsIndexGenerator()
+    g.vault = tmp_path / "vault"
+    g.index_file = tmp_path / "pipeline" / DERIVED_NAME
+    g.typed_index_file = tmp_path / "pipeline" / TYPED_NAME
+    g.proposals_file = tmp_path / "pipeline" / "no-proposals.json"
+    g.vault.mkdir(parents=True, exist_ok=True)
+    g.index_file.parent.mkdir(parents=True, exist_ok=True)
+    if derived_payload is not None:
+        g.index_file.write_text(json.dumps(derived_payload))
+    if typed_payload is not None:
+        g.typed_index_file.write_text(json.dumps(typed_payload))
+    return g
+
+
+@pytest.fixture
+def scratch_home(tmp_path):
+    """A fake ``$HOME`` laid out like the live box — empty vault, and a
+    ``~/lloyd/_pipeline/relations-index.json`` holding the derived shape with a
+    sentinel in it. Every path the CLI resolves off ``Path.home()`` lands here,
+    so "production state did not move" becomes "these bytes did not change"."""
+    home = tmp_path / "home"
+    (home / "obsidian").mkdir(parents=True)
+    (home / "lloyd" / "_pipeline").mkdir(parents=True)
+    (home / "lloyd" / "_pipeline" / DERIVED_NAME).write_text(json.dumps(DERIVED_SHAPED))
+    return home
+
+
+def _run_cli(args, home, tmp_path):
+    """The module's CLI in a subprocess, under the scratch HOME and a TMPDIR
+    inside ``tmp_path`` so the self-test's own temp dir is visible to the caller."""
+    tmp = tmp_path / "tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, HOME=str(home), TMPDIR=str(tmp))
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        capture_output=True, text=True, env=env, timeout=300, cwd=str(ROOT),
+    )
+
+
+def test_test_flag_leaves_the_live_index_alone(scratch_home, tmp_path):
+    """Clause 1: ``relations_index.py --test`` leaves ``relations-index.json``
+    byte-identical, because Test 4's generator is pointed at a temp dir.
+
+    It used to build a bare ``RelationsIndexGenerator()`` — whose default
+    ``index_file`` is the real ``_pipeline/relations-index.json`` — and call
+    ``rebuild()``, so the developer's smoke test scanned ``~/obsidian`` and
+    replaced the production index with an ``edges`` file. The whole
+    ``_pipeline`` directory is compared, not just the derived file: any file
+    appearing there means the self-test wrote outside the temp dir it prints."""
+    pipeline = scratch_home / "lloyd" / "_pipeline"
+    before = {p.name: p.read_bytes() for p in pipeline.iterdir()}
+    assert before == {DERIVED_NAME: json.dumps(DERIVED_SHAPED).encode()}, (
+        "the fixture did not seed a sentinel-bearing derived index; the byte "
+        "comparison below would pass on an empty directory"
+    )
+
+    proc = _run_cli(["--test"], scratch_home, tmp_path)
+    assert proc.returncode == 0, (
+        f"--test exited {proc.returncode}\n{proc.stdout[-1500:]}\n{proc.stderr[-1500:]}"
+    )
+    assert "All tests passed" in proc.stdout, "--test did not run to completion"
+
+    after = {p.name: p.read_bytes() for p in pipeline.iterdir()}
+    assert after == before, (
+        f"`--test` changed _pipeline/ from {sorted(before)} to {sorted(after)}; "
+        "the self-test writes production state again (#1148)"
+    )
+    sandbox = [ln for ln in proc.stdout.splitlines() if ln.startswith("Sandbox:")]
+    assert sandbox, "--test never reported the temp dir it works in"
+    reported = Path(sandbox[0].split("Sandbox:", 1)[1].strip())
+    assert str(reported).startswith(str(tmp_path / "tmp")), (
+        f"--test reported a sandbox outside TMPDIR: {reported} (#1148 wants a temp dir)"
+    )
+
+
+def test_rebuild_in_the_scratch_home_writes_only_the_typed_index(scratch_home, tmp_path):
+    """Positive control for the clause-1 assert above, and the write half of
+    #1148 at CLI level. Same scratch HOME, same subprocess, ``--rebuild``: if the
+    HOME redirect did not work, "nothing in _pipeline changed" would be vacuous —
+    this is the run that must write, and it must write only the file this module
+    owns."""
+    pipeline = scratch_home / "lloyd" / "_pipeline"
+    derived = pipeline / DERIVED_NAME
+    before = derived.read_bytes()
+
+    proc = _run_cli(["--rebuild"], scratch_home, tmp_path)
+    assert proc.returncode == 0, (
+        f"--rebuild exited {proc.returncode}\n{proc.stdout[-1500:]}\n{proc.stderr[-1500:]}"
+    )
+    assert (pipeline / TYPED_NAME).exists(), (
+        "--rebuild wrote no typed index: the subprocess is not running under the "
+        "scratch HOME, which would make every 'production did not move' assert in "
+        "this file vacuous"
+    )
+    assert derived.read_bytes() == before, (
+        "--rebuild moved the derived index it no longer owns (#1148)"
+    )
+
+
+def test_get_relations_for_doc_reads_the_relationships_key(ri, tmp_path):
+    """Clause 2: a generator whose loaded index uses the ``relationships`` key
+    returns that document's rows and raises nothing.
+
+    That is the shape ``scripts/memory/rebuild_index.py`` leaves behind — 341,373
+    rows over 3,524 docs on 2026-09-21 — and the query path used to read
+    ``self.index_data["edges"]``, so against exactly this file ``--query`` raised
+    ``KeyError: 'edges'`` (``relations_index.py:553``, via ``main()``) for as long
+    as the pipeline had been running. The third fixture row names neither of the
+    queried document's paths, so an unfiltered return fails here too."""
+    g = _gen_at(tmp_path, ri, derived_payload=DERIVED_SHAPED)
+    g.load_index()
+    rows = g.get_relations_for_doc("memory/2026-09-12.md")
+    assert [(r["source"], r["target"], r["type"]) for r in rows] == [
+        ("memory/2026-09-12.md", "knowledge/a.md", "wiki-link"),
+        ("knowledge/b.md", "memory/2026-09-12.md", "tag-cluster"),
+    ], f"the queried document's derived rows came back wrong: {rows}"
+
+
+def test_get_relations_for_doc_performs_no_write(ri, tmp_path, monkeypatch, write_targets):
+    """Clause 3: ``get_relations_for_doc`` performs no write — called with empty
+    ``edges`` it does not rebuild and leaves the index file untouched.
+
+    The body was ``if not self.index_data["edges"]: self.rebuild()``, and a
+    ``relationships``-shaped file loads as exactly that: empty ``edges``. So a
+    *query* triggered a full vault scan and rewrote the 105 MB live index — and
+    with no ``load_index()`` before it, which is what ``--test`` built at ``:610``,
+    every call did. ``rebuild`` is trapped, both files are compared by bytes, and
+    the write spy is required to stay empty."""
+    g = _gen_at(tmp_path, ri, derived_payload=DERIVED_SHAPED,
+                typed_payload={"edges": [], "stale": [], "built_at": None})
+    g.load_index()
+    before = {p.name: p.read_bytes() for p in g.index_file.parent.iterdir()}
+
+    def trap_rebuild():
+        raise AssertionError(
+            "get_relations_for_doc called rebuild(): a read must not rebuild (#1148)"
+        )
+    monkeypatch.setattr(g, "rebuild", trap_rebuild)
+
+    write_targets.clear()
+    rows = g.get_relations_for_doc("memory/2026-09-12.md")
+    assert rows, (
+        "no rows came back, so the no-write assertions below would prove nothing"
+    )
+    assert write_targets == [], (
+        f"reading relations wrote {write_targets} (#1148: a read must not write state)"
+    )
+    assert {p.name: p.read_bytes() for p in g.index_file.parent.iterdir()} == before
+
+    # The other half of the clause: nothing loaded at all. This is the shape the
+    # self-test built, and the one that used to trigger the rebuild.
+    empty = _gen_at(tmp_path / "empty", ri)
+    write_targets.clear()
+    assert empty.get_relations_for_doc("memory/2026-09-12.md") == []
+    assert write_targets == [], f"an empty read wrote {write_targets} (#1148)"
+    assert not empty.typed_index_file.exists() and not empty.index_file.exists(), (
+        "the read created an index file it does not own (#1148)"
+    )
+
+
+def test_no_arg_summary_reports_the_rows_in_the_derived_file(scratch_home, tmp_path):
+    """Clause 4: the module's no-arg summary reports the row count present in the
+    ``relationships``-shaped file rather than printing ``Index loaded: 0 edges``.
+
+    The fixture file carries 3 rows; the live file carried 341,373 while the
+    summary printed 0, because it read only the ``edges`` key. Asserted through
+    the real CLI, since printing the wrong thing is the failure."""
+    proc = _run_cli([], scratch_home, tmp_path)
+    assert proc.returncode == 0, (
+        f"no-arg run exited {proc.returncode}\n{proc.stdout}\n{proc.stderr[-1500:]}"
+    )
+    assert "Index loaded: 0 edges" not in proc.stdout, (
+        f"the summary is back to reading one key out of a two-schema file:\n{proc.stdout}"
+    )
+    found = re.search(rf"Derived rows \([^)]*\): {len(DERIVED_SHAPED['relationships'])}\b",
+                      proc.stdout)
+    assert found, (
+        f"the summary never reported the {len(DERIVED_SHAPED['relationships'])} rows "
+        f"the derived file holds:\n{proc.stdout}"
+    )
+
+
+def _production_py_files():
+    """Every tracked ``.py`` outside ``tests/`` — the corpus a claim about
+    "exactly one writer" has to be made over. Tracked files, via
+    ``git ls-files``: a walk would count scratch trees and miss the point, and
+    the two index writers are both tracked."""
+    listing = subprocess.run(
+        ["git", "ls-files", "-z", "*.py"], cwd=str(ROOT),
+        capture_output=True, text=True, timeout=120,
+    )
+    assert listing.returncode == 0, f"git ls-files failed: {listing.stderr[:400]}"
+    files = [ROOT / p for p in listing.stdout.split("\0") if p and not p.startswith("tests/")]
+    assert len(files) > 100, f"only {len(files)} files scanned; the corpus is not the checkout"
+    return files
+
+
+def _bind_key(node):
+    """The name a write target or assignment binds, for the two shapes the
+    checkout's writers actually use: a module-level constant, or ``self.<attr>``."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if (isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name) and node.value.id == "self"):
+        return f"self.{node.attr}"
+    return None
+
+
+def _written_index_names(source, strict=False):
+    """Which of the two index filenames this module can put bytes on.
+
+    Follows one-level binding chains (``X = Path(...) / "name.json"``,
+    ``self.attr = X``, ``X.write_text(...)``). ``strict`` also reports a write
+    whose target binds to nothing: a one-file probe can be answered with a plan,
+    a checkout-wide scan cannot, because the blind spot *is* the second writer."""
+    tree = ast.parse(source)
+    binds = {}
+    for node in ast.walk(tree):
+        targets, value = [], None
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        if value is None:
+            continue
+        for tgt in targets:
+            key = _bind_key(tgt)
+            if key and key not in binds:
+                binds[key] = value
+
+    def json_names(node, depth=0):
+        if depth > 8:
+            return set()
+        found = {c.value for c in ast.walk(node)
+                 if isinstance(c, ast.Constant)
+                 and isinstance(c.value, str) and c.value.endswith(".json")}
+        key = _bind_key(node)
+        if key and key in binds:
+            found |= json_names(binds[key], depth + 1)
+        return found
+
+    names, opaque = set(), []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in {"write_text", "write_bytes", "open"}:
+            target = func.value
+        elif isinstance(func, ast.Name) and func.id == "atomic_write_text" and node.args:
+            target = node.args[0]
+        else:
+            continue
+        reachable = json_names(target)
+        if not reachable and strict:
+            opaque.append(node.lineno)
+        names |= reachable & set(INDEX_NAMES)
+    if opaque:
+        raise AssertionError(
+            f"write targets at line(s) {opaque} resolve to no *.json name; the "
+            "one-writer claim cannot be checked past them (#1148)"
+        )
+    return names
+
+
+def test_exactly_one_writer_per_index():
+    """Clause 5: exactly one script in the checkout writes
+    ``_pipeline/relations-index.json``, and the other writer emits to a distinct
+    path the module's own readers read — so a Data Pipeline cycle, which runs both
+    scripts in one task in a fixed order, cannot clobber either.
+
+    Before #1148 both scripts wrote the same path with different schemas and
+    ``nightly_extraction.py`` carried a third pointer to it as a constant; the
+    scan is over every tracked ``.py``, because the claim is about the checkout
+    and a grep scoped to ``scripts/`` is what let the second writer hide."""
+    writers = {name: set() for name in INDEX_NAMES}
+    for path in _production_py_files():
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        rel = path.relative_to(ROOT).as_posix()
+        # The two owners are checked fail-closed: an unresolvable write in either
+        # would let a second writer of the derived path through unreported.
+        writers_seen = _written_index_names(source, strict=rel in _INDEX_OWNER_PATHS)
+        for name in writers_seen:
+            writers[name].add(rel)
+
+    assert writers[DERIVED_NAME] == {"scripts/memory/rebuild_index.py"}, (
+        f"the derived index has writers {sorted(writers[DERIVED_NAME])}; #1148 wants "
+        "exactly scripts/memory/rebuild_index.py"
+    )
+    assert writers[TYPED_NAME] == {"scripts/memory/next-gen-memory/relations_index.py"}, (
+        f"the typed index has writers {sorted(writers[TYPED_NAME])}; #1148 wants "
+        "exactly the module that reads it"
+    )
+
+
+def test_index_owner_paths_are_two_distinct_files(ri):
+    """The other half of clause 5's wording: the two paths are distinct, and the
+    module's readers read both — asserted through the loaded attributes rather
+    than a string comparison, so a rename in the module moves this test too."""
+    assert ri.DERIVED_INDEX_FILE != ri.TYPED_INDEX_FILE
+    assert ri.DERIVED_INDEX_FILE.name == DERIVED_NAME
+    assert ri.TYPED_INDEX_FILE.name == TYPED_NAME
+    g = ri.RelationsIndexGenerator()
+    assert g.index_file == ri.DERIVED_INDEX_FILE, (
+        "the module's read target is no longer the derived file: clause 2's read "
+        "and this clause are about different files (#1148)"
+    )
+    assert g.typed_index_file == ri.TYPED_INDEX_FILE
+    assert g.typed_index_file != g.index_file
+
+
+def test_the_writer_scan_detects_a_planted_second_writer():
+    """Positive control for clause 5: the scan has to be able to see a write of
+    the derived path made through the same ``self.attr`` chain the real second
+    writer used. Without it, ``writers[derived] == {one file}`` would pass on a
+    checkout with two writers, which is the exact state #1148 was filed about."""
+    planted = (
+        "from pathlib import Path\n"
+        "DERIVED = Path('/tmp') / '_pipeline' / 'relations-index.json'\n"
+        "class Writer:\n"
+        "    def __init__(self):\n"
+        "        self.index_file = DERIVED\n"
+        "    def run(self):\n"
+        "        self.index_file.write_text('{}')\n"
+    )
+    assert _written_index_names(planted) == {DERIVED_NAME}
+    assert _written_index_names("from pathlib import Path\nPath('/x').read_text()\n") == set()
+
+
+@pytest.fixture
+def derived_writer(request, scratch_home):
+    """`rebuild_index.py` imported as a module, with its scan root and its output
+    path redirected into the scratch HOME. Only the two module globals the writer
+    reads are patched; the function body is the real scheduled-task Step 2."""
+    spec = importlib.util.spec_from_file_location(
+        f"rebuild_index_{request.node.name.replace('[', '_').replace(']', '_')}",
+        REBUILD_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    mod.VAULT = scratch_home / "obsidian"
+    mod.RELATIONS_INDEX = scratch_home / "lloyd" / "_pipeline" / DERIVED_NAME
+    yield mod
+    sys.modules.pop(spec.name, None)
+
+
+def test_the_scheduled_task_cycle_leaves_both_indexes_readable(scratch_home, tmp_path,
+                                                               derived_writer, ri):
+    """The composition the clobber lived in, run as one sequence: task #24 Data
+    Pipeline (`skills/autonomy-data-pipeline/SKILL.md` — `nightly_extraction.py`
+    at :126, which calls ``RelationsIndexGenerator.rebuild()``, then
+    ``rebuild_index.py`` at :261) executes the two writers as two steps in a fixed
+    order. Before #1148 both wrote the one path, so step 2 replaced step 1's file
+    and the module's own CLI could not read the result.
+
+    Step 1 runs the real CLI as a subprocess under the scratch HOME; step 2 calls
+    the real ``rebuild_relations_index()`` with only its ``VAULT`` and
+    ``RELATIONS_INDEX`` globals redirected into the same scratch ``_pipeline``.
+    Three things must hold afterwards, none of which was true before: step 2 left
+    step 1's file byte-identical, each file carries exactly one schema, and one
+    ``get_relations_for_doc`` call answers with a typed edge from step 1 *and* a
+    co-occurrence row from step 2.
+    """
+    notes = scratch_home / "obsidian" / "knowledge"
+    notes.mkdir(parents=True, exist_ok=True)
+    (notes / "alpha.md").write_text(
+        "---\ntype: knowledge-note\nsegment: knowledge\ntitle: Alpha\n"
+        "relations:\n  depends-on:\n    - knowledge/beta.md\n---\n\n# Alpha\n\n"
+        "See [[gamma]] too.\n"
+    )
+    (notes / "beta.md").write_text(
+        "---\ntype: knowledge-note\nsegment: knowledge\ntitle: Beta\n---\n\n# Beta\n\n"
+        "Also [[gamma]].\n"
+    )
+
+    # Step 1 — nightly_extraction's call, via the CLI, in its own process.
+    step1 = _run_cli(["--rebuild"], scratch_home, tmp_path)
+    assert step1.returncode == 0, f"step 1 failed: {step1.stderr[-800:]}"
+    typed_path = scratch_home / "lloyd" / "_pipeline" / TYPED_NAME
+    typed_after_step1 = typed_path.read_bytes()
+    typed_rows = json.loads(typed_after_step1)["edges"]
+    assert len(typed_rows) == 2, (
+        f"step 1 produced {len(typed_rows)} typed edges from one depends-on; "
+        "expected 2 (the edge and its required-by inverse), so the reader "
+        "assertions below would be testing an index nobody built"
+    )
+
+    # Step 2 — the script that used to overwrite it.
+    result = derived_writer.rebuild_relations_index()
+    assert result["status"] == "rebuilt" and result["total_relationships"] == 1, (
+        f"step 2 wrote {result}; expected one wiki-link relationship from two notes "
+        "linking the same target — with no rows the clobber check is vacuous"
+    )
+    derived_path = scratch_home / "lloyd" / "_pipeline" / DERIVED_NAME
+    assert typed_path.read_bytes() == typed_after_step1, (
+        "step 2 rewrote the typed index: the two writers are back on one path (#1148)"
+    )
+
+    derived = json.loads(derived_path.read_text())
+    assert set(derived) >= {"relationships", "total_relationships", "documents_indexed"}
+    assert "edges" not in derived, "step 2 wrote an `edges` key: two schemas in one file (#1148)"
+    assert "relationships" not in json.loads(typed_path.read_text()), (
+        "step 1 wrote a `relationships` key: two schemas in one file (#1148)"
+    )
+
+    # The end state one cycle leaves behind, read by the module's own reader: a
+    # document that both indexes know about must answer with rows from both files.
+    # Pre-fix this call raised KeyError: 'edges' against exactly this shape.
+    reader = _gen_at(scratch_home / "reader", ri)
+    reader.index_file = derived_path
+    reader.typed_index_file = typed_path
+    reader.load_index()
+    kinds = {r.get("type") for r in reader.get_relations_for_doc("knowledge/alpha.md")}
+    assert {"depends-on", "required-by", "wiki-link"} <= kinds, (
+        f"after a full cycle the reader sees {sorted(kinds)}; it must see the typed "
+        "relations from step 1 and the co-occurrence row from step 2 (#1148)"
+    )

@@ -8,7 +8,9 @@ next-gen-memory/
 ├── nightly_extraction.py   # the entry point: corpus → extract → index → overviews
 ├── fact_extractor.py       # one document → facts → markdown + store edges
 ├── profile_generator.py    # entity overview files (definition + summary)
-├── relations_index.py      # document-level co-occurrence index (relations-index.json)
+├── relations_index.py      # typed frontmatter relations → relations-index-typed.json
+│                         #   (reads, never writes, relations-index.json — that one
+│                         #   belongs to scripts/memory/rebuild_index.py; #1148)
 └── pipeline_config.yaml    # THE CORPUS. Edit this, not the code.
 ```
 
