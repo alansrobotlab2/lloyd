@@ -35,6 +35,13 @@ own column, and is deliberately excluded from `decide()`.
 
 Outputs land in `eval/secondary-routing/`: `results-<label>.json` (every
 trial) and `REPORT-<label>.md` (the table and the per-job decision).
+
+The second engine is optional, and one cause string cannot cover both of its
+states. With the slot switched off there is nothing to pair against, so the
+sweep does not start at all: `EXIT_SLOT_DISABLED` (7), zero trials, nothing
+written, no row in the trend. Exit 3 is then what it always was — the slot is
+up and the per-arm redirect still landed both arms on one endpoint, which is a
+broken box and a result (item #1328).
 """
 
 from __future__ import annotations
@@ -417,8 +424,10 @@ def _engine(job: str, alias: str):
     *unpinned* router in the secondary arm and something the code never does in
     the primary one, and the two arms would have stopped being the same
     harness. `secondary_enabled: false` still outranks this in both arms
-    (`resolve_model_alias` has the last word), which is what
-    `arms_are_separate` then reports as both arms answering from one endpoint.
+    (`resolve_model_alias` has the last word), which is why
+    `secondary_slot_state` turns such a run away before the first trial rather
+    than letting `arms_are_separate` report a retired engine as a failed
+    override.
 
     The pair therefore means the same thing whichever jobs are pinned when the
     run starts, so a run taken to confirm a flip is comparable with the run
@@ -595,6 +604,42 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+#: Exit code for "the secondary slot is switched off, so there is nothing to
+#: pair against". 3 (arms merged), 4 (below the repeat floor), 5 (no downstream
+#: denominator) and 6 (router disagreement) are taken and 2 is argparse's error
+#: code, so a retired slot gets the one code no other path in this file
+#: returns. #1328: until the two causes had separate codes, a slot retired on
+#: policy and a per-arm redirect that silently failed were the same row on the
+#: board — and the retired slot cost a nightly run to report the wrong cause.
+EXIT_SLOT_DISABLED = 7
+
+#: The supervisord program that owns the second engine, named through
+#: `app/llm_slots.py` rather than by reading `secondary_enabled` here. That
+#: module is the ONE definition of "should this program be running?"; a sixth
+#: private reader of the flag is the thing its docstring exists to prevent.
+SECONDARY_PROGRAM = "agent-llm-secondary"
+
+
+def secondary_slot_state(config: dict | None = None) -> tuple[bool, str]:
+    """Is there a second engine to pair against, and which switch says so?
+
+    A disabled slot and a failed override are indistinguishable *in the trial
+    records* — both show every arm on one endpoint — and mean opposite things:
+    one is `secondary_enabled: false`, the config's answer since 2026-09-20 when
+    GPU 2 went to djev, the other is the silent misroute this file was written
+    to catch. So the state is read from the slot flag, and read before the
+    sweep, because after a sweep the two cases can no longer be separated.
+    """
+    from app import llm_slots
+
+    if llm_slots.is_enabled(SECONDARY_PROGRAM, config):
+        return True, f"{SECONDARY_PROGRAM} is enabled"
+    flag = llm_slots.slot_flag(SECONDARY_PROGRAM) or "secondary_enabled"
+    return False, (f"{SECONDARY_PROGRAM} is switched off in config.yaml "
+                   f"(`{flag}: false`), so `resolve_model_alias('secondary')` answers "
+                   "`primary` and both arms reach one engine by design, not by accident")
+
+
 def arms_are_separate(summary: dict[str, Any]) -> tuple[bool, str]:
     """Did the two arms actually reach two different engines?
 
@@ -602,6 +647,10 @@ def arms_are_separate(summary: dict[str, Any]) -> tuple[bool, str]:
     not take would produce two identical arms and a plausible-looking
     table. Checked from the URLs the recorded calls used, not from the
     label the run asked for.
+
+    Reachable only with the slot enabled: `secondary_slot_state` turns away a
+    disabled slot before the first request, which is what keeps a merged pair
+    here meaning a real override failure rather than a retired engine.
     """
     for job, arms in summary.items():
         sec, pri = arms.get("secondary"), arms.get("primary")
@@ -1427,6 +1476,20 @@ def main(argv: list[str] | None = None) -> int:
             return 5
         return 0
 
+    # The slot switch outranks the sweep, and this is the last place the two
+    # causes are still separable: with `secondary_enabled` false every trial of
+    # both arms lands on the primary, which is config doing what it says rather
+    # than the per-arm override failing. The run used to report it as the
+    # override failing — after spending 120 primary-engine trials on it
+    # (#1328). Nothing is written on this path: a night that measured nothing
+    # must not become a row in the trend.
+    slot_on, slot_why = secondary_slot_state()
+    if not slot_on:
+        print(f"SECONDARY SLOT DISABLED: {slot_why}")
+        print("nothing to pair against — re-enable the slot or park the job that "
+              "runs this sweep. No sweep started, so trials: 0 and no artifact written.")
+        return EXIT_SLOT_DISABLED
+
     items = load_items(Path(args.items))
     jobs = [j for j in args.jobs.split(",") if j in JOBS]
     missing = [j for j in jobs if not items[j]]
@@ -1467,8 +1530,10 @@ def main(argv: list[str] | None = None) -> int:
     separate, why = arms_are_separate(summary)
     decisions = [decide(job, summary[job]) for job in jobs if job in summary]
     if not separate:
-        # An alias override that silently did not take would leave two
-        # identical arms and a table that still reads like a result.
+        # Reachable only with the slot enabled (`secondary_slot_state` above),
+        # so this is the case the wording is for: an alias override that
+        # silently did not take leaves two identical arms and a table that
+        # still reads like a result.
         for row in decisions:
             row["decision"] = "insufficient_data"
             row["reason"] = f"arms not separate — {why}"

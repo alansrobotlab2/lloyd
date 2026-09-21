@@ -173,6 +173,146 @@ def test_arms_are_separate_catches_one_engine_answering_both():
     assert ev.arms_are_separate(split) == (True, "every arm reached a distinct engine endpoint")
 
 
+# ── A retired slot is policy, not a broken override (#1328) ──────────────
+#
+# Since 2026-09-20 (`551e9044`) GPU 2 holds djev, `secondary_enabled` is false,
+# and `resolve_model_alias('secondary')` answers `primary` for both arms. The
+# sweep ran anyway on 2026-09-21: 120 trials, 148.6 s, all of them against
+# :8096, and the cause it printed read "the alias override did not take — a
+# broken box". The override took perfectly. These four tests are the difference
+# between "there is no second engine" and "the per-arm redirect silently
+# failed", which is the one thing the instrument used to be unable to say.
+
+def _voice_items(tmp_path) -> tuple[Path, Path]:
+    """A one-item item set `main()` would genuinely run: a session in a tmp
+    store whose input hash the real builder computed. So the only thing that
+    can stop the sweep in the tests below is the slot switch — not a missing
+    item, and not a hash that moved."""
+    import hashlib
+
+    import yaml
+
+    session = {"messages": [
+        {"role": "user", "content": "what moved in the retrieval eval?"},
+        {"role": "assistant", "content": "The runner imports `defaults` from "
+                                         "app.config | the compare step read 3 "
+                                         "stale columns"},
+    ]}
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "parked-night.json").write_text(json.dumps(session), encoding="utf-8")
+    text = ev.job_inputs("voice", session)
+    items = {"voice": {"label": ev.JOB_LABELS["voice"], "items": [{
+        "id": "voice-1", "job": "voice", "source_session": "parked-night",
+        "input_sha256": hashlib.sha256(text.encode()).hexdigest()[:16],
+        "input_chars": len(text), "anchors": ev.anchors_from(text)}]}}
+    items_path = tmp_path / "items.yaml"
+    items_path.write_text(yaml.safe_dump(items, sort_keys=False), encoding="utf-8")
+    return items_path, sessions
+
+
+def _sweep_args(items_path: Path, sessions: Path, label: str, repeats: int = 3) -> list[str]:
+    return ["--repeats", str(repeats), "--jobs", "voice", "--label", label,
+            "--items", str(items_path), "--sessions-dir", str(sessions), "--quiet"]
+
+
+def _slot_off(monkeypatch, tmp_path):
+    """Slot switched off, artifacts in a tmp dir, engines stood in for.
+    Returns (requests the fake recorded, the artifact dir, the sweep args)."""
+    from app import config as app_config
+
+    items_path, sessions = _voice_items(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    monkeypatch.setattr(ev, "OUT_DIR", out_dir)
+    # Pinned OFF rather than inherited: the live box has had this flag false
+    # since 2026-09-20, so a test that relied on the ambient value would pass
+    # for the wrong reason and could not fail if the guard were removed.
+    monkeypatch.setitem(app_config.CONFIG, "secondary_enabled", False)
+    seen = _fake_transport(monkeypatch)
+    return seen, out_dir, _sweep_args(items_path, sessions, "parked-night")
+
+
+def test_a_disabled_secondary_slot_exits_7_before_the_first_request(monkeypatch, tmp_path):
+    """The retirement must be its own exit code, reached with zero requests.
+
+    `3`, `4`, `5` and `6` are taken (arms merged, below the repeat floor, no
+    downstream denominator, router disagreement) and `2` is argparse's error
+    code, so 7 is the first code no other path in the script returns. A
+    nightly that cannot tell the two causes apart reports a policy as a broken
+    box, which is what #1328 is about.
+    """
+    seen, _out_dir, argv = _slot_off(monkeypatch, tmp_path)
+
+    assert ev.EXIT_SLOT_DISABLED == 7
+    assert ev.main(argv) == ev.EXIT_SLOT_DISABLED
+    assert seen == [], "a sweep with no second engine must not spend one primary-engine trial"
+
+
+def test_the_retirement_notice_names_the_slot_and_flag_not_the_override(monkeypatch, tmp_path,
+                                                                        capsys):
+    """The sentence a run reports is the half that was wrong. `arms_are_separate`
+    says what a merged pair means; on this path there is no merged pair, and the
+    message has to name the switch a person can flip instead."""
+    _seen, _out_dir, argv = _slot_off(monkeypatch, tmp_path)
+
+    assert ev.main(argv) == 7
+    out = capsys.readouterr().out
+    assert "agent-llm-secondary" in out, out
+    assert "secondary_enabled" in out, out
+    assert "trials: 0" in out, out
+    assert "did not take" not in out, "the override wording belongs to exit 3 only"
+    assert "both arms reached" not in out, out
+    assert "NOT DECISION GRADE" not in out, out
+
+
+def test_a_parked_slot_night_writes_no_results_and_no_report(monkeypatch, tmp_path):
+    """Nothing is written, so a night that measured nothing cannot enter the
+    trend. The 2026-09-21 same-engine night produced secondary-minus-primary
+    score gaps of −2.92 (focus), +3.75 (facts), −0.84 (capture), +0.83 (voice)
+    and 0.00 (title) against a `KEEP_MARGIN_POINTS` of 5.0 — the widest is 75 %
+    of the margin, from two arms that are provably one engine — and every
+    `keep` the trend recorded inside ±4 points was noise that the artifact made
+    look like a measurement."""
+    _seen, out_dir, argv = _slot_off(monkeypatch, tmp_path)
+
+    assert ev.main(argv) == 7
+    left = sorted(p.name for p in out_dir.iterdir())
+    assert left == [], f"a skipped night left artifacts behind: {left}"
+
+
+def test_the_one_engine_case_still_exits_3_while_the_slot_is_enabled(monkeypatch, tmp_path,
+                                                                    capsys):
+    """Exit 3 keeps the meaning it was written for: the slot is up and the arms
+    still collapsed onto one endpoint. Simulated the way that box actually
+    happens — `models.secondary` pointed at the primary's base_url, so
+    `resolve_model_alias` returns `secondary` and both arms dial :8096 anyway.
+
+    This is the case the retirement code must NOT swallow, which is why it runs
+    the real sweep through the real transport rather than asserting on a string.
+    """
+    from app import config as app_config
+
+    items_path, sessions = _voice_items(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    monkeypatch.setattr(ev, "OUT_DIR", out_dir)
+    monkeypatch.setitem(app_config.CONFIG, "secondary_enabled", True)
+    monkeypatch.setattr(app_config, "_ALIAS_REWRITES_LOGGED", set(), raising=False)
+    # MODEL_CONFIGS IS CONFIG["models"] (app/config.py:286) — one dict, so
+    # mispointing the slot's endpoint is a config fact, not a patched function.
+    primary_base = app_config.MODEL_CONFIGS["primary"]["base_url"]
+    merged = dict(app_config.MODEL_CONFIGS["secondary"], base_url=primary_base)
+    monkeypatch.setitem(app_config.MODEL_CONFIGS, "secondary", merged)
+    seen = _fake_transport(monkeypatch)
+
+    assert ev.main(_sweep_args(items_path, sessions, "merged-arms", repeats=1)) == 3
+    out = capsys.readouterr().out
+    assert "NOT DECISION GRADE" in out, out
+    assert "both arms reached" in out, out
+    assert seen, "the sweep really ran — that is what makes exit 3 a result about engines"
+
+
 def test_plan_pairs_the_arms_adjacent_and_repeats_each_item():
     items = [{"id": "title-1"}, {"id": "title-2"}]
     trials = ev.plan(3, ["title"], items)
@@ -463,8 +603,60 @@ def test_that_nightly_task_is_one_the_scheduler_will_actually_run():
     front = yaml.safe_load(body.split("---\n")[1])
     assert front["frequency"] == "daily"
     assert front.get("skill_name"), f"{runners[0].name} would never run"
-    assert front["status"] in ("up_next", "in_progress")
+    # `status` is asserted by `test_the_task_dispatches_only_when_there_is_a_slot_to_measure`
+    # below, keyed on the slot: pinning it to `up_next` unconditionally is the
+    # claim acceptance clause 4 makes false — #1328 parks the job while
+    # `secondary_enabled` is false, and a nightly with no second engine is the
+    # burn, not the coverage.
     assert "--repeats" in body and "3" in body, "the nightly run must be decision-grade"
+
+
+def test_the_task_dispatches_only_when_there_is_a_slot_to_measure():
+    """The dispatch rule and the instrument's rule have to be one rule.
+
+    Runnable while an engine exists to compare against; a status in
+    `DISPATCH_STOPPING_STATUSES` (`autonomy.py:218` — `draft` or `paused`, the
+    two values the scheduler drops) while it does not. Asserted as a pair
+    rather than as one literal so it goes red in both directions: a slot
+    re-armed without re-arming the job stops being measured nightly, and a
+    slot retired without parking the job burns 120 primary-engine trials every
+    morning on a cause string that is false.
+    """
+    import yaml
+
+    import autonomy
+    from app import llm_slots
+
+    runners = [p for p in AUTONOMY_DIR.glob("*.md")
+               if "secondary_routing_eval.py" in p.read_text(encoding="utf-8")]
+    assert runners
+    front = yaml.safe_load(runners[0].read_text(encoding="utf-8").split("---\n")[1])
+    status = str(front["status"])
+    if llm_slots.is_enabled("agent-llm-secondary"):
+        assert status in autonomy.RUNNABLE_STATUSES, (
+            f"the secondary slot is enabled but task #85 ({status}) is not dispatching: "
+            "the routing decision would stop being measured nightly")
+    else:
+        assert status in autonomy.DISPATCH_STOPPING_STATUSES, (
+            f"task #85 is {status} with `secondary_enabled` false: both arms reach the "
+            "primary by policy, so the sweep produces 120 same-engine trials and a "
+            "cause string that is false (#1328). Park it until a second engine exists.")
+
+
+def test_the_skill_states_the_exit_codes_and_the_frozen_trend():
+    """The skill is what a nightly run obeys: the "alias override did not take"
+    sentence lived there too (SKILL.md:69-70), so a code-only fix would leave a
+    run reporting the false cause from the prose while the script said the true
+    one. Clause 5 of #1328.
+    """
+    skill = (Path.home() / "obsidian" / "skills" / "secondary-routing-eval" / "SKILL.md")
+    body = skill.read_text(encoding="utf-8")
+    assert "agent-llm-secondary" in body, "the skill never names the slot it is talking about"
+    assert "nothing to pair against" in body, "exit 7 is undocumented"
+    assert "the slot is enabled" in body, (
+        "exit 3 is still described as an unqualified merged-arms failure, which is the "
+        "wording that made a parked slot read as a broken box")
+    assert "frozen at 2026-09-20" in body, "the six-night trend is not marked frozen"
 
 
 def test_the_paths_the_nightly_run_names_are_in_the_checkout():
