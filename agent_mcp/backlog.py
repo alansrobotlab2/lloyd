@@ -458,6 +458,7 @@ def _dedupe(args: dict) -> tuple[list[dict], str | None]:
         mergeable = (spawn_write and not bool(args.get("force")) and cfg.get("merge", True)
                      and not (_NEVER_MERGE_TAGS & set(tags)))
         target = SIM.merge_target(similar, cfg=cfg) if mergeable else None
+        _djev_shadow_dedupe(args, similar, target, cfg)
         if target is None:
             SIM.log_decision({"action": "created" if similar or spawn_write else "created_quiet",
                               "name": str(args.get("name") or "")[:120],
@@ -470,6 +471,75 @@ def _dedupe(args: dict) -> tuple[list[dict], str | None]:
         return similar, out
     except Exception:  # noqa: BLE001 — a dedupe failure never blocks a write
         return [], None
+
+
+def _djev_shadow_dedupe(args: dict, similar: list[dict], target: dict | None,
+                        cfg: dict) -> None:
+    """Record djev's "same finding?" beside the merge production just decided.
+
+    THIS caller, not `merge_target`. `merge_target` is handed rows of
+    `{id, title, status, score, lexical, shared, created, source}` and no
+    body text at all, so the one thing a language model needs to answer the
+    question is the one thing that function has never seen. Here the write's
+    own `name` and `description` are in hand.
+
+    The candidate HEADS are a disk read per candidate, so they are read by the
+    shadow worker through a callable and never on the write path — the whole
+    reason the recorder takes callables.
+    """
+    try:
+        from app import djev_shadow
+        if not djev_shadow.enabled("dedupe"):
+            return
+        top = [r for r in similar[:3] if r.get("id")]
+        if not top:
+            return
+        name = str(args.get("name") or "")
+        description = str(args.get("description") or "")
+
+        def _questions() -> dict:
+            # One `choice` per candidate in a single canvas — three questions
+            # is one ~45 ms read, and the sweep's economics say batching is
+            # nearly free (≈33 ms fixed + 1.3 ms per extra decision).
+            from eval.djev import schemas
+            q = schemas.DEDUPE.spec["same_finding"]
+            return {f"cand{r['id']}": {
+                "type": q["type"],
+                "instructions": q["instructions"] + f" (Item B is backlog #{r['id']}.)",
+                # dict(...) rather than the frozen object: option ORDER is
+                # part of the schema hash and must survive the copy.
+                "criteria": dict(q["criteria"]),
+            } for r in top}
+
+        def _state() -> str:
+            from eval.djev import schemas
+            heads = []
+            for r in top:
+                body = ""
+                for path in BACKLOG_DIR.glob(f"{int(r['id'])}-*.md"):
+                    head = SIM._head(path, head_bytes=int(cfg["head_bytes"]),
+                                     body_chars=int(cfg["body_chars"]))
+                    body = (head or {}).get("text") or ""
+                    break
+                heads.append(schemas.pair_state(name, description,
+                                                f"#{r['id']} {r.get('title') or ''}",
+                                                body))
+            return "\n\n---\n\n".join(heads)
+
+        djev_shadow.shadow(
+            seam="dedupe",
+            state=_state,
+            questions=_questions,
+            actual={"merged_into": int(target["id"]) if target else None,
+                    "rule": (target or {}).get("rule")},
+            meta={"name": name[:200],
+                  "candidates": [{"id": int(r["id"]), "score": r.get("score"),
+                                  "lexical": r.get("lexical"),
+                                  "shared": r.get("shared"),
+                                  "status": r.get("status")} for r in top]},
+        )
+    except Exception:  # noqa: BLE001 — a recorder never blocks a write
+        pass
 
 
 def _merge_into(target: dict, args: dict, similar: list[dict]) -> str | None:

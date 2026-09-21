@@ -1402,5 +1402,27 @@ def main() -> int:
     return 0
 
 
+def _flush_djev_shadow() -> None:
+    """Give the shadow recorder its chance before this process exits.
+
+    The recorder's worker is a DAEMON thread, so a script takes its queue with
+    it on the way out and this seam — ~302 clusters a day, the only one with
+    real ground truth behind it — would be the one that never recorded
+    anything. The aggregator does the same from `main.lifespan`; a script has
+    to ask.
+    """
+    try:
+        from app import djev_shadow
+        left = djev_shadow.flush(timeout=30.0)
+        if left:
+            print(f"  [djev] {left} shadow rows unsent at exit "
+                  f"(counted as dropped_at_shutdown)")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    finally:
+        _flush_djev_shadow()

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections import defaultdict
@@ -25,8 +26,18 @@ HERE = Path(__file__).resolve().parent
 LLOYD_HOME = HERE.parent
 sys.path.insert(0, str(LLOYD_HOME))
 
+# The djev shadow recorder is MUTED for every eval run, and this line must
+# stay above the `agent_mcp.vault` import: the lead shadow seam lives inside
+# `_vault_recall`, so an eval that scored 20 queries against the pinned corpus
+# would write 20 rows indistinguishable from production traffic — into the
+# very `label_mass` distribution those rows' floors are supposed to be derived
+# from. `setdefault`, so a caller who set it deliberately keeps their value.
+os.environ.setdefault("LLOYD_DJEV_SHADOW", "0")
+
 from agent_mcp.vault import (
     RECALL_DEMOTE_DAILY_LOGS,
+    RECALL_DJEV_RERANK,
+    RECALL_DJEV_RERANK_TOP,
     RECALL_GRAPH_HOPS,
     RECALL_GRAPH_RERANK,
     RECALL_GRAPH_TOP_K,
@@ -323,6 +334,8 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
              graph_top_k: int = RECALL_GRAPH_TOP_K,
              graph_hops: int = RECALL_GRAPH_HOPS,
              seed_top_k: int = RECALL_SEED_TOP_K,
+             djev_rerank: bool = RECALL_DJEV_RERANK,
+             djev_rerank_top: int = RECALL_DJEV_RERANK_TOP,
              counterfactual: bool = True) -> list[dict]:
     records = []
     # Frozen perturbation records, loaded once. Absent or short is surfaced per
@@ -350,6 +363,12 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
                 "rerank_alpha": rerank_alpha,
                 "graph_top_k": graph_top_k,
                 "graph_hops": graph_hops,
+                # The adoption arm. It is a real parameter of the handler and
+                # not a log, because the question — "does djev's ordering beat
+                # qmd's own reranker" — can only be answered on the labelled
+                # set, and a shadow row has no labels.
+                "djev_rerank": djev_rerank,
+                "djev_rerank_top": djev_rerank_top,
             }
             if demote_factor is not None:
                 recall_params["demote_factor"] = demote_factor
@@ -694,6 +713,17 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--seed-top-k", type=int, default=RECALL_SEED_TOP_K,
                     help=f"How many query entities become recall seeds "
                          f"(production {RECALL_SEED_TOP_K})")
+    # The djev adoption arm. Note the honest caveat before reading a result
+    # off it: the labelled set is 20 queries / 50 doc labels and the noise
+    # floor is 0.02 MRR (agent_mcp/vault.py:172), so this eval can adjudicate
+    # a LARGE win or a LARGE loss and nothing in between.
+    ap.add_argument("--djev-rerank", dest="djev_rerank", action="store_true",
+                    default=RECALL_DJEV_RERANK,
+                    help=f"Re-rank the head of the pool through djev "
+                         f"(production {RECALL_DJEV_RERANK})")
+    ap.add_argument("--djev-rerank-top", type=int, default=RECALL_DJEV_RERANK_TOP,
+                    help=f"How many top documents djev re-orders "
+                         f"(production {RECALL_DJEV_RERANK_TOP}, ceiling 16)")
     # Measuring the no-graph baseline on purpose is legitimate — it is how the
     # blind spot above was found. Everything else that reaches an empty corpus
     # got there by accident and must not be handed a well-formed score sheet.
@@ -734,6 +764,8 @@ def build_run_config(args: argparse.Namespace) -> dict:
         # artifact itself: a baseline can now be asked how many seeds it scored
         # with instead of being assumed to have used the current constant.
         "seed_top_k": args.seed_top_k,
+        "djev_rerank": args.djev_rerank,
+        "djev_rerank_top": args.djev_rerank_top,
         "matches_production_defaults": (
             args.graph_rerank == RECALL_GRAPH_RERANK
             and args.alpha == RECALL_RERANK_ALPHA
@@ -741,6 +773,12 @@ def build_run_config(args: argparse.Namespace) -> dict:
             and args.graph_hops == RECALL_GRAPH_HOPS
             # The term whose absence is #843: 5 against 10 used to read `true`.
             and args.seed_top_k == RECALL_SEED_TOP_K
+            # An arm run is NOT production, and the artifact has to say so or
+            # a djev-reranked baseline is comparable with a plain one by
+            # accident. `djev_rerank_top` is deliberately not a term: it means
+            # nothing while the arm is off, and a conjunction that can be
+            # falsified by an inert knob is #1000's defect one constant over.
+            and args.djev_rerank == RECALL_DJEV_RERANK
             and not args.no_graph
         ),
     }
@@ -797,6 +835,8 @@ def main() -> int:
         graph_top_k=args.graph_top_k,
         graph_hops=args.graph_hops,
         seed_top_k=args.seed_top_k,
+        djev_rerank=args.djev_rerank,
+        djev_rerank_top=args.djev_rerank_top,
         counterfactual=args.counterfactual,
     )
     summary = summarize(records)

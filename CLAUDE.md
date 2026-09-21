@@ -2679,6 +2679,16 @@ llama.cpp divides `--ctx-size` across slots and the full 256K window was the
 point — `secondary_models.py` post-session jobs and voice summaries queue
 behind agent turns there.
 
+**GPU 2 runs djev, not the secondary, since 2026-09-20** — DiffusionGemma
+26B-A4B NVFP4 answering typed decisions on `:8011/v1/systemone` in ~40 ms. It
+is not a chat slot, is absent from `models:` and `resolve_model_alias`, and
+nothing routes a turn to it. It answers three MCP tools (`djev_rank`,
+`djev_decide`, `djev_status`) and records three production seams in shadow,
+changing no decision. **Rank with it; do not gate on it** — measured, a fixed
+0.5 cutoff is meaningless and every threshold belongs to one frozen schema,
+option order included. `architecture/djev.md` is the long version and carries
+the numbers, the floors and the follow-on work.
+
 **Subagents inherit the calling turn's model.** `subagents.<type>.model: ''`
 means "whatever spawned me"; the harness ships it in the MCP request `_meta`
 (`lloyd/model`, `lloyd/base_url`) since Task runs in the aggregator process

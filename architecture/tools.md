@@ -283,6 +283,7 @@ aggregator *dispatches*; what the model is shown is smaller — subtract
 | `backlog` | 4 | `backlog_boards`, `backlog_tasks`, `backlog_get_task`, `backlog_write_task` |
 | `browser` | 14 | `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_scroll`, `browser_press`, `browser_tabs`, `browser_screenshot`, `browser_evaluate`, `browser_fill`, `browser_wait`, `browser_select`, `browser_drag`, `browser_cookies` |
 | `code_graph` | 6 | `graph_explain`, `graph_affected`, `graph_path`, `graph_hubs`, `graph_status`, `graph_refresh` — structural navigation over graphify's AST extraction of a tree |
+| `djev` | 3 | `djev_rank`, `djev_decide`, `djev_status` — typed decisions on GPU 2's otherwise-idle DiffusionGemma, ~40 ms each. Ranking and ordering only: the scores are self-consistent within a call and NOT calibrated, so nothing here compares one to a fixed cutoff ([[djev]]) |
 | `discord_bot` | 4 | `discord_send`, `discord_send_embed`, `discord_list_channels`, `discord_get_home_channel` |
 | `facts` | 10 | `fact_get`, `fact_add`, `fact_profile`, `fact_check`, `fact_resolve`, `fact_invalidate`, `fact_relate`, `fact_relationships`, `fact_path`, `fact_neighbors` |
 | `memory_ops` | 4 | `remember`, `recall`, `forget`, `improve` — #376's four cognitive verbs. **Routers, not replacements**: each one wraps a `fact_*`/`vault_*` tool and adds the single guard it lacks (a dedupe check, a refusal to expire unscoped), so the surface grew by four rather than shrinking by fifteen |

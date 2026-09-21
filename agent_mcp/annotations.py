@@ -62,6 +62,14 @@ READ_ONLY: frozenset[str] = frozenset({
     # exists to let you draw one.
     "graph_explain", "graph_affected", "graph_path", "graph_hubs",
     "graph_status",
+    # djev, the structured-decision engine on GPU 2. A decision is one
+    # stateless read off a diffusion canvas: nothing on this machine changes,
+    # the engine keeps no conversation, and the same call twice returns the
+    # same answer (the canvas is seeded). Read-only also buys two things that
+    # are right here and would be wrong for a writer — `MCPPool._retry_safe`
+    # may re-send a call the transport dropped, and the harness's
+    # parallel-tool-dispatch batch may overlap it with other reads.
+    "djev_rank", "djev_decide", "djev_status",
     # Web + browser observation
     "http_search", "http_fetch",
     "browser_snapshot", "browser_screenshot",

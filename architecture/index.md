@@ -25,6 +25,7 @@ turns out to describe something gone or never built is moved to
 |---|---|
 | [[infrastructure]] | host, GPUs, supervisord programs, systemd units, ports, remote access |
 | [[vllm]] | the primary engine end to end: the served config, the GPU and its power clamp, FP8 KV, YaRN (built, off), the tuning knobs, the benchmarks |
+| [[djev]] | GPU 2's structured-decision engine: the client and its two trust flags, three tools, three shadow seams, the calibration that says rank with it and do not gate on it |
 
 ## The agent
 

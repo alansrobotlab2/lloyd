@@ -547,6 +547,14 @@ class PinnedCorpus:
         """
         env = dict(base if base is not None else os.environ)
         env["LLOYD_CONFIG_OVERLAY"] = str(self.overlay)
+        # Every child that runs against the pinned corpus has the djev shadow
+        # recorder muted, and it is set HERE rather than at each caller
+        # because this is the one function they all pass through — the two
+        # regression arms, the noise runs and the warm-up. The lead shadow
+        # seam lives inside `_vault_recall`, so a pinned-corpus arm would
+        # otherwise write rows indistinguishable from production traffic into
+        # the distribution those seams' `label_mass` floors are derived from.
+        env["LLOYD_DJEV_SHADOW"] = "0"
         if code_root is not None:
             env["LLOYD_CODE_ROOT"] = str(code_root)
         return env

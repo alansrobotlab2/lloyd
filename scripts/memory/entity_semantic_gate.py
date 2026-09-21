@@ -182,6 +182,7 @@ class SemanticGate:
             except Exception as e:
                 judges[alias] = {"verdict": "ERROR", "reason": f"{type(e).__name__}: {e}"[:200]}
         decision = "SAME" if judges and all(j["verdict"] == "SAME" for j in judges.values()) else "REVIEW"
+        _shadow_djev(a, b, da, db, decision, judges)
         rec = {"key": key, "a": a, "b": b, "decision": decision, "judges": judges,
                "def_a": da[:160], "def_b": db[:160]}
         self._cache[key] = rec
@@ -191,6 +192,48 @@ class SemanticGate:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         out = dict(rec); out["cached"] = False
         return out
+
+
+def _shadow_djev(a: str, b: str, da: str, db: str, decision: str,
+                 judges: dict) -> None:
+    """Record djev's SAME/DIFFERENT beside this gate's, changing nothing.
+
+    Placed after the judges have spoken and before the record is written, so
+    the row carries the verdict production actually reached — including a
+    REVIEW that came from a judge erroring, which is a different thing from a
+    REVIEW that came from disagreement.
+
+    Only the uncached path. A cached verdict returns above this and is not a
+    decision being made; recording it would inflate the corpus with re-runs of
+    pairs already in it and weight the calibration toward whatever the sweep
+    happens to re-walk most.
+
+    The highest-stakes of the three seams, and the only one with real ground
+    truth behind it: the 151 verified-bad merges of 2026-09-03. Note that the
+    "two judges" this gate was built around is one today — `default_judges()`
+    adds the secondary only while `resolve_model_alias("secondary")` still
+    returns `secondary`, and it has not since `secondary_enabled: false`. djev
+    as the restored SECOND judge is the follow-on round this is calibrating
+    for; it is not a judge here and casts no vote.
+    """
+    try:
+        from app import djev_shadow
+        from eval.djev import schemas
+        if not djev_shadow.enabled("entity"):
+            return
+        q = schemas.ENTITY.spec["same_entity"]
+        djev_shadow.shadow(
+            seam="entity",
+            state=lambda: schemas.pair_state(a, da, b, db),
+            questions=lambda: {"same_entity": {
+                "type": q["type"], "instructions": q["instructions"],
+                "criteria": dict(q["criteria"])}},
+            actual={"decision": decision,
+                    "judges": {k: v.get("verdict") for k, v in judges.items()}},
+            meta={"a": a, "b": b},
+        )
+    except Exception:  # noqa: BLE001 — never reaches the sweep
+        pass
 
 
 if __name__ == "__main__":

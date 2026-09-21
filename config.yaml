@@ -41,15 +41,27 @@ secondary_enabled: false
 # on GPU 2's RTX 3090, from github.com/mmastrac/djev-spark. It answers
 # structured decisions through Jev's `POST /v1/systemone`: typed questions
 # (yes/no, choice, ordered scale) read off one diffusion canvas, with
-# calibrated probabilities rather than sampled prose.
+# SELF-CONSISTENT SCORES rather than sampled prose.
+#
+# "self-consistent", not "calibrated", and the correction is measured. Over
+# four framings of one question on 2026-09-20, AUC held at 0.72-0.83 — so the
+# ORDER is a real signal — while merely reversing the option order moved P by
+# 0.324 on average (max 0.851) and each framing had a different optimal
+# threshold: 0.39, 0.03, 0.30, 0.01. A fixed 0.5 cutoff is meaningless. Rank
+# with it; gate on it only with a threshold measured against its own frozen
+# schema (`eval/djev/schemas.py`). The earlier "calibrated probabilities"
+# wording here and in 551e9044 read as a licence to do the opposite.
 #
 # It is NOT a chat slot and deliberately absent from `models:`. Nothing routes
-# a turn here yet; `resolve_model_alias`, the model dropdown and the harness
-# have never heard of it. Wiring it into Lloyd is a separate piece of work.
-# What `enabled` does today is exactly two things: server.py reconciles the
-# supervisord process against it on boot (the same treatment
-# `secondary_enabled` gets), and the Mission Control dashboard shows its
-# engine card while it is true and hides it while it is false.
+# a TURN here; `resolve_model_alias`, the model dropdown and the harness have
+# never heard of it, and that stays true. Since 2026-09-20 it does answer
+# three MCP tools (`djev_rank`, `djev_decide`, `djev_status`) and record three
+# production seams in shadow — `architecture/djev.md` is the long version.
+# What `enabled` does is: server.py reconciles the supervisord process against
+# it on boot (the same treatment `secondary_enabled` gets), the Mission
+# Control dashboard shows its engine card while it is true, and `app/djev.py`
+# reads it through `app/llm_slots.py::is_enabled` so every client and seam
+# goes dark together rather than one surface at a time.
 #
 # GPU 2 holds this OR the secondary, never both — 17.6 GiB of weights plus KV
 # leaves no room beside a 21.7 GiB llama.cpp process.
@@ -68,6 +80,41 @@ djev:
   # The structured decision server in front of it. Not an OpenAI endpoint —
   # POST /v1/systemone, GET /health.
   structured_url: http://127.0.0.1:8011
+  # Recording what djev WOULD have decided beside what production did decide,
+  # at three seams. It changes no decision anywhere: the recorder returns
+  # None, drops rather than waits, and runs on its own thread.
+  #
+  # `LLOYD_DJEV_SHADOW=0` mutes it for a process, which every eval and every
+  # pinned-corpus regression arm sets — a replay recorded as production
+  # traffic would poison the label_mass distribution the floors are read off,
+  # and the lead seam lives inside `_vault_recall`, which the rerank arm
+  # calls directly.
+  shadow:
+    enabled: true
+    # Small on purpose. The three seams fire a few hundred times a day
+    # between them and a decision is ~40 ms plus prefill, so a healthy
+    # backlog is single digits; a queue deep enough to hold an hour of
+    # traffic would hide the overflow this bound exists to report.
+    queue_max: 256
+    # Above the client default, because nothing waits on a shadow call and
+    # its states are the large ones (a 12-candidate rerank pool, an item
+    # body).
+    timeout_seconds: 20.0
+    # Per-seam switches. A seam ABSENT from this map is ON — adding a seam
+    # and forgetting its flag must not be the same as switching it off.
+    seams:
+      # Reranking, in agent_mcp/vault.py between the demote sort and the
+      # slice. The lead seam: both `vault_recall` and `memory_ops.recall`
+      # pass through it.
+      rerank: true
+      # Write-time backlog dedupe, at the backlog_write_task caller that
+      # holds the name and description — not at `merge_target`, which sees
+      # no text at all.
+      dedupe: true
+      # The entity SAME/DIFFERENT gate in the resolution sweep. The
+      # highest-stakes of the three and the only one with true ground truth
+      # behind it (the 151 verified-bad merges of 2026-09-03).
+      entity: true
 inner_voice:
   # Pinned to primary deliberately. `secondary_enabled: true` (2026-09-03,
   # de893d7) made resolve_model_alias stop rewriting secondary -> primary,

@@ -247,6 +247,34 @@ serve_structured() {
 serve_structured &
 SERVER_LOOP=$!
 
+# ── Warmup ────────────────────────────────────────────────────────────
+# One dummy read as soon as the structured server answers, to absorb the
+# Triton JIT of `_fill_logprob_token_ids_kernel` and `_topk_log_softmax_kernel`.
+# That compile costs ~1 s and happens on the FIRST structured read after boot
+# and never again — measured as exactly two occurrences in the whole of
+# agent-djev.log's history, both on a first read, with zero more across a
+# ~200-call benchmark over many shapes. The engine log asks for this itself
+# ("consider extending warmup to cover this shape/config").
+#
+# Detached and entirely failure-tolerant: this must not delay or fail the
+# boot, and a warmup that did would be worse than the 1 s it saves. Without
+# it the first real caller after every restart pays the spike — and since
+# 2026-09-20 the first caller is usually a shadow row, so the spike would
+# land in the latency distribution the seams are being judged on.
+(
+    for _ in $(seq 1 60); do
+        healthy "$STRUCTURED_PORT" && break
+        sleep 1
+    done
+    curl -sf --max-time 30 -X POST "http://127.0.0.1:$STRUCTURED_PORT/v1/systemone" \
+        -H 'content-type: application/json' \
+        ${API_KEY:+-H "authorization: Bearer $API_KEY"} \
+        -d '{"model":"'"$SERVED_NAME"'","state":"warmup","questions":{"ok":{"type":"noul","instructions":"Is this a warmup?"}}}' \
+        >/dev/null 2>&1 \
+        && echo "==> djev warmed (JIT absorbed)" \
+        || echo "==> djev warmup skipped (structured server not ready)" >&2
+) &
+
 cleanup() {
     kill "$VLLM_PID" "$SERVER_LOOP" 2>/dev/null || true
     pkill -f "structured_server.py --upstream http://127.0.0.1:$PORT" 2>/dev/null || true

@@ -172,6 +172,24 @@ DAILY_LOG_DEMOTE_FACTOR = 0.4
 # n=20, so treat a 0.02 difference as noise — 0.11 is not.
 RECALL_GRAPH_RERANK = False
 RECALL_RERANK_ALPHA = 0.3      # only consulted when rerank is explicitly on
+
+# djev re-ranking of the head of the pool, on GPU 2's idle decision engine.
+# OFF, and the constant is what makes flipping it an adoption decision with an
+# eval result behind it rather than a default that drifted on.
+#
+# Measured 2026-09-20 by inverse-cloze over 14 trials of 16 candidates: djev
+# MRR 0.766 / recall@1 0.64, against 0.498 / 0.29 for lexical Jaccard and
+# 0.146 / 0.00 for random, at 662 ms for 16. But Jaccard is a WEAK baseline
+# and the comparison that decides adoption is against qmd's own reranker on
+# the labelled set — `eval/run_eval.py --djev-rerank`, which is the only
+# reason this arm exists in the handler at all. A shadow log has no labels
+# and cannot answer it.
+#
+# 12 rather than 16: listwise `label_mass` measured 0.446, 0.807 and 0.965 at
+# n=16 on three corpora, so 16 is the edge of the safe window. `app/djev.py`
+# carries the numbers.
+RECALL_DJEV_RERANK = False
+RECALL_DJEV_RERANK_TOP = 12
 RECALL_DEMOTE_DAILY_LOGS = True
 RECALL_GRAPH_TOP_K = 5
 RECALL_GRAPH_HOPS = 1
@@ -1211,6 +1229,77 @@ def _vault_search(params: dict) -> dict:
         return _err(str(exc), ErrorCode.INTERNAL, results=[])
 
 
+def _djev_doc_text(doc: dict) -> str:
+    """One pool row as the decision engine sees it: the title, then the
+    snippet qmd already returned. No disk read — the point of ranking a
+    shortlist is that everything it needs is already in hand."""
+    title = str(doc.get("title") or doc.get("path") or "")
+    snippet = str(doc.get("snippet") or "")
+    return f"{title}\n{snippet}" if snippet else title
+
+
+def _djev_rerank_pool(documents: list[dict], query: str, top: int) -> list[dict]:
+    """Reorder the HEAD of the pool through djev; the tail keeps its order.
+
+    Only the head, because djev is a final-stage reranker over a shortlist and
+    nothing else: above 32 questions the server splits the canvas into
+    separate shared contexts whose scores are not comparable, and `label_mass`
+    is already falling at 32. Fanning a 240-row pool across chunks and sorting
+    the union produces an artefact that looks exactly like a ranking.
+
+    Fail-open at every exit. `None` from the client means the engine did not
+    answer — or answered across a canvas split, which it refuses to sort — and
+    the pool keeps the order qmd gave it.
+    """
+    try:
+        from app import djev
+        n = min(int(top or 0), len(documents), djev.RANK_MAX_N)
+        if n < 2:
+            return documents
+        head, tail = documents[:n], documents[n:]
+        rows = djev.rank(query, [_djev_doc_text(d) for d in head],
+                         seam="recall_arm")
+        if rows is None:
+            return documents
+        return [head[r["index"]] for r in rows] + tail
+    except Exception as e:  # noqa: BLE001 — an advisory reranker never fails a recall
+        logger.debug("djev rerank arm: %s", e)
+        return documents
+
+
+def _djev_shadow_rerank(documents: list[dict], query: str) -> None:
+    """Record what djev would have ordered, beside what production returns.
+
+    Unconditional and off-thread: one `put_nowait` on a bounded queue that
+    drops rather than waits. The lead seam of the three, because
+    `memory_ops.recall` delegates here too, so both callers pass through it.
+
+    The state and question set are built by a lambda the shadow WORKER runs —
+    the recall path holds the texts already and must not spend even a string
+    concatenation on an observation nobody is waiting for.
+    """
+    try:
+        from app import djev, djev_shadow
+        if not djev_shadow.enabled("rerank"):
+            return
+        head = documents[:djev.RANK_DEFAULT_N]
+        if len(head) < 2:
+            return
+        texts = [_djev_doc_text(d) for d in head]
+        djev_shadow.shadow(
+            seam="rerank",
+            state=lambda: djev.rank_state(query, texts),
+            questions=lambda: djev.rank_questions(texts),
+            # Production's ordering of the same slice — the thing djev's is
+            # being recorded beside.
+            actual=[d.get("path") for d in head],
+            meta={"query": query[:300], "pool_size": len(documents),
+                  "scores": [round(float(d.get("score", 0) or 0), 4) for d in head]},
+        )
+    except Exception as e:  # noqa: BLE001 — a recorder never reaches its caller
+        logger.debug("djev rerank shadow: %s", e)
+
+
 def _vault_recall(params: dict, *, seed_top_k: int | None = None) -> dict:
     """Combined recall over documents, entity facts and graph neighbours.
 
@@ -1248,6 +1337,10 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None) -> dict:
     # Defaults preserve the historic behaviour exactly.
     graph_top_k = int(params.get("graph_top_k", RECALL_GRAPH_TOP_K))
     graph_hops = int(params.get("graph_hops", RECALL_GRAPH_HOPS))
+    # Resolved at call time from the constants, like every knob above, so a
+    # test that moves `RECALL_DJEV_RERANK` moves what this call does.
+    djev_rerank = bool(params.get("djev_rerank", RECALL_DJEV_RERANK))
+    djev_rerank_top = int(params.get("djev_rerank_top", RECALL_DJEV_RERANK_TOP))
 
     # Seed width. The number and why it is 10 rather than 5 are at
     # RECALL_SEED_TOP_K; the reason it had to stop being a literal here is that
@@ -1517,6 +1610,25 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None) -> dict:
                     d["_pre_demote_score"] = d.get("score", 0)
                     d["score"] = round(float(d.get("score", 0)) * demote_factor, 6)
             documents.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
+        # ── djev: the eval arm, then the shadow seam ─────────────────────
+        # `documents` holds qmd's reranked pool in the order production
+        # returns it: the demote has sorted it and the slice has not run. Both
+        # of the things below belong at exactly this point.
+        #
+        # The shadow hook's first draft sat inside `_graph_rerank`, which is
+        # only reached under `if graph_rerank:` while `RECALL_GRAPH_RERANK` is
+        # False — so it would have fired zero times in production and read as
+        # a quiet seam rather than as a hook on dead code.
+        #
+        # They are exclusive because with the arm ON djev IS the decision, and
+        # a shadow row comparing djev's ordering against djev's ordering is
+        # not an observation. The eval mutes the recorder anyway
+        # (`LLOYD_DJEV_SHADOW=0`); this keeps that true for anyone who flips
+        # the constant by hand.
+        if djev_rerank:
+            documents = _djev_rerank_pool(documents, query, djev_rerank_top)
+        else:
+            _djev_shadow_rerank(documents, query)
         if graph_rerank:
             documents = _graph_rerank(documents, seed_entities, weighted_neighbors, alpha=rerank_alpha)[:limit]
         else:
@@ -1571,6 +1683,8 @@ async def list_tools():
                 "graph_top_k": {"type": "integer", "description": f"Graph expansion breadth (default {RECALL_GRAPH_TOP_K})"},
                 "graph_hops": {"type": "integer", "description": f"Graph expansion depth (default {RECALL_GRAPH_HOPS})"},
                 "demote_daily_logs": {"type": "boolean", "description": f"Down-weight daily notes (default {RECALL_DEMOTE_DAILY_LOGS})"},
+                "djev_rerank": {"type": "boolean", "description": f"Re-rank the head of the pool through the djev decision engine (default {RECALL_DJEV_RERANK}; an evaluation arm, not production)"},
+                "djev_rerank_top": {"type": "integer", "description": f"How many of the top documents djev re-orders when djev_rerank is on (default {RECALL_DJEV_RERANK_TOP}, ceiling 16)"},
             }, "required": ["query"]}),
     ]
 
