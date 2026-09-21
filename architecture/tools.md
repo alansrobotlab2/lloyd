@@ -22,7 +22,7 @@ summary: The lloyd-mcp aggregator — 155 tools across 27 modules behind one
   tool with its properties.
 type: reference
 status: implemented
-date: 2026-09-20
+date: 2026-09-21
 ---
 
 # MCP tools
@@ -224,10 +224,27 @@ advertising has three consequences in `app/harness/tool_schema.py::build_tool_li
    `sync_registration`, `service_control`) and the outbound content gate
    (#1136: deny credential-shaped payloads, report PII-shaped ones). It installs
    the #534 grant gate for background platforms, the Inner Voice observer's
-   pre-tool hook when the session is observed, and skill dispatch. The bench
+   pre-tool hook when the session is observed, and skill dispatch. The grant
+   gate is `policy.install_policy_hook`, and since #724 it is also the
+   reversibility-tier gate: `TIER2_TOOLS`/`TIER3_TOOLS` plus
+   `effective_tier()`, which demotes an `autonomy_write_task` call that moves
+   no dispatch-affecting field back to tier 1, so an unattended turn needs a
+   grant to re-arm or park a task and does not need one to write an activity
+   note. It is installed for worker sources (`workers/sources/_common.py`),
+   autonomy task turns (`autonomy.py`), and the ambient and sync dispatch
+   paths — not only "background". Every hook here keys on the name the model
+   emitted, so the legacy `mcp__lloyd-mcp__` spelling skips them (filed, #727).
+   The bench
    runner installs `install_bench_corpus_hook` on its own registry
    (`scripts/autoresearch/bench_runner_sdk.py`). A denial becomes a tool result
-   the model reads ("Tool call denied: …").
+   the model reads ("Tool call denied: …"). Non-Bash writes have their own
+   lane: `builtin_fs` refuses `Write`/`Edit` under `PROTECTED_WRITE_ROOTS` —
+   the credential tree, `~/lloyd/agent-services`, `~/lloyd/.venvs`, and
+   `~/obsidian/lloyd/SOUL.md` (`app/harness/protected_paths.py:119`, landed
+   2026-09-20) — lifted only by the `allow_protected_writes()` contextvar,
+   which is settable in code and by no production caller today. It is not
+   `protected_roots()`: those are `$HOME`, the vault and the code tree, and
+   refusing writes under them would refuse every note and every round.
 4. **Invoke.** `MCPPool._invoke` opens one short-lived HTTP session per call
    and stamps `_meta` (below). The call bound is `CALL_TIMEOUT_SECONDS` 660 s,
    and the HTTP read timeout sits 30 s above it. It re-sends after a transport
@@ -368,6 +385,9 @@ the direction that matters: a write treated as a read.
 The durable fix for the first two is to split the read and write halves into
 separate tools, or to move them out of `READ_ONLY`. Either choice changes
 plan-mode behaviour, so it is left for a decision rather than made here.
+Re-checked 2026-09-21 at `a8cdd7ef`: both names are still in `READ_ONLY`, and
+`autonomy_config`'s write still rebuilds `_config.md` from the front matter
+alone, so any body below it is dropped. Filed as #1326.
 
 ---
 
@@ -378,7 +398,7 @@ plan-mode behaviour, so it is left for a decision rather than made here.
 | Module | n | What it is |
 |--------|---|------------|
 | `builtin_bash` | 2 | `Bash` and its background-completion drain |
-| `builtin_fs` | 5 | `Read` `Write` `Edit` `Grep` `Glob`, with the read-before-edit gates, the change ledger and edit diagnostics ([[editing-safeguards]]) |
+| `builtin_fs` | 5 | `Read` `Write` `Edit` `Grep` `Glob`, with the read-before-edit gates, the change ledger, edit diagnostics, and a refusal of writes under `PROTECTED_WRITE_ROOTS` ([[editing-safeguards]]) |
 | `builtin_goal` | 2 | the session goal |
 | `builtin_grants` | 3 | #534 scope-bound authority grants: the human's mint path |
 | `builtin_plan` | 2 | plan mode |
@@ -706,7 +726,8 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 ## 7. Progressive disclosure (`ToolSearch`)
 
 Advertising the whole catalog on every request is billed as input tokens on
-every turn (~25.8k at 124 tools), and tool-call accuracy degrades past roughly
+every turn (~25.8k measured when the catalog was 124 tools; re-measure it
+against today's 155 before quoting it), and tool-call accuracy degrades past roughly
 30–50 tools loaded at once. `harness.tool_search` advertises a small baseline
 plus a `ToolSearch` meta-tool and loads the rest on demand
 (`app/harness/tool_search.py`, `tool_search_cache.py`). The model gets a
@@ -757,8 +778,15 @@ directly misses both the overrides and `${VAR}` expansion. Routes:
 `POST /api/tool-toggle`, and `GET`/`POST /api/tool-discovery`, in
 `app/routers/tools.py`.
 
-`Bash` disabled this way is blocked under both spellings, bare and
-`mcp__lloyd-mcp__Bash`, at advertise time and at dispatch.
+`Bash` disabled this way is blocked under both spellings at **advertise** time
+(`tool_schema.build_tool_list` matches the bare name and
+`mcp__<server>__<bare>`). At **dispatch** the check is a raw comparison against
+the name the model emitted — `loop._pre_dispatch` tests
+`name in effective_disallowed` with the unnormalised name, and
+`MCPPool.call_tool` then resolves the legacy prefixed form to the bare tool and
+runs it. So the prefixed spelling, which the pool accepts deliberately for old
+session JSON, is still reachable for a disabled tool (#727). `normalize_tool_name`
+in `app/harness/policy.py` is the fix's shape; the tier gate already uses it.
 
 **No flag may empty a module's `list_tools()`** (`code_graph` has no
 `enabled` key at all; `djev.enabled` switches the engine, not the tools). A
@@ -856,8 +884,12 @@ base URL and the `task:*` session id all come from the history, so a
 continuation keeps its `LoadedToolSet` and its spill directory. Only
 `disallowed_tools` is merged live. The store is process-scoped and bounded
 (8 tasks, 30 minutes, 3 M chars). After an aggregator restart every id reads
-`unknown or evicted`. The three refusal reasons stay distinct because they call
-for different next moves. `_sanitise` drops a trailing assistant message whose
+`unknown or evicted`. Nothing can stop a wedged child from outside the process:
+`_subagent_registry.steer()` and `cancel_run()` (#411) exist, the child honours
+both — it gets a real `cancel_event` and answers `stop_reason: cancelled` — and
+no tool, route or UI verb calls either one (#1135), so a hung `Task` holds its
+660 s call budget until the aggregator restarts. The three refusal reasons stay
+distinct because they call for different next moves. `_sanitise` drops a trailing assistant message whose
 tool calls were never answered, the one invalid shape a cancel can leave and
 the one every engine rejects on replay.
 
@@ -919,3 +951,18 @@ for t in asyncio.run(m.list_tools()):
     print(m._dispatch[n].__name__.rsplit(".", 1)[-1], n, " ".join(marks), ",".join(req), sep="\t")
 EOF
 ```
+
+## Review log
+
+- **2026-09-21 — `current`.** Regenerated §6 against the live `:8500/health` and
+  the offline `list_tools()` dump: 155 tools / 27 modules, and all 155 rows agree
+  with the tree on module, marks and required arguments; module counts, the
+  timeouts (660 s + 30 s), the 50k/2k spill, the routes, `TOOL_NAME_MAX`,
+  `ttl_ms`, the tier/annotation tests, the subagent store bounds and the
+  `tool_search` block all re-derived clean. Three things the prose got wrong or
+  never said: the §8 "blocked at dispatch under both spellings" claim is false
+  (dispatch compares the raw emitted name — #727), the hook list omitted the
+  reversibility-tier gate #724 added inside `install_policy_hook`, and
+  `builtin_fs`'s new `PROTECTED_WRITE_ROOTS` refusal was unmentioned. The §5
+  classification gaps are still open (#1326) and a stopped `Task` child still
+  has no caller behind `steer()`/`cancel_run()` (#1135).
