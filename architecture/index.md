@@ -25,14 +25,14 @@ turns out to describe something gone or never built is moved to
 |---|---|
 | [[infrastructure]] | host, GPUs, supervisord programs, systemd units, ports, remote access |
 | [[vllm]] | the primary engine end to end: the served config, the GPU and its power clamp, FP8 KV, YaRN (built, off), the tuning knobs, the benchmarks |
-| [[djev]] | GPU 2's structured-decision engine: the client and its two trust flags, three tools, three shadow seams, the calibration that says rank with it and do not gate on it |
+| [[djev]] | GPU 2's structured-decision engine: serving, the wire protocol, the client and its two trust flags, three tools, the schema registry, three shadow seams, the eval arm, the calibration that says rank with it and do not gate on it |
 
 ## The agent
 
 | Doc | Covers |
 |---|---|
 | [[harness]] | `run_query`: events, the position-0 rule, preserved thinking, tool pool, summaries, thinking trace, finalizer, subagents |
-| [[tools]] | the lloyd-mcp aggregator, the module and tool inventory, annotations |
+| [[tools]] | the lloyd-mcp aggregator: routes and credential, the dispatch path in order, tool properties and what each decides, every tool with its properties |
 | [[editing-safeguards]] | read-before-edit gates, edit diagnostics and blast radius, the change and effect ledgers, the code graph |
 | [[vault-protection]] | the 09-10/09-12 vault wipes and the four layers after them: the bench/eval tool sandbox, the wholesale-delete check, the guardian's vault tripwire and sync gate, 15-minute snapshots |
 | [[inner-voice]] | the observer that watches the primary stream and steers it with five soft levers |
