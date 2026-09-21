@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, vault, safety, guardian, autoresearch, sync]
 type: reference
 status: implemented
-date: 2026-09-14
+date: 2026-09-21
 ---
 
 # Vault protection: four layers, none of which trusts the prompt
@@ -99,6 +99,23 @@ check, and older copies of the runner live in automod worktrees.
   fails `tool_not_called`, and the delete gets EROFS.
 - **Everything that is not `readOnlyHint` is refused**, with a `Tool call
   denied:` reason so the bench files it under `denied_calls`.
+- **One read is refused too: a trial reading its own grading corpus.** Since
+  #651 (`app/harness/bench_corpus.py`, landed `7128d756`) the same
+  `_tool_sandbox.refusal` consults `bench_corpus.deny_reason` *before* the
+  `readOnlyHint` check and refuses a read whose resolved target is inside
+  `~/obsidian/lloyd/bench/`, where each task's `objective_checks:` sit in the
+  very file a trial can `Read` or `Grep`. Decided on realpaths, so a `~`, a
+  `cd` or a symlinked parent lands on the corpus the way the plain path does;
+  the vault root itself stays readable, because `bench_003_vault_recall`'s task
+  is reading the vault. The attempt survives as a denied call plus a rubric-probe
+  count on the trace and the ledger row — refusing the read does not erase the
+  reach for it, and the count is the reward-hacking signal.
+- **A state-changing call that arrives with no session id is refused** (#1053,
+  `main.py:517`). `is_sandboxed_session("")` is False by design, so before this
+  the *absence* of a session id was itself a route back to the whole write
+  surface: a trial that dropped its own id from `_meta` got `Write` back.
+  Read-only tools still dispatch with no session id, so `tools/list` and every
+  probe are untouched.
 - **Background Bash is refused.** A detached child outlives its turn.
 - **It fails closed.** No bwrap, or a bwrap that cannot build a namespace,
   means Bash is refused. `builtin_bash` re-checks, so a future dispatch route
@@ -127,6 +144,24 @@ CLI prints `session_id`.
 It is still one definition, now with two enforcement points: the harness hook
 and the aggregator's `call_tool`. The aggregator check matters because a caller
 that builds its own `HookRegistry` without the safety hook is still checked.
+
+The module now answers **two questions, and each is enforced on one lane**:
+
+| Predicate | Question | Enforced by |
+|---|---|---|
+| `protected_roots()` / `check_protected_delete` | does this command *take out* the vault, the lloyd tree or `$HOME`? | the Bash lane: the hook and `main.call_tool` |
+| `PROTECTED_WRITE_ROOTS` / `write_deny_reason` | may this file be *written* at all? | the file-tool lane only: `agent_mcp/builtin_fs._gate_check` (#1049, landed `485fa6c0`) |
+
+The write deny-set is four entries — `~/.openclaw`, `~/lloyd/agent-services`,
+`~/lloyd/.venvs`, `~/obsidian/lloyd/SOUL.md` — and it runs ahead of
+`_gate_check`'s create early-return and outside the `harness.edit_gates.enabled`
+switch, so "delete it then Write it back" and "no session bound" are neither a
+route; it fails closed, and the lift is a `ContextVar` no tool argument can set.
+It is deliberately *not* `protected_roots()`: those roots are the vault, the
+lloyd tree and `$HOME`, and refusing writes under them refuses every ordinary
+note. **The asymmetry is open**: `write_deny_reason` is consulted from the fs
+lane and nowhere else, so a redirect or `tee` on the Bash lane reaches the same
+four targets unchecked — tracked as #1049's remaining half.
 
 At dispatch the aggregator enforces the whole regex table except `sudo`,
 whose `\bsudo\b` matches the word inside grep text. The hook-less paths ran
@@ -170,8 +205,8 @@ for a stronger reason: a wipe must be caught while paused, while BROKEN, with
 supervisord unreachable, and with nothing under observation. The existing
 `evaluate_data_damage` counted vault files only inside a promotion's window.
 
-The walk costs ≈10 ms for 5.5k files and skips `.git`, which churns thousands of
-loose objects. It trips on:
+The walk costs ≈12 ms for 5.8k files (re-measured 2026-09-21) and skips `.git`,
+which churns thousands of loose objects. It trips on:
 
 - a missing vault root;
 - a *replaced* root (inode change), because that is what left sync watching
@@ -286,5 +321,17 @@ that pass so Lloyd's own writes do not read as downloads.
   ≤5 s before the tripwire. Obsidian Sync's server-side version history is the
   recovery for those.
 - **The sandboxed prefixes are a list.** A new eval driver that replays prompts
-  with live tools must mint a sandboxed id. `tests/test_tool_sandbox.py` pins
-  the two runners that exist.
+  with live tools must mint a sandboxed id. Of the two producers that exist,
+  `tests/test_tool_sandbox.py` pins only the bench runner's mint
+  (`_trial_session_id`); the eval driver's shape at
+  `eval/run_preserve_thinking_eval.py:267` is covered by a literal in the
+  parametrised table, so renaming that prefix would leave its sessions
+  unsandboxed with a green suite (#1333).
+- **The write deny-set stops at the file-tool lane** — see 2.3. Bash reaches
+  `SOUL.md`, `~/.openclaw` and `agent-services/` with no location rule, and
+  that route also skips the lock, the change ledger and the audit a
+  `vault_write` of the same path takes (#1049).
+
+## Review log
+
+- **2026-09-21 — `stale`.** All four layers are live and verified against the tree (tripwire on every tick, sync start-gate, 15-min timer last snapshot 09:00:49, `require_tool_sandbox` reporting `enforced`/`bwrap` true), but three things landed after 09-14 and are now written in: the bench-corpus read deny (#651) and the sessionless-write refusal (#1053) in 2.1, and `protected_paths`' second predicate — the write deny-set (#1049), which 2.3 now tabulates against the delete predicate, including the open asymmetry that the Bash lane does not consult it. Corrected: the §3 claim that the suite pins both id producers (it pins only the bench runner; #1333), and the tripwire walk cost, re-measured at ≈12 ms over 5.8k files.
