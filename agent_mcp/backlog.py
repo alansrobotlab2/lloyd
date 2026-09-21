@@ -30,13 +30,16 @@ def parse_frontmatter(content: str) -> tuple:
 
     The block is bounded by `app.frontmatter.split_frontmatter`: the first line
     that is *exactly* `---` after the opening one, not the first `---` anywhere
-    in the text. The old `content.split("---", 2)` cut an item whose own text
-    quotes that expression — an activity-log entry carrying
-    `text.split('---\\n',2)` is a YAML scalar with a fence-looking substring —
-    truncated the quoted scalar mid-scalar, failed the parse, and left the
-    record marked `_yaml_broken`, which `save_task` and `_handle_write` then
-    refused to write ("fix the file by hand") for YAML that `yaml.safe_load`
-    reads fine. #1146.
+    in the text. The retired reader here found the end of the block by splitting
+    the file on the bare fence substring with a limit of two — the call shape
+    `tests/test_backlog_unattended.py::test_no_board_reader_keeps_a_private_unanchored_fence_split`
+    keeps out of this module, so it is described rather than quoted. That cut an
+    item whose own text quotes the expression it was split on: an activity-log
+    entry carrying `text.split('---\\n',2)` is a YAML scalar with a fence-looking
+    substring, and the split truncated it mid-scalar. The parse failed, the record
+    came back marked `_yaml_broken`, and `save_task` and `_handle_write` refused to
+    write it ("fix the file by hand") for YAML that `yaml.safe_load` reads fine.
+    #1146, #1221.
     """
     block = FM.split_frontmatter(content)
     if block is None:

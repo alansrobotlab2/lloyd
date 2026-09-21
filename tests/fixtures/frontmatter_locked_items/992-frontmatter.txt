@@ -1,0 +1,59 @@
+created: '2026-09-12T13:45:18.721124'
+status: draft
+priority: medium
+blocked: false
+assigned: false
+position: 992000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- spawned-by-data-pipeline
+- vault-maintenance
+- skill-text
+- frontmatter
+- guardrails
+- swept
+- confirmed-held
+activity_log:
+- '**2026-09-12T13:45:19.490240** — Updated: name, description, status to draft, priority
+  to medium, board to lloyd'
+- '**2026-09-16T01:59:39.308744** — swept (sw-ccbe105589): worth=high size=small —
+  Skill guardrail 2 (obsidian :217-238) still specifies no insertion offset and only
+  after-the-fact validation; literal reading still reproduces the 251-file fusion
+  class in an unattended vault-write step'
+- '**2026-09-16T09:39:10.237667** — Updated: description'
+- '**2026-09-16T16:39:57.326766** — autotriage: **confirmed**. Guardrail 2 (skills/autonomy-data-pipeline/SKILL.md:217-238)
+  is unchanged since before this item was filed — the only diff since 0860640e is
+  13 lines about venv python at :67-71 — and its only position-bearing expression
+  is the read-side slice t[m[0].end():m[1].start()] (:236), with grep -n insert returning
+  0 hits and drop( 0 hits. The repro confirms the mechanism exactly: m0.end()==3 and
+  text[3]==''\n'', so inserting at .end() produces first line ''---segment: backlog'',
+  the 09-03 fusion shape. Narrowing the item: guardrail 2''s snippet *does* reject
+  that text (AssertionError: no closing fence, 1 fence match not 2) but only via open(f).read()
+  over <files you just edited> (:234,:237), so it can never run pre-write — the fix
+  must add a string-in validator, not merely "validate earlier". The item''s own motivating
+  artifacts are gone (scripts/memory/next-gen-memory/backfill_segments.py absent;
+  vault 84f78e77 retracted that run''s file counts; the damaging writer was deleted
+  in 88e3bb4 #484), so the confirmed basis is the instruction text plus live consumer
+  umbrella #1167, which plans exactly this bulk segment: insertion; findings were
+  appended to #992, and the phantom-app.md_frontmatter defect that also blocks open
+  item #1182 was appended there rather than filed new. Check: `git log --since=2026-09-11
+  -- skills/autonomy-data-pipeline/SKILL.md (empty; last commit 0860640e 2026-09-10)
+  + grep -n insert skills/autonomy-data-pipeline/SKILL.md (exit 1) + a venv-python
+  repro inserting "segment: backlog\n" at the ^---[ \t]*$ match''s .end(), and feeding
+  the result back through guardrail 2''s snippet verbatim.`'
+updated: '2026-09-16T16:39:57.326766'
+worth: high
+size: small
+acceptance_clauses:
+- 'Guardrail 2 states the insertion offset as an explicit advance past the fence''s
+  own newline (equivalent to at = m0.end(); if text[at] == "\n": at += 1), so no prescribed
+  insertion can place a key on the same line as the opening --- — skills/autonomy-data-pipeline/SKILL.md'
+- 'Guardrail 2 contains a validator that takes the in-memory NEW text as a string
+  and raises on a fused fence (verified by feeding it "---segment: backlog\ntitle:
+  Foo\n---\n" and seeing it fail) and instructs running it before write_text, while
+  keeping the per-line fence matcher ^---[ \t]*$ plus yaml.safe_load — skills/autonomy-data-pipeline/SKILL.md'
+- Guardrail 2 states the post-edit equality assert as drop(new) == drop(old), the
+  changed key dropped from both sides, and says in words that a pass on files lacking
+  that key proves nothing — skills/autonomy-data-pipeline/SKILL.md

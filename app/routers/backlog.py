@@ -128,13 +128,16 @@ def _backlog_parse_fm(path: Path) -> tuple:
     split, so it counted this defect and not that one.
 
     The block itself is bounded by `app.frontmatter.split_frontmatter`, the same
-    rule the MCP writer uses. Until #1146 this was `content.split("---", 2)`,
-    which cut at a `---` *inside* the front matter — an activity-log scalar that
-    quotes that very expression, for instance — and so manufactured
-    `_yaml_broken` on YAML that is valid, on which `_reject_broken_fm` then
-    answered HTTP 409 to every board edit. Bounding the block at a fence line
-    rather than at a substring means the items still marked broken here are the
-    ones whose YAML really is broken, which is what makes the 409 mean something.
+    rule the MCP writer uses. Until #1146 this reader found the end of the block by
+    splitting the file on the bare fence substring with a limit of two, which cut at
+    a `---` *inside* the front matter — an activity-log scalar quoting that very
+    expression, for instance — and so manufactured `_yaml_broken` on YAML that is
+    valid, on which `_reject_broken_fm` then answered HTTP 409 to every board edit.
+    That call shape is described rather than quoted because
+    `tests/test_backlog_unattended.py::test_no_board_reader_keeps_a_private_unanchored_fence_split`
+    keeps it out of this module. Bounding the block at a fence line rather than at a
+    substring means the items still marked broken here are the ones whose YAML
+    really is broken, which is what makes the 409 mean something.
 
     The recovered dict carries `_yaml_broken`; `_reject_broken_fm` keeps it out of
     the writers, because the regex fallback only recovers `_FALLBACK_FIELDS` and

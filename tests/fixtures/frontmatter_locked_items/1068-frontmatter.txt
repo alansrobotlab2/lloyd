@@ -1,0 +1,67 @@
+created: '2026-09-13T03:41:12.004596'
+status: done
+priority: medium
+blocked: false
+assigned: false
+position: 1068000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- umbrella
+- spawned-by-triage
+- prefetch
+- context-budget
+- unfolded
+activity_log:
+- '**2026-09-13T03:41:12.800959** — Updated: name, description, priority to medium,
+  board to lloyd'
+- '**2026-09-13T10:42:24.109956** — autotriage: **confirmed**. The two prefetch items
+  are one change: prefetch.py bounds every injected field it knows about and passes
+  two through verbatim — qmd''s diff formatting and entry.summary — one file, one
+  renderer, one test file, one convention. The hunk half had to be re-measured rather
+  than inherited: #471 landed as `211761ad` on 2026-09-12, so the rendered entry now
+  carries `file:` and `[... truncated]`, which means the hunk header is the only remaining
+  carrier of the match''s line number and a bare strip would delete information the
+  cluster''s parent item asked for; the umbrella therefore moves position to an attribute
+  in the same clause that removes the prose. #1010 and #1047 survive because neither
+  the writer hole nor the unexplained emitter has any overlap with that renderer.
+  Running #1010''s own reproduction is what surfaced #1069: prompt_surface.py:198-204
+  compares the first raw line, and all three prompt files open with YAML `---`, so
+  the #464 guard fires on every real file pair and both enforcement points (vault_round.py:192-199,
+  promote.py:150) are permanently red — while 9ca4fc6 (09-11) fixed only the test''s
+  private copy of the check, leaving the module the docstring says all three consumers
+  share untouched, and the 09-12 verdict ledger recorded the trip as "the guard correctly
+  catching a real MEMORY.md regression". Check: `decoded every JSON string in ~/lloyd/sessions/*.json,
+  sliced <vault-context> blocks, split on `\n- **`, counted `@@ -\d+,\d+ @@(\(\d+
+  before, \d+ after\))?` plus `^\s*\d{1,4}: ` against entry chars → `1514 1060 2441
+  12.53%` (2436/2441 entries carry a hunk header, mean 33.7 chars); prompt_surface.check_paths
+  on the live healthy SOUL/MEMORY pair → one H1 error, `[]` once front matter is stripped.`'
+- '**2026-09-15T22:02:54.329776** — unfolded (2 member(s) released): oversized: 10
+  clauses against a cap of 6 and never attempted; members released to be swept and
+  ranked on their own'
+- '**2026-09-15T22:02:56.036399** — up_next → done: unfolded: oversized: 10 clauses
+  against a cap of 6 and never attempted; members released to be swept and ranked
+  on their own'
+updated: '2026-09-15T22:02:56.036399'
+acceptance_clauses:
+- 1. An injected <vault-context> entry rendered from a snippet containing `@@ -39,4
+  @@ (38 before, 11 after)` contains no `@@` text.
+- 2. The same entry carries no `NN:` line-number prefix and its prose is otherwise
+  unchanged.
+- 3. The match's start line reaches the agent as an attribute in the position set
+  already carrying `file:`, so deleting the hunk prose deletes no information.
+- 4. A hit with no hunk header renders no position attribute and no extra prose.
+- 5. Sessions captured after landing measure the `@@ -N,N @@` header form at ≈0% of
+  entry characters.
+- 6. vault_search's returned text for the same query is byte-identical to before —
+  surfaces converge, neither output shifts.
+- 7. An AmbientPrefetchEntry with a 5,000-char summary renders an <ambient-signals>
+  line bounded by the new cap plus marker plus the fixed envelope.
+- 8. A 120-char summary renders byte-identically to today — no marker, no reflow.
+- 9. entry.content's existing 800-char cut and `…` marker behave exactly as today
+  (900 chars → 800 + marker).
+- '10. The bound is applied at render, not storage: the stored queue and the debug
+  peek still carry the producer''s full summary.'
+members: []
+completed: '2026-09-15T22:02:56.036399'

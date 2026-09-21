@@ -1,0 +1,60 @@
+created: '2026-09-11T20:05:00'
+status: up_next
+priority: high
+blocked: false
+assigned: true
+position: 866000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- okf
+- vault-conformance
+- migrator
+- umbrella
+- spawned-by-group-triage
+activity_log:
+- '**2026-09-11T20:05:00** — Restored twice by round SM_20260911_190850: automod_vault_land
+  refused the surface half and its revert deletes untracked new files, which destroyed
+  this item both times. The refusal is a false #464 trip in prompt_surface.py (it
+  fingerprints line 1, and clause 7 gives MEMORY.md and SOUL.md frontmatter so both
+  open with `---`); its fix lands in this round, and until it deploys the vault route
+  cannot accept this surface.'
+- '**2026-09-11T19:52:24.662804** — automod review sent round SM_20260911_190850 back:
+  test honesty tests/test_prompt_surface_budget.py:120: Defines a local `_shared_line_share`
+  that shadows the `ps.shared_line_share` alias bound at :75 (now dead code) and compares
+  below a new `_body()` fence at :178 — the second private definition the file''s
+  own comment at :68-71 warns against. Production is unchanged (prompt_surface.py:103-109,
+  :199-20; test honesty tests/test_prompt_surface_budget.py:112: Docstring justifies
+  the scoping with a shared-line share of 0.054 including the fence; measured against
+  the live vault it is 0.0714.; test honesty knowledge/ai/okf-gap-analysis.md:107:
+  Landed note claims both #464 paste-detectors now compare prose below the fence.
+  False as shipped — the prompt_surface.py half was dropped in commit eb189b1 as not
+  a writable path.; test honesty scripts/vau — work is on branch `automod/SM_20260911_190850`'
+- '**2026-09-11T19:52:29.273736** — in_progress → up_next: offered again — incomplete:
+  the turn ran out of iterations before reaching a verdict; its work is on branch
+  `automod/SM_20260911_190850`'
+- '**2026-09-12T00:32:26.677438** — up_next → in_progress: automod round starting'
+- '**2026-09-12T00:47:58.780079** — in_progress → up_next: offered again — infra:
+  the turn never reported completion'
+- '**2026-09-12T01:18:47.242267** — automod round SM_20260912_003509 abandoned: the
+  review rung sent the round back and the turn ended without abort or re-gate; implement
+  turn ended (None) and the round stayed open for 30 min with nothing running in its
+  session. Its work is on branch `automod/SM_20260912_003509` in ~/lloyd.'
+- '**2026-09-12T01:18:57.532861** — up_next → in_progress: automod round starting'
+- '**2026-09-12T01:42:57.740216** — automod review sent round SM_20260912_012138 back:
+  clause 2 partial: The tree satisfies the clause — the live dry run over 859 files
+  proposes no `[type=note]` — but the test never reaches the changed branch, because
+  every live backlog file already carries a type, so my branch-deleted mutant also
+  prints nothing against the vault while printing `[type=note]` against a fixture.
+  Its tally half sits under `if len(block) > 1` and no backfill block is emitted today.
+  Satisfiable pin: the same assertion against a --root fixture holding one type-less
+  `backlog/*.md`, which provably distinguishes fix from mutant.; test honesty tests/test_okf_reserved_and_backlog.py:153:
+  test_backlog_dry_run_proposes_no_note_type passes without reaching the code it names:
+  all 859 live backlog files already carry a type, so process() never calls infer_type,
+  and my branc — work is on branch `automod/SM_20260912_012138`'
+- '**2026-09-12T01:43:02.748501** — in_progress → up_next: offered again — review_retry:
+  the review rung found the premise sound but the implementation or its tests short
+  — clause 2 partial: The tree satisfies'
+updated: '2026-09-12T01:43:02.748501'
+timestamp: '2026-09-11T20:05:00'

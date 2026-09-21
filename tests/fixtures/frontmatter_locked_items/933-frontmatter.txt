@@ -1,0 +1,41 @@
+created: '2026-09-12T00:41:50.041199'
+status: draft
+priority: medium
+blocked: false
+assigned: false
+position: 933000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- frontmatter
+- yaml
+- false-positive
+- memory-tab
+- spawned-by-task-24
+- okf
+- swept
+- grouped
+activity_log:
+- '**2026-09-12T00:41:51.883770** — Updated: name, description, status to draft, priority
+  to medium, board to lloyd'
+- '**2026-09-13T04:40:14.829448** — merged finding ''Three more vault frontmatter
+  split sites in app/routers/memory.py are outside #9'' from session 20260913_043702_autotriage_89eb
+  (write-time dedupe)'
+- '**2026-09-13T11:40:33.473203** — group triage c-189b55bd: distinct from the others;
+  stays in the single-item pool — app/routers/memory.py:78-80 still reads read_text(encoding="utf-8")[:2000]
+  then head.split("---", 2); anchor note knowledge/robotics/real-time-policy-adaptation-online-learning-failures.md
+  closes its fence at [0, 5152]; vault scan over the 7 stats segments gives 3961 md,
+  18 with the closing fence past 2000, 0 unclosed. Not a duplicate of #979 (different
+  subsystem) or of #787 (backlog-store parser, a separate code path #933 itself names
+  as the second site).'
+- '**2026-09-16T01:28:40.679947** — swept (sw-0940acc563): worth=medium size=small
+  — all four sites live: `[:2000]`/`[:500]` truncation plus `split("---", 2)` at `:78-80`,
+  `:138-140`, `:161-162`, `:193-194`; #787 done.'
+- '**2026-09-16T17:14:45.908889** — folded into umbrella #1190 by automod group triage
+  (hand-frontmatter): same fix as the rest of the frontmatter family; folded by hand
+  2026-09-16'
+updated: '2026-09-16T17:14:45.908889'
+worth: medium
+size: small
+group: 1190

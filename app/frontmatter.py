@@ -51,7 +51,18 @@ _OPENING_FENCE = re.compile(r"^---[^\n]*\n")
 # CRLF allowed — hand-edited items carry them), anywhere after the opening line,
 # consuming its own terminator so the returned rest is the body proper.
 #
-# The `^` anchor is not a nicety. YAML will not put a fence-lookalike at column 0
+# The `$` at the end carries as much of the rule as the `^` at the start. Written
+# as `[ \t]*\r?\n?` — both terminators optional — the pattern also matched a
+# *prefix* of a longer line, so `--- Some Heading` or a markdown rule with text
+# after it ended the block: the reader then took the rest of that line for the
+# first body line, the YAML it had kept stopped at whatever the heading line was
+# interrupting, and a writer handed that truncated dict re-dumps it — losing every
+# key that came after the heading, with the lost text appearing in the body. So the
+# line must be *nothing but* the fence: three hyphens, optional blanks, optional CR,
+# and then end of line or end of text (`(?:\n|$)` rather than `\n?`, so a closing
+# fence on the file's last line with no trailing newline is still a fence).
+#
+# The `^` anchor is not a nicety either. YAML will not put a fence-lookalike at column 0
 # inside a value in any quoting style: a continuation line unindented under
 # `note: "before` is a scanner error, and a bare `---` line at column 0 is a
 # document separator, which `yaml.safe_load` refuses as "expected a single
@@ -59,8 +70,15 @@ _OPENING_FENCE = re.compile(r"^---[^\n]*\n")
 # *indented* one — which is exactly what `yaml.dump` emits for a multi-line
 # scalar: `yaml.dump({"note": "a\n---\nb"})` is `note: 'a\n\n  ---\n\n  b'`, so a
 # value holding a fence line survives the loop's own re-dump without ever
-# starting a line with it.
-_CLOSING_FENCE = re.compile(r"^---[ \t]*\r?\n?", re.MULTILINE)
+# starting a line with it. And a file that does carry a column-0 `--- ` line inside
+# its block is malformed YAML on exactly those grounds, so the stricter close sends
+# it to `_yaml_broken` — where clause 4 of #1221 wants a file like that refused
+# rather than silently mis-sliced. Measured across every corpus these three readers
+# touch (1,264 board items, 36 autonomy tasks, 194 skills, 3,507 other vault notes)
+# no file's split moves at all between the two patterns, so this tightening changes
+# no live item: it only stops a shape that has not happened yet from being
+# mis-read when it does.
+_CLOSING_FENCE = re.compile(r"^---[ \t]*\r?(?:\n|$)", re.MULTILINE)
 
 
 def split_frontmatter(text: str) -> tuple[str, str] | None:

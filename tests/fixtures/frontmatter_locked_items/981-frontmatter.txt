@@ -1,0 +1,69 @@
+created: '2026-09-12T10:02:21.134814'
+status: done
+priority: medium
+blocked: false
+assigned: false
+position: 981000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- umbrella
+- spawned-by-triage
+- okf
+- skills
+- frontmatter
+- daily-notes
+- memory-capture
+- unfolded
+activity_log:
+- '**2026-09-12T10:02:21.911013** — Updated: name, description, status to up_next,
+  priority to medium, board to lloyd'
+- '**2026-09-12T17:02:43.759669** — autotriage: **confirmed**. The cluster''s shared
+  premise is a producer defect, and it is still standing: grep -rln ''segment: agents''
+  skills/*/SKILL.md returns 8 files, four of which emit it into the validator-scanned
+  memory/ tree, and the memory-capture heredoc reproduces as a real violation when
+  fed through validate_okf.py in a temp vault. The existing violations the items measured
+  are gone — validate_okf.py --dir memory now prints scanned 584 / conformant 584
+  / VIOLATIONS : 0, repaired by vault ed1c3cc3 (task #24) and fafb31e1 (#866) rather
+  than by #440, which is still draft — so #597''s counts are stale while its claim
+  is not. #519 landed (8a54b31) with tests/test_post_capture_daily_note_okf.py, whose
+  test_existing_note_header_is_left_alone documents "never rewrite a pre-existing
+  header", which is why #981 requires the append-behaviour decision to be pinned by
+  a test rather than mandating self-repair. #601''s premise is independently live:
+  grep -rn ''PDT'' --include=''*.py'' app/ hits only post_capture.py:100, and the
+  signals skill''s own header template hardcodes PST. Check: `TMP=$(mktemp -d) &&
+  mkdir -p $TMP/obsidian/memory && printf -- ''---\nsegment: agents\n---\n\n# 2026-09-13
+  Daily Notes\n\n## Sessions\n'' > $TMP/obsidian/memory/2026-09-13.md && HOME=$TMP
+  .venvs/lloyd/bin/python scripts/vault/validate_okf.py --dir memory` → `VIOLATIONS
+  : 1`'
+- '**2026-09-15T22:06:34.731482** — unfolded (2 member(s) released): oversized: 11
+  clauses against a cap of 6 and never attempted; members released to be swept and
+  ranked on their own'
+- '**2026-09-15T22:06:36.371272** — up_next → done: unfolded: oversized: 11 clauses
+  against a cap of 6 and never attempted; members released to be swept and ranked
+  on their own'
+updated: '2026-09-15T22:06:36.371272'
+acceptance_clauses:
+- 'grep -rn "segment: agents" over the four daily-note skills (memory-capture, periodic-memory-capture-lloyd,
+  periodic-memory-capture-dee, heartbeat) returns 0 hits'
+- 'Each of those four templates emits front matter with a non-empty type: line and
+  segment: memory'
+- Each template still contains the unchanged `# YYYY-MM-DD Daily Notes` heading and
+  `## Sessions` body
+- 'nightly-reflection-knowledge-write/SKILL.md''s safety-net line instructs a front
+  matter with a non-empty type, not the bare `segment: memory` it names today'
+- 'A note written verbatim from the edited memory-capture heredoc passes validate_okf.py
+  --dir memory (probe → VIOLATIONS : 0)'
+- 'validate_okf.py --dir memory still reports VIOLATIONS : 0 after the change lands'
+- The append branch opens the existing note with an explicit encoding="utf-8", pinned
+  by a test that appends under LC_ALL=C and reads the captured text back intact
+- Appending to a note whose front matter has no type preserves every pre-existing
+  body line, and exactly one named test states which behaviour was chosen (repaired,
+  or deliberately untouched)
+- All tests in tests/test_post_capture_daily_note_okf.py pass, including exactly one
+  front matter block after two captures
+- The section heading string emitted by _append_daily_note is unchanged by this work
+- No _pipeline/reflection/** report template is touched by this work
+members: []
+completed: '2026-09-15T22:06:36.371272'

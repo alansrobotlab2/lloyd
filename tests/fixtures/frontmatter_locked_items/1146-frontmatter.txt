@@ -1,0 +1,53 @@
+created: '2026-09-14T15:33:18.958485'
+status: draft
+priority: medium
+blocked: false
+assigned: false
+position: 1146000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- automod
+- backlog
+- loop-defect
+- swept
+- re-triage
+- grouped
+activity_log:
+- '**2026-09-14T15:33:19.738843** — Updated: name, description, status to draft, priority
+  to medium, board to lloyd'
+- '**2026-09-14T22:33:19.741485** — autotriage: **confirmed**. agent_mcp/backlog.py::parse_frontmatter
+  splits on ''---'' anywhere; #460 plus 14 other items with valid YAML (yaml.safe_load
+  succeeds) read as _yaml_broken and refuse backlog_write_task. #392, #399 and #413
+  were status done yet still tagged needs-human on 2026-09-14 because close_landed/record_verdict
+  closes never strip the tag that the spent-attempt move added. Check: `grep -n ''def
+  parse_frontmatter'' -A12 agent_mcp/backlog.py; grep -n ''def _split_frontmatter''
+  -A10 scripts/automod/backlog.py; grep -n ''def close_landed'' -A30 scripts/automod/backlog.py
+  | grep -n tags`'
+- '**2026-09-14T22:33:19.744589** — filed and confirmed by hand — needs-human sweep
+  2026-09-14 (Alan''s ruling, Claude Code session)'
+- '**2026-09-14T22:35:27.318706** — absorbs #918 — needs-human sweep 2026-09-14 (Alan''s
+  ruling, Claude Code session)'
+- '**2026-09-16T06:11:11.276334** — swept (sw-ac3de2e0c2): worth=high size=small —
+  Both writers still split on unanchored `---` (backlog.py:30, automod/backlog.py:866),
+  locking 15 valid-YAML items against `backlog_write_task`; `close_landed` appends
+  tags but never strips `needs-human`.'
+- '**2026-09-16T13:03:44.159722** — up_next → in_progress: automod round starting'
+- '**2026-09-16T13:10:36.992710** — automod round SM_20260916_130411 abandoned: implement
+  turn ended (stop) with the round still open, no gate or landing running, and no
+  observer to rescue it. Its work is on branch `automod/SM_20260916_130411` in ~/lloyd.'
+- '**2026-09-16T13:10:38.835688** — in_progress → up_next: its round was abandoned;
+  back in the pool'
+- '**2026-09-16T13:10:52.310390** — up_next → draft: its one unattended attempt is
+  spent; a human decides (reopen_item to grant another)'
+- '**2026-09-16T13:26:56.524841** — its implement attempt was spent in round SM_20260916_130411;
+  sent back through triage once, with the refusal, for a contract a round can meet
+  or a retirement'
+- '**2026-09-16T17:14:45.905415** — folded into umbrella #1190 by automod group triage
+  (hand-frontmatter): same fix as the rest of the frontmatter family; folded by hand
+  2026-09-16'
+updated: '2026-09-16T17:14:45.905415'
+worth: high
+size: small
+group: 1190

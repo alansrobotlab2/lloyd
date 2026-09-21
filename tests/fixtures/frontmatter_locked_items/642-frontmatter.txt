@@ -1,0 +1,80 @@
+created: '2026-09-09T09:17:16.438880'
+status: up_next
+priority: medium
+blocked: false
+assigned: false
+position: 642000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- spawned-by-triage
+- autonomy
+- workers
+- observability
+- swept
+activity_log:
+- '**2026-09-09T09:17:16.440287** — Updated: name, description, status to up_next,
+  priority to medium, board to lloyd'
+- '**2026-09-09T18:34:38.501808** — up_next → draft: never triaged; autotriage reads
+  draft'
+- '**2026-09-11T18:02:41.754369** — group triage c-0cd7a98d: distinct from the others;
+  stays in the single-item pool — Head-slicing unchanged at HEAD: `summary=final_response[:200]`
+  (`autonomy.py:1188`), `response_preview: final_response[:300]` (`:1222`), `summary[:500]`
+  (`workers/pool.py:142`, `workers/queue.py:496`); `git log -S "final_response[:200]"`
+  returns only `30646b6 initial commit`. Self-contained code fix, no shared landing
+  surface with the claims pilot.'
+- '**2026-09-14T08:42:26.784503** — Updated: description'
+- '**2026-09-14T08:42:34.378512** — Updated: description'
+- '**2026-09-14T15:43:19.767135** — autotriage: **confirmed**. autonomy.py:1288 writes
+  `summary=final_response[:200]` and :1322 writes `"response_preview": final_response[:300]`
+  — unchanged from the item, only relocated (was :927/:961; `git log -S''final_response[:''
+  -- autonomy.py` returns only `30646b6 initial commit`, so nothing fixed it). Live
+  data still shows it: 474 scheduled-task rows since 09-09, 326 at the cap, MAX exactly
+  300, 42 with a table rule row, 79 opening with narration; `run_scheduled-task_20260914_151053_bd2544`
+  ends `…50 rows (this run appended 2`. 10/10 sampled summaries matched the head of
+  the artifact body and 0/10 its tail, and `runs.response_json` is only 300 chars
+  too (`scheduled_task.py:411` reuses the preview), so the artifact is the only full-text
+  store. Narration rate rose from the item''s 7.8% baseline to 79/474 = 16.7%. Check:
+  `sqlite3 file:~/lloyd/workers.db?mode=ro "SELECT COUNT(*), SUM(length(summary)>=295),
+  MAX(length(summary)), SUM(summary LIKE ''%|---%''), SUM(summary LIKE ''Now %'' OR
+  summary LIKE ''Let me %'') FROM runs WHERE source=''scheduled-task'' AND completed_at>=''2026-09-09'';"
+  plus a python join of 10 recent capped rows to their runs.artifact_path bodies comparing
+  head vs last-200-char overlap`'
+- '**2026-09-15T22:15:30.101965** — draft → up_next: released from hold: the implement
+  pool has room (37 ready < bound 75)'
+- '**2026-09-16T05:09:23.521184** — swept (sw-2950404898): worth=high size=small —
+  Confirmed unchanged at autonomy.py:1288 (`[:200]`) and :1322 (`[:300]`) feeding
+  scheduled_task.py:407''s dead `[:500]` cap; measured 438/1282 records at the cap,
+  100 opening with narration; fix is one tail-slicing helper plus both call sites.'
+updated: '2026-09-16T05:09:23.521184'
+parent: 525
+timestamp: '2026-09-11T18:02:41.754369'
+acceptance_clauses:
+- 1. For a fixture run whose final response is longer than the summary cap, the stored
+  `runs.summary` is a suffix of that response (the last N chars, N = the one constant)
+  rather than its first N — asserted by a unit test on the run-task result path.
+- 2. A fixture response that ends in a markdown table yields a stored summary containing
+  the response's final line, so a report's outcome survives truncation instead of
+  its table header.
+- '3. Both summary writers use one value: `grep -n "final_response\[" ~/lloyd/autonomy.py`
+  shows every remaining slice going through a single named constant or helper, and
+  no literal `[:200]` or `[:300]` remains in the file.'
+- 4. The artifact frontmatter `summary:` and the DB `runs.summary` for the same run
+  derive from the same slice, so neither store keeps the head while the other keeps
+  the tail.
+- '5. Purpose guard for the classifier: `compute_health` decides a timeout from `meta.timeout`/`pool_timeout`
+  or a non-success status, not from narrative text — a success run whose response
+  merely mentions "timed out" is not counted as a timeout, and a genuinely timed-out
+  run still is (regression over `run_scheduled-task_20260909_084821_30159b`).'
+- '6. The completion notification still behaves: a non-silent successful run with
+  `notify_on_complete` calls `_discord_notify_task_complete` exactly once with text
+  that includes the response''s closing, and a `[SILENT]` run still does not notify.'
+human_clauses:
+- '1. After ≥2 days of real traffic: `SUM(summary LIKE ''Now %'' OR summary LIKE ''Let
+  me %'')/COUNT(*)` over new `scheduled-task` rows is below 5% (measured today: 79/474
+  = 16.7%) and `SUM(summary LIKE ''%|---%'')` = 0. Needs traffic, not code.'
+- 2. A person reads a few Discord completion messages and confirms they now report
+  the run's outcome rather than its opening narration.
+worth: high
+size: small

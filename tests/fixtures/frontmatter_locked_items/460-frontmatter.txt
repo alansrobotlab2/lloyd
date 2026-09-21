@@ -1,0 +1,166 @@
+created: '2026-09-08T07:31:00.000000'
+status: done
+priority: low
+blocked: false
+assigned: false
+position: 460000
+board: lloyd
+tags:
+- spawned-by-triage
+- inner-voice
+- observability
+activity_log:
+- '**2026-09-08T07:31:00Z** — Created during selfmod triage of #373 (filed directly
+  to `~/obsidian/backlog/` because `backlog_write_task` misrouted to Bash in that
+  session)'
+- '**2026-09-11T17:56:40.981932** — group triage c-e5f29bac: distinct from the others;
+  stays in the single-item pool — `grep -rl iv_grade ~/obsidian/autonomy ~/obsidian/skills`
+  → 0 files and no `iv-metrics*` artifact; the missing thing is one nightly task plus
+  a JSONL append, a different file set from every other item here.'
+- '**2026-09-12T14:11:10.755881** — Updated: description'
+- '**2026-09-12T21:26:01.438604** — autotriage: **confirmed**. The grader still runs
+  and still lands nowhere: `grep -rln "iv_grade" ~/obsidian/autonomy/ ~/obsidian/skills/`
+  returns 0 files across 37 task files, `_pipeline/reflection/iv-metrics.jsonl` does
+  not exist, and `find ~/lloyd/_pipeline ~/obsidian -name "*iv*grade*"` yields only
+  backlog markdown — a live run for 09-01→09-12 printed 847 turns / 9,027 LLM calls
+  / landed_rate 0.955 and `errors {''http_error'': 1, ''timeout after 5.0s'': 118,
+  ''timeout after 12.0s'': 234}`, all of which evaporated with my terminal. The error
+  column is unread by any consumer: 0 hits for `observer_error|error_rate` in app/scripts/agent-services,
+  `app/routers/inner_voice.py:95,208` are its own exception handlers, `InnerVoicePage.tsx`
+  matches no error/timeout/trend line, `observer.py` still returns `action="noop"
+  … error=err` on a deadline, and a read-only `usage.db` query counts 353 such rows
+  since 09-01 (234@12.0 s, 118@5.0 s; 24 on 09-12) — still firing nightly with nobody
+  told. Nothing supersedes the item: it is the only file on the board naming `iv-metrics`,
+  and #565''s 09-11 autotriage cites #460 as the owner of this exact gap; `iv_grade.py
+  --json` already emits `cost.errors` as a dict, so no collector code is needed. The
+  second claim (dropped verdicts have no alert surface) was filed and merged into
+  #458 rather than left in this transcript; the `pretool` zero-LLM-call anomaly was
+  checked and ruled out by design (`observer.py:102,1906,2066`). Check: `grep -rln
+  "iv_grade" ~/obsidian/autonomy ~/obsidian/skills (→0) ; ls ~/lloyd/_pipeline/reflection/iv-metrics.jsonl
+  (→absent) ; python3 scripts/iv_grade.py --since 2026-09-01 ; grep -rn "observer_error\|error_rate"
+  --include=*.py app scripts agent-services | grep -i "inner\|observ" (→0)` Merged
+  findings into: #458.'
+- '**2026-09-14T01:01:21.484330** — up_next → in_progress: automod round starting'
+- '**2026-09-13T18:40:41.848271** — findings appended by round SM_20260914_010420
+  (gate: 4/5 rungs green incl. full suite 4382 passed; review rung refused twice on
+  clause 2''s live-tree ordering)'
+- '**2026-09-14T01:41:19.867897** — automod review sent round SM_20260914_010420 back:
+  test honesty tests/test_iv_metrics_series.py:698: a new pytest.skip; test honesty
+  tests/test_iv_metrics_series.py:711: `assert isinstance(over, list)` on a list comprehension
+  cannot fail, so the test''s own named check — a consumer comparing the timeout count
+  against a bound — asserts nothing. [repeat]; test honesty tests/test_iv_metrics_series.py:678:
+  The ''body'' chunk is `text`, the whole file, so re.search re-returns the frontmatter
+  description''s match — measured, both iterations yield ''bound in the row, 0.10''.
+  The body''s ''**Bound: 0.10**'' is never located, contradicting the comment at :675;
+  search text.split(''---\n'',2)[2] or anchor on ''Bound:''. [repeat]; advisory tests/test_iv_metrics_series.py:260:
+  `if UTC_OFFSET_HOURS:` guards a permanently-true constant, and the constant is labelled
+  P — work is on branch `automod/SM_20260914_010420`'
+- '**2026-09-14T01:41:28.808955** — in_progress → up_next: offered again — review_retry:
+  the review rung found the premise sound but the implementation or its tests short
+  — test honesty tests/test_iv_metrics_s'
+- '**2026-09-14T02:26:56.690283** — up_next → in_progress: automod round starting'
+- '**2026-09-14T03:07:08.801030** — automod review passed round SM_20260914_022718
+  with advisories — post-landing seams: ~/obsidian/autonomy/86-nightly-iv-metrics-series.md
+  read by the autonomy scheduler in another process (parse, due-ness, preferred_hours
+  window, model and name resolution) | recorder exit 2 -> the nightly agent''s Bash
+  tool result -> the run''s final prose -> _detect_silent_failures -> the silent-failure
+  section inserted into the run report (autonomy.py:1265,1271) | recorder exit 3 (nothing
+  appended) -> no consumer: empty-window stdout is plain text, the recorder''s diagnosis
+  goes to stderr only, so a series that silently stops growing trips nothing; advisory
+  findings: tests/test_iv_metrics_series.py:196: The ''flagged'' scenario is 1 dropped
+  over 10 LLM calls, rate exactly 0.10, and over_bound compares strictly greater,
+  so flagged is False (reproduced standalone) and that arm behaves identically to
+  ''healthy''; the test''s named three-way discrimination is two-way and | tests/test_iv_metrics_series.py:747:
+  The truthiness assert on preferred_hours is satisfied by the string ''1-4'', which
+  _effective_preferred_hours rejects because it requires a list, so the assertion
+  cannot express the schedule window its message names; asserting a list of ints would
+  have caught the i | tests/test_iv_metrics_series.py:764: The armed-implies-script-present
+  assert evaluates the tree under test, which necessarily contains the new file whenever
+  this diff is applied, so it cannot detect the armed-while-absent-from-main state
+  its comment claims it pins. | tests/test_iv_metrics_series.py:866: Three nodes assert
+  on mutable production state (live task status, live series row count, and a loop
+  over the live file that iterates over nothing when the file is absent), so an unrelated
+  auto-pause of task 86 or a rotated series turns the unit suite red for ever'
+- '**2026-09-14T03:12:48.822760** — round SM_20260914_022718 needed paths the loop
+  may not write, left for a person: `~/obsidian/autonomy/86-nightly-iv-metrics-series.md`,
+  `~/obsidian/backlog/460-iv-grader-output-is-never-persisted-the-metric-exist.md`'
+- '**2026-09-14T03:12:56.327824** — in_progress → draft: its one unattended attempt
+  is spent; a human decides (reopen_item to grant another)'
+- '**2026-09-14T03:14:28.264206** — draft → in_progress: landed; the promotion is
+  under observation'
+- '**2026-09-14T03:44:17.463391** — automod landed as `fea74c88` (round SM_20260914_022718,
+  settled 2026-09-14T03:28:46Z). Left open: the round reported every acceptance clause
+  met; still waiting on a person for: 1. Two consecutive scheduled nightly runs must
+  actually land rows before this item''s "a trend exists" claim is met — needs real
+  nights, and no pre-landing test can produce them.; 2. Alan chooses the threshold
+  value on the dropped-verdict rate and the channel a breach reaches (against the
+  measured 0.039 baseline for 09-01→09-12, that bound is a scope decision, not an
+  implementation detail).; apply `~/obsidian/autonomy/86-nightly-iv-metrics-series.md`
+  by hand: The file is correct on disk and armed (status: up_next) but automod_vault_land
+  was refused at review 1/2 on a style complaint versus 60-knowledge-health-report.md,
+  so it is untracked in the vault and needs one more land to be committed; apply `~/obsidian/backlog/460-iv-grader-output-is-never-persisted-the-metric-exist.md`
+  by hand: backlog_write_task refused: front matter is malformed and only readable
+  by fallback parse, so this round''s three findings (autonomy subprocess exit codes
+  never reach the scheduler; ai_description is read by nothing on the dispatch path
+  per autonomy.py:945-951; `alert: true` is not a real autonomy fi'
+- '**2026-09-14T03:44:24.699454** — in_progress → draft: landed with every clause
+  met; the code is live and a person still owes it: the round reported every acceptance
+  clause met; still waiting on a person for: 1. Two consecutive scheduled nightly
+  runs must actually land rows before this ite'
+- '**2026-09-14T22:35:27.078489** — draft → done: code landed; task #86 repaired by
+  hand; threshold/channel ruled → #1145 — needs-human sweep 2026-09-14 (Alan''s ruling,
+  Claude Code session)'
+updated: '2026-09-14T22:35:27.078489'
+parent: 373
+type: backlog
+timestamp: '2026-09-11T17:56:40.981932'
+acceptance_clauses:
+- 1. A task file exists under `~/obsidian/autonomy/` whose frontmatter parses as YAML
+  (same style as `60-knowledge-health-report.md`) and whose body invokes `python3
+  scripts/iv_grade.py --json` with an explicit window bound — pinned by `grep -l "iv_grade"
+  ~/obsidian/autonomy/*.md` returning ≥1 file.
+- 2. Executing the command that task documents appends exactly one line to `~/lloyd/_pipeline/reflection/iv-metrics.jsonl`,
+  and that line parses as a JSON object (verified by a one-shot manual run against
+  a fixed `--since`).
+- '3. The appended row exposes as numeric fields at least: window bounds (`since`/`until`),
+  `turns`, `llm_calls`, dropped-verdict count (derived from `cost.errors`), `landed_rate`,
+  `miss_rate` — so a delta between two rows is a field read, not a parse of the human-readable
+  block.'
+- '4. The job writes nothing to `usage.db`: `scripts/iv_grade.py:283`''s read-only
+  open (`file:…?mode=ro`) is unchanged, and a run leaves `usage.db` byte-untouched
+  (mtime and `sqlite_master` identical before/after), preserving the grader''s documented
+  read-only contract at `scripts/iv_grade.py:1-6`.'
+- 5. The task file states a threshold on the dropped-verdict rate (`dropped / llm_calls`)
+  and instructs the run to flag the row when the last N rows exceed it, with the comparison
+  expressed over JSONL fields rather than prose.
+- '6. The window bound is written so the UTC-vs-local-naive mismatch documented in
+  #835 cannot silently drop the newest hours — pinned by comparing the row''s `llm_calls`
+  for a fixed window computed both ways within the offset.'
+human_clauses:
+- 1. Two consecutive scheduled nightly runs must actually land rows before this item's
+  "a trend exists" claim is met — needs real nights, and no pre-landing test can produce
+  them.
+- 2. Alan chooses the threshold value on the dropped-verdict rate and the channel
+  a breach reaches (against the measured 0.039 baseline for 09-01→09-12, that bound
+  is a scope decision, not an implementation detail).
+post_landing_seams:
+- ~/obsidian/autonomy/86-nightly-iv-metrics-series.md read by the autonomy scheduler
+  in another process (parse, due-ness, preferred_hours window, model and name resolution)
+- recorder exit 2 -> the nightly agent's Bash tool result -> the run's final prose
+  -> _detect_silent_failures -> the silent-failure section inserted into the run report
+  (autonomy.py:1265,1271)
+- 'recorder exit 3 (nothing appended) -> no consumer: empty-window stdout is plain
+  text, the recorder''s diagnosis goes to stderr only, so a series that silently stops
+  growing trips nothing'
+human_paths:
+- path: ~/obsidian/autonomy/86-nightly-iv-metrics-series.md
+  reason: 'The file is correct on disk and armed (status: up_next) but automod_vault_land
+    was refused at review 1/2 on a style complaint versus 60-knowledge-health-report.md,
+    so it is untracked in the vault and needs one more land to be committed'
+- path: ~/obsidian/backlog/460-iv-grader-output-is-never-persisted-the-metric-exist.md
+  reason: 'backlog_write_task refused: front matter is malformed and only readable
+    by fallback parse, so this round''s three findings (autonomy subprocess exit codes
+    never reach the scheduler; ai_description is read by nothing on the dispatch path
+    per autonomy.py:945-951; `alert: true` is not a real autonomy fi'
+automod_landed: fea74c88de0023944fe6ef8d65327c51897e5d73
+completed: '2026-09-14T22:35:27.015152'

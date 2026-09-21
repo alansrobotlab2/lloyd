@@ -1,0 +1,85 @@
+segment: backlog
+created: '2026-09-08T04:06:24.029825'
+status: draft
+priority: medium
+blocked: false
+assigned: false
+position: 478000
+board: lloyd
+tags:
+- spawned-by-selfmod
+- okf
+- frontmatter
+- parsing
+- re-triage
+- swept
+activity_log:
+- '**2026-09-08T04:06:24.030745** — Found while implementing #370, during the acceptance
+  grep. Blocked the grep check on 3 files; the other 218 are latent.'
+- '**2026-09-11T18:15:58.069044** — group triage c-3cd52c73: distinct from the others;
+  stays in the single-item pool — re-measured exactly as filed (221 files / 332 orphan
+  `type:` lines after stripping the leading block); independent acceptance (orphan
+  lines → 0) and per-family judgement on the `youtube-digest.md`/`updates.md` entry
+  metadata, and its own scope guard says the vocabulary is settled and this is a structural-parsing
+  defect.'
+- '**2026-09-12T05:09:02.213892** — merged finding ''No tool detects a second frontmatter
+  block in a body; okf_migrate claims to repa'' from session 20260912_050429_autotriage_fe5a
+  (write-time dedupe)'
+- '**2026-09-12T05:09:54.012210** — merged finding ''121 glued flow-list `tags:` values
+  in 16 knowledge/ files are malformed YAML tha'' from session 20260912_050429_autotriage_fe5a
+  (write-time dedupe)'
+- '**2026-09-12T12:10:48.896997** — autotriage: **confirmed**. The headline reproduces
+  exactly — 221 files / 332 orphan type: lines over 2,576 knowledge notes, and only
+  2 of the 332 sit inside a code fence, so the fencing work is untouched; 210 of the
+  221 carry an orphan type that contradicts the parsed one (knowledge/foundational/thinking-foundations.md
+  line 5 `notes` vs line 10 `book-note`). Failure mode 1 is real: validate_okf.py:38
+  STRICT_FM_RE is offset-0 anchored and applied via .match() at :83, so --dir knowledge
+  --strict reports "conformant: 2574, VIOLATIONS: 0" with exit 0, and okf_migrate.py
+  --repair-only --dir knowledge reports `repaired: 0` despite its docstring (okf_migrate.py:10-12)
+  claiming the "stacked-block corruption families" as repaired. Failure mode 2 is
+  false as stated: split("---\n", 2)[1] equals the strict leading block in 0-of-221
+  files — the lenient split picks the correct block because every file starts with
+  ---\n, so the exposure is line/regex readers (which is what actually broke #370''s
+  acceptance grep), not a wrong-block parse; no code reads superseded_by/redirect_to
+  at all. Two of the item''s own references have moved on: app.okf_types.CANONICAL_TYPES
+  does not exist (scripts/vault/okf_taxonomy.py:47 is the vocabulary, commit 728ce7c),
+  and knowledge/youtube/AI_Engineer is now 188 files not ~130 — where the leading
+  block says notes (184) / research (4) while all 188 stranded blocks say video-note,
+  against 422 leading video-note in the same tree with no stranded block, so #478''s
+  "fence as content" answer would permanently bury real types and provenance there.
+  No writer is reintroducing the shape (0 +type: lines added to the still-written
+  digest/updates files since 2026-09-08), so this is legacy from a July wrapper pass
+  (batch stamps 2026-07-06T14:37:12 ×97, 2026-07-11T10:48:12 ×91). Check: `Python
+  walk over ~/obsidian/knowledge/**/*.md — strip the leading ^---\n(.*?)\n---\n block,
+  then count (?m)^type:[ \t]*\S in the remainder and the files it hits; plus scripts/vault/validate_okf.py
+  --dir knowledge --strict and okf_migrate.py --repair-only --dir knowledge (dry run)
+  read against the same tree.` Filed as new items: #959, #960, #961.'
+- '**2026-09-12T23:05:22.418356** — up_next → in_progress: automod round starting'
+- '**2026-09-12T23:23:31.188693** — round ? needed paths the loop may not write, left
+  for a person: `~/obsidian/backlog/478-221-knowledge-files-carry-a-second-orphaned-frontm.md`'
+- '**2026-09-12T23:23:40.533054** — in_progress → draft: its one unattended attempt
+  is spent; a human decides (reopen_item to grant another)'
+- '**2026-09-13T15:56:02.303003** — folded into umbrella #971: #971 is #478''s implementation
+  — #971 clause 6 is #478''s own verification walk (0 files with a `^type:` line outside
+  the leading block). It closes when #971 lands met — folded by hand on Alan''s instruction
+  (duplicate sweep, Claude Code session)'
+- '**2026-09-15T22:06:05.265832** — released from umbrella #971: oversized: 12 clauses
+  against a cap of 6 and never attempted; members released to be swept and ranked
+  on their own'
+- '**2026-09-15T22:14:17.116463** — its implement attempt was spent; sent back through
+  triage once, with the refusal, for a contract a round can meet or a retirement'
+- '**2026-09-15T22:32:17.091080** — swept (sw-c03e8d810c): worth=medium size=medium
+  — walk re-measured today: exactly 221 files / 332 stranded `type:` lines, and validate_okf.py:38
+  STRICT_FM_RE still anchored at offset 0; survivor over its detector-child #960'
+updated: '2026-09-15T22:32:17.091080'
+parent: 370
+type: backlog
+timestamp: '2026-09-11T18:15:58.069044'
+human_paths:
+- path: ~/obsidian/backlog/478-221-knowledge-files-carry-a-second-orphaned-frontm.md
+  reason: 'Needs its YAML frontmatter repaired by hand: the backlog store refuses
+    every write to #478 (''malformed YAML frontmatter and was only read by fallback
+    parse; fix the file by hand before writing to it''), so #478 cannot currently
+    receive findings, triage notes, or the clause-1 amendment through any san'
+worth: medium
+size: medium

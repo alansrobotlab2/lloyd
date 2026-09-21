@@ -633,3 +633,226 @@ def test_a_file_with_no_front_matter_at_all_has_no_block_to_find():
     odd = FM.split_frontmatter("--- not a fence\nstatus: draft\n---\nbody\n")
     assert odd is not None and odd[0] == "status: draft\n" and odd[1] == "body\n"
     assert FM.split_frontmatter(PLAIN_ITEM) is not None, "positive control: the real thing is found"
+
+
+# ===========================================================================
+# The twenty real items the substring split locked (#1221 clause 2), and the
+# two writers' refusal to round-trip a file that is broken for real (clause 4).
+# ===========================================================================
+#
+# Everything above is built from synthetic items. The section below cannot be:
+# `tests/fixtures/frontmatter_locked_items/` holds the front matter of the twenty
+# board items that stamped `_yaml_broken` under the retired split, captured from
+# disk exactly as they stood on 2026-09-17 — the set #1146 counted as 15 on
+# 2026-09-14, re-counted as 20 three days later, and grown to 21 that evening when
+# #1221 locked *itself* by recording a finding about the defect into its own
+# activity log. Only the front matter is captured, because the front matter is the
+# whole defect: the body was never the ambiguous half, and the files on the board
+# have moved since (several of the twenty have been written to since the fix
+# landed), so the bodies are supplied here as plain prose and the block under test
+# is byte-exactly the one that locked each item.
+#
+# Re-measured on 2026-09-21 against the live board: 1,263 files, 0 stamping
+# `_yaml_broken` through the anchored rule. That is the acceptance check, and these
+# fixtures are its frozen half — the live count can only show that the board is
+# clean *today*, whereas these twenty show that the specific texts which used to
+# break it now do not, on a reader that cannot be edited to fit.
+LOCKED_ITEMS = Path(__file__).resolve().parent / "fixtures" / "frontmatter_locked_items"
+
+#: The twenty ids #1221's sweep named, spelled out rather than derived from the
+#: directory: a deleted fixture must fail here, naming the id, instead of quietly
+#: shrinking the parametrised set to whatever files happen to be left.
+LOCKED_IDS = (
+    460, 478, 519, 520, 525, 575, 601, 642, 787, 866,
+    918, 933, 971, 981, 992, 1068, 1069, 1146, 1167, 1190,
+)
+
+
+def locked_item_doc(id_: int) -> str:
+    """One captured item laid down as a backlog file: fences around its real block.
+
+    The block is the fixture verbatim, so a fence-inside-the-block case is exactly
+    as hard as the file that was on the board.
+    """
+    block = (LOCKED_ITEMS / f"{id_}-frontmatter.txt").read_text(encoding="utf-8")
+    return f"---\n{block}---\n\n# Captured item {id_}\n\nBody prose of item {id_}.\n"
+
+
+def test_the_captures_are_the_twenty_items_the_sweep_locked():
+    """The fixture set itself, before any reader gets to interpret it.
+
+    Two things are pinned so the parametrised tests below cannot pass by
+    attrition. The twenty named ids are all present — and each capture really
+    holds a `---` inside its block, which is the property that made the item
+    unwritable. A fixture that lost that substring would stop testing anything the
+    anchored rule handles better than the retired one did, and no test that reads
+    it would notice.
+    """
+    present = {int(p.name.split("-")[0]) for p in LOCKED_ITEMS.glob("*.txt")}
+    assert set(LOCKED_IDS) <= present, f"missing captures: {sorted(set(LOCKED_IDS) - present)}"
+    for id_ in LOCKED_IDS:
+        block = (LOCKED_ITEMS / f"{id_}-frontmatter.txt").read_text(encoding="utf-8")
+        assert "---" in block, f"{id_}: capture holds no fence-looking text"
+        assert "activity_log" in block, f"{id_}: capture lost its activity log"
+        # A capture truncated mid-scalar would parse for the wrong reason — nothing
+        # to do with where the block ends.
+        assert yaml.safe_load(FM.split_frontmatter(locked_item_doc(id_))[0]), \
+            f"{id_}: captured block is not valid YAML on its own"
+
+
+@pytest.mark.parametrize("id_", LOCKED_IDS)
+def test_the_retired_split_still_locks_every_captured_item(id_):
+    """The control that makes the two reader tests below worth reading.
+
+    Each capture is fed to the retired rule as well as the live one, and must still
+    fail there — the block the substring split returns is not valid YAML. Without
+    this, "the anchored rule parses all twenty" could be satisfied by swapping the
+    captures for ordinary items, which is the same vacuous green that let the split
+    ship unpinned the first time.
+    """
+    assert _unparsable(_old_unanchored(locked_item_doc(id_))), (
+        f"{id_}: the substring split parses this capture cleanly, so it no "
+        "longer reproduces the lock it was captured for")
+
+
+@pytest.mark.parametrize("id_", LOCKED_IDS)
+def test_every_item_the_substring_split_locked_parses_in_the_mcp_reader(id_):
+    """Clause 2, the reader the tool path uses.
+
+    `parse_frontmatter` is what `backlog_get_task` and `backlog_write_task` read
+    through, and `_yaml_broken` from here is what made `save_task` answer
+    "malformed YAML frontmatter … fix the file by hand". `status` and
+    `activity_log` are the two keys the clause names because they are the two the
+    regex fallback could not always reach — the flag absent and both keys present
+    is the whole of the acceptance for these files.
+    """
+    fm, body = MCP.parse_frontmatter(locked_item_doc(id_))
+    assert not fm.get("_yaml_broken"), f"{id_}: a valid block still reported broken"
+    assert fm.get("status"), f"{id_}: no status recovered"
+    assert isinstance(fm.get("activity_log"), list) and fm["activity_log"], \
+        f"{id_}: no activity log recovered"
+    assert fm.get("board") == "lloyd", f"{id_}: the item fell off its board"
+    assert body.startswith(f"# Captured item {id_}"), f"{id_}: the body was cut"
+
+
+@pytest.mark.parametrize("id_", LOCKED_IDS)
+def test_every_item_the_substring_split_locked_parses_in_the_api_reader(id_, tmp_path):
+    """Clause 2, the reader the Mission Control board uses.
+
+    The same twenty files through `app/routers/backlog.py`'s own reader, which is
+    the one whose `_reject_broken_fm` answered HTTP 409 to every board edit of
+    them. That guard is called unguarded at the end of the test: it raises on a
+    `_yaml_broken` record, so simply reaching the line is the assertion, and a
+    regression here fails as a 409 rather than as a passing check.
+    """
+    from app.routers import backlog as BR
+
+    path = tmp_path / f"{id_}-captured-item.md"
+    path.write_text(locked_item_doc(id_), encoding="utf-8")
+    fm, body = BR._backlog_parse_fm(path)
+    assert not fm.get("_yaml_broken"), f"{id_}: the API reader invented a broken item"
+    assert fm.get("status"), f"{id_}: no status recovered"
+    assert isinstance(fm.get("activity_log"), list) and fm["activity_log"], \
+        f"{id_}: no activity log recovered"
+    assert body.startswith(f"# Captured item {id_}"), f"{id_}: the body was cut"
+    BR._reject_broken_fm(fm, path)
+
+
+# --- clause 4, the writers: the fix must not have disarmed the guard ---------------
+
+def test_the_mcp_writer_refuses_to_round_trip_a_genuinely_broken_record():
+    """Clause 4, half one: `backlog_write_task` still refuses what is really broken.
+
+    The refusal is the point of `_yaml_broken`, and an over-eager fix that made
+    every block parse would clear it for files whose YAML is genuinely
+    unparseable — where the regex fallback recovers a handful of fields and a
+    re-dump from that dict deletes the rest. `save_task` is the writer, so the test
+    runs the tool handler and then reads the file back: the answer must be the
+    refusal, and the bytes on disk must be untouched.
+    """
+    broken = _with_an_unterminated_quote(fence_item_text())
+    with _scratch_board(broken) as board:
+        path = board / "460-the-item.md"
+        before = path.read_text(encoding="utf-8")
+
+        out = json.loads(MCP._handle_write({
+            "task_id": 460, "priority": "high", "activity": "must not be written",
+        }))
+
+        assert out.get("success") is False, f"a broken record was written: {out}"
+        assert "malformed YAML frontmatter" in out["error"], out
+        assert path.read_text(encoding="utf-8") == before, (
+            "the refusal still rewrote the file")
+
+        # `save_task` is the writer underneath that handler, and it guards on the
+        # flag itself rather than trusting its caller — the guard that matters for
+        # every caller that is not `_handle_write`. Pinned directly for the same
+        # reason: the fallback dict is short, and dumping it back is what would
+        # delete `activity_log` and the timestamps from a real item.
+        record = MCP.load_task(460)
+        assert record.get("_yaml_broken"), "the reader stopped degrading this file"
+        assert MCP.save_task(record) is False, "save_task round-tripped a broken record"
+        assert path.read_text(encoding="utf-8") == before, (
+            "save_task refused and wrote anyway")
+
+
+async def test_the_board_route_refuses_to_round_trip_a_genuinely_broken_record():
+    """Clause 4, half two: the HTTP route still answers 409 for the same file.
+
+    `app/routers/backlog.py` is the second writer of the pair, and its guard is the
+    one that had stopped meaning anything — on 2026-09-17 it fired for twenty-one
+    items whose YAML was fine. So the assertion is deliberately split: a *quoted
+    fence* passes (pinned by every test above) while an unterminated quote is
+    refused, and both directions are checked against the route, not only against
+    `_reject_broken_fm` standing alone.
+    """
+    from fastapi import HTTPException
+
+    from app.routers import backlog as BR
+
+    class _Req:
+        def __init__(self, payload):
+            self._payload = payload
+
+        async def json(self):
+            return self._payload
+
+    broken = _with_an_unterminated_quote(fence_item_text())
+    with _scratch_board(broken) as board:
+        path = board / "460-the-item.md"
+        before = path.read_text(encoding="utf-8")
+
+        with pytest.raises(HTTPException) as exc:
+            await BR.backlog_task_update(_Req({"id": 460, "priority": "high"}))
+        assert exc.value.status_code == 409
+        assert "malformed YAML frontmatter" in exc.value.detail
+        assert path.read_text(encoding="utf-8") == before, (
+            "the 409 still rewrote the file")
+
+
+def test_only_a_line_that_is_nothing_but_the_fence_closes_the_block():
+    """The other half of the closing rule, pinned against the fixtures' own shape.
+
+    "Line-anchored" is two claims, and the test above only pins one of them: the
+    fence has to start the line (so `divider: ---` stays inside the block), and
+    nothing but blanks may follow it. The second claim is what a body's
+    `--- Some Heading` or a markdown horizontal rule with text after it would
+    otherwise trip: a closing rule that tolerated trailing text would end the block
+    at that line, take whatever followed for the body, and hand the writer a
+    truncated front matter to re-dump — the same class of damage as the substring
+    split, one line further down the file. And a block whose fence never closes at
+    all has to answer `None`, which every guarded reader in this file already
+    refuses to write back, rather than reaching forward for the next line that
+    merely starts like a fence.
+    """
+    # A line that only *starts* like the fence is content, not the boundary.
+    assert FM.split_frontmatter("---\nstatus: draft\n--- not a fence\n---\nbody\n") == (
+        "status: draft\n--- not a fence\n", "body\n")
+    # With no exact fence anywhere after the opener there is no block to find —
+    # even though a line beginning `---` is present, and would be a plausible-
+    # looking boundary to a rule that let text follow it.
+    assert FM.split_frontmatter("---\nstatus: draft\n--- still not a fence\nbody\n") is None
+    # Trailing blanks stay legal: a hand-edited item on the board can carry them,
+    # and such a line is still nothing but the fence.
+    assert FM.split_frontmatter("---\nstatus: draft\n---   \nbody\n") == (
+        "status: draft\n", "body\n")

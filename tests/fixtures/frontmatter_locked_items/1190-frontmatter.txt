@@ -1,0 +1,58 @@
+created: '2026-09-16T10:14:43.395133'
+status: in_progress
+priority: high
+blocked: false
+assigned: false
+position: 1190000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- umbrella
+- hand-regroup
+- backlog
+- frontmatter
+- automod
+- data-loss
+- swept
+activity_log:
+- '**2026-09-16T10:14:44.192418** — filed by hand: Alan''s regroup 2026-09-16 (items
+  combined by shared fix)'
+- '**2026-09-16T17:14:45.911424** — autotriage: **confirmed**. Measured 2026-09-14/15
+  on the members: `agent_mcp/backlog.py::parse_frontmatter` splits on the first `---`;
+  15 live items answered ''malformed YAML frontmatter'' to backlog_write_task; `scripts/automod/backlog.py:711`
+  `text.split(''---\n'', 2)` + `except YAMLError: fm = {}` with `_apply_status` (:1648)
+  and `note_item` (:1872) dumping `fm` back unguarded; `app/routers/memory.py:78-80`
+  splits the first 2000 chars as a substring. Check: `python -c "from agent_mcp.backlog
+  import parse_frontmatter; print(parse_frontmatter(open(''backlog/460-*.md'').read())[0].get(''_yaml_broken''))";
+  grep -n "split(''---" agent_mcp/backlog.py scripts/automod/backlog.py app/routers/memory.py`'
+- '**2026-09-16T17:26:14.071885** — ranked by hand 2026-09-16: worth=high size=medium
+  — a hand umbrella over high/medium members; unranked would have sorted behind every
+  ranked single'
+- '**2026-09-17T03:58:11.523444** — up_next → in_progress: automod round starting'
+updated: '2026-09-17T03:58:11.523444'
+acceptance_clauses:
+- '`agent_mcp/backlog.py::parse_frontmatter` and `scripts/automod/backlog.py::_split_frontmatter`
+  end the block at the first line that is exactly `---` after the opening one, through
+  one shared function: an item whose activity log quotes `text.split(''---\n'', 2)`
+  inside a YAML string parses without `_yaml_broken` and `backlog_write_task` updates
+  it — tests/test_frontmatter_parsing.py'
+- 'An item body containing a markdown `---` rule line survives an `update_frontmatter`
+  round trip byte for byte, and every item on the live board that `backlog_write_task`
+  refused as malformed on 2026-09-14 (the 15 #1146 names) parses cleanly with the
+  new reader — tests/test_frontmatter_parsing.py'
+- '`_apply_status` and `note_item` refuse (return False and log) rather than rewrite
+  when the parse yields an empty dict for a file that starts with `---`, the guard
+  `update_frontmatter` already carries, so no writer can turn a parse failure into
+  an empty file — tests/test_frontmatter_parsing.py'
+- The Memory-tab stats reader at `app/routers/memory.py:78-80` uses the same line-anchored
+  split, so a note whose body contains `---` is counted with its real front matter
+  — tests/test_frontmatter_parsing.py
+- '`close_landed(..., close=True)` on an item tagged `needs-human` removes the tag,
+  while a landing left open with human clauses still adds it — tests/test_backlog_unattended.py'
+members:
+- 933
+- 1020
+- 1146
+worth: high
+size: medium

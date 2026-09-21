@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from app import frontmatter as FM
 from app.routers import backlog as BR
 
 
@@ -297,3 +298,99 @@ async def test_the_detail_routes_description_is_a_fixed_point_of_the_write(
         f"{len(again)} B out"
     )
     assert again == body.strip(), "the round-trip is not the body that was written"
+
+
+# ── #1221 clause 3: an item whose front matter *quotes the fence* is writable ─────
+
+#: The captured front matter of the twenty items the retired split locked — the
+#: same fixtures `tests/test_frontmatter_parsing.py` reads, reused here because this
+#: file is where the body-preservation guarantee lives, and a fenced block is
+#: exactly the case that guarantee had never been held against.
+LOCKED_CAPTURES = Path(__file__).resolve().parent / "fixtures" / "frontmatter_locked_items"
+
+CAPTURE_BODY = "## Handoff\n\nProse that has to survive an edit to a locked item.\n"
+
+
+def write_captured_item(d: Path, item_id: int, capture_id: int) -> Path:
+    """Item `item_id` carrying item `capture_id`'s real captured front matter.
+
+    The block comes off disk verbatim: it is the text that locked the real item,
+    including the activity-log scalar that quotes the retired split. Only the body
+    is written fresh, so this file can assert about it.
+    """
+    block = (LOCKED_CAPTURES / f"{capture_id}-frontmatter.txt").read_text(encoding="utf-8")
+    p = d / f"{item_id}-captured-item.md"
+    p.write_text(f"---\n{block}---\n\n# Captured item {capture_id}\n\n{CAPTURE_BODY}",
+                 encoding="utf-8")
+    return p
+
+
+def anchored_fm(path: Path) -> dict:
+    """The file's front matter, read the way the route now reads it.
+
+    Deliberately not the two helpers above, which slice on the bare fence because
+    no file *they* build has one inside its block. On this fixture the unanchored
+    slice returns the text up to the fence quoted inside the activity log — the
+    defect itself, not a way of measuring it.
+    """
+    block = FM.split_frontmatter(path.read_text(encoding="utf-8"))[0]
+    return yaml.safe_load(block)
+
+
+def anchored_body(path: Path) -> str:
+    """Everything after the closing fence line, heading and all."""
+    return FM.split_frontmatter(path.read_text(encoding="utf-8"))[1]
+
+
+@pytest.mark.asyncio
+async def test_an_update_to_an_item_whose_front_matter_quotes_the_fence_succeeds(
+    backlog_dir
+):
+    """Clause 3: the malformed-frontmatter refusal must stop firing on valid YAML.
+
+    This is the user-visible half of #1146 and #1221: `backlog_write_task` answered
+    "has malformed YAML frontmatter … fix the file by hand" and the board route
+    answered HTTP 409, on items whose YAML `yaml.safe_load` reads without complaint.
+    #460 is the capture used here because it is the item #1146 names as the trigger
+    — its activity log quotes the retired split, and that quotation is what ended
+    its front-matter block.
+
+    The assertion is the update itself plus everything it may not touch: the
+    request succeeds, the recorded status note is the only front-matter text that
+    grew, every key the capture carried is still there after the re-dump, the
+    quoted fence is still quoted, and not one byte of the body moved.
+    """
+    path = write_captured_item(backlog_dir, 40, 460)
+
+    # Control: the retired rule still cannot read this file. It takes the text up to
+    # the `---` inside the activity-log scalar for the whole block, and that
+    # truncated YAML does not parse — which is what produced the `_yaml_broken` the
+    # 409 was built on.
+    truncated = path.read_text(encoding="utf-8").split("---", 2)[1]
+    try:
+        yaml.safe_load(truncated)
+        raise AssertionError("capture no longer breaks the retired split")
+    except yaml.YAMLError:
+        pass
+
+    before = anchored_fm(path)
+    assert isinstance(before.get("activity_log"), list) and before["activity_log"]
+    before_body = anchored_body(path)
+    assert before_body.strip() == f"# Captured item 460\n\n{CAPTURE_BODY}".strip()
+
+    resp = await BR.backlog_task_update(_Req({
+        "id": 40, "status": "up_next", "priority": "high",
+    }))
+
+    assert resp.status_code == 200, "a valid item was still refused as malformed"
+    after = anchored_fm(path)
+    assert "_yaml_broken" not in after, "the write re-broke the record it just read"
+    assert after["status"] == "up_next" and after["priority"] == "high"
+    assert set(after) == set(before), (
+        f"the re-dump changed the key set: {sorted(set(before) ^ set(after))}")
+    # The one thing the update is allowed to add: the note recording the move.
+    assert len(after["activity_log"]) == len(before["activity_log"]) + 1, \
+        "the status move did not append exactly one note"
+    assert any("---" in entry for entry in after["activity_log"]), \
+        "the quoted fence did not survive the re-dump"
+    assert anchored_body(path).strip() == before_body.strip(), "the body moved"

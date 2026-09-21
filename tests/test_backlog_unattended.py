@@ -3337,3 +3337,62 @@ def test_a_confirmed_verdict_leaves_the_needs_human_tag_on(isolated):
     fm = _fm(p)
     assert fm["status"] != "done", "a confirmed verdict does not close the item"
     assert B.NEEDS_HUMAN_TAG in (fm.get("tags") or [])
+
+
+# ── #1221 clause 5: no board reader keeps a private unanchored fence split ────────
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+#: The three programs that read a board item's markdown. A fourth reader of
+#: markdown-shaped front matter exists (`app/routers/memory.py`, the Memory tab) and
+#: is recorded as a finding on #1221 rather than folded into this list silently: it
+#: reads vault notes generally, not the board, and its half of the fix is a separate
+#: change with its own blast radius — it was the clause that refused the round which
+#: first wrote the shared rule.
+_BOARD_READERS = (
+    "app/routers/backlog.py",      # the Mission Control board route
+    "agent_mcp/backlog.py",        # the backlog_* MCP tools
+    "scripts/automod/backlog.py",  # the triage/implement loop
+)
+
+
+def test_no_board_reader_keeps_a_private_unanchored_fence_split():
+    """The rule lives once, so a re-inlined copy cannot re-open the lock.
+
+    #1146's defect was three readers each finding the end of a front-matter block
+    with their own substring split — `str.split` on the bare fence, with or without
+    a trailing newline. #1221's fifth clause is that none of the three keeps such a
+    call, because the shared anchored rule in `app.frontmatter` is what healed all
+    twenty-one locked items, and a module that quietly grows its own copy back
+    re-locks them with nothing else in the diff changing.
+
+    Two checks, because a grep can go quiet in more than one honest way. The literal
+    call shape is searched for, but a re-inlined split written with the limit
+    dropped, or the fence in single quotes, would slip past it — so the AST is
+    walked too: no `.split(...)` call in these three modules may take a string
+    literal whose stripped value is the fence. And a check that passes because a
+    module stopped reading board markdown at all would be worthless, so each of the
+    three must still call the shared helper by name.
+    """
+    import ast
+
+    for rel in _BOARD_READERS:
+        src = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert 'split("---"' not in src and "split('---'" not in src, (
+            f"{rel} went back to ending the block on the bare fence substring")
+
+        for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "split"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                    and node.args[0].value.strip() == "---"):
+                raise AssertionError(
+                    f"{rel}:{node.lineno} splits on a bare fence literal again")
+
+        assert "split_frontmatter" in src, (
+            f"{rel} no longer calls the shared anchored rule; the two checks above "
+            "would also pass on a module that had stopped reading board markdown, "
+            "which is not the guarantee this test is for")

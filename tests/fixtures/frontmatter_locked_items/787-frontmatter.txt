@@ -1,0 +1,28 @@
+created: '2026-09-10T15:05:48.984751'
+status: done
+priority: medium
+blocked: false
+assigned: false
+position: 787000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- backlog
+- data-integrity
+- tool-reliability
+- triage-found
+activity_log:
+- '**2026-09-10T15:05:48.986377** — Filed by Daily Backlog Triage #35 on 2026-09-10
+  while checking in_progress staleness: get_task(520) returned null created/updated,
+  an empty activity_log and the title "|---|---|---|" for a file whose frontmatter
+  parses clean with PyYAML and carries all 14 keys. Left in draft deliberately — it
+  is a correctness defect in a read path, not something today''s queue needed topped
+  up, and #642 (the status-schema fix) is the more urgent of the two.'
+- '**2026-09-13T15:56:02.179320** — draft → done: duplicate of #918; what it adds
+  is carried there under "Merged from #787" — folded by hand on Alan''s instruction
+  (duplicate sweep, Claude Code session)'
+updated: '2026-09-13T15:56:02.179328'
+timestamp: '2026-09-10T15:05:48.984751'
+completed: '2026-09-13T15:56:02.179297'
+duplicate_of: 918

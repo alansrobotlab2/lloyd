@@ -1,0 +1,65 @@
+created: '2026-09-13T03:41:44.693863'
+status: up_next
+priority: high
+blocked: false
+assigned: false
+position: 1069000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- spawned-by-triage
+- prompt-surface
+- automod
+- autoresearch
+- guard-false-positive
+- swept
+activity_log:
+- '**2026-09-13T03:41:45.485682** — Updated: name, description, priority to high,
+  board to lloyd'
+- '**2026-09-14T03:54:50.351969** — folded into umbrella #1105 by automod group triage
+  (c-257a8723): `check_paths` on the live healthy SOUL/MEMORY pair returns the H1
+  error and `[]` once front matter is stripped; it is reached through the same `validate()`
+  funnel (`vault_round.py:206`) as #777/#1097''s loader check (`:208`).'
+- '**2026-09-15T22:03:15.474171** — released from umbrella #1105: oversized: 11 clauses
+  against a cap of 6 and never attempted; members released to be swept and ranked
+  on their own'
+- '**2026-09-16T02:35:01.323156** — swept (sw-2a2f7657a3): worth=high size=small —
+  reproduced: `check_paths` on the healthy SOUL/MEMORY pair returns only the false
+  H1 error; module unchanged since `6c9607f`, both writer-side gates read raw text.'
+- '**2026-09-16T13:44:17.295018** — Updated: description'
+- '**2026-09-16T20:44:34.267960** — autotriage: **confirmed**. prompt_surface.py:199-200
+  still compares raw line 1 of MEMORY.md against raw line 1 of SOUL.md, and the module''s
+  last commit is still 6c9607f — the reporting-copy fix 9ca4fc6 touched only tests/test_prompt_surface_budget.py,
+  which still carries its own _h1() at :156-160. All three loaded prompt files open
+  with `---\ntype: note`, so check_paths on the healthy live pair returns exactly
+  the one error ''MEMORY.md opens with SOUL.md''s H1 — …''; stripping the leading
+  ---…--- block from both texts makes the same call return []. Both enforcement points
+  are red: vault_round.py:256 feeds it into automod_vault_land (promotions.jsonl holds
+  2 ok:false vault_land rows carrying this message, newest 2026-09-11T19:27:57Z item
+  866), and promote.py:29-33 makes contract_refusals refuse even a no-op overlay because
+  _prospective falls back to the live vault files. Meanwhile pytest tests/test_prompt_surface_guard.py
+  tests/test_prompt_surface_budget.py -q reports 41 passed, because every fixture
+  is front-matter-free. Check: `cd ~/lloyd && ~/lloyd/.venvs/lloyd/bin/python -c "import
+  prompt_surface as ps; print(ps.check_paths(''/home/alansrobotlab/obsidian/lloyd/SOUL.md'',''/home/alansrobotlab/obsidian/lloyd/MEMORY.md''))"
+  plus `contract_refusals(Path(empty_tempdir))` and `git log --oneline -1 -- prompt_surface.py``'
+- '**2026-09-16T21:47:04.134673** — draft → up_next: released from hold: priority
+  high: never held by the depth gate'
+updated: '2026-09-16T21:47:04.134673'
+worth: high
+size: small
+acceptance_clauses:
+- 1. check_contract reports no duplicate-contract error when both texts open with
+  a YAML `---` fence and their bodies carry different H1s (the front-matter-delimited
+  fixture) — tests/test_prompt_surface_guard.py
+- '2. check_contract still returns the #464 error when the memory text''s body begins
+  with SOUL.md''s H1 and both files carry YAML front matter — the paste the guard
+  exists to catch stays caught — tests/test_prompt_surface_guard.py'
+- 3. check_contract still returns [] for a memory text that quotes a few SOUL.md lines,
+  keeping the corrected read from becoming a blanket refusal — tests/test_prompt_surface_guard.py
+- 4. The metrics check_contract reports are computed over the same front-matter-free
+  body as the H1 comparison, so the live SOUL.md/MEMORY.md pair yields shared_line_share
+  of 0.0 (0.0606 today, against a 0.10 ceiling) — tests/test_prompt_surface_guard.py
+- '5. The reporting copy no longer reimplements the invariant: the #464 test in tests/test_prompt_surface_budget.py
+  asserts through prompt_surface, so breaking the module turns that test red (its
+  local _h1() is gone) — tests/test_prompt_surface_budget.py'

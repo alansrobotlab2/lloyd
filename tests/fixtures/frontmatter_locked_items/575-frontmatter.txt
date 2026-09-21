@@ -1,0 +1,123 @@
+segment: backlog
+created: '2026-09-09T03:09:14.262950'
+status: done
+priority: medium
+blocked: false
+assigned: false
+position: 575000
+board: lloyd
+tags:
+- spawned-by-triage
+- health-check
+- mission-control
+- frontend
+- tls
+activity_log:
+- '**2026-09-09T03:09:14.264136** — Updated: name, description, status to draft, priority
+  to medium, board to lloyd'
+- '**2026-09-12T05:07:53.673116** — group triage c-660efcf0: distinct from the others;
+  stays in the single-item pool — `grep -c 5173 ~/obsidian/skills/system-health-check/SKILL.md`
+  → 0 and probes stop at :8080/:8096/:8097, while `curl -sk https://localhost:5173/`
+  → 200 vs plain `http://` → 000/exit 52 with `web/vite.config.ts` still TLS; correct
+  and uncovered'
+- '**2026-09-12T22:27:22.763966** — merged finding ''The frontend health probe uses
+  -k, which is blind to the two failures that actua'' from session 20260912_222414_autotriage_d8b3
+  (write-time dedupe)'
+- '**2026-09-12T22:28:01.011633** — merged finding ''The cert lloyd-frontend serves
+  names neither the tailnet address all 7 live clie'' from session 20260912_222414_autotriage_d8b3
+  (write-time dedupe)'
+- '**2026-09-13T05:28:36.316790** — autotriage: **confirmed**. The premise still holds
+  on the file it targets: the skill''s own script printed `--- Tool Health ---` with
+  only `lloyd-backend :8080` and `vLLM 122B :8096`, then `=== Overall: HEALTHY ===`
+  / `exit=0`, while `lloyd-mc:lloyd-frontend` is RUNNING and serving — `grep -c 5173
+  ~/obsidian/skills/system-health-check/SKILL.md` → 0, `ENDPOINTS` is `system_health_check.py:32-33`
+  (8080, 8096), and `git log --since=2026-09-09 -- skills/system-health-check/SKILL.md`
+  is empty, so nothing landed since the item was written. The scheme half reproduces
+  exactly: `curl http://localhost:5173/` → `000` / exit 52 in the same minute that
+  `ss -tnp | grep :5173` showed 7 ESTAB client sockets (one from iOS peer 100.84.111.39),
+  and `curl -s https://localhost:5173/` → `200` / exit 0. One half is now fixed on
+  the sibling skill: vault commits `38d01e84` + `57272e6e` (2026-09-11, backlog #406)
+  put `curl -s -k https://localhost:5173/` plus the exit-52-is-not-an-outage rule
+  into `skills/service-health-check/SKILL.md:147-151`, so "the rule exists in no probe
+  or skill" is no longer true — but `system-health-check`, the file this item targets,
+  still has neither probe nor rule. One premise detail is also false and matters for
+  #1045: there is no Tailscale cert (`agent-services/cert/goliath.taile37041.ts.net.crt`
+  absent → `haveTs=false`, `web/vite.config.ts:16-21`); the frontend serves private
+  `CN=lloyd`, SAN `DNS:localhost, DNS:goliath, IP:127.0.0.1, IP:192.168.50.108`, which
+  verifies without `-k`. Check: `python3 ~/obsidian/skills/system-health-check/system_health_check.py
+  | tail -6 + grep -c 5173 ~/obsidian/skills/system-health-check/SKILL.md + curl http://localhost:5173/;
+  echo exit=$? + ss -tnp | grep :5173` Filed as new items: #1043, #1044, #1045.'
+- '**2026-09-14T21:13:14.811975** — up_next → in_progress: automod round starting'
+- '**2026-09-14T22:06:27.124419** — automod review sent round SM_20260914_212024 back:
+  test honesty tests/test_system_health_check_frontend_endpoint.py:80: a new pytest.skip;
+  test honesty tests/test_system_health_check_frontend_endpoint.py:763: `assert "schemes_tried"
+  not in row` cannot fail: the hand-built endpoint at 758-759 has no `schemes` key,
+  so _candidate_urls (:300-303) yields one URL and the only writer, `if len(urls)
+  > 1` at system_health_check.py:406, never runs. Measured against the same fixture
+  with the shape frontend_endpoint [repeat]; advisory tests/test_system_health_check_frontend_endpoint.py:439:
+  `endpoints.index(row) == len(endpoints) - 1` is unfalsifiable: run_script defaults
+  LLOYD_HEALTH_ENDPOINT_PORTS to the frontend''s own port, so the array always holds
+  exactly one row. `build_endpoints` appears only in a docstring — no test assembles
+  the un-narrowed t — work is on branch `automod/SM_20260914_212024`'
+- '**2026-09-14T22:06:38.725091** — in_progress → up_next: offered again — incomplete:
+  the turn ran out of iterations before reaching a verdict; its work is on branch
+  `automod/SM_20260914_212024`'
+- '**2026-09-14T22:08:46.244947** — up_next → in_progress: automod round starting'
+- '**2026-09-14T22:56:15.788185** — automod review passed round SM_20260914_220959
+  with advisories — post-landing seams: vite''s own runtime decision to serve plain
+  HTTP when haveServer is false (web/vite.config.ts:28-35,44) — the derivation mirrors
+  vite''s four fs.existsSync checks by regex and a hand-written plain-HTTP fixture
+  stands in; no test starts node/vite; advisory findings: tests/test_system_health_check_frontend_endpoint.py:494:
+  Clause-2 node asserts ''(https)'' in the live text and url == ''https://localhost:5173/'',
+  so a tree with cert material absent (vite serving plain HTTP) reddens a node whose
+  clause is only that both output paths carry the row. | tests/test_system_health_check_frontend_endpoint.py:998:
+  The no-`-k` guard is a source-text grep: `''verify_mode'' not in source` also rejects
+  a correct future `ctx.verify_mode = ssl.CERT_REQUIRED`, and other verification-off
+  forms (custom SSLContext, ssl._https_verify_certificates) slip past. It fail | tests/test_system_health_check_frontend_endpoint.py:537:
+  Docstring claim that a hardcoded https probe cannot print 200 here is overstated:
+  with the two-scheme fallback a https-first probe still reaches the plain-HTTP fixture
+  and prints 200 with a scheme-mismatch note; the real discriminator is the b | tests/test_system_health_check_frontend_endpoint.py:700:
+  Calls _refused_port() directly although the helper''s own docstring says the caller
+  retries via refused_port(3); a lost ephemeral-port race here is a spurious red on
+  a busy box.'
+- '**2026-09-14T22:56:42.383297** — automod round SM_20260914_220959 abandoned: implement
+  turn ended (max_turns) with the round still open, no gate or landing running, and
+  no observer to rescue it. Its work is on branch `automod/SM_20260914_220959` in
+  ~/lloyd.'
+- '**2026-09-14T22:56:44.380375** — in_progress → up_next: its round was abandoned;
+  back in the pool'
+- '**2026-09-14T22:57:25.341366** — up_next → in_progress: automod round starting'
+- '**2026-09-14T23:04:51.556965** — in_progress → done: closed by hand (Alan approved,
+  Claude Code session 2026-09-14): the acceptance landed in vault 588339ab at 21:25Z
+  (+d2b909ac, 9bd08d1e) and every review graded all five clauses met; rounds SM_20260914_212024,
+  SM_20260914_220959 and SM_20260914_225757 were a tests-only code round, not the
+  fix'
+updated: '2026-09-14T23:04:51.556965'
+parent: 449
+type: backlog
+timestamp: '2026-09-11T16:05:51.587182'
+acceptance_clauses:
+- A run of `~/obsidian/skills/system-health-check/system_health_check.py` prints a
+  Tool Health line naming the Mission Control frontend on port 5173 (today `ENDPOINTS`
+  at lines 32-33 has only 8080 and 8096, and the printed Tool Health has exactly two
+  lines).
+- That frontend line is emitted by both output paths — `--format text` and `--format
+  json` — so the JSON `tools.endpoints` array also carries it.
+- 'The scheme is derived rather than hardcoded to `https`: with the server cert/key
+  absent (the `haveServer=false` branch at `web/vite.config.ts:23,44,137`, which makes
+  vite serve plain HTTP), the probe targets `http://localhost:5173/` and reports the
+  service''s real state instead of DOWN — the fixture-reproducible inversion of the
+  very false-DOWN this item is about.'
+- 'The frontend line participates in the verdict: with that endpoint unreachable the
+  run must not print `Overall: HEALTHY`, and a RUNNING `lloyd-mc:lloyd-frontend` supervisor
+  row alone must not be enough to keep it HEALTHY (the current run shows `[✓] lloyd-mc:lloyd-frontend
+  — RUNNING` beside a Tool Health section that never touches 5173).'
+- '`SKILL.md` states the rule in words a re-reader cannot paraphrase away: an `http://`
+  probe of this port returning `000` / curl exit 52 is a scheme mismatch and must
+  never be written as a DOWN verdict, with the correct positive probe named — mirroring
+  `skills/service-health-check/SKILL.md:147-151`.'
+post_landing_seams:
+- vite's own runtime decision to serve plain HTTP when haveServer is false (web/vite.config.ts:28-35,44)
+  — the derivation mirrors vite's four fs.existsSync checks by regex and a hand-written
+  plain-HTTP fixture stands in; no test starts node/vite
+completed: '2026-09-14T23:04:51.556965'

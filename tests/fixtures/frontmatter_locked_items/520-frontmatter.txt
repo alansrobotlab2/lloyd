@@ -1,0 +1,113 @@
+segment: backlog
+created: '2026-09-08T17:46:13.568367'
+status: done
+priority: high
+blocked: false
+assigned: false
+position: 520000
+board: lloyd
+tags:
+- youtube-eval
+- ai-engineer
+- inference
+- harness
+- context-engineering
+activity_log:
+- '**2026-09-08T17:46:13.569704** — Filed 2026-09-09 by Alan and Claude while reviewing
+  the first youtube-digest session (20260909_003102_youtubed_9fbc): the session rated
+  the talk worth_a_look without checking the live prefix-cache counter; the counter
+  reads 68.7% since boot.'
+- '**2026-09-08T21:29:29.994847** — Candidate cause added 2026-09-09 by youtube-digest
+  (Agent Lightning v1.0, arXiv:2608.17528, via [[20260821-enterprise-ready-rl-for-ai-agents]])
+  — not in causes 1-4 above: **text round-trip at the API boundary**. The harness
+  keeps the *detokenized* assistant turn and re-sends text; vLLM re-tokenizes the
+  whole prompt, so "append-only in characters" is not "append-only in token ids".
+  Any token at a join that re-encodes differently (trailing whitespace/newline after
+  assistant text, tool-call XML re-rendered from JSON rather than the tokens actually
+  emitted, stripped reasoning_content) breaks the block hash from that point onward
+  with no message edit at all. The paper''s transferable method is an **exact-token-continuation
+  check at each call boundary**: assert the rebuilt prompt''s token prefix reproduces
+  the previous request''s token ids, rather than asserting the message list was not
+  rewritten. Worth running beside step 1''s per-iteration cached_tokens logging —
+  it names the break position instead of only its cost. Live counter has worsened
+  since filing: 5,097,760 / 88,119,712 = **57.85% since boot** (63.27% recent) vs
+  68.7% on 2026-09-09 ~00:45 UTC.'
+- '**2026-09-09T05:56:16.941384** — Triage 2026-09-09: CONFIRMED, live hit rate 61.75%
+  (worse than filed 68.7%). Cause 1 confirmed empirically — cliff at iteration 8 (77.6%
+  to 23.2%) across 41 sessions, 167 sessions analysed. Instrumentation from step 1
+  already shipped in 5531f21. Split #603 #604 #605.'
+- '**2026-09-09T12:56:34.873183** — selfmod triage: **confirmed**. The live counter
+  is worse than filed — prefix_cache_hits_total 170,993,600 / prefix_cache_queries_total
+  276,914,183 = 61.75%, and queries_total ≈ prompt_tokens_total (276.91M vs 276.82M,
+  1.00x) so the ratio is a genuine token-level rate, not group-amplified. Cause 1
+  is intact and confirmed: _prune_reasoning at app/harness/loop.py:1214 still mutates
+  history in place every iteration (loop.py:446-447, one commit acd1e10), harness.preserve_thinking_iterations:
+  6 still set in config.yaml, and the measured cliff lands exactly where keep=6 predicts
+  — iteration 7 = 77.6% -> iteration 8 = 23.2%, with 41 individual sessions showing
+  a >=4pt fall at that index (~10.2M tokens/day of avoidable re-prefill). Two premises
+  in the item are now false and corrected in the item body: step 1''s instrumentation
+  already shipped in 5531f21 (2026-09-08, loop.py:875-880 reads nested prompt_tokens_details.cached_tokens
+  into usage[''cache_read'']), and candidate 2 is inactive at idle (kv_cache_usage_perc
+  = 0.0). The item''s own >=90%-from-iteration-3 acceptance is unreachable by the
+  pruning fix alone, since the pre-cliff baseline is 72-78%. Check: `curl -s localhost:8096/metrics
+  | grep prefix_cache, plus per-iteration cache_read/input_tokens aggregated from
+  sessions/*.json assistant.stats (167 sessions created 2026-09-09, deduped to one
+  row per session×iteration)` Filed as new items: #603, #604, #605.'
+- '**2026-09-09T07:00:54.086587** — **2026-09-09T07:0XZ — implemented in round SM_20260909_135140
+  (commit `2677dea`).** Change: the keep-window is now applied once at turn entry
+  (`_cap_history_reasoning`, `app/harness/loop.py:1220`, called at `:217`); the per-iteration
+  `_prune_reasoning` call is gone, so the intra-turn message list is a strict extension
+  of the previous request''s. `_prune_reasoning` itself and `harness.preserve_thinking_iterations`
+  are untouched — config.yaml was not modified.
+
+
+  **Mechanism confirmed on the live engine rather than inferred** (private prefix,
+  salt `645e8b8c`, :8096 `primary`, max_tokens=1 so only prefill differs):
+
+
+  | request over the same prefix | prompt | cached | rate |
+
+  |---|---|---|---|
+
+  | cold | 7965 | 0 | 0.0% |
+
+  | warm, identical resend | 7965 | **0** | 0.0% |
+
+  | strict extension | 7999 | 4800 | 60.0% |
+
+  | reasoning popped from FIRST assistant msg | 7385 | **0** | 0.0% |
+
+  | reasoning popped from LAST assistant msg | 7385 | 4800 | 65.0% |
+
+
+  Same bytes of history, opposite outcomes: the position of the rewrite is the whole
+  effect — earlier message, larger loss. That is the iteration-8 cliff with the mechanism
+  attached. Row 2 also independently confirms this item''s own risk note ("`cached_tokens`
+  reads 0 for the first two requests of any prefix on this engine"): an identical
+  resend read 0 while the extension one message later read 4800, so single points
+  off this counter are unreadable, only series.
+
+
+  **Acceptance:** the per-iteration aggregate cannot be re-run meaningfully until
+  ~24h of post-landing traffic exists, and the filter must not blend engine boots
+  — filed as #618 with the script this needs. Contract''s other half (>=90% bar re-derived
+  from the pre-cliff floor) is #603. Spawned: #617 (the preserve-thinking eval now
+  measures the wrong arm), #618, #619.'
+- '**2026-09-09T17:25:04.081318** — selfmod landed as `2677dea7` (round SM_20260909_135140,
+  settled 2026-09-09T14:20:45Z). Left open: the round recorded no structured outcome
+  (it predates the finalizer); a human decides'
+- '**2026-09-09T18:34:23.175993** — up_next → in_progress: landed, awaiting the acceptance
+  check or a human close'
+- '**2026-09-13T02:17:53.512732** — in_progress → draft: landed with no structured
+  outcome recorded (predates the finalizer); a human decides'
+- '**2026-09-14T01:14:47.705741** — draft → done: post-change aggregate re-run: the
+  iteration-8 cliff is gone — needs-human sweep 2026-09-13 (Alan''s ruling, Claude
+  Code session)'
+updated: '2026-09-14T01:14:47.705741'
+source_video: y2W4FNAuPEA
+source_url: https://www.youtube.com/watch?v=y2W4FNAuPEA
+source_channel: ai-engineer
+selfmod_landed: 2677dea7b141a51a52c2f7b6faf43302b9f91573
+type: backlog
+timestamp: '2026-09-09T18:34:23.175993'
+completed: '2026-09-14T01:14:47.705741'

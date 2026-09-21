@@ -1,0 +1,56 @@
+created: '2026-09-08T18:59:50.673574'
+status: done
+priority: medium
+blocked: false
+assigned: false
+position: 525000
+board: lloyd
+tags:
+- youtube-eval
+- discover-ai
+- autonomy
+- workers
+- eval
+- harness
+activity_log:
+- '**2026-09-08T18:59:50.674965** — Updated: name, description, status to draft, board
+  to lloyd'
+- '**2026-09-09T16:17:56.540428** — selfmod triage: **confirmed**. The runs table
+  has no claims/verification column (live PRAGMA returns 12 columns ending meta_json;
+  workers/queue.py:43-55, migration at :161-162) and no verifier module exists anywhere
+  in workers/ — normalize_result (workers/pool.py:38-88) still takes the model''s
+  own summary string verbatim, capped. The summary is front-sliced model narration:
+  autonomy.py:927 summary=final_response[:200], autonomy.py:961 "response_preview":
+  final_response[:300] -> workers/sources/scheduled_task.py:317; measured 1282 scheduled-task
+  records over 7 days, 438 at the 300-char cap, 46 ending inside a markdown table
+  (e.g. run_scheduled-task_20260909_131346_0ebe6e cuts at "| # | Sender | Subject
+  | Decision |"), and session-distill failures remain free text ("...empty response
+  (stop_reason=max_turns, turns=16) — nothing written"). The only structural check
+  in the pipeline, scripts/validate_handoff.py:20-39, validates H2/H3 section presence,
+  not claims against disk; #611 already owns the failure-signature half of the same
+  summary[:500] seam and is not a duplicate. Two of #525''s own anchors are now stale:
+  #383 (which it said to absorb) is status: done at backlog/383-*.md:5, and its pilot
+  volume premise ("30-50 runs in 2 weeks") is ~50x under the live 82-189 runs/day.
+  Check: `sqlite3 file:~/lloyd/workers.db?mode=ro "PRAGMA table_info(runs);" + grep
+  -rn "claims|verifier|evidence_bundle" workers/ app/ agent_mcp/ + SELECT COUNT(*),
+  SUM(length(summary)>=295), SUM(summary LIKE ''%|---%'') FROM runs WHERE source=''scheduled-task''
+  AND completed_at>=''2026-09-02''` Filed as new items: #642, #643.'
+- '**2026-09-09T18:34:24.878433** — draft → up_next: triage confirmed it with an acceptance
+  check'
+- '**2026-09-09T22:00:55.557028** — up_next → in_progress: autoimplement round starting'
+- '**2026-09-09T22:23:17.079266** — in_progress → draft: its one unattended attempt
+  is spent; a human decides (reopen_item to grant another)'
+- '**2026-09-09T22:32:12.209339** — draft → in_progress: landed; the promotion is
+  under observation'
+- '**2026-09-09T22:47:33.338962** — autoimplement landed as `ee649e8a` (round SM_20260909_220149,
+  settled 2026-09-09T22:39:29Z). Closed: the round reported the acceptance check met
+  — Round SM_20260909_220149 landed: verifier-bound evidence claims on worker runs
+  (#525). New workers/evidence.py holds the claim schema (file_exists|count_eq|json_key|regex
+  -> verified/refuted/insufficient), a stdlib-only verifier (json/re/pathlib, no LLM
+  judge) and the verified/gap partition; workers/queue.py adds the additive runs.claims_json
+  column and record_run(claims_json=); workers/pool.py ca'
+updated: '2026-09-09T22:47:33.338962'
+autoimplement_landed: ee649e8a944411dd5a814b06f81c15d24c7365ae
+completed: '2026-09-09T22:47:33.338962'
+type: backlog
+timestamp: '2026-09-09T22:47:33.338962'

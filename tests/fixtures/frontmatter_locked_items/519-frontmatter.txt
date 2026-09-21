@@ -1,0 +1,47 @@
+created: '2026-09-08T17:34:54.970704'
+status: done
+priority: medium
+blocked: false
+assigned: false
+position: 519000
+board: lloyd
+tags:
+- okf
+- memory-capture
+- metadata-integrity
+- daily-notes
+activity_log:
+- '**2026-09-08T17:34:54.971968** — Updated: name, description, status to up_next,
+  priority to medium, board to lloyd'
+- '**2026-09-09T11:59:00.368237** — selfmod triage: **confirmed**. The writer is unchanged
+  at HEAD `96b60e11`: `app/post_capture.py:100-103` still runs `daily_path.write_text(f"---\nsegment:
+  agents\n---\n\n# {today} Daily Notes\n\n## Sessions\n{entry}")` with no `type` (`git
+  diff HEAD -- app/post_capture.py` empty; the string was introduced in `533f69f`
+  and no commit has touched it since). It is the only Python site emitting that header,
+  and it fired today: `~/obsidian/memory/2026-09-09.md` opens `---\nsegment: agents\n---`,
+  first section `### Session 00:05 PDT — Auto-captured`, 74 such sections, and `validate_okf.py
+  --dir memory` reports `scanned 575 / conformant 496 / VIOLATIONS 79` including it.
+  The headline holds but two of the item''s details are wrong: the count is 79 (not
+  77), and of the 40 `memory/YYYY-MM-DD.md` violations only 6 carry this writer''s
+  signature (`2026-09-04` … `2026-09-09`) — the item''s own examples `2026-09-02`
+  and `2026-09-03` are `segment: memory` files written by the nightly reflection safety
+  net (`git log -- memory/2026-09-02.md` → `autonomy-data-pipeline: pre-flight`),
+  not by post_capture, so this writer''s true yield is ~1 violation/day, not 34. Repairing
+  the existing 79 files is owned by backlog #440 (`okf_migrate.py --dir memory --apply`;
+  dry run today: `migrated: 107 / backfilled type assignments: note 79 / QUARANTINED:
+  0`). Check: ``git show HEAD:app/post_capture.py | sed -n ''96,106p''` + `grep -rn
+  "segment: agents" --include=*.py ~/lloyd` + `.venvs/lloyd/bin/python scripts/vault/validate_okf.py
+  --dir memory` + per-file `head -4` on `~/obsidian/memory/2026-09-*.md`` Filed as
+  new items: #597.'
+- '**2026-09-09T17:25:04.072401** — selfmod landed as `8a54b317` (round SM_20260909_124929,
+  settled 2026-09-09T13:12:23Z). Left open: the round recorded no structured outcome
+  (it predates the finalizer); a human decides'
+- '**2026-09-09T17:28:58.468473** — Closed by Alan''s decision: the round landed as
+  `8a54b317` and settled, but predates the structured outcome, so the close is a human''s
+  call rather than the loop''s. #520, from the same batch, stays open — its round
+  deferred to #618.'
+updated: '2026-09-09T17:28:58.468473'
+selfmod_landed: 8a54b317bae942dab580b0f0f2b3308ad3596c40
+completed: '2026-09-09T17:28:58.468473'
+type: backlog
+timestamp: '2026-09-09T17:28:58.468473'

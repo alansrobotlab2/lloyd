@@ -1,0 +1,90 @@
+created: '2026-09-12T07:57:55.978456'
+status: done
+priority: medium
+blocked: false
+assigned: false
+position: 971000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- umbrella
+- spawned-by-triage
+- unfolded
+activity_log:
+- '**2026-09-12T07:57:56.773188** — Updated: name, description, status to up_next,
+  priority to medium, board to lloyd'
+- '**2026-09-12T14:58:32.833335** — autotriage: **confirmed**. The shared premise
+  is live and reproduced exactly as filed: the gate parses only `^---\n…\n---\n` at
+  offset 0, so 221 body-level frontmatter blocks are invisible to it and to `okf_migrate.py`,
+  whose repair function `_split_flow_glue()` is only ever handed the leading block.
+  The two data defects are disjoint populations inside that same mass and both are
+  promoted-to-broken hazards: 188 AI_Engineer notes whose real `type`/provenance exist
+  only below the fence (control group: 422 clean youtube files already lead with `video-note`),
+  and 121 unterminated flow-list `tags:` values across 16 digest/updates files. #918
+  is the same theme in a different store — `app/routers/backlog.py` splits on unanchored
+  `---` where `validate_okf.py` anchors, so the two tools disagree about the same
+  bytes — but its blast radius is self-amplifying (5 files on 09-11 → 7 today, #478
+  and #484 newly added by their own activity_log appends) and it is worth raising
+  in priority on that basis, not folding. #949 shares only the "no closed vocabulary"
+  shape, on the `domain` axis that neither #370 nor #872 touched. Check: ``validate_okf.py
+  --dir knowledge --strict` (→ VIOLATIONS: 0, `video-note=424`, exit 0) against a
+  hand walk of the same tree (→ stranded-block files: 221, stranded type lines: 332,
+  glued-tag files: 16, occurrences: 121)`'
+- '**2026-09-13T15:56:02.300919** — member #478 folded in — #971 is #478''s implementation
+  — #971 clause 6 is #478''s own verification walk (0 files with a `^type:` line outside
+  the leading block). — folded by hand on Alan''s instruction (duplicate sweep, Claude
+  Code session)'
+- '**2026-09-15T22:06:05.279932** — unfolded (4 member(s) released): oversized: 12
+  clauses against a cap of 6 and never attempted; members released to be swept and
+  ranked on their own'
+- '**2026-09-15T22:06:06.908781** — up_next → done: unfolded: oversized: 12 clauses
+  against a cap of 6 and never attempted; members released to be swept and ranked
+  on their own'
+updated: '2026-09-15T22:06:06.908781'
+acceptance_clauses:
+- '`validate_okf.py --dir knowledge --strict` exits non-zero and names a violating
+  file while any `knowledge/` file still holds a key-shaped block below its leading
+  frontmatter (today exit 0, VIOLATIONS: 0, against 221 files)'
+- 'A synthetic leading block + body block containing `type: book-note` yields exactly
+  one reported stranded block with its line number'
+- A single-block document whose body has a `type:` line inside a fenced code block
+  yields no report
+- '`okf_migrate.py --repair-only` on a seeded two-block file reports it repaired,
+  leaves exactly one `^---`-delimited block, and reports it unchanged on a second
+  run'
+- '`okf_migrate.py --repair-only --dir knowledge` reports a non-zero repairable count
+  on the un-migrated tree (today `repaired: 0` / 2574)'
+- 'The instrument for this clause is the fence-aware stranded-block detector built
+  by clauses 2 and 3, not a line-based walk: that detector reports 0 stranded blocks
+  under `~/obsidian/knowledge/`. Two carve-outs are part of the measurement, and both
+  are mechanical so that no round has to make a prose judgement to reach zero. (a)
+  A key run inside a fenced code block is not a stranded block — so fencing a family,
+  as order of work step 3 prescribes for the digest and updates families, is a compliant
+  outcome and the detector stops counting it. (b) A key line is not a stranded block
+  if it sits in no delimiter-delimited block and is not contiguous with other key
+  lines; the test is whether either neighbouring line matches `^[a-z][a-z0-9_]*:[
+  \t]+\S`, so a key line whose neighbours are prose is not counted. That is what excludes
+  the five quoted upstream openclaw PR-template prose lines (`type: user-facing description`)
+  in `knowledge/tools/openclaw/prs.md`: their neighbours are the sentences `Required
+  PR title:` and `Use a parenthesized scope only when it adds clarity:`, which match
+  no key pattern. Those five are excluded as prose — they must never be converted
+  into real front matter and must never be re-indented to move this number. A line-based
+  walk that matches a line-start `type:` below the leading block is not an acceptable
+  instrument for this clause: it counts every fenced line and every prose line, so
+  its only routes to zero are writing prose into real front matter or indenting prose,
+  and either games the check instead of fixing the tree. The per-file dispositions
+  that make zero reachable are in order of work step 3.'
+- '0 files in `knowledge/youtube/AI_Engineer/` parse to a `type` other than `video-note`
+  (today 188: 184 `notes`, 4 `research`)'
+- 0 files in that directory are missing `source`, `video_id`, `channel` or `published`
+  from the parsed block (today 228)
+- '`validate_okf.py --dir knowledge --strict` prints `video-note` ≥ 600 (today 424)'
+- '`^[ \t]*tags:[ \t]*\[[^\]\n]*[ \t]+-[ \t]+\S` matches 0 files under `knowledge/`
+  (today 16 files / 121 occurrences)'
+- Every migrated file's parsed `tags` loads under `yaml.safe_load` as a list, not
+  a string
+- Once clause 6 holds, the `#478` exemption in `scripts/vault/okf_taxonomy.py` applies
+  to 0 files and a test fails if it still applies to any
+members: []
+completed: '2026-09-15T22:06:06.908781'

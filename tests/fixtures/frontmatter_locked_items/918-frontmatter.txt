@@ -1,0 +1,40 @@
+created: '2026-09-11T18:24:04.032001'
+status: done
+priority: high
+blocked: false
+assigned: false
+position: 918000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- spawned-by-autocode
+- blocker
+- backlog-store
+- frontmatter
+activity_log:
+- '**2026-09-11T18:24:04.783438** — Updated: name, description, status to up_next,
+  priority to high, board to lloyd'
+- '**2026-09-11T18:29:24.294416** — pointer to #787 added by round SM_20260912_012138'
+- '**2026-09-11T18:32:54.741931** — fifth #866 finding appended by round SM_20260912_012138'
+- '**2026-09-12T01:34:23.904027** — up_next → draft: never triaged; autotriage reads
+  draft'
+- '**2026-09-11T18:42:03.930231** — round SM_20260912_012138 aborted at review 2/2;
+  findings carried here because #866 is unwritable'
+- '**2026-09-12T14:58:31.944886** — group triage c-2b731175: distinct from the others;
+  stays in the single-item pool — Different file and defect (`_backlog_parse_fm` uses
+  `content.split("---", 2)`, `_reject_broken_fm` raises 409); reproduced today: `store
+  says broken: True`, `gate says parseable: True` for #866, and the affected list
+  grew 5→7 files since it was filed — now including #478 itself.'
+- '**2026-09-13T15:56:02.177786** — merged duplicate #787 into this item — folded
+  by hand on Alan''s instruction (duplicate sweep, Claude Code session)'
+- '**2026-09-13T15:56:02.188477** — merged duplicate #891 into this item — folded
+  by hand on Alan''s instruction (duplicate sweep, Claude Code session)'
+- '**2026-09-13T15:56:02.197697** — merged duplicate #1082 into this item — folded
+  by hand on Alan''s instruction (duplicate sweep, Claude Code session)'
+- '**2026-09-14T22:35:27.310621** — draft → done: duplicate of #1146, which carries
+  a test-pinned contract for it — needs-human sweep 2026-09-14 (Alan''s ruling, Claude
+  Code session)'
+updated: '2026-09-14T22:35:27.310621'
+completed: '2026-09-14T22:35:27.015152'
+duplicate_of: 1146

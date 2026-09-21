@@ -1,0 +1,59 @@
+created: '2026-09-15T09:20:54.285723'
+status: draft
+priority: medium
+blocked: false
+assigned: false
+position: 1167000
+type: backlog
+segment: backlog
+board: lloyd
+tags:
+- umbrella
+- spawned-by-triage
+- okf
+- frontmatter
+- vault-maintenance
+- knowledge-memory
+- confirmed-held
+activity_log:
+- '**2026-09-15T09:20:55.103038** — Updated: name, description, status to draft, priority
+  to medium, board to lloyd'
+- '**2026-09-15T16:21:28.151469** — autotriage: **confirmed**. The two items are one
+  field with two genuinely different root causes, so neither is a duplicate: `backlog/`
+  is a closed historical cohort (128 files, all created before `96b60e1`; 106 edited
+  this month without healing because `app/routers/backlog.py:300-304` declares `segment`
+  on create only and updates round-trip existing keys), while `knowledge/` sits at
+  0 only because of yesterday''s hand-backfill — the deep-research and doc-digester
+  templates still omit the key, so the next note from either reproduces it inside
+  the extractor allow-list (`pipeline_config.yaml:25-33`, which excludes `backlog/`).
+  The one consumer is `relations_index.py:461` (`frontmatter.get("segment", "unknown")`),
+  so the cost is a mislabelled index, not hidden retrieval, and `validate_okf.py`
+  does not gate on `segment` (OKF v0.1 requires only `type`), so the net must be a
+  separate scan. The count drifted 201->177->152->128 across four runs under the 25-file
+  cap, i.e. hand-shoveled rather than fixed; a bounded fence window gives false offenders
+  on 5 files (420, 463, 475, 504, 570) whose frontmatter exceeds 200 lines. Caveat
+  flagged for the implementer: `tests/test_backlog_okf_frontmatter.py:108` pins "update
+  never invents a key" as intentional, so clause 2 is a deliberate contract change
+  with a test to revise. Check: `Fence-aware per-file scan (`^---[ \t]*$` matched
+  per line, `yaml.safe_load` on the slice between the first two fences) over backlog
+  + knowledge/research + knowledge/stack-updates: 1,481 files, 0 no-frontmatter, 0
+  YAML parse failures, 128 missing `segment:` — all 128 in `backlog/`, 0 in knowledge/.`'
+updated: '2026-09-15T16:21:28.156064'
+acceptance_clauses:
+- '`grep -L ''^segment:'' ~/obsidian/backlog/*.md` is empty and the backfill commit''s
+  `git diff --numstat` is `+1 / -0` per file (pure line insertion, no `yaml.dump`
+  round-trip) — vault path `~/obsidian/backlog/`'
+- 'Saving an edit to a legacy backlog item lacking `segment:` leaves the file carrying
+  `segment: backlog`, and both create paths still declare `type`/`segment` at birth
+  — tests/test_backlog_okf_frontmatter.py'
+- 'A note written from the deep-research note template carries `segment: knowledge`
+  in its frontmatter block — tests/test_okf_segment_producers.py'
+- 'A note written from the doc-digester stack-update template carries `segment: knowledge`
+  and a non-empty `tags:` — tests/test_okf_segment_producers.py'
+- A committed vault-wide frontmatter scan prints per-directory missing-`segment:`
+  counts over the extractor allow-list plus `backlog/`, exits 0 on the fixed vault
+  and non-zero on a fixture file omitting the key in an otherwise-conformant directory
+  — tests/test_okf_segment_producers.py
+members:
+- 977
+- 1153

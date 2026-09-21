@@ -1,0 +1,90 @@
+created: '2026-09-09T05:55:00.178802'
+status: draft
+priority: low
+blocked: false
+assigned: false
+position: 601000
+type: backlog
+segment: backlog
+board: lloyd
+activity_log:
+- '**2026-09-09T05:55:00.179991** — Updated: name, description, status to draft, priority
+  to low, board to lloyd'
+- '**2026-09-12T03:18:50.312064** — merged finding ''Dated archive names derive from
+  a hand-written PST/PDT-mislabelled stamp that al'' from session 20260912_031519_autotriage_eeaa
+  (write-time dedupe)'
+- '**2026-09-12T17:02:43.756099** — group triage c-dc704f40: distinct from the others;
+  stays in the single-item pool — Different class and different surface, live on both
+  remaining halves: the hardcoded zone literal at app/post_capture.py:100 and the
+  report template skills/nightly-reflection-signals/SKILL.md:268 `generated: YYYY-MM-DD
+  HH:MM PST` against a PDT-0700 host (4 of 7 archived reports say PST). Its merged-in
+  filename half is already fixed by vault 56e71846 (#436).'
+- '**2026-09-12T10:12:36.190902** — merged finding ''Fix morning-brief timestamp labeling
+  and stop routing the cancelled CSULB meetin'' from session 20260912_043416_iv9aa2
+  (write-time dedupe)'
+- '**2026-09-13T06:45:13.950007** — merged finding ''morning-brief header stamp is
+  hand-typed with a hardcoded PST literal and no clo'' from session 20260913_064112_autotriage_81cb
+  (write-time dedupe)'
+- '**2026-09-13T06:45:14.741196** — merged finding ''nightly-reflection-signals report
+  header still emits a hand-typed `generated: … '' from session 20260913_064112_autotriage_81cb
+  (write-time dedupe)'
+- '**2026-09-13T06:45:56.693702** — merged finding ''nightly-reflection-signals report
+  header still emits a hand-typed `generated: … '' from session 20260913_064112_autotriage_81cb
+  (write-time dedupe)'
+- '**2026-09-13T13:48:50.094344** — autotriage: **confirmed**. app/post_capture.py:100
+  is unchanged and still reads `entry = f"\n---\n\n### Session {now_time} PDT — Auto-captured\n\n{summary}\n"`,
+  with `git log -S''PDT — Auto-captured'' -- app/post_capture.py` returning only the
+  original `533f69f server refactor to modules` — no fix commit. The item''s own repro
+  prints `PST | ### Session 09:05 PDT — Auto-captured`, so the label contradicts the
+  zone it came from. `grep -rn "PDT" --include="*.py" app/` hits exactly that one
+  line, and no test pins the abbreviation: `grep -rn "PST\|PDT\|%Z" tests/test_post_capture_daily_note_okf.py`
+  returns only `:110`, a hand-written fixture string. One correction to the item:
+  the damage is prospective, not historical — auto-captured headings exist only from
+  April 2026 on (36/108/128/116/53/583 for Apr–Sep, 1024 total, 0 saying PST), and
+  the Feb notes that fall in the PST window contain none, so the first mislabelled
+  winter is 2026-11-01 → 2027-03-08. Check: `cd ~/lloyd && grep -rn "PDT" --include="*.py"
+  app/ ; then .venvs/lloyd/bin/python -c "<item''s frozen-January repro>"` Filed as
+  new items: #1079, #1080, #1081, #1082.'
+- '**2026-09-13T15:56:02.349338** — marked 3 merged block(s) superseded by #1079/#1080
+  (#1082 finding 2) — folded by hand on Alan''s instruction (duplicate sweep, Claude
+  Code session)'
+- '**2026-09-16T04:54:00.544781** — swept (sw-da525a3828): worth=medium size=small
+  — app/post_capture.py:100 still hardcodes `PDT` (sole occurrence in app/); host
+  test file tests/test_post_capture_daily_note_okf.py already exists from #519.'
+- '**2026-09-16T17:14:43.366851** — folded into umbrella #1189 by automod group triage
+  (hand-timezone): same fix as the rest of the timezone family; folded by hand 2026-09-16'
+- '**2026-09-16T17:15:27.206699** — up_next → draft: folded into umbrella #1189; it
+  closes when that lands'
+updated: '2026-09-16T17:15:27.206699'
+tags:
+- spawned-by-selfmod
+- daily-notes
+- timezone
+- swept
+- grouped
+parent: 519
+timestamp: '2026-09-11T16:05:51.593821'
+acceptance_clauses:
+- 'grep -rn ''"PDT"\|PDT —'' --include="*.py" app/ returns 0 hits (today: 1, at app/post_capture.py:100).'
+- A test in tests/test_post_capture_daily_note_okf.py builds the heading from a PST-window
+  LA instant (e.g. datetime(2026,1,15,9,5,tzinfo=ZoneInfo("America/Los_Angeles")))
+  and asserts the emitted line contains no zone token disagreeing with that instant
+  — satisfied by either fix shape (no abbreviation at all, or %Z), and it fails if
+  a bare PDT literal returns.
+- A test asserts the emitted heading still matches ^### Session \d{2}:\d{2} and still
+  ends the line with Auto-captured, so the section shape the 1024 existing daily-note
+  sections are known by survives.
+- 'A test asserts the file written is obsidian/memory/<LA-date>.md and the clock is
+  still America/Los_Angeles, pinning the item''s own prohibition: neither the timezone
+  nor the filename may change (scripts/extract-trajectories.py:22-24 documents UTC
+  bucketing as the misfiling bug).'
+- 'The four pre-existing #519 assertions in tests/test_post_capture_daily_note_okf.py
+  still pass unchanged — the frontmatter contract from commit 8a54b31 is not reverted
+  by this change.'
+human_clauses:
+- On or after 2026-11-02, read one auto-captured heading in that day's ~/obsidian/memory/<date>.md
+  and confirm it does not read PDT — only confirmable once the zone has actually flipped,
+  so it cannot be a gate clause.
+worth: medium
+size: small
+group: 1189
