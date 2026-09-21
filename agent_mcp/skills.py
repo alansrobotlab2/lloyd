@@ -12,7 +12,7 @@ Each skill is a folder containing a SKILL.md with YAML frontmatter
 import json
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, NamedTuple, Optional
 
 import yaml
 from mcp.types import Tool
@@ -24,10 +24,54 @@ from agent_mcp._shared import _SKILLS_QUERY_STOPWORDS as _QUERY_STOPWORDS, text_
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-SKILLS_DIRS = [
+#: The roots as the code ships them. `SKILLS_DIRS` below is this list unioned with
+#: whatever `config.yaml skills.directories` names, so that the config key steers
+#: every surface instead of only the two that happened to read it (#1294).
+_BUILTIN_SKILL_DIRS = [
     Path.home() / "obsidian" / "skills",
     Path(__file__).parent.parent / "skills",
 ]
+
+
+def _config_skill_dirs() -> list[Path]:
+    """`config.yaml skills.directories`, `~`-expanded, best effort.
+
+    `GET /api/skills` and the Mission Control tab used to read this key while
+    retrieval and the prompt index read the constant above — two answers to "where
+    do skills live", which is one reason the two human-facing numbers could read
+    194 and 189 about the same vault. Folding it in here leaves one list. It is
+    defensive because this module is also imported by standalone scripts that have
+    no backend config in their environment.
+    """
+    try:
+        from app.config import CONFIG
+        raw = (CONFIG.get("skills") or {}).get("directories") or []
+    except Exception:
+        return []
+    out: list[Path] = []
+    for item in raw:
+        text = str(item).strip()
+        if text:
+            out.append(Path(text.replace("~", str(Path.home()))))
+    return out
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    out: list[Path] = []
+    for path in paths:
+        if str(path) not in seen:
+            seen.add(str(path))
+            out.append(path)
+    return out
+
+
+#: One definition of where live skills may sit, highest priority first: the roots
+#: the code ships, then any the config adds. Every surface walks it through
+#: `iter_active_skills` (#1294), and a test that needs a controlled tree replaces
+#: THIS list — the one knob all five surfaces share. Two names in two roots is
+#: decided by order, which is why this one list, not two, is the answer.
+SKILLS_DIRS = _dedupe_paths([*_BUILTIN_SKILL_DIRS, *_config_skill_dirs()])
 
 # Frontmatter `status:` values that quarantine a skill — it stays on disk
 # (and in git history) but is excluded from retrieval entirely. This is the
@@ -80,6 +124,117 @@ def _load_skill(skill_dir: Path) -> Optional[dict]:
     }
 
 
+# ── The one definition of "a live skill" (#1294) ──────────────────────────────
+
+class ActiveSkill(NamedTuple):
+    """One live skill, as `iter_active_skills` found it.
+
+    A NamedTuple carrying the parsed front matter, because the five surfaces that
+    need this set need different slices of it: the prompt index wants `name`,
+    `GET /api/skills` wants `description`/`category` out of `frontmatter`, the
+    Mission Control tab only counts, and `skill_lint` wants the front matter and
+    the directory it sits in. `directory` rather than a path is deliberate — the
+    lint also resolves `scripts/` cited from inside the skill.
+
+    `frontmatter` is `{}` when the block will not parse. That is the whole point of
+    carrying it here: the route used to raise on an unexpected shape
+    (`metadata:\n  openclaw: null`) and its bare `except Exception: continue`
+    deleted seven live skills from the Skills page. An unparseable block is a
+    finding for `skill_lint`, not a reason to hide that the skill exists.
+    """
+
+    name: str
+    directory: Path
+    frontmatter: dict
+
+    @property
+    def skill_file(self) -> Path:
+        return self.directory / "SKILL.md"
+
+
+def is_quarantined_skill_file(skill_file: Path) -> bool:
+    """Whether the skill at `skill_file` has pulled itself out of circulation.
+
+    One spelling of the rule (#1294). `prompt_builder` used to re-scan the
+    front matter line-by-line for a `status:` key and compare it against a copy of
+    the set — same answer today, two answers whenever the front-matter formats
+    differ, and the two implementations were held in step only by an equality
+    assertion in one test.
+
+    A missing or unreadable file answers `False`: that is damage, not retirement,
+    and `skill_load_defect` is the function that says which.
+    """
+    try:
+        content = skill_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    status = str(_parse_frontmatter(content)[0].get("status", "") or "").strip().lower()
+    return status in _QUARANTINE_STATUSES
+
+
+def skill_roots(overlay: Optional[Path] = None,
+                base: Optional[list[Path]] = None) -> list[Path]:
+    """The directories to walk for live skills, highest priority first.
+
+    `overlay` — autoresearch's variant directory — goes first as
+    `<overlay>/skills`, which is how a promoted prompt variant can replace a skill
+    for one build without touching the vault. `base` replaces `SKILLS_DIRS` for the
+    one caller that keeps its own canonical pair (`prompt_builder`); it exists so
+    that caller can hand the walker its roots without re-implementing this
+    composition a second time.
+    """
+    dirs: list[Path] = []
+    if overlay:
+        dirs.append(Path(overlay) / "skills")
+    dirs.extend(SKILLS_DIRS if base is None else base)
+    return dirs
+
+
+def iter_active_skills(overlay: Optional[Path] = None,
+                       roots: Optional[list[Path]] = None) -> "Iterator[ActiveSkill]":
+    """Yield every live skill exactly once — the definition every surface shares.
+
+    Three rules, decided here and nowhere else (#1294; five code paths each had
+    their own answer, and only two of them honoured the second):
+
+      1. a dot-prefixed directory is the archive, not a skill — `skills/.archived/`
+         holds retired skills in per-skill subdirectories;
+      2. a front-matter `status:` in `_QUARANTINE_STATUSES` is retired in place:
+         on disk, in git, absent from every surface;
+      3. a name present in two roots belongs to the first root — the copy
+         `_skills_read` would actually serve.
+
+    A directory is yielded as soon as it has a `SKILL.md`, even if its front
+    matter is unreadable: presence is what the index, the Skills page and the tab
+    count are reporting, and a defect in the file is `skill_lint`'s to find.
+
+    `roots` overrides the walked list for a caller that already has one — the
+    prompt builder passes its own canonical pair. A caller should not pass a list
+    that disagrees with `skill_roots()` on the live tree; that is the drift this
+    function exists to end.
+    """
+    seen: set[str] = set()
+    for skills_dir in skill_roots(overlay, roots):
+        if not skills_dir.is_dir():
+            continue
+        for entry in sorted(skills_dir.iterdir()):
+            if not entry.is_dir() or entry.name.startswith(".") or entry.name in seen:
+                continue
+            skill_file = entry / "SKILL.md"
+            if not skill_file.is_file():
+                continue
+            try:
+                content = skill_file.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                content = ""
+            fm, _body = _parse_frontmatter(content)
+            status = str(fm.get("status", "") or "").strip().lower()
+            if status in _QUARANTINE_STATUSES:
+                continue
+            seen.add(entry.name)
+            yield ActiveSkill(name=entry.name, directory=entry, frontmatter=fm)
+
+
 def skill_load_defect(skill_dir: Path) -> Optional[str]:
     """Why `skill_dir` is a *damaged* skill, or None when it may sit on disk.
 
@@ -115,18 +270,18 @@ def skill_load_defect(skill_dir: Path) -> Optional[str]:
 
 
 def _iter_skills():
-    """Yield loaded skill dicts from all skill directories."""
-    seen = set()
-    for skills_dir in SKILLS_DIRS:
-        if not skills_dir.exists():
-            continue
-        for entry in sorted(skills_dir.iterdir()):
-            if not entry.is_dir() or entry.name.startswith(".") or entry.name in seen:
-                continue
-            skill = _load_skill(entry)
-            if skill:
-                seen.add(entry.name)
-                yield skill
+    """Yield loaded skill dicts from all skill directories.
+
+    The walk is `iter_active_skills()`' (#1294); this turns its records back into
+    the dicts the scorer and `skills_read` want. `_load_skill` re-reads the file
+    because `skills_search` returns the body and `skills_read` the raw text, which
+    the walker deliberately does not carry, and it abstains on a record whose body
+    turned out to be unreadable.
+    """
+    for active in iter_active_skills():
+        skill = _load_skill(active.directory)
+        if skill:
+            yield skill
 
 
 # Suffixes we collapse for matching. "systems" → "system", "services" → "service",

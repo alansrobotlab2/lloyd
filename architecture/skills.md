@@ -46,31 +46,39 @@ still turns up in the vault, in old skills and in `nightly-skills-management`.
 | `~/obsidian/skills/.archived/` | 193 retired skills, kept on disk and in git |
 | `~/lloyd/skills/` | second root, configured everywhere, **does not exist** |
 
-**Three separate definitions of "where skills live", and they do not agree.**
-`agent_mcp/skills.py:27` hardcodes `SKILLS_DIRS`; `prompt_builder.py:108`
-hardcodes `_CANON_SKILLS_DIRS`, anchored to the *repo* location rather than
-`Path.home()` so it resolves the same whoever runs the process; and
-`config.yaml:1037` `skills.directories` is read by only three call sites
-(`app/routers/skills.py:19`, `:60` and `app/routers/mc_ui.py:457`) — the two
-HTTP routes and the Mission Control tab summary. Nothing the *model* touches
-reads the config key. All three currently list the same two paths, so the
-divergence is latent: editing `skills.directories` moves the Skills page and
-the tab summary and changes nothing about what reaches a turn.
+**One definition of where skills live, since #1294.** `agent_mcp.skills.SKILLS_DIRS`
+is the pair the code ships unioned with `config.yaml skills.directories` — built-in
+roots first, so a config entry never silently outranks them — de-duplicated and
+`~`-expanded at import. One walker, `agent_mcp.skills.iter_active_skills`, reads
+that list, and the prompt index, `GET /api/skills`, the Mission Control tab count,
+`scripts/skill_lint.py`, `prefetch`'s skill cache and the MCP tools all consume it.
+Before this, five code paths and one test helper each did their own `iterdir()` over
+the same directories and only two of them applied the quarantine rule, so the
+surfaces disagreed about *what a live skill is* — 189 advertised, 187 listed, 194
+counted, about one vault. `prompt_builder._CANON_SKILLS_DIRS` survives as a
+test-facing patch point whose `None` means "whatever `SKILLS_DIRS` is at call time",
+read per build rather than copied at import; it used to be a second hardcoded pair
+anchored to the *repo* location, which inside an automod worktree resolved to
+`<worktree>/home/obsidian/skills` — a directory that has never existed, so a prompt
+built in a round advertised **no skills at all** while the Skills page listed the
+live vault.
 
 `~/lloyd/skills/` has never existed on this box. It is harmless — every reader
-skips a missing directory — but it means the second root is not a tested path.
+skips a missing directory — but it means the second root is not a tested path
+against the live config; it is tested against a temp tree instead
+(`tests/test_skills_single_walk.py`).
 
-**Retirement is by directory, or by frontmatter.** Both loaders skip
-dot-prefixed directories (`prompt_builder.py:639`, `agent_mcp/skills.py:124`),
-so moving a skill into `.archived/` removes it from every model-facing surface
-while keeping it on disk and in git history. The `status:` quarantine below is
-the other lever, and it is **not** the unused one the 2026-09-04 pass found:
-189 of the 194 skills on disk read `status: active`, and five
+**Retirement is by directory, or by frontmatter, and the walker enforces both.** It
+skips dot-prefixed directories and any skill whose `status:` is in
+`_QUARANTINE_STATUSES`, so moving a skill into `.archived/` removes it from every
+model-facing surface while keeping it on disk and in git history. The `status:`
+quarantine is the other lever, and it is **not** the unused one the 2026-09-04 pass
+found: 189 of the 194 skills on disk read `status: active`, and five
 (`groundskeeper-loop`, `groundskeeper-research`, `nightly-behavior-test`,
 `nightly-morning-briefing`, `nightly-prompt-audit`) read `status: archived`
-while still sitting in the live directory. Those five are absent from the
-advertised index and unreadable through the MCP tools, and still reported as
-`enabled: True` by the Skills page (#1292, #1294).
+while still sitting in the live directory. Those five are now absent from every
+surface; until #1294 they were absent from the index and the MCP tools but still
+listed, as `enabled: True`, by the Skills page (#1292).
 
 ## The four surfaces that read a skill
 
@@ -355,7 +363,14 @@ are not real: `web-search-and-fetch`, `nightly-skills-management`,
 ## skill_lint
 
 `scripts/skill_lint.py` is an advisory sweep writing
-`~/obsidian/autonomy/skill-lint-report.md`. Six categories: DEAD (unparseable
+`~/obsidian/autonomy/skill-lint-report.md`. Its subject set is
+`agent_mcp.skills.iter_active_skills()` (#1294) — the same live set every other
+surface reports — where it used to walk its own hardcoded `~/obsidian/skills` with
+no quarantine rule, so its weekly total counted retired skills the model can no
+longer reach and never saw a second configured root. Narrowing the set is only
+admissible because every finding is computed from the same walked records: a live
+skill with a DEAD frontmatter or a PHANTOM_TOOL reference is still reported, and the
+report now names the roots it scanned. Six categories: DEAD (unparseable
 frontmatter, or description *and* tags both empty — the live scorer would
 return 0 for any query), MISSING_DESC, DRIFT (description is output-framed
 rather than trigger-framed), DUPLICATE (difflib name ratio ≥ 0.85 **and** description ratio ≥ 0.60), STALE (mtime
@@ -399,17 +414,31 @@ into a dot-tree is recognised as a retirement, and the question asked is now
 ## The Skills page
 
 `web/src/components/pages/SkillsPage.tsx`, backed by two GET routes in
-`app/routers/skills.py`: `/api/skills` (list, with a `metadata.hermes` /
-`metadata.openclaw` fallback for description and category — the last live
-remnant of the old vocabulary) and `/api/skill-content?name=` (raw text).
+`app/routers/skills.py`: `/api/skills` (list) and `/api/skill-content?name=`
+(raw text).
 
-**The list route does not apply the quarantine rule**, so it reports the
-on-disk count (194) where the index advertises 189, and it hardcodes
-`enabled: True` for skills the loaders refuse (#1292, #1294). It is also the
-only reader that re-implements the frontmatter split instead of calling
-`agent_mcp.skills._parse_frontmatter` (`agent_mcp/skills.py:42`), so its
-description and category can come back empty on a file the loaders parse
-cleanly.
+**The list route is the walker's output, since #1294.** `get_skills` is
+`iter_active_skills()` rendered — dot-skip, `_QUARANTINE_STATUSES`, first root
+wins — and `/api/skill-content` resolves through the same `skill_roots()`, so the
+page cannot offer a skill whose own content endpoint then 404s. It used to be the
+odd one out: its own `iterdir()` over `skills.directories`, its own frontmatter
+split instead of `agent_mcp.skills._parse_frontmatter`, no quarantine rule, and a
+`metadata.hermes` / `metadata.openclaw` fallback for description and category (the
+last live remnant of the old vocabulary). That fallback is what made the page *lie
+in both directions at once*: a null-valued `metadata.openclaw:` — which is what most
+of the migrated skills carry — is `None`, `None.get("category")` raised, and the
+route's bare `except Exception: continue` reported the skill as nonexistent. Seven
+live skills (`alfie-monitoring`, `backlog-triage`, `email-calendar-monitoring`,
+`github-watch`, `python-library-pipeline`, `ralph-loop`, `workspace-audit`) were
+invisible on the page while the five `status: archived` ones were listed. The
+fallback is gone rather than null-guarded because no live skill's description or
+category lives only under those keys — `tests/test_skills_single_walk.py::test_no_live_skill_needs_the_hermes_fallback_the_route_dropped`
+re-measures that against the vault, and a missing category is now an empty field
+instead of a deleted row.
+
+`enabled: True` remains hardcoded, because it is not state: nothing can turn a skill
+off except retiring it, and a retired skill is now absent from the response on every
+surface rather than listed and refusing (#1292).
 
 **Three of the page's API calls hit routes that do not exist.**
 `api.skillToggle` → `POST /api/skill-toggle`, `api.skillContentSave` →
@@ -438,4 +467,4 @@ no tool set `isError`.
 
 ## Review log
 
-- 2026-09-20 — **stale.** Counts and line references had drifted wholesale: 194 skills on disk / 189 advertised, not "191 active", and five live-directory skills do carry `status: archived`, so quarantine is not the unused lever this doc claimed. Refreshed ~25 drifted `file:line` refs (`prompt_builder`, `prefetch`, `agent_mcp/skills`, `autonomy`, `vault_round`, `config.yaml`), corrected the DUPLICATE lint threshold to its two-threshold form, and rewrote the vault-route loader clause — `skill_load_defect` replaced the `_load_skill`-is-None check on 2026-09-19, which is what had made retirement unlandable (#777). Filed #1292 (`/api/skills` ignores quarantine and re-parses front matter itself), #1293 (three SkillsPage POSTs hit unregistered routes), #1294 (five independent walks over the skill dirs, only two apply quarantine); appended a re-verification to #750 (deliverer installed on one route only).
+- 2026-09-21 — **one walker.** #1294: the five independent `iterdir()`s over the skill directories (prompt index, MCP discovery, `/api/skills`, the Mission Control tab count, `skill_lint`) collapsed onto `agent_mcp.skills.iter_active_skills`, which owns dot-skip + `_QUARANTINE_STATUSES` + first-root-wins, and `SKILLS_DIRS` now absorbs `config.yaml skills.directories` so the config key steers every surface instead of two. Rewrote *Where skills live*, *The Skills page* and *skill_lint* above; the "three separate definitions" paragraph and the route's "reports the on-disk count (194)" claim are gone with the code they described. Measured over the live vault after the change: prompt index, route, tab count and `skill_lint`'s total all 189, 54 rows carrying an empty `category` rather than vanishing. The route's `metadata.hermes`/`metadata.openclaw` fallback was deleted, not null-guarded, and a live-vault test pins why. Counts and line references had drifted wholesale: 194 skills on disk / 189 advertised, not "191 active", and five live-directory skills do carry `status: archived`, so quarantine is not the unused lever this doc claimed. Refreshed ~25 drifted `file:line` refs (`prompt_builder`, `prefetch`, `agent_mcp/skills`, `autonomy`, `vault_round`, `config.yaml`), corrected the DUPLICATE lint threshold to its two-threshold form, and rewrote the vault-route loader clause — `skill_load_defect` replaced the `_load_skill`-is-None check on 2026-09-19, which is what had made retirement unlandable (#777). Filed #1292 (`/api/skills` ignores quarantine and re-parses front matter itself), #1293 (three SkillsPage POSTs hit unregistered routes), #1294 (five independent walks over the skill dirs, only two apply quarantine); appended a re-verification to #750 (deliverer installed on one route only).

@@ -192,10 +192,22 @@ def test_active_skill_is_included(fake_vault, tmp_path):
 
 def test_quarantine_vocabulary_matches_the_mcp_skills_module(fake_vault):
     """The advertised index and the readable set must not drift — a skill the
-    index promises but `skills_read` declines is a broken promise to the model."""
-    from agent_mcp.skills import _QUARANTINE_STATUSES
+    index promises but `skills_read` declines is a broken promise to the model.
 
-    assert pb._QUARANTINE_STATUSES == _QUARANTINE_STATUSES
+    Until #1294 this could only be checked by comparing two copies of the set, and
+    that is precisely the shape that kept the drift possible: `prompt_builder` held
+    the vocabulary twice (an import, and a fallback literal behind a `try/except`)
+    and re-read the `status:` key itself, with this equality assertion as the only
+    thing standing between them and the loader. There is one definition now, so what
+    is assertable is stronger — no copy remains, and the prompt-side predicate *is*
+    the loader's function.
+    """
+    import agent_mcp.skills as skills
+
+    assert not hasattr(pb, "_QUARANTINE_STATUSES"), (
+        "prompt_builder carries its own copy of the quarantine set again; the "
+        "walker is the only definition (#1294)")
+    assert pb._is_quarantined_skill is skills.is_quarantined_skill_file
 
 
 def test_quarantine_check_survives_an_unreadable_file(fake_vault, tmp_path):

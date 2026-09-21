@@ -31,7 +31,18 @@ except ImportError:
     sys.exit(2)
 
 
-SKILLS_DIR = Path.home() / "obsidian" / "skills"
+# The one definition of a live skill lives in `agent_mcp.skills` (#1294), and this
+# script is what task #70 runs *by path* — `python …/scripts/skill_lint.py`, which
+# puts `scripts/` on `sys.path` and not the repo root. Without the insertion the
+# import below raises `ModuleNotFoundError: No module named 'agent_mcp'` and the
+# lint silently keeps counting its own directory listing, which is the defect this
+# line exists to close: 194 linted on 2026-09-20, five of them retired skills.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from agent_mcp.skills import iter_active_skills, skill_roots  # noqa: E402
+
 REPORT_PATH = Path.home() / "obsidian" / "autonomy" / "skill-lint-report.md"
 
 STALE_DAYS = 90
@@ -359,13 +370,22 @@ def check_script_paths(content: str, skill_dir: Path | None = None,
 
 
 def lint() -> dict:
-    if not SKILLS_DIR.exists():
-        return {
-            "error": f"skills dir missing: {SKILLS_DIR}",
-            "dead": [], "drift": [], "duplicates": [], "stale": [],
-            "missing_script": [],
-            "total": 0, "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
-        }
+    """Lint every *live* skill — the set `agent_mcp.skills.iter_active_skills` owns.
+
+    This used to be a sixth walk, over a `SKILLS_DIR` it hardcoded and with no
+    quarantine rule at all: it linted retired-in-place skills as if they were live,
+    so the weekly report's `total` (194 on 2026-09-20) was computed over a set no
+    loader ever uses, and it never saw the second configured root.
+
+    Narrowing the set is only admissible because every finding below is computed
+    from the same walked records: DEAD, MISSING_DESC, DRIFT, DUPLICATE, STALE,
+    PHANTOM_TOOL and MISSING_SCRIPT all still fire for a live skill that has them.
+    What stops being reported is a defect in a skill the model can no longer reach —
+    a retired skill cannot mislead anyone, and its findings would be permanently
+    unactionable noise in a report a human reads.
+    """
+    active = list(iter_active_skills())
+    roots_walked = skill_roots()
 
     dead: list[dict] = []
     missing_desc: list[dict] = []
@@ -376,12 +396,9 @@ def lint() -> dict:
     skills: list[tuple[str, str]] = []
     total = 0
 
-    for entry in sorted(SKILLS_DIR.iterdir()):
-        if not entry.is_dir() or entry.name.startswith("."):
-            continue
-        skill_file = entry / "SKILL.md"
-        if not skill_file.exists():
-            continue
+    for record in active:
+        entry = record.directory
+        skill_file = record.skill_file
         total += 1
         # description filled in below once frontmatter is parsed
 
@@ -458,6 +475,10 @@ def lint() -> dict:
     return {
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "total": total,
+        # Which roots `total` was counted over. The report used to print a hardcoded
+        # `~/obsidian/skills/`, which was a claim rather than a measurement now that
+        # the walker follows `config.yaml skills.directories` and may scan two roots.
+        "roots": [str(r) for r in roots_walked],
         "dead": dead,
         "missing_desc": missing_desc,
         "drift": drift,
@@ -484,7 +505,9 @@ def render_report(result: dict) -> str:
 
     lines.append(f"# Skill Lint Report — {ts}")
     lines.append("")
-    lines.append(f"Scanned **{total}** skills in `~/obsidian/skills/`.")
+    roots = result.get("roots") or []
+    where = ", ".join(f"`{r}`" for r in roots) if roots else "`~/obsidian/skills/`"
+    lines.append(f"Scanned **{total}** live skills in {where}.")
     lines.append("")
     lines.append("| category | count | action |")
     lines.append("|---|---|---|")

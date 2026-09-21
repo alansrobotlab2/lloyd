@@ -456,19 +456,25 @@ def _summarize_tools() -> dict:
 
 
 def _summarize_skills() -> dict:
+    """The Skills tab's count: whatever the one walker calls live (#1294).
+
+    This used to be its own `iterdir()` over `config.yaml skills.directories`,
+    counting any top-level entry that was a directory containing a `SKILL.md`. That
+    excluded the `skills/.archived/` archive by accident and only by accident — the
+    archive keeps its retired skills in per-skill subdirectories, so `.archived`
+    itself has no `SKILL.md` of its own; drop one there and the archive became a
+    skill. It never consulted `_QUARANTINE_STATUSES` either, so the tab counted the
+    five retired-in-place skills as live: 194 beside the 189 the prompt advertises.
+
+    The import is guarded the way `_summarize_tools` guards its own; the walk is
+    not, because a count the tab cannot compute should surface as the failure it is
+    rather than as a zero the dashboard presents as fact.
+    """
     try:
-        from app.config import CONFIG
-    except Exception:
+        from agent_mcp.skills import iter_active_skills
+    except Exception:  # pragma: no cover - same degradation as the tool summary
         return {}
-    total = 0
-    for dir_path in CONFIG.get("skills", {}).get("directories", []):
-        expanded = Path(dir_path.replace("~", str(Path.home())))
-        if not expanded.exists():
-            continue
-        for entry in expanded.iterdir():
-            if entry.is_dir() and (entry / "SKILL.md").exists():
-                total += 1
-    return {"skill_count": total}
+    return {"skill_count": sum(1 for _ in iter_active_skills())}
 
 
 def _summarize_services() -> dict:

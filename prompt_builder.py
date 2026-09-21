@@ -105,18 +105,43 @@ LLOYD_HOME = Path(__file__).parent
 # regardless of who/where the process runs as.
 _CANON_SOUL_PATH = LLOYD_HOME.parent / "obsidian" / "lloyd" / "SOUL.md"
 _CANON_MEMORIES_DIR = LLOYD_HOME.parent / "obsidian" / "lloyd"
-_CANON_SKILLS_DIRS = [
-    LLOYD_HOME.parent / "obsidian" / "skills",
-    LLOYD_HOME / "skills",
-]
+# The roots and the walk both come from `agent_mcp.skills` now (#1294). This pair
+# used to be built from `LLOYD_HOME`, which is the *checkout's* location: inside an
+# automod worktree it named `<worktree>/home/obsidian/skills`, a directory that has
+# never existed, so a prompt built in a round advertised no skills at all while
+# `GET /api/skills` listed 187 of the live vault and the Mission Control tab
+# counted 194 of it — and `tests/test_archived_skill_artifacts.py:52-60` had to
+# document that the prompt-side loader "would read nothing and pass". The walker's
+# roots are anchored where the vault actually is, so the advertised index and every
+# other surface are the same walk of the same directories.
+#
+# Same reason the quarantine vocabulary is imported rather than restated: the
+# fallback literal that used to sit here was a second definition of the rule, kept
+# honest only by one equality assertion in one test.
+#
+# This import used to be wrapped in `try/except Exception` so prompt building could
+# survive `agent_mcp` being unimportable. The wrapper is gone because surviving it
+# meant *silently advertising a different set of skills*: the fallback re-derived
+# the roots from `LLOYD_HOME` and re-spelled the quarantine set, and nothing could
+# see that it had taken over. `prefetch.py:29` has imported this module
+# unconditionally all along, and every runtime path that builds a prompt imports
+# `prefetch`, so the fallback protected a path that does not exist.
+from agent_mcp import skills as _skills_module
+from agent_mcp.skills import iter_active_skills, is_quarantined_skill_file
+
+#: Patch point for the roots the advertised index walks; `None` means "whatever
+#: `agent_mcp.skills.SKILLS_DIRS` is right now", which is the only arrangement that
+#: keeps one definition (#1294) — and it is read per call, never copied at import,
+#: so a caller that redirects the walker's roots redirects the index with it.
+#: Tests that want a private pair set this; production leaves it `None`.
+_CANON_SKILLS_DIRS: list[Path] | None = None
 
 
-# Same quarantine vocabulary the MCP skills module enforces — imported so the
-# advertised index and the readable set cannot drift apart.
-try:
-    from agent_mcp.skills import _QUARANTINE_STATUSES
-except Exception:  # pragma: no cover - prompt building must not hard-depend on MCP
-    _QUARANTINE_STATUSES = {"inactive", "archived", "disabled", "retired", "quarantined"}
+def _skill_walk_roots() -> list[Path]:
+    """The roots to advertise from, read at call time rather than bound at import."""
+    if _CANON_SKILLS_DIRS is not None:
+        return list(_CANON_SKILLS_DIRS)
+    return list(_skills_module.SKILLS_DIRS)
 
 
 def _resolve_overlay(overlay_dir: str | Path | None) -> Path | None:
@@ -600,50 +625,34 @@ def _load_memories(
     return "\n\n".join(parts) if parts else None
 
 
-def _is_quarantined_skill(skill_file: Path) -> bool:
-    """True if the skill's frontmatter status pulls it from circulation.
-
-    `agent_mcp.skills` already refuses to serve these, so advertising them
-    here promised the model a skill that `skills_read` would then decline —
-    the same "the prompt names something that does not work" failure as the
-    phantom `web_search` tool references (2026-09-04).
-    """
-    try:
-        head = skill_file.read_text(encoding="utf-8", errors="replace")[:2000]
-    except OSError:
-        return False
-    if not head.startswith("---"):
-        return False
-    fm_end = head.find("\n---", 3)
-    fm = head[3:fm_end] if fm_end != -1 else head
-    for line in fm.splitlines():
-        key, sep, value = line.partition(":")
-        if sep and key.strip() == "status":
-            return value.strip().strip("'\"").lower() in _QUARANTINE_STATUSES
-    return False
+# True when a skill's frontmatter `status:` pulls it from circulation.
+# `agent_mcp.skills` already refuses to serve those, so advertising them here
+# promised the model a skill that `skills_read` would then decline — the same
+# "the prompt names something that does not work" failure as the phantom
+# `web_search` tool references (2026-09-04).
+#
+# This is the walker's own function, not a re-implementation (#1294). The name used
+# to be a local def that scanned the first 2000 characters line-by-line for a
+# `status:` key — a second opinion rather than a copy of the rule, which called a
+# nested `metadata:\n  openclaw:\n    status: archived` a retirement and missed a
+# `status:` written below the 2000-character cut. The alias is kept because
+# `tests/test_yaml_fix_skill_claims.py` and `tests/test_archived_skill_artifacts.py`
+# reach for this name; the rule they are really testing now lives in one place.
+_is_quarantined_skill = is_quarantined_skill_file
 
 
 def _load_skills_index(overlay: Path | None = None) -> str | None:
-    """Build a list of available skill names from skill directories (overlay first)."""
-    dirs: list[Path] = []
-    if overlay and (overlay / "skills").exists():
-        dirs.append(overlay / "skills")
-    dirs.extend(_CANON_SKILLS_DIRS)
+    """Build a list of available skill names from skill directories (overlay first).
 
-    skill_names: list[str] = []
-    seen: set[str] = set()
-    for skills_dir in dirs:
-        if not skills_dir.exists():
-            continue
-        for entry in sorted(skills_dir.iterdir()):
-            if not entry.is_dir() or entry.name.startswith("."):
-                continue
-            if entry.name in seen:
-                continue
-            skill_file = entry / "SKILL.md"
-            if skill_file.exists() and not _is_quarantined_skill(skill_file):
-                skill_names.append(entry.name)
-                seen.add(entry.name)
+    The set is the single walker's (#1294). This function used to do its own
+    `iterdir()` over the same roots with its own copy of the quarantine rule, which
+    is how the advertised index, `GET /api/skills` and the Mission Control tab came
+    to print 189, 187 and 194 about one vault — the model being told a set that no
+    human-facing surface agreed with.
+    """
+    skill_names = [active.name
+                   for active in iter_active_skills(overlay=overlay,
+                                                    roots=_skill_walk_roots())]
     if not skill_names:
         return None
     return "Available skills: " + ", ".join(skill_names)
