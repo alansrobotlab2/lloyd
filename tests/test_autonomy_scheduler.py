@@ -2934,3 +2934,299 @@ async def test_a_succeeded_run_cannot_be_enqueued_twice_in_one_night(
         "scheduler that silently dropped the job")
     assert len(list((aut.AUTONOMY_RUNS_DIR / "102").glob("run_*.md"))) == 1, (
         "one run record, one night")
+
+
+# ── `model:` validated against the configured slots (#1209) ──────────────────
+#
+# Task #85 dispatched on 2026-09-16 carrying `model: eco`, an alias
+# `config.yaml` never defined, and burned three sub-second vLLM 404s before the
+# row disabled itself. Every one of those refusals was avoidable with one
+# membership test against `models:` — and the three that were spent were spent
+# because the 404 was booked as a task failure, so the check below refuses
+# BEFORE any engine call and BEFORE `failure_count` moves.
+
+_CONFIGURED_MODELS = {"primary": {"alias": "primary"},
+                      "secondary": {"alias": "secondary"}}
+
+
+def _stub_engine(monkeypatch):
+    """Replace the engine with a recorder; return the list of attempted calls.
+
+    `MODEL_CONFIGS` is pinned to two slots so the refusal text names
+    `primary, secondary` as a property of this fixture and not of whatever the
+    live config.yaml happens to define the day someone adds a third model.
+    """
+    calls = []
+
+    async def _rq(messages, options):
+        calls.append(options)
+        yield TEXT
+        yield RESULT
+
+    import app.harness as harness
+    monkeypatch.setattr(harness, "run_query", _rq)
+    monkeypatch.setattr("app.config.MODEL_CONFIGS", _CONFIGURED_MODELS, raising=False)
+    return calls
+
+
+def _stub_sessions(monkeypatch):
+    created = []
+    monkeypatch.setattr("app.sessions_io.create_session",
+                        lambda sid, **_kw: created.append(sid), raising=False)
+    return created
+
+
+async def test_a_model_that_is_not_a_configured_slot_refuses_before_the_engine(aut, monkeypatch):
+    """Clause 1: `model: eco` cannot dispatch, and the refusal says why.
+
+    The proof of "before the engine" is that the engine was never reached — the
+    recorder stays empty and no run record exists, so there is no vLLM 404
+    artifact for the next reader to find, which is what the acceptance check
+    asks must stop happening. `create_session` is asserted too: a dispatch that
+    was refused must not leave a phantom session row behind either.
+    """
+    calls = _stub_engine(monkeypatch)
+    sessions = _stub_sessions(monkeypatch)
+    write_task(aut, 1, model="eco")
+
+    result = await aut.run_task(1)
+
+    assert result["success"] is False
+    text = result["error"]
+    assert "eco" in text, f"the refusal must name the offending value, got: {text}"
+    assert "primary" in text and "secondary" in text, (
+        f"the refusal must name the slots that DO exist, got: {text}")
+    assert calls == [], "a refused dispatch must not reach the engine at all"
+    assert sessions == [], "a refused dispatch must not create a session either"
+    assert list(aut.AUTONOMY_RUNS_DIR.rglob("run_*.md")) == [], (
+        "a refused dispatch writes no run record — the #1209 artifact was a "
+        "404 in a run record nobody read")
+
+
+async def test_a_configured_model_or_the_default_fallback_still_dispatches(
+        aut, monkeypatch, tmp_path):
+    """Clause 2: the validator refuses typos, never a working dispatch.
+
+    Three shapes must all still run: a slot key (`primary`), a declared alias
+    (`secondary`), and no `model:` at all, which falls back to the `model.default`
+    of the config file `run_task` reads.
+
+    The third case is why this test carries its own `config.yaml`. Pointing
+    `LLOYD_HOME` at a fixture config whose `model.default` is `secondary` — a
+    real slot, and NOT this box's default, which is `primary` — is what makes the
+    assertion falsifiable: measured against the live default, a fallback that
+    hardcoded the string `"primary"` would have passed the first version of this
+    test, because the fixture and the box happened to agree. `secondary_enabled`
+    is forced on for the same reason: `resolve_model_alias` rewrites
+    `secondary`→`primary` when that switch is off, and with it off every case
+    below collapses onto `primary` and neither the slot lookup nor the fallback
+    has any observable content. That rewrite predates this check and is unchanged
+    by it — pinned separately at
+    `test_a_secondary_task_still_falls_back_when_the_secondary_slot_is_off`.
+    """
+    from app.config import CONFIG
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("agent:\n  max_turns: 60\nmodel:\n  default: secondary\n")
+    monkeypatch.setattr(autonomy, "LLOYD_HOME", tmp_path)
+    monkeypatch.setitem(CONFIG, "secondary_enabled", True)
+
+    for model, expected in (("primary", "primary"),
+                            ("secondary", "secondary"),
+                            # Unset: must land on THIS file's default, not the
+                            # box's, and not on a literal.
+                            (None, "secondary")):
+        calls = _stub_engine(monkeypatch)
+        write_task(aut, 1, model=model)
+
+        result = await aut.run_task(1)
+
+        assert result["success"] is True, (
+            f"model={model!r} was refused; only an unconfigured NAME may be")
+        assert len(calls) == 1, f"model={model!r} must reach the engine once"
+        handed = getattr(calls[0], "model", None)
+        assert handed in _CONFIGURED_MODELS, (
+            f"the engine was handed {handed!r}, which is not a configured slot")
+        assert handed == expected, (
+            f"model={model!r}: expected the engine to be handed {expected!r}, "
+            f"got {handed!r}")
+
+
+async def test_the_unset_model_lands_on_the_default_this_box_boots_with(
+        aut, monkeypatch):
+    """Clause 2's literal: `model.default: primary`, read off the tracked file.
+
+    The test above proves the fallback is READ from a config file; this one proves
+    what the shipped one says, because the clause is stated in terms of `primary`
+    and a fixture cannot stand in for the file `run_task` opens when
+    `LLOYD_HOME` is unpatched — which is the state production runs in. Both halves
+    are checked: that `config.yaml` really carries `model.default: primary` (it is
+    a tracked, human-editable file, so the premise is measured, not assumed), and
+    that an unset `model:` therefore hands the engine `primary` rather than the
+    empty string `resolve_model_alias` would otherwise pass through.
+
+    If a person ever repoints the default, this fails and names the file — the
+    clause's wording then needs the same edit, which is the point of pinning it.
+    """
+    import yaml as _yaml
+    from app.config import CONFIG
+
+    shipped = _yaml.safe_load(
+        (autonomy.LLOYD_HOME / "config.yaml").read_text()) or {}
+    default = (shipped.get("model") or {}).get("default")
+    assert default == "primary", (
+        f"clause 2 is written against `model.default: primary`; "
+        f"{autonomy.LLOYD_HOME / 'config.yaml'} now says {default!r}")
+    assert default in _CONFIGURED_MODELS, "and the default is itself a real slot"
+    assert (CONFIG.get("model") or {}).get("default") == default, (
+        "the file this process actually booted with says the same thing")
+
+    calls = _stub_engine(monkeypatch)
+    write_task(aut, 1, model=None)
+
+    result = await aut.run_task(1)
+
+    assert result["success"] is True, "an unset model is the default path, not a refusal"
+    assert len(calls) == 1
+    assert getattr(calls[0], "model", None) == "primary"
+
+
+async def test_a_secondary_task_still_falls_back_when_the_secondary_slot_is_off(
+        aut, monkeypatch):
+    """The pre-existing `secondary_enabled` rewrite survives the new validator.
+
+    `resolve_model_alias` turns `secondary` into `primary` when the switch is
+    off, and it runs BEFORE the membership test. With both `primary` and
+    `secondary` configured the rewritten value is a configured slot either way,
+    so this dispatch must not be refused — a validator that ran first, or that
+    checked the file's raw string instead of the resolved one, would refuse a
+    task that has always worked.
+    """
+    from app.config import CONFIG
+
+    monkeypatch.setitem(CONFIG, "secondary_enabled", False)
+    calls = _stub_engine(monkeypatch)
+    write_task(aut, 1, model="secondary")
+
+    result = await aut.run_task(1)
+
+    assert result["success"] is True, "a switched-off secondary falls back; it does not refuse"
+    assert len(calls) == 1
+    assert getattr(calls[0], "model", None) == "primary"
+
+
+async def test_a_refusal_leaves_one_line_in_the_task_file_it_refuses(aut, monkeypatch):
+    """The refusal is durable where a person reads, not only in a log line.
+
+    `run_task` returns a `skipped` queue row and logs at error level; the review
+    rung of the previous round named the gap — "the refusal is loud but not
+    durable", and clause 3 forbids the obvious remedy of moving the row. The task
+    file's own Activity Log is the durable surface that already works on this box
+    (it is where #85's `DISABLED after 3 consecutive failures` line landed), so
+    the refusal gets one line there naming the value and the real slots. Once
+    per (task, model): a refusal does not consume the retry budget, so the same
+    typo is refused again on the next tick and the next, and a curated file that
+    grows a line per tick is a file nobody reads.
+    """
+    monkeypatch.setattr(autonomy, "_model_refusal_logged", set())
+    _stub_engine(monkeypatch)
+    _stub_sessions(monkeypatch)
+    path = write_task(aut, 1, model="eco")
+
+    await aut.run_task(1)
+    lines = [ln for ln in path.read_text().splitlines()
+             if "not a configured alias" in ln]
+    assert len(lines) == 1, f"one durable line for the first refusal, got {lines}"
+    assert "eco" in lines[0] and "primary" in lines[0] and "secondary" in lines[0]
+
+    await aut.run_task(1)
+    await aut.run_task(1)
+    lines = [ln for ln in path.read_text().splitlines()
+             if "not a configured alias" in ln]
+    assert len(lines) == 1, (
+        f"the second and third refusal must not repeat the note, got {lines}")
+    # And clause 3 again from the other side: the note is a body append, so no
+    # front-matter field moved to carry it.
+    assert int(read_task(aut, 1)["failure_count"]) == 0
+
+
+async def test_the_refusal_survives_the_real_execute_adapter(
+        aut, monkeypatch, tmp_path):
+    """The refusal reaches the board as a skipped row that says why — across the seam.
+
+    `workers/sources/scheduled_task.execute()` builds the dict the queue stores
+    from a HAND-WRITTEN whitelist (`status`, `summary`, `task_id`,
+    `artifact_path`, `response`, `meta`, `claims`), and `workers/pool.
+    normalize_result` is the hop after it. A test that hands `normalize_result` a
+    dict shaped like `execute()`'s output asserts on its own input and never
+    touches either (#945 severed the pilot's `claims` exactly there, for 4,922
+    rows). So this drives the real `run_task` refusal through the real
+    `execute()` into the real `normalize_result`.
+
+    The outcome the pool's own docstring is written to prevent is the one being
+    refused here: `{"skipped": reason}` with no status was recorded as a SUCCESS
+    for all 22 runs of `automod-regression`, so "a check that never ran" read as
+    "a check that ran and found nothing". For #1209 the same misread would be
+    worse — a task that cannot dispatch at all would read as a green night.
+
+    Stubbed only what is not this claim: the model loop, the vLLM health probe
+    `execute()` waits on before it dispatches, and the Discord completion
+    notifier. Everything between `run_task` and `normalize_result` is shipped
+    code.
+    """
+    import workers.sources.scheduled_task as scheduled_task
+    from workers.pool import normalize_result
+    from workers.queue import QueueItem
+
+    calls = _stub_engine(monkeypatch)
+    _stub_sessions(monkeypatch)
+    write_task(aut, 1, name="Nightly Secondary Routing Eval", model="eco")
+    monkeypatch.setattr(scheduled_task, "_vllm_healthy", lambda *a, **k: True)
+
+    async def _no_notify(*_a, **_k):
+        return None
+    monkeypatch.setattr("app.discord_notify._discord_notify_task_complete", _no_notify)
+
+    item = QueueItem(id=1, source="scheduled-task", kind="run", priority=50,
+                     payload={"task_id": "1"}, dedup_key=None, state="running",
+                     attempts=1, enqueued_at="", claimed_at=None, claimed_by=None,
+                     completed_at=None, error=None)
+    out = await scheduled_task.execute(item)
+
+    assert out["status"] == "skipped", out
+    assert "eco" in out["summary"] and "primary" in out["summary"], out
+    assert calls == [], "crossing the seam must not smuggle in an engine call"
+
+    norm = normalize_result(item, out)
+    assert norm["status"] == "skipped", (
+        "a refused dispatch must not be the pool's default `success`")
+    assert "eco" in norm["summary"] and "not a configured alias" in norm["summary"], (
+        f"the row a human reads must carry the refusal, got: {norm['summary']!r}")
+    assert norm["artifact_path"] == "", (
+        "no run record exists, so the row must not point at one")
+
+
+async def test_an_unknown_model_refusal_does_not_spend_the_retry_budget(aut, monkeypatch):
+    """Clause 3: one typo in one field cannot disable a schedule.
+
+    The 09-16 refusals were booked as `failure_kind: task`, so three of them
+    hit `max_retries: 3` and nulled `next_run`. This task starts one failure
+    short of that line with the SAME bad model: if the refusal were recorded as
+    a failure, the file would read `status: failed` afterwards. Every field
+    that a failure would move is compared against its own before-value, so the
+    test fails on a refusal that writes any of them.
+    """
+    _stub_engine(monkeypatch)
+    write_task(aut, 1, model="eco", failure_count=2, max_retries=3)
+    before = read_task(aut, 1)
+
+    result = await aut.run_task(1)
+
+    assert result["success"] is False
+    assert result.get("disabled") is not True
+    after = read_task(aut, 1)
+    assert int(after["failure_count"]) == 2, "a config refusal is not a retry"
+    for field in ("status", "failure_count", "next_run", "last_attempt", "last_run"):
+        assert after.get(field) == before.get(field), (
+            f"`{field}` moved on a refused dispatch: {before.get(field)!r} -> "
+            f"{after.get(field)!r}")

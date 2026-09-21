@@ -77,9 +77,15 @@ def _task(task_id: int, **extra) -> dict:
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     """Isolate every side effect: sessions, events, and the `config.yaml` that
-    `run_task` loads the global budget out of."""
+    `run_task` loads the global budget out of.
+
+    `model.default` names `primary`, a real `models:` slot, not a fixture-invented
+    name: since #1209 `run_task` refuses a dispatch whose model resolves to no
+    configured slot, so a fixture whose fake default was `test-model` was a
+    fiction this check exists to catch — production's own default is `primary`.
+    """
     (tmp_path / "config.yaml").write_text(
-        "agent:\n  max_turns: 60\nmodel:\n  default: test-model\n")
+        "agent:\n  max_turns: 60\nmodel:\n  default: primary\n")
     monkeypatch.setattr(autonomy, "LLOYD_HOME", tmp_path)
     monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", tmp_path / "sessions")
     monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", tmp_path / "events")

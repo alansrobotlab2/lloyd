@@ -54,10 +54,24 @@ def _default_state_dirs_to_scratch() -> None:
     — so a suite that writes there is a suite that corrupts its own acceptance
     evidence. Tests that own a store point the variable at their own `tmp_path`,
     as the three `test_component_manifest*`/`test_prompt_diff` files already do.
+
+    `LLOYD_DAILY_NOTE_DIR` joined on 2026-09-21 for the same reason one level up
+    the tree: `autonomy._append_fast_failure_alert` (#1209) appends a line to
+    today's note under `~/obsidian/memory/` by default, and an existing
+    failure-backoff test already drives a task through three sub-second failures
+    without caring where an alert might go. Measured with this guard removed and
+    the variable aimed at an empty directory: the scheduler, timeout, silence and
+    grant-policy suites (173 tests, all passing) wrote one `2026-09-21.md`
+    carrying one `Autonomy #` alert line, 387 bytes. A fixture writing "Autonomy
+    #N failed 3 times in a row" into the live note is the same class of pollution
+    as the manifest lines above, and worse, because the note is the surface a
+    human reads to decide whether the fleet is healthy. Tests that assert on the
+    alert point it at their own `tmp_path`.
     """
     scratch: Path | None = None
     for var, sub in (("LLOYD_AUTOMOD_STATE", "automod"), ("LLOYD_GUARDIAN_STATE", "guardian"),
-                     ("LLOYD_MANIFEST_STORE", "request-manifests")):
+                     ("LLOYD_MANIFEST_STORE", "request-manifests"),
+                     ("LLOYD_DAILY_NOTE_DIR", "daily-notes")):
         if os.environ.get(var):
             continue
         if scratch is None:

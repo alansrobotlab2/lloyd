@@ -1585,6 +1585,137 @@ def _get_model_env(model_name: str) -> dict:
     return {}
 
 
+def _configured_model_names() -> list[str]:
+    """Every name a task may put in `model:`, in config order, deduplicated.
+
+    The `models:` slot keys plus each slot's declared `alias` — the two forms
+    `app.config._get_model_cfg` resolves, so the two forms that can reach the
+    engine. Read through the module attribute rather than a snapshot so a test
+    (or a reload) that replaces `MODEL_CONFIGS` is answered by the replacement.
+
+    An empty list means CANNOT ADJUDICATE, never "nothing is valid": a validator
+    that fails closed when its own config read failed would take the whole
+    fleet down with the config file, which is a bigger outage than the one this
+    exists to prevent.
+    """
+    try:
+        from app.config import MODEL_CONFIGS
+    except Exception:  # pragma: no cover - import failure is not fatal
+        return []
+    names: list[str] = []
+    for key, cfg in (MODEL_CONFIGS or {}).items():
+        for name in (key, (cfg or {}).get("alias")):
+            if name and name not in names:
+                names.append(str(name))
+    return names
+
+
+def _model_dispatch_refusal(task_id, task_model: str) -> Optional[str]:
+    """Why this dispatch must not reach the engine, or None to let it through.
+
+    #1209. Task #85 dispatched for the first time on 2026-09-16 carrying
+    `model: eco` — an alias `config.yaml` never defined — and failed three
+    times in 38 minutes at 0.3 s / 5.6 s / 0.3 s with `vLLM returned 404: The
+    model `eco` does not exist`, then self-disabled. The string was passed
+    straight to the engine because nothing between the task file and
+    `create_session(model=...)` asked whether it named a configured slot:
+    `resolve_model_alias` only rewrites `secondary`→`primary` when the secondary
+    switch is off, and this module's `_get_model_env` swallows a miss into `{}`
+    with no log line at all. So the first signal anyone got was the engine's
+    404, and the second was the row reading `status: failed` — which, with
+    `next_run` nulled, both stall alarms skip by construction.
+
+    A typo is fully detectable here for the price of one membership test, so it
+    is refused HERE: no engine call, no run record, no `failure_count`, and the
+    text names both the offending value and the slots that exist, because
+    "unknown model" alone would send whoever reads it looking at the engine.
+
+    An empty `task_model` is deliberately let through. It is not an unvalidated
+    name, it is the absence of one — the value a task with no `model:` lands on
+    when `model.default` is unreadable too — and refusing it would turn a
+    missing key into a new outage class for a bug that only ever came from a
+    name that WAS present.
+    """
+    if not task_model:
+        return None
+    known = _configured_model_names()
+    if not known or task_model in known:
+        return None
+    return (f"Task #{task_id}: model '{task_model}' is not a configured alias; "
+            f"known: {', '.join(known)} — refusing dispatch instead of sending "
+            f"an unvalidated model id to the engine")
+
+
+# Refusals already written to a task's activity log, keyed `"<task id>:<model>"`.
+# Same one-mark-per-process shape as `_no_skill_warned` above, for the same reason:
+# the scheduler re-enqueues a refused task on the tick after the refusal (a
+# refusal must not move the row — clause 3 of #1209 — so due-ness is untouched),
+# so anything written unconditionally is written once per tick forever.
+_model_refusal_logged: set[str] = set()
+
+
+def _record_model_refusal(task_id, task_model: str, refusal: str) -> bool:
+    """Mark the task file with its own refused dispatch. True if this call wrote it.
+
+    The refusal returns a `skipped` queue row and a `logger.error`, and both are
+    true at the instant they are written; what neither is is a record on the
+    thing that is broken. The review rung of SM_20260921_091912 named exactly
+    that: "the refusal is loud but not durable, and nothing backs a task off".
+    The task file's own Activity Log is the durable surface that already exists
+    here — it is where `DISABLED after 3 consecutive failures` landed for #85 and
+    what the autonomy board renders — so the refusal gets one line there, naming
+    the offending value and the real slots, written once per (task, model) per
+    process. The repeated refusals themselves stay at log level on purpose: a
+    config typo that outlives a person's attention must not append a hundred
+    identical lines to a curated file, which is the same judgement
+    `_no_skill_warned` reached from the other direction.
+    """
+    key = f"{task_id}:{task_model}"
+    if key in _model_refusal_logged:
+        return False
+    _model_refusal_logged.add(key)
+    try:
+        _append_activity_log(task_id, refusal)
+    except Exception as exc:  # noqa: BLE001 — a note is never worth the dispatch
+        logger.warning("Task #%s: could not record the model refusal in its log: %s",
+                       task_id, exc)
+    return True
+
+
+def _resolve_task_model(task_id, task: dict) -> str:
+    """The model name this dispatch will hand the engine, after two rewrites.
+
+    Both rewrites predate #1209 and are unchanged by it: an absent/`null`
+    `model:` falls back to `model.default`, and `secondary` becomes `primary`
+    when `secondary_enabled` is off — every other caller in the codebase goes
+    through `resolve_model_alias` for that second one and the autonomy path did
+    not, so a task pinned to a switched-off secondary failed instead of falling
+    back. Split out of `run_task` so the refusal below has something to check
+    that is not inline arithmetic, and so the empty-string case (no key, no
+    readable default) is visibly the absence of a name rather than a name.
+    """
+    task_model = str(task.get("model", "") or "").strip()
+    if not task_model or task_model.lower() in ("null", "none"):
+        try:
+            cfg = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
+            task_model = cfg.get("model", {}).get("default", "")
+        except Exception:
+            pass
+    if not task_model:
+        task_model = ""
+
+    try:
+        from app.config import resolve_model_alias
+        resolved = resolve_model_alias(task_model)
+        if resolved != task_model:
+            logger.info("Task #%s: model %s -> %s (secondary_enabled=false)",
+                        task_id, task_model, resolved)
+            task_model = resolved
+    except Exception as e:
+        logger.warning("Model alias resolution failed for #%s: %s", task_id, e)
+    return task_model
+
+
 # ── Declared output artifact as evidence for run status (#832) ────────────────
 #
 # Run status used to be derived from one thing: whether the terminal assistant
@@ -1768,6 +1899,172 @@ async def _record_artifact_success(task: dict, task_id, run_id: str,
     return result
 
 
+# ── Fast-failure alert (#1209) ────────────────────────────────────────────────
+# A failure that completes in under half a minute is not a task that failed at
+# its work. A run that reaches the engine and does something takes minutes;
+# 0.3 s is a request refused on the way in — a model alias the server does not
+# have, a route that is not there, a payload it rejects. #1209's task #85 logged
+# exactly that (0.3 s / 5.6 s / 0.3 s, `vLLM returned 404: The model `eco` does
+# not exist`) and the only trace was the task row reading `status: failed` with
+# `next_run` nulled, which both stall alarms skip by construction and the one
+# alert that fires is a no-op on an unconfigured transport. The shape is worth
+# its own line in the one place a person reads daily.
+_FAST_FAILURE_ALERT_SECONDS = 30.0
+_FAST_FAILURE_ALERT_STREAK = 3
+
+
+def _daily_note_dir() -> Path:
+    """Where today's daily note lives: the vault's `memory/`, unless overridden.
+
+    `LLOYD_DAILY_NOTE_DIR` exists for the test suite — the same env-var-at-read
+    shape `tests/conftest.py` uses for the automod, guardian and manifest state
+    dirs, for the same reason: the default is the live vault, and a fixture that
+    fails three runs to prove an alert exists would otherwise write fiction into
+    today's note. `app/post_capture._append_daily_note` hardcodes the vault
+    path; this is the same target, made redirectable rather than duplicated.
+    """
+    env = os.environ.get("LLOYD_DAILY_NOTE_DIR")
+    if env:
+        return Path(env)
+    return Path.home() / "obsidian" / "memory"
+
+
+def _fast_task_failure_seconds(path: Path, *,
+                               max_seconds: float) -> Optional[float]:
+    """This run record's duration, when it IS a sub-`max_seconds` task failure.
+
+    `None` means "this record is not part of a fast-failure streak", which the
+    caller reads as STOP LOOKING, not as "skip it and keep going" — the
+    distinction is the whole meaning of `consecutive`, see
+    `_fast_failure_streak`. Includes a record whose front matter cannot be read
+    or which carries no numeric `duration_seconds`: a streak the reader cannot
+    certify is not a streak, and guessing from the neighbour either way is what
+    this helper exists to refuse.
+    """
+    try:
+        parts = path.read_text(encoding="utf-8").split("---\n", 2)
+        if len(parts) < 2:
+            return None
+        fm = yaml.safe_load(parts[1])
+    except (OSError, ValueError):
+        return None
+    if not isinstance(fm, dict) or fm.get("status") != "failed":
+        return None
+    if str(fm.get("failure_kind") or "task") != "task":
+        return None
+    duration = fm.get("duration_seconds")
+    if not isinstance(duration, (int, float)) or duration >= max_seconds:
+        return None
+    return float(duration)
+
+
+def _fast_failure_streak(task_id, *, max_seconds: float = _FAST_FAILURE_ALERT_SECONDS,
+                         limit: int = 12) -> list[float]:
+    """Durations of this task's trailing run of sub-`max_seconds` failures.
+
+    Oldest first, so the caller can print them as a sequence. Consecutive in the
+    literal sense: the walk goes newest-record-first and STOPS at the first
+    record that is not itself a sub-`max_seconds` `failure_kind: task` failure —
+    a success, an `infra` failure, a slow failure, an unreadable record. The
+    first cut of this reader collected only the qualifying records and then
+    measured the tail of that filtered list, so `0.3s, 0.3s, SUCCESS, 0.3s` read
+    as a streak of three and the alert said "consecutive" about a task that had
+    succeeded in the middle of it. A filter cannot express "consecutive";
+    stopping can, which is what `test_a_successful_run_between_two_fast_failures_
+    does_not_alert` now pins.
+
+    An `infra` failure breaks the streak for the same reason it does not count
+    toward it: the 2026-09-01 eleven-hour empty-server window produced nothing
+    but those, and its remedy is patience, not a look at the task file. What a
+    run of them does change is the *sequence* — after an outage the clock starts
+    again, so the alert speaks about failures that are all post-outage.
+
+    Read off the run records rather than a counter kept somewhere: the only
+    per-task counter that survives a restart is `failure_count` in the task
+    file, which cannot distinguish three 0.3 s refusals from three 600 s
+    timeouts — and the durations ARE the signal here, and are already on disk in
+    the one place every run is recorded. Filenames are the order: a run id is
+    `run_<task>_<UTC date>_<HHMMSS>` made at dispatch, so a lexical sort of the
+    directory is a chronological one and needs no timestamp parsing to agree
+    with itself. Newest-first up to `limit` records, so a weekly job's month of
+    history costs one directory of ~17 small files.
+    """
+    task_dir = AUTONOMY_RUNS_DIR / str(task_id)
+    if not task_dir.is_dir():
+        return []
+    try:
+        paths = sorted(task_dir.glob("run_*.md"))
+    except OSError:
+        return []
+    streak: list[float] = []
+    for path in reversed(paths[-limit:]):
+        duration = _fast_task_failure_seconds(path, max_seconds=max_seconds)
+        if duration is None:
+            break
+        streak.append(duration)
+    return list(reversed(streak))
+
+
+def _append_fast_failure_alert(task: dict, task_id, durations: list[float]) -> bool:
+    """Write the one line a fast-failing task never had. True if it landed.
+
+    Deliberately NOT routed through `app.discord_notify.discord_alert`, which is
+    what the disable alert further below calls: this box carries
+    `discord.home_channel: null` and an empty token, so `discord_alert` logs a
+    warning and returns (app/discord_notify.py:52-56). #85's disable alert
+    therefore "fired" and reached nobody — an alert whose only transport is
+    unconfigured is not an alert, and routing a new one through that transport
+    would inherit the dead end. The daily note is a surface that demonstrably
+    works here: it is the file `app/post_capture._append_daily_note` appends
+    session summaries to, on the same America/Los_Angeles date filename, so the
+    line lands where a person already reads rather than where a webhook would.
+
+    A failure to write is logged and reported as False; it never propagates,
+    because a note that could not be written must not change what the run record
+    or the retry budget say.
+    """
+    from zoneinfo import ZoneInfo
+
+    try:
+        la = ZoneInfo("America/Los_Angeles")
+        now = datetime.datetime.now(la)
+        path = _daily_note_dir() / f"{now.strftime('%Y-%m-%d')}.md"
+        name = str(task.get("name") or "").strip() or "unnamed task"
+        listed = ", ".join(f"{d:.1f}s" for d in durations)
+        entry = (
+            f"\n- {now.strftime('%H:%M %Z')} — **Autonomy #{task_id} ({name}): "
+            f"{len(durations)} consecutive failures under "
+            f"{_FAST_FAILURE_ALERT_SECONDS:.0f}s each ({listed}).** A run that "
+            f"reached the engine takes minutes; these were refused before any "
+            f"work — check `model:` and the engine route in the task file. "
+            f"Details: autonomy-runs/{task_id}/\n"
+        )
+        if not path.exists():
+            # Same OKF-conformant header a fresh daily note gets from
+            # `app/post_capture._append_daily_note`: `type` is required
+            # (scripts/vault/validate_okf.py) and a note born without it is a
+            # conformance violation from its first line.
+            frontmatter = yaml.safe_dump(
+                {"segment": "memory", "tags": ["memory", "daily-notes"],
+                 "type": "note",
+                 "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S")},
+                sort_keys=False, allow_unicode=True, default_flow_style=False,
+            ).rstrip()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                f"---\n{frontmatter}\n---\n\n"
+                f"# {now.strftime('%Y-%m-%d')} Daily Notes\n{entry}",
+                encoding="utf-8")
+        else:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(entry)
+        return True
+    except Exception as exc:  # noqa: BLE001 — a note is never worth the run
+        logger.warning("Task #%s: could not write the fast-failure alert: %s",
+                       task_id, exc)
+        return False
+
+
 async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
                           started_dt: datetime.datetime, *, summary: str, body: str,
                           kind: str = "task", extra: Optional[dict] = None,
@@ -1823,6 +2120,30 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
         note += (f" — DISABLED after {failures} consecutive failures; "
                  f"set status back to up_next to re-enable")
     _append_activity_log(task_id, note)
+
+    # The sub-30s streak gets one line in today's daily note (#1209), written
+    # here rather than at the disable below because the two are different facts:
+    # a task with `max_retries: 10` can burn three refusals and still be
+    # retrying, and a task with `max_retries: 1` disables on its FIRST fast
+    # failure — waiting for the disable to say anything would have kept #85's
+    # first two refusals silent. `alert` gates both transports together: a
+    # caller that says do-not-notify-this-failure means it for the note too.
+    #
+    # Computed after the record above, so this run's own duration is in the
+    # streak it is counted as.
+    if kind == "task" and alert:
+        streak = _fast_failure_streak(task_id)
+        # Exactly the threshold, never "threshold or more": a fourth and fifth
+        # fast failure of the same streak must not append a fourth identical line
+        # to the same note. One line per streak is what "exactly one alert line"
+        # asks for, and the streak length is the only thing that can tell the
+        # third failure from the fourth.
+        if len(streak) == _FAST_FAILURE_ALERT_STREAK:
+            if _append_fast_failure_alert(task, task_id, streak):
+                logger.error("Task #%s: %d consecutive failures under %.0fs (%s) — "
+                             "alerted in today's daily note", task_id, len(streak),
+                             _FAST_FAILURE_ALERT_SECONDS,
+                             ", ".join(f"{d:.1f}s" for d in streak))
 
     if disabled and alert:
         try:
@@ -1905,35 +2226,30 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             return {"success": False, "skipped": True, "status": "skipped",
                     "task_id": task_id, "error": msg}
 
+    # Resolve the model, then refuse a dispatch whose `model:` names no slot the
+    # engine has (#1209) — and refuse it HERE, above the `in_progress` flip, so a
+    # refusal leaves the task file exactly as it was found. Below the flip the
+    # refusal would strand the row at `in_progress` until the stale-run window
+    # expired, which is a second bug wearing the first one's clothes.
+    task_model = _resolve_task_model(task_id, task)
+    refusal = _model_dispatch_refusal(task_id, task_model)
+    if refusal:
+        logger.error("%s", refusal)
+        _record_model_refusal(task_id, task_model, refusal)
+        # `skipped`, not `failed`: no run happened, so nothing may be charged
+        # against the retry budget, and `failed` here would let one typo in one
+        # field disable a schedule — the exact outcome this check exists to stop.
+        # `skipped` carries the text because the queue's `normalize_result`
+        # honours a bare `skipped` key as both the status and the summary, so the
+        # board row reads as a refusal that names its reason.
+        return {"success": False, "status": "skipped", "skipped": refusal,
+                "task_id": task_id, "error": refusal,
+                "refusal": "unconfigured_model"}
+
     _update_task_field(task_id, status="in_progress", updated=now_iso)
     prompt = _build_task_prompt(task, skill_content)
     # Appended payload only — see `_evidence_prompt` for the cache reasoning.
     prompt += _evidence_prompt(task_id)
-
-    # Resolve model
-    task_model = str(task.get("model", "") or "").strip()
-    if not task_model or task_model.lower() in ("null", "none"):
-        try:
-            cfg = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
-            task_model = cfg.get("model", {}).get("default", "")
-        except Exception:
-            pass
-    if not task_model:
-        task_model = ""
-
-    # Honour the `secondary_enabled` switch: when the secondary slot is off,
-    # route its tasks back to primary rather than at a dead port. Everything
-    # else in the codebase goes through this helper; the autonomy path did not,
-    # so a task pinned to `secondary` would fail instead of falling back.
-    try:
-        from app.config import resolve_model_alias
-        resolved = resolve_model_alias(task_model)
-        if resolved != task_model:
-            logger.info("Task #%s: model %s -> %s (secondary_enabled=false)",
-                        task_id, task_model, resolved)
-            task_model = resolved
-    except Exception as e:
-        logger.warning("Model alias resolution failed for #%s: %s", task_id, e)
 
     model_env = _get_model_env(task_model)
     declared_timeout = int(task.get("timeout_seconds") or 1800)
