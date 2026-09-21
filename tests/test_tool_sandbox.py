@@ -310,7 +310,9 @@ def dispatch_stub(monkeypatch):
     # `lloyd/effect_scope`, so `_tool_effects.claim` returns `_UNLEDGERED` on its
     # own and dispatch proceeds without the ledger's database being touched.
     table = dict(getattr(M, "_dispatch", None) or {})
-    for name in ("vault_write", "Write", "Bash", "Read"):
+    for name in ("vault_write", "Write", "Bash", "Read",
+                 "autonomy_config", "fact_resolve",
+                 "autonomy_config_set", "fact_resolve_apply"):
         table[name] = Stub()
     monkeypatch.setattr(M, "_dispatch", table)
     return M, calls
@@ -546,3 +548,158 @@ async def test_dispatch_still_lets_a_trial_read_outside_the_corpus(corpus_home, 
         {M.META_SESSION_ID: "20260916_123000_bench_xy13"})
     assert "Tool call denied" not in _text(result), _text(result)
     assert "harmless prose" in _text(result)
+
+
+# ── #1326: two tools whose names said "read" and whose handlers wrote ────────
+#
+# `autonomy_config` (key+value rewrote `~/obsidian/autonomy/_config.md`) and
+# `fact_resolve` (`auto_resolve=true` marked facts invalid) both sat in
+# `READ_ONLY`, so none of the refusals keyed off that table fired for them. The
+# writes now live in `autonomy_config_set` and `fact_resolve_apply` — names in
+# none of the annotation tables, which is the safe default: a name that appears
+# nowhere is a writer. These tests pin that all four consumers see them that way
+# and that the read halves stay callable, which is what keeps them usable for
+# inspection in a plan-mode or bench turn.
+
+WRITERS = ("autonomy_config_set", "fact_resolve_apply")
+#: Each write that left a read-only name for a new one on #1326.
+SPLIT_WRITE_OF = {"autonomy_config": "autonomy_config_set",
+                  "fact_resolve": "fact_resolve_apply"}
+READERS = ("autonomy_config", "fact_resolve")
+
+
+def test_the_split_writers_are_in_none_of_the_annotation_tables():
+    """The precondition for every refusal below. `annotations_for` gives a name
+    absent from all four tables no hint at all, so it is neither plan-mode
+    allowed, sandbox-allowed, retry-safe, nor replay-suppressed."""
+    from agent_mcp import annotations as A
+    for name in WRITERS:
+        assert name not in A.READ_ONLY | A.IDEMPOTENT | A.REPEAT_EXPECTED, name
+        assert name not in A.PLAN_MODE_ALWAYS_ALLOWED, name
+        ann = A.annotations_for(name)
+        assert not (getattr(ann, "readOnlyHint", False)
+                    or getattr(ann, "read_only_hint", False)), name
+        assert not (getattr(ann, "idempotentHint", False)
+                    or getattr(ann, "idempotent_hint", False)), name
+        assert A.side_effecting(name) is True, name
+    for name in READERS:
+        assert name in A.READ_ONLY, name
+
+
+def test_plan_mode_blocks_the_split_writers_and_spares_the_read_halves():
+    """Through the consumer, not the derivation: `mcp_discovery` is what builds
+    the harness `disallowed_tools` list for a plan-mode turn.
+
+    Seeded from the surface the aggregator really advertises rather than from a
+    handful of names this test writes down, so the writers are blocked from the
+    same universe a plan-mode turn is actually built out of, and a positive
+    control (`vault_write`, blocked since before this change) rides along: with
+    no control, a derivation that returned an empty list would pass.
+    """
+    import asyncio as _asyncio
+
+    from app import mcp_discovery as md
+
+    advertised = {t.name for t in _asyncio.run(M.list_tools())}
+    assert set(WRITERS) | set(READERS) <= advertised, (
+        f"the split tools are not on the advertised surface: "
+        f"{(set(WRITERS) | set(READERS)) - advertised}")
+    assert "vault_write" in advertised, "no actuator to compare against"
+
+    monkey_universe = set(md._TOOL_UNIVERSE)
+    try:
+        md._TOOL_UNIVERSE.clear()
+        md.record_tool_universe(advertised)
+        blocked = set(md._plan_mode_blocked())
+        # Positive control through the same derivation: the writer that has
+        # always been blocked is blocked, so a blocked-list that lists nothing
+        # cannot pass this test by accident.
+        assert "vault_write" in blocked, "the derivation blocked no one"
+        for name in WRITERS:
+            assert name in blocked, f"{name} stayed callable in a plan-mode turn"
+        for name in READERS:
+            assert name not in blocked, f"{name} lost its read-only plan-mode call"
+        # One blocked name that is a writer only by the safe default — in no
+        # annotation table at all, exactly like the two under test. Without it
+        # the list could be blocked from a rule that happens to spare every
+        # annotated tool and still satisfy the writer assertions above.
+        tables = (S._annotations.READ_ONLY | S._annotations.IDEMPOTENT
+                  | S._annotations.REPEAT_EXPECTED)
+        untabled = [n for n in blocked if n not in tables]
+        assert set(WRITERS) < set(untabled), (
+            f"no untabled writer is blocked besides the two under test: {untabled}")
+        disallowed = md._get_disallowed_tools(plan_mode=True)
+        for name in WRITERS:
+            assert name in disallowed, f"{name} missing from RunOptions disallowed"
+    finally:
+        md._TOOL_UNIVERSE.clear()
+        md._TOOL_UNIVERSE.update(monkey_universe)
+
+
+def test_a_bench_or_eval_session_is_refused_the_split_writers():
+    for prefix in ("bench_001_x", "eval_001_x"):
+        for name in WRITERS:
+            why = S.refusal(name, f"{prefix}_abc")
+            assert why, f"{name} ran in a {prefix} session"
+            assert "read-only" in why
+        for name in READERS:
+            assert S.refusal(name, f"{prefix}_abc") is None, name
+
+
+@pytest.mark.parametrize("writer", WRITERS)
+async def test_a_sessionless_call_to_a_split_writer_is_refused(dispatch_stub, writer):
+    """#1053: a write that names no session is refused, not waved through. The
+    predicate is `state_changing_tool`, which read-only names fail — that is how
+    these two escaped it while carrying a write."""
+    M, calls = dispatch_stub
+    result = await M.call_tool(writer, {"key": "a", "value": "b", "entity": "x"},
+                               {"lloyd/tool_allowed": "1"})
+    assert _is_error(result), f"{writer} with no session id dispatched"
+    assert "lloyd/session_id" in _text(result), _text(result)
+    assert calls == [], f"{writer} reached the module handler"
+
+
+async def test_the_read_halves_still_dispatch_with_no_session(dispatch_stub):
+    """The positive half: the split moved the write, it did not mute the read.
+    `tools/list` and every probe call these with no session id."""
+    M, calls = dispatch_stub
+    for name in READERS:
+        result = await M.call_tool(name, {"entity": "x"}, {"lloyd/tool_allowed": "1"})
+        assert not _is_error(result), f"{name}: {_text(result)[:200]}"
+    assert [c[0] for c in calls] == list(READERS), calls
+
+
+def test_the_restricted_contexts_deny_list_names_the_split_writers():
+    """A split only holds if every list that named the old read-only name names
+    the new write too.
+
+    `workers/sources/*`, the bench runner and the Discord bridge each subtract a
+    list of names from the toolbox. `autonomy_config` was in them as a write
+    (that is why it was listed); after the split a worker denied only the old
+    name would have been able to rewrite the scheduler config under the new one.
+    This asserts both writer names are present in each, so the next rename cannot
+    reopen the hole the same way.
+    """
+    from agent_mcp import discord_bot
+    from scripts.autoresearch import bench_runner_sdk
+    from workers.sources import arch_review, deep_research, youtube_digest
+
+    surfaces = {
+        "arch_review DISALLOWED": arch_review.DISALLOWED,
+        "deep_research DISALLOWED": deep_research.DISALLOWED,
+        "youtube_digest DISALLOWED": youtube_digest.DISALLOWED,
+        "bench_runner STATEFUL_TOOLS": bench_runner_sdk.STATEFUL_TOOLS,
+        "discord NON_OWNER_DISALLOWED": discord_bot.NON_OWNER_DISALLOWED,
+    }
+    # The invariant, not a snapshot: a list that denied the read-only name was
+    # denying the write, so it must deny the name the write now lives under. A
+    # list that never named the old one is making a different decision (the
+    # research sources keep the fact surface — `fact_add` is their job), and this
+    # says nothing about them.
+    assert set(WRITERS) == set(SPLIT_WRITE_OF.values())
+    for label, names in surfaces.items():
+        for old_name, new_name in SPLIT_WRITE_OF.items():
+            if old_name in names:
+                assert new_name in names, (
+                    f"{label} denies {old_name} but not {new_name}: the split "
+                    f"re-opened the write it was denying")

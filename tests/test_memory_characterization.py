@@ -232,6 +232,7 @@ def test_path_constants_follow_the_running_code_not_the_home_dir():
 
 EXPECTED_TOOL_NAMES = {
     "fact_get", "fact_add", "fact_profile", "fact_check", "fact_resolve",
+    "fact_resolve_apply",
     "fact_invalidate", "fact_relate", "fact_relationships", "fact_path",
     "fact_neighbors",
     "vault_read", "vault_write", "vault_overview", "vault_search",

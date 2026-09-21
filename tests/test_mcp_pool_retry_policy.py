@@ -147,3 +147,74 @@ def test_annotations_are_dropped_with_the_routes_on_reopen():
     assert pool._retry_safe("x")
     asyncio.run(pool.aclose())
     assert not pool._retry_safe("x")
+
+
+# ── #1326: two tools whose read-only annotation would have re-sent a write ───
+#
+# `autonomy_config` (key+value rewrote the scheduler config file) and
+# `fact_resolve` (`auto_resolve=true` marked facts invalid) were annotated
+# read-only, so `_retry_safe` said "it only reads" and re-sent them after a
+# transport drop — a write that had already landed, landing twice. The writes now
+# live in `autonomy_config_set` and `fact_resolve_apply`: names the server
+# advertises with no hint at all, so the retry rule gets them right while the two
+# read halves keep the retry a read deserves.
+
+SPLIT_WRITERS = ("autonomy_config_set", "fact_resolve_apply")
+SPLIT_READERS = ("autonomy_config", "fact_resolve")
+
+
+def _wire_hints(name: str) -> dict:
+    """The hint set `tools/list` puts on the wire for one name.
+
+    camelCase because that is what the pool reads out of the JSON, and read
+    through `getattr` twice because the local `ToolAnnotations` is snake_case —
+    the same 1.x/2.x field split `agent_mcp/main.py::_result_is_error` papers
+    over for results."""
+    from agent_mcp import annotations as A
+    ann = A.annotations_for(name)
+    return {
+        "readOnlyHint": bool(getattr(ann, "readOnlyHint", False)
+                             or getattr(ann, "read_only_hint", False)),
+        "idempotentHint": bool(getattr(ann, "idempotentHint", False)
+                               or getattr(ann, "idempotent_hint", False)),
+    }
+
+
+def _split_annotations() -> dict:
+    """What the server actually advertises for each name, so this exercises the
+    hint it sends rather than a guess about it."""
+    return {n: _wire_hints(n) for n in SPLIT_WRITERS + SPLIT_READERS}
+
+
+def test_the_split_writers_are_not_retry_safe_and_their_read_halves_are(monkeypatch):
+    pool = _pool(monkeypatch, _split_annotations())
+    for name in SPLIT_WRITERS:
+        assert pool._retry_safe(name) is False, name
+    for name in SPLIT_READERS:
+        assert pool._retry_safe(name) is True, name
+
+
+@pytest.mark.parametrize("writer", SPLIT_WRITERS)
+def test_a_dropped_transport_does_not_re_fire_the_split_writer(monkeypatch, writer):
+    """One attempt for a write, and the caller keeps the guidance that says the
+    server may have run it anyway."""
+    pool = _pool(monkeypatch, _split_annotations())
+    calls: list[str] = []
+    monkeypatch.setattr(pool, "_invoke", _failing_invoke(calls, then_ok=False))
+    with pytest.raises(ToolDispatchError) as exc:
+        asyncio.run(pool.call_tool(writer, {}))
+    assert calls == [writer], f"{writer} was re-sent after a transport drop: {calls}"
+    assert "may have run" in str(exc.value), str(exc.value)
+
+
+@pytest.mark.parametrize("reader", SPLIT_READERS)
+def test_the_split_read_halves_keep_their_retry(monkeypatch, reader):
+    """The positive control: the split moved the write, it did not mute the read.
+    Without a second attempt a dropped stream turns a working read into an
+    outage."""
+    pool = _pool(monkeypatch, _split_annotations())
+    calls: list[str] = []
+    monkeypatch.setattr(pool, "_invoke", _failing_invoke(calls, then_ok=True))
+    out = asyncio.run(pool.call_tool(reader, {}))
+    assert calls == [reader, reader], f"{reader} lost its retry: {calls}"
+    assert out["is_error"] is False

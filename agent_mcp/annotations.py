@@ -37,6 +37,8 @@ READ_ONLY: frozenset[str] = frozenset({
     # Polls a detached gate; observes, never starts one.
     "automod_gate_wait",
     # Knowledge graph
+    # `fact_resolve` is a report since #1326: `auto_resolve` is gone and the
+    # marking lives in `fact_resolve_apply`, deliberately in no table.
     "fact_get", "fact_profile", "fact_check", "fact_resolve",
     "fact_relationships", "fact_path", "fact_neighbors",
     # Vault + memory + sessions
@@ -48,6 +50,9 @@ READ_ONLY: frozenset[str] = frozenset({
     # Skills
     "skills_search", "skills_read",
     # Autonomy / backlog / research — inspection halves
+    # `autonomy_config` stopped writing on #1326: it takes no `value` any more,
+    # and `autonomy_config_set` — in no table at all, which is the safe default —
+    # is the write.
     "autonomy_tasks", "autonomy_get_task", "autonomy_config", "autonomy_health",
     "backlog_boards", "backlog_tasks", "backlog_get_task",
     "autoresearch_status", "autoresearch_bench_list", "autoresearch_ledger_query",

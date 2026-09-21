@@ -102,8 +102,8 @@ def _marked(root: Path) -> list[tuple[str, str, str]]:
 
 # ── the two-file fixture every id-collision clause is graded against ─────────
 # A fixture that puts the SAME two texts in both category files yields two
-# equal-confidence pairs, which `_fact_resolve` skips — it marks 0 and proves
-# nothing. This one puts the loser's id on a fact the other file uses for its
+# equal-confidence pairs, which `_fact_resolve_apply` skips — it marks 0 and
+# proves nothing. This one puts the loser's id on a fact the other file uses for its
 # winner, which is what the live corpus looks like: state/fact-001 is condemned
 # while usage/fact-001 must survive.
 
@@ -125,10 +125,10 @@ def _colliding_entity(root: Path) -> Path:
 
 # ── clause 1: the non-condemned twin keeps its null marks ────────────────────
 
-def test_auto_resolve_leaves_the_noncondemned_twin_unmarked(tree):
+def test_fact_resolve_apply_leaves_the_noncondemned_twin_unmarked(tree):
     facts_root, st, _vault = tree
     _colliding_entity(facts_root)
-    out = facts_mod._fact_resolve({"entity": "Idcol", "auto_resolve": True})
+    out = facts_mod._fact_resolve_apply({"entity": "Idcol"})
     marked = _marked(facts_root)
     assert ("Idcol-state.md", "fact-001", "invalid_at") in marked, marked
     assert ("Idcol-usage.md", "fact-001", "invalid_at") not in marked, \
@@ -138,10 +138,10 @@ def test_auto_resolve_leaves_the_noncondemned_twin_unmarked(tree):
 
 # ── clause 2: exactly 2 facts marked, and `resolved` equals that ─────────────
 
-def test_auto_resolve_marks_exactly_two_and_reports_what_it_marked(tree):
+def test_fact_resolve_apply_marks_exactly_two_and_reports_what_it_marked(tree):
     facts_root, st, _vault = tree
     _colliding_entity(facts_root)
-    out = facts_mod._fact_resolve({"entity": "Idcol", "auto_resolve": True})
+    out = facts_mod._fact_resolve_apply({"entity": "Idcol"})
     marked = _marked(facts_root)
     assert len(marked) == 2, marked
     assert out["resolved"] == 2 == len(marked)
@@ -167,7 +167,7 @@ def test_confidence_class_records_its_loser_with_invalid_at_not_expired_at(tree)
     assert len(marked) == 1, marked
     assert marked[0][2] == "invalid_at", \
         "a claim that should not have been recorded is invalid, not expired " \
-        "(agent_mcp/facts.py `_fact_resolve` is the semantics)"
+        "(agent_mcp/facts.py `_fact_resolve_apply` is the semantics)"
     assert not any(f == "expired_at" for _, _, f in marked)
 
 
@@ -245,8 +245,8 @@ def test_marking_holds_the_file_lock_across_its_whole_read_modify_write(tree,
             real_write(path, facts_mod._write_fact_frontmatter(fm) + body)
             holder_added.set()
 
-    marker = threading.Thread(target=facts_mod._fact_resolve,
-                              args=({"entity": "Locky", "auto_resolve": True},),
+    marker = threading.Thread(target=facts_mod._fact_resolve_apply,
+                              args=({"entity": "Locky"},),
                               daemon=True)
     adder = threading.Thread(target=concurrent_adder, daemon=True)
     try:

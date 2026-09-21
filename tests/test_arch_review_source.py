@@ -235,7 +235,10 @@ def test_the_toolbox_denies_what_a_doc_review_must_not_do():
     for name in WORKER_AUTOMOD_BAN:
         assert name in A.DISALLOWED
     for name in ("Task", "Write", "vault_write", "autonomy_write_task",
-                 "research_propose", "graph_refresh", "http_request"):
+                 "research_propose", "graph_refresh", "http_request",
+                 # #1326: the scheduler-config write is its own tool now, so the
+                 # old name in `DISALLOWED` alone would no longer block a write.
+                 "autonomy_config", "autonomy_config_set"):
         assert name in A.DISALLOWED
     for name in ("Bash", "Edit", "Read", "Grep", "Glob", "backlog_write_task",
                  "graph_explain", "graph_affected"):
@@ -1131,8 +1134,12 @@ def test_the_toolbox_denies_the_memory_and_fact_writers(tree):
     """#709. `DISALLOWED` subtracts from the whole chat toolbox rather than
     granting from nothing, so everything not named here is live — and the
     memory and fact surfaces were."""
+    # `fact_resolve_apply` is on this list because #1326 moved the marking out
+    # of `fact_resolve`; `fact_resolve` itself is a read now and stays denied
+    # only because a stale name here costs nothing.
     for name in ("memory_add", "memory_remove", "memory_replace",
-                 "fact_add", "fact_relate", "fact_invalidate", "fact_resolve"):
+                 "fact_add", "fact_relate", "fact_invalidate", "fact_resolve",
+                 "fact_resolve_apply"):
         assert name in A.DISALLOWED, f"{name} can write outside the one doc"
     for name in ("memory_read", "fact_get", "fact_profile", "vault_read",
                  "vault_search", "session_recall"):

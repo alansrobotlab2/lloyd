@@ -1107,3 +1107,115 @@ def test_the_skill_names_a_script_that_exists():
         "the skill must name the command it runs")
     assert _SCRIPT_PATH.is_file(), (
         f"{_SCRIPT_PATH} is named by {_SKILL_PATH} but is not in the tree")
+
+
+# ── #1326: the write half of `fact_resolve` is its own writer-classified verb ──
+#
+# `fact_resolve` sat in `READ_ONLY` while `auto_resolve=true` marked the weaker
+# side of a pair `invalid_at`. That table is the predicate behind four refusals,
+# and none of them fired: plan mode (`plan_mode_blocked_tools`), a bench or eval
+# session (`_tool_sandbox.refusal`), a sessionless `call_tool` (#1053), and
+# `MCPPool._retry_safe`, which re-sends a read-only call after a transport drop
+# — so one dropped stream could re-mark a fact it had already marked. The
+# marking now lives in `fact_resolve_apply`, a name absent from every annotation
+# table and therefore a writer everywhere; `fact_resolve` only reports.
+
+def _resolve_pair(facts_root):
+    """A contradictory pair with one clearly weaker side, ids `stat-001`/`-002`."""
+    _write_facts(facts_root, "Lloyd", "state", [
+        {"fact": "the feature is enabled", "confidence": 0.9, "created_at": _days_ago(2)},
+        {"fact": "the feature is disabled", "confidence": 0.5, "created_at": _days_ago(30)},
+    ])
+
+
+def _fact_rows(facts_root, entity="Lloyd", category="state"):
+    raw = (facts_root / entity / f"{entity}-{category}.md").read_text(encoding="utf-8")
+    return {f["id"]: f for f in yaml.safe_load(raw.split("---")[1])["facts"]}
+
+
+def test_fact_resolve_apply_marks_the_weaker_side_and_names_the_files(world):
+    """Clause 3, write half: it invalidates the loser, says which facts in which
+    files, and the invalidation is visible to a reader without a reindex. A count
+    that does not name the file cannot be audited — the reason #874 left the list
+    in the payload."""
+    from agent_mcp import facts as facts_mod
+    facts_root, st, _vault = world
+    _resolve_pair(facts_root)
+    _reindex(st, facts_root)
+    assert _active(st, "Lloyd") == 2, "the pair did not index as two active facts"
+    out = facts_mod._fact_resolve_apply({"entity": "Lloyd"})
+    assert out["resolved"] == 1, out
+    assert sorted((m["file"], m["id"]) for m in out["facts"]) == [
+        ("Lloyd/Lloyd-state.md", "stat-002")], out["facts"]
+    rows = _fact_rows(facts_root)
+    assert rows["stat-002"]["invalid_at"], "the lower-confidence fact was not invalidated"
+    assert not rows["stat-002"].get("expired_at"), (
+        "invalid is 'should not have been recorded'; expired is 'was true, no longer is'")
+    assert "fact_resolve_apply" in (rows["stat-002"].get("invalid_reason") or ""), (
+        "the audit line in the vault must name the verb that wrote it")
+    assert not rows["stat-001"].get("invalid_at"), "the winner lost its fact too"
+    # No `_reindex` between the mark and this count: an invalidation the index
+    # still shows as active is not an invalidation, it is a footnote in one file.
+    assert _active(st, "Lloyd") == 1, (
+        "the marked fact is still active in facts_idx after fact_resolve_apply")
+
+
+def test_fact_resolve_marks_nothing_even_when_asked_to_auto_resolve(world):
+    """Clause 3, read half: the shape that used to write is now inert, and the
+    file it used to rewrite does not change at all."""
+    from agent_mcp import facts as facts_mod
+    facts_root, _st, _vault = world
+    _resolve_pair(facts_root)
+    path = facts_root / "Lloyd" / "Lloyd-state.md"
+    before = path.read_bytes()
+    out = facts_mod._fact_resolve({"entity": "Lloyd", "auto_resolve": True})
+    assert out["resolved"] == 0, out
+    assert out["remaining"] >= 1, out
+    assert out["contradictions"], "the report stopped reporting"
+    assert "fact_resolve_apply" in json.dumps(out), (
+        "a caller that asked for the write has to be told where it went")
+    assert path.read_bytes() == before, "`fact_resolve` still writes"
+    assert not [i for i, f in _fact_rows(facts_root).items()
+                if f.get("invalid_at") or f.get("expired_at")]
+
+
+def test_the_two_fact_verbs_split_over_the_mcp_module_seam(world):
+    """The boundary a caller crosses is `agent_mcp.facts.call_tool`, not the
+    private handler: the read must come back clean and the write must arrive."""
+    from agent_mcp import facts as facts_mod
+    facts_root, _st, _vault = world
+    _resolve_pair(facts_root)
+    path = facts_root / "Lloyd" / "Lloyd-state.md"
+    before = path.read_bytes()
+    read = asyncio.run(facts_mod.call_tool(
+        "fact_resolve", {"entity": "Lloyd", "auto_resolve": True}))
+    assert not (getattr(read, "isError", False) or getattr(read, "is_error", False)), read
+    assert json.loads(read.content[0].text)["resolved"] == 0
+    assert path.read_bytes() == before, "the read verb wrote to the tree"
+    applied = asyncio.run(facts_mod.call_tool(
+        "fact_resolve_apply", {"entity": "Lloyd"}))
+    assert json.loads(applied.content[0].text)["resolved"] == 1
+    assert path.read_bytes() != before
+
+
+def test_fact_resolve_apply_is_a_registered_writer_and_resolve_stays_a_reader():
+    """The classification is the fix: an unlisted name is a writer by the safe
+    default in `annotations_for`, and the reader must stop advertising a
+    parameter that no longer does anything."""
+    import asyncio as _asyncio
+
+    from agent_mcp import annotations as A
+    from agent_mcp import facts as facts_mod
+    assert "fact_resolve" in A.READ_ONLY
+    assert "fact_resolve_apply" not in A.READ_ONLY | A.IDEMPOTENT | A.REPEAT_EXPECTED
+    tools = {t.name: t for t in _asyncio.run(facts_mod.list_tools())}
+    assert "fact_resolve_apply" in tools, sorted(tools)
+    assert "auto_resolve" not in (
+        tools["fact_resolve"].input_schema.get("properties") or {})
+    assert tools["fact_resolve_apply"].input_schema.get("required") == ["entity"]
+    for name in ("fact_resolve", "fact_resolve_apply"):
+        assert len(tools[name].description or "") >= 60, name
+        for pname, spec in (tools[name].input_schema.get("properties") or {}).items():
+            assert (spec.get("description") or "").strip(), f"{name}.{pname}"
+        assert "fact_resolve_apply" in (tools["fact_resolve"].description or "") \
+            or "fact_resolve_apply" in (tools[name].description or ""), name

@@ -95,7 +95,7 @@ DISALLOWED: tuple[str, ...] = (
     "browser_evaluate", "browser_fill", "browser_type", "browser_click",
     "browser_press", "browser_cookies", "browser_drag", "browser_select",
     "autonomy_write_task", "autonomy_delete_task", "autonomy_run_task",
-    "autonomy_config",
+    "autonomy_config", "autonomy_config_set",
     "research_propose", "research_next", "research_complete",
 )
 

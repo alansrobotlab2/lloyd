@@ -135,12 +135,16 @@ DISALLOWED: tuple[str, ...] = (
     # structurally incapable of seeing a fact write, so denying the tool is
     # not a second line of defence there — it is the only one.
     "memory_add", "memory_remove", "memory_replace",
+    # `fact_resolve` became a pure read on #1326 and the marking moved to
+    # `fact_resolve_apply`; both stay denied, since only the second one still
+    # writes and a stale name here costs nothing.
     "fact_add", "fact_relate", "fact_invalidate", "fact_resolve",
+    "fact_resolve_apply",
     "http_request",
     "browser_evaluate", "browser_fill", "browser_type", "browser_click",
     "browser_press", "browser_cookies", "browser_drag", "browser_select",
     "autonomy_write_task", "autonomy_delete_task", "autonomy_run_task",
-    "autonomy_config",
+    "autonomy_config", "autonomy_config_set",
     "research_propose", "research_next", "research_complete",
     "graph_refresh",
 )

@@ -170,7 +170,10 @@ STATEFUL_TOOLS: frozenset[str] = frozenset({
     "vault_write",
     # boards and schedulers
     "backlog_write_task", "autonomy_write_task", "autonomy_delete_task",
-    "autonomy_run_task", "autonomy_config",
+    "autonomy_run_task", "autonomy_config", "autonomy_config_set",
+    # `fact_resolve` was not here while it was a mislabelled read; its write half
+    # `fact_resolve_apply` is (#1326).
+    "fact_resolve_apply",
     # outbound comms
     "email_send", "email_save_draft", "email_reply", "email_forward",
     "email_delete", "email_update", "email_empty_trash", "email_empty_junk",

@@ -6,7 +6,8 @@ Provides tools for creating, listing, running, and managing autonomy tasks
 stored in ~/obsidian/autonomy/ as markdown files with YAML frontmatter.
 
 Tools: autonomy_tasks, autonomy_write_task, autonomy_get_task,
-       autonomy_delete_task, autonomy_config, autonomy_run_task
+       autonomy_delete_task, autonomy_config, autonomy_config_set,
+       autonomy_run_task
 """
 
 import asyncio
@@ -270,10 +271,49 @@ def _read_config() -> dict:
     return {}
 
 
-def _write_config(config: dict) -> None:
+#: The front-matter fence of `_config.md`. The file is read with
+#: `split("---\n", 2)`, so the *second* fence is the closing one and everything
+#: after it is prose — a rewrite must not care what that prose contains, which
+#: is why this splits rather than re-parses (#1326).
+_CONFIG_FENCE = "---\n"
+
+
+def _split_config(raw: str) -> tuple[str, dict, str] | None:
+    """`(front_matter_text, parsed, tail)` for `_config.md`, or None.
+
+    None means "this writer cannot promise a safe rewrite": no closing fence,
+    prose above the opening one, or a front matter that does not parse as a
+    mapping. `tail` is every byte below the closing fence, kept verbatim —
+    `_write_config` used to rebuild the file from the parsed front matter alone,
+    so any prose under it was discarded on every set.
+
+    The boundary is the same `split("---\n", 2)` `_read_config` uses, so the two
+    cannot disagree about where the front matter ends even when the tail itself
+    contains a line that reads like a fence (the live file's does).
+    """
+    parts = raw.split(_CONFIG_FENCE, 2)
+    if len(parts) < 3 or parts[0].strip():
+        return None
+    try:
+        frontmatter = yaml.safe_load(parts[1])
+    except yaml.YAMLError:
+        return None
+    if not isinstance(frontmatter, dict):
+        return None
+    return parts[1], frontmatter, parts[2]
+
+
+def _write_config(config: dict, tail: str = "") -> None:
+    """Rewrite the front matter and re-emit `tail` untouched.
+
+    `tail` defaults to "" only for a file that does not exist yet; every
+    existing file must hand back the bytes `_split_config` read out of it.
+    """
     AUTONOMY_DIR.mkdir(parents=True, exist_ok=True)
     config_path = AUTONOMY_DIR / "_config.md"
-    content = f"---\n{yaml.dump(config, default_flow_style=False, allow_unicode=True)}---\n\n"
+    content = (f"---\n"
+               f"{yaml.dump(config, default_flow_style=False, allow_unicode=True)}"
+               f"{_CONFIG_FENCE}{tail}")
     config_path.write_text(content, encoding="utf-8")
 
 
@@ -323,12 +363,19 @@ async def list_tools():
             },
             "required": ["id"],
         }),
-        Tool(name="autonomy_config", description="Read or change autonomy scheduler configuration. Called with no key it returns the whole config; with a key and no value it reads one setting.", inputSchema={
+        Tool(name="autonomy_config", description="Read autonomy scheduler configuration. Called with no key it returns the whole config; with a key it reads one setting. It never writes — use autonomy_config_set to change a key.", inputSchema={
             "type": "object",
             "properties": {
-                "key": {"type": "string", "description": "Config key to get/set (empty to get all)"},
-                "value": {"type": "string", "description": "Value to set (None to get key)"},
+                "key": {"type": "string", "description": "Config key to read (empty to read the whole config)"},
             },
+        }),
+        Tool(name="autonomy_config_set", description="Set one key in the autonomy scheduler config (~/obsidian/autonomy/_config.md). Writes the key into the front matter and leaves any prose below it untouched; to read instead, call autonomy_config.", inputSchema={
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "Config key to set, e.g. 'max_parallel'"},
+                "value": {"type": "string", "description": "New value, as a string the scheduler parses (e.g. '3', 'true')"},
+            },
+            "required": ["key", "value"],
         }),
         Tool(name="autonomy_run_task", description="Run an autonomy task immediately, outside its schedule. The run happens in the background; use autonomy_get_task to see the result.", inputSchema={
             "type": "object",
@@ -363,6 +410,8 @@ async def call_tool(name: str, arguments: dict):
         return text_result(_handle_delete(arguments))
     elif name == "autonomy_config":
         return text_result(_handle_config(arguments))
+    elif name == "autonomy_config_set":
+        return text_result(_handle_config_set(arguments))
     elif name == "autonomy_run_task":
         text = await _handle_run(arguments)
         return text_result(text)
@@ -562,21 +611,66 @@ def _handle_delete(params: dict) -> str:
         return json.dumps({"success": True, "id": task_id})
 
 
+#: #1326: the write left `autonomy_config`, whose name is a read and whose entry
+#: in `agent_mcp.annotations.READ_ONLY` is the predicate behind four refusals
+#: (plan mode, the bench/eval sandbox, a sessionless `call_tool`, and
+#: `MCPPool._retry_safe` re-sending the call after a transport drop). A caller
+#: that still sends `value` is pointed at the verb that does it.
+_CONFIG_WRITE_MOVED = (
+    "autonomy_config no longer writes. The write half is "
+    "autonomy_config_set(key=..., value=...); this tool reads the whole config "
+    "with no key, or one setting with a key alone.")
+
+
 def _handle_config(params: dict) -> str:
     key = params.get("key", "")
     value = params.get("value", None)
+    if value is not None:
+        return json.dumps({"error": _CONFIG_WRITE_MOVED,
+                           "use_tool": "autonomy_config_set"})
     if not key:
         return json.dumps(_read_config())
-    if value is not None:
-        config = _read_config()
-        config[key] = value
-        _write_config(config)
-        return json.dumps({"set": key, "value": value})
     else:
         config = _read_config()
         if key in config:
             return json.dumps({key: config[key]})
         return json.dumps({"error": f"Config key not found: {key}"})
+
+
+def _handle_config_set(params: dict) -> str:
+    """`autonomy_config_set`: one key into `_config.md`'s front matter, nothing else.
+
+    A writer, deliberately — see `_CONFIG_WRITE_MOVED`. It rewrites the front
+    matter and puts back the bytes below the closing fence exactly as it read
+    them, and it refuses a file whose shape it cannot round-trip rather than
+    re-emitting a fallback parse over it (the clobber rule `_write_task_file`
+    applies to task files, which is #1014).
+    """
+    key = params.get("key", "")
+    value = params.get("value", "")
+    if not key:
+        return json.dumps({"error": "key is required"})
+    config_path = AUTONOMY_DIR / "_config.md"
+    try:
+        raw = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    except OSError as exc:
+        return json.dumps({"error": f"cannot read {config_path}: {exc}"})
+    split = _split_config(raw) if raw else ("", {}, "")
+    if split is None:
+        return json.dumps({
+            "error": f"{config_path} has no parseable front matter to update "
+                     "(no closing `---` fence, prose above the opening one, or a "
+                     "front matter that is not a mapping); refusing to rewrite it",
+            "yaml_broken": True})
+    _frontmatter_text, config, tail = split
+    config[key] = value
+    try:
+        _write_config(config, tail)
+    except (OSError, yaml.YAMLError) as exc:
+        return json.dumps({"error": f"could not rewrite {config_path}: {exc}",
+                           "yaml_broken": True})
+    return json.dumps({"set": key, "value": value, "path": str(config_path),
+                       "bytes_below_front_matter": len(tail.encode("utf-8"))})
 
 
 async def _handle_run(params: dict) -> str:

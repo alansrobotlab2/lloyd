@@ -82,7 +82,9 @@ DISALLOWED: tuple[str, ...] = (
     "browser_press", "browser_cookies", "browser_drag", "browser_select",
     "backlog_write_task",
     "autonomy_write_task", "autonomy_delete_task", "autonomy_run_task",
-    "autonomy_config",
+    # #1326: the config write is `autonomy_config_set` now, so the old name in
+    # this list alone would no longer block it.
+    "autonomy_config", "autonomy_config_set",
     "research_propose", "research_next", "research_complete",
 )
 

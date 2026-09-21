@@ -45,6 +45,9 @@ NON_OWNER_DISALLOWED = [
     # Memory — block writes, allow reads
     "fact_add",
     "fact_resolve",
+    # #1326: `fact_resolve` is a read now and `fact_resolve_apply` is the write
+    # that used to hide inside it. Both stay blocked; the write is the reason.
+    "fact_resolve_apply",
     "vault_write",
     # Autonomy (all)
     "autonomy_tasks",
@@ -52,6 +55,8 @@ NON_OWNER_DISALLOWED = [
     "autonomy_get_task",
     "autonomy_delete_task",
     "autonomy_config",
+    # The write half split out of `autonomy_config` on #1326.
+    "autonomy_config_set",
     "autonomy_run_task",
     # Mission control (all)
     "chat_list_sessions",

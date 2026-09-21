@@ -4,8 +4,8 @@ Lloyd MCP Server: Facts — knowledge-graph facts and typed relationships.
 
 Tools:
     fact_get, fact_add, fact_profile, fact_check, fact_resolve,
-    fact_invalidate, fact_relate, fact_relationships, fact_path,
-    fact_neighbors  (10 tools)
+    fact_resolve_apply, fact_invalidate, fact_relate, fact_relationships,
+    fact_path, fact_neighbors  (11 tools)
 
 Data root: app.paths.VAULT_FACTS_ROOT
     (currently ~/lloyd/_pipeline/vault-derived/facts/)
@@ -607,28 +607,21 @@ def _fact_check(params: dict) -> dict:
         return _err(str(exc), ErrorCode.INTERNAL, contradictions=[], checked=0)
 
 
-def _fact_resolve(params: dict) -> dict:
-    """Report contradictions; optionally mark the weaker side invalid.
+def _resolve_scan(params: dict) -> dict:
+    """Scan one entity for contradictory pairs, with each fact file-attributed.
 
-    `auto_resolve` now defaults to FALSE. It defaulted to true, so a bare
-    `fact_resolve(entity=...)` — which reads like a query — silently expired
-    facts, and its contradiction detector fires on `_token_overlap > 0.6`,
-    which is two facts phrased similarly, not two facts that disagree.
+    One read shared by both verbs, so the report a caller acts on and the write
+    it triggers cannot disagree about which pairs exist. Returns an `_err`
+    payload — including the god-node refusal — or `{"entity", "contradictions"}`.
 
-    When it does act it sets `invalid_at` only, not `expired_at`. The two
-    mean different things: expired is "was true, no longer is"; invalid is
-    "should not have been recorded". A same-confidence pair is left alone —
-    there is no basis to pick a winner.
-
-    Refuses outright on an entity above FACT_GODNODE_THRESHOLD facts, where
-    the pairwise scan is O(n²) and the overlap heuristic produces mostly
-    false positives.
+    Refuses outright on an entity above FACT_GODNODE_THRESHOLD facts, where the
+    pairwise scan is O(n²) and the overlap heuristic produces mostly false
+    positives. The scan runs for the write too: an unbounded scan is exactly as
+    dangerous from a verb that marks as from one that reports.
     """
     entity = params.get("entity", "").strip()
     if not entity:
         return _err("entity is required", ErrorCode.MISSING_PARAM)
-    auto_resolve = bool(params.get("auto_resolve", False))
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:
         # Read with a file attribution, because a loser selected by id alone is
         # a loser that cannot be written safely — see `fact_identity`. This read
@@ -640,15 +633,60 @@ def _fact_resolve(params: dict) -> dict:
         if detection.get("refused"):
             return _err(detection["hint"], ErrorCode.INVALID_PARAM,
                         resolved=0, remaining=0)
-        contradictions = detection.get("contradictions", [])
-        if not auto_resolve:
-            return {"entity": entity, "resolved": 0,
-                    "contradictions": contradictions[:20],
-                    "remaining": len(contradictions),
-                    "hint": ("Reporting only. Pass auto_resolve=true to mark the "
-                             "lower-confidence side invalid, or use fact_invalidate "
-                             "to expire a specific fact.")}
+        return {"entity": entity,
+                "contradictions": detection.get("contradictions", [])}
+    except Exception as exc:
+        return _err(str(exc), ErrorCode.INTERNAL, contradictions=[], checked=0)
 
+
+def _fact_resolve(params: dict) -> dict:
+    """Report the contradictory pairs on an entity. Marks nothing.
+
+    It used to take `auto_resolve`, and the marking sat behind it in the same
+    handler — so the tool whose name is a read was annotated read-only and drew
+    none of the refusals that classification is supposed to carry (plan mode,
+    the bench/eval sandbox, a sessionless call, a transport-drop retry). The
+    write is `fact_resolve_apply` now (#1326); a caller that still passes
+    `auto_resolve` gets the report and is pointed at the verb that acts.
+
+    A same-confidence pair is left alone in both verbs — there is no basis to
+    pick a winner, and the detector fires on `_token_overlap > 0.6`, which is
+    two facts phrased similarly, not two facts that disagree. That is why the
+    write is a separate call a caller has to name.
+    """
+    scanned = _resolve_scan(params)
+    if "error" in scanned:
+        return scanned
+    contradictions = scanned["contradictions"]
+    return {"entity": scanned["entity"], "resolved": 0,
+            "contradictions": contradictions[:20],
+            "remaining": len(contradictions),
+            "hint": ("Reporting only. Call fact_resolve_apply(entity=...) to mark "
+                     "the lower-confidence side invalid, or use fact_invalidate "
+                     "to expire a specific fact.")}
+
+
+def _fact_resolve_apply(params: dict) -> dict:
+    """Mark the lower-confidence side of each contradictory pair `invalid_at`.
+
+    Sets `invalid_at` only, never `expired_at`: expired is "was true, no longer
+    is"; invalid is "should not have been recorded". Same-confidence pairs are
+    skipped, and a loser is only marked when it carries a file attribution — a
+    fact id is a per-file counter, so selecting by id alone is what made one
+    call invalidate 25 facts to change 2 (#874).
+
+    A writer by classification, which is the point of splitting it out: the name
+    appears in none of the annotation tables, so plan mode and a bench session
+    refuse it, a sessionless call is refused, and the pool will not re-send it
+    after a dropped transport.
+    """
+    scanned = _resolve_scan(params)
+    if "error" in scanned:
+        return scanned
+    entity = scanned["entity"]
+    contradictions = scanned["contradictions"]
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    try:
         entity_dir = _find_entity_dir(entity)
         marks: dict[tuple, str] = {}
         unattributed = 0
@@ -662,7 +700,8 @@ def _fact_resolve(params: dict) -> dict:
             if key is None:
                 unattributed += 1
                 continue
-            marks[key] = f"fact_resolve: {contradiction.get('reason', 'contradiction')}"
+            marks[key] = (f"fact_resolve_apply: "
+                          f"{contradiction.get('reason', 'contradiction')}")
         resolved = 0
         applied: dict = {"marked": 0, "matched_facts": [], "applied": 0,
                          "unapplied": [], "files_touched": []}
@@ -950,11 +989,15 @@ async def list_tools():
             }, "required": ["entity"]}),
         Tool(name="fact_check", description=f"Detect contradictions in an entity's facts. Pairwise and O(n squared), so it is refused above {FACT_GODNODE_THRESHOLD} facts — pass `category` to scan a slice.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Scan one category instead of the whole entity"}}, "required": ["entity"]}),
-        Tool(name="fact_resolve", description=f"Report contradictions between an entity's facts. Reports only unless auto_resolve=true, which marks the lower-confidence side invalid (never expired). Refused above {FACT_GODNODE_THRESHOLD} facts; pass `category` to scan a slice.", inputSchema={
+        Tool(name="fact_resolve", description=f"Report contradictions between an entity's facts. Reports only — it marks nothing; `fact_resolve_apply` is the call that marks. Refused above {FACT_GODNODE_THRESHOLD} facts; pass `category` to scan a slice.", inputSchema={
             "type": "object", "properties": {
                 "entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"},
                 "category": {"type": "string", "description": "Scan one category instead of the whole entity"},
-                "auto_resolve": {"type": "boolean", "description": "Mark the weaker side invalid (default false)"},
+            }, "required": ["entity"]}),
+        Tool(name="fact_resolve_apply", description=f"Mark the lower-confidence side of each contradictory pair on an entity `invalid_at` (never expired), and report which facts in which files it marked. Refused above {FACT_GODNODE_THRESHOLD} facts; pass `category` to act on a slice. The write half of `fact_resolve`, split out so the read stays a read: this name is classified as a writer, so plan mode and a bench or eval session refuse it.", inputSchema={
+            "type": "object", "properties": {
+                "entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"},
+                "category": {"type": "string", "description": "Apply within one category instead of the whole entity"},
             }, "required": ["entity"]}),
         Tool(name="fact_invalidate", description="Expire facts that are no longer current. Sets expired_at on matching facts.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "fact_substring": {"type": "string", "description": "Match facts containing this text"}, "ended": {"type": "string", "description": "ISO date when fact stopped being true"}, "reason": {"type": "string", "description": "Why the fact was expired"}}, "required": ["entity", "ended"]}),
@@ -979,6 +1022,7 @@ async def call_tool(name: str, arguments: dict):
     handlers = {
         "fact_get": _fact_get, "fact_add": _fact_add, "fact_profile": _fact_profile,
         "fact_check": _fact_check, "fact_resolve": _fact_resolve,
+        "fact_resolve_apply": _fact_resolve_apply,
         "fact_invalidate": _fact_invalidate,
         "fact_relate": _fact_relate, "fact_relationships": _fact_relationships,
         "fact_path": _fact_path, "fact_neighbors": _fact_neighbors,

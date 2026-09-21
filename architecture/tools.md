@@ -17,7 +17,7 @@ relations:
   - autonomy/38-nightly-reflection-signals.md
   - architecture/autonomy-jobs.md
 tags: [architecture, tools, mcp]
-summary: The lloyd-mcp aggregator — 155 tools across 27 modules behind one
+summary: The lloyd-mcp aggregator — 157 tools across 27 modules behind one
   Server("lloyd") on :8500/mcp, the dispatch path every call takes, and every
   tool with its properties.
 type: reference
@@ -372,22 +372,43 @@ remembers to, which is why §10 says so.
 
 ### Classification gaps (found while writing this, 2026-09-20)
 
-Four tools are classified against what they actually do. The first two are
-the direction that matters: a write treated as a read.
+Two of these are closed (#1326, 2026-09-21); two remain. The two that were
+open were the direction that matters — a write travelling under a read-only
+name — and the fix was to split, not to re-annotate:
+
+- **`autonomy_config` is a pure read** (no `value` parameter at all). The write
+  is `autonomy_config_set(key, value)`, a name absent from every annotation
+  table, so it takes the safe default — a writer everywhere.
+- **`fact_resolve` is a pure read** (no `auto_resolve` parameter). The write is
+  `fact_resolve_apply(entity, category)`, same treatment.
+
+Splitting rather than moving the names out of `READ_ONLY` is what gets all four
+refusals *and* stops the double-send: a name moved out and left unannotated
+would be replayed from the effect ledger inside one scope (`_tool_effects.py`),
+suppressing a bare `autonomy_config()` re-read, and adding it to `IDEMPOTENT` to
+escape that restores `idempotentHint`, which `_retry_safe` also honours. The read
+halves refuse a write argument in their handler and name the tool that does it,
+so an old prompt loses nothing but the write.
+
+`autonomy_config_set` also stops discarding the file's body: it splits on the
+front-matter fence, so the bytes below it survive byte-for-byte, and it refuses a
+file whose front matter it cannot parse instead of re-emitting a fallback over it.
 
 | Tool | Classified | Does | Consequence |
 |---|---|---|---|
-| `autonomy_config` | RO | **writes** `~/obsidian/autonomy/_config.md` when `key` and `value` are both passed, re-dumping the front matter and dropping any body | allowed in plan mode, allowed in a bench/eval session (a vault write the sandbox exists to prevent), allowed with no session id, re-sent on a transport error |
-| `fact_resolve` | RO | **writes** with `auto_resolve=true`: marks the weaker facts invalid | same four |
 | `grant_list` | hint RO (module-set), not in `READ_ONLY` | reads only | blocked in plan mode and in bench sessions; ledgered as FX. Harmless, but the two readers disagree |
 | `automod_status` | RX only | reads, plus `git worktree prune` on the live repo (`round.status()` → `W.prune_orphans`), an idempotent housekeeping write | blocked in plan mode and in bench sessions. Note the prune before moving it into `READ_ONLY` |
 
-The durable fix for the first two is to split the read and write halves into
-separate tools, or to move them out of `READ_ONLY`. Either choice changes
-plan-mode behaviour, so it is left for a decision rather than made here.
-Re-checked 2026-09-21 at `a8cdd7ef`: both names are still in `READ_ONLY`, and
-`autonomy_config`'s write still rebuilds `_config.md` from the front matter
-alone, so any body below it is dropped. Filed as #1326.
+Pinned by `tests/test_autonomy_config_write.py`, `tests/test_tool_sandbox.py`,
+`tests/test_mcp_pool_retry_policy.py` and the `fact_resolve_apply` cases in
+`tests/test_memory_improvement.py`. One name in the class is still open by
+decision, not oversight: `browser_screenshot` is in `READ_ONLY` (`annotations.py:75`)
+and its handler `mkdir`s the screenshot directory and writes a PNG on every call
+(`browser.py:664-671`). It is a derived artifact, like the `graphify-out/` cache
+`annotations.py` explicitly justifies a few lines above — but that comment covers
+only `graph_*`, and `_retry_safe` re-sends it, so a dropped transport leaves two
+PNGs. Low severity: no vault state, no authority, and the duplicate is
+self-evidently a file with a fresh timestamp.
 
 ---
 
@@ -405,14 +426,14 @@ alone, so any body below it is dropped. Filed as #1326.
 | `builtin_task` | 1 | in-process subagents (§9) |
 | `builtin_todo` | 1 | the session todo list |
 | `ambient` | 2 | background producers pushing into the active chat, and the ambient turn's routing verdict |
-| `autonomy` | 7 | the scheduled-task fleet ([[autonomy]]) |
+| `autonomy` | 8 | the scheduled-task fleet ([[autonomy]]) |
 | `autoresearch` | 7 | prompt-variant rounds against the bench |
 | `backlog` | 4 | the kanban backlog. `backlog_write_task` runs write-time dedupe ([[backlog]]) |
 | `browser` | 14 | Playwright Chromium, with the SSRF guard on resolved addresses |
 | `code_graph` | 6 | structural navigation over graphify's AST extraction (§9) |
 | `discord_bot` | 4 | Discord. All four are disabled in config today |
 | `djev` | 3 | typed decisions on GPU 2's DiffusionGemma, ~40 ms each. Ranking only: the scores are not calibrated ([[djev]]) |
-| `facts` | 10 | the knowledge-graph fact layer and store ([[knowledge-graph]]) |
+| `facts` | 11 | the knowledge-graph fact layer and store ([[knowledge-graph]]) |
 | `memory_ops` | 4 | #376's four verbs. Routers over `fact_*`/`vault_*`, each adding the one guard its target lacks |
 | `vault` | 5 | the Obsidian vault: read, write, search, recall |
 | `session` | 5 | `MEMORY.md`/`USER.md`, and transcript search |
@@ -497,7 +518,8 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `autonomy_write_task` | ID | — | Create or update (upsert) a scheduled task |
 | `autonomy_get_task` | RO | `id` | One task in full, with its recent run records |
 | `autonomy_delete_task` | DX ID | `id` | Archive a task back to `draft` (the default), or delete its file with `archive=false` |
-| `autonomy_config` | RO | — | Read (or, with `value`, change) scheduler configuration |
+| `autonomy_config` | RO | — | Read scheduler configuration: the whole config with no key, one setting with a key |
+| `autonomy_config_set` | FX | `key`, `value` | Set one scheduler config key. Was the `value` half of `autonomy_config` (#1326); rewrites the front matter and leaves the body below it byte-identical |
 | `autonomy_run_task` | FX | `id` | Run a task now, inside the aggregator. The call blocks until the run ends (its own description says "background", which is wrong) |
 | `autonomy_health` | RO | — | Fleet health over N days: failures, timeouts, empty runs, GPU-hours |
 
@@ -577,7 +599,8 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `fact_add` | FX | `entity`, `category`, `fact` | Add one fact to an entity's markdown fact file and index it |
 | `fact_profile` | RO | `entity` | An entity's facts grouped by category, capped at 10 each |
 | `fact_check` | RO | `entity` | Pairwise contradiction scan (refused above 50 facts) |
-| `fact_resolve` | RO | `entity` | Report contradictions; `auto_resolve` invalidates the weaker side |
+| `fact_resolve` | RO | `entity` | Report contradictions. It marks nothing (#1326) |
+| `fact_resolve_apply` | FX | `entity` | Mark the lower-confidence side of each pair `invalid_at` (never expired). Was `fact_resolve`'s `auto_resolve` |
 | `fact_invalidate` | DX ID | `entity`, `ended` | Expire facts that stopped being true |
 | `fact_relate` | FX | `source`, `target`, `type` | Add a typed edge between two entities |
 | `fact_relationships` | RO | `entity` | An entity's inbound and outbound edges |

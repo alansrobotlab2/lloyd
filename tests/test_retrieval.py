@@ -714,13 +714,15 @@ def test_fact_resolve_reports_by_default(world):
     assert all(not f.get("invalid_at") and not f.get("expired_at") for f in fm["facts"])
 
 
-def test_fact_resolve_sets_invalid_at_only(world):
+def test_fact_resolve_apply_sets_invalid_at_only(world):
+    """#1326: the marking left `fact_resolve`, whose name is a read, and became
+    `fact_resolve_apply`, so the four read-only refusals start firing for it."""
     root, _ = world
     _write_facts(root, "Lloyd", "state", [
         {"id": "stat-001", "fact": "the feature is enabled", "confidence": 0.9},
         {"id": "stat-002", "fact": "the feature is disabled", "confidence": 0.5},
     ])
-    out = facts_mod._fact_resolve({"entity": "Lloyd", "auto_resolve": True})
+    out = facts_mod._fact_resolve_apply({"entity": "Lloyd"})
     assert out["resolved"] == 1
     fm = yaml.safe_load((root / "Lloyd" / "Lloyd-state.md").read_text().split("---")[1])
     by_id = {f["id"]: f for f in fm["facts"]}
@@ -734,7 +736,7 @@ def test_fact_resolve_leaves_equal_confidence_alone(world):
         {"id": "stat-001", "fact": "the feature is enabled", "confidence": 0.9},
         {"id": "stat-002", "fact": "the feature is disabled", "confidence": 0.9},
     ])
-    assert facts_mod._fact_resolve({"entity": "Lloyd", "auto_resolve": True})["resolved"] == 0
+    assert facts_mod._fact_resolve_apply({"entity": "Lloyd"})["resolved"] == 0
 
 
 def test_the_contradiction_scan_is_refused_on_a_god_node(world):
@@ -750,6 +752,8 @@ def test_the_contradiction_scan_is_refused_on_a_god_node(world):
     for params in ({"entity": "Lloyd", "auto_resolve": True}, {"entity": "Lloyd"}):
         out = facts_mod._fact_resolve(params)
         assert "error" in out and "refused" in out["error"], params
+    applied = facts_mod._fact_resolve_apply({"entity": "Lloyd"})
+    assert "error" in applied and "refused" in applied["error"], applied
     check = facts_mod._fact_check({"entity": "Lloyd"})
     assert "error" in check and "refused" in check["error"]
     # a narrower slice is still scannable
@@ -838,7 +842,7 @@ def test_fact_add_and_resolve_also_update_the_index(world):
     ])
     st.facts_idx.reindex(root=root)
     retrieval.invalidate_fact_file_cache()
-    assert facts_mod._fact_resolve({"entity": "Pair", "auto_resolve": True})["resolved"] == 1
+    assert facts_mod._fact_resolve_apply({"entity": "Pair"})["resolved"] == 1
     assert [f["fact_id"] for f in st.facts_idx.for_entity("Pair")] == ["stat-001"]
 
 
