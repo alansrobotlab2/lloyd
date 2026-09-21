@@ -28,6 +28,8 @@ import pytest
 
 import prompt_surface as ps
 
+from scripts.automod import gate as G
+
 
 # A minimal contract that satisfies every invariant: all nine load-bearing
 # markers, three gate roles, gate stack and prohibition ratio under their
@@ -465,10 +467,22 @@ def test_gate_tests_rung_excludes_live_vault_assertions():
 
     Without this the two halves drift silently — the mark exists, the tests
     carry it, and the gate keeps running them anyway.
+
+    The literal widened on 2026-09-21 for #644 clause 4, which requires a bare
+    `pytest -q` — the shape of this very rung — to collect zero fault-injecting
+    tests. The assertion is deliberately about `"-m", <expr>` being *adjacent*,
+    which is a different claim from the count the degradation contract test
+    makes: pytest consumes exactly one argument after `-m`, so an expression
+    split across two argv elements would hand pytest `-m not` and a stray
+    `not live_vault...` file argument, deselecting nothing while looking right.
     """
     src = (Path(__file__).resolve().parent.parent
            / "scripts" / "automod" / "gate.py").read_text(encoding="utf-8")
-    assert '"-m", "not live_vault"' in src
+    assert '"-m", TESTS_MARK_EXPR' in src, (
+        "every pytest site must pass the expression as the one argument pytest's `-m` takes; "
+        "a second `-m` flag would replace the first and silently drop the live_vault exclusion")
+    assert f'TESTS_MARK_EXPR = "{G.TESTS_MARK_EXPR}"' in src, (
+        "the expression has to be defined once in the gate, not retyped at each site")
 
 
 # ── #797: the mark that moved one node, pinned across the selection seam ─────

@@ -689,7 +689,7 @@ def test_only_the_nodes_that_are_new_get_re_run(tmp_path, monkeypatch):
         g.rung_tests()
     finally:
         git(repo, "worktree", "remove", "--force", str(wt))
-    suite = [c for c in argv if c[1:3] == ["-m", "pytest"] and c[-1] == "not live_vault"]
+    suite = [c for c in argv if c[1:3] == ["-m", "pytest"] and c[-1] == G.TESTS_MARK_EXPR]
     repeats = [c for c in argv
                if c[1:3] == ["-m", "pytest"] and "--continue-on-collection-errors" not in c
                and c != suite[0]]

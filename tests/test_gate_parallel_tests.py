@@ -24,6 +24,11 @@ import pytest
 from scripts.automod import gate as G
 
 SUMMARY_OK = "5895 passed, 13 skipped, 2 xfailed in 70.10s\n"
+# The rung's `-m` expression, as one argv element, read from the gate rather than copied: it
+# widened on 2026-09-21 for #644 clause 4, and three tests below assert the argv it builds, so
+# a local copy would be a second place the expression exists and a widening would redden three
+# assertions that all say the same thing. `test_degradation_contract.py` pins its VALUE.
+GATE_MARK_EXPR = G.TESTS_MARK_EXPR
 LOAD_FLAKE = "tests/test_edit_diagnostics.py::test_a_cross_file_break_names_its_caller[rename_function]"
 
 
@@ -55,7 +60,7 @@ def test_a_full_run_uses_the_configured_workers_grouped_by_file(tmp_path, monkey
     script.append((0, SUMMARY_OK))
     r, text, counts = g._run_suite(None)
     assert r.returncode == 0 and calls == [[sys.executable, "-m", "pytest", "-q", "-m",
-                                            "not live_vault", "-n", "8", "--dist", "loadfile"]]
+                                            GATE_MARK_EXPR, "-n", "8", "--dist", "loadfile"]]
     assert counts["workers"] == 8 and counts["passed"] == 5895
     # `loadfile`, not the default: a file's module-scoped fixtures (a booted
     # uvicorn, a temp repo) are built once per file, as they always were.
@@ -68,7 +73,7 @@ def test_a_failure_under_load_that_passes_serially_is_a_pass_and_is_named(tmp_pa
     script.append((0, "53 passed in 1.39s\n"))
     r, _text, counts = g._run_suite(None)
     assert r.returncode == 0, "a fact about the box was taken for a fact about the change"
-    assert calls[1] == [sys.executable, "-m", "pytest", "-q", "-m", "not live_vault",
+    assert calls[1] == [sys.executable, "-m", "pytest", "-q", "-m", GATE_MARK_EXPR,
                         "tests/test_edit_diagnostics.py"], "re-asked serially, that file only"
     assert counts["failed"] == 0 and counts["passed"] == 5896
     assert counts["parallel_only_failures"] == [LOAD_FLAKE]
@@ -112,7 +117,7 @@ def test_a_parallel_failure_that_names_no_file_re_runs_the_whole_suite_serially(
     script.append((3, "INTERNALERROR> worker 'gw3' crashed\n"))
     script.append((0, SUMMARY_OK))
     r, _text, counts = g._run_suite(None)
-    assert r.returncode == 0 and "-n" not in calls[1] and calls[1][-1] == "not live_vault"
+    assert r.returncode == 0 and "-n" not in calls[1] and calls[1][-1] == GATE_MARK_EXPR
     assert counts["serial_rerun"] == "whole suite"
 
 

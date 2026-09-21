@@ -376,11 +376,14 @@ def test_promote_defines_no_new_threshold_constant():
 
 
 #: Every key either per-trial ledger writer emits, and a superset of every key
-#: `ledger.jsonl` has ever carried. Measured, not remembered: the live ledger holds
-#: 30,764 per-trial rows whose keys union to 25 — the writers have grown by
-#: `rubric_status` and `rubric_excluded` (#646) since the last round was written, which
-#: is why the pin is the writers' own output cross-checked against the file (the two
-#: tests below) rather than one number transcribed from one era's rows. #595 clause 6:
+#: `ledger.jsonl` has ever carried. Measured, not remembered: the live ledger held
+#: 30,868 per-trial rows on 2026-09-21 whose keys union to all 27 — #646's
+#: `rubric_status` and `rubric_excluded` were absent from the file until its first
+#: round ran, which is why the pin is the writers' own output
+#: (`test_the_round_writer_emits_the_published_per_trial_keys` /
+#: `test_the_ondemand_writer_emits_the_same_per_trial_keys`) cross-checked against the
+#: file (`test_the_published_key_sets_cover_every_key_the_ledger_already_carries`)
+#: rather than one number transcribed from one era's rows. #595 clause 6:
 #: a per-trial transcript field is #884's change, and it has to be added HERE, with
 #: #884 named, in the commit that also moves #428's denominator.
 PUBLISHED_TRIAL_KEYS = {
@@ -392,11 +395,28 @@ PUBLISHED_TRIAL_KEYS = {
     "tool_call_count", "tool_search_enabled", "trace_status", "turns", "variant_id",
 }
 
-#: A `decision` row's unconditional keys. The live ledger's 2,400 decision rows union
-#: to exactly these seven — the #646 validity keys are conditional and no round has
-#: written them yet, which is why they are pinned separately below.
+#: A `decision` row's unconditional keys: the floor, never a ceiling. A row written by
+#: a round whose bench lint could not run is exactly these seven —
+#: `test_the_validity_keys_stay_conditional_on_the_decision_row` pins that — while a
+#: linted row is these seven plus `CONDITIONAL_VALIDITY_KEYS` below. #646 landed that
+#: widening, so the live ledger's 2,407 decision rows (read 2026-09-21) union to 16
+#: keys, not 7; the census below admits the conditional ones and nothing else.
 PUBLISHED_DECISION_KEYS = {"round_id", "event", "variant_id", "should_promote",
                            "reason", "promoted", "created_at"}
+
+#: The keys `run_round.decision_ledger_row` puts on top of the seven when the bench
+#: lint ran: the eight #646 validity fields it flattens onto the row (`promote_valid`,
+#: `reason_valid`, `means_agree`, `all_task_mean`, `valid_task_mean`, `valid_tasks`,
+#: `excluded_tasks`, `safety_outside_valid_pool`) plus `bench_validity`, the copy of
+#: the whole validity dict it appends when that dict is non-empty. The set is pinned
+#: against the writer's own output by
+#: `test_the_conditional_key_set_is_what_the_writer_flattens`, not transcribed from a
+#: round's log: a name here the writer never emits would be invisible to the census,
+#: which can only ever see a key that was actually written.
+CONDITIONAL_VALIDITY_KEYS = {"promote_valid", "reason_valid", "means_agree",
+                             "all_task_mean", "valid_task_mean", "valid_tasks",
+                             "excluded_tasks", "safety_outside_valid_pool",
+                             "bench_validity"}
 
 #: The names #884's rollout transcript and judge rationale would most plausibly use.
 #: The general pin is the subset check against `PUBLISHED_TRIAL_KEYS` — any new key of
@@ -484,6 +504,38 @@ def test_the_validity_keys_stay_conditional_on_the_decision_row(tmp_path):
     assert linted["reason"] == refusal["reason"], "validity rides alongside, not over"
 
 
+def test_the_conditional_key_set_is_what_the_writer_flattens():
+    """`CONDITIONAL_VALIDITY_KEYS` is the writer's own output, not a list of names.
+
+    A validity dict carrying all eight #646 fields — the shape the bench lint hands
+    `decision_ledger_row` on a round where it ran — must produce a row whose keys
+    outside the seven published ones are exactly that set, and a validity dict carrying
+    two of them must produce a strict subset. The census admits this set, and the
+    census can only ever observe a key that was written, so a name here the writer does
+    not emit would sit untested: this node catches a dropped field, an invented one, and
+    (via the count) a swap that keeps the size the same.
+    """
+    from scripts.autoresearch import run_round
+
+    refusal = {"variant_id": "V_1", "should_promote": False,
+               "reason": f"{promote.REFUSAL_WIN_FRACTION} (0.12 < 0.5)"}
+    all_eight = {"promote_valid": True, "reason_valid": True, "means_agree": False,
+                 "all_task_mean": 0.4100, "valid_task_mean": 0.4400, "valid_tasks": 9,
+                 "excluded_tasks": ["bench_000_dud"],
+                 "safety_outside_valid_pool": []}
+    full = run_round.decision_ledger_row("R_1", {**refusal, "validity": all_eight}, None)
+    assert set(full) - PUBLISHED_DECISION_KEYS == CONDITIONAL_VALIDITY_KEYS, \
+        sorted(set(full) ^ (PUBLISHED_DECISION_KEYS | CONDITIONAL_VALIDITY_KEYS))
+    assert len(CONDITIONAL_VALIDITY_KEYS) == 9, sorted(CONDITIONAL_VALIDITY_KEYS)
+
+    partial = run_round.decision_ledger_row(
+        "R_1", {**refusal, "validity": {"means_agree": True, "promote_valid": True}},
+        None)
+    extra = set(partial) - PUBLISHED_DECISION_KEYS
+    assert extra and extra < CONDITIONAL_VALIDITY_KEYS, sorted(extra)
+    assert len(all_eight) == 8, "the writer flattens eight fields, plus the dict copy"
+
+
 def test_the_win_fraction_reason_reaches_the_ledger_byte_identical(tmp_path):
     """The census counts the strict-win leg by matching `promote.REFUSAL_WIN_FRACTION`
     against the stored reason, so the prefix is a contract between the predicate and
@@ -559,21 +611,27 @@ def test_the_ondemand_writer_emits_the_same_per_trial_keys():
 
 
 def test_the_published_key_sets_cover_every_key_the_ledger_already_carries():
-    """The other direction, against the file: both frozen sets above are supersets of what
-    `ledger.jsonl` actually holds, so they are a measurement and not an allow-list somebody
-    forgot to widen.
+    """The other direction, against the file: the frozen key sets above are supersets of
+    what `ledger.jsonl` actually holds — on the decision side the admitted set is the
+    union `PUBLISHED_DECISION_KEYS | CONDITIONAL_VALIDITY_KEYS` — so they are a
+    measurement and not an allow-list somebody forgot to widen.
 
-    Over the 30,764 per-trial rows in the live ledger the keys union to 25 — two fewer than
-    either writer emits today, because #646's `rubric_status`/`rubric_excluded` landed after
-    the last round ran — and over the 2,400 decision rows they union to exactly the seven
-    published keys, because no round has yet had the bench lint write a validity field. So
-    the writers' sets are ahead of the file and the file is never ahead of the writers,
-    which is the only ordering under which clause 6 means something: a per-trial transcript
-    key would have to be added here first, with #884 named.
+    Counted in the live ledger on 2026-09-21: 30,868 per-trial rows and 2,407 decision
+    rows. The trial keys union to all 27 of `PUBLISHED_TRIAL_KEYS` — #646's
+    `rubric_status`/`rubric_excluded` are in the file now, so that arm holds with
+    equality today while the assertion stays a subset check. The decision keys union to
+    the seven published keys plus the conditional #646 validity fields: 7 of those
+    2,407 rows carry a validity key, the first being round `R_20260921_175534` at
+    2026-09-21T17:59:34Z, the first decision written after #646 landed its writer. So
+    the decision arm admits the seven plus `CONDITIONAL_VALIDITY_KEYS` — a set pinned
+    to the writer, never to this file — and the `n_validity >= 1` assert below keeps
+    that admission from passing on a corpus where no row ever carried a conditional
+    key. What stays strict is the trial arm: a per-trial transcript key would still
+    have to be added to `PUBLISHED_TRIAL_KEYS` first, with #884 named.
     """
     trial_keys: set[str] = set()
     decision_keys: set[str] = set()
-    n_trial = n_decision = 0
+    n_trial = n_decision = n_validity = 0
     for row in rfs.read_jsonl(live_ledger()):
         if row.get("event") in (None, "") and row.get("task_id"):
             trial_keys |= set(row)
@@ -581,10 +639,17 @@ def test_the_published_key_sets_cover_every_key_the_ledger_already_carries():
         elif row.get("event") == "decision":
             decision_keys |= set(row)
             n_decision += 1
+            if set(row) - PUBLISHED_DECISION_KEYS:
+                n_validity += 1
     assert n_trial > 25_000 and n_decision > 2_000, (n_trial, n_decision)
     assert trial_keys <= PUBLISHED_TRIAL_KEYS, sorted(trial_keys - PUBLISHED_TRIAL_KEYS)
-    assert decision_keys <= PUBLISHED_DECISION_KEYS, \
-        sorted(decision_keys - PUBLISHED_DECISION_KEYS)
+    assert decision_keys <= PUBLISHED_DECISION_KEYS | CONDITIONAL_VALIDITY_KEYS, \
+        sorted(decision_keys - (PUBLISHED_DECISION_KEYS | CONDITIONAL_VALIDITY_KEYS))
+    assert n_validity >= 1, (
+        f"no decision row in {n_decision} carries a key outside the seven published "
+        "ones, so the conditional admission above is untested allowance rather than "
+        "coverage; #646's keys reached the ledger with R_20260921_175534 on 2026-09-21 "
+        "and 7 rows carried them that day")
 
 
 def write_written_round(ledger_path: Path, *, rid: str, base_scores: dict,

@@ -1,0 +1,433 @@
+# Lloyd degradation matrix (#644)
+#
+# One row per (consumer, dependency, fault, declared behavior). This is the spec
+# that the fault-injecting runner (`runner.py` in this directory) executes: for
+# each row it makes the fault happen **for real** against a fixture stand-in of
+# the dependency, calls the consumer that reads it in production, and prints what
+# the consumer reported. Nothing here mocks a dependency — the listener answers,
+# the file is deleted, the socket table is empty.
+#
+# Provenance of the method: Shopify's Toxiproxy work (Simon Eskildsen), where the
+# matrix of "when component X is down, service Y must behave like Z" was written
+# down *first* and the tests came after. Rows therefore carry an `incident` — a
+# real failure that motivated the row, resolving to a backlog item or a vault note
+# — or the literal `unmotivated`. An auto-generated row would just be another way
+# to produce green tests that assert nothing.
+#
+# Field meanings:
+#   dependency          what fails. Named as it is consumed, not as a service manager entry.
+#   consumer            the code that reads it and has to survive the fault:
+#                       `<path>::<function>`, resolved live by the runner (so a
+#                       renamed function fails the run, not the row).
+#   fault               the injected condition, in words.
+#   injection           how the fault is made real. Every value here is a fixture:
+#                       `fixture-listener` binds a free port the caller owns,
+#                       `fixture-state` writes a temp directory, `fixture-proc`
+#                       synthesises a /proc layout. The runner refuses a fault whose
+#                       target a live process already holds — injecting into the
+#                       services that are serving Alan is how you manufacture the
+#                       false-DOWN report this matrix exists to prevent.
+#   declared_behavior   what the consumer must do, in prose, for a human.
+#   expect              what the runner asserts, machine-checked: `reported` is the
+#                       token the adapter emits, `contains` are strings that must
+#                       appear in the evidence line.
+#   incident            `backlog/<file>.md`, `knowledge/<...>.md`, `autonomy/<...>.md`,
+#                       `skills/<...>` or the literal `unmotivated`.
+#
+# Run: python3 -m tests.degradation.runner --check   (headless, CPU, no cloud)
+
+rows:
+  # ---------------------------------------------------------------- HTTP legs
+  # The consumer is `check_endpoints` in the vault health checker. The faults are
+  # injected on a fixture listener, never on the live port: what is under test is
+  # how the consumer *reports*, and that does not require the real vLLM to break.
+  - id: D-HTTP-404-IGNORED
+    dependency: vllm:8096
+    consumer: skills/system-health-check/system_health_check.py::check_endpoints
+    fault: the health endpoint the probe constant names returns HTTP 404 while the port still answers
+    injection: fixture-listener
+    probe: http
+    args: {code: 404, ignore_404: true}
+    declared_behavior: >-
+      A 404 is the server saying it has no such route: that is `route-absent`, it
+      is not healthy, and the row names the endpoint constant as the thing to fix.
+      Until #644 this row reported `healthy: True, note: '404'`.
+    expect:
+      reported: route-absent
+      contains: ["endpoint constant", "healthy=False"]
+    incident: backlog/644-inject-dependency-faults-and-assert-a-declared-deg.md
+    fixed_by: vault 41f545e5 (#644)
+
+  - id: D-HTTP-404-PLAIN
+    dependency: llama.cpp:8091
+    consumer: skills/system-health-check/system_health_check.py::check_endpoints
+    fault: an endpoint that never opted out of status-code strictness returns 404
+    injection: fixture-listener
+    probe: http
+    args: {code: 404}
+    declared_behavior: a non-2xx is `no-answer` and never healthy; there is no implicit tolerance
+    expect:
+      reported: no-answer
+      contains: ["HTTP 404", "healthy=False"]
+    incident: backlog/644-inject-dependency-faults-and-assert-a-declared-deg.md
+
+  - id: D-HTTP-200-NOT-JSON
+    dependency: lloyd-backend:8080
+    consumer: skills/system-health-check/system_health_check.py::check_endpoints
+    fault: the endpoint answers 200 with a body that is not the payload it promises
+    injection: fixture-listener
+    probe: http
+    args: {code: 200, body: "<html> captive portal </html>", expect_payload: json}
+    declared_behavior: >-
+      A status code is not a payload. `expect: json` makes a 200 whose body is not
+      JSON `payload-unexpected`, so a dependency that returns 200-with-wrong-bytes
+      cannot be concluded healthy — the row shape the source item called "consumer
+      concludes success on a response that proves the dependency is not answering".
+    expect:
+      reported: payload-unexpected
+      contains: ["not the promised JSON payload"]
+    incident: backlog/644-inject-dependency-faults-and-assert-a-declared-deg.md
+    fixed_by: vault 41f545e5 (#644)
+
+  - id: D-HTTP-REFUSED
+    dependency: agent-tts
+    consumer: skills/system-health-check/system_health_check.py::check_endpoints
+    fault: nothing is listening on the port (connection refused)
+    injection: fixture-listener-closed
+    probe: http
+    args: {closed: true}
+    declared_behavior: >-
+      `no-answer` with the refusal named; a dead dependency is never reported as idle
+    expect:
+      # The fault here removes the input rather than degrading it, so the only
+      # admissible answer is a named non-healthy verdict. Pinned per consumer by
+      # tests/test_degradation_consumers.py and structurally by the contract test (#644 clause 6).
+      non_healthy: true
+      reported: no-answer
+      contains: ["Connection refused", "healthy=False"]
+    incident: unmotivated
+
+  - id: D-HTTP-SILENCE
+    dependency: qmd-daemon
+    consumer: skills/system-health-check/system_health_check.py::check_endpoints
+    fault: the socket accepts the connection and then never replies (a hung worker, not a dead one)
+    injection: fixture-listener
+    probe: http
+    args: {silence: true, timeout: 0.25}
+    declared_behavior: >-
+      A dependency that accepts and stalls is `no-answer`, reported within the
+      declared timeout rather than hanging the whole report — a hung probe is how a
+      health check stops being evidence at all.
+    expect:
+      # The fault here removes the input rather than degrading it, so the only
+      # admissible answer is a named non-healthy verdict. Pinned per consumer by
+      # tests/test_degradation_consumers.py and structurally by the contract test (#644 clause 6).
+      non_healthy: true
+      reported: no-answer
+      contains: ["healthy=False"]
+    incident: unmotivated
+
+  - id: D-HTTP-TLS-PORT-OFFERED-AS-PLAIN
+    dependency: mc-frontend:5173
+    consumer: skills/system-health-check/system_health_check.py::check_endpoints
+    fault: the derived scheme is https while the service actually speaks plain HTTP on that port
+    injection: fixture-listener
+    probe: http
+    args: {code: 200, urls: [https, http], tls: none}
+    declared_behavior: >-
+      The scheme mismatch is retried on the scheme that answers and the row says it
+      was a mismatch: a service that is up is never reported DOWN because one
+      derived scheme went stale (#575).
+    expect:
+      reported: answered
+      contains: ["scheme mismatch"]
+    incident: backlog/575-system-health-check-never-probes-5173-and-its-tls-.md
+
+  - id: D-HTTP-TLS-TRUST-FAILED
+    dependency: mc-frontend:5173
+    consumer: skills/system-health-check/system_health_check.py::check_endpoints
+    fault: the port speaks TLS but the certificate is not trusted by the probing user
+    injection: fixture-listener
+    probe: http
+    args: {code: 200, urls: [https], tls: self-signed}
+    declared_behavior: >-
+      A trust failure is a trust problem, named as one, and is not healthy. It is
+      not a DOWN either: the service answered in TLS. The 2026-09-09 report read a
+      plain-HTTP probe of this TLS port as "MC UI unusable" while Alan was typing
+      into it; the message has to send a reader to the certificate, not to the
+      service manager.
+    expect:
+      reported: no-answer
+      contains: ["TLS TRUST FAILED"]
+    incident: backlog/575-system-health-check-never-probes-5173-and-its-tls-.md
+
+  # ------------------------------------------------------- on-disk vault tree
+  # `count_vault_files` is the denominator of the guardian's `data_damage` trip and
+  # of the promotion safety check. A guard whose number moves with zero note loss
+  # is not a safety check, and this one spent two items' unattended attempts on
+  # false trips.
+  - id: D-VAULT-COUNT-GIT-REPACK
+    dependency: obsidian-vault-tree
+    consumer: scripts/automod/promote.py::count_vault_files
+    fault: git removes 400 loose objects and writes one pack — .git churn with zero notes lost
+    injection: fixture-state
+    probe: vault_count
+    args: {mutation: git_repack, loose_objects: 400}
+    declared_behavior: >-
+      The protected-content count does not move. Both consumers (the promoter's
+      baseline and the guardian's live count) read `.git/**` as skipped because
+      both go through `vaultwatch.measure`, whose SKIP_DIRS is the tripwire's rule —
+      one measurement, so a repack cannot move one count and not the other.
+    expect:
+      reported: unchanged
+      contains: ["promoted=0", "guardian=0"]
+    incident: knowledge/software/guardian-data-damage-false-trip.md
+    fixed_by: add6692 (both counters through vaultwatch.measure)
+
+  - id: D-VAULT-COUNT-NOTE-LOSS
+    dependency: obsidian-vault-tree
+    consumer: scripts/automod/promote.py::count_vault_files
+    fault: 30 markdown notes are deleted, the fault the trip exists for
+    injection: fixture-state
+    probe: vault_count
+    args: {mutation: delete_notes, notes: 30, loose_objects: 400}
+    declared_behavior: >-
+      The count drops by exactly the notes, so a real loss still trips. A guard that
+      cannot see the deletion it was built for is not safe, it is only quiet.
+    expect:
+      reported: dropped
+      contains: ["promoted=-30", "guardian=-30", "porcelain_empty=True"]
+    incident: knowledge/software/guardian-data-damage-false-trip.md
+
+  # ------------------------------------------------------------- voice media
+  # The 2026-09-06 stale `rtc.node_ip` fault: the SFU advertised an address it was
+  # not bound to, no media socket existed, openWakeWord never got a sample, and
+  # every probe on the box read green. The evidence lives in the kernel's socket
+  # table, which no consumer read before #644.
+  - id: D-VOICE-CLIENT-GRANTED-NO-MEDIA
+    dependency: livekit-sfu:7880/udp-50000-51000
+    consumer: skills/system-health-check/system_health_check.py::check_voice_media
+    fault: a client holds a signalling connection while no UDP port in the media pool is bound
+    injection: fixture-proc
+    probe: voice
+    args: {media_ports: [], signal_clients: 1}
+    declared_behavior: >-
+      `no-media-socket`, not healthy, and it counts as an outage: a client was
+      promised a media plane it cannot get. This is the 2026-09-06 shape, and before
+      this probe nothing on the box could see it at all.
+    expect:
+      reported: no-media-socket
+      contains: ["healthy=False", "rtc.node_ip"]
+    incident: knowledge/software/livekit-node-ip-tailnet-drift.md
+    fixed_by: vault 2910b05c (#644)
+
+  - id: D-VOICE-PROC-UNREADABLE
+    dependency: livekit-sfu:7880/udp-50000-51000
+    consumer: skills/system-health-check/system_health_check.py::check_voice_media
+    fault: the socket table the probe reads cannot be read at all
+    injection: fixture-proc
+    probe: voice
+    args: {unreadable_proc: true}
+    declared_behavior: >-
+      `no_probe`, not healthy, and an outage. The defect family this item is named
+      for is a guard that reads its own missing input and reports OK anyway; the
+      only acceptable answer to an unreadable input is a named one.
+    expect:
+      # The fault here removes the input rather than degrading it, so the only
+      # admissible answer is a named non-healthy verdict. Pinned per consumer by
+      # tests/test_degradation_consumers.py and structurally by the contract test (#644 clause 6).
+      non_healthy: true
+      reported: no_probe
+      contains: ["healthy=False"]
+    incident: knowledge/software/livekit-node-ip-tailnet-drift.md
+    fixed_by: vault 2910b05c (#644)
+
+  - id: D-VOICE-IDLE-NOT-OUTAGE
+    dependency: livekit-sfu:7880/udp-50000-51000
+    consumer: skills/system-health-check/system_health_check.py::check_voice_media
+    fault: no media port is bound and no client is connected — the box is simply idle
+    injection: fixture-proc
+    probe: voice
+    args: {media_ports: [], signal_clients: 0}
+    declared_behavior: >-
+      `no-media-session`: named, not healthy, and **not an outage**. LiveKit
+      allocates media ports lazily per session, so calling idleness a fault would
+      put a permanent red line in the daily report — the false-DOWN failure this
+      matrix exists to prevent, arriving from the opposite direction.
+    expect:
+      reported: no-media-session
+      contains: ["healthy=False", "outage=False"]
+    incident: knowledge/software/livekit-node-ip-tailnet-drift.md
+    fixed_by: vault 2910b05c (#644)
+
+  - id: D-VOICE-NO-PROCESS
+    dependency: livekit-sfu:7880/udp-50000-51000
+    consumer: skills/system-health-check/system_health_check.py::check_voice_media
+    fault: the SFU process is not running at all
+    injection: fixture-proc
+    probe: voice
+    args: {pids: []}
+    declared_behavior: >-
+      `no-livekit-process` — an absent process and an unreadable process table are
+      different findings and send a reader to different places.
+    expect:
+      # The fault here removes the input rather than degrading it, so the only
+      # admissible answer is a named non-healthy verdict. Pinned per consumer by
+      # tests/test_degradation_consumers.py and structurally by the contract test (#644 clause 6).
+      non_healthy: true
+      reported: no-livekit-process
+      contains: ["healthy=False"]
+    incident: unmotivated
+
+  # ------------------------------------------------- gate state files (.lock)
+  # dream-consolidation's 24 h gate read the mtime of a lock file whose path Phase 5
+  # had been stamping into a deleted directory. Every stamp raised FileNotFoundError,
+  # `hours_since` came out at ~56 years, and the gate passed on every run from
+  # 2026-09-03 to 2026-09-09. The snippet is executed as written, against a fixture
+  # memory root — the same code path, the fault supplied by the runner.
+  - id: D-LOCK-STAMPED-PATH-MISSING
+    dependency: dream-consolidation-lock
+    consumer: skills/dream-consolidation/SKILL.md::LOCK_MISSING
+    fault: the lock file the gate reads does not exist, because Phase 5 stamps a different path
+    injection: fixture-state
+    probe: consolidation
+    args: {lock: absent}
+    declared_behavior: >-
+      The gate announces `LOCK_MISSING` and says the time/session gates are
+      unevaluable, instead of reading a nonexistent mtime as "very long ago" and
+      passing. Closed before this matrix: #644's triage found it already fixed, so
+      the row is a regression guard on a fixed incident.
+    expect:
+      # The fault here removes the input rather than degrading it, so the only
+      # admissible answer is a named non-healthy verdict. Pinned per consumer by
+      # tests/test_degradation_consumers.py and structurally by the contract test (#644 clause 6).
+      non_healthy: true
+      reported: LOCK_MISSING
+      contains: ["unevaluable"]
+    incident: skills/dream-consolidation/SKILL.md
+
+  - id: D-LOCK-FRESH-LAST-RUN
+    dependency: dream-consolidation-lock
+    consumer: skills/dream-consolidation/SKILL.md::LOCK_MISSING
+    fault: the lock was stamped one hour ago, inside the 24 h window
+    injection: fixture-state
+    probe: consolidation
+    args: {lock: fresh}
+    declared_behavior: >-
+      `GATE_FAIL`, and the run stops. The gate has to be able to say no — a guard
+      that only ever passes is indistinguishable from no guard, whatever its input.
+    expect:
+      reported: GATE_FAIL
+      contains: ["since last consolidation"]
+    incident: unmotivated
+
+  # ------------------------------------------------------ autonomy task graph
+  # The 2026-09-08 nightly chain ran backwards: task #42 was `paused`, so it was
+  # invisible to the runnable-task filter, so its dependents' `depends_on` gate was
+  # vacuously satisfied and #39/#40 fired with nothing upstream.
+  - id: D-DEP-UPSTREAM-PAUSED
+    dependency: autonomy-task-42
+    consumer: autonomy.py::_is_task_due
+    fault: the upstream task a dependent names is paused and so absent from the runnable set
+    injection: fixture-state
+    probe: dependency
+    args: {upstream_status: paused}
+    declared_behavior: >-
+      The dependent is held: a dependency that cannot be resolved as *completed* is
+      not a dependency that is satisfied. Closed before this matrix by
+      `dependency_resolution_set` (#870, a726d33); this row is the regression guard
+      on that fix, because the failure was silent and inverted a whole nightly
+      chain.
+    expect:
+      reported: held
+    incident: knowledge/software/autonomy-dispatch-hold-reason.md
+    fixed_by: a726d33 (#870)
+
+  - id: D-DEP-DANGLING-REF
+    dependency: autonomy-task-file
+    consumer: autonomy.py::_is_task_due
+    fault: depends_on names a task id whose file does not exist at all
+    injection: fixture-state
+    probe: dependency
+    args: {dangling: 9999}
+    declared_behavior: >-
+      Fails closed: an id that resolves to no task file answers NOT met and the
+      dependent is held, which is Alan's ruling on #558 (2026-09-13) and what
+      `_is_dependency_met` does today. The #644 triage recorded the opposite — that
+      `if not dep_task: return True` still ran and #558 was an open decision — and
+      the row was written from that note; the injected fault is what disproved it.
+      This row is now the guard on the fail-closed answer: if anyone re-opens the
+      decision, this row is the thing that has to be argued with.
+    expect:
+      # The fault here removes the input rather than degrading it, so the only
+      # admissible answer is a named non-healthy verdict. Pinned per consumer by
+      # tests/test_degradation_consumers.py and structurally by the contract test (#644 clause 6).
+      non_healthy: true
+      reported: held
+    incident: backlog/558-treat-an-unresolvable-depends-on-as-not-met-so-a-p.md
+    fixed_by: "#558 ruling, in autonomy.py::_is_dependency_met"
+
+  # ---------------------------------------------------------------- kg store
+  - id: D-KG-STORE-UNOPENABLE
+    dependency: kg.sqlite
+    consumer: app/kg_store.py::KGStore
+    fault: the store file is there and is not a database (a truncated write, an interrupted restore)
+    injection: fixture-state
+    probe: kg
+    args: {mutation: corrupt}
+    declared_behavior: >-
+      `store-unavailable`. What the rule forbids is the report that reads
+      "0 entities" — an unopenable store and an empty graph are different facts, and
+      the difference is the whole 2026-08-22 wipe incident.
+    expect:
+      # The fault here removes the input rather than degrading it, so the only
+      # admissible answer is a named non-healthy verdict. Pinned per consumer by
+      # tests/test_degradation_consumers.py and structurally by the contract test (#644 clause 6).
+      non_healthy: true
+      reported: store-unavailable
+      contains: ["StoreUnavailable"]
+    incident: unmotivated
+
+  # -------------------------------------------------------- supervisor socket
+  - id: D-SUPERVISOR-SOCKET-LOST
+    dependency: supervisorctl-socket:/tmp/agent-supervisor.sock
+    consumer: skills/system-health-check/system_health_check.py::check_services
+    fault: >-
+      the unix socket supervisorctl's conf names does not exist, so the real
+      supervisorctl binary exits 4 printing one prose line to STDOUT
+    injection: fixture-state
+    probe: supervisor
+    args: {real_binary: true}
+    declared_behavior: >-
+      Not healthy, and the reason names the broken reading rather than a stopped program.
+      This row invokes the real binary on purpose: the response that has to be withstood is
+      the one supervisorctl actually sends (rc=4, `unix:///… no such file` on stdout, which
+      parses as a program named after a socket path with status `no`), not a fixture's guess
+      at it. An unrecognised status token is a broken reading, not a STOPPED service, and
+      #1191 is the clause that says the two must send a reader to different places.
+    expect:
+      non_healthy: true
+      reported: not-healthy
+    incident: skills/system-health-check/SKILL.md
+
+  - id: D-SUPERVISOR-NO-OUTPUT
+    dependency: supervisorctl-socket:/tmp/agent-supervisor.sock
+    consumer: skills/system-health-check/system_health_check.py::check_services
+    fault: the binary exits non-zero having printed nothing at all
+    injection: fixture-state
+    probe: supervisor
+    args: {stdout: empty, rc: 1}
+    declared_behavior: >-
+      Not healthy, with the emptiness named. Zero programs parsed is the vacuous
+      `all([])` pass #1191 closed; a report that says "everything running" because it
+      could not ask is this family's plainest case. This half stays a shim because the
+      binary it stands in for is one that cannot produce this response — killed by a
+      signal, or an unreadable conf — and inventing that exit is legitimate exactly when
+      the point is the absence of output, not the shape of the answer.
+    expect:
+      # The fault here removes the input rather than degrading it, so the only
+      # admissible answer is a named non-healthy verdict. Pinned per consumer by
+      # tests/test_degradation_consumers.py and structurally by the contract test (#644 clause 6).
+      non_healthy: true
+      reported: not-healthy
+    incident: skills/system-health-check/SKILL.md

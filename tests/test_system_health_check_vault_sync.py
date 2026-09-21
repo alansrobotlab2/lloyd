@@ -536,12 +536,33 @@ def test_component_selection_runs_only_the_sync_probe(rig):
 
 
 def test_skip_vault_sync_excludes_the_block(rig):
-    payload, _ = rig.json("--skip", "vault_sync", "disk", "services", "tools")
+    """`--skip vault_sync` removes the block, and checking nothing is a degraded run.
+
+    Both halves used to ride on one argv: `--skip vault_sync disk services tools` relied
+    on `--skip`'s `nargs='+'` swallowing the four names after it, so `components == []`
+    was a fact about argument parsing rather than about the check. `voice_media` joined
+    `COMPONENTS` when #644 gave the checker a media-plane probe — five components now —
+    and the swallowed list left one running, which turned the assertion into whichever
+    component happened to sit outside the skip list. Each half is now stated on its own:
+    the skip list is built from `COMPONENTS`, so a sixth component cannot quietly reopen
+    it, and the block-exclusion claim is asserted against a real selection.
+    """
+    payload, _ = rig.json("--component", "disk", "services", "tools", "--skip", "vault_sync")
     assert "vault_sync" not in payload, sorted(payload)
-    assert payload["components"] == [], payload["components"]
+    assert payload["components"] == ["disk", "services", "tools"], payload["components"]
+
     # Selecting nothing is not a pass either — the check measured nothing.
-    assert payload["overall_status"] == "degraded", payload
-    assert payload["reasons"] == ["no components were checked"], payload["reasons"]
+    empty, _ = rig.json("--skip", *shc.COMPONENTS)
+    assert empty["components"] == [], empty["components"]
+    assert empty["overall_status"] == "degraded", empty
+    assert empty["reasons"] == ["no components were checked"], empty["reasons"]
+
+    # And the component #644 added is selectable and excludable like the other four:
+    # skipping it removes its block rather than leaving a row that reads as checked.
+    skipped, _ = rig.json("--component", "disk", "--skip", "voice_media")
+    assert "voice_media" not in skipped, sorted(skipped)
+    assert skipped["components"] == ["disk"], skipped["components"]
+    assert "voice_media" in shc.COMPONENTS, shc.COMPONENTS
 
 
 def test_skipping_the_end_to_end_leg_is_a_weaker_named_state_not_green(rig):

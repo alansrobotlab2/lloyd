@@ -241,6 +241,29 @@ def _parse_pytest_summary(text: str) -> dict:
 # backlog item is what was wrong.
 EXTERNAL_PROBE_TIMEOUT = 600.0
 
+# The `-m` expression every pytest invocation in this module carries, in one place because the
+# three sites below must agree and an argv is not something a typo survives quietly.
+#
+# `not live_vault` is the pre-existing half: those assertions read the live ~/obsidian vault,
+# which no round under test controls, so on a hard rung they would fail the next author for the
+# previous writer's change (see tests/test_prompt_surface_guard.py, which pins the seam).
+#
+# `not fault_injection` is #644 clause 4: the degradation matrix's rows bind fixture ports and
+# write temp state files, and this rung runs `pytest -q` on a box whose worker pool may be live
+# serving Alan. They are excluded from the gate, never from the suite — anything that runs
+# without a narrowing `-m` still reaches them. The marker is deliberately NOT registered in
+# pytest.ini: that file is a path this loop may not write, and #644's acceptance check requires
+# the suite to land without editing it, so this expression is the only place the exclusion could
+# live, which is exactly why it is pinned (tests/test_degradation_contract.py asserts it carries
+# the marker the rows apply). Selection does not depend on registration either way — `-m`
+# matches marks applied to an item, not names listed in `ini` — so the unregistered name costs
+# one PytestUnknownMarkWarning and buys a harmless term in a candidate tree that predates
+# tests/degradation/, where it must match nothing rather than error.
+#
+# It has to be ONE argument rather than two `-m` flags: pytest's `-m` is `store`, so a second
+# occurrence replaces the first and would silently drop the `live_vault` exclusion.
+TESTS_MARK_EXPR = "not live_vault and not fault_injection"
+
 
 def _failed_node_ids(text: str) -> list[str]:
     """Node ids from pytest's short test summary, in order, deduplicated.
@@ -349,7 +372,7 @@ def _reconfirm_candidate_failures(python: Path, root: Path,
             if not pending:
                 break
             r = _run([str(python), "-m", "pytest", "-q", "--no-header",
-                      "-p", "no:cacheprovider", "-m", "not live_vault", *pending],
+                      "-p", "no:cacheprovider", "-m", TESTS_MARK_EXPR, *pending],
                      cwd=root, env=env or None, timeout=timeout)
             text = r.stdout + r.stderr
             if not _parse_pytest_summary(text)["collected"]:
@@ -422,7 +445,7 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
         # one written by the candidate run.
         r = _run([str(python), "-m", "pytest", "-q", "--no-header",
                   "-p", "no:cacheprovider", "--continue-on-collection-errors",
-                  "-m", "not live_vault", *files],
+                  "-m", TESTS_MARK_EXPR, *files],
                  cwd=wt, env=probe_env or None, timeout=EXTERNAL_PROBE_TIMEOUT)
         text = r.stdout + r.stderr
         failed = set(_failed_node_ids(text))
@@ -1168,7 +1191,7 @@ class Gate:
         per file as they always were. A partial run — the changed test files
         a re-gate gets — is seconds long and stays serial.
         """
-        base_cmd = [str(self.python), "-m", "pytest", "-q", "-m", "not live_vault"]
+        base_cmd = [str(self.python), "-m", "pytest", "-q", "-m", TESTS_MARK_EXPR]
         env = self._child_env()
 
         def serial(extra: list[str]):
