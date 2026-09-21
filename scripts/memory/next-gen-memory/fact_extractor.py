@@ -408,7 +408,10 @@ class FactExtractor:
         from a real vault note from one extracted out of the pipeline's own
         exhaust.
 
-        Returns the written path, `None` when the entity is rejected as junk.
+        Returns the written path, `None` when the entity is rejected as junk,
+        when the existing file had to be quarantined, or when every fact in the
+        batch was a copy the entity already holds and the target file does not
+        exist to fold it into (#1144).
         """
         # `enforce=False` because this is not where a name enters: every name
         # arriving from the model has been through `extract_from_document`,
@@ -453,6 +456,29 @@ class FactExtractor:
             if existing_facts is None:
                 return None            # quarantined; do not write over it
 
+            # #1144: the cross-category leak. `_merge_facts` can only see THIS
+            # file, so a fact whose text the entity already holds under another
+            # category was appended as a second indexed row. It is still
+            # happening after #499: measured on the live store at 2026-09-21
+            # 07:34Z, 95 same-entity duplicate groups have BOTH copies created
+            # on or after 2026-09-14, the day #499's refusal settled. Refuse on
+            # the same lookup `_fact_add` uses — `facts_idx.find_duplicate`,
+            # keyed `(entity, text_hash)` across every category — and inside the
+            # lock for the same reason `_fact_add` does it there: two concurrent
+            # writers must not both pass the check and both append.
+            incoming = len(new_facts)
+            new_facts = self._refuse_held_facts(entity, new_facts)
+            refused = incoming - len(new_facts)
+            if refused:
+                print(f"  ⤫ {fact_file.name}: refused {refused} duplicate fact(s) "
+                      f"{entity} already holds")
+            if refused and not new_facts and not existing_facts:
+                # The whole batch was a copy and this category file holds
+                # nothing: writing it would create an empty file behind a write
+                # that added no fact, the shape `_duplicate_refusal` (#499)
+                # avoids by never opening the file at all.
+                return None
+
             merged_facts = self._merge_facts(existing_facts, new_facts)
             merged_facts = _assign_fact_ids(merged_facts, category)
 
@@ -473,6 +499,46 @@ class FactExtractor:
 
         self._index_and_link(entity, category, fact_file, new_facts, source_doc)
         return fact_file
+
+    def _refuse_held_facts(self, entity: str, new_facts: list) -> list:
+        """The incoming facts minus any whose text `entity` already carries.
+
+        One key with `fact_add`, not two (#1144). #499 put the cross-category
+        refusal in `_fact_add` alone, so the highest-volume writer of fact files
+        kept minting the copies that guard was written to stop: of the duplicate
+        groups on the live store 2026-09-21, 95 have both rows created after
+        #499 settled. `facts_idx.find_duplicate` is the one lookup that answers
+        "does this entity already hold this text, in ANY category" — an
+        extractor-local version of it would be a second key to keep in step.
+
+        An expired or invalid copy does not refuse a new one (the store's own
+        rule): re-stating a superseded claim is a new claim. And nothing here
+        expires anything.
+
+        When the store cannot be read the list comes back whole, which is
+        exactly the pre-#1144 behaviour: `_merge_facts` still folds the copies
+        inside this one file, so an unreadable index narrows the guard to the
+        file rather than dropping facts. A failed lookup likewise keeps the
+        fact — this guard refuses writes, so failing toward writing loses
+        nothing and failing toward dropping would be a new way to lose a claim.
+        """
+        if not new_facts:
+            return new_facts
+        try:
+            facts_idx = _kg_store().facts_idx
+        except StoreUnavailable:
+            return new_facts
+        kept: list = []
+        for nf in new_facts:
+            text = str(nf.get("fact") or "") if isinstance(nf, dict) else ""
+            if text.strip():
+                try:
+                    if facts_idx.find_duplicate(entity, text):
+                        continue
+                except Exception as e:      # noqa: BLE001 - see the docstring
+                    print(f"  ⚠ duplicate lookup failed for {entity!r}: {e}")
+            kept.append(nf)
+        return kept
 
     def _read_existing_facts(self, fact_file: Path) -> list | None:
         """Existing facts, or None when the file is corrupt and was quarantined.

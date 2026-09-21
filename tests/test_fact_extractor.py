@@ -174,6 +174,98 @@ def test_merge_facts_keeps_the_copy_that_carries_an_expiry(extractor):
     ]
 
 
+# ── cross-category duplicate refusal (#1144 clause 1) ────────────────────────
+
+def test_extracting_a_text_the_entity_holds_elsewhere_leaves_one_row(extractor):
+    """#1144 clause 1: the write path that owns the corpus refuses on the store's
+    key, not on the file it is about to append to.
+
+    Of the same-entity duplicate groups on the live store at 2026-09-21 07:34Z,
+    95 have BOTH copies created on or after 2026-09-14 — after #499's refusal
+    settled — because that guard lives in `_fact_add` and nightly extraction
+    writes through here, where `_merge_facts` consults one file. A fact filed
+    under `state` and then re-extracted under `relationship` is the shape it
+    took, so that is the shape this pins.
+    """
+    e = extractor
+    e.write_fact_file("Lloyd", "state", {"facts": [_fact("serves the bench model")]})
+
+    e.write_fact_file("Lloyd", "relationship",
+                      {"facts": [_fact("serves the bench model",
+                                       category="relationship")]})
+
+    rows = kg_store.store().facts_idx.for_entity("Lloyd", include_expired=True)
+    assert [r["fact"] for r in rows] == ["serves the bench model"], rows
+    assert rows[0]["category"] == "state", rows
+    assert not (e.facts_dir / "Lloyd" / "Lloyd-relationship.md").exists(), \
+        "the refused write still created its category file"
+
+
+def test_case_and_padding_variants_refuse_on_the_stores_own_key(extractor):
+    """The extractor now refuses on `text_hash` — strip + casefold + sha256 —
+    so it refuses exactly what `facts_idx` counts as a duplicate, no looser and
+    not stricter: a re-worded claim is a different claim and still writes."""
+    e = extractor
+    e.write_fact_file("Lloyd", "state", {"facts": [_fact("Re-indexes the vault")]})
+
+    e.write_fact_file("Lloyd", "event",
+                      {"facts": [_fact("  re-indexes the vault  ", category="event")]})
+    e.write_fact_file("Lloyd", "event",
+                      {"facts": [_fact("Re-indexes the vault nightly", category="event")]})
+
+    rows = kg_store.store().facts_idx.for_entity("Lloyd", include_expired=True)
+    assert sorted(r["fact"] for r in rows) == ["Re-indexes the vault",
+                                              "Re-indexes the vault nightly"], rows
+
+
+def test_a_different_category_still_gets_a_genuinely_new_fact(extractor):
+    """The guard is keyed on text, not on the category: an earlier `state` file
+    must not swallow the entity's first `event` fact."""
+    e = extractor
+    e.write_fact_file("Lloyd", "state", {"facts": [_fact("runs on vLLM")]})
+    path = e.write_fact_file("Lloyd", "event",
+                             {"facts": [_fact("shipped 0.9 on Tuesday", category="event")]})
+
+    assert path == e.facts_dir / "Lloyd" / "Lloyd-event.md"
+    rows = kg_store.store().facts_idx.for_entity("Lloyd", include_expired=True)
+    assert len(rows) == 2, rows
+
+
+def test_an_all_duplicate_batch_does_not_create_an_empty_category_file(extractor):
+    """A refusal that opened its file would leave an empty fact file per refused
+    write — churn the index then has to carry. `_fact_add`'s refusal never opens
+    the file; this one matches, and only in that case."""
+    e = extractor
+    e.write_fact_file("Lloyd", "state", {"facts": [_fact("holds this text")]})
+
+    assert e.write_fact_file("Lloyd", "goal",
+                             {"facts": [_fact("holds this text", category="goal")]}) is None
+    assert not (e.facts_dir / "Lloyd" / "Lloyd-goal.md").exists()
+
+
+def test_the_guard_narrows_to_the_file_when_the_store_is_unreadable(extractor, monkeypatch):
+    """`_index_and_link` already degrades to a warning when the store is down, so
+    the duplicate check cannot live only in the store. With no index to consult
+    the extractor behaves exactly as it did before #1144: same-file copies are
+    still folded by `_merge_facts`, cross-category ones are not refused. Failing
+    toward writing is the deliberate direction — a guard that dropped facts
+    because it could not read would be a worse defect than the one it prevents."""
+    def no_store():
+        raise kg_store.StoreUnavailable("probe: store is closed")
+    monkeypatch.setattr(fx, "_kg_store", no_store)
+    e = extractor
+
+    e.write_fact_file("Lloyd", "state", {"facts": [_fact("captured without an index")]})
+    e.write_fact_file("Lloyd", "state", {"facts": [_fact("captured without an index")]})
+    e.write_fact_file("Lloyd", "event",
+                      {"facts": [_fact("captured without an index", category="event")]})
+
+    assert [f["fact"] for f in _read(e.facts_dir / "Lloyd" / "Lloyd-state.md")["facts"]] == \
+        ["captured without an index"]
+    assert (e.facts_dir / "Lloyd" / "Lloyd-event.md").exists(), \
+        "the degraded guard stopped writing"
+
+
 # ── LLM failure ──────────────────────────────────────────────────────────────
 
 def test_llm_failure_raises_rather_than_returning_empty(extractor, monkeypatch):
