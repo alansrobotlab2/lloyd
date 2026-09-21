@@ -137,6 +137,10 @@ FIELDS = (
 _STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 _PATTERN_RE = re.compile(r"^pattern:\s*(\S+)", re.MULTILINE)
 _OCCURRENCES_RE = re.compile(r"^occurrences:\s*(\d+)", re.MULTILINE)
+# Emitted by `mine-trajectories.py` since #515: how many mined signature buckets one
+# candidate file stands for. Absent means one bucket (a pre-#515 file, or a success or
+# sequence candidate), which is the behaviour that predates the field.
+_SIGNATURE_BUCKETS_RE = re.compile(r"^signature_buckets:\s*(\d+)", re.MULTILINE)
 
 
 def now_iso() -> str:
@@ -486,19 +490,28 @@ def record_verdict(
     return row
 
 
-def read_candidate(file: Path) -> tuple[str, str, int]:
-    """(pattern_key, status_token, occurrences) from one candidate's frontmatter."""
+def read_candidate(file: Path) -> tuple[str, str, int, int]:
+    """(pattern_key, status_token, occurrences, signature_buckets) from one candidate.
+
+    `signature_buckets` is 1 for a candidate that stands for one mined pattern: a
+    pre-#515 file, a success pattern, or an error key with a single signature behind
+    it. It is >1 only for a merged error emission unit, whose `occurrences:` is the sum
+    over every bucket behind the key rather than one pattern's count — which is why
+    `scan_candidates` treats the two cases differently.
+    """
     text = Path(file).read_text(encoding="utf-8", errors="replace")
     # Frontmatter only: `status:` also appears in mined body examples.
     head = text.split("---", 2)[1] if text.startswith("---") else text[:2000]
     pattern = _PATTERN_RE.search(head)
     status = _STATUS_RE.search(head)
     occ = _OCCURRENCES_RE.search(head)
+    buckets = _SIGNATURE_BUCKETS_RE.search(head)
     status_token = status.group(1).split()[0].strip("_*` ") if status else ""
     return (
         pattern.group(1) if pattern else "",
         status_token,
         int(occ.group(1)) if occ else 0,
+        max(1, int(buckets.group(1)) if buckets else 1),
     )
 
 
@@ -559,22 +572,35 @@ def scan_candidates(candidates_dir: Path, store: Path | str | None = None, *,
     `table` lets a caller that already resolved the verdict source (see
     `resolve_verdict_source`, and `cmd_check`) hand the loaded ledger over instead of
     reading the default store a second time.
+
+    A candidate whose frontmatter says `signature_buckets: N` with N > 1 (#515) is one
+    emission unit standing for N mined signature patterns, and its `occurrences:` is the
+    sum over all of them. The ledger's `occurrences_at_decision` for such a key was
+    recorded from ONE bucket's file (#530 seeded it before buckets were merged), so
+    comparing the two is a units error: the >10x growth reopen is not evaluated for a
+    merged unit, exactly as `mine_trajectories.verdict_for` decides from the other side
+    of the same seam. Terminality and the 60-day expiry still bind, so the set of
+    suppressed keys is the same one either program computes.
     """
     rows = []
     if table is None:
         table = load_verdicts(resolve_verdict_source(store)[0])
     for file in sorted(Path(candidates_dir).glob("candidate-*.md")):
-        key, status, occurrences = read_candidate(file)
+        key, status, occurrences, buckets = read_candidate(file)
         if not key:
             continue
         row = table.get(key)
         terminal = is_terminal(row)
-        lift = reopen_reason(row, occurrences=occurrences) if terminal else None
+        growth_baseline_free = buckets > 1
+        lift = (reopen_reason(row, occurrences=0 if growth_baseline_free
+                              else occurrences) if terminal else None)
         rows.append({
             "file": file.name,
             "pattern_key": key,
             "status": status,
             "occurrences": occurrences,
+            "signature_buckets": buckets,
+            "growth_reopen_evaluated": not growth_baseline_free,
             "verdict": (row or {}).get("verdict", ""),
             "reason": (row or {}).get("reason", ""),
             "decided_at": (row or {}).get("decided_at", ""),
@@ -591,10 +617,15 @@ def cmd_check(args: argparse.Namespace) -> int:
     rows = scan_candidates(Path(args.candidates).expanduser(), table=table)
     skipped = [r for r in rows if r["blocked"]]
     for row in rows:
+        # How many mined patterns one verdict stands in front of (#515): a coarse
+        # `Bash/logic` rejection gating 19 signatures must not read as one judgement
+        # about one pattern.
+        merged = (f" [{row['signature_buckets']} mined patterns under this key]"
+                  if row["signature_buckets"] > 1 else "")
         if row["blocked"]:
             print(
                 f"SKIP {row['pattern_key']} :: {row['verdict']} :: {row['reason']} "
-                f"(decided {row['decided_at']}, file {row['file']})"
+                f"(decided {row['decided_at']}, file {row['file']}){merged}"
             )
         elif row["reopened"]:
             print(f"REOPEN {row['pattern_key']} :: {row['reopened']}")
@@ -643,15 +674,22 @@ def cmd_seed(args: argparse.Namespace) -> int:
     the grep that re-derives that status from that file. Duplicate keys keep the
     newest file's disposition. Skips keys already in the ledger, so re-seeding after
     the key derivation changes is a re-run, not a cleanup.
+
+    A merged candidate (#515: `signature_buckets` > 1) seeds `occurrences: 0`, not its
+    `occurrences:` field: that number is the sum over every signature bucket behind the
+    key, and a baseline recorded in those units would be compared forever after against
+    counts recorded in one bucket's units. `reopen_reason` requires a baseline above 0,
+    so a seeded merged key reopens on the 60-day expiry and not on a growth ratio it
+    cannot measure — the same asymmetry `scan_candidates` and `verdict_for` apply.
     """
     table = load_verdicts(resolve_verdict_source(args.store)[0])
     newest: dict[str, tuple[Path, str, int]] = {}
     for file in sorted(Path(args.candidates).expanduser().glob("candidate-*.md")):
-        key, status, occurrences = read_candidate(file)
+        key, status, occurrences, buckets = read_candidate(file)
         if key and is_terminal({"verdict": status}):
             prev = newest.get(key)
             if prev is None or file.name > prev[0].name:
-                newest[key] = (file, status, occurrences)
+                newest[key] = (file, status, 0 if buckets > 1 else occurrences)
     seeded = 0
     for key, (file, status, occurrences) in sorted(newest.items()):
         if key in table:

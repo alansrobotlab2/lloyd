@@ -278,43 +278,62 @@ def emit_candidates(patterns: list[dict], output_dir: Path) -> list[Path]:
     re-ranked corpus need to see what the extractor is producing), but nothing
     in the non-skill class reaches skill authoring.
 
-    The list is de-duplicated because it is a list of *files*, and `main()`
-    prints one `Written:` line per entry and hands the same list to
-    `write_index()`. Before this, a run reporting 1234 candidates left 1169
-    files on disk — one entry per write attempt, not per file (#1131, clause 5).
-    Deduplicating here is also why `main()` can no longer derive its suppression
-    count as `len(all_patterns) - len(written)`: that subtraction was correct only
-    while `written` held one entry per emittable *pattern*, and it now counts
-    files, so the gate gets counted directly instead.
+    The returned list is one entry per *file*, because `main()` prints one
+    `Written:` line per entry and hands the same list to `write_index()`. It gets
+    there by refusing a collision before writing anything, not by folding one away:
+    two patterns landing on one path raise below instead of being silently
+    de-duplicated, because a folded list is how #1131's aliased sequence and #515's
+    collapsed error keys both hid — a run reporting 1234 candidates over 1169 files,
+    and, for the error class, 73 writes landing on 25 paths with the surviving file
+    holding one arbitrary bucket's evidence. That is also why `main()` measures its
+    suppression count off `is_emittable` rather than off `len(...) - len(written)`:
+    the subtraction turns a refused collision into a phantom suppression (#1131,
+    clause 5).
 
-    De-duplicating the list does not fix the other half of the mismatch. Several
-    mined *error* patterns still share one coarse `tool/error_type` key and so
-    still share one file — 72 collapsing onto 16 keys at filing — and the last
-    writer there still wins. #515 owns deciding what that adjudication unit
-    should be; this only stops the run from *reporting* a file it did not
-    create. The assertion below is sequence-scoped for the same reason: a
-    sequence's key is the n-gram itself, so its patterns genuinely are distinct
-    and every one of them is owed a file of its own.
+    Error patterns reach the writer already merged onto their candidate key
+    (`merge_error_patterns`), which is what makes the error class 1:1 by
+    construction rather than by luck: `mine_error_patterns` groups on the
+    signature too and `candidate_pattern_key` deliberately drops it, so a
+    per-pattern writer would put far more writes than keys at the paths.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    seen: set[Path] = set()
-    for pattern in patterns:
+    units = merge_error_patterns(patterns)
+    emittable = [p for p in units if is_emittable(p)]
+    # Checked over the WHOLE list, every class, BEFORE the first write. The first
+    # version of this guard looked only at `type == "error"` paths and stayed silent
+    # while a `candidate-seq-3-…` name was written twice by two distinct n-grams,
+    # which is the review's own finding against round SM_20260914_140724 (#515 clause
+    # 1: "no path appears more than once in the list returned by emit_candidates()" is
+    # a statement about the list, not about one class of it). A duplicate here is
+    # always the same defect — some key reaching the filename step where two patterns
+    # are still equal. Checking before the loop rather than after it is what turns
+    # detection into prevention: post-loop, the second write has already replaced the
+    # first file's bytes and the raise only reports the damage, while the item's own
+    # requirement is that a collision be "an error rather than a lost file".
+    names = [candidate_filename(p) for p in emittable]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        raise AssertionError(
+            f"{len(emittable)} emittable patterns resolve to {len(set(names))} "
+            f"filenames; {len(emittable) - len(set(names))} of them would be "
+            "discarded by last-writer-wins, so nothing was written. Colliding names: "
+            + ", ".join(dupes[:5]))
+    for pattern in emittable:
         path = write_candidate_file(pattern, output_dir)
-        if not path:
-            continue
-        path = Path(path)
-        if path in seen:
-            continue
-        seen.add(path)
-        written.append(path)
+        if path:
+            written.append(Path(path))
+    assert len(written) == len(emittable), (
+        f"{len(emittable)} patterns passed `is_emittable` but "
+        f"{len(written)} files came back: the writer refused a pattern the emitter "
+        "had already accepted, so `main()` would report a file that does not exist")
     # One sequence pattern = one n-gram = one key, and `mine_sequence_patterns`
-    # returns each n-gram once, so comparing distinct keys to sequence files is
-    # the whole of clause 1: a 50-character slug that folds two n-grams onto one
-    # name makes these two numbers disagree here, in the function that writes
-    # them, instead of in somebody's eyeball of a nightly log.
+    # returns each n-gram once, so comparing distinct keys to sequence files is the
+    # key-level half of the same claim: a 50-character slug that folds two n-grams
+    # onto one *key* (not just one name) leaves this pair equal while the path
+    # guard above can only see the filename (#1131 clause 2).
     sequence_keys = {
-        candidate_pattern_key(p) for p in patterns
+        candidate_pattern_key(p) for p in units
         if p.get("type") == "sequence" and is_emittable(p)
     }
     sequence_paths = [p for p in written if p.name.startswith("candidate-seq-")]
@@ -1340,6 +1359,25 @@ def candidate_pattern_key(pattern: dict) -> str:
     return f"{pattern['tool_name']}/{pattern['params_signature']}"
 
 
+def candidate_filename(pattern: dict, today: str | None = None) -> str:
+    """The file one pattern writes to: `candidate-{slug_for(key)}-{today}.md`.
+
+    `slug_for`, not `slugify`: the key of a sequence that hit the cap is longer than
+    the cap itself, so a plain `slugify` here re-cut it at 50 and put the two 5-grams
+    back onto one filename — the disambiguator arriving at byte 51 onward, exactly
+    where the cut lands. Sluging the key through the same cap-scoped rule appends a
+    hash of the *key*, which is injective on the pattern; the two mechanisms together
+    are what make one pattern own one file (#1131, clause 1).
+
+    Split out of `write_candidate_file` so `emit_candidates` can ask the collision
+    question over every class **before** its first write. Deriving the name twice by
+    two code paths is the thing to avoid, so the writer calls this too and there is
+    one rule for the name (#515, clause 1).
+    """
+    today = today or datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+    return f"candidate-{slug_for(candidate_pattern_key(pattern))}-{today}.md"
+
+
 def sequence_pattern_key(ngram_size: int, sequence_str: str) -> str:
     """The key for one mined n-gram: `seq-{n}-{slug}`, disambiguator included.
 
@@ -1361,17 +1399,159 @@ def sequence_pattern_key(ngram_size: int, sequence_str: str) -> str:
     return slug_for(f"seq-{ngram_size}-{sequence_str}")
 
 
+# How many error examples survive into one candidate file. A merged candidate
+# carries the evidence of every signature bucket behind its key, so the cap is
+# spent one bucket at a time rather than taken from whichever bucket the mined
+# dict happened to yield first — that arbitrary choice is #515's defect.
+MAX_MERGED_EXAMPLES = 5
+
+
+def _bucket_row(pattern: dict) -> dict:
+    """One mined signature bucket, in the shape a merged candidate reports it."""
+    return {
+        "params_signature": str(pattern.get("params_signature") or "generic"),
+        "occurrences": int(pattern.get("total_calls") or 0),
+        "sessions": len(pattern.get("sessions") or ()),
+        "first_seen": pattern.get("first_seen", ""),
+        "last_seen": pattern.get("last_seen", ""),
+    }
+
+
+def _merged_examples(buckets: list[dict], cap: int = MAX_MERGED_EXAMPLES) -> list[dict]:
+    """Up to `cap` examples, taken one per signature bucket on each pass.
+
+    The buckets arrive in sorted order, so reversing the mined pattern list cannot
+    change which examples reach the file — the byte-identity #515 clause 3 asks for.
+    """
+    chosen: list[dict] = []
+    for rank in range(cap):
+        for bucket in buckets:
+            examples = bucket.get("examples") or []
+            if rank < len(examples) and len(chosen) < cap:
+                chosen.append(examples[rank])
+    return chosen
+
+
+def merge_error_patterns(patterns: list[dict]) -> list[dict]:
+    """One emission unit per candidate key, carrying every bucket behind that key.
+
+    `mine_error_patterns` groups on `(tool_name, error_type, params_signature)`
+    while `candidate_pattern_key` deliberately drops the signature, because
+    `Tool/error_type` is the shape the verdict ledger adjudicates. Two things
+    follow from that mismatch, both measured over the live corpus on 2026-09-14:
+    73 mined error patterns collapse to 25 keys, so a per-pattern writer puts 73
+    writes at 25 paths and keeps only the last one (`Bash/logic`: 19 buckets, 531
+    occurrences over 340 sessions, filed with one bucket's numbers), and one
+    verdict gates every bucket behind its key.
+
+    Merging at emission respects both halves: mining keeps its finer telemetry,
+    the ledger keeps its coarse join, and each key gets one file whose
+    `occurrences:` and `sessions:` are the sum and the union over its buckets,
+    with the per-bucket breakdown printed inside the file so a reader can see how
+    many distinct mined patterns one verdict is standing in front of (#515).
+
+    Idempotent: a group of one is copied through with its own one-row breakdown,
+    so feeding a merged list back in cannot rewrite an already-merged candidate.
+    """
+    groups: dict[str, list[dict]] = {}
+    rest: list[dict] = []
+    for pattern in patterns:
+        if pattern.get("type") == "error":
+            groups.setdefault(candidate_pattern_key(pattern), []).append(pattern)
+        else:
+            rest.append(pattern)
+
+    def single(pattern: dict) -> dict:
+        """A key with one bucket behind it: same numbers, breakdown filled in.
+
+        A pattern that arrived already merged keeps its own breakdown rows rather
+        than being re-described as one bucket, which is what makes this function
+        idempotent.
+        """
+        if pattern.get("merged_buckets"):
+            return dict(pattern)
+        return dict(pattern, merged_from=1, merged_buckets=[_bucket_row(pattern)])
+
+    def combined(buckets: list[dict]) -> dict:
+        head = dict(buckets[0])
+        sessions: set = set()
+        dates: set = set()
+        for bucket in buckets:
+            sessions |= set(bucket.get("sessions") or ())
+            dates |= set(bucket.get("dates") or ())
+        head.update(
+            total_calls=sum(int(b.get("total_calls") or 0) for b in buckets),
+            sessions=sessions,
+            dates=dates,
+            examples=_merged_examples(buckets),
+            params_signature="+".join(sorted(
+                {str(b.get("params_signature") or "generic") for b in buckets})),
+            merged_from=len(buckets),
+            merged_buckets=[_bucket_row(b) for b in buckets],
+        )
+        if dates:
+            head["first_seen"] = min(dates)
+            head["last_seen"] = max(dates)
+        return head
+
+    merged = []
+    for key in sorted(groups):
+        buckets = sorted(groups[key],
+                         key=lambda b: (str(b.get("params_signature") or "generic"),
+                                        int(b.get("total_calls") or 0)))
+        if len(buckets) == 1:
+            merged.append(single(buckets[0]))
+        else:
+            merged.append(combined(buckets))
+    return merged + rest
+
+
+def merge_note(pattern: dict) -> str:
+    """What one emitted file stands for, in the units the run actually merged.
+
+    Every emitted pattern gets a statement, not only the merged ones: the count is
+    derived from `merged_buckets`, which only `merge_error_patterns` creates. A
+    pattern with no buckets of its own — a success or sequence candidate, or an error
+    one that bypassed the merge — says so instead of printing a bare `1` the run has
+    no way to know.
+    """
+    buckets = pattern.get("merged_buckets")
+    if buckets is None:
+        return "not signature-keyed (non-error candidate)"
+    if len(buckets) > 1:
+        return f"{len(buckets)} mined patterns merged onto this key"
+    return "1 mined pattern, nothing merged"
+
+
 def verdict_for(pattern: dict, store: str | Path | None = None) -> dict | None:
     """The binding terminal verdict blocking this pattern, or None if it is free.
 
     An absent ledger file returns None for every key: that is the honest empty state,
     and the runbook has to print `skipped_by_verdict: 0` out loud rather than have the
     gate pretend it saw something.
+
+    An error unit with MORE THAN ONE signature bucket behind its key (#515) skips the
+    >10x growth trigger. Its `total_calls` counts every bucket behind the key while
+    the ledger's `occurrences_at_decision` was recorded from ONE bucket's file, since
+    #530 seeded the ledger before the buckets were ever merged. Comparing the two is a
+    units error, and it would reopen exactly the multi-bucket keys on the first run
+    after the merge — re-adjudicating a stack of patterns nobody asked to reopen,
+    which is the decision Alan reserved on #515 (whether the existing coarse rows
+    should be re-adjudicated per signature). Terminality and the 60-day expiry still
+    bind, and the suppression set is therefore the same one as before the merge. The
+    candidate body says this out loud.
+
+    A key with one bucket behind it keeps the growth rule: there `total_calls` is that
+    one bucket's count, so it and the stored baseline have the same denominator and
+    zeroing it would suppress a key that is genuinely entitled to reopen.
     """
+    occurrences = int(pattern.get("total_calls") or 0)
+    if len(pattern.get("merged_buckets") or ()) > 1:
+        occurrences = 0
     return _verdicts_module().terminal_verdict(
         candidate_pattern_key(pattern),
         store=store,
-        occurrences=int(pattern.get("total_calls") or 0),
+        occurrences=occurrences,
     )
 
 
@@ -1429,20 +1609,12 @@ def write_candidate_file(pattern: dict, output_dir: Path, verdict_store: str | P
     # gets a candidate file, not a FileNotFoundError halfway through a nightly run.
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate filename
     pattern_slug = candidate_pattern_key(pattern)
     status_value, verdict_fm, _verdict = status_block(pattern, store=verdict_store)
 
-    # `slug_for`, not `slugify`: the key of a sequence that hit the cap is longer
-    # than the cap itself, so a plain `slugify` here re-cut it at 50 and put the
-    # two 5-grams back onto one filename — the disambiguator arriving at byte 51
-    # onward, exactly where the cut lands. Sluging the key through the same
-    # cap-scoped rule appends a hash of the *key*, which is injective on the
-    # pattern; the two mechanisms together are what make one pattern own one
-    # file (#1131, clause 1).
-    slug = slug_for(pattern_slug)
-    today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
-    filename = f"candidate-{slug}-{today}.md"
+    # Derived through the one function that knows the rule, so the name this writer
+    # produces is necessarily the name `emit_candidates` pre-flight-checked.
+    filename = candidate_filename(pattern)
     filepath = output_dir / filename
 
     # Generate content
@@ -1458,6 +1630,19 @@ def write_candidate_file(pattern: dict, output_dir: Path, verdict_store: str | P
 
     if pattern["type"] == "error":
         error_rate = pattern["total_calls"] / len(pattern["sessions"]) if pattern["sessions"] else 0
+        buckets = pattern.get("merged_buckets") or [_bucket_row(pattern)]
+        bucket_rows = "".join(
+            f"| `{b['params_signature']}` | {b['occurrences']} | {b['sessions']} |\n"
+            for b in buckets
+        )
+        growth_note = (
+            "\nWhile the ledger's stored baseline for this key is a single bucket's count, "
+            "the >10x growth reopen does not evaluate against a merged key (`verdict_for`): "
+            "the numbers have different denominators. The verdict still binds on its own "
+            "terms and the 60-day expiry still applies. Re-keying the coarse rows per "
+            "signature is a human decision (#515)."
+            if len(buckets) > 1 else ""
+        )
         content = f"""---
 candidate: true
 pattern: {pattern_slug}
@@ -1468,6 +1653,7 @@ sessions: {len(pattern["sessions"])}
 first_seen: {pattern["first_seen"]}
 last_seen: {pattern["last_seen"]}
 error_rate: 1.0
+signature_buckets: {len(buckets)}
 status: {status_value}{verdict_fm}
 ---
 
@@ -1476,7 +1662,12 @@ status: {status_value}{verdict_fm}
 ## Pattern Summary
 This pattern captures repeated {pattern['error_type']} errors when using the `{pattern['tool_name']}` tool. 
 These errors occur across {len(pattern["sessions"])} distinct sessions, indicating a systematic issue worth addressing.
+{len(buckets)} mined signature bucket(s) share the key `{pattern_slug}`: the two counts above are their sum and their union, and the verdict ledger adjudicates all of them together under that one key (#515).{growth_note}
 
+## Signature Buckets Behind This Key
+| Signature | Occurrences | Sessions |
+|---|---|---|
+{bucket_rows}
 ## Error Examples
 """
         for i, example in enumerate(pattern["examples"], 1):
@@ -1950,29 +2141,49 @@ def main() -> int:
     # authoring — the runbook used to dispose of it by hand, one
     # `review_reason` at a time.
     all_patterns = error_patterns + success_patterns + sequence_patterns
-    written = emit_candidates(all_patterns, output_dir)
+    # Emission units, not mined buckets: `emit_candidates` merges error patterns
+    # onto their candidate key, so this is the list its `written` result is 1:1 with
+    # in this order (`write_candidate_file` returns None exactly when `is_emittable`
+    # is False). Merging once here and handing the units to the emitter — rather than
+    # letting it merge a second copy — is what makes the zip below pair a pattern with
+    # its own file by construction instead of by two calls agreeing.
+    emitted = merge_error_patterns(all_patterns)
+    written = emit_candidates(emitted, output_dir)
+    assert len(written) == len([p for p in emitted if is_emittable(p)]), (
+        "emit_candidates and its emitted-pattern list disagree, so the per-key "
+        "report below would name the wrong files")
     candidate_files = [os.path.basename(p) for p in written]
-    # Counted from the gate, not subtracted from `written`. The arithmetic form
-    # was `len(all_patterns) - len(written)`, and while `written` held one entry
-    # per write attempt that subtraction did land on the gate's number (measured
-    # 2026-09-15: 1482 patterns, 1234 attempts, 248 reported, 248 refused by
-    # `is_emittable`) — right by coincidence of shape, never by measuring the
-    # gate. Deduplicating `written` is what breaks it: an aliased pattern would
-    # then be reported as suppressed when the gate never refused it. Counting
-    # `is_emittable` directly reports the thing the line claims (#1131, clause 5).
-    suppressed = sum(1 for p in all_patterns if not is_emittable(p))
+    # Mined error buckets folded onto their key, and emission units the gate refused
+    # — two different reasons for a file not existing, and the old single
+    # `len(all_patterns) - len(written)` conflated them the moment the merge existed.
+    merged_away = len(all_patterns) - len(emitted)
+    # Counted from the gate, not subtracted from `written`. The arithmetic form was
+    # right only by coincidence of shape, never by measuring the gate, and a
+    # de-duplicated or collided `written` turns a pattern into a phantom suppression
+    # (measured 2026-09-15: 1482 patterns, 1234 attempts, 248 reported, 248 refused by
+    # `is_emittable`). Counting `is_emittable` over the emission units reports the
+    # thing the line claims (#1131 clause 5) in the units the merge emits (#515).
+    suppressed = sum(1 for p in emitted if not is_emittable(p))
 
     # Keys the verdict ledger blocked. Reported, never silent: the number plus one
     # reason line per key is what turns "zero proposed" from an unexplained gap into a
     # decision a reader can check (#530; #391 recorded the silent-zero symptom).
-    blocked = superseded_pattern_keys(all_patterns)
+    # One line per KEY, each naming how many mined signature buckets it gates —
+    # a coarse verdict suppressing 19 patterns must not read as one judgement
+    # about one pattern (#515).
+    blocked = superseded_pattern_keys(emitted)
+    notes = {candidate_pattern_key(p): merge_note(p) for p in emitted}
 
-    for filepath in written:
-        print(f"  Written: {filepath}", file=sys.stderr)
+    for pattern, filepath in zip((p for p in emitted if is_emittable(p)), written):
+        print(f"  Written: {filepath} [{candidate_pattern_key(pattern)}: "
+              f"{merge_note(pattern)}]", file=sys.stderr)
+    print(f"  Mined error patterns merged onto a shared key: {merged_away}",
+          file=sys.stderr)
     print(f"  Suppressed as non-skill candidates: {suppressed}", file=sys.stderr)
     print(f"  Superseded by verdict: {len(blocked)}", file=sys.stderr)
     for key in blocked:
-        print(f"    superseded: {key}", file=sys.stderr)
+        print(f"    superseded: {key} ({notes.get(key, 'count unknown')})",
+              file=sys.stderr)
 
     # Write index
     write_index(candidate_files, output_dir)
@@ -1988,6 +2199,7 @@ def main() -> int:
     print(f"  Success patterns:     {len(success_patterns)}")
     print(f"  Sequence patterns:    {len(sequence_patterns)}")
     print(f"  Candidates written:   {len(candidate_files)}")
+    print(f"  Error patterns merged onto a shared key: {merged_away}")
     print(f"  Suppressed (non-skill): {suppressed}")
     print(f"  Superseded by verdict: {len(blocked)}")
     print(f"  Output directory:     {output_dir}")

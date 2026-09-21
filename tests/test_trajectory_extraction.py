@@ -27,7 +27,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1835,6 +1835,575 @@ def test_the_live_corpus_emits_one_file_per_sequence_pattern(tmp_path):
     assert not (refused_keys & set(fields)), (
         f"{sorted(refused_keys & set(fields))[:3]}: a sequence with no failing "
         "step in it still reached a candidate file")
+
+
+# ── one candidate per key, merged evidence (#515) ────────────────────────────
+#
+# `mine_error_patterns` groups on `(tool_name, error_type, params_signature)`;
+# `candidate_pattern_key` deliberately drops the signature, because `Tool/error_type`
+# is the shape the verdict ledger adjudicates (#530). Before this section the two
+# granularities met at the writer, so 73 mined error patterns went to 25 paths and
+# the last writer won: `Bash/logic` carried one bucket's numbers under a key that
+# gates 19 buckets, and the run's own `Written:` count reported 73. The fix is a
+# merge at emission (`merge_error_patterns`) — mining keeps its finer telemetry, the
+# ledger keeps its coarse join, and each key gets exactly one file whose totals are
+# the sum and the union over its buckets.
+
+MERGE_TOOL = "Mergetest515"
+
+
+def merge_rows():
+    """Two signature buckets under one key, each corroborated in two sessions.
+
+    `cmd:pytest` and `cmd:ls` are distinct `params_signature`s; both are
+    `Mergetest515/not_found`, which is the collision the item measured as
+    `Edit/not_found` on 2026-09-08 and `Bash/logic` (19 buckets) on 2026-09-14.
+    """
+    rows = []
+    for i in (1, 2):
+        rows.append(error_traj(f"pytest{i}", MERGE_TOOL, "not_found", "protocol",
+                               {"command": "pytest tests/"}))
+    for i in (1, 2, 3):
+        rows.append(error_traj(f"ls{i}", MERGE_TOOL, "not_found", "protocol",
+                               {"command": "ls -la"}))
+    return rows
+
+
+def frontmatter_field(body: str, field: str) -> str:
+    fm = body.split("---", 2)[1]
+    line = next((ln for ln in fm.splitlines() if ln.startswith(f"{field}:")), "")
+    return line.split(":", 1)[1].strip()
+
+
+def test_two_signatures_under_one_error_key_mine_as_two_buckets():
+    """The premise, pinned: the miner still sees the finer granularity. Merging is
+    an emission decision, not a mining one — `--stats` must keep the breakdown."""
+    patterns = mt.mine_error_patterns(merge_rows(), threshold=2)
+    assert len(patterns) == 2
+    assert {p["params_signature"] for p in patterns} == {"cmd:pytest", "cmd:ls"}
+    assert len({mt.candidate_pattern_key(p) for p in patterns}) == 1
+    assert mt.candidate_pattern_key(patterns[0]) == f"{MERGE_TOOL}/not_found"
+
+
+def test_the_two_buckets_emit_one_file_with_merged_totals(tmp_path):
+    """Clauses 1 + 2 + 6: one returned path, one file on disk, `occurrences:` the
+    sum over the buckets and `sessions:` the size of their union — 5 sessions and
+    5 calls here, not one bucket's 2."""
+    patterns = mt.mine_error_patterns(merge_rows(), threshold=2)
+    expected_occ = sum(p["total_calls"] for p in patterns)
+    expected_sessions = len(set().union(*(set(p["sessions"]) for p in patterns)))
+
+    written = mt.emit_candidates(patterns, tmp_path)
+    files = sorted(tmp_path.glob("candidate-*.md"))
+
+    assert len(written) == len(set(written)) == len(files) == 1, [str(p) for p in written]
+    body = files[0].read_text(encoding="utf-8")
+    assert frontmatter_field(body, "pattern") == f"{MERGE_TOOL}/not_found"
+    assert int(frontmatter_field(body, "occurrences")) == expected_occ == 5
+    assert int(frontmatter_field(body, "sessions")) == expected_sessions == 5
+    assert frontmatter_field(body, "signature_buckets") == "2"
+    # The breakdown is printed inside the file, so a reader can see how many
+    # distinct mined patterns the one verdict over this key is standing in front of.
+    assert "cmd:pytest" in body and "cmd:ls" in body
+
+
+def test_reversing_the_mined_pattern_list_writes_byte_identical_candidates(tmp_path):
+    """Clause 3: which bucket's evidence survived used to be dict iteration order."""
+    patterns = mt.mine_error_patterns(merge_rows(), threshold=2)
+    forward, backward = tmp_path / "fwd", tmp_path / "rev"
+    mt.emit_candidates(patterns, forward)
+    mt.emit_candidates(list(reversed(patterns)), backward)
+
+    names = sorted(p.name for p in forward.glob("candidate-*.md"))
+    assert names == sorted(p.name for p in backward.glob("candidate-*.md"))
+    assert len(names) == 1
+    for name in names:
+        assert (forward / name).read_bytes() == (backward / name).read_bytes()
+
+
+def test_merge_error_patterns_leaves_success_and_sequence_patterns_alone():
+    """The merge is scoped to error patterns; `emit_candidates`'s other two feeds
+    would lose their per-pattern rows if it were applied to them."""
+    seq = {"type": "sequence", "ngram_size": 2, "sequence_str": "read -> edit",
+           "sessions": {"s1", "s2"}, "total_calls": 4, "examples": [],
+           "first_seen": "2026-09-08", "last_seen": "2026-09-08"}
+    out = mt.merge_error_patterns([
+        {"type": "success", "tool_name": "Read", "params_signature": "read_limit",
+         "sessions": {"s1", "s2"}, "total_calls": 3, "examples": []}, seq])
+    assert len(out) == 2, [p["type"] for p in out]
+    assert [p["type"] for p in out] == ["success", "sequence"]
+    assert "merged_from" not in out[0] and "merged_buckets" not in out[1]
+
+
+def test_the_emitted_run_reports_one_line_per_key_with_its_merge_count(tmp_path):
+    """Clause 4, through the CLI the nightly invokes (`run_miner`: the same flags as
+    skills/trajectory-skill-mining/SKILL.md:46 over a synthetic corpus): one
+    `Written:` line per distinct key, each naming how many mined patterns merged into
+    it, and an `INDEX.md` with one entry per file written."""
+    def row(key, command):
+        return {
+            "session_key": key, "agent_id": "lloyd", "session_class": "interactive",
+            "timestamp": "2026-09-12T10:10:10Z",
+            "tool_count": 1, "error_count": 1, "has_errors": True,
+            "tools": [{"name": MERGE_TOOL, "is_error": True, "error_source": "protocol",
+                       "sequence": 0, "params_summary": {"command": command},
+                       "result_summary": "boom: no such file"}],
+            "error_tools": [{"name": MERGE_TOOL, "sequence": 0,
+                             "error_type": "not_found", "error_source": "protocol",
+                             "params_summary": {"command": command}}],
+            "signals": [],
+        }
+
+    corpus = write_traj_corpus(tmp_path / "corpus", [])
+    rows = ([row("p1", "pytest tests/"), row("p2", "pytest tests/"),
+             row("l1", "ls -la"), row("l2", "ls -la")])
+    (corpus / CORPUS_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    out = tmp_path / "cands"
+    proc = run_miner(corpus, out)
+    assert proc.returncode == 0, proc.stderr
+    report = proc.stdout + proc.stderr
+
+    written_lines = [ln for ln in report.splitlines() if "  Written: " in ln]
+    files = [p for p in out.glob("candidate-*.md")]
+    assert len(written_lines) == len(files), report
+    key_line = [ln for ln in written_lines if MERGE_TOOL.lower() in ln.lower()]
+    assert len(key_line) == 1, written_lines
+    # Before emission, at the threshold the nightly actually runs: BOTH signature
+    # buckets must qualify. Without this, the count asserted below could pass on a
+    # corpus the threshold mines down to one bucket, where there is no collision to
+    # merge at all and `1` would be the honest number.
+    previous_dir = mt.TRAJECTORY_DIR
+    mt.set_trajectory_dir(corpus)
+    try:
+        buckets = [q for q in mt.mine_error_patterns(
+            mt.load_trajectories(days=9999, agent_filter=NIGHTLY_AGENT), threshold=2)
+            if mt.candidate_pattern_key(q) == f"{MERGE_TOOL}/not_found"]
+    finally:
+        mt.set_trajectory_dir(previous_dir)
+    assert len(buckets) == 2, [mt.candidate_pattern_key(q) for q in buckets]
+
+    # The line states the count in units of the thing that was merged: 2 mined
+    # patterns became 1 file. A bare `1` is indistinguishable from a run that mined
+    # one pattern and merged nothing.
+    assert f"{MERGE_TOOL}/not_found: 2 mined patterns merged onto this key" \
+        in key_line[0], key_line[0]
+    assert re.search(r"^occurrences: 4$", files[0].read_text(), re.MULTILINE)
+    index = (out / "INDEX.md").read_text(encoding="utf-8")
+    assert len(re.findall(r"^- \[candidate-", index, re.MULTILINE)) == len(files)
+
+    # And the counts reconcile: 4 mined buckets, 1 key for this tool, so exactly the
+    # buckets that folded into another are reported as merged — never also as
+    # suppressed, which is what a single `mined - written` number conflated.
+    merge_lines = [ln for ln in report.splitlines()
+                   if "merged onto a shared key" in ln]
+    assert len(merge_lines) == 2, report          # stderr progress + SUMMARY line
+    assert all(ln.rstrip().endswith(": 1") for ln in merge_lines), merge_lines
+    assert "Candidates written:   1" in report, report
+
+
+def test_the_verdict_ledger_join_still_resolves_every_coarse_error_key():
+    """Clause 5: the join field is unchanged, so no already-decided candidate is
+    orphaned. Read-only over the live ledger.
+
+    Every coarse `Tool/error_type` key in `_pipeline/skills/reviews/verdicts.jsonl`
+    must still be what `candidate_pattern_key` derives for a pattern with that tool,
+    that error type and *some* signature, and `verdict_for` must return the row
+    exactly when the ledger says it binds (terminal, and not lifted by the reopen
+    rules). Widen the key to `tool/error_type/<signature>` and the derived key stops
+    matching the stored one, so this fails — which is the point: that widening needs
+    a migration of the existing rows, not just of the filename.
+    """
+    ledger = Path.home() / "lloyd" / "_pipeline" / "skills" / "reviews" / "verdicts.jsonl"
+    # Hard assert, not a skip: this is the clause that guards a human's reserved
+    # decision, so a run that does not look at the ledger must fail rather than pass
+    # without having checked.
+    assert ledger.is_file(), f"no verdict ledger at {ledger} — nothing was kept reachable"
+    rows = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines()
+            if ln.strip()]
+    coarse = {}
+    for row in rows:
+        key = str(row.get("pattern_key") or "")
+        if key.count("/") == 1 and not key.startswith("seq-"):
+            coarse[key] = row          # latest-wins, as the store does
+    assert len(coarse) >= 21, (
+        f"only {len(coarse)} coarse keys in a ledger that held 21 on 2026-09-13 — a"
+        " migration that dropped rows must not pass as a key-shape change")
+
+    sv = mt._verdicts_module()
+    # Which of these rows SHOULD resolve is decided here from the ledger text and the
+    # module's two constants, never by calling `terminal_verdict`/`is_terminal` back:
+    # asserting `(verdict_for(p) is not None) is sv.terminal_verdict(k) and ...` restates
+    # the function's own internals and can only fail on a store break, so it would
+    # certify any semantics the implementation happens to have (advisory on round
+    # SM_20260914_140724). What the clause actually pins is the IDENTITY of the row a
+    # key resolves to, which is asserted per key below.
+    terminal = set(sv.TERMINAL_VERDICTS)
+    window = timedelta(days=sv.REOPEN_AFTER_DAYS)
+    now = datetime.now(tz=timezone.utc)
+    resolved = 0
+    for key, row in coarse.items():
+        tool, error_type = key.split("/")
+        pattern = {"type": "error", "tool_name": tool, "error_type": error_type,
+                   "params_signature": "cmd:something", "total_calls": 0,
+                   "sessions": {"s1"}}
+        assert mt.candidate_pattern_key(pattern) == key, key
+        verdict = mt.verdict_for(pattern, store=ledger)
+        if verdict is None:
+            continue
+        resolved += 1
+        assert verdict.get("pattern_key") == key, (key, verdict.get("pattern_key"))
+        assert verdict.get("verdict") == row.get("verdict"), (key, verdict, row)
+        assert str(verdict.get("decided_at")) == str(row.get("decided_at")), key
+        assert (row.get("verdict") or "") in terminal, (key, row.get("verdict"))
+        decided = row.get("decided_at")
+        assert decided, key  # an absent decided_at never expires; pin the shape
+        age = now - datetime.fromisoformat(str(decided).replace("Z", "+00:00"))
+        assert age <= window, (key, str(decided), age.days)
+    # Non-vacuity from the ledger text: 14 of the 21 coarse rows were terminal and
+    # inside the window on 2026-09-21, so a change that stopped resolving any of them
+    # drops this count. A ledger whose terminal rows have all expired would make the
+    # loop above certify nothing, and this floor is what says so.
+    assert resolved >= 12, (
+        f"only {resolved} of {len(coarse)} coarse keys resolved a verdict; the ledger's"
+        " terminal rows are close to expiring, and this test proves nothing at 0")
+
+
+# ── live-data guard: one candidate per key over the real corpus ───────────────
+
+
+def test_a_merged_key_does_not_reopen_on_growth_measured_in_other_units(tmp_path):
+    """The >10x growth reopen compares a live count against a baseline the ledger
+    recorded from ONE bucket's file (#530 seeded it before #515 merged buckets), so the
+    two numbers have different denominators. Acting on that comparison would reopen
+    every multi-bucket key on the first merged run and re-adjudicate a stack of
+    patterns nobody asked to reopen — the decision Alan reserved on #515. So
+    `verdict_for` skips the growth trigger for a unit with MORE THAN ONE bucket behind
+    its key, while terminality and the 60-day expiry still bind. A key with one bucket
+    keeps the rule, merged or not: there the live count and the stored baseline are the
+    same denominator, so zeroing it would suppress a key entitled to reopen."""
+    store = tmp_path / "verdicts.jsonl"
+    sv = mt._verdicts_module()
+    sv.record_verdict(store, pattern_key="Bash/logic",
+                      verdict="rejected_false_positive", reason="one signature judged",
+                      evidence_cmd="python3 -c 'print(1)'", occurrences=1,
+                      decided_by="unit-test")
+    merged = mt.merge_error_patterns([
+        {"type": "error", "tool_name": "Bash", "error_type": "logic",
+         "params_signature": f"cmd:prog{i}", "sessions": {f"s{i}", f"s{i}b"},
+         "examples": [], "dates": {"2026-09-10"}, "total_calls": 10 + i}
+        for i in range(12)])
+    assert len(merged) == 1 and merged[0]["total_calls"] > 10, (
+        "the fixture no longer exceeds 10x the stored baseline of 1")
+    assert mt.verdict_for(merged[0], store=store) is not None, (
+        "the merged unit stopped suppressing a key whose verdict was never revisited")
+    one_bucket = {"type": "error", "tool_name": "Bash", "error_type": "logic",
+                  "params_signature": "cmd:prog0", "sessions": {"s0"},
+                  "examples": [], "dates": {"2026-09-10"}, "total_calls": 100}
+    assert mt.verdict_for(one_bucket, store=store) is None, (
+        "the per-bucket growth rule changed, which is not this item's to change")
+    # The same single bucket, run through the merge: one bucket behind the key means
+    # the denominators match, so the growth reopen must still fire. Passing every
+    # merged unit through the skip — which `merged_buckets` also marks — would widen
+    # suppression beyond the multi-bucket keys this item touches.
+    passed_through = mt.merge_error_patterns([dict(one_bucket)])
+    assert len(passed_through) == 1 and len(passed_through[0]["merged_buckets"]) == 1
+    assert mt.verdict_for(passed_through[0], store=store) is None, (
+        "a one-bucket key stopped evaluating the growth rule just because it was "
+        "copied through the merge")
+    # `write_candidate_file`, not `emit_candidates`, and with the tmp store passed:
+    # otherwise `store_path` falls back to $SKILL_VERDICTS_STORE / the live ledger and
+    # the `superseded_by_verdict` asserted below could be production's answer rather
+    # than the one this test seeded.
+    body = Path(mt.write_candidate_file(merged[0], tmp_path / "c",
+                                        verdict_store=store)).read_text(encoding="utf-8")
+    assert "status: superseded_by_verdict" in body, body[:400]
+    assert "growth reopen does not evaluate" in body
+    # The same unit against an empty ledger is `pending_review`: proof that the status
+    # above came from the store this test wrote, not from the machine it runs on.
+    blank = tmp_path / "empty-ledger.jsonl"
+    free_body = Path(mt.write_candidate_file(merged[0], tmp_path / "d",
+                                             verdict_store=blank)).read_text(encoding="utf-8")
+    assert "status: pending_review" in free_body, free_body[:400]
+
+
+def test_the_verdict_checker_reads_a_merged_candidate_as_one_unit(tmp_path):
+    """The seam in the other program: `skill_verdicts.py` reads the frontmatter this
+    miner writes, in its own process, and decides SKIP / REOPEN / PROCEED from it.
+
+    A merged unit carries `occurrences:` summed over every signature bucket behind the
+    key, while the ledger's `occurrences_at_decision` for the same key came from ONE
+    bucket's file (#530 seeded the ledger before buckets were ever merged). Compared as
+    a ratio the two numbers have different denominators, and the reader applied the >10x
+    growth reopen to them anyway — flipping `SKIP` (the verdict binds) to `REOPEN`
+    (Alan's reserved re-adjudication, arriving by arithmetic). `signature_buckets:` is
+    what tells the two cases apart, so the reader has to see it.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    sv = mt._verdicts_module()
+    sv.record_verdict(store, pattern_key="Bash/logic",
+                      verdict="rejected_false_positive", reason="one signature judged",
+                      evidence_cmd="python3 -c 'print(1)'", occurrences=1,
+                      decided_by="unit-test")
+    merged = mt.merge_error_patterns([
+        {"type": "error", "tool_name": "Bash", "error_type": "logic",
+         "params_signature": f"cmd:prog{i}", "sessions": {f"s{i}", f"s{i}b"},
+         "examples": [], "dates": {"2026-09-10"}, "total_calls": 10 + i}
+        for i in range(12)])
+    assert merged[0]["total_calls"] > 10, "fixture no longer exceeds 10x baseline 1"
+    cands = tmp_path / "cands"
+    mt.write_candidate_file(merged[0], cands, verdict_store=store)
+
+    # Same file, through the other program's own frontmatter reader.
+    file = next(cands.glob("candidate-*.md"))
+    key, status, occurrences, buckets = sv.read_candidate(file)
+    assert (key, status) == ("Bash/logic", "superseded_by_verdict")
+    assert occurrences == merged[0]["total_calls"]
+    assert buckets == 12, "the reader cannot see how many patterns this file stands for"
+
+    # And through the CLI a consolidation agent actually runs: separate process.
+    proc = subprocess.run(
+        [sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"), "check",
+         "--candidates", str(cands), "--store", str(store)],
+        capture_output=True, text=True, timeout=120)
+    out = proc.stdout
+    assert proc.returncode == 0, proc.stderr
+    assert "REOPEN Bash/logic" not in out, (
+        f"the merged sum reopened a verdict through the checker:\n{out}")
+    assert "SKIP Bash/logic" in out, out
+    assert "12 mined patterns under this key" in out, (
+        f"a coarse verdict must say how many patterns it gates:\n{out}")
+    assert "skipped_by_verdict: 1" in out, out
+
+
+def test_a_one_bucket_candidate_still_reopens_the_checker_on_growth(tmp_path):
+    """The narrowing, from the reader's side: with one signature behind the key,
+    `occurrences:` and the stored baseline share a denominator, so the >10x growth
+    reopen must still fire. A field that blanket-disabled growth would silently widen
+    suppression across keys this item has no business touching."""
+    store = tmp_path / "verdicts.jsonl"
+    sv = mt._verdicts_module()
+    sv.record_verdict(store, pattern_key="Bash/logic",
+                      verdict="rejected_false_positive", reason="small at decision",
+                      evidence_cmd="python3 -c 'print(1)'", occurrences=1,
+                      decided_by="unit-test")
+    lone = {"type": "error", "tool_name": "Bash", "error_type": "logic",
+            "params_signature": "cmd:prog0",
+            "sessions": {f"s{i}" for i in range(30)},
+            "examples": [], "dates": {"2026-09-10"}, "total_calls": 100,
+            "first_seen": "2026-09-10", "last_seen": "2026-09-10"}
+    # Through `merge_error_patterns`, which is where a real emission unit gets its
+    # `first_seen`/`last_seen`: a one-bucket key comes back with a one-row breakdown.
+    lone_unit = mt.merge_error_patterns([lone])[0]
+    assert len(lone_unit["merged_buckets"]) == 1
+    cands = tmp_path / "cands"
+    mt.write_candidate_file(lone_unit, cands, verdict_store=store)
+    assert sv.read_candidate(next(cands.glob("candidate-*.md")))[3] == 1
+    proc = subprocess.run(
+        [sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"), "check",
+         "--candidates", str(cands), "--store", str(store)],
+        capture_output=True, text=True, timeout=120)
+    assert "REOPEN Bash/logic" in proc.stdout, proc.stdout
+    assert "skipped_by_verdict: 0" in proc.stdout, proc.stdout
+
+
+def test_the_merge_moves_nobody_out_of_suppression():
+    """The suppressed SET, not only the ledger join: every mined pattern a verdict
+    gates today must still be gated after the merge. If the merge let any of them
+    resolve to `pending_review`, already-rejected work would be back in the review
+    queue (clause 5 read as a set, not only as row reachability).
+
+    A bucket is identified by the triple `mine_error_patterns` groups on, not by its
+    `params_signature`: measured over the live 7-day corpus on 2026-09-21, the string
+    `file_md_signature` is carried by buckets under four different keys
+    (`Grep/not_found`, `Read/logic`, `vault_read/not_found`, `vault_write/validation`),
+    two of them gated and two not, so comparing a gated set of *signature strings*
+    against a gated set of *keys* reports the two ungated ones as escapes. The first
+    version of this test did exactly that and failed on a corpus where nothing leaked.
+    """
+    def bucket_id(q: dict) -> tuple:
+        return (q["tool_name"], q["error_type"], q["params_signature"])
+
+    previous = mt.TRAJECTORY_DIR
+    mt.set_trajectory_dir(LIVE_CORPUS)
+    try:
+        mined = mt.mine_error_patterns(
+            mt.load_trajectories(days=7, agent_filter="all",
+                                 exclude_machine=False), threshold=2)
+    finally:
+        mt.set_trajectory_dir(previous)
+    assert mined, ("no qualifying error pattern mined — the merge suppressed nobody "
+                   "because there was nobody to suppress")
+    assert len({bucket_id(q) for q in mined}) == len(mined), (
+        "mine_error_patterns returned two buckets with the same grouping triple, so "
+        "the identity below identifies nothing")
+    gated_before = {bucket_id(q) for q in mined if mt.verdict_for(q)}
+    assert gated_before, (
+        f"the ledger gates none of the {len(mined)} mined patterns, so this compares "
+        "two empty sets; a ledger whose coarse rows have all expired is a finding")
+    gated_keys = {mt.candidate_pattern_key(q)
+                  for q in mt.merge_error_patterns(mined) if mt.verdict_for(q)}
+    leaked = sorted(f"{t}/{e} ({sig})" for t, e, sig in gated_before
+                    if f"{t}/{e}" not in gated_keys)
+    assert not leaked, (f"{len(leaked)} judged patterns re-arrived as pending_review: "
+                        f"{leaked[:5]}")
+    # The other direction, floored: a coarse key that gates buckets must not end up
+    # gating none of them, and every gated bucket's key is one of the 30 keys the merge
+    # emits — so the count of gated buckets cannot fall below the count that was gated.
+    assert sum(1 for q in mined
+               if mt.candidate_pattern_key(q) in gated_keys) >= len(gated_before)
+
+
+def test_a_live_week_emits_one_merged_candidate_per_error_key(tmp_path):
+    """Read-only over `_pipeline/trajectories`; emission goes to a temp dir.
+
+    The item's acceptance check as written: paths returned == distinct paths ==
+    files on disk, and every written error candidate's `occurrences:` / `sessions:`
+    equal the sum and the union over the mined buckets that share its key. On
+    2026-09-14 the same run returned 73 paths for 25 files and `Bash/logic` reported
+    one bucket while gating 19.
+
+    No skip paths: this machine is the machine the corpus is on, and a green run over an
+    empty pattern list would prove nothing about a collision. `exclude_machine=False` is
+    deliberate — since #493 the nightly default drops worker/autonomy/inner-voice/browser
+    sessions, and over a quiet week that corpus holds no qualifying error pattern at all.
+    """
+    assert LIVE_CORPUS.is_dir(), f"live corpus absent: {LIVE_CORPUS}"
+    previous = mt.TRAJECTORY_DIR
+    mt.set_trajectory_dir(LIVE_CORPUS)
+    try:
+        rows = mt.load_trajectories(days=7, agent_filter="all", exclude_machine=False)
+        patterns = mt.mine_error_patterns(rows, threshold=2)
+        assert patterns, ("no qualifying error pattern in a 7-day all-classes window — "
+                          "a collision cannot be vacuously absent, so this is a finding")
+        by_key = {}
+        for pattern in patterns:
+            by_key.setdefault(mt.candidate_pattern_key(pattern), []).append(pattern)
+        multi = {k: v for k, v in by_key.items() if len(v) > 1}
+        # `>= 2`, not truthy: one multi-bucket key would let a merge that happened to
+        # fold a single pair pass, and the merged-total assertions below are only
+        # evidence across a population. Measured 15 of 30 keys on 2026-09-21, so this
+        # floor has room before a quiet week makes the test vacuous — and if it ever
+        # does, this message is the finding, not a silent pass.
+        assert len(multi) >= 2, (
+            f"only {len(multi)} mined key had more than one signature behind it, so the "
+            "merge was barely exercised and the merged totals below prove nothing")
+
+        written = mt.emit_candidates(patterns, tmp_path)
+        files = sorted(tmp_path.glob("candidate-*.md"))
+        assert len(written) == len(set(written)) == len(files)
+
+        error_keys = 0
+        for body_files in files:
+            body = body_files.read_text(encoding="utf-8")
+            key = frontmatter_field(body, "pattern")
+            if frontmatter_field(body, "type") != "error":
+                continue
+            error_keys += 1
+            buckets = by_key[key]
+            assert int(frontmatter_field(body, "occurrences")) == sum(
+                p["total_calls"] for p in buckets), key
+            assert int(frontmatter_field(body, "sessions")) == len(
+                set().union(*(set(p["sessions"]) for p in buckets))), key
+        assert error_keys == len(by_key)
+    finally:
+        mt.set_trajectory_dir(previous)
+
+
+def test_a_full_live_week_emits_one_file_per_path_across_every_class(tmp_path):
+    """Clauses 1 and 3 over the WHOLE emission, not over the error class alone.
+
+    The review refused round SM_20260914_140724 on exactly this: the error class was
+    already 1:1 (25 patterns returned / 25 distinct / 25 files) and the guard that
+    proves it was scoped to `type == "error"` paths, while the same commit's full run
+    returned 1073 paths for 1072 files — `candidate-seq-3-backlog-write-task-…-err-ba-
+    20260914.md` written twice, silently, and its surviving bytes decided by input
+    order. Clause 1 says "no path appears more than once in the list returned by
+    `emit_candidates()`" about the LIST, and clause 3 says "each written candidate",
+    so both are asserted here across every class the nightly feeds the writer.
+
+    Read-only over `_pipeline/trajectories`; both emissions go to a temp dir.
+    """
+    assert LIVE_CORPUS.is_dir(), f"live corpus absent: {LIVE_CORPUS}"
+    previous = mt.TRAJECTORY_DIR
+    mt.set_trajectory_dir(LIVE_CORPUS)
+    try:
+        rows = mt.load_trajectories(days=7, agent_filter="all", exclude_machine=False)
+        # The same concatenation `main()` performs, at the runbook's threshold.
+        patterns = (mt.mine_error_patterns(rows, threshold=2)
+                    + mt.mine_success_patterns(rows, threshold=2)
+                    + mt.mine_sequence_patterns(rows, threshold=2))
+        assert patterns, "a 7-day all-classes window mined nothing: vacuous below"
+        forward, backward = tmp_path / "fwd", tmp_path / "rev"
+        written = mt.emit_candidates(patterns, forward)
+        reversed_written = mt.emit_candidates(list(reversed(patterns)), backward)
+
+        # Clause 1: the returned list, all classes, has no repeats, and its length is
+        # the number of files that exist — the two halves of "1073 returned / 1072 on
+        # disk", which no per-class assertion can see.
+        counts: dict = {}
+        for path in written:
+            counts[path] = counts.get(path, 0) + 1
+        repeated = sorted(str(p.name) for p, n in counts.items() if n > 1)
+        assert not repeated, (
+            f"{len(written)} paths returned, {len(counts)} distinct; repeated: "
+            f"{repeated[:3]}")
+        files = sorted(forward.glob("candidate-*.md"))
+        assert len(written) == len(files), (
+            f"emit_candidates returned {len(written)} paths and {len(files)} "
+            "candidate-*.md exist on disk")
+
+        # Non-vacuity: the class the review caught must be in this emission, or the
+        # all-class claim above is the error-class claim under a different name. The
+        # class is read out of each file's own `type:` field, not off the filename,
+        # so a mislabelled writer cannot make the split look populated.
+        kinds = [frontmatter_field(f.read_text(encoding="utf-8"), "type")
+                 for f in files]
+        assert kinds.count("sequence") >= 1, (
+            f"no sequence candidate was written ({kinds.count('error')} error, "
+            f"{len(files)} total), so this run never touched the class whose file aliased")
+        assert kinds.count("error") >= 1, "no error candidate was written"
+
+        # Clause 3, every class: the reversed input writes the same names and the same
+        # bytes, so which pattern's evidence survives is not an iteration-order answer.
+        back_files = sorted(backward.glob("candidate-*.md"))
+        assert [f.name for f in files] == [f.name for f in back_files]
+        differing = [a.name for a, b in zip(files, back_files)
+                     if a.read_bytes() != b.read_bytes()]
+        assert not differing, (
+            f"{len(differing)} of {len(files)} candidates differ between the forward "
+            f"and reversed run: {differing[:3]}")
+        assert sorted(p.name for p in reversed_written) == sorted(p.name for p in written)
+    finally:
+        mt.set_trajectory_dir(previous)
+
+
+def test_a_colliding_name_raises_before_a_single_candidate_is_written(tmp_path):
+    """The guard's scope and its timing, both from the review's finding.
+
+    Scope: the first guard looked only at error paths, so the aliased
+    `candidate-seq-3-…` file in the refusing run was written twice with the guard
+    silent. A post-merge alias in a NON-error class must therefore trip it, and the
+    only alias left in the sequence class is two patterns whose n-grams are equal —
+    which `mine_sequence_patterns` cannot produce (its dict is keyed by the n-gram),
+    so the fixture supplies it the way a future caller would.
+
+    Timing: the old guard raised AFTER the loop, so the collision had already
+    replaced one file's bytes and the raise merely reported the loss. The item's
+    requirement is "an error rather than a lost file", so nothing may reach disk.
+    """
+    def ngram(seq):
+        return {"type": "sequence", "ngram_size": 2, "sequence_str": seq,
+                "has_error_recovery": True, "sessions": {"s1"}, "total_calls": 4,
+                "examples": [], "first_seen": "2026-09-20", "last_seen": "2026-09-20"}
+
+    pair = [ngram("read -> edit"), ngram("read -> edit")]
+    assert mt.candidate_filename(pair[0]) == mt.candidate_filename(pair[1])
+    with pytest.raises(AssertionError, match="last-writer-wins"):
+        mt.emit_candidates(pair, tmp_path)
+    assert not list(tmp_path.glob("candidate-*.md")), (
+        "the guard fired after the writes, so the first candidate's evidence was "
+        "already gone — the collision was reported, not refused")
 
 
 # ── live-data guard: the sweep must not survive in regenerated data ──────────
