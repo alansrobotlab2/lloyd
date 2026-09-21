@@ -1196,44 +1196,76 @@ def test_the_recorded_debt_is_measured_by_archive_presence(skills):
 # shape, prove it against the vault from a marked test).
 #
 # One correction to carry forward: the archive step is `nightly-reflection-signals`'
-# **Phase 0** — "## Phase 0: Claim the output file FIRST", live vault :35-38 — not
+# **Phase 0** — the code block under "## Phase 0: Claim the output file FIRST" — not
 # Phase 5 as #1080/#1189 describe it. Phase 5 is where the report body is written;
 # the claim→archive→overwrite triple that #436 protects is Phase 0, which is also
 # where clause 2's protected `date -u` `cp` lives. Same instruction, same guard;
 # the phase number in the item text is simply wrong.
 
+# One more correction, from #1285 (2026-09-21): the skeleton no longer lives in this
+# triple at all. Phase 0 used to claim, archive, then overwrite the canonical pointer
+# with a `status: in-progress` stub, so a run that died mid-investigation left the stub
+# sitting at the path every downstream job reads as current — which is what happened on
+# 2026-09-20. Phase 0 now claims and archives and writes the stub to
+# `signals-inflight.md`, and the pointer is written exactly once per run, by Phase 3,
+# with the complete report. So the shape the retention mutation has to be applied to is
+# no longer one section: it is Phase 0's `cp` plus the Phase 3 publish the `cp` exists to
+# protect, and a fixture holding only the in-flight write would still pass with the `cp`
+# deleted because nothing in it overwrites the pointer any more.
+
 _SIGNALS_LIVE = "/home/alansrobotlab/lloyd/_pipeline/reflection/signals-latest.md"
+_SIGNALS_INFLIGHT = "/home/alansrobotlab/lloyd/_pipeline/reflection/signals-inflight.md"
 _REAL_SIGNALS_READ = f'Read("{_SIGNALS_LIVE}")   # MUST come first'
+_REAL_SIGNALS_INFLIGHT_READ = (
+    f'Read("{_SIGNALS_INFLIGHT}")   # exists from last night too; '
+    "Write refuses an unread file"
+)
 _REAL_SIGNALS_ARCHIVE = (
     'Bash("STAMP=$(date -u +%Y-%m-%d-%H%M) && \\\n'
     f"     cp {_SIGNALS_LIVE} \\\n"
     f"        {_SIGNALS_LIVE[:-3]}-$STAMP.md\")   # archive, new path"
 )
-_REAL_SIGNALS_WRITE = (
-    f'Write(file_path="{_SIGNALS_LIVE}",\n'
+_REAL_SIGNALS_SKELETON = (
+    f'Write(file_path="{_SIGNALS_INFLIGHT}",\n'
     '      content="# Signal Report <today>\\n\\nstatus: in-progress\\n\\n(Investigating.)\\n")'
+)
+#: The single write to the canonical pointer (Phase 3, complete report). The archive
+#: step is there to protect *this* overwrite, so the transcription the retention
+#: mutation is applied to must carry it — otherwise the mutation bites on a fixture that
+#: has no canonical overwrite left to archive, which is a pass for the wrong reason.
+_REAL_SIGNALS_PUBLISH = (
+    'Write the structured signal report to '
+    f'`Write(file_path="{_SIGNALS_LIVE}")`'
 )
 
 
-def _real_signals_phase0(with_archive: bool = True) -> str:
-    """Transcription of the live Phase 0: claim, archive, overwrite, in that order.
+def _real_signals_archive_shape(with_archive: bool = True) -> str:
+    """Transcription of the shipped instructions the archive rule binds for
+    `signals-latest`: Phase 0's claim, archive `cp` and in-flight skeleton, then the
+    Phase 3 publish that overwrites the pointer — in that order.
 
     Copied byte-for-byte from `~/obsidian/skills/nightly-reflection-signals/SKILL.md`
     including the backslash continuations, because the wrapping is what
     `logical_lines` exists for — a fixture written on one line would prove the
     guard against a shape the shipped skill does not have.
+
+    Both sections, not Phase 0 alone. Since #1285 the skeleton no longer names the
+    canonical pointer, so a Phase 0-only fixture would report `no writes to
+    signals-latest` with the `cp` deleted and nothing at all with it present: the
+    mutation would bite on a report nobody was about to overwrite, which is a pass for
+    the wrong reason.
     """
-    parts = [_REAL_SIGNALS_READ]
+    phase0 = [_REAL_SIGNALS_READ, _REAL_SIGNALS_INFLIGHT_READ]
     if with_archive:
-        parts.append(_REAL_SIGNALS_ARCHIVE)
-    parts.append(_REAL_SIGNALS_WRITE)
-    return ("## Phase 0: Claim the output file FIRST\n\n```\n"
-            + "\n".join(parts) + "\n```\n")
+        phase0.append(_REAL_SIGNALS_ARCHIVE)
+    phase0.append(_REAL_SIGNALS_SKELETON)
+    return ("## Phase 0: Claim the output file FIRST\n\n```\n" + "\n".join(phase0) + "\n```\n"
+            "## Phase 3: Finalise the Signal Report\n\n" + _REAL_SIGNALS_PUBLISH + "\n")
 
 
 def test_the_rule_fails_when_the_signals_archive_copy_is_deleted():
     """#1189 clause 4: with the archive `cp` deleted from the signals skill's own
-    Phase 0 shape, the rule must refuse it and name the missing step; with it
+    shipped shape, the rule must refuse it and name the missing step; with it
     present, `signals-latest` must be clean.
 
     Unmarked, so every gate rung runs it, and it reads no vault — the transcription
@@ -1241,13 +1273,15 @@ def test_the_rule_fails_when_the_signals_archive_copy_is_deleted():
     ``test_the_live_signals_archive_step_is_the_one_this_mutation_deletes``, which is
     how a fixture stays honest about what it claims to mutate.
 
-    Deletion is the failure #436 was filed for: a Phase 0 that keeps the `Read` and
-    the `Write` and loses the `cp` between them overwrites the live report with no
+    Deletion is the failure #436 was filed for: instructions that keep the `Read` and
+    the publish `Write` and lose the `cp` between them overwrite the live report with no
     copy of the previous cycle, and `_pipeline/` is gitignored (`.gitignore:25`), so
     nothing else can recover it. The expected message is asserted exactly, because
-    a looser assertion would pass on a rule that fired for the wrong reason.
+    a looser assertion would pass on a rule that fired for the wrong reason — and after
+    #1285 moved the skeleton off the pointer, exactness is also what stops the node
+    passing on a fixture with no canonical write in it at all.
     """
-    body = _real_signals_phase0()
+    body = _real_signals_archive_shape()
     assert ra.archive_problems(body, "signals-latest") == [], (
         "the transcription is not clean as written, so the deletion below proves "
         f"nothing about the real step: {ra.archive_problems(body, 'signals-latest')}"
@@ -1256,7 +1290,7 @@ def test_the_rule_fails_when_the_signals_archive_copy_is_deleted():
         "the transcribed step no longer carries the `date -u` stamp, so the copy it "
         "survives would be named from a local clock (#436 clause 2)"
     )
-    problems = ra.archive_problems(_real_signals_phase0(with_archive=False),
+    problems = ra.archive_problems(_real_signals_archive_shape(with_archive=False),
                                    "signals-latest")
     assert problems == [
         "no dated-copy archive step for signals-latest: no cp to "
@@ -1271,8 +1305,10 @@ def test_the_rule_fails_when_the_signals_archive_copy_is_deleted():
 def test_the_live_signals_archive_step_is_the_one_this_mutation_deletes():
     """The transcription drift guard, on the real skill text.
 
-    Three things at once, in the direction that matters: the Phase 0 instructions
-    appear verbatim in `~/obsidian/skills/nightly-reflection-signals/SKILL.md`; the
+    Three things at once, in the direction that matters: every transcribed
+    instruction — Phase 0's claim, in-flight skeleton read, archive `cp` and
+    skeleton write, and the Phase 3 publish — appears verbatim in
+    `~/obsidian/skills/nightly-reflection-signals/SKILL.md`; the
     real body is clean under the rule; and deleting *its own* archive `cp` — located
     by the rule's predicates (`COPY` + `archive_dest` over `logical_lines`), never by
     a remembered line number — yields the same verdict as the transcription. So
@@ -1295,7 +1331,9 @@ def test_the_live_signals_archive_step_is_the_one_this_mutation_deletes():
     )
     assert path is not None, f"nightly-reflection-signals/SKILL.md absent under {SKILLS_DIRS}"
     body = path.read_text(encoding="utf-8", errors="replace")
-    for instruction in (_REAL_SIGNALS_READ, _REAL_SIGNALS_ARCHIVE, _REAL_SIGNALS_WRITE):
+    for instruction in (_REAL_SIGNALS_READ, _REAL_SIGNALS_INFLIGHT_READ,
+                        _REAL_SIGNALS_ARCHIVE, _REAL_SIGNALS_SKELETON,
+                        _REAL_SIGNALS_PUBLISH):
         assert instruction in body, (
             f"the real Phase 0 no longer contains {instruction!r} — the transcription "
             "this file mutates has drifted from the shipped text; update "
@@ -1320,3 +1358,213 @@ def test_the_live_signals_archive_step_is_the_one_this_mutation_deletes():
         "no dated-copy archive step for signals-latest: no cp to "
         "`signals-latest-<stamp>.md`"
     ], "deleting the real archive cp did not produce the guard's verdict"
+
+
+
+# --- #1285: the canonical pointer only ever carries a complete report ------------
+# Phase 0 used to claim the canonical slot by overwriting it with a `status:
+# in-progress` skeleton, so a run that died mid-investigation left a stub at the path
+# every downstream job reads as this cycle's report. The damage is on the record:
+# `autonomy-runs/38/run_38_20260920_050102.md` is `status: failed`,
+# `failure_kind: infra`, and `_pipeline/reflection/knowledge-handoff-2026-09-20.md`
+# says "this morning's #42 consumed it" about the 46-line stub it left behind. The
+# skeleton now goes to `signals-inflight.md`; the canonical slot is written once per
+# run, by Phase 3, with `status: complete`.
+_SIGNALS_LATEST_NAME = "signals-latest.md"
+_SIGNALS_INFLIGHT_NAME = "signals-inflight.md"
+#: The call form both publish instructions use for the canonical slot — the prose
+#: before the template ("Write the structured signal report to …") and the line after
+#: it ("**Write this report to:** …"). The skills prescribe the same call twice, so a
+#: rule about what writes the pointer has to count call instructions, not sections.
+_PUBLISH_CALL = f'Write(file_path="{_SIGNALS_LIVE}")'
+#: The consumers that act on the pointer's contents: **#40** (config) and **#42**
+#: (knowledge-analysis). `nightly-reflection-knowledge-write` (**#39**) is deliberately
+#: absent — it takes the day's handoff as its only source of truth and never opens this
+#: path (#1285's triage re-derived that from its Data Load), so guarding it would pin
+#: prose no reader needs.
+SIGNALS_POINTER_READERS = ("nightly-reflection-config",
+                           "nightly-reflection-knowledge-analysis")
+
+
+def _pointer_write_instructions(body: str) -> list[str]:
+    """Every instruction in `body` that writes the canonical signal pointer.
+
+    An *instruction* here is the call plus its continuation lines up to a blank line or
+    a closed fence, not one physical line. That is the whole design decision: the
+    shape #1285 removed broke after the `file_path` argument, so the `content` carrying
+    `status: in-progress` sat on the line below the path. `logical_lines` splices
+    backslash continuations only — it exists for the wrapped `cp` — so scanning it a
+    line at a time reports the forbidden shape as clean, which is a pin that cannot
+    fail. A run reading the skill reads both lines as one instruction, so this does too.
+
+    The archive `cp` is excluded because it names the path to copy it, never to write
+    it, and is discharged by `archive_problems` instead.
+    """
+    lines = body.split("\n")
+    out: list[str] = []
+    for i, ln in enumerate(lines):
+        if (_SIGNALS_LATEST_NAME not in ln or not ra.TOOL_WRITE.search(ln)
+                or ra.COPY.search(ln)):
+            continue
+        parts = [ln]
+        j = i + 1
+        while j < len(lines) and lines[j].strip() and lines[j].strip() != "```":
+            parts.append(lines[j])
+            j += 1
+        out.append("\n".join(parts))
+    return out
+
+
+def test_the_pointer_write_scan_catches_the_shape_1285_removed():
+    """The unmarked control for the two assertions below: the scan must catch the
+    instruction that shipped until #1285, and must not catch the one that replaced it.
+
+    Transcribed from `5f746695:skills/nightly-reflection-signals/SKILL.md` (the last
+    vault commit that carried it): the `Write` names the canonical path on one line and
+    carries `status: in-progress` on the next, which is the split a per-line scan
+    reports as clean. Reading no vault, so every gate rung runs it — the failure this
+    file's own docstring calls a pin that cannot fail.
+    """
+    forbidden = (
+        '## Phase 0: Claim the output file FIRST\n\n```\n'
+        + _REAL_SIGNALS_READ + "\n" + _REAL_SIGNALS_ARCHIVE + "\n"
+        + f'Write(file_path="{_SIGNALS_LIVE}",\n'
+          '      content="# Signal Report <today>\\n\\nstatus: in-progress\\n\\n(Investigating.)\\n")'
+        + "\n```\n"
+    )
+    caught = _pointer_write_instructions(forbidden)
+    assert len(caught) == 1, (
+        f"the scan found {len(caught)} write instructions in the pre-#1285 Phase 0, "
+        "which is the shape this rule exists to refuse — a scan that misses it cannot "
+        "guard the replacement either"
+    )
+    assert "in-progress" in caught[0], (
+        f"the write instruction found in the pre-#1285 Phase 0 does not carry its "
+        f"skeleton content, so the split across lines is what hid it: {caught[0]!r}"
+    )
+    shipped = _pointer_write_instructions(_real_signals_archive_shape())
+    assert shipped and not any("in-progress" in ins for ins in shipped), (
+        f"the transcription of the shipped shape is not what #1285 replaced: {shipped}"
+    )
+
+
+@pytest.mark.live_vault
+def test_no_skill_writes_an_in_progress_report_to_the_canonical_pointer(skills):
+    """#1285 clause 1: nowhere in the advertised skills does an instruction write
+    `status: in-progress` content to `signals-latest.md`.
+
+    Asserted across the whole corpus rather than one skill: the defect is a *slot*
+    holding a stub, and any second writer could leave one as effectively as the
+    producer did. The producer now writes that skeleton only to
+    `signals-inflight.md`, and the sentence of **#40**'s guard which says both
+    `status: complete` and `in-progress` about the canonical path stays out of this set
+    because it carries no write call — which is why the unit is an instruction with a
+    `Write`/`Edit` target, not a mention.
+    """
+    offenders: dict[str, list[str]] = {}
+    for name, body in skills.items():
+        bad = [ins for ins in _pointer_write_instructions(body) if "in-progress" in ins]
+        if bad:
+            offenders[name] = bad
+    assert offenders == {}, (
+        "skills instruct an in-progress write to the canonical signal report slot, "
+        "which a run that dies before Phase 3 leaves as the file every downstream job "
+        f"reads as this cycle's report (#1285): {offenders}"
+    )
+
+
+@pytest.mark.live_vault
+def test_the_signals_skill_publishes_the_pointer_only_with_a_complete_report(skills):
+    """#1285 clause 1's other half: the writes the producer keeps for the canonical
+    slot are the Phase 3 publish calls, and the template they fill carries
+    `status: complete`.
+
+    Checking the call form rather than counting sections is the point — a later edit
+    that moved the publish elsewhere, or quietly re-added a claim-time overwrite in
+    some other shape, changes either the set of instructions or the call form, and this
+    names which. The `status: complete` line is what clauses 5's consumer guards read,
+    so a publish that dropped it would leave the guard checking for a token no report
+    contains.
+    """
+    body = skills["nightly-reflection-signals"]
+    instructions = _pointer_write_instructions(body)
+    assert instructions, "the signals skill no longer writes signals-latest.md at all"
+    wrong = [ins for ins in instructions if _PUBLISH_CALL not in ins]
+    assert wrong == [], (
+        f"an instruction writes the canonical signal slot in a form other than the "
+        f"Phase 3 publish call {_PUBLISH_CALL!r} (#1285): {wrong}"
+    )
+    assert "status: complete" in body, (
+        "the published report template no longer carries `status: complete`, so the "
+        "consumers' guard (#1285 clause 5) has nothing to check"
+    )
+
+
+def test_the_in_flight_skeleton_is_not_an_archive_bound_report():
+    """#1285: moving the skeleton to a new path must not give it an archive obligation.
+
+    The archive rule binds a *canonical* slot — the `-latest` in the name is what marks
+    a file as the one thing readers believe, and `LATEST_PATH` is what discovers the
+    set. `signals-inflight.md` is deliberately named otherwise: it is the working file
+    of a run that may have died, overwriting it destroys nothing anyone reads, so a
+    `cp` for it would be an archive nobody consults. Renaming it into the `-latest`
+    shape would silently hand it an unmet obligation and make the nightly writer dirty
+    on a path nobody overwrote unreadably.
+
+    Unmarked: it reads the shipped constant, no path.
+    """
+    assert not ra.LATEST_PATH.search(_SIGNALS_INFLIGHT), (
+        f"{_SIGNALS_INFLIGHT} now matches LATEST_PATH, so it classifies as a bound "
+        "report and the producer owes a dated copy before every skeleton write"
+    )
+
+
+def _signals_reader_item(body: str) -> str:
+    """The block of a consumer skill that covers reading the canonical signal report.
+
+    A guard belongs to the read it qualifies. The two consumers attach it differently —
+    **#40** as an indented continuation of its numbered item, **#42** as a following
+    paragraph — so this takes the item and everything up to the next heading or sibling
+    list item. Asserting inside that block is what stops a `status: complete` sentence
+    parked in some unrelated section of a 300-line skill from discharging the clause.
+    """
+    lines = body.split("\n")
+    start = next(
+        (i for i, ln in enumerate(lines)
+         if f"_pipeline/reflection/{_SIGNALS_LATEST_NAME}" in ln),
+        None,
+    )
+    assert start is not None, "this skill no longer reads the canonical signal report"
+    out = [lines[start]]
+    for ln in lines[start + 1:]:
+        if ln.lstrip().startswith("#") or re.match(r"^\s*(?:\d+\.|[-*+])\s", ln):
+            break
+        out.append(ln)
+    return "\n".join(out).strip()
+
+
+@pytest.mark.live_vault
+def test_signal_pointer_readers_check_the_report_is_this_cycle_complete(skills):
+    """#1285 clause 5: every consumer of the pointer carries the freshness guard.
+
+    Each reader's data-load item must state the two checks **#40** already had —
+    `status:` is `complete`, and `generated:` names this cycle — and the fallback they
+    trigger: read the newest dated `signals-latest-<stamp>.md` instead. The producer fix
+    (clause 1) makes a stub impossible from *this* producer; the guard is what makes it
+    harmless from any other, and it also covers the failure a producer change cannot: a
+    run that dies after archiving but before publishing leaves a *complete* report from
+    the previous cycle under this name, which is stale rather than incomplete.
+    """
+    offenders: dict[str, list[str]] = {}
+    for name in SIGNALS_POINTER_READERS:
+        item = _signals_reader_item(skills[name])
+        missing = [token for token in ("status:", "complete", "generated:",
+                                       "newest", "signals-latest-")
+                   if token not in item]
+        if missing:
+            offenders[name] = missing
+    assert offenders == {}, (
+        "consumers read the canonical signal report without checking it is this cycle's "
+        "complete report, so a stub or a stale report is consumed as current (#1285): "
+        f"{offenders}"
+    )
