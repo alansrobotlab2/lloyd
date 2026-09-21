@@ -521,3 +521,85 @@ def test_a_round_requires_an_observer():
     import yaml
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
     assert cfg["automod"]["require_inner_voice"] is True
+
+
+# ─── the qmd fork: the one tree outside the gate (backlog #854) ───────────
+#
+# `~/lloyd/qmd` is a separate clone the outer repo ignores, so no rung builds or
+# tests it and no rollback reverts it — while `agent-qmd-daemon` serves its
+# `dist/` and so answers the vector leg of retrieval. The only defence a round
+# has is the two documents it actually reads stating the rule, so these pin the
+# sentences, not just the word "qmd": a mention in passing satisfies `grep -ci
+# qmd` and tells a round nothing.
+
+AUTOMOD_SECTION_START = "## Automod (self-modification)"
+
+
+def _automod_section() -> str:
+    """CLAUDE.md's Automod section only: everything from its heading up to the
+    next top-level heading. A rule stated anywhere else in a file of CLAUDE.md's
+    size is not in the section a round is pointed at."""
+    text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    start = text.index(AUTOMOD_SECTION_START)
+    rest = text[start + len(AUTOMOD_SECTION_START):]
+    end = rest.index("\n## ")
+    return rest[:end]
+
+
+def _assert_fork_rule(text: str, where: str) -> None:
+    """The four things the rule has to say, each checked on the words a round
+    would act on. Prose is whitespace-normalised first: these files are
+    hand-wrapped at ~80 columns, and a check that broke on a newline in the
+    middle of a phrase would fail for a reason no reader could see."""
+    low = " ".join(text.split()).lower()
+    assert "qmd" in low, f"{where}: never mentions qmd at all"
+    # 1. What the tree is: a separate clone the outer repo ignores, so it is
+    # neither a submodule nor present in a round's worktree.
+    for phrase in ("gitignore", "separate", "clone", "not a submodule"):
+        assert phrase in low, f"{where}: does not say the fork is a separate gitignored clone, not a submodule"
+    # 2. That no rung builds or tests it, which is the whole hazard.
+    assert "never build" in low, f"{where}: does not say the gate never builds the fork"
+    # 3. The prohibition, aimed at a round, naming the path.
+    assert "must not edit" in low, f"{where}: does not forbid a round editing qmd/src/**"
+    assert "qmd/src" in low, f"{where}: never names the path it forbids editing"
+    # 4. Where a fork change goes instead, in the order the steps run.
+    steps = low[low.index("human-landed"):low.index("human-landed") + 300]
+    for step in ("build", "suite", "branch `lloyd`", "push to `origin`"):
+        assert step in steps, f"{where}: human-landing steps omit {step!r}"
+    assert (steps.index("build") < steps.index("suite") < steps.index("branch `lloyd`")
+            < steps.index("push to `origin`")), f"{where}: the fork's landing steps are out of order"
+
+
+def test_claude_md_states_the_fork_rule_in_the_automod_section():
+    """Clause 1 of #854. The section is the one a round is sent to by the
+    implement prompt's `grep '^## Automod' CLAUDE.md`; a sentence about the
+    fork anywhere else in the file is not where it would look."""
+    section = _automod_section()
+    assert section, "CLAUDE.md has no Automod section body"
+    _assert_fork_rule(section, "CLAUDE.md Automod section")
+
+
+def test_the_automod_skill_states_the_fork_rule_where_a_round_reads_it():
+    """Clause 2 of #854. `grep -ci qmd` on this file returned 0 when the item
+    was triaged; the count is the cheap half — the same sentence has to be in
+    the Boundaries section, which is the section that tells a round what it may
+    not touch.
+
+    No skip when the file is missing: this rule's whole subject is a tree
+    outside the gated repo, so a guard that could go quietly unverified would
+    repeat the defect it is guarding. The path is not worktree-relative —
+    `app.paths.VAULT_ROOT` is `Path.home() / "obsidian"` (`app/paths.py:11`), so
+    every worktree reads the same live vault, and a missing file is a real
+    regression rather than an artefact of where the test was run.
+    `tests/test_skill_tool_names.py:35` reads that same tree unguarded, so this
+    test may too."""
+    from app.paths import VAULT_ROOT
+
+    skill = VAULT_ROOT / "skills" / "automod-change-own-code" / "SKILL.md"
+    assert skill.is_file(), f"clause 2's subject is absent: {skill} does not exist"
+    text = skill.read_text(encoding="utf-8")
+    boundaries = text[text.index("## Boundaries"):]
+    _assert_fork_rule(boundaries[:4000], "SKILL.md Boundaries")
+    # A round that cannot edit the fork still has to close the item, so the
+    # skill has to say what to do instead of silently reporting a change.
+    assert "human_paths" in boundaries[:4000], "skill does not name the route out"

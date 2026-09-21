@@ -468,6 +468,33 @@ error-shaped lines.
   down predicate entirely and judged by `mcp_degraded_is_fatal` instead.
 - **Every rollback this loop has performed has been a false positive.** The
   failure mode to design against is inventing a bad build, not missing one.
+- **The qmd fork is a second tree the gate never touches, and a round must not
+  edit it.** `~/lloyd/qmd` is a separate clone — upstream `tobi/qmd`, our branch
+  `lloyd` pushed to `origin` = `alansrobotlab2/qmd` — that the outer repo
+  ignores: `.gitignore` carries `/qmd/`, `git ls-files qmd` is empty, and there
+  is no `.gitmodules`, so it is not a submodule. Consequence: it appears in no
+  round's worktree, no diff bucket, no promotion record, and no rollback — the
+  guardian's `stash push -u` / `reset --hard` / `clean -fd` all leave an ignored
+  path standing. Production still answers the vector leg of retrieval from it:
+  `agent-qmd-daemon` serves `~/lloyd/qmd/dist/cli/qmd.js` on :8181. So an edit
+  to `qmd/src/**` made from a round crosses a boundary no rung watches: the gate
+  never builds it and never runs the fork's own suite over it, the review diff
+  cannot see it, and a rollback cannot revert it. **A round must not edit
+  `qmd/**`; fork changes are human-landed**: the fork's own build, then the
+  fork's own suite, then commit on branch `lloyd`, then push to `origin`. One
+  command answers whether a fork sha is in that state —
+  `python -m scripts.qmd_fork_landing` runs `node scripts/build.mjs` and
+  `node scripts/test-all.mjs` in the fork, prints its branch and HEAD sha, and
+  exits non-zero on a failing step, a dirty working tree, or commits its
+  upstream never received (`tests/test_qmd_fork_landing.py` pins each). It checks
+  git state *before* the steps, because the build writes `dist/` — the directory
+  the daemon serves — so a dirty fork is refused without ever being compiled into
+  it, and it names the `node` and `bun` it resolved before any step output,
+  because the fork's suite spawns `bun` by bare name (`test-all.mjs:37`) and a
+  missing bun is an environment verdict, not a red fork. Teaching
+  the gate to build and test the fork as a second tree — fork sha in the
+  promotion record, a revert target for the guardian — is #854's route (a), a
+  human decision, and not implemented.
 
 ### Alerts: one fan-out, six channels
 
