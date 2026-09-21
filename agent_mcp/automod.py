@@ -845,9 +845,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if gate:
                 return text_result(json.dumps(gate, indent=2))
             paths = [str(x) for x in (arguments.get("paths") or []) if str(x).strip()]
+            # The turn's own session id, from the `_meta` the harness stamps — not
+            # from `arguments`, which the caller controls. It is the attribution
+            # that survives an omitted optional `item_id`, and 56 of the 172
+            # `vault_land` rows in the ledger on 2026-09-21 carry no item, so a
+            # vault round that landed would otherwise be recorded as not landed
+            # (`scripts/automod/backlog.py:round_landing_rows`).
+            from agent_mcp import _task_registry
             try:
                 out = VR.land(paths, str(arguments.get("message") or ""),
-                              item_id=arguments.get("item_id"))
+                              item_id=arguments.get("item_id"),
+                              session_id=str(_task_registry.current_session_id.get("") or ""))
             except VR.VaultRoundError as exc:
                 return text_result(_err(str(exc)))
             out["note"] = ("Committed on the vault's main and live already — nothing "

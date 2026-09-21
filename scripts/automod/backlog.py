@@ -513,6 +513,110 @@ def settle_item_verdict(outcome: dict | None, *, landing_seen: bool) -> tuple[di
             "landed": bool(landing)}, why
 
 
+# The ledger rows that prove a landing happened, written by the landing itself
+# and never by the turn describing it. The two surfaces write different ones:
+# `promoted` (the code half fast-forwarded onto main, `promote.py`) and
+# `item_landed` (the settle sweep recording it on the item) for code; a
+# successful `vault_land` for the vault half, which commits on the vault's own
+# main and never produces a `promoted` row.
+CODE_LANDING_EVENTS = ("promoted", "item_landed")
+VAULT_LANDING_EVENT = "vault_land"
+LANDING_LEDGER_EVENTS = CODE_LANDING_EVENTS + (VAULT_LANDING_EVENT,)
+
+
+def round_landing_rows(events, *, round_id: str | None = None,
+                       item_id: int | None = None, surface: str = "code",
+                       session_id: str | None = None) -> list[dict]:
+    """The landing rows that belong to this round, from the ledger.
+
+    `promoted` and `item_landed` carry `round_id`; `vault_land` does not, so a
+    vault landing is matched on `item_id` — and on the calling turn's
+    `session_id`, because `item_id` is OPTIONAL at the tool boundary
+    (`automod_vault_land` takes it as an optional integer, and 56 of the 172
+    `vault_land` rows in `promotions.jsonl` on 2026-09-21 carry none). A reader
+    that assumed the argument was always supplied would demote a vault-surface
+    turn that really did land, which is the false-positive direction this
+    reconciliation must not have. The session id is not the model's say-so
+    either: the harness stamps it into every MCP request's `_meta`
+    (`agent_mcp/main.py:META_SESSION_ID`) and the tool handler, not the caller,
+    writes it onto the row (`agent_mcp/automod.py`, `scripts/automod/vault_round.py`).
+    Only a successful row counts — an `ok: false` one is a validation failure
+    that reverted its own paths.
+
+    `surface` decides what counts. For a `vault` item the vault row *is* the
+    landing. For `code` and `mixed` it is not enough: the code half reaches
+    production only through the fast-forward, so only `promoted` / `item_landed`
+    proves it, and accepting a `vault_land` there is precisely the half-landing
+    that #415 reported as complete.
+    """
+    rid = str(round_id or "")
+    sid = str(session_id or "")
+    vault_ok = [ev for ev in (events or ())
+                if ev.get("event") == VAULT_LANDING_EVENT and ev.get("ok")
+                and ((item_id is not None and ev.get("item_id") == item_id)
+                     or (rid and str(ev.get("round_id") or "") == rid)
+                     or (sid and str(ev.get("session_id") or "") == sid))]
+    code_ok = [ev for ev in (events or ())
+               if ev.get("event") in CODE_LANDING_EVENTS and rid
+               and str(ev.get("round_id") or "") == rid]
+    if str(surface or "code").strip().lower() == "vault":
+        return vault_ok + code_ok
+    return code_ok
+
+
+def reconcile_outcome_landing(outcome: dict | None, *, round_id: str | None = None,
+                              item_id: int | None = None, events=(),
+                              landing_seen: bool = False,
+                              surface: str = "code",
+                              session_id: str | None = None) -> tuple[dict | None, str]:
+    """A `landed: true` the ledger cannot see is recorded as not landed.
+
+    Returns `(outcome, mismatch)`; `mismatch` is empty when the claim stands.
+
+    `landed` used to be stored exactly as the finalizer said it — `parse_outcome`
+    read the structured self-report and nothing compared it with the ledger.
+    Measured over the whole ledger on 2026-09-21 (465 finished implement rows, 403
+    carrying an outcome, 12,479 events): 228 claim `landed: true`, 23 of them on a
+    round with no landing row of any kind, and 6 more whose only landing row is a
+    `vault_land` while the round's surface was `code` or `mixed`. #415's round is
+    one of those 6 and is the shape worth naming: its record says "Landed in two
+    halves: vault commit 5f65d971 … code commit b0818d4 …" with `"landed": true`,
+    and `main` was never fast-forwarded, so the item's one unattended attempt was
+    spent on a change that did not exist in production. A mixed-surface round is
+    where this hides: `automod_vault_land` really does commit immediately, so half
+    the summary is always true, and a reader who checks that half stops there.
+
+    `landing_seen` covers the window where the ledger is legitimately silent:
+    `automod_land` returns before the landing runs, so a round that honestly
+    called it has a live marker or a `current.json` entry and possibly no
+    `promoted` row yet at the moment its turn is finalised. That is the
+    implementer's own evidence, and #1213 shows the ledger can also record nothing
+    for a change that did reach main. So the rule is: keep the claim if either the
+    process saw a landing start or the ledger has a landing row for the surface
+    that needs one; otherwise demote it, name the round, and let the record say
+    which.
+
+    `session_id` is the implement turn's own session, and it is what makes a
+    vault landing attributable when the turn did not pass `item_id` to
+    `automod_vault_land` — see `round_landing_rows`. It attributes a row, it does
+    not manufacture one: a turn that landed nothing has no row carrying its
+    session either, and still gets demoted.
+    """
+    if not outcome or not outcome.get("landed"):
+        return outcome, ""
+    if landing_seen:
+        return outcome, ""
+    if round_landing_rows(events, round_id=round_id, item_id=item_id, surface=surface,
+                          session_id=session_id):
+        return outcome, ""
+    wanted = (LANDING_LEDGER_EVENTS if str(surface or "code").strip().lower() == "vault"
+              else CODE_LANDING_EVENTS)
+    mismatch = (f"self-report claimed `landed: true` but round {round_id or '(none opened)'} "
+                f"(surface {surface}) has no {'/'.join(wanted)} ledger row and no landing "
+                f"in flight")
+    return {**outcome, "landed": False, "landed_mismatch": mismatch}, mismatch
+
+
 def apply_post_landing(outcome: dict | None, post_landing: list[int]) -> dict | None:
     """Re-read an outcome with the review's `post_landing` clauses honoured.
 

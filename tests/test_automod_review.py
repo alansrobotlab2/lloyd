@@ -67,9 +67,10 @@ def write_item(d: Path, item_id, *, status="up_next", clauses=None, board="lloyd
     return path
 
 
-def _confirm(item_id, acceptance="the check passes", clauses=()):
+def _confirm(item_id, acceptance="the check passes", clauses=(), surface=""):
     S.append_event({"event": "backlog_triage", "item_id": item_id, "verdict": "confirmed",
-                    "acceptance": acceptance, "acceptance_clauses": list(clauses)},
+                    "acceptance": acceptance, "acceptance_clauses": list(clauses),
+                    **({"surface": surface} if surface else {})},
                    path=S.LEDGER_PATH)
 
 
@@ -1017,3 +1018,287 @@ def test_evidence_paths_are_normalized_before_they_are_judged(wt, tmp_path):
     parsed = RV.parse_review(_obj(evidence_path="app/x.py:3,7"), worktree=wt,
                              changed_tests=["tests/test_x.py"], n_clauses=1)
     assert parsed["clauses"][0]["verdict"] == "met" and parsed["clauses"][0]["evidence_path"] == "app/x.py"
+
+
+# ── a `landed: true` the ledger cannot see is not stored as landed ──────────
+#
+# `landed` came straight out of the implementer's structured self-report
+# (`parse_outcome`, then the `finished` row) with nothing comparing it to the
+# ledger. Measured on 2026-09-21 over `promotions.jsonl`: of 228 finished rows
+# claiming `landed: true`, 23 name a round with no landing row at all and 6 more
+# have only a `vault_land` while the round's surface was `code` or `mixed`.
+# `SM_20260916_095854` (#415) is one of the 6 — "Landed in two halves: vault
+# commit 5f65d971 … code commit b0818d4 …", and `main` never moved, which spent
+# the item's single unattended attempt. The tests below are the #415 row's shape
+# read out of that ledger, then the same claim through the writer.
+
+LANDING_CLAIM = {"acceptance": "met", "landed": True, "clause_outcomes": [],
+                 "deferred_to": [], "summary": "Landed in two halves", "spawned": []}
+UNLANDED_ROUND = "SM_20260916_095854"
+
+
+def _vault_row(item_id=415, *, ok=True):
+    return {"event": "vault_land", "item_id": item_id, "ok": ok, "commit": "5f65d971" + "0" * 32}
+
+
+def _reconcile(events, *, surface="mixed", round_id=UNLANDED_ROUND, item_id=415,
+               landing_seen=False):
+    """The self-report as the finalizer hands it over, reconciled once."""
+    outcome = B.parse_outcome(LANDING_CLAIM)
+    outcome, _ = B.settle_item_verdict(outcome, landing_seen=landing_seen)
+    return B.reconcile_outcome_landing(outcome, round_id=round_id, item_id=item_id,
+                                       events=list(events), landing_seen=landing_seen,
+                                       surface=surface)
+
+
+def test_a_mixed_round_with_only_a_vault_landing_is_recorded_as_not_landed():
+    """The #415 case, exactly: a `vault_land` row and no promotion, `landed: true`.
+
+    Accepting any landing row would pass this claim — the vault half really did
+    commit, which is why the round's own summary reads true and why a mixed round
+    is where the defect hides. On a `code`/`mixed` surface only `promoted` /
+    `item_landed` says the diff reached `main`.
+    """
+    outcome, mismatch = _reconcile([_vault_row()])
+    assert outcome["landed"] is False, "the half-landing stored the self-report verbatim"
+    assert UNLANDED_ROUND in mismatch and "promoted" in mismatch, mismatch
+    assert outcome["landed_mismatch"] == mismatch
+    # The reconciliation demotes the flag, not the verdict: the round still said
+    # `met`, and rewriting that here would move a judgment that is not this one.
+    assert outcome["acceptance"] == "met"
+
+
+@pytest.mark.parametrize("event", ["promoted", "item_landed"])
+def test_a_round_with_a_code_landing_row_keeps_its_landed_claim(event):
+    outcome, mismatch = _reconcile([{"event": event, "round_id": UNLANDED_ROUND,
+                                     "item_id": 415, "commit": "a" * 40}])
+    assert outcome["landed"] is True and mismatch == ""
+
+
+def test_a_round_with_no_landing_row_at_all_is_recorded_as_not_landed():
+    outcome, mismatch = _reconcile([{"event": "gate", "round_id": UNLANDED_ROUND,
+                                     "rung": "review", "ok": True}], surface="code")
+    assert outcome["landed"] is False and "promoted" in mismatch
+
+
+def test_an_unsuccessful_vault_land_row_is_not_a_landing():
+    """`ok: false` is a validation failure that reverted its own paths."""
+    outcome, mismatch = _reconcile([_vault_row(ok=False)], surface="vault")
+    assert outcome["landed"] is False and mismatch, "a reverted vault land counted as landed"
+
+
+def test_a_vault_surface_round_lands_on_its_vault_row():
+    """The other half of the surface rule: a vault-only item has no `promoted`
+    row by construction, and demoting it would flag every vault round."""
+    outcome, mismatch = _reconcile([_vault_row()], surface="vault")
+    assert outcome["landed"] is True and mismatch == ""
+
+
+def test_a_landing_still_in_flight_keeps_the_claim():
+    """`automod_land` returns before the landing runs, so the ledger can be
+    legitimately silent at the moment the turn is finalised. The process's own
+    evidence — the live marker or `current.json` — covers that window."""
+    outcome, mismatch = _reconcile([], landing_seen=True)
+    assert outcome["landed"] is True and mismatch == ""
+
+
+class _Payload:
+    def __init__(self, payload):
+        self.payload = payload
+
+
+def _implement_turn_isolated(board, monkeypatch, structured, *, mid_turn=None,
+                             surface=""):
+    """Run one real implement turn against an isolated board and ledger, and
+    return its `finished` ledger row. `mid_turn` fires inside the turn, which is
+    when a landing's ledger row would actually appear; it may be async, for a hook
+    that has to cross a tool handler (`agent_mcp/automod.py:call_tool`)."""
+    import asyncio
+    import inspect
+
+    from workers.sources import _common as C
+
+    write_item(board, 415)
+    _confirm(415, acceptance="the check passes", surface=surface)
+
+    async def fake(prompt, **kw):
+        if mid_turn:
+            hooked = mid_turn()
+            if inspect.isawaitable(hooked):
+                await hooked
+        return {"text": "done\n\nSPAWNED: none\n", "session_id": "s415",
+                "stop_reason": "stop", "num_turns": 30, "errors": [],
+                "structured": structured, "structured_error": ""}
+
+    async def no_reap(session_id):
+        return None
+
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, ""))
+    monkeypatch.setattr(I, "_reap_at_turn_end", no_reap)
+    asyncio.run(I.execute(_Payload({"structured_outcome": True, "max_turns": 40})))
+    return [e for e in S.read_events(path=S.LEDGER_PATH)
+            if e.get("event") == "backlog_implement" and e.get("phase") == "finished"][-1]
+
+
+def test_a_vault_landing_row_is_not_evidence_that_the_round_promoted():
+    """The two landing checks must not disagree about what a row means.
+
+    `reconcile_outcome_landing` reads `promoted` / `item_landed` / `vault_land`
+    (`backlog.LANDING_LEDGER_EVENTS`) and asks `_landing_seen` whether a landing was
+    in flight, as the one exemption that covers `automod_land` returning before its
+    landing runs. If `_landing_seen` also counted a `vault_land` row, every mixed
+    half-landing would take that exemption and the reconciliation would never fire
+    — the exact #415 shape, passing its own guard. The two lists are asserted
+    against each other, through the real function, because the difference between
+    them *is* the mixed-surface rule.
+    """
+    row = lambda event: {"event": event, "round_id": "SM_VOCAB", "item_id": 415,
+                         "ok": True, "commit": "c" * 40}
+    assert "vault_land" in B.LANDING_LEDGER_EVENTS, (
+        "the reconciliation no longer recognises a vault landing at all, so a "
+        "vault-surface round would be demoted on a landing it really did make")
+    assert not I._landing_seen("SM_VOCAB", [row("vault_land")]), (
+        "`_landing_seen` read a vault landing as this round reaching `automod_land`")
+    assert I._landing_seen("SM_VOCAB", [row("promoted")])
+    assert I._landing_seen("SM_VOCAB", [row("item_landed")])
+
+
+def test_the_writer_demotes_an_unlanded_self_report_on_the_finished_row(isolated, monkeypatch):
+    """The seam itself: the finalizer's structured object in, the persisted row
+    out. #415's row said `"landed": true` beside a `round_aborted` four minutes
+    later; a row that still says that after this change is the defect."""
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM)
+    assert ev["outcome"]["landed"] is False, ev["outcome"]
+    assert "promoted" in ev["outcome_landing_mismatch"], ev["outcome_landing_mismatch"]
+    assert ev["outcome"]["acceptance"] == "met", "the verdict is not what this reconciles"
+
+
+def test_the_writer_demotes_a_mixed_round_whose_only_landing_is_the_vault(isolated, monkeypatch):
+    """#415 end to end: the vault half committed, the code half did not, `landed: true`.
+
+    The mixed-surface rule is only reachable if the in-flight escape hatch does
+    not read a `vault_land` row as "the round reached `automod_land`" — that row
+    is a landing of the other half. So this is the integration test for the
+    wiring: the row appears inside the turn, the real writer runs, and the
+    persisted row says not-landed.
+    """
+    def vault_half():
+        S.append_event({"event": "vault_land", "item_id": 415, "ok": True,
+                        "round_id": "SM_MIXED", "commit": "5f65d971" + "0" * 32},
+                       path=S.LEDGER_PATH)
+
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM,
+                                  mid_turn=vault_half, surface="mixed")
+    assert ev["outcome"]["landed"] is False, ev["outcome"]
+    assert "promoted" in ev["outcome_landing_mismatch"], ev["outcome_landing_mismatch"]
+
+
+def test_the_writer_keeps_a_claim_the_round_actually_promoted(isolated, monkeypatch):
+    """The false-positive direction, same seam: a round that did land must not be
+    demoted, or every landed item's row starts lying the other way."""
+    def landed():
+        S.append_event({"event": "round_start", "round_id": "SM_TEST_LANDED",
+                        "item_id": 415, "session_id": "s415"}, path=S.LEDGER_PATH)
+        S.append_event({"event": "promoted", "round_id": "SM_TEST_LANDED", "item_id": 415,
+                        "commit": "b" * 40}, path=S.LEDGER_PATH)
+
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM, mid_turn=landed)
+    assert ev["outcome"]["landed"] is True, ev["outcome"]
+    assert ev["outcome_landing_mismatch"] == ""
+
+
+def test_a_landing_that_finished_after_the_snapshot_is_still_a_landing(tmp_path, monkeypatch):
+    """The first seam the review rung named on `SM_20260921_091624`: the marker and
+    `current.json` are read live, the ledger is a snapshot taken earlier in the
+    run, so a landing that completes inside that window leaves both empty — the
+    marker cleared, its `promoted` row appended after the snapshot — and the round
+    that DID land gets demoted.
+
+    The row is written with the real writer (`S.append_event`, what `promote.py`
+    calls) into the real ledger file this test isolated, and the marker is absent
+    because the landing is over. What is stale is the injected snapshot, which is
+    exactly the condition under test. The mutation control is the same call with
+    nothing in the ledger: the second look must not become an unconditional True.
+    """
+    monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(S, "read_land_marker", lambda rid: None)
+    monkeypatch.setattr(S, "read_current", lambda: {"round_id": "SM_OTHER"})
+    S.append_event({"event": "promoted", "round_id": "SM_RACE", "commit": "e" * 40},
+                   path=S.LEDGER_PATH)
+    assert I._landing_seen("SM_RACE", []), (
+        "a landing that completed after the run's snapshot was read as no landing — "
+        "the round that landed is demoted to `landed: false`")
+    # Control: same stale snapshot, same absent marker, but a ledger with no
+    # landing row at all. The second look is a re-read of a file, not a yes.
+    monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "empty-ledger.jsonl")
+    assert not I._landing_seen("SM_RACE", [
+        {"event": "round_start", "round_id": "SM_RACE"}]), (
+        "`_landing_seen` answered True for a round with no landing row anywhere, "
+        "which makes the second look meaningless")
+
+
+def test_a_vault_landing_with_no_item_id_is_attributed_to_the_turn_that_made_it(
+        isolated, monkeypatch, tmp_path):
+    """The second seam the review rung named: `item_id` is OPTIONAL on
+    `automod_vault_land`, and 56 of the 172 `vault_land` rows in the ledger on
+    2026-09-21 carry none, so matching a vault landing on `item_id` alone demotes a
+    vault-surface turn that really landed.
+
+    End to end across the process boundary the row actually crosses: the row is
+    written by the real MCP handler (`agent_mcp/automod.py`, a different process in
+    production) with no item_id and no open round, into the ledger the worker
+    reads; the fake implement turn reports the same session id the harness put in
+    `_meta`. The claim must survive. The control is the same turn with no landing
+    at all — attribution is not a licence.
+    """
+    import json
+
+    import agent_mcp.automod as AM
+
+    vault = tmp_path / "obsidian"
+    (vault / "backlog").mkdir(parents=True)
+    git(vault, "init", "-q", "-b", "main", str(vault))
+    git(vault, "config", "user.email", "t@e.com")
+    git(vault, "config", "user.name", "t")
+    (vault / "backlog" / "9-item.md").write_text("---\nstatus: draft\n---\n# item\n")
+    git(vault, "add", "-A")
+    git(vault, "commit", "-q", "-m", "base")
+    # The change the tool is asked to land: the base commit must not contain it.
+    (vault / "backlog" / "9-item.md").write_text("---\nstatus: done\n---\n# item\n")
+    monkeypatch.setattr(V, "VAULT", vault)
+    monkeypatch.setattr(V, "loader_errors", lambda paths: [])
+    monkeypatch.setattr(AM, "_inner_voice_gate", lambda action: None)
+
+    async def land_without_an_item():
+        from agent_mcp import _task_registry
+        token = _task_registry.current_session_id.set("s415")
+        try:
+            # The real handler, awaited exactly as the MCP server awaits it.
+            res = await AM.call_tool("automod_vault_land", {
+                "paths": ["backlog/9-item.md"], "message": "backlog: promote #9"})
+        finally:
+            _task_registry.current_session_id.reset(token)
+        out = json.loads(res[0].text if isinstance(res, list) else res.content[0].text)
+        assert out.get("ok"), out
+        return out
+
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM,
+                                  mid_turn=land_without_an_item, surface="vault")
+    assert ev["outcome"]["landed"] is True, (
+        f"a vault landing the handler really committed was attributed to nobody: {ev}")
+    assert ev.get("outcome_landing_mismatch", "") == "", ev
+    rows = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "vault_land"]
+    assert len(rows) == 1 and rows[0]["item_id"] is None, rows
+    assert rows[0]["session_id"] == "s415", (
+        "the row carries no attribution at all, so nothing downstream can tell a "
+        "landing from a round that landed nothing")
+
+
+def test_the_vault_writer_still_demotes_a_turn_that_landed_nothing(isolated, monkeypatch):
+    """The control for the seam above, same surface and same claim: a `vault`
+    turn whose ledger holds no `vault_land` row keeps being demoted. Attributing a
+    row by session is not the same as trusting the claim."""
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM, surface="vault")
+    assert ev["outcome"]["landed"] is False, ev["outcome"]
+    assert "vault_land" in ev["outcome_landing_mismatch"], ev["outcome_landing_mismatch"]

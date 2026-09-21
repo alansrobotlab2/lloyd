@@ -434,7 +434,18 @@ def _vault_review_attempts(item_id: int) -> int:
                and e.get("item_id") == item_id and float(e.get("ts") or 0) >= started)
 
 
-def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
+def land(paths: list[str], message: str, *, item_id: int | None = None,
+         session_id: str | None = None) -> dict:
+    """Validate these paths, commit exactly them on the vault's main, ledger it.
+
+    `session_id` is the calling turn's session and it goes on the `vault_land`
+    row. The tool handler writes it (`agent_mcp/automod.py`) from the session the
+    harness stamped into the request's `_meta` — never from the caller's
+    arguments — because `item_id` is optional at that boundary, and a landing
+    whose row carries neither an item nor a session belongs to no one: the
+    implement reconciler then reads a vault round that really landed as one that
+    did not (`scripts/automod/backlog.py:round_landing_rows`).
+    """
     norm = []
     for p in paths:
         n = spec.normalize(p)
@@ -450,7 +461,8 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
     if errors:
         undone = revert_paths(norm) if not buckets["denied"] else []
         S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
-                        "paths": norm, "errors": errors[:10], "reverted": undone})
+                        "paths": norm, "errors": errors[:10], "reverted": undone,
+                        **({"session_id": session_id} if session_id else {})})
         raise VaultRoundError("validation failed; the change was reverted: "
                               + "; ".join(errors[:5]))
 
@@ -550,6 +562,10 @@ def land(paths: list[str], message: str, *, item_id: int | None = None) -> dict:
                     "paths": norm, "validated": buckets["validated"],
                     "review": review, "review_reason": review_reason,
                     "review_clauses": review_clauses, "landing_clauses": landing_rows,
+                    # The attribution `round_landing_rows` falls back to when the
+                    # caller passed no item_id. A CLI/autoresearch land has no
+                    # turn and so no session; it writes no key, which is honest.
+                    **({"session_id": session_id} if session_id else {}),
                     "message": message.strip()[:200]})
     return {"ok": True, "commit": sha, "paths": norm, "validated": buckets["validated"],
             "review": review, "review_reason": review_reason,

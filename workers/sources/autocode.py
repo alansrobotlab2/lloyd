@@ -435,9 +435,36 @@ def _landing_seen(round_id: str | None, events: list[dict]) -> bool:
     """Did this round reach `round land`? Read from what the landing itself
     leaves behind, never from what the turn says about it: its live marker
     (`automod_land` writes one before it returns), the promotion under way in
-    `current.json`, or a `promoted` / `land_failed` / `land_rescued` row."""
+    `current.json`, or a landing row that can only mean the round got there:
+    `promoted`, `item_landed`, or a landing that ran and was undone (`land_failed`,
+    `land_rescued`). Deliberately not `vault_land` — that row lands the *vault*
+    half and is no evidence this round reached `automod_land`, which is the one
+    question `reconcile_outcome_landing` needs it to answer honestly.
+
+    The `events` list is a snapshot taken earlier in this run, while the marker
+    and `current.json` are read here — so a landing that completes inside that
+    window (marker written and cleared, `promoted` appended after the snapshot)
+    leaves the snapshot with nothing and the marker already gone, and the round
+    that DID land is demoted. Hence the second look: when the snapshot and the
+    live marker both come up empty, re-read the ledger at the moment of the
+    decision. It is the same file the detached landing appends to, so one fresh
+    read is the cross-process check; `events` stays the injected source for the
+    tests that hand the function its input.
+
+    Reading the ledger *after* the marker is safe because of the landing's own
+    ordering: `round.land` appends `promoted` inside `P.promote`
+    (`scripts/automod/promote.py:1335`) and clears the marker in its `finally`
+    (`scripts/automod/round.py:382`), so the row exists by the time the marker is
+    gone — the two sources cannot both be empty on a completed landing.
+    """
     if not round_id:
         return False
+    landing_events = {"promoted", "item_landed", "land_failed", "land_rescued"}
+
+    def _row(source: list[dict]) -> bool:
+        return any(ev.get("round_id") == round_id and ev.get("event") in landing_events
+                   for ev in source)
+
     from scripts.automod import state as S
     try:
         if S.land_in_progress(round_id):
@@ -446,9 +473,12 @@ def _landing_seen(round_id: str | None, events: list[dict]) -> bool:
             return True
     except Exception:  # noqa: BLE001 — an unreadable marker is not a landing
         pass
-    return any(ev.get("round_id") == round_id
-               and ev.get("event") in ("promoted", "land_failed", "land_rescued")
-               for ev in events)
+    if _row(events):
+        return True
+    try:
+        return _row(S.read_events(limit=500))
+    except Exception:  # noqa: BLE001 — an unreadable ledger is not a landing either
+        return False
 
 
 def _abandon_grace_seconds() -> int:
@@ -1385,17 +1415,32 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             logger.warning("reconcile_statuses after #%s failed: %s", candidate.id, exc)
 
 
-def _vault_commits_since(events: list[dict], item_id: int, since_ts: float) -> list[str]:
-    """Shas of this item's successful `vault_land`s at or after `since_ts`."""
+def _vault_commits_since(events: list[dict], item_id: int, since_ts: float,
+                         session_id: str | None = None) -> list[str]:
+    """Shas of this item's successful `vault_land`s at or after `since_ts`.
+
+    Matched on `item_id` OR on the turn's `session_id`, because `item_id` is
+    optional on the `automod_vault_land` tool and 56 of the 172 `vault_land`
+    rows in the ledger on 2026-09-21 carry none — a vault-only turn that passed
+    no item, or that opened no round, would otherwise have its real landing
+    read as no landing. The session id on the row is written by the tool handler
+    from the harness's `_meta`, never by the caller's arguments
+    (`agent_mcp/automod.py`, `scripts/automod/vault_round.py:land`).
+    """
+    sid = str(session_id or "")
     return [e.get("commit") for e in events
             if e.get("event") == "vault_land" and e.get("ok")
-            and e.get("item_id") == item_id and float(e.get("ts") or 0) >= since_ts]
+            and float(e.get("ts") or 0) >= since_ts
+            and (e.get("item_id") == item_id
+                 or (sid and str(e.get("session_id") or "") == sid))]
 
 
-def _vault_landed_since(item_id: int, since_ts: float) -> bool:
+def _vault_landed_since(item_id: int, since_ts: float,
+                        session_id: str | None = None) -> bool:
     """Whether a `vault_land` for this item succeeded at or after `since_ts`."""
     from scripts.automod import state as S
-    return bool(_vault_commits_since(S.read_events(limit=500), item_id, since_ts))
+    return bool(_vault_commits_since(S.read_events(limit=500), item_id, since_ts,
+                                     session_id=session_id))
 
 
 async def _reap_at_turn_end(session_id: str | None) -> None:
@@ -1511,7 +1556,13 @@ async def _run_and_record(item, candidate, triage, budget, started,
                         "phase": "finished", "reason": str(exc),
                         "round_id": _round_opened_since(timeout_events, started,
                                                         item_id=candidate.id),
-                        "vault_commits": _vault_commits_since(timeout_events, candidate.id, started),
+                        # No session id on this path: `run` is unbound because
+                        # the await raised, so a vault row can only be matched on
+                        # its own `item_id` here — same as before this round. The
+                        # attribution fallback belongs to the path that got a
+                        # session back, not to the one that ran out of clock.
+                        "vault_commits": _vault_commits_since(
+                            timeout_events, candidate.id, started),
                         "surface": triage.get("surface") or "code",
                         "stop_reason": "turn_timeout"})
         logger.warning("backlog #%s: %s", candidate.id, exc)
@@ -1541,7 +1592,9 @@ async def _run_and_record(item, candidate, triage, budget, started,
                        candidate.id, run["session_id"])
         return {"status": "failed", "item_id": candidate.id,
                 "summary": f"#{candidate.id}: turn never completed — not counted as an attempt"}
-    vault_commits = _vault_commits_since(events, candidate.id, started)
+    turn_session = str(run.get("session_id") or "")
+    vault_commits = _vault_commits_since(events, candidate.id, started,
+                                         session_id=turn_session)
     outcome = B.parse_outcome(run.get("structured")) if want_outcome else None
     outcome_error = str(run.get("structured_error") or "")
     # `unnecessary` / `rejected` close the item below, now, with no landing to
@@ -1552,11 +1605,32 @@ async def _run_and_record(item, candidate, triage, budget, started,
     # A vault landing is a landing: #982's turn committed to the vault, the
     # vault review graded it 4 of 4 met, and with no round to look at this
     # read as "nothing landed".
-    outcome, verdict_refused = B.settle_item_verdict(
-        outcome, landing_seen=_landing_seen(round_id, events) or bool(vault_commits))
+    # `round_seen` is the round's own landing evidence — marker, `current.json`,
+    # or a `promoted` / `item_landed` / `land_failed` / `land_rescued` row.
+    # `seen` adds this turn's vault commits, which is the right evidence for
+    # "did this turn land anything at all" (#982's vault-only turn graded 4 of 4
+    # with no round to look at) and the wrong evidence for "did the round reach
+    # `automod_land`": #415's mixed round committed to the vault, never to `main`,
+    # and reported `landed: true` from exactly that half.
+    round_seen = _landing_seen(round_id, events)
+    seen = round_seen or bool(vault_commits)
+    outcome, verdict_refused = B.settle_item_verdict(outcome, landing_seen=seen)
     if verdict_refused:
         logger.warning("backlog #%s: item verdict not taken — %s (round %s)",
                        candidate.id, verdict_refused, round_id)
+    # The other half of the same cross-check, on the field `settle_item_verdict`
+    # does not read: `landed` itself. A round that never reached `automod_land`
+    # reports `landed: true` and the row used to store it verbatim — #415's spent
+    # its item's one attempt that way, half-landed through the vault route with
+    # the code commit never on `main`. Hence the surface: on `code`/`mixed` only a
+    # `promoted` / `item_landed` row counts, because that is the half the round's
+    # own diff still needs a landing for.
+    outcome, landing_mismatch = B.reconcile_outcome_landing(
+        outcome, round_id=round_id, item_id=candidate.id, events=events,
+        landing_seen=round_seen, surface=str(triage.get("surface") or "code"),
+        session_id=turn_session)
+    if landing_mismatch:
+        logger.warning("backlog #%s: %s", candidate.id, landing_mismatch)
     # A path the round needed and the loop may never write. Recorded on the
     # item, which tags it `needs-human` and holds it open — reported rather
     # than hidden, which is what `git add -f` was.
@@ -1648,6 +1722,11 @@ async def _run_and_record(item, candidate, triage, budget, started,
                     # Why an `unnecessary`/`rejected` was not taken, when one
                     # was not (`backlog.settle_item_verdict`). Empty otherwise.
                     "outcome_refused": verdict_refused,
+                    # Why a self-reported `landed: true` was demoted to not
+                    # landed (`backlog.reconcile_outcome_landing`): the row's
+                    # `outcome.landed` is False and this names the round that has
+                    # no landing row. Empty when the claim stood.
+                    "outcome_landing_mismatch": landing_mismatch,
                     "finalizer_tokens": run.get("finalizer_tokens"),
                     "response_tail": (run.get("text") or "")[-1500:]})
     outcome = (f"round {round_id}" if round_id else
