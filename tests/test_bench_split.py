@@ -19,9 +19,15 @@ import pytest
 from scripts.autoresearch import bench_split, hypothesis_generator as hg
 from scripts.autoresearch.common import AutoresearchConfig, AutoresearchPaths
 
-# The live bench's category census, measured 2026-09-10: 4 replay, 4 synthetic,
-# 2 adversarial, 1 safety. Written down so a bench file added or recategorised
-# shows up here as well as in the split itself.
+#: The corpus as it stood on 2026-09-10 — 4 replay, 4 synthetic, 2 adversarial, 1
+#: safety — kept at that composition on purpose. The split arithmetic below is
+#: pinned against a KNOWN composition (`test_slice_sizes_are_constant_across_rounds`
+#: asserts 6 targeted / 5 held-out for twelve round ids), and growing this fixture to
+#: match the live corpus would move those two numbers on every nightly bench addition:
+#: the corpus-width equality this item retires, smuggled back in through a fixture.
+#: A fixture with its own composition is therefore honest, but it is NOT the census —
+#: the map kept in step with `~/obsidian/lloyd/bench` is `LIVE_BENCH_CATEGORIES`
+#: further down, checked against the files on disk.
 LIVE_BENCH = {
     "bench_001_reply_greeting": "replay",
     "bench_002_recall_user_fact": "replay",
@@ -287,8 +293,40 @@ requires_real_bench = pytest.mark.skipif(
 #: flight when someone else's bench task lands, and does so with `external_blocker`
 #: set, which blocks the promotion without spending the item's attempt (#1320). A
 #: shrink below this is the event worth failing on: tasks are only ever added, so a
-#: smaller live corpus means one was deleted or failed to load.
+#: smaller live corpus means one was deleted or failed to load. Two landed the same
+#: day this was written — bench_012 (`af6ac64b`) and bench_013 (`8eb62ade`,
+#: 2026-09-21T05:01Z, between two probes of this file) — which is the rate at which
+#: a per-task map here needs a human, and why it is checked rather than trusted.
 MIN_LIVE_BENCH_TASKS = 11
+
+#: Every file in `~/obsidian/lloyd/bench/`, keyed by task id (the file stem, which
+#: each file also declares as `id:`), with the `category:` its own front matter
+#: carries. Measured 2026-09-21: 13 tasks — 6 replay, 4 synthetic, 2 adversarial,
+#: 1 safety.
+#:
+#: This is the map a nightly bench addition has to be recorded in, and
+#: `test_every_live_bench_file_is_named_in_the_census` is what makes it fail loudly
+#: and by name when it is not. Deliberately NOT the same map as `LIVE_BENCH` above:
+#: that one is the frozen 2026-09-10 corpus the split-SHAPE arithmetic is pinned
+#: against (6 targeted / 5 held-out), and merging the two would make every added
+#: task move an arithmetic assertion — the width pin this item retires, back under
+#: another name. Here, a new entry is the whole fix, and an unmapped file says which
+#: id needs one.
+LIVE_BENCH_CATEGORIES = {
+    "bench_001_reply_greeting": "replay",
+    "bench_002_recall_user_fact": "replay",
+    "bench_003_vault_recall": "synthetic",
+    "bench_004_replay_schedule_task": "replay",
+    "bench_005_replay_memory_update": "replay",
+    "bench_006_contradiction_check": "synthetic",
+    "bench_007_skill_invocation": "synthetic",
+    "bench_008_adversarial_gap": "adversarial",
+    "bench_009_adversarial_probe": "adversarial",
+    "bench_010_safety_destructive": "safety",
+    "bench_011_haiku_quantum": "synthetic",
+    "bench_012_replay_schedule_verify_chain": "replay",
+    "bench_013_replay_memory_update_novelty": "replay",
+}
 
 
 def _assert_live_bench_big_enough(tasks: list[dict]) -> None:
@@ -296,6 +334,56 @@ def _assert_live_bench_big_enough(tasks: list[dict]) -> None:
     assert len(tasks) >= MIN_LIVE_BENCH_TASKS, (
         f"live bench at {REAL_BENCH} holds {len(tasks)} tasks, below the "
         f"{MIN_LIVE_BENCH_TASKS} this guard was written against")
+
+
+@requires_real_bench
+def test_every_live_bench_file_is_named_in_the_census():
+    """What a nightly bench addition does now that no width is asserted.
+
+    Retiring the corpus-width equality (#1320/#1323) left this question open: a new
+    `~/obsidian/lloyd/bench/*.md` used to fail eleven nodes across two files with
+    `expected the live 11-task bench, got 12` — a number, no task id, and no hint
+    that the fix is one line. The answer is that it has to land HERE, on one node,
+    naming the file. That is only worth having if this node is the corpus check the
+    other two are not: it says which id is unmapped and what to do about it.
+
+    Both directions are compared against the files ON DISK rather than against
+    `load_bench_tasks`, because that loader `continue`s past a file whose front
+    matter fails to parse — a corpus silently losing a task would otherwise read as
+    a smaller corpus, and no width assertion is left to notice.
+    `test_bench_invariants.py::test_every_bench_file_loads` already counts that
+    difference; the check here is kept because it is the one this node needs to be
+    self-contained (a skipped file would otherwise surface only as a `None` category
+    in the drift report below) and because it reads `REAL_BENCH` exactly as the other
+    live-corpus nodes in this file do. What is unique to this node is the per-file
+    category: the census is compared against the front matter the splitter actually
+    reads, because the veto slice's composition, and so the denominator of every
+    promotion verdict, is a function of it.
+    """
+    from scripts.autoresearch.common import load_bench_tasks
+
+    on_disk = {p.stem for p in REAL_BENCH.glob("*.md")}
+    missing = sorted(on_disk - set(LIVE_BENCH_CATEGORIES))
+    assert not missing, (
+        f"{len(missing)} bench file(s) in {REAL_BENCH} with no entry in "
+        f"LIVE_BENCH_CATEGORIES: {missing} — add each keyed by its task id with the "
+        f"`category:` its own front matter declares")
+    stale = sorted(set(LIVE_BENCH_CATEGORIES) - on_disk)
+    assert not stale, (
+        f"LIVE_BENCH_CATEGORIES names {len(stale)} task(s) with no file in "
+        f"{REAL_BENCH}: {stale} — a retired bench task leaves the census too")
+
+    loaded = {t["id"]: t.get("category") for t in load_bench_tasks(REAL_BENCH)}
+    assert set(loaded) == on_disk, (
+        f"files on disk and loadable tasks disagree; `load_bench_tasks` skips a "
+        f"file silently when its front matter is missing or unparseable: "
+        f"{sorted(on_disk ^ set(loaded))}")
+    drift = {tid: (census, loaded.get(tid))
+             for tid, census in LIVE_BENCH_CATEGORIES.items()
+             if loaded.get(tid) != census}
+    assert not drift, (
+        "census and front matter disagree, shown (census, loaded) — the split is "
+        f"computed from the loaded category: {drift}")
 
 
 @requires_real_bench

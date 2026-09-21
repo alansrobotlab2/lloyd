@@ -29,7 +29,8 @@ from pathlib import Path
 import pytest
 
 from scripts.autoresearch import promote
-from scripts.autoresearch.common import AutoresearchConfig, AutoresearchPaths
+from scripts.autoresearch.common import (
+    AutoresearchConfig, AutoresearchPaths, load_bench_tasks)
 
 # For the test that reads the gate's own prose (#1060): the comment above the win
 # leg is behaviour pinned by the file it documents, so it is asserted from disk.
@@ -291,9 +292,16 @@ def test_ties_are_not_wins(isolated_prompts, tmp_path):
 
 # ── #1060: the tie rule is one written decision, and the refusal says the split ─
 
-# The live bench's eleven tasks, with the categories `~/obsidian/lloyd/bench/*.md`
-# actually carry (4 replay, 4 synthetic, 2 adversarial, 1 safety). `derive_split`
-# reads this axis, so a test built on it goes down the same path the live gate does.
+# The eleven tasks of ledger round `R_20260901_111544`, with the categories their
+# front matter carried then (4 replay, 4 synthetic, 2 adversarial, 1 safety). This
+# map ages with that round, not with the bench: the live corpus is 13 tasks on
+# 2026-09-21: `bench_012_replay_schedule_verify_chain` and
+# `bench_013_replay_memory_update_novelty` postdate the row `LEDGER_BASELINE`
+# transcribes, and the ledger holds no score for either, which is why extending this
+# map would be fabricating one. The map that IS kept in step with the bench is
+# `LIVE_BENCH_CATEGORIES` in `tests/test_bench_split.py`, checked there against the
+# files on disk. `derive_split` reads this axis, so a test built on it goes down the
+# same path the live gate does.
 LIVE_CATEGORIES = {
     "bench_001_reply_greeting": "replay",
     "bench_002_recall_user_fact": "replay",
@@ -1516,8 +1524,8 @@ def test_the_manual_promote_route_refuses_the_same_ratchet(isolated_prompts, tmp
 # ─────────────────────────────────────────────────────────────────────────────
 # `--bench-limit` against the live gate, over the REAL bench.
 #
-# `run_round` writes the split from all 11 bench tasks and truncates the round's
-# evaluation afterwards, and its comment claims a truncated round is then refused
+# `run_round` writes the split from every bench task in the live corpus and
+# truncates the round's evaluation afterwards, and its comment claims a truncated
 # rather than promoted. That claim is about two functions meeting — `record_split`
 # and `evaluate_promotion` — across the real category layout, and no synthetic
 # fixture can make it: the refusal depends on WHERE the limit cuts the actual bench
@@ -1529,10 +1537,20 @@ REAL_BENCH = Path.home() / "obsidian" / "lloyd" / "bench"
 requires_real_bench = pytest.mark.skipif(
     not REAL_BENCH.is_dir(), reason=f"no live bench at {REAL_BENCH}")
 
-#: Truncation widths to refuse. Every one must be strictly below the live task
-#: count, or the node would be asserting that a FULL round is refused for partial
-#: coverage — so the node checks that itself rather than trusting this list.
-LIMITS = list(range(1, 11))
+#: Every truncation width the live corpus exposes, read at collection time: on an
+#: N-task bench that is 1..N-1, so 1..12 on the 13-task bench measured 2026-09-21.
+#: Deriving it instead of writing it down is the point. This list was `range(1, 11)`,
+#: which was every truncation width of an 11-task bench and quietly stopped being one
+#: as the corpus grew: against the 13-task corpus it covers 10 of the 12 widths, and
+#: nothing in the suite says so. That is the #1320 corpus-width defect outliving its
+#: own deletion — the equality red eleven nodes and named a number nobody could act
+#: on, an un-enforced ceiling reds nothing and simply stops testing the widths above
+#: it. Reading the corpus at collection is what keeps "refused at EVERY truncation
+#: width" meaning its name; `MIN_LIVE_BENCH_TASKS` below is where a count is
+#: asserted, and only as a floor. A corpus that grows between collection and the run
+#: is caught inside the node by `limit < len(all_tasks)`, and with no live bench this
+#: is `[1]` while the whole section skips on `requires_real_bench`.
+LIMITS = list(range(1, len(load_bench_tasks(REAL_BENCH)) or 2))
 
 #: Floor, not the size of the live corpus. `lloyd/bench/` is written by the vault
 #: and an added task is routine (bench_012 landed 2026-09-20 in vault commit
@@ -1561,27 +1579,30 @@ def _truncated_pair(tasks: list[dict], n: int, gain: float) -> tuple[dict, dict]
 @pytest.mark.parametrize("limit", LIMITS)
 def test_a_truncated_round_is_refused_by_the_live_gate(cfg, tmp_path, limit):
     """Every `--bench-limit` below the full bench fails to promote, naming the half
-    it never measured. Two refusals cover the range, and which one fires is decided
-    by where the cut lands in the real bench order:
+    it never measured — at EVERY width the live corpus exposes, because `LIMITS` is
+    derived from its length (1..12 on the 13-task bench measured 2026-09-21). Which
+    refusal family fires is decided by where the cut lands in the real load order:
 
-    - `no_heldout_overlap`: the round scored NONE of the veto slice (the cut lands
-      before the first held-out task — positions past 4 in the load order).
+    - `no_heldout_overlap`: the round scored NONE of the veto slice. Measured at
+      widths 1-4, where the cut lands before the first adversarial/safety task.
     - `partial_heldout_coverage` / `partial_targeted_coverage`: it scored SOME of a
       slice but not all of it, so a mean over the part it has would be read as a
       verdict on the whole — the averaging defect the split exists to remove, one
-      layer down.
+      layer down. Measured at widths 5-12; at 10-12 the only unscored task is
+      `bench_013_replay_memory_update_novelty`, which this round id rotates into the
+      veto.
 
-    WHICH family fires is a property of the live load order, so the assertion is on
-    the family, not the per-limit mapping: on the corpus measured 2026-09-21 (12
-    tasks) limits 1-4 give `no_heldout_overlap`, 5-9 `partial_heldout_coverage` and
-    10-11 `partial_targeted_coverage`. Without the coverage check, a truncation that
-    scores one to five veto tasks would promote a variant whose veto mean merely did
-    not decline on a fraction of the slice. Asserting the refusal for EVERY limit is
-    the point: a partial refusal that let one truncation width through is not a
-    fail-closed gate.
+    The assertion is on the FAMILY, not a per-width mapping, because which slice a
+    width leaves short depends on which targeted tasks `record_split` rotates into
+    the veto for the round id — a mapping would be a claim about the rotation, not
+    about the gate. Without the coverage check, a truncation that scores part of the
+    veto slice would promote a variant whose veto mean merely did not decline on a
+    fraction of it. Asserting the refusal at every width is the point: a partial
+    refusal that let one truncation width through is not a fail-closed gate, and
+    `test_the_full_live_round_is_not_refused_for_coverage` is the counterpart that
+    proves these refusals are coverage and not a gate that refuses everything.
     """
     from scripts.autoresearch import run_round
-    from scripts.autoresearch.common import load_bench_tasks
 
     cfg.paths.ensure()
     all_tasks = load_bench_tasks(REAL_BENCH)
@@ -1589,8 +1610,10 @@ def test_a_truncated_round_is_refused_by_the_live_gate(cfg, tmp_path, limit):
         f"live bench at {REAL_BENCH} holds {len(all_tasks)} tasks, below the "
         f"{MIN_LIVE_BENCH_TASKS} this guard was written against")
     assert limit < len(all_tasks), (
-        f"the parametrised ceiling {LIMITS[-1]} no longer truncates a "
-        f"{len(all_tasks)}-task bench: widen LIMITS, or this node asserts nothing")
+        f"the corpus grew after collection: width {limit} is no longer a truncation "
+        f"of a {len(all_tasks)}-task bench (LIMITS was built against "
+        f"{LIMITS[-1] + 1}). Re-run this file — LIMITS derives the widths, it is not "
+        f"edited by hand")
     split = run_round.record_split(cfg, all_tasks, "R_20260919_120000")
 
     base, var = _truncated_pair(all_tasks, limit, gain=0.4)
@@ -1604,12 +1627,55 @@ def test_a_truncated_round_is_refused_by_the_live_gate(cfg, tmp_path, limit):
 
 
 @requires_real_bench
+def test_the_full_live_round_is_not_refused_for_coverage(cfg):
+    """The counterpart to the parametrised refusal: score EVERY live bench task and
+    the same gate promotes.
+
+    Without this node the refusals above prove nothing on their own — a gate that
+    refused on any input would satisfy them, and so would one whose coverage check
+    is keyed to a corpus width that no longer exists. Measured on the 13-task corpus
+    on 2026-09-21, the un-truncated round promotes with
+    `promote (targeted_delta=+0.4000, heldout_delta=+0.4000, normalized_gain=72.73%,
+    win_frac=1.00)`. The two asserted fragments are chosen to hold at any corpus
+    width: the deltas are a property of `_truncated_pair` scoring +0.40 on every task
+    it covers, and `win_frac=1.00` is the claim that carries the node — the variant
+    strictly beats the baseline everywhere it looked, so coverage was the only thing
+    that could have stopped it, and coverage is what this round now has.
+
+    The middle assertion is the one that keeps `LIMITS` honest: it fails if the
+    corpus moves between collection and this run, which is the only way a
+    corpus-derived parametrisation can quietly stop covering every width — the
+    silent half of the defect #1320 retired the loud half of.
+    """
+    from scripts.autoresearch import run_round
+
+    cfg.paths.ensure()
+    all_tasks = load_bench_tasks(REAL_BENCH)
+    assert len(all_tasks) >= MIN_LIVE_BENCH_TASKS, (
+        f"live bench at {REAL_BENCH} holds {len(all_tasks)} tasks, below the "
+        f"{MIN_LIVE_BENCH_TASKS} this guard was written against")
+    assert len(LIMITS) == len(all_tasks) - 1, (
+        f"the refusal node covers {len(LIMITS)} widths (1..{LIMITS[-1]}) on a "
+        f"{len(all_tasks)}-task corpus, so it is not refusing every truncation: "
+        f"LIMITS is derived from the corpus at collection, so re-run — a corpus that "
+        f"grew mid-run is the only legitimate reason, and a hand-narrowed LIMITS is "
+        f"the one this assertion exists to catch")
+
+    split = run_round.record_split(cfg, all_tasks, "R_20260919_120000")
+    base, var = _truncated_pair(all_tasks, len(all_tasks), gain=0.4)
+    should, reason = promote.evaluate_promotion(cfg, base, var, split=split)
+    assert should is True, (
+        f"a round that scored all {len(all_tasks)} live bench tasks was refused, so "
+        f"the truncation refusals are not about coverage: {reason}")
+    assert "targeted_delta=+0.4000" in reason and "win_frac=1.00" in reason, reason
+
+
+@requires_real_bench
 def test_the_partial_coverage_refusal_names_the_tasks_it_never_scored(cfg):
     """The refusal has to say WHICH tasks went unread, or a debugging agent reads
     `partial_heldout_coverage` and has to re-derive the truncation to learn what the
     round missed — and the round's own report is the only artifact it has."""
     from scripts.autoresearch import run_round
-    from scripts.autoresearch.common import load_bench_tasks
 
     cfg.paths.ensure()
     all_tasks = load_bench_tasks(REAL_BENCH)
@@ -1640,7 +1706,6 @@ def test_the_full_round_promotes_and_the_coverage_clause_costs_it_nothing(cfg):
     the two refusal tests above would also pass if the coverage check refused every
     round, which is a gate that is merely broken rather than correctly strict."""
     from scripts.autoresearch import run_round
-    from scripts.autoresearch.common import load_bench_tasks
 
     cfg.paths.ensure()
     all_tasks = load_bench_tasks(REAL_BENCH)
