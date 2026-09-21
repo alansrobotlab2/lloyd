@@ -198,3 +198,46 @@ def test_within_file_guard_still_holds_when_the_store_is_unavailable(tree, monke
     assert _add(fact="captured without an index").get("skipped") is not True
     assert _add(fact="captured without an index").get("skipped") is True
     assert _file_fact_texts(tree, "Zedlink", "state") == ["captured without an index"]
+
+
+# ── the guard's entity key is the canonical, not the file's tag (#957) ────────
+
+def test_a_declared_variant_spelling_cannot_smuggle_a_second_copy_in(tree):
+    """The MCP write boundary #957 crosses: `fact_add` → file → index → guard.
+
+    `_fact_add` resolves the request name to canonical
+    (`agent_mcp/facts.py:467`) before asking `facts_idx` for a copy of the
+    claim. While the index keyed a row by its file's own tag, the two spellings
+    never met, so a fact the family already carried was appended again: run
+    against base `7e054cdd` on 2026-09-21 this same write answered
+    `{'success': True, 'skipped': False}`, leaving the family holding two copies
+    under two keys. Folding the key at
+    index-build time is what makes the guard's `(entity, text_hash)` key cover a
+    family, so the refusal — and only the refusal — is the new behaviour here.
+    """
+    st = kg_store.store()
+    st.aliases.set("TencentDB-Agent-Memory", "TencentDB Agent Memory",
+                   kind="punct", origin="test")
+    d = tree / "TencentDB Agent Memory"                 # canonical directory…
+    d.mkdir()
+    seeded = d / "TencentDB-Agent-Memory-architecture.md"
+    fm = {"type": "facts", "entity": "TencentDB-Agent-Memory",   # …variant tag
+          "category": "architecture",
+          "facts": [{"id": "arch-001", "fact": "keeps a vector store",
+                     "confidence": 0.9, "provenance": "EXTRACTED"}]}
+    seeded.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# x\n",
+                      encoding="utf-8")
+    facts._reindex_files([seeded])
+
+    assert [r["entity"] for r in st.conn.execute("SELECT DISTINCT entity FROM facts_idx")] \
+        == ["TencentDB Agent Memory"], "the seeded row is still keyed by its tag"
+
+    again = _add(entity="TencentDB Agent Memory", category="usage",
+                 fact="keeps a vector store")
+    assert again.get("skipped") is True, f"the variant copy was appended: {again}"
+    assert again["duplicate_of"]["fact_id"] == "arch-001", again
+    assert again["duplicate_of"]["file_path"] == \
+        "TencentDB Agent Memory/TencentDB-Agent-Memory-architecture.md", again
+    assert len(_rows("TencentDB Agent Memory")) == 1
+    assert not (d / "TencentDB Agent Memory-usage.md").exists(), \
+        "the refused write still created its category file"

@@ -212,6 +212,165 @@ def _fact_file(root, entity, cat, facts):
     return p
 
 
+def _variant_fact_file(root, dir_name, entity_tag, cat, facts):
+    """Fact file that SITS IN `dir_name` but whose `entity:` tag is `entity_tag`.
+
+    That mismatch is the whole defect: the file already lives in the canonical
+    directory while its own tag still spells a variant, which is how
+    `_rows_for_file` came to key 17,202 active rows under 1,430 alias surfaces
+    on the live index (measured 2026-09-21).
+    """
+    d = root / dir_name; d.mkdir(parents=True, exist_ok=True)
+    fm = {"type": "facts", "entity": entity_tag, "category": cat, "facts": facts}
+    p = d / f"{entity_tag}-{cat}.md"
+    p.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {dir_name} - {cat}\n")
+    return p
+
+
+def _indexed(db, sql="SELECT fact_id, file_path, entity FROM facts_idx"):
+    return sorted(tuple(r) for r in db.conn.execute(sql))
+
+
+def test_reindex_keys_facts_under_the_canonical_the_alias_table_declares(db, tmp_path):
+    """#957 clause 1: the stored key is `aliases.resolve(name)`, literal when no row exists.
+
+    Covers both sources of the key — the file's own `entity:` frontmatter tag
+    and a per-fact `entity:` override — and pins the no-alias fallback, because
+    folding a name nobody declared is the `06f0e41` failure mode. The fold
+    lives at index-build time so the per-file write path (`update_file`, which
+    every `fact_add` triggers) keys canonically too; a one-off UPDATE would
+    revert on the next write.
+    """
+    root = tmp_path / "facts"
+    db.aliases.set("TencentDB-Agent-Memory", "TencentDB Agent Memory", kind="punct", origin="test")
+    db.aliases.set("autonomy-data-pipeline", "Autonomy Data Pipeline", kind="punct", origin="test")
+    # (a) the file-level tag is the declared variant
+    variant_file = _variant_fact_file(
+        root, "TencentDB Agent Memory", "TencentDB-Agent-Memory", "architecture",
+        [{"id": "arch-001", "fact": "keeps a vector store"}])
+    # (b) the file tag is already canonical; the per-fact override is the variant
+    _variant_fact_file(
+        root, "Autonomy Data Pipeline", "Autonomy Data Pipeline", "usage",
+        [{"id": "u-001", "fact": "runs nightly", "entity": "autonomy-data-pipeline"}])
+    # (c) no alias row for this tag: the literal name is the key
+    _variant_fact_file(root, "Loamgate", "Loamgate Archived", "state",
+                       [{"id": "l-001", "fact": "no alias row names it"}])
+    db.facts_idx.reindex(root=root)
+    assert sorted(r[0] for r in _indexed(db, "SELECT entity, fact_id FROM facts_idx")) == [
+        "Autonomy Data Pipeline", "Loamgate Archived", "TencentDB Agent Memory"]
+    assert db.facts_idx.count(entity="TencentDB Agent Memory", active_only=True) == 1
+    assert db.facts_idx.count(entity="TencentDB-Agent-Memory", active_only=True) == 0
+    # and a single-file re-read after a write keys the same way
+    db.facts_idx.update_file(variant_file, root=root)
+    assert db.facts_idx.count(entity="TencentDB Agent Memory", active_only=True) == 1
+
+
+def test_a_chained_alias_folds_to_the_end_of_the_chain_not_one_hop(db, tmp_path):
+    """One hop would leave rows under a surface, which is the defect restated.
+
+    The live alias table holds 107 rows whose canonical is itself a surface
+    (measured 2026-09-21), e.g. `Codemode` -> `CodeMode` -> `Code Mode`, and 81
+    active rows sat two hops from home. Every hop is still a declared row, so
+    following the chain is still not a guess.
+    """
+    root = tmp_path / "facts"
+    db.aliases.set("LloydBot", "lloyd-bot", kind="punct", origin="sweep")
+    db.aliases.set("lloyd-bot", "Lloyd Bot", kind="case", origin="sweep")
+    _variant_fact_file(root, "Lloyd Bot", "LloydBot", "state",
+                       [{"id": "b-001", "fact": "greets in the morning"}])
+    db.facts_idx.reindex(root=root)
+    assert db.facts_idx.count(entity="Lloyd Bot", active_only=True) == 1
+    assert db.facts_idx.count(entity="lloyd-bot", active_only=True) == 0
+    assert db.facts_idx.count(entity="LloydBot", active_only=True) == 0
+    assert db.facts_idx.for_entity("Lloyd Bot")[0]["fact_id"] == "b-001"
+
+
+def test_canonical_read_covers_a_family_whose_files_keep_the_variant_tag(db, tmp_path):
+    """#957 clause 2: for_entity(canonical) returns the whole family, not one file's rows.
+
+    Before the fix the canonical dir's two files split across two keys, so the
+    entity API (`app/routers/entities.py` → `for_entity`) served the canonical
+    file's rows only while the variant's rows were unreachable — the route
+    normalises the request name first, so the variant key cannot be asked for.
+    """
+    root = tmp_path / "facts"
+    db.aliases.set("TencentDB-Agent-Memory", "TencentDB Agent Memory", kind="punct", origin="test")
+    _fact_file(root, "TencentDB Agent Memory", "architecture",
+               [{"id": "a-001", "fact": "keeps a vector store"}])
+    _variant_fact_file(root, "TencentDB Agent Memory", "TencentDB-Agent-Memory", "usage",
+                       [{"id": "u-001", "fact": "serves the memory api"},
+                        {"id": "u-002", "fact": "backs fact_add"}])
+    db.facts_idx.reindex(root=root)
+    rows = db.facts_idx.for_entity("TencentDB Agent Memory")
+    assert [f["fact_id"] for f in rows] == ["a-001", "u-001", "u-002"]      # 3 of 3, was 1 of 3
+    assert db.facts_idx.for_entity("TencentDB-Agent-Memory") == []          # that key no longer exists
+    assert all(f["file_path"].startswith("TencentDB Agent Memory/") for f in rows)
+
+
+def test_entity_fact_counts_reports_one_entry_per_family_and_no_alias_key(db, tmp_path):
+    """#957 clause 3: the per-entity totals the MC entity list and graph read carry one entry per family.
+
+    `entity_fact_counts` groups the raw key, so a family split across the
+    canonical and a variant surface showed up twice — `Autonomy Data Pipeline`
+    179 next to `autonomy-data-pipeline` 2,661.
+    """
+    root = tmp_path / "facts"
+    db.aliases.set("TencentDB-Agent-Memory", "TencentDB Agent Memory", kind="punct", origin="test")
+    _fact_file(root, "TencentDB Agent Memory", "architecture",
+               [{"id": "a-001", "fact": "keeps a vector store"}])
+    _variant_fact_file(root, "TencentDB Agent Memory", "TencentDB-Agent-Memory", "usage",
+                       [{"id": "u-001", "fact": "serves the memory api"},
+                        {"id": "u-002", "fact": "backs fact_add"}])
+    _fact_file(root, "Lloyd", "state", [{"id": "s-001", "fact": "runs on vLLM"}])
+    db.facts_idx.reindex(root=root)
+    counts = db.facts_idx.entity_fact_counts()
+    assert counts == {"TencentDB Agent Memory": 3, "Lloyd": 1}
+    surfaces = {r["surface"] for r in db.aliases.rows() if r["surface"] != r["canonical"]}
+    assert surfaces == {"TencentDB-Agent-Memory"}
+    assert not (set(counts) & surfaces)                 # no count is filed under an alias surface
+
+
+def test_retagging_index_keys_rewrites_no_fact_file_and_moves_no_file_path(db, tmp_path):
+    """#957 clause 5: only the key moves — files stay byte-identical, and the
+    contamination gate, which reads those files, reports the same thing."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "kg_hygiene", ROOT / "scripts/memory/kg_hygiene.py")
+    kgh = importlib.util.module_from_spec(spec); spec.loader.exec_module(kgh)
+
+    root = tmp_path / "facts"
+    _variant_fact_file(root, "TencentDB Agent Memory", "TencentDB-Agent-Memory", "architecture",
+                       [{"id": "a-001", "fact": "keeps a vector store"},
+                        {"id": "a-002", "fact": "serves the memory api"}])
+    # 832 of the 17,243 rows sat in directories that are THEMSELVES alias
+    # surfaces (`The Graph/`, `Lloyd Knowledge Graph/`, …), so after the fold a
+    # canonical key can name a different entity than the directory holding its
+    # own file. Pinned here, because it is the one shape that could make the
+    # file-based gate disagree with the index.
+    _variant_fact_file(root, "The Graph", "The-Graph", "state",
+                       [{"id": "g-001", "fact": "one node per entity"}])
+    bytes_before = {p: p.read_bytes() for p in sorted(root.rglob("*.md"))}
+    db.facts_idx.reindex(root=root)                     # no alias row yet: literal key
+    literal = _indexed(db)
+    assert [r[2] for r in literal] == ["TencentDB-Agent-Memory", "TencentDB-Agent-Memory", "The-Graph"]
+    contam_before = kgh.contamination(root)             # normalize_punct already equates the two spellings
+    assert contam_before["foreign_facts"] == 0
+
+    db.aliases.set("TencentDB-Agent-Memory", "TencentDB Agent Memory", kind="punct", origin="test")
+    db.aliases.set("The-Graph", "Knowledge Graph", kind="punct", origin="test")
+    db.aliases.set("The Graph", "Knowledge Graph", kind="punct", origin="test")
+    db.facts_idx.reindex(root=root)
+    after = _indexed(db)
+    assert [(r[0], r[1]) for r in after] == [(r[0], r[1]) for r in literal]  # same rows, same files
+    assert [r[2] for r in after] == ["TencentDB Agent Memory", "TencentDB Agent Memory",
+                                     "Knowledge Graph"]                      # only the key moved
+    # The directory keeps its own variant name under a canonical key: decoupled
+    # on purpose, and exactly what no-fact-file-rewritten buys.
+    assert ("g-001", "The Graph/The-Graph-state.md", "Knowledge Graph") in after
+    assert {p: p.read_bytes() for p in sorted(root.rglob("*.md"))} == bytes_before
+    assert kgh.contamination(root) == contam_before
+
+
 def test_facts_idx_reindex_and_temporal_filters(db, tmp_path):
     root = tmp_path / "facts"
     _fact_file(root, "Lloyd", "state", [

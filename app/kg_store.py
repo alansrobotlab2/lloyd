@@ -961,11 +961,74 @@ class _FactsIdx:
         self._s = store
 
     # ── build ───────────────────────────────────────────────────────────
-    def _rows_for_file(self, path: Path, root: Path) -> list[tuple]:
+    #: How far a chained alias may be followed. Live table measured 2026-09-21:
+    #: 107 rows whose canonical is itself a surface; the longest chain in the
+    #: table is 3 hops (`nightly_reflection → nightly-reflection → Nightly
+    #: Reflection → Nightly Reflection Pipeline`), and among surfaces that
+    #: actually carry active facts the longest is 2 (`Codemode → CodeMode →
+    #: Code Mode`). The bound is only a cycle guard — a table that somehow
+    #: cycles cannot spin here. No cycle exists today, checked by walking every
+    #: surface: `cycles present: 0`.
+    _ALIAS_HOPS = 6
+
+    def _canonical_key(self, name: str, memo: Optional[dict] = None) -> str:
+        """The index key for an entity name: its canonical when the alias table
+        declares one, the literal name when it does not.
+
+        Three decisions live here, and each is load-bearing:
+
+        * **Folded at index-build time, never by a one-off UPDATE.** The index is
+          derived, not authoritative: the key is re-derived from the file's own
+          `entity:` tag on every per-file reindex (which every fact-file write
+          triggers, `agent_mcp/facts.py`) and on every full rebuild
+          (`scripts/memory/kg_rebuild.py:772`). Rows retagged in place therefore
+          revert the next time anyone touches the file — 17,202 active rows under
+          1,430 alias surfaces were on the live index when this was written
+          (2026-09-21, of 319,451 active rows).
+        * **Follows declared alias rows only.** Name-shape similarity is not
+          evidence: `Voice-Loop`, `Voice Pipeline` and `voice` are three distinct
+          systems and keep three keys (`06f0e41`). That is also why a `None` from
+          `Aliases.resolve` is answered with the literal, never a guess.
+        * **Follows a chain to its end, applying `resolve` at each hop.** One hop
+          is not enough on the live table: 107 alias rows point at a canonical
+          that is itself a surface, which would leave 81 active rows across 11
+          surfaces filed under a surface — the exact defect the fold removes,
+          one level down. Every hop is a declared row, so this is still not a
+          guess.
+
+        The file's tag is deliberately left alone: the contamination gate reads
+        the frontmatter (`scripts/memory/kg_hygiene.py:83-121`), and 872 active
+        rows (2026-09-21) sit in directories that are themselves alias surfaces,
+        so rewriting tags there would light up a gate that has nothing to do with
+        the key. `file_path` likewise never moves — the files already sit in the
+        canonical directory; only the key was wrong.
+
+        `memo` is a caller-scoped cache; its lifetime is one `reindex` call so a
+        row written mid-rebuild cannot be shadowed by a stale fold. A full-tree
+        rebuild sees 27,688 distinct keys over 319,495 rows (2026-09-21), so the
+        memo is what keeps the fold off the hot path: one lookup per name, not
+        per row.
+        """
+        if memo is None:
+            memo = {}
+        hit = memo.get(name)
+        if hit is not None:
+            return hit
+        key = name
+        for _ in range(self._ALIAS_HOPS):
+            nxt = self._s.aliases.resolve(key)
+            if not nxt or nxt == key:
+                break
+            key = nxt
+        memo[name] = key
+        return key
+
+    def _rows_for_file(self, path: Path, root: Path,
+                       memo: Optional[dict] = None) -> list[tuple]:
         fm, facts = parse_fact_file(path)
         if not facts:
             return []
-        entity = str(fm.get("entity") or path.parent.name)
+        entity = self._canonical_key(str(fm.get("entity") or path.parent.name), memo)
         category = str(fm.get("category") or (path.stem.rsplit("-", 1)[-1] if "-" in path.stem else "general"))
         try:
             rel = str(path.relative_to(root))
@@ -977,7 +1040,13 @@ class _FactsIdx:
             if not text.strip():
                 continue
             rows.append((
-                str(f.get("entity") or entity), str(f.get("category") or category),
+                # A per-fact override is its own name: fold it too, or a file
+                # that carries another entity's facts re-splits that family. The
+                # same memo serves both folds, so a file that repeats one
+                # override across hundreds of facts costs one lookup, not one
+                # query per row.
+                self._canonical_key(str(f.get("entity") or entity), memo),
+                str(f.get("category") or category),
                 f.get("id"), _text_hash(text), text,
                 _float_or_none(f.get("confidence")),
                 _jsonable(f.get("created_at")), _jsonable(f.get("valid_at")),
@@ -1013,6 +1082,7 @@ class _FactsIdx:
             if full:
                 c.execute("DELETE FROM facts_idx")
             seen_dirs: set[str] = set()
+            memo: dict[str, str] = {}     # one call's scope, see `_canonical_key`
             for p in files:
                 try:
                     rel = str(p.relative_to(root))
@@ -1022,7 +1092,7 @@ class _FactsIdx:
                     c.execute("DELETE FROM facts_idx WHERE file_path=?", (rel,))
                 if not p.exists():
                     continue
-                rows = self._rows_for_file(p, root)
+                rows = self._rows_for_file(p, root, memo)
                 if rows:
                     c.executemany(self._INSERT, rows)
                 stats["files"] += 1

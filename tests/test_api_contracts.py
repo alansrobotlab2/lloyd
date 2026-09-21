@@ -605,6 +605,64 @@ async def test_entity_detail_filters_expired_by_default(client, entity_world):
     assert body2["includeExpired"] is True
 
 
+async def test_entity_detail_serves_a_whole_family_under_its_canonical_name(
+        client, tmp_path, monkeypatch):
+    """The process boundary #957 was filed against: the UI's own read of the index.
+
+    `/api/entity` builds its facts from `facts_idx.for_entity` after resolving
+    the requested name to canonical, so a family whose rows are keyed under a
+    declared alias variant is served in pieces. Measured on the live store
+    2026-09-17: `TencentDB Agent Memory` returned 98 of its family's 226 active
+    facts, `Autonomy Data Pipeline` 179 of 2,840, and neither number could be
+    recovered by asking for the variant, because the route normalises the
+    argument away first (`app/routers/entities.py:265`).
+
+    Here: 3 facts, 1 of them in a file still tagged with the variant.
+    """
+    import yaml
+    from app import kg_store
+    from app.routers import entities as entities_router
+
+    d = tmp_path / "facts" / "TencentDB Agent Memory"
+    d.mkdir(parents=True)
+    for fname, entity_tag, facts in (
+            ("TencentDB Agent Memory-architecture.md", "TencentDB-Agent-Memory",
+             [{"id": "arch-001", "fact": "keeps a vector store"},
+              {"id": "arch-002", "fact": "serves the memory api"}]),
+            ("TencentDB Agent Memory-state.md", "TencentDB Agent Memory",
+             [{"id": "state-001", "fact": "backs the agent memory layer"}])):
+        fm = {"type": "facts", "entity": entity_tag,
+              "category": fname.rsplit("-", 1)[1][:-3],
+              "facts": [dict(f, confidence=0.9, provenance="EXTRACTED",
+                             created_at="2026-01-01T00:00:00+00:00") for f in facts]}
+        (d / fname).write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {fname}\n")
+
+    monkeypatch.setattr(entities_router, "_FACTS_ROOT", tmp_path / "facts")
+    st = kg_store.configure(tmp_path / "kg.sqlite")
+    st.aliases.set("TencentDB-Agent-Memory", "TencentDB Agent Memory",
+                   kind="punct", origin="test")
+    st.facts_idx.reindex(root=tmp_path / "facts")
+    entities_router._ENTITIES_CACHE.clear()
+    entities_router._GRAPH_CACHE.clear()
+    whole = ["arch-001", "arch-002", "state-001"]
+    try:
+        body = (await client.get("/api/entity?name=TencentDB%20Agent%20Memory")).json()
+        assert sorted(f["id"] for f in body["facts"]) == whole
+        assert body["factCount"] == 3
+        # Asking with the variant spelling reaches the same whole family: the
+        # route resolves first, and the index now answers for the canonical.
+        again = (await client.get("/api/entity?name=TencentDB-Agent-Memory")).json()
+        assert sorted(f["id"] for f in again["facts"]) == whole
+        # One sidebar entry for the family, at its whole size — not 1 + 2.
+        listing = (await client.get("/api/entities?q=tencent")).json()
+        assert [e["name"] for e in listing["entities"]] == ["TencentDB Agent Memory"]
+        assert listing["entities"][0]["factCount"] == 3
+    finally:
+        kg_store.reset()
+        entities_router._ENTITIES_CACHE.clear()
+        entities_router._GRAPH_CACHE.clear()
+
+
 async def test_entity_detail_splits_direction_and_names_the_other_end(client, entity_world):
     body = (await client.get("/api/entity?name=Lloyd")).json()
     assert [r["type"] for r in body["outbound"]] == ["uses"]

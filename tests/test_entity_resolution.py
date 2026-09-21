@@ -296,10 +296,53 @@ def test_unknown_entity_write_mode_returns_verbatim():
 
 
 # ---------------------------------------------------------------------------
+# Index keys (#957)
+# ---------------------------------------------------------------------------
+
+def test_index_keys_follow_declared_aliases_and_never_name_shape():
+    """Canonicalising `facts_idx` keys folds declared aliases, never name-shape.
+
+    `Voice-Loop`, `Voice Pipeline` and `voice` are three distinct systems — the
+    `06f0e41` guard, after the sweep's suffix tier fused 151 such pairs — and no
+    alias row joins them, so the index must keep three keys even though every
+    normaliser in the repo calls them one cluster. A declared `vllm` → `vLLM`
+    row does fold: with no row the literal key stands, with one the canonical
+    replaces it. That asymmetry is the whole contract.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "facts"
+        st = kg_store.configure(Path(td) / "kg.sqlite")
+        for name in ("Voice-Loop", "Voice Pipeline", "voice", "vLLM"):
+            tag = "vllm" if name == "vLLM" else name      # tagged with the variant
+            d = root / name
+            d.mkdir(parents=True)
+            (d / f"{name}-state.md").write_text(
+                "---\n"
+                f"type: facts\nentity: {tag}\ncategory: state\nfacts:\n"
+                f"- id: {name}-001\n  fact: says something about {name}\n"
+                "---\n\n# x\n", encoding="utf-8")
+
+        def keys() -> set[str]:
+            return {r["entity"] for r in
+                    st.conn.execute("SELECT DISTINCT entity FROM facts_idx")}
+
+        st.facts_idx.reindex(root=root)
+        assert keys() == {"Voice-Loop", "Voice Pipeline", "voice", "vllm"}
+
+        st.aliases.set("vllm", "vLLM", kind="case", origin="test")
+        st.facts_idx.reindex(root=root)
+        assert keys() == {"Voice-Loop", "Voice Pipeline", "voice", "vLLM"}
+        assert st.facts_idx.count(entity="vLLM", active_only=True) == 1
+        assert st.facts_idx.count(entity="vllm", active_only=True) == 0
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
 _TESTS = [
+    # index keys (#957)
+    test_index_keys_follow_declared_aliases_and_never_name_shape,
     # signature
     test_mode_is_required,
     test_auto_create_removed,
