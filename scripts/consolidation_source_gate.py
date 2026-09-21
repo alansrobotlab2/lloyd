@@ -2,9 +2,15 @@
 """consolidation_source_gate.py — Phase 1.3's source gate (backlog #1287).
 
 `scripts/mine-trajectories.py::is_emittable()` (landed under #1181) refuses to write
-a candidate file for a `sequence` pattern flagged `has_error_recovery: false`: an
-n-gram with no `:ERR` step in it is a call order, not a lesson, and authoring rule 5
-forbids it as skill content. That refusal is an *emit-time* gate. #1181 said so in
+a candidate file for a `sequence` pattern flagged `has_error_recovery: false`. What
+that flag means changed under #1327 and the gate deliberately did not: a sequence is
+flagged true only when some *observed instance* of the n-gram recovered — a later
+step in the same window re-attempted the failed call (same tool, same Bash command
+category, so the same label without `:ERR`) or named the object the failure named
+(an argument value equal to one of the failed call's object-naming values: a path,
+URL, filename or dotted id). An `:ERR` step followed by any old next step sets
+nothing, which is what makes a kept key evidence rather than a call order that
+happened to sit next to a failure; authoring rule 5 still forbids the latter. That refusal is an *emit-time* gate. #1181 said so in
 its own acceptance notes — "What the fix does NOT cure. It is an emit-time gate: the
 ~2,900 historical candidate files with `has_error_recovery: false` … the pool decays
 only as they age out" — and the consequence is still on disk: `nightly-skill-consolidation`
@@ -53,10 +59,23 @@ Two deliberate asymmetries, both toward keeping a key:
   signature; every other key is, because an absent flag is a keep under the emitter's
   own `is False` test. Under-dropping is a slower run; over-dropping is a lost lesson.
 
-Age is never a reason. The gate reads `has_error_recovery` and nothing else, so the
-108 eligible keys flagged `true` still reach the evidence gate no matter how old their
-newest snapshot is — which is what #1181's own measurement demands: 672 of 780
-actionable keys read false, 108 carried a real recovery.
+Age is never a reason, and neither is a count. The gate reads the key's
+`has_error_recovery` flag and nothing else, so every eligible key whose own front
+matter proves a recovery reaches the evidence gate no matter how old its newest
+snapshot is, and every key whose front matter proves it does not is dropped here —
+the decision is `is_emittable()`'s, on whatever key set is on disk tonight. How many
+keys land on either side moves with the corpus and with the flag's own semantics, so
+this docstring deliberately carries no number for it: the counts it used to attest
+("672 of 780 actionable keys read false, 108 carried a real recovery") were a
+snapshot of the adjacency rule that #1327 retired, and one of that 108's
+successors was a `date -u` after a failed grep.
+
+A candidate file's flag is the value the miner wrote when it emitted that snapshot,
+so historical files keep the meaning they were written with: a key flagged true
+under the adjacency rule stays kept by this gate, because the gate drops a key only
+on its own front matter and under-dropping is hand-adjudication rather than a lost
+lesson. Newly mined candidates carry the new meaning, so the pool this gate keeps
+shrinks towards the keys that really recovered.
 
 Usage:
   consolidation_source_gate.py check --candidates ~/lloyd/_pipeline/skills/candidates/

@@ -1041,21 +1041,26 @@ def mined_error_pattern():
     return patterns[0]
 
 
-def recovering_traj(session_key):
-    """One session whose Bash step fails and is followed by successful steps.
+def adjacent_next_step_traj(session_key):
+    """One session whose failed `mkdir` is followed by an unrelated `Read`.
 
-    The flag the emission gate reads is derived from the steps, not declared, so a
-    test that needs a sequence to *reach* a file needs this shape — `aliased_traj`
-    carries no failing step at all and mines nothing the gate admits.
+    This is the shape #1327 says is *not* a recovery: `bash:fs:ERR → read`, where
+    the successor neither re-attempts the failed `mkdir` nor names its target (the
+    `Read` opens `/tmp/rec/b`, the failed call named `/tmp/rec`). Under the
+    adjacency rule it was flagged `has_error_recovery: true` — the item's own
+    falsifier pairs were a failed `grep` followed by `date -u …` and a traceback
+    followed by a fresh `ls` — and since the narrowing every key mined from this
+    row is flagged false.
 
-    Mined at threshold 2 across three copies this shape yields both sequence
-    kinds the gate now separates: the 2-gram `bash:fs:ERR → read` and the
-    3-gram `read → bash:fs:ERR → read` carry an `:ERR` step followed by a
-    non-error step and are flagged `has_error_recovery: true`, while `bash:fs →
-    read`, `read → bash:fs:ERR` and `bash:fs → read → bash:fs:ERR` end on or
-    before the failure and are flagged false. `error_tools` is empty on purpose:
-    error mining has its own fixture (`error_traj`) and adding a row here would
-    add an error pattern these assertions do not need.
+    Mined at threshold 2 across three copies it yields the false half of the
+    gate: the 2-grams `bash:fs → read`, `read → bash:fs:ERR` and
+    `bash:fs:ERR → read` (the trigrams `bash:fs → read → bash:fs:ERR` and
+    `read → bash:fs:ERR → read` are mined too but never emitted — a windowed key
+    owes its sessions to its own suffix, see
+    `test_a_windowed_key_does_not_bill_sessions_its_suffix_already_counted`).
+    `retrying_traj` is the true half. `error_tools` is empty on purpose: error
+    mining has its own fixture (`error_traj`) and adding a row here would add an
+    error pattern these assertions do not need.
     """
     return {
         "session_key": session_key,
@@ -1077,6 +1082,246 @@ def recovering_traj(session_key):
         "error_tools": [],
         "signals": [],
     }
+
+
+def retrying_traj(session_key: str, command: str = "mkdir -p /tmp/rec") -> dict:
+    """One session whose failed call is re-attempted and succeeds (#1327).
+
+    `mkdir -p /tmp/rec` errors and the very next step is the same `mkdir` again,
+    OK: the bigram is `bash:fs:ERR → bash:fs`, and its successor *is* the failed
+    call run again — the same tool and the same Bash command category, which is
+    what the label carries. That is a re-attempt, so the flag is true; under the
+    old rule this fixture and `adjacent_next_step_traj` were indistinguishable.
+    """
+    return {
+        "session_key": session_key,
+        "timestamp": "2026-09-21T18:00:00Z",
+        "tool_count": 2, "error_count": 1, "has_errors": True,
+        "tools": [
+            {"name": "Bash", "is_error": True, "sequence": 0,
+             "params_summary": {"command": command},
+             "result_summary": "mkdir: cannot create directory: Read-only file system"},
+            {"name": "Bash", "is_error": False, "sequence": 1,
+             "params_summary": {"command": command},
+             "result_summary": "ok"},
+        ],
+        "error_tools": [], "signals": [],
+    }
+
+
+def edit_then_read_traj(session_key: str, failed_target: str, read_target: str) -> dict:
+    """One session whose failed `Edit` is followed by a `Read`.
+
+    Which way the flag falls is decided by the *argument*, not the tool: the
+    bigram is `edit:ERR → read` either way, and it is a recovery only when the
+    `Read` names the object the failure named (the agent going back to the file
+    the edit could not touch) and not when it opens something else.
+    """
+    return {
+        "session_key": session_key,
+        "timestamp": "2026-09-21T18:00:00Z",
+        "tool_count": 2, "error_count": 1, "has_errors": True,
+        "tools": [
+            {"name": "Edit", "is_error": True, "sequence": 0,
+             "params_summary": {"file_path": failed_target},
+             "result_summary": "File has been modified since read"},
+            {"name": "Read", "is_error": False, "sequence": 1,
+             "params_summary": {"file_path": read_target},
+             "result_summary": "ok"},
+        ],
+        "error_tools": [], "signals": [],
+    }
+
+
+def windowed_traj(session_key: str, with_prefix: bool) -> dict:
+    """One session from the 17⊂20 pair #1327 measured, built from `mkdir`.
+
+    `with_prefix=True` emits `bash:fs → bash:fs:ERR → bash:fs` (17 sessions in the
+    item's shape); `with_prefix=False` emits just the suffix bigram
+    `bash:fs:ERR → bash:fs`, which is what makes the other 3 of 20. The real pair
+    was `seq-3-bash-fs-bash-fs-err-bash-other` (17 sessions) inside
+    `seq-2-bash-fs-err-bash-other` (20), and it is not a coincidence of these
+    fixtures: `mine_sequence_patterns` walks `for n in (2, 3)` over one collapsed
+    label stream, so a 3-gram at position *i* always feeds its suffix bigram at
+    *i+1* in the same session — every `seq-3` key's sessions are a subset of its
+    suffix's. Both keys here are flagged true by `ngram_shows_recovery`, so what
+    keeps the 3-gram out is the session arithmetic and nothing else.
+    """
+    steps = ([{"command": "mkdir -p /tmp/w", "is_error": False}]
+             if with_prefix else [])
+    steps += [{"command": "mkdir -p /tmp/w", "is_error": True},
+              {"command": "mkdir -p /tmp/w", "is_error": False}]
+    return {
+        "session_key": session_key,
+        "timestamp": "2026-09-21T18:00:00Z",
+        "tool_count": len(steps), "error_count": 1, "has_errors": True,
+        "tools": [{"name": "Bash", "is_error": step["is_error"],
+                   "sequence": i, "params_summary": {"command": step["command"]},
+                   "result_summary": "boom" if step["is_error"] else "ok"}
+                  for i, step in enumerate(steps)],
+        "error_tools": [], "signals": [],
+    }
+
+
+def test_an_unrelated_next_step_is_not_a_recovery_and_a_retry_is():
+    """Clause 1 (#1327), both directions, computed by the miner.
+
+    The flag used to be set by adjacency alone: `scripts/mine-trajectories.py`
+    walked the n-gram and set it on any `:ERR` step followed by any non-`:ERR`
+    step, so `bash:fs:ERR → read` — a failed `mkdir` followed by a read of a
+    *different* file — was a "recovery", and consolidation hand-adjudicated keys
+    on that evidence. Now the successor has to address the failure, and the two
+    directions are pinned from the same mining call so a rule that merely always
+    sets the flag, or never sets it, fails one side.
+    """
+    adjacency = mt.mine_sequence_patterns(
+        [adjacent_next_step_traj(f"adj-{i}") for i in (1, 2, 3)], threshold=2)
+    retried = mt.mine_sequence_patterns(
+        [retrying_traj(f"retry-{i}") for i in (1, 2, 3)], threshold=2)
+
+    by_seq = {p["sequence_str"]: p for p in adjacency + retried}
+    for seq in ("bash:fs:ERR → read", "read → bash:fs:ERR"):
+        assert seq in by_seq, f"the adjacency fixture lost {seq}: {sorted(by_seq)}"
+        assert by_seq[seq]["has_error_recovery"] is False, (
+            f"{seq}: adjacency is still setting the flag")
+    assert "bash:fs:ERR → bash:fs" in by_seq, (
+        f"the retry fixture mined no retry bigram: {sorted(by_seq)}")
+    assert by_seq["bash:fs:ERR → bash:fs"]["has_error_recovery"] is True, (
+        "a re-attempt of the failed call is not being read as recovery")
+    assert mt.is_emittable(by_seq["bash:fs:ERR → read"]) is False
+    assert mt.is_emittable(by_seq["bash:fs:ERR → bash:fs"]) is True
+
+
+def test_a_successor_that_names_the_failed_target_is_a_recovery():
+    """Clause 1's other accepted shape: `edit:ERR → read` where both calls name the
+    same path is the agent going back to the object the failure named."""
+    seqs = mt.mine_sequence_patterns(
+        [edit_then_read_traj(f"same-{i}", "/tmp/rec/a.py", "/tmp/rec/a.py")
+         for i in (1, 2, 3)], threshold=2)
+    pat = [p for p in seqs if p["sequence_str"] == "edit:ERR → read"]
+    assert len(pat) == 1, f"no `edit:ERR → read` mined: {[p['sequence_str'] for p in seqs]}"
+    assert pat[0]["has_error_recovery"] is True
+
+
+def test_a_successor_that_names_a_different_target_is_not_a_recovery():
+    """The same two tools and the same labels, with a different path in the
+    successor: the labels cannot tell these two fixtures apart, which is exactly
+    why the flag has to read the arguments."""
+    seqs = mt.mine_sequence_patterns(
+        [edit_then_read_traj(f"other-{i}", "/tmp/rec/a.py", "/tmp/other/b.py")
+         for i in (1, 2, 3)], threshold=2)
+    pat = [p for p in seqs if p["sequence_str"] == "edit:ERR → read"]
+    assert len(pat) == 1, f"no `edit:ERR → read` mined: {[p['sequence_str'] for p in seqs]}"
+    assert pat[0]["has_error_recovery"] is False
+
+
+def test_a_shared_mode_setting_does_not_make_a_shared_target():
+    """`limit: 200` on both calls names no object. Matching argument values
+    without asking whether the value *can* name one would rebuild the adjacency
+    bug out of the arguments — every `Read` in the corpus shares `limit` with
+    every other."""
+    rows = [{
+        "session_key": f"mode-{i}", "timestamp": "2026-09-21T18:00:00Z",
+        "tool_count": 2, "error_count": 1, "has_errors": True,
+        "tools": [
+            {"name": "Read", "is_error": True, "sequence": 0,
+             "params_summary": {"file_path": "/tmp/rec/a.py", "limit": 200},
+             "result_summary": "File is a binary file"},
+            {"name": "Read", "is_error": False, "sequence": 1,
+             "params_summary": {"file_path": "/tmp/rec/b.py", "limit": 200},
+             "result_summary": "ok"},
+        ],
+        "error_tools": [], "signals": [],
+    } for i in (1, 2, 3)]
+    pat = [p for p in mt.mine_sequence_patterns(rows, threshold=2)
+           if p["sequence_str"] == "read:ERR → read"]
+    # The same label twice with only the error flag between them is a re-attempt
+    # (`read:ERR → read`), so this key is true for that reason whatever the
+    # arguments say — the mode-value question is pinned below at the helper, where
+    # the two calls genuinely differ.
+    assert len(pat) == 1 and pat[0]["has_error_recovery"] is True
+    assert mt.ngram_shows_recovery(
+        ["edit:ERR", "read"],
+        [{"params_summary": {"file_path": "/tmp/rec/a.py", "limit": 200}},
+         {"params_summary": {"file_path": "/tmp/rec/b.py", "limit": 200}}]) is False
+
+
+def test_a_windowed_key_does_not_bill_sessions_its_suffix_already_counted():
+    """Clause 3 (#1327), on the item's own 17⊂20 shape with the flag ruled out.
+
+    Both keys here are flagged `has_error_recovery: true`, so the 3-gram's absence
+    can only come from the session arithmetic: its 17 sessions are 17 of the 20
+    its suffix bigram counted, which is every one of them, so it has no session of
+    its own and clears no `sessions >= 3` gate. Before this it reached a candidate
+    file — and consolidation's nightly `sessions >= 3` evidence gate — on a session
+    set that was one event set counted at two window sizes.
+    """
+    rows = ([windowed_traj(f"tri-{i}", with_prefix=True) for i in range(17)]
+            + [windowed_traj(f"bi-{i}", with_prefix=False) for i in range(3)])
+    bigram_seq, trigram_seq = "bash:fs:ERR → bash:fs", "bash:fs → bash:fs:ERR → bash:fs"
+    for threshold in (2, 3):
+        seqs = mt.mine_sequence_patterns(rows, threshold=threshold)
+        by_seq = {p["sequence_str"]: p for p in seqs}
+        assert bigram_seq in by_seq, (
+            f"threshold {threshold}: the suffix bigram itself vanished: {sorted(by_seq)}")
+        bigram = by_seq[bigram_seq]
+        assert len(bigram["sessions"]) == bigram["total_sessions"] == 20, (
+            f"threshold {threshold}: the suffix key lost sessions: "
+            f"{len(bigram['sessions'])} of {bigram['total_sessions']}")
+        assert bigram["borrowed_sessions"] == 0, "a bigram has no shorter suffix"
+        assert bigram["has_error_recovery"] is True
+        assert trigram_seq not in by_seq, (
+            f"threshold {threshold}: a windowed key was emitted on "
+            f"{len(by_seq[trigram_seq]['sessions'])} own sessions borrowed from "
+            "its suffix key")
+    assert [p for p in mt.mine_sequence_patterns(rows, threshold=1)
+            if p["sequence_str"] == trigram_seq] == [], (
+        "a key with no session of its own clears the gate at threshold 1, so it "
+        "is still being counted at its own window size")
+
+
+def test_the_window_dedup_subtracts_only_the_suffix_key_set():
+    """The arithmetic clause 3 rests on, where the mined sets cannot show it.
+
+    Under `for n in (2, 3)` a 3-gram's session set is always a *subset* of its
+    suffix's, so no real key can exhibit a partial subtraction — which is why the
+    count needs a direct check, and why the consequence is that whole `seq-3`
+    keys stop being emitted. The disjoint `("a", "b")` key is the prefix, not the
+    suffix: subtracting it would bill sessions nobody counted for this window.
+    """
+    data = {
+        ("a", "b"): {"sessions": {"s9"}},
+        ("b", "c"): {"sessions": {"s1", "s2", "s3", "s4"}},
+        ("a", "b", "c"): {"sessions": {"s1", "s2", "s5"}},
+    }
+    assert mt._suffix_sessions(("a", "b", "c"), data) == {"s1", "s2", "s3", "s4"}
+    assert data[("a", "b", "c")]["sessions"] - mt._suffix_sessions(
+        ("a", "b", "c"), data) == {"s5"}
+    assert mt._suffix_sessions(("b", "c"), data) == set(), (
+        "a 2-gram has no strictly shorter suffix and must never be subtracted")
+
+
+def test_the_candidate_file_separates_own_sessions_from_the_observed_total(tmp_path):
+    """A windowed key that *did* have its own sessions must say so, or its
+    `sessions:` count and its `## Sessions Affected` list disagree with the corpus
+    that produced them. No key reaches this through the miner today — every
+    3-gram's set is a subset of its suffix's, so its own count is 0 and it is not
+    emitted — so the dict is built here, against the writer that would print it."""
+    pat = {
+        "type": "sequence", "sequence": ("a", "b", "c"),
+        "sequence_str": "a → b → c", "ngram_size": 3,
+        "sessions": {"s5", "s6", "s7"}, "total_sessions": 5,
+        "borrowed_sessions": 2, "examples": [], "dates": {"2026-09-21"},
+        "has_error_recovery": True, "first_seen": "2026-09-21",
+        "last_seen": "2026-09-21",
+    }
+    path = mt.write_candidate_file(pat, tmp_path)
+    text = Path(path).read_text(encoding="utf-8")
+    assert "sessions: 3" in text.split("---")[1], "the count billed the borrowed set"
+    assert len(re.findall(r"^- s\d$", text, re.MULTILINE)) == 3, (
+        "the Sessions Affected list and the sessions: count disagree")
+    assert "2 further session(s) carried this window too" in text
+    assert "(5 observed in total)" in text
 
 
 def test_a_sequence_with_no_recovery_in_it_is_not_emittable():
@@ -1124,7 +1369,12 @@ def test_a_mining_call_writes_only_the_recovering_sequence(tmp_path):
         (or the reverse) trips the one-key-one-file assertion inside it (#1131);
       * an `error` pattern mined alongside them still gets its file.
     """
-    rows = [recovering_traj(f"rec-{i}") for i in (1, 2, 3)]
+    rows = [adjacent_next_step_traj(f"rec-{i}") for i in (1, 2, 3)]
+    # The true half has to come from `retrying_traj`: `adjacent_next_step_traj`
+    # is the shape #1327 narrowed the flag *against*, so on its own it now mines
+    # nothing flagged true and `recovering` below would be empty — a test that
+    # asserts "both kinds" and silently holds one.
+    rows += [retrying_traj(f"retry-{i}") for i in (1, 2, 3)]
     seqs = mt.mine_sequence_patterns(rows, threshold=2)
     refusing = [p for p in seqs if p["has_error_recovery"] is False]
     recovering = [p for p in seqs if p["has_error_recovery"] is True]
@@ -1246,18 +1496,43 @@ def aliased_traj(session_key):
     }
 
 
+def sequence_pattern(ngram: tuple[str, ...], sessions: set[str]) -> dict:
+    """One mined-shaped sequence pattern, for the writer tests that need a
+    specific n-gram in hand. Field-for-field what `mine_sequence_patterns`
+    returns; the flag is false because these fixtures carry no failing step."""
+    return {
+        "type": "sequence", "sequence": ngram,
+        "sequence_str": " → ".join(ngram), "ngram_size": len(ngram),
+        "sessions": set(sessions), "total_sessions": len(sessions),
+        "borrowed_sessions": 0, "examples": [], "dates": {"2026-09-15"},
+        "has_error_recovery": False, "first_seen": "2026-09-15",
+        "last_seen": "2026-09-15",
+    }
+
+
 def aliased_pair():
-    """The two sequence patterns whose *filename* aliased, mined through the real
-    miner. Their keys were already distinct at filing — asserted by
+    """The two sequence patterns whose *filename* aliased, from the same row the
+    miner is fed. Their keys were already distinct at filing — asserted by
     `test_the_aliased_pair_shares_one_plain_slug_but_not_one_candidate_name`; the
     pair whose keys aliased is the 5-gram fixture in
-    `test_two_ngrams_differing_only_past_the_cap_get_distinct_keys`."""
-    rows = [aliased_traj("alias-a"), aliased_traj("alias-b")]
-    pair = [p for p in mt.mine_sequence_patterns(rows, threshold=2)
-            if tuple(p["sequence"][:2]) == ALIASED_HEAD
-            and p["sequence"][-1] in ALIASED_TAILS]
-    assert len(pair) == 2, "the fixture must mine both aliased n-grams"
-    return pair
+    `test_two_ngrams_differing_only_past_the_cap_get_distinct_keys`.
+
+    Built from the row's labels rather than pulled out of
+    `mine_sequence_patterns`'s return, because since #1327 it no longer returns
+    them: these are trigrams, and a trigram's session set is a subset of its own
+    suffix bigram's, so it has no session of its own and clears no threshold. The
+    alias needs a key past the 50-character slug cap, which no 2-gram has, so
+    there is no pair to mine at a size the window rule leaves emitted. The n-grams
+    come from `aliased_traj` through `normalize_tool_name` — the miner's own label
+    step — so the collision these tests grade is still the one the writer gets."""
+    labels = [mt.normalize_tool_name(tool)
+              for tool in sorted(aliased_traj("alias-a")["tools"],
+                                 key=lambda tool: tool.get("sequence", 0))]
+    pair = [tuple(labels[i:i + 3]) for i in range(len(labels) - 2)
+            if tuple(labels[i:i + 2]) == ALIASED_HEAD
+            and labels[i + 2] in ALIASED_TAILS]
+    assert len(pair) == 2, "the fixture must yield both aliased n-grams"
+    return [sequence_pattern(ngram, {"alias-a", "alias-b"}) for ngram in pair]
 
 
 def recovering(patterns: list[dict]) -> list[dict]:
@@ -1442,14 +1717,16 @@ def test_the_nightly_run_reports_one_line_per_file_it_wrote(tmp_path):
     corpus = tmp_path / "corpus"
     corpus.mkdir()
     rows = [aliased_traj(f"alias-{i}") for i in (1, 2, 3)]
-    # The pair that reaches a file is a *recovering* pair. Since #1181 an
+    # The pair that reaches a file has to carry a real recovery. Since #1181 an
     # n-gram with no failing step in it is refused by the emission gate, so
     # `aliased_traj` alone — 6 successful steps, nothing to recover from — mines
     # only suppressed patterns, and `main()` would report zero sequence files
-    # while still honouring the arithmetic this test pins. The aliased pair stays
-    # in the fixture for the Suppressed count; `recovering_traj` supplies the
-    # patterns that actually reach a file.
-    rows += [recovering_traj(f"rec-{i}") for i in (1, 2, 3)]
+    # while still honouring the arithmetic this test pins. Since #1327 so does
+    # `adjacent_next_step_traj`: its failing `mkdir` is followed by a `Read` of a
+    # different file, which is adjacency, not recovery. The aliased pair stays in
+    # the fixture for the Suppressed count; `retrying_traj` supplies the patterns
+    # that actually reach a file.
+    rows += [retrying_traj(f"retry-{i}") for i in (1, 2, 3)]
     # A refused-by-gate success pattern: `_signature` keys are counted as mined
     # and never emitted, which is what the Suppressed line is for.
     for i in (1, 2, 3):

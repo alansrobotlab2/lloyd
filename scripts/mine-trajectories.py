@@ -237,18 +237,22 @@ def is_emittable(pattern: dict) -> bool:
     reach it.
 
     A `sequence` pattern survives only when it is flagged
-    `has_error_recovery: true` — the n-gram contains an `:ERR` step followed by a
-    non-error step. That flag is what makes a repeated n-gram a lesson rather
-    than a call order: `seq-2-calendar-events-email-recent` appears in 157
+    `has_error_recovery: true` — some observed instance of the n-gram re-attempted
+    the failed call or touched its target again, which is what `ngram_shows_recovery`
+    decides. An `:ERR` step followed by any old next step is not it: since #1327
+    that adjacency sets nothing. That flag is what makes a repeated n-gram a lesson
+    rather than a call order: `seq-2-calendar-events-email-recent` appears in 157
     sessions with 6 of 6 steps succeeding and its top worker class at 100 % of
     them, and `seq-2-write-read` in 209 sessions at 94 % — one pipeline's
     ordinary order, which the `sessions >= 3` gate counts as a shared lesson.
     Measured 2026-09-16, 672 of the 780 actionable candidate keys were
-    `has_error_recovery: false` and 108 carried a real recovery; at the
-    runbook's 5 patterns a night, adjudicating that pool by hand was ~156 nights
-    to reach "no skill here" for every one of them. A sequence that reaches here
-    with no flag at all stays emittable, so a hand-built or legacy pattern is
-    not suppressed by absence.
+    `has_error_recovery: false` and 108 were flagged true — by the adjacency rule
+    then in force, which is why #1327 narrowed the flag: four of five keys
+    adjudicated from that pool on 2026-09-21 had successors that were unrelated
+    next commands. At the runbook's 5 patterns a night, adjudicating the pool by
+    hand was ~156 nights to reach "no skill here" for every one of them. A
+    sequence that reaches here with no flag at all stays emittable, so a
+    hand-built or legacy pattern is not suppressed by absence.
     """
     if pattern.get("type") != "success":
         # `is False`, not falsy: an `error` pattern dict carries no
@@ -981,11 +985,128 @@ def mine_success_patterns(trajectories: list[dict], threshold: int = 2) -> list[
     return qualifying_patterns
 
 
+ERR_SUFFIX = ":ERR"
+
+# The shortest argument value that can name an object, and the two characters
+# that say it does: a path, a URL, a filename or a dotted id carries one of
+# them. `limit: 200`, `offset: 0` and `output_mode: count` name no object at all,
+# and matching on those would rebuild the adjacency bug out of argument values.
+MIN_REFERENCE_LEN = 5
+REFERENCE_MARKS = ("/", ".")
+
+
+def _reference_values(params_summary) -> set[str]:
+    """The argument values of one call that name the *object* it touched.
+
+    Values are compared as whole strings across the two calls, not by argument
+    name — a failed `Edit` names its target `path` or `file_path` depending on
+    which extractor wrote the row, and the retry names it with whatever its own
+    tool calls it. The identity is the value. Scrubbed values
+    (`[truncated: N chars]`, `[MASKED]`) are the same non-evidence #391 removed
+    from the keys and are skipped: a placeholder equals every placeholder.
+    """
+    if not isinstance(params_summary, dict):
+        return set()
+    values: set[str] = set()
+    for value in params_summary.values():
+        items = value if isinstance(value, (list, tuple)) else [value]
+        for item in items:
+            if item is None or isinstance(item, (bool, dict)):
+                continue
+            text = str(item).strip()
+            if len(text) < MIN_REFERENCE_LEN or text.startswith(KEY_ARTIFACT_PREFIX):
+                continue
+            if not any(mark in text for mark in REFERENCE_MARKS):
+                continue
+            values.add(text)
+    return values
+
+
+def ngram_shows_recovery(labels: list[str] | tuple[str, ...],
+                         tools: list[dict]) -> bool:
+    """Whether one observed instance of an n-gram contains a recovery, not just a
+    next step (backlog #1327).
+
+    A step whose label ends in `:ERR` counts as recovered only when a *later*
+    step in the same window addresses that failure, in one of the two ways the
+    item names:
+
+    * it **re-attempts** the failed call — its base label is the failed step's
+      base label, so the same tool ran again without the error flag (a retried
+      `mkdir`, a second `Read`); or
+    * it **references the failed target** — it carries an argument value equal to
+      one of the failed call's object-naming values (the same path, URL or
+      command), which is how a failed `Edit` followed by a `Read` of that same
+      file differs from a failed `Edit` followed by a `Read` of another one.
+
+    Anything else leaves the flag false. Bare adjacency — `:ERR` followed by any
+    non-`:ERR` step — used to set it, and that is not recovery: of the five
+    candidate keys consolidation hand-adjudicated from the keys this flag kept on
+    2026-09-21, four had successors that were unrelated next commands (`date -u …`
+    after a failed grep, a fresh `ls` after a traceback) and in one the "error"
+    was legitimate stdout on a non-zero exit. An n-gram of one step, or one with
+    no `:ERR` step, has nothing to recover from and returns False.
+    """
+    for idx, label in enumerate(labels):
+        if not label.endswith(ERR_SUFFIX):
+            continue
+        base = label[:-len(ERR_SUFFIX)]
+        failed_refs = _reference_values(
+            tools[idx].get("params_summary") if idx < len(tools) else None)
+        for later in range(idx + 1, len(labels)):
+            later_label = labels[later]
+            if later_label.endswith(ERR_SUFFIX):
+                continue
+            if later_label == base:
+                return True
+            if idx < len(tools) and later < len(tools) and failed_refs:
+                if failed_refs & _reference_values(
+                        tools[later].get("params_summary")):
+                    return True
+    return False
+
+
+def _suffix_sessions(ngram: tuple[str, ...],
+                     pattern_data: dict[tuple[str, ...], dict]) -> set[str]:
+    """Sessions a strictly shorter *suffix* of this n-gram already counted.
+
+    `mine_sequence_patterns` walks `for n in (2, 3)` over one collapsed label
+    stream per session, so a 3-gram at position *i* always feeds its suffix
+    bigram at *i+1* in the same session: a `seq-3` key's session set is a subset
+    of its suffix bigram's by construction, and its sessions are the same events
+    counted at a second window size. `seq-3-bash-fs-bash-fs-err-bash-other`
+    shared all 17 of its sessions with the 20 that
+    `seq-2-bash-fs-err-bash-other` reported. Measured over
+    `_pipeline/skills/candidates/` on 2026-09-21: 626 `seq-3` keys, 594 with a
+    `seq-2` suffix sibling, 570 of those pairs fully contained. Borrowed here, so
+    a windowed key cannot clear the emission gate on a session its own suffix
+    already billed.
+    """
+    borrowed: set[str] = set()
+    for size in range(2, len(ngram)):
+        suffix = tuple(ngram[-size:])
+        sibling = pattern_data.get(suffix)
+        if sibling is not None:
+            borrowed |= sibling["sessions"]
+    return borrowed
+
+
 def mine_sequence_patterns(trajectories: list[dict], threshold: int = 2) -> list[dict]:
     """
     Mine repeating tool-call sequences (bigrams and trigrams) across sessions.
     Normalizes tool names, collapses consecutive duplicates, then extracts
     n-grams. Returns patterns appearing in >= threshold distinct sessions.
+
+    Two rules decide what survives the threshold, both from backlog #1327:
+
+    * `has_error_recovery` is set per observed instance by
+      `ngram_shows_recovery()`, so a key is flagged true only when at least one
+      session actually re-attempted the failed call or touched its target again
+      — not because an `:ERR` label happened to sit next to a non-`:ERR` label;
+    * a key is qualified on its **own** sessions: those not already counted by a
+      strictly shorter suffix key (`_suffix_sessions`). A windowed n-gram reports
+      `sessions` as that own count, with the full observed total in
+      `total_sessions` and what the suffix already billed in `borrowed_sessions`.
     """
     # {ngram_tuple: {sessions, examples, dates}}
     pattern_data: dict[tuple[str, ...], dict] = defaultdict(lambda: {
@@ -1045,6 +1166,16 @@ def mine_sequence_patterns(trajectories: list[dict], threshold: int = 2) -> list
                 first_from_session = session_key not in pd["sessions"]
                 pd["sessions"].add(session_key)
                 pd["dates"].add(date_str)
+                # Recovery is a property of an observed instance, not of the
+                # label shape: the same `edit:ERR → read` n-gram is a recovery
+                # when the `Read` opens the file the `Edit` failed on and is not
+                # when it opens another one. OR'd across every instance the key
+                # was seen in, so the flag says "at least one session in this
+                # set recovered" and never "the next step happened to exist".
+                if not pd.get("has_error_recovery"):
+                    window_tools = collapsed_tools[i: i + n]
+                    pd["has_error_recovery"] = ngram_shows_recovery(
+                        collapsed_labels[i: i + n], window_tools)
 
                 # Sample up to 3 concrete examples, newest-first rather than
                 # first-wins.
@@ -1074,14 +1205,17 @@ def mine_sequence_patterns(trajectories: list[dict], threshold: int = 2) -> list
     # Filter by threshold
     qualifying: list[dict] = []
     for ngram, data in pattern_data.items():
-        if len(data["sessions"]) < threshold:
+        # The threshold is on the key's OWN sessions. A windowed n-gram's set is
+        # a subset of its suffix's (`_suffix_sessions`), so counting it again at
+        # its own window size is what let `seq-3-bash-fs-bash-fs-err-bash-other`
+        # clear `sessions >= 3` on 17 sessions every one of which its suffix
+        # `seq-2-bash-fs-err-bash-other` had already billed.
+        borrowed = _suffix_sessions(ngram, pattern_data)
+        own_sessions = data["sessions"] - borrowed
+        if len(own_sessions) < threshold:
             continue
 
-        has_error_recovery = False
-        for idx in range(len(ngram) - 1):
-            if ngram[idx].endswith(":ERR") and not ngram[idx + 1].endswith(":ERR"):
-                has_error_recovery = True
-                break
+        has_error_recovery = bool(data.get("has_error_recovery"))
 
         # Skip sequences composed entirely of boring labels (no :ERR, no MCP, no edit/write)
         base_labels = {lbl.split(":ERR")[0] for lbl in ngram}
@@ -1093,7 +1227,9 @@ def mine_sequence_patterns(trajectories: list[dict], threshold: int = 2) -> list
             "sequence": ngram,
             "sequence_str": " → ".join(ngram),
             "ngram_size": len(ngram),
-            "sessions": data["sessions"],
+            "sessions": own_sessions,
+            "total_sessions": len(data["sessions"]),
+            "borrowed_sessions": len(data["sessions"]) - len(own_sessions),
             "examples": pool_sample(data["examples"]),
             "dates": data["dates"],
             "has_error_recovery": has_error_recovery,
@@ -1384,8 +1520,20 @@ status: {status_value}{verdict_fm}
 ## Pattern Summary
 This {pattern["ngram_size"]}-step tool sequence appears across {len(pattern["sessions"])} distinct sessions: `{seq_str}`.
 """
+        borrowed = pattern.get("borrowed_sessions", 0)
+        if borrowed:
+            # The reported count is the key's own; a reader comparing two
+            # snapshots of a windowed key must be able to see what the shorter
+            # suffix key already billed (#1327).
+            content += (f"{borrowed} further session(s) carried this window too and are "
+                        f"counted by its shorter suffix key, not here "
+                        f"({pattern.get('total_sessions', len(pattern['sessions']) + borrowed)} "
+                        "observed in total).\n")
         if pattern["has_error_recovery"]:
-            content += "This pattern includes **error recovery** — the agent encounters an error and then recovers in a subsequent step.\n"
+            content += ("This pattern includes **error recovery** — in at least one "
+                        "observed instance a failed step is followed, inside this "
+                        "window, by a re-attempt of the same call or by a call naming "
+                        "the same target (#1327).\n")
 
         content += "\n## Concrete Examples\n"
         for i, example in enumerate(pattern["examples"], 1):
