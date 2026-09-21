@@ -218,6 +218,16 @@ async def run_query(
         caption_total = 0
         caption_present = 0
         caption_nudged = False
+        # One relief pass per crossing of the target instead of one per
+        # iteration (#800). Per turn: the turn owns the message list and the
+        # engine's cached prefix for it, and a new turn invalidates both
+        # anyway. This latch gates ONLY the per-iteration call — while it is
+        # closed the prompt can still climb, and it does so into the
+        # pre-request rung (headroom under `context_relief_min_completion_
+        # tokens`), the terminal-inject guard, and the context-overflow
+        # recovery, all of which run the whole ladder with no latch and are
+        # what keep a latched turn from dying at the wall.
+        relief_latch = _ReliefLatch()
         num_turns = 0
         stop_reason = "stop"
         context_overflow_recoveries = 0
@@ -828,6 +838,10 @@ async def run_query(
                 if tool_count >= threshold:
                     # The tool-count threshold stays a cheap pre-check; the
                     # ladder's own rungs each decide whether they are needed.
+                    # `relief_latch` is what makes that "needed" mean a
+                    # crossing rather than a standing state: the ladder re-
+                    # enters only once the prompt has regrown to the
+                    # intra-turn trigger (see `_ReliefLatch`).
                     _relieve_context(
                         chat_messages,
                         options=options,
@@ -837,6 +851,7 @@ async def run_query(
                         keep_recent=keep,
                         tool_count=tool_count,
                         iteration=num_turns,
+                        latch=relief_latch,
                     )
 
         structured, structured_error = await _maybe_finalize(
@@ -1077,6 +1092,67 @@ def _relief_target(options: Any, meter: Any) -> int:
     return int(threshold * frac)
 
 
+def _relief_rearm_level(options: Any, meter: Any) -> int:
+    """Tokens the prompt must regrow to before the next intra-turn pass runs.
+
+    Deliberately the same arithmetic rung 1 uses for its own trigger —
+    `truncation_threshold(window) × intra_turn_microcompact_trigger_fraction`
+    (`app/harness/microcompact.py`; `truncation_threshold` is the compaction
+    wall, not the raw context window) — so the latch releases exactly where
+    the ladder would have fired on its own. Inventing a second, independent
+    number for the same wall is how a latch ends up either never releasing or
+    firing on every iteration anyway.
+    """
+    try:
+        threshold = int(meter.threshold)
+    except Exception:  # noqa: BLE001
+        return 0
+    frac = float(getattr(options, "intra_turn_microcompact_trigger_fraction", 0.8))
+    return int(threshold * frac)
+
+
+class _ReliefLatch:
+    """One relief pass per crossing of the target, not one per iteration.
+
+    Why this exists: on a long turn the ladder can never reach its target.
+    Rung 1's budget is `target - offset`, where `offset` is the system prompt
+    plus the tool schemas (~44k tokens the message list cannot pay for), so
+    once a turn settles above the target the ladder's only gate —
+    `meter.used > target` — is true on *every* iteration. Measured on
+    2026-09-20 over `logs/server.err.1` (relief events 10:04:29 → 18:51:02,
+    8.78 h): **2,474** `intra_turn` relief events = 282 an hour, 87.1% of them
+    firing *below* the level at which rung 1 would have triggered by itself and
+    73.9% freeing under 2,000 tokens; the item's own triage reading one day
+    earlier (2026-09-19) was 240 an hour, 97.0% below trigger. Each event
+    rewrites cached history, which costs a re-prefill of everything after the
+    edit point (#520).
+
+    So after a pass the ladder stays closed until the prompt regrows to
+    `_relief_rearm_level`. The state is per turn: a new turn has a new message
+    list and a new cached prefix, so it gets a new latch. It applies to the
+    per-iteration (`intra_turn`) caller only — the wall paths (context-overflow
+    recovery, pre-request, terminal-inject) run the whole ladder unconditionally,
+    because three autocode rounds died at that wall on 2026-09-11 (866-a, 869,
+    875) and a latch that can kill a turn is worse than a drip.
+    """
+
+    __slots__ = ("passes", "rearm", "announced")
+
+    def __init__(self) -> None:
+        self.passes = 0          # relief passes already run this turn
+        self.rearm = 0           # token level at which the next pass is allowed
+        self.announced = False   # the latched turn has said so once in the log
+
+    def closed(self, used: int) -> bool:
+        """True once a pass has run and until `used` reaches the rearm level.
+
+        Fails open: with no pass run, or with a stub meter that left `rearm`
+        at 0, the ladder runs. Relief that cannot be armed must not also be
+        blocked.
+        """
+        return self.passes > 0 and used < self.rearm
+
+
 def _relieve_context(
     chat_messages: list[dict[str, Any]],
     *,
@@ -1088,6 +1164,7 @@ def _relieve_context(
     keep_recent: int = 15,
     tool_count: int = 0,
     iteration: int = 0,
+    latch: "_ReliefLatch | None" = None,
 ) -> dict[str, Any]:
     """Free context, cheapest rung first, stopping as soon as it is enough.
 
@@ -1099,14 +1176,25 @@ def _relieve_context(
        only rung that runs when the meter is unmeasured.
     2. **Prune preserved reasoning**, first to the configured window and
        then to `reasoning_keep_under_pressure`. This rewrites messages the
-       engine has already cached and costs a re-prefill (#520) — which is
-       why it is here and not in the per-iteration path. Under pressure the
-       alternative is losing the turn, and that is the trade #520 did not
-       have to make.
+       engine has already cached and costs a re-prefill (#520). Until
+       2026-09-19 the comment here claimed that meant it did not run in the
+       per-iteration path; it ran there 2,474 times in 8.78 h (282/hour, and in
+       all 2,474 of those lines — every one names `reasoning:` in its `via`
+       field), because the gate is `used > target`
+       and a long turn is above target
+       from iteration ~15 on. Under pressure the alternative is losing the
+       turn; what is not defensible is paying it once per iteration, which
+       is what `latch` now stops.
     3. **Spill `Write`/`Edit` bodies** out of assistant tool-call arguments
        once their results have landed. The residue nothing else can reach.
     4. **Truncate the largest tool results** — destructive-ish (it spills
        first now), and last for that reason.
+
+    `latch` is the per-turn `_ReliefLatch` the per-iteration caller passes:
+    once a pass has run, later iterations of the same turn return without
+    running any rung until the prompt regrows to `_relief_rearm_level`. The
+    wall callers (overflow recovery, pre-request, terminal-inject) pass no
+    latch at all and always get the whole ladder.
 
     Returns a report dict for the log and the event; never raises, because a
     turn that dies inside its own relief path is strictly worse than one
@@ -1118,6 +1206,34 @@ def _relieve_context(
 
     before = int(getattr(meter, "used", 0) or 0)
     target = target or _relief_target(options, meter)
+    rearm = _relief_rearm_level(options, meter)
+
+    # -- the latch, for the per-iteration caller only --------------------
+    # An unmeasured meter cannot say where the prompt sits, so it cannot
+    # justify closing: the ladder runs exactly as it always has.
+    if (
+        latch is not None
+        and getattr(meter, "measured", False)
+        and latch.closed(before)
+    ):
+        report["latched"] = True
+        report["passes"] = latch.passes
+        report["rearm"] = latch.rearm
+        if not latch.announced:
+            # Said once per turn, and worded so that it does NOT match the
+            # grep for `loop: context relief (intra_turn)` — the follow-up
+            # measurement counts those lines to see whether the drip
+            # stopped. A turn that is simply under target logs nothing at
+            # all, so this line is the only thing that tells the two apart.
+            latch.announced = True
+            logger.info(
+                "loop: context relief latched (%s): used %d below rearm %d "
+                "after %d pass%s this turn (target %d) — next pass allowed "
+                "at >=%d",
+                reason, before, latch.rearm, latch.passes,
+                "" if latch.passes == 1 else "es", target, latch.rearm,
+            )
+        return report
 
     def _over() -> bool:
         # Unmeasured never counts as over: an iteration-1 turn with no
@@ -1210,17 +1326,61 @@ def _relieve_context(
     report["used_before"] = before
     report["used_after"] = after
     report["target"] = target
+    if latch is not None and rearm <= 0:
+        # `_relief_rearm_level` could not name a level, which happens when the
+        # meter has no readable `threshold`. Do not arm on that.
+        #
+        # What a 0 level actually does, read off `closed()`
+        # (`passes > 0 and used < rearm`): every reading is non-negative, so
+        # `used < 0` is false and the latch would never close — the ladder
+        # would keep running every iteration exactly as it did before this
+        # change. That is not the dangerous direction; a level ABOVE the wall
+        # is, because then `used < rearm` stays true for the whole turn and
+        # relief stops while the turn walks into the wall. What a 0 level does
+        # buy is a lie in the log: `pass 1 this turn, next pass allowed at
+        # >=0` records a release level the turn has already passed, so the
+        # field the whole point of this line is to expose — the level the next
+        # pass waits for — reads as a latch that exists and does nothing.
+        # Refusing to arm keeps that field honest, and a meter that cannot
+        # answer for its window costs the drip it has always cost, never a
+        # pass it was entitled to run.
+        if not latch.announced:
+            logger.warning(
+                "loop: context relief (%s) NOT latched: this meter yields no re-arm "
+                "level (threshold unreadable), so the ladder stays open on every "
+                "iteration (target %d)",
+                reason, target,
+            )
+            latch.announced = True
+        report["unlatched"] = True
+        tail = ""
+    elif latch is not None:
+        # Counted even when every rung freed nothing. That is precisely the
+        # case that used to re-arm forever: a pass that cannot reach its
+        # target (the ~44k of system prompt and tool schemas inside `used` is
+        # not in the message list to clear) would otherwise run again next
+        # iteration, and free nothing again.
+        latch.passes += 1
+        latch.rearm = rearm
+        report["passes"] = latch.passes
+        report["rearm"] = latch.rearm
+        tail = (
+            f"; pass {latch.passes} this turn, "
+            f"next pass allowed at >={latch.rearm}"
+        )
+    else:
+        tail = ""
     if report["rungs"] and report["freed_tokens"]:
         logger.info(
-            "loop: context relief (%s) freed ~%d tokens: %d -> %d (target %d) via %s",
+            "loop: context relief (%s) freed ~%d tokens: %d -> %d (target %d) via %s%s",
             reason, report["freed_tokens"], before, after, target,
-            ", ".join(report["rungs"]),
+            ", ".join(report["rungs"]), tail,
         )
     elif _over():
         logger.warning(
             "loop: context relief (%s) could not get under target: %d > %d "
-            "(rungs tried: %s)",
-            reason, after, target, ", ".join(report["rungs"]) or "none",
+            "(rungs tried: %s)%s",
+            reason, after, target, ", ".join(report["rungs"]) or "none", tail,
         )
     return report
 

@@ -206,9 +206,11 @@ def _run_first_tool_call(events, monkeypatch):
 
 def test_first_tool_call_returns_its_own_usage(monkeypatch):
     """The usage dict on the record is the one this query's stream carried."""
-    # Real stream order: `loop.py:498` yields `assistant_message` (carrying
-    # `usage`) and only `loop.py:744` yields the `tool_call`, so the usage of the
-    # turn that produced the tool call is already in hand when we stop.
+    # Real stream order: `loop.py:524` yields `assistant_message` (carrying
+    # `usage`) and only `loop.py:770` yields the `tool_call`, so the usage of the
+    # turn that produced the tool call is already in hand when we stop. (These two
+    # numbers moved with #800's relief latch, like the header range in
+    # `tool_choice_queries.yaml` did; the claim they name did not.)
     out = _run_first_tool_call([
         {"type": "assistant_message", "usage": dict(FAKE_USAGE)},
         {"type": "tool_call", "name": "http_search", "args_dict": {"query": "q"}},

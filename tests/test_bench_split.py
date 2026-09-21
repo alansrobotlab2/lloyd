@@ -267,7 +267,8 @@ def test_exclusion_happens_before_the_limit_is_spent(cfg):
 # tell you that `run_round.run()` fails to write the artifact at all — a test
 # that fakes the whole round and asserts on a hand-built split dict has that hole.
 # These call the same `record_split` `run()` calls, against a bench directory
-# that is the real 11-task one, and read back what landed on disk: the JSON
+# that is the real live one (its size is a floor, see `MIN_LIVE_BENCH_TASKS`), and
+# read back what landed on disk: the JSON
 # artifact, its hash, and the ledger row. Read-only — the bench is only listed,
 # and `research_root` is a tmp dir, so no split file is written to the live
 # store and no live ledger is opened.
@@ -280,6 +281,22 @@ ROUND = "R_20260919_120000"
 requires_real_bench = pytest.mark.skipif(
     not REAL_BENCH.is_dir(), reason=f"no live bench at {REAL_BENCH}")
 
+#: Floor, not the size. `lloyd/bench/` is written by the vault — an added task is
+#: routine (bench_012 landed 2026-09-20 in vault commit `af6ac64b`), so an equality
+#: here reds the gate's `tests` rung for whichever automod round happens to be in
+#: flight when someone else's bench task lands, and does so with `external_blocker`
+#: set, which blocks the promotion without spending the item's attempt (#1320). A
+#: shrink below this is the event worth failing on: tasks are only ever added, so a
+#: smaller live corpus means one was deleted or failed to load.
+MIN_LIVE_BENCH_TASKS = 11
+
+
+def _assert_live_bench_big_enough(tasks: list[dict]) -> None:
+    """Name the directory and the count, so the failure says which corpus moved."""
+    assert len(tasks) >= MIN_LIVE_BENCH_TASKS, (
+        f"live bench at {REAL_BENCH} holds {len(tasks)} tasks, below the "
+        f"{MIN_LIVE_BENCH_TASKS} this guard was written against")
+
 
 @requires_real_bench
 def test_record_split_writes_the_artifact_and_the_ledger_row(cfg):
@@ -291,7 +308,7 @@ def test_record_split_writes_the_artifact_and_the_ledger_row(cfg):
 
     cfg.paths.ensure()
     tasks = load_bench_tasks(REAL_BENCH)
-    assert len(tasks) == 11, f"expected the live 11-task bench, got {len(tasks)}"
+    _assert_live_bench_big_enough(tasks)
 
     split = run_round.record_split(cfg, tasks, ROUND)
 

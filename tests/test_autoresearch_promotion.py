@@ -1529,6 +1529,20 @@ REAL_BENCH = Path.home() / "obsidian" / "lloyd" / "bench"
 requires_real_bench = pytest.mark.skipif(
     not REAL_BENCH.is_dir(), reason=f"no live bench at {REAL_BENCH}")
 
+#: Truncation widths to refuse. Every one must be strictly below the live task
+#: count, or the node would be asserting that a FULL round is refused for partial
+#: coverage — so the node checks that itself rather than trusting this list.
+LIMITS = list(range(1, 11))
+
+#: Floor, not the size of the live corpus. `lloyd/bench/` is written by the vault
+#: and an added task is routine (bench_012 landed 2026-09-20 in vault commit
+#: `af6ac64b`), so an equality here reds the gate's `tests` rung for whichever
+#: automod round is in flight when someone else's bench task lands — which is what
+#: blocked #800's round SM_20260921_020317 at 11 failures, all one cause (#1320).
+#: A shrink below this is the failure worth stopping a promotion for: tasks are
+#: only added, so a smaller live corpus means one went missing or stopped loading.
+MIN_LIVE_BENCH_TASKS = 11
+
 
 def _truncated_pair(tasks: list[dict], n: int, gain: float) -> tuple[dict, dict]:
     """Baseline/variant summaries scoring exactly the first `n` bench tasks, the
@@ -1544,31 +1558,39 @@ def _truncated_pair(tasks: list[dict], n: int, gain: float) -> tuple[dict, dict]
 
 
 @requires_real_bench
-@pytest.mark.parametrize("limit", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+@pytest.mark.parametrize("limit", LIMITS)
 def test_a_truncated_round_is_refused_by_the_live_gate(cfg, tmp_path, limit):
     """Every `--bench-limit` below the full bench fails to promote, naming the half
     it never measured. Two refusals cover the range, and which one fires is decided
     by where the cut lands in the real bench order:
 
-    - `no_heldout_overlap`: the round scored NONE of the veto slice (limits 1-4 —
-      the four adversarial/safety tasks that are held-out unconditionally sit past
-      position 4 in the load order).
+    - `no_heldout_overlap`: the round scored NONE of the veto slice (the cut lands
+      before the first held-out task — positions past 4 in the load order).
     - `partial_heldout_coverage` / `partial_targeted_coverage`: it scored SOME of a
       slice but not all of it, so a mean over the part it has would be read as a
       verdict on the whole — the averaging defect the split exists to remove, one
       layer down.
 
-    Without the coverage check, limits 5-10 would score one to five veto tasks and
-    promote a variant whose veto mean merely did not decline on a fraction of the
-    slice. Asserting the refusal for EVERY limit is the point: a partial refusal
-    that let one truncation width through is not a fail-closed gate.
+    WHICH family fires is a property of the live load order, so the assertion is on
+    the family, not the per-limit mapping: on the corpus measured 2026-09-21 (12
+    tasks) limits 1-4 give `no_heldout_overlap`, 5-9 `partial_heldout_coverage` and
+    10-11 `partial_targeted_coverage`. Without the coverage check, a truncation that
+    scores one to five veto tasks would promote a variant whose veto mean merely did
+    not decline on a fraction of the slice. Asserting the refusal for EVERY limit is
+    the point: a partial refusal that let one truncation width through is not a
+    fail-closed gate.
     """
     from scripts.autoresearch import run_round
     from scripts.autoresearch.common import load_bench_tasks
 
     cfg.paths.ensure()
     all_tasks = load_bench_tasks(REAL_BENCH)
-    assert len(all_tasks) == 11, f"expected the live 11-task bench, got {len(all_tasks)}"
+    assert len(all_tasks) >= MIN_LIVE_BENCH_TASKS, (
+        f"live bench at {REAL_BENCH} holds {len(all_tasks)} tasks, below the "
+        f"{MIN_LIVE_BENCH_TASKS} this guard was written against")
+    assert limit < len(all_tasks), (
+        f"the parametrised ceiling {LIMITS[-1]} no longer truncates a "
+        f"{len(all_tasks)}-task bench: widen LIMITS, or this node asserts nothing")
     split = run_round.record_split(cfg, all_tasks, "R_20260919_120000")
 
     base, var = _truncated_pair(all_tasks, limit, gain=0.4)
