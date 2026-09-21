@@ -2089,6 +2089,107 @@ LANDED_MARKER = "automod_landed"
 # Items landed before the rename carry the old marker. Read both; write the new.
 _LEGACY_LANDED_MARKERS = ("autoimplement_landed", "selfmod_landed")
 
+# The finalizer's own instruction, transcribed back as its answer instead of
+# being answered. `workers/sources/autocode.py` opens the finalizer's
+# `final_schema_prompt` with "Restate the result of this round as a single JSON
+# object matching the schema:", and #875's recorded `summary` opens with that
+# sentence in the gerund — "Restating the result of this round as a single JSON
+# object matching the schema: whether the change landed, and for EACH acceptance
+# clause…" — the instruction copied, and nothing answered after it.
+#
+# Matched at the start of the summary against the prompt's own opening, in both
+# verb forms, rather than as "prose that looks like an instruction": a match is
+# proof, a report that *quotes* its contract after answering still counts as a
+# report, and `tests/test_backlog_unattended.py` fails if the prompt is reworded
+# without this pattern following it.
+_FINALIZER_PROMPT_OPENERS = (
+    # The instruction's own first words, as the implement turn is handed them in
+    # `workers/sources/autocode.py`. The test
+    # `tests/test_backlog_unattended.py::test_the_prompt_that_produces_the_echo_is_the_one_the_rule_matches`
+    # reads that wording out of the same source and fails if the two drift,
+    # because an opener that no longer matches what the finalizer is told pins
+    # nothing.
+    "Restate the result of this round as a single JSON object",
+    # How #875's finalizer actually transcribed it, one letter changed.
+    "Restating the result of this round as a single JSON object",
+)
+
+
+def echoes_finalizer_prompt(outcome) -> bool:
+    """True when an outcome's summary opens with the finalizer's instruction.
+
+    Prefix, not substring: a turn that answers and then quotes its contract has
+    reported something. `tests/test_backlog_unattended.py`
+    ::test_the_prompt_that_produces_the_echo_is_the_one_the_rule_matches reads
+    the prompt out of `autocode.py` and fails if the two files drift apart."""
+    s = str((outcome or {}).get("summary") or "").lstrip().lower()
+    return any(s.startswith(o.lower()) for o in _FINALIZER_PROMPT_OPENERS)
+
+
+def _landing_stamp(row: dict) -> float:
+    """When a landed row happened, as epoch seconds. −inf when it cannot say.
+
+    Prefers the `ts` the ledger stamped on the row that recorded the landing;
+    falls back to the ISO `settled_at`, which is second-resolution and therefore
+    cannot separate two landings inside one second."""
+    ts = row.get("landed_ts")
+    try:
+        if ts is not None:
+            return float(ts)
+    except (TypeError, ValueError):
+        pass
+    return _iso_ts(row.get("settled_at")) or float("-inf")
+
+
+def _same_commit(a, b) -> bool:
+    """Do these two sha strings name one commit?
+
+    `close_landed` writes a full sha into the landed marker, but an item marked
+    by hand or by an older writer can hold the 12-character form `git log`
+    prints, and comparing those as strings reports two commits where the ledger
+    and the item name one. Only a shared prefix of at least 7 characters —
+    git's own minimum unambiguous length — counts as one commit."""
+    a, b = str(a or "").strip(), str(b or "").strip()
+    if not a or not b:
+        return False
+    n = min(len(a), len(b))
+    return n >= 7 and a[:n] == b[:n]
+
+
+def outcome_carries_no_claim(outcome) -> bool:
+    """True when a reported outcome states nothing a sweep can act on.
+
+    #1318. Both shapes are gated on an empty `clause_outcomes`, because the
+    clause list *is* the per-clause claim: `acceptance: not_met` with no
+    clauses behind it (#699, and #875 once its echoed summary is set aside)
+    cannot name what it refused, and an echoed summary leaves nothing else
+    either. Six items — #608 #617 #699 #875 #1175 #1275 — sat `draft` and
+    `needs-human` on 2026-09-20 with the change on `main` and the review rung
+    grading every clause `met`, because a truthy word here silenced the second
+    reader (`code_review_outcome`) that exists for exactly this case.
+
+    An empty `not_met` and an echoed summary are reached independently, so each
+    rule carries cases the other cannot. Only a `not_met` is judged unusable on
+    emptiness alone: a `met` with no clauses closes on the turn's word as it
+    always has (#617's second landing, whose empty clause list was a finalizer
+    that wrote its summary instead), and `deferred`, `unnecessary` and
+    `rejected` carry their own meaning — overriding a `deferred` on the
+    review's grading would close an item whose turn named ids it waits on,
+    which is the one claim this loop cannot take back. An echoed summary needs
+    no such gate but the empty list: prose that restates the prompt reports
+    nothing whatever word sits beside it, so a finalizer that transcribed its
+    contract and answered `met` is refused too, and the review grading decides
+    it. That half is not a recorded row — no landed round has done it yet — but
+    it is the same silent-green this item exists to close, and
+    `test_an_echoed_summary_reports_nothing_even_beside_a_bare_met` is what
+    keeps the echo rule load-bearing rather than decorative.
+    """
+    if not isinstance(outcome, dict) or (outcome.get("clause_outcomes") or []):
+        return False
+    if echoes_finalizer_prompt(outcome):
+        return True
+    return outcome.get("acceptance") == "not_met"
+
 
 def settled_landings(ledger: Path) -> list[dict]:
     """Every item whose round landed and stayed landed.
@@ -2120,6 +2221,26 @@ def settled_landings(ledger: Path) -> list[dict]:
     the whole contract and it is used. An outcome the turn did report is never
     overridden, and a landing beside a round closes on a reported `met` only
     when that review agrees.
+
+    **An outcome that carries no per-clause claim counts as no outcome**
+    (`outcome_carries_no_claim`, #1318). #699's `acceptance: not_met` with
+    `clause_outcomes: []` and #875's summary that transcribed the finalizer's
+    own instruction were both truthy words, so neither reached the stand-ins and
+    both parked a landed, all-met-graded item as work owed to a person.
+
+    **A settled promotion is joined even when its implement turn wrote no
+    `finished` row** (#1318). A finalizer can die after the promotion settles —
+    `SM_20260920_020242` went `infra_failed` five minutes after its landing, and
+    `SM_20260920_025936` after the reaper landed it — and reading only finished
+    rows made those promotions invisible here, which is the only route from a
+    landing to an item. A `promoted` row carries no item id; `round_start` and
+    `land_rescued` do. With no turn's word in existence the review rung is the
+    only reader, and it answers only on an all-`met` grading.
+
+    **One row per item: the newest settled landing wins.** A re-offer that lands
+    clean supersedes the landing that sent it back. #608 and #617 each landed
+    twice and the join returned the first — round 1's sha and round 1's
+    `not_met` — while round 2 sat graded all-met.
     """
     settled = {str(d.get("commit") or ""): d
                for d in _ledger_events(ledger, "settled", require_item=False)}
@@ -2162,27 +2283,49 @@ def settled_landings(ledger: Path) -> list[dict]:
         vault = [str(c) for c in (d.get("vault_commits") or []) if c]
         outcome = d.get("outcome")
         reported = outcome.get("acceptance") if isinstance(outcome, dict) else None
+        # #1318: a truthy word is not a report. `not_met` with no clauses, or a
+        # summary that is the finalizer's own instruction, states nothing per
+        # clause — and it is exactly the shape that silenced the second reader
+        # for six landed items on 2026-09-20.
+        usable = bool(reported) and not outcome_carries_no_claim(outcome)
         if rid in promoted and promoted[rid]["commit"] not in reverted:
             p = promoted[rid]
-            # Nothing reported: the vault review for a `vault` contract, else
-            # the review rung's own grading of this round. Both answer only
-            # when every clause was `met`; a reported outcome is never
-            # overridden. The refused item verdict rides along so the sweep's
-            # note can say why the turn's word was not taken.
-            stand_in = None if reported else (graded_for(d, vault)
-                                              or code_review_outcome(ledger, rid))
+            # Nothing usable reported: the vault review for a `vault` contract,
+            # else the review rung's own grading of this round. Both answer only
+            # when every clause was `met`; an outcome that carries a claim is
+            # never overridden. The refused item verdict rides along so the
+            # sweep's note can say why the turn's word was not taken.
+            stand_in = None if usable else (graded_for(d, vault)
+                                            or code_review_outcome(ledger, rid))
             if stand_in and isinstance(outcome, dict) and outcome.get("item_verdict_refused"):
                 stand_in = {**stand_in, "item_verdict_refused": outcome["item_verdict_refused"]}
             out.append({"item_id": int(d["item_id"]), "round_id": rid, "commit": p["commit"],
                         "settled_at": settled[p["commit"]].get("created_at"),
-                        "outcome": outcome if reported else (stand_in or outcome),
+                        "landed_ts": d.get("ts"),
+                        # When the turn's word is unusable and the second
+                        # reader does not answer, the landing carries *no*
+                        # outcome — not the discarded word. `#1318`: forwarded
+                        # onward, a degenerate outcome still decided the item
+                        # (an echoed summary glued to a bare `met` closed it on
+                        # the turn's word, which the line above had just
+                        # declared worthless); with nothing carried the sweep
+                        # parks it as the no-outcome shape instead.
+                        "outcome": outcome if usable else stand_in,
                         "vault": False})
             continue
         if not vault:
             continue
+        # The two vault branches below keep the raw `reported` test (#1318
+        # deliberately stopped at the code-round path). #575 pins that a vault
+        # landing's reported outcome is never overridden —
+        # `tests/test_vault_surface_churn.py::test_an_outcome_the_turn_reported_is_never_overridden`,
+        # whose fixture is a `not_met` with no `clause_outcomes` at all, exactly
+        # the shape `usable` discards — and a vault round has no gate review rung
+        # to stand in for it anyway. Widening it there would trade a landed
+        # code-round fix for that guarantee.
         if not rid:
             out.append({"item_id": int(d["item_id"]), "round_id": "", "commit": vault[-1],
-                        "settled_at": d.get("created_at"),
+                        "settled_at": d.get("created_at"), "landed_ts": d.get("ts"),
                         "outcome": outcome if reported else (graded_for(d, vault) or outcome),
                         "vault": True})
             continue
@@ -2192,9 +2335,58 @@ def settled_landings(ledger: Path) -> list[dict]:
         if graded is None:
             continue
         out.append({"item_id": int(d["item_id"]), "round_id": "", "commit": vault[-1],
-                    "settled_at": d.get("created_at"),
+                    "settled_at": d.get("created_at"), "landed_ts": d.get("ts"),
                     "outcome": outcome if reported else graded, "vault": True})
-    return out
+
+    # A settled promotion with no `finished` implement row is a landing too
+    # (#1318). The finalizer runs after the promotion, so it can die with the
+    # change already on `main`: `SM_20260920_020242` (#1175) went `infra_failed`
+    # five minutes after its own promotion and `SM_20260920_025936` (#1275)
+    # after the reaper landed it — and reading only finished rows made both
+    # invisible here, which is the only route from a landing to an item.
+    # `promoted` carries no item id, so the round's own rows bind it; with no
+    # turn's word in existence the review rung is the only reader, and it
+    # answers only on a grading that is all `met`. A round it will not vouch for
+    # produces no row at all, which is what it produced before: nothing closes,
+    # and no invented note lands on an item nobody reported on.
+    joined = {str(d.get("round_id") or "") for d in out if not d["vault"]}
+    round_items: dict[str, int] = {}
+    for ev in ("round_start", "land_rescued"):
+        for d in _ledger_events(ledger, ev):
+            rid, iid = str(d.get("round_id") or ""), d.get("item_id")
+            if rid and iid is not None:
+                round_items.setdefault(rid, int(iid))
+    for rid, p in promoted.items():
+        # Bind first, grade second: `code_review_outcome` reads the whole ledger
+        # per call, and a round with no item is not going to produce a row.
+        if rid in joined or p["commit"] in reverted or (item_id := round_items.get(rid)) is None:
+            continue
+        graded = code_review_outcome(ledger, rid)
+        if graded is None:
+            continue
+        out.append({"item_id": item_id, "round_id": rid, "commit": p["commit"],
+                    "settled_at": settled[p["commit"]].get("created_at"),
+                    # This landing was never *noted* on the item, so the closest
+                    # thing to when it happened is when its promotion settled —
+                    # and ordering has to compare like with like.
+                    "landed_ts": settled[p["commit"]].get("ts"),
+                    "outcome": graded, "vault": False})
+
+    # One row per item: the newest settled landing (#1318). #608's join took
+    # round 1 (`not_met`, 5 clauses) while round 2 sat graded all-met, and #617
+    # had the same happen — an item re-offered after a landing that left it open
+    # is only finished when its *latest* landing is judged.
+    newest: dict[int, tuple[tuple, dict]] = {}
+    for i, row in enumerate(out):
+        iid = int(row["item_id"])
+        # The landing's own ledger stamp decides. `landed_ts` is the float its
+        # writer stamped, second-resolution `settled_at` is not: two landings a
+        # second apart is exactly what this function has to tell apart. Ledger
+        # order breaks an exact tie and answers a missing stamp.
+        key = (_landing_stamp(row), i)
+        if iid not in newest or key >= newest[iid][0]:
+            newest[iid] = (key, row)
+    return [newest[i][1] for i in sorted(newest)]
 
 
 def vault_review_outcome(ledger: Path, vault_commits: list[str], *,
@@ -2259,6 +2451,14 @@ def code_review_outcome(ledger: Path, round_id: str) -> dict | None:
     verdict the landing contradicts is refused (`settle_item_verdict`). Only
     ever a stand-in for an outcome that is MISSING: what the turn did report is
     never overridden.
+
+    The reaper shape is named here because #1318 is what made the name true. A
+    reaped finalizer leaves no `phase: finished` row, and `settled_landings`
+    iterated only those, so such a round never reached this call site — #1175 and
+    #1275 (`SM_20260920_020242`, `SM_20260920_025936`) are that case, the second
+    one landed by `land_rescued`. Such a promotion is now joined through its
+    `round_start`/`land_rescued` item id, which is where the promise became a
+    reachable path.
 
     Reads the round's NEWEST graded review. It must not be blocking, its
     verdicts must cover clauses 1..n with no gap, and every one must be `met` —
@@ -2408,7 +2608,14 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
         if item is None:
             continue
         fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
-        if fm.get(LANDED_MARKER) or any(fm.get(m) for m in _LEGACY_LANDED_MARKERS):
+        # The marker means *this landing has been noted*: `close_landed` stamps it
+        # whether or not it closes, so it is not evidence that the item is settled.
+        # The landing that left #608 and #617 open in `draft` also fenced them off
+        # from their own later, clean landing — a marker naming another commit has
+        # nothing to say about this one (#1318).
+        marked = str(fm.get(LANDED_MARKER) or "") or next(
+            (str(fm.get(m)) for m in _LEGACY_LANDED_MARKERS if fm.get(m)), "")
+        if marked and _same_commit(marked, str(landing["commit"])):
             continue
         outcome = landing.get("outcome") or {}
         # The review rung's own `post_landing` verdicts, honoured here rather

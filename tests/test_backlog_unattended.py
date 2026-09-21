@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1683,6 +1684,423 @@ def test_the_kill_switch_and_an_already_closed_item(isolated):
             outcome={"acceptance": "met", "landed": True, "deferred_to": [], "summary": "", "spawned": []})
     assert B.close_settled_items(S.LEDGER_PATH, enabled=False) == []
     assert B.close_settled_items(S.LEDGER_PATH) == [], "a human closed it; nothing to do"
+
+
+# ===========================================================================
+# #1318: a landing whose outcome carries no per-clause claim is not a verdict.
+#
+# Six items (#608 #617 #699 #875 #1175 #1275) sat `draft` + `needs-human` on
+# 2026-09-20 with their change on `main` and the review rung grading every
+# clause `met`. Each was closed by hand. Four shapes reached it, and each has a
+# test below that replays the round's recorded ledger rows.
+# ===========================================================================
+
+def _reviewed(rid, verdicts, *, ok=True, blocking=False):
+    """The review rung's grading of a round, as `gate.rung_review` records it."""
+    S.append_event({"event": "review", "round_id": rid, "ok": ok, "blocking": blocking,
+                    "clauses": [{"clause": i + 1, "verdict": v, "evidence": "ran the nodes"}
+                                for i, v in enumerate(verdicts)]},
+                   path=S.LEDGER_PATH)
+
+
+def _round_of(item_id, rid):
+    """The round's own rows: what binds a round to an item when the finalizer
+    never got to write one (`round_start`, and `land_rescued` for a round the
+    reaper landed)."""
+    S.append_event({"event": "round_start", "round_id": rid, "item_id": item_id,
+                    "goal": "the item's goal"}, path=S.LEDGER_PATH)
+
+
+def test_a_landing_reporting_not_met_with_no_clauses_is_closed_by_the_review_grading(isolated):
+    """#699, round SM_20260916_205241, landed 37bb21b2. Its `backlog_implement`
+    row carries `acceptance: not_met` with `clause_outcomes: []` and an empty
+    summary — a verdict word with no clause behind it, which read as a refusal
+    and the review rung was never consulted."""
+    p = write_item(isolated, 699, status="up_next")
+    _round_of(699, "SM_20260916_205241")
+    _reviewed("SM_20260916_205241", ["met"] * 5)
+    _landed(699, "SM_20260916_205241", "37bb21b23469",
+            outcome={"acceptance": "not_met", "landed": True, "clause_outcomes": [],
+                     "deferred_to": [], "summary": "", "spawned": [], "human_paths": []})
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert out == [{"item_id": 699, "closed": True, "acceptance": "met"}]
+    fm = _fm(p)
+    assert fm["status"] == "done" and fm["automod_landed"] == "37bb21b23469"
+    assert "the review rung" in fm["activity_log"][-1]
+    assert "all 5 clause(s) met for round SM_20260916_205241" in fm["activity_log"][-1]
+
+
+def _finalizer_prompt_open() -> str:
+    """The opening of `autocode`'s finalizer instruction, read out of the source.
+
+    Read from `workers/sources/autocode.py`, not typed out here: the echo rule is
+    only worth having while it matches what the finalizer is actually told, and a
+    fixture that quotes a reworded prompt would keep pinning nothing."""
+    import inspect
+    src = inspect.getsource(I)
+    m = re.search(r'"(Restate the result of this round as a single JSON[^"]*)"', src)
+    assert m, ("autocode's finalizer prompt changed its wording; backlog.py's echo "
+               "detector and this test have to be re-read together (#1318)")
+    return m.group(1).strip()
+
+
+def _echo_of_the_finalizer_prompt() -> str:
+    """That instruction transcribed back as an answer, as #875's finalizer did."""
+    return _finalizer_prompt_open() + " whether the change landed, and for EACH " \
+        "acceptance clause in order whether it is now met, not_met, or deferred"
+
+
+def test_the_prompt_that_produces_the_echo_is_the_one_the_rule_matches():
+    """The process boundary the echo rule sits on: the prompt `autocode` writes
+    and the detector in `backlog` that recognises it coming back."""
+    opener = _finalizer_prompt_open()
+    assert any(opener.lower().startswith(o.lower())
+               for o in B._FINALIZER_PROMPT_OPENERS), \
+        f"backlog.py no longer matches the prompt autocode writes: {opener!r}"
+    assert B.echoes_finalizer_prompt({"summary": _echo_of_the_finalizer_prompt()}), \
+        "a finalizer that transcribes its instruction verbatim is caught"
+    assert B.echoes_finalizer_prompt(
+        {"summary": "Restating the result of this round as a single JSON object, "
+                    "per the schema: landed."}), \
+        "a finalizer that transcribes it in the gerund, as #875 did, is caught"
+    assert not B.echoes_finalizer_prompt({
+        "summary": "All 9 clauses are met. The contract asked for a restatement "
+                   "of the result of this round as a single JSON object; here it is."}), \
+        "a real report that quotes its contract after answering is still a report"
+
+
+def test_a_landing_whose_summary_is_the_finalizers_own_instruction_reports_nothing(isolated):
+    """#875, round SM_20260919_010127, landed 767ff403. Its summary opens with
+    the instruction the finalizer was given — the turn transcribed its prompt
+    instead of answering it, and the review graded 9 clauses met against a
+    recorded `not_met`."""
+    p = write_item(isolated, 875, status="draft")
+    _round_of(875, "SM_20260919_010127")
+    _reviewed("SM_20260919_010127", ["met"] * 9)
+    _landed(875, "SM_20260919_010127", "767ff403580c",
+            outcome={"acceptance": "not_met", "landed": True, "clause_outcomes": [],
+                     "deferred_to": [], "spawned": [], "human_paths": [],
+                     "summary": "Restating the result of this round as a single JSON object "
+                                "matching the schema: whether the change landed, and for EACH "
+                                "acceptance clause in order whether it is now met, not_met, or "
+                                "deferred"})
+    assert B.close_settled_items(S.LEDGER_PATH) == [
+        {"item_id": 875, "closed": True, "acceptance": "met"}]
+    fm = _fm(p)
+    assert fm["status"] == "done" and "all 9 clause(s) met" in fm["activity_log"][-1]
+
+
+def test_an_echoed_summary_reports_nothing_even_beside_a_bare_met(isolated):
+    """The echo rule on its own, with no empty-`not_met` rule to hide behind.
+
+    A finalizer that transcribed its instruction and answered `met` with no
+    clauses is the silent-green this item is about: the turn stated nothing, so
+    the review rung decides it. `acceptance: met` with an empty clause list and
+    an honest summary still closes on the turn's word (clause 6's neighbourhood
+    — see `test_a_reported_met_with_clauses_closes_exactly_as_it_did_before`);
+    only the echo changes the answer, which is what makes the rule load-bearing.
+
+    That was measured before it was claimed: replacing the echo branch of
+    `outcome_carries_no_claim` with `return False` while its
+    `acceptance == "not_met"` branch stayed intact ran green (183 passed) on
+    2026-09-21 with only #699's and #875's fixtures in the suite — both recorded
+    rows carry `not_met`, so the empty-clause branch answers them first and the
+    echo rule decided nothing. No landed round has echoed its prompt under a
+    `met`, so the payload here is constructed for this node: its ledger rows are
+    the fixture's, not a replay of one, and the claim it pins is the graded one —
+    the join asks `code_review_outcome` before it asks which word the turn used.
+    """
+    p = write_item(isolated, 1340, status="draft")
+    _round_of(1340, "SM_ECHO_MET")
+    _reviewed("SM_ECHO_MET", ["met"] * 2)
+    _landed(1340, "SM_ECHO_MET", "echo0000echo01",
+            outcome={"acceptance": "met", "landed": True, "clause_outcomes": [],
+                     "deferred_to": [], "spawned": [], "human_paths": [],
+                     "summary": _echo_of_the_finalizer_prompt()})
+    assert B.close_settled_items(S.LEDGER_PATH) == [
+        {"item_id": 1340, "closed": True, "acceptance": "met"}]
+    fm = _fm(p)
+    assert fm["status"] == "done"
+    note = fm["activity_log"][-1]
+    assert "the review rung graded all 2 clause(s) met" in note
+    assert "the round reported" not in note, \
+        "an echoed summary closed the item on the turn's own word, not the review's"
+
+
+def test_deleting_the_echo_rule_leaves_a_bare_met_echo_closing_on_the_turn(isolated,
+                                                                          monkeypatch):
+    """The echo branch is load-bearing for clause 2, measured not assumed.
+
+    Both recorded degenerate outcomes (#699, #875) carry `not_met`, so the
+    empty-clause branch answers them whether the echo branch is present or not —
+    deleting it ran green (183 passed) on 2026-09-21 with only those two
+    fixtures in the suite. This does the deletion in-process: `echoes_finalizer_prompt`
+    answers False, its one call site in `outcome_carries_no_claim` untouched, so
+    only the echo branch is gone. The real module asks the review rung and leaves
+    an echoed `met` open when that review graded clause 2 `not_met`; the mutated
+    module reads the transcribed instruction as a report of `met` and closes the
+    item on the turn's own word. That difference is the silent-green the branch
+    exists to refuse, and no other node in this file reproduces it.
+    """
+    echoed = {"acceptance": "met", "landed": True, "clause_outcomes": [],
+              "deferred_to": [], "spawned": [], "human_paths": [],
+              "summary": _echo_of_the_finalizer_prompt()}
+    assert B.outcome_carries_no_claim(echoed) is True
+
+    p = write_item(isolated, 1342, status="draft")
+    _round_of(1342, "SM_ECHO_MUT")
+    _reviewed("SM_ECHO_MUT", ["met", "not_met"])
+    _landed(1342, "SM_ECHO_MUT", "echo0000echo03", outcome=echoed)
+    assert B.close_settled_items(S.LEDGER_PATH) == [
+        {"item_id": 1342, "closed": False, "acceptance": None}]
+    assert _fm(p)["status"] == "draft", \
+        "the unmutated module closed on a review that graded clause 2 not_met"
+
+    monkeypatch.setattr(B, "echoes_finalizer_prompt", lambda outcome: False)
+    assert B.outcome_carries_no_claim(echoed) is False, \
+        "the mutation did not take: this probe is pinned to nothing"
+
+    p2 = write_item(isolated, 1343, status="draft")
+    _round_of(1343, "SM_ECHO_MUT2")
+    _reviewed("SM_ECHO_MUT2", ["met", "not_met"])
+    _landed(1343, "SM_ECHO_MUT2", "echo0000echo04", outcome=echoed)
+    # 1342 is out of the second sweep on its own merits: the parked close wrote
+    # its `automod_landed` marker, which is exactly the marker #1318 allows an
+    # item to carry and still be re-joined by a later landing.
+    assert B.close_settled_items(S.LEDGER_PATH) == [
+        {"item_id": 1343, "closed": True, "acceptance": "met"}], \
+        "removing the echo branch changed nothing, so it decides nothing"
+    note2 = _fm(p2)["activity_log"][-1]
+    assert "the round reported" in note2 and "review rung" not in note2, \
+        "the mutated module closed on the review rather than on the turn's own " \
+        "word, so the probe says nothing about which branch was load-bearing"
+    assert "Restating the result of this round" in note2 or \
+        "Restate the result of this round" in note2, \
+        "the close quoted something other than the transcribed instruction"
+
+
+def test_an_unusable_outcome_the_review_does_not_answer_is_carried_as_none(isolated):
+    """The other half of the same rule: an echoed summary that the second reader
+    refuses must reach the sweep as *no outcome*, not as the discarded word.
+
+    Forwarding it is what made the echo decorative — `close_settled_items` read
+    `acceptance: met` off the row the join had just declared worthless and
+    closed on it. The parked shape here is the no-outcome shape, and
+    `test_a_promotion_the_review_did_not_grade_all_met_is_still_nobody` is what
+    pins the guard for every other shape.
+    """
+    p = write_item(isolated, 1341, status="draft")
+    _round_of(1341, "SM_ECHO_UNMET")
+    _reviewed("SM_ECHO_UNMET", ["met", "not_met"])
+    _landed(1341, "SM_ECHO_UNMET", "echo0000echo02",
+            outcome={"acceptance": "met", "landed": True, "clause_outcomes": [],
+                     "deferred_to": [], "spawned": [], "human_paths": [],
+                     "summary": _echo_of_the_finalizer_prompt()})
+    assert B.close_settled_items(S.LEDGER_PATH) == [
+        {"item_id": 1341, "closed": False, "acceptance": None}]
+    fm = _fm(p)
+    assert fm["status"] == "draft", \
+        "a review that graded clause 2 not_met closed an echoed outcome"
+    assert "no structured outcome" in fm["activity_log"][-1], \
+        "an unusable outcome was forwarded as a verdict instead of recorded as none"
+
+
+def test_an_item_with_two_settled_landings_joins_the_newest_one(isolated):
+    """#608 and #617 each landed twice: round 1 with clauses not met, round 2
+    clean and graded all-met. The join took round 1 — and the marker round 1
+    wrote, having left the item open, blocked round 2 from ever being joined."""
+    p608 = write_item(isolated, 608, status="draft")
+    p617 = write_item(isolated, 617, status="draft")
+    # #608: SM_20260919_160709 landed 042bd207 with clause 1 refused and 2-5 met ...
+    _round_of(608, "SM_20260919_160709")
+    _reviewed("SM_20260919_160709", ["met"] * 5)
+    _landed(608, "SM_20260919_160709", "042bd207178e",
+            outcome={"acceptance": "not_met", "landed": True, "deferred_to": [], "spawned": [],
+                     "summary": "did not land; the gate refused at rung 8 "
+                                "(canary: backend did not reach idle within 240s)",
+                     "clause_outcomes": [{"clause": 1, "outcome": "not_met",
+                                          "evidence": "", "deferred_to": []}]
+                         + [{"clause": c, "outcome": "met", "evidence": "green node",
+                             "deferred_to": []} for c in range(2, 6)]})
+    assert B.close_settled_items(S.LEDGER_PATH) == [
+        {"item_id": 608, "closed": False, "acceptance": "not_met"}]
+    assert _fm(p608)["automod_landed"] == "042bd207178e", "the marker round 1 wrote"
+    # ... then SM_20260919_174512 landed be84d7c4 reporting all five met.
+    _round_of(608, "SM_20260919_174512")
+    _reviewed("SM_20260919_174512", ["met"] * 5)
+    _landed(608, "SM_20260919_174512", "be84d7c4bcf2",
+            outcome={"acceptance": "met", "landed": True, "deferred_to": [], "spawned": [],
+                     "summary": "clauses 1-5 met",
+                     "clause_outcomes": [{"clause": i, "outcome": "met", "evidence": "green",
+                                          "deferred_to": []} for i in range(1, 6)]})
+    # #617's two landings, same shape: round 1 not_met, round 2 met with a
+    # human path the round could not write.
+    _round_of(617, "SM_20260919_132210")
+    _reviewed("SM_20260919_132210", ["met"] * 5)
+    _landed(617, "SM_20260919_132210", "afbd92f816cd",
+            outcome={"acceptance": "not_met", "landed": True, "deferred_to": [], "spawned": [],
+                     "summary": "",
+                     "clause_outcomes": [{"clause": c, "outcome": "not_met",
+                                          "evidence": "the node is red",
+                                          "deferred_to": []} for c in (1, 2)]
+                         + [{"clause": c, "outcome": "met",
+                             "evidence": "the node is green",
+                             "deferred_to": []} for c in (3, 4, 5)]})
+    _round_of(617, "SM_20260919_145037")
+    _reviewed("SM_20260919_145037", ["met"] * 5)
+    _landed(617, "SM_20260919_145037", "230f07211652",
+            outcome={"acceptance": "met", "landed": True, "clause_outcomes": [],
+                     "deferred_to": [], "spawned": [],
+                     "summary": "Round landed. Clauses 1-5 are all met by the "
+                                "change itself, so none is deferred and nothing "
+                                "waits on an id.",
+                     "human_paths": [{"path": "agent-llm-primary boot",
+                                      "reason": "a round is refused at dispatch"}]})
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert {o["item_id"] for o in out} == {608, 617} and all(o["closed"] for o in out)
+    assert _fm(p608)["status"] == "done" and _fm(p608)["automod_landed"] == "be84d7c4bcf2", \
+        "the newest settled landing, not the first"
+    assert _fm(p617)["status"] == "done" and _fm(p617)["automod_landed"] == "230f07211652"
+    assert "needs-human" in _fm(p617)["tags"], "the path a person owes survives the close"
+    assert B.close_settled_items(S.LEDGER_PATH) == [], "the newest marker still means processed"
+
+
+def test_a_promotion_with_no_finished_implement_row_is_still_joined_to_its_item(isolated):
+    """#1175 (SM_20260920_020242, 28812b97) and #1275 (SM_20260920_025936,
+    bc13c5cc, landed by the reaper): their finalizer died at `infra_failed`
+    minutes after the promotion settled, so the join — which iterated only
+    `phase: finished` rows — never saw them at all. The `promoted` row carries
+    no item id; `round_start` and `land_rescued` do."""
+    p1175 = write_item(isolated, 1175, status="up_next")
+    p1275 = write_item(isolated, 1275, status="up_next")
+    for item_id, rid, commit in ((1175, "SM_20260920_020242", "28812b97bb0a"),
+                                 (1275, "SM_20260920_025936", "bc13c5cc7345")):
+        _round_of(item_id, rid)
+        _reviewed(rid, ["met"] * 4)
+        S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "started"},
+                       path=S.LEDGER_PATH)
+        S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "infra_failed",
+                        "round_id": rid, "stop_reason": "error"}, path=S.LEDGER_PATH)
+        if rid == "SM_20260920_025936":
+            S.append_event({"event": "land_rescued", "round_id": rid, "item_id": item_id,
+                            "head": commit, "reason": "gate passed, the turn had ended"},
+                           path=S.LEDGER_PATH)
+        S.append_event({"event": "promoted", "round_id": rid, "commit": commit},
+                       path=S.LEDGER_PATH)
+        S.append_event({"event": "settled", "commit": commit}, path=S.LEDGER_PATH)
+    assert [r["item_id"] for r in B.settled_landings(S.LEDGER_PATH)] == [1175, 1275]
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert {o["item_id"] for o in out} == {1175, 1275} and all(o["closed"] for o in out)
+    assert _fm(p1175)["status"] == "done" and _fm(p1175)["automod_landed"] == "28812b97bb0a"
+    assert _fm(p1275)["status"] == "done" and _fm(p1275)["automod_landed"] == "bc13c5cc7345"
+    assert "all 4 clause(s) met" in _fm(p1275)["activity_log"][-1]
+
+
+def test_a_promotion_the_review_did_not_grade_all_met_is_still_nobody(isolated):
+    """The gate this loosens still catches what it exists to catch: a closed
+    item is never re-triaged, so the review's word is taken only when it graded
+    every clause `met`. A reported `not_met` that names a clause stays open and
+    names it; a missing, blocking, clause-gapped or partly-met review answers
+    nothing."""
+    p1 = write_item(isolated, 701, status="up_next")
+    _landed(701, "SM_701", "aaaa1111aaaa",
+            outcome={"acceptance": "not_met", "landed": True, "deferred_to": [], "spawned": [],
+                     "summary": "clause 2 is red",
+                     "clause_outcomes": [{"clause": 2, "outcome": "not_met",
+                                          "evidence": "the node fails", "deferred_to": []}]})
+    # A degenerate `not_met` beside a review that is not all-met answers nothing.
+    p2 = write_item(isolated, 702, status="up_next")
+    _round_of(702, "SM_702")
+    _reviewed("SM_702", ["met", "met", "partial"])
+    _landed(702, "SM_702", "bbbb2222bbbb",
+            outcome={"acceptance": "not_met", "landed": True, "clause_outcomes": [],
+                     "deferred_to": [], "summary": "", "spawned": [], "human_paths": []})
+    # Same outcome, review blocking.
+    p3 = write_item(isolated, 703, status="up_next")
+    _round_of(703, "SM_703")
+    _reviewed("SM_703", ["met", "met"], blocking=True)
+    _landed(703, "SM_703", "cccc3333cccc",
+            outcome={"acceptance": "not_met", "landed": True, "clause_outcomes": [],
+                     "deferred_to": [], "summary": "", "spawned": [], "human_paths": []})
+    # Same outcome, review graded clauses 1 and 3 but not 2 — a gap.
+    p4 = write_item(isolated, 704, status="up_next")
+    _round_of(704, "SM_704")
+    S.append_event({"event": "review", "round_id": "SM_704", "ok": True, "blocking": False,
+                    "clauses": [{"clause": 1, "verdict": "met", "evidence": ""},
+                                {"clause": 3, "verdict": "met", "evidence": ""}]},
+                   path=S.LEDGER_PATH)
+    _landed(704, "SM_704", "dddd4444dddd",
+            outcome={"acceptance": "not_met", "landed": True, "clause_outcomes": [],
+                     "deferred_to": [], "summary": "", "spawned": [], "human_paths": []})
+    # Same outcome, no review row for the round at all.
+    p5 = write_item(isolated, 705, status="up_next")
+    _round_of(705, "SM_705")
+    _landed(705, "SM_705", "eeee5555eeee",
+            outcome={"acceptance": "not_met", "landed": True, "clause_outcomes": [],
+                     "deferred_to": [], "summary": "", "spawned": [], "human_paths": []})
+    out = {o["item_id"]: o for o in B.close_settled_items(S.LEDGER_PATH)}
+    assert sorted(out) == [701, 702, 703, 704, 705]
+    assert not any(o["closed"] for o in out.values()), "nothing closed"
+    for p, sha in ((p1, "aaaa1111aaaa"), (p2, "bbbb2222bbbb"), (p3, "cccc3333cccc"),
+                   (p4, "dddd4444dddd"), (p5, "eeee5555eeee")):
+        fm = _fm(p)
+        assert fm["status"] == "up_next" and fm["automod_landed"] == sha
+        assert not fm.get("completed"), "left open for a person or another round"
+    assert "clause(s) [2]" in _fm(p1)["activity_log"][-1], "the note names the clause it owes"
+
+    # Newest-wins has a guard direction too, and it is the shape the replay above
+    # does not cover: an *older* landing that wrote no `finished` implement row, so
+    # the review rung stands in for it (all 3 clauses `met`), beside a *newer* one
+    # that reports a real `not_met` naming its clause. Reaching the newest landing
+    # must not let the older one's borrowed `met` close the item — one row per item
+    # means one verdict, the newest one's, and nothing else.
+    write_item(isolated, 706, status="up_next")
+    _round_of(706, "SM_706_old")
+    _reviewed("SM_706_old", ["met"] * 3)
+    S.append_event({"event": "promoted", "round_id": "SM_706_old", "commit": "ffff6666ffff"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "settled", "commit": "ffff6666ffff"}, path=S.LEDGER_PATH)
+    _round_of(706, "SM_706_new")
+    _reviewed("SM_706_new", ["met", "not_met", "met"])
+    _landed(706, "SM_706_new", "aaaa7777aaaa",
+            outcome={"acceptance": "not_met", "landed": True, "deferred_to": [], "spawned": [],
+                     "summary": "clause 2 is not met",
+                     "clause_outcomes": [{"clause": 2, "outcome": "not_met",
+                                          "evidence": "the node is red", "deferred_to": []}]})
+    row = next(o for o in B.close_settled_items(S.LEDGER_PATH) if o["item_id"] == 706)
+    assert row["closed"] is False and row["acceptance"] == "not_met"
+    marked = _fm(next(isolated.glob("706-*.md")))
+    assert marked["automod_landed"] == "aaaa7777aaaa", \
+        "marked with the landing that was judged, not the older one"
+    assert marked["status"] != "done"
+
+
+def test_a_reported_met_with_clauses_closes_exactly_as_it_did_before(isolated):
+    """The path the six did not take, pinned so the loosening is measurable:
+    a `met` outcome with its clauses closes on the turn's own word, with the
+    same reason text, and the close path still drops `needs-human` when nobody
+    is owed a check and keeps it when the item carries one."""
+    p_clean = write_item(isolated, 711, status="up_next")
+    B.update_frontmatter(p_clean, {"tags": ["backlog", "needs-human"]})
+    p_owed = write_item(isolated, 712, status="up_next")
+    B.update_frontmatter(p_owed, {"human_clauses": ["Alan confirms the panel"]})
+    met = {"acceptance": "met", "landed": True, "deferred_to": [], "spawned": [],
+           "summary": "shipped it",
+           "clause_outcomes": [{"clause": 1, "outcome": "met", "evidence": "green",
+                                "deferred_to": []}]}
+    _landed(711, "SM_711", "f00d711f00d7", outcome=met)
+    _landed(712, "SM_712", "f00d712f00d7", outcome=dict(met))
+    assert B.close_settled_items(S.LEDGER_PATH) == [
+        {"item_id": 711, "closed": True, "acceptance": "met"},
+        {"item_id": 712, "closed": True, "acceptance": "met"}]
+    clean, owed = _fm(p_clean), _fm(p_owed)
+    assert "Closed: the round reported the acceptance check met — shipped it" \
+        in clean["activity_log"][-1]
+    assert "needs-human" not in clean["tags"], "nothing owed, so the tag goes on the way out"
+    assert "a person still owes" in owed["activity_log"][-1]
+    assert "needs-human" in owed["tags"], "#1210: the owed check survives the close"
+    assert "the review rung" not in clean["activity_log"][-1], \
+        "the turn's own word closes it; the second reader was not needed"
 
 
 @pytest.mark.parametrize("obj,expect", [
