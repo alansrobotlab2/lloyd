@@ -57,13 +57,39 @@ def _ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
-def _per_task(summary: dict[str, Any]) -> dict[str, float]:
+#: The census key of the strict-win leg. One definition, shared with
+#: `replay_frontier_selection.py`, which counts this leg by matching the prefix: the
+#: reason text and the counter cannot then drift apart, because a counter that stops
+#: matching a renamed reason reports 0 and reads as "the leg stopped firing".
+REFUSAL_WIN_FRACTION = "insufficient_win_fraction"
+
+
+def _per_task(summary: dict[str, float]) -> dict[str, float]:
     out: dict[str, float] = {}
     for p in summary.get("per_task", []) or []:
         tid = p.get("task_id")
         score = p.get("composite_score")
         if tid is not None and isinstance(score, (int, float)):
             out[str(tid)] = float(score)
+    return out
+
+
+def _per_task_flags(summary: dict[str, Any]) -> dict[str, tuple[bool, Any]]:
+    """task_id -> (safety_critical, safety_passed), read from the same rows the
+    scores come from — `judge.aggregate_variant` stamps both onto every per-task row.
+
+    Needed because the frontier's accept path cannot rest on the summary-level
+    `safety_passed` alone. The operator is allowed to switch that leg off —
+    `promotion_require_safety_pass` is their knob — and a frontier that read only the
+    config flag would let a prompt through whose safety-critical probe had just
+    failed. The per-task veto is the last thing standing between a frontier and an
+    unsafe land, so it is read here, from the row the score itself came from.
+    """
+    out: dict[str, tuple[bool, Any]] = {}
+    for p in summary.get("per_task", []) or []:
+        tid = p.get("task_id")
+        if tid is not None:
+            out[str(tid)] = (bool(p.get("safety_critical")), p.get("safety_passed"))
     return out
 
 
@@ -140,9 +166,43 @@ def slice_metrics(
     wins = sum(1 for t in t_ids if var_per[t] > base_per[t])
     losses = sum(1 for t in t_ids if var_per[t] < base_per[t])
     ties = len(t_ids) - wins - losses
+
+    # ── #595: strict dominance, the frontier's own question ────────────────────
+    # A different question from the leg above, and asked over BOTH slices. The win
+    # fraction asks how many targeted tasks moved — a fraction, so on a bench whose
+    # tasks sit at the floor or the ceiling it has a low ceiling by construction (the
+    # comment above). Dominance asks whether anything moved backwards at all:
+    # strictly better on at least one compared task, strictly worse on none. The
+    # shape it names is the one in the comment above — better on 4 of 11, worse on
+    # none — and `replay_frontier_selection.py` is the census of it, so the count
+    # lives in that script's output rather than twice in this file.
+    # The safety veto belongs to THIS condition, not only to the leg that reads
+    # `variant_summary["safety_passed"]`: that leg is the operator's to disable
+    # (`promotion_require_safety_pass`), and a frontier that accepted a prompt whose
+    # safety-critical probe failed would be a frontier with no veto at all. So a
+    # per-task failed veto is decided here, where the frontier is decided.
+    var_flags = _per_task_flags(variant_summary)
+    all_ids = [t for t in targeted + heldout if t in base_per and t in var_per]
+    # A task scored on one side and not the other is not a tie and not a regression —
+    # it is an absence, and "regressed on none" is only a verdict when there was
+    # something to regress on. A truncated rollout (a variant that scored 4 of 11
+    # tasks before the round died) would otherwise dominate by never being measured:
+    # exactly the shape #549 refuses as `partial_heldout_coverage` and #416 refuses as
+    # not-rankable. So coverage is a precondition of the frontier, not a footnote.
+    missing_ids = sorted(t for t in targeted + heldout
+                         if (t in base_per) != (t in var_per))
+    better = [t for t in all_ids if var_per[t] > base_per[t]]
+    worse = [t for t in all_ids if var_per[t] < base_per[t]]
+    safety_failed = sorted(t for t in all_ids
+                           if var_flags.get(t, (False, True))[0]
+                           and var_flags.get(t, (False, True))[1] is False)
+    dominates = bool(better) and not worse and not safety_failed and not missing_ids
+
     return {
         "compared": len(t_ids),
         "wins": wins, "ties": ties, "losses": losses,
+        "dominates": dominates, "better_ids": better, "worse_ids": worse,
+        "safety_failed_ids": safety_failed, "compared_all": len(all_ids),
         "unsplit": unsplit,
         "targeted_ids": t_ids, "targeted_baseline": t_base, "targeted_variant": t_var,
         "targeted_delta": t_var - t_base,
@@ -237,6 +297,31 @@ def evaluate_promotion(
             f"heldout_tie (held-out flat at {m['heldout_variant']:.4f} across "
             f"{len(m['heldout_ids'])} veto tasks — strict no-decline refuses a tie)"
         )
+    if m["dominates"] and m["win_fraction"] < cfg.promotion_min_win_fraction:
+        # ── #595's accept path ─────────────────────────────────────────────────
+        # Reached only with the safety leg answered, every #549 slice leg answered
+        # (targeted gained, veto slice gained), and nothing regressed on any scored
+        # task. The win fraction is not the right instrument for that shape: it is a
+        # fraction of targeted tasks that moved, and on a bench where most tasks sit
+        # at floor or ceiling it cannot rise far, so it refuses improvement that cost
+        # nothing. This is deliberately BEFORE the win-fraction refusal and
+        # deliberately after every veto — it is an alternative selector, never a
+        # lowered threshold, and `min_composite_delta`, `min_bench_win_fraction` and
+        # `require_safety_pass` are all still read at their loaded values.
+        # It cannot accept a variant that only got lucky on one task: `dominates`
+        # requires zero regressions across the union of both pools, so a single loss
+        # anywhere sends the decision down the refusal path below.
+        gain = m["normalized_gain"]
+        gain_str = "n/a" if gain is None else f"{gain:.2%}"
+        return True, (
+            f"promote (dominance path: accepted — {len(m['better_ids'])} of "
+            f"{m['compared_all']} tasks improved, 0 regressed, safety veto intact; "
+            f"strict-win leg would have refused at {m['win_fraction']:.2f} < "
+            f"{cfg.promotion_min_win_fraction}; win_frac={m['win_fraction']:.2f}, "
+            f"targeted_delta={m['targeted_delta']:+.4f}, "
+            f"heldout_delta={m['heldout_delta']:+.4f}, normalized_gain={gain_str}, "
+            f"headroom={m['headroom']:.4f})"
+        )
     if m["win_fraction"] < cfg.promotion_min_win_fraction:
         # The `insufficient_win_fraction (X.XX < Y.YY` prefix is load-bearing: the
         # ledger's 552-row census keys on it. Everything after it is the tie/loss
@@ -244,7 +329,7 @@ def evaluate_promotion(
         # the strict leg refuses by design — is recognisable from the round report or
         # the ledger row alone instead of only from a recomputation of the ledger.
         return False, (
-            f"insufficient_win_fraction ({m['win_fraction']:.2f} < "
+            f"{REFUSAL_WIN_FRACTION} ({m['win_fraction']:.2f} < "
             f"{cfg.promotion_min_win_fraction}; wins={m['wins']} "
             f"ties={m['ties']} losses={m['losses']} of {m['compared']} targeted tasks)"
         )

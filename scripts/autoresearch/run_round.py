@@ -353,6 +353,99 @@ async def _run_trials(
     return direct_traces, sdk_traces
 
 
+# ── ledger rows, as functions ────────────────────────────────────────────────────
+# Both row shapes are contracts read by other programs — `promotion_fp_rate.py` and
+# #428's published false-positive denominator parse `decision` rows, and
+# `replay_frontier_selection.py` recomputes dominance from the per-trial rows — so
+# each is built here rather than inline in `run()`. Same reason `record_split` is a
+# function: a test that hand-builds the dict it is checking cannot tell you that
+# `run()` never writes that key, which is exactly the failure a row-shape pin has to
+# avoid. #595 clause 6 pins both shapes by CALLING these, so a renamed or added key
+# fails a test instead of silently moving the denominator.
+
+def trial_ledger_row(round_id: str, trace: dict[str, Any],
+                     score: dict[str, Any]) -> dict[str, Any]:
+    """The per-trial ledger row for one scored rollout of one task.
+
+    Key-for-key the row `run()` has appended since #353, built with the same two
+    helpers `bench_runner_sdk.ledger_row_for` uses so the two writers cannot disagree
+    about what they measured. No transcript lives here: per-trial rollout text plus the
+    judge's rationale is #884's change, and it must arrive in the commit that also
+    grows #428's denominator, deliberately — not as a side effect of a selector change.
+    """
+    return {
+        "round_id": round_id,
+        "variant_id": trace["variant_id"],
+        "task_id": trace["task_id"],
+        "task_category": trace.get("task_category"),
+        "harness": trace.get("harness", "direct"),
+        "tool_search_enabled": trace.get("tool_search_enabled"),
+        "trace_status": trace["status"],
+        "turns": trace.get("turns"),
+        "tool_call_count": len(trace.get("tool_calls", [])),
+        "denied_call_count": len(trace.get("denied_calls", [])),
+        # #651, from the same helper the on-demand runner uses. A round is
+        # where the volume is, so this is the row that makes "did a variant
+        # read its own grading" a queryable question rather than an
+        # inspection of one CLI run. A direct trace has no tool channel and
+        # gets the honest zeros.
+        **probe_ledger_fields(trace),
+        "duration_seconds": trace.get("duration_seconds"),
+        "composite_score": score["composite_score"],
+        "objective_score": score["objective_score"],
+        "rubric_overall": score["rubric_overall"],
+        "safety_critical": score.get("safety_critical"),
+        "safety_passed": score.get("safety_passed"),
+        # #416: which of this row's numbers were measured. `rankable: False`
+        # means every objective check the task declares is a tool-behaviour
+        # check and the trace carried no dispatch record, so
+        # `objective_score`/`composite_score` are null on that row rather than
+        # 0.0 — a reader summing the column must not read a null as zero.
+        # `objective_excluded` names the dropped checks on a row that did
+        # score. Same helper as `bench_runner_sdk.ledger_row_for`, so neither
+        # writer can omit them; on the sdk arm both come back clean.
+        **rankability_fields(score),
+        "promoted": None,  # filled in after promotion decision
+        "created_at": now_iso(),
+    }
+
+
+def decision_ledger_row(round_id: str, decision: dict[str, Any],
+                        promoted_variant_id: str | None) -> dict[str, Any]:
+    """The `decision` row for one variant, as the ledger sees it.
+
+    Seven keys, always, and the eight conditional #646 validity keys on top when the
+    bench lint ran. `reason` is the predicate's own prose verbatim —
+    `replay_frontier_selection.py` counts the strict-win leg by matching
+    `promote.REFUSAL_WIN_FRACTION` against its prefix, so flattening, prefixing or
+    rewording it here would silently move that census' denominator.
+    """
+    validity = decision.get("validity") or {}
+    row = {
+        "round_id": round_id,
+        "event": "decision",
+        "variant_id": decision["variant_id"],
+        "should_promote": decision["should_promote"],
+        "reason": decision["reason"],
+        "promoted": promoted_variant_id == decision["variant_id"],
+        "created_at": now_iso(),
+    }
+    # #646: the all-task mean beside the lint-valid-task mean, flattened onto
+    # the row that carries the decision. `means_agree` is the field the item
+    # asks for — the ledger line that says the two denominators disagreed on
+    # promote/no-promote, which is the broken-task effect measured rather than
+    # averaged away. Absent entirely when the lint could not run, never a
+    # `True` that means nothing.
+    for key in ("promote_valid", "reason_valid", "means_agree",
+                "all_task_mean", "valid_task_mean", "valid_tasks",
+                "excluded_tasks", "safety_outside_valid_pool"):
+        if key in validity:
+            row[key] = validity[key]
+    if validity:
+        row["bench_validity"] = validity
+    return row
+
+
 def record_split(cfg: AutoresearchConfig, all_tasks: list[dict], rid: str) -> dict:
     """Write this round's bench split and record it in the ledger; return the split.
 
@@ -487,41 +580,7 @@ async def run(
         task = task_by_id.get(t["task_id"]) or {}
         score = judge_trace(task, t, rubric_model=model)
         scored_traces.append({**t, "_task": task, "_score": score})
-        ledger_append(cfg.paths.ledger_path, {
-            "round_id": rid,
-            "variant_id": t["variant_id"],
-            "task_id": t["task_id"],
-            "task_category": t.get("task_category"),
-            "harness": t.get("harness", "direct"),
-            "tool_search_enabled": t.get("tool_search_enabled"),
-            "trace_status": t["status"],
-            "turns": t.get("turns"),
-            "tool_call_count": len(t.get("tool_calls", [])),
-            "denied_call_count": len(t.get("denied_calls", [])),
-            # #651, from the same helper the on-demand runner uses. A round is
-            # where the volume is, so this is the row that makes "did a variant
-            # read its own grading" a queryable question rather than an
-            # inspection of one CLI run. A direct trace has no tool channel and
-            # gets the honest zeros.
-            **probe_ledger_fields(t),
-            "duration_seconds": t.get("duration_seconds"),
-            "composite_score": score["composite_score"],
-            "objective_score": score["objective_score"],
-            "rubric_overall": score["rubric_overall"],
-            "safety_critical": score.get("safety_critical"),
-            "safety_passed": score.get("safety_passed"),
-            # #416: which of this row's numbers were measured. `rankable: False`
-            # means every objective check the task declares is a tool-behaviour
-            # check and the trace carried no dispatch record, so
-            # `objective_score`/`composite_score` are null on that row rather than
-            # 0.0 — a reader summing the column must not read a null as zero.
-            # `objective_excluded` names the dropped checks on a row that did
-            # score. Same helper as `bench_runner_sdk.ledger_row_for`, so neither
-            # writer can omit them; on the sdk arm both come back clean.
-            **rankability_fields(score),
-            "promoted": None,  # filled in after promotion decision
-            "created_at": now_iso(),
-        })
+        ledger_append(cfg.paths.ledger_path, trial_ledger_row(rid, t, score))
 
     # Aggregate per variant
     by_variant: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
@@ -701,30 +760,8 @@ async def run(
     # Patch ledger with final promotion decisions (cheap second pass — append another entry)
     promoted_vid = promotion_result["variant_id"] if promotion_result and not dry_run else None
     for d in decisions:
-        validity = d.get("validity") or {}
-        row = {
-            "round_id": rid,
-            "event": "decision",
-            "variant_id": d["variant_id"],
-            "should_promote": d["should_promote"],
-            "reason": d["reason"],
-            "promoted": promoted_vid == d["variant_id"],
-            "created_at": now_iso(),
-        }
-        # #646: the all-task mean beside the lint-valid-task mean, flattened onto
-        # the row that carries the decision. `means_agree` is the field the item
-        # asks for — the ledger line that says the two denominators disagreed on
-        # promote/no-promote, which is the broken-task effect measured rather than
-        # averaged away. Absent entirely when the lint could not run, never a
-        # `True` that means nothing.
-        for key in ("promote_valid", "reason_valid", "means_agree",
-                    "all_task_mean", "valid_task_mean", "valid_tasks",
-                    "excluded_tasks", "safety_outside_valid_pool"):
-            if key in validity:
-                row[key] = validity[key]
-        if validity:
-            row["bench_validity"] = validity
-        ledger_append(cfg.paths.ledger_path, row)
+        ledger_append(cfg.paths.ledger_path,
+                      decision_ledger_row(rid, d, promoted_vid))
 
     return {
         "round_id": rid,

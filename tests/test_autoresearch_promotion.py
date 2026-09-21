@@ -391,17 +391,29 @@ def test_the_win_leg_comment_states_the_strict_rule_it_enforces(isolated_prompts
 
 
 def test_a_win_fraction_refusal_names_wins_ties_and_losses(isolated_prompts, tmp_path):
-    """A dominating-but-refused variant is recognisable from the reason alone.
+    """The refusal reason carries the arithmetic, not just the ratio.
 
     Before #1060 the reason was `insufficient_win_fraction (0.33 < 0.5, targeted
     slice only)`, which cannot distinguish "lost 4 of 6" from "tied 5 of 6 and lost
     none" — the difference between a regression and a saturated bench, and the
     reason establishing this item took a 28k-row ledger recompute instead of one
     look at a round report.
+
+    #595 moved the zero-regression shape out of this refusal: the recorded
+    `LEDGER_VARIANT` improves 4 tasks and regresses none, so it is accepted on the
+    frontier path now (pinned by
+    `test_the_dominating_ledger_row_is_accepted_on_the_frontier_path` below). The
+    leg's own purpose — catching a variant that bought its gains with a regression —
+    is pinned here instead, on the same eleven recorded rows with the `bench_006`
+    gain turned into a small loss. The census key has to stay verbatim:
+    `replay_frontier_selection.py` attributes this leg by matching the prefix.
     """
     cfg = make_cfg(tmp_path)
+    # The four recorded gains, minus `bench_003_vault_recall` slipping 0.25 -> 0.225:
+    # 2 targeted wins, 1 targeted loss, 5 ties.
+    var_scores = dict(LEDGER_VARIANT, bench_003_vault_recall=0.2250)
     base = ledger_summary(LEDGER_BASELINE)
-    var = ledger_summary(LEDGER_VARIANT)
+    var = ledger_summary(var_scores)
     should, reason = promote.evaluate_promotion(cfg, base, var)
 
     assert should is False
@@ -410,20 +422,59 @@ def test_a_win_fraction_refusal_names_wins_ties_and_losses(isolated_prompts, tmp
     m = re.search(r"wins=(\d+) ties=(\d+) losses=(\d+)", reason)
     assert m, f"the refusal does not report the split: {reason}"
     wins, ties, losses = (int(g) for g in m.groups())
-    # 3 of the 4 improvements are in the targeted categories; `bench_010` is safety,
-    # which sits in the veto slice, so the leg counts 3 wins over 8 targeted tasks.
-    assert (wins, ties, losses) == (3, 5, 0), reason
+    # 3 of the 4 movements inside the targeted pool are gains; `bench_010` is safety,
+    # which sits in the veto slice, so it is not one of the compared 8. Ties are the
+    # rest of that pool: 3 + 4 + 1 = 8.
+    assert (wins, ties, losses) == (3, 4, 1), reason
     assert wins + ties + losses == 8, "the split must sum to the compared targeted pool"
     assert ties > 0, "a refusal with no ties would not prove the tie count is measured"
-    assert "losses=0" in reason, (
-        "zero regressions is the fact that makes this refusal questionable at a "
-        "glance; the reason has to carry it")
+    assert "losses=1" in reason, (
+        "the regression is the fact that makes this refusal correct rather than a "
+        "measurement artefact; the reason has to carry it")
 
     # The same reason reaches the round report and the ledger decision row through
     # run_round's interpolation, so the split survives the process boundary —
     # composed here the way the writer composes it, never transcribed.
     line = f"- `V_20260901_111642_70c3ba`: HOLD — {reason}"
-    assert "losses=0" in line and line.startswith("- `V_20260901_111642_70c3ba`: HOLD"), line
+    assert "losses=1" in line and line.startswith("- `V_20260901_111642_70c3ba`: HOLD"), line
+
+
+def test_the_dominating_ledger_row_is_accepted_on_the_frontier_path(
+        isolated_prompts, tmp_path):
+    """The recorded ledger row is now ACCEPTED, and the reason names the path.
+
+    `V_20260901_111642_70c3ba` beat its baseline on 4 tasks, tied 7, regressed on 0,
+    mean +0.1227 against the 0.05 `min_composite_delta` and the 0.50 win threshold
+    still named in `config.yaml`. Until #595 it was refused by the tie rule alone —
+    `wins=3 ties=5 losses=0`, 3/8 = 0.38. Now the frontier accepts it because 0 of 11
+    scored tasks regressed. The tie rule itself is untouched: the strict-win fraction
+    in the reason is still 3/8 with ties NOT counted as wins, and both of #549's
+    slice legs still have to pass first. Only the zero-regression shape changed, and
+    the reason prints the leg it displaced so the ledger stays auditable.
+    """
+    cfg = make_cfg(tmp_path)
+    base = ledger_summary(LEDGER_BASELINE)
+    var = ledger_summary(LEDGER_VARIANT)
+    should, reason = promote.evaluate_promotion(cfg, base, var)
+
+    assert should is True, reason
+    assert "dominance" in reason, reason
+    # The displaced leg is named with its own numbers, so a reader of the ledger can
+    # see what the old selector would have done.
+    assert re.search(r"strict-win leg would have refused at 0\.38 < 0\.5", reason), reason
+    assert "4 of 11 tasks improved, 0 regressed" in reason, reason
+    assert "safety veto intact" in reason, reason
+
+    # The strict tie arithmetic the test above pins is unchanged by this path: ties
+    # are still not wins, they simply no longer veto a variant with nothing to lose.
+    m = promote.slice_metrics(base, var, promote.derive_split(base, var))
+    assert (m["wins"], m["ties"], m["losses"]) == (3, 5, 0), m
+    assert m["win_fraction"] < cfg.promotion_min_win_fraction, m
+    assert m["dominates"] is True and m["worse_ids"] == [], m
+
+    # And it reaches the round report as a PROMOTE line the FP-rate parser reads.
+    line = f"- `V_20260901_111642_70c3ba`: PROMOTE — {reason}"
+    assert line.startswith("- `V_20260901_111642_70c3ba`: PROMOTE"), line
 
 
 def test_a_refusal_with_a_real_regression_reports_it_separately(isolated_prompts, tmp_path):
@@ -445,16 +496,16 @@ def test_a_refusal_with_a_real_regression_reports_it_separately(isolated_prompts
 
 def test_the_strict_tie_rule_is_a_deliberate_decision_on_the_ledger_shape(
         isolated_prompts, tmp_path):
-    """The recorded ledger row is refused, and by the tie rule — not by arithmetic.
+    """The tie is still NOT a win, and the ledger shape that turned on it is written down.
 
-    `V_20260901_111642_70c3ba` beat its baseline on 4 tasks, tied 7, regressed on 0,
-    mean +0.1227 against the 0.05 `min_composite_delta` and 0.50 win threshold still
-    named in `config.yaml`. It stays refused, and this test is the written decision:
-    the leg catches a variant that gains on a few tasks while regressing on others,
-    and ties-as-wins would let a variant that moved ONE targeted task pass a threshold
-    measured on a bench with four tasks pinned at 0.00. It is also the only leg that
-    fails this row (asserted below), which is what the item's ledger census found for
-    all 552 refusals of this shape.
+    `V_20260901_111642_70c3ba` beat its baseline on 4 tasks, tied 7, regressed on 0.
+    Under #1060's rule it was refused with `wins=3 ties=5 losses=0`; under #595 the
+    same rows are accepted on the frontier path, by 0 regressions and not by counting
+    ties as wins — the fraction asserted below is still the strict 3/8. What this
+    test now pins is the surviving half of the decision: ties stay out of the
+    numerator, so the only way a many-tie variant is accepted is by having nothing to
+    lose anywhere on the bench, which is a stronger condition than the fraction it
+    displaced.
     """
     cfg = make_cfg(tmp_path)
     assert (cfg.promotion_min_composite_delta, cfg.promotion_min_win_fraction) == (0.05, 0.50)
@@ -476,10 +527,12 @@ def test_the_strict_tie_rule_is_a_deliberate_decision_on_the_ledger_shape(
     assert round(mean_delta, 4) == 0.1227, mean_delta
 
     should, reason = promote.evaluate_promotion(cfg, base, var)
-    assert should is False and reason.startswith("insufficient_win_fraction"), reason
+    # Accepted now — by zero regressions, and the reason says so while naming the
+    # fraction that strict rule still computes.
+    assert should is True and "dominance" in reason, reason
 
-    # The refusal is the tie rule, not a marginal delta: had ties counted as wins the
-    # same row would clear the threshold outright.
+    # The tie is still not a win: had ties counted as wins the fraction below would
+    # read 1.00 rather than 3/8, and #1060's written decision is that it must not.
     m = promote.slice_metrics(base, var, promote.derive_split(base, var))
     assert m["losses"] == 0
     ties_as_wins = (m["wins"] + m["ties"]) / m["compared"]
@@ -504,12 +557,21 @@ def test_majority_gain_with_a_flat_veto_slice_is_refused(isolated_prompts, tmp_p
 def test_below_min_majority_rejected(isolated_prompts, tmp_path):
     """The win fraction survives as an additional veto, over the targeted slice
     only. Built so the veto slice rises and the targeted mean rises, leaving the
-    majority as the only thing failing: two tasks of six did all the work."""
+    majority as the only thing failing: two tasks of six did all the work.
+
+    One targeted task also drops (0.4 → 0.3), which is what keeps this test
+    meaningful after #595. Without a regression the construction is strictly
+    non-dominated and the frontier path accepts it on purpose — that shape is
+    clause 3 and is pinned in `test_autoresearch_frontier_selection.py`. Here the
+    question is the leg's own: a variant that bought two wins with a loss and moved
+    only a third of the pool is refused on the fraction, and the veto slice rising
+    does not save it."""
     cfg = make_cfg(tmp_path)
-    base, var = scored([0.4] * 11, [1.0, 1.0, 0.4, 0.4, 0.4, 0.4] + [0.6] * 5)
+    base, var = scored([0.4] * 11, [1.0, 1.0, 0.3, 0.4, 0.4, 0.4] + [0.6] * 5)
     should, reason = promote.evaluate_promotion(cfg, base, var)
     assert should is False and "insufficient_win_fraction" in reason
     assert "0.33" in reason            # 2 of the 6 targeted tasks
+    assert "losses=1" in reason, reason
 
 
 def test_tasks_absent_from_baseline_are_not_counted(isolated_prompts, tmp_path):

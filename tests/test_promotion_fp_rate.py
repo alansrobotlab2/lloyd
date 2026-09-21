@@ -474,16 +474,21 @@ def test_the_tie_split_added_to_a_refusal_is_never_read_as_a_promotion(tmp_path)
     """
     cfg = make_cfg(tmp_path)
     base = slice_scores(0.40, 0.40)
-    # Two targeted tasks up (+0.20 each), the veto slice up by 0.01: a real gain on
-    # the pool the variant aimed at, refused because only 2 of 6 targeted tasks moved.
+    # Two targeted tasks up (+0.20 each), the veto slice up by 0.01, and ONE targeted
+    # task 0.05 below baseline. That last term is #595's doing: without a regression
+    # this construction is now accepted, because 2 wins / 0 losses is exactly the
+    # dominating shape this item reclaimed from the tie rule (the recorded ledger row
+    # `V_20260901_111642_70c3ba`). The construction stays a refusal, which is the only
+    # thing this test is about: that a HOLD line's split is never read as a delta.
     var = {tid: (sc + 0.20 if tid in ("task_0", "task_2") and _is_targeted(tid)
+                 else sc - 0.05 if tid == "task_4" and _is_targeted(tid)
                  else sc + 0.01 if _is_heldout(tid) else sc)
            for tid, sc in base.items()}
 
     should, reason = promote.evaluate_promotion(cfg, bench_summary(base), bench_summary(var),
                                                 split=None)
     assert should is False and reason.startswith("insufficient_win_fraction"), reason
-    assert "wins=2 ties=4 losses=0" in reason, reason
+    assert "wins=2 ties=3 losses=1" in reason, reason
 
     hold_line = f"- `V_20261008_074540_4e602b`: HOLD — {reason}"
     assert pfr.PROMOTE_LINE_RE.match(hold_line) is None, (
