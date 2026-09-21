@@ -26,7 +26,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from app import host_metrics, sessions_io, vllm_metrics
-from app.sessions_io import is_background_session_name, is_user_session
+from app.sessions_io import is_background_session_name, is_conversation_session
 from app.aggregator_config import route as aggregator_route
 from app.backlog_status import CLOSED_STATUSES
 
@@ -293,7 +293,8 @@ def _scan_recent_sessions() -> list[dict[str, Any]]:
         # four-part id the shape is the whole decision here: it is skipped
         # unread. That is safe only while nothing that creates a user session
         # mints one, which `tests/test_session_platform_checks.py` pins at the
-        # creators. A three-part id is still judged by its `platform` below.
+        # creators. A three-part id is still judged below, by the same
+        # predicate `/api/sessions` applies.
         if is_background_session_name(path.name):
             continue
         if len(rows) >= _RECENT_KEPT or opened >= _RECENT_CEILING:
@@ -304,11 +305,14 @@ def _scan_recent_sessions() -> list[dict[str, Any]]:
         except (OSError, json.JSONDecodeError):
             continue
         # Scheduled tasks have their own panel, and so do worker jobs. They
-        # are not chats. One definition (`sessions_io.is_user_session`) rather
-        # than a literal per reader — this one had never learned about
-        # `worker`, which was already 479 of the directory's 643 files on
-        # 2026-09-10.
-        if not is_user_session(data):
+        # are not chats, and neither is a machine run that was named like a
+        # chat: this panel used `is_user_session`, a deny-list tuned for brief
+        # delivery, so `e2e-harness` and the gate's `canary` turns were
+        # "recent chats" here while they were nothing a person had read. One
+        # definition (`sessions_io.is_conversation_session`) rather than a
+        # literal per reader — this one had never learned about `worker`,
+        # which was already 479 of the directory's 643 files on 2026-09-10.
+        if not is_conversation_session(path.name, data):
             continue
         goal = data.get("goal") if isinstance(data.get("goal"), dict) else {}
         ts = _last_active_ts(path, data)

@@ -1956,7 +1956,17 @@ async def post_message_stream(request: Request):
         options.final_schema_prompt = str(data.get("final_schema_prompt") or "")
     options.effect_scope = _effect_scope_for(session_id, data)
 
-    await _save_session_meta(session_id, model, preview=text)
+    # SEAM(http), receiving side: the worker pool posts `"platform": "worker"` in
+    # this body (`workers/sources/_common.py:736`), the web UI posts nothing, and
+    # this line is the only route either has into the session's `platform` when no
+    # file exists yet — `_save_session_meta` is the lone writer that has to guess.
+    # Before #1064 it guessed `mission-control` for every shape, which is how a
+    # four-part worker turn whose create had raised landed in the user's chat
+    # history and in the corpus qmd embeds. Crossing verified by
+    # test_session_platform_checks.py::
+    # test_the_worker_s_loopback_post_arrives_with_its_platform.
+    await _save_session_meta(session_id, model, preview=text,
+                             platform=data.get("platform"))
 
     logger.info(
         f"[TIMING] pre-enqueue overhead: prompt={t_prompt - t0:.3f}s  "
@@ -2247,7 +2257,17 @@ async def post_message(request: Request):
         messages = messages[:-1]
     messages.append({"role": "user", "content": prefetched_text})
 
-    await _save_session_meta(session_id, model, preview=text)
+    # SEAM(http), receiving side: the worker pool posts `"platform": "worker"` in
+    # this body (`workers/sources/_common.py:736`), the web UI posts nothing, and
+    # this line is the only route either has into the session's `platform` when no
+    # file exists yet — `_save_session_meta` is the lone writer that has to guess.
+    # Before #1064 it guessed `mission-control` for every shape, which is how a
+    # four-part worker turn whose create had raised landed in the user's chat
+    # history and in the corpus qmd embeds. Crossing verified by
+    # test_session_platform_checks.py::
+    # test_the_worker_s_loopback_post_arrives_with_its_platform.
+    await _save_session_meta(session_id, model, preview=text,
+                             platform=data.get("platform"))
 
     try:
         full_response = ""

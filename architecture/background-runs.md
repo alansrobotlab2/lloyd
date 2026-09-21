@@ -213,13 +213,33 @@ Four records per run, and each can reach the others.
 
 ## 8. The history split
 
-### One definition of "is a human reading this"
+### Two predicates, because the two questions are not one
 
-`sessions_io.is_user_session(data)` — false for any `platform` in
-`NON_USER_PLATFORMS` (`autonomy`, `worker`), true for a missing platform, and
-true for a platform the list has never heard of (a deny-list, on purpose).
+The split rests on **two** decisions in `sessions_io`, deliberately kept apart
+because inverting one of them breaks the other.
 
-Six readers hand-rolled `data.get("platform") == "autonomy"` and none of them
+- `NON_USER_PLATFORMS` = (`autonomy`, `worker`) with `is_user_session(data)` —
+  a **deny-list**, so a platform the list has never heard of keeps receiving its
+  ambient briefs rather than silently losing them. It answers "may this session
+  receive a brief / is this ever *the user's* session", and nothing else.
+- `INTERACTIVE_PLATFORMS` = (`mission-control`, `browser`) with
+  `is_conversation_session(name, data)` — an **allow-list**, and it additionally
+  refuses any four-part id whatever its platform says. It answers "is this a
+  conversation a human will read", which is the only question that may decide
+  being *listed* and being *embedded*.
+
+The two lists cannot be collapsed into one bool, and the reason is on disk:
+`e2e-harness` and the gate's `canary` are machine platforms no one ever meant to
+deliver a brief to, yet they are absent from `NON_USER_PLATFORMS` — so under the
+deny-list alone they read as user sessions, were listed in the chat history, and
+were exported into the corpus qmd embeds, while a four-part run stamped
+`mission-control` was dropped by both listings and appeared nowhere. Flipping
+`NON_USER_PLATFORMS` into an allow-list to fix the second would silently stop
+the first receiving briefs. An unknown platform is therefore still eligible for a
+brief and still not a conversation; `POST /api/sessions/create` refuses an
+unknown `platform` outright so the set stops growing by accident.
+
+Six readers once hand-rolled `data.get("platform") == "autonomy"` and none of them
 had learned about `worker`. Worker turns arrive through the chat path, so the
 sessions this machine ran for itself were:
 
@@ -232,12 +252,19 @@ sessions this machine ran for itself were:
 | session recall | `agent_mcp/session.py` | recalled to the model as the user's own words |
 | agent's view of the chat tab | `app/routers/mc_ui.py` | described to the model as chats |
 
-All six call `is_user_session` now. `tests/test_session_platform_checks.py`
-greps `app/`, `agent_mcp/` and `workers/` for the literal, because a seventh
-reader written next month is how this comes back — silently, since a
-background session in the history looks like a session. The retention sweep
-restates the tuple (it is stdlib-only and runs from cron with no venv), and
-the same test pins that the two agree.
+The four that decide *listing, titling, embedding and recall* now call
+`is_conversation_session`; the ones that decide *delivery* —
+`workers/handlers/ambient.py`, the Chat/Background tab summaries, the active-
+session resolver — keep calling `is_user_session`, which is where the deny-list's
+generosity belongs. `tests/test_session_platform_checks.py` greps `app/`,
+`agent_mcp/`, `workers/` and `scripts/` for the literal, because a seventh reader
+written next month is how this comes back — silently, since a background session
+in the history looks like a session. `scripts/` was added by #1064: the backfill
+exporter was reader number seven all along, sitting outside the swept roots with
+its own `== "autonomy"`, and had written 469 `worker` transcripts into the
+embedded chat corpus. The retention sweep restates the tuple (it is stdlib-only
+and runs from cron with no venv), and the same test pins that the two agree.
+
 
 ### The id shape is a fast path — and in the chat listings, it decides
 
@@ -259,29 +286,61 @@ listing:
   creators: exactly three `session_id = f"..."` mints in the swept packages,
   two in the chat router and one in `POST /api/sessions/create`, both three-part.
   `tests/test_api_contracts.py` checks the create endpoint end to end.
-- **Three-part ids are parsed and judged by `platform`.** A chat-shaped name
-  carrying a background platform is still excluded — and the inverse case is on
-  disk: 52 sessions carry `platform: browser` (ids `<ts>_iv<4hex>`, minted by the
+- **Three-part ids are parsed and judged by `is_conversation_session`.** A
+  chat-shaped name carrying a platform off the allow-list is still excluded — the
+  3 `e2e-harness` automod smokes and the gate's `canary` turns are that shape, and
+  until #1064 they sat in the chat history and the embedded corpus because the
+  deny-list had never heard of them. The other side of that census is on disk
+  too: 54 sessions
+  carry `platform: browser` (ids `<ts>_iv<4hex>`, minted by the
   Chrome extension's side panel, which posts `platform: "browser",
   inner_voice: true` to `POST /api/sessions/create` from
-  `chrome-extension/src/background/lloyd-client.ts:15` — an endpoint that takes
-  `platform` from the request body unchecked). These are not harness runs: the
-  panel sends a real user turn per follow-up a person types. `NON_USER_PLATFORMS`
-  is `{"autonomy", "worker"}`, so they read as user sessions, which is right: they
-  sit in the chat history and export to `sessions/`, i.e. into the embedded
-  corpus, and since #1143 the trajectory miner keeps them under their own
-  `browser` class. An earlier draft of this page ascribed them to the observer's
-  own bench harness — the same wrong premise as #493's — and the count above is a
-  `platform` census of `sessions/`, not a claim about who typed.
-- **`/api/background/sessions` parses every four-part file** and judges it by
-  `platform`, so there the name is a hint.
+  `chrome-extension/src/background/lloyd-client.ts:15`). These are not harness
+  runs: the panel sends a real user turn per follow-up a person types, which is
+  why `browser` is on the allow-list and they stay in the chat history and the
+  embedded `sessions/` corpus; since #1143 the trajectory miner keeps them under
+  their own `browser` class. An earlier draft of this page ascribed them to the
+  observer's own bench harness — the same wrong premise as #493's — and the count
+  above is a `platform` census of `sessions/`, not a claim about who typed. The
+  endpoint that mints them now refuses a `platform` outside the named set, so a
+  new caller has to say what it is instead of defaulting into the human corpus.
+- **`/api/background/sessions` is the complement, not a name-based mirror.** It
+  lists whatever `is_conversation_session` refuses, so the two listings cannot both
+  show a session and cannot both hide it — hiding was the live failure, and it is why
+  this endpoint no longer skips a three-part name unread. It also catches a
+  chat-shaped run nobody classified (`e2e-harness`, `canary`), which the four-part
+  name rule could not see at all.
+  Membership is decided in two phases and the split is the substance: a four-part
+  name is settled by the name rule — the shape answers membership, and that is what
+  makes the second phase affordable — and the read budget
+  (`_BACKGROUND_PLATFORM_SCAN_CEILING`, 600) is spent on the ambiguous chat-shaped
+  half, 201 of the 4,045 files in `sessions/` on 2026-09-21. "Settled by the name"
+  means membership needs no read; it does not mean the file goes unopened. A
+  four-part candidate is still opened, 2 KB at a time, for two fields that exist
+  only in the bytes: `title`/`preview` for the row, and the `source` the tab shows a
+  mis-labelled run under — `source` is written on a background row and blanked on a
+  chat row, so an unclassified four-part session carries no platform and no source
+  and only its own file can say what it is. What the budget refuses is spending
+  reads in proportion to the directory: reads are capped, membership never is.
+  Budgeting *reads* rather
+  than *reach* is what makes this hold on live data instead of only in a test: a rule
+  bounded by a scan window silently stops applying to everything older than the
+  window, and all 12 orphan sessions below sit past rank 600 in mtime order (newest
+  at rank 1234, oldest at rank 3630), so the previous "open the newest 600, judge
+  what you read" loop could not have returned one of them with the predicate fixed
+  or not. Measured over those 4,046 files at the tab's own limit: 521 ms for the
+  old loop, which reached 594 candidate rows in its 600 reads, and 401 ms for the
+  two-phase one, which finds 3,848 candidates and builds 150 rows.
 
-One consequence is already on disk: eight sessions named
-`20260909_1538xx_autonomy_<4hex>`, created within 11 seconds by the sandbox
-experiment above, carry `platform: mission-control` because the chat endpoint
-created them. They are four-part, so the chat listings skip them, and
-user-labelled, so the Background listing drops them. They appear in neither.
-They hold one or two user rows each and are not conversations.
+What that changed is on disk: twelve sessions in four-part ids carry
+`platform: mission-control` — eight named `20260909_1538xx_autonomy_<4hex>`,
+created within 11 seconds by the sandbox experiment above, plus four minted
+since, newest `20260917_105134_autocode_029c`. The chat listings skip a four-part
+name unread, and the Background listing used to drop them for being
+user-labelled, so they appeared in neither. They are now the Background tab's,
+and `_save_session_meta` stamps a newly created four-part session `worker`
+instead, so no fresh run joins the set. They hold one or two user rows each and
+are not conversations, which is why the Background tab is where they belong.
 
 `_scan_recent_sessions` used to keep the newest 24 files by mtime and only
 then drop non-user rows, which with 22 of the newest 24 already background
@@ -290,7 +349,7 @@ stops at `_RECENT_KEPT` user rows or `_RECENT_CEILING` (400) files opened.
 
 A fifth reader of that directory has no ceiling: `mc_ui._summarize_chat`
 (`app/routers/mc_ui.py:321-343`) sorts the whole glob, opens every file because
-`is_user_session` sits inside the loop's `try` with no name-based skip, and
+`is_conversation_session` sits inside the loop's `try` with no name-based skip, and
 globs a second time for `total_session_count`. It runs on every
 `mc_navigate`/`POST /api/mc/state` through `_SUMMARIZERS`, uncached, measured at
 238 ms against 1,420 files where the bounded scans cost 35-182 ms — so it is the
@@ -508,11 +567,22 @@ volume a list would be a wall of near-identical titles in the model's context.
   prevent. Each section degrades independently on a failed fetch.
 
 **The tab is a recent view, not an archive.** The page requests the newest
-150 background sessions and the endpoint opens at most
-`_BACKGROUND_SCAN_CEILING` (600) files, newest first. At ~240 a day that is
-the last ~15 hours on screen and ~2½ days reachable. Older transcripts stay on
-disk for 30 days, openable by id; paging the listing past the ceiling is not
-built.
+150 background sessions and the endpoint builds 150 rows, newest first, from the
+candidates phase 1 settled — which at ~240 a day is the last ~15 hours on screen
+and ~1½ days reachable. Two exclusions keep that window honest rather than merely
+recent. A row is not dropped for a value nobody read: `platform` sits ~165 bytes
+into every session file, so a cheap head read decides whether a candidate is an
+ordinary machine run (whose recency is all the tab has to offer) or a chat-shaped
+or mis-labelled one, and only the ordinary pool is cut to `limit`. And the *reads*
+stay budgeted — `_BACKGROUND_PLATFORM_SCAN_CEILING`, 600 files, spent on the
+ambiguous chat-shaped half alone — so an aging directory cannot turn one refresh
+into a multi-second request. Every four-part file is therefore still *considered*
+for membership however old it is, which is how the 12 mis-labelled sessions get
+listed at all; they are listed ahead of ordinary runs, since the tab's ordinary
+window will not reach them otherwise and nothing else lists them. Paging past
+`limit` is not built; `unclassified` names the chat-shaped files the read budget
+could not reach, so `count: 150` cannot be read as "there are 150". Older
+transcripts stay on disk for 30 days, openable by id.
 
 ---
 
@@ -526,7 +596,10 @@ built.
 
 ## 13. Known limits
 
-- The eight mis-labelled sandbox sessions (§8) appear in neither listing.
+- The twelve mis-labelled sessions (§8) are listed by the Background tab and by
+  no chat listing, which since #1064 is where they belong. The file still carries
+  `platform: mission-control`, so anything that reads that key directly instead of
+  through `is_conversation_session` still sees a human conversation.
 - `backlog-cluster` carries an `inner_voice` key it cannot use, so
   `/api/workers/health` reports it `false` rather than `null` — observable-
   but-off, for a source with no agent turn (§9).
@@ -542,7 +615,7 @@ built.
 |---|---|
 | `app/run_recorder.py` | the passthrough recorder, kill switch |
 | `app/transcript_entries.py` | every transcript row's shape |
-| `app/sessions_io.py` | `create_session`, `new_background_session_id`, `is_background_session_name`, `is_user_session`, `current_run_sessions` |
+| `app/sessions_io.py` | `create_session`, `new_background_session_id`, `is_background_session_name`, `is_user_session`, `is_conversation_session`, `known_platforms`, `current_run_sessions` |
 | `autonomy.py` | `run_task` wiring, `_task_inner_voice`, observer attach |
 | `workers/sources/_common.py` | `run_prompt_on_primary` wiring, `source_inner_voice`, `grant_scope` in the payload |
 | `workers/pool.py` | `session_ids` on every run row |

@@ -441,29 +441,44 @@ SUPERSEDED_CLAIMS = (
 #: sentence stays perfectly true about the behaviour while pointing a reader at a
 #: `logger.info` three lines off the `def`, and the next session then "discovers" a
 #: defect that is only a stale pointer.
-CITED_FUNCTIONS = {
-    "enqueue_ambient_prefetch": 404,
-    "drain_ambient_prefetch": 475,
-}
+#: The functions the page cites by name and line. The NUMBER is deliberately not
+#: recorded here: it is read from the source below, which is the only thing that
+#: can be right about it.
+#:
+#: This dict used to hold the numbers (404/475, then 481/552 after #1064 added
+#: `INTERACTIVE_PLATFORMS`, `known_platforms` and `is_conversation_session` above
+#: both defs). Each of those pairs was true for exactly one commit — the gate
+#: rebases a round onto live main before the tests run, so the number a human
+#: measured in their own tree is stale by the time the pin runs, and the
+#: rebase-then-fail happened twice in one day. A pin that must be edited to stay
+#: green on an unrelated change is not catching the class it names: a stale pointer
+#: and a fresh main produced the identical message. So the test asserts the one
+#: invariant that survives any rebase — the page's number equals the `def`'s actual
+#: line, today, in the tree it is running in.
+CITED_FUNCTIONS = (
+    "enqueue_ambient_prefetch",
+    "drain_ambient_prefetch",
+)
 
 
 def test_the_pages_line_citations_point_at_the_functions_they_name():
     """Each `app/sessions_io.py:<N>` on the page must land on its `def` line.
 
-    Checks the pointer, not the prose: the page and this dict agree on which
-    function each number labels, and the source agrees with both.
+    Checks the pointer, not the prose: the page cites each function, and the number
+    it cites is where that function's `def` actually sits in THIS tree.
     """
     text = ARCH_PAGE.read_text(encoding="utf-8")
-    for name, cited in CITED_FUNCTIONS.items():
-        assert f"(`app/sessions_io.py:{cited}`)" in text, (
-            f"the page no longer cites {name} at app/sessions_io.py:{cited}; "
-            "update CITED_FUNCTIONS with it, never silently")
     src = (Path(__file__).resolve().parents[1] / "app" / "sessions_io.py").read_text().splitlines()
-    for name, cited in CITED_FUNCTIONS.items():
-        line = src[cited - 1]
-        assert line.startswith(f"def {name}("), (
-            f"the page points readers at app/sessions_io.py:{cited} for {name}, "
-            f"but that line reads: {line!r}")
+    for name in CITED_FUNCTIONS:
+        actual = [i for i, line in enumerate(src, 1) if line.startswith(f"def {name}(")]
+        assert len(actual) == 1, (
+            f"app/sessions_io.py has {len(actual)} `def {name}(` lines; the page cites "
+            f"it by line number and a test cannot pin a pointer to an ambiguous name")
+        cited = actual[0]
+        assert f"(`app/sessions_io.py:{cited}`)" in text, (
+            f"the page does not cite {name} at its actual line app/sessions_io.py:{cited}"
+            f" — the prose is stale or the function moved; fix the page, this test takes"
+            f" no numbers to update")
 
 
 def test_the_architecture_page_describes_the_retention_that_shipped():

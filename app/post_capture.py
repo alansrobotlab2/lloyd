@@ -27,7 +27,8 @@ from typing import Optional
 import yaml
 
 from app.paths import SESSIONS_DIR
-from app.sessions_io import is_user_session, mutate_session
+from app.sessions_io import (is_conversation_session, is_user_session,
+                             mutate_session)
 from app.secondary_models import (
     _sync_secondary_capture_call,
     _sync_secondary_fact_extraction,
@@ -550,7 +551,15 @@ def _export_session_markdown(session_id: str, data: dict) -> Optional[Path]:
     if len(lines) <= 3:
         return None
 
-    root = (VAULT_SESSIONS_DIR if is_user_session(data)
+    # The same predicate the two listings apply. This used to be
+    # `is_user_session` — the deny-list tuned for brief delivery — so a
+    # transcript whose platform nobody had named was, by that list's own
+    # design, "a user session", and landed in the corpus qmd embeds: the 3
+    # automod `e2e-harness` smokes (93-203 messages of round transcripts each)
+    # and the gate's `canary` turns are what a chat-shaped machine run looks
+    # like, and a four-part run stamped `mission-control` was embedded too.
+    # Being embedded is not the thing a delivery list should decide.
+    root = (VAULT_SESSIONS_DIR if is_conversation_session(session_id, data)
             else VAULT_BACKGROUND_SESSIONS_DIR)
     out_dir = root / date_str
     out_dir.mkdir(parents=True, exist_ok=True)

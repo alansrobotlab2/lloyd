@@ -97,8 +97,49 @@ NON_USER_PLATFORMS = frozenset({"autonomy", "worker"})
 
 
 def is_user_session(data: dict) -> bool:
-    """True if a human reads this session. Missing platform means the web UI."""
+    """False only for a platform known to be a machine's — a DENY-list.
+
+    This is the *delivery* question: "may a brief, a summary, a fact pass or a
+    turn budget reach this session?" It stays a deny-list for the reason above
+    — a client this list has never heard of must keep receiving its briefs
+    rather than silently losing them — and it is deliberately NOT the question
+    the listings ask. That one is `is_conversation_session`, an allow-list:
+    answering "is this a conversation a human will read" with the same bool is
+    what let a platform nobody named (`e2e-harness`, `canary`) mint a session
+    that sat in the user's chat history and exported into the corpus qmd
+    embeds. Missing platform means the web UI, on both lists.
+    """
     return (data.get("platform") or "mission-control") not in NON_USER_PLATFORMS
+
+
+#: The platforms that name a surface a person reads their own conversation on.
+#: `mission-control` is the web UI (and every session that predates the
+#: `platform` field); `browser` is the Chrome side-panel extension — the panel
+#: sends a real user turn per follow-up a person types
+#: (`chrome-extension/src/background/lloyd-client.ts:15`), so #493's open scope
+#: question about whether it belongs in the interactive pool notwithstanding,
+#: excluding it here would delete 54 real conversations from the history.
+#: Everything else is either a machine run (`autonomy`, `worker`, the
+#: `e2e-harness` smokes, the gate's `canary` turn) or a client that has not
+#: been classified yet, and an unclassified client keeps its session — in the
+#: Background listing, not in the chat history. Widening THIS list is the safe
+#: direction (a new client's chats appear); widening it wrongly hides nothing
+#: from the machine, only from a listing, and the row is still reachable.
+INTERACTIVE_PLATFORMS = frozenset({"mission-control", "browser"})
+
+
+def known_platforms() -> frozenset:
+    """Every platform this codebase knows the meaning of.
+
+    One function rather than a fourth literal, so `POST /api/sessions/create`
+    validates against the union of the two rules instead of a copy of one of
+    them. A caller may only name a platform whose semantics exist somewhere:
+    interactive (chat history, the embedded corpus), or a machine platform the
+    deny-list already refuses delivery to. Anything else is a client that has
+    not been classified yet, and the endpoint's job is to send it back with the
+    list rather than file it under "human" by default.
+    """
+    return INTERACTIVE_PLATFORMS | NON_USER_PLATFORMS
 
 
 #: A background session's id has four underscore-separated parts
@@ -137,12 +178,124 @@ def is_background_session_name(name: str) -> bool:
             and len(parts[1]) == 6 and parts[1].isdigit())
 
 
+#: Bytes read from the head of a session file by `platform_from_head`. Every
+#: writer of a session JSON in this tree puts `platform` in the first dozen
+#: keys (`_save_session_meta`, `create_session`, the worker recorder), so the
+#: word is found well inside this window on the live box: over all 3,853
+#: four-part session files on 2026-09-21 the key first appears at a median byte
+#: 105 and a maximum of 420, so 2,048 covers the shape with room for a long
+#: title. A file it does not cover is not a miss — it is reported as
+#: unclassifiable and the caller opens the whole file instead.
+HEAD_PLATFORM_WINDOW = 2048
+
+_HEAD_PLATFORM = None  # compiled lazily; `re` is cheap but this module is imported everywhere
+
+
+def platform_from_head(text: str) -> Optional[str]:
+    """The `platform` word from the head of a session file, or None.
+
+    Exists so a listing can *classify* a transcript it has no intention of
+    opening. A session JSON holds the whole conversation, so parsing one to read
+    one scalar costs whatever the longest message is worth — 737 MB over the
+    four-part half of `sessions/` on 2026-09-21. Reading a window instead turns
+    "which of these runs is the anomaly" from a full parse of every file into a
+    bounded scan, which is what lets `/api/background/sessions` promise that a
+    mis-classified run is reachable at the row budget the UI asks for.
+
+    Returns None when the word is not inside the window — including for a file
+    with no platform at all, which is the pre-field case. Callers must treat
+    None as *unknown*, never as *machine* or as *human*: this is a scanner, not
+    a verdict.
+    """
+    global _HEAD_PLATFORM
+    if _HEAD_PLATFORM is None:
+        import re
+        _HEAD_PLATFORM = re.compile(r'"platform"\s*:\s*"([^"]*)"')
+    m = _HEAD_PLATFORM.search(text or "")
+    return m.group(1) if m else None
+
+
+def head_names_a_machine_platform(text: str) -> Optional[bool]:
+    """`names_a_machine_platform` for a file that has not been opened.
+
+    Three answers, not two: True and False are the class, None is "the word is
+    not inside the window, so open the file and ask the dict". A caller that
+    folds None into False has turned a read budget into a classification rule —
+    the mistake that made `is_user_session`'s missing-platform default read as a
+    human conversation for six weeks (#1064) — and the caller here is the
+    listing that is supposed to *catch* that shape rather than repeat it.
+
+    Membership is decided here, in the module that owns the lists, so the
+    routers stay one question away from the definition instead of importing a
+    list they could then test against by hand.
+    """
+    word = platform_from_head(text)
+    return None if word is None else word in NON_USER_PLATFORMS
+
+
+def names_a_machine_platform(data: dict) -> bool:
+    """True only when the recorded platform positively names a machine.
+
+    The Background listing needs the *class* of a run, not just its membership:
+    a four-part transcript whose platform is `worker` or `autonomy` is one of
+    ~300 ordinary runs a day and belongs in a newest-first window, while one
+    whose platform is `mission-control`, absent, or a word that is neither
+    machine nor interactive (`browser` on a four-part id, an unclassifiable new
+    client) is the shape #1064 exists to catch — a machine run wearing a human's
+    label, which no other surface shows. That class must never be aged out of
+    the listing, so it has to be identifiable, and it is identified by *failing*
+    this test rather than by matching anything.
+
+    Not `is_user_session`: that one answers "may this session receive a brief"
+    and deliberately says yes to a word it has never heard, which here is
+    exactly backwards — an unclassifiable platform is precisely the reason to
+    show the row.
+    """
+    return (data.get("platform") or "") in NON_USER_PLATFORMS
+
+
 def new_background_session_id(slug: str) -> str:
     """Mint a four-part background session id from a producer slug."""
     import uuid as _uuid
     clean = "".join(ch for ch in str(slug or "bg") if ch.isalnum())[:12] or "bg"
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{ts}_{clean}_{_uuid.uuid4().hex[:4]}"
+
+
+#: The producer slug inside a four-part id (`20260917_104051_autocode_0fa8` →
+#: `autocode`). It is a SOURCE, not a platform — a slug names which job ran, a
+#: platform names which surface it ran for — but it is the only thing a
+#: background-shaped id that arrived with no file carries, so it is what the
+#: Background tab gets to group by when it has to show one.
+def background_slug(name: str) -> str:
+    """The third part of a four-part session id, or "" for any other shape."""
+    stem = str(name or "")
+    if stem.endswith(".json"):
+        stem = stem[:-5]
+    parts = stem.split("_")
+    if not is_background_session_name(stem):
+        return ""
+    return parts[2]
+
+
+def is_conversation_session(name: str, data: dict) -> bool:
+    """The one predicate the two listings and the markdown export share.
+
+    True only for BOTH halves of "a human will read this": a chat-shaped id
+    AND an allow-listed platform. Each half catches what the other cannot —
+    the platform half excludes a machine run that was named like a chat
+    (`e2e-harness`, `canary`); the shape half excludes a run named like a run
+    whose file was stamped with a human's platform, which is how 12 sessions
+    ended up in no listing at all: four-part, so the chat listings skipped
+    them unread, and `platform: mission-control`, so the Background listing
+    then dropped them. Reading shape here costs nothing, because every caller
+    that asks this question already holds a filename — and it is what makes
+    "no four-part id is ever a conversation" a property of the definition
+    rather than an agreement between five call sites.
+    """
+    return (not is_background_session_name(name)
+            and (data.get("platform") or "mission-control")
+            in INTERACTIVE_PLATFORMS)
 
 
 #: Sessions created while a worker-pool job is claimed. The pool binds an
@@ -915,10 +1068,43 @@ async def mutate_session(session_id: str, fn) -> bool:
         return True
 
 
-async def _save_session_meta(session_id: str, model: str, preview: str = ""):
-    """Save session metadata to JSON file (creates if missing)."""
+async def _save_session_meta(session_id: str, model: str, preview: str = "",
+                             platform: str | None = None):
+    """Save session metadata to JSON file (creates if missing).
+
+    The create branch is the lazy half of the chat path: every turn the Chat
+    tab, the side panel or a session-backed worker posts goes through here, and
+    a caller-supplied id with no file yet gets whatever the caller is presumed
+    to be — this function is the ONLY place that decides that, and until #1064
+    it answered `mission-control` unconditionally, for every id shape. That is
+    what minted the orphans: `20260917_104051_autocode_0fa8` and eleven others
+    are four-part ids — a worker's recorder never wrote them — stamped with a
+    human's platform, so the chat listings skipped them by name and the
+    Background listing dropped them by platform. Neither listing had them.
+
+    A four-part id that reaches the chat path with no file is a machine run
+    whose recording step was skipped, so it is stamped `worker`: the one
+    platform word the router already treats as "a machine turn arrived on the
+    chat path" — it honours `final_schema`, arms the authority gate, and keeps
+    the transcript out of the chat history and out of the embedded corpus
+    (`scripts/automod/review.py:write_session` stamps the same word for the
+    same reason). The slug from the name is recorded as `source` so the
+    Background tab can group it. Nothing in the tree creates a *user* session
+    with a four-part id — the three chat mints are pinned to three parts in
+    `tests/test_session_platform_checks.py` — so this branch cannot hide a
+    conversation; if that ever stops being true, that test fails first.
+
+    `platform` is a caller's *request*, honoured only for a chat-shaped id and
+    only when the word is already a machine platform. An unclassifiable word
+    arriving here must not buy a session a place in the chat corpus — the same
+    asymmetry `POST /api/sessions/create` now enforces with a 400 — and the shape
+    outranks any requested value, because the chat listings would skip the file
+    unread whatever its platform says.
+    """
     meta_path = SESSIONS_DIR / f"{session_id}.json"
     now = datetime.now().isoformat()
+    background_shaped = is_background_session_name(session_id)
+    requested = platform if platform in NON_USER_PLATFORMS else None
     async with _get_file_lock(session_id):
         if meta_path.exists():
             data = json.loads(meta_path.read_text())
@@ -935,7 +1121,9 @@ async def _save_session_meta(session_id: str, model: str, preview: str = ""):
                 "preview": preview[:60],
                 "message_count": 1,
                 "messages": [],
-                "platform": "mission-control",
+                "platform": ("worker" if background_shaped
+                             else requested or "mission-control"),
+                "source": background_slug(session_id) if background_shaped else "",
                 # Inner Voice (#345): A/B linkage tag. Sessions sharing an
                 # experiment_id (typically Chat-tab + Inner-Voice-tab runs
                 # of the same task) can be joined for meta-review.

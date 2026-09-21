@@ -15,9 +15,13 @@ from app import sessions_io
 from app.date_fidelity import refusal_detail
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
+    HEAD_PLATFORM_WINDOW,
+    head_names_a_machine_platform,
     is_background_session_name,
+    is_conversation_session,
     is_user_session,
     is_session_active,
+    names_a_machine_platform,
     get_cancel_event,
     get_queue_state,
     drain_pending,
@@ -72,19 +76,27 @@ async def list_sessions():
         # grows with the fleet's throughput. For a four-part id the shape is
         # the whole decision: it is skipped unread, which is safe only while
         # no user-session creator mints one (pinned in
-        # tests/test_session_platform_checks.py). `is_user_session` below
-        # judges everything else.
+        # tests/test_session_platform_checks.py), and `is_conversation_session`
+        # re-states exactly that rule for the files it does open — so the fast
+        # path and the parsed path cannot disagree about a four-part id.
         if is_background_session_name(sf.name):
             continue
         try:
             data = json.loads(sf.read_text())
         except Exception:
             continue
-        # Chat history is conversations. `worker` never belonged here any
-        # more than `autonomy` did — worker turns go through the chat path, so
-        # a backlog-triage session sat in the user's history looking like
-        # something they had said. `is_user_session` is the one definition.
-        if not is_user_session(data):
+        # Chat history is conversations, and "conversation" is one predicate
+        # (`sessions_io.is_conversation_session`), not this endpoint's opinion.
+        # `worker` never belonged here any more than `autonomy` did — worker
+        # turns go through the chat path, so a backlog-triage session sat in the
+        # user's history looking like something they had said — and neither did
+        # a run whose platform nobody had named: `is_user_session` is a
+        # deny-list tuned for brief delivery, so `e2e-harness` (3 automod smoke
+        # transcripts, 93-203 messages each) and the gate's `canary` turn read
+        # as user sessions there. Being listed is the one thing a deny-list must
+        # NOT hand out, because a listed session is also exported into the
+        # corpus qmd embeds and recalled as something the user discussed.
+        if not is_conversation_session(sf.name, data):
             continue
         loaded.append((_last_active_ts(sf, data), data, sf))
     loaded.sort(key=lambda row: row[0], reverse=True)
@@ -126,24 +138,40 @@ async def list_sessions():
     return JSONResponse({"sessions": sessions[:50], "count": len(sessions)})
 
 
-#: How many session files the background listing may open. Background runs
-#: are the bulk of the directory by construction, so unlike the chat listing
-#: this one cannot skip most of what it walks — it is bounded by an explicit
-#: budget instead. The walk is mtime-ordered, so the budget spends itself on
-#: the newest files, which is what the tab shows.
-_BACKGROUND_SCAN_CEILING = 600
+#: How many *ambiguous* session files the background listing may open. A
+#: four-part name is decided by its shape and costs no read, so the only files
+#: worth opening are the chat-shaped ones — the half of the directory where a
+#: machine run can hide behind a human-looking id. That half is small (201 of
+#: 4,045 files on 2026-09-21) and grows with human conversation volume, not with
+#: machine throughput. The walk is mtime-ordered, so the budget spends itself on
+#: the newest of them.
+_BACKGROUND_PLATFORM_SCAN_CEILING = 600
 
 
 @router.get("/api/background/sessions")
 async def list_background_sessions(limit: int = 100):
     """Every run that is not a conversation: autonomy tasks and worker jobs.
 
-    The other half of the bifurcation. `/api/sessions` is conversations and
-    now excludes these; this endpoint is the only listing that shows them, and
-    the Background tab is the only page that reads it. Before recording became
-    universal there was nothing here to list — autonomy runs left no session
-    at all, and the worker sessions that did exist sat in the user's chat
-    history looking like something they had said.
+    The other half of the bifurcation, and the *complement* of `/api/sessions`
+    rather than its mirror image by filename: this listing shows everything
+    `is_conversation_session` refuses. That matters for two shapes the old
+    four-part-name fast path could not see.
+
+    * A four-part id stamped with a human platform — 12 sessions on 2026-09-21,
+      newest `20260917_105134_autocode_029c` — minted by the chat path's lazy
+      create. The chat listings skip a four-part name unread, so when this
+      endpoint also dropped them as user-labelled they existed in no listing at
+      all.
+    * A three-part id stamped with a machine platform: the 3 `e2e-harness`
+      automod smokes and the gate's `canary` turns. They used to sit in the
+      user's chat history, which was wrong but visible; the allow-list takes
+      them out of it, so a name-based skip here would have made them invisible
+      instead.
+
+    Dropping the name fast path costs almost nothing, because chats are rare
+    next to ~300 background runs a day: 6 of the newest 600 files were
+    chat-shaped on 2026-09-21, against the 600 this budget already spends. The
+    ceiling is what bounds this walk either way.
 
     Rows carry `platform` and `source` because that is how the tab groups
     them: `autonomy-task:39` and `autocode` are different kinds of unattended
@@ -157,29 +185,107 @@ async def list_background_sessions(limit: int = 100):
     except OSError as e:
         return JSONResponse({"sessions": [], "count": 0, "error": str(e)})
 
-    loaded: list[tuple[float, dict, object]] = []
+    # Phase 1: decide membership, and settle as much of it as possible without
+    # opening a file. A four-part name is decided free, because the shape answers
+    # it — `is_conversation_session` refuses four parts before it looks at a
+    # platform — so the bulk of the directory costs a stat and no read. The read
+    # budget goes to the chat-shaped half, the only place a machine run can hide
+    # behind a human-looking id.
+    #
+    # Budgeting *reads* rather than *reach* is what makes the orphan half of #1064
+    # true on live data instead of only in a test. The loop's previous shape opened
+    # the newest 600 files whatever they were, and all 12 four-part
+    # `mission-control` orphans sit past rank 600 in mtime order (newest at rank
+    # 1234, oldest at rank 3630), so that listing could not have returned one of
+    # them even with the membership rule fixed. A rule bounded by a scan window is
+    # a rule that silently stops applying to everything older than the window.
+    #
+    # A candidate settled for free must not then be dropped by the ROW budget,
+    # which is the half this endpoint got wrong on its first pass: slicing the
+    # candidate list to `limit * 2` before building rows reproduced the same
+    # blindness at a different number — the 12 orphans sit past index 1200 of
+    # 3,853 four-part candidates while the Background tab asks for 150 rows
+    # (`web/src/components/pages/BackgroundPage.tsx:101`). So a four-part
+    # candidate is split here by `platform_from_head` — one 2 KB read, 55 ms over
+    # the whole four-part half on this box — into the ordinary machine runs, which
+    # are what `limit` is for, and the mis-labelled or unclassifiable ones, which
+    # are what this endpoint exists to show and are therefore exempt from the
+    # window. A platform word outside the window reads as unknown and gets the
+    # file opened rather than a guess: 19 of 3,854 four-part files on 2026-09-21.
+    ordinary: list[tuple[float, dict | None, object]] = []  # machine-named runs
+    special: list[tuple[float, dict | None, object]] = []   # mis-labelled, or unknown
     opened = 0
     for sf in paths:
-        if opened >= _BACKGROUND_SCAN_CEILING:
-            break
-        # Inverse of the chat listing's fast path, and deliberately only a
-        # *hint*: a three-part id is never a background run, so skipping it
-        # unread is free. A four-part one is still parsed and judged by its
-        # `platform`, because the filename is not the authority.
-        if not is_background_session_name(sf.name):
+        if is_background_session_name(sf.name):
+            try:
+                with sf.open("r", encoding="utf-8", errors="ignore") as fh:
+                    head = fh.read(HEAD_PLATFORM_WINDOW)
+            except OSError:
+                continue
+            known = head_names_a_machine_platform(head)
+            row = (_last_active_ts(sf, {}), None, sf)
+            # `None` is not `False`: the word was outside the window, so the row
+            # is read in phase 2 and lands in whichever pool the file says.
+            if known is True:
+                ordinary.append(row)
+            else:
+                special.append(row)
+            continue
+        if opened >= _BACKGROUND_PLATFORM_SCAN_CEILING:
             continue
         opened += 1
         try:
             data = json.loads(sf.read_text())
         except Exception:
             continue
-        if is_user_session(data):
-            continue
-        loaded.append((_last_active_ts(sf, data), data, sf))
+        # The same predicate the chat listing applies, from the other side, so
+        # "in exactly one listing" is a property of the two endpoints sharing
+        # one definition rather than an agreement maintained by hand.
+        if not is_conversation_session(sf.name, data):
+            row = (_last_active_ts(sf, data), data, sf)
+            (ordinary if names_a_machine_platform(data) else special).append(row)
 
+    # Phase 2: pay for rows. The mis-labelled class is read first, in full, and
+    # never sliced: 12 rows against 3,853, the class no other surface shows, and
+    # clause 3 of #1064 is precisely the promise that it is not aged out. What is
+    # left of `limit` then goes to the ordinary runs.
+    def _read(row):
+        ts, data, sf = row
+        if data is not None:
+            return (ts, data, sf)
+        try:
+            fresh = json.loads(sf.read_text())
+        except Exception:
+            return None
+        return (_last_active_ts(sf, fresh), fresh, sf)
+
+    mislabelled: list[tuple[float, dict, object]] = []
+    for row in special:
+        read = _read(row)
+        if read is None:
+            continue
+        # A head-window miss that resolves to a machine platform was an ordinary
+        # run after all: it joins the pool rather than the exemption, so the
+        # exemption holds only for the class it is meant for.
+        if names_a_machine_platform(read[1]):
+            ordinary.append(read)
+        else:
+            mislabelled.append(read)
+
+    keep = max(0, limit - len(mislabelled))
+    # mtime ordered the unread half, and for a machine run `last_active` sits
+    # within seconds of mtime (measured over 400 of them on 2026-09-21: median 0 s,
+    # max 4 s). The slack covers the case `_last_active_ts`'s own docstring names —
+    # a backfill that re-touches mtimes and reorders the walk — and is why the
+    # slice happens after that sort and not before it.
+    window = sorted(ordinary, key=lambda row: row[0], reverse=True)
+    window = window[:keep + max(8, keep // 4)]
+    loaded = [r for r in (_read(row) for row in window) if r is not None]
+    loaded.sort(key=lambda row: row[0], reverse=True)
+    loaded = (loaded[:keep] + mislabelled)
     loaded.sort(key=lambda row: row[0], reverse=True)
     out = []
-    for ts, data, sf in loaded[:limit]:
+    for ts, data, sf in loaded:
         out.append({
             "id": data.get("session_id", sf.stem),
             "session_key": data.get("session_id", sf.stem),
@@ -195,8 +301,17 @@ async def list_background_sessions(limit: int = 100):
             "last_active": datetime.fromtimestamp(
                 ts, timezone.utc).isoformat().replace("+00:00", "Z"),
         })
+    # `count` is rows returned; `total` is what the directory holds after this
+    # pass settled it (settled machine runs plus the mis-labelled class), and
+    # `unclassified` is the chat-shaped remainder the read ceiling could not
+    # reach — the three fields are the honest version of a listing that is
+    # deliberately bounded. The Background tab reads none of them today; they
+    # exist so `count: 150` is not silently read as "there are 150".
+    chat_shaped = sum(1 for p in paths if not is_background_session_name(p.name))
     return JSONResponse({"sessions": out, "count": len(out),
-                         "scanned": opened})
+                         "scanned": opened,
+                         "total": len(ordinary) + len(mislabelled),
+                         "unclassified": max(0, chat_shaped - opened)})
 
 
 @router.get("/api/sessions/{session_id}/todos")
@@ -571,9 +686,43 @@ async def create_session(request: Request):
     model = body.get("model")
     if model is not None and not isinstance(model, str):
         raise HTTPException(status_code=400, detail="model must be a string")
+    # `platform` is not free text. Everything downstream — both listings, the
+    # chat-tab summary, brief delivery, and which markdown corpus qmd embeds —
+    # is keyed off this one word, so a value nobody has named was worth less
+    # than nothing: `is_user_session` is a deny-list and read any new word as
+    # "a human wrote this". 54 of the sessions this endpoint minted were
+    # `platform: browser` (the Chrome side panel, `lloyd-client.ts:15`) and 3
+    # were `e2e-harness` (the automod smoke harness) — the first genuinely
+    # human, the second a harness that had to be told, not guessed. An unknown
+    # word is now a 400 with the real choices, so a new caller names itself
+    # here, in the diff that adds it, instead of quietly opting into the human
+    # corpus. The word list is `sessions_io`'s, not a second copy: an entry
+    # that stops being interactive stops being mintable, one edit.
+    #
+    # A 400 across a process boundary needs every sender re-read before it ships,
+    # and the two trees that send this word are TypeScript, so nothing in this
+    # repo's import graph reaches them: `chrome-extension/src/background/
+    # lloyd-client.ts:15` posts `browser` and
+    # `web/src/components/RightChatSidebar.tsx:196` plus
+    # `web/src/components/pages/InnerVoicePage.tsx:145` post `mission-control`.
+    # `tests/test_session_platform_checks.py::
+    # test_every_client_that_names_a_platform_to_the_endpoint_names_a_known_one`
+    # sweeps both trees on every run, so a rename there fails here rather than as
+    # a side panel that can no longer start a conversation. In-process callers
+    # pass the kwarg instead of the body and are unaffected by this check:
+    # `workers/sources/_common.py:409`/`:620` (`worker`), `autonomy.py:1956`/
+    # `:2108` (`autonomy`), `scripts/autoresearch/bench_runner_sdk.py:513`
+    # (`worker`).
     platform = body.get("platform") or "mission-control"
     if not isinstance(platform, str):
         raise HTTPException(status_code=400, detail="platform must be a string")
+    if platform not in sessions_io.known_platforms():
+        raise HTTPException(
+            status_code=400,
+            detail=(f"unknown platform {platform!r}; send one of "
+                    f"{sorted(sessions_io.known_platforms())}, or omit the field "
+                    f"for a Mission Control chat"),
+        )
 
     iv = bool(body.get("inner_voice", False))
     iv_user = bool(body.get("inner_voice_evaluate_user_turns", False))

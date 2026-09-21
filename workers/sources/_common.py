@@ -724,7 +724,21 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     # between a grant made to `autonomy-task:39` and one made to whatever runs
     # on that source next.
     from app.harness.policy import current_effect_scope, current_scope
+    # SEAM(http): worker pool -> backend `POST /api/message/stream`, the one
+    # process boundary a worker session's `platform` crosses. Verified across it by
+    # test_session_platform_checks.py::
+    # test_the_worker_s_loopback_post_arrives_with_its_platform, which drives the
+    # real `_post_stream` through the real endpoint rather than calling the helper.
     payload = {"session_id": session_id, "text": prompt, "model": model,
+               # Also read by the endpoint's lazy create
+               # (`sessions_io._save_session_meta`), the only writer of a
+               # session's platform with no file to read one from. A worker that
+               # reaches that line with no file — the `create_session` above
+               # raised — was otherwise stamped `mission-control` and appeared in
+               # the user's chat history and the embedded corpus. It changes
+               # nothing about *this* turn's gating: `_session_identity` reads the
+               # session file and had already run by then.
+               "platform": "worker",
                "priority": int(priority), "max_turns": int(max_turns),
                "grant_scope": current_scope.get(),
                # #544 — the same hop, the other contextvar. The effect ledger

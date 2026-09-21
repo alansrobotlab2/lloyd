@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import mc_state
 from app.paths import LLOYD_HOME, SESSIONS_DIR
-from app.sessions_io import is_background_session_name, is_user_session
+from app.sessions_io import is_conversation_session
 
 logger = logging.getLogger("lloyd-server")
 
@@ -299,14 +299,18 @@ def _summarize_background() -> dict:
     for sf in paths:
         if opened >= 400:
             break
-        if not is_background_session_name(sf.name):
-            continue
         opened += 1
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if is_user_session(data):
+        # The complement of the chat half below, by the same predicate
+        # `/api/background/sessions` uses: this used to skip every three-part
+        # name unread and then drop anything `is_user_session` allowed, which
+        # left a machine run with a chat-shaped id (`e2e-harness`, `canary`)
+        # counted as a chat here while a four-part run stamped
+        # `mission-control` was counted as neither.
+        if is_conversation_session(sf.name, data):
             continue
         source = str(data.get("source") or data.get("platform") or "unknown")
         by_source[source] = by_source.get(source, 0) + 1
@@ -324,7 +328,10 @@ def _summarize_chat() -> dict:
                       key=lambda f: f.stat().st_mtime, reverse=True):
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))
-            if not is_user_session(data):
+            # One predicate with `/api/sessions`, so the summary the model
+            # reads about the Chat tab can never disagree with what the tab
+            # itself shows.
+            if not is_conversation_session(sf.name, data):
                 continue
             sessions.append({
                 "id": data.get("session_id", sf.stem),
