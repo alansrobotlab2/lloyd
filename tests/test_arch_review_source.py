@@ -589,6 +589,106 @@ async def test_a_stray_write_in_the_vault_is_reverted_too(tree, monkeypatch):
     assert [s["path"] for s in out["meta"]["stray_writes"]] == ["skills/some-skill.md"]
 
 
+TASK_AT_NIGHT_BEFORE = """\
+---
+id: 82
+name: Nightly Retrieval Eval
+last_run: '2026-09-19T13:07:31.589361+00:00'
+next_run: '2026-09-20T13:07:31.589361+00:00'
+---
+
+# Nightly Retrieval Eval
+
+## Activity Log
+
+- **2026-09-19T13:07:31Z** — run run_82_20260919_130010 — success (251s)
+"""
+
+#: The completion stamp `autonomy.run_task` writes on a success: front matter
+#: plus one Activity Log line, from the 09-20 run of task #82.
+TASK_AFTER_SUCCESS = """\
+---
+id: 82
+name: Nightly Retrieval Eval
+last_run: '2026-09-20T13:07:04.862230+00:00'
+next_run: '2026-09-21T13:07:04.862230+00:00'
+---
+
+# Nightly Retrieval Eval
+
+## Activity Log
+
+- **2026-09-19T13:07:31Z** — run run_82_20260919_130010 — success (251s)
+- **2026-09-20T13:07:04Z** — run run_82_20260920_130244 — success (260s)
+"""
+
+
+def _committed_task_file(tree):
+    """An `autonomy/82-*.md` task file tracked and CLEAN at turn start.
+
+    That is the normal state: the nightly `autonomy-data-pipeline` pre-flight
+    commits the task file before the review unit can start, which is exactly
+    why the scheduler's mid-turn stamp falls into `after - before`.
+    """
+    task = tree["vault"] / "autonomy" / "82-nightly-retrieval-eval.md"
+    task.write_text(TASK_AT_NIGHT_BEFORE)
+    _git(tree["vault"], "add", "-A")
+    _git(tree["vault"], "commit", "-qm", "pre-flight commit of the task file")
+    assert "82-nightly-retrieval-eval.md" not in A.vault_dirty(tree["vault"])
+    return task
+
+
+async def test_the_schedulers_completion_stamp_survives_the_sweep(tree, monkeypatch):
+    """An `autonomy/*.md` file clean at turn start and dirty at turn end is left
+    on disk with the scheduler's bytes, not `git checkout --`'d back to HEAD.
+
+    The sweep is a set-diff of dirty paths, so a path that was clean at turn
+    start is a stray by construction however it came to be dirty — and a task
+    file is clean at turn start on every normal run. Task #82 completed at
+    13:07:04Z on 2026-09-20 and the `doc:skills` turn that opened at 12:55:25Z
+    closed 48 s later and reverted its front matter to the previous night's
+    `last_run`; `next_run` then fell due 27 s after the run finished and the
+    task dispatched again.
+    """
+    task = _committed_task_file(tree)
+
+    def edits():
+        task.write_text(TASK_AFTER_SUCCESS)
+    monkeypatch.setattr(A, "run_prompt_in_session", _turn(_block(), edits=edits))
+    out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+    assert out["status"] == "success"
+    assert task.read_text() == TASK_AFTER_SUCCESS, (
+        "the scheduler's stamp was reverted: last_run must still read the "
+        "2026-09-20 completion, not the 09-19 one the fixture committed")
+    assert "run_82_20260920_130244" in task.read_text(), (
+        "the Activity Log line the run appended must survive too")
+
+
+async def test_a_spared_task_file_is_still_named_in_the_stray_list(tree, monkeypatch):
+    """Sparing the scheduler is not the same as not seeing the write.
+
+    A worker that really did edit a task file — #724's unattended edit with no
+    provenance — has to leave a trace somewhere a person reads, so the spared
+    path is named in the run's stray list and on the ledger event, with an
+    action that is not `checkout`.
+    """
+    task = _committed_task_file(tree)
+
+    def edits():
+        task.write_text(TASK_AFTER_SUCCESS)
+    monkeypatch.setattr(A, "run_prompt_in_session", _turn(_block(), edits=edits))
+    out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+
+    path = "autonomy/82-nightly-retrieval-eval.md"
+    actions = {s["path"]: s["action"] for s in out["meta"]["stray_writes"]}
+    assert path in actions, f"the spared write is not surfaced: {actions}"
+    assert actions[path] != "checkout", "it must be reported, not undone"
+    ledger = {s["path"]: s["action"]
+              for s in _arch_events(tree)[0]["stray_writes"]}
+    assert path in ledger and ledger[path] != "checkout", (
+        "promotions.jsonl is what a person checks after landing")
+
+
 async def test_a_pre_existing_dirty_path_is_not_reverted(tree, monkeypatch):
     """A diff against a baseline, never a snapshot: a human with an editor open
     in `~/lloyd` must not have their work thrown away by a doc review."""

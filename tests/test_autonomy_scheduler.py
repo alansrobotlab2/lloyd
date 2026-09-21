@@ -2711,3 +2711,226 @@ async def test_a_sustained_outage_alerts_once_and_a_later_outage_alerts_again(
     assert len(alerts) == 2, (
         f"the second outage never alerted: {alerts} — a fleet that has been "
         "through one outage must not be deaf to the next")
+
+
+# ── The run record vetoes a second dispatch of a period that already ran ──────
+# #1296. An arch-review stray sweep reverted task #82's completion stamp 48 s
+# after the run finished, so `last_run` stayed on 2026-09-19, elapsed read a full
+# 24 h on the next tick, and the same nightly job dispatched again 27 s after it
+# finished. Every gate that existed read the task file, and the task file is in
+# the vault — the thing that got rewritten. These tests pin the one verdict that
+# consults a second, gitignored account: the run record.
+
+STALE_19 = "2026-09-19T13:07:31.589361+00:00"
+RUN_20_DONE = "2026-09-20T13:07:04.862230+00:00"
+REDISPATCH_20 = dt.datetime(2026, 9, 20, 13, 8, 17, 549634, tzinfo=dt.timezone.utc)
+
+
+def _record(aut, task_id, run_id, *, status, completed_at, started_at=None):
+    """A run record on disk, in the exact shape `run_task` writes: `---`
+    delimited front matter then the body. Without the delimiters the loader
+    under test never sees front matter, so the fixture would test nothing."""
+    d = aut.AUTONOMY_RUNS_DIR / str(task_id)
+    d.mkdir(parents=True, exist_ok=True)
+    fm = {"run_id": run_id, "task_id": task_id, "status": status,
+          "completed_at": completed_at}
+    if started_at:
+        fm["started_at"] = started_at
+    (d / f"{run_id}.md").write_text(
+        f"---\n{yaml.dump(fm, default_flow_style=False)}---\n\nreport\n",
+        encoding="utf-8")
+
+
+def test_a_stale_last_run_cannot_re_dispatch_a_task_the_record_says_succeeded(
+        aut, monkeypatch):
+    """The 2026-09-20 window for task #82, with the timestamps as recorded.
+
+    `last_run`/`next_run` are the values the vault held after the sweep reverted
+    the stamp; the record's times are `run_82_20260920_130244.md`'s own; `now` is
+    the instant queue row 8514 was enqueued. At that instant elapsed-since-
+    `last_run` is 86,446 s against an 82,800 s interval minus the 3,600 s window
+    slack, so the elapsed gate calls it due and only the record can refuse.
+
+    The second half is the clause's other edge: 23 h 59 m later the same record
+    must NOT hold it. A guard that kept refusing would be a worse failure than
+    the duplicate it prevents.
+    """
+    _pin(aut, monkeypatch, REDISPATCH_20)
+    monkeypatch.setattr(aut, "_local_hour", lambda: 6)  # hour 06 local, UTC-7
+    write_task(aut, 82, name="Nightly Retrieval Eval", frequency="daily",
+               skill_name="retrieval-eval", status="up_next",
+               preferred_hours=[6], last_run=STALE_19, next_run=STALE_19)
+    task = read_task(aut, 82)
+    _record(aut, 82, "run_82_20260920_130244", status="success",
+            completed_at=RUN_20_DONE, started_at="2026-09-20T13:02:44.476948+00:00")
+
+    assert aut._already_ran_this_period(task, now=REDISPATCH_20) == "run_82_20260920_130244"
+    assert aut._is_task_due(task, [task], now=REDISPATCH_20) is False
+    # And the board says why, in the same vocabulary. A reverted stamp with the
+    # window open is otherwise indistinguishable from a scheduler that silently
+    # skipped a night.
+    assert aut.hold_reason(task, [task], now=REDISPATCH_20) == aut.RUN_SUCCESS_HOLD
+
+    # Expiry: past the guard's hold, the same never-repaired file must dispatch.
+    later = REDISPATCH_20 + dt.timedelta(hours=23, minutes=59)
+    assert aut._already_ran_this_period(task, now=later) == ""
+    assert aut._is_task_due(task, [task], now=later) is True
+
+
+def test_the_guard_holds_exactly_as_long_as_the_intact_stamp_would(
+        aut, monkeypatch):
+    """The guard must substitute for the lost stamp and never delay past it.
+
+    A run that COMPLETED at S makes the elapsed gate grant due-ness at
+    S + interval - slack (the slack the windowed task is given, because
+    completion time drifts the cycle later every night otherwise). The guard
+    refuses while `now < S + interval - slack` — the same instant, to the second.
+    Two ticks either side of it: refused at 13:08:17Z on the 20th, due at
+    12:08:17Z on the 21st — one second past S + (86,400 − 3,600) =
+    2026-09-21T12:07:04.862230Z — and the healthy path would have dispatched at
+    that same moment. That identity is what makes the guard safe to add to
+    every dispatch path; a period anchored on `last_run` or `next_run` instead —
+    both vault writes, both reverted by this very defect — would hold a task
+    inside one stale period forever and silence it outright.
+    """
+    _pin(aut, monkeypatch, REDISPATCH_20)
+    monkeypatch.setattr(aut, "_local_hour", lambda: 6)
+    write_task(aut, 76, name="Queue Health Check", frequency="daily",
+               skill_name="queue-health-check", status="up_next",
+               preferred_hours=[6], last_run=STALE_19)
+    task = read_task(aut, 76)
+    _record(aut, 76, "run_76_20260920_130244", status="success",
+            completed_at=RUN_20_DONE)
+
+    assert aut._is_task_due(task, [task], now=REDISPATCH_20) is False
+
+    # S + (interval - slack) = 2026-09-20T13:07:04.862230Z + 82,800 s =
+    # 2026-09-21T12:07:04.862230Z. The first tick strictly after it dispatches.
+    past_hold = dt.datetime(2026, 9, 21, 12, 8, 17, tzinfo=dt.timezone.utc)
+    assert aut._is_task_due(task, [task], now=past_hold) is True
+
+
+def test_a_failed_run_record_does_not_refuse_the_next_dispatch(aut, monkeypatch):
+    """The guard reads `status`, not the existence of a record.
+
+    Same instant, same stale `last_run`, one field different: a failed run stays
+    eligible, or the guard would silently retire every task that had one bad
+    night. `last_failure_at` is absent, so the failure-cooldown gate is not what
+    keeps it eligible either.
+    """
+    _pin(aut, monkeypatch, REDISPATCH_20)
+    monkeypatch.setattr(aut, "_local_hour", lambda: 6)
+    write_task(aut, 82, frequency="daily", skill_name="retrieval-eval",
+               status="up_next", preferred_hours=[6], last_run=STALE_19)
+    task = read_task(aut, 82)
+    _record(aut, 82, "run_82_20260920_130244", status="failed",
+            completed_at=RUN_20_DONE)
+
+    assert aut._already_ran_this_period(task, now=REDISPATCH_20) == ""
+    assert aut._is_task_due(task, [task], now=REDISPATCH_20) is True
+    assert aut.hold_reason(task, [task], now=REDISPATCH_20) is None
+
+
+def test_a_task_with_no_declared_period_is_never_vetoed_by_a_record(aut, monkeypatch):
+    """No `frequency`, no `runs_per_day` → no defensible window → no veto.
+
+    A success of unknown age would otherwise silence the job forever, which is a
+    worse failure than the duplicate. Such a task is not due either — the cadence
+    gate refuses it first (`hold_reason` answers "no frequency") — so what this
+    pins is that the guard is inert, not load-bearing, in that shape.
+    """
+    _pin(aut, monkeypatch, REDISPATCH_20)
+    write_task(aut, 55, skill_name="some-skill", status="up_next",
+               frequency=None)   # `write_task` drops keys whose value is None
+    task = read_task(aut, 55)
+    _record(aut, 55, "run_55_20260920_120000", status="success",
+            completed_at="2026-09-20T12:00:10+00:00")
+
+    assert aut._run_period_start(task, now=REDISPATCH_20) is None
+    assert aut._already_ran_this_period(task, now=REDISPATCH_20) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_succeeded_run_cannot_be_enqueued_twice_in_one_night(
+        aut, tmp_path, monkeypatch):
+    """The harm the item predicted, refused by the DISPATCHER (clause 4).
+
+    Task #82 writes one `eval/baselines/nightly-<date>-*.json` per night.
+    `scripts/eval_trend_stats.load_window` returns one `Night` per FILE — sorted by
+    each file's own `ran_at`, never deduplicated by date — and the caller pairs
+    consecutive rows, so a second file for one night is accepted by `join_ids`
+    (same query ids) and becomes a night→itself transition in the series, while
+    the row count that stands for "how many nights" overstates by one. On
+    2026-09-20 only judgment stopped that: the second dispatch spent 259 s and
+    2,254,592 tokens of a primary engine turn to conclude "this is a duplicate
+    dispatch, I won't re-run", and the fleet default is that a run follows its
+    skill.
+
+    The instant is the real clock, not a pinned one, so this holds whatever `TZ`
+    pytest runs under. The run itself is the real `autonomy.run_task` with
+    `app.harness.run_query` patched to the canned `stop` stream — the same call
+    `scheduled_task.execute` makes — so both accounts the guard reads are written
+    by production code: the vault stamp AND the run record. Nothing here touches
+    `eval/baselines/`; the only writer of a second baseline that has to be
+    stopped is the dispatcher handing the job a second turn.
+    """
+    import workers.sources.scheduled_task as st
+    from workers.queue import WorkQueue
+
+    q = WorkQueue(tmp_path / "workers.db")
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    # The stall alarms live in this module and notify through autonomy; the
+    # queue rows are what this test reads, and no Discord message is owed here.
+    monkeypatch.setattr(aut, "_notify_alert_channel", lambda *a, **k: None)
+    monkeypatch.setattr("app.harness.run_query", fake_run_query([TEXT, RESULT]))
+    write_task(aut, 102, name="Nightly Retrieval Eval", frequency="daily",
+               skill_name="retrieval-eval", status="up_next",
+               timeout_seconds=120)
+
+    async def tick():
+        """One scheduler tick, then close what it enqueued.
+
+        Draining matters: an item left in `queued` would dedup-collide on
+        `scheduled-task:102` and the NEXT tick would enqueue nothing for a reason
+        that has nothing to do with the guard — the test would pass on plumbing.
+        """
+        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+        rows = [i for i in q.list_items(source="scheduled-task", limit=500)
+                if i.state == "queued" and i.payload.get("task_id") == 102]
+        for i in rows:
+            q.mark_completed(i.id)
+        return rows
+
+    # Tick 1: no run record, no stamp — the first run must be dispatched.
+    assert len(await tick()) == 1, (
+        "a first-ever run must still be dispatched — the guard's subject is the "
+        "second one, not the first")
+    result = await aut.run_task(102)
+    assert result["success"] is True
+    assert read_task(aut, 102)["last_run"], "the success stamped the task file"
+    assert len(list((aut.AUTONOMY_RUNS_DIR / "102").glob("run_*.md"))) == 1
+
+    # Tick 2: the stamp survived, so the elapsed gate alone refuses.
+    assert await tick() == []
+
+    # Tick 3: the stamp is gone — what an arch-review stray sweep actually
+    # leaves behind. The run record is now the only thing between this task and a
+    # second `nightly-<date>-*.json` for the same night.
+    stripped = dict(read_task(aut, 102))
+    for key in ("last_run", "last_attempt", "next_run"):
+        stripped.pop(key, None)
+    (aut.AUTONOMY_DIR / "102-task102.md").write_text(
+        f"---\n{yaml.dump(stripped, default_flow_style=False)}---\n"
+        f"{stripped.get('body', '')}", encoding="utf-8")
+    board = [read_task(aut, 102)]
+
+    assert await tick() == [], (
+        "a reverted `last_run` re-dispatched a task whose run record reports "
+        "`status: success` — that second turn is what would have written the "
+        "second same-night baseline")
+    assert board[0].get("last_run") is None, "the file is still the reverted one"
+    assert aut.hold_reason(board[0], board) == aut.RUN_SUCCESS_HOLD, (
+        "the board must name the veto, or the skipped dispatch reads as a "
+        "scheduler that silently dropped the job")
+    assert len(list((aut.AUTONOMY_RUNS_DIR / "102").glob("run_*.md"))) == 1, (
+        "one run record, one night")

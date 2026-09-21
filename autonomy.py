@@ -800,6 +800,135 @@ def next_run_gap(task: dict,
 _no_skill_warned: set[str] = set()
 
 
+#: The `status:` `_write_run_record` gives a run that finished its work. Written
+#: into `AUTONOMY_RUNS_DIR/<id>/run_<id>_<stamp>.md`. That tree is gitignored
+#: (`/autonomy-runs/`, `.gitignore:24`), which is exactly why it is the account
+#: of what happened that a vault sweep cannot undo — see #1296.
+RUN_STATUS_SUCCESS = "success"
+
+
+def _due_slack_seconds(task: dict) -> float:
+    """How early a task may come due relative to its own interval.
+
+    `last_run` is a COMPLETION time, so a due-gate measured from it drifts later
+    by the run's own duration every cycle; for a task pinned to a one-hour window
+    that drift eventually steps past the window and skips a day. One function
+    because the two places that need this — the elapsed gate in `_is_task_due`
+    and the period the run-record guard measures a success against — must agree
+    to the second, or the guard holds a task longer than the healthy path ever
+    would and pushes it out of its own window.
+    """
+    interval = _frequency_interval_seconds(task) or 0.0
+    return min(3600.0, interval * 0.25) if _effective_preferred_hours(task) else 0.0
+
+
+def _run_period_start(task: dict, *, now: datetime.datetime) -> Optional[datetime.datetime]:
+    """Start of the period a success at `now` would still be held for.
+
+    `now - (interval - slack)`, which is deliberately the exact window the
+    elapsed gate would have granted had the completion stamp survived: a
+    successful run at S refuses the next dispatch while `now <= S + interval -
+    slack`, and the healthy path refuses while `now - S < interval - slack`. Same
+    inequality, so the guard can never delay a task that the intact file would
+    have dispatched — it substitutes for the lost stamp and nothing more.
+
+    Trailing `now`, therefore: never anchored on `last_run` (the field this guard
+    exists to survive — a verdict computed from it inherits its corruption) and
+    never on `next_run`, which lives in the same vault front matter and is
+    reverted by the same sweep. A hold anchored on a stale `last_run` would keep
+    every tick inside one period and silence the job outright, which is a worse
+    failure than the duplicate it prevents.
+    """
+    interval = _frequency_interval_seconds(task)
+    if interval is None:
+        return None
+    return now - datetime.timedelta(seconds=max(1.0, interval - _due_slack_seconds(task)))
+
+
+def _successful_run_this_period(
+    task_id, *, period_start: datetime.datetime,
+) -> tuple[bool, str]:
+    """Did a run record for this task report success inside the current period?
+
+    Returns ``(succeeded, run_id)``; `run_id` is the record that answered, empty
+    when nothing did, so a caller can name the run it refused to re-dispatch.
+
+    Why due-ness needs a second account of what already ran (#1296). The front
+    matter `last_run` is the ONLY thing `_is_task_due` measured, and it is a
+    file in the vault — a tree other writers sweep. On 2026-09-20 an arch-review
+    turn ended 48 s after task #82 (Nightly Retrieval Eval, `daily`,
+    `preferred_hours: [6]`) completed at 13:07:04Z and reverted that task file
+    to HEAD, restoring `last_run: 2026-09-19T13:07:31Z`. Elapsed was a whole
+    24 h again on the next tick (13:08:17Z, 27 s after the run finished), the
+    task dispatched a second time, and that dispatch spent 259 s and
+    2,254,592 tokens of a primary-engine turn reaching
+    "Today's baseline already exists — this is a duplicate dispatch". The run
+    record it refused to re-run is gitignored and was untouched by the sweep.
+
+    Reads are bounded to the task's own directory and to records that completed
+    inside the period, so a weekly job's month-old successes cost nothing and a
+    nightly job pays for one directory of ~17 files.
+    """
+    task_dir = AUTONOMY_RUNS_DIR / str(task_id)
+    if not task_dir.is_dir():
+        return False, ""
+    newest = None
+    try:
+        paths = sorted(task_dir.glob("run_*.md"))
+    except OSError:
+        return False, ""
+    for path in paths:
+        try:
+            parts = path.read_text(encoding="utf-8").split("---\n", 2)
+            if len(parts) < 2:
+                continue
+            fm = yaml.safe_load(parts[1])
+        except (OSError, ValueError):
+            continue
+        if not isinstance(fm, dict) or not isinstance(fm.get("status"), str):
+            continue
+        if fm.get("status").strip().lower() != RUN_STATUS_SUCCESS:
+            continue
+        # Prefer the instant the work FINISHED; `started_at` is the fallback so a
+        # record missing `completed_at` still counts. The stamp in the filename
+        # names the run's start, not its end, and the sort here is a comparison
+        # against a completion-derived window — so the content decides, not the
+        # path.
+        when = _parse_iso(fm.get("completed_at")) or _parse_iso(fm.get("started_at"))
+        if when is None or when < period_start:
+            continue
+        if newest is None or when > newest[0]:
+            newest = (when, str(fm.get("run_id") or path.stem))
+    if newest is None:
+        return False, ""
+    return True, newest[1]
+
+
+#: The hold reason the board shows when the run record vetoes a dispatch. One
+#: constant because `hold_reason` and `_is_task_due` are answering two questions
+#: about one fact, and every previous pair of those two disagreed by
+#: construction (#870, #558).
+RUN_SUCCESS_HOLD = "already ran this period"
+
+
+def _already_ran_this_period(task: dict, *, now: datetime.datetime) -> str:
+    """Run id of a successful run inside this task's own period, else ''.
+
+    The single source for both gates. Returns '' for a task with no declared
+    period — `frequency` absent and no `runs_per_day` — because there is then no
+    defensible window and a stale success must not silence a job forever.
+    """
+    task_id = task.get("id")
+    if task_id is None:
+        return ""
+    period_start = _run_period_start(task, now=now)
+    if period_start is None:
+        return ""
+    ok, run_id = _successful_run_this_period(
+        task_id, period_start=period_start)
+    return run_id if ok else ""
+
+
 def _utcnow() -> datetime.datetime:
     """Current UTC instant. Indirection exists so tests can pin it.
 
@@ -1042,8 +1171,7 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
         # own duration every cycle. For a task pinned to a one-hour window that
         # drift eventually steps past the window and skips a day, so allow a
         # little slack when a window is in force.
-        slack = min(3600.0, interval * 0.25) if _effective_preferred_hours(task) else 0.0
-        if elapsed < interval - slack:
+        if elapsed < interval - _due_slack_seconds(task):
             return False
     # A failed run keeps last_run untouched, so without this gate the task is
     # due again on the next tick — the retry storm.
@@ -1052,6 +1180,24 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
     if not _is_dependency_met(task, all_tasks, now=now):
         return False
     if not _is_preferred_hour(task):
+        return False
+    # ── The work already ran this period ─────────────────────────────────
+    # Last, on purpose: every gate above reads only the task file, so this is
+    # the one place that asks a second, independent account — the run record on
+    # disk — and it is only paid for by tasks that everything else already
+    # called due. It exists because the file every gate above reads is in the
+    # vault, and vault writers exist: task #82's completion stamp was reverted
+    # by an arch-review sweep 48 s after it landed on 2026-09-20, `last_run`
+    # went back a day, elapsed read a whole 24 h again on the next tick, and the
+    # task dispatched a second time 27 s after it finished. `hold_reason` asks
+    # the same helper, so the board cannot show runnable what the scheduler
+    # refuses to run (#1296, and the #870/#558 pair this file keeps citing).
+    ran_id = _already_ran_this_period(task, now=now)
+    if ran_id:
+        logger.info(
+            "Task #%s (%s): not due — run record %s reports `status: success` "
+            "inside this task's period, whatever `last_run` (%r) says",
+            task.get("id"), task.get("name"), ran_id, task.get("last_run"))
         return False
     return True
 
@@ -1111,6 +1257,13 @@ def hold_reason(task: dict, all_tasks: list[dict], *,
     if not _is_preferred_hour(task):
         window = _hour_windows(_effective_preferred_hours(task) or [])
         return f"outside hours {window}" if window else "outside hours"
+    # Same helper, same position in the order, so the board never paints green a
+    # dispatch the scheduler is refusing. This is the state a reverted stamp
+    # leaves behind: `last_run` a day stale, the window open, and the run record
+    # saying the job already ran — which a person has to be able to SEE, or it
+    # reads as a scheduler that silently skipped a night (#1296).
+    if _already_ran_this_period(task, now=now):
+        return RUN_SUCCESS_HOLD
     return None
 
 

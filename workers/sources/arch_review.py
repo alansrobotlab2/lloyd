@@ -28,7 +28,8 @@ Three properties decide whether this is safe, and they are the whole module:
 * **Every review edits production.** `~/lloyd` is the running tree, so a saved
   file is a deploy. `Write` is denied — the doc already exists and `Edit` is
   the only verb needed. Every other path the turn touched — anywhere in this
-  repo, and anywhere in the vault except `backlog/`, where its filings belong —
+  repo, and anywhere in the vault except `backlog/`, where its filings belong,
+  and `autonomy/`, whose task files are the scheduler's bookkeeping (#1296) —
   is reverted after the turn from a `git status` baseline taken before it, and
   a path that was *already* dirty is reported by content hash rather than
   reverted, because somebody else is mid-edit on it. What a `git status` sweep
@@ -154,6 +155,30 @@ DISALLOWED: tuple[str, ...] = (
 #: somebody thought of and one that covers what exists: a directory added to
 #: the vault next month is swept by default instead of silently not being.
 VAULT_UNSWEPT_PREFIXES = ("backlog/",)
+
+#: The other thing the vault sweep must never undo: not a directory that is
+#: exempt from the sweep, but a directory whose *writes belong to another
+#: process*. `autonomy/<id>-*.md` is the autonomy scheduler's own bookkeeping —
+#: `autonomy.run_task` stamps `last_run`/`last_attempt`/`next_run`/`updated` and
+#: appends the Activity Log line there when a run finishes — and a review turn
+#: that reverts it silently un-runs the run.
+#:
+#: The sweep decides by comparing the SET of dirty paths at turn end against the
+#: set at turn start, so a file that was clean at start and dirty at end is a
+#: stray by construction — which is exactly the normal case for a task file,
+#: because the nightly `autonomy-data-pipeline` pre-flight commits it before the
+#: turn opens. #915 covered the mirror case (already-dirty paths are reported,
+#: not reverted); this is the one that bit: task #82's success stamped the file
+#: at 13:07:04Z on 2026-09-20, the `doc:skills` turn closed 48 s later and
+#: `git checkout --`'d it back to the previous night, `next_run` fell due 27 s
+#: after the run finished, and the task dispatched a second time. Ten
+#: `autonomy/*` paths were swept across 09-13/09-18/09-20, five of them a hard
+#: `checkout` (tasks 24, 30, 58, 76, 82).
+#:
+#: Sparing is not blindness: `revert_strays` still reports the path, with an
+#: action that is not `checkout`, so a worker that really did edit a task file
+#: (#724) is still visible in the run record and on the ledger.
+SCHEDULER_OWNED_VAULT_PREFIXES = ("autonomy/",)
 
 #: Defaults for every knob, so a source config that predates a key still runs.
 DEFAULT_REVIEW_INTERVAL_DAYS = 30
@@ -876,7 +901,9 @@ doc edit is thrown away, while your filed items survive. Stay well inside it.
 
 Every file you write other than that one doc is reverted after the turn — \
 anywhere in this repository, and anywhere in the vault except `backlog/`, \
-where your filings belong. A file that was already modified before your turn \
+where your filings belong, and `autonomy/`, whose task files are the \
+scheduler's bookkeeping and are spared a revert while still being named in the \
+run record. A file that was already modified before your turn \
 is not reverted (somebody else is mid-edit) but any change you make to it is \
 reported. You cannot write memory or facts: those tools are not available to \
 you, because a document review has no business changing what Lloyd believes.
@@ -1021,6 +1048,17 @@ def _under(repo: Path, rel: str) -> Optional[Path]:
     return p
 
 
+def _scheduler_owned(rel: str) -> bool:
+    """True for a vault path whose legitimate writer is the autonomy scheduler.
+
+    `autonomy/<id>-*.md` front matter and Activity Log are what
+    `autonomy.run_task` stamps when a run finishes, and `autonomy-runs/**` is
+    the run record itself. Sparing them is about WHO writes, not about which
+    directory happens to be watched.
+    """
+    return rel.startswith(SCHEDULER_OWNED_VAULT_PREFIXES)
+
+
 def revert_strays(repo: Path, before: set[str], after: set[str],
                   keep: Iterable[str] = ()) -> list[dict]:
     """Undo every path this turn changed except the ones named in `keep`.
@@ -1031,11 +1069,22 @@ def revert_strays(repo: Path, before: set[str], after: set[str],
     people's work. A tracked path goes back to HEAD; an untracked one is
     unlinked. The baselines are taken with `-uall` so an untracked *directory*
     is never one entry to delete wholesale.
+
+    A scheduler-owned vault path is reported and left alone (see
+    `SCHEDULER_OWNED_VAULT_PREFIXES`). The path-diff was introduced to avoid
+    reverting the scheduler and only managed it for files already dirty at turn
+    start; a task file committed by the nightly pre-flight is clean at start,
+    so its legitimate mid-turn stamp landed in `after - before` and got
+    `git checkout --`'d — which un-ran the run and re-armed the task.
     """
     kept = set(keep)
     out: list[dict] = []
     for rel in sorted(after - before):
         if rel in kept:
+            continue
+        if repo == VAULT_ROOT and _scheduler_owned(rel):
+            out.append({"repo": repo.name, "path": rel,
+                        "action": "kept (scheduler-owned)"})
             continue
         if _is_tracked(repo, rel):
             _git(repo, "checkout", "--", rel)
