@@ -744,6 +744,22 @@ than changing what is in it.
 top-12 runs 41–648 ms over. The plan anticipated exactly this and called it a
 result rather than a tuning, which it is.
 
+**Re-measured at n=87, 2026-09-21 (#1335): not adopted.** The gold set grew to
+87 queries and the recall moved to global fusion over a 40-row pool, so the table
+above describes neither. One pinned snapshot, two runs per arm, paired per query
+against a baseline that repeated exactly (MRR 0.191):
+
+| arm | MRR | paired ΔMRR, 95% interval | better / worse | latency avg |
+|---|---|---|---|---|
+| baseline | 0.191 | — | — | 1,757–1,782 ms |
+| `--djev-rerank` (top 12) | 0.246 / 0.244 | +0.055 [−0.002, +0.112] / +0.053 [−0.001, +0.107] | 15/8, 16/7 | 2,300–2,315 ms |
+| `--djev-rerank-top 8` | 0.241 / 0.239 | +0.050 [−0.005, +0.107] / +0.048 [−0.007, +0.104] | 13/9, 13/10 | 2,194–2,279 ms |
+
+0 djev misses in 696 calls, 0 qmd rerank fallbacks. Consistent in sign and half
+the n=20 step, never clear of zero, and ~0.5 s slower. A change that is slower
+has to show a gain, so `RECALL_DJEV_RERANK` stays off. A djev that *replaces*
+the cross-encoder only has to match it, which is #1336.
+
 **Carry the caveat anyway.** The labelled set is 20 queries and 50 doc labels,
 and `agent_mcp/vault.py:172` puts the noise floor at 0.02 MRR. Reproducing +0.09
 three times against a deterministic baseline is much stronger than one run, but

@@ -3279,11 +3279,13 @@ revert it; `qmd/WORKLOG.md` section 7 is the long version of everything below.
   depth 4 several 240-row recalls queued on one daemon for 20-60 s each, past
   the 15 s client timeout. `QMD_RERANK_PARALLELISM` is not a speed knob.
 - **The recall asks for global fusion over a 40-row pool** with a floor of 5
-  for the `autonomy` collection (`RECALL_QMD_FUSION` in `agent_mcp/vault.py`,
-  with the pinned eval: hit rate at parity, MRR and NDCG up, ~1.4 s against
-  ~4.7 s). `"collection"` is the kill switch and restores #504's 240-row request
-  exactly. The floor was chosen by reading that eval's misses; the durable fix
-  is making autonomy task files retrievable.
+  for the three small collections it outscores wholesale, `autonomy`,
+  `architecture` and `skills` (`RECALL_QMD_FUSION` in `agent_mcp/vault.py`).
+  On the 87-query pinned eval (#1335) that is ~2.2 s against 7.5 s for
+  #504's 240-row request, ranking quality equivalent, doc_hit -0.07 with an
+  interval that only just reaches zero: the best fast setting, not a proven
+  equal. The autonomy-only floor it replaced lost -0.115. `"collection"` is the
+  kill switch and restores the 240-row request exactly.
 - **A rerank that could not run says so.** No VRAM for a ranking context used
   to be an HTTP 200 with fusion-order results. The daemon now returns
   `meta.reranked`, never caches a fallback score, and `app/qmd_health.py`

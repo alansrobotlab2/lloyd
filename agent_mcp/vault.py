@@ -159,7 +159,7 @@ RECALL_DOC_POOL = QMD_POOL_MAX
 #     collection  240   -            1.00     0.610       0.497  0.582    ~4.7 s   <- was
 #     collection   40   -            0.80     0.525       0.477  0.515
 #     global       40   -            0.95     0.558       0.512  0.588    ~1.3 s
-#     global       40   autonomy=5   1.00     0.578       0.532  0.603    ~1.4 s   <- deployed
+#     global       40   autonomy=5   1.00     0.578       0.532  0.603    ~1.4 s   <- deployed 09-19
 #     global       60   autonomy=5   1.00     0.546 MRR, 0.602 NDCG — inside the noise of 40
 #
 # n=20, so read 0.02 as noise: hit rate is at parity, MRR and NDCG are up, and
@@ -169,6 +169,30 @@ RECALL_DOC_POOL = QMD_POOL_MAX
 # and the durable fix is making task files retrievable (index their
 # `description`), after which the floor can go.
 #
+# **Re-measured on the 87-query set (2026-09-21, #1335), and the autonomy-only
+# floor did NOT hold.** One pinned snapshot per comparison, paired per query
+# against collection-240, 95% bootstrap intervals; p50 is per-query recall on the
+# pin beside the live daemon:
+#
+#     arm                               doc_hit                doc_recall             MRR     p50
+#     collection 240 (was)              0.563                  0.411                  0.166   7.5 s
+#     global 40, autonomy=5             -0.115 [-0.195,-0.034] -0.085 [-0.158,-0.018] +0.025  1.9 s
+#     global 40, autonomy/arch/skills=5 -0.069 [-0.138,+0.000] -0.050 [-0.110,+0.008] +0.035  2.2 s  <- deployed
+#     global 40, every collection=2     -0.092 [-0.172,-0.023] -0.071 [-0.138,-0.008] +0.024  2.1 s
+#     global 60, autonomy/arch/skills=5 -0.057 [-0.115,+0.000] -0.041 [-0.091,+0.004] +0.039  2.8 s
+#     global 80, autonomy=5             -0.103 [-0.172,-0.046] -0.083 [-0.144,-0.029] +0.029  3.1 s
+#
+# NDCG@10 is inside +-0.06 of zero on every arm. What global fusion loses is HITS,
+# and it loses them the way it lost autonomy's: the small collections are
+# outscored wholesale. `skills/retrieval-eval/SKILL.md` alone was four of the
+# twelve queries global-40 lost (global rank 78 or past 240, where per-collection
+# fusion had it at 13-50). A wider pool barely helps (80 is no better than 40);
+# floors on the small collections do. `architecture` (36 docs) and `skills` (249)
+# join `autonomy` (36). The remaining gap is -0.07 on doc_hit with an interval
+# that only just reaches zero: the best FAST setting measured, not a proven
+# equivalent. The 7.5 s per recall that buys the rest is not on offer (Alan,
+# 2026-09-21); a deep pool at speed is #1336's route (djev on GPU 2).
+#
 # `RECALL_QMD_FUSION = "collection"` is the kill switch: it restores the old
 # request exactly, 240-row pool included. An older daemon ignores the two new
 # keys, which would mean per-collection fusion at a 40-row pool — the worst arm
@@ -176,7 +200,7 @@ RECALL_DOC_POOL = QMD_POOL_MAX
 # constant directly.
 RECALL_QMD_FUSION = "global"
 RECALL_GLOBAL_DOC_POOL = 40
-RECALL_COLLECTION_FLOOR = {"autonomy": 5}
+RECALL_COLLECTION_FLOOR = {"autonomy": 5, "architecture": 5, "skills": 5}
 
 
 def recall_doc_pool() -> int:
@@ -220,7 +244,10 @@ DAILY_LOG_DEMOTE_FACTOR = 0.4
 #     rerank on, alpha 0.30, penalty still broken  MRR 0.436  NDCG@10 0.535
 #
 # Off wins at every alpha and is faster. The knob stays; the default flips.
-# n=20, so treat a 0.02 difference as noise — 0.11 is not.
+# That was n=20. Scaled from the 87-query set, where a paired MRR difference
+# carries a 95% interval of about +-0.06 (#1335, 2026-09-21), a paired gap at
+# n=20 is uncertain to about +-0.11: "off wins" rests on off winning at all five
+# alphas, not on any single gap being clear of noise.
 RECALL_GRAPH_RERANK = False
 RECALL_RERANK_ALPHA = 0.3      # only consulted when rerank is explicitly on
 
@@ -239,6 +266,15 @@ RECALL_RERANK_ALPHA = 0.3      # only consulted when rerank is explicitly on
 # 12 rather than 16: listwise `label_mass` measured 0.446, 0.807 and 0.965 at
 # n=16 on three corpora, so 16 is the edge of the safe window. `app/djev.py`
 # carries the numbers.
+#
+# Re-measured on the 87-query set over global fusion (#1335, 2026-09-21, one
+# pinned snapshot, two runs per arm, paired per query against the baseline):
+# top 12 is +0.053/+0.055 MRR, 95% interval [-0.002,+0.112] and [-0.001,+0.107],
+# 15-16 queries better against 7-8 worse; top 8 is +0.048/+0.050 with intervals
+# down to -0.007. Consistent in sign, half the n=20 step, never clear of zero, and
+# +0.4-0.5 s on every recall. A change that is slower has to show a gain, so the
+# arm stays off; a djev that REPLACES the cross-encoder only has to match it
+# (#1336).
 RECALL_DJEV_RERANK = False
 RECALL_DJEV_RERANK_TOP = 12
 RECALL_DEMOTE_DAILY_LOGS = True
@@ -278,7 +314,8 @@ RECALL_SEED_TOP_K = 10
 #     qmd rerank on    MRR 0.484   NDCG@10 0.590   doc_hit 0.95
 #     qmd rerank off   MRR 0.323   NDCG@10 0.450   doc_hit 0.85
 #
-# 0.16 MRR is not noise at n=20. The old docstring's "rarely changes top-1"
+# n=20; at that size a paired MRR gap is uncertain to about +-0.11 (scaled from
+# the +-0.06 measured at n=87, #1335), so 0.16 is clear of it, if not by much. The old docstring's "rarely changes top-1"
 # was measured against a daemon that never turned it off. Prefetch still
 # skips it explicitly (prefetch.py) because it runs inside a latency budget.
 RECALL_QMD_RERANK = True

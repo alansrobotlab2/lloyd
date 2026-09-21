@@ -30,7 +30,9 @@ def test_the_doc_leg_sends_fusion_pool_and_floor_together(wire):
     leg = [b for b in wire if len(b["searches"]) == 2][0]
     assert leg["fusion"] == "global"
     assert leg["limit"] == leg["candidateLimit"] == vault.RECALL_GLOBAL_DOC_POOL == vault.recall_doc_pool()
-    assert leg["collectionFloor"] == {"autonomy": 5}
+    # The measured floor (#1335, 87-query pinned eval): the three small
+    # collections global fusion outscores wholesale.
+    assert leg["collectionFloor"] == {"autonomy": 5, "architecture": 5, "skills": 5}
     assert leg["collections"] == list(vault.VAULT_SEGMENTS) and leg["rerank"] is True
 
 
@@ -62,6 +64,8 @@ def test_a_floor_is_only_sent_for_collections_in_the_request(wire):
     assert "collectionFloor" not in wire[0], "autonomy is not in this request"
     vault._qmd_daemon_search("anything at all", 10, ["memory", "autonomy"])
     assert wire[1]["collectionFloor"] == {"autonomy": 5}
+    vault._qmd_daemon_search("anything at all", 10, ["knowledge", "skills", "architecture"])
+    assert wire[2]["collectionFloor"] == {"skills": 5, "architecture": 5}
 
 
 def test_other_callers_keep_their_own_pool_arithmetic(wire):
