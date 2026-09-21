@@ -260,3 +260,64 @@ def _isolate_backlog_dedupe(tmp_path_factory, monkeypatch):
                         tmp_path_factory.mktemp("dedupe") / "dedupe.jsonl")
     monkeypatch.setattr(SIM, "semantic_candidates", lambda text, **kw: [])
     monkeypatch.setattr(SIM, "dedupe_config", lambda: dict(SIM.DEFAULTS))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_djev_shadow(tmp_path_factory):
+    """No test appends a row to the log the djev floors are calibrated from.
+
+    `~/.local/state/lloyd-djev/shadow.jsonl` is what `eval/djev/replay.py
+    --floors` reads, and step 5 of `architecture/djev.md` §9.3 is "let the
+    shadow rows accumulate, then set the floor from them" — a corpus that is
+    mostly fixtures yields a floor set from fixtures. Its three paths are
+    `Path.home()` literals bound at import (`app/djev_shadow.py:68-71`), and
+    three seams (`agent_mcp/backlog.py:529`, `agent_mcp/vault.py:1289`,
+    `scripts/memory/entity_semantic_gate.py:225`) call the recorder from code
+    that has no idea a test is running. Re-measured 2026-09-21 08:19Z over the
+    live log: 36 of its 44 `dedupe` rows carried one of two fixture titles and
+    27 of its 32 `rerank` rows carried an empty `meta`, in a file six hours
+    old — nothing decays, `_write()` only appends.
+
+    SESSION scope, not per test, because the recorder's worker is a daemon
+    thread that drains whenever it likes and `_write()` re-reads `SHADOW_LOG`
+    at write time (`:295`). `tests/test_djev_shadow.py` has patched these names
+    per test since the recorder landed and still leaked: after its `monkeypatch`
+    tears down, the module points at the home path again and the row arrives
+    there. Its own per-test patch still wins while the test runs — a narrower
+    patch applied later simply covers it — and restores TO this one afterwards.
+
+    **And deliberately no teardown, for the same reason.** The first cut of
+    this fixture restored the three names on session teardown and still left a
+    row in `$HOME/.local/state/lloyd-djev/shadow.jsonl` after
+    `HOME=$FH pytest tests/test_backlog_dedupe.py tests/test_backlog_spawn_loop.py`:
+    neither module calls `flush()`, so a job whose djev read outlasts pytest's
+    teardown lands wherever the module points then, and restoring put the home
+    path back exactly when a drain was in flight. Nothing reads these globals
+    after the session ends — the process exits — so the restore bought nothing
+    and cost the isolation. Measured after dropping it: the file is not created
+    at all.
+
+    Paths, not `LLOYD_DJEV_SHADOW=0`, because that variable is itself asserted
+    on: `test_djev_rerank_arm.py::test_the_eval_mutes_the_shadow_recorder`
+    reads it out of the process to prove `eval/run_eval.py:35` set it, and an
+    ambient mute makes that assertion hold with the line under test deleted. A
+    redirected path silences the same writes without touching the switch.
+
+    All three globals move together, because they are three independent leaks:
+    `_write()` opens `SHADOW_LOG`, `_record_pending_drops()` writes
+    `PENDING_DROPS`, and both `mkdir` `STATE_DIR`.
+
+    Pinned by `tests/test_djev_shadow_isolation.py`, whose child-pytest node is
+    #1324's reproduction (`HOME=$FH pytest tests/test_backlog_dedupe.py
+    tests/test_backlog_spawn_loop.py` must leave no shadow log in `$FH`) run as
+    an assertion, so the automod gate's own full-suite run — which inherits
+    `HOME` from `_child_env` — is covered by the same property.
+    """
+    try:
+        from app import djev_shadow
+    except Exception:          # module not importable in this test's env
+        return
+    root = tmp_path_factory.mktemp("djev-shadow")
+    djev_shadow.STATE_DIR = root
+    djev_shadow.SHADOW_LOG = root / "shadow.jsonl"
+    djev_shadow.PENDING_DROPS = root / "dropped_at_shutdown.json"

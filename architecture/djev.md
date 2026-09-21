@@ -816,7 +816,10 @@ rows = djev.rank(query, shortlist)   # ≤16 candidates, else ValueError; None o
    sends>`. Write the threshold, the floor, `calibrated_on` and
    `calibrated_hash` into the schema by hand, as the existing five do.
 5. Let the shadow rows accumulate, then set the floor from them
-   (`replay.py --floors`).
+   (`replay.py --floors`) — **after** quarantining the fixture rows still in
+   the log from before #1324 landed (§11), or the floor is a floor set from
+   tests. Once it is live, a run appends nothing: `wc -l` on the log across a
+   full suite moves only with production traffic.
 
 ### 9.4 Turning a schema into a gate
 
@@ -900,29 +903,6 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
 
 ## 11. Known gaps (2026-09-20)
 
-- **Test runs write to production's shadow log.** `tests/test_djev_shadow.py`
-  points `STATE_DIR` at `tmp_path` with `monkeypatch`, but the recorder's worker
-  is a daemon thread that outlives the fixture. It drains the queue after
-  teardown, into the real `~/.local/state/lloyd-djev/shadow.jsonl`.
-  `tests/test_backlog_dedupe.py` and `test_backlog_spawn_loop.py` call the
-  dedupe seam with no isolation at all. `tests/conftest.py` neither sets
-  `LLOYD_DJEV_SHADOW=0` nor moves the state dir, and every automod gate runs
-  the suite. Re-measured 2026-09-21 over the live log (91 rows spanning
-  01:55–07:09Z): **62 are fixtures**, 36 of 40 `dedupe` rows and 26 of 31
-  `rerank` rows (`meta: {}`, `actual: null`, one question), and the newest
-  fixture row landed that same morning — so the ratio has not decayed, the
-  rerank fixture count has more than doubled, and the 26 empty-`meta` rows are
-  now most of the seam rather than most of its head. Filed as #1324. The
-  dedupe fixtures were all answered, so each was a real read
-  on the single-sequence engine, and `replay.py --floors` reads their
-  `label_mass` as dedupe traffic. The rerank fixtures send an empty question
-  or hit a stubbed client and carry no answers, so they cannot move a floor,
-  but they inflate the seam's row count. Until this is fixed, drop rerank rows
-  with empty `meta`, and dedupe rows titled "http_fetch error body says only
-  the status code…" or "graph_refresh is advertised but never called…" (the
-  fixtures in `test_backlog_dedupe.py` and `test_backlog_spawn_loop.py`). The
-  fix is conftest's `_isolate_backlog_dedupe` pattern: mute and redirect for
-  every test.
 - **`SchemaDrift`'s message names `replay.py --calibrate`, which does not
   exist.** Calibration is `--corpus <c> --batch <n>` and a hand edit (§9.3).
 - **`djev_rank`'s `low_label_mass_indexes` uses a fixed 0.5.** It refuses
@@ -934,6 +914,72 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
   defaults to 1, which is wrong: omitted, it is `"auto"`.
 - **Engine contention** between shadow reads and tool calls (§5.3). It is
   harmless while every consumer is advisory.
+
+### Closed 2026-09-21 — test runs wrote to production's shadow log (#1324)
+
+**What it was.** `STATE_DIR`, `SHADOW_LOG` and `PENDING_DROPS` are
+`Path.home()` literals bound at import (`app/djev_shadow.py:68-71`) and
+`_write()` opens `SHADOW_LOG` on the recorder's daemon thread at *write* time
+(`:295`), so a per-test patch could not hold: `tests/test_djev_shadow.py`
+patched the three names and a queued job still drained after its `monkeypatch`
+tore down, into the corpus §9.3 step 5 reads. `tests/test_backlog_dedupe.py`
+and `test_backlog_spawn_loop.py` reached the seam with no shadow isolation at
+all — `_djev_shadow_dedupe` gates on the lexical `similar[:3]`, which
+conftest's `_isolate_backlog_dedupe` keeps supplying. Re-measured 2026-09-21
+08:19Z over the live log, 96 rows spanning 01:55:15Z→08:19:15Z: 36 of its 44
+`dedupe` rows carry one of the two fixture titles (32 ×
+"http_fetch error body says only the status code on a quarter of calls" at
+`tests/test_backlog_dedupe.py:58`, 4 × "graph_refresh is advertised but never
+called by any tool" at `tests/test_backlog_spawn_loop.py:792`), and 27 of its
+32 `rerank` rows carry an empty `meta` — the shape of `test_djev_shadow.py`'s
+direct `shadow(seam="rerank", state="s", questions={"q": {}})` calls. 63 fixture
+rows in a log six hours old, and `_write()` only appends: nothing rotates them
+and nothing decays.
+
+**What closes it.** `tests/conftest.py::_isolate_djev_shadow`, one
+session-scoped `autouse` fixture that moves all three globals into the session
+tmp dir and **does not restore them**. The first cut restored them at session
+teardown and still left a row in `$HOME/.local/state/lloyd-djev/shadow.jsonl`:
+neither backlog module calls `flush()`, so a read in flight when pytest finishes
+lands wherever the module points *then*, and the restore put the home path back
+at exactly that moment. Session scope is also what the per-test patch needed —
+`test_djev_shadow.py`'s `_isolated` now restores *to* the session dir, so a late
+drain has nowhere production to go. Paths are redirected rather than
+`LLOYD_DJEV_SHADOW=0` set, because
+`test_djev_rerank_arm.py::test_the_eval_mutes_the_shadow_recorder` reads that
+variable out of the process to prove `eval/run_eval.py:35` set it; an ambient
+mute would make that assertion hold with the line under test deleted.
+
+**The check.** `FH=$(mktemp -d); HOME=$FH .venvs/lloyd/bin/python -m pytest
+tests/test_backlog_dedupe.py tests/test_backlog_spawn_loop.py -q` → 72 passed,
+and `$FH/.local/state/lloyd-djev/shadow.jsonl` **does not exist**. That command
+is `tests/test_djev_shadow_isolation.py::test_a_child_pytest_run_leaves_no_shadow_log_in_its_home`,
+which failed on the base commit naming `['dedupe', 'dedupe']` in the file. The
+pin runs one extra node — this file's own create test, which calls `flush()` —
+so a recorder that recorded nothing anywhere could not pass it, and then
+requires a `dedupe` row naming that fixture to exist somewhere in the child's
+tree and not under its `HOME`: the positive control is the parsed row, not a
+directory that `mktemp` made anyway. Its three siblings pin the three globals
+together, the seam driven by a real `backlog_write_task` create, and the drain
+race at its mechanism; `tests/test_djev_doc_claims.py` pins this paragraph.
+`HOME` is redirected rather than the path patched because the globals
+bind at import — a patch cannot imitate a fresh process, and a fresh process is
+what a test run is. `scripts/automod/gate.py::_child_env` hands its pytest the
+real `HOME` (`grep -n DJEV scripts/automod/gate.py` → 0 hits), so this fixture,
+not the gate's environment, is what covers the suite every promotion runs — and
+what the gate's own suite cannot show is the real log's line count across a full
+run, which is why that count is a person's post-landing check.
+
+**What is left, and it is a person's call.** The 63 fixture rows counted at
+08:19Z — 36 `dedupe` under the two titles above plus 27 `rerank` with an empty
+`meta` — stay in the log; a code round does not edit a live state file. The
+count is a snapshot and rises by a couple of rows every time anyone falsifies
+this pin by removing the fixture, so quarantine by the RULE (drop `rerank` rows
+with an empty `meta`, and `dedupe` rows whose `meta.name` is one of those two
+titles), never by taking the last 63. Until that happens any floor read by
+`replay.py --floors` is fixture-dominated. Once this is live,
+`wc -l ~/.local/state/lloyd-djev/shadow.jsonl` across a full-suite run should
+move only with production traffic.
 
 ---
 
@@ -955,6 +1001,23 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
 - djev stays out of `models:` and out of `resolve_model_alias`.
 
 ## Review log
+
+- **2026-09-21 — #1324 closed, and the entry below is superseded on this
+  point.** It recorded "§11's fixture counts … with the leak still live
+  (#1324)"; §11 now carries that leak under a Closed subsection instead, and
+  `tests/conftest.py::_isolate_djev_shadow` is what closed it — one
+  session-scoped autouse fixture that moves `STATE_DIR`, `SHADOW_LOG` and
+  `PENDING_DROPS` into the session tmp dir and never restores them. Measured on
+  this change: `HOME=$FH pytest tests/test_backlog_dedupe.py
+  tests/test_backlog_spawn_loop.py` → 72 passed and no
+  `$FH/.local/state/lloyd-djev/shadow.jsonl`; the rows are still recorded, but
+  in the session shadow dir under pytest's basetemp (under `$FH` only when
+  `TMPDIR` says so), which is the whole point — and the gate-shaped full suite
+  (7,768 passed, 15 skipped, 2 xfailed)
+  left the real log at 96 rows before and after. What that does NOT settle is
+  in §11: the 63 fixture rows counted at 08:19Z are still in the file until
+  someone quarantines them by rule, so a floor read by `replay.py --floors` is
+  still fixture-dominated.
 
 - **2026-09-21 — `current`.** Checked every path, port, constant, config key and
   measured table against HEAD `485fa6c03e31`: the engine, the three tools, the
