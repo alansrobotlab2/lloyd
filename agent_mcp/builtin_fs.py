@@ -3,9 +3,15 @@
 
 Recreates the Claude Code built-in tools we lost when we ripped the SDK
 out. Names and input schemas mirror the SDK contracts so persisted
-session JSON, SOUL.md prompts, and inner_voice.pretooluse_deny rules all
-keep working unchanged. Output formatting (e.g. cat -n line prefix on
-Read) matches too.
+session JSON, the persona prompt surfaces, and inner_voice.pretooluse_deny
+rules all keep working unchanged. Output formatting (e.g. cat -n line
+prefix on Read) matches too.
+
+Two refusals stand in front of every write here, in this order: the write
+deny-set (`app.harness.protected_paths.write_deny_reason` — a rule about
+*where* a write may land, no session required), then the Read-before-write
+clobber gate below (a rule about *who looked*). They are separate on purpose:
+the config switch that disables the clobber gate must not disable the other.
 
 Mounted into the unified Server("lloyd") via agent_mcp/main.py MODULES.
 """
@@ -23,7 +29,7 @@ from pathlib import Path
 
 from mcp.types import Tool
 
-from agent_mcp._shared import get_bound_session, text_result
+from agent_mcp._shared import ErrorCode, get_bound_session, text_result
 from app.atomic_io import commit_lock, write_text_durable
 
 logger = logging.getLogger("lloyd-builtin-fs")
@@ -198,14 +204,59 @@ def _ledger_commit(mut: _Mutation) -> None:
         logger.warning("change ledger: commit failed for %s", mut.path, exc_info=True)
 
 
+def _protected_path_refusal(mut: _Mutation) -> str | None:
+    """The deny-set refusal for this mutation's target, or None to proceed.
+
+    Checked before anything else in `_gate_check`, and outside the `gate_on`
+    switch: this is a rule about *where* a write may land, not about whether a
+    session looked at the file first, so neither an unbound caller nor the
+    config switch that disables the clobber gate may open it. It runs ahead of
+    the create early-return for the same reason — otherwise removing a denied
+    file and writing it back is a route.
+
+    Fails closed. A deny-set that cannot load is not a deny-set that passed,
+    and the alternative — every write silently proceeding while the checker is
+    broken — is the exact hole #1049 exists to close. The failure is loud in
+    the result and in the log.
+    """
+    try:
+        from app.harness.protected_paths import write_deny_reason
+        label = write_deny_reason(mut.real or mut.path)
+    except Exception:  # noqa: BLE001 — an unloadable checker must not read as a pass
+        logger.exception("protected-path check unavailable for %s", mut.path)
+        return json.dumps({
+            "error": (f"{'Write' if mut.kind == 'write' else 'Edit'} refused: "
+                      f"the protected-path check could not run, so {mut.path} "
+                      f"is not being written. Report this rather than "
+                      f"working around it."),
+            "code": ErrorCode.PROTECTED_PATH,
+        })
+    if label is None:
+        return None
+    return json.dumps({
+        "error": (
+            f"{'Write' if mut.kind == 'write' else 'Edit'} refused: {mut.path} "
+            f"is protected ({label}). This lane refuses it for every session. "
+            f"Land the change through the route that validates it — "
+            f"`vault_write` or `automod_vault_land` for vault and prompt "
+            f"surfaces, an automod round for code — or ask Alan."
+        ),
+        "code": ErrorCode.PROTECTED_PATH,
+    })
+
+
 def _gate_check(mut: _Mutation) -> str | None:
     """The refusal, as a JSON error string, or None to proceed.
 
-    Skipped entirely when no session is bound: unit tests and legacy callers
-    dispatch straight into these handlers with no aggregator context, and a
-    gate that fired there would fail `tests/test_mcp_layer.py` rather than
-    protect anything.
+    The write deny-set runs first and unconditionally (see
+    `_protected_path_refusal`). What follows is skipped entirely when no
+    session is bound: unit tests and legacy callers dispatch straight into
+    these handlers with no aggregator context, and a gate that fired there
+    would fail `tests/test_mcp_layer.py` rather than protect anything.
     """
+    refusal = _protected_path_refusal(mut)
+    if refusal is not None:
+        return refusal
     if not mut.gate_on:
         return None
     if mut.kind == "write" and not mut.existed:

@@ -1,4 +1,9 @@
-"""Structural check for shell commands that delete a protected tree wholesale.
+"""What may be destroyed, and what may be written: one module, two policies.
+
+The first is a structural check for shell commands that delete a protected tree
+wholesale. The second, added by #1049, is the write deny-set the `Write`/`Edit`
+lane consults — a different question, over a different surface, answered from
+the same place so the two cannot drift into disagreeing about what is sacred.
 
 `safety._HARD_DENY_PATTERNS` matched `rm -rf` only when the flags were fused
 and the target began with a bare `/`, `~` or `$HOME`. That shape is one
@@ -37,10 +42,16 @@ sandboxed ones.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import logging
 import os
 import re
 import shlex
+from collections.abc import Sequence
 from dataclasses import dataclass
+
+logger = logging.getLogger("lloyd-protected-paths")
 
 
 @dataclass(frozen=True)
@@ -71,6 +82,155 @@ def protected_roots() -> list[Root]:
         roots.append(Root(lloyd_here, "lloyd tree", True))
     roots.append(Root(home, "home directory", False))
     return roots
+
+
+# ---------------------------------------------------------------------------
+# The write deny-set — the file-tool lane's half of the same protection
+# ---------------------------------------------------------------------------
+#
+# Everything above answers a question about a *shell command*. The `Write` and
+# `Edit` tools never reach a shell: `agent_mcp.builtin_fs` takes an absolute
+# path and writes it, and until #1049 nothing on that lane compared the path to
+# anything but "did you Read it first". So the shorter route to the identity
+# file was two tool calls — Read, then Write — while the longer one had a
+# checker.
+#
+# This deny-set is deliberately NOT `protected_roots()`. That one exists to
+# catch a wholesale *delete*, so its roots are the vault, the lloyd tree and
+# $HOME; refusing writes under those would refuse every ordinary vault note and
+# every file a self-modification round writes into its own worktree — a larger
+# outage than the hole. A write predicate needs the surfaces whose *contents*
+# are load-bearing on their own: the credentials beside the agent's home, the
+# supervisor/guardian/service units an agent must not rewire from a chat turn,
+# the interpreter those units run on, and the one vault file that *is* the
+# system prompt.
+#
+# Membership is exactly this one constant. `agent_mcp/builtin_fs.py` holds no
+# path literal of its own, and no other caller keeps a copy — a set that lives
+# in two places is a set that diverges, which is what the four earlier
+# spellings of "protected" on this box did (L0 prose, the Bash regexes, the
+# automod diff globs, and `protected_roots`).
+#
+# Entries are home-relative templates rather than `app.paths` constants:
+# `LLOYD_HOME` is *code*-relative, so inside a worktree it names the worktree,
+# and a deny-set that followed the code would protect the copy while leaving
+# the live tree open. `Path.home()/"obsidian"` is what `VAULT_ROOT` already is
+# (`app/paths.py:11`), so the vault entry agrees with it on this box today.
+PROTECTED_WRITE_ROOTS: tuple[tuple[str, str], ...] = (
+    ("~/.openclaw", "the OpenClaw credential tree"),
+    ("~/lloyd/agent-services", "the supervisor, guardian and service units"),
+    ("~/lloyd/.venvs", "the interpreter the lloyd services run on"),
+    ("~/obsidian/lloyd/SOUL.md", "the identity file loaded into every system prompt"),
+)
+
+#: Lifted in code or not at all. A `ContextVar`, not an argument: the model
+#: controls the tool-arguments dict, and it controls `_meta` and the session id
+#: that arrive beside them, so an authorisation readable from any of those is a
+#: key the model can turn. A contextvar is settable only by Python already
+#: running in this process — a job runner wrapping its own dispatch — and
+#: `asyncio.to_thread` copies the context, so a grant taken on the event loop
+#: is still in force on the worker thread that performs the write.
+_write_grant: "contextvars.ContextVar[tuple[str, ...] | None]" = contextvars.ContextVar(
+    "lloyd_protected_write_grant", default=None)
+
+
+def protected_write_roots() -> list[tuple[str, str]]:
+    """`PROTECTED_WRITE_ROOTS` resolved to realpaths, computed per call.
+
+    Per call so a relocated `HOME` (a test, a container) moves the set with it,
+    exactly like `protected_roots()`. `realpath` rather than `normpath` so a
+    symlink and its target are one answer, and that answer is judged by the
+    same rule the write itself will be.
+    """
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for template, label in PROTECTED_WRITE_ROOTS:
+        expanded = os.path.expanduser(template)
+        if not expanded:
+            continue
+        real = os.path.realpath(expanded)
+        if real in seen:
+            continue
+        seen.add(real)
+        out.append((real, label))
+    return out
+
+
+def _covers(root: str, real: str) -> bool:
+    """Is `real` the root itself or something below it? Whole-component only."""
+    return real == root or real.startswith(root.rstrip("/") + os.sep)
+
+
+def write_deny_reason(target: str) -> str | None:
+    """The label of the deny-set entry covering `target`, or None to allow it.
+
+    Realpath-anchored prefix matching, never a suffix match, in both
+    directions. Realpath-first is what keeps an automod round able to write its
+    own worktree: the round's tree can hold a directory named like a deny entry
+    at a path outside the set, and a `**/agent-services/**`-style suffix rule
+    would refuse that copy — which is precisely the file the round was opened
+    to change. It also means a link standing inside a denied directory is
+    judged by where it points: writing *through* one lands outside the set, and
+    a link pointing into the set is refused from a permitted directory too.
+
+    Resolves `target` itself, so a caller that has no realpath to hand cannot
+    skip the check by forgetting to resolve one.
+    """
+    if not target:
+        return None
+    real = os.path.realpath(target)
+    granted = _write_grant.get()
+    for root, label in protected_write_roots():
+        if not _covers(root, real):
+            continue
+        if granted is not None and (
+                # An empty grant list means the whole set; a narrowed one means
+                # only those locations, so a job handed two loaded-memory files
+                # does not also get the service units.
+                not granted
+                or any(_covers(os.path.realpath(os.path.expanduser(g)), real)
+                       for g in granted)):
+            return None
+        return label
+    return None
+
+
+def grant_protected_writes(reason: str,
+                           paths: Sequence[str] | None = None) -> contextvars.Token:
+    """Lift the write deny-set for this context; return the token that undoes it.
+
+    `reason` is required and logged, because an authorisation nobody can name
+    is an authorisation nobody revokes. `paths` narrows the lift to those
+    locations (an empty sequence lifts the whole set).
+
+    Callers are job runners inside this process. Nothing here reads the
+    tool-arguments dict, `_meta`, or the session id, so a turn cannot lift its
+    own denial — which is the entire property this function exists to provide.
+    """
+    granted = tuple(os.path.realpath(os.path.expanduser(p)) for p in paths) if paths else ()
+    token = _write_grant.set(granted)
+    logger.info("protected writes granted (%s): %s", reason,
+                list(granted) or "the whole deny-set")
+    return token
+
+
+def release_protected_writes(token: contextvars.Token) -> None:
+    _write_grant.reset(token)
+
+
+def protected_writes_granted() -> "tuple[str, ...] | None":
+    """The active lift, or None while the deny-set is in force. Tests and /state."""
+    return _write_grant.get()
+
+
+@contextlib.contextmanager
+def allow_protected_writes(reason: str, paths: Sequence[str] | None = None):
+    """Scoped `grant_protected_writes`, so a grant cannot outlive its `with`."""
+    token = grant_protected_writes(reason, paths)
+    try:
+        yield
+    finally:
+        release_protected_writes(token)
 
 
 _GLOB = re.compile(r"[*?\[]")

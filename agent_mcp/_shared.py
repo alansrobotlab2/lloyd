@@ -102,6 +102,12 @@ class ErrorCode:
     LOCK_TIMEOUT = "LOCK_TIMEOUT"          # Another writer held the commit lock
                                            # past the wait; retry, do not
                                            # assume the write happened.
+    PROTECTED_PATH = "PROTECTED_PATH"      # The target is on the write
+                                           # deny-set (`app.harness.
+                                           # protected_paths`): refused for
+                                           # every session, bytes unchanged.
+                                           # Distinct from PATH_ESCAPE, which
+                                           # is about leaving the vault.
 
 
 def _err(message: str, code: str = ErrorCode.INTERNAL, **extra: Any) -> dict:

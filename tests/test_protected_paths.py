@@ -14,9 +14,14 @@ nothing here depends on the live vault.
 
 from __future__ import annotations
 
+import ast
+import re
+from pathlib import Path
+
 import pytest
 
 from app.harness import protected_paths
+from app.harness import protected_paths as PP
 from app.harness.safety import check_bash_command
 
 
@@ -127,3 +132,165 @@ def test_safety_hook_passes_cwd_through(tree):
         session_id="t", tool_name="Bash",
         tool_input={"command": "rm -rf ./*", "cwd": str(tree / "obsidian")}))
     assert (out.get("hookSpecificOutput") or {}).get("permissionDecision") == "deny"
+
+
+# ── the write deny-set: one constant, one consult site ──────────────────────
+#
+# `protected_roots()` above answers "may this command destroy this tree"; the
+# write deny-set answers "may this tool write to this path". Both live in this
+# module so the two policies cannot drift into disagreeing about what is
+# sacred — which is what the four separate spellings of "protected" on this box
+# did before #1049 (the L0 prose, the Bash regexes, the automod diff globs, and
+# `protected_roots` itself).
+
+REPO = Path(__file__).resolve().parent.parent
+FS_LANE = REPO / "agent_mcp" / "builtin_fs.py"
+
+
+@pytest.fixture()
+def wtree(tmp_path, monkeypatch):
+    """Scratch `$HOME` with every deny entry present, as the fs-lane tests have it."""
+    home = tmp_path / "home"
+    for rel in ("obsidian/lloyd/SOUL.md", ".openclaw/config.json",
+                "lloyd/agent-services/supervisor/conf.d/agent-backend.conf",
+                "lloyd/.venvs/lloyd/bin/python"):
+        p = home / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def test_the_write_deny_set_is_exactly_one_constant():
+    """Membership is one module-level tuple, and it is the only place a denied
+    write path is spelled."""
+    entries = dict(PP.PROTECTED_WRITE_ROOTS)
+    assert len(entries) == 4, list(entries)
+    assert set(entries) == {
+        "~/.openclaw", "~/lloyd/agent-services", "~/lloyd/.venvs",
+        "~/obsidian/lloyd/SOUL.md",
+    }, list(entries)
+    assert all(entries.values()), "every entry must say what it is"
+
+
+def test_the_write_deny_set_is_not_the_delete_roots(wtree):
+    """Denying `protected_roots()` for writes would refuse every vault note and
+    every file a round writes in its own worktree: those roots are `$HOME`, the
+    vault and the whole lloyd tree. Pinned so nobody 'simplifies' the two sets
+    into one again."""
+    denied = {root for root, _ in PP.protected_write_roots()}
+    assert denied, "an empty deny-set would pass this test and protect nothing"
+    home = str(wtree.resolve())
+    assert str((wtree / "obsidian").resolve()) not in denied, (
+        "the vault is writable; one file inside it is not")
+    assert str((wtree / "lloyd").resolve()) not in denied, (
+        "the code tree is writable; two directories inside it are not")
+    assert home not in denied
+
+
+def test_write_deny_reason_matches_whole_path_components_only(wtree):
+    inside = wtree / "lloyd" / "agent-services" / "supervisor" / "conf.d" / "c.conf"
+    label = PP.write_deny_reason(str(inside))
+    assert label == dict(PP.PROTECTED_WRITE_ROOTS)["~/lloyd/agent-services"], label
+    # A sibling whose name merely starts with an entry's name is outside it.
+    assert PP.write_deny_reason(str(wtree / "lloyd" / "agent-services-extra" / "r.md")) is None
+    assert PP.write_deny_reason(str(wtree / "lloyd" / ".venvs-backup" / "x")) is None
+    # The entry itself is denied, and so is a bare directory below it.
+    assert PP.write_deny_reason(str(wtree / "lloyd" / "agent-services")) is not None
+    assert PP.write_deny_reason(str(wtree / "lloyd")) is None
+    assert PP.write_deny_reason("") is None
+
+
+def test_a_symlink_is_judged_by_where_it_points(wtree, tmp_path):
+    """Realpath-first cuts both ways: a link standing outside the set that
+    points into it is refused, and one pointing out of it is allowed — the
+    bytes are what the rule is about."""
+    into = tmp_path / "points-in.md"
+    into.symlink_to(wtree / "obsidian" / "lloyd" / "SOUL.md")
+    assert PP.write_deny_reason(str(into)) is not None
+    real_note = tmp_path / "note.md"
+    real_note.write_text("x")
+    link = wtree / "obsidian" / "lloyd" / "link-out.md"
+    link.symlink_to(real_note)
+    assert PP.write_deny_reason(str(link)) is None
+
+
+def test_granting_lifts_the_set_and_expiring_relifts_it(wtree):
+    target = str(wtree / ".openclaw" / "config.json")
+    assert PP.write_deny_reason(target) is not None
+    token = PP.grant_protected_writes("test: the whole set")
+    try:
+        assert PP.write_deny_reason(target) is None
+    finally:
+        PP.release_protected_writes(token)
+    assert PP.write_deny_reason(target) is not None
+    assert PP.protected_writes_granted() is None
+    with PP.allow_protected_writes("test: scoped"):
+        assert PP.write_deny_reason(target) is None
+    assert PP.write_deny_reason(target) is not None
+
+
+def test_a_narrowed_grant_lifts_only_what_it_names(wtree):
+    soul = str(wtree / "obsidian" / "lloyd" / "SOUL.md")
+    venv = str(wtree / "lloyd" / ".venvs" / "lloyd" / "bin" / "python")
+    with PP.allow_protected_writes("test: one entry", paths=["~/lloyd/.venvs"]):
+        assert PP.write_deny_reason(venv) is None
+        assert PP.write_deny_reason(soul) is not None
+    # Lifting `~/lloyd/.venvs` must not lift a sibling that shares its prefix.
+    with PP.allow_protected_writes("test: prefix sibling", paths=["~/lloyd/.venvs"]):
+        assert PP.write_deny_reason(str(wtree / "lloyd" / ".venvs-extra" / "f")) is None
+
+
+def test_grant_requires_a_reason():
+    """An authorisation nobody can name is an authorisation nobody revokes."""
+    with pytest.raises(TypeError):
+        PP.grant_protected_writes()  # type: ignore[call-arg]
+
+
+def test_the_fs_lane_holds_no_path_literal_of_its_own():
+    """The clause-3 grep, run as written: the rule lives in one module, so the
+    lane that applies it may not keep a copy of any entry — a second spelling
+    is how the earlier four lists diverged."""
+    offenders = [line for line in FS_LANE.read_text(encoding="utf-8").splitlines()
+                 if re.search(r"openclaw|agent-services|\.venvs|SOUL", line)]
+    assert offenders == [], offenders
+
+
+def test_the_deny_set_is_consulted_from_one_place_in_the_write_path():
+    """One consult site, reached first, ahead of the `gate_on` switch. A check
+    a config switch can switch off is not a location rule, and a second copy of
+    it somewhere else is how two checks start disagreeing. Counted on the
+    syntax tree, not by grep: the name also appears in prose, and a test that
+    counts sentences is a test that fails when somebody improves a comment."""
+    tree = ast.parse(FS_LANE.read_text(encoding="utf-8"))
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    gate, refusal = funcs["_gate_check"], funcs["_protected_path_refusal"]
+
+    def calls(node):
+        return [n.func.id for n in ast.walk(node)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+
+    assert calls(refusal).count("write_deny_reason") == 1, calls(refusal)
+    assert "_protected_path_refusal" in calls(gate), calls(gate)
+    refusal_line = min(n.lineno for n in ast.walk(gate)
+                       if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                       and n.func.id == "_protected_path_refusal")
+    gate_on_line = min(n.lineno for n in ast.walk(gate)
+                       if isinstance(n, ast.Attribute) and n.attr == "gate_on")
+    assert refusal_line < gate_on_line, (
+        "the location check must run before the session-scoped clobber gate")
+    src = FS_LANE.read_text(encoding="utf-8")
+    assert "PROTECTED_PATH" in src, "the refusal must carry the standard code"
+
+
+def test_no_other_write_lane_consults_the_deny_set():
+    """`vault_write` and `automod_vault_land` are sanctioned writers with their
+    own root checks and their own validation, and the 06:00 nightly job runs on
+    them; the deny-set stops at the fs lane so it cannot fail that run."""
+    for rel in ("agent_mcp/vault.py", "agent_mcp/automod.py", "agent_mcp/memory_ops.py",
+                "app/harness/safety.py", "app/harness/mcp_pool.py", "agent_mcp/main.py"):
+        path = REPO / rel
+        assert path.exists(), rel
+        src = path.read_text(encoding="utf-8")
+        assert "write_deny_reason" not in src, rel
+        assert "PROTECTED_WRITE_ROOTS" not in src, rel
