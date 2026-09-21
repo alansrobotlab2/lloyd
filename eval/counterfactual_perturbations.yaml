@@ -3,6 +3,35 @@ _comment: Deterministic counterfactual perturbations for the retrieval eval (#54
   graph data at eval time. The pinned corpus and vault_recall_queries.yaml ground
   truth are not read by the generator.
 perturbations:
+- id: alarm-comes-back-after-fixed
+  axis_changed: qualifier
+  old_value: fixed
+  new_value: deleted
+  perturbed_query: the alert keeps coming back after I deleted it which note explains
+    an alarm that outlives its cause
+  expected_to_move: []
+  expected_pinned:
+  - alert
+- id: ambient-prefetch-ttl-reclaim
+  axis_changed: entity
+  old_value: background context
+  new_value: Ambient Turns
+  perturbed_query: what finally frees Ambient Turns queued for a session that never
+    takes another turn?
+  expected_to_move:
+  - Ambient Turns
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: automod-to-entity-guard
+  axis_changed: entity
+  old_value: self-modification round
+  new_value: Lloyd automod
+  perturbed_query: What does a Lloyd automod run before it can land, and how does
+    it know a memory change broke retrieval?
+  expected_to_move:
+  - Lloyd automod
+  expected_pinned: []
+  sibling_source: kg_alias_table
 - id: autonomy-pipeline
   axis_changed: entity
   old_value: autonomy pipeline
@@ -12,6 +41,16 @@ perturbations:
   - Data Pipeline
   expected_pinned:
   - autonomy
+  sibling_source: kg_alias_table
+- id: autonomy-task-to-skill
+  axis_changed: entity
+  old_value: autonomy task
+  new_value: Autonomy Scheduler
+  perturbed_query: What does an Autonomy Scheduler actually execute, and how is a
+    recurring pipeline different from a one-off task?
+  expected_to_move:
+  - Autonomy Scheduler
+  expected_pinned: []
   sibling_source: kg_alias_table
 - id: backlog-363
   axis_changed: entity
@@ -30,6 +69,52 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - Backlog
+- id: bash-arrays-vs-strings
+  axis_changed: artifact
+  old_value: filenames
+  new_value: package versions
+  perturbed_query: How do I loop over package versions safely in bash, and what is
+    the common mistake?
+  expected_to_move: []
+  expected_pinned:
+  - bash
+- id: browser-tool-falls-back
+  axis_changed: artifact
+  old_value: HTTP request
+  new_value: WebSocket session
+  perturbed_query: why the browser tool sometimes quietly gives up and uses a raw
+    WebSocket session instead
+  expected_to_move: []
+  expected_pinned:
+  - browser tool
+- id: browser-tool-validation
+  axis_changed: entity
+  old_value: browser tool
+  new_value: Browser Extraction
+  perturbed_query: How do I tell a Browser Extraction that is wired wrong from one
+    that is simply not configured?
+  expected_to_move:
+  - Browser Extraction
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: cheaper-model-every-turn
+  axis_changed: qualifier
+  old_value: cheap
+  new_value: biggest
+  perturbed_query: the argument for sending most turns to a biggest model and only
+    the hard ones to the expensive one
+  expected_to_move: []
+  expected_pinned:
+  - expensive one
+- id: check-that-cannot-see-its-input
+  axis_changed: qualifier
+  old_value: cannot read
+  new_value: always reads
+  perturbed_query: the note about a check that reports a verdict about an input it
+    always reads
+  expected_to_move: []
+  expected_pinned:
+  - guard
 - id: classifier-v4
   axis_changed: qualifier
   old_value: upgrade
@@ -38,6 +123,72 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - mention classifier
+- id: config-yaml-readonly
+  axis_changed: qualifier
+  old_value: never
+  new_value: sometimes
+  perturbed_query: Why must config.yaml sometimes be rewritten by a running job, and
+    where does runtime UI state go instead?
+  expected_to_move: []
+  expected_pinned:
+  - config.yaml
+- id: counterfactual-to-trend-audit
+  axis_changed: entity
+  old_value: retrieval eval
+  new_value: Knowledge Health Report
+  perturbed_query: How does the Knowledge Health Report tell a stale index from a
+    real regression, and where are the verdict rules that use that number?
+  expected_to_move:
+  - Knowledge Health Report
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: djev-decision-engine-integration
+  axis_changed: qualifier
+  old_value: second GPU
+  new_value: third GPU
+  perturbed_query: which small engine answers typed yes-or-no questions off the mostly-idle
+    third GPU, and what do its scores not mean?
+  expected_to_move: []
+  expected_pinned:
+  - yes-or-no
+- id: docker-volumes-uv-cache
+  axis_changed: qualifier
+  old_value: re-downloading
+  new_value: re-building
+  perturbed_query: How do I keep uv from re-building wheels on every container build?
+  expected_to_move: []
+  expected_pinned:
+  - wheels
+- id: dream-to-skill-edit
+  axis_changed: entity
+  old_value: dream consolidation
+  new_value: Nightly Skills Management
+  perturbed_query: What does the Nightly Skills Management pass change, and which
+    loop decides whether a changed skill stays?
+  expected_to_move:
+  - Nightly Skills Management
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: email-pipeline-to-daily-note
+  axis_changed: entity
+  old_value: morning briefing
+  new_value: morning-brief
+  perturbed_query: What happens to the mail the morning-brief summarizes, and where
+    does that summary end up?
+  expected_to_move:
+  - morning-brief
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: entity-guard-to-alias-table
+  axis_changed: entity
+  old_value: knowledge graph
+  new_value: Memory Graph
+  perturbed_query: What stops the Memory Graph from merging two different systems,
+    and which table decides what counts as the same name?
+  expected_to_move:
+  - Memory Graph
+  expected_pinned: []
+  sibling_source: kg_alias_table
 - id: entity-resolution-sweep
   axis_changed: entity
   old_value: entity resolution sweep
@@ -47,6 +198,51 @@ perturbations:
   - Semantic Entity Resolution
   expected_pinned: []
   sibling_source: kg_alias_table
+- id: eval-artifact-absolute-path
+  axis_changed: qualifier
+  old_value: worktree
+  new_value: live checkout
+  perturbed_query: Where does the eval write its artifact when an automod round runs
+    it from a live checkout?
+  expected_to_move: []
+  expected_pinned:
+  - artifact
+- id: eval-corpus-naming-conventions
+  axis_changed: artifact
+  old_value: baseline artifacts
+  new_value: session transcripts
+  perturbed_query: What are the naming rules for the eval corpus files, and where
+    do the session transcripts live?
+  expected_to_move: []
+  expected_pinned:
+  - naming rules
+- id: eval-north-star-candidate
+  axis_changed: qualifier
+  old_value: not simply recall
+  new_value: exactly recall
+  perturbed_query: What would the eval's single headline metric be, and why is it
+    exactly recall?
+  expected_to_move: []
+  expected_pinned:
+  - headline metric
+- id: facts-that-contradict
+  axis_changed: entity
+  old_value: memory
+  new_value: Fact Store
+  perturbed_query: how the Fact Store notices that two things it believes about the
+    same system disagree
+  expected_to_move:
+  - Fact Store
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: git-signals-in-async-code
+  axis_changed: qualifier
+  old_value: can't
+  new_value: always
+  perturbed_query: Why always I catch SIGINT inside an asyncio callback?
+  expected_to_move: []
+  expected_pinned:
+  - asyncio
 - id: godnode-threshold
   axis_changed: qualifier
   old_value: why does it exist
@@ -55,6 +251,43 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - FACT_GODNODE_THRESHOLD
+- id: gpu-daemon-ipc-timeout
+  axis_changed: entity
+  old_value: GPU daemon
+  new_value: LiveKit Agents
+  perturbed_query: Why does a LiveKit Agents report a monotonic timeout against a
+    process that is clearly alive?
+  expected_to_move:
+  - LiveKit Agents
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: gpu-model-naming-collision
+  axis_changed: qualifier
+  old_value: different
+  new_value: identical
+  perturbed_query: Why does the hardware inventory report two identical GPUs for the
+    same machine?
+  expected_to_move: []
+  expected_pinned:
+  - GPU
+- id: gpu-ram-thin-should-not-reboot
+  axis_changed: qualifier
+  old_value: thin
+  new_value: abundant
+  perturbed_query: why is it a bad idea to boot the big model again just because free
+    memory looks a bit abundant
+  expected_to_move: []
+  expected_pinned:
+  - model
+- id: grafana-monitoring-stack
+  axis_changed: qualifier
+  old_value: small
+  new_value: large
+  perturbed_query: What does the Grafana deployment on this machine consist of and
+    how is its database kept large?
+  expected_to_move: []
+  expected_pinned:
+  - Grafana
 - id: graph-quality
   axis_changed: qualifier
   old_value: noise
@@ -63,6 +296,44 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - graph
+- id: graph-rerank-ab-cache
+  axis_changed: qualifier
+  old_value: A/B tested
+  new_value: never measured
+  perturbed_query: How was the graph re-ranking of recalled documents never measured,
+    and what did the production read say?
+  expected_to_move: []
+  expected_pinned:
+  - production
+- id: groundskeeper-queue-corruption
+  axis_changed: qualifier
+  old_value: corrupted
+  new_value: emptied
+  perturbed_query: What emptied the groundskeeper survey queue, and what now guards
+    its size?
+  expected_to_move: []
+  expected_pinned:
+  - queue
+- id: guardian-alert-to-retraction
+  axis_changed: entity
+  old_value: guardian
+  new_value: Groundskeeper
+  perturbed_query: What happens after the Groundskeeper raises an alert, and what
+    is the defect in how that alert ever gets retracted?
+  expected_to_move:
+  - Groundskeeper
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: guardian-to-backlog
+  axis_changed: entity
+  old_value: guardian
+  new_value: Self-mod guardian
+  perturbed_query: What does the Self-mod guardian do after it detects a failure,
+    and where does the backlog item it files come from?
+  expected_to_move:
+  - Self-mod guardian
+  expected_pinned: []
+  sibling_source: kg_alias_table
 - id: harness-tools
   axis_changed: artifact
   old_value: tool calls
@@ -80,6 +351,52 @@ perturbations:
   - Voice Mode
   expected_pinned: []
   sibling_source: kg_alias_table
+- id: inner-voice-to-surface
+  axis_changed: entity
+  old_value: inner voice
+  new_value: Inner Voice Observer
+  perturbed_query: What does Inner Voice Observer decide about a turn, and where do
+    its signals end up on the UI?
+  expected_to_move:
+  - Inner Voice Observer
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: isaac-gr00t-n17
+  axis_changed: artifact
+  old_value: humanoid foundation model
+  new_value: manipulation policy
+  perturbed_query: What is the current NVIDIA manipulation policy release, and what
+    does the local analysis compare it against?
+  expected_to_move: []
+  expected_pinned:
+  - NVIDIA
+- id: job-that-changes-its-own-code
+  axis_changed: qualifier
+  old_value: rewriting
+  new_value: deleting
+  perturbed_query: the job that keeps deleting the code it itself runs in
+  expected_to_move: []
+  expected_pinned:
+  - code
+- id: json-filter-epoch-vs-iso
+  axis_changed: qualifier
+  old_value: zero rows
+  new_value: every row
+  perturbed_query: Why does filtering a JSONL log by a date string select every row
+    when the file has thousands?
+  expected_to_move: []
+  expected_pinned:
+  - JSONL
+- id: kg-dedup-key
+  axis_changed: entity
+  old_value: knowledge graph
+  new_value: Lloyd Memory Graph
+  perturbed_query: Which field identifies one fact in the Lloyd Memory Graph store,
+    and why is fact_id not it?
+  expected_to_move:
+  - Lloyd Memory Graph
+  expected_pinned: []
+  sibling_source: kg_alias_table
 - id: kg-maintenance-tasks
   axis_changed: entity
   old_value: knowledge graph
@@ -89,6 +406,16 @@ perturbations:
   - Entity Graph
   expected_pinned:
   - autonomy
+  sibling_source: kg_alias_table
+- id: kg-rebuild-abandoned
+  axis_changed: entity
+  old_value: knowledge graph
+  new_value: Entity Graph
+  perturbed_query: Why was the 2026-09-03 Entity Graph rebuild abandoned instead of
+    fixed?
+  expected_to_move:
+  - Entity Graph
+  expected_pinned: []
   sibling_source: kg_alias_table
 - id: lloyd-vllm-rel
   axis_changed: entity
@@ -100,6 +427,46 @@ perturbations:
   expected_pinned:
   - lloyd
   sibling_source: kg_alias_table
+- id: mcp-transport-error-recovery
+  axis_changed: entity
+  old_value: MCP server
+  new_value: GitHub MCP Server
+  perturbed_query: What are the documented recovery steps when an GitHub MCP Server's
+    transport dies mid-session?
+  expected_to_move:
+  - GitHub MCP Server
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: memory-capture-to-kg
+  axis_changed: entity
+  old_value: knowledge graph
+  new_value: Memory Graph
+  perturbed_query: What happens to a memory the periodic capture job writes, before
+    the Memory Graph can use it?
+  expected_to_move:
+  - Memory Graph
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: memory-line-contradicts-vault
+  axis_changed: entity
+  old_value: memory
+  new_value: MEMORY.md
+  perturbed_query: the MEMORY.md says one number and the file says another which note
+    settles which one to believe
+  expected_to_move:
+  - MEMORY.md
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: memory-md-clobber-to-guard
+  axis_changed: entity
+  old_value: loaded memory file
+  new_value: MEMORY.md
+  perturbed_query: What truncated the MEMORY.md in September, and what rule now stops
+    a job from committing that shrink?
+  expected_to_move:
+  - MEMORY.md
+  expected_pinned: []
+  sibling_source: kg_alias_table
 - id: memory-persistence
   axis_changed: qualifier
   old_value: across sessions
@@ -108,6 +475,35 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - Lloyd
+- id: mission-control-tab-layout
+  axis_changed: entity
+  old_value: Mission Control
+  new_value: Mission Control Frontend
+  perturbed_query: What tabs does Mission Control Frontend have and which one shows
+    background workers?
+  expected_to_move:
+  - Mission Control Frontend
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: model-alias-resolution
+  axis_changed: qualifier
+  old_value: actually
+  new_value: originally
+  perturbed_query: Which model does a request originally get when the caller passes
+    a routing name?
+  expected_to_move: []
+  expected_pinned:
+  - routing name
+- id: nightly-cannot-tell
+  axis_changed: entity
+  old_value: nightly retrieval run
+  new_value: Groundskeeper Survey
+  perturbed_query: why the Groundskeeper Survey always says it cannot tell whether
+    anything changed
+  expected_to_move:
+  - Groundskeeper Survey
+  expected_pinned: []
+  sibling_source: kg_alias_table
 - id: nightly-reflection
   axis_changed: artifact
   old_value: skills
@@ -116,6 +512,42 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - nightly reflection
+- id: numbers-differ-after-rebuild
+  axis_changed: entity
+  old_value: graph
+  new_value: Lloyd Memory Graph
+  perturbed_query: why did the Lloyd Memory Graph's numbers change so much after a
+    rebuild and which note says the reference was the broken part
+  expected_to_move:
+  - Lloyd Memory Graph
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: primary-ram-floor-changed
+  axis_changed: qualifier
+  old_value: allowed to start above
+  new_value: forbidden to start above
+  perturbed_query: what moved the memory floor a model boot is forbidden to start
+    above, and what does the abort line still name?
+  expected_to_move: []
+  expected_pinned:
+  - abort line
+- id: prompt-surface-open-set
+  axis_changed: qualifier
+  old_value: hand-written list
+  new_value: generated rule
+  perturbed_query: why can't a generated rule of prompt files ever prove that every
+    prompt file is covered?
+  expected_to_move: []
+  expected_pinned:
+  - prompt files
+- id: python-dataclasses
+  axis_changed: artifact
+  old_value: a Pydantic model
+  new_value: a Rust struct
+  perturbed_query: When should I use a dataclass instead of a Rust struct or a TypedDict?
+  expected_to_move: []
+  expected_pinned:
+  - dataclass
 - id: qmd
   axis_changed: entity
   old_value: QMD
@@ -134,6 +566,14 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - Qwen3.8
+- id: regex-lookbehind-recall
+  axis_changed: qualifier
+  old_value: work
+  new_value: fail
+  perturbed_query: Why does my lookbehind fail in ripgrep but not in grep -E?
+  expected_to_move: []
+  expected_pinned:
+  - ripgrep
 - id: relationships-location
   axis_changed: artifact
   old_value: index
@@ -142,6 +582,34 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - relationships
+- id: research-queue-to-vault-note
+  axis_changed: entity
+  old_value: research queue
+  new_value: Groundskeeper Research
+  perturbed_query: Where does the Groundskeeper Research keep its topics, and what
+    does a finished topic have to point at?
+  expected_to_move:
+  - Groundskeeper Research
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: retrieval-eval-item-1085
+  axis_changed: qualifier
+  old_value: closed without landing
+  new_value: shipped early
+  perturbed_query: Which eval work item was shipped early, and what was measured instead?
+  expected_to_move: []
+  expected_pinned:
+  - eval work item
+- id: retrieval-seed-anchoring-contract
+  axis_changed: entity
+  old_value: seed extractor
+  new_value: skills_search
+  perturbed_query: Which eval queries have no gold entity the skills_search can even
+    reach?
+  expected_to_move:
+  - skills_search
+  expected_pinned: []
+  sibling_source: kg_alias_table
 - id: robotics-projects
   axis_changed: artifact
   old_value: projects
@@ -150,6 +618,61 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - robotics
+- id: self-referential-check-catalogue
+  axis_changed: qualifier
+  old_value: cannot read
+  new_value: always reads
+  perturbed_query: How many different ways has a guard been seen to answer about an
+    input it always reads?
+  expected_to_move: []
+  expected_pinned:
+  - note
+- id: shell-quoting-word-splitting
+  axis_changed: qualifier
+  old_value: contain spaces
+  new_value: contain digits
+  perturbed_query: Why does my for loop break on filenames that contain digits?
+  expected_to_move: []
+  expected_pinned:
+  - filenames
+- id: skill-mining-to-promotion
+  axis_changed: artifact
+  old_value: trajectory skill mining
+  new_value: nightly build
+  perturbed_query: What does nightly build propose, and which loop decides whether
+    a mined skill gets promoted?
+  expected_to_move: []
+  expected_pinned:
+  - promotion step
+- id: skill-that-never-improves
+  axis_changed: entity
+  old_value: reflection loop
+  new_value: Nightly Skill Consolidation
+  perturbed_query: what makes a skill stop getting better even though the Nightly
+    Skill Consolidation keeps touching it
+  expected_to_move:
+  - Nightly Skill Consolidation
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: sqlite-alias-metacharacters
+  axis_changed: artifact
+  old_value: LIKE
+  new_value: GLOB
+  perturbed_query: Why does my SQL GLOB pattern with an underscore in a name match
+    the wrong rows?
+  expected_to_move: []
+  expected_pinned:
+  - SQLite
+- id: stop-auto-merging-entities
+  axis_changed: entity
+  old_value: automatically merging
+  new_value: Semantic Entity Resolution
+  perturbed_query: where we decided to stop Semantic Entity Resolution entities that
+    looked alike
+  expected_to_move:
+  - Semantic Entity Resolution
+  expected_pinned: []
+  sibling_source: kg_alias_table
 - id: tgs-rag-state
   axis_changed: qualifier
   old_value: current
@@ -166,6 +689,34 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - autonomy
+- id: three-d-printing-calibration
+  axis_changed: qualifier
+  old_value: flow rate
+  new_value: bed level
+  perturbed_query: How do I calibrate the printer's bed level and temperature tower?
+  expected_to_move: []
+  expected_pinned:
+  - printer
+- id: thunderbird-mcp-toolset
+  axis_changed: entity
+  old_value: Thunderbird MCP
+  new_value: Thunderbird Service
+  perturbed_query: Which tools does the Thunderbird Service server expose for mail,
+    calendar and contacts?
+  expected_to_move:
+  - Thunderbird Service
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: tts-voice-cloning
+  axis_changed: entity
+  old_value: TTS
+  new_value: Piper TTS
+  perturbed_query: How do I use a cloned voice with the Piper TTS service, and which
+    model does a built-in voice use?
+  expected_to_move:
+  - Piper TTS
+  expected_pinned: []
+  sibling_source: kg_alias_table
 - id: vault-recall
   axis_changed: entity
   old_value: vault_recall
@@ -173,5 +724,80 @@ perturbations:
   perturbed_query: what is Vault Index and how does it work?
   expected_to_move:
   - Vault Index
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: voice-session-to-room
+  axis_changed: entity
+  old_value: voice
+  new_value: Voice Mode
+  perturbed_query: Why did Voice Mode stop answering even though the ASR model was
+    fine, and what actually proves the media path is bound?
+  expected_to_move:
+  - Voice Mode
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: wake-word-models
+  axis_changed: entity
+  old_value: wake phrases
+  new_value: OpenWakeWord
+  perturbed_query: How many OpenWakeWord are configured and why can't the acoustic
+    models be retrained?
+  expected_to_move:
+  - OpenWakeWord
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: watchdog-architecture-split
+  axis_changed: qualifier
+  old_value: without a daemon
+  new_value: with two daemons
+  perturbed_query: What does the watchdog check with two daemons, and what needs one?
+  expected_to_move: []
+  expected_pinned:
+  - watchdog
+- id: watchdog-metacharacter
+  axis_changed: qualifier
+  old_value: every process on the machine
+  new_value: every process in the container
+  perturbed_query: Why does pkill -f 'watchdog|daemon' match every process in the
+    container?
+  expected_to_move: []
+  expected_pinned:
+  - pkill
+- id: write-that-ate-the-memory-file
+  axis_changed: entity
+  old_value: memory file
+  new_value: MEMORY.md
+  perturbed_query: the time a write swallowed the whole MEMORY.md and how it was got
+    back
+  expected_to_move:
+  - MEMORY.md
+  expected_pinned: []
+  sibling_source: kg_alias_table
+- id: wrong-thing-broke-simultaneously
+  axis_changed: qualifier
+  old_value: same minute
+  new_value: same hour
+  perturbed_query: two things broke at the same hour and the obvious cause was the
+    wrong one which incident is that
+  expected_to_move: []
+  expected_pinned:
+  - cause
+- id: yaml-scalar-block-indent
+  axis_changed: qualifier
+  old_value: first line
+  new_value: last line
+  perturbed_query: Why does my YAML block scalar lose its content when I use a colon
+    in the last line?
+  expected_to_move: []
+  expected_pinned:
+  - YAML Parser
+- id: youtube-transcript-workflow
+  axis_changed: entity
+  old_value: YouTube transcript
+  new_value: Transcript Extraction
+  perturbed_query: Where does a Transcript Extraction go once it is extracted, and
+    what breaks extraction?
+  expected_to_move:
+  - Transcript Extraction
   expected_pinned: []
   sibling_source: kg_alias_table

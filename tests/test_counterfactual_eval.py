@@ -16,6 +16,8 @@ These tests pin the committed perturbation records (one per query, deterministic
 never re-derived from live graph data at eval time so a nightly diff stays a
 diff) and the two metric definitions.
 """
+import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -30,19 +32,40 @@ import eval.run_eval as ev  # noqa: E402
 
 QUERIES = ROOT / "eval" / "vault_recall_queries.yaml"
 RECORDS = ROOT / "eval" / "counterfactual_perturbations.yaml"
+GENERATOR = ROOT / "eval" / "counterfactual.py"
 
 
 def _specs():
     return yaml.safe_load(QUERIES.read_text())["queries"]
 
 
+# The rater is sized against the live corpus, never a literal. MIN_CORPUS_N is
+# the floor the trend audit's 80%-power claim needs (#1319): the exact McNemar
+# search in scripts/eval_trend_stats.py reports n = 78 for a 0.10 paired change
+# at 80% power, alpha 0.05, so a corpus under it cannot support the verdicts the
+# nightly writes no matter how well the rater covers it.
+CORPUS_N = len(_specs())
+MIN_CORPUS_N = 78
+
+
 # ── the committed perturbation set ───────────────────────────────────────────
 
 def test_one_perturbation_per_query_with_the_declared_shape():
-    """Exactly the 20 queries, one variant each, one changed axis each."""
+    """One variant per query, one changed axis each, over the WHOLE corpus.
+
+    The count is the live corpus size, never a literal 20. The generator was
+    written for the 20-query corpus and its records raise `ValueError` for an id
+    with no PLAN entry, so a corpus growth that forgets the rater leaves the
+    nightly scoring 87 queries while its summary still reports
+    `counterfactual_n_moved: 20` — one summary describing two different corpora.
+    """
     specs = {s["id"]: s for s in _specs()}
     recs = cf.load_records(RECORDS)
-    assert len(recs) == len(specs) == 20
+    assert len(recs) == len(specs) == CORPUS_N, (
+        f"records {len(recs)}, corpus {CORPUS_N}")
+    assert CORPUS_N >= MIN_CORPUS_N, (
+        f"corpus is {CORPUS_N}; the trend audit needs at least {MIN_CORPUS_N} "
+        "paired queries for 80% power on a 0.10 change")
     assert set(recs) == set(specs)
     for qid, rec in recs.items():
         for key in ("axis_changed", "old_value", "new_value",
@@ -51,6 +74,118 @@ def test_one_perturbation_per_query_with_the_declared_shape():
         assert rec["axis_changed"] in cf.AXES, (qid, rec["axis_changed"])
         assert isinstance(rec["expected_to_move"], list)
         assert isinstance(rec["expected_pinned"], list)
+
+
+def test_plan_covers_every_query_and_nothing_outside_it():
+    """The PLAN/corpus join, as a set difference that names EVERY gap.
+
+    `build_perturbations` raises on the first id with no plan entry, so it stops
+    there; a growth that added 67 queries would be reported one id at a time.
+    """
+    ids = {s["id"] for s in _specs()}
+    assert sorted(set(cf.PLAN) - ids) == [], "PLAN entries with no query in the corpus"
+    assert sorted(ids - set(cf.PLAN)) == [], "corpus queries with no PLAN entry"
+
+
+def test_cli_check_reports_no_drift():
+    """`python eval/counterfactual.py --check`: the committed file IS the generator.
+
+    Goes through the same entry point a person runs rather than only the
+    in-process comparison, so a `--write` that emits something `--check` cannot
+    reproduce — a header, a key order, a path the generator would not write — is
+    caught here.
+    """
+    out = subprocess.run([sys.executable, str(GENERATOR), "--check"],
+                         capture_output=True, text=True, timeout=600)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "records match the generator" in out.stdout, out.stdout
+
+
+def test_alias_resolver_indexes_the_distinct_canonical_row(tmp_path):
+    """`select distinct canonical` returns a ROW, not a string.
+
+    `{c.lower() for c in con.execute("select distinct canonical ...")}` calls
+    `.lower()` on a one-column tuple and raises AttributeError, so `--verify` —
+    the only audit of an entity swap's chosen sibling — had never run against a
+    real store. Every sibling claim in this file rested on `_resolver`, a
+    hand-written dict that cannot fail this way. Built on a real sqlite file
+    because the defect IS the row shape.
+    """
+    db = tmp_path / "kg.sqlite"
+    con = sqlite3.connect(db)
+    con.execute("create table aliases (surface_lc text, canonical text)")
+    con.executemany("insert into aliases values (?, ?)",
+                    [("thunderbird mcp", "Thunderbird Service"),
+                     ("qwen3-tts", "Qwen3-TTS")])
+    con.commit()
+    con.close()
+    resolve = cf.alias_resolver(db)
+    assert resolve("thunderbird mcp") == "Thunderbird Service"   # via a surface row
+    assert resolve("Qwen3-TTS") == "Qwen3-TTS"                   # via the canonical set
+    assert resolve("no such thing") is None
+
+
+def test_verify_siblings_reaches_a_verdict_on_the_committed_corpus(tmp_path):
+    """The audit runs, and returns 0 unverified swaps, on the real alias table.
+
+    With the resolver fixed, every entity-axis record must name a swapped-in
+    value that is a DISTINCT canonical — the risk-1 rule #537 spells out for
+    exactly these labels. Falls back to a hand-built store when the derived
+    knowledge store is absent, so the assertion is about the code path rather
+    than the build; the entity swaps in the committed corpus are the ones the
+    fallback store cannot vouch for, and it says so by being named here.
+    """
+    db = cf.kg_db_path()
+    if not db.exists():
+        db = tmp_path / "kg.sqlite"
+        con = sqlite3.connect(db)
+        con.execute("create table aliases (surface_lc text, canonical text)")
+        con.executemany("insert into aliases values (?, ?)",
+                        [(cf._norm(r["new_value"]), r["new_value"])
+                         for r in cf.load_records(RECORDS).values()
+                         if r["axis_changed"] == cf.ENTITY_AXIS])
+        con.commit()
+        con.close()
+    recs = list(cf.load_records(RECORDS).values())
+    unverified = cf.verify_siblings(recs, cf.alias_resolver(db))
+    assert [r["id"] for r in unverified] == [], unverified
+
+
+def test_a_scored_run_reports_counterfactual_n_over_the_whole_corpus(monkeypatch):
+    """One scored run over the live corpus rates EVERY query, not 20 of them.
+
+    The clause this pins is the one a yaml-only growth cannot satisfy: the
+    summary reports `counterfactual_n_moved`, and if any query id is missing
+    from the plan the runtime degrades it to `counterfactual_error: "no
+    perturbation record for this query id"` and drops it from the denominator.
+    The nightly then prints one number over 20 queries and another over 87 and
+    reads as though it described a single corpus. So the whole production loop
+    runs here — `run_eval` with only the retriever injected, then `summarize` —
+    and its denominator has to equal the corpus size.
+    """
+    specs = _specs()
+
+    def retrieve(params):
+        # The rater reads only fact-attributed entities and their text, so the
+        # stub echoes the query text as the ATTRIBUTED ENTITY: an entity swap
+        # then finds its swapped-in sibling among the rows the variant added, a
+        # swap with no named target sees a different attributed set, and a
+        # pinned constraint matches the same single text in both arms.
+        return {"documents": [{"path": "knowledge/whatever.md"}],
+                "entities": [], "entity_facts": [],
+                "facts": [{"entity": params["query"], "text": "one fact"}],
+                "graph_neighbors_used": []}
+
+    monkeypatch.setattr(ev, "_vault_recall", lambda params, **kw: retrieve(params))
+    out = ev.summarize(ev.run_eval(specs, limit=len(specs)))["overall"]
+    assert out["n_queries"] == CORPUS_N
+    assert out["counterfactual_n_moved"] == CORPUS_N, (
+        "the scored run rated fewer queries than the corpus holds — the rater "
+        "is describing a smaller corpus than the eval is")
+    assert out["counterfactual_moved_rate"] == 1.0
+    # A twin that was never recalled would leave the pinned leg empty, so a
+    # non-zero pinned denominator is the evidence both arms ran.
+    assert out["counterfactual_n_pinned"] > 0
 
 
 def test_each_perturbation_changes_exactly_one_named_constraint():

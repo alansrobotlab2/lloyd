@@ -899,3 +899,310 @@ def test_a_store_that_opens_with_no_entity_rows_is_refused_as_a_verdict(monkeypa
         _entity_satisfiability_report(getter=EmptyStore)
     assert "0 entity rows" in str(exc.value), exc.value
     assert "not a verdict" in str(exc.value), exc.value
+
+
+# ── #1319: the DOCUMENT leg gets the same guard the entity leg has ───────────
+#
+# `expect_docs` is scored per label — `doc_recall` is hits-over-labels
+# (`eval/run_eval.py:267`) and `ndcg10` takes the label list as its ideal set
+# (`:250`) — so a label that matches no vault path is not a neutral miss: it is
+# a permanent subtraction from every run's measured ceiling, attributed to
+# retrieval. Before this guard existed, 13 of the 50 labels in the 20-query
+# corpus were code paths (`agent_mcp/vault.py`, `app/harness/loop.py`,
+# `classifier-v4`) that the doc scorer could never satisfy, capping
+# `doc_recall_avg` at 37/50 = 0.74 while the measured value read 0.593 — and
+# nothing in the suite could see it, because the entity leg's guard below reads
+# the ENTITY store and never a document path.
+#
+# Same rule as the scorer, deliberately re-implemented rather than imported:
+# `_norm(label) in _norm(path)` with `-` folded to `_`, from
+# `eval/run_eval.py:158` (`_norm`) and `:210`/`:213` (both sides normalised,
+# substring test). Importing run_eval here would make the guard read the tree
+# it guards, which is the discipline the module docstring keeps this file to;
+# the three lines below are the whole rule and the comments name the lines to
+# check it against.
+
+def _doc_norm(s: str) -> str:
+    """Mirror of `eval/run_eval.py::_norm` — lowercase, `-` and `_` equivalent."""
+    return str(s or "").lower().replace("-", "_")
+
+
+def _doc_label_satisfiability_report(
+        specs_path: Path = CORPUS,
+        vault_root: Path = Path.home() / "obsidian") -> dict:
+    """Walk the vault once and return which `expect_docs` labels match no path.
+
+    `path` is every path under `vault_root` (files AND directories,
+    vault-relative), minus `.git/**` — the scorer compares a label against a
+    returned document path, and a substring of git internals is not a document.
+    Hidden entries are NOT skipped: `skills/.archived/**` is a real location the
+    index can hold, and skipping it would report five live labels as dead,
+    which is the false-alarm direction this file's other guards refuse to
+    produce. `walked_paths` is returned so the zero is checkable in the same
+    breath as the verdict — a denominator of zero is not a pass.
+    """
+    specs = yaml.safe_load(specs_path.read_text())["queries"]
+    labels = [(str(s.get("id")), str(d))
+              for s in specs for d in (s.get("expect_docs") or [])]
+    walked, normed = 0, []
+    for p in vault_root.rglob("*"):
+        rel = p.relative_to(vault_root)
+        if ".git" in rel.parts:
+            continue
+        walked += 1
+        normed.append(_doc_norm(str(rel)))
+    dead = [{"query": qid, "label": label} for qid, label in labels
+            if not any(_doc_norm(label) in n for n in normed)]
+    return {"vault": str(vault_root), "corpus": str(specs_path),
+            "queries": len(specs), "labels": len(labels),
+            "walked_paths": walked, "dead": dead}
+
+
+def test_committed_corpus_has_no_unresolvable_document_label():
+    """Every `expect_docs` label in the committed corpus matches a real path.
+
+    The failure message names the query AND the label, because a list of bare
+    labels cannot be acted on: the reader has to open the query to judge whether
+    the label is wrong or the note moved.
+    """
+    rep = _doc_label_satisfiability_report()
+    assert rep["labels"] > 0, rep
+    assert rep["walked_paths"] > 100, (
+        f"the walk under {rep['vault']} found {rep['walked_paths']} paths; a "
+        "walk that reaches nothing reports every label as dead OR as clean "
+        "depending on the comparison, and neither is a verdict (#878's shape)")
+    assert rep["dead"] == [], (
+        f"{len(rep['dead'])} of {rep['labels']} expect_docs labels in "
+        f"{rep['corpus']} match no path under {rep['vault']} (walked "
+        f"{rep['walked_paths']} paths): "
+        + "; ".join(f"{d['query']}: {d['label']!r}" for d in rep["dead"])
+        + " — a label that cannot match is subtracted from doc_recall and "
+        "ndcg@10 by every future run, so re-point it at the note the answer "
+        "would cite, or delete it, rather than leaving the ceiling capped.")
+
+
+def test_the_document_label_guard_fails_on_an_unresolvable_label(tmp_path):
+    """A synthetic unresolvable label is caught by name, and a resolvable one is not.
+
+    Both halves matter. The negative half is the point — a guard that never
+    fires is indistinguishable from a corpus with no dead labels, which is
+    exactly how 13 dead labels survived an entire month of nightly runs. The
+    positive half is what stops the guard from being a tautology that flags
+    everything.
+    """
+    vault = tmp_path / "vault"
+    (vault / "knowledge" / "software").mkdir(parents=True)
+    (vault / "knowledge" / "software" / "live-note.md").write_text("body\n")
+    corpus = tmp_path / "queries.yaml"
+    corpus.write_text(
+        "queries:\n"
+        "  - id: resolvable-one\n"
+        "    query: what does the live note say\n"
+        "    category: single\n"
+        "    expect_entities: []\n"
+        "    expect_docs: [knowledge/software/live-note.md]\n"
+        "  - id: dead-one\n"
+        "    query: what does the missing note say\n"
+        "    category: single\n"
+        "    expect_entities: []\n"
+        "    expect_docs: [knowledge/software/never-written.md]\n"
+    )
+    rep = _doc_label_satisfiability_report(specs_path=corpus, vault_root=vault)
+    assert rep["walked_paths"] >= 2, rep          # positive control: it walked
+    assert [d["query"] for d in rep["dead"]] == ["dead-one"], rep["dead"]
+    assert rep["dead"][0]["label"] == "knowledge/software/never-written.md"
+
+    # A dead label must be named by BOTH its query and the label itself: a
+    # reader who is only told "one label is dead" cannot fix it.
+    rendered = "; ".join(f"{d['query']}: {d['label']!r}" for d in rep["dead"])
+    assert "dead-one" in rendered and "never-written" in rendered
+
+    # Folding `-`/`_` is the scorer's tolerance, so a label that differs from
+    # the path only in that spelling must NOT be flagged — otherwise this guard
+    # is stricter than the metric it predicts and alarms on a passing label.
+    hyphen = tmp_path / "hyphen.yaml"
+    hyphen.write_text(
+        "queries:\n"
+        "  - id: hyphen-spelling\n"
+        "    query: what does the live note say\n"
+        "    category: single\n"
+        "    expect_entities: []\n"
+        "    expect_docs: [knowledge/software/live_note.md]\n"
+    )
+    assert _doc_label_satisfiability_report(specs_path=hyphen,
+                                            vault_root=vault)["dead"] == []
+
+
+
+# The 20 ids the corpus opened with, in committed file order, and the SHA-256 of
+# their `query` strings joined by "\n" as of `b49a7a36` — the last commit before
+# #1319 grew the set. Pinning the digest is how byte-identity is checked without
+# a second copy of the answers in the tree: a re-worded original query changes
+# the digest even when the new wording still resolves, so the 2026-09-04 ->
+# 2026-09-17 series stays joinable on the queries it was measured with.
+ORIGINAL_GOLD_IDS = [
+    "backlog-363", "entity-resolution-sweep", "inner-voice", "vault-recall",
+    "qmd", "kg-maintenance-tasks", "lloyd-vllm-rel", "harness-tools",
+    "nightly-reflection", "qwen38-local-serving", "tgs-rag-state",
+    "graph-quality", "classifier-v4", "godnode-threshold",
+    "relationships-location", "memory-persistence", "autonomy-pipeline",
+    "robotics-projects", "this-week-autonomy", "backlog-overview",
+]
+ORIGINAL_QUERY_DIGEST = \
+    "sha256:2382e4eabb68242034c3b958d75aed12a7caa1131ff1aa57959240e657e29e74"
+
+# The exact-McNemar search in scripts/eval_trend_stats.py prints this: queries
+# needed for a 0.10 paired change at 80 % power, alpha 0.05. Below it the
+# nightly's trend verdicts are unsupported by its own audit, which is the defect
+# #1319 was filed to close — so it belongs in the corpus guard, where a later
+# trim that drops back under it fails loudly instead of quietly re-decorating
+# the nightly.
+GOLD_SET_MIN_QUERIES = 78
+
+
+def test_the_gold_set_is_big_enough_for_its_own_power_claim(tmp_path):
+    """>= 78 gold queries, the original 20 first and byte-identical (#1319).
+
+    Two halves, both from the trend audit's own arithmetic: the corpus has to
+    clear the n its sizing says is required for a 0.10 paired change at 80 %
+    power, and the ids the 2026-09-04 -> 2026-09-17 series was measured with have
+    to remain the first 20 entries with their `query` strings unchanged.
+    `expect_*` labels may legitimately be re-pointed — the dead-doc repair did
+    exactly that — but the query text is what the old series joined on, so it is
+    frozen by digest.
+    """
+    report = _gold_set_shape_report()
+    assert report["n_queries"] >= GOLD_SET_MIN_QUERIES, (
+        f"the gold set holds {report['n_queries']} queries, under the "
+        f"{GOLD_SET_MIN_QUERIES} this script's own power search requires — the "
+        "nightly would be back to emitting trend verdicts its audit withholds")
+    assert report["misplaced_original_ids"] == [], report["misplaced_original_ids"]
+    assert report["missing_original_ids"] == [], report["missing_original_ids"]
+    assert report["query_digest"] == ORIGINAL_QUERY_DIGEST, (
+        "a pre-growth query string changed. Its expect_* labels may be "
+        "re-pointed; the query itself may not — the whole "
+        "2026-09-04 -> 2026-09-17 series joined on that text.")
+
+    # The shape check must be able to FAIL. A corpus that re-orders the
+    # originals, or drops one, is the failure this guards, so both are injected
+    # here and named in the report rather than passing silently.
+    base = [{"id": qid, "query": f"query {i}", "category": "single",
+             "expect_entities": ["Alpha"], "expect_docs": ["lloyd"]}
+            for i, qid in enumerate(ORIGINAL_GOLD_IDS)]
+    filler = [{"id": f"grown-{i}", "query": f"grown query {i}", "category": "single",
+               "expect_entities": ["Alpha"], "expect_docs": ["lloyd"]}
+              for i in range(GOLD_SET_MIN_QUERIES - len(ORIGINAL_GOLD_IDS))]
+    good = _gold_set_shape_report(specs_path=_write_corpus(tmp_path, base + filler))
+    assert good["n_queries"] == GOLD_SET_MIN_QUERIES, good
+    assert good["misplaced_original_ids"] == [], good
+    assert good["missing_original_ids"] == [], good
+
+    rotated = _gold_set_shape_report(specs_path=_write_corpus(
+        tmp_path, filler[:1] + base + filler[1:]))
+    assert rotated["misplaced_original_ids"], (
+        "the original ids are no longer the first 20 in file order and the "
+        "guard did not notice")
+
+    dropped = _gold_set_shape_report(specs_path=_write_corpus(
+        tmp_path, [q for q in base if q["id"] != "qmd"] + filler))
+    assert dropped["missing_original_ids"] == ["qmd"], dropped
+
+    short = _gold_set_shape_report(specs_path=_write_corpus(
+        tmp_path, base + filler[:GOLD_SET_MIN_QUERIES - len(base) - 1]))
+    assert short["n_queries"] == GOLD_SET_MIN_QUERIES - 1, short
+
+
+def _write_corpus(tmp_path: Path, specs: list[dict], name: str = "gold.yaml") -> Path:
+    """Emit a corpus YAML with the given specs, in the given order."""
+    p = tmp_path / name
+    p.write_text(yaml.safe_dump({"queries": specs}, sort_keys=False))
+    return p
+
+
+def _gold_set_shape_report(specs_path: Path | None = None) -> dict:
+    """Size, the first ids in file order, and a digest of the originals' text.
+
+    Reads the corpus YAML only — no store, no vault, no retriever — so it cannot
+    manufacture a label, and a digest of the ORIGINAL ids' query text means a
+    re-worded original is caught even when the new wording still resolves.
+    """
+    import hashlib
+
+    corpus = Path(specs_path or CORPUS)
+    specs = yaml.safe_load(corpus.read_text())["queries"]
+    ids = [str(s["id"]) for s in specs]
+    originals = [s for s in specs if str(s["id"]) in ORIGINAL_GOLD_IDS]
+    digest = "sha256:" + hashlib.sha256(
+        "\n".join(str(s["query"]) for s in originals).encode()).hexdigest()
+    first = ids[:len(ORIGINAL_GOLD_IDS)]
+    return {"corpus": str(corpus), "n_queries": len(specs),
+            "first_ids": first,
+            "query_digest": digest,
+            "misplaced_original_ids": [qid for qid in ORIGINAL_GOLD_IDS
+                                       if qid not in first],
+            "missing_original_ids": [qid for qid in ORIGINAL_GOLD_IDS
+                                     if qid not in ids]}
+
+
+# The nightly retrieval-eval autonomy task, read from the live vault. It has no
+# worktree, so the only tree that can answer a question about it is the vault.
+NIGHTLY_TASK_GLOB = "autonomy/82-nightly-retrieval-eval*.md"
+VAULT_ROOT = Path.home() / "obsidian"
+
+# Measured on the 20-query corpus: two consecutive nightly runs took 259.4 s and
+# 260.4 s, i.e. ~13.0 s per query counting BOTH arms (the reference and its
+# perturbed twin). The constant below is that measured cost per query, rounded
+# up, and it is what makes the timeout claim arithmetic rather than reassurance.
+MEASURED_SECONDS_PER_QUERY = 13.0
+NIGHTLY_TIMEOUT_MIN_SECONDS = 1800
+
+
+def test_the_nightly_timeout_fits_the_corpus_it_now_has():
+    """The nightly's own ceiling has to accommodate the grown gold set.
+
+    The task ran `timeout_seconds: 900` against a 20-query corpus that took
+    ~260 s. Scaling that measured per-query cost by the corpus that exists now
+    is well past 900 s, so a run would have been killed mid-flight and written
+    no baseline at all — the failure mode is a silent gap in the series, not a
+    loud error, which is the worst thing a nightly trend instrument can do.
+
+    The assertion is therefore on the ARITHMETIC (ceiling vs measured cost x
+    queries) and not on a bare constant: a later growth that outgrows this
+    timeout fails here even though 1800 is still in the file.
+    """
+    task = _nightly_task_timeout()
+    n_queries = _gold_set_shape_report()["n_queries"]
+    needed = MEASURED_SECONDS_PER_QUERY * n_queries
+    assert task["timeout_seconds"] >= NIGHTLY_TIMEOUT_MIN_SECONDS, (
+        f"{task['path']} declares timeout_seconds: "
+        f"{task['timeout_seconds']}, under the {NIGHTLY_TIMEOUT_MIN_SECONDS} s "
+        "floor the grown corpus needs")
+    assert task["timeout_seconds"] >= needed, (
+        f"{task['path']} allows {task['timeout_seconds']} s for a run whose "
+        f"{n_queries} queries cost ~{needed:.0f} s at the measured "
+        f"{MEASURED_SECONDS_PER_QUERY} s/query (both arms). The nightly would "
+        "time out and write no baseline — a gap in the series, not an error.")
+
+
+def _nightly_task_timeout() -> dict:
+    """timeout_seconds from the live nightly retrieval-eval autonomy task."""
+    import yaml as _yaml
+
+    matches = sorted(VAULT_ROOT.glob(NIGHTLY_TASK_GLOB))
+    if not matches:
+        raise AssertionError(
+            f"no file matches {VAULT_ROOT / NIGHTLY_TASK_GLOB}. The nightly retrieval eval "
+            "task is where the corpus's runtime budget lives; a guard that "
+            "skipped when it could not find the file would report a verdict it "
+            "cannot justify.")
+    path = matches[0]
+    text = path.read_text()
+    fm = text.split("---", 2)[1]
+    meta = _yaml.safe_load(fm) or {}
+    timeout = meta.get("timeout_seconds")
+    if not isinstance(timeout, (int, float)):
+        raise AssertionError(
+            f"{path} has no numeric timeout_seconds ({timeout!r}); the run's "
+            "ceiling is undeclared, so nothing bounds the grown corpus")
+    return {"path": str(path), "timeout_seconds": float(timeout),
+            "n_matches": len(matches)}

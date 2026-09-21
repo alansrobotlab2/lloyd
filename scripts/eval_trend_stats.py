@@ -477,9 +477,23 @@ def power_exact(n: int, p_discord: float, q: float, detect: float,
     return total
 
 
+def joined_paired_n(transitions: list[Transition]) -> int | None:
+    """The paired-query count of the audited window: the median joined id count.
+
+    ``t.n`` is the number of query ids one transition's two baseline files share,
+    which is what every McNemar verdict in that transition was computed over — so
+    it, not the size of the query file, is the ``n`` a power claim must name. The
+    median rather than the maximum because the block describes the window most
+    verdicts were reached on, not the largest pair in it. None when no transition
+    joined, which the caller must print as no-verdict rather than as n = 0.
+    """
+    ns = sorted(t.n for t in transitions if t.joinable and t.n)
+    return ns[len(ns) // 2] if ns else None
+
+
 def required_n(detect: float = DETECT, power: float = POWER_TARGET,
                alpha: float = ALPHA, observed: dict | None = None,
-               max_n: int = 2000) -> dict:
+               max_n: int = 2000, paired_n: int | None = None) -> dict:
     """Queries needed to detect a ``detect`` paired change at ``power``.
 
     Derived from measured discordance, not taste. Two shapes are reported:
@@ -494,16 +508,31 @@ def required_n(detect: float = DETECT, power: float = POWER_TARGET,
     ``normal_approximation`` — the textbook McNemar size
     ``(z_975 + z_80)^2 * p / detect^2``, kept as a cross-check because the
     exact power search above is the number this script stands behind.
+
+    ``paired_n`` is the joined paired-query count of the window being audited
+    (``joined_paired_n(transitions)``); ``power_at_paired_n`` is this script's
+    own exact power evaluated at it, and is None when the window pairs nothing.
     """
     obs_rate = (observed or {}).get("rate")
     p_measured = max(detect, obs_rate) if obs_rate and obs_rate > 0 else detect
     n_exact = next((n for n in range(1, max_n + 1)
                     if power_exact(n, p_measured, 1.0, detect, alpha) >= power), None)
-    power_at_observed = power_exact(20, p_measured, 1.0, detect, alpha)
+    # Power is evaluated at the paired-query count of the window being audited —
+    # `paired_n`, the joined id count of its transitions — and NOT at a literal
+    # 20. The literal was accurate only while the corpus and the joined baseline
+    # files both held 20 ids; once #1319 grew the corpus the line kept printing
+    # `at n=20: 0.011` no matter how many queries were scored, so the Check
+    # "the power line for the current n is at or above 0.80" could not be
+    # satisfied by growing anything. `paired_n=None` means no joinable
+    # transition exists, and then this reports None — no verdict — rather than
+    # inventing a denominator.
+    power_at_paired_n = (power_exact(paired_n, p_measured, 1.0, detect, alpha)
+                         if paired_n else None)
     return {"detect": detect, "alpha": alpha, "power_target": power,
             "observed_rate": obs_rate, "p_used": p_measured,
             "n_exact": n_exact,
-            "power_at_n20": power_at_observed,
+            "paired_n": paired_n,
+            "power_at_paired_n": power_at_paired_n,
             "normal_approximation": math.ceil(
                 (Z_975 + Z_80) ** 2 * p_measured / (detect ** 2)),
             "lower_bound": True}
@@ -699,15 +728,23 @@ def main(argv: list[str] | None = None) -> int:
     totals = print_totals(transitions, args.alpha)
 
     disc = observed_discordance(transitions)
-    need = required_n(args.detect, args.power, args.alpha, disc)
+    need = required_n(args.detect, args.power, args.alpha, disc,
+                      paired_n=joined_paired_n(transitions))
     print("\nPOWER / QUERY-COUNT SIZING")
     print(f"  observed pooled discordance: {disc['discordant']}/{disc['pairs']} "
           f"paired records = {disc['rate']:.3f} over {disc['legs']} binary legs; "
           f"largest discordance on any one leg = {disc['max_per_leg']} query")
-    print(f"  power to detect a {args.detect:.2f} paired change at n=20: "
-          f"{need['power_at_n20']:.3f} — under the most favourable discordance shape "
-          f"the data allows (every pair one-sided, q=1). A real 0.10 shift is close "
-          f"to invisible at this n.")
+    pn = need["paired_n"]
+    if pn and need["power_at_paired_n"] is not None:
+        print(f"  power to detect a {args.detect:.2f} paired change at n={pn}: "
+              f"{need['power_at_paired_n']:.3f} — under the most favourable discordance "
+              f"shape the data allows (every pair one-sided, q=1). n here is the "
+              f"joined paired-query count of this window, not the size of the query "
+              f"file, so it moves when the corpus the baselines were scored on moves.")
+    else:
+        print(f"  power to detect a {args.detect:.2f} paired change: no-verdict — no "
+              f"transition in this window joined a query-id set, so there is no "
+              f"paired n to evaluate power at and none is invented.")
     print(f"  observed discordance {disc['rate']:.3f} is below the {args.detect:.2f} shift "
           f"worth detecting, so sizing uses p = max(observed, detect) = "
           f"{need['p_used']:.3f}: a {args.detect:.2f} net change cannot occur unless at "
@@ -720,9 +757,13 @@ def main(argv: list[str] | None = None) -> int:
         print("  that n is a LOWER BOUND: every discordant pair observed in this "
               "series is one-sided (b,c = 1,0 or 0,1), the most favourable shape "
               "available. Any two-sided discordance needs more queries.")
-    print("  No query file is edited here: growing eval/vault_recall_queries.yaml "
-          "re-bases the absolute values the whole series is compared on, which is "
-          "a person's call.")
+    print("  The query file was grown under #1319 on 2026-09-21 (20 -> 87 gold "
+          "queries, the original 20 ids first and byte-identical), and that growth "
+          "IS the approved re-base point: absolute values measured from the first "
+          "night scored on the grown corpus are not comparable with the "
+          "2026-09-04..2026-09-17 series, so do not read a trend across that "
+          "boundary. The 80%-power decision that used to sit behind this line is "
+          "no longer open — see the n printed above.")
 
     by_label = {n.label: n for n in nights}
     claims = [] if args.no_claims else list(CLAIMS) + [_parse_claim(c) for c in args.claim]

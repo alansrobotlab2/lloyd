@@ -100,6 +100,126 @@ PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
     "backlog-overview": ("qualifier", "interesting", "stale", [], ["Backlog"]),
     # date swap
     "this-week-autonomy": ("date", "this week", "last quarter", [], ["autonomy"]),
+
+    # ── added with the #1319 corpus growth (20 -> 87 queries) ───────────────
+    # Authored from the query text alone, never from a recall run: each entry names
+    # the swap that tests it.
+    # an entity that is a real, DISTINCT canonical in the live alias table, so
+    # `--verify` can audit the chosen sibling (#537's risk-1 rule applies).
+    "tts-voice-cloning": ("entity", "TTS", "Piper TTS", ["Piper TTS"], []),
+    "wake-word-models": ("entity", "wake phrases", "OpenWakeWord", ["OpenWakeWord"], []),
+    "thunderbird-mcp-toolset": ("entity", "Thunderbird MCP",
+                                "Thunderbird Service", ["Thunderbird Service"], []),
+    "mission-control-tab-layout": ("entity", "Mission Control",
+                                   "Mission Control Frontend", ["Mission Control Frontend"], []),
+    "browser-tool-validation": ("entity", "browser tool",
+                                "Browser Extraction", ["Browser Extraction"], []),
+    "youtube-transcript-workflow": ("entity", "YouTube transcript",
+                                    "Transcript Extraction", ["Transcript Extraction"], []),
+    "mcp-transport-error-recovery": ("entity", "MCP server",
+                                     "GitHub MCP Server", ["GitHub MCP Server"], []),
+    "kg-rebuild-abandoned": ("entity", "knowledge graph", "Entity Graph", ["Entity Graph"], []),
+    "kg-dedup-key": ("entity", "knowledge graph",
+                     "Lloyd Memory Graph", ["Lloyd Memory Graph"], []),
+    "guardian-to-backlog": ("entity", "guardian",
+                            "Self-mod guardian", ["Self-mod guardian"], []),
+    "dream-to-skill-edit": ("entity", "dream consolidation",
+                            "Nightly Skills Management", ["Nightly Skills Management"], []),
+    "automod-to-entity-guard": ("entity", "self-modification round",
+                                "Lloyd automod", ["Lloyd automod"], []),
+    "memory-capture-to-kg": ("entity", "knowledge graph", "Memory Graph", ["Memory Graph"], []),
+    "research-queue-to-vault-note": ("entity", "research queue",
+                                     "Groundskeeper Research", ["Groundskeeper Research"], []),
+    # Sibling is the OTHER instrument that has to make the same stale-vs-real call.
+    # It must not be the query's own gold entity (clause 2 re-points that label to
+    # `Nightly Retrieval Eval`): a twin that names the gold answer outright measures
+    # the perturbation as unseen even when the retriever is right.
+    # Canonical in the live alias table, so `--verify` can actually confirm it.
+    "counterfactual-to-trend-audit": ("entity", "retrieval eval", "Knowledge Health Report",
+                                      ["Knowledge Health Report"], []),
+    "autonomy-task-to-skill": ("entity", "autonomy task",
+                               "Autonomy Scheduler", ["Autonomy Scheduler"], []),
+    "inner-voice-to-surface": ("entity", "inner voice",
+                               "Inner Voice Observer", ["Inner Voice Observer"], []),
+    "entity-guard-to-alias-table": ("entity", "knowledge graph",
+                                    "Memory Graph", ["Memory Graph"], []),
+    "email-pipeline-to-daily-note": ("entity", "morning briefing",
+                                     "morning-brief", ["morning-brief"], []),
+    "guardian-alert-to-retraction": ("entity", "guardian",
+                                     "Groundskeeper", ["Groundskeeper"], []),
+    "voice-session-to-room": ("entity", "voice", "Voice Mode", ["Voice Mode"], []),
+    "memory-md-clobber-to-guard": ("entity", "loaded memory file",
+                                   "MEMORY.md", ["MEMORY.md"], []),
+    "gpu-daemon-ipc-timeout": ("entity", "GPU daemon",
+                               "LiveKit Agents", ["LiveKit Agents"], []),
+    "stop-auto-merging-entities": ("entity", "automatically merging",
+                                   "Semantic Entity Resolution", ["Semantic Entity Resolution"], []),
+    "write-that-ate-the-memory-file": ("entity", "memory file", "MEMORY.md", ["MEMORY.md"], []),
+    "nightly-cannot-tell": ("entity", "nightly retrieval run",
+                            "Groundskeeper Survey", ["Groundskeeper Survey"], []),
+    "facts-that-contradict": ("entity", "memory", "Fact Store", ["Fact Store"], []),
+    "skill-that-never-improves": ("entity", "reflection loop",
+                                  "Nightly Skill Consolidation", ["Nightly Skill Consolidation"], []),
+    "numbers-differ-after-rebuild": ("entity", "graph",
+                                     "Lloyd Memory Graph", ["Lloyd Memory Graph"], []),
+    "memory-line-contradicts-vault": ("entity", "memory", "MEMORY.md", ["MEMORY.md"], []),
+    "ambient-prefetch-ttl-reclaim": ("entity", "background context",
+                                     "Ambient Turns", ["Ambient Turns"], []),
+    "retrieval-seed-anchoring-contract": ("entity", "seed extractor",
+                                          "skills_search", ["skills_search"], []),
+    # the swap is one modifier that flips what the answer should say, and names no
+    # sibling, so `--verify` owes nothing for them.
+    "grafana-monitoring-stack": ("qualifier", "small", "large", [], ["Grafana"]),
+    "gpu-model-naming-collision": ("qualifier", "different", "identical", [], ["GPU"]),
+    "three-d-printing-calibration": ("qualifier", "flow rate", "bed level", [], ["printer"]),
+    "config-yaml-readonly": ("qualifier", "never", "sometimes", [], ["config.yaml"]),
+    "model-alias-resolution": ("qualifier", "actually", "originally", [], ["routing name"]),
+    "groundskeeper-queue-corruption": ("qualifier", "corrupted", "emptied", [], ["queue"]),
+    "watchdog-metacharacter": ("qualifier", "every process on the machine",
+                               "every process in the container", [], ["pkill"]),
+    "yaml-scalar-block-indent": ("qualifier", "first line", "last line", [], ["YAML Parser"]),
+    "json-filter-epoch-vs-iso": ("qualifier", "zero rows", "every row", [], ["JSONL"]),
+    "git-signals-in-async-code": ("qualifier", "can't", "always", [], ["asyncio"]),
+    "docker-volumes-uv-cache": ("qualifier", "re-downloading", "re-building", [], ["wheels"]),
+    "regex-lookbehind-recall": ("qualifier", "work", "fail", [], ["ripgrep"]),
+    "shell-quoting-word-splitting": ("qualifier", "contain spaces",
+                                     "contain digits", [], ["filenames"]),
+    "job-that-changes-its-own-code": ("qualifier", "rewriting", "deleting", [], ["code"]),
+    "check-that-cannot-see-its-input": ("qualifier", "cannot read",
+                                        "always reads", [], ["guard"]),
+    "cheaper-model-every-turn": ("qualifier", "cheap", "biggest", [], ["expensive one"]),
+    "gpu-ram-thin-should-not-reboot": ("qualifier", "thin", "abundant", [], ["model"]),
+    "alarm-comes-back-after-fixed": ("qualifier", "fixed", "deleted", [], ["alert"]),
+    "wrong-thing-broke-simultaneously": ("qualifier", "same minute",
+                                         "same hour", [], ["cause"]),
+    "djev-decision-engine-integration": ("qualifier", "second GPU",
+                                         "third GPU", [], ["yes-or-no"]),
+    "primary-ram-floor-changed": ("qualifier", "allowed to start above",
+                                  "forbidden to start above", [], ["abort line"]),
+    "prompt-surface-open-set": ("qualifier", "hand-written list",
+                                "generated rule", [], ["prompt files"]),
+    "watchdog-architecture-split": ("qualifier", "without a daemon",
+                                    "with two daemons", [], ["watchdog"]),
+    "graph-rerank-ab-cache": ("qualifier", "A/B tested", "never measured", [], ["production"]),
+    "eval-north-star-candidate": ("qualifier", "not simply recall",
+                                  "exactly recall", [], ["headline metric"]),
+    "retrieval-eval-item-1085": ("qualifier", "closed without landing",
+                                 "shipped early", [], ["eval work item"]),
+    "self-referential-check-catalogue": ("qualifier", "cannot read",
+                                         "always reads", [], ["note"]),
+    "eval-artifact-absolute-path": ("qualifier", "worktree", "live checkout", [], ["artifact"]),
+    # the swap exchanges the artifact the answer points at, and names no sibling.
+    "skill-mining-to-promotion": ("artifact", "trajectory skill mining",
+                                  "nightly build", [], ["promotion step"]),
+    "sqlite-alias-metacharacters": ("artifact", "LIKE", "GLOB", [], ["SQLite"]),
+    "bash-arrays-vs-strings": ("artifact", "filenames", "package versions", [], ["bash"]),
+    "python-dataclasses": ("artifact", "a Pydantic model", "a Rust struct", [], ["dataclass"]),
+    "browser-tool-falls-back": ("artifact", "HTTP request",
+                                "WebSocket session", [], ["browser tool"]),
+    "isaac-gr00t-n17": ("artifact", "humanoid foundation model",
+                        "manipulation policy", [], ["NVIDIA"]),
+    "eval-corpus-naming-conventions": ("artifact", "baseline artifacts",
+                                       "session transcripts", [], ["naming rules"]),
 }
 
 
@@ -236,13 +356,20 @@ def alias_resolver(db_path: Path) -> callable:
     is not present as a surface row — resolving through the table alone reports
     'Knowledge Graph' as unknown. That false negative is what made the first
     version of this audit flag all eight entity swaps as unverified.
+
+    `select distinct canonical` returns a one-column ROW, so the canonical set
+    has to index it. Reading the row itself calls `.lower()` on a tuple and
+    raises AttributeError, which is why `--verify` had never once run against a
+    real store: the audit that is the ONLY check on an entity swap's chosen
+    sibling could not be invoked at all, and every `verify_siblings` claim in
+    this file's tests was made against a hand-written resolver instead.
     """
     import sqlite3
 
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     surfaces = {s.lower(): c for s, c in
                 con.execute("select surface_lc, canonical from aliases")}
-    canonicals = {c.lower() for c in
+    canonicals = {row[0].lower() for row in
                   con.execute("select distinct canonical from aliases")}
     con.close()
 

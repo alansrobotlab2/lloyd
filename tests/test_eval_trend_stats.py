@@ -45,6 +45,7 @@ from scripts.eval_trend_stats import (  # noqa: E402
     default_baselines_dir,
     fmt_drift,
     join_ids,
+    joined_paired_n,
     load_window,
     main,
     mcmemar_exact,
@@ -600,27 +601,43 @@ def test_required_query_count_is_measured_from_observed_discordance(capsys):
     actually shows (every discordant pair in this series is ``b,c`` = 1,0 or 0,1,
     i.e. ``q = 1``). Under that most-favourable shape the exact power of this
     script's own McNemar test reaches 80 % at **n = 78**, and every discordant
-    pair observed so far is one-sided, so 78 is a lower bound. The live run also
-    prints the power at n = 20, which is 0.011.
+    pair observed so far is one-sided, so 78 is a lower bound. The power the live
+    run prints is evaluated at that window's own joined paired-query count — 20
+    ids here, because every baseline in 2026-09-04..2026-09-17 was scored on the
+    pre-#1319 corpus — and reads 0.011.
     """
+    transitions = [audit_transition(p, c) for p, c in
+                   zip(_live_baselines_in_window(), _live_baselines_in_window()[1:])]
+    paired_n = joined_paired_n(transitions)
     assert main(["--since", AUDIT_WINDOW[0], "--until", AUDIT_WINDOW[1]]) == 0
     out = capsys.readouterr().out
     sizing = out.split("POWER / QUERY-COUNT SIZING")[1]
     assert "required queries for 0.10 at 80% power" in sizing
     assert "n = 78" in sizing
-    assert "power to detect a 0.10 paired change at n=20" in sizing
+    # The printed n is asserted AGAINST the window's joined count, not against a
+    # literal. `at n=20` was the symptom of the bug (a constant no window could
+    # move) and is simultaneously this window's correct measurement, so only the
+    # join can tell those two apart — hence comparing the two rather than
+    # quoting the string.
+    printed_n, printed_power = _sizing_power_line(sizing)
+    assert printed_n == paired_n == 20, (
+        f"the block printed n={printed_n} while this window joins {paired_n} "
+        "query ids per transition — the power line must name its own window")
+    assert printed_power < 0.02, (
+        "0.011 at n=20 is the measurement #1319 was filed from; the pre-growth "
+        "series has to stay readable at the n it was measured on")
     assert "LOWER BOUND" in sizing
-    transitions = [audit_transition(p, c) for p, c in
-                   zip(_live_baselines_in_window(), _live_baselines_in_window()[1:])]
     disc = observed_discordance(transitions)
     assert disc["legs"] == 22, "11 joinable transitions x 2 binary legs"
     assert disc["rate"] == pytest.approx(9 / 440, abs=1e-9), \
         "9 discordant of 11 joinable transitions x 20 queries x 2 legs = 440"
     assert disc["max_per_leg"] == 2, "the largest discordance anywhere in the series"
-    measured = required_n(observed=disc)
+    measured = required_n(observed=disc, paired_n=paired_n)
     assert measured["n_exact"] == 78
     assert measured["p_used"] == pytest.approx(0.10)
-    assert measured["power_at_n20"] < 0.02
+    assert measured["power_at_paired_n"] < 0.02, (
+        "the 0.011 at n=20 is the measurement this item was filed from; the "
+        "power figure must still be computable at a stated n")
     assert measured["normal_approximation"] == 79, "cross-check within one query of the exact"
     assert measured["n_exact"] > 20, "the whole point: n=20 is not enough"
 
@@ -638,11 +655,184 @@ def test_the_sizing_moves_when_the_observed_discordance_moves():
     assert required_n(detect=0.05)["n_exact"] > required_n(detect=0.10)["n_exact"]
 
 
+# ── #1319 clause 4: the power line is computed from the WINDOW, not from 20 ───
+#
+# Until #1319 this block evaluated `power_exact(20, ...)` unconditionally and
+# printed the literal `at n=20`, while the corpus it describes had been grown to
+# 87 queries — so the audit's headline number described a window that no longer
+# existed, and the Check "the power line for the current n is at or above 0.80"
+# could not be satisfied by growing anything. `joined_paired_n(transitions)` is
+# now threaded in, and the window has to be injectable for that to be testable:
+# every real baseline on this box holds 20 records, because baselines with 78+
+# records can only be written by a nightly that runs after the growth lands. A
+# test that waited for live data would be asserting a post-landing observation,
+# which is what the human half of this clause is for.
+
+BIG_WINDOW_N = 90          # paired queries per transition in the injected window
+BIG_WINDOW_POWER_FLOOR = 0.80
+
+
+def _night_n(label: str, day: int, ids: tuple[str, ...], entity, doc,
+             ndcg, rr, corpus) -> dict:
+    """`_night` at an arbitrary query count; the record shape is identical.
+
+    Exists because `IDS` has eight ids and clause 4 needs a window whose paired
+    count clears the 78-query power floor.
+    """
+    doc_out = {
+        "label": label,
+        "ran_at": f"2026-01-{day:02d}T13:00:00+00:00",
+        "records": [
+            {"id": q, "query": f"query {q}",
+             "scoring": {"entity_hit": bool(e), "doc_hit": bool(d),
+                         "entity_recall": 1.0 if e else 0.0,
+                         "doc_recall": 1.0 if d else 0.0,
+                         "ndcg10": n, "rr_doc": r, "first_doc_rank": 1,
+                         "fact_entity_recall": 1.0 if e else 0.0}}
+            for q, e, d, n, r in zip(ids, entity, doc, ndcg, rr)
+        ],
+        "summary": {"overall": {"n_queries": len(ids)}},
+    }
+    if corpus is not None:
+        doc_out["corpus"] = dict(corpus)
+    return doc_out
+
+
+def _write_paired_window(tmp_path: Path, n_ids: int) -> Path:
+    """Three nights sharing `n_ids` query ids, with discordance kept rare.
+
+    Three one-sided flips on night 2's entity leg and two on night 3's doc leg,
+    so the pooled discordance over 2 transitions x 2 legs x ``n_ids`` records is
+    5/360 at n=90 — below the 0.10 shift worth detecting, which is the shape the
+    live series actually has and the reason the sizing uses p = max(observed,
+    detect) = 0.10. Same ids in every night, because a transition that cannot
+    join contributes no paired n and the median would then describe fewer nights
+    than were written.
+    """
+    ids = tuple(f"g{i:03d}" for i in range(1, n_ids + 1))
+    entity_1 = [1] * n_ids
+    entity_2 = [0, 0, 0] + [1] * (n_ids - 3)
+    doc_1 = [1] * n_ids
+    doc_2 = [0, 0] + [1] * (n_ids - 2)
+    d = tmp_path / "baselines"
+    d.mkdir(parents=True, exist_ok=True)
+    nights = [("nightly-20260101", 1, entity_1, doc_1),
+              ("nightly-20260102", 2, entity_2, doc_1),
+              ("nightly-20260103", 3, entity_2, doc_2)]
+    for label, day, entity, doc in nights:
+        night = _night_n(label, day, ids, entity, doc,
+                         [0.5] * n_ids, [0.5] * n_ids, CORPUS_A)
+        (d / f"{label}.json").write_text(json.dumps(night), encoding="utf-8")
+    return d
+
+
+def _sizing_power_line(sizing: str) -> tuple[int, float]:
+    """The (n, power) the block actually printed — parsed, not recomputed.
+
+    Reading the number off the line is the point: asserting on
+    ``power_exact(...)`` again in the test would pass even if the block printed a
+    constant, which is the defect being closed.
+    """
+    m = re.search(r"power to detect a [\d.]+ paired change at n=(\d+): ([\d.]+)",
+                  sizing)
+    assert m, f"no power line in the sizing block:\n{sizing[:600]}"
+    return int(m.group(1)), float(m.group(2))
+
+
+def test_the_power_line_names_the_window_not_the_literal_20(tmp_path, capsys):
+    """An injected 90-paired-query window reports power at 90, and it clears 0.80.
+
+    Both directions are asserted, because the clause is "at the real n", not
+    "≥ 0.80": an 8-id window in the same run must report n=8 and a power far
+    below the floor. A block that printed a constant power would satisfy the
+    ≥ 0.80 half on the big window and fail here.
+    """
+    big = _write_paired_window(tmp_path, BIG_WINDOW_N)
+    assert main(["--baselines", str(big), "--reps", "200", "--no-claims"]) == 0
+    sizing = capsys.readouterr().out.split("POWER / QUERY-COUNT SIZING")[1]
+    n_big, power_big = _sizing_power_line(sizing)
+    assert n_big == BIG_WINDOW_N, (
+        f"the block printed n={n_big} for a window whose transitions each join "
+        f"{BIG_WINDOW_N} query ids — the printed n must be the window's own "
+        "paired count, not a constant lifted from the pre-#1319 corpus")
+    assert power_big >= BIG_WINDOW_POWER_FLOOR, (
+        f"power {power_big} at n={n_big}, under the {BIG_WINDOW_POWER_FLOOR} "
+        "the sizing block itself says is required for a 0.10 paired change")
+    assert "at n=20" not in sizing, "the pre-#1319 literal is back"
+    assert "joined paired-query count" in sizing, (
+        "the line must say which n it is quoting; an unqualified n is how the "
+        "old line read as a corpus claim when it was a window claim")
+
+    small = _write_paired_window(tmp_path / "small", len(IDS))
+    assert main(["--baselines", str(small), "--reps", "200", "--no-claims"]) == 0
+    sizing_small = capsys.readouterr().out.split("POWER / QUERY-COUNT SIZING")[1]
+    n_small, power_small = _sizing_power_line(sizing_small)
+    assert n_small == len(IDS), (
+        f"the 8-id window printed n={n_small}; the block must follow the window "
+        "down as well as up, or it is a constant with better arithmetic")
+    assert power_small < 0.05, (
+        f"power {power_small} at n={n_small} should be near zero — the 20-query "
+        "series measured 0.011, which is the whole reason #1319 was filed")
+    assert power_small < power_big, "power must respond to the window's size"
+
+
+def test_a_window_that_pairs_nothing_reports_no_power_rather_than_inventing_n(tmp_path, capsys):
+    """No joinable transition means no paired n, and the block must say so.
+
+    ``required_n`` previously fell back to a literal 20 whenever there was no
+    window to read; the replacement returns None. Printing `n=0` would be a
+    number, and a number gets quoted into a nightly report.
+    """
+    d = tmp_path / "baselines"
+    d.mkdir(parents=True, exist_ok=True)
+    for day, ids in ((1, tuple(f"a{i}" for i in range(8))),
+                     (2, tuple(f"b{i}" for i in range(8)))):
+        night = _night_n(f"nightly-2026010{day}", day, ids, [1] * 8, [1] * 8,
+                         [0.5] * 8, [0.5] * 8, CORPUS_A)
+        (d / f"nightly-2026010{day}.json").write_text(json.dumps(night),
+                                                      encoding="utf-8")
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    sizing = capsys.readouterr().out.split("POWER / QUERY-COUNT SIZING")[1]
+    assert "no-verdict" in sizing, sizing[:600]
+    assert "at n=0" not in sizing and "at n=20" not in sizing, sizing[:600]
+
+
+def test_the_sizing_block_records_the_approved_re_base_point(tmp_path, capsys):
+    """The closing line states the 2026-09-21 re-base, not "is a person's call".
+
+    #608's third `human_clause` — whether to pay the re-basing cost — was approved
+    on 2026-09-20 and discharged by the growth itself, so the sentence that told
+    every reader the decision was still open became the thing that re-opens a
+    closed decision. It is replaced by the boundary a later reader must not
+    compare across. The corpus count quoted in that sentence is checked against
+    the corpus file, because a number in prose that outlives the growth it
+    describes is the same defect this item is about, one file over.
+    """
+    import yaml
+
+    corpus = yaml.safe_load(
+        (ROOT / "eval" / "vault_recall_queries.yaml").read_text())["queries"]
+    d = _write_paired_window(tmp_path, BIG_WINDOW_N)
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    sizing = capsys.readouterr().out.split("POWER / QUERY-COUNT SIZING")[1]
+    assert "person's call" not in sizing, (
+        "the pre-#1319 line is back: it tells the next reader the 80 %-power "
+        "decision is unmade, which it is not")
+    for required in ("#1319", "2026-09-21", "re-base"):
+        assert required in sizing, f"{required!r} missing from the sizing block"
+    assert f"{len(corpus)} gold queries" in sizing, (
+        f"the line quotes a corpus size that is not the corpus on disk "
+        f"({len(corpus)} queries)")
+
 
 def test_the_audit_does_not_touch_the_query_set(tmp_path):
-    """Growing ``eval/vault_recall_queries.yaml`` re-bases every absolute value
-    the 09-04 -> 09-17 series is compared on, which is a person's call. The audit
-    states the needed n and edits nothing.
+    """The audit still edits nothing, after #1319 grew the set on human approval.
+
+    Growth was Alan's call (2026-09-20, discharging #608's third `human_clause`)
+    and was done as its own change; the audit's job remains to print the needed n
+    and leave the file alone. If this ever fails, something started rewriting the
+    gold set from a reporting script — which is how a benchmark silently becomes
+    whatever the retriever returns.
     """
     queries = ROOT / "eval" / "vault_recall_queries.yaml"
     before = queries.read_bytes()

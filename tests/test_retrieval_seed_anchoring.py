@@ -350,6 +350,11 @@ for q in qs:
                  'seeds_extracted': seeds,
                  'expected': {'entities': q.get('expect_entities') or []}})
 anchorless = ev.anchorless_queries(recs)
+# The pre-#1319 half is the first 20 entries in file order, which
+# tests/test_eval_corpus_guard.py::test_the_gold_set_is_big_enough_for_its_own_power_claim
+# pins as exactly the original 20 ids. Splitting here rather than re-listing them
+# keeps one source of truth for what "the original corpus" means.
+anchorless_first20 = [a for a in anchorless if a in {q["id"] for q in qs[:20]}]
 
 st = store()
 names = set(st.entities.all())
@@ -359,25 +364,52 @@ for q in qs:
         c = st.resolve(e)
         if c is None or c not in names:
             unresolvable.append({'id': q['id'], 'expect': e, 'resolved': c})
-print(json.dumps({'anchorless': anchorless, 'unresolvable': unresolvable}))
+print(json.dumps({'anchorless': anchorless,
+                  'anchorless_first20': anchorless_first20,
+                  'n_queries': len(qs),
+                  'unresolvable': unresolvable}))
 """
 
 
-def test_the_shipped_corpus_has_exactly_five_anchorless_queries():
-    """Clause 1's number: 6 → 5, with the other five ids unchanged.
+def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
+    """#1260's five are still exactly the anchorless ones among the original 20.
 
-    `graph-quality` is the alias case and the one this contract removes: the query
-    says `relationship graph`, the alias table resolves that to `Knowledge Graph`,
-    and the gold entity IS `Knowledge Graph`. The five survivors
-    (`kg-maintenance-tasks`, `qwen38-local-serving`, `relationships-location`,
-    `memory-persistence`, `robotics-projects`) have gold entities related to the
-    query only semantically — no lexical path exists at any seed budget — and
-    reaching zero is #1164's recall arm, explicitly not this contract.
+    Clause 1's number was 6 → 5 over the 20-query corpus: `graph-quality` is the
+    alias case that contract removed (the query says `relationship graph`, the
+    alias table resolves that to `Knowledge Graph`, and the gold entity IS
+    `Knowledge Graph`), and the five survivors have gold entities related to the
+    query only semantically — no lexical path exists at any seed budget.
+
+    #1319 grew the corpus to 87 queries and 19 of the 67 additions are anchorless
+    for the same reason — a gold entity no seed extractor can reach lexically — so
+    the residue is 24 of 87 and the entity leg's measured ceiling moves from
+    (20−5)/20 = 0.750 to (87−24)/87 = 0.724. Both halves are pinned: the original
+    five by id (a gold that silently stops, or starts, being lexically reachable is
+    exactly what #1260 watches), and the grown residue in full, because that count
+    is the denominator every baseline artifact carries. Reaching zero remains
+    #1164's recall arm, not this contract.
     """
     out = _run_against_the_live_corpus(_CORPUS_SCRIPT)
+    assert out["anchorless_first20"] == [
+        "kg-maintenance-tasks", "qwen38-local-serving", "relationships-location",
+        "memory-persistence", "robotics-projects"], out["anchorless_first20"]
     assert out["anchorless"] == [
         "kg-maintenance-tasks", "qwen38-local-serving", "relationships-location",
-        "memory-persistence", "robotics-projects"], out["anchorless"]
+        "memory-persistence", "robotics-projects",
+        "browser-tool-validation", "three-d-printing-calibration",
+        "config-yaml-readonly", "dream-to-skill-edit", "automod-to-entity-guard",
+        "job-that-changes-its-own-code", "stop-auto-merging-entities",
+        "facts-that-contradict", "browser-tool-falls-back",
+        "skill-that-never-improves", "gpu-ram-thin-should-not-reboot",
+        "alarm-comes-back-after-fixed", "djev-decision-engine-integration",
+        "ambient-prefetch-ttl-reclaim", "isaac-gr00t-n17",
+        "retrieval-seed-anchoring-contract", "eval-corpus-naming-conventions",
+        "eval-north-star-candidate", "retrieval-eval-item-1085",
+    ], out["anchorless"]
+    ceiling = (out["n_queries"] - len(out["anchorless"])) / out["n_queries"]
+    assert (len(out["anchorless"]), out["n_queries"], round(ceiling, 3)) == (
+        24, 87, 0.724
+    ), f"{len(out['anchorless'])} anchorless of {out['n_queries']} queries"
 
 
 def test_every_gold_entity_name_resolves_to_an_entity_the_store_can_return():

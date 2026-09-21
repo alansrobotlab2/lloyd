@@ -29,6 +29,27 @@
 #   inline. Two changes make a query HARDER (FACT_GODNODE_THRESHOLD,
 #   Agent Harness); one is a genuine WEAKENING and is flagged as such
 #   (nightly-reflection).
+#
+# 2026-09-21 (#1319) — GOLD-SET GROWTH 20 → 87 QUERIES. THIS IS THE RE-BASE POINT.
+#   At n=20 the trend audit's own exact-McNemar power search measured the power to
+#   detect a 0.10 paired change at 0.011, so the nightly could not see the shift it
+#   exists to see; 78 is what 0.10 at 80 % power (alpha 0.05) requires. Approved by
+#   Alan on 2026-09-20 as the discharge of #608's third human_clause.
+#   DO NOT COMPARE ABSOLUTE VALUES ACROSS THIS POINT. Every rate the
+#   2026-09-04 → 2026-09-17 series carries (entity_hit_rate, doc_recall_avg, ndcg10)
+#   is a mean over 20 questions; the 87-query mean is over different questions, not
+#   the same questions rescored. The paired tests in scripts/eval_trend_stats.py
+#   join on ids present in both nights, so the old series stays joinable on the
+#   original 20, whose `query` text is byte-identical — pinned by
+#   tests/test_eval_corpus_guard.py::test_the_gold_set_is_big_enough_for_its_own_power_claim
+#   — while their `expect_*` labels were re-pointed wherever they named nothing.
+#   Category mix before → after: single 5→20, multi-hop 5→19, technical 3→14,
+#   hard 3→12, recent 2→11, fuzzy 2→11. Whether that mix is representative of real
+#   use is a person's call and is carried as needs-human on #1319.
+#   The 67 new labels were authored from the vault and the entity table, and each
+#   was written before any recall run on its query: a gold label read off what the
+#   retriever currently returns manufactures the passing eval this growth exists to
+#   prevent, which is why the spot-check is owed by a person and not by this file.
 
 queries:
   # --- Single-entity lookups (basic retrieval) ---
@@ -55,7 +76,10 @@ queries:
     # file is contained in no entity name, so re-breaking it is a red test rather
     # than a nightly number that quietly reads as a retrieval regression.
     expect_entities: ["Task #363", "#363 TGS-RAG Implementation"]
-    expect_docs: ["backlog/363-implement-tgs-rag", "Backlog Item 363"]
+    # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
+    # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
+    # live vault listing, that a correct answer to THIS query would cite.
+    expect_docs: ['backlog/363-implement-tgs-rag-visited-memory-orphan-entity-bri.md', 'knowledge/ai/tgs-rag-bidirectional-text-graph-synergy.md']
 
   - id: entity-resolution-sweep
     query: "what does the entity resolution sweep skill do?"
@@ -75,7 +99,10 @@ queries:
     query: "what is vault_recall and how does it work?"
     category: single
     expect_entities: ["vault_recall"]
-    expect_docs: ["agent_mcp/vault.py", "vault_recall"]
+    # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
+    # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
+    # live vault listing, that a correct answer to THIS query would cite.
+    expect_docs: ['architecture/tools.md', 'architecture/knowledge-graph.md']
 
   - id: qmd
     query: "what is QMD?"
@@ -95,7 +122,10 @@ queries:
     query: "how does Lloyd use vLLM?"
     category: multi-hop
     expect_entities: ["lloyd", "vLLM"]
-    expect_docs: ["vllm", "harness", "config.yaml"]
+    # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
+    # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
+    # live vault listing, that a correct answer to THIS query would cite.
+    expect_docs: ['knowledge/inference/vllm-multi-model-serving.md', 'knowledge/inference/vllm-multi-model-serving-roadmap.md', 'projects/lloyd/gpu-allocation.md']
 
   - id: harness-tools
     query: "how does the agent harness dispatch tool calls?"
@@ -105,7 +135,10 @@ queries:
     # the eval was requiring an entity the system is designed never to make.
     # "Agent Harness" is the real entity and a stricter target than "lloyd".
     expect_entities: ["Agent Harness", "lloyd"]
-    expect_docs: ["app/harness/loop.py", "app/harness/tool_schema.py", "harness"]
+    # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
+    # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
+    # live vault listing, that a correct answer to THIS query would cite.
+    expect_docs: ['architecture/tools.md', 'architecture/agents.md', 'architecture/infrastructure.md']
 
   - id: nightly-reflection
     query: "what skills are involved in nightly reflection?"
@@ -210,7 +243,10 @@ queries:
     query: "how does the v4 mention classifier decide what to upgrade?"
     category: technical
     expect_entities: ["KG Mention Classifier", "Knowledge Graph v4 Classifier"]
-    expect_docs: ["classify-relationships-v4", "kg-mention-classifier"]
+    # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
+    # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
+    # live vault listing, that a correct answer to THIS query would cite.
+    expect_docs: ['knowledge/2026-05-04-knowledge-graph-v4-classifier-audit.md', 'knowledge/2026-05-04-knowledge-graph-edge-audit.md']
 
   - id: godnode-threshold
     query: "what's the FACT_GODNODE_THRESHOLD and why does it exist?"
@@ -219,27 +255,39 @@ queries:
     # code path the junk guard correctly rejects; the new one is the actual
     # subject of the question and a STRICTER, more precise target.
     expect_entities: ["FACT_GODNODE_THRESHOLD", "Knowledge Graph"]
-    expect_docs: ["agent_mcp/facts.py", "fact_graph"]
+    # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
+    # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
+    # live vault listing, that a correct answer to THIS query would cite.
+    expect_docs: ['architecture/knowledge-graph.md', 'knowledge/2026-05-04-knowledge-graph-edge-audit.md']
     notes: "Niche technical detail — tests whether retrieval finds source code references."
 
   - id: relationships-location
     query: "where is the relationships index stored?"
     category: technical
     expect_entities: ["Knowledge Graph"]
-    expect_docs: ["facts.py", "vault-derived/facts", "_relationships"]
+    # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
+    # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
+    # live vault listing, that a correct answer to THIS query would cite.
+    expect_docs: ['architecture/knowledge-graph.md', 'architecture/memory.md']
 
   # --- Conceptual / fuzzy ---
   - id: memory-persistence
     query: "how does Lloyd remember things across sessions?"
     category: fuzzy
     expect_entities: ["Memory Capture", "MEMORY.md", "Knowledge Graph"]
-    expect_docs: ["memory", "MEMORY.md", "autonomy/25-"]
+    # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
+    # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
+    # live vault listing, that a correct answer to THIS query would cite.
+    expect_docs: ['architecture/autonomy-system.md', 'architecture/infrastructure.md']
 
   - id: autonomy-pipeline
     query: "describe the autonomy pipeline end to end"
     category: fuzzy
     expect_entities: ["Autonomy Data Pipeline", "Data Pipeline", "Conversation Relation Linking"]
-    expect_docs: ["autonomy/24-", "autonomy-data-pipeline", "autonomy.py"]
+    # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
+    # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
+    # live vault listing, that a correct answer to THIS query would cite.
+    expect_docs: ['architecture/autonomy-system.md', 'architecture/staged-pipeline.md']
 
   # --- Known-difficult / cross-domain ---
   - id: robotics-projects
@@ -255,7 +303,10 @@ queries:
     query: "what changed in the autonomy system this week?"
     category: hard
     expect_entities: ["Autonomy Data Pipeline", "KG Mention Classifier", "Entity Resolution Sweep"]
-    expect_docs: ["autonomy/", "kg-pipeline"]
+    # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
+    # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
+    # live vault listing, that a correct answer to THIS query would cite.
+    expect_docs: ['architecture/autonomy-system.md', 'knowledge/software/autonomy-dispatch-hold-reason.md']
     notes: "Recency-biased; semantic similarity alone tends to miss 'this week' framing."
 
   - id: backlog-overview
@@ -264,3 +315,649 @@ queries:
     expect_entities: ["Backlog System"]
     expect_docs: ["backlog/"]
     notes: "Open-ended; current vault_recall probably returns weak results. Useful baseline."
+  # ── Growth 2026-09-21 (#1319): entries 21-78. ──────────────────────────────
+  # Authored from the vault and the entity store, NOT from a recall run: each
+  # query and its `expect_*` labels were written down first, then checked
+  # mechanically that every doc label is a path under ~/obsidian under the
+  # scorer's own rule and every entity label resolves to a row
+  # (tests/test_eval_corpus_guard.py). A human spot-checks a sample against that
+  # rule before the expanded set re-bases anything.
+  # ── single-hop, direct factual lookups (15) ────────────────────────────────
+  - id: tts-voice-cloning
+    query: "How do I use a cloned voice with the TTS service, and which model does a built-in voice use?"
+    category: single
+    expect_entities:
+      - "Qwen3-TTS"
+    expect_docs:
+      - 'knowledge/software/qwen3-tts-built-in-voice-model-routing.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Cloned voices route through Custom Voice and work; built-in voices 500'd until the model-key fix — knowledge/tts-404-model-key-resolution.md."
+
+  - id: wake-word-models
+    query: "How many wake phrases are configured and why can't the acoustic models be retrained?"
+    category: single
+    expect_entities:
+      - "Wake-word ONNX Model"
+    expect_docs:
+      - 'backlog/52-wake-word-training-hey-lloyd-lloyd.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/llm-serving/model-sleep-wake-latency-96b+.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "5 configured phrases against 2 acoustic models; the training-data gap is what blocks retraining."
+
+  - id: thunderbird-mcp-toolset
+    query: "Which tools does the Thunderbird MCP server expose for mail, calendar and contacts?"
+    category: single
+    expect_entities:
+      - "Thunderbird MCP"
+    expect_docs:
+      - 'skills/thunderbird-mcp-implementation/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "knowledge/software/thunderbird-mcp-tools.md is the 14-tool reference the skill defers to."
+
+  - id: mission-control-tab-layout
+    query: "What tabs does Mission Control have and which one shows background workers?"
+    category: single
+    expect_entities:
+      - "Mission Control"
+    expect_docs:
+      - 'skills/.archived/mission-control-build/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The tab list and the event flow behind it."
+
+  - id: grafana-monitoring-stack
+    query: "What does the Grafana deployment on this machine consist of and how is its database kept small?"
+    category: single
+    expect_entities:
+      - "Grafana"
+    expect_docs:
+    notes: "Prometheus/Grafana/Loki plus the WAL trim and vacuum that bound the DB."
+
+  - id: gpu-model-naming-collision
+    query: "Why does the hardware inventory report two different GPUs for the same machine?"
+    category: single
+    expect_entities:
+      - "GPU"
+    expect_docs:
+      - 'knowledge/hardware/gpu-hardware-inventory.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Two naming sources for one card; the collision is documented, not a phantom second card."
+
+  - id: browser-tool-validation
+    query: "How do I tell a browser tool that is wired wrong from one that is simply not configured?"
+    category: single
+    expect_entities:
+      - "Playwright"
+    expect_docs:
+      - 'skills/browser-tool-validation/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/misc/browser-automation.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The probe hierarchy: navigate, snapshot, then evaluate."
+
+  - id: three-d-printing-calibration
+    query: "How do I calibrate the printer's flow rate and temperature tower?"
+    category: single
+    expect_entities:
+      - "3D Printing"  # re-pointed 2026-09-21 (#1319): no entity name contains "3D Printer"
+    expect_docs:
+    notes: "Both calibration guides sit under knowledge/3d-printing/."
+
+  - id: youtube-transcript-workflow
+    query: "Where does a YouTube transcript go once it is extracted, and what breaks extraction?"
+    category: single
+    expect_entities:
+      - "Raw YouTube Transcripts"  # re-pointed 2026-09-21 (#1319): the old value is a short/alias name the entity store cannot return; this is the canonical it resolves to
+    expect_docs:
+      - 'knowledge/software/youtube-transcript-extraction-continuity.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/ai/youtube-transcript-extraction.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/general/youtube-video-deep-research.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The continuity note carries the 0-hit-grep lesson; the extraction note carries the failure modes."
+
+  - id: mcp-transport-error-recovery
+    query: "What are the documented recovery steps when an MCP server's transport dies mid-session?"
+    category: single
+    expect_entities:
+      - "MCP"
+    expect_docs:
+      - 'skills/mcp-transport-error-recovery/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/youtube/AI_Engineer/20260828-building-the-engine-while-flying-the-plane-launching-the-figma-mcp-server-jesse.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Recovery steps, not the symptom write-up."
+
+  - id: config-yaml-readonly
+    query: "Why must config.yaml never be rewritten by a running job, and where does runtime UI state go instead?"
+    category: single
+    expect_entities:
+      - "Lloyd Config"  # re-pointed 2026-09-21 (#1319): the old value is a short/alias name the entity store cannot return; this is the canonical it resolves to
+    expect_docs:
+      - 'backlog/456-tool-search-is-disabled-in-the-live-override-so-th.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "An in-flight yaml.dump(CONFIG) writes secrets into the tree and stops the automod loop; data/tool_overrides.yaml is the writable half."
+
+  - id: model-alias-resolution
+    query: "Which model does a request actually get when the caller passes a routing name?"
+    category: single
+    expect_entities:
+      - "Model Router"
+      - "Model Routing"
+    expect_docs:
+      - 'knowledge/youtube/AI_Engineer/20260806-the-state-of-model-routing-nvidia-cognition-openrouter.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The alias table and the router that reads it; the eval-side view is model-routing-eval."
+
+  - id: groundskeeper-queue-corruption
+    query: "What corrupted the groundskeeper survey queue, and what now guards its size?"
+    category: single
+    expect_entities:
+      - "Groundskeeper Queue"
+    expect_docs:
+      - 'memory/learnings/2026-03-30-groundskeeper-queue-corruption.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Root cause plus the size guard added after it."
+
+  - id: kg-rebuild-abandoned
+    query: "Why was the 2026-09-03 knowledge graph rebuild abandoned instead of fixed?"
+    category: single
+    expect_entities:
+      - "Knowledge Graph"
+    expect_docs:
+      - 'knowledge/ai/2026-08-22-entity-graph-incident.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The coverage-gate failure closed as abandoned, not fixed; the August incident is the cause behind it."
+
+  - id: kg-dedup-key
+    query: "Which field identifies one fact in the knowledge graph store, and why is fact_id not it?"
+    category: single
+    expect_entities:
+      - "Fact Store"
+    expect_docs:
+      - 'backlog/957-facts-idx-rows-keyed-under-alias-variant-names-are.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "fact_id is a per-file counter; text_hash is the dedupe key."
+
+  # ── multi-hop, cross-referencing several notes (15) ────────────────────────
+  - id: guardian-to-backlog
+    query: "What does the guardian do after it detects a failure, and where does the backlog item it files come from?"
+    category: multi-hop
+    expect_entities:
+      - "Guardian"
+      - "Backlog System"
+    expect_docs:
+      - 'knowledge/software/guardian-alert-retraction-asymmetry.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Classification routes into alerting, and alerting is what files the item."
+
+  - id: dream-to-skill-edit
+    query: "What does the dream consolidation pass change, and which loop decides whether a changed skill stays?"
+    category: multi-hop
+    expect_entities:
+      - "Nightly Reflection"
+      - "Skills Library"
+    expect_docs:
+      - 'skills/dream-consolidation/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/fact-improvement/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/python-library-pipeline/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The dream proposes skill edits; promotion is a separate decision."
+
+  - id: automod-to-entity-guard
+    query: "What does a self-modification round run before it can land, and how does it know a memory change broke retrieval?"
+    category: multi-hop
+    expect_entities:
+      - "automod gate"
+      - "promotion gate"
+    expect_docs:
+      - 'knowledge/ai/2026-09-06-self-mod-test-coverage.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/evaluation/composite-scoring-weighted-promotion-gate.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'backlog/1260-retrieval-eval-s-entity-leg-is-seed-anchor-bound-6.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Rungs plus the eval that catches an entity-leg regression."
+
+  - id: memory-capture-to-kg
+    query: "What happens to a memory the periodic capture job writes, before the knowledge graph can use it?"
+    category: multi-hop
+    expect_entities:
+      - "Fact Store"
+      - "Knowledge Graph"
+    expect_docs:
+      - 'skills/periodic-memory-capture-dee/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'backlog/284-pipeline-multi-stage-transition-broken-stages-dir-.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/autonomy-reflection-pipeline/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "markdown first, then the ingest stages; the queue between them is what silently fails."
+
+  - id: research-queue-to-vault-note
+    query: "Where does the research queue keep its topics, and what does a finished topic have to point at?"
+    category: multi-hop
+    expect_entities:
+      - "Research Queue"
+    expect_docs:
+      - 'skills/deep-research/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/research/2026-04-25-token-efficiency-autonomous-agents.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The registry plus the artifact rule that refuses a topic with no note on disk."
+
+  - id: counterfactual-to-trend-audit
+    query: "How does the retrieval eval tell a stale index from a real regression, and where are the verdict rules that use that number?"
+    category: multi-hop
+    expect_entities:
+      - "Nightly Retrieval Eval"  # re-pointed 2026-09-21 (#1319): the old value is a short/alias name the entity store cannot return; this is the canonical it resolves to
+    expect_docs:
+      - 'skills/retrieval-eval/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The perturbation twin plus the paired test that decides whether a delta is a verdict."
+
+  - id: autonomy-task-to-skill
+    query: "What does an autonomy task actually execute, and how is a recurring pipeline different from a one-off task?"
+    category: multi-hop
+    expect_entities:
+      - "Autonomy Data Pipeline"
+      - "Skills Library"
+    expect_docs:
+      - 'backlog/810-the-autonomy-board-and-the-scheduler-resolve-depen.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'architecture/autonomy-system.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'architecture/staged-pipeline.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The task row names a SKILL.md; the pipeline is the named chain of tasks."
+
+  - id: inner-voice-to-surface
+    query: "What does inner voice decide about a turn, and where do its signals end up on the UI?"
+    category: multi-hop
+    expect_entities:
+      - "Inner Voice"
+      - "Mission Control"
+    expect_docs:
+      - 'architecture/inner-voice.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/.archived/mission-control-build/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The decision seam, then the tab that renders it."
+
+  - id: entity-guard-to-alias-table
+    query: "What stops the knowledge graph from merging two different systems, and which table decides what counts as the same name?"
+    category: multi-hop
+    expect_entities:
+      - "Knowledge Graph"
+    expect_docs:
+      - 'backlog/917-the-daily-graph-backup-s-data-loss-guard-fails-ope.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/synthesis/2026-08-26-ratchet-and-graph-share-the-baseline-integrity-gate.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/entity-resolution-sweep/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The guard's threshold and the alias table it leans on; the sweep is the audit of the same question."
+
+  - id: email-pipeline-to-daily-note
+    query: "What happens to the mail the morning briefing summarizes, and where does that summary end up?"
+    category: multi-hop
+    expect_entities:
+      - "Morning Briefing"
+    expect_docs:
+      - 'skills/email-calendar-monitoring/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'memory/DAILY_NOTES.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Monitor, brief, then write the day's note."
+
+  - id: skill-mining-to-promotion
+    query: "What does trajectory skill mining propose, and which loop decides whether a mined skill gets promoted?"
+    category: multi-hop
+    expect_entities:
+      - "Trajectory Skill Mining"
+      - "AutoResearch"
+    expect_docs:
+      - 'knowledge/ai-agents/runtime-trace-skill-extraction.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/python-library-pipeline/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Mined candidates go through the same promotion and rollback machinery as prompt variants."
+
+  - id: guardian-alert-to-retraction
+    query: "What happens after the guardian raises an alert, and what is the defect in how that alert ever gets retracted?"
+    category: multi-hop
+    expect_entities:
+      - "Guardian"
+    expect_docs:
+      - 'knowledge/software/guardian-alert-retraction-asymmetry.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/software/guardian-data-damage-false-trip.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The alarm is written to the surface a human reads; the retraction has no equivalent writer."
+
+  - id: voice-session-to-room
+    query: "Why did voice stop answering even though the ASR model was fine, and what actually proves the media path is bound?"
+    category: multi-hop
+    expect_entities:
+      - "Voice Pipeline"
+      - "LiveKit"
+    expect_docs:
+      - 'knowledge/software/livekit-node-ip-tailnet-drift.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/SLAM-VLA-Closed-Loop-Integration.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "A room the agent never joined cannot be fixed by threshold tuning; the worker log's rms_peak is the decisive probe."
+
+  - id: memory-md-clobber-to-guard
+    query: "What truncated the loaded memory file in September, and what rule now stops a job from committing that shrink?"
+    category: multi-hop
+    expect_entities:
+      - "Memory"
+    expect_docs:
+      - 'knowledge/software/memory-md-clobber-2026-09-10.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/software/landed-claim-provenance.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "A truncating commit plus the diff-before-commit rule for loaded-memory files."
+
+  # ── technical (11) ─────────────────────────────────────────────────────────
+  - id: watchdog-metacharacter
+    query: "Why does pkill -f 'watchdog|daemon' match every process on the machine?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'skills/.archived/false-positive-error-handling/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/pkill-self-match/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "ERE with a BRE-style escaped pipe: the alternation becomes a literal, so the pattern matches everything."
+
+  - id: yaml-scalar-block-indent
+    query: "Why does my YAML block scalar lose its content when I use a colon in the first line?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'backlog/1006-blocks-484-its-frontmatter-is-yaml-broken-so-no-ro.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Indentation and the block-scalar indicator, plus the frontmatter parser that silently drops the body."
+
+  - id: json-filter-epoch-vs-iso
+    query: "Why does filtering a JSONL log by a date string select zero rows when the file has thousands?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'knowledge/software/automod-round-lifecycle-telemetry.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'architecture/inner-voice.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The row carries both an epoch float and an ISO string; the string comparison against the epoch selects nothing and reads as an idle day."
+
+  - id: sqlite-alias-metacharacters
+    query: "Why does my SQL LIKE pattern with an underscore in a name match the wrong rows?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'knowledge/youtube/AI_Engineer/20260714-dont-build-agents-you-cant-answer-for-addy-osmani.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Two sqlite traps in the same store: LIKE wildcards inside an identifier, and a placeholder that cannot name a table."
+
+  - id: bash-arrays-vs-strings
+    query: "How do I loop over filenames safely in bash, and what is the common mistake?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+    notes: "Word splitting on an unquoted expansion; arrays plus the quoting rule."
+
+  - id: python-dataclasses
+    query: "When should I use a dataclass instead of a Pydantic model or a TypedDict?"
+    category: technical
+    expect_entities:
+      - "Pydantic"
+    expect_docs:
+      - 'knowledge/tools/claude-agent-sdk-advanced-features.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The stdlib-vs-validation trade-off."
+
+  - id: git-signals-in-async-code
+    query: "Why can't I catch SIGINT inside an asyncio callback?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'backlog/128-migrate-service-management-into-distrobox-container.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Signal delivery is main-thread only; add_signal_handler is the loop's route."
+
+  - id: docker-volumes-uv-cache
+    query: "How do I keep uv from re-downloading wheels on every container build?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'knowledge/inference/docker-container-failover-patterns.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "A bind-mounted cache directory against the default ephemeral one."
+
+  - id: regex-lookbehind-recall
+    query: "Why does my lookbehind work in ripgrep but not in grep -E?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+    notes: "The regex crate refuses look-around; POSIX ERE never had it."
+
+  - id: shell-quoting-word-splitting
+    query: "Why does my for loop break on filenames that contain spaces?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'skills/bash-background-tasks/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Unquoted expansion splits on IFS; the shellcheck notes carry the diagnostic."
+
+  - id: gpu-daemon-ipc-timeout
+    query: "Why does a GPU daemon report a monotonic timeout against a process that is clearly alive?"
+    category: technical
+    expect_entities:
+      - "GPU"
+    expect_docs:
+      - 'backlog/314-qmd-daemon-gpu-oom-monitoring-alerting.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Reading /proc's clock against the daemon's own monotonic clock across a process boundary."
+
+  # ── fuzzy, natural-language paraphrase (9) ─────────────────────────────────
+  - id: job-that-changes-its-own-code
+    query: "the job that keeps rewriting the code it itself runs in"
+    category: fuzzy
+    expect_entities:
+      - "automod gate"
+    expect_docs:
+      - 'knowledge/software/automod-round-lifecycle-telemetry.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Named by role, not by slug."
+
+  - id: check-that-cannot-see-its-input
+    query: "the note about a check that reports a verdict about an input it cannot read"
+    category: fuzzy
+    expect_entities: []
+    expect_docs:
+      - 'knowledge/software/guardian-data-damage-false-trip.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'backlog/1178-guardian-self-test-computes-its-failing-check-s-de.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/synthesis/2026-08-26-ratchet-and-graph-share-the-baseline-integrity-gate.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The catalogue of guards that read their own missing input."
+
+  - id: stop-auto-merging-entities
+    query: "where we decided to stop automatically merging entities that looked alike"
+    category: fuzzy
+    expect_entities:
+      - "Entity Resolution Sweep"
+    expect_docs:
+      - 'knowledge/entity-resolution-ambiguous-review.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/entity-resolution-sweep/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The review queue exists because the automatic sweep destroyed things."
+
+  - id: cheaper-model-every-turn
+    query: "the argument for sending most turns to a cheap model and only the hard ones to the expensive one"
+    category: fuzzy
+    expect_entities:
+      - "Model Routing"
+    expect_docs:
+      - 'skills/secondary-routing-eval/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/.archived/model-usage/skill.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Cost-per-turn framing rather than the router's name."
+
+  - id: write-that-ate-the-memory-file
+    query: "the time a write swallowed the whole memory file and how it was got back"
+    category: fuzzy
+    expect_entities:
+      - "Memory"
+    expect_docs:
+      - 'knowledge/software/memory-md-clobber-2026-09-10.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Narrative description of the truncation incident."
+
+  - id: nightly-cannot-tell
+    query: "why the nightly retrieval run always says it cannot tell whether anything changed"
+    category: fuzzy
+    expect_entities:
+      - "Nightly Retrieval Eval"  # re-pointed 2026-09-21 (#1319): the old value is a short/alias name the entity store cannot return; this is the canonical it resolves to
+    expect_docs:
+      - 'skills/retrieval-eval/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Underpowered paired test, phrased as the nightly's own hedge."
+
+  - id: facts-that-contradict
+    query: "how the memory notices that two things it believes about the same system disagree"
+    category: fuzzy
+    expect_entities:
+      - "Fact Store"
+    expect_docs:
+      - 'backlog/397-community-detection-over-the-fact-graph-prove-the-m.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'architecture/knowledge-graph.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Contradiction detection described without naming the tool."
+
+  - id: browser-tool-falls-back
+    query: "why the browser tool sometimes quietly gives up and uses a raw HTTP request instead"
+    category: fuzzy
+    expect_entities:
+      - "Playwright"
+    expect_docs:
+      - 'skills/browser-tool-validation/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/misc/browser-automation.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The fallback path, described from the symptom."
+
+  - id: skill-that-never-improves
+    query: "what makes a skill stop getting better even though the reflection loop keeps touching it"
+    category: fuzzy
+    expect_entities:
+      - "Skills Library"
+    expect_docs:
+      - 'skills/fact-improvement/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/python-library-pipeline/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/autonomy-self-improvement/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The stagnation patterns, not the loop's name."
+
+  # ── hard, adversarial phrasing (9) ─────────────────────────────────────────
+  - id: gpu-ram-thin-should-not-reboot
+    query: "why is it a bad idea to boot the big model again just because free memory looks a bit thin"
+    category: hard
+    expect_entities:
+      - "GPU"
+    expect_docs:
+    notes: "The n-gram table lives in host RAM; the kill takes the whole supervisor unit, not one engine."
+
+  - id: alarm-comes-back-after-fixed
+    query: "the alert keeps coming back after I fixed it which note explains an alarm that outlives its cause"
+    category: hard
+    expect_entities:
+      - "Guardian"
+    expect_docs:
+      - 'knowledge/software/guardian-alert-retraction-asymmetry.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'backlog/375-add-observer-watchdog-pattern-to-inner-voice.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "A retraction is never written to the surface the alarm used."
+
+  - id: numbers-differ-after-rebuild
+    query: "why did the graph's numbers change so much after a rebuild and which note says the reference was the broken part"
+    category: hard
+    expect_entities:
+      - "Knowledge Graph"
+    expect_docs:
+      - 'knowledge/synthesis/2026-08-26-ratchet-and-graph-share-the-baseline-integrity-gate.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/ai/2026-08-22-entity-graph-incident.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/2026-05-04-knowledge-graph-edge-audit.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "A baseline that rewrites itself is defective in both directions."
+
+  - id: memory-line-contradicts-vault
+    query: "the memory says one number and the file says another which note settles which one to believe"
+    category: hard
+    expect_entities:
+      - "Memory"
+    expect_docs:
+      - 'knowledge/software/landed-claim-provenance.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "When loaded memory and disk disagree, disk wins and the prompt copy is the defect."
+
+  - id: wrong-thing-broke-simultaneously
+    query: "two things broke at the same minute and the obvious cause was the wrong one which incident is that"
+    category: hard
+    expect_entities: []
+    expect_docs:
+      - 'knowledge/sync/obsidian-sync-alternatives.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Same-minute coincidence read as causation; the deleter was a live session's containment."
+
+  - id: djev-decision-engine-integration
+    query: "which small engine answers typed yes-or-no questions off the mostly-idle second GPU, and what do its scores not mean?"
+    category: hard
+    expect_entities:
+      - "Decision Engine"
+    expect_docs:
+    notes: "Scores are self-consistent, not calibrated; the hard ceiling on candidate count is deliberate."
+
+  - id: ambient-prefetch-ttl-reclaim
+    query: "what finally frees background context queued for a session that never takes another turn?"
+    category: hard
+    expect_entities:
+      - "Ambient Queue"
+    expect_docs:
+      - 'backlog/910-ambient-prefetch-ttl-is-enforced-only-at-drain-so-.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'architecture/ambient-context-injection.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "TTL was only enforced at drain, so an idle session's entries were never reclaimed."
+
+  - id: primary-ram-floor-changed
+    query: "what moved the memory floor a model boot is allowed to start above, and what does the abort line still name?"
+    category: hard
+    expect_entities: []
+    expect_docs:
+      - 'knowledge/software/oomd-primary-restart-ram-gate.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The floor is machine- and day-specific; the abort threshold is the retired box's floor."
+
+  - id: prompt-surface-open-set
+    query: "why can't a hand-written list of prompt files ever prove that every prompt file is covered?"
+    category: hard
+    expect_entities: []
+    expect_docs:
+      - 'backlog/1242-blocks-1069-prompt-surface-py-is-outside-every-aut.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/ai/2026-09-04-dont-break-the-cache-prompt-caching-long-horizon-agents.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "An allowlist cannot close a property that must hold over an open set; the class re-files itself each night."
+
+  # ── recent (9) ─────────────────────────────────────────────────────────────
+  - id: isaac-gr00t-n17
+    query: "What is the current NVIDIA humanoid foundation model release, and what does the local analysis compare it against?"
+    category: recent
+    expect_entities:
+      - "Isaac GR00T N1.7"
+    expect_docs:
+      - 'knowledge/research/2026-08-23-isaac-gr00t-reference-humanoid.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/health/2026-05-retatrutide-deep-dive.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The release plus the local closeout and the model card."
+
+  - id: watchdog-architecture-split
+    query: "What does the watchdog check without a daemon, and what needs one?"
+    category: recent
+    expect_entities: []
+    expect_docs:
+      - 'skills/.archived/false-positive-error-handling/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/claude-code/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "Which checks are stateless and which need a persistent process."
+
+  - id: graph-rerank-ab-cache
+    query: "How was the graph re-ranking of recalled documents A/B tested, and what did the production read say?"
+    category: recent
+    expect_entities:
+      - "Knowledge Graph"
+    expect_docs:
+      - 'backlog/1001-a-comment-in-vault-recall-says-graph-rerank-is-def.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'backlog/1000-matches-production-defaults-checks-expand-graph-ag.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The offline arm, the production read, and the rollout decision."
+
+  - id: retrieval-seed-anchoring-contract
+    query: "Which eval queries have no gold entity the seed extractor can even reach?"
+    category: recent
+    expect_entities:
+      - "Nightly Retrieval Eval"  # re-pointed 2026-09-21 (#1319): the old value is a short/alias name the entity store cannot return; this is the canonical it resolves to
+    expect_docs:
+      - 'backlog/1260-retrieval-eval-s-entity-leg-is-seed-anchor-bound-6.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The anchorless count is the ceiling on the entity leg, carried in every baseline artifact."
+
+  - id: eval-corpus-naming-conventions
+    query: "What are the naming rules for the eval corpus files, and where do the baseline artifacts live?"
+    category: recent
+    expect_entities:
+      - "Nightly Retrieval Eval"  # re-pointed 2026-09-21 (#1319): the old value is a short/alias name the entity store cannot return; this is the canonical it resolves to
+    expect_docs:
+      - 'knowledge/observability/span-naming-conventions-attributes.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'skills/retrieval-eval/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'architecture/staged-pipeline.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The artifact naming contract, and the gitignored baselines directory."
+
+  - id: eval-north-star-candidate
+    query: "What would the eval's single headline metric be, and why is it not simply recall?"
+    category: recent
+    expect_entities:
+      - "Nightly Retrieval Eval"  # re-pointed 2026-09-21 (#1319): the old value is a short/alias name the entity store cannot return; this is the canonical it resolves to
+    expect_docs:
+    notes: "The candidate metric and the reason a per-query binary is the unit."
+
+  - id: retrieval-eval-item-1085
+    query: "Which eval work item was closed without landing, and what was measured instead?"
+    category: recent
+    expect_entities:
+      - "Nightly Retrieval Eval"  # re-pointed 2026-09-21 (#1319): the old value is a short/alias name the entity store cannot return; this is the canonical it resolves to
+    expect_docs:
+      - 'skills/retrieval-eval/SKILL.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "A closure that names what was measured rather than what shipped."
+
+  - id: self-referential-check-catalogue
+    query: "How many different ways has a guard been seen to answer about an input it cannot read?"
+    category: recent
+    expect_entities: []
+    expect_docs:
+      - 'backlog/46-explore-self-improving-agent-pattern-for-lloyd.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/software/guardian-data-damage-false-trip.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'knowledge/synthesis/2026-08-26-ratchet-and-graph-share-the-baseline-integrity-gate.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "The instance count lives in the catalogue, not in loaded memory, precisely so it stops being stale."
+
+  - id: eval-artifact-absolute-path
+    query: "Where does the eval write its artifact when an automod round runs it from a worktree?"
+    category: recent
+    expect_entities: []
+    expect_docs:
+      - 'backlog/567-report-the-absolute-path-cannot-be-closed-by-skill.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+      - 'architecture/staged-pipeline.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
+    notes: "A relative artifact path lands in the worktree and disappears with it."
