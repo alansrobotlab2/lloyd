@@ -19,6 +19,14 @@ The second half is the silent no-op. ``board_id`` used to resolve through
 unresolvable id fell back to the board the task was already on and returned
 ``{"success": True}``. A move the user asked for, reported as done, that did
 not happen. It is a 400 now, like an invalid status.
+
+The last section is the other thing this route writes: ``status``. A close or a
+repost from the board used to land as a bare ``fm["status"] =`` — no
+``activity_log`` line, no reason, no ``completed``, and none of the tag handling
+the loop's own writer does — so the one writer a person uses was the one writer
+that left no trace (#1023). Those tests pin what the route must now write; the
+``completed``/non-status/one-definition clauses are pinned in
+``tests/test_backlog_route_done_window.py``.
 """
 
 import json
@@ -241,3 +249,74 @@ def test_the_backlog_writers_raise_on_a_refused_write():
         block = src.split(f"/backlog/{route}`", 1)[1].split("\n  },", 1)[0]
         assert "if (!r.ok)" in block, f"{route} swallows a non-2xx response"
         assert "throw new Error" in block, f"{route} does not raise"
+
+
+# ── #1023 clause 1: a status move through the board is attributed ─────────────
+#
+# `architecture/backlog.md` states as fact that "Every status move is attributed
+# in the activity log and carries its reason". For a move made in Mission
+# Control that was false: the route assigned `fm["status"]` and nothing else.
+# These pin the close itself; the `completed` stamp, the non-status save and the
+# one-shared-writer structure are in tests/test_backlog_route_done_window.py.
+
+
+@pytest.mark.asyncio
+async def test_closing_an_item_from_the_board_appends_a_status_move(board_dir):
+    """The board's close lands in `activity_log` naming both statuses.
+
+    This is the acceptance check for #1023: a human closing a card must leave
+    the same trace the loop leaves, or the audit trail only ever narrates the
+    moves the machine made.
+    """
+    f = _write(board_dir, 1, board="lloyd")
+    _write(board_dir, 2, board="alan")
+    resp = await BR.backlog_task_update(_Req({"id": 1, "status": "done"}))
+
+    assert resp.status_code == 200, resp.body
+    assert json.loads(resp.body)["success"] is True
+
+    fm = _fm(f)
+    assert fm["status"] == "done"
+    log = fm["activity_log"]
+    assert len(log) == 1, f"exactly one line for one move: {log!r}"
+    line = str(log[0])
+    assert "draft" in line, f"the line must name the status it moved from: {line!r}"
+    assert "done" in line, f"the line must name the status it moved to: {line!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_reopen_from_the_board_takes_the_needs_human_tag_off(board_dir):
+    """A person reopening a card is the decision `needs-human` was waiting for.
+
+    The loop strips the tag with the reopen (`_apply_status`'s `remove_tags`),
+    and its pools then filter on `NEEDS_HUMAN_TAG not in i.tags` — so a human who
+    reopened a parked item from the UI put it back on the board while leaving it
+    invisible to every triage pool that would ever work it.
+    """
+    f = board_dir / "1-a-task.md"
+    f.write_text(
+        "---\ntype: backlog\nsegment: backlog\nstatus: done\n"
+        "completed: '2026-03-01T12:00:00'\npriority: medium\nboard: lloyd\n"
+        "tags: [needs-human]\n---\n\n# A task\n\nBody.\n",
+        encoding="utf-8",
+    )
+    await BR.backlog_task_update(_Req({"id": 1, "status": "up_next"}))
+
+    fm = _fm(f)
+    assert fm["status"] == "up_next"
+    assert "needs-human" not in (fm.get("tags") or []), fm.get("tags")
+    assert any("done → up_next" in str(line) for line in fm["activity_log"])
+
+
+@pytest.mark.asyncio
+async def test_a_board_close_does_not_invent_an_empty_tags_key(board_dir):
+    """Removing a tag is allowed; giving an item `tags: []` is not.
+
+    The rule `close_landed` and `update_frontmatter` already follow: a writer
+    that merely moved an item must not add a field it has nothing to say about,
+    because `tags: []` is a value every reader now has to distinguish from "no
+    tags field at all".
+    """
+    f = _write(board_dir, 1, board="lloyd")
+    await BR.backlog_task_update(_Req({"id": 1, "status": "done"}))
+    assert "tags" not in _fm(f)

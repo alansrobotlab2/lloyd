@@ -270,10 +270,27 @@ activity_log:
 - '**2026-09-11T21:25:36.823760** — up_next → in_progress: automod round starting'
 ```
 
-A status move records its reason in that line (`_apply_status` writes
-`old → new: why`), which is the whole point: an item closed as stale with no
-stated reason is indistinguishable from one closed by mistake, and the value of
-an unattended pass is that a human can audit it later.
+A status move records its reason in that line (`old → new: why`), which is the
+whole point: an item closed as stale with no stated reason is indistinguishable
+from one closed by mistake, and the value of an unattended pass is that a human
+can audit it later.
+
+**What a status move writes is one function, `app/backlog_move.py::record_status_move`**
+— the log line, the `updated` stamp, the `completed` stamp that arrives with a
+move onto `done`, and the `needs-human` add/remove that rides the move. Both
+writers call it: the loop through `_apply_status`, and Mission Control's
+`POST /api/backlog/task-update` directly, keeping its own writes for the
+non-status fields. Until #1023 the route assigned `fm["status"]` and nothing
+else, so the sentence above was true only of the moves the loop made: a human
+closing a card left no line, no `completed`, and left `needs-human` on an item
+whose decision they had just made — which matters because both triage pools
+filter on that tag being absent, so a UI reopen put an item back on the board and
+out of every pool at once. What the two writers keep separate is which moves they
+accept: `done` is terminal for the loop, and a person reopening a closed card from
+the board must be allowed, so the refusal lives in `_apply_status` and not in the
+shared recorder. The recorder imports only the standard library (plus
+`app/backlog_tags.py`) for the same reason `backlog_status.py` does: the automod
+CLI must be able to load it without `mcp` and `httpx`.
 
 **Until early 2026 this was a `## Activity Log` section at the bottom of the
 body**, with lines like `- **2026-03-08 18:05** — Moved to in_review (Lloyd)`.
@@ -521,9 +538,13 @@ most active is the worst possible reading of "bounded".
 
 - Lloyd queries the backlog directly through the MCP tools — never from
   vault memory or a summary, which may be stale.
-- Every status move is attributed in the activity log and carries its reason.
-  Tag-only writes (`tag_item`) move `updated` and nothing else, so a tag is the
-  one change the log does not narrate.
+- Every status move is attributed in the activity log and carries its reason —
+  from the loop and from Mission Control alike, because both record it through
+  `app/backlog_move.py::record_status_move`, which also stamps `updated` and, on a
+  move onto `done`, `completed`. Tag-only writes (`tag_item`) move `updated` and
+  nothing else, so a tag is the one change the log does not narrate, and a save
+  that posts the status it already has (`TaskModal` posts the whole form on every
+  edit) records no move at all.
 - All operations are file-based, with no lock and no atomic replace anywhere in
   the five writers — concurrency is "last writer wins on a whole file"
   (#891). It is survivable only because writes are small, rare and

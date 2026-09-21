@@ -28,6 +28,22 @@ from typing import Any
 SPAWN_TAG_PREFIX = "spawned-by-"
 
 
+# A spent attempt goes to `draft`, where a human looks for things that need a
+# judgment — but `draft` is also 250 items deep, and an item that needs a
+# decision looks exactly like one nobody has read yet. The tag is the
+# difference. It rides the status move both ways: on when the item goes to
+# draft as spent, off when a reopen takes it back into the pool.
+#
+# Both pool filters (`select_cluster`, `sweep_pool`) test
+# `NEEDS_HUMAN_TAG not in i.tags`, which is why the tag has to come off on
+# *every* move back into the pool and not only the loop's own: a human who
+# reopened a parked item from Mission Control put it back on the board while
+# leaving it invisible to both (#1023). It lives here, rather than beside the
+# pools in `scripts/automod/backlog.py`, so the board's writer can name it
+# without importing the automod CLI.
+NEEDS_HUMAN_TAG = "needs-human"
+
+
 def is_spawn_tag(tag: Any) -> bool:
     """Does this tag mark an item as something a loop session filed for itself?
 

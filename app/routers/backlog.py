@@ -31,8 +31,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agent_mcp._shared import parse_frontmatter_text
+from app.backlog_move import record_status_move
 from app.backlog_status import PIPELINE_STATUSES
-from app.backlog_tags import normalize_tags
+from app.backlog_tags import NEEDS_HUMAN_TAG, normalize_tags
 from app import frontmatter as FM
 
 
@@ -563,6 +564,9 @@ async def backlog_task_update(request: Request):
     board_map = _backlog_board_map()
     id_to_name = {v: k for k, v in board_map.items()}
     _, current_description = _split_body(body)
+    # Set when this save moves the status; see the `status` branch below for who
+    # reads it and why.
+    status_recorded = False
     if "name" in data:
         heading = _HEADING_RE.search(body)
         if heading:
@@ -594,7 +598,24 @@ async def backlog_task_update(request: Request):
     if "status" in data:
         if data["status"] not in _VALID_STATUSES:
             raise HTTPException(status_code=400, detail=f"Invalid status '{data['status']}'. Must be one of: {', '.join(sorted(_VALID_STATUSES))}")
-        fm["status"] = data["status"]
+        # The one place a person moves an item, and until #1023 the one writer
+        # that recorded nothing: no `activity_log` line, no `completed`, and none
+        # of the tag handling — so "every status move is attributed with its
+        # reason" (architecture/backlog.md) held only for the loop's own moves,
+        # and a route-closed item's place in the `?done_since=` window was
+        # whatever date last touched the file. `record_status_move` is the
+        # loop's recorder, and so is its tag rule: `needs-human` comes off with
+        # any move back into the pool, and stays only where it means something —
+        # `draft`, the status a parked-for-a-decision item sits in. Both triage
+        # pools filter on `NEEDS_HUMAN_TAG not in i.tags`, so a reopen that left
+        # it on put the item back on the board while hiding it from every pool
+        # that could work it. Unchanged status records nothing: `TaskModal` posts
+        # the whole form on every save, so logging a posted status would narrate a
+        # move on an ordinary title edit and re-date the close on a done card.
+        status_recorded = record_status_move(
+            fm, data["status"], "set from Mission Control",
+            remove_tags=() if data["status"] == "draft" else (NEEDS_HUMAN_TAG,))
+
     for key in ("priority", "blocked", "position"):
         if key in data:
             fm[key] = data[key]
@@ -627,7 +648,13 @@ async def backlog_task_update(request: Request):
         fm["board"] = id_to_name[board_id]
     if "assigned_to_agent" in data:
         fm["assigned"] = data["assigned_to_agent"]
-    fm["updated"] = datetime.now().isoformat()
+    if not status_recorded:
+        # A recorded move already stamped `updated:` with the same clock as the
+        # activity-log line that narrates it; stamping again here with a second
+        # `now` — a different zone, since the recorder writes UTC and this route
+        # has always written local — would leave a move whose own entry and whose
+        # `updated:` disagree about when it happened.
+        fm["updated"] = datetime.now().isoformat()
     _write_task_file(filepath, fm, body)
     return JSONResponse({"success": True, "description_ignored": description_ignored})
 

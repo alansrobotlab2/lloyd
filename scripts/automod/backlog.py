@@ -59,7 +59,8 @@ from app.backlog_status import (
     canonical_status,
     is_off_vocabulary,
 )
-from app.backlog_tags import is_spawn_tag, normalize_tags
+from app.backlog_move import record_status_move
+from app.backlog_tags import NEEDS_HUMAN_TAG, is_spawn_tag, normalize_tags
 # Standard-library-only by design (see its docstring): this module is the light
 # one the automod CLI loads, so the shared fence rule must not drag in `mcp`.
 from app import frontmatter as FM
@@ -2879,13 +2880,6 @@ TRIAGE_POOL_STATUS = "draft"
 IMPLEMENT_POOL_STATUS = "up_next"
 
 
-# A spent attempt goes to `draft`, where a human looks for things that need a
-# judgment — but `draft` is also 250 items deep, and an item that needs a
-# decision looks exactly like one nobody has read yet. The tag is the
-# difference. It rides the status move both ways: on when the item goes to
-# draft as spent, off when a reopen takes it back into the pool.
-NEEDS_HUMAN_TAG = "needs-human"
-
 # A confirmation that arrived while the implement pool was full: triaged,
 # judged real, parked in `draft` until a slot opens. Visible on the item
 # the way `needs-human` is; the ledger (`held: true` on the verdict, then a
@@ -3052,11 +3046,13 @@ def _apply_status(path: Path, status: str, why: str, *,
                   add_tags: tuple[str, ...] = (), remove_tags: tuple[str, ...] = ()) -> bool:
     """Write one status move onto an item file, reason in its activity log.
 
-    The single writer. `set_status` reaches it by id through `open_items`;
+    The loop's writer. `set_status` reaches it by id through `open_items`;
     the off-vocabulary rescue reaches it by path, because the item it is
-    fixing is by definition not in `open_items`. A second definition of
-    "record a status move" is how the two would come to disagree about the
-    log line, the `updated` stamp, or which moves are refused.
+    fixing is by definition not in `open_items`. It is not the only writer of
+    `status` on the board — Mission Control's route writes it too — which is
+    why what the two share is a function both import
+    (`app.backlog_move.record_status_move`) rather than a second copy of the
+    log line, the `updated` stamp and the `completed` stamp (#1023).
 
     Refuses a file whose front matter did not parse, before any other check:
     the item it is reached through was loaded with defaulted fields, so an
@@ -3069,19 +3065,14 @@ def _apply_status(path: Path, status: str, why: str, *,
         return False
     if fm.get("status") == status or fm.get("status") == "done":
         return False
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
-    log = list(fm.get("activity_log") or [])
-    log.append(f"**{stamp}** — {fm.get('status')} → {status}: {why}")
-    fm["activity_log"] = log
-    fm["status"] = status
-    # `normalize_tags`, never a bare iteration: a `tags` string that looks like
-    # a list (the eval digest writes them) would come back one tag per character.
-    tags = normalize_tags(fm.get("tags"))
-    tags = [t for t in tags if t not in remove_tags] + [t for t in add_tags if t not in tags]
-    fm["tags"] = tags
-    fm["updated"] = stamp
-    if status == "done":
-        fm["completed"] = stamp
+    # What a move *writes* is `app.backlog_move`, shared with the Mission Control
+    # route (#1023). What stays here is this writer's own policy about which moves
+    # it accepts, and it cannot move into the shared recorder: `done` is terminal
+    # for the loop, while a human reopening a closed card from the board has to be
+    # allowed — the two writers legitimately disagree there.
+    if not record_status_move(fm, status, why, add_tags=add_tags,
+                              remove_tags=remove_tags):
+        return False
     path.write_text(
         f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
         f"---\n{body}", encoding="utf-8")

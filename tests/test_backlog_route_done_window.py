@@ -28,13 +28,21 @@ YAML null (`null`, `~` and empty are), so those 23 files parse to the *string*
 `'None'` — truthy, present, and not a date. `"completed" in fm` accepts every
 one of them and hides 23 items; `_fm_date` rejects them and they fall through to
 `updated:`.
+
+The last section is why the window can be trusted at all: a row closed through
+Mission Control used to have no `completed:` key, because the route wrote
+`fm["status"]` and nothing else, so its position in this window was whatever
+date last touched it (#1023). Those tests pin the route's writes, through the
+same HTTP client these do.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import os
-from datetime import datetime, timedelta
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -375,3 +383,187 @@ def test_the_window_slides_without_restarting_the_process(client, backlog_dir):
 
     assert ids(wide) == {1}, "a row touched 3 days ago is inside a 7-day window"
     assert ids(narrow) == set(), "tomorrow's cut-off excludes it — same process, no restart"
+
+
+# ── #1023: what a status move through this route must write ───────────────────
+#
+# `_done_date` judges a done row by `completed:` first, so a route that closes an
+# item without stamping one leaves that row's window position to whatever next
+# touches the file — a priority edit months later re-admits it. 135 items closed
+# since 2026-09-01 carry no `completed:`, and this route is a standing generator
+# of that set. The fix is one shared recorder for both writers; these pin what it
+# writes (clauses 2-4) through the same `client` the window tests use, because
+# the POST is the boundary a person's click actually crosses.
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def post(client, **payload) -> dict:
+    """One `POST /api/backlog/task-update`, as the board's modal sends it."""
+    resp = client.post("/api/backlog/task-update", json=payload)
+    assert resp.status_code == 200, resp.text
+    return json.loads(resp.content)
+
+
+def read_fm(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8").split("---", 2)[1])
+
+
+def test_a_close_through_the_route_stamps_completed_and_nothing_else_does(
+        client, backlog_dir):
+    """#1023 clause 2: `completed:` arrives with a close and with no other move.
+
+    The stamp is the shared one — naive UTC with microseconds, the format
+    `_apply_status` and `close_landed` already write. It is bounded by two reads
+    of UTC taken around the POST rather than by a tolerance in seconds: a budget
+    fails a correct change on a loaded suite run, while a bracket is only as wide
+    as the request actually took and still rejects a local-time stamp outright,
+    which on this box (UTC-7) is seven hours outside it.
+    """
+    closing = write_item(backlog_dir, 1, status="up_next")
+    opening = write_item(backlog_dir, 2, status="draft")
+
+    before = datetime.now(timezone.utc).replace(tzinfo=None)
+    post(client, id=1, status="done")
+    after = datetime.now(timezone.utc).replace(tzinfo=None)
+    post(client, id=2, status="up_next")
+
+    closed = read_fm(closing)
+    assert closed["status"] == "done"
+    stamped = datetime.fromisoformat(str(closed["completed"]))
+    assert before <= stamped <= after, (
+        f"`completed:` must be a fresh UTC stamp between {before} and {after}, "
+        f"got {closed['completed']!r}"
+    )
+
+    moved = read_fm(opening)
+    assert moved["status"] == "up_next"
+    assert "completed" not in moved, (
+        "a move into an open status must not date a completion that did not happen"
+    )
+
+
+def test_a_reopen_through_the_route_leaves_the_earlier_completed_alone(
+        client, backlog_dir):
+    """A reopen is not an un-close: the earlier `completed:` stays as it was.
+
+    `_done_date` only consults `completed:` on rows whose status is `done`, so a
+    stale one on an open row costs nothing — while clearing it would throw away
+    the only record of when the item was first closed.
+    """
+    f = write_item(backlog_dir, 1, status="done", completed=OLD, updated=OLD)
+
+    post(client, id=1, status="up_next")
+
+    fm = read_fm(f)
+    assert fm["status"] == "up_next"
+    assert str(fm["completed"]) == OLD
+    assert any("done → up_next" in str(line) for line in fm["activity_log"])
+
+
+def test_a_non_status_save_writes_no_activity_line_and_no_completed(
+        client, backlog_dir):
+    """#1023 clause 3: editing priority, blocked, board or name narrates nothing.
+
+    Every one of these rides through the same handler, so a recorder wired to the
+    wrong key would write "up_next → up_next" on every card edit and re-date the
+    close each time.
+    """
+    f = write_item(backlog_dir, 1, status="up_next")
+
+    post(client, id=1, priority="high")
+    post(client, id=1, blocked=True)
+    post(client, id=1, name="Renamed")
+    post(client, id=1, board="other")
+
+    fm = read_fm(f)
+    assert "activity_log" not in fm, f"a field edit narrated a move: {fm.get('activity_log')!r}"
+    assert "completed" not in fm
+    assert fm["priority"] == "high" and fm["blocked"] is True and fm["board"] == "other"
+
+
+def test_a_modal_save_that_re_posts_an_unchanged_status_records_no_move(
+        client, backlog_dir):
+    """The modal posts `status` on *every* save, so an unchanged one is not a move.
+
+    `web/src/components/pages/BacklogPage.tsx` builds the update as
+    `{ name, status, priority, blocked }` regardless of what was edited, so a
+    recorder that logged any posted status would append a `up_next → up_next`
+    line — and, on a done card, re-stamp `completed` and pull an item closed
+    months ago back into the 7-day window on a title edit.
+    """
+    f = write_item(backlog_dir, 1, status="up_next")
+
+    post(client, id=1, name="Renamed", status="up_next", priority="high", blocked=False)
+
+    fm = read_fm(f)
+    assert fm["status"] == "up_next"
+    assert fm["priority"] == "high" and fm["blocked"] is False, "the edits still landed"
+    assert "activity_log" not in fm, f"'no move' wrote a line: {fm.get('activity_log')!r}"
+    assert "completed" not in fm
+
+
+def test_the_route_no_longer_assigns_status_itself():
+    """#1023 clause 4: `fm["status"] =` is gone from the Mission Control writer.
+
+    Grep-shaped on purpose: the clause is that the assignment does not exist
+    anywhere in the file, which no behavioural test can show — but the negative
+    needs a control, or it passes for the wrong reason. The pattern that must
+    still hit is the recorder's own line, so a check that found nothing because
+    the string is spelled differently in this tree fails here instead of passing.
+    """
+    src = (_ROOT / "app" / "routers" / "backlog.py").read_text(encoding="utf-8")
+    assert 'fm["status"]' not in src
+    assert "record_status_move(" in src, "the route must record, not merely abstain"
+
+    recorder = (_ROOT / "app" / "backlog_move.py").read_text(encoding="utf-8")
+    assert 'fm["status"] =' in recorder, (
+        "the assignment moved somewhere else, or the pattern above matches nothing"
+    )
+
+
+def _import_roots(path: Path) -> set[str]:
+    """Top-level module names a file imports, read off its AST."""
+    roots: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            roots.add(node.module.split(".")[0])
+    return roots
+
+
+def test_the_shared_recorder_needs_only_the_standard_library():
+    """#1023 clause 4: the automod CLI must load it without `mcp` or `httpx`.
+
+    This is the reason `app/backlog_status.py` and `app/backlog_tags.py` live
+    where they do: `scripts/automod/backlog.py` is the light module the CLI
+    imports, so anything it shares with the backend has to be importable by a
+    process that never touches the SDK.
+    """
+    helper = _ROOT / "app" / "backlog_move.py"
+    roots = _import_roots(helper)
+    non_stdlib = {root for root in roots if root not in sys.stdlib_module_names}
+    assert non_stdlib == {"app"}, (
+        f"the recorder may import local modules and stdlib only, imports {sorted(roots)}"
+    )
+    assert not {"mcp", "httpx", "yaml", "fastapi"} & roots
+
+    # ...and the one local module it leans on is itself stdlib-only, or the
+    # `app` allowance above would be a hole rather than a boundary.
+    tags = _import_roots(_ROOT / "app" / "backlog_tags.py")
+    assert {root for root in tags if root not in sys.stdlib_module_names} == set(), tags
+
+
+def test_both_writers_call_the_same_record_status_move():
+    """One definition, literally: both modules reach the same function object.
+
+    Two copies that agree today are the state this item was filed against — the
+    route's copy had drifted until it stamped nothing at all.
+    """
+    from app.backlog_move import record_status_move as shared
+    from app.routers import backlog as route_module
+    from scripts.automod import backlog as loop_module
+
+    assert route_module.record_status_move is shared
+    assert loop_module.record_status_move is shared
