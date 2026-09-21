@@ -5,7 +5,7 @@ relations:
 tags: [architecture, lloyd, vllm, primary, kv-cache, gpu, throughput, benchmarks]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-09-21
 ---
 
 # The primary engine: vLLM setup, tuning, throughput
@@ -46,7 +46,16 @@ supervisord as `agent-llm-primary`. The live command line, verbatim:
   --language-model-only
   --max-num-batched-tokens 4096
   --gdn-prefill-backend flashinfer --no-enable-flashinfer-autotune
+  --kv-cache-dtype fp8
+  --engram-config {"cpu_offload": true}
 ```
+
+The last two are the flags this configuration exists for, and both come from
+the conf's environment rather than the launcher's defaults: `--kv-cache-dtype
+fp8` is emitted from `KV_CACHE_DTYPE` (§3), and `--engram-config
+'{"cpu_offload": true}'` is the uva build's spelling of the PLE host-RAM
+offload (§8) — on the older worker build the same request goes out as
+`VLLM_PLE_CPU_OFFLOAD=1` plus `--distributed-executor-backend mp` instead.
 
 vLLM main at `dff1bde84dd6` (the wheel reports `0.2.1.dev19+gdff1bde84`) — a
 **main** build, not a release, because the FP8 QSA path §3 depends on is newer
@@ -63,8 +72,9 @@ repo uses, and `Qwen3.8-Flash-Next-nvfp4` is what `models.primary.expect_model`
 substring-matches at boot.
 
 **The load-bearing values live in supervisord's `environment=`, not in the
-launcher.** `agent-llm-primary.conf` carries `VLLM_VENV`, `KV_CACHE_DTYPE=fp8`
-and `MAX_NUM_BATCHED_TOKENS=4096`. The launcher's own fallbacks are the older
+launcher.** `agent-llm-primary.conf` carries `VLLM_VENV`, `KV_CACHE_DTYPE=fp8`,
+`MAX_NUM_BATCHED_TOKENS=4096` and `KV_CACHE_MEMORY_BYTES=15032385536` (§3). The
+launcher's own fallbacks are the older
 BF16 worker build (`VLLM_VENV` defaults to `.venvs/vllm-qwen38-flash-next`,
 `KV_CACHE_DTYPE` to empty), so a conf that loses those lines boots a
 perfectly healthy engine with §3 undone. That is exactly the failure §3.1
@@ -453,11 +463,17 @@ parser, so the dashboard's own rate baseline is undisturbed.
 ### 6.3 Keep prefixes alive
 
 - **The KV gate** (`workers/pool.py`, [[workers]] §2): a source declaring
-  `LONG_LIVED = True` — autocode, autotriage, deep-research — is not claimed
-  while the primary's KV is over `workers.kv_gate.max_kv_usage` (0.60). It
-  judges the **one-minute median**, not the newest sample, for the reason in
-  §7.2. A hold keeps the item's attempt; no reading means open.
-- **`workers.slots` stays 2.**
+  `LONG_LIVED = True` — autocode, autotriage, deep-research, arch-review — is
+  not claimed while the primary's KV is over `workers.kv_gate.max_kv_usage`
+  (0.60). It judges the **one-minute median**, not the newest sample, for the
+  reason in §7.2. A hold keeps the item's attempt; no reading means open.
+- **`workers.slots` is 6, not the 2 this page prescribed until 2026-09-17.**
+  `e20fdba0` took it to 5 and `e0098082` to 6 on the rule "autocode rounds +
+  triages + 1" (four rounds today), which `tests/test_loop_depth.py` pins — so
+  the slot count is no longer the bound on how many long-lived contexts are
+  resident at once. The KV gate above is. That trade is deliberate and it is
+  unmeasured: §10's acceptance bar is still written for slots = 2, and nobody
+  has re-read the counter since the raise.
 - **The compaction wall** moved from 0.8/0.6 to 0.72/0.52 of the 210k
   threshold — trigger ≈168k → 151k, target ≈126k → 109k. The target moved with
   the trigger so the band stays 0.2 wide: every compaction rewrites the middle
@@ -468,13 +484,19 @@ parser, so the dashboard's own rate baseline is undisturbed.
   not the sixty after it.
 - **`harness.parallel_tool_calls` stays off.** See §8.
 
-### 6.4 The observer runs at its watched turn's priority
+### 6.4 The observer runs at its watched turn's priority, or one step below
 
-`install_observer` takes the turn's `RunOptions.priority`, so a chat's second
-opinion runs at 0 beside the chat instead of queueing at 1 behind every worker
-iteration. The old rule — always 1, "to yield to the agent it is watching" —
-guarded something equal priority already guarantees (§5). Not a throughput
-lever; an intent fix.
+`attach_observer_for_turn` passes `_observer_priority(options, platform)`
+(`app/routers/_messages_inner_voice.py:252`, since `97a86cc0` on 2026-09-12),
+which is two-valued: **the turn's own `RunOptions.priority`** for a user
+platform, so a chat's second opinion runs at 0 beside the chat instead of
+queueing at 1 behind every worker iteration; **`priority + 1`** for a platform
+in `NON_USER_PLATFORMS`, because a worker round's observer calling the primary
+at the round's own priority puts a second-opinion request in front of a human's
+first token, and no human is waiting on the round. The original rule — always
+1, "to yield to the agent it is watching" — guarded something equal priority
+already guarantees (§5). Not a throughput lever; an intent fix, widened once
+the observer started watching unattended turns too.
 
 ## 7. Benchmarks
 
@@ -483,8 +505,12 @@ All on the production engine with the rest of the stack down, through
 replaced the scratchpad drafts every earlier measurement used. A = a ~119k
 context decoding continuously; B = ~200k. Every request at priority 1.
 
-**Do not run it casually**: it issues priority-0 requests that preempt live
-worker turns, and it refuses a busy engine.
+**Do not run it casually**: it wants the engine to itself — the worker pool
+paused and drained or the backend down — and it waits for an idle engine and
+refuses to start otherwise (`wait_idle`, :128). Every request it issues goes at
+priority 1 (`PRIORITY`, :61), so a live chat still outranks it; the reason for
+the idle gate is that the measurement is A's step gap, and any other tenant is
+noise in the number.
 
 ### 7.1 End to end (`verify`)
 
@@ -575,17 +601,42 @@ another 140 ms of neighbour latency for +27% prefill and no further KV benefit.
   failure becomes an *unexpected exit* that `autorestart` retries forever
   instead of parking in FATAL. `supervisorctl start` will not return for up to
   900 s.
-- **Never restart this engine twice in quick succession.** `supervisorctl stop`
+- **Never boot it onto a host that cannot take it.** `supervisorctl stop`
   returns when processes are signalled, not when the kernel has reclaimed their
   memory, and the engine holds a **95.37 GiB** BF16 n-gram table in *host* RAM.
   On 2026-09-08 an A/B sweep started the next boot before the old one's pages
   were freed, twice, and `systemd-oomd` killed the **whole
   `agent-supervisord.service` unit** — 953 processes the first time, 793 the
-  second. Peak RSS 230.3 GiB. Wait for `MemAvailable` above ~150 GiB between
-  boots; `agent-services/bin/flash-next-run-arm.sh` does this and refuses to
-  start below 120 GiB.
-- **Restart through `flash-next-run-arm.sh`**, one boot at a time — not bare
-  `supervisorctl`.
+  second. Peak RSS 230.3 GiB. It has happened twice since (2026-09-15 23:52Z,
+  620 processes; 2026-09-17 17:09).
+- **The RAM wait is not what keeps oomd off the unit** — read
+  `flash-next-run-arm.sh:62-69` before leaning on it. On 2026-09-17 that wait
+  passed at 198 GiB and the unit was killed 129 s later, because **one** boot
+  drives its own cgroup to ~226 GiB (a 170 GiB checkpoint read plus a 95 GiB
+  shared mapping, page cache charged to the reader's cgroup) and so consumes the
+  very gauge the wait reads — `MemAvailable` fell to 79 GiB mid-load. What
+  protects the stack is `Slice=lloyd.slice` on `agent-supervisord.service`
+  (oomd watches only `app.slice`); the wait answers the narrower question it
+  was written for — has the *previous* engine's mapping been released — and
+  raising its floor will not stop a kill.
+- **Two floors, two routes, neither derived from the other.** Production
+  restarts go through `scripts.automod.round restart --only agent-llm-primary`,
+  whose `_restart_primary` (`scripts/automod/promote.py:1526`) waits
+  `MemAvailable` back to `PRIMARY_RAM_FLOOR_GIB = 180` and refuses under
+  `PRIMARY_RAM_ABORT_GIB = 150` (:117-118). `flash-next-run-arm.sh` is the A/B
+  sweep runner, waits to 150 and aborts below 120 (:74-83) — a lower bar, so it
+  is not the production restart route even though it restarts the same program.
+  Both numbers are machine- and day-specific; read `/proc/meminfo`, not this
+  page.
+- **A venv switch compiles, and the compile is its own memory event.** Both
+  primary venvs carry the same flashinfer, whose `build.ninja` embeds the venv's
+  absolute include paths — so every switch between `vllm-flash-next-main` and
+  `-main-0910` rebuilt all ~64 `fused_moe_120` objects `nproc` (32) wide: on
+  2026-09-18 09:39 that put 83 GiB of `cicc` on top of the PLE table, hit
+  `MemAvailable` 0, and the boot had to be stopped. Since `0150e88b` the
+  launcher defaults `FLASHINFER_WORKSPACE_BASE` to `$VLLM_VENV` (one kernel
+  cache per venv, so a switch costs nothing) and `MAX_JOBS` to 8 (a real
+  rebuild peaks near 45 GiB).
 - **Don't start a second Flash-Next engine on GPU 1** while this one is up:
   two 95 GiB PLE tables is that same OOM.
 - `flash-next-bootfacts.sh` after any boot you did not watch.
@@ -616,10 +667,12 @@ has still not been run as of 2026-09-11.
 
 ## 10. Still open
 
-- **One normal day** with slots = 2 and Alan chatting: success is zero
+- **One normal day** with Alan chatting: success is zero
   iterations ≥ 100k with < 90% reuse after iteration 2, KV p50 well under the
   gate, and no two-request window under 15 tok/s that is not a cold admission.
-  The first day of counted data does not clear that bar.
+  The first day of counted data does not clear that bar. It was written for
+  slots = 2 (§6.3), so it cannot be applied to a day since 2026-09-17 as
+  written — it needs re-stating for the current fleet shape first.
 - **What the counter says so far** (2026-09-11 22:30 UTC, 24 h): 410 turns,
   368 measured, **53 turns carrying 135 misses and 20.4M re-prefilled
   tokens**, worst turn 2.70M; 138 `brain1.prefix_miss` events across 49
@@ -639,9 +692,12 @@ has still not been run as of 2026-09-11.
   accrue. One reading on a three-minute-old backend is a hint, not a day.
 - **If misses show up at low KV pressure**, eviction was not the cause and the
   draft-group limitation is — upstream. Name the function, not the line:
-  `_warn_if_unannotated_eagle_mamba` in vLLM's `v1/core/kv_cache_utils.py`
-  (2133 in the production venv, with the warning at 2166; the
-  `kv_cache_utils.py:1871` cited in older notes is the *worker* build's copy).
+  `_warn_if_unannotated_eagle_mamba` in vLLM's `v1/core/kv_cache_utils.py`.
+  Three builds, three offsets, which is exactly why the rule is to name the
+  function: in the **production** venv at `dff1bde` the def is 2190 and its
+  `logger.warning` 2215; the 2133/2166 this page used to quote is the
+  `-0910` revert target's copy, and the `kv_cache_utils.py:1871` in older notes
+  is the *worker* build's.
   With no group annotated as the drafter's, every group — all four Mamba
   groups included — is treated as a draft group, and "prefix-cache reuse
   across requests will be disabled".
@@ -667,3 +723,7 @@ has still not been run as of 2026-09-11.
   sourced and deleted before the `DRY_RUN` exit, so a test or a human checking
   the command line during a sweep would have eaten the arm. `ARM_ENV`
   overrides the path.
+
+## Review log
+
+- 2026-09-21 — **stale.** §3's cache table, §2.3's clamp values (275/450/275), §2.4's index table, §2.5's persistence-mode claim, §5's knob defaults, §3.1's three asserts and the `workers.slots`-adjacent KV gate all verified against the live engine (`vllm:cache_config_info`: fp8, 844,969 tokens, block 3200) and the tree. Corrected: §1's verbatim command line was missing `--kv-cache-dtype fp8` and `--engram-config`; §6.3's "`workers.slots` stays 2" (now 6, `config.yaml:1163`); §6.4's observer priority (one step lower on unattended platforms since `97a86cc0`); §7's "priority-0 requests" (the bench runs at 1); §8's OOM account (four kills, not two — and `Slice=lloyd.slice`, not the RAM wait, is what keeps oomd off the unit, plus the FlashInfer JIT rebuild since `0150e88b`) and its restart route; §10's venv line numbers, which had drifted onto the `-0910` revert target. Filed #1337 #1338 #1339 #1340 #1341.
