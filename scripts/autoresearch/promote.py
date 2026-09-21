@@ -721,11 +721,15 @@ def rollback(cfg: AutoresearchConfig, snapshot_ts: str) -> dict[str, Any]:
     `shutil.copy2` calls. Its targets are `CANONICAL_PROMPTS` — tracked files in
     the live vault — so a raw copy left the contract modified in the working tree
     while HEAD still pointed at the promotion commit, and nothing anywhere
-    recorded that a restore had happened. `scripts/util/vault-commit.sh:53` runs
-    `git add -A` over `~/obsidian` from ten call sites in seven nightly skills, so
-    the next job to commit a dirty vault landed the restore under *its* message:
+    recorded that a restore had happened. `scripts/util/vault-commit.sh` was invoked
+    from eleven call sites in eight nightly skills and staged the whole vault tree on
+    every one of them until #1070, so the next job to commit a dirty vault landed the
+    restore under *its* message:
     the blame-masking that let the 2026-09-10 MEMORY.md truncation sit undiscovered
-    for 19 hours (see the clobber note in lloyd/MEMORY.md).
+    for 19 hours (see the clobber note in lloyd/MEMORY.md). The wrapper now stages
+    exactly the paths a caller names — the route this function already takes through
+    `scripts.automod.vault_round.land` — but a whole-tree sweep commit is still only
+    *labelled*, not attributed, so a restore must never rely on one.
 
     The copy stays — a validated commit is not a revert, and the bytes have to be
     in the tree before anything can validate them — but

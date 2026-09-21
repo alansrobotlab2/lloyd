@@ -263,7 +263,13 @@ def test_wrapper_refuses_a_job_name_that_could_not_form_an_identity(vault_repo):
 # --------------------------------------------------------------------------
 
 def test_wrapper_without_the_job_env_keeps_the_identity_and_adds_no_trailer(vault_repo):
-    """Clause 2: the human and automod-round paths keep exactly what they had."""
+    """Clause 2: the human and automod-round paths keep exactly the identity they had.
+
+    What is asserted is identity and subject, not byte-for-byte the whole message:
+    #1070 clause 2 requires any whole-tree commit — this one, which names no paths —
+    to say in its body which paths it carries, and this test's own claim is that
+    nothing about *who the commit is from* changed.
+    """
     proc = _run_wrapper(vault_repo, "human: reword the daily note",
                         dirty="memory/learnings/today.md")
     assert proc.returncode == 0, proc.stderr
@@ -271,7 +277,7 @@ def test_wrapper_without_the_job_env_keeps_the_identity_and_adds_no_trailer(vaul
     assert _head(vault_repo, "%ae") == HUMAN_EMAIL
     body = _head(vault_repo, "%B")
     assert "Job:" not in body, body
-    assert body.strip() == "human: reword the daily note"
+    assert body.splitlines()[0] == "human: reword the daily note", body
 
 
 def test_the_two_paths_differ_only_in_identity_when_the_subject_is_identical(vault_repo):

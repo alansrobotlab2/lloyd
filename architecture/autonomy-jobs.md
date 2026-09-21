@@ -363,10 +363,17 @@ trajectories it writes are the same artifact the graph chain mines for co-access
 pairs.
 
 **#83's pre-flight is a git snapshot, because there is no other undo.** The pass
-opens by running `scripts/util/vault-commit.sh "skills-mgmt: pre-run snapshot"`.
-Nightly jobs commit straight to the vault's `main` — no worktree, no gate, no
-guardian, unlike [[automod]] — so the commit taken *before* the run is the whole
-of the rollback story.
+opens by running `scripts/util/vault-commit.sh "skills-mgmt: pre-run snapshot
+(unattributed dirty state)"`. Nightly jobs commit straight to the vault's `main` — no
+worktree, no gate, no guardian, unlike [[automod]] — so the commit taken *before* the run
+is the whole of the rollback story. That sweep is why the message says what it does: it
+takes the whole tree, so it commits work this job did not write, and since #1070 the
+wrapper says so in the commit body and on stderr (`unattributed dirty state:` plus the
+path list) instead of letting a job's name stand in for authorship. The five nightly
+final commits go the other way and name their paths (`-- memory/ knowledge/ …`), which
+is what makes *their* subjects mean what they say; see
+[[guardian-data-damage-false-trip]] for the sibling class of a check that reads the
+wrong thing.
 
 **What it mines is the human half of the day, by construction.** Post-session
 capture appends the daily-note summary only for a user session and routes

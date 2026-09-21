@@ -777,8 +777,9 @@ def test_promote_still_refuses_on_a_runtime_snapshot_error_and_applies_nothing(
 # `rollback()` used to be three `shutil.copy2` calls with no validator, no commit
 # and no ledger line. Its targets are tracked vault files, so a restore left the
 # contract dirty in the working tree while HEAD still pointed at the promotion —
-# and `scripts/util/vault-commit.sh` runs `git add -A` over the vault from seven
-# nightly skills, which lands that restore under an unrelated job's message. The
+# and `scripts/util/vault-commit.sh`, invoked from eight nightly skills, staged the
+# whole vault tree on every call site until #1070 — which lands a restore under an
+# unrelated job's message, labelled as unattributed at best. The
 # tests below therefore run against a real git-backed vault: "the restore was
 # committed, validated and recorded" is not observable in a plain tmp dir.
 
