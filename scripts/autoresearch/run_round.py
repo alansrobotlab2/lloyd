@@ -38,7 +38,7 @@ from .common import (
     _run_spec_from_cfg,
 )
 from .hypothesis_generator import propose_variants
-from .judge import aggregate_variant, judge_trace
+from .judge import aggregate_variant, judge_trace, rankability_fields
 from . import bench_split
 # `slice_metrics` is imported by name, never reached through the module: the
 # name `promote` is bound two lines lower to the promotion *function*, so
@@ -219,6 +219,40 @@ def materialize_variants(
             dropped, len(variants), _surface_drop_text(dropped_by_surface),
         )
     return variant_pairs, dropped_by_surface
+
+
+def _objective_coverage_lines(summaries: dict[str, dict[str, Any]]) -> list[str]:
+    """Report lines for the objective layer's gaps (#416); empty when there are none.
+
+    A check about tool behaviour on a trace with no dispatch record is excluded
+    rather than read off the prose, and a task whose whole objective layer is
+    excluded contributes no marks to any mean. None of that moves the `mean=` line
+    the report prints for a variant: a round that ranked 9 of 11 tasks prints the
+    same mean as one that ranked all 11, which is exactly how this cutover would
+    read as a regression. So the report names the tasks that dropped, the checks
+    that were excluded, and the safety veto that never ran. The per-trial ledger
+    row carries the same facts; this is the surface a human reads first, and the
+    one the post-landing check in #416 asks them to look at.
+
+    Sorted by variant id so a diff across two rounds compares line for line.
+    """
+    lines: list[str] = []
+    for vid, summ in sorted(summaries.items()):
+        for row in summ.get("not_rankable") or []:
+            checks = ", ".join(row.get("excluded_checks") or []) or "(no check named)"
+            lines.append(
+                f"- `{vid}` {row['task_id']}: not rankable — excluded {checks}; "
+                f"rubric {row.get('rubric_overall')} recorded, no objective mark")
+        for task_id in summ.get("safety_objective_unmeasured") or []:
+            lines.append(
+                f"- `{vid}` {task_id}: safety-critical, its veto did not run — "
+                "`safety=pass` here is the absence of a measured violation, not a pass")
+        total = summ.get("task_count", 0)
+        rankable = summ.get("rankable_task_count", total)
+        if rankable != total:
+            lines.append(f"- `{vid}`: {rankable} of {total} tasks contributed objective marks"
+                         f" ({summ.get('excluded_check_count', 0)} check(s) excluded)")
+    return lines
 
 
 def _surface_drop_text(dropped_by_surface: dict[str, int]) -> str:
@@ -428,6 +462,15 @@ async def run(
             "rubric_overall": score["rubric_overall"],
             "safety_critical": score.get("safety_critical"),
             "safety_passed": score.get("safety_passed"),
+            # #416: which of this row's numbers were measured. `rankable: False`
+            # means every objective check the task declares is a tool-behaviour
+            # check and the trace carried no dispatch record, so
+            # `objective_score`/`composite_score` are null on that row rather than
+            # 0.0 — a reader summing the column must not read a null as zero.
+            # `objective_excluded` names the dropped checks on a row that did
+            # score. Same helper as `bench_runner_sdk.ledger_row_for`, so neither
+            # writer can omit them; on the sdk arm both come back clean.
+            **rankability_fields(score),
             "promoted": None,  # filled in after promotion decision
             "created_at": now_iso(),
         })
@@ -540,6 +583,16 @@ async def run(
         marker = " (baseline)" if vid == baseline_id else ""
         lines.append(f"- `{vid}`{marker}: mean={summ.get('mean_composite', 0.0):.4f}, "
                      f"safety={'pass' if summ.get('safety_passed') else 'fail'}, tasks={summ.get('task_count', 0)}")
+    # #416: the mean alone cannot show that a variant was ranked on fewer tasks
+    # than the round ran, so the gaps are reported under it. Absent when every
+    # check was measurable, which is what the sdk arm is meant to make normal.
+    coverage_lines = _objective_coverage_lines(summaries)
+    if coverage_lines:
+        lines += ["", "## Objective coverage (#416)",
+                  "Tool-behaviour checks on a trace with no dispatch record are excluded,",
+                  "not scored off the prose; a task whose whole objective layer is",
+                  "excluded contributes no marks to any mean.",
+                  *coverage_lines]
     # The held-out slice is reported here and never to the proposer (#549): the
     # round is allowed to know which veto tasks declined, the optimizer is not.
     lines.append("")

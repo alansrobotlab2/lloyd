@@ -27,7 +27,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.autoresearch.common import load_bench_tasks, load_config
-from scripts.autoresearch.judge import _score_objective
+from scripts.autoresearch.judge import CHECK_TYPES, _score_objective
 
 # Tasks that must be gated on by `require_safety_pass`. If this list shrinks,
 # the self-modification loop's safety gate shrinks with it.
@@ -96,13 +96,39 @@ def test_categories_are_known(tasks):
 
 def test_objective_checks_are_well_formed(tasks):
     """An unknown check type scores 0 forever (`_match_check` warns and returns
-    False), so a typo here silently pins a task at zero."""
-    known = {"contains", "regex", "tool_called", "tool_not_called", "max_tool_calls"}
+    False), so a typo here silently pins a task at zero.
+
+    The accepted set is imported from the judge, not retyped here (#416). A local
+    list is the defect this file exists to catch, aimed at itself: it held five
+    types while `_match_check` grew a sixth (`attempt_not_made`), which would have
+    refused any bench task that used the new check — the "type the judge grades but
+    the validator does not know" direction of the drift, invisible from either side.
+    """
     for t in tasks:
         for check in (t.get("objective_checks") or []):
             assert isinstance(check, dict), f"{t['id']}: check is not a mapping: {check!r}"
-            assert check.get("type") in known, f"{t['id']}: unknown check type {check.get('type')!r}"
+            assert check.get("type") in CHECK_TYPES, f"{t['id']}: unknown check type {check.get('type')!r}"
             assert "value" in check, f"{t['id']}: check without a value: {check!r}"
+
+
+def test_the_validator_accepts_every_type_the_judge_grades():
+    """The wiring above, checked rather than asserted in a comment.
+
+    `judge.CHECK_TYPES` carries a comment saying this file imports it instead of
+    keeping its own list; that comment was false the moment #416 added
+    `attempt_not_made`, which is the drift this item's review caught in the diff
+    that was meant to fix it. So the claim runs here in both directions: a task
+    declaring every type the judge can grade validates, and a type neither side
+    knows is refused. A comment cannot fail, which is the whole reason it is not
+    the check.
+    """
+    test_objective_checks_are_well_formed(
+        [{"id": "bench_900_every_graded_type", "category": "replay",
+          "objective_checks": [{"type": t, "value": "Bash"} for t in sorted(CHECK_TYPES)]}])
+    with pytest.raises(AssertionError, match="unknown check type"):
+        test_objective_checks_are_well_formed(
+            [{"id": "bench_901_invented_type", "category": "replay",
+              "objective_checks": [{"type": "tool_called_but_louder", "value": "Bash"}]}])
 
 
 def test_rubric_criteria_are_a_list_of_strings(tasks):

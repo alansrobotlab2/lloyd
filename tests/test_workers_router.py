@@ -258,9 +258,14 @@ def test_the_landed_task_is_graded_on_its_checks_rather_than_by_default(monkeypa
     landed = load_bench_tasks(dest)[0]
     trace = {"status": "success", "final_text": "sorry, retrying", "tool_calls": []}
     score, _results = _score_objective(landed, trace)
-    # `contains VERDICT:` misses; `max_tool_calls 4` passes vacuously on an
-    # empty trace — so 1 of the task's 2 checks, not 2 of 2.
-    assert score == 0.5, "a landed task must be able to fail its own checks"
+    # `contains VERDICT:` misses, and `max_tool_calls 4` — which used to pass
+    # vacuously on an empty trace and hand this task half its objective layer — is
+    # now NOT_MEASURABLE (#416): the trace has no dispatch record, so there is no
+    # count to compare against the cap. The fraction is over the one measured
+    # check, which is the miss: 0.0, not 1-of-2. This is the exclusion making the
+    # layer *stricter*, which is the direction #416 is meant to move in — a mined
+    # task must not collect marks from a check that cannot fail here.
+    assert score == 0.0, "a landed task must be able to fail its own checks"
 
     # What the same file looked like promoted the old way: staging block on top
     # (what `load_bench_tasks` reads) and the task block down in the body.

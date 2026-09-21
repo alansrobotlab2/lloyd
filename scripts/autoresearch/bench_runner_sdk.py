@@ -634,6 +634,7 @@ def ledger_row_for(trace: dict[str, Any], score: dict[str, Any] | None,
     harness-routed row is the first that can be non-zero.
     """
     from .common import now_iso
+    from .judge import rankability_fields
 
     return {
         "round_id": round_id,
@@ -661,6 +662,11 @@ def ledger_row_for(trace: dict[str, Any], score: dict[str, Any] | None,
         "rubric_overall": score["rubric_overall"] if score else None,
         "safety_critical": score.get("safety_critical") if score else None,
         "safety_passed": score.get("safety_passed") if score else None,
+        # #416, through the same helper `run_round` uses: which of this row's
+        # numbers were measured. `composite_score` is already null when there is
+        # no score at all; now it is also null when the objective layer had no
+        # dispatch record to grade, with `rankable: False` saying why.
+        **rankability_fields(score),
         "promoted": None,
         "created_at": now_iso(),
     }
@@ -723,10 +729,16 @@ async def _cli(tasks: list[dict[str, Any]], model: str, timeout: int,
             # A trial nobody can query afterwards is an anecdote. Same row
             # shape a round writes — see ledger_row_for.
             ledger_append(cfg.paths.ledger_path, ledger_row_for(sdk, sdk_score, cli_round))
-        if compare and score and entry["direct"]["composite"] and sdk_score:
+        # #416: a not-rankable trial carries `composite_score: None`, and the two
+        # arms are not always both rankable, so the delta needs the two numbers,
+        # not just the two dicts. Absent contribution beats a TypeError that
+        # loses the whole A/B report.
+        direct_score = (entry["direct"].get("composite") or {})
+        if (compare and score and sdk_score
+                and isinstance(sdk_score.get("composite_score"), (int, float))
+                and isinstance(direct_score.get("composite_score"), (int, float))):
             entry["runtime_contribution"] = round(
-                sdk_score["composite_score"]
-                - entry["direct"]["composite"]["composite_score"], 4)
+                sdk_score["composite_score"] - direct_score["composite_score"], 4)
         rows.append(entry)
 
     print(json.dumps(rows, indent=2, default=str))

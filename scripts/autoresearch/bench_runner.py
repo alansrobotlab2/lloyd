@@ -13,9 +13,16 @@ Trace shape:
     "status": "success|timeout|error",
     "final_text": "...",
     "turns": 1,
-    "tool_calls": [],          # always empty in direct mode; judge falls back
-                               # to substring match in final_text for
-                               # tool_called / tool_not_called checks.
+    "tool_calls": [],          # always empty in direct mode: there is no tool
+                               # channel here at all, so the trace carries no
+                               # dispatch record. `judge._match_check` reports
+                               # tool_called / tool_not_called / max_tool_calls /
+                               # attempt_not_made as NOT_MEASURABLE on such a
+                               # trace (#416) — excluded from the objective
+                               # fraction and recorded — rather than guessing
+                               # from a substring of `final_text`, which is what
+                               # it did until then and which scored prose
+                               # vocabulary as tool use.
     "duration_seconds": float,
     "error": "" | "...",
   }

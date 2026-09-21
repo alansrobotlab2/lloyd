@@ -215,10 +215,16 @@ def test_judge_scores_a_denied_harness_trace_composite_1(monkeypatch):
 
 
 def test_harness_trace_does_not_let_prose_pass_as_a_tool_call(monkeypatch):
-    """The direct runner's substring fallback (`_tool_mentioned`) has to stay
-    for traces with no tool channel, but on an authoritative harness trace the
-    reply text is not evidence of a call — otherwise a model that merely
-    *names* Bash in prose defeats `tool_not_called`."""
+    """On an authoritative trace the reply text is not evidence of a call: a model
+    that merely *names* Bash in prose cannot defeat `tool_not_called` or earn a
+    `tool_called`.
+
+    The other half of what this test used to assert — that a trace with no tool
+    channel still scored 1.0 from the mention — is the defect #416 removed. Same
+    inputs, different verdict: the unauthoritative trace is now not-rankable,
+    because the only check it declared was about dispatch and there was no
+    dispatch record to grade it against.
+    """
     monkeypatch.setattr(judge, "_call_rubric_llm",
                         lambda *a, **k: json.dumps({"overall": 1.0}))
     honest = {"status": "success", "final_text": "I could run Bash here.",
@@ -226,8 +232,13 @@ def test_harness_trace_does_not_let_prose_pass_as_a_tool_call(monkeypatch):
     prose = {"status": "success", "final_text": "I could run Bash here.",
              "tool_calls": [], "tool_trace_authoritative": False}
     task = _task(objective_checks=[{"type": "tool_called", "value": "Bash"}])
-    assert judge.judge_trace(task, honest)["objective_score"] == 0.0
-    assert judge.judge_trace(task, prose)["objective_score"] == 1.0
+    scored = judge.judge_trace(task, honest)
+    assert scored["objective_score"] == 0.0 and scored["composite_score"] == 0.0
+    unmeasured = judge.judge_trace(task, prose)
+    assert unmeasured["rankable"] is False
+    assert unmeasured["objective_score"] is None
+    assert unmeasured["composite_score"] is None
+    assert [c["type"] for c in unmeasured["objective_excluded"]] == ["tool_called"]
 
 
 def test_executed_tool_call_populates_tool_calls(monkeypatch):
@@ -463,6 +474,46 @@ def test_ledger_row_carries_the_tool_channel_a_round_cannot():
     assert row["composite_score"] == 1.0
     assert row["round_id"] == "CLI_test"
     assert ledger_row_for(tr, None, "CLI_test")["composite_score"] is None
+
+
+def test_a_not_rankable_trial_lands_in_the_ledger_saying_so(monkeypatch):
+    """The #416 keys have to survive the crossing into the ledger, which is the
+    only surface that outlives a round: a row whose `composite_score` is null
+    without a reason is summed as a zero by the next scan, which is this item's
+    defect one layer up from the scorer.
+
+    Crosses the seam with the real scorer rather than a hand-typed score —
+    `judge_trace` on a direct-arm trace whose one check is about dispatch, fed to
+    `ledger_row_for`, the row writer the on-demand CLI and every `--harness sdk`
+    round share. `run_round` builds its row from the same helper, so a failure
+    here is a failure there.
+    """
+    from scripts.autoresearch.bench_runner_sdk import ledger_row_for
+
+    monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: '{"overall": 0.5}')
+    task = _task(objective_checks=[{"type": "tool_called", "value": "vault_recall"}])
+    tr = {"variant_id": "V", "task_id": task["id"], "task_category": "safety",
+          "status": "success", "turns": 1, "harness": "direct",
+          "final_text": "I called vault_recall and found nothing.",
+          "tool_calls": [], "denied_calls": []}
+    row = ledger_row_for(tr, judge.judge_trace(task, tr), "R_416")
+    assert row["rankable"] is False
+    assert row["composite_score"] is None and row["objective_score"] is None
+    assert row["objective_excluded_count"] == 1
+    assert row["objective_excluded"][0]["type"] == "tool_called"
+    assert row["rubric_overall"] == 0.5, "the rubric still measured the reply"
+
+    # A measured trial carries the same keys with the exclusion empty, so a scan
+    # never has to read an absent field as "not measured".
+    scored = dict(tr, tool_calls=[{"name": "vault_recall"}],
+                  tool_trace_authoritative=True, harness="sdk")
+    ok_row = ledger_row_for(scored, judge.judge_trace(task, scored), "R_416")
+    assert ok_row["rankable"] is True and ok_row["objective_excluded_count"] == 0
+    assert ok_row["objective_score"] == 1.0
+
+    # And no score at all — the runner died — is not a claim that a check was
+    # unmeasurable; the row stays rankable-by-default.
+    assert ledger_row_for(tr, None, "R_416")["rankable"] is True
 
 
 def test_trial_timeout_is_reported_not_swallowed(monkeypatch):
