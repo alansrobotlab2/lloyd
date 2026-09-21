@@ -933,13 +933,14 @@ def _doc_label_satisfiability_report(
     """Walk the vault once and return which `expect_docs` labels match no path.
 
     `path` is every path under `vault_root` (files AND directories,
-    vault-relative), minus `.git/**` — the scorer compares a label against a
-    returned document path, and a substring of git internals is not a document.
-    Hidden entries are NOT skipped: `skills/.archived/**` is a real location the
-    index can hold, and skipping it would report five live labels as dead,
-    which is the false-alarm direction this file's other guards refuse to
-    produce. `walked_paths` is returned so the zero is checkable in the same
-    breath as the verdict — a denominator of zero is not a pass.
+    vault-relative), minus any path with a dot-prefixed component. That is
+    qmd's own indexing rule (`qmd/src/cli/qmd.ts`, the `parts.some(part =>
+    part.startsWith("."))` filter after the glob), so `skills/.archived/**` is
+    NOT a location the index can hold: the live index had 0 such documents on
+    2026-09-21, and the five labels this walk used to accept there could never
+    be returned. `.git/**` falls under the same rule. `walked_paths` is returned
+    so the zero is checkable in the same breath as the verdict — a denominator
+    of zero is not a pass.
     """
     specs = yaml.safe_load(specs_path.read_text())["queries"]
     labels = [(str(s.get("id")), str(d))
@@ -947,7 +948,7 @@ def _doc_label_satisfiability_report(
     walked, normed = 0, []
     for p in vault_root.rglob("*"):
         rel = p.relative_to(vault_root)
-        if ".git" in rel.parts:
+        if any(part.startswith(".") for part in rel.parts):
             continue
         walked += 1
         normed.append(_doc_norm(str(rel)))
@@ -979,6 +980,22 @@ def test_committed_corpus_has_no_unresolvable_document_label():
         + " — a label that cannot match is subtracted from doc_recall and "
         "ndcg@10 by every future run, so re-point it at the note the answer "
         "would cite, or delete it, rather than leaving the ceiling capped.")
+
+
+def test_a_label_only_a_dot_directory_holds_is_dead(tmp_path):
+    """qmd never indexes a dot-directory, so a label that resolves only there is
+    unreachable and must be reported, not accepted (gold audit, 2026-09-21)."""
+    vault = tmp_path / "vault"
+    (vault / "skills" / ".archived" / "old-skill").mkdir(parents=True)
+    (vault / "skills" / ".archived" / "old-skill" / "SKILL.md").write_text("x")
+    (vault / "skills" / "live-skill").mkdir(parents=True)
+    (vault / "skills" / "live-skill" / "SKILL.md").write_text("x")
+    corpus = tmp_path / "q.yaml"
+    corpus.write_text(yaml.safe_dump({"queries": [
+        {"id": "a", "query": "q", "expect_docs": ["skills/.archived/old-skill/SKILL.md"]},
+        {"id": "b", "query": "q", "expect_docs": ["skills/live-skill/SKILL.md"]}]}))
+    rep = _doc_label_satisfiability_report(specs_path=corpus, vault_root=vault)
+    assert rep["dead"] == [{"query": "a", "label": "skills/.archived/old-skill/SKILL.md"}], rep
 
 
 def test_the_document_label_guard_fails_on_an_unresolvable_label(tmp_path):

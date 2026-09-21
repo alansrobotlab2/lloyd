@@ -210,6 +210,8 @@ def production_payload(text: str) -> dict:
         payload = {"searches": [{"type": "lex", "query": text}, {"type": "vec", "query": text}],
                    "limit": int(shape["limit"]), "candidateLimit": int(shape["candidateLimit"]),
                    "collections": list(V.VAULT_SEGMENTS), "rerank": bool(shape["rerank"])}
+        if shape.get("lexMode") and shape["lexMode"] != "and":
+            payload["lexMode"] = shape["lexMode"]
         if getattr(V, "RECALL_QMD_FUSION", "collection") == "global":
             payload["fusion"] = "global"
             floor = {c: n for c, n in shape["floor"].items() if c in payload["collections"]}

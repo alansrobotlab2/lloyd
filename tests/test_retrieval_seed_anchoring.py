@@ -383,7 +383,8 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
     #1319 grew the corpus to 87 queries and 19 of the 67 additions are anchorless
     for the same reason — a gold entity no seed extractor can reach lexically — so
     the residue is 24 of 87 and the entity leg's measured ceiling moves from
-    (20−5)/20 = 0.750 to (87−24)/87 = 0.724. Both halves are pinned: the original
+    (20−5)/20 = 0.750 to (87−24)/87 = 0.724 — 23 of 81, (81−23)/81 = 0.716, since
+    the 2026-09-21 gold audit dropped six queries the vault cannot answer. Both halves are pinned: the original
     five by id (a gold that silently stops, or starts, being lexically reachable is
     exactly what #1260 watches), and the grown residue in full, because that count
     is the denominator every baseline artifact carries. Reaching zero remains
@@ -404,11 +405,11 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
         "alarm-comes-back-after-fixed", "djev-decision-engine-integration",
         "ambient-prefetch-ttl-reclaim", "isaac-gr00t-n17",
         "retrieval-seed-anchoring-contract", "eval-corpus-naming-conventions",
-        "eval-north-star-candidate", "retrieval-eval-item-1085",
+        "eval-north-star-candidate",
     ], out["anchorless"]
     ceiling = (out["n_queries"] - len(out["anchorless"])) / out["n_queries"]
     assert (len(out["anchorless"]), out["n_queries"], round(ceiling, 3)) == (
-        24, 87, 0.724
+        23, 81, 0.716
     ), f"{len(out['anchorless'])} anchorless of {out['n_queries']} queries"
 
 

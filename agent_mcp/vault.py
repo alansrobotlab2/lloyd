@@ -30,6 +30,7 @@ import re
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Optional
@@ -237,6 +238,23 @@ RECALL_COLLECTION_FLOOR = {"autonomy": 5, "architecture": 5, "skills": 5}
 # recall down that same path, counted and announced by `app/qmd_health.py`, so
 # an outage costs speed, never quality. `djev.enabled` false means "qmd".
 RECALL_RERANKER = "djev"
+
+# ── The keyword leg ORs its terms (2026-09-21) ───────────────────────────────
+#
+# qmd's lex leg used to AND every non-stopword term, so a natural-language
+# question matched only documents holding every one of its words: over the
+# 87-query set the lex leg alone had an expected document within its top 32
+# for 11% of them (AND) against 36% (OR), and within its top 240 for 13%
+# against 54%. End to end on one pin, djev ranking, paired against AND:
+#
+#     doc_hit +0.011  doc_recall +0.033  MRR +0.028  NDCG +0.042 [-0.005,+0.094]
+#     p50 510 ms against 494 ms
+#
+# and on the cross-encoder fallback path doc_hit +0.046, doc_recall +0.050.
+# `lexWeight` 0.5 and 2 measured inside the noise of 1, so it stays unset. The
+# fork's `lexMode` is opt-in (qmd fork, `buildFTS5Query`); a daemon that predates
+# it ignores the key and ANDs, which is exactly the old request.
+RECALL_LEX_MODE = "or"
 RECALL_DJEV_HEAD = 20
 RECALL_DJEV_FLOOR = {"autonomy": 2, "architecture": 2, "skills": 2}
 RECALL_DJEV_POOL = 32     # head + floors can never pass it: 20 + (2+2+2) x 2 searches
@@ -261,10 +279,10 @@ def recall_doc_leg_shape(reranker: str | None = None) -> dict:
     leg and `scripts/automod/evalpin.production_payload` both read."""
     if (reranker or recall_reranker()) == "djev":
         return {"limit": RECALL_DJEV_POOL, "candidateLimit": RECALL_DJEV_HEAD,
-                "rerank": False, "floor": dict(RECALL_DJEV_FLOOR)}
+                "rerank": False, "floor": dict(RECALL_DJEV_FLOOR), "lexMode": RECALL_LEX_MODE}
     pool = RECALL_GLOBAL_DOC_POOL if RECALL_QMD_FUSION == "global" else RECALL_DOC_POOL
     return {"limit": pool, "candidateLimit": pool, "rerank": RECALL_QMD_RERANK,
-            "floor": dict(RECALL_COLLECTION_FLOOR)}
+            "floor": dict(RECALL_COLLECTION_FLOOR), "lexMode": RECALL_LEX_MODE}
 
 
 def recall_doc_pool() -> int:
@@ -588,6 +606,16 @@ def _qmd_timeout() -> float:
     return value if value > 0 else QMD_TIMEOUT_S
 
 
+def qmd_file(file: str) -> str:
+    """A qmd result's `file`, decoded. The daemon percent-encodes every path
+    segment (`encodeQmdPath`), so `people/Ali Behrouz.md` arrived as
+    `people/Ali%20Behrouz.md` and a `vault_read` of the cited path failed — 18
+    indexed notes have a space, `+`, `#` or `&` in their path."""
+    if not isinstance(file, str) or not file.startswith("qmd://"):
+        return file
+    return "qmd://" + urllib.parse.unquote(file[len("qmd://"):])
+
+
 def _qmd_post(payload: dict) -> list:
     req = urllib.request.Request(
         QMD_DAEMON_URL,
@@ -607,7 +635,7 @@ def _qmd_post(payload: dict) -> list:
         pass
     return [
         {
-            "file": r.get("file", ""),
+            "file": qmd_file(r.get("file", "")),
             "title": r.get("title", ""),
             "snippet": r.get("snippet", ""),
             "score": r.get("score", 0),
@@ -653,7 +681,8 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
                       lex_query: Optional[str] = None,
                       exact_pool: Optional[int] = None,
                       candidate_limit: Optional[int] = None,
-                      floor: Optional[dict] = None) -> list:
+                      floor: Optional[dict] = None,
+                      lex_mode: Optional[str] = None) -> list:
     """Send a lex and/or vec query to the qmd daemon.
 
     **Returns a list, or raises `QmdUnavailable`.** An empty list means the
@@ -803,6 +832,8 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
         floor_sent = {c: n for c, n in floor_map.items() if c in payload["collections"]}
         if floor_sent:
             payload["collectionFloor"] = floor_sent
+    if lex_mode and lex_mode != "and" and "lex" in legs:
+        payload["lexMode"] = lex_mode
 
     def _finish(rows: list) -> list:
         if not unrestricted:
@@ -1595,7 +1626,8 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
                                   skip_rerank=not doc_shape["rerank"],
                                   exact_pool=doc_shape["limit"],
                                   candidate_limit=doc_shape["candidateLimit"],
-                                  floor=doc_shape["floor"])
+                                  floor=doc_shape["floor"],
+                                  lex_mode=doc_shape.get("lexMode"))
 
     def _do_code_grep():
         if not params.get("grep_code", True):

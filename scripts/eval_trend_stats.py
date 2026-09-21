@@ -762,8 +762,12 @@ def main(argv: list[str] | None = None) -> int:
           "IS the approved re-base point: absolute values measured from the first "
           "night scored on the grown corpus are not comparable with the "
           "2026-09-04..2026-09-17 series, so do not read a trend across that "
-          "boundary. The 80%-power decision that used to sit behind this line is "
-          "no longer open — see the n printed above.")
+          "boundary. Later on 2026-09-21 a gold audit re-pointed 38 labels that "
+          "did not answer their query and dropped 6 queries the vault cannot "
+          "answer (87 -> 81 gold queries, the original 20 texts untouched): a "
+          "second re-base point, for the same reason. The 80%-power decision "
+          "that used to sit behind this line is no longer open — see the n "
+          "printed above.")
 
     by_label = {n.label: n for n in nights}
     claims = [] if args.no_claims else list(CLAIMS) + [_parse_claim(c) for c in args.claim]

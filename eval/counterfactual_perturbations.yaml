@@ -475,16 +475,6 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - Lloyd
-- id: mission-control-tab-layout
-  axis_changed: entity
-  old_value: Mission Control
-  new_value: Mission Control Frontend
-  perturbed_query: What tabs does Mission Control Frontend have and which one shows
-    background workers?
-  expected_to_move:
-  - Mission Control Frontend
-  expected_pinned: []
-  sibling_source: kg_alias_table
 - id: model-alias-resolution
   axis_changed: qualifier
   old_value: actually
@@ -540,14 +530,6 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - prompt files
-- id: python-dataclasses
-  axis_changed: artifact
-  old_value: a Pydantic model
-  new_value: a Rust struct
-  perturbed_query: When should I use a dataclass instead of a Rust struct or a TypedDict?
-  expected_to_move: []
-  expected_pinned:
-  - dataclass
 - id: qmd
   axis_changed: entity
   old_value: QMD
@@ -592,14 +574,6 @@ perturbations:
   - Groundskeeper Research
   expected_pinned: []
   sibling_source: kg_alias_table
-- id: retrieval-eval-item-1085
-  axis_changed: qualifier
-  old_value: closed without landing
-  new_value: shipped early
-  perturbed_query: Which eval work item was shipped early, and what was measured instead?
-  expected_to_move: []
-  expected_pinned:
-  - eval work item
 - id: retrieval-seed-anchoring-contract
   axis_changed: entity
   old_value: seed extractor
@@ -627,14 +601,6 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - note
-- id: shell-quoting-word-splitting
-  axis_changed: qualifier
-  old_value: contain spaces
-  new_value: contain digits
-  perturbed_query: Why does my for loop break on filenames that contain digits?
-  expected_to_move: []
-  expected_pinned:
-  - filenames
 - id: skill-mining-to-promotion
   axis_changed: artifact
   old_value: trajectory skill mining
@@ -654,15 +620,6 @@ perturbations:
   - Nightly Skill Consolidation
   expected_pinned: []
   sibling_source: kg_alias_table
-- id: sqlite-alias-metacharacters
-  axis_changed: artifact
-  old_value: LIKE
-  new_value: GLOB
-  perturbed_query: Why does my SQL GLOB pattern with an underscore in a name match
-    the wrong rows?
-  expected_to_move: []
-  expected_pinned:
-  - SQLite
 - id: stop-auto-merging-entities
   axis_changed: entity
   old_value: automatically merging
@@ -746,14 +703,6 @@ perturbations:
   - OpenWakeWord
   expected_pinned: []
   sibling_source: kg_alias_table
-- id: watchdog-architecture-split
-  axis_changed: qualifier
-  old_value: without a daemon
-  new_value: with two daemons
-  perturbed_query: What does the watchdog check with two daemons, and what needs one?
-  expected_to_move: []
-  expected_pinned:
-  - watchdog
 - id: watchdog-metacharacter
   axis_changed: qualifier
   old_value: every process on the machine

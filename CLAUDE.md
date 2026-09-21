@@ -3292,6 +3292,20 @@ revert it; `qmd/WORKLOG.md` section 7 is the long version of everything below.
   kill switch. `RECALL_QMD_FUSION = "collection"` still restores #504's
   240-row request under it. Tests pin the recall to `"qmd"` in
   `tests/conftest.py` so none reaches the live djev.
+- **The keyword leg ORs its terms and the vector leg is Qwen3-Embedding-0.6B**
+  (2026-09-21). qmd ANDed every term, so a question matched only documents
+  holding every word: the lex leg found an expected doc in its top 32 for 11%
+  of queries (36% under OR). The fork's opt-in `lexMode: "or"` is sent by the
+  recall doc leg only (`RECALL_LEX_MODE`). The embedding model is set in ONE
+  place, `models.embed` in `~/.config/qmd/index.yml` (it beats
+  `QMD_EMBED_MODEL`), which the daemon, the watcher and task #81 all read; the
+  regression pin reads `~/.config/qmd/evalpin.yml`, which must name the same
+  model, and the committed template is `agent-services/conf/qmd-index.yml`. A
+  model change is a full re-embed built beside the live index and swapped in.
+  The gold set (`eval/vault_recall_queries.yaml`) was repaired the same day, 38
+  labels that did not answer their query and 6 unanswerable queries. Every
+  measurement, kept or rejected, is in `architecture/retrieval.md`; qmd itself
+  (fork, daemon, config, models, API, maintenance) is `architecture/qmd.md`.
 - **A rerank that could not run says so.** No VRAM for a ranking context used
   to be an HTTP 200 with fusion-order results. The daemon now returns
   `meta.reranked`, never caches a fallback score, and `app/qmd_health.py`

@@ -37,6 +37,8 @@ turns out to describe something gone or never built is moved to
 | [[vault-protection]] | the 09-10/09-12 vault wipes and the four layers after them: the bench/eval tool sandbox, the wholesale-delete check, the guardian's vault tripwire and sync gate, 15-minute snapshots |
 | [[inner-voice]] | the observer that watches the primary stream and steers it with five soft levers |
 | [[subliminal]] | pre-call context retrieval: skills, facts, vault docs, sessions, backlog |
+| [[qmd]] | the vault search engine: Lloyd's fork, the daemon, index, config and models, its REST API, maintenance, eval pins |
+| [[retrieval]] | vault recall's document leg: qmd fusion (OR keyword leg, Qwen3 vectors), djev ranking, the gold set, every measured change |
 | [[ambient-context-injection]] | how background producers surface context into the active chat |
 | [[skills]] | on-demand SKILL.md procedures from the vault |
 | [[voice]] | the whole voice-to-voice round trip: LiveKit transport, wake word, ASR, speaker id, the cloned TTS voice and its client-side shaping |

@@ -113,7 +113,8 @@ async def memory_search(q: str = "", limit: int = 10, scope: str = ""):
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
-        results = [{"path": r.get("file", ""), "title": r.get("title", ""), "score": r.get("score", 0), "snippet": r.get("snippet", ""), "summary": r.get("summary", "")} for r in data.get("results", [])]
+        from agent_mcp.vault import qmd_file
+        results = [{"path": qmd_file(r.get("file", "")), "title": r.get("title", ""), "score": r.get("score", 0), "snippet": r.get("snippet", ""), "summary": r.get("summary", "")} for r in data.get("results", [])]
         return JSONResponse({"query": q, "results": results})
     except Exception as e:
         return JSONResponse({"query": q, "error": str(e), "results": []})

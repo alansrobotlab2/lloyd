@@ -62,7 +62,7 @@ def _doc_legs(sent):
 def test_the_measured_shape_fits_one_canvas():
     shape = vault.recall_doc_leg_shape("djev")
     assert shape == {"limit": 32, "candidateLimit": 20, "rerank": False,
-                     "floor": {"autonomy": 2, "architecture": 2, "skills": 2}}
+                     "floor": {"autonomy": 2, "architecture": 2, "skills": 2}, "lexMode": "or"}
     # The fused head plus every floor row (two searches each) never passes the
     # pool, and the pool never passes the canvas split.
     worst = shape["candidateLimit"] + 2 * sum(shape["floor"].values())
