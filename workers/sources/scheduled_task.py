@@ -85,7 +85,25 @@ _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS = 24 * 3600
 # 45 min is long enough to sit past a vLLM restart (the n-gram table alone takes
 # minutes to load) and short enough that a person hears about it within an hour.
 _VLLM_DOWN_ALERT_SECONDS = 45 * 60
-_state = {"vllm_down_logged": False, "startup_checked": False,
+# How often to re-scan the task files for ones the scheduler cannot parse (#939).
+# This used to be a one-shot per process: the flag was set on the first tick and
+# every later tick inherited that first tick's answer, so a file that turned
+# unparseable while the scheduler was up — a half-written file from a crashed
+# vault sync, a bulk edit cut off before its closing `---` fence — stopped being
+# dispatched and produced no alert until the next backend restart, which a round
+# under observation can defer for a day. Re-scanning is the cheap half; neither
+# stall alarm can cover this class, because both iterate sets built from files
+# that ALREADY parse, so a file parsing to `None` is missing from their input as
+# well as from dispatch. 30 min costs one directory scan per interval at the
+# pool's 60 s tick and sits inside the one-hour ceiling #939 sets.
+_UNPARSEABLE_SCAN_SECONDS = 30 * 60
+_state = {"vllm_down_logged": False,
+          # `_unparseable_scan_at` is the instant the parse scan last ran (None
+          # until the first tick takes its slot) and `_unparseable_alerted` the
+          # file names it has already raised. Together they make the scan a
+          # cadence with transition-only alerting, so neither an unchanged bad
+          # set nor a healthy one sends a message every half hour.
+          "unparseable_scan_at": None, "unparseable_alerted": set(),
           "stall_streak": 0, "stall_alerted_at": None,
           "nextrun_streak": 0, "nextrun_alerted_at": None,
           # Outage accounting: `_vllm_down_since` is the instant the current
@@ -105,11 +123,17 @@ def _vllm_healthy(timeout: float = 4.0, url: str | None = None) -> bool:
 
 
 def _unparseable_task_files() -> list[str]:
-    """Task files the scheduler cannot parse (invisible to dispatch)."""
+    """Task files the scheduler cannot parse (invisible to dispatch).
+
+    Reads `autonomy.AUTONOMY_DIR`, the one directory constant the scans beside it
+    already use (`recover_stuck_tasks` at autonomy.py:96, `_find_task_file` at
+    :161), rather than spelling `Path.home() / "obsidian" / "autonomy"` a second
+    time: the value is the same in production — that is how the constant is
+    defined, at autonomy.py:77 — and the indirection is what lets a test point the
+    real scan at a scratch fleet instead of the live board it would alert about."""
     import re
-    from pathlib import Path
     import autonomy
-    d = Path.home() / "obsidian" / "autonomy"
+    d = autonomy.AUTONOMY_DIR
     bad = []
     for p in d.glob("*.md"):
         if not re.match(r"\d+-", p.name):
@@ -327,25 +351,69 @@ async def _note_vllm_outage() -> None:
         await _alert(msg)
 
 
+async def _scan_unparseable_task_files(loop) -> None:
+    """Scan the task files and alert on a CHANGE in the unparseable set (#939).
+
+    The alert is keyed on the transition, not on the scan: `_state
+    ["unparseable_alerted"]` holds the names already raised, so a file that stays
+    broken is named once and not again, and a file that heals gets a recovery
+    message and leaves the set — which is what lets a later re-corruption be heard
+    at all. A per-scan alert would be one message every `_UNPARSEABLE_SCAN_SECONDS`
+    for as long as the file is broken, which is the noise that made the stall alarm
+    beside it unreadable (see `_STALL_ALERT_INTERVAL_SECONDS`).
+
+    The recovery half is not decoration. Without it the alert channel records the
+    injury and never its repair, and the only surviving account of a resolved
+    incident is an instruction to act on it.
+
+    Runs on the caller's event loop with the directory walk on an executor thread,
+    like every other scan here: it parses every task file, and the pool's scheduler
+    loop is the same loop that dispatches.
+    """
+    bad = set(await loop.run_in_executor(None, _unparseable_task_files))
+    alerted = set(_state.get("unparseable_alerted") or ())
+    _state["unparseable_alerted"] = bad
+    newly_bad = bad - alerted
+    if newly_bad:
+        still = alerted & bad
+        msg = (f"{len(newly_bad)} autonomy task file(s) unparseable and INVISIBLE "
+               f"to the scheduler: {', '.join(sorted(newly_bad))}"
+               + (f" (already alerted, still unparseable: "
+                  f"{', '.join(sorted(still))})" if still else ""))
+        logger.error("%s", msg)
+        await _alert(msg)
+    recovered = alerted - bad
+    if recovered:
+        msg = (f"{len(recovered)} autonomy task file(s) parseable again and back "
+               f"on the scheduler: {', '.join(sorted(recovered))}")
+        logger.warning("%s", msg)
+        await _alert(msg)
+
+
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
+    import autonomy
     from autonomy import get_due_tasks
 
     loop = asyncio.get_event_loop()
 
-    # One-time startup validation: loudly surface any task file the scheduler
-    # cannot parse (would otherwise be silently dropped — the 2026-05-28 stall).
-    if not _state["startup_checked"]:
-        _state["startup_checked"] = True
-        bad = await loop.run_in_executor(None, _unparseable_task_files)
-        if bad:
-            msg = (f"{len(bad)} autonomy task file(s) unparseable and INVISIBLE to "
-                   f"the scheduler: {', '.join(bad)}")
-            logger.error("STARTUP: %s", msg)
-            await _alert(msg)
+    # Validation of the task files against the scheduler's own parser, on a
+    # cadence rather than once per process: any file the scheduler cannot parse is
+    # silently dropped (the 2026-05-28 stall), and neither stall alarm can see it.
+    # The slot is claimed BEFORE the scan so a scan that raises — an unreadable
+    # directory, a mount mid-flip — costs the next interval, not one executor call
+    # per tick. It needs no model server, so it sits above the vLLM gate below
+    # along with `recover_stuck_tasks`, and a fleet pinned to a dead engine still
+    # gets its task files checked.
+    scan_at = _state.get("unparseable_scan_at")
+    scan_now = autonomy._utcnow()
+    if (scan_at is None
+            or (scan_now - scan_at).total_seconds() >= _UNPARSEABLE_SCAN_SECONDS):
+        _state["unparseable_scan_at"] = scan_now
+        await _scan_unparseable_task_files(loop)
 
     # Reset tasks stuck in_progress past their timeout (e.g. worker died
-    # mid-run). Cheap relative to the get_due_tasks parse below.
-    import autonomy
+    # mid-run). Cheap relative to the get_due_tasks parse below. (`autonomy` is
+    # already bound above, where the scan reads its clock.)
     recovered = await loop.run_in_executor(None, autonomy.recover_stuck_tasks)
     if recovered:
         logger.warning("Recovered %d stuck task(s): %s", len(recovered), recovered)

@@ -25,6 +25,44 @@ def _iso(**delta):
     return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(**delta)).isoformat()
 
 
+# `_state["unparseable_scan_at"]` is compared against `autonomy._utcnow()`, and every
+# pinned test here replaces that helper with an instant of its own. This value is a
+# year ahead of ANY clock a test here can pin, so a tick whose subject is not the parse
+# scan never spends its cadence slot, and never posts about, its fixture fleet.
+# "The scan ran this very instant" would do the same ONLY while the clock is the real
+# one: #939 replaced the one-shot `startup_checked` flag with a real cadence, so
+# "skip the scan" became "the scan is not due yet" — which has to hold on a pinned
+# clock too, not by the accident that every pin in this file sits at or before the
+# wall clock. Far future, so no pin can make it due.
+_SCAN_NOT_DUE = dt.datetime.max.replace(tzinfo=dt.timezone.utc) - dt.timedelta(days=365)
+
+
+def _scan_not_due():
+    """A fresh `unparseable_scan_at` for a test that is about something else."""
+    return _SCAN_NOT_DUE
+
+
+@pytest.fixture(autouse=True)
+def _scheduler_state_restored():
+    """Restore `scheduled_task._state`'s CONTENTS around every test in this file.
+
+    The scan cadence lives in a module-level dict, and `monkeypatch` rebinds module
+    attributes — it cannot undo a mutation made inside the dict a pre-existing binding
+    points at. So a tick that runs the parse scan without patching `_state` writes
+    `unparseable_scan_at` onto the real module dict and leaves it there for whichever
+    test runs next, making "does this tick re-scan?" a function of test order rather
+    than of the state the test asked for. Restoring the contents makes each test's
+    cadence state its own (#939). Verified by neutering this fixture's last two lines:
+    a later probe file then reads `unparseable_scan_at` as the instant the file's last
+    tick ran instead of the module's `None`.
+    """
+    import workers.sources.scheduled_task as st
+    saved = {k: (set(v) if isinstance(v, set) else v) for k, v in st._state.items()}
+    yield
+    st._state.clear()
+    st._state.update(saved)
+
+
 @pytest.fixture
 def aut(tmp_path, monkeypatch):
     """Isolated task dir + runs dir, with a resolvable skill file."""
@@ -218,7 +256,7 @@ async def test_one_queue_tick_rearms_a_retired_task(aut, monkeypatch, tmp_path):
     # fails on the real nextrun stall alarm ("#1 (task1) is 24.0h past its
     # next_run"), so it is a live check on the rearm's next_run and not a
     # tautology about an empty list.
-    monkeypatch.setattr(st, "_state", {**st._state, "startup_checked": True,
+    monkeypatch.setattr(st, "_state", {**st._state, "unparseable_scan_at": _scan_not_due(),
                                        "stall_streak": st._STALL_ALARM_TICKS,
                                        "nextrun_streak": st._STALL_NEXTRUN_TICKS,
                                        "stall_alerted_at": None,
@@ -1308,7 +1346,7 @@ async def test_one_pool_tick_enqueues_exactly_what_the_board_calls_unheld(
                last_run=(PIN - dt.timedelta(days=3)).isoformat())
 
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
-    monkeypatch.setattr(st, "_state", {**st._state, "startup_checked": True,
+    monkeypatch.setattr(st, "_state", {**st._state, "unparseable_scan_at": _scan_not_due(),
                                        "stall_streak": 0, "stall_alerted_at": None})
 
     async def _no_alert(msg):
@@ -1464,7 +1502,7 @@ async def test_the_next_run_alert_carries_the_hold_reason_and_fires_low_frequenc
     # test_the_stall_alarm_shares_the_one_verdict and again in the test above.
     _next_run_fleet(aut, control=False)
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
-    monkeypatch.setattr(st, "_state", {**st._state, "startup_checked": True,
+    monkeypatch.setattr(st, "_state", {**st._state, "unparseable_scan_at": _scan_not_due(),
                                        "stall_streak": 0, "stall_alerted_at": None,
                                        "nextrun_streak": 0,
                                        "nextrun_alerted_at": None})
@@ -1513,7 +1551,7 @@ async def test_the_pool_reaches_the_next_run_assertion_through_the_registry(
 
     `graph_affected(enqueue_if_due)` returns ZERO dependents: the pool never
     names this function, it dispatches `source.enqueue_if_due(...)` by attribute
-    off `SOURCE_REGISTRY` (workers/pool.py:391). Every assertion made by calling
+    off `SOURCE_REGISTRY` (workers/pool.py:572). Every assertion made by calling
     the coroutine directly is therefore an assertion about a caller production
     does not have. This registers the real module and lets the real scheduler
     loop find it.
@@ -1539,7 +1577,7 @@ async def test_the_pool_reaches_the_next_run_assertion_through_the_registry(
                next_run=(PIN - 2 * day).isoformat())
 
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
-    monkeypatch.setattr(st, "_state", {**st._state, "startup_checked": True,
+    monkeypatch.setattr(st, "_state", {**st._state, "unparseable_scan_at": _scan_not_due(),
                                        "stall_streak": 0, "stall_alerted_at": None,
                                        "nextrun_streak": st._STALL_NEXTRUN_TICKS - 1,
                                        "nextrun_alerted_at": None})
@@ -1692,7 +1730,7 @@ async def test_the_widened_alert_names_the_draft_task_and_its_status(
                last_run=(PIN - dt.timedelta(hours=12, minutes=30)).isoformat(),
                next_run=(PIN - dt.timedelta(hours=12, minutes=15)).isoformat())
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
-    monkeypatch.setattr(st, "_state", {**st._state, "startup_checked": True,
+    monkeypatch.setattr(st, "_state", {**st._state, "unparseable_scan_at": _scan_not_due(),
                                        "stall_streak": 0, "stall_alerted_at": None,
                                        "nextrun_streak": 0,
                                        "nextrun_alerted_at": None})
@@ -2431,7 +2469,7 @@ def _clean_outage_state(monkeypatch, st, **over):
     """Swap in a `_state` with both stall streaks and all outage accounting at
     zero, so no tick here inherits another test's streak, cooldown or outage, and
     nothing here leaks into the module copy afterwards."""
-    fresh = {**st._state, "startup_checked": True,
+    fresh = {**st._state, "unparseable_scan_at": _scan_not_due(),
              "stall_streak": 0, "stall_alerted_at": None,
              "nextrun_streak": 0, "nextrun_alerted_at": None,
              "vllm_down_logged": False, "vllm_down_since": None,
@@ -3230,3 +3268,254 @@ async def test_an_unknown_model_refusal_does_not_spend_the_retry_budget(aut, mon
         assert after.get(field) == before.get(field), (
             f"`{field}` moved on a refused dispatch: {before.get(field)!r} -> "
             f"{after.get(field)!r}")
+
+
+# ── #939: the unparseable-file scan is a cadence, not a startup one-shot ───────
+#
+# `_unparseable_task_files` re-reads every task file from scratch, but
+# `enqueue_if_due` called it behind one flag set on the first tick, so the
+# scheduler's answer to "can I parse every task file?" stayed the answer from the
+# moment it booted. A file that became unparseable afterwards — a half-written
+# file from a crashed vault sync, a bulk edit truncated before its closing `---`
+# fence — stopped being dispatched and nothing said so. Neither stall alarm can
+# cover it: `_grossly_overdue` iterates `_all_runnable_tasks` and
+# `_next_run_stalled` iterates `dependency_resolution_set()`, both built from
+# files that ALREADY parse, so a file parsing to `None` is absent from their input
+# as well as from the dispatch list. Restarts re-ran the scan, and an automod
+# round under observation can defer a restart for a day, so "until the next
+# restart" is not a short window.
+#
+# These tests step the clock forward instead of waiting out uptime. The corruption
+# is a real file write into the fixture's `AUTONOMY_DIR`, and the scan is the real
+# one running on a real executor thread, so an alert here can exist only if the
+# scheduler genuinely lost a task. What is stubbed is what leaves the process: the
+# model-server probe and the Discord post. Real delivery to the channel for a
+# mid-uptime corruption is a person's check on a live file, not something to
+# simulate here.
+#
+# The clause each node pins, so a reader grading the item need not search for the
+# mapping (item #939's acceptance clauses, in their own order):
+#   1  test_the_unparseable_scan_runs_again_on_a_bounded_cadence
+#   2  test_a_file_that_turns_unparseable_mid_uptime_alerts_exactly_once
+#   3  test_the_unparseable_alert_follows_transitions_not_scans
+
+def _unparseable_fleet(aut):
+    """One healthy `daily` task, and its file path for a test to corrupt.
+
+    Freshly run and a full period from its own `next_run`, so at the pinned
+    instant it is neither 2.5x overdue nor past its next_run: the alert count in
+    this section belongs to the unparseable scan alone, and neither stall alarm
+    adds a clause to it.
+    """
+    write_task(aut, 771, last_run=PIN.isoformat(),
+               next_run=(PIN + dt.timedelta(days=1)).isoformat())
+    return aut.AUTONOMY_DIR / "771-task771.md"
+
+
+def _clean_unparseable_state(monkeypatch, st):
+    """`_state` with the scan never run and no file already alerted on, and both
+    stall streaks plus the outage accounting at zero, so a tick here inherits
+    neither another test's cadence nor its cooldown."""
+    monkeypatch.setattr(st, "_state", {
+        **st._state, "unparseable_scan_at": None, "unparseable_alerted": set(),
+        "stall_streak": 0, "stall_alerted_at": None,
+        "nextrun_streak": 0, "nextrun_alerted_at": None,
+        "vllm_down_logged": False, "vllm_down_since": None,
+        "vllm_down_alerted": False})
+
+
+def _watch_alerts(monkeypatch, st):
+    """Stub the two things that leave the process — the model-server health probe
+    and the Discord post — and hand back the list the alerts land in."""
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture)
+    return alerts
+
+
+def _unparseable_clock(aut, monkeypatch, st):
+    """Pin the scheduler's clock at `PIN` and return a step of one scan cadence.
+
+    The cadence is measured in scheduler uptime, which a test may not wait out:
+    at the pool's 60 s tick, a 30-minute interval is 30 minutes of wall clock.
+    `autonomy._utcnow` is the one instant this scan and both stall detectors read,
+    so stepping it steps uptime, and no stdlib `datetime` attribute is touched.
+
+    The interval is asserted to exist rather than simply read: declaring one is
+    what makes this a cadence, so on the pre-fix source the failure names the
+    defect instead of dying on an attribute lookup.
+    """
+    assert getattr(st, "_UNPARSEABLE_SCAN_SECONDS", None) is not None, (
+        "the scan declares no re-run interval, so it is still the one that runs on "
+        "the first tick and never again: there is no cadence to step")
+    now = [_pin(aut, monkeypatch)]
+
+    def step():
+        now[0] = now[0] + dt.timedelta(seconds=st._UNPARSEABLE_SCAN_SECONDS)
+        _pin(aut, monkeypatch, when=now[0])
+
+    return step
+
+
+def _corrupt(path):
+    """Make a task file unparseable the way it happens for real: the file exists
+    and is named like a task, but has no front matter to parse.
+
+    This is the class `autonomy._parse_task_file` returns `None` for, which is the
+    class this scan exists for. Mangled YAML is the other class and it is not here:
+    since 5da3c01 it comes back as a degraded dict (`_yaml_broken: True`) and keeps
+    being dispatched, so it does not belong in this alert.
+    """
+    path.write_text("")
+
+
+async def test_the_unparseable_scan_runs_again_on_a_bounded_cadence(
+        aut, monkeypatch, tmp_path):
+    """Clause 1: the scan re-runs inside the tick, at most once per interval.
+
+    The spy wraps the real helper instead of replacing it, so what is counted is
+    the real directory scan on the real executor thread. The middle tick at the
+    SAME instant is the non-vacuity half: a scan that simply ran on every tick
+    would satisfy "more than once" while making the alert a per-minute broadcast,
+    so the count has to hold at one there. Pre-fix the flag is set on the first
+    tick and the count is 1 for every tick after it, at any clock.
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    _unparseable_fleet(aut)
+    step = _unparseable_clock(aut, monkeypatch, st)
+    _clean_unparseable_state(monkeypatch, st)
+    alerts = _watch_alerts(monkeypatch, st)
+
+    scans: list[int] = []
+    real = st._unparseable_task_files
+
+    def _spy():
+        scans.append(1)
+        return real()
+
+    monkeypatch.setattr(st, "_unparseable_task_files", _spy)
+
+    q = WorkQueue(tmp_path / "cadence.db")
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(scans) == 1, (
+        f"the first tick ran the scan {len(scans)} times: a boot that never "
+        f"checks its task files at all is not the defect being fixed")
+
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(scans) == 1, (
+        "the scan ran twice with no uptime between the ticks, so there is no "
+        "cadence and the alert would fire every tick instead")
+
+    assert st._UNPARSEABLE_SCAN_SECONDS <= 3600, (
+        f"a cadence of {st._UNPARSEABLE_SCAN_SECONDS}s cannot deliver a check "
+        f"within the one-hour bound the acceptance clause sets")
+
+    step()
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(scans) == 2, (
+        f"after one interval of scheduler uptime the scan had run {len(scans)} "
+        f"time(s): the one-shot flag is still in force, which is the whole defect "
+        f"— a file corrupted after the first tick is never seen again")
+    assert alerts == [], f"a healthy fleet produced an alert: {alerts}"
+
+
+async def test_a_file_that_turns_unparseable_mid_uptime_alerts_exactly_once(
+        aut, monkeypatch, tmp_path):
+    """Clause 2: no restart, one alert, naming the file, across the real parse boundary.
+
+    Two ticks of one running scheduler with a file corrupted on disk between them.
+    The scan parses that file with the real `autonomy._parse_task_file` on an
+    executor thread, so the only way the assertion is met is if the scheduler
+    actually noticed it lost a task. Pre-fix `alerts` is empty: the second tick
+    never scans.
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    path = _unparseable_fleet(aut)
+    step = _unparseable_clock(aut, monkeypatch, st)
+    _clean_unparseable_state(monkeypatch, st)
+    alerts = _watch_alerts(monkeypatch, st)
+
+    q = WorkQueue(tmp_path / "mid-uptime.db")
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert alerts == [], f"the boot scan alerted on a healthy fleet: {alerts}"
+
+    _corrupt(path)
+    assert aut._parse_task_file(path) is None, (
+        "the corruption stopped parsing to None: this test is no longer exercising "
+        "the class the scan exists for")
+
+    step()
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+
+    assert len(alerts) == 1, (
+        f"a file that became unparseable after boot produced {len(alerts)} "
+        f"alert(s): the scheduler dropped a task in silence, which is the "
+        f"2026-05-28 failure this scan was written against. {alerts}")
+    assert path.name in alerts[0], (
+        f"the alert does not name the file a reader would have to fix: {alerts[0]}")
+    assert "unparseable" in alerts[0], alerts[0]
+
+
+async def test_the_unparseable_alert_follows_transitions_not_scans(
+        aut, monkeypatch, tmp_path):
+    """Clause 3: one alert per change of state, in both directions, forever.
+
+    Walks a file through broken → unchanged → healed → broken again on one running
+    scheduler. An unchanged bad set must not re-alert, or the alert becomes a
+    broadcast every interval and reads as noise; a healed file must be reported as
+    recovered and dropped from the alerted set, or a later re-corruption is silent
+    — the retraction asymmetry, which is how a resolved incident survives as an
+    instruction to act. Pre-fix the walk stops at the first arrow.
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    path = _unparseable_fleet(aut)
+    intact = path.read_text()
+    step = _unparseable_clock(aut, monkeypatch, st)
+    _clean_unparseable_state(monkeypatch, st)
+    alerts = _watch_alerts(monkeypatch, st)
+
+    q = WorkQueue(tmp_path / "transitions.db")
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+
+    _corrupt(path)
+    step()
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, f"corruption did not alert exactly once: {alerts}"
+
+    # Still broken, one interval later: named once, and not again.
+    step()
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, (
+        f"an unchanged bad set re-alerted on a later check: {alerts}. The alert "
+        f"is keyed on the transition, not on the scan")
+
+    # Healed: the recovery is said, and the file leaves the alerted set.
+    path.write_text(intact)
+    step()
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 2, (
+        f"a file that parses again was not reported as recovered: {alerts}")
+    assert "parseable again" in alerts[1] and path.name in alerts[1], alerts[1]
+    assert path.name not in st._state["unparseable_alerted"], (
+        "the recovered file stayed in the alerted set, so the next corruption "
+        "would be silently swallowed")
+
+    # Broken again: the same file must be able to raise an alert a second time.
+    _corrupt(path)
+    step()
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 3, (
+        f"a re-corruption after a recovery was silent: {alerts}. Recovery that "
+        f"does not re-arm the alert is the retraction asymmetry, and the second "
+        f"outage is the one that never gets reported")
+    assert path.name in alerts[2] and "unparseable" in alerts[2], alerts[2]
