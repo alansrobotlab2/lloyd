@@ -203,9 +203,73 @@ RECALL_GLOBAL_DOC_POOL = 40
 RECALL_COLLECTION_FLOOR = {"autonomy": 5, "architecture": 5, "skills": 5}
 
 
+# ── djev ranks the recall (#1336, 2026-09-21) ────────────────────────────────
+#
+# qmd's cross-encoder is compute-bound on the 3090 it shares with TTS, the
+# desktop and the regression pin (~2.2 s p50 for the 40-row pool above, 5-8 s
+# under the pin). djev (GPU 2) ranks listwise in one read. Measured on the
+# 87-query pinned eval, every arm reordering EXACTLY the same candidates:
+#
+#     same <=32-row pool, ordered by     doc_hit  MRR    NDCG@10  recall p50
+#     qmd cross-encoder                  0.425    0.193  0.214    1.04 s
+#     djev, 160 chars, one read          0.471    0.249  0.274    0.51 s
+#     djev, full candidates, one read    0.437    0.226  0.251    0.87 s
+#     fusion order, nothing              0.414    0.155  0.179    0.15 s
+#
+# djev beat the cross-encoder on the same pool (doc_hit +0.046 [+0.011,+0.092],
+# NDCG +0.060 [+0.004,+0.114]), and shorter candidates beat longer ones. The
+# shape then chosen, against the cross-encoder path above on the same pin:
+#
+#     global 40 + floors 5 + cross-encoder     0.494  0.201  0.234    2.18 s
+#     head 20 + floors 2/2/2, djev 160 x1      0.517  0.256  0.275    0.52 s  <- deployed
+#       paired: doc_hit +0.023 [-0.057,+0.103]  doc_recall -0.005 [-0.067,+0.058]
+#               MRR +0.055 [-0.011,+0.122]      NDCG +0.041 [-0.028,+0.109]
+#
+# Equivalent on every metric and 4x faster, which is a win by Alan's rule. One
+# read is deterministic (a repeat was identical on 87/87 queries); `samples:
+# "auto"` cost 200 ms and ranked worse; 100 chars lost hits and 240 ranked
+# worse. The ceiling is the pool, not djev: no ~32-row pool holds as many
+# findable documents as collection-240 did, and djev cannot rank more than the
+# 32 rows one 128-token canvas holds (`djev.CANVAS_CHUNK_QUESTIONS`).
+#
+# `RECALL_RERANKER = "qmd"` is the kill switch: the request above, byte for
+# byte. A djev that does not answer (down, timed out, a split canvas) sends the
+# recall down that same path, counted and announced by `app/qmd_health.py`, so
+# an outage costs speed, never quality. `djev.enabled` false means "qmd".
+RECALL_RERANKER = "djev"
+RECALL_DJEV_HEAD = 20
+RECALL_DJEV_FLOOR = {"autonomy": 2, "architecture": 2, "skills": 2}
+RECALL_DJEV_POOL = 32     # head + floors can never pass it: 20 + (2+2+2) x 2 searches
+RECALL_DJEV_CHARS = 160
+RECALL_DJEV_SAMPLES = 1
+RECALL_DJEV_TIMEOUT_S = 4.0
+
+
+def recall_reranker() -> str:
+    """Who orders the recall's document pool: "djev" or "qmd"."""
+    if RECALL_RERANKER != "djev":
+        return "qmd"
+    try:
+        from app import djev
+        return "djev" if djev.enabled() else "qmd"
+    except Exception:  # noqa: BLE001 — no djev client means the cross-encoder
+        return "qmd"
+
+
+def recall_doc_leg_shape(reranker: str | None = None) -> dict:
+    """What the recall's document leg asks qmd for. The one definition the doc
+    leg and `scripts/automod/evalpin.production_payload` both read."""
+    if (reranker or recall_reranker()) == "djev":
+        return {"limit": RECALL_DJEV_POOL, "candidateLimit": RECALL_DJEV_HEAD,
+                "rerank": False, "floor": dict(RECALL_DJEV_FLOOR)}
+    pool = RECALL_GLOBAL_DOC_POOL if RECALL_QMD_FUSION == "global" else RECALL_DOC_POOL
+    return {"limit": pool, "candidateLimit": pool, "rerank": RECALL_QMD_RERANK,
+            "floor": dict(RECALL_COLLECTION_FLOOR)}
+
+
 def recall_doc_pool() -> int:
-    """Rows the recall doc leg asks qmd to fetch AND rerank."""
-    return RECALL_GLOBAL_DOC_POOL if RECALL_QMD_FUSION == "global" else RECALL_DOC_POOL
+    """Rows the recall doc leg asks qmd to return: the pool its ranker orders."""
+    return recall_doc_leg_shape()["limit"]
 
 VAULT_EXCLUDE_DIRS = {"templates", "images"}
 VAULT_EXCLUDE_FILES = {"tags.md"}
@@ -587,7 +651,9 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
                       skip_rerank: bool = not RECALL_QMD_RERANK,
                       legs: tuple[str, ...] = ("lex", "vec"),
                       lex_query: Optional[str] = None,
-                      exact_pool: Optional[int] = None) -> list:
+                      exact_pool: Optional[int] = None,
+                      candidate_limit: Optional[int] = None,
+                      floor: Optional[dict] = None) -> list:
     """Send a lex and/or vec query to the qmd daemon.
 
     **Returns a list, or raises `QmdUnavailable`.** An empty list means the
@@ -718,7 +784,9 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
         # leaves this at 40 has its other 200 rows returned but never scored, which
         # is the same miss with a bigger payload (recorded: 0 of 5 expected files
         # at pool 40, all 5 at 240). Always explicit, like `rerank` below.
-        "candidateLimit": pool,
+        # A caller may fuse a smaller head than it asks back: the djev ranker
+        # (#1336) takes the fused head plus the floors' rows, all returned.
+        "candidateLimit": candidate_limit if (candidate_limit and unrestricted) else pool,
         "collections": list(VAULT_SEGMENTS) if unrestricted else collections,
         # Always explicit. Omitting it means "the daemon's default", which
         # is rerank-on today and is not something this client should lean on.
@@ -731,9 +799,10 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
     # fuse across, and the prefetch lex leg is restricted and budgeted.
     if RECALL_QMD_FUSION == "global" and len(payload["collections"] or []) > 1:
         payload["fusion"] = "global"
-        floor = {c: n for c, n in RECALL_COLLECTION_FLOOR.items() if c in payload["collections"]}
-        if floor:
-            payload["collectionFloor"] = floor
+        floor_map = RECALL_COLLECTION_FLOOR if floor is None else floor
+        floor_sent = {c: n for c, n in floor_map.items() if c in payload["collections"]}
+        if floor_sent:
+            payload["collectionFloor"] = floor_sent
 
     def _finish(rows: list) -> list:
         if not unrestricted:
@@ -1367,6 +1436,37 @@ def _djev_rerank_pool(documents: list[dict], query: str, top: int) -> list[dict]
         return documents
 
 
+def _djev_rank_recall(documents: list[dict], query: str) -> list[dict] | None:
+    """djev orders the recall's whole pool (#1336); `None` when it did not answer.
+
+    The pool is at most `RECALL_DJEV_POOL` rows, which one canvas holds, so
+    nothing is cut. Each document's fusion score is kept as `_fusion_score` and
+    `score` becomes djev's, so a consumer that re-sorts by score keeps djev's
+    order rather than undoing it.
+    """
+    try:
+        from app import djev
+        head, tail = documents[:RECALL_DJEV_POOL], documents[RECALL_DJEV_POOL:]
+        if len(head) < 2:
+            return documents
+        rows = djev.rank(query, [_djev_doc_text(d) for d in head],
+                         seam="recall_rank", timeout=RECALL_DJEV_TIMEOUT_S,
+                         chars=RECALL_DJEV_CHARS, samples=RECALL_DJEV_SAMPLES,
+                         max_n=RECALL_DJEV_POOL)
+        if not rows:
+            return None
+        ordered = []
+        for r in rows:
+            d = head[r["index"]]
+            d["_fusion_score"] = d.get("score", 0)
+            d["score"] = round(float(r["score"]), 6)
+            ordered.append(d)
+        return ordered + tail
+    except Exception as e:  # noqa: BLE001 — a ranker failure is a fallback, not a failed recall
+        logger.warning("djev recall ranking failed: %s", e)
+        return None
+
+
 def _djev_shadow_rerank(documents: list[dict], query: str) -> None:
     """Record what djev would have ordered, beside what production returns.
 
@@ -1400,7 +1500,8 @@ def _djev_shadow_rerank(documents: list[dict], query: str) -> None:
         logger.debug("djev rerank shadow: %s", e)
 
 
-def _vault_recall(params: dict, *, seed_top_k: int | None = None) -> dict:
+def _vault_recall(params: dict, *, seed_top_k: int | None = None,
+                  reranker: str | None = None) -> dict:
     """Combined recall over documents, entity facts and graph neighbours.
 
     `params` is what the `vault_recall` tool receives — `call_tool` hands this
@@ -1441,6 +1542,11 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None) -> dict:
     # test that moves `RECALL_DJEV_RERANK` moves what this call does.
     djev_rerank = bool(params.get("djev_rerank", RECALL_DJEV_RERANK))
     djev_rerank_top = int(params.get("djev_rerank_top", RECALL_DJEV_RERANK_TOP))
+    # Who orders the document pool (#1336). Keyword-only and never read from
+    # `params`: a stray key must not choose the retriever. Only this function's
+    # own fallback passes it.
+    ranker = reranker or recall_reranker()
+    doc_shape = recall_doc_leg_shape(ranker)
 
     # Seed width. The number and why it is 10 rather than 5 are at
     # RECALL_SEED_TOP_K; the reason it had to stop being a literal here is that
@@ -1485,7 +1591,11 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None) -> dict:
         # `_qmd_daemon_search` slices its folded reply at the same `pool`, so nothing
         # here re-cuts it; the list gets smaller further down only at the `[:limit]`
         # that hands the answer over.
-        return _qmd_daemon_search(query, recall_doc_pool(), VAULT_SEGMENTS, exact_pool=recall_doc_pool())
+        return _qmd_daemon_search(query, doc_shape["limit"], VAULT_SEGMENTS,
+                                  skip_rerank=not doc_shape["rerank"],
+                                  exact_pool=doc_shape["limit"],
+                                  candidate_limit=doc_shape["candidateLimit"],
+                                  floor=doc_shape["floor"])
 
     def _do_code_grep():
         if not params.get("grep_code", True):
@@ -1692,7 +1802,7 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None) -> dict:
         # unconditional: `demote_daily_logs` re-sorts the pool by *path shape* alone,
         # so its slice is not a quality order and narrowing it is a quality decision
         # made by a path regex.
-        pool_size = max(recall_doc_pool(), limit)
+        pool_size = max(doc_shape["limit"], limit)
         prerank_pool = raw_results[:pool_size]
         for r in prerank_pool:
             path = r.get("file", "").removeprefix("qmd://")
@@ -1725,9 +1835,25 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None) -> dict:
         # not an observation. The eval mutes the recorder anyway
         # (`LLOYD_DJEV_SHADOW=0`); this keeps that true for anyone who flips
         # the constant by hand.
-        if djev_rerank:
+        #
+        # With djev AS the ranker (#1336) neither runs: the pool arrives in
+        # fusion order and djev orders it. A djev that does not answer sends the
+        # whole recall down the cross-encoder path instead of serving fusion
+        # order, which measured 0.05 MRR worse.
+        if ranker == "djev":
+            ranked = _djev_rank_recall(documents, query)
+            if ranked is None:
+                from app import qmd_health
+                qmd_health.note_ranker(False, "djev did not answer")
+                return _vault_recall(params, seed_top_k=seed_top_k, reranker="qmd")
+            from app import qmd_health
+            qmd_health.note_ranker(True)
+            documents = ranked
+        elif djev_rerank:
             documents = _djev_rerank_pool(documents, query, djev_rerank_top)
-        else:
+        elif reranker is None:
+            # Not inside the fallback: that path exists because djev just failed
+            # to answer, and a shadow row would queue another read at it.
             _djev_shadow_rerank(documents, query)
         if graph_rerank:
             documents = _graph_rerank(documents, seed_entities, weighted_neighbors, alpha=rerank_alpha)[:limit]

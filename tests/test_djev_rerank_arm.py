@@ -172,7 +172,9 @@ def test_the_arm_and_the_shadow_are_exclusive():
     ordering against djev's ordering is not an observation."""
     import inspect
     src = inspect.getsource(vault._vault_recall)
-    i = src.index("if djev_rerank:")
-    block = src[i:i + 400]
-    assert "_djev_rerank_pool" in block and "else:" in block
+    i = src.index("elif djev_rerank:")
+    block = src[i:i + 500]
+    assert "_djev_rerank_pool" in block and "elif reranker is None:" in block
     assert block.index("_djev_rerank_pool") < block.index("_djev_shadow_rerank")
+    # djev AS the ranker (#1336) is decided before either, and excludes both.
+    assert src.index('if ranker == "djev":') < i

@@ -38,9 +38,17 @@ _stats = {
     "last_fallback_reason": None,
     "last_ms": None,
     "last_phases": None,
+    # The recall's ranker (#1336): djev on GPU 2, falling back to qmd's
+    # cross-encoder when djev does not answer.
+    "djev_ranked": 0,
+    "djev_fallbacks": 0,
+    "last_djev_fallback_at": None,
+    "last_djev_fallback_reason": None,
 }
 _last_log_at = 0.0
 _last_announce_at = 0.0
+_last_ranker_log_at = 0.0
+_last_ranker_announce_at = 0.0
 
 
 def stats() -> dict:
@@ -105,9 +113,46 @@ def note_response(rerank_requested: bool, meta: dict | None, *,
     return fell_back
 
 
+def note_ranker(ok: bool, reason: str = "", *,
+                announce: Callable[[str, str], None] | None = None,
+                now: float | None = None) -> None:
+    """Fold one recall ranking in: djev answered (`ok`), or the recall fell back.
+
+    A fallback still answers — it takes qmd's cross-encoder path, ~2 s instead of
+    ~0.5 s — so, like a rerank fallback, it is counted, logged and announced,
+    never raised. Same cooldowns, its own clock."""
+    global _last_ranker_log_at, _last_ranker_announce_at
+    now = time.time() if now is None else now
+    ring = log = False
+    with _lock:
+        if ok:
+            _stats["djev_ranked"] += 1
+            return
+        _stats["djev_fallbacks"] += 1
+        _stats["last_djev_fallback_at"] = now
+        _stats["last_djev_fallback_reason"] = reason or "djev did not answer"
+        if now - _last_ranker_log_at >= LOG_COOLDOWN_SECONDS:
+            _last_ranker_log_at, log = now, True
+        if now - _last_ranker_announce_at >= ANNOUNCE_COOLDOWN_SECONDS:
+            _last_ranker_announce_at, ring = now, True
+        total = _stats["djev_fallbacks"]
+    if log:
+        print(f"[qmd] DEGRADED: djev did not rank a recall ({reason or 'no answer'}); "
+              f"fell back to qmd's cross-encoder; {total} such recalls since this process started",
+              file=sys.stderr, flush=True)
+    if ring:
+        title = "Vault recall fell back to the cross-encoder"
+        body = (f"djev on GPU 2 did not rank a recall ({reason or 'no answer'}). Recalls are "
+                f"taking qmd's cross-encoder path (~2 s instead of ~0.5 s) until it answers. "
+                f"`djev_status` shows the engine.")
+        fn = announce or _default_announce
+        threading.Thread(target=fn, args=(title, body), daemon=True).start()
+
+
 def _reset_for_tests() -> None:
-    global _last_log_at, _last_announce_at
+    global _last_log_at, _last_announce_at, _last_ranker_log_at, _last_ranker_announce_at
     with _lock:
         for key, value in list(_stats.items()):
             _stats[key] = 0 if isinstance(value, int) else None
     _last_log_at = _last_announce_at = 0.0
+    _last_ranker_log_at = _last_ranker_announce_at = 0.0

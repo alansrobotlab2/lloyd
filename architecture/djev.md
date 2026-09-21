@@ -774,6 +774,36 @@ recall@1 0.64 over 16 candidates, against 0.498 / 0.29 for lexical Jaccard and
 0.146 / 0.00 for random, at 662 ms for 16. **Jaccard is a weak baseline**, and
 that comparison decides nothing.
 
+### 8.1 djev ranks the recall (#1336, 2026-09-21)
+
+The arm above puts djev on top of qmd's cross-encoder, which is slower and has
+to show a gain. What landed instead **replaces** the cross-encoder, which only
+has to match it (Alan: equal accuracy plus throughput is a win).
+
+- **The pool is the ceiling, not djev.** No ~32-row pool holds as many findable
+  documents as collection-240 did (phase 0 on #1336). One 128-token canvas holds
+  32 rank rows, so djev ranks at most 32 (`rank(max_n=32)`, capped at
+  `CANVAS_CHUNK_QUESTIONS`).
+- **On the same ≤32 rows, djev beat qmd's cross-encoder** (87-query pinned eval):
+  doc_hit 0.471 vs 0.425 (+0.046 [+0.011, +0.092]), NDCG@10 0.274 vs 0.214
+  (+0.060 [+0.004, +0.114]), 0.51 s vs 1.04 s per recall. Full-length
+  candidates ranked worse than 160 chars, `samples: "auto"` was 200 ms slower
+  and worse than one read, and one read is deterministic (87/87 identical on a
+  repeat).
+- **Deployed shape:** global fusion's 20-row head + floors 2/2/2 for autonomy,
+  architecture and skills, cross-encoder off, `rank(chars=160, samples=1,
+  max_n=32, timeout=4)`, seam `recall_rank`. Against the cross-encoder path on
+  one pin: doc_hit 0.517 vs 0.494, MRR 0.256 vs 0.201, NDCG 0.275 vs 0.234,
+  doc_recall 0.357 vs 0.361. Every paired interval includes zero, and p50 is
+  0.52 s vs 2.18 s.
+- **Fail open, to the better answer.** `None` or a raise from `rank` re-runs
+  the recall on the cross-encoder path rather than serving fusion order (0.05
+  MRR worse). `app/qmd_health.py::note_ranker` counts it, logs it and rings
+  `announce()` once per 30 minutes. The shadow seam does not run when djev
+  ranks, nor inside that fallback.
+- **The line holds:** this orders documents and gates nothing. `RANK_MAX_N`
+  stays 16 for every other caller.
+
 ---
 
 ## 9. Using it
@@ -1015,6 +1045,8 @@ move only with production traffic.
   would make one.
 - An eval arm is code in the handler, not a log.
 - djev stays out of `models:` and out of `resolve_model_alias`.
+- djev orders the vault recall (#1336); qmd's cross-encoder is its fallback,
+  and the fallback is counted, never silent.
 
 ## Review log
 

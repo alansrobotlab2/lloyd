@@ -202,8 +202,22 @@ def production_payload(text: str) -> dict:
     what a recall costs — the cross-encoder scores every row of it — and it has
     moved once already (40 to 240, #504) without the pin's probe following."""
     from agent_mcp import vault as V
-    # `recall_doc_pool` where the tree has it (global fusion, 2026-09-19); the
-    # baseline arm may be an older tree, whose pool is the constant.
+    # `recall_doc_leg_shape` where the tree has it (#1336: the djev ranker asks
+    # for a fused head plus floors with the cross-encoder off); the baseline arm
+    # may be an older tree, which only knows a pool.
+    if hasattr(V, "recall_doc_leg_shape"):
+        shape = V.recall_doc_leg_shape()
+        payload = {"searches": [{"type": "lex", "query": text}, {"type": "vec", "query": text}],
+                   "limit": int(shape["limit"]), "candidateLimit": int(shape["candidateLimit"]),
+                   "collections": list(V.VAULT_SEGMENTS), "rerank": bool(shape["rerank"])}
+        if getattr(V, "RECALL_QMD_FUSION", "collection") == "global":
+            payload["fusion"] = "global"
+            floor = {c: n for c, n in shape["floor"].items() if c in payload["collections"]}
+            if floor:
+                payload["collectionFloor"] = floor
+        return payload
+    # `recall_doc_pool` where the tree has it (global fusion, 2026-09-19); an
+    # older tree's pool is the constant.
     pool = int(V.recall_doc_pool()) if hasattr(V, "recall_doc_pool") else int(V.RECALL_DOC_POOL)
     payload = {"searches": [{"type": "lex", "query": text}, {"type": "vec", "query": text}],
                "limit": pool, "candidateLimit": pool,

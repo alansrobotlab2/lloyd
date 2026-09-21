@@ -276,6 +276,22 @@ def _isolate_backlog_dedupe(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(SIM, "dedupe_config", lambda: dict(SIM.DEFAULTS))
 
 
+@pytest.fixture(autouse=True)
+def _recall_ranked_by_qmd_in_tests(monkeypatch):
+    """No test's recall reaches the LIVE djev on GPU 2 unless it asks to (#1336).
+
+    `agent_mcp.vault.recall_reranker()` is "djev" whenever `djev.enabled` is on in
+    the live config, and a test that stubs qmd's reply with two rows or more would
+    then send a real ranking to :8011 — production load and a result that depends
+    on a GPU. Pinned to the cross-encoder path the existing recall tests were
+    written against; `tests/test_recall_djev_ranker.py` opts back in, with djev
+    stubbed.
+    """
+    import agent_mcp.vault as _vault
+    monkeypatch.setattr(_vault, "RECALL_RERANKER", "qmd")
+    yield
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolate_djev_shadow(tmp_path_factory):
     """No test appends a row to the log the djev floors are calibrated from.

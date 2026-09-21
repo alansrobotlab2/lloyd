@@ -489,7 +489,9 @@ def rank_state(query: str, candidates: Sequence[str], *,
 def rank(query: str, candidates: Sequence[str], *,
          timeout: float = DEFAULT_TIMEOUT_S, seam: str = "rank",
          floor: float | None = None,
-         levels: Sequence[str] = RANK_LEVELS) -> list[dict] | None:
+         levels: Sequence[str] = RANK_LEVELS,
+         chars: int = 1200, samples: int | None = None,
+         max_n: int = RANK_MAX_N) -> list[dict] | None:
     """`[{index, score, label_mass, ...}]` best first, or `None`.
 
     Refuses more than `RANK_MAX_N` candidates rather than truncating: a caller
@@ -499,17 +501,27 @@ def rank(query: str, candidates: Sequence[str], *,
     arriving from the other side — different chunks are different shared
     contexts, so their scores are not comparable and sorting the union
     produces an artefact that looks exactly like a ranking.
+
+    `max_n` raises the cap for a caller that measured a wider window, never past
+    `CANVAS_CHUNK_QUESTIONS`: the vault recall ranks up to 32 (#1336), measured
+    against qmd's cross-encoder on the same pools. `chars` is how much of each
+    candidate the state carries and `samples` the number of reads; that recall
+    measured 160 chars and one read as both the fastest and the best-ordered
+    of the shapes it tried (full text and `samples: "auto"` were slower and
+    ranked worse), and one read is deterministic.
     """
+    if max_n > CANVAS_CHUNK_QUESTIONS:
+        raise ValueError(f"max_n {max_n} is past the canvas split ({CANVAS_CHUNK_QUESTIONS})")
     n = len(candidates)
     if n == 0:
         return []
-    if n > RANK_MAX_N:
+    if n > max_n:
         raise ValueError(
-            f"djev ranks at most {RANK_MAX_N} candidates in one request "
+            f"djev ranks at most {max_n} candidates in one request "
             f"(got {n}); shortlist first")
-    out = ask_sync(rank_state(query, candidates),
+    out = ask_sync(rank_state(query, candidates, chars=chars),
                    rank_questions(candidates, levels=levels),
-                   timeout=timeout, seam=seam, floor=floor)
+                   timeout=timeout, seam=seam, floor=floor, samples=samples)
     if out is None:
         return None
     if out.cross_chunk:

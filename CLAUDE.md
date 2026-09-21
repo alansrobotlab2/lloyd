@@ -2710,8 +2710,9 @@ behind agent turns there.
 26B-A4B NVFP4 answering typed decisions on `:8011/v1/systemone` in ~40 ms. It
 is not a chat slot, is absent from `models:` and `resolve_model_alias`, and
 nothing routes a turn to it. It answers three MCP tools (`djev_rank`,
-`djev_decide`, `djev_status`) and records three production seams in shadow,
-changing no decision. **Rank with it; do not gate on it** — measured, a fixed
+`djev_decide`, `djev_status`) and records three production seams in shadow.
+Since #1336 (2026-09-21) it also **orders every vault recall** in place of
+qmd's cross-encoder, which is its fallback. **Rank with it; do not gate on it** — measured, a fixed
 0.5 cutoff is meaningless and every threshold belongs to one frozen schema,
 option order included. `architecture/djev.md` is the long version and carries
 the numbers, the floors and the follow-on work.
@@ -3278,14 +3279,19 @@ revert it; `qmd/WORKLOG.md` section 7 is the long version of everything below.
   ranking contexts measure the same). A rerank costs rows x window, so at loop
   depth 4 several 240-row recalls queued on one daemon for 20-60 s each, past
   the 15 s client timeout. `QMD_RERANK_PARALLELISM` is not a speed knob.
-- **The recall asks for global fusion over a 40-row pool** with a floor of 5
-  for the three small collections it outscores wholesale, `autonomy`,
-  `architecture` and `skills` (`RECALL_QMD_FUSION` in `agent_mcp/vault.py`).
-  On the 87-query pinned eval (#1335) that is ~2.2 s against 7.5 s for
-  #504's 240-row request, ranking quality equivalent, doc_hit -0.07 with an
-  interval that only just reaches zero: the best fast setting, not a proven
-  equal. The autonomy-only floor it replaced lost -0.115. `"collection"` is the
-  kill switch and restores the 240-row request exactly.
+- **djev ranks the recall, not qmd's cross-encoder** (#1336,
+  `RECALL_RERANKER` in `agent_mcp/vault.py`). The doc leg asks qmd for global
+  fusion's 20-row head plus floors of 2 for `autonomy`, `architecture` and
+  `skills` (≤32 rows, one djev canvas), cross-encoder off, and djev orders
+  them from 160-char candidates in one read. On the 87-query pinned eval that
+  is ~0.5 s against ~2.2 s for the cross-encoder path, equivalent on every
+  metric and ahead on hit rate, MRR and NDCG. On the same pool djev beat the
+  cross-encoder outright. A djev that does not answer sends the recall down the
+  cross-encoder path (global 40 + floors 5, #1335), counted and announced by
+  `app/qmd_health.py`: an outage costs speed, never quality. `"qmd"` is the
+  kill switch. `RECALL_QMD_FUSION = "collection"` still restores #504's
+  240-row request under it. Tests pin the recall to `"qmd"` in
+  `tests/conftest.py` so none reaches the live djev.
 - **A rerank that could not run says so.** No VRAM for a ranking context used
   to be an HTTP 200 with fusion-order results. The daemon now returns
   `meta.reranked`, never caches a fallback score, and `app/qmd_health.py`
