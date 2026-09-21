@@ -532,3 +532,338 @@ def test_no_inline_mcp_server_config_anywhere_in_the_repo():
         "inline MCP server config found — use DEFAULT_LLOYD_MCP_SERVERS: "
         + ", ".join(offenders)
     )
+
+
+# ── The grant gate meets the tool surface (#724) ─────────────────────────────
+# `autonomy_write_task` rewrites the fields the scheduler reads to decide
+# whether and when a task runs. The gate lives in the harness hook; the write
+# lives here, in the server process. Clause 2 of #724 is that the interactive
+# half of that seam is untouched: chat and owner-Discord turns upsert those
+# fields exactly as they did before the tier promotion. Pinned across the seam —
+# hook decision, then the real handler's bytes on disk.
+
+def _seam_hook(tmp_path, scope):
+    """A hook registry carrying the same gate the live dispatch paths install,
+    over a grant store in `tmp_path` (the real one is the fleet's)."""
+    from app.harness import HookRegistry
+    from app.harness import policy
+
+    store = policy.GrantStore(tmp_path / "seam-grants.db")
+    store.ensure_schema()
+    hooks = HookRegistry()
+    # store= explicitly: omitted, the hook installs the FLEET's real store, and
+    # a test that denies nothing because a live grant happens to exist is the
+    # false green this suite exists to catch.
+    policy.install_policy_hook(hooks, store=store, scope=scope)
+    return hooks, store
+
+
+def _seam_decision(hooks, args: dict) -> dict:
+    """The hook's answer, in the shape the SDK sees."""
+    out = asyncio.run(hooks.fire_pre_tool_use(
+        session_id="", tool_name="autonomy_write_task", tool_input=args)) or {}
+    spec = out.get("hookSpecificOutput") or {}
+    # An absent decision means the hook let it through: `install_policy_hook`
+    # denies by returning a `deny` decision and passes by returning nothing but
+    # `continue_`, the same shape `tests/unit/test_grant_policy._denied` relies on.
+    return {"decision": spec.get("permissionDecision") or "allow",
+            "reason": spec.get("permissionDecisionReason") or ""}
+
+
+def _seam_dispatch(name: str, args: dict) -> dict:
+    """Call the tool the way the aggregator does, so an error shape is the
+    server's and not a test's."""
+    import json
+
+    import agent_mcp.autonomy as AZ
+
+    return json.loads(AZ._handle_write(args))
+
+
+def test_interactive_scope_still_upserts_the_gated_fields(tmp_path, monkeypatch):
+    """Chat and owner-Discord are behaviourally unchanged: every field #724
+    gates is written, and written to the file the scheduler reads."""
+    import agent_mcp.autonomy as AZ
+
+    d = tmp_path / "autonomy"
+    d.mkdir()
+    (d / "68-morning-brief-triage.md").write_text(
+        "---\nid: 68\nname: Morning Brief\nstatus: draft\n"
+        "depends_on: 39\nfrequency: daily\n---\n\nbody\n", encoding="utf-8")
+    monkeypatch.setattr(AZ, "AUTONOMY_DIR", d)
+
+    hooks, _store = _seam_hook(tmp_path, "interactive")
+    dec = _seam_decision(hooks, {"id": 68, "status": "up_next", "depends_on": None,
+                                 "frequency": "weekdays", "auto_advance": False,
+                                 "skill_name": "morning-brief-triage"})
+    assert dec["decision"] == "allow", dec
+
+    out = _seam_dispatch("autonomy_write_task", {
+        "id": 68, "status": "up_next", "frequency": "weekdays",
+        "auto_advance": False, "skill_name": "morning-brief-triage"})
+    assert "error" not in out, out
+    text = (d / "68-morning-brief-triage.md").read_text()
+    assert "status: up_next" in text
+    assert "frequency: weekdays" in text
+    assert "auto_advance: false" in text
+    assert "skill_name: morning-brief-triage" in text
+
+
+def test_unattended_scope_is_denied_before_the_handler_runs(tmp_path, monkeypatch):
+    """The other side of the same seam, in the same file: under a
+    `scheduled-task`-shaped scope with nothing declared, the hook denies and the
+    task file is byte-for-byte what it was. The denial is the harness stopping
+    the call — the server never sees it, which is why no handler-side check is
+    needed and why the same code path serves every worker source."""
+    import agent_mcp.autonomy as AZ
+
+    d = tmp_path / "autonomy"
+    d.mkdir()
+    original = ("---\nid: 68\nname: Morning Brief\nstatus: draft\n"
+                "frequency: daily\n---\n\nbody\n")
+    (d / "68-morning-brief-triage.md").write_text(original, encoding="utf-8")
+    monkeypatch.setattr(AZ, "AUTONOMY_DIR", d)
+
+    hooks, _store = _seam_hook(tmp_path, "worker:scheduled-task")
+    dec = _seam_decision(hooks, {"id": 68, "status": "up_next"})
+    assert dec["decision"] == "deny", dec
+    assert "worker:scheduled-task" in dec["reason"], dec
+    assert "autonomy_write_task" in dec["reason"], dec
+    assert "target #68" in dec["reason"], dec
+    assert "status" in dec["reason"], dec
+    assert (d / "68-morning-brief-triage.md").read_text() == original
+
+
+def test_a_declared_grant_reopens_the_seam(tmp_path, monkeypatch):
+    """The nightly route: the human wrote the authority into the task's
+    frontmatter, the dispatcher materialised it, and the same call that was
+    denied a moment ago now passes. Without this the fix is a stop sign, not a
+    gate, and the #40 -> #68/#85 re-arm breaks on the first nightly.
+
+    What this does NOT prove, and the two nodes after it exist to prove: that
+    `run_task` reaches that sync call. The row here is synced by the test, with
+    the task dict handed in explicitly, so the dispatcher's own reading of
+    `grants` from the file — clause 3's parser output — is still unexercised,
+    and a sync that ran after the hook was installed, or not at all, would leave
+    this green. An ungranted `autonomy_write_task` was tier 1 before #724, so no
+    test on this path ever needed to get a run that far.
+
+    It is also the reason `sync_task_grants` runs BEFORE the `GrantError` guard:
+    a malformed block must not leave the rows its last good self minted live in
+    the store while its file now says something else. That ordering is load-
+    bearing and a refactor that "tidies" the two blocks together silently
+    un-fixes #534's read-back half."""
+    import datetime as dt
+
+    import agent_mcp.autonomy as AZ
+    from app.harness import policy
+
+    d = tmp_path / "autonomy"
+    d.mkdir()
+    (d / "40-nightly-reflection-config.md").write_text(
+        "---\nid: 40\nname: Nightly Reflection Config\nstatus: up_next\n"
+        "grants:\n- tool: autonomy_write_task\n"
+        "  expires_at: '2099-01-01T00:00:00Z'\n  issued_by: alan\n---\n\nbody\n",
+        encoding="utf-8")
+    (d / "68-morning-brief-triage.md").write_text(
+        "---\nid: 68\nname: Morning Brief\nstatus: draft\n---\n\nbody\n",
+        encoding="utf-8")
+    monkeypatch.setattr(AZ, "AUTONOMY_DIR", d)
+
+    hooks, store = _seam_hook(tmp_path, "autonomy-task:40")
+    policy.sync_task_grants(
+        store, task_id=40, scope="autonomy-task:40",
+        grants=[{"tool": "autonomy_write_task",
+                 "expires_at": "2099-01-01T00:00:00Z", "issued_by": "alan"}],
+        now=dt.datetime.now(dt.timezone.utc))
+
+    dec = _seam_decision(hooks, {"id": 68, "status": "up_next"})
+    assert dec["decision"] == "allow", dec
+    out = _seam_dispatch("autonomy_write_task", {"id": 68, "status": "up_next"})
+    assert "error" not in out, out
+    assert "status: up_next" in (d / "68-morning-brief-triage.md").read_text()
+
+
+# ── #724: the dispatcher half — run_task arms the turn it built ──────────────
+#
+# The node above this seam calls `sync_task_grants` with a grant list the test
+# wrote out by hand, and `tests/unit/test_grant_policy.py::
+# test_the_shipped_nightly_rearm_grant_materialises_and_reopens_the_write` reads
+# the shipped #40 block and then syncs it itself, from the tuple it named. Both
+# are a mock AT the seam clause 4 names — "sync_task_grants materialises it at
+# dispatch". What neither touches is the dispatcher: `run_task` takes the block
+# out of `_parse_task_file`'s output (`autonomy.py:1860` and `:1868`), syncs it
+# into `default_store()`, and installs the hook three statements later
+# (`:1881-1882`). A `grants` key lost between the parse and the sync, or an
+# install that ran before the sync, left both green while the task whose only
+# authority is its frontmatter was denied on its first nightly. These two nodes
+# run the real `autonomy.run_task` and assert on the store rows it leaves.
+
+_GRANT_BLOCK = (
+    "---\n"
+    "id: 40\n"
+    "name: Nightly Reflection Config\n"
+    "status: up_next\n"
+    "frequency: daily\n"
+    "skill_name: nightly-reflection-config\n"
+    "grants:\n"
+    "- tool: autonomy_write_task\n"
+    "  expires_at: '2099-01-01T00:00:00Z'\n"
+    "  issued_by: alan\n"
+    "  note: nightly re-arm of #68 and #85\n"
+    "---\n"
+    "\n# Nightly Reflection Config\n"
+)
+
+_TASK_ONLY = _GRANT_BLOCK.replace(
+    "grants:\n"
+    "- tool: autonomy_write_task\n"
+    "  expires_at: '2099-01-01T00:00:00Z'\n"
+    "  issued_by: alan\n"
+    "  note: nightly re-arm of #68 and #85\n", "")
+
+
+def _grant_dispatch_env(monkeypatch, tmp_path, frontmatter: str):
+    """Run the real `autonomy.run_task` over a task file, with only the engines
+    replaced: the model, the brain, the prompt builder, the run-record writer and
+    the grant DB path. Everything between the parse and the hook install is the
+    production code, which is the point — the row a run leaves in the store is
+    what the next nightly will be judged against, so it is what gets asserted.
+
+    `LLOYD_GRANT_DB` is what makes the registry the turn is handed and the store
+    the test reads one pair of objects: `install_policy_hook` is called with no
+    store, so the hook resolves `default_store()` itself, and that resolver reads
+    this variable. The cache is the resolver's own, so it is cleared the way a
+    cold dispatcher process would find it."""
+    import autonomy as AUT
+
+    from app.harness import policy
+
+    db = tmp_path / "grants.db"
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(db))
+    policy._STORE_CACHE.clear()
+    # A dispatcher that got this far is a booted one, and boot owns the schema
+    # (`GrantStore.__init__` does not create it). Without this the run dies on
+    # `no such table: authority_grants` and the node measures the fixture.
+    store = policy.GrantStore(db)
+    store.ensure_schema()
+
+    # The file is real and the reader is real: `run_task` reaches `grants`
+    # through `_parse_task_file`, so a block the parser cannot return — the exact
+    # failure clause 3 exists for — fails this node rather than being hand-
+    # patched around. The frontmatter carries the timeout and retry fields the
+    # failure path reads, so nothing else has to be stubbed.
+    task_file = tmp_path / "40-nightly-reflection-config.md"
+    task_file.write_text(frontmatter, encoding="utf-8")
+
+    monkeypatch.setattr(AUT, "AUTONOMY_RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(AUT, "AUTONOMY_DIR", tmp_path)
+    monkeypatch.setattr(AUT, "_load_skill_content", lambda s: "SKILL BODY")
+    monkeypatch.setattr(AUT, "_get_model_env", lambda m: {})
+    monkeypatch.setattr(AUT, "_task_inner_voice", lambda t: False)
+    monkeypatch.setattr(AUT, "_update_task_field", lambda *a, **k: None)
+    monkeypatch.setattr(AUT, "_append_activity_log", lambda *a, **k: None)
+    monkeypatch.setattr(AUT, "_write_run_record", lambda *a, **k: tmp_path / "r.md")
+    monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr("app.run_recorder.recording_enabled", lambda: False)
+    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
+
+    captured: dict = {}
+
+    async def _run_query(messages, options):
+        # `options` here is the real `RunOptions` `run_task` built — the object
+        # clause 4 names, not a stand-in for it — so the hook this node reads is
+        # the registry the model's own loop would consult.
+        captured["options"] = options
+        captured["hooks"] = options.hooks
+        # The two events `run_task` actually reads: it concatenates `text` over
+        # `text_delta` into the response, and keeps the last `assistant_message`
+        # as the run's terminal block. A stream with only the second is an empty
+        # run, and `run_task` correctly says so — which is not what this node is
+        # asserting about.
+        block = "re-armed #68 and #85\n"
+        yield {"type": "text_delta", "text": block}
+        yield {"type": "assistant_message", "text": block}
+
+    import app.harness as harness_mod
+    monkeypatch.setattr(harness_mod, "run_query", _run_query)
+    return captured, store
+
+
+def test_run_task_materialises_the_declared_grant_before_arming_the_hook(
+        tmp_path, monkeypatch):
+    """Clause 4, at the seam it names: the block on the task file becomes a row
+    in the dispatch store, and the hook that judges the task's next call is
+    installed holding the scope that row is addressed to."""
+    import asyncio
+
+    import autonomy as AUT
+
+    captured, store = _grant_dispatch_env(monkeypatch, tmp_path, _GRANT_BLOCK)
+    out = asyncio.run(AUT.run_task(40))
+
+    assert out.get("success") is True, out
+    rows = store.live(scope="autonomy-task:40")
+    assert [r["tool_pattern"] for r in rows] == ["autonomy_write_task"], rows
+    assert rows[0]["minted_by"] == "frontmatter:40", (
+        "the row exists but not from this file, so the audit trail does not lead "
+        "back to the human who wrote the block")
+
+    # The hook is armed, and armed against the same scope the row carries. An
+    # install that never ran, or a scope spelled differently from the sync's,
+    # would leave the row unread by the gate and the task denied.
+    #
+    # The denial side is checked FIRST, on the same registry, because an empty
+    # registry answers every call with `{}` and an `!= "deny"` assertion would
+    # then pass on a turn that had no gate at all. Same call, same registry,
+    # revocation the only difference: the row is what moves the answer.
+    hooks = captured["hooks"]
+    assert hooks is not None, "the turn was dispatched with no gate at all"
+
+    def _fire() -> dict:
+        return asyncio.run(hooks.fire_pre_tool_use(
+            session_id="s", tool_name="mcp__lloyd-mcp__autonomy_write_task",
+            tool_input={"id": 68, "status": "up_next"}, tool_use_id="t1"))
+
+    granted = _fire()
+    assert granted.get("hookSpecificOutput", {}).get(
+        "permissionDecision") != "deny", (
+        "the dispatcher minted the grant and then asked a gate that could not "
+        "see it: %r" % (granted,))
+
+    store.revoke(rows[0]["id"])
+    revoked = _fire()
+    decision = revoked.get("hookSpecificOutput", {}).get("permissionDecision")
+    assert decision == "deny", (
+        "an empty registry answers the same way as an armed one that let the "
+        "call through; the allow above measured nothing: %r" % (revoked,))
+    assert "autonomy-task:40" in revoked.get(
+        "hookSpecificOutput", {}).get("permissionDecisionReason", ""), (
+        "denied, but not by the scope whose frontmatter is the authority")
+
+
+def test_run_task_refuses_to_dispatch_a_task_whose_grants_block_is_malformed(
+        tmp_path, monkeypatch):
+    """The fail-closed half, and it needs its own node because `run_task` has two
+    exits that both mean 'did not run'.
+
+    A corrupt block must cost the run before the turn starts, and must leave no
+    row — a task whose YAML is broken must not be able to widen its own authority
+    by editing bytes. The store is empty either way, so the store cannot tell
+    this from the case where the file declares nothing; only the refusal names
+    which happened."""
+    import asyncio
+
+    import autonomy as AUT
+
+    broken = _GRANT_BLOCK.replace("expires_at: '2099-01-01T00:00:00Z'",
+                                  "expires_at: not-a-date")
+    captured, store = _grant_dispatch_env(monkeypatch, tmp_path, broken)
+    out = asyncio.run(AUT.run_task(40))
+
+    assert out.get("success") is not True, out
+    assert "grants" in str(out.get("error", "")).lower(), out
+    assert store.live() == [], "a block nobody could read still put a grant on the books"
+    assert "hooks" not in captured, (
+        "the turn was dispatched anyway: the refusal is decoration and the task "
+        "runs with whatever the accidental scope resolves to")

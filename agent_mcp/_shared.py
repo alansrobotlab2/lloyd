@@ -290,7 +290,56 @@ AUTONOMY_TASK_FIELDS: tuple[str, ...] = (
     # files, so a degraded file should present them too rather than blanks.
     "skill_path", "pipeline", "pipeline_mode", "notify_on_complete",
     "cron_id", "run_count", "tags", "type", "created", "updated", "title",
+    # `grants` is the ONE field here whose loss fails OPEN. Every other name
+    # degrades a schedule or a label; a recovered record missing `grants` reads
+    # as a task that declares no authority, so (a) its legitimate tier-2 call is
+    # denied — #724 made `autonomy_write_task` grant-gated for unattended scopes,
+    # and the nightly chain's one sanctioned re-arm (#40 → #68/#85) is authorised
+    # only by this block on #40's file — and (b) `validate_task_grants` sees
+    # nothing to validate on a file whose YAML broke. Recovery must be able to
+    # see a block sequence, hence `_recover_block_field` below.
+    "grants",
 )
+
+
+def _recover_block_field(fm_text: str, field: str):
+    """Recover a block *sequence* that the loose scalar regex cannot see, or None.
+
+    The fallback match is `^field:\\s*(.+)$` — it requires something after the
+    colon, so a block field (`grants:` followed by its items) never matches at
+    all and the key simply is not in the recovered dict. For a descriptive field
+    that is a cosmetic loss. For `grants:` it is an authority loss:
+    `validate_task_grants` sees nothing, and a task whose YAML broke mid-cycle
+    loses the grant a human signed for it.
+
+    Takes the lines belonging to the key — up to the next top-level key, since a
+    column-0 `- ` line still belongs to it in valid YAML — and parses them as
+    YAML. Returns only a non-empty LIST, so a scalar list keeps the loose path
+    below and keeps the string values its existing callers depend on. A block
+    that parses to a scalar or garbage returns None, and the caller's loose match
+    keeps its existing behaviour: recovery must not turn a broken authorization
+    into a readable-looking one.
+    """
+    m = re.search(rf"^{field}:[ \t]*$", fm_text, re.MULTILINE)
+    if not m:
+        return None
+    first = next((ln.strip() for ln in fm_text[m.end():].split("\n")[1:]
+                  if ln.strip()), "")
+    if not first.startswith("-") or ":" not in first:
+        # Not a block of mappings: a scalar list (or prose) stays with the loose
+        # scan below, whose string items its callers already depend on.
+        return None
+    block: list[str] = []
+    for line in fm_text[m.end():].split("\n")[1:]:
+        if line.strip() and not line[0].isspace() and not line.lstrip().startswith("-"):
+            break
+        block.append(line)
+    try:
+        parsed = yaml.safe_load(f"{field}:\n" + "\n".join(block))
+    except Exception:
+        return None
+    value = parsed.get(field) if isinstance(parsed, dict) else None
+    return value if isinstance(value, list) and value else None
 
 
 def parse_frontmatter_text(
@@ -334,6 +383,10 @@ def parse_frontmatter_text(
     )
     fm = {"_yaml_broken": True}
     for field in fallback_fields:
+        block_value = _recover_block_field(fm_text, field)
+        if block_value is not None:
+            fm[field] = block_value
+            continue
         m = re.search(rf"^{re.escape(field)}:\s*(.+)$", fm_text, re.MULTILINE)
         if not m:
             continue

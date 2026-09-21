@@ -229,6 +229,10 @@ TIER2_TOOLS = frozenset({
     "calendar_create", "calendar_update_event",
     "contacts_create", "contacts_update",
     "tasks_create", "tasks_update",
+    # Scheduler state (#724). Tiered by NAME, gated per call — see
+    # `effective_tier`. The sibling that deletes a task is tier 3 above; this one
+    # rewrites whether and when every task in the fleet runs, and was tier 1.
+    "autonomy_write_task",
 })
 
 TIER3_TOOLS = frozenset({
@@ -253,6 +257,99 @@ def normalize_tool_name(name: Any) -> str:
     return text
 
 
+# ---------------------------------------------------------------------------
+# Scheduler-state writes (#724)
+# ---------------------------------------------------------------------------
+#
+# `autonomy_write_task` is in TIER2_TOOLS above, but a NAME cannot express what
+# needs gating here, and the difference is the whole design.
+#
+# The tool rewrites the fields the scheduler reads to decide WHETHER and WHEN a
+# task runs. Before this change it was tier 1, so every unattended turn could
+# arm, park or re-point any task in the fleet. #724 counted 17 dispatches from
+# unattended sessions in the retained event window; this round re-ran that count
+# and got 17 again, 7 of them moving a dispatch-affecting field, none from a
+# turn whose contract authorised a scheduler change: a backlog-triage turn armed
+# task #84, automod implement rounds parked and re-armed #85, and nightly task
+# #40 armed #68 and #85. That is #534's forbidden state arriving by a different
+# door — an unattended scope issuing itself authority, over the schedule instead
+# of over a grant.
+#
+# But ten of those seventeen carried only `activity_note`/`activity`, the
+# run-record habit every skill prescribes, mostly against the writer's OWN task.
+# Gating the name outright would deny the fleet's ordinary bookkeeping on the
+# first nightly while still naming the wrong predicate — the writes that moved
+# dispatch were the cross-task ones. So `effective_tier` demotes a call that
+# moves no dispatch-affecting field back to 1, and the gate asks one question of
+# the calls that do: may this turn change what runs?
+#
+# `model`, `preferred_hours`, `next_run`/`last_run`, `max_retries`,
+# `failure_count` and `runs_per_day` are deliberately NOT in the set. The first
+# two change how a run behaves once dispatched, not whether it dispatches — a
+# parked task stays parked with a new model, and a narrowed hour window cannot
+# start a run its status has not authorised. The rest are scheduler OUTPUT; the
+# scheduler writes them itself, and gating them would deny every completion
+# stamp. There is no interactive fallback on the worker path, so an over-broad
+# predicate here ends every nightly parked behind a human.
+SCHEDULE_STATE_TOOL = "autonomy_write_task"
+
+# The six fields the acceptance names, plus `preferred_hours`: the nightly
+# chain's ORDER lives nowhere but in each task's own `preferred_hours` (the
+# `pipeline:` key is read by display code and by no gate), so editing one
+# window silently re-sequences #38 -> #42 -> #39 -> #40. Leaving it out would
+# keep the hazard this item was filed about standing.
+SCHEDULE_STATE_FIELDS = frozenset({
+    "status", "scheduled_at", "depends_on", "auto_advance", "frequency",
+    "skill_name", "preferred_hours",
+})
+
+#: The one status the queue will actually dispatch (`DISPATCHING_STATUS` mirrors
+#: the comment "Only up_next dispatches" in `autonomy._is_task_due`).
+#: `in_progress` and `failed` are in `RUNNABLE_STATUSES` for dependency lookups,
+#: not because either can start a run.
+DISPATCHING_STATUS = "up_next"
+
+
+def schedule_fields_changed(tool_input: Any) -> list[str]:
+    """Dispatch-affecting fields this call proposes to move, sorted.
+
+    Two shapes, because a create and an update do not carry the same risk:
+
+    * **Update** (`id` present): every non-empty dispatch-affecting field counts.
+      A key alone is not enough — the measured benign case is an update that
+      passes a *falsy* value for a field it does not mean to change
+      (`status: ""`), and `_handle_write` (`agent_mcp/autonomy.py`) drops
+      empty/None updates, so such a call changes nothing. What it cannot see is
+      whether the value differs from the field's current value: a write that
+      resends `up_next` to an already-armed task is denied. That is deliberate —
+      the gate reads the call, not the disk, so a decision never depends on the
+      vault being readable, and no measured unattended write does that
+      (of 17, the 6 self-targeted ones carried only `activity_note`).
+    * **Create** (`id` absent or 0): only `status: up_next` dispatches anything.
+      A new task with `skill_name`/`frequency` and the default `draft` is inert
+      until something arms it, so gating creates on those fields would deny the
+      documented dispatch route (`skills/pipeline-dispatch`) to buy no safety.
+    """
+    if not isinstance(tool_input, dict):
+        return []
+    new_task = tool_input.get("id") in (None, "", 0)
+    if new_task:
+        if str(tool_input.get("status") or "").strip() == DISPATCHING_STATUS:
+            return ["status"]
+        return []
+    return sorted(
+        field for field in SCHEDULE_STATE_FIELDS
+        if tool_input.get(field) not in (None, "", [])
+    )
+
+
+def changes_schedule_state(name: Any, tool_input: Any) -> bool:
+    """True when this call would move a field the scheduler reads to dispatch."""
+    if normalize_tool_name(name) != SCHEDULE_STATE_TOOL:
+        return False
+    return bool(schedule_fields_changed(tool_input))
+
+
 def tool_tier(name: Any) -> int:
     tool = normalize_tool_name(name)
     if tool in TIER3_TOOLS:
@@ -260,6 +357,24 @@ def tool_tier(name: Any) -> int:
     if tool in TIER2_TOOLS:
         return 2
     return 1
+
+
+def effective_tier(name: Any, tool_input: Any = None) -> int:
+    """The tier that governs THIS call, not the tier of the tool's name.
+
+    Every tool except `autonomy_write_task` answers with `tool_tier`. That one
+    tool has two shapes with opposite risk — an update that appends a run record
+    to its own task, and an update that re-arms another task — and one tier
+    cannot cover both, so the benign shape is demoted. It reuses the existing
+    tier machinery (the `check_grants` check, the denial ledger, the `grants:`
+    materialisation) rather than opening a parallel authority system, which is
+    why it is a tier function and not a second gate.
+    """
+    tier = tool_tier(name)
+    if tier == 2 and normalize_tool_name(name) == SCHEDULE_STATE_TOOL:
+        if not changes_schedule_state(name, tool_input):
+            return 1
+    return tier
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +693,7 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
                         + grant_shape(scope=scope, tool="<the tool you need>",
                                       tool_input={}, now=at))
 
-    tier = tool_tier(tool)
+    tier = effective_tier(tool, args)
     if tier == 1:
         return Decision(True, None, "")
 
@@ -615,8 +730,19 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
     why = _explain_missing(scope, tool, store.candidates(scope=scope, tool=tool, now=at), at)
     reason = (f"grant: {'no grant' if not why else why} — '{tool}' is a "
               f"tier-{tier} (hard-to-reverse) action and scope '{scope}' is "
-              f"unattended. "
-              + grant_shape(scope=scope, tool=tool, tool_input=args, now=at))
+              f"unattended.")
+    if tool == SCHEDULE_STATE_TOOL:
+        # The scope and tool alone are not actionable here: the same tool call
+        # either appends a run record or re-arms a nightly, and whoever has to
+        # decide needs to see which one was proposed.
+        changed = ", ".join(schedule_fields_changed(args))
+        target = args.get("id") or "new (this call creates the task)"
+        reason += (f" This call would change dispatch-affecting field(s) "
+                   f"[{changed}] on target #{target}, which decides whether and "
+                   f"when that task runs. To authorise it, a human either adds a "
+                   f"`grants:` block to the calling task's frontmatter "
+                   f"(scope `autonomy-task:*` only) or runs the line below.")
+    reason += (" " + grant_shape(scope=scope, tool=tool, tool_input=args, now=at))
     if record:
         store.record_dispatch(scope=scope, tool=tool, decision="deny",
                               reason=reason, now=at)

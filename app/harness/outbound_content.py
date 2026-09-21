@@ -75,7 +75,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from app.harness.hooks import HookRegistry
-from app.harness.policy import current_scope, tool_tier
+from app.harness.policy import current_scope, effective_tier
 
 logger = logging.getLogger(__name__)
 
@@ -1447,7 +1447,17 @@ def install_outbound_content_gate(
         tool_name = str(input_data.get("tool_name", ""))
         # Tier 1 tools have no durable recipient; scanning them is the
         # false-positive surface that gets a gate turned off.
-        if tool_tier(tool_name) < 2:
+        #
+        # Per-call, not per-name. `autonomy_write_task` went tier 2 with #724
+        # because six of its short fields decide whether a task runs; the same
+        # tool also carries the run-record note the skills tell every unattended
+        # run to append to its own task file — free prose, no recipient,
+        # deliberately outside the grant gate. Arming on the name would put this
+        # fail-closed scan in front of that note, and would answer tier 1 for a
+        # call that `check_grants`, on the same registry with the same
+        # arguments, answers tier 2. `effective_tier` is the one number both
+        # gates read for one call.
+        if effective_tier(tool_name, input_data.get("tool_input") or {}) < 2:
             return {}
         active_scope = str(scope or current_scope.get() or "")
         reason_exempt = is_exempt(active_scope, exempt_scopes)

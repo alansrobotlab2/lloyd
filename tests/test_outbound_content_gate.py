@@ -343,6 +343,84 @@ def test_a_tier1_tool_is_not_scanned(tool, args):
     assert _decision(_fire(_content_only(scope=CHAT), tool, args)) == "allow"
 
 
+def test_a_tier2_schedule_write_is_scanned_but_its_run_record_is_not(
+        tmp_path, monkeypatch):
+    """#724 moved `autonomy_write_task` to tier 2, and the two shapes it takes
+    now have to land on opposite sides of this gate.
+
+    The tier exists to stop a dispatch-affecting field change from an unattended
+    scope. That argument set is six short scalars, so scanning it costs nothing
+    and a credential sitting inside one is worth catching. The other shape — an
+    append-only note on the caller's own task, which the grant gate deliberately
+    leaves open — is the run-record habit the skills prescribe, and it is long
+    free prose. Routing that through a scan which fails closed on its own errors
+    would put this gate in front of the bookkeeping that says whether a nightly
+    ran. `effective_tier` is what separates the two, so this is the test that
+    pins the seam from the content side: one tool, two calls, one scanned and one
+    not.
+
+    Both calls carry a deny-shaped payload, so neither assertion can pass
+    because the payload happened to be benign.
+    """
+    from app.harness.policy import GrantStore, effective_tier
+
+    assert effective_tier("autonomy_write_task",
+                          {"id": 68, "status": "up_next"}) == 2
+    assert effective_tier("autonomy_write_task",
+                          {"id": 68, "activity_note": "run completed"}) == 1
+
+    payload = dict(DENY_PAYLOADS["private-key-material"])
+
+    out = _fire(_content_only(scope=AUTONOMY), "autonomy_write_task",
+                {"id": 68, "status": "up_next", **payload})
+    assert _decision(out) == "deny", out
+    assert "private-key-material" in _reason(out)
+
+    # The run-record shape: same tool, and the sentinel is inside the note
+    # itself, so the allow cannot be credited to a benign payload. It is not
+    # scanned — this gate is `direction: out`, and a note lands in the caller's
+    # own task file rather than with a recipient. The findings file is the
+    # positive control for *which* kind of allow this is: a scanned call that
+    # found nothing also returns allow and writes a row, an unscanned call
+    # writes nothing.
+    # A fresh ledger for this call: the deny above already wrote its row to the
+    # autouse fixture's path, so reusing that file could not distinguish 'no row
+    # because unscanned' from 'no row because this ledger was never opened'.
+    findings = tmp_path / "note-findings.jsonl"
+    monkeypatch.setenv(OC.FINDINGS_ENV, str(findings))
+    out = _fire(_content_only(scope=AUTONOMY), "autonomy_write_task",
+                {"id": 68, "activity_note": f"run finished; the key was "
+                                            f"{PROVIDER_TOKEN_SENTINEL}"})
+    assert _decision(out) == "allow", out
+    assert not findings.exists(), (
+        "the note was scanned: this payload carries a provider-token sentinel, "
+        "so a scan of any kind would have recorded a row here — a file means the "
+        "gate read the tier from the tool name and not from the call")
+
+    # And the denial above is this gate's refusal, not the grant gate's: the
+    # registry it fired on carries no grant gate. With both gates present — the
+    # way both dispatch paths arm them — a clean schedule write with no grant is
+    # the grant gate's to refuse, and the reason names the scope, the tool and
+    # the field. Order is the same on both paths, because both call
+    # `install_policy_hook` before `install_outbound_content_gate`
+    # (`workers/sources/_common.py`, in `_worker_run_options`; `autonomy.py`, in
+    # `run_task`), and `fire_pre_tool_use` returns the FIRST deny in
+    # registration order (`app/harness/hooks.py`). So an ungranted schedule write
+    # that also carries a key is refused by the grant gate and never reaches this
+    # scan; the content gate earns its keep on the calls the grant gate lets
+    # through — a granted scope like #40's, or an interactive turn. That is also
+    # why the per-call tier has to agree across the two gates: a call this gate
+    # skips on the name while the grant gate denies on the args would report a
+    # denial that was never a content decision, and the reverse would scan a note
+    # the grant gate had already passed as tier 1.
+    store = GrantStore(tmp_path / "grants.db")
+    store.ensure_schema()
+    both = _registry(store, scope=AUTONOMY)
+    out = _fire(both, "autonomy_write_task", {"id": 68, "status": "up_next"})
+    assert _decision(out) == "deny", out
+    assert "grant:" in _reason(out), _reason(out)
+
+
 def test_a_non_string_argument_is_not_scanned():
     """Ints, bools and None are not content. A port number is not a secret."""
     out = _fire(_content_only(scope=CHAT), "email_send",

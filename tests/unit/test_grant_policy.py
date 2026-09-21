@@ -11,6 +11,11 @@ Inner Voice and no L0 block on any path these tests touch — which is the
 point: enforcement that needs the prompt to say so is not enforcement.
 The prompt-independence of that is itself pinned below, at source level.
 
+One case is deliberately not hermetic: the last one reads the shipped
+`autonomy/40-*.md` from the real vault, because clause 4 of #724 is a claim
+about that file and a fixture cannot evidence it. Its rationale, and why it
+fails rather than skips, are at its own docstring.
+
 Run:
   /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python -m pytest tests/unit/test_grant_policy.py
 """
@@ -34,6 +39,7 @@ from app.harness.policy import (  # noqa: E402
     GrantError,
     GrantStore,
     check_grants,
+    effective_tier,
     install_policy_hook,
     tool_tier,
 )
@@ -526,3 +532,284 @@ def test_dispatch_is_ledgered_with_grant_id_or_reason(store):
     denied = [r for r in rows if r["decision"] == "deny"]
     assert len(allowed) == 1 and allowed[0]["grant_id"] is not None
     assert len(denied) == 1 and denied[0]["reason"]
+
+
+# ── Scheduler state is authority too (#724) ─────────────────────────────────
+# `autonomy_write_task` rewrites the six fields the scheduler reads to decide
+# whether and when a task runs. Until #724 it sat at tier 1 while its sibling
+# `autonomy_delete_task` sat at tier 3, so an unattended turn that could not
+# send an email could re-arm a nightly job. The dispatches behind that — a
+# backlog-triage turn arming #84, automod implement turns parking and re-arming
+# #85, autonomy task #40 arming #68 and #85 while it ran — are counted on the
+# item, with the command that reproduces them, because `event_logs/` is a
+# rolling window and a figure quoted here would be wrong within days.
+#
+# What the counts settled on is structural and stable, so it is what the cases
+# below encode: the benign writes carried `activity_note` (plus a run `summary`)
+# and nothing else, and every armed-and-parked write touched one of the six
+# fields. A gate keyed on the target id — the fix this item originally proposed
+# — would therefore have blocked the notes and passed the schedule writes, which
+# is why the predicate is the field set.
+
+#: A schedule write: one of the six clauses names, on an existing task.
+SCHED_CALL = {"id": 68, "status": "up_next"}
+#: The run-record habit the skills prescribe: own id, activity note, nothing else.
+RUN_RECORD_CALL = {"id": 68, "activity_note": "run completed"}
+
+
+def test_autonomy_write_task_is_tier2_while_its_read_siblings_stay_tier1():
+    """The tier table is the whole gate; `tool_tier` returns 1 for anything
+    unlisted, so a schedule-rewriting tool listed nowhere is a tool with no
+    check at all. The read siblings must NOT be promoted — a task that cannot
+    list the board cannot do its job."""
+    assert tool_tier("autonomy_write_task") == 2
+    assert tool_tier("autonomy_delete_task") == 3  # unchanged
+    for read_only in ("autonomy_tasks", "autonomy_get_task", "autonomy_health"):
+        assert tool_tier(read_only) == 1, read_only
+
+
+def test_unattended_schedule_write_is_denied_without_a_grant(store, monkeypatch):
+    """The acceptance's negative half: a grant-scoped turn, no live grant, the
+    call denied and the reason naming the scope."""
+    from app.harness import HookRegistry
+
+    monkeypatch.setattr(policy, "default_store", lambda: store)
+    hooks = HookRegistry()
+    policy.install_policy_hook(hooks, scope="autonomy-task:68")
+    out = _fire(hooks, "autonomy_write_task", SCHED_CALL)
+    assert _denied(out) is True
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "autonomy-task:68" in reason
+    assert "autonomy_write_task" in reason
+
+
+def test_deny_reason_names_the_target_and_the_field_that_moved(store):
+    """A denial a run cannot act on is a run that retries. The reason has to
+    say which task and which dispatch-affecting field, not just the tool."""
+    d = _check(store, scope="autonomy-task:68", tool="autonomy_write_task",
+               tool_input={"id": 68, "depends_on": 42, "frequency": "every-15min"})
+    assert d.allowed is False
+    assert "target #68" in d.reason
+    assert "depends_on" in d.reason and "frequency" in d.reason
+    assert "grants:" in d.reason  # points at the frontmatter route, not only the tool
+
+
+@pytest.mark.parametrize("field,value", [
+    ("status", "up_next"), ("depends_on", 42), ("frequency", "daily"),
+    ("scheduled_at", "2026-09-21T01:00:00Z"), ("auto_advance", True),
+    ("skill_name", "nightly-vault-maintenance"),
+])
+def test_each_dispatch_affecting_field_is_gated(store, field, value):
+    """Six clauses, six fields. A gate that missed one is a gate with a hole
+    the next nightly walks through."""
+    d = _check(store, scope="autonomy-task:68", tool="autonomy_write_task",
+               tool_input={"id": 68, field: value})
+    assert d.allowed is False, f"{field} passed ungated"
+
+
+def test_a_run_record_note_is_not_a_schedule_write(store):
+    """The benign half, and the reason the gate keys on fields rather than on
+    target id.
+
+    Every unattended `autonomy_write_task` call that touched no gated field, in
+    the dispatches counted on #724, took an id and appended a note — the shape
+    `skills/sandbox-permission-errors/SKILL.md` prescribes as the conflict-free
+    update ("use `activity_note` only"). So an id-keyed gate ('deny if the
+    target is the caller's own task') would have refused those, while every
+    armed-and-parked write — which named a *different* task — passed. The
+    field-set predicate is what makes the two cases come out the right way round.
+    """
+    d = _check(store, scope="autonomy-task:68", tool="autonomy_write_task",
+               tool_input=RUN_RECORD_CALL)
+    assert d.allowed is True
+
+
+def test_creating_a_task_in_a_dispatchable_state_is_a_schedule_write(store):
+    """No `id` means create, and create takes a `status` — so the same hole
+    reopens one edit wider if the gate looks only at updates. A new task in
+    `up_next` is dispatched exactly like an existing one moved to `up_next`."""
+    d = _check(store, scope="worker:autotriage", tool="autonomy_write_task",
+               tool_input={"name": "Nightly thing", "status": "up_next"})
+    assert d.allowed is False
+    assert "target #new" in d.reason
+
+
+def test_creating_a_task_inert_stays_open(store):
+    """The positive control for the case above: a create with no dispatchable
+    status is inert — `agent_mcp/autonomy.py` defaults it to `draft`, which
+    dispatch does not run — so the pipeline-dispatch route an unattended turn
+    uses to hand work to the queue survives."""
+    d = _check(store, scope="worker:autotriage", tool="autonomy_write_task",
+               tool_input={"name": "Nightly thing", "frequency": "daily"})
+    assert d.allowed is True
+
+
+def test_the_real_noop_is_an_empty_value_the_handler_drops(store):
+    """An update whose value is empty writes nothing, so denying it would refuse
+    a call that cannot change dispatch.
+
+    The mechanism is `_handle_write`'s update loop in `agent_mcp/autonomy.py`:
+    each update field is copied only `if params.get(key)`, so `status: ""` never
+    reaches `_update_task_field` and the task file keeps its old value. The tier
+    demotion is what stops the gate denying a write the handler is about to
+    discard — the same 'empty means no dispatch-affecting change' rule the
+    create path uses one branch earlier, where an empty status falls back through
+    `params.get("status", "") or "draft"` and dispatch runs only `up_next`.
+    """
+    assert effective_tier("autonomy_write_task",
+                          {"id": 84, "status": "", "scheduled_at": ""}) == 1
+    d = _check(store, scope="autonomy-task:84", tool="autonomy_write_task",
+               tool_input={"id": 84, "status": ""})
+    assert d.allowed is True
+
+
+def test_a_resent_status_is_gated_because_the_gate_reads_the_call(store):
+    """No disk lookup. A worker turn can genuinely mean to park a task, or to
+    arm one — the dispatches counted on #724 include an automod implement round
+    writing `status: draft` to #85 and a later one writing `up_next` to the same
+    task — so the gate decides from the argument set and lets a human's grant
+    answer the question, rather than guessing from a task file the caller may not
+    own.
+    Carrying the current value in to slip a real change past a file comparison
+    is the attack that would make such a comparison useless, so a resent status
+    is gated too: the check never consults disk, so it cannot be stale, and the
+    human's grant is the only thing that opens it."""
+    assert effective_tier("autonomy_write_task",
+                          {"id": 85, "status": "draft"}) == 2
+    d = _check(store, scope="worker:autocode", tool="autonomy_write_task",
+               tool_input={"id": 85, "status": "draft"})
+    assert d.allowed is False
+
+
+def test_a_field_that_only_times_the_run_is_still_a_schedule_write(store):
+    """`scheduled_at` and `auto_advance` are dispatch-affecting even though they
+    leave `status` alone: one re-times a run, the other decides whether a
+    completion silently re-arms the task. One of the measured writes touched
+    only `scheduled_at`, and that is what moved task #84's next dispatch."""
+    assert effective_tier("autonomy_write_task",
+                          {"id": 84, "scheduled_at": "2026-09-10T02:00:00Z"}) == 2
+    assert effective_tier("autonomy_write_task",
+                          {"id": 84, "auto_advance": False}) == 2
+    # The nightly chain's order lives only in `preferred_hours`, so a write to
+    # it re-orders #38 -> #42 -> #39 -> #40 without touching any status.
+    assert effective_tier("autonomy_write_task",
+                          {"id": 39, "preferred_hours": [2, 3, 4]}) == 2
+
+
+def test_a_description_edit_is_not_a_schedule_write(store):
+    assert effective_tier("autonomy_write_task",
+                          {"id": 68, "description": "reworded"}) == 1
+
+
+def test_declared_grant_reopens_the_schedule_write(aut, store, monkeypatch):
+    """The fix is a gate plus an explicit grant, not a gate alone: the nightly
+    #40 → #68/#85 re-arm keeps working because the human wrote it into the task
+    file, not because nothing was checking."""
+    _write_task(aut, 40, grants=[{"tool": "autonomy_write_task",
+                                  "expires_at": _iso(24), "issued_by": "alan"}])
+    task = aut._all_runnable_tasks()[0]
+    policy.sync_task_grants(store, task_id=40, scope="autonomy-task:40",
+                            grants=task["grants"], now=NOW)
+    d = _check(store, scope="autonomy-task:40", tool="autonomy_write_task",
+               tool_input={"id": 68, "status": "up_next"})
+    assert d.allowed is True, d.reason
+
+
+def test_schedule_denial_is_ledged_on_the_decision_surface(store):
+    """Clause 1's last half: the denial has to be countable after the fact,
+    because the only proof a promotion like this cost nothing is a window with
+    zero new `denied` rows for the nightly chain."""
+    _check(store, scope="autonomy-task:68", tool="autonomy_write_task",
+           tool_input=SCHED_CALL)
+    _check(store, scope="autonomy-task:68", tool="autonomy_write_task",
+           tool_input=RUN_RECORD_CALL)
+    rows = [r for r in store.dispatch_rows()
+            if r["tool"] == "autonomy_write_task"]
+    assert len(rows) == 1
+    assert rows[0]["decision"] == "deny"
+    assert rows[0]["scope"] == "autonomy-task:68"
+    assert "target #68" in rows[0]["reason"]
+
+
+def test_the_gate_lives_in_policy_not_in_the_prompt():
+    """Prompt-independence, the same reasoning as the module-level tests above:
+    the check is in `check_grants`, which every one of the four call sites
+    reaches through the same hook, so no turn talks its way past it and no
+    prompt edit turns it off."""
+    src = (LLOYD_HOME / "app" / "harness" / "policy.py").read_text()
+    assert "SCHEDULE_STATE_TOOL" in src
+    assert "changes_schedule_state" in src
+    assert "system_prompt" not in src
+
+
+# ── Clause 4: the shipped nightly re-arm, read from the scheduler's own dir ──
+
+
+def _real_task_40() -> Path:
+    """The real `autonomy/40-*.md`, or a failure that names the lost clause.
+
+    `LLOYD_OBSIDIAN_VAULT` is the override `tests/board_presence.py` honours,
+    read per call so a caller's `monkeypatch.setenv` moves it. Failing on an
+    absent file — never skipping — is that file's policy, and the reason it
+    transfers: this task's `grants:` block *is* the authorisation the nightly
+    re-arm runs on, so no file means no authorisation, not no measurement.
+    """
+    import os
+
+    raw = os.environ.get("LLOYD_OBSIDIAN_VAULT")
+    vault = Path(raw).expanduser() if raw else Path.home() / "obsidian"
+    board = vault / "autonomy"
+    hits = sorted(board.glob("40-*.md"))
+    if not hits:
+        pytest.fail(f"clause 4 of #724 is unpinned: no 40-*.md under {board}. "
+                    "The nightly #40 → #68/#85 re-arm is meant to be authorised "
+                    "by a `grants:` block in that file, so a missing file is a "
+                    "missing authorisation.")
+    return hits[0]
+
+
+def test_the_shipped_nightly_rearm_grant_materialises_and_reopens_the_write(tmp_path):
+    """The acceptance's third half, run against the file the scheduler reads.
+
+    Every other case in this file parses a fixture, so it stays true whatever
+    the shipped task file says. This one cannot: it reads the real
+    `40-nightly-reflection-config.md` through the scheduler's own
+    `_parse_task_file`, validates the block, materialises it with
+    `sync_task_grants`, and then asks the question the clause is about — does a
+    `autonomy-task:40` turn holding nothing but that declared block get to move
+    #68 to `up_next`?
+
+    No `now=` anywhere below, because dispatch passes no `now=`: the expiry is
+    judged by the real clock, so a block nobody renews goes red here on the same
+    day it starts denying the nightly, and `#534` deliberately gives the run no
+    way to extend it.
+    """
+    import autonomy
+
+    path = _real_task_40()
+    task = autonomy._parse_task_file(path)
+    assert task is not None, f"{path.name} does not parse; the scheduler would not run it"
+    specs, errors = policy.validate_task_grants(task.get("grants"))
+    assert errors == [], f"the shipped grants block is not acceptable: {errors}"
+    assert [s["tool"] for s in specs] == ["autonomy_write_task"], (
+        "clause 4 names exactly one authority; any other entry is a scope call "
+        "a human has to make, not drift this file can accept quietly")
+    assert specs[0]["expires_at"] > dt.datetime.now(dt.timezone.utc), (
+        f"{path.name}'s grant expired on "
+        f"{specs[0]['expires_at'].isoformat()}; renewal is a human editing the "
+        "block, and until then the nightly re-arm is denied, as it should be")
+
+    store = GrantStore(tmp_path / "workers.db")
+    store.ensure_schema()
+    assert policy.sync_task_grants(store, task_id=40, scope="autonomy-task:40",
+                                   grants=task["grants"]) >= 1
+
+    d = check_grants(store, scope="autonomy-task:40",
+                     tool_name="autonomy_write_task", tool_input=SCHED_CALL)
+    assert d.allowed is True, f"the shipped block does not re-open the write: {d.reason}"
+    assert d.grant_id is not None, ("allowed without consuming a row means the "
+                                    "gate was absent, not satisfied")
+    # The control: the allow came from #40's row, not from the tool being open.
+    other = check_grants(store, scope="autonomy-task:41",
+                         tool_name="autonomy_write_task", tool_input=SCHED_CALL)
+    assert other.allowed is False, "a declared grant leaked to another task's scope"
