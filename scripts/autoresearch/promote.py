@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -714,7 +715,120 @@ def promote(
     return result
 
 
-def rollback(cfg: AutoresearchConfig, snapshot_ts: str) -> dict[str, Any]:
+def authored_bytes(vault_root: Path, sha: str, rel: str) -> bytes | None:
+    """The bytes commit `sha` put at vault-relative `rel`, or None if it has none.
+
+    #1099 clause 3 needs a reference for "did this file change after the promotion
+    landed", and the only honest one is the promotion commit's own object: the vault's
+    object store already holds what the landing wrote, so no side channel had to
+    record a hash at promotion time, and a hash taken from anywhere else (HEAD before
+    the copy, the snapshot, a caller's memory) would silently bless whatever it
+    actually read. A commit that never touched the path returns None, which callers
+    must treat as *no reference* — refuse, never "unchanged".
+    """
+    show = subprocess.run(["git", "-C", str(vault_root), "show", f"{sha}:{rel}"],
+                          capture_output=True, check=False)
+    if show.returncode != 0:
+        return None
+    return show.stdout
+
+
+def changed_since_promotion(present_in_vault: list[str], rel: list[str],
+                            vault_root: Path, vault_commit: str) -> tuple[list[str], list[dict]]:
+    """Split restore candidates into `(safe_names, refused)`.
+
+    `refused` is `({"file", "reason"}, ...)` with the file named exactly as the
+    canonical-prompt key, because the clause is "refused **by name** and reported"
+    — a count tells a reader nothing about which contract line was protected.
+    """
+    safe: list[str] = []
+    refused: list[dict] = []
+    for name, r in zip(present_in_vault, rel):
+        target = CANONICAL_PROMPTS[name]
+        try:
+            current = target.read_bytes()
+        except OSError as exc:
+            refused.append({"file": name, "reason": f"unreadable: {exc}"})
+            continue
+        authored = authored_bytes(vault_root, vault_commit, r)
+        if authored is None:
+            refused.append({"file": name,
+                            "reason": f"{vault_commit[:10]} wrote no {r}, so there is nothing "
+                                      "to compare the live file against"})
+        elif current != authored:
+            refused.append({"file": name,
+                            "reason": "changed after the promotion landed, so restoring the "
+                                      "snapshot would overwrite an edit made afterwards"})
+        else:
+            safe.append(name)
+    return safe, refused
+
+
+def _differs_from_head(vault_root: Path, rel: list[str]) -> bool:
+    """Would committing `rel` right now put anything new on the vault's `main`?
+
+    Anything but exit 0 is read as "yes" — an untracked file has no HEAD blob to diff
+    against, and a restore of a file the vault has never committed is a change, not a
+    no-op. The one answer that must not be guessed at is `False`, because that is the
+    answer that reports a restore as already-done.
+    """
+    if not rel:
+        return False
+    diff = subprocess.run(["git", "-C", str(vault_root), "diff", "--quiet", "HEAD", "--", *rel],
+                          capture_output=True, check=False)
+    return diff.returncode != 0
+
+
+def _unattended_refusal_reason(promotion: dict[str, Any], rel: list[str],
+                               vault_root: Path) -> str | None:
+    """Why an unattended restore cannot proceed at all, or None if it can.
+
+    Both answers here are about the route, not the content: an unattended restore has
+    no human to notice a contract left modified-but-uncommitted, and no human to
+    notice that "unchanged since the promotion" was compared against nothing.
+    """
+    if not rel:
+        return (f"the canonical prompts are not tracked files under {vault_root}, so this "
+                "restore has no validated vault landing route — an unattended restore "
+                "never leaves a contract modified but uncommitted")
+    if not str(promotion.get("vault_commit") or "").strip():
+        return (f"no vault commit is on record for promotion "
+                f"{promotion.get('variant_id') or '(unknown variant)'}, so nothing can be "
+                "refused as 'changed after the promotion' and nothing can be trusted as "
+                "unchanged")
+    return None
+
+
+def _rollback_message(snapshot_ts: str, snap: Path, restored: list[str],
+                      refused_files: list[dict], promotion: dict[str, Any] | None) -> str:
+    """The commit message for a restore, attributable to the decline that caused it.
+
+    The manual tool's message is unchanged; an unattended one names the promotion's
+    variant id and both round ids in the subject, because a vault sha that says only
+    "rollback to snapshot <ts>" cannot be traced back to the round that decided it,
+    which is the same attribution gap #1070 closed for the nightly sweep.
+    """
+    body = (f"Restored {', '.join(restored) or 'no files'} from {snap}. "
+            "The vault route validated the restored contract before committing it, so a "
+            "bad promotion is undone by one revert.")
+    if promotion is None:
+        return f"autoresearch: rollback to snapshot {snapshot_ts}\n\n{body}"
+    refused = ("Refused, not overwritten: "
+               + "; ".join(f"{r['file']} ({r['reason']})" for r in refused_files) + ".\n")
+    return (
+        "autoresearch: restore promotion "
+        f"{promotion.get('variant_id')} (round {promotion.get('promoted_round_id')}) "
+        "after a post-promotion decline\n\n"
+        f"{body}\n\n"
+        f"Decline {promotion.get('decline')} past the noise floor "
+        f"{promotion.get('noise_floor')}, detected by round "
+        f"{promotion.get('restoring_round_id')}.\n"
+        f"{refused}"
+    )
+
+
+def rollback(cfg: AutoresearchConfig, snapshot_ts: str, *,
+             promotion: dict[str, Any] | None = None) -> dict[str, Any]:
     """Restore canonical prompts from the named snapshot, through the vault route.
 
     This is the one undo path for a bad prompt promotion, and it used to be three
@@ -738,26 +852,35 @@ def rollback(cfg: AutoresearchConfig, snapshot_ts: str) -> dict[str, Any]:
     puts the paths back if any of them fails, commits exactly the restored files
     on the vault's `main` with the snapshot ts in the message, and appends a
     `vault_land` ledger event carrying the sha. The sha is returned.
+
+    **`promotion=` is the unattended caller's contract (#1099).** A restore driven by
+    a round — `scripts/autoresearch/auto_restore.py`, reached from `run_round` when a
+    fresh baseline declines past the noise floor — passes the promotion it is undoing:
+    `{"variant_id", "promoted_round_id", "restoring_round_id", "vault_commit",
+    "decline", "noise_floor"}`. Three things follow that a human clicking the
+    `autoresearch_rollback` tool does not get asked for, because a human is the check:
+
+      * every canonical file whose current bytes are not the bytes `vault_commit`
+        wrote is **refused by name** instead of overwritten (`changed_since_promotion`),
+        so an edit made after the promotion cannot be silently reverted;
+      * no `vault_commit` on record means no restore — without it there is no
+        reference to compare against, and "unchanged" guessed from the wrong
+        reference is the failure this guard exists to prevent;
+      * the commit message names the promotion's variant id, its round and the
+        round that asked, so the sha is attributable to the decline that caused it.
+
+    Without `promotion` the manual tool's behaviour is byte-for-byte what it was,
+    including a raw copy when the canonical prompts sit outside the vault.
     """
     snap = cfg.paths.snapshots_dir / snapshot_ts
     result: dict[str, Any] = {"snapshot": str(snap), "restored_files": [],
-                              "vault_commit": None, "no_change": False}
+                              "vault_commit": None, "no_change": False,
+                              "refused_files": [], "promotion": dict(promotion or {})}
     if not snap.exists():
         result["error"] = f"snapshot {snapshot_ts} not found"
         return result
 
     present = [name for name in CANONICAL_PROMPTS if (snap / name).exists()]
-    try:
-        _present_in_vault, rel, vault_root = _vault_relative_paths(present)
-    except Exception as exc:  # noqa: BLE001 — no landing route reachable: refuse, do not raw-copy
-        result["refused"] = [f"cannot reach the vault landing route: {exc}"]
-        logger.error("rollback to %s refused before touching anything: %s", snapshot_ts, exc)
-        return result
-
-    for name in present:
-        shutil.copy2(snap / name, CANONICAL_PROMPTS[name])
-        result["restored_files"].append(name)
-
     if not present:
         # A snapshot directory that holds no prompt file restores nothing and has
         # nothing to commit. `land` would refuse an empty path list; that refusal
@@ -765,26 +888,70 @@ def rollback(cfg: AutoresearchConfig, snapshot_ts: str) -> dict[str, Any]:
         logger.warning("snapshot %s holds none of %s — nothing restored",
                        snap, sorted(CANONICAL_PROMPTS))
         return result
+    try:
+        _present_in_vault, rel, vault_root = _vault_relative_paths(present)
+    except Exception as exc:  # noqa: BLE001 — no landing route reachable: refuse, do not raw-copy
+        result["refused"] = [f"cannot reach the vault landing route: {exc}"]
+        logger.error("rollback to %s refused before touching anything: %s", snapshot_ts, exc)
+        return result
+
+    to_restore = list(present)
+    rel_restore = list(rel)
+    if promotion is not None:
+        refusal = _unattended_refusal_reason(promotion, rel, vault_root)
+        if refusal:
+            result["refused"] = [refusal]
+            logger.error("unattended restore of %s refused before touching anything: %s",
+                         promotion.get("variant_id"), refusal)
+            return result
+        to_restore, result["refused_files"] = changed_since_promotion(
+            _present_in_vault, rel, vault_root, str(promotion["vault_commit"]))
+        refused_names = {r["file"] for r in result["refused_files"]}
+        # Only the restored files go to `land`. `land` stages the paths it is given,
+        # so a refused file with an uncommitted post-promotion edit in the tree would
+        # otherwise be committed under this restore's message — the exact
+        # attribution failure the guard above exists to prevent, arriving one call
+        # later as a half-restored set that also silently shipped someone else's edit.
+        rel_restore = [r for name, r in zip(_present_in_vault, rel)
+                       if name not in refused_names]
+        if not to_restore:
+            result["refused"] = [f"every canonical file in {snap.name} was refused: "
+                                 + "; ".join(f"{r['file']} ({r['reason']})"
+                                             for r in result["refused_files"])]
+            logger.error("unattended restore of %s refused: %s",
+                         promotion.get("variant_id"), result["refused"][0])
+            return result
+
+    for name in to_restore:
+        shutil.copy2(snap / name, CANONICAL_PROMPTS[name])
+        result["restored_files"].append(name)
 
     if not rel:
-        # Not an error: the variant sandbox and the unit tests point the canonical
-        # prompts at a directory that is not the vault, where a raw copy is all
-        # that can be done — and no nightly sweep commits that tree, so there is
-        # nothing to mask. `promote()` has the same branch.
+        # Not an error for the manual tool: the variant sandbox and the unit tests
+        # point the canonical prompts at a directory that is not the vault, where a
+        # raw copy is all that can be done — and no nightly sweep commits that tree,
+        # so there is nothing to mask. `promote()` has the same branch. An
+        # unattended restore cannot reach here: `_unattended_refusal_reason` refuses it.
         logger.info("rolled back %s files from %s with no vault commit — those "
                     "paths are outside %s", len(result["restored_files"]), snap, vault_root)
+        return result
+
+    if not _differs_from_head(vault_root, rel_restore):
+        # Content that already matches HEAD: a repeated rollback, or a snapshot that
+        # *is* the live contract. Checked against the tree rather than by reading
+        # `land`'s exception text, because with a partially refused restore a
+        # message match would report the *restored* file as uncommitted work that
+        # was never restored. A no-op is not a failed undo.
+        result["no_change"] = True
+        logger.info("rollback to %s restored content that already matches "
+                    "HEAD — nothing to commit", snapshot_ts)
         return result
 
     try:
         from scripts.automod import vault_round as VR
 
-        landed = VR.land(
-            rel,
-            f"autoresearch: rollback to snapshot {snapshot_ts}\n\n"
-            f"Restored {', '.join(result['restored_files']) or 'no files'} from {snap}. "
-            "The vault route validated the restored contract before committing it, so a "
-            "bad promotion is undone by one revert.",
-        )
+        landed = VR.land(rel_restore, _rollback_message(snapshot_ts, snap, to_restore,
+                                                        result["refused_files"], promotion))
     except Exception as exc:  # VaultRoundError, or git refusing for any reason
         if "nothing to commit" in str(exc):
             # Content that already matches HEAD: a repeated rollback, or a

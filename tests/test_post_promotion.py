@@ -363,6 +363,14 @@ def test_the_report_the_writer_writes_reads_back_as_a_promotion(tmp_path):
         "promoted_variant_id": PROMOTED,
         "promoted_variant_mean": 0.6145,
         "snapshot_dir": SNAPSHOT_DIR,
+        # #1099: the key is present and None, not absent. A round report names the
+        # snapshot it could restore from but never the sha it landed with (that is in
+        # the landing ledger), so a promotion read from its prose has no reference for
+        # "is this file still what the promotion wrote" — and the restore downstream
+        # treats a missing sha as a refusal. `None` makes that visible in the record
+        # instead of leaving the next reader to distinguish an absent key from an
+        # unmeasured one.
+        "vault_commit": None,
     }
 
 

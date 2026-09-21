@@ -19,7 +19,7 @@ from typing import Any
 
 from app.harness.bench_corpus import probe_ledger_fields
 
-from . import post_promotion
+from . import auto_restore, post_promotion
 from .bench_runner import run_bench
 from .bench_runner_sdk import DEFAULT_PER_TASK_TIMEOUT as SDK_PER_TASK_TIMEOUT
 from .bench_runner_sdk import run_bench_sdk
@@ -50,12 +50,37 @@ from .variant_sandbox import AnchorApplyError, materialize, materialize_baseline
 
 logger = logging.getLogger("autoresearch.run_round")
 
+#: `post_promotion_check`'s "look it up yourself" default. A sentinel object rather
+#: than `None`, because `None` is a real comparison value here — it means "there was
+#: no promotion on record to compare against" and has its own report branch, so a
+#: `None` default could not tell "nothing to compare" from "caller did not say".
+_COMPUTE = object()
+
 
 def _group_traces_by_variant(traces: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for t in traces:
         grouped.setdefault(t["variant_id"], []).append(t)
     return grouped
+
+
+def post_promotion_comparison(
+    cfg: AutoresearchConfig, round_id: str, baseline_mean: float,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Look up the previous promotion and compare this round's baseline against it.
+
+    Split out of :func:`post_promotion_check` because #1099 needs the verdict before
+    anything is written: the lookup must precede this round's own `round_summary` row
+    (a round must never be compared against itself, so `last_promotion` excludes
+    `round_id` and the exclusion is worthless once the row exists), and the restore has
+    to happen in the same window — after the comparison, before the record. Returns
+    `(prior, comparison)`; `prior` is what tells the restore which snapshot and which
+    vault commit it is undoing.
+    """
+    prior = post_promotion.last_promotion(
+        cfg.paths.ledger_path, cfg.paths.rounds_dir, exclude_round=round_id,
+    )
+    return prior, post_promotion.compare(baseline_mean, prior, cfg.promotion_noise_floor)
 
 
 def post_promotion_check(
@@ -65,6 +90,8 @@ def post_promotion_check(
     promotion_result: dict[str, Any] | None,
     variant_summary: dict[str, Any] | None = None,
     candidate_overlay: Path | None = None,
+    comparison: Any = _COMPUTE,
+    restore: dict[str, Any] | None = None,
 ) -> tuple[list[str], dict[str, Any], dict[str, Any] | None]:
     """Compare this round's fresh baseline against the last promotion (#429).
 
@@ -81,16 +108,22 @@ def post_promotion_check(
     written before the drift block is built, so the block names this round too — the
     ratchet that refused a candidate read a history assembled *without* it, and a
     reader three promotions later wants to see the point that tripped it.
+
+    `comparison` is the verdict from :func:`post_promotion_comparison`, passed by
+    `run()` because the restore had to act on it before this call wrote the round's
+    own row; `_COMPUTE` keeps a caller with no restore to run — a replay, a test —
+    able to ask for the whole thing in one call. `restore` is #1099's outcome,
+    rendered into this section by `post_promotion.report_section`: the restore happens
+    *before* the record, but its verdict is reported in the section the record
+    produced, because one section per round is what a reader follows.
     """
     import prompt_surface
 
     from .promote import contract_shape_fields
 
-    prior = post_promotion.last_promotion(
-        cfg.paths.ledger_path, cfg.paths.rounds_dir, exclude_round=round_id,
-    )
-    comparison = post_promotion.compare(baseline_mean, prior, cfg.promotion_noise_floor)
-    lines = post_promotion.report_section(comparison)
+    if comparison is _COMPUTE:
+        _, comparison = post_promotion_comparison(cfg, round_id, baseline_mean)
+    lines = post_promotion.report_section(comparison, restore)
     row = post_promotion.record_round_summary(
         cfg, round_id, baseline_mean, promotion_result, variant_summary,
         contract_shape_fields(candidate_overlay),
@@ -410,6 +443,16 @@ async def run(
 
     baseline_summary = summaries.get(baseline_id) or {"mean_composite": 0.0, "per_task": []}
 
+    # #429 + #1099: read the previous promotion's recorded mean *now*, before the
+    # promotion decision below and long before this round's `round_summary` row is
+    # appended. The order is load-bearing twice over: `last_promotion` excludes this
+    # round by id, an exclusion that buys nothing once the row exists, and the restore
+    # has to run in this window — a round that wrote its own comparison row first would
+    # be recording a decline it had already acted on, and the report would describe a
+    # contract it had already rewritten.
+    prior_promotion, comparison = post_promotion_comparison(
+        cfg, rid, float(baseline_summary.get("mean_composite", 0.0)))
+
     # Evaluate each candidate vs baseline and pick the winner
     decisions: list[dict[str, Any]] = []
     best_variant: dict[str, Any] | None = None
@@ -443,10 +486,21 @@ async def run(
     if best_variant and best_summary and best_overlay:
         promotion_result = promote(cfg, best_variant, best_overlay, best_summary, baseline_summary, dry_run=dry_run)
 
-    # #429: a promotion used to be the last time anything looked at it. Compare
-    # this round's fresh baseline to the mean the previous promoted variant
-    # recorded in its own round, record the row, and carry the verdict into the
-    # report below. Record and surface only — nothing here restores a file.
+    # #1099, Alan's sign-off on #429's out-of-scope clause: a beyond-noise decline is
+    # no longer only reported, it undoes the promotion that caused it — through
+    # `promote.rollback`, which commits by the same validated vault route `promote`
+    # uses, refuses any canonical file that changed after the promotion landed, and
+    # never restores one promotion twice. Nothing here waits for a human; nothing here
+    # copies a prompt file by hand. A `--dry-run` round never restores either.
+    restore_outcome = auto_restore.restore_for_decline(
+        cfg, rid, comparison, prior_promotion, dry_run=dry_run,
+    )
+
+    # #429: a promotion used to be the last time anything looked at it. Record this
+    # round's comparison row and carry the verdict into the report below. The restore
+    # above already ran (or declined, or refused) on the comparison computed before the
+    # promotion decision; what is recorded here is the row plus that outcome, so the
+    # report states the restore in the same section as the decline that caused it.
     # #789: the same row carries the contract shape — the live SOUL.md's two
     # ratios and this round's candidate's own two, read from `best_overlay`, which
     # is None whenever no candidate survived to the contract check.
@@ -457,6 +511,8 @@ async def run(
         promotion_result,
         best_summary,
         best_overlay,
+        comparison=comparison,
+        restore=restore_outcome,
     )
 
     # Write round summary markdown
@@ -537,6 +593,13 @@ async def run(
         "decisions": decisions,
         "promoted": promotion_result,
         "post_promotion": comparison,
+        # #1099: the restore verdict is part of the round's result, not a side effect
+        # a caller has to go and find in the ledger. `status` is one of
+        # `auto_restore`'s statuses and `vault_commit` is the sha when it landed one.
+        "post_promotion_restore": (
+            {k: restore_outcome.get(k) for k in
+             ("status", "restored", "vault_commit", "reason", "restored_by")}
+            if restore_outcome else None),
         "round_summary_row": summary_row,
         "parent_variant_id": parent_variant["variant_id"] if parent_variant else None,
         "dry_run": dry_run,

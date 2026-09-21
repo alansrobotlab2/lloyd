@@ -1,12 +1,15 @@
-"""Post-promotion comparison — record and surface, never restore (backlog #429).
+"""Post-promotion comparison — this module records and surfaces, never restores.
 
-The defect
-----------
+Acting on what is recorded here is a separate module: see
+:mod:`scripts.autoresearch.auto_restore` (#1099) for the automated restore.
+
+The defect this was filed on
+----------------------------
 `promote()` decides, writes and logs, and then nothing ever looks again.
-`rollback()` (:mod:`scripts.autoresearch.promote`) is manual-only and reachable
-only from the `autoresearch_rollback` MCP handler; across the live ledger's
+`rollback()` (:mod:`scripts.autoresearch.promote`) had one entry point, the manual
+`autoresearch_rollback` MCP handler, when this was written; across the live ledger's
 30,953 rows the string `rollback`/`revert` appears **0** times while
-`"promoted": true` appears 65 — no promotion has ever been detected as a
+`"promoted": true` appears 65 — no promotion had ever been detected as a
 false positive, because nothing re-measured anything after a promotion landed.
 `run_round.py`'s only reference to prior rounds was
 :func:`~scripts.autoresearch.common.find_last_promoted_variant`, used for parent
@@ -31,11 +34,17 @@ Option (b) from the item: **record** and **surface**.
 
 What it deliberately does not do
 --------------------------------
-It never touches a prompt file. Automated restore of a landed prompt/skill file
-is the item's out-of-scope clause and needs a human sign-off; the print here
-gives that human the rollback point rather than using it. The statistical
-backstop remains the false-positive sweep in :mod:`scripts.autoresearch.promotion_fp_rate`
-(backlog #428), which measures the *rate*; this measures *this round*.
+It never touches a prompt file. Acting on a decline it detects is real work and it
+lives in :mod:`scripts.autoresearch.auto_restore` (backlog #1099, Alan's sign-off on
+the out-of-scope clause this module originally reserved for a human); this module
+still only records and surfaces, and #429's separation test — which walks this
+module's import list looking for the promotion and file-copy machinery — is the
+reason the restore cannot simply move in here. What this module owns of #1099 is the
+*reading* side of the same record: :func:`restore_rows` and
+:func:`restored_promotion_rounds`, so a promotion somebody already undied is neither
+restored again nor measured as the live contract. The statistical backstop remains
+the false-positive sweep in :mod:`scripts.autoresearch.promotion_fp_rate` (backlog
+#428), which measures the *rate*; this measures *this round*.
 
 The floor
 ---------
@@ -67,6 +76,20 @@ from .promotion_fp_rate import BASELINE_RE
 #: Ledger event name for the per-round machine-readable comparison row.
 ROUND_SUMMARY_EVENT = "round_summary"
 
+#: Ledger event name for a restore decision, written by
+#: :mod:`scripts.autoresearch.auto_restore` (#1099). The schema constant lives here
+#: because this module is the reader — `restored_promotion_rounds` below is what keeps
+#: a undone promotion from being compared as the live contract again — and a schema
+#: constant must not be imported from the module that writes it, or the reader cannot
+#: be tested without the restore machinery.
+RESTORE_EVENT = "promotion_restored"
+
+#: Which `promotion_restored` statuses mean the promotion is undone. `no_change`
+#: counts: content that already matches the snapshot is the same end state, reached
+#: without a second commit to attribute, and treating it as "not restored" would have
+#: a later round look for a vault sha that does not exist.
+RESTORED_STATUSES = frozenset({"restored", "no_change"})
+
 #: `- BASELINE_x` and `- V_...` lines in the "Variant summaries" block.
 _VARIANT_MEAN_RE = re.compile(
     r"^-\s*`(?P<vid>[^`]+)`(?:\s*\(baseline\))?:\s*mean=(?P<mean>[0-9.]+)", re.M
@@ -93,6 +116,26 @@ def _rows(ledger_path: Path):
 def round_summary_rows(ledger_path: Path) -> list[dict[str, Any]]:
     """Every `event == "round_summary"` row, oldest first."""
     return [r for r in _rows(ledger_path) if r.get("event") == ROUND_SUMMARY_EVENT]
+
+
+def restore_rows(ledger_path: Path) -> list[dict[str, Any]]:
+    """Every `event == "promotion_restored"` row, oldest first (#1099)."""
+    return [r for r in _rows(ledger_path)
+            if isinstance(r, dict) and r.get("event") == RESTORE_EVENT]
+
+
+def restored_promotion_rounds(ledger_path: Path) -> set[str]:
+    """Round ids whose promotion a later round already undid.
+
+    The reason this is subtracted out of :func:`last_promotion` is not bookkeeping,
+    it is that the comparison has to describe the contract that is actually live:
+    once a round restores a promotion's snapshot, the files on disk are the ones that
+    promotion's predecessor produced, so measuring a fresh baseline against the
+    *restored* promotion's mean would call the restored contract a regression and
+    send the loop looking for a second promotion to undo.
+    """
+    return {str(r.get("restored_round_id")) for r in restore_rows(ledger_path)
+            if r.get("status") in RESTORED_STATUSES and r.get("restored_round_id")}
 
 
 #: How many recorded shape pairs the round report prints. One more promotion than the
@@ -238,6 +281,11 @@ def promotion_record_from_report(path: Path) -> dict[str, Any] | None:
         "promoted_variant_id": vid,
         "promoted_variant_mean": means.get(vid),
         "snapshot_dir": snap_dir,
+        # A report never carried the sha it landed with — the round report names the
+        # snapshot, and the sha lives in the landing ledger — so a promotion read from
+        # its prose has no reference for "unchanged since the promotion". Explicit
+        # None, so a reader never mistakes an absent key for an unmeasured one.
+        "vault_commit": None,
     }
 
 
@@ -265,6 +313,11 @@ def promotion_records(ledger_path: Path, rounds_dir: Path) -> list[dict[str, Any
             "promoted_variant_id": vid,
             "promoted_variant_mean": row.get("promoted_variant_mean"),
             "snapshot_dir": row.get("snapshot_dir") or "",
+            # The sha the promotion was committed with (#1099). Present on every
+            # ledger-sourced record, None on every row written before that key
+            # existed and on every record recovered from a round report — a
+            # missing sha downstream is a refusal, never a guess.
+            "vault_commit": row.get("vault_commit"),
         }
     return [by_round[rid] for rid in sorted(by_round)]
 
@@ -277,10 +330,18 @@ def last_promotion(
 ) -> dict[str, Any] | None:
     """The most recent promotion on record, excluding the round asking.
 
+    Also excludes any promotion a later round has already restored (#1099 clause 4),
+    which is what stops a restored promotion from being both restored twice and
+    measured as the live contract: after a restore the files on disk are the ones its
+    predecessor produced, so the next round compares against that predecessor — the
+    promotion whose mean actually describes the contract now in force.
+
     Round ids are `R_%Y%m%d_%H%M%S`, so lexicographic order is chronological.
     """
+    restored = restored_promotion_rounds(ledger_path)
     records = [
-        r for r in promotion_records(ledger_path, rounds_dir) if r["round_id"] != exclude_round
+        r for r in promotion_records(ledger_path, rounds_dir)
+        if r["round_id"] != exclude_round and r["round_id"] not in restored
     ]
     return records[-1] if records else None
 
@@ -314,14 +375,23 @@ def compare(
     }
 
 
-def report_section(comparison: dict[str, Any] | None) -> list[str]:
+def report_section(comparison: dict[str, Any] | None,
+                   restore: dict[str, Any] | None = None) -> list[str]:
     """The `## Post-promotion check` lines for a round report.
 
-    A decline past the floor is named, attributed to the promoted variant and
-    the round that landed it, and carries the snapshot directory it could be
-    restored from. It also says plainly that nothing was restored: the automated
-    restore is human-only (item's out-of-scope clause) and backlog #428's FP
-    sweep is the statistical backstop.
+    A decline past the floor is named, attributed to the promoted variant and the
+    round that landed it, and carries the snapshot directory it can be restored from.
+
+    `restore` is the outcome of
+    :func:`scripts.autoresearch.auto_restore.restore_for_decline` for this round —
+    passed in as already-rendered lines by the caller, because #429's separation test
+    keeps the recorder from importing the restore machinery. Three states are
+    deliberately distinguishable: `restore is None` means no restore was attempted
+    (the pre-#1099 report shape, still what a direct caller gets), an empty
+    `restore["report_lines"]` means the loop ran and found nothing to undo, and a
+    non-empty one names the vault sha it restored or the reason it refused. A reader
+    must never be able to confuse "the loop undid it" with "the loop declined" with
+    "no loop exists".
     """
     lines = ["", "## Post-promotion check"]
     if comparison is None:
@@ -332,7 +402,7 @@ def report_section(comparison: dict[str, Any] | None) -> list[str]:
         return lines
     if comparison["regression"]:
         snap = comparison["snapshot_dir"]
-        restore = (
+        restore_src = (
             f"rollback point `{comparison['snapshot_ts']}` (`{snap}`), i.e. "
             f"`autoresearch_rollback(snapshot_ts=\"{comparison['snapshot_ts']}\")`"
             if snap
@@ -344,11 +414,18 @@ def report_section(comparison: dict[str, Any] | None) -> list[str]:
             f"{comparison['promoted_variant_mean']:.4f} recorded for promoted variant "
             f"`{comparison['promoted_variant_id']}` (round `{comparison['prior_round_id']}`), "
             f"which exceeds the noise floor {comparison['noise_floor']:.4f}. "
-            f"Restore source: {restore}. "
-            f"Nothing was restored: this check records and surfaces only (backlog #429 "
-            f"option (b)); automated restore is human-only and the FP sweep in backlog "
-            f"#428 (`scripts/autoresearch/promotion_fp_rate.py`) is the statistical backstop."
+            f"Restore source: {restore_src}."
         )
+        if restore is None:
+            # No restore outcome was supplied: the report says so rather than
+            # implying the loop acted, and names the statistical backstop.
+            lines.append(
+                "- Nothing was restored by this section: no restore outcome was supplied, "
+                "and the FP sweep in backlog #428 (`scripts/autoresearch/promotion_fp_rate.py`) "
+                "is the statistical backstop for promotions like this one."
+            )
+        else:
+            lines.extend(restore.get("report_lines") or [])
     else:
         lines.append(
             f"- baseline mean {comparison['baseline_mean']:.4f} vs "
@@ -357,6 +434,8 @@ def report_section(comparison: dict[str, Any] | None) -> list[str]:
             f"decline {comparison['decline']:+.4f} is within the noise floor "
             f"{comparison['noise_floor']:.4f}."
         )
+        if restore is not None:
+            lines.extend(restore.get("report_lines") or [])
     return lines
 
 
@@ -399,6 +478,12 @@ def record_round_summary(
         "promoted_variant_id": variant_id,
         "promoted_variant_mean": round(float(mean), 4) if mean is not None else None,
         "snapshot_dir": promotion_result.get("snapshot_dir") if landed else None,
+        # The sha the promotion was committed with (#1099). A later restore reads this
+        # to answer "is this file still what the promotion wrote", and the answer has
+        # to come from the commit that landed, not from whatever HEAD said at some
+        # earlier point — so `promote()`'s returned sha is recorded here, in the row
+        # that says the promotion happened. None whenever nothing landed.
+        "vault_commit": promotion_result.get("vault_commit") if landed else None,
         "noise_floor": round(float(cfg.promotion_noise_floor), 4),
         # The variant whose shape is recorded below, named even when it was refused:
         # `promoted_variant_id` above is None in exactly the rounds the shape series
