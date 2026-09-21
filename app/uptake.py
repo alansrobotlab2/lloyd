@@ -92,6 +92,58 @@ ROW_KEYS = frozenset({
     "entry", "present_in_turns", "disputes", "dispute_rate", "weighted_disputes",
     "overlap_max", "presence_source",
 })
+
+#: Which scorer wrote a table, stamped into the artifact. A reader cannot tell
+#: one scorer's output from another's by looking at a filename: the three files
+#: under `eval/uptake/` predate #1195, and every rule that tells a consumer how
+#: to read a `weighted_disputes` is true of one generation and false of the
+#: other. Generation 1 (unstamped — `uptake-2026-09-11/17/20.json` at this
+#: commit): no `coverage.by_presence_source`, no `scored_on` on any row, a
+#: `weighted_disputes` that is never null, the skill channel paying
+#: `max(overlap(...), 0.05)` under every disputed hit — 5, 4 and 5 rows sit at
+#: exactly 0.05 in those three files — and every note row scored on its title.
+#: Generation 2 is this scorer. `tests/test_uptake.py` pins that the stamp and
+#: the bytes agree in both directions, so a stamped table cannot promise keys it
+#: does not have and an unstamped one is read by the rules its own generation
+#: supports. Bump it whenever a reading rule changes meaning.
+SCORER_GENERATION = 2
+
+#: What each row field means, in the artifact's own words. `build_uptake_table`
+#: emits this on every table, and `scripts/uptake_probe.py` no longer carries its own
+#: copy: the glossary used to live in the writer's `main()` and it was **false**
+#: for two of the three channels — it described `weighted_disputes` as overlap
+#: "between the entry text and the correction", which is true of the
+#: always-in-force rows only. A skill row's entry text was its *name* with a 0.05
+#: constant under it, and a note row's was its *title*. The table is the only
+#: thing a consumer reads, so the correction belongs here and not in a comment.
+GLOSSARY = {
+    "dispute_rate": "disputes / present_in_turns. An UPPER BOUND for "
+                    "always-in-force memory entries, since those are in every prompt.",
+    "weighted_disputes": "disputes discounted by lexical overlap (word-set Jaccard "
+                         "over unigrams+bigrams) between the entry text and the "
+                         "correction. null means no signal, not zero: no disputed "
+                         "turn shares any text with the entry, so the row supports "
+                         "neither keeping nor pruning and must not be coalesced to "
+                         "0 for a sort. The text behind the number differs per "
+                         "`presence_source` — the entry's own text for "
+                         "always-in-force rows, the skill NAME for proxy rows, the "
+                         "note's injected line (`scored_on`) for note rows — and the "
+                         "channels are not on one scale: never rank across them, "
+                         "read `coverage.by_presence_source` and rank within one "
+                         "channel only.",
+    "presence_source": "which evidence says the entry was in force. Evidence-bound "
+                      "for skills and notes; always_in_force for USER.md/MEMORY.md.",
+    "scorer_generation": "which scorer wrote THIS file, so the rules above can be "
+                         "read against the right table. Absent means generation 1: "
+                         "no `coverage.by_presence_source`, no `scored_on`, never a "
+                         "null, and a skill weight of 0.05 that is a removed "
+                         "calibration floor rather than a measurement. Read the key, "
+                         "never the filename or the date.",
+    "by_presence_source": "per-channel denominators: `rows`, `rows_with_weight`, "
+                          "`rows_null_weight`, `max_weight`. The four numbers that "
+                          "make a cross-channel comparison impossible, published "
+                          "instead of leaving the reader to discover them.",
+}
 #: How tightly a skill row's presence is bounded, tightest last. A row must name
 #: one: "this skill was injected into that very turn" and "some turn of that
 #: session opened this skill at some point" are not the same claim, and a
@@ -291,18 +343,88 @@ def _synthetic(text: str, source: Any) -> bool:
 
 
 _SKILL_INJECTION = re.compile(r'<skill\s+name="([^"]+)"')
-_VAULT_CTX_ITEM = re.compile(r"^- \*\*(.{5,120}?)\*\*", re.M)
+#: One `- **…**` line of a persisted `<vault-context>` block, tail included: the
+#: tail is where `(score: 0.87, file: knowledge/x.md): <body excerpt>` lives, and
+#: it is the difference between scoring a note against its heading and scoring it
+#: against the line the model actually read.
+_VAULT_CTX_ITEM = re.compile(r"^- \*\*(.{5,120}?)\*\*(?P<tail>[^\n]*)$", re.M)
+_VAULT_CTX_FILE = re.compile(r"\bfile:\s*([^),]+)")
+
+
+class VaultCtx(str):
+    """The bold title of an injected note line, plus the rest of that line.
+
+    The writer's form (`prefetch.py`, stored verbatim by
+    `app/routers/_messages_subliminal.py:86`) is::
+
+        - **<title>** (score: 0.87, file: knowledge/x.md): <body excerpt>
+
+    The reader kept only the bold title and scored the row with
+    `overlap(title, user_text)`, so a note was weighed against a heading: in
+    `eval/uptake/uptake-2026-09-17.json` 13 of the 14 presence-verified disputed
+    note rows came out exactly 0.0000 — ten of them `YYYY-MM-DD Daily Notes`
+    titles, which are dates and can never overlap prose — while the path and the
+    excerpt sat in the same string, discarded.
+
+    Subclassing `str` rather than replacing it is deliberate: the title is the
+    row's identity (`note:<title>` is how every consumer addresses it) and
+    `Turn.vault_context` is a list of titles in every existing caller, fixture
+    and committed transcript. `VaultCtx("x") == "x"`, so comparison, sorting and
+    formatting are unchanged, and `scored_text` / `scored_on` travel with it.
+    """
+
+    __slots__ = ("path", "excerpt")
+
+    def __new__(cls, title: str, path: str = "", excerpt: str = "") -> "VaultCtx":
+        self = super().__new__(cls, title)
+        self.path = path
+        self.excerpt = excerpt
+        return self
+
+    @property
+    def scored_text(self) -> str:
+        """What this row's weight is computed from: title, path, body excerpt."""
+        return " ".join(p for p in (str(self), self.path, self.excerpt) if p)
+
+    @property
+    def scored_on(self) -> str:
+        """`line` when more than the heading reached the score, else `title`."""
+        return "line" if (self.path or self.excerpt) else "title"
 
 
 def _injected_skills(text: str) -> list[str]:
     return _SKILL_INJECTION.findall(text)
 
 
-def _vault_context_titles(text: str) -> list[str]:
+def _vault_ctx_excerpt(tail: str) -> str:
+    """The body excerpt off the tail, with `(score: …, file: …)` and the colon off."""
+    t = tail.strip()
+    if t.startswith("("):
+        close = t.find(")")
+        if close != -1:
+            t = t[close + 1:]
+    return t.lstrip(":").strip()
+
+
+def _vault_context_titles(text: str) -> list[VaultCtx]:
+    """Every `- **…**` line of this turn's persisted injected block.
+
+    The element type widened from `str` to `VaultCtx`: the elements still *are*
+    the titles, so nothing that compares, dedupes, sorts or interpolates them
+    changes, and the `file:` path and body excerpt the note row is scored
+    against now reach the scorer instead of being dropped at parse time.
+    """
     block = text.split("<vault-context>", 1)
     if len(block) < 2:
         return []
-    return [t.strip() for t in _VAULT_CTX_ITEM.findall(block[1].split("</vault-context>", 1)[0])]
+    out: list[VaultCtx] = []
+    for title, tail in _VAULT_CTX_ITEM.findall(
+            block[1].split("</vault-context>", 1)[0]):
+        found = _VAULT_CTX_FILE.search(tail)
+        out.append(VaultCtx(title.strip(),
+                            path=found.group(1).strip() if found else "",
+                            excerpt=_vault_ctx_excerpt(tail)))
+    return out
 
 
 def human_turns(root: Path | str | None = None, days: int = 30) -> list[Turn]:
@@ -1062,14 +1184,33 @@ def active_skill_names(vault: Path | None = None) -> list[str]:
     return sorted(p.parent.name for p in (vault / "skills").glob("*/SKILL.md"))
 
 
+def _weight_or_null(overlaps: Iterable[float]) -> float | None:
+    """Sum the per-dispute overlaps, or report that there was nothing to sum.
+
+    A `weighted_disputes` of 0.0 used to carry two different claims — "measured,
+    and the correction never mentioned this entry" and "there was no disputed
+    turn to measure" — and the skill channel paid `max(overlap(…), 0.05)` on top
+    of both, so a row could be nonzero while overlapping nothing at all
+    (`skill:code-review`: weight 0.05, `overlap_max` 0.0). A row with nothing to
+    say is null: it cannot be averaged into a headline, cannot sort above a row
+    that genuinely measured zero, and cannot be read by the pruning job as "a low
+    score" when it is in fact no score. The 0.05 had no stated rationale and
+    arrived in the first implementation commit; it is gone rather than lowered.
+    """
+    total = sum(overlaps)
+    return round(total, 4) if total > 0 else None
+
+
 def _row(entry: str, presence_source: str, present: int, disputes: int,
-         weighted: float, overlap_max: float, extra: dict | None = None) -> dict:
+         weighted: float | None, overlap_max: float, extra: dict | None = None) -> dict:
+    """One row. `weighted` is already rounded, or None for "no signal" — see
+    `_weight_or_null` and `GLOSSARY["weighted_disputes"]`."""
     row = {
         "entry": entry,
         "presence_source": presence_source,
         "present_in_turns": present,
         "disputes": disputes,
-        "weighted_disputes": round(weighted, 4),
+        "weighted_disputes": weighted,
         "overlap_max": round(overlap_max, 4),
         "dispute_rate": round(disputes / present, 4) if present else 0.0,
     }
@@ -1125,6 +1266,40 @@ def _memory_coverage(entries: Sequence[Entry], tally: dict[str, Any] | None) -> 
             "honored; weighted_disputes on the row is the usable signal."
         ),
     }
+
+
+def _by_presence_source(entries: Sequence[dict]) -> dict[str, dict]:
+    """Per-channel denominators for `weighted_disputes`, one block per channel.
+
+    Published because the pooled version of that column is not one quantity.
+    Measured in `eval/uptake/uptake-2026-09-17.json`, the largest weight per
+    source was 0.2308 (`proxy:skills_read+injected_context`) / 0.0505
+    (`always_in_force:system_prompt`) / 0.0294 (`prefetch:vault_context`) — an
+    ~8x spread that comes from which channel a row belongs to and from nothing
+    about uptake. A single sorted list over all rows therefore ranks channels,
+    and a reader comparing two numbers from different ones is comparing the
+    scorer against itself. Every declared source gets a block even with no rows:
+    a missing key reads as "not measured", which is a different claim from
+    "measured, nothing here".
+    """
+    stray = sorted({r["presence_source"] for r in entries} - set(PRESENCE_SOURCES))
+    if stray:
+        # `raise`, not a dropped key: a channel absent from PRESENCE_SOURCES would
+        # vanish from the one block whose job is to make cross-channel ranking
+        # impossible, and the table would go on inviting exactly that.
+        raise RuntimeError(f"rows carry a presence_source outside PRESENCE_SOURCES: {stray}")
+    out: dict[str, dict] = {}
+    for src in sorted(PRESENCE_SOURCES):
+        weights = [r["weighted_disputes"] for r in entries
+                   if r["presence_source"] == src and r["weighted_disputes"] is not None]
+        rows = sum(1 for r in entries if r["presence_source"] == src)
+        out[src] = {
+            "rows": rows,
+            "rows_with_weight": len(weights),
+            "rows_null_weight": rows - len(weights),
+            "max_weight": max(weights) if weights else None,
+        }
+    return out
 
 
 def build_uptake_table(
@@ -1210,11 +1385,16 @@ def build_uptake_table(
     for name in sorted(skill_present):
         present = skill_present[name]
         hits = [t for t in present if t.turn_id in disputed_ids]
-        weight = sum(max(overlap(name, t.user_text), 0.05) for t in hits)
+        # Scored against the skill NAME — not the skill body — which is why a
+        # null here is the expected value for most rows and not a malfunction.
+        # Out of scope to widen it (#1195, Alan's call); the 0.05 that used to
+        # sit under this is gone, so the channel now says "no signal" when that
+        # is what it measured.
+        overlaps = [overlap(name, t.user_text) for t in hits]
         entries.append(_row(
-            f"skill:{name}", SKILL_PRESENCE_PROXY, len(present), len(hits), weight,
-            max((overlap(name, t.user_text) for t in hits), default=0.0),
-            {"kind": "skill", "name": name,
+            f"skill:{name}", SKILL_PRESENCE_PROXY, len(present), len(hits),
+            _weight_or_null(overlaps), max(overlaps, default=0.0),
+            {"kind": "skill", "name": name, "scored_on": "name",
              "presence_bound": skill_bound.get(name, "session_wide"),
              "present_turn_ids": [t.turn_id for t in present][:20]},
         ))
@@ -1226,14 +1406,15 @@ def build_uptake_table(
         # and labeled an upper bound, and why `weighted_disputes` (which is not
         # the same number for two different entries) is the usable signal.
         hits = disputed
-        weight = sum(overlap(e.text, t.user_text) for t in hits)
+        overlaps = [overlap(e.text, t.user_text) for t in hits]
         entries.append(_row(
-            e.key, ALWAYS_IN_FORCE, len(turns), len(hits), weight,
-            max((overlap(e.text, t.user_text) for t in hits), default=0.0),
-            {"kind": "memory_entry", "source_doc": e.source,
+            e.key, ALWAYS_IN_FORCE, len(turns), len(hits),
+            _weight_or_null(overlaps), max(overlaps, default=0.0),
+            {"kind": "memory_entry", "source_doc": e.source, "scored_on": "entry_text",
              "text": e.text[:300],
              "note": "present in every prompt: dispute_rate is an upper bound, "
-                     "weighted_disputes is the usable signal"},
+                     "weighted_disputes is the usable signal, and a null there is "
+                     "no signal rather than a low score"},
         ))
 
     # --- notes/facts that arrived through prefetch --------------------------
@@ -1247,15 +1428,43 @@ def build_uptake_table(
                 continue
             seen.add(t.turn_id)
             note_present.setdefault(key, []).append(t)
+
+    def note_ctx(turn: Turn, title: str) -> VaultCtx:
+        """The line THIS turn was shown for `title`, falling back to bare title.
+
+        Scoring each disputed turn against the line it was actually shown is the
+        faithful join: that excerpt, not another turn's, was in front of the model
+        when it got corrected. A caller that supplied plain titles — every fixture
+        predating #1195, and any real block whose line carried no path or excerpt
+        — still scores on the title, and `scored_on` says that out loud instead of
+        leaving the reader to guess which of the two a number came from.
+        """
+        for ctx in turn.vault_context:
+            if str(ctx) == title:
+                return ctx if isinstance(ctx, VaultCtx) else VaultCtx(title)
+        return VaultCtx(title)
+
     for key in sorted(note_present):
         present = note_present[key]
         hits = [t for t in present if t.turn_id in disputed_ids]
         title = key.split(":", 1)[1]
+        line_of = {t.turn_id: note_ctx(t, title) for t in present}
+        overlaps = [overlap(line_of[t.turn_id].scored_text, t.user_text) for t in hits]
+        # With no disputed turn there is nothing the weight was computed from, so
+        # the basis is reported over the turns the note WAS present for.
+        bases = {line_of[t.turn_id].scored_on for t in (hits or present)}
+        extra: dict[str, Any] = {
+            "kind": "note",
+            "scored_on": (next(iter(bases)) if len(bases) == 1 else "mixed"),
+            "presence_turn_ids": [t.turn_id for t in present][:20],
+        }
+        path = next((line_of[t.turn_id].path for t in present
+                     if line_of[t.turn_id].path), "")
+        if path:
+            extra["source_doc"] = path
         entries.append(_row(
             key, NOTE_PRESENCE_EMITTED, len(present), len(hits),
-            sum(overlap(title, t.user_text) for t in hits),
-            max((overlap(title, t.user_text) for t in hits), default=0.0),
-            {"kind": "note", "presence_turn_ids": [t.turn_id for t in present][:20]},
+            _weight_or_null(overlaps), max(overlaps, default=0.0), extra,
         ))
 
     cov_skills = sorted(set(skill_present) & set(active_skills or ()))
@@ -1283,6 +1492,17 @@ def build_uptake_table(
                 NOTE_PRESENCE_EMITTED if note_present else NOTE_PRESENCE_UNREACHABLE),
             "note": NOTE_PRESENCE_NOTE,
         },
+        # Per-channel denominators for `weighted_disputes`. Published because the
+        # pooled version of this column is not one quantity: measured in
+        # eval/uptake/uptake-2026-09-17.json the largest weight per source was
+        # 0.2308 (proxy skills) / 0.0505 (always-in-force) / 0.0294 (notes), an
+        # ~8x spread produced by which channel a row belongs to and by nothing
+        # about uptake. Any single sorted list over all rows therefore ranks
+        # channels, and a reader comparing two numbers from different channels is
+        # reading an artefact of the scorer. Every declared source gets a block
+        # even with no rows — a missing key reads as "not measured", which is a
+        # different claim from "measured, nothing here".
+        "by_presence_source": _by_presence_source(entries),
     }
 
     return {
@@ -1297,6 +1517,18 @@ def build_uptake_table(
         },
         "coverage": coverage,
         "entries": entries,
+        # Which scorer wrote this file. A reader picking the newest
+        # `eval/uptake/uptake-*.json` cannot otherwise tell whether the reading
+        # rules its consumer skill gives it apply to the bytes in front of it:
+        # nulls, `scored_on` and `coverage.by_presence_source` are generation-2
+        # facts, and the tables already committed are generation 1.
+        "scorer_generation": SCORER_GENERATION,
+        # Every field's meaning travels with the artifact. The probe used to hand
+        # `write_table` its own glossary text and it described all three channels
+        # as overlap against "the entry text" — true of the always-in-force rows
+        # alone, and the reason a floor-only skill row and a title-only note row
+        # both read as measured signal.
+        "glossary": GLOSSARY,
     }
 
 

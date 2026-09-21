@@ -486,18 +486,20 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"table": table, "stores": stores}, indent=2, default=str)[:6000])
         return 0
 
-    path = uptake.write_table(
-        table, out_dir=out_dir, classifier=classifier_block, stores=stores,
-        extra={"glossary": {
-            "dispute_rate": "disputes / present_in_turns. An UPPER BOUND for "
-                            "always-in-force memory entries, since those are in every prompt.",
-            "weighted_disputes": "dispute counts discounted by lexical overlap between the "
-                                 "entry text and the correction — the usable signal for memory "
-                                 "entries, and a proxy for the embedding weight the item "
-                                 "prescribes.",
-            "presence_source": "which evidence says the entry was in force. Evidence-bound "
-                              "for skills and notes; always_in_force for USER.md/MEMORY.md.",
-        }})
+    # No glossary passed: it ships from `uptake.GLOSSARY` inside `write_table`, the
+    # module that computes the fields. The copy that used to live here defined
+    # `weighted_disputes` as overlap "between the entry text and the correction" for
+    # every channel, and that was false for two of the three — a skill row's entry
+    # text is its NAME with a constant under it, and a note row's was its TITLE. A
+    # definition owned by whoever prints the table can drift from the table; it did.
+    path = uptake.write_table(table, out_dir=out_dir, classifier=classifier_block,
+                              stores=stores)
+    # Printed, not just stored: the pooled headline is the mistake a reader reaches
+    # for first, and the per-channel maxima are what show why it is one.
+    bps = table["coverage"].get("by_presence_source", {})
+    print("per-channel weighted_disputes (never rank across these): " + ", ".join(
+        f"{src}: rows={b['rows']} weighted={b['rows_with_weight']} max={b['max_weight']}"
+        for src, b in sorted(bps.items())))
     print(f"wrote {path} ({len(table['entries'])} entries, "
           f"{table['corpus']['disputes']} disputes over {table['corpus']['turns']} turns)")
     return 0

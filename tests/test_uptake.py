@@ -1820,3 +1820,493 @@ def test_a_worktree_holding_only_the_gates_canary_session_is_not_a_transcript_st
     assert uptake._has_sessions(tmp_path) is False, "the gate's own smoke turn is not a corpus"
     (tmp_path / "sessions" / "20260917_101500_ab12cd.json").write_text("{}")
     assert uptake._has_sessions(tmp_path) is True
+
+
+# ------------------------------- #1195: what a `weighted_disputes` may mean --
+
+def test_a_skill_row_with_no_text_overlap_reports_no_signal_not_a_small_constant():
+    """Defect 1, clause 1: the `+ 0.05` calibration floor fabricated readings.
+
+    In the committed table `eval/uptake/uptake-2026-09-17.json`, 4 of the 90
+    skill rows sit at exactly 0.0500 and `skill:code-review` reports
+    `weighted_disputes 0.05` on `overlap_max 0.0` — uptake credit composed
+    entirely of a constant that arrived in the first implementation commit
+    (`1e21fc1`) with no stated rationale and nothing pinning it. A constant
+    cannot be averaged into a headline: it sorts *above* a row that genuinely
+    measured zero, which is how a note row ended up scoring below a skill row
+    that never overlapped anything. No overlap is no signal, and null is the
+    only value that says so without becoming a number.
+    """
+    t = _mk_turn(1, "wrong, that is not what I asked at all", "Here you are.",
+                 skills=["voice-mode"])
+    # The fixture's own premise, checked: this turn shares no word-gram with the
+    # skill name, so a nonzero weight here can only come from a constant.
+    assert uptake.overlap("voice-mode", t.user_text) == 0.0
+    table = uptake.build_uptake_table(
+        turns=[t], dispute_flags={"s1#1": True}, memory_entries=[],
+        skills_read={"s1": {"voice-mode": 1}})
+    row = [r for r in table["entries"] if r["entry"] == "skill:voice-mode"][0]
+    assert row["disputes"] == 1, row
+    assert row["weighted_disputes"] is None, row
+    assert row["overlap_max"] == 0.0, row
+
+
+def test_the_skill_weighting_carries_no_calibration_constant():
+    """Clause 1's second half: the constant is *gone*, not merely unused.
+
+    At triage `grep -n "0.05" app/uptake.py` returned exactly one line — the
+    skill weighting — so a module-wide check on that literal and on the
+    `max(overlap(…), <constant>)` shape both have a denominator of one.
+
+    The check reads *numeric literals*, not the file's text: this module's
+    comments and docstrings name the constant they removed, and a prose mention
+    is not a calibration floor. Tokenising first is what makes the assertion
+    about the code rather than about the writeup.
+    """
+    import inspect
+    import io
+    import tokenize
+
+    src = inspect.getsource(uptake)
+    code = " ".join(t.string for t in tokenize.generate_tokens(io.StringIO(src).readline)
+                    if t.type not in (tokenize.COMMENT, tokenize.STRING))
+    assert "0.05" not in code, "a 0.05 numeric literal is back in app/uptake.py"
+    assert re.search(r"max\s*\(\s*overlap\s*\(", code) is None, \
+        "a floor under overlap() is back: a channel with no signal must emit null"
+
+
+#: Invented here, in this test, for this test. It is in no committed
+#: `eval/uptake/*.json`, no transcript and no other fixture — clause 2's
+#: externally-sourced check has to be a reference the instrument did not write,
+#: or "the probe agrees with the probe's last table" would be the whole result.
+_TOKEN = "quokka-spline-7741"
+
+
+def test_a_shared_token_makes_a_weight_and_deleting_it_takes_the_weight_away():
+    """Clause 2: dropping the floor must not silence genuine signal.
+
+    The same synthetic turn, twice — once carrying a token the entry also
+    carries, once with that token deleted. The first run's weight is the summed
+    per-turn overlaps; the second's is null. Inject-then-remove is the pair that
+    shows the weight tracks the text rather than the row's existence, and it is
+    built from turns this test invents, not from any artifact under
+    `eval/uptake/`.
+    """
+    entry = uptake.Entry("lloyd/MEMORY.md", _TOKEN)
+    t1 = "wrong, the quokka-spline-7741 is stale"
+    t2 = "no, quokka-spline-7741 again"
+    with_tok = [_mk_turn(1, t1, "Done.", session="s1"),
+                _mk_turn(2, t2, "Fixed.", session="s1")]
+    table = uptake.build_uptake_table(
+        turns=with_tok, dispute_flags={"s1#1": True, "s1#2": True},
+        memory_entries=[entry], skills_read={})
+    row = table["entries"][0]
+    assert row["presence_source"] == uptake.ALWAYS_IN_FORCE, row
+    assert row["disputes"] == 2, row
+    # Hand-computed, NOT recomputed from uptake.overlap: recomputing it here would
+    # make the assertion a tautology that no change to the scorer could fail.
+    # `_TOKENS` is `[a-z0-9_]+`, so "quokka-spline-7741" is the three tokens
+    # quokka / spline / 7741 plus their two bigrams = 5 grams, and turn 1's seven
+    # tokens ("wrong the quokka spline 7741 is stale") are 7 + 6 = 13 grams that
+    # contain all five. Turn 2 is five tokens = 5 + 4 = 9 grams, again containing
+    # all five. Jaccard is therefore 5/13 + 5/9 = 110/117.
+    expected = 5 / 13 + 5 / 9
+    assert expected == pytest.approx(110 / 117)
+    assert row["weighted_disputes"] == pytest.approx(expected, abs=5e-5), row
+
+    # Same entries, same turns, token deleted from both: nothing is left to match,
+    # and the honest answer is no signal — not the 0.05 that used to be paid out.
+    without_tok = [
+        _mk_turn(1, "wrong, the is stale", "Done.", session="s1"),
+        _mk_turn(2, "no, again", "Fixed.", session="s1"),
+    ]
+    off = uptake.build_uptake_table(
+        turns=without_tok, dispute_flags={"s1#1": True, "s1#2": True},
+        memory_entries=[entry], skills_read={})["entries"][0]
+    assert off["disputes"] == 2, off
+    assert off["weighted_disputes"] is None, off
+    assert off["overlap_max"] == 0.0, off
+
+
+def test_the_skill_channel_pays_a_shared_token_and_nulls_without_one():
+    """Clause 2 across the seam that had the floor: a skill row is scored on the
+    skill's name, so the token goes into the name.
+
+    One row with a real overlap must keep its number — a null-everywhere change
+    would look like an improvement while quietly disabling the channel.
+    """
+    on = uptake.build_uptake_table(
+        turns=[_mk_turn(1, f"wrong, rerun {_TOKEN} please", "Ran it.", session="s1")],
+        dispute_flags={"s1#1": True}, memory_entries=[],
+        skills_read={"s1": {_TOKEN: 1}})
+    row = [r for r in on["entries"] if r["entry"] == f"skill:{_TOKEN}"][0]
+    # Again hand-computed: "wrong rerun quokka spline 7741 please" is 6 tokens =
+    # 6 + 5 = 11 grams, and the entry's 5 grams are all inside it, so the row's
+    # single disputed turn is worth 5/11.
+    assert row["weighted_disputes"] == pytest.approx(5 / 11, abs=5e-5), row
+
+    off = uptake.build_uptake_table(
+        turns=[_mk_turn(1, "wrong, rerun it please", "Ran it.", session="s1")],
+        dispute_flags={"s1#1": True}, memory_entries=[],
+        skills_read={"s1": {_TOKEN: 1}})
+    off_row = [r for r in off["entries"] if r["entry"] == f"skill:{_TOKEN}"][0]
+    assert off_row["disputes"] == 1 and off_row["weighted_disputes"] is None, off_row
+
+
+def test_overlap_itself_scores_hand_counted_grams():
+    """The one honest limit of an inject/remove pair whose expected value is
+    produced by `overlap()`: it pins aggregation and null-ing and cannot catch a
+    change to `overlap()`. These are the literals that can.
+
+    Every number is gram counts read off the definition — word-set Jaccard over
+    unigrams plus bigrams, `_TOKENS` = `[a-z0-9_]+`, so a hyphen splits rather
+    than joins:
+
+      * identical text shares every gram with itself, and the union is the same
+        set, so it is 1.0 whatever the wording;
+      * disjoint text shares nothing -> 0.0, and an empty side is 0.0 rather than
+        a ZeroDivisionError, which is what would silently delete every weight;
+      * "alpha beta" inside "alpha beta gamma delta" is 3 shared grams (alpha,
+        beta, "alpha beta") over 7 union grams (3 + 4 more from the longer text);
+      * "quokka-spline-7741" is the tokens quokka / spline / 7741 plus two
+        bigrams = 5 grams, and "wrong, the quokka-spline-7741 is stale" is 7
+        tokens = 13 grams holding all five, so 5/13 — the number the row above
+        is built from.
+    """
+    assert uptake.overlap("wrist torque spec", "Wrist Torque Spec") == 1.0
+    assert uptake.overlap("alpha beta", "gamma delta") == 0.0
+    assert uptake.overlap("", "anything at all") == 0.0
+    assert uptake.overlap("alpha beta", "alpha beta gamma delta") == pytest.approx(3 / 7)
+    assert uptake.overlap(_TOKEN, "wrong, the quokka-spline-7741 is stale") \
+        == pytest.approx(5 / 13)
+
+
+def _note_block(title, path="", excerpt=""):
+    """One persisted `<vault-context>` block in production's own form.
+
+    `prefetch.py` writes `- **<title>** (score: N, file: <vault path>): <excerpt>`
+    and `_messages_subliminal.py:86` stores that line verbatim; both the path and
+    the excerpt are in the string the reader used to throw away.
+    """
+    meta = f"score: 0.87, file: {path}" if path else "score: 0.87"
+    line = f"- **{title}** ({meta})" + (f": {excerpt}" if excerpt else "")
+    return {"role": "subliminal",
+            "content": [{"type": "text",
+                         "text": f"<vault-context>\n{line}\n</vault-context>"}],
+            "timestamp": "2026-09-10T01:00:05+00:00"}
+
+
+def test_the_note_reader_keeps_the_path_and_excerpt_of_an_injected_line():
+    """Clause 3, first half: `_vault_context_titles` captures the whole line.
+
+    The title stays the row's identity — `note:<title>` is how every consumer
+    addresses the row — so the captured path and excerpt ride *beside* it rather
+    than replacing it.
+    """
+    block = ("<vault-context>\n- **Wrist Joint Torque Spec** (score: 0.87, "
+             "file: knowledge/rig/torque.md): the elbow harmonic drive takes 4 Nm\n"
+             "</vault-context>")
+    got = uptake._vault_context_titles(block)
+    assert [str(g) for g in got] == ["Wrist Joint Torque Spec"], got
+    assert got[0] == "Wrist Joint Torque Spec", "the title must still equal the row key"
+    assert got[0].path == "knowledge/rig/torque.md", got[0].path
+    assert "harmonic drive" in got[0].excerpt, got[0].excerpt
+    assert "harmonic drive" in got[0].scored_text, got[0].scored_text
+
+    # A title-only line, the shape the older fixtures emit, still parses and says
+    # which basis it was scored on.
+    bare = uptake._vault_context_titles("<vault-context>\n- **A Bare Note Title**\n"
+                                        "</vault-context>")
+    assert bare[0].path == "" and bare[0].excerpt == "", bare[0]
+    assert bare[0].scored_text == "A Bare Note Title", bare[0].scored_text
+
+
+def test_a_disputed_note_is_weighted_against_the_injected_line_not_its_title(tmp_path):
+    """Clause 3, second half: defect 2, on a turn built through the real reader.
+
+    13 of the 14 presence-verified disputed note rows in the committed table
+    weighed exactly 0.0000 — including rows whose *excerpt* was the thing under
+    dispute — because the score was `overlap(title, user_text)` and the title is
+    a heading, 10 of them a date. Here the title shares nothing with the
+    correction and the excerpt is the correction's subject: title-scored the row
+    is null, line-scored it is not.
+    """
+    _write_session(tmp_path, "s9", [
+        _user("wrong, the harmonic drive spec you quoted is stale"),
+        _note_block("Wrist Notes", "knowledge/rig/torque.md",
+                    "the harmonic drive needs 4 Nm on the elbow"),
+        _asst("here is the note."),
+    ])
+    turns = uptake.human_turns(root=tmp_path)
+    assert turns[0].vault_context == ["Wrist Notes"], turns[0].vault_context
+    assert uptake.overlap("Wrist Notes", turns[0].user_text) == 0.0, \
+        "the title must be the answer the old scorer would have given"
+
+    table = uptake.build_uptake_table(turns=turns, dispute_flags={"s9#1": True},
+                                      memory_entries=[], skills_read={})
+    row = [r for r in table["entries"] if r["kind"] == "note"][0]
+    assert row["entry"] == "note:Wrist Notes", row
+    assert row["source_doc"] == "knowledge/rig/torque.md", row
+    assert row["scored_on"] == "line", row
+    assert row["disputes"] == 1, row
+    assert row["weighted_disputes"] > 0.0, row
+    assert row["overlap_max"] > 0.0, row
+
+
+def test_a_note_row_says_whether_it_was_scored_on_its_line_or_its_title(tmp_path):
+    """The row has to state its own scoring basis, or clause 3's prohibition in
+    the consumer skill is unfalsifiable prose.
+
+    A note that arrived with neither path nor excerpt can only be title-scored;
+    the row says `title`, and the skill tells the consolidator not to rest a keep
+    on such a weight.
+    """
+    _write_session(tmp_path, "s10", [
+        _user("wrong, that is not what the note says"),
+        _note_block("2026-04-21 Daily Notes"),
+        _asst("ok."),
+    ])
+    table = uptake.build_uptake_table(uptake.human_turns(root=tmp_path),
+                                      dispute_flags={"s10#1": True},
+                                      memory_entries=[], skills_read={})
+    row = [r for r in table["entries"] if r["kind"] == "note"][0]
+    assert row["scored_on"] == "title", row
+    assert row["weighted_disputes"] is None, row
+
+
+def test_a_note_shown_two_ways_across_turns_reports_its_basis_as_mixed(tmp_path):
+    """`scored_on: mixed` — the branch where a note's own rows disagree.
+
+    Two disputed turns, the same note, two different injected lines: one carries
+    the path and body excerpt, the other only the bold title. Neither `line` nor
+    `title` describes that row honestly, and a reader told one or the other would
+    read a half-measured weight as a measured one. The pair below is what makes
+    `mixed` falsifiable: strip the excerpt from both turns and the same fixture
+    collapses to `title` with a null weight.
+    """
+    _write_session(tmp_path, "s11", [
+        _user("wrong, the harmonic drive spec you quoted is stale"),
+        _note_block("Wrist Notes", "knowledge/rig/torque.md",
+                    "the harmonic drive needs 4 Nm on the elbow"),
+        _asst("here is the note."),
+        _user("that is not what I asked at all"),
+        _note_block("Wrist Notes"),
+        _asst("ok."),
+    ])
+    table = uptake.build_uptake_table(uptake.human_turns(root=tmp_path),
+                                      dispute_flags={"s11#1": True, "s11#2": True},
+                                      memory_entries=[], skills_read={})
+    row = [r for r in table["entries"] if r["kind"] == "note"][0]
+    assert row["disputes"] == 2, row
+    assert row["scored_on"] == "mixed", row
+    # The title turn shares no gram with its correction, so the weight the row
+    # reports is the line turn's alone — a `mixed` basis is not an average.
+    assert row["weighted_disputes"] > 0.0, row
+    assert row["overlap_max"] > 0.0, row
+
+    # Same two turns, both stripped to the bare title: one basis, no signal. The
+    # second fixture lives under its own root so this build cannot see s11's
+    # line-bearing turns and report `mixed` for the wrong reason.
+    bare = tmp_path / "bare"
+    _write_session(bare, "s12", [
+        _user("wrong, the harmonic drive spec you quoted is stale"),
+        _note_block("Wrist Notes"),
+        _asst("here is the note."),
+        _user("that is not what I asked at all"),
+        _note_block("Wrist Notes"),
+        _asst("ok."),
+    ])
+    stripped = uptake.build_uptake_table(uptake.human_turns(root=bare),
+                                         dispute_flags={"s12#1": True, "s12#2": True},
+                                         memory_entries=[], skills_read={})
+    srow = [r for r in stripped["entries"] if r["kind"] == "note"][0]
+    assert srow["disputes"] == 2, srow
+    assert srow["scored_on"] == "title", srow
+    assert srow["weighted_disputes"] is None, srow
+
+
+def _three_channel_table():
+    """One row from each channel, so the per-source block has a denominator."""
+    return uptake.build_uptake_table(
+        turns=[_mk_turn(1, f"wrong, {_TOKEN} is stale", "Done.", skills=[_TOKEN],
+                        ctx_titles=["2026-04-21 Daily Notes"])],
+        dispute_flags={"s1#1": True},
+        memory_entries=[uptake.Entry("lloyd/MEMORY.md", _TOKEN)],
+        skills_read={"s1": {_TOKEN: 1}})
+
+
+def test_the_table_breaks_its_weights_out_per_presence_source():
+    """Clause 4: per-channel numbers, because pooling them ranks channels.
+
+    Measured in the committed table: the largest `weighted_disputes` per source
+    is 0.2308 / 0.0505 / 0.0294 — an ~8× gap that is a property of which channel
+    a row belongs to, not of uptake. Any single ranking over all rows is decided
+    by that, and a reader with one sorted list cannot see it happening.
+    """
+    table = _three_channel_table()
+    assert {r["presence_source"] for r in table["entries"]} <= set(uptake.PRESENCE_SOURCES)
+    bps = table["coverage"]["by_presence_source"]
+    # Every channel a row can carry gets a block, including one with no rows at
+    # all: a missing key reads as "not measured", which is a different claim from
+    # "measured, and nothing landed here".
+    assert set(bps) == set(uptake.PRESENCE_SOURCES), bps
+    for src, blk in bps.items():
+        assert {"rows", "rows_with_weight", "rows_null_weight", "max_weight"} <= set(blk), (src, blk)
+    assert all(b["rows"] >= 1 for b in bps.values()), bps
+    mem = bps[uptake.ALWAYS_IN_FORCE]
+    assert mem["rows"] == 1 and mem["rows_with_weight"] == 1, mem
+    assert mem["max_weight"] is not None and mem["max_weight"] > 0.0, mem
+    note = bps[uptake.NOTE_PRESENCE_EMITTED]
+    assert note["rows"] == 1 and note["rows_with_weight"] == 0, note
+    assert note["rows_null_weight"] == 1 and note["max_weight"] is None, note
+
+
+def test_the_glossary_says_a_null_is_no_signal_and_the_channels_are_not_one_scale(tmp_path):
+    """Clause 4's second half: the table's own glossary promised something the
+    code does not do.
+
+    It read "dispute counts discounted by lexical overlap between the entry text
+    and the correction" — true of exactly one channel. For skills a constant
+    could *raise* a zero, and for notes "the entry text" was a title. The
+    glossary now travels with every table `write_table` emits, so a consumer
+    reading the JSON alone is told the truth about both.
+    """
+    text = uptake.GLOSSARY["weighted_disputes"]
+    assert "null" in text and "not zero" in text, text
+    assert "no signal" in text, text
+    assert "presence_source" in text, text
+    assert "never rank across" in text or "not on one scale" in text, text
+
+    path = uptake.write_table(_three_channel_table(), out_dir=tmp_path, date="2026-09-21")
+    j = json.loads(path.read_text())
+    assert j["glossary"] == uptake.GLOSSARY, j["glossary"]
+    assert set(j["coverage"]["by_presence_source"]) == set(uptake.PRESENCE_SOURCES)
+
+
+def _resolve(doc: dict, dotted: str):
+    cur = doc
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return False
+        cur = cur[part]
+    return True
+
+
+def test_a_current_table_carries_the_keys_its_generation_promises(tmp_path):
+    """The seam the review rung found: prose that outruns the bytes.
+
+    Clause 5 put three reading rules into the consumer skill — read
+    `coverage.by_presence_source`, treat `weighted_disputes: null` as no signal,
+    check `scored_on` before resting a keep on a note row. None of those keys
+    existed in any committed table, because no probe had run since the scorer
+    that emits them shipped. A rule about keys that are not in the file a job
+    reads is not enforced by anything. So the artifact now names its own scorer
+    generation, and this asserts against a table written by *this* code that the
+    generation and the keys it promises travel together.
+    """
+    assert uptake.SCORER_GENERATION == 2, "bump the corpus rule with the constant"
+    path = uptake.write_table(_three_channel_table(), out_dir=tmp_path,
+                              date="2026-09-21")
+    j = json.loads(path.read_text())
+    assert j["scorer_generation"] == uptake.SCORER_GENERATION, j["scorer_generation"]
+    for dotted in ("coverage.by_presence_source", "glossary.weighted_disputes",
+                   "glossary.scorer_generation"):
+        assert _resolve(j, dotted), f"{dotted} missing from a generation-2 table"
+    notes = [r for r in j["entries"] if r.get("kind") == "note"]
+    assert notes and all("scored_on" in r for r in notes), notes
+    # And the glossary explains the stamp, in terms of what its absence means —
+    # that is the sentence that makes an old table readable rather than wrong.
+    g = uptake.GLOSSARY["scorer_generation"]
+    assert "generation 1" in g and "Absent" in g, g
+
+
+def test_every_committed_table_declares_a_generation_and_only_claims_its_own_keys():
+    """The same rule read off the committed corpus, not a fixture.
+
+    Generation 1 predates `scorer_generation` itself, so absence *is* its
+    declaration — and the point of pinning this is that the generation-1 tables
+    must not contain the generation-2 keys (a stamped-old/unstamped-new mix would
+    let a job read a floor-composed 0.05 as measured signal). The positive control
+    is the count: the loop must have looked at at least one file, and at least one
+    file must be generation 1, or the absence branch of this test proves nothing.
+    """
+    files = sorted((REPO / "eval/uptake").glob("uptake-*.json"))
+    assert files, "no committed table to read the generation rule against"
+    gens = []
+    for f in files:
+        j = json.loads(f.read_text())
+        gen = int(j.get("scorer_generation", 1))
+        gens.append(gen)
+        rows = j["entries"]
+        bps = "by_presence_source" in j.get("coverage", {})
+        gloss = "glossary" in j
+        note_keys = {"scored_on" in r for r in rows if r.get("kind") == "note"}
+        nulls = [r for r in rows if r.get("weighted_disputes") is None]
+        # Generation 1 emitted a glossary too — the one that was false for two of
+        # the three channels — so its presence proves nothing. The keys that
+        # distinguish a generation are the ones a reading rule depends on.
+        if gen == 1:
+            assert "scorer_generation" not in j, f"{f.name} declares 1 and carries the key"
+            assert not bps, f"{f.name} is generation 1 but emits by_presence_source"
+            assert not any(note_keys), f"{f.name} is generation 1 but rows carry scored_on"
+            assert not nulls, f"{f.name} is generation 1 but has null weights"
+            floor = [r for r in rows if r.get("presence_source", "").startswith("proxy:")
+                     and r.get("weighted_disputes") == 0.05 and r.get("overlap_max") == 0.0]
+            assert floor, f"{f.name} is gen 1 with no floor-only skill row: the " \
+                "0.05 this generation pays is no longer visible in it"
+        else:
+            assert gen == uptake.SCORER_GENERATION, f"{f.name} declares {gen}"
+            assert bps and gloss, f"{f.name} claims gen {gen} without its keys"
+            assert not [r for r in rows if r.get("weighted_disputes") == 0.05
+                        and r.get("overlap_max") == 0.0], \
+                f"{f.name} is stamped {gen} and still pays a floor"
+    assert 1 in gens, "every committed table is stamped: the absence rule is untested"
+
+
+@pytest.mark.live_vault
+def test_the_knowledge_write_skill_reads_a_null_as_no_signal_not_zero(tmp_path):
+    """Clause 5: the producer's vocabulary change is only safe if the one live
+    consumer is told. `nightly-reflection-knowledge-write` mandates citing
+    `weighted_disputes` for every keep / merge / archive decision, so a null it
+    reads as `0` becomes an argument for pruning a row that was never measured —
+    and the row that reads as zero sorts *lowest*, which is the direction that
+    gets an entry archived.
+
+    This reads the vault, so it is `live_vault` and does not run under the gate's
+    `-m "not live_vault"` (pytest.ini: a round cannot change the vault). The
+    hermetic counterparts that DO run at the gate are
+    `test_a_current_table_carries_the_keys_its_generation_promises` and
+    `test_every_committed_table_declares_a_generation_and_only_claims_its_own_keys`:
+    together they pin that every path this prose orders the job to read exists in
+    a table the current scorer emits, and that the tables which do NOT have it
+    declare the generation they belong to — which is the seam the review rung
+    found open, where the prose was written for keys no committed table had.
+    """
+    text = (Path.home() / "obsidian/skills/nightly-reflection-knowledge-write/SKILL.md").read_text()
+    assert "null" in text and "no signal, not zero" in text, "null semantics not stated"
+    assert "never rank across" in text, "cross-channel ranking not forbidden"
+    assert "scored_on" in text and "title" in text, \
+        "a title-scored note row is not told to be non-load-bearing"
+
+    # The prose has to say which scorer a rule applies to, because the committed
+    # tables are generation 1 and say nothing about it.
+    assert "scorer_generation" in text, "the skill never says how to tell the generations apart"
+    assert "generation 1" in text and "0.05" in text, \
+        "the skill does not name the floor its tables may still be showing"
+
+    # Every `coverage.*` path the skill orders the job to read must resolve in a
+    # table this code emits. A named path that does not exist is not a missing
+    # figure — the job reads nothing, explains the gap, and its citation still
+    # names the key, which is how prose silently becomes fiction.
+    j = json.loads(uptake.write_table(_three_channel_table(), out_dir=tmp_path,
+                                      date="2026-09-21").read_text())
+    cites = set(re.findall(r"`(coverage\.[a-z_]+)`", text))
+    assert "coverage.by_presence_source" in cites, sorted(cites)
+    for dotted in cites:
+        assert _resolve(j, dotted), f"skill orders the job to read {dotted}; it is not emitted"
+
+    # And a named sub-key under a declared channel must be a real channel, since
+    # the block is what the skill tells the job to rank within.
+    channels = set(uptake.PRESENCE_SOURCES)
+    for src in re.findall(r"coverage\.by_presence_source/([A-Za-z0-9_:+*]+)", text):
+        assert src in channels or src == "<one declared source>", (src, sorted(channels))
