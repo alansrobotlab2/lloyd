@@ -162,6 +162,24 @@ secondary's config and the model it served drifted apart on 2026-09-06.
 | `KV_CACHE_DTYPE` | `bfloat16` | the checkpoint asks for FP8 KV, which is SM89+. Ampere has none, and this is what makes the full window impossible |
 | `ATTN` | `TRITON_ATTN` | |
 
+**Widening `CANVAS` was measured and rejected (#1345, 2026-09-21).** The
+checkpoint's own `config.json` says `canvas_length: 256`; 128 is served to save
+the sampler transient.
+
+- **A wider canvas boots only with the KV pool sized by hand.** vLLM's profiling
+  under-reserves the transient: at 256 it gave KV 3.81 GiB and then OOMed in
+  warm-up on one 256 MiB `[256 × vocab]` buffer.
+- **KV also carries ~0.9 GiB of fixed sliding-window overhead.** 1 GiB serves
+  ~4.7k tokens and 2 GiB ~53k.
+- **What booted:**
+  - 256: `KV_CACHE_GB=2` with `MAX_MODEL_LEN=49152` (splits at 65 rank rows);
+  - 384: `--kv-cache-memory 1400000000` in `EXTRA_ARGS` with `MAX_MODEL_LEN=12288`
+    (splits at 97). `KV_CACHE_GB` takes whole GiB only.
+- **Why it was not worth it.** The recall eval over deeper pools found no gain:
+  44 rows was +0.011 doc_hit (noise) for +0.22 s, and 92 rows was −0.115. The
+  served width also changes djev's answers to an identical request (66/87
+  identical between 256 and 384).
+
 ### 2.3 Switching it on and off
 
 - **`djev.enabled` in config.yaml is the switch.** `server.py::_sync_llm_slots`
