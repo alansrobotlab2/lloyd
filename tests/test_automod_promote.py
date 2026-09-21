@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from scripts.automod import promote as P, state as S
+from scripts.automod import gate as G, promote as P, state as S
 
 
 @pytest.fixture(autouse=True)
@@ -888,3 +888,209 @@ def test_a_rebase_replays_only_the_rounds_own_commits(tmp_path):
     assert not (wt / "a.txt").exists(), "the rolled-back promotion was replayed into the round"
     assert (wt / "b.txt").exists() and (wt / "h.txt").exists()
     assert _sh(wt, "rev-list", "--count", f"{live}..HEAD") == "1"
+
+
+# ---------------------------------------------------------------------------
+# The venv swap is triggered by the venv the gate built, not by a path (#692)
+# ---------------------------------------------------------------------------
+
+LIVE_MARKER = "live interpreter\n"
+
+
+def _live_with_venv(tmp_path, *, symlink_venvs: bool):
+    """A scratch live tree with a real `.venvs/lloyd`, plus a round worktree.
+
+    `symlink_venvs=True` is #692's rejected fix: sharing the live `.venvs` into
+    the worktree makes the documented relative interpreter path resolve, and
+    makes the old `.exists()` probe true on every round.
+    """
+    live = tmp_path / "live"
+    (live / ".venvs" / "lloyd" / "bin").mkdir(parents=True)
+    (live / ".venvs" / "lloyd" / "bin" / "python").write_text(LIVE_MARKER, encoding="utf-8")
+    wt = tmp_path / "wt"
+    if symlink_venvs:
+        wt.mkdir(parents=True)
+        (wt / ".venvs").symlink_to(live / ".venvs", target_is_directory=True)
+    else:
+        wt.mkdir(parents=True)
+    return live, wt
+
+
+def test_a_symlinked_venvs_in_the_worktree_never_renames_the_live_venv(tmp_path):
+    """The hazard #692's triage measured, kept shut on both branches.
+
+    Through the symlink the probe `Path(worktree)/".venvs"/"lloyd").exists()`
+    reads True — asserted below, because that is the whole trap — and the
+    promoter used to act on it: rename the LIVE venv aside, then raise
+    `FileNotFoundError` on the second rename with `main` already fast-forwarded.
+
+    A shared `.venvs` is a shared path under either report, so both arms are
+    exercised against the symlink rather than only the first: a report naming
+    no candidate (requirements unchanged, the case that used to trip on the
+    probe) must return False, and a report naming the worktree's
+    `.venvs/lloyd` — which resolves into the live tree — must raise. Neither
+    may move the live interpreter.
+    """
+    live, wt = _live_with_venv(tmp_path, symlink_venvs=True)
+    assert (wt / ".venvs" / "lloyd").exists(), "the probe the promoter used to trust"
+    current = {"venv_swapped": False}
+    assert P.swap_candidate_venv(wt, live, {"venv": None}, current=current) is False
+    with pytest.raises(P.PromoteError, match="not an isolated directory inside the worktree"):
+        P.swap_candidate_venv(wt, live, {"venv": str(wt / ".venvs" / "lloyd")})
+    assert (live / ".venvs" / "lloyd" / "bin" / "python").read_text() == LIVE_MARKER
+    assert not (live / ".venvs" / "lloyd.prev").exists()
+    assert current["venv_swapped"] is False
+
+
+def test_a_candidate_venv_the_gate_actually_built_is_swapped_in(tmp_path):
+    """The normal case must survive the narrowing: `rung_venv` clones the live
+    venv into the worktree and records it as `GateReport.venv`, and that
+    candidate is what goes live when the diff changed requirements.
+    """
+    live, wt = _live_with_venv(tmp_path, symlink_venvs=False)
+    clone = wt / ".venvs" / "lloyd"
+    (clone / "bin").mkdir(parents=True)
+    (clone / "bin" / "python").write_text("candidate interpreter\n", encoding="utf-8")
+    current = {"venv_swapped": False}
+    assert P.swap_candidate_venv(wt, live, {"venv": str(clone)}, current=current) is True
+    assert (live / ".venvs" / "lloyd" / "bin" / "python").read_text() == "candidate interpreter\n"
+    assert (live / ".venvs" / "lloyd.prev" / "bin" / "python").read_text() == LIVE_MARKER
+    assert current["venv_swapped"] is True
+
+
+def test_a_named_venv_that_resolves_into_the_live_tree_is_refused(tmp_path):
+    """Even a report that DOES name the shared path cannot make the promoter
+    touch the live venv: the named path has to be a real directory inside the
+    worktree that does not resolve into the live tree.
+    """
+    live, wt = _live_with_venv(tmp_path, symlink_venvs=True)
+    with pytest.raises(P.PromoteError) as exc:
+        P.swap_candidate_venv(wt, live, {"venv": str(wt / ".venvs" / "lloyd")})
+    assert "not an isolated directory inside the worktree" in str(exc.value)
+    assert (live / ".venvs" / "lloyd" / "bin" / "python").read_text() == LIVE_MARKER
+    assert not (live / ".venvs" / "lloyd.prev").exists()
+
+
+def _landing_repo(tmp_path, monkeypatch):
+    """A live repo one round-branch commit ahead, with every external action stubbed.
+
+    Only the network, the service restarts and the announce are faked; the
+    merge, the venv decision, the records and the denylist all run for real.
+    Returns `(live, worktree, base, head)`.
+    """
+    import subprocess
+
+    from scripts.automod import backlog as B
+    live = tmp_path / "live"
+    live.mkdir()
+
+    def sh(repo, *args):
+        return subprocess.run(["git", "-C", str(repo), *args],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    sh(tmp_path, "init", "-q", "-b", "main", str(live))
+    sh(live, "config", "user.email", "t@t")
+    sh(live, "config", "user.name", "t")
+    (live / ".gitignore").write_text(".venvs/\n", encoding="utf-8")   # as the real repo: .gitignore:3
+    (live / "f.py").write_text("A = 1\n", encoding="utf-8")
+    sh(live, "add", ".")
+    sh(live, "commit", "-qm", "base")
+    # The venv is untracked, so the round worktree below cannot have one of its own.
+    (live / ".venvs" / "lloyd" / "bin").mkdir(parents=True)
+    (live / ".venvs" / "lloyd" / "bin" / "python").write_text(LIVE_MARKER, encoding="utf-8")
+    base = sh(live, "rev-parse", "HEAD")
+    wt = tmp_path / "wt"
+    sh(live, "worktree", "add", "-q", "-b", "automod/SM_V", str(wt))
+    (wt / "f.py").write_text("A = 2\n", encoding="utf-8")
+    sh(wt, "add", ".")
+    sh(wt, "commit", "-qm", "gated")
+    head = sh(wt, "rev-parse", "HEAD")
+
+    health = {"boot_id": "boot-1", "commit": "not-the-candidate"}
+
+    def fake_get(url, timeout=5.0):
+        return 200, {"turns": {"active": 0, "queued": 0, "harness_runs": 0},
+                     "boot_id": health["boot_id"], "commit": health["commit"]}
+
+    def fake_restart(program):
+        health["boot_id"], health["commit"] = "boot-2", head
+        return True, "restarted"
+
+    monkeypatch.setattr(P, "LIVE_ROOT", live)
+    monkeypatch.setattr(P.S, "read_current", lambda: None)
+    monkeypatch.setattr(P, "count_kg_rows", lambda: 0)
+    monkeypatch.setattr(P, "count_vault_files", lambda: 0)
+    monkeypatch.setattr(P, "vault_commits_for", lambda round_id: [])
+    monkeypatch.setattr(P, "wait_idle", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(P, "set_drain", lambda on, ttl=P.DRAIN_TTL: True)
+    monkeypatch.setattr(P, "pool_paused", lambda: False)
+    monkeypatch.setattr(P, "set_pool_paused", lambda paused: True)
+    monkeypatch.setattr(P, "release_pool_pause", lambda: None)
+    monkeypatch.setattr(P, "_apply_service_changes", lambda changed: [])
+    monkeypatch.setattr(P, "restart_process", fake_restart)
+    monkeypatch.setattr(P, "_wait_health", lambda url, budget: True)
+    monkeypatch.setattr(P, "_announce_promoted", lambda *a, **k: None)
+    monkeypatch.setattr(P, "_get", fake_get)
+    monkeypatch.setattr(B, "work_title_for_round", lambda ledger, round_id: "a title")
+    return live, wt, base, head
+
+
+def test_a_requirements_unchanged_landing_leaves_the_live_venv_whole(tmp_path, monkeypatch):
+    """The clause end to end: `main` really moves, a `.venvs/lloyd` really does
+    exist inside the worktree (symlinked into the live tree, the shape that
+    used to trigger the swap), and the live venv is neither replaced nor
+    renamed to `.prev`.
+
+    `venv_swapped: False` on the landing record is only meaningful beside its
+    positive control — `test_a_candidate_venv_named_by_the_gate_reaches_the_landing_
+    through_gate_json`, same harness, where the field does flip to True. Under
+    the path-probe trigger this test fails outright, with `FileNotFoundError`
+    from the second rename and `main` already fast-forwarded.
+    """
+    live, wt, base, head = _landing_repo(tmp_path, monkeypatch)
+    (wt / ".venvs").symlink_to(live / ".venvs", target_is_directory=True)
+    assert (wt / ".venvs" / "lloyd").exists(), "the shared venv the promoter used to act on"
+
+    out = P.promote("SM_V", wt, base, gate_report={"head": head, "venv": None})
+    assert out["promoted"] is True
+    assert _sh(live, "rev-parse", "HEAD") == head, "the landing did not move main"
+    assert (live / ".venvs" / "lloyd" / "bin" / "python").read_text() == LIVE_MARKER
+    assert not (live / ".venvs" / "lloyd.prev").exists(), "the live venv was renamed aside"
+    assert json.loads(S.CURRENT_PATH.read_text())["venv_swapped"] is False
+
+
+def test_a_candidate_venv_named_by_the_gate_reaches_the_landing_through_gate_json(tmp_path, monkeypatch):
+    """The seam the trigger actually reads: a file this diff does not write.
+
+    `swap_candidate_venv` is now the sole arbiter of whether the live venv gets
+    renamed, and it decides from `gate_report["venv"]` — a value that travels
+    `GateReport.to_dict()` -> `S.write_gate_report` -> `gate.json` ->
+    `json.loads` in `round.land` -> `promote`'s `gate_report` argument. A key
+    renamed or dropped at any of those steps reads as a permanent `None`: the
+    guard declines on every landing, the candidate the gate built and verified
+    against is quietly discarded, and code whose dependencies were only ever
+    checked against that clone goes live on the old venv — with
+    `venv_swapped: False` on the record looking exactly like a requirements-
+    unchanged round. Handing `promote` a hand-built dict cannot see that, so
+    this starts from the gate's own object and reads the real file back.
+
+    Only the network, the service restarts and the announce are stubbed, by
+    `_landing_repo`; the serialisation, the file, the merge and the swap all run.
+    """
+    live, wt, base, head = _landing_repo(tmp_path, monkeypatch)
+    clone = wt / ".venvs" / "lloyd"
+    (clone / "bin").mkdir(parents=True)
+    (clone / "bin" / "python").write_text("candidate interpreter\n", encoding="utf-8")
+
+    report = G.GateReport(round_id="SM_V", base=base, head=head, ok=True)
+    report.venv = str(clone)
+    S.write_gate_report("SM_V", report.to_dict())
+    landed_report = json.loads((S.ROUNDS_DIR / "SM_V" / "gate.json").read_text(encoding="utf-8"))
+    assert landed_report["venv"] == str(clone), "`venv` did not survive the gate file"
+
+    out = P.promote("SM_V", wt, base, gate_report=landed_report)
+    assert out["promoted"] is True
+    assert (live / ".venvs" / "lloyd" / "bin" / "python").read_text() == "candidate interpreter\n", \
+        "the candidate the gate named was not installed"
+    assert (live / ".venvs" / "lloyd.prev" / "bin" / "python").read_text() == LIVE_MARKER
+    assert json.loads(S.CURRENT_PATH.read_text())["venv_swapped"] is True

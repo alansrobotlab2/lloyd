@@ -975,6 +975,68 @@ def _regate_after_move(round_id: str, worktree: Path, live: Path, base: str,
     return report.base, report.head, rep
 
 
+def swap_candidate_venv(worktree: Path, live: Path, gate_report: dict | None,
+                        current: dict | None = None) -> bool:
+    """Install the venv the gate actually built, in place of the live one.
+
+    Returns True when a candidate was swapped in, False when the gate named
+    none — which is every requirements-unchanged landing, the common case.
+    Raises `PromoteError` when the gate DID name one and it cannot be installed
+    safely: code whose dependencies were verified against a candidate must not
+    go live against the old venv, and the caller's except path rolls the merge
+    back, which is what the old crash did too.
+
+    The trigger used to be a filesystem probe — `Path(worktree)/".venvs"/"lloyd"
+    .exists()` — not the gate's report. Those agree only while a `.venvs/lloyd`
+    inside a worktree can have exactly one cause: `Gate.rung_venv` cloning the
+    live venv and recording it as `GateReport.venv`. #692's proposed fix (symlink
+    the whole `.venvs` into the round so the documented relative interpreter path
+    resolves) breaks that agreement for every round at once: the probe reads True
+    through the symlink, the promoter renames the LIVE venv aside as `lloyd.prev`,
+    and its second rename raises `FileNotFoundError` — with `git merge --ff-only`
+    already having moved `main`. Measured in a scratch tree: probe True, live venv
+    renamed aside, `rename RAISED: [Errno 2] No such file or directory`. A guard
+    acting on a number it cannot re-measure, and the expensive kind: it spends the
+    item's one unattended attempt on a rollback of a build that was fine.
+
+    So: the report decides, and the named path must be a real directory inside
+    the worktree that does not resolve into the live tree. A `.venvs` shared
+    with, or symlinked into, the live checkout can therefore never be the thing
+    that renames the live venv aside.
+    """
+    named = str((gate_report or {}).get("venv") or "").strip()
+    if not named:
+        return False
+
+    import os
+    clone, live_venv = Path(named), Path(live) / ".venvs" / "lloyd"
+    wt_root, live_root = Path(worktree).resolve(), Path(live).resolve()
+    resolved = clone.resolve()
+    inside_worktree = clone.is_dir() and resolved.is_relative_to(wt_root)
+    if not inside_worktree or resolved.is_relative_to(live_root):
+        raise PromoteError(
+            f"the gate named candidate venv {named}, but it is not an isolated directory "
+            f"inside the worktree (resolves to {resolved}, worktree {wt_root}, live "
+            f"{live_root}) — refusing to touch {live_venv}")
+    if not live_venv.is_dir():
+        raise PromoteError(f"cannot swap in candidate venv {named}: no live venv at {live_venv}")
+
+    prev = live_venv.parent / "lloyd.prev"
+    if prev.exists():
+        raise PromoteError(f"cannot swap in candidate venv {named}: {prev} already exists")
+
+    os.rename(live_venv, prev)
+    try:
+        os.rename(clone, live_venv)
+    except OSError as exc:
+        os.rename(prev, live_venv)   # never leave the live tree without its venv
+        raise PromoteError(f"candidate venv {named} could not be moved into place: {exc}; "
+                           "the live venv was put back")
+    if current is not None:
+        current["venv_swapped"] = True
+    return True
+
+
 def promote(round_id: str, worktree: Path, base: str, *,
             gate_report: dict | None = None, dry_run: bool = False) -> dict:
     live = LIVE_ROOT
@@ -1202,13 +1264,8 @@ def promote(round_id: str, worktree: Path, base: str, *,
                 set_drain(True, drain_ttl())
                 S.set_pause(RESTART_LEASE)
 
-        venv_clone = Path(worktree) / ".venvs" / "lloyd"
-        if venv_clone.exists():
-            import os
-            venvs = live / ".venvs"
-            os.rename(venvs / "lloyd", venvs / "lloyd.prev")
-            os.rename(venv_clone, venvs / "lloyd")
-            current["venv_swapped"] = True
+        # The gate's report, not a path probe: see `swap_candidate_venv`.
+        if swap_candidate_venv(Path(worktree), live, gate_report, current):
             S.write_verified(S.CURRENT_PATH, current)
 
         # Service definitions the diff changed must reach the running system

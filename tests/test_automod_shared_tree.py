@@ -112,3 +112,70 @@ def test_dirty_paths_reports_renames_on_both_sides(tmp_path):
     (repo / "c.py").write_text("3\n", encoding="utf-8")
     assert W.dirty_paths(repo) == ["a.py", "b.py", "c.py"]
     assert W.dirty_paths(repo, limit=1) == ["a.py"]
+
+
+# ---------------------------------------------------------------------------
+# The round is told which interpreter it has (#692)
+# ---------------------------------------------------------------------------
+
+def test_round_start_hands_the_round_an_absolute_interpreter(scratch):
+    """`.venvs/` is gitignored, so the worktree has none, and the relative form
+    every handoff writes — `.venvs/lloyd/bin/python -m pytest …` — dies inside
+    the round with `No such file or directory`, which reads exactly like a
+    failed acceptance check. The start response names the interpreter instead.
+    """
+    out = R.start("a goal", force=True)
+    try:
+        expected = scratch / ".venvs" / "lloyd" / "bin" / "python"
+        assert out["venv_python"] == str(expected)
+        assert Path(out["venv_python"]).is_absolute(), "cwd-relative is the bug"
+    finally:
+        W.remove(out["round_id"], repo=scratch)
+
+
+def test_the_run_spec_carries_that_interpreter_and_still_validates(scratch):
+    """Same value, in the file a resumed or detached reader reads.
+
+    `validate_code_run_spec` requires `code.base_commit` and `code.branch` and
+    rejects no extra key, so the entry has to ride through unchanged — a spec
+    that stopped validating would refuse the round its own gate runs on.
+    """
+    import yaml
+
+    from scripts.automod import spec as SP
+    out = R.start("a goal", force=True)
+    try:
+        loaded = yaml.safe_load(Path(out["run_spec"]).read_text(encoding="utf-8"))
+        assert loaded["code"]["venv_python"] == out["venv_python"]
+        assert SP.validate_code_run_spec(loaded) is None
+    finally:
+        W.remove(out["round_id"], repo=scratch)
+
+
+async def test_the_mcp_tool_hands_that_interpreter_to_the_agent(scratch, monkeypatch):
+    """The process boundary the round actually crosses.
+
+    An implementer never calls `round.start()` — it calls the `automod_start`
+    MCP tool, which serialises the dict with `json.dumps`. A key dropped
+    between the two is invisible to a test on the in-process return value. The
+    IV gate is stubbed: what is under test is the payload, not who may call.
+    """
+    import json
+
+    import agent_mcp.automod as AM
+    monkeypatch.setattr(AM, "_inner_voice_gate", lambda action: None)
+    monkeypatch.setattr(AM, "_enabled", lambda: True)
+    # The tool wrapper checks `automod.enabled` and then calls `start` WITHOUT
+    # `force`, which checks it again inside `state`. Both are config reads, and
+    # the loop ships inert in config; what is under test is the payload.
+    monkeypatch.setattr(S, "require_enabled", lambda action, root: None)
+    rid, payload = None, {}
+    try:
+        payload = json.loads((await AM.call_tool(
+            "automod_start", {"goal": "a goal"})).content[0].text)
+        rid = payload.get("round_id")
+        assert payload["venv_python"] == str(
+            scratch / ".venvs" / "lloyd" / "bin" / "python")
+    finally:
+        if rid:
+            W.remove(rid, repo=scratch)

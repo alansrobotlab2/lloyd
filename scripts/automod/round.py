@@ -21,6 +21,29 @@ from scripts.automod import gate as G, promote as P, spec, state as S, worktree 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+def live_venv_python(live_root: Path | None = None) -> Path:
+    """The absolute interpreter a round must run its own verify command with.
+
+    `.venvs/` is gitignored, so it exists only in the live checkout: a round
+    worktree under `~/lloyd-work/<round>/home/lloyd` has no `.venvs/` at all
+    until the gate's `venv` rung clones one, and that rung is skipped whole on
+    a requirements-unchanged diff — after the implement turn in which the
+    verify command actually runs. So the relative form the vault has always
+    prescribed (`.venvs/lloyd/bin/python`, `CLAUDE.md:12`, 247 files under
+    `~/obsidian`) dies inside the round with `No such file or directory`,
+    which reads exactly like a failed acceptance check and is not one (#692,
+    measured again on the round that found it: exit 127 on the relative form,
+    the same pytest invocation through the live interpreter 3 passed).
+
+    The round is therefore told the interpreter it has, in absolute form, in
+    both the start response and its run spec. Provisioning a symlinked
+    `.venvs` instead was rejected: `promote` decided the venv swap off a
+    `.exists()` probe, and through a symlink that probe is true on every
+    round — see `swap_candidate_venv`.
+    """
+    return (live_root or LIVE_ROOT) / ".venvs" / "lloyd" / "bin" / "python"
+
+
 def _round_id() -> str:
     from scripts.autoresearch.common import round_id
     return round_id().replace("R_", "SM_")
@@ -89,7 +112,7 @@ def start(goal: str, *, base: str | None = None, force: bool = False,
             "budget": {"max_rounds": 1, "max_variants_per_round": 1},
             "mutation_scope": {"writable_paths": list(spec.ALLOWED_GLOBS)},
             "code": {"base_commit": base, "branch": f"automod/{rid}",
-                     "worktree": str(wt)},
+                     "worktree": str(wt), "venv_python": str(live_venv_python())},
         }
         if item_id:
             run_spec["item"] = {"id": int(item_id)}
@@ -126,6 +149,10 @@ def start(goal: str, *, base: str | None = None, force: bool = False,
                         **({"live_dirty_paths": dirty[:20]} if dirty else {})})
         out_d = {"round_id": rid, "worktree": str(wt), "base": base,
                  "branch": f"automod/{rid}",
+                 # The implementer's verify command has to be runnable from the
+                 # cwd it was handed, and the worktree has no `.venvs/` to run
+                 # the relative form through (`live_venv_python`).
+                 "venv_python": str(live_venv_python()),
                  "run_spec": str(out / "run_spec.yaml"), **resumed}
         if item_id:
             out_d["item_id"] = int(item_id)
