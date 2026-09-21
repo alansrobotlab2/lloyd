@@ -63,6 +63,17 @@ try:
 except ImportError:  # pragma: no cover - script-dir invocation
     import counterfactual as cf
 
+# The interval behind every number this file writes or prints (#696). Owned by
+# its own stdlib module rather than restated here, for the reason stated at the
+# top of `eval/stats.py`: the trend audit, this writer and the backtest all need
+# the same arithmetic, and two copies of a statistic is how two sides come to
+# disagree about whether a number moved. Same dual spelling as `counterfactual`:
+# this file runs as a script AND as `import eval.run_eval` from the tests.
+try:
+    from eval import stats as evstats
+except ImportError:  # pragma: no cover - script-dir invocation
+    import stats as evstats
+
 
 def _corpus_provenance() -> dict:
     """What was actually scored, not just how it was scored.
@@ -492,6 +503,94 @@ def _attach_counterfactual(rec: dict, spec: dict, result: dict, seeds: list[str]
         rec["counterfactual_error"] = f"{type(e).__name__}: {e}"
 
 
+# The seven scored metrics and how each one's run-to-run uncertainty is
+# estimated (#696). A hit/miss rate is a binomial proportion and takes the
+# closed-form Wilson interval; the other five are means of a per-query value
+# that is not a count of successes — an mrr_doc of 0.447 is not "8.9 of 20" —
+# so their interval comes from resampling the run's own per-query vector. The
+# per-query values are already persisted (`records[].scoring`), so this adds
+# arithmetic and nothing to collect.
+CI_METRICS = {
+    "entity_hit_rate": ("entity_hit", "wilson"),
+    "doc_hit_rate": ("doc_hit", "wilson"),
+    "entity_recall_avg": ("entity_recall", "bootstrap"),
+    "doc_recall_avg": ("doc_recall", "bootstrap"),
+    "mrr_doc": ("rr_doc", "bootstrap"),
+    "ndcg10": ("ndcg10", "bootstrap"),
+    "fact_entity_recall_avg": ("fact_entity_recall", "bootstrap"),
+}
+
+
+def confidence_intervals(records: list[dict], *,
+                         n_resamples: int = evstats.N_RESAMPLES,
+                         seed: int = evstats.SEED) -> dict:
+    """The 95 % interval beside each of the seven overall metrics.
+
+    Entry shape: ``{"ci": [lo, hi], "n": int, "kind": "wilson"|"bootstrap"}``,
+    plus `k` (the hit count) on the two rates. Every entry carries its own `n`
+    because a 20-query run is not one denominator: `fact_entity_recall_avg` is
+    scored only where the corpus HAS the entity row, and a query whose
+    expectation list is empty scores None for a recall (#541) and leaves that
+    metric's average. Averaging over 4 of 20 and reporting an interval over 20
+    would be the zero-denominator failure in a new costume.
+
+    `ci` is `[null, null]` — not `[0, 0]`, not `[1, 1]` — when there is nothing
+    to bound: a `NaN` is not valid JSON and a baseline artifact has to stay
+    parseable, so the empty case serialises as nulls and the printer says
+    "no verdict". A one-query run gets nulls for the same reason: a percentile
+    bootstrap on a single value reports that value back with zero width, which
+    is not an interval.
+
+    This is a WITHIN-run interval (how precisely this run measured this corpus).
+    It is deliberately NOT the night-over-night interval — the nightly corpus is
+    not pinned between runs, so a night-to-night comparison is unpaired and needs
+    the wider `independent_bootstrap_ci` over the two runs' vectors, which
+    `scripts/eval_trend_stats.py` owns. Quoting this block as if it bounded a
+    delta between two nights is the misuse clause 5 of #696 names out loud.
+    """
+    out: dict = {}
+    for metric, (field, method) in CI_METRICS.items():
+        vals = [r["scoring"].get(field) for r in records]
+        known = [v for v in vals if v is not None]
+        if method == "wilson":
+            n = len(known)
+            if n == 0:
+                out[metric] = {"ci": [None, None], "n": 0, "k": 0, "kind": "wilson"}
+                continue
+            k = sum(1 for v in known if v)
+            lo, hi = evstats.wilson_ci(k, n)
+            out[metric] = {"ci": [round(lo, 4), round(hi, 4)], "n": n, "k": k,
+                           "kind": "wilson"}
+        else:
+            res = evstats.bootstrap_mean_ci(known, n_resamples=n_resamples, seed=seed)
+            out[metric] = {
+                "ci": ([None, None] if res["lo"] is None
+                       else [round(res["lo"], 4), round(res["hi"], 4)]),
+                "n": res["n"], "kind": "bootstrap",
+            }
+    out["params"] = {"confidence": 0.95, "n_resamples": n_resamples, "seed": seed}
+    return out
+
+
+def _fmt_ci(metric: str, overall: dict) -> str:
+    """The interval suffix for one printed metric line: ` [0.300,0.701] n=20`.
+
+    A zero or absent denominator prints `[no verdict]`, never a rate and never a
+    bracket — that is the same rule `METRIC_NAN_POLICY` already applies to the
+    stored value, extended to the printed line so a reader cannot take "0.00" of
+    an unscored metric for a measured zero (#1260 fixed the fact metric's side of
+    this in the artifact; this is its side of the page).
+    """
+    entry = (overall.get("ci95") or {}).get(metric)
+    if not isinstance(entry, dict):
+        return "  [no interval] n=?"
+    n = entry.get("n") or 0
+    ci = entry.get("ci")
+    if n <= 0 or not ci or any(b is None for b in ci):
+        return f"  [no verdict] n={n}"
+    return f"  [{ci[0]:.3f},{ci[1]:.3f}] n={n}"
+
+
 def summarize(records: list[dict]) -> dict:
     by_cat = defaultdict(list)
     for r in records:
@@ -529,6 +628,8 @@ def summarize(records: list[dict]) -> dict:
         "mrr_doc": avg([r["scoring"]["rr_doc"] for r in records]),
         "ndcg10": avg([r["scoring"]["ndcg10"] for r in records]),
         "fact_entity_recall_avg": avg([r["scoring"]["fact_entity_recall"] for r in records]),
+        # ...and each with its 95 % interval and its own denominator (#696).
+        "ci95": confidence_intervals(records),
         "latency_ms_avg": avg([r["latency_ms"] for r in records]),
         "errors": sum(1 for r in records if r.get("error")),
         "counterfactual_moved_rate": avg([v for v in moved_vals]),
@@ -647,11 +748,29 @@ def print_table(records: list[dict], summary: dict) -> None:
     # `_fmt_rate`, not `or 0`: a null fact metric (the guard's "the fact leg read
     # nothing", #1250) and a measured 0.000 are different facts, and printing
     # both as 0.000 is how the zeroed arms read as ordinary results in the log.
-    print(f"Overall: n={o['n_queries']}  MRR={o['mrr_doc']:.3f}  NDCG10={o['ndcg10']:.3f}  "
-          f"fact_entity_recall={_fmt_rate3(o['fact_entity_recall_avg'])}")
-    print(f"         entity_hit={o['entity_hit_rate']:.2f}  doc_hit={o['doc_hit_rate']:.2f}  "
-          f"ent_recall={o['entity_recall_avg']:.2f}  doc_recall={o['doc_recall_avg']:.2f}  "
-          f"avg_lat={o['latency_ms_avg']:.0f}ms  errors={o['errors']}")
+    #
+    # One metric per line now, each with its 95 % interval and its own
+    # denominator (#696). The single packed line could not carry them and the
+    # packing is what made the page unreadable as evidence: one query flipping
+    # on a 20-query eval moves a rate by 5 points against an interval roughly 40
+    # points wide, so a number copied off this page without its bracket is
+    # exactly the reading `scripts/eval_trend_stats.py` now refuses to make.
+    # `errors` keeps its place on the header line — it is a count, not a score,
+    # and the zero-denominator rule below is about scores.
+    print(f"Overall: n={o['n_queries']}  errors={o['errors']}")
+    for label, metric, fmt in (("MRR", "mrr_doc", _fmt_rate3),
+                               ("NDCG10", "ndcg10", _fmt_rate3),
+                               ("doc_hit", "doc_hit_rate", _fmt_rate),
+                               ("doc_recall", "doc_recall_avg", _fmt_rate),
+                               ("entity_hit", "entity_hit_rate", _fmt_rate),
+                               ("entity_recall", "entity_recall_avg", _fmt_rate),
+                               ("fact_entity_recall", "fact_entity_recall_avg", _fmt_rate3)):
+        # A metric whose denominator is empty prints the rate as null (it was
+        # never measured) and the interval as "no verdict" — never a number and
+        # never a bracket, so a zero-denominator run cannot read as a pass here
+        # either (#1260's rule, applied to the printed page).
+        print(f"  {label:<20}{fmt(o.get(metric))}{_fmt_ci(metric, o)}")
+    print(f"  {'avg_lat':<20}{o['latency_ms_avg']:.0f}ms")
     # Printed beside entity_hit/doc_hit because that gap is what #541 exists to
     # explain: retrieval finds a relevant document far more reliably than it
     # finds the right entity row.
@@ -857,6 +976,14 @@ def main() -> int:
     fact_leg_vacuous = fact_leg_read_nothing(records, corpus)
     if fact_leg_vacuous:
         summary["overall"]["fact_entity_recall_avg"] = None
+        # The interval goes with the rate (#696). A bootstrap over a leg that
+        # read nothing returns a tight bracket around zero, and a bracket beside
+        # a nulled metric is worse than no bracket: it is a precision claim about
+        # a number this run just declared it does not have.
+        summary["overall"].setdefault("ci95", {})["fact_entity_recall_avg"] = {
+            "ci": [None, None], "n": 0, "kind": "bootstrap",
+            "suppressed": "fact leg read nothing on every query (#1260)",
+        }
         for cat_summary in summary["by_category"].values():
             cat_summary["fact_entity_recall_avg"] = None
         corpus_ok = False

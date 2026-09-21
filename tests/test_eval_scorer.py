@@ -667,3 +667,109 @@ def test_a_record_with_no_recorded_seeds_is_not_counted_anchorless():
     rec = _anchor_record("unseeded", ["Index"], ["Knowledge Graph"])
     rec["seeds_extracted"] = None
     assert ev.anchorless_queries([rec]) == []
+
+
+# ── ci95: the interval beside every scored metric (#696) ─────────────────────
+
+CI_METRICS = ("entity_hit_rate", "doc_hit_rate", "entity_recall_avg",
+              "doc_recall_avg", "mrr_doc", "ndcg10", "fact_entity_recall_avg")
+
+
+def _ci_records(hits, doc_hits, values=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 0.5,
+                                       0.1, 0.3, 0.7, 0.9, 0.2, 0.4, 0.6,
+                                       0.8, 0.0, 0.5, 1.0, 0.3, 0.7)):
+    """Twenty scored records with named hit patterns and one value vector reused
+    across the five non-binary metrics, so a Wilson bound can be checked against
+    the same per-query hits the summary was built from."""
+    return [
+        {"id": f"ci{i}", "category": "single", "latency_ms": 100.0, "error": None,
+         "scoring": {"entity_hit": bool(hits[i]), "doc_hit": bool(doc_hits[i]),
+                     "entity_recall": values[i], "doc_recall": values[i],
+                     "rr_doc": values[i], "ndcg10": values[i],
+                     "fact_entity_recall": values[i], "first_doc_rank": 1}}
+        for i in range(20)
+    ]
+
+
+def test_summarize_writes_a_ci95_block_covering_all_seven_scored_metrics():
+    """Clause 2 of #696. Every number in `overall` is a 20-query point estimate
+    and the printed line and the nightly report both read it as a verdict, so
+    the interval has to live in the artifact — a summary a reader cannot bound
+    is a summary a reader will over-read."""
+    hits = [1] * 10 + [0] * 10
+    doc_hits = [1] * 17 + [0] * 3
+    overall = ev.summarize(_ci_records(hits, doc_hits))["overall"]
+    ci = overall["ci95"]
+    assert set(CI_METRICS) <= set(ci), set(CI_METRICS) - set(ci)
+    for metric in CI_METRICS:
+        entry = ci[metric]
+        assert isinstance(entry["ci"], list) and len(entry["ci"]) == 2, metric
+        assert entry["n"] == 20, metric
+    assert ci["params"] == {"confidence": 0.95, "n_resamples": 10000,
+                            "seed": ev.evstats.SEED}
+
+
+def test_the_binary_intervals_come_from_the_same_per_query_hits_as_the_rate():
+    """Wilson over k=10 of n=20 is (0.2993, 0.7007) — the interval the item
+    quotes, and the reason one flipped query cannot be called a regression."""
+    hits = [1] * 10 + [0] * 10
+    doc_hits = [1] * 17 + [0] * 3
+    overall = ev.summarize(_ci_records(hits, doc_hits))["overall"]
+    ci = overall["ci95"]
+    assert overall["entity_hit_rate"] == 0.5
+    assert ci["entity_hit_rate"]["ci"] == [0.2993, 0.7007]
+    assert ci["entity_hit_rate"]["k"] == 10
+    # k=17/20 is the item's other worked number: a rate of 0.85 whose honest
+    # interval reaches down to 0.64 — the 09-09 vs 09-14 nightly pair that the
+    # old report called "doc_hit went 1.00" sits entirely inside this bracket.
+    assert overall["doc_hit_rate"] == 0.85
+    assert ci["doc_hit_rate"]["ci"] == [0.6396, 0.9476]
+
+
+def test_the_non_binary_intervals_are_bootstrap_not_wilson():
+    """mrr_doc / ndcg10 / the recalls are means of a per-query value, not counts
+    of successes, so a binomial interval does not describe them. The check that
+    it is a bootstrap: it is computed from the value vector, so a vector with
+    spread gets a wide bracket while a constant vector collapses."""
+    spread = ev.summarize(_ci_records([1] * 20, [1] * 20))["overall"]["ci95"]
+    flat = ev.summarize([
+        {"id": f"f{i}", "category": "single", "latency_ms": 10.0, "error": None,
+         "scoring": {"entity_hit": True, "doc_hit": True, "entity_recall": 0.5,
+                     "doc_recall": 0.5, "rr_doc": 0.5, "ndcg10": 0.5,
+                     "fact_entity_recall": 0.5, "first_doc_rank": 1}}
+        for i in range(20)])["overall"]["ci95"]
+    lo, hi = spread["mrr_doc"]["ci"]
+    assert lo < 0.55 < hi, (lo, hi)
+    assert spread["ndcg10"]["kind"] == "bootstrap"
+    assert flat["mrr_doc"]["ci"] == [0.5, 0.5]      # no spread, no uncertainty
+    assert spread["mrr_doc"]["ci"] != flat["mrr_doc"]["ci"]
+
+
+def test_a_metric_scored_on_no_query_gets_no_interval_not_a_bracket_around_nothing():
+    """The zero-denominator failure mode #696 clause 3 names, at the artifact
+    layer: with every fact score None the rate is null, and an interval computed
+    over an empty vector must be null too rather than the [0.0, 0.0] a naive
+    mean-of-nothing would report."""
+    records = _ci_records([1] * 20, [1] * 20)
+    for r in records:
+        r["scoring"]["fact_entity_recall"] = None
+    overall = ev.summarize(records)["overall"]
+    assert overall["fact_entity_recall_avg"] is None
+    entry = overall["ci95"]["fact_entity_recall_avg"]
+    assert entry["ci"] == [None, None] and entry["n"] == 0, entry
+
+
+def test_the_ci95_block_survives_the_baseline_round_trip():
+    """NaN is not valid JSON, and a baseline that `json.load` cannot read is not
+    a baseline — which is why the empty case serialises as nulls instead. The
+    subprocess path that writes a real baseline file is covered end to end in
+    `test_eval_ci_reporting.py`; what this pins is the narrower claim that the
+    block `summarize` builds survives a JSON round trip with its bounds intact."""
+    import json as _json
+    # The runner's own harness for this lives in test_eval_corpus_guard.py; here
+    # the cheaper equivalent: summarise, dump, reload.
+    overall = ev.summarize(_ci_records([1] * 10 + [0] * 10, [1] * 17 + [0] * 3))["overall"]
+    blob = _json.dumps({"summary": {"overall": overall}})
+    assert "NaN" not in blob and "Infinity" not in blob
+    back = _json.loads(blob)["summary"]["overall"]["ci95"]
+    assert back["entity_hit_rate"]["ci"] == [0.2993, 0.7007]
