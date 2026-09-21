@@ -16,7 +16,7 @@ summary: GPU 2's structured-decision engine — how it is served, its wire
   gate on it.
 type: reference
 status: implemented
-date: 2026-09-20
+date: 2026-09-21
 ---
 
 # djev — the structured-decision engine on GPU 2
@@ -554,8 +554,12 @@ one thing it has never seen. It asks one `same_finding` `choice` per candidate
 every create that has candidates, including human, `force`, `blocker` and
 `umbrella` writes that were never eligible to merge. For those, `merged_into:
 null` means "not eligible", not "merge declined", and the row does not record
-which it was. A calibration off these rows has to recover eligibility from the
-tags in `meta`.
+which it was — and unlike the first draft of this section, that bit cannot be
+recovered afterwards: `meta` carries `name` and `candidates` and nothing else
+(measured 2026-09-21 — every `dedupe` row in the live log has the meta key set
+`('candidates', 'name')`), and the tags and `force` flag that decided
+`mergeable` at `backlog.py:458-460` are never passed to the hook, though all
+three are in scope at its call site. Filed as #934.
 
 ### 6.3 Entity SAME/DIFFERENT — `scripts/memory/entity_semantic_gate.py`
 
@@ -886,6 +890,7 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
 | `app/llm_slots.py` | the slot switch shared with the secondary |
 | `agent_mcp/djev.py` | the three tools |
 | `agent_mcp/vault.py`, `agent_mcp/backlog.py`, `scripts/memory/entity_semantic_gate.py` | the three seams |
+| `scripts/service_health_check.py` | `SERVICES["agent-djev"]` declares `"port": 8011`, so a supervisor `RUNNING` line with no listener behind it shows up as a red probe, and `_switched_off()` reads `llm_slots.slots()` so a `djev.enabled: false` verdict is not an outage |
 | `eval/djev/schemas.py`, `eval/djev/replay.py` | the registry, and calibration |
 | `agent-services/bin/start-djev.sh`, `agent-services/setup/setup-djev.sh`, `agent-services/bin/bench-djev.py` | serving, setup, the bench |
 | `agent-services/supervisor/conf.d/agent-djev.conf` | the program and every tuning knob |
@@ -902,9 +907,13 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
   `tests/test_backlog_dedupe.py` and `test_backlog_spawn_loop.py` call the
   dedupe seam with no isolation at all. `tests/conftest.py` neither sets
   `LLOYD_DJEV_SHADOW=0` nor moves the state dir, and every automod gate runs
-  the suite. Of the first 72 rows, **47 are fixtures**: 36 of 38 `dedupe`
-  rows, and 11 of 14 `rerank` rows (`meta: {}`, `actual: null`, one
-  question). The dedupe fixtures were all answered, so each was a real read
+  the suite. Re-measured 2026-09-21 over the live log (91 rows spanning
+  01:55–07:09Z): **62 are fixtures**, 36 of 40 `dedupe` rows and 26 of 31
+  `rerank` rows (`meta: {}`, `actual: null`, one question), and the newest
+  fixture row landed that same morning — so the ratio has not decayed, the
+  rerank fixture count has more than doubled, and the 26 empty-`meta` rows are
+  now most of the seam rather than most of its head. Filed as #1324. The
+  dedupe fixtures were all answered, so each was a real read
   on the single-sequence engine, and `replay.py --floors` reads their
   `label_mass` as dedupe traffic. The rerank fixtures send an empty question
   or hit a stubbed client and carry no answers, so they cannot move a floor,
@@ -944,3 +953,18 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
   would make one.
 - An eval arm is code in the handler, not a log.
 - djev stays out of `models:` and out of `resolve_model_alias`.
+
+## Review log
+
+- **2026-09-21 — `current`.** Checked every path, port, constant, config key and
+  measured table against HEAD `485fa6c03e31`: the engine, the three tools, the
+  five-schema registry with its three thresholds and four floors, the three
+  seams and their
+  guards, the kill switch through `llm_slots`, and the 4,800 ms nightly ceiling
+  (`workers/sources/automod_regression.py:231`) all still describe what runs.
+  Two things changed: §6.2 had claimed a calibration can recover merge
+  eligibility from the tags in `meta`, which is false — no tags are written
+  (#934) — and §11's fixture counts are re-measured at 62 of 91 rows with the
+  leak still live (#1324). `scripts/service_health_check.py` is added to the
+  consumer table. The 20-query caveat on the §8 arm table is now also a stale
+  denominator, since the gold set grew to 87 queries in `98fa216b` (#1319).
