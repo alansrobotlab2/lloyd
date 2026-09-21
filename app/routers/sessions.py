@@ -23,6 +23,7 @@ from app.sessions_io import (
     drain_pending,
     get_active_session_id,
     enqueue_ambient_prefetch,
+    clear_ambient_prefetch,
     peek_ambient_prefetch,
     set_ambient_decision,
     get_current_turn,
@@ -758,8 +759,14 @@ async def delete_session(session_id: str):
     """Wipe a session's history.
 
     Cancels the current turn (if any), drains the queued turns in **both**
-    tiers — ambient then user — and removes the session JSON. The next
-    message lands in a fresh session at the same id.
+    tiers — ambient then user — discards the session's **ambient prefetch**
+    entries, and removes the session JSON. The next message lands in a fresh
+    session at the same id.
+
+    The prefetch entries go for the same reason the queued turns do: only a turn
+    for this exact session id reads them, so once the JSON is unlinked nothing
+    will ever drain them and the key sits in the process for its whole life —
+    expiry at drain time is expiry that never happens (#910).
 
     The user tier has to be drained here even though `/cancel` deliberately
     leaves it alone: a queued user turn that survives this delete still runs
@@ -775,6 +782,7 @@ async def delete_session(session_id: str):
     if cancel_event is not None:
         cancel_event.set()
     await drain_pending(session_id, source="all")
+    clear_ambient_prefetch(session_id)
     meta_path = SESSIONS_DIR / f"{session_id}.json"
     removed = False
     try:
@@ -975,6 +983,15 @@ async def inject_ambient_prefetch(session_id: str, request: Request):
     `GET /api/sessions/active` first or pass `session_id=""` to let the
     server resolve to the most recent user session.
 
+    A session whose platform is in `NON_USER_PLATFORMS` is refused with **409**,
+    as `/inject` has done since 2026-09-07. This endpoint checked only that the
+    file existed, so a producer that passed an explicit worker or autonomy id got
+    a 200 and an entry that accumulated forever: those sessions take no user
+    turn, and until #910 expiry ran only inside the drain, so a signal queued
+    where nobody reads it was also a signal nothing could reclaim. 409 rather
+    than a 200 "skipped" so `session_inject_context` reports ok=false and no
+    producer records the notification as delivered.
+
     Refused with 400, naming the fragment, when `summary` or `content` carries
     a weekday word and an ordinal that cannot both be true (`Fri Sept 19` in
     2026) — the same guard `/inject` applies, because both endpoints are the
@@ -985,6 +1002,18 @@ async def inject_ambient_prefetch(session_id: str, request: Request):
     meta_path = SESSIONS_DIR / f"{session_id}.json"
     if not meta_path.exists():
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # Deny-list, not allow-list: an unreadable or platform-less file is treated
+    # as the web UI it almost certainly is, so a client this code has never heard
+    # of keeps receiving its briefs rather than silently losing them.
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (OSError, ValueError):
+        meta = {}
+    if not is_user_session(meta):
+        raise HTTPException(status_code=409, detail=(
+            f"session {session_id} is a {meta.get('platform')} session; "
+            "ambient signals are not queued where nobody reads them"))
 
     data = await request.json()
     source = (data.get("source") or "").strip()

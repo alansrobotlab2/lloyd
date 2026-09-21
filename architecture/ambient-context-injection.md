@@ -102,14 +102,7 @@ reference them only if naturally relevant to what they're saying now.
 ### Key Properties
 
 - **Dedup by `dedup_key`** — same key re-firing replaces the previous unsent entry (newest wins). Default `dedup_key = source`.
-- **TTL** — entries carry `expires_at`, from `ttl_seconds` (default 3600, and the ambient tier only). Expired entries are evicted silently at drain time —
-  and expiry is evaluated *only* there: `drain_ambient_prefetch`
-  (`app/sessions_io.py:334-352`) is both the only TTL check and the only place a
-  session's key leaves the dict, and it runs only when that session next takes a
-  turn. A signal queued against a session that never takes one — a worker or
-  autonomy session, which `/inject-prefetch` does not refuse — is therefore
-  neither delivered nor reclaimed, and its key persists for the process
-  lifetime. Backlog #910.
+- **TTL** — entries carry `expires_at`, from `ttl_seconds` (default 3600, and the ambient tier only). Expiry is evaluated on **both** doors, so reclaiming a signal never depends on a turn arriving for the session it was queued against. `enqueue_ambient_prefetch` (`app/sessions_io.py:404`) purges that session's dead entries before it stores the new one, names each casualty's `source` in `dropped`, refuses a signal that was already expired at the moment it was written, and releases the session's key whenever the purge empties it; `drain_ambient_prefetch` (`app/sessions_io.py:475`) keeps its own filter as defence in depth, because an entry can pass its deadline while it waits rather than at write — and names each casualty in the log, since a path that drops a signal without a trace is how #910 stayed invisible. What `expires_at == 0.0` means is **no deadline**, not the epoch — every caller that omits `ttl_seconds` gets that value, so a purge that read it as "already expired" would silently delete nearly every ambient signal in the system and still report a clean queue. `tests/test_ambient_prefetch_retention.py` pins both halves of that boundary: expiry-on-write, key release through every door (a dead signal into an empty session, purge-to-empty, drain-to-empty, cap eviction), the drain's overflow re-insert and its logged drop of a signal that expired while it waited, that drain driven through its only production caller `prefetch._prefetch_prepare` rather than called directly, the `DELETE` and `/inject-prefetch` routes, and this page's own `app/sessions_io.py:<line>` citations (`test_the_pages_line_citations_point_at_the_functions_they_name`), since a stale pointer reads as a discovered defect. What the page said before, and what was wrong with it, is in the 2026-09-20 review-log entry below — and the three sentences that read as current but described the old tree are pinned absent by `test_the_architecture_page_describes_the_retention_that_shipped`, which is the machine-readable version of that entry.
 - **Two caps, and they answer different questions.** `AMBIENT_PREFETCH_CAP = 5`
   bounds what a session may *hold*: the oldest is evicted on enqueue.
   `AMBIENT_PREFETCH_DRAIN_MAX = 3` bounds what one turn may *see*: the drain
@@ -234,7 +227,7 @@ the branch is reachable, through `"all"`. Fixed by #909.
 
 | Route | Does |
 |---|---|
-| `POST /api/sessions/{id}/inject-prefetch` | Mechanism 1. 404 on an unknown session; 400 without `source` and `summary` |
+| `POST /api/sessions/{id}/inject-prefetch` | Mechanism 1. 404 on an unknown session; 409 on a non-user one (#910); 400 without `source` and `summary` |
 | `POST /api/sessions/{id}/inject` | Mechanism 2. 409 on a non-user session, 404 on an unknown one |
 | `POST /api/sessions/{id}/ambient-decide` | 400 unless the session's *current* turn has `source == "ambient"` |
 | `GET /api/sessions/active` | The resolver a producer gets when it passes `session_id=""` |
@@ -260,11 +253,13 @@ missing one reads as the web UI.
 
 `/inject` refuses such a session with **409 rather than a 200 "skipped"**, so
 `session_inject_context` reports `ok=false` and no producer records the
-notification as delivered. Note the asymmetry: `/inject-prefetch` carries no
-such gate — it checks only that the session file exists — because the cheap
-tier's defence is the resolver, and a producer that passes an explicit worker
-`session_id` there will queue a signal nobody drains.
-`tests/test_active_session_resolution.py` pins the resolver and the 409.
+notification as delivered. `/inject-prefetch` makes the same refusal for the same
+reason, since #910. It used to check only that the session file existed, on the
+theory that the cheap tier's defence is the resolver — but a producer that passes
+an explicit worker `session_id` got a 200, and because expiry then lived only in
+the drain, that response queued a signal nobody would drain and nothing could
+reclaim. `tests/test_active_session_resolution.py` pins the resolver and `/inject`'s
+409; `tests/test_ambient_prefetch_retention.py` pins this route's.
 
 ### Inner Voice is the second producer
 
@@ -319,6 +314,54 @@ mode has no reason to block it.
 
 ## Review log
 
+- 2026-09-20 — **#910 landed**: expiry moved onto the write path, so reclaiming an
+  ambient signal no longer requires a turn for the session it was queued against.
+  `enqueue_ambient_prefetch` purges that session's dead entries, reports their
+  `source`s in `dropped`, refuses a signal already expired at the moment it was
+  written, and releases the session's key when the purge empties it; the drain
+  keeps its filter as defence in depth and now **logs each entry it drops** rather
+  than evicting silently — a signal that dies without a trace is how this defect
+  stayed invisible, and until this change no test in the tree had exercised the
+  drain's expiry at all: `drain_ambient_prefetch` appears in no other test file,
+  and none of the five `AmbientPrefetchEntry` constructions elsewhere in `tests/`
+  passes `expires_at`, so every pre-existing entry arrived as the no-deadline
+  sentinel. (Stated about this dataclass, not the field name — `expires_at` also
+  appears in seven other test files as grant and mail-object expiry, which is why
+  the narrower wording is the true one.) `DELETE /api/sessions/{id}` now
+  discards prefetch entries along with queued turns, seeded in its test through
+  `POST /inject-prefetch` so what gets cleared is an entry the route itself stored
+  rather than one a helper invented. `POST
+  /api/sessions/{id}/inject-prefetch` answers 409 for a `NON_USER_PLATFORMS`
+  session — the refusal `/inject` has returned since 2026-09-07 and the one this
+  route lacked, which is how a producer naming a worker or autonomy id got a 200
+  for a signal nobody would ever read. `app/routers/messages.py` also lost its
+  unused `enqueue_ambient_prefetch` / `AmbientPrefetchEntry` imports, so the
+  producer set is as small as it actually is: `sessions.py` is the only writer.
+  Pinned by 16 nodes (15 functions, one parametrised over both non-user
+  platforms) in the new `tests/test_ambient_prefetch_retention.py`, one
+  per door a signal or a key can leave through — including the drain driven
+  through `prefetch._prefetch_prepare`, its only production caller, so the
+  seam a turn actually crosses is covered and not just the function that
+  changed — plus this page.
+  Verified 2026-09-20: `pytest tests/test_ambient_prefetch_retention.py` → 16
+  passed; with the three source files reverted to their pre-fix versions and the
+  same file re-run, 10 of the 16 fail, each for the reason its clause names (the
+  other six are the controls that must not change, one of which — the
+  `_prefetch_prepare` seam — passes at base by design, because that caller's
+  behaviour is being preserved, not changed). Blast radius, taken from
+  `graph_affected` over `enqueue_ambient_prefetch` and `drain_ambient_prefetch`
+  rather than from a filename guess, and re-measured 2026-09-21: **275 passed** over
+  the 14 test files that reach this store — the nine the graph walk named
+  (`test_prefetch`, `test_ambient_inject`, `test_session_queue`,
+  `test_session_doc_claims`, `test_active_session_resolution`,
+  `test_session_platform_checks`, `test_ambient_prefetch_retention`,
+  `test_api_contracts`, `test_files_changed_surface`) plus five that touch it by
+  name (`test_session_titles`, `test_component_manifest_prefetch_seam`,
+  `test_brief_triage_clock_skill`, `test_background_inner_voice`,
+  `test_grant_gate_session_path`). An earlier cut of this entry claimed "every
+  ambient and session test in the tree → 160 passed" while naming seven files: the
+  seven do measure 160, but they are not every such file, and a count that outruns
+  the set it names is exactly the defect this page keeps recording.
 - 2026-09-20 — **#909 landed**, which makes the 2026-09-12 entry's first
   correction historical rather than current. `DELETE /api/sessions/{id}` now
   drains both tiers through `drain_pending(source="all")`, so a queued user
@@ -340,7 +383,16 @@ mode has no reason to block it.
   800-char truncation, the envelope text and its one-verb `urgent` variant, the
   deferred 0.5 s cancel, the `worker`/`autonomy` deny-list and the `/inject` 409,
   the Inner Voice second-producer path, every config and `PLAN_MODE_ALWAYS_ALLOWED`
-  claim, and 63 green tests across the three pinned files. Two claims were wrong
+  claim, and the green tests across the pinned files. (This entry originally read
+  "63 green tests across the three pinned files"; that number names a file set no
+  later reader can identify — the plausible triads measure 27
+  (`test_session_queue.py` + `test_session_doc_claims.py` +
+  `test_active_session_resolution.py`), 33 (the first two +
+  `test_session_platform_checks.py`) and 58 (`test_ambient_inject.py` +
+  `test_active_session_resolution.py` + `test_session_platform_checks.py`) on
+  2026-09-21, none of them 63. The count is dropped rather than replaced with a
+  guess, and a set is named wherever a count is quoted.) Two claims were wrong
   and are corrected in place: `DELETE /api/sessions/{id}` does *not* drain queued
-  user turns (#909), and TTL is enforced only at drain, so signals aimed at a
-  session that never takes a turn are neither delivered nor reclaimed (#910).
+  user turns (#909), and TTL was enforced only at drain, so a signal aimed at a
+  session that never takes one sat unreclaimed — both since fixed, #909 first and
+  #910 on 2026-09-20; the entries above record each.

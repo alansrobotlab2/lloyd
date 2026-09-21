@@ -18,6 +18,7 @@ import asyncio
 import contextvars
 import json
 import logging
+import time as _time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -271,8 +272,6 @@ def get_active_session_id(max_age_hours: float = 24.0) -> Optional[str]:
     Returns None if nothing qualifies — producers should treat this as a
     no-op (the user simply has no active chat session to notify).
     """
-    import time as _time
-
     if _last_user_session_id:
         p = SESSIONS_DIR / f"{_last_user_session_id}.json"
         if p.exists():
@@ -358,19 +357,95 @@ def ambient_clock_stamp(epoch_seconds: float | None) -> str:
     return when.strftime("%Y-%m-%d %H:%M %Z")
 
 
+def _is_expired(entry: AmbientPrefetchEntry, now: float) -> bool:
+    """Has this entry's deadline passed? `expires_at == 0.0` means none was set.
+
+    The sentinel is checked first and is never expired. It is the dataclass
+    default, so every producer that never thought about a TTL — and every test
+    that enqueues with the field unset — arrives as 0.0. Reading it as an instant
+    (epoch zero, permanently past) would make any purge silently delete signals
+    that were never given a deadline, which is a worse failure than the one #910
+    fixes: the old bug kept a signal too long, this one would drop it forever.
+    """
+    return entry.expires_at != 0.0 and entry.expires_at <= now
+
+
+def _release_if_empty(session_id: str) -> None:
+    """Drop `session_id`'s key once its list is empty; keep it otherwise.
+
+    The dict lives for the process lifetime, so an empty list parked under a key
+    is a permanent entry per session id that ever received a signal — the
+    unbounded dimension #910 names, since `AMBIENT_PREFETCH_CAP` bounds entries
+    but not keys. Callers use this after any step that can empty a list; the
+    invariant is "a key is present iff it holds entries", so a drain that
+    overflows `AMBIENT_PREFETCH_DRAIN_MAX` must NOT release its key, and neither
+    must cap eviction, which drops the oldest and still leaves the cap.
+    """
+    if not _ambient_prefetch_queue.get(session_id):
+        _ambient_prefetch_queue.pop(session_id, None)
+
+
+def clear_ambient_prefetch(session_id: str) -> int:
+    """Discard every ambient prefetch entry queued for `session_id`.
+
+    For a caller that is destroying the session outright: the entries are
+    drained only by a turn for this exact id, so once the session JSON is
+    unlinked nothing in the process will ever read them. `DELETE
+    /api/sessions/{id}` calls this — it already drained both tiers of the *turn*
+    queue for the same reason (#909), and the prefetch dict was the one store it
+    left behind.
+
+    Returns how many entries were discarded.
+    """
+    dropped = _ambient_prefetch_queue.pop(session_id, [])
+    return len(dropped)
+
+
 def enqueue_ambient_prefetch(session_id: str, entry: AmbientPrefetchEntry) -> dict[str, Any]:
     """Push an ambient prefetch entry for `session_id`.
 
     Behavior:
+      - Expiry is applied here as well as at the drain (#910). Expiry used to
+        live only inside `drain_ambient_prefetch`, whose sole caller is
+        `prefetch._prefetch_prepare` — so a signal's TTL could not fire until a
+        turn ran **for its own session id**, and a producer that named a session
+        which never takes one left the entry and its key in RAM for the life of
+        the process. Purging on write makes every producer that touches a session
+        reclaim that session's dead entries, and its `dropped` names them.
+      - A signal already past its deadline is not stored at all. `queued` is 0
+        then, because `session_inject_context` echoes this body as what was
+        delivered and must not report a signal that can never reach anyone.
       - If `dedup_key` is set, collapses any existing entry sharing that
         key (newest wins — old is dropped so rapid producer re-fires don't
-        stack).
+        stack). A signal that will not be stored does not spend a live entry.
       - Caps at `AMBIENT_PREFETCH_CAP`; oldest beyond cap is evicted.
+      - The session's key is released whenever the list ends up empty.
 
     Returns a small dict describing what happened (for producer logging).
     """
+    now = _time.time()
     q = _ambient_prefetch_queue.setdefault(session_id, [])
     dropped: list[str] = []
+
+    expired = [e for e in q if _is_expired(e, now)]
+    if expired:
+        dropped.extend(e.source for e in expired)
+        q[:] = [e for e in q if not _is_expired(e, now)]
+
+    if _is_expired(entry, now):
+        # Refused at the door: it could only ever be drained as expired. The
+        # depth reported is what the session still holds — a refusal is not an
+        # empty queue, and a producer reading `queue_depth: 0` would conclude its
+        # earlier signals had already been delivered.
+        dropped.append(entry.source)
+        _release_if_empty(session_id)
+        return {
+            "queued": 0,
+            "queue_depth": len(_ambient_prefetch_queue.get(session_id, [])),
+            "dropped": dropped,
+            "deduped": False,
+        }
+
     deduped = False
     if entry.dedup_key:
         keep: list[AmbientPrefetchEntry] = []
@@ -385,6 +460,10 @@ def enqueue_ambient_prefetch(session_id: str, entry: AmbientPrefetchEntry) -> di
     while len(q) > AMBIENT_PREFETCH_CAP:
         old = q.pop(0)
         dropped.append(old.source)
+    # No release check on this path: the append above put one entry in, so the
+    # list cannot be empty and cap eviction cannot empty it (`AMBIENT_PREFETCH_CAP
+    # = 5` — eviction only runs above 5 and stops at 5). The one write that can
+    # end with nothing stored is the refusal above.
     return {
         "queued": 1,
         "queue_depth": len(q),
@@ -395,15 +474,30 @@ def enqueue_ambient_prefetch(session_id: str, entry: AmbientPrefetchEntry) -> di
 
 def drain_ambient_prefetch(session_id: str) -> list[AmbientPrefetchEntry]:
     """Pop and return (up to `AMBIENT_PREFETCH_DRAIN_MAX`) unexpired entries
-    for `session_id`. Expired entries are silently evicted. Safe to call
-    when the queue is empty (returns []).
+    for `session_id`. Safe to call when the queue is empty (returns []).
+
+    An entry past its deadline is dropped and **named in the log**, the way the
+    write path names its casualties in `dropped`. This filter is the backstop, not
+    the primary — the write path refuses to store an expired signal at all — but a
+    signal can still pass its deadline here, because it may wait in the queue
+    between one write and the next drain. A silently-falling-signal path is what
+    kept #910 invisible for as long as it did, so this drop is not silent either.
+
+    Takes the key with the list, then puts back only what actually overflows —
+    so an exhausted queue leaves no key behind (#910) while a drain that hit the
+    per-turn cap keeps exactly the leftover entries under it.
     """
-    import time as _time
     q = _ambient_prefetch_queue.pop(session_id, [])
     if not q:
         return []
     now = _time.time()
-    alive = [e for e in q if e.expires_at == 0.0 or e.expires_at > now]
+    alive = [e for e in q if not _is_expired(e, now)]
+    dead = [e.source for e in q if _is_expired(e, now)]
+    if dead:
+        logger.info(
+            "ambient prefetch: dropped %d expired signal(s) for session %s: %s",
+            len(dead), session_id, ", ".join(dead),
+        )
     # Keep newest first for drain, then put any overflow back for next turn.
     alive.sort(key=lambda e: e.enqueued_at, reverse=True)
     drained = alive[:AMBIENT_PREFETCH_DRAIN_MAX]

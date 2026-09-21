@@ -53,11 +53,9 @@ from app.sessions_io import (
     get_queue_state,
     set_last_user_session,
     take_ambient_decision,
-    enqueue_ambient_prefetch,
     ambient_clock_stamp,
     set_turn_activity,
     tool_activity_detail,
-    AmbientPrefetchEntry,
 )
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_harness_kwargs
 from app.post_capture import _post_session_capture, _maybe_extract_focus
