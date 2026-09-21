@@ -25,13 +25,16 @@ from __future__ import annotations
 import datetime
 import hashlib
 import importlib.util
+import inspect
 import json
+import os
 import re
 import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -41,10 +44,86 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 GRADER = SCRIPTS / "iv_grade.py"
 RECORDER = SCRIPTS / "iv_metrics_record.py"
+#: The one fan-out a breach announcement goes through (#1145 clause 2). Copied into the
+#: fixture repo below, because the recorder resolves it relative to its own `__file__`
+#: and a test that cannot reach it would silently test the no-notify fallback.
+GUARDIAN = ROOT / "agent-services" / "guardian"
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 #: The task file clause 1 requires. Globbed, not hardcoded, so renaming it does not
 #: silently un-pin every test below.
 TASK_GLOB = "86-*iv*metrics*.md"
+
+#: The two commands the LIVE guardian fan-out shells out to for the channels someone in the
+#: room can experience: `_journal` runs `systemd-cat`, `_desktop` runs `notify-send`
+#: (`agent-services/guardian/notify.py:203-217`). One tuple because "no test reaches the
+#: machine" is ONE property of this suite. It was not treated as one on 2026-09-20: the
+#: clause-5 guard checked only the mutes in the #1145 fixture's own environment, while
+#: `_make_repo` — the fixture every *other* test uses — copied the live `notify.py`, and the
+#: breaching fixture rows fanned out for real (20 lines into the host journal from 32 PIDs).
+#: See `test_the_announcement_tests_reach_neither_systemd_cat_nor_notify_send`.
+LIVE_CHANNEL_BINARIES = ("systemd-cat", "notify-send")
+
+#: The variables `_channel_on` (`notify.py:47-65`) reads as the master mute for those two
+#: channels. Named once so every fixture environment and the guard test agree on what
+#: "closing the door" means.
+ROOM_MUTE_VARS = ("LLOYD_JOURNAL_ALERTS", "LLOYD_DESKTOP_ALERTS")
+
+
+def _room_mutes() -> dict:
+    """The variables that keep a fixture's fan-out out of the room.
+
+    `ROOM_MUTE_VARS` are `_channel_on`'s master mutes, read at dispatch time; an empty
+    `DBUS_SESSION_BUS_ADDRESS` makes `_desktop` decline at its own pre-flight
+    (`notify.py:214`) before it can look for `notify-send`. Every environment this suite
+    hands a subprocess includes them, generic `_env` included — the clause-5 guard test
+    proves against the LIVE fan-out that these are the variables that close it, and that
+    with them unset it is open.
+    """
+    mutes = {name: "0" for name in ROOM_MUTE_VARS}
+    mutes["DBUS_SESSION_BUS_ADDRESS"] = ""
+    return mutes
+
+
+#: The receipt the substituted fan-out appends to. One line per call, so a count of
+#: announcements is a count of calls across the process boundary, at the one boundary the
+#: recorder uses.
+RECEIPT = "IV_TEST_FANOUT_RECEIPT"
+
+#: Written to `agent-services/guardian/notify.py` of EVERY fixture repo this suite builds:
+#: `_make_repo` is the only writer and `_fanout_check` builds on it, so the suite has one
+#: fan-out and one file that could reach the room. Same constructor keywords and the same
+#: `announce(title, body, level=...)` as the real class — pinned against the real signature
+#: by `test_the_substitute_fan_out_is_the_real_ones_shape` — except that it records each call
+#: to the file named by `$IV_TEST_FANOUT_RECEIPT` instead of putting anything in the room.
+#:
+#: It is deliberately NOT a copy of `notify.py`. The real `Notifier.announce` writes no file
+#: at all — its two room channels ARE `systemd-cat` and `notify-send` — so there is nothing
+#: to count, and a fixture that copied the live file was a fixture that alerted the machine
+#: about a breach that never happened. `notify.py:56-62` records that accident reaching a gate
+#: run on 2026-09-07; this suite repeated it on 2026-09-20 through `_make_repo`.
+RECORDING_FANOUT = '''"""Substitute guardian fan-out: records, never notifies."""
+import json
+import os
+
+
+class Notifier:
+    def __init__(self, *, ledger, state_dir, vault_root, backend_url=None,
+                 external=True, voice=True, voice_window=3600.0):
+        self.ledger, self.state_dir, self.vault_root = ledger, state_dir, vault_root
+        self.backend_url, self.external, self.voice = backend_url, external, voice
+        self.voice_window = voice_window
+
+    def announce(self, title, body="", level="info"):
+        path = os.environ.get("%s")
+        if path:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"title": title, "body": body, "level": level}) + "\\n")
+        return {"journal": True, "desktop": True, "voice": False}
+
+    def alert(self, level, title, body="", **kwargs):
+        raise AssertionError("a bound breach must never route through alert(): "
+                             + title)
+''' % RECEIPT
 
 # Loaded by path rather than by putting `scripts/` on sys.path: that directory holds
 # 40+ modules, several of which shadow stdlib names, and a shadowed `json` or `re`
@@ -93,6 +172,22 @@ def _make_repo(tmp_path: Path) -> Path:
     (repo / "scripts").mkdir(parents=True)
     for name in ("iv_grade.py", "iv_metrics_record.py"):
         shutil.copy2(SCRIPTS / name, repo / "scripts" / name)
+    # The announcement reaches the guardian through a path computed from the recorder's
+    # own `__file__`, so a fixture repo with no `agent-services/guardian/notify.py` takes
+    # the "no notify.py" fallback and every announcement test would pass while proving
+    # nothing. The file is therefore there — but it is `RECORDING_FANOUT`, never a copy of
+    # the live one. This is the seam that leaked: the generic fixture is used by tests that
+    # breach the bound with no announce-specific environment, and the live fan-out is on by
+    # default, so a copied `notify.py` alerted the machine for a condition that never
+    # happened. `gstate.py` and `policy.py` stay the real files: `announce_breach` reads
+    # `policy.AUTOMOD_STATE`, `policy.GUARDIAN_STATE` and `policy.VAULT_ROOT` by name to
+    # build the Notifier, and a fixture without them fails the import, which is how a broken
+    # fan-out gets reported rather than read as a quiet night.
+    guardian = repo / "agent-services" / "guardian"
+    guardian.mkdir(parents=True)
+    (guardian / "notify.py").write_text(RECORDING_FANOUT, encoding="utf-8")
+    for name in ("gstate.py", "policy.py"):
+        shutil.copy2(GUARDIAN / name, guardian / name)
     return repo
 
 
@@ -124,8 +219,29 @@ def _make_db(repo: Path, rows: list[dict]) -> Path:
     return db
 
 
+def _env(home: Path) -> dict:
+    """A subprocess environment that cannot reach the machine.
+
+    `HOME` alone would be enough for the state paths, which all resolve under it, but the
+    room mutes are named explicitly too: #1145 made this the first suite here that runs
+    code writing OUTSIDE the repo, and a breaching fixture row is a breach nobody observed.
+    `_room_mutes` is the same set the #1145 announcing runs use — one definition, so a
+    generic test can't be the one that leaks (that is exactly what happened on 2026-09-20).
+    `IV_METRICS_ANNOUNCE` is deliberately NOT set here: the recorder's own mute, and a test
+    that carried it would satisfy "the recorder announces" by sending nothing.
+    """
+    return {
+        "HOME": str(home),
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "LLOYD_GUARDIAN_STATE": str(home / ".local/state/lloyd-guardian"),
+        "LLOYD_AUTOMOD_STATE": str(home / ".local/state/lloyd-automod"),
+        **_room_mutes(),
+    }
+
+
 def _call(*, since: str, repo: Path, out: Path,
-          extra: list[str] | None = None) -> subprocess.CompletedProcess:
+          extra: list[str] | None = None,
+          env: dict | None = None) -> subprocess.CompletedProcess:
     """Run the documented pipeline: `iv_grade.py --json --since X | iv_metrics_record.py`.
 
     Two real processes and a real pipe, launched by bash with `HOME` set to the fixture
@@ -135,10 +251,12 @@ def _call(*, since: str, repo: Path, out: Path,
     script = (f"cd ~/lloyd && python3 scripts/iv_grade.py --json --since '{since}'"
               f" | python3 scripts/iv_metrics_record.py --out '{out}'"
               + "".join(f" {e}" for e in (extra or [])))
+    # `env` replaces the fixture environment wholesale. The #1145 tests pass their own
+    # because which variables are present IS the clause under test there — see
+    # `_announcing_env` against `_env`.
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                           check=False, cwd=str(repo.parent),
-                          env={"HOME": str(repo.parent),
-                               "PATH": "/usr/bin:/bin:/usr/local/bin"})
+                          env=env if env is not None else _env(repo.parent))
 
 
 def _rows_of(path: Path) -> list[dict]:
@@ -184,8 +302,8 @@ def test_the_alert_reaches_the_autonomy_runner(tmp_path):
     The nightly reaches the recorder through an agent's Bash tool, so the process's
     exit status is a tool result and the task's own exit code is the agent's turn — 0
     whether or not anything was wrong. The one automated consumer that exists is
-    `autonomy._detect_silent_failures`, applied to the run's FINAL PROSE
-    (`autonomy.py:1263`), whose patterns include `exit code [1-9]`. So this runs the
+    `autonomy._detect_silent_failures`, applied to the run's terminal block
+    (`autonomy.py:2268-2270`), whose patterns include `exit code [1-9]`. So this runs the
     real pipeline three ways — breach / one-night-flagged / healthy — feeds each run's
     actual stdout to that production detector, and requires that only the breach trips
     it. A breach that only moved an exit code nobody reads would pass every other test
@@ -517,8 +635,8 @@ def test_breach_exits_2_when_the_recent_median_is_over_the_bound(tmp_path):
     expressed over JSONL fields rather than prose". Four prior rows at 0.20 plus
     this run's 1.0: median 0.20 > the 0.05 bound, so exit 2. Exit status rather than a
     sentence because the autonomy runner consumes exit codes reliably —
-    `scripts/skill_verdicts.py:320` and `scripts/validate_handoff.py:70` use 2 for a
-    refusal for the same reason, and `_detect_silent_failures` (`autonomy.py:26-32`) only catches
+    `scripts/skill_verdicts.py:633` and `scripts/validate_handoff.py:70` use 2 for a
+    refusal for the same reason, and `_detect_silent_failures` (`autonomy.py:27-33`) only catches
     prose it has been told to look for.
     """
     repo = _make_repo(tmp_path)
@@ -729,8 +847,9 @@ def test_task_file_frontmatter_parses_and_is_schedulable():
     """Clause 1: frontmatter parses as YAML, house style, and can actually dispatch.
 
     Same style as `60-knowledge-health-report.md`. `status: up_next` and a
-    resolvable `skill_name` are checked because `autonomy.py:510-521` makes either
-    one missing a permanent silent skip — a task file that parses but never
+    resolvable `skill_name` are checked because `autonomy.py:1145-1157` skips a task with no
+    `skill_name` forever, and `RUNNABLE_STATUSES` (`autonomy.py:542`) never dispatches a status
+    outside up_next/in_progress/failed — a task file that parses but never
     dispatches would satisfy the clause's grep and still measure nothing.
     """
     fm = yaml.safe_load(_task_file().read_text().split("---\n", 2)[1])
@@ -788,7 +907,7 @@ def test_task_body_invokes_the_grader_with_an_explicit_window():
 def test_prompt_the_scheduler_builds_contains_a_runnable_command(tmp_path):
     """The command the *runner* sees is the command that works — executed end to end.
 
-    This is the seam #460 would otherwise miss. `autonomy.py:674-694` builds a run's
+    This is the seam #460 would otherwise miss. `autonomy.py:1333-1353` builds a run's
     prompt from the frontmatter `description` plus the skill file: the markdown
     **body is not in it**. A task whose procedure lives only in the body passes
     clause 1's grep and then leaves the model to improvise, which is how a scheduled
@@ -818,7 +937,7 @@ def test_prompt_the_scheduler_builds_contains_a_runnable_command(tmp_path):
     run = subprocess.run(
         ["bash", "-c", command.replace("--hours 26", f"--out '{out}' --hours 26")],
         capture_output=True, text=True, check=False, cwd=str(tmp_path),
-        env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin:/usr/local/bin"})
+        env=_env(tmp_path))
 
     assert run.returncode in (0, 2), (run.stdout, run.stderr)
     assert out.exists(), (
@@ -867,6 +986,12 @@ def test_task_file_threshold_matches_the_code_default():
             iv_metrics_record.DEFAULT_THRESHOLD), (
             f"{label} says {stated.group(1)}, DEFAULT_THRESHOLD is "
             f"{iv_metrics_record.DEFAULT_THRESHOLD}")
+        assert float(stated.group(1)) == pytest.approx(0.05), (
+            f"the {label} states {stated.group(1)}; the bound Alan ruled for #1145 is "
+            "0.05 — 0.10 is the provisional value that never fired on the degraded "
+            "09-05..09-11 median of ~0.053")
+    assert iv_metrics_record.DEFAULT_THRESHOLD == pytest.approx(0.05), (
+        "DEFAULT_THRESHOLD must be the ruled bound, 0.05")
     assert "0.039" in text, "the measured baseline belongs next to the bound"
 
 
@@ -1047,3 +1172,714 @@ def test_a_consumer_compares_the_timeout_count_against_the_bound():
             f"row since={row['since']} stored flagged={row['flagged']} but the "
             f"consumer says otherwise — the nightly verdict and the reader would "
             "disagree about the same row")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #1145 — the bound is 0.05, and a breach announces itself from CODE.
+#
+# Clauses 2, 3 and 4 are about a process boundary: the recorder process sends the
+# message, a human with a toast and a journal line reads it. So every test below drives
+# the recorder as a real subprocess of the documented pipeline, and the ONE thing
+# substituted is the fan-out module the recorder imports by path — `RECORDING_FANOUT`,
+# which every fixture repo in this file gets from `_make_repo`.
+#
+# Why a substitute and not the live `Notifier`: `Notifier.announce` writes no file. Its
+# journal channel shells out to `systemd-cat` (`notify.py:203-208`) and `_desktop` needs a
+# session bus (`:210-217`), so there is no artifact to count — and a test that ran the real
+# one would be posting to the machine's journal for a condition that never happened. The
+# 2026-09-07 note at `notify.py:56-62` records exactly that accident on a gate run, in the
+# live journal, labelled critical; this suite repeated it on 2026-09-20 because the generic
+# fixture copied the live `notify.py` and its breaching rows alerted for real. So the
+# substitute writes a receipt file, and
+# `test_the_substitute_fan_out_is_the_real_ones_shape` pins it against the real signature
+# so the substitution cannot drift. `IV_METRICS_ANNOUNCE` stays UNSET in the clause-2 and
+# clause-3 tests: a mute cannot prove an alert fires by proving nothing was sent.
+#
+# The bound (clause 1) is coupled to the vault by the vault-reading
+# `test_task_file_threshold_matches_the_code_default`
+# above, which reads `~/obsidian/autonomy/86-*.md` and pins the front-matter copy, the body
+# copy and `DEFAULT_THRESHOLD` as ONE value. Code-only or vault-only turns that test red —
+# it is what killed round SM_20260916_093433, whose vault commit alone took the live suite
+# from green to red. Both halves are in this round.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: `_announced` reads what that recording wrote. `RECORDING_FANOUT` and `RECEIPT` — the
+#: substitute and the variable naming its receipt — are defined with the other fixture
+#: constants at the top of the file, because `_make_repo` writes them for every test here,
+#: not only for the ones below.
+
+
+def _announced(out_dir) -> list[dict]:
+    """The substituted fan-out's receipt: one dict per announce() CALL.
+
+    Reads the process's receipt file, so it counts calls that crossed the process boundary
+    and nothing else. Absent file means zero calls, which is the honest reading of an empty
+    result in every test here: the pipeline's own exit code is asserted alongside, so a
+    receipt-less run is either a quiet night or a stated failure, never an invisible one.
+    """
+    receipt = Path(out_dir) / "fanout.jsonl"
+    if not receipt.exists():
+        return []
+    return [json.loads(line) for line in receipt.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+def _fanout_check(tmp_path: Path, *, raising: bool = False) -> Path:
+    """A fixture checkout built by `_make_repo`, optionally with a fan-out that raises.
+
+    It has to be `_make_repo` and not a parallel builder: the announcement resolves the
+    fan-out as `<the recorder's own repo>/agent-services/guardian`, so whoever writes that
+    file decides whether a test reaches the room — which is why the substitute is installed
+    there rather than here, so no fixture can opt out of it. Building a second fixture for
+    the announcing tests anyway is how two answers to that question existed at once on
+    2026-09-20, the #1145 one recording and the generic one posting, and the generic one won:
+    23 breach lines from 23 distinct PIDs landed in the host journal between 03:17 and 04:48
+    (`journalctl --no-pager --since 2026-09-19 | grep -c dropped-verdict`), each one a
+    warning toast about a breach that had not happened.
+
+    `raising=True` injects a failing fan-out: `announce` raises on entry, which is clause 4's
+    fault. Injected as text rather than by wrapping, so the recorder still imports a module
+    named `notify` with the same class and signature — the only thing that changes is that
+    the call blows up, as a dead session bus or an unreadable state dir would.
+    """
+    repo = _make_repo(tmp_path)
+    notify = repo / "agent-services" / "guardian" / "notify.py"
+    if raising:
+        notify.write_text(RECORDING_FANOUT.replace(
+            "    def announce(self, title, body=\"\", level=\"info\"):\n",
+            "    def announce(self, title, body=\"\", level=\"info\"):\n"
+            "        raise RuntimeError('session bus unreachable')\n"),
+            encoding="utf-8")
+    return repo
+
+
+def _announcing_env(home: Path, repo: Path) -> dict:
+    """Environment for an announcing run: everything off, and the receipt named.
+
+    Set by construction, never inherited, because which variables exist IS clauses 3 and 5:
+    - `IV_METRICS_ANNOUNCE` is absent. The recorder's own mute is production-dead, and a
+      test that set it would satisfy "the recorder announces" by sending nothing.
+    - Clause 5's mutes, from `_room_mutes()`: `LLOYD_JOURNAL_ALERTS`/`LLOYD_DESKTOP_ALERTS`
+      are `0` and `DBUS_SESSION_BUS_ADDRESS` is empty. A real defence, not decoration: the
+      substitute never constructs a real `Notifier`, so if the module substitution ever
+      stopped working these are the variables standing between the suite and the machine's
+      journal — and `test_the_mutes_close_the_live_fan_out_and_every_fixture_sets_them`
+      proves they close it by running the REAL fan-out twice over decoy channel binaries,
+      rather than merely being set.
+    - Both state dirs point inside the fixture. `policy.py:166-171` reads each with
+      `environ.get(name, default)` and no `or` fallback, so the empty string resolves to
+      `Path("")` — the current working directory — and a real `Notifier` built on it would
+      append `ledger.jsonl` and `ALERT.md` wherever it happened to be standing.
+    - `HOME` points at the fixture, so the pipeline's own `cd ~/lloyd` lands in the fixture
+      checkout and grades the fixture's `usage.db`, never the live one.
+    """
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(home),
+        "PYTHONPATH": str(repo),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        RECEIPT: str(home / "fanout.jsonl"),
+        **_room_mutes(),
+        "LLOYD_AUTOMOD_STATE": str(home / ".local/state/lloyd-automod"),
+        "LLOYD_GUARDIAN_STATE": str(home / ".local/state/lloyd-guardian"),
+    }
+
+
+def _night(home: Path, *, rate: float, since: str, out: Path, repo: Path,
+           extra: list[str] | None = None,
+           env_extra: dict | None = None) -> subprocess.CompletedProcess:
+    """One nightly through the documented pipeline, for a day whose rate is `rate`.
+
+    `rate` is applied as whole percentage points of 100 observer calls, so no assertion here
+    is ever within a rounding tolerance of being wrong. `_call` runs `cd ~/lloyd &&
+    iv_grade.py | iv_metrics_record.py` under `HOME=home`, which is the checkout the
+    fixture built.
+    """
+    n_dropped = round(rate * 100)
+    stamp = datetime.datetime.fromisoformat(since)
+    blank = {"action": "noop", "created_at": stamp}
+    dropped = dict(blank, error="observer refused")
+    rows = [dict(dropped)] * n_dropped + [dict(blank)] * (100 - n_dropped)
+    (repo / "usage.db").unlink(missing_ok=True)   # one night's db, never a growing one
+    _make_db(repo, rows)
+    env = _announcing_env(home, repo)
+    env.update(env_extra or {})
+    return _call(since=since, repo=repo, out=out, extra=extra, env=env)
+
+
+def _nights(home: Path, *, rates: list, out: Path, repo: Path,
+            extra: list[str] | None = None, env_extra: dict | None = None):
+    """Several nightlies in sequence; returns (per-night counts, exit codes, rows, last run).
+
+    The series file is never seeded. Each night's `dropped_rate` and `breach` come from the
+    recorder's own previous output, so the file is evidence rather than an input and the
+    assertion below is reading a chain, not a fixture.
+    """
+    per_night, codes, stored = [], [], []
+    for index, rate in enumerate(rates):
+        before = len(_announced(home))
+        result = _night(home, rate=rate, since=f"2026-09-{15 + index:02d}T03:00:00",
+                        out=out, repo=repo, extra=extra, env_extra=env_extra)
+        assert result.returncode in (0, 2), (
+            f"night {index + 1} exited {result.returncode}, not 0 or 2 — the pipeline "
+            f"itself failed and every assertion downstream would be reading a run that "
+            f"never recorded anything\nstdout: {result.stdout!r}\n"
+            f"stderr: {result.stderr!r}")
+        per_night.append(len(_announced(home)) - before)
+        codes.append(result.returncode)
+        stored = _rows_of(out)
+        last_run = result
+    # The last run is returned because "the failure is legible in the run record" is a claim
+    # about the run the chain just made, and a test that manufactured a seventh night to read
+    # a line off would be asserting about a night the scenario never had.
+    return per_night, codes, stored, last_run
+
+
+def _real_notify_module():
+    """Import the live guardian fan-out by the same path route the recorder uses.
+
+    `announce_breach` loads `agent-services/guardian/notify.py` by file location because the
+    guardian sits outside the package and is not importable by name. Two tests need the real
+    module — one to pin this section's substitute against it, one to prove `announce` has no
+    recording channel — and both must reach it the way production does rather than by a bare
+    `import notify` that would silently pick up anything else on the path. `sys.path` is
+    restored so the guardian's own module names (`policy`, `gstate`) stay unshadowed for the
+    rest of the suite.
+    """
+    import importlib
+    import sys as _sys
+
+    gdir = str(ROOT / "agent-services" / "guardian")
+    added = gdir not in _sys.path
+    if added:
+        _sys.path.insert(0, gdir)
+    try:
+        return importlib.import_module("notify")
+    finally:
+        if added:
+            _sys.path.remove(gdir)
+
+
+def test_the_default_bound_is_005_and_the_recorder_uses_it():
+    """Clause 1: the constant, and why a bare number is not enough.
+
+    `test_task_file_threshold_matches_the_code_default` above already reads
+    `~/obsidian/autonomy/86-*.md` and fails if either copy of the bound disagrees with
+    `DEFAULT_THRESHOLD`, so this test does not re-parse the markdown. It pins what that test
+    cannot see: the provenance beside the constant. The number without the measurement is a
+    constant nobody can re-litigate, and this file's own history is the argument — #460
+    shipped 0.10 as a first guess and it never fired on a single recorded night, including
+    the week the observer was measurably degraded.
+    """
+    assert iv_metrics_record.DEFAULT_THRESHOLD == 0.05
+    assert iv_metrics_record.DEFAULT_WINDOW_ROWS == 7
+    assert iv_metrics_record.MIN_BREACH_ROWS == 3, (
+        "the floor is what makes the tighter bound safe; if it moved, the ruling this item "
+        "records (median of 7, floor 3) would no longer describe the code")
+    body = (ROOT / "scripts" / "iv_metrics_record.py").read_text(encoding="utf-8")
+    assert "0.039" in body, (
+        "the measured baseline the bound was set against has to live next to the constant")
+    assert "0.0526" in body, (
+        "so does the 7-row median of the degraded stretch the bound was set AT — the exact "
+        "figure, the same one `test_the_code_default_is_the_ruled_bound` requires of that "
+        "comment, or a reader cannot tell 0.05 from a second guess")
+
+
+def test_six_nights_of_one_incident_announce_exactly_once_end_to_end(tmp_path):
+    """Clauses 2 and 3, as one unbroken chain of real runs from an empty series file.
+
+    Every other test here declares the previous night's verdict and shows the recorder
+    honouring it. That is a real boundary only if the declaration the recorder reads is the
+    one IT wrote the night before, so this chain seeds nothing: six nights of
+    0.06/0.06/0.06/0.00/0.00/0.00 run through the real shell pipeline, and the series file
+    grows only from the recorder's own output. The measured count is (0, 0, 1, 0, 0, 0).
+
+    Each position rules something out alone. Nights 1-2 are the floor — a breach needs three
+    numeric rows and there are one and two. Night 3 is the message. Nights 4-5 are
+    one-per-breach: the median is still 0.06 and each row is still a breach, so a recorder
+    that announces every breaching night answers (0,0,1,1,1,0) here. Night 6 is the rule the
+    other way: the median of [0.06,0.06,0.0,0.0,0.0] is 0.0, the breach ENDS, and a recorder
+    that latched "already announced" in a state file would stay silent through the next
+    incident too. The stored verdicts read (False,False,True,True,True,False) — the
+    announcement count and the file disagree in exactly one place, the nights a breach
+    continues — and the exit codes (0,0,2,2,2,0) follow the median, not the announcement.
+    """
+    home = tmp_path
+    repo = _fanout_check(tmp_path)
+    out = home / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    per_night, codes, stored, last_run = _nights(home, rates=[0.06] * 3 + [0.0] * 3, out=out,
+                                       repo=repo)
+    assert per_night == [0, 0, 1, 0, 0, 0], (
+        f"announcements per night were {per_night}, expected [0, 0, 1, 0, 0, 0] — one "
+        "message for six nights of one incident, on the night it starts")
+    assert codes == [0, 0, 2, 2, 2, 0], (
+        f"exit codes were {codes}, expected [0, 0, 2, 2, 2, 0] — the exit code tracks the "
+        "median and must not move with the announcement")
+    assert [bool(r.get("breach")) for r in stored] == [
+        False, False, True, True, True, False], (
+        f"stored verdicts were {[r.get('breach') for r in stored]}")
+    assert len(_announced(home)) == 1
+    assert _announced(home)[0]["level"] == "warning", (
+        "level=warning is the ruling; 'info' would be indistinguishable from the promotion "
+        "notice and 'error' is the road to alert()")
+
+
+def test_the_announcement_quotes_the_basis_the_verdict_medianed(tmp_path):
+    """One decision, one row count: the toast and the verdict line report the same basis.
+
+    A short series is the normal state, not an edge case — the live file held 6 rows when
+    the bound tightened to 0.05 — and it is the only place the two texts can disagree,
+    because `window_rows` records what was *asked for* (7) while `breach_basis_rows` records
+    what was *medianed* (3). The toast printed the former beside a verdict line printing the
+    latter, which is two copies of one number wearing a sentence: someone reading "median of
+    7 rows" joins the alert to a decision the recorder never made. Asserted off one real
+    run's two outputs rather than off a hand-built row, so `_verdict` and the message cannot
+    drift apart without this going red.
+    """
+    home = tmp_path
+    repo = _fanout_check(tmp_path)
+    out = home / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    per_night, codes, stored, last_run = _nights(home, rates=[0.06] * 3, out=out, repo=repo)
+    assert per_night == [0, 0, 1] and codes == [0, 0, 2], (per_night, codes)
+    row = stored[-1]
+    assert row["window_rows"] == 7 and row["breach_basis_rows"] == 3, (
+        "this scenario only tests anything while the requested window and the medianed "
+        f"basis differ; got window {row['window_rows']}, basis {row['breach_basis_rows']}")
+
+    announced = _announced(home)
+    assert len(announced) == 1, announced
+    counts = re.findall(r"median of (\d+) row", last_run.stdout + announced[0]["body"])
+    assert counts == ["3", "3"], (
+        f"the verdict line and the toast reported bases {counts}, expected both '3' — the "
+        f"verdict said {last_run.stdout.strip().splitlines()[-1]!r} and the toast said "
+        f"{announced[0]['body']!r}")
+
+
+def test_a_starting_breach_announces_once_and_a_continuing_one_stays_quiet(tmp_path):
+    """Clause 2 read two ways at once: the file's own verdict, and the fan-out's count.
+
+    The chain in the test above already proves the sequence end to end. This one checks the
+    other half — that the STORED row and the announced message are the same decision, made
+    the same night — because clause 2's "exactly one" is a statement about a row, and a
+    reader of `_pipeline/reflection/iv-metrics.jsonl` must be able to reconstruct it. So the
+    row that started the breach carries the verdict the fan-out was called with, and the row
+    that merely continued it carries the verdict the fan-out never heard about.
+
+    The rates are one spike (0.11) on three clean nights — the shape the tighter bound must
+    NOT alert on — then four nights at 0.06. The spike row is `flagged` and is not a
+    `breach`: one bad night is a report, a run of them is a fault. And the arithmetic is the
+    point of the test, because the median of seven is slow to turn: with
+    [0, 0, 0, 0.11, 0.06, 0.06] on the table the median is 0.03, still under the bound, so
+    the breach starts on the SEVENTH night, not the fifth.
+    """
+    home = tmp_path
+    repo = _fanout_check(tmp_path)
+    out = home / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    per_night, codes, stored, last_run = _nights(
+        home, rates=[0.0, 0.0, 0.0, 0.11, 0.06, 0.06, 0.06], out=out, repo=repo)
+    assert per_night == [0, 0, 0, 0, 0, 0, 1], (
+        f"announcements were {per_night}, expected the spike and the two first worsening "
+        "nights to be silent and the message to land on the seventh run")
+    flagged = [bool(r.get("flagged")) for r in stored]
+    breach = [bool(r.get("breach")) for r in stored]
+    assert flagged == [False, False, False, True, True, True, True], (
+        f"per-row `flagged` was {flagged}; each bad night is flagged on its own rate")
+    assert breach == [False, False, False, False, False, False, True], (
+        f"`breach` was {breach}: the median of [0,0,0,0.11,0.06,0.06] is 0.03, under the "
+        "bound, so the breach starts on the SEVENTH run where the window holds three 0.06s "
+        "— and the announcement count has to agree with the file, not with a reader's guess")
+    assert codes == [0, 0, 0, 0, 0, 0, 2], f"exit codes were {codes}"
+
+
+def test_the_announcement_comes_from_the_recorder_with_no_model_in_the_loop(tmp_path):
+    """Clause 3: no model, no prose, no `_detect_silent_failures` — and a person is told.
+
+    The pre-existing half of this suite is `test_the_alert_reaches_the_autonomy_runner`,
+    which feeds the recorder's verdict lines to `autonomy._detect_silent_failures` and
+    proves the regex finds "exit code 2" in them. That is the channel this item exists to
+    replace: the regex runs over the run's terminal block, so a model that
+    paraphrases the Bash result loses the breach, and its only effect is a section in the
+    run record. Here there is no model to paraphrase anything — one subprocess, stdin from
+    a pipe, stdout to a file — and the fan-out still receives the message.
+
+    Also asserted: the same verdict text that the regex looks for is still printed, so the
+    new channel is additive and the run record is unchanged.
+    """
+    home = tmp_path
+    repo = _fanout_check(tmp_path)
+    out = home / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    per_night, codes, stored, last_run = _nights(home, rates=[0.06, 0.06, 0.06], out=out, repo=repo)
+    assert codes == [0, 0, 2], f"exit codes were {codes}"
+    assert per_night == [0, 0, 1], f"announcements were {per_night}"
+    calls = _announced(home)
+    assert len(calls) == 1, f"the fan-out saw {len(calls)} calls, expected exactly 1"
+    assert stored[-1]["breach"] is True, (
+        "the row itself carries the verdict, so a reader of the file can reconstruct the "
+        "night without the run's prose")
+
+
+def test_a_failing_fan_out_costs_neither_the_row_nor_the_exit_code(tmp_path):
+    """Clause 4: the bell breaking must not become the reason nobody was told.
+
+    A fan-out that raises — no guardian checkout, a permission-denied state dir, a dead
+    session bus — sits between "the row is appended", "the exit code is 2" and "a person
+    reads a toast". The first two are the recorder's contract and the third is what this
+    item is FOR, so a broken announce has to degrade to the loud, visible failure it can
+    still deliver (stderr + exit 2 + a stored breach) and never to a missing row or a clean
+    exit. The failure is also printed, because a silently-swallowed announce exception is
+    the same silence this item is fixing, one layer down.
+    """
+    home = tmp_path
+    repo = _fanout_check(tmp_path, raising=True)
+    out = home / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    per_night, codes, stored, last_run = _nights(home, rates=[0.06, 0.06, 0.06], out=out, repo=repo)
+    assert codes == [0, 0, 2], (
+        f"a raising fan-out changed the exit codes to {codes}")
+    assert per_night == [0, 0, 0], (
+        "the receipt is empty by construction here — this is a failed announcement, not a "
+        "quiet one")
+    assert len(stored) == 3, (
+        f"the series holds {len(stored)} rows, expected 3: the row must survive its own "
+        "broken alert")
+    assert bool(stored[-1].get("breach")) is True, (
+        "and it must still carry the verdict, or the next night cannot tell it was inside "
+        "a breach")
+    assert "breach announcement FAILED" in last_run.stderr, (
+        "the failure has to be legible verbatim in the run record — that line is the only "
+        f"evidence a reader gets that the room got nothing\nstderr: {last_run.stderr!r}")
+    assert "exit code 2" in last_run.stdout and "exit code 2" in last_run.stderr, (
+        "the verdict stays on both streams, since the exit code is invisible to the "
+        "nightly and stdout is invisible to a shell that only shows stderr on failure")
+
+
+def test_the_substitute_fan_out_is_the_real_ones_shape():
+    """Why the receipt file is admissible evidence at all.
+
+    Every clause-2/3/4 count in this file is taken from `RECORDING_FANOUT`, so its signature
+    has to be the real one or the counts are counting a fiction. `announce_breach` constructs
+    `Notifier(ledger=..., state_dir=..., vault_root=..., voice=False, voice_window=...)` and
+    calls `announce(title, body, level="warning")`; the real `announce` returns a dict of
+    per-channel booleans, which the recorder reports channel-by-channel. The live class is
+    imported here by the same path route the recorder uses, so this pins the substitute
+    against the thing it replaces rather than against this file's memory of it.
+
+    Executed from the module source rather than read as text, and proven to be the file the
+    fixture actually has: `Path` cannot hold a module, so the shape check and the checkout
+    are forced to agree on one string.
+    """
+    notify_mod = _real_notify_module()
+    real_ctor = inspect.signature(notify_mod.Notifier.__init__)
+    stub_ns: dict = {}
+    exec(RECORDING_FANOUT.replace('os.environ.get("%s")' % RECEIPT, "None"), stub_ns)
+    fixture = _make_repo(Path(tempfile.mkdtemp()))
+    assert (fixture / "agent-services" / "guardian" / "notify.py").read_text(
+        encoding="utf-8") == RECORDING_FANOUT, (
+        "the fixture's fan-out is not the module whose shape is being checked here, so this "
+        "test pins one file while the subprocesses run another")
+    stub_ctor = inspect.signature(stub_ns["Notifier"].__init__)
+    for name, param in real_ctor.parameters.items():
+        if name == "self":
+            continue
+        assert name in stub_ctor.parameters, (
+            f"the substitute fan-out cannot construct a Notifier the way the recorder does "
+            f"missing {name}")
+    real_ann = inspect.signature(notify_mod.Notifier.announce)
+    stub_ann = inspect.signature(stub_ns["Notifier"].announce)
+    assert [p.name for p in real_ann.parameters.values()] == [
+        p.name for p in stub_ann.parameters.values()], (
+        "the substitute's announce signature drifted from the real one; every count in "
+        "this section is then counting a method the recorder never calls")
+
+
+def test_a_breach_announcement_writes_no_ledger_row_no_alert_file_and_no_task(tmp_path):
+    """Clause 2's other half: `announce`, and specifically never `alert`.
+
+    `alert()` is the recording fan-out — it appends `ledger.jsonl`, writes `ALERT.md`, and
+    above a threshold files a backlog task, so a five-night breach through `alert` files five
+    tasks and five ledger rows for one condition (`notify.py:118-160`, backlog gate at
+    `:157-159`). `announce()` has none of those channels: its body is `_journal`, `_desktop`
+    and `_speak` (`notify.py:162-188`). A sustained bound breach is a condition, not an
+    incident, which is the ruling this item exists to implement.
+
+    Two halves, because one would be a tautology. (a) The structural one: the REAL
+    `Notifier.announce` is read and proven to reach none of alert's recording methods, so
+    the property is a fact about the guardian's code and not about this repo's stub. (b) The
+    behavioural one: a breach run leaves nothing in the two state directories its own
+    environment names — the paths `_announcing_env` actually passes to the subprocess, not
+    side directories nothing points at. `Notifier._backlog_task` writes into
+    `policy.VAULT_ROOT`, a literal path rather than an environment variable, so the vault is
+    NOT redirectable and is deliberately not asserted on: the claim that no task is filed is
+    carried by (a).
+    """
+    home = tmp_path
+    repo = _fanout_check(tmp_path)
+    out = home / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    per_night, codes, _stored, last_run = _nights(
+        home, rates=[0.06, 0.06, 0.06], out=out, repo=repo)
+    assert codes == [0, 0, 2] and per_night == [0, 0, 1], (
+        "this fixture has to BE a starting breach for a claim about one to mean anything")
+
+    import inspect
+    recording = {"_alert_file", "_ledger", "_backlog_task", "_vault_note"}
+    src = inspect.getsource(_real_notify_module().Notifier.announce)
+    reached = sorted(name for name in recording if f"self.{name}(" in src)
+    assert not reached, (
+        f"announce() reaches alert()'s recording channels {reached}; it is supposed to be "
+        "the fan-out with no bookkeeping")
+
+    for name in ("ledger.jsonl", "ALERT.md"):
+        for directory in (home / ".local/state/lloyd-guardian",
+                          home / ".local/state/lloyd-automod"):
+            assert not (directory / name).exists(), (
+                f"{directory / name} exists after a breach announcement: alert() wrote it, "
+                "or something is filing incidents for a recurring condition")
+
+
+def test_the_announcing_env_mutes_the_room_but_never_the_recorders_own_channel(tmp_path):
+    """Clause 5's variable discipline, plus the mute being loud rather than silent.
+
+    Two things are checked and they pull in opposite directions, which is why they sit in one
+    test.
+
+    (a) The room channels are muted by the environment every announcing run gets:
+    `LLOYD_JOURNAL_ALERTS=0` and `LLOYD_DESKTOP_ALERTS=0`, which `_channel_on`
+    (`notify.py:47-65`) treats as off, plus no session bus so `_desktop`'s pre-flight
+    declines before it looks for `notify-send`. That is defence in depth, not the primary
+    defence: the fan-out a fixture run resolves is the substitute `_make_repo` installs, so
+    the live module is not reachable from inside a fixture at all. Whether those variables
+    actually close the LIVE fan-out is measured, with a positive control, by
+    `test_the_mutes_close_the_live_fan_out_and_every_fixture_sets_them`; whether a run reaches
+    a channel process at all is measured by
+    `test_the_announcement_tests_reach_neither_systemd_cat_nor_notify_send`.
+
+    (b) `IV_METRICS_ANNOUNCE` — the recorder's own mute — is NOT among them, and
+    `_announce_enabled()` reads it from the environment with no default other than "on". If it
+    were set, every clause-3 assertion would pass while sending nothing. So the mute is run
+    here to show what it does and does not cost: the announcement stops, exit 2 and the stored
+    `breach` field survive, and stderr says both that nothing was announced and which variable
+    did it. A silent return would be indistinguishable, in the run record, from a night that
+    quietly decided not to alert.
+    """
+    env = _announcing_env(tmp_path, tmp_path / "lloyd")
+    assert env["LLOYD_JOURNAL_ALERTS"] == "0"
+    assert env["LLOYD_DESKTOP_ALERTS"] == "0"
+    assert "IV_METRICS_ANNOUNCE" not in env, (
+        "the recorder's own mute must be absent from every announcing test; set, it would "
+        "satisfy 'a starting breach announces' by announcing nothing")
+    # The positive control first: the environment above, nothing added, one chain.
+    on = tmp_path / "unmuted"
+    repo_on = _fanout_check(on)
+    per_night, codes, _stored, _last = _nights(
+        on, rates=[0.06, 0.06, 0.06], out=on / "iv-metrics.jsonl", repo=repo_on)
+    assert per_night == [0, 0, 1], (
+        f"with the mute unset the breach announced {per_night} times; clause 3 is the "
+        "assertion that this absence is load-bearing, not decorative")
+
+    # The negative control: the identical chain with ONLY the mute added, in its own fixture
+    # so the receipt file cannot be shared. Mutating one variable and comparing two runs is
+    # what makes the mute the difference rather than the fixture.
+    off = tmp_path / "muted"
+    repo_off = _fanout_check(off)
+    per_night, codes, stored, last_run = _nights(
+        off, rates=[0.06, 0.06, 0.06], out=off / "iv-metrics.jsonl", repo=repo_off,
+        env_extra={"IV_METRICS_ANNOUNCE": "0"})
+    assert codes == [0, 0, 2], (
+        f"with the mute set the exit codes were {codes}, expected [0, 0, 2] — muting the "
+        "alert must not mute the verdict")
+    assert per_night == [0, 0, 0], (
+        f"the mute let {per_night} messages through; it has to return before a notifier is "
+        "constructed, because an announce that fires and is then discounted still puts a "
+        "toast in the room")
+    assert bool(stored[-1].get("breach")) is True, (
+        "the row still carries the verdict, so the next night knows it was inside a breach "
+        "it was never allowed to announce")
+    assert "breach NOT announced" in last_run.stderr, (
+        "the mute is LOUD: a silent return is indistinguishable, in the run record, from a "
+        f"night that decided not to announce\nstderr: {last_run.stderr!r}")
+    assert "IV_METRICS_ANNOUNCE" in last_run.stderr, (
+        "and it names the variable, so a reader can tell a deliberate mute from a broken "
+        f"fan-out\nstderr: {last_run.stderr!r}")
+
+
+def test_the_announcement_tests_reach_neither_systemd_cat_nor_notify_send(tmp_path):
+    """Clause 5, measured as invocations: a run that DOES announce starts no channel process.
+
+    The refused first version of this guard asserted `"systemd-cat" not in RECORDING_FANOUT` —
+    a string authored four hundred lines above in this same file, which could only fail if
+    someone edited that literal. It passed in full on 2026-09-20 while the generic `_make_repo`
+    fixture was copying the REAL `notify.py` into its fake home and 23 breach lines from 23
+    distinct PIDs landed in the host journal (`journalctl --no-pager --since 2026-09-19 |
+    grep -c dropped-verdict`) — 23 warning toasts about a breach that had not happened. A check
+    that reads only its own fixture cannot see the other fixture, which is the pattern this
+    file's own catalogue already names twice.
+
+    So measure invocations instead, over a PATH of decoy binaries whose only behaviour is to
+    record that they ran. The positive control is
+    `test_the_mutes_close_the_live_fan_out_and_every_fixture_sets_them`: the same decoys under
+    the live `Notifier.announce` DO get invoked, so a zero here is a verdict and not an artefact
+    of a missing file or a mangled PATH — the denominator this file's clause-7 lesson says to
+    print beside the numerator. And the run under test MUST announce, asserted before the zero:
+    a run that alerted nobody would produce the same zero and prove the opposite of the clause.
+
+    The last assertion is the structural half: what protects the machine is not the spelling of
+    the substitute but that the fan-out a fixture installs has no way to start a process at all.
+    Every channel in the live module is a `subprocess.run`, so that property fails the day a real
+    channel call is added to a fixture fan-out, however the new command is spelled — and it
+    cannot be satisfied by pointing at a file other than the one the runs executed.
+    """
+    room = tmp_path / "room"
+    room.mkdir()
+    bindir, hits = _room_bin(tmp_path)
+    out = room / "iv-metrics.jsonl"
+    repo = _fanout_check(room)
+    # PATH and ROOM_HITS are the only additions: every other variable is the same
+    # `_announcing_env` the clause-2/3/4 runs use, so this is that run and not a new one.
+    per_night, codes, _stored, last_run = _nights(
+        room, rates=[0.06, 0.06, 0.06], out=out, repo=repo,
+        env_extra={"PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+                   "ROOM_HITS": str(hits)})
+    assert codes == [0, 0, 2], f"exit codes were {codes}, expected [0, 0, 2]: {last_run.stderr}"
+    assert sum(per_night) == 1, (
+        f"the run recorded {sum(per_night)} announcements; the zero below only means "
+        "'isolated' if something was actually announced through the fan-out")
+    assert not hits.is_file() or not hits.read_text(encoding="utf-8").strip(), (
+        "an announcing run invoked a real channel binary while the suite believed it was "
+        f"recording instead: {hits.read_text() if hits.is_file() else ''}")
+
+    fan_out = (repo / "agent-services" / "guardian" / "notify.py").read_text(encoding="utf-8")
+    assert fan_out == RECORDING_FANOUT, (
+        "the fan-out in the fixture is not the source reasoned about below, so anything asserted "
+        "of it is a claim about a file the runs never executed")
+    spawnable = [tok for tok in ("import subprocess", "Popen", "os.system", "os.exec",
+                                 "os.spawn", "os.fork") if tok in fan_out]
+    assert not spawnable, (
+        f"the fan-out the fixture installs can start a process ({spawnable}), so 'no channel "
+        "binary is reached' is no longer a property of the code that runs — an environment "
+        "variable would be the only thing left between a fixture breach and the host journal, "
+        "which is exactly the arrangement that alerted the machine on 2026-09-20")
+
+
+#: The driver the clause-5 proof runs: the LIVE `Notifier.announce`, in a subprocess, over
+#: the same keyword-free positional route and the same `level="warning"` that
+#: `announce_breach` uses. Nothing here fakes the fan-out — the whole point is that the real
+#: one is inert under the mutes and live without them.
+_LIVE_ANNOUNCE_DRIVER = '''
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
+import notify
+state = Path(sys.argv[2])
+state.mkdir(parents=True, exist_ok=True)
+notifier = notify.Notifier(ledger=state / "ledger.jsonl", state_dir=state,
+                           vault_root=sys.argv[3], voice=False)
+print(notifier.announce("IV metrics: clause-5 probe", "probe body", level="warning"))
+'''
+
+
+def _room_bin(tmp_path: Path) -> tuple[Path, Path]:
+    """Executables named `systemd-cat` and `notify-send` that only record being run.
+
+    The decoys are what make the clause-5 guard able to fail. The alternatives each answer
+    nothing on this machine: grepping the fixture's own source asserts one literal against
+    another literal authored in the same file, and `shutil.which` finds the real binaries
+    because this box has both installed — so the only observable is whether a process
+    invokes those names, and the only way to observe it is to be the thing it invokes.
+    Decoys go on the FRONT of `PATH`, so the machine's real binaries are never run.
+    """
+    bindir = tmp_path / "room-bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    hits = tmp_path / "room-hits.txt"
+    hits.touch()
+    for name in LIVE_CHANNEL_BINARIES:
+        script = bindir / name
+        # Built as a concatenation, not an f-string: the shell needs `${VAR}` and an
+        # f-string would eat the braces.
+        script.write_text("#!/bin/sh\n"
+                          "printf '%s\\n' '" + name + " $*' >> \"$ROOM_HITS\"\n",
+                          encoding="utf-8")
+        script.chmod(0o755)
+    return bindir, hits
+
+
+def test_the_mutes_close_the_live_fan_out_and_every_fixture_sets_them(tmp_path):
+    """The clause-5 guard, run across a real process boundary in both directions.
+
+    The first version of this check asserted that the string `systemd-cat` did not appear in
+    a `notify.py` that this same file writes. That assertion cannot fail — the literal and
+    the thing searched are both authored here, so editing one edits the other — and it sat
+    green while the fixture builder copied the LIVE `notify.py` for every other test in the
+    suite, whose breaching rows alerted for real: 23 lines into the host journal from 23
+    distinct PIDs on 2026-09-20, a count `journalctl --no-pager --since 2026-09-19 |
+    grep -c dropped-verdict` still gives. What was missing was the room. So this test puts
+    the room there, as two decoy executables on the front of `PATH` named `systemd-cat` and
+    `notify-send`, each of which only records that it was invoked. `shutil.which` cannot
+    answer this question on this machine — both binaries are installed, so "would it have
+    found them" is always yes —
+    and reading the fixture's source answers nothing, which is exactly what just happened.
+
+    Three claims, in this order:
+
+    - **Positive control.** The live `Notifier.announce`, run as a subprocess with the mutes
+      unset and a session bus present, reaches for both binaries. Without this the zero below
+      is just a zero, and the class of bug this whole item is written about is a guard whose
+      input is missing (`knowledge/software/guardian-data-damage-false-trip.md`).
+    - **The mutes close it.** The same subprocess with `_room_mutes()` invokes neither. The
+      door is closed by those variables, not by a sandbox that was inert anyway.
+    - **Every fixture has them.** `_env` and `_announcing_env` both carry them, checked on
+      the dicts the helpers return rather than on the source that builds them — the seam was
+      two fixture builders disagreeing, so the guard is on the answer, not on the prose.
+    """
+    bindir, hits = _room_bin(tmp_path)
+    # The LIVE fan-out, copied verbatim into a checkout of its own. Deliberately NOT
+    # `_fanout_check`: this test's subject is the module that reaches the room, so it gets no
+    # substitute at all.
+    guardian = tmp_path / "live-guardian"
+    guardian.mkdir()
+    shutil.copy2(GUARDIAN / "notify.py", guardian / "notify.py")
+    driver = tmp_path / "live_announce_driver.py"
+    driver.write_text(_LIVE_ANNOUNCE_DRIVER, encoding="utf-8")
+
+    def announce_live(extra_env: dict) -> list[str]:
+        hits.write_text("", encoding="utf-8")
+        run = subprocess.run(
+            [sys.executable, str(driver), str(guardian), str(tmp_path / "state"),
+             str(tmp_path / "vault")],
+            capture_output=True, text=True, timeout=90,
+            env={"PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+                 "HOME": str(tmp_path), "ROOM_HITS": str(hits), **extra_env})
+        assert run.returncode == 0, f"live announce driver died: {run.stderr[-400:]}"
+        return [ln for ln in hits.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    # The two binaries this test guards are the two the live channels shell out to — read out
+    # of the live module, so a channel renamed or swapped re-pins `LIVE_CHANNEL_BINARIES`
+    # rather than leaving this test guarding names nobody calls.
+    live = _real_notify_module()
+    for method, binary in zip(("_journal", "_desktop"), LIVE_CHANNEL_BINARIES):
+        assert binary in inspect.getsource(getattr(live.Notifier, method)), (
+            f"the live {method} no longer runs `{binary}`; LIVE_CHANNEL_BINARIES is guarding "
+            "a name that is not the room, and this test proves nothing about the real one")
+
+    # ── positive control: door open, the fan-out reaches the room.
+    open_hits = announce_live({"DBUS_SESSION_BUS_ADDRESS": "/tmp/definitely-not-a-bus"})
+    assert sorted(ln.split()[0] for ln in open_hits) == sorted(LIVE_CHANNEL_BINARIES), (
+        "expected the LIVE fan-out to invoke both room binaries with the mutes unset — that "
+        f"control is what makes the closed case below evidence; got {open_hits!r}. Either "
+        "the channels changed shape or this test stopped exercising them: rewrite it, do not "
+        "leave it green on an input it cannot read")
+
+    # ── the same call, the same decoys, with clause 5's mutes: nothing reaches the room.
+    assert announce_live(_room_mutes()) == [], (
+        "the live fan-out reached the room WITH the mutes set — clause 5 is a mute that does "
+        f"not mute, and every announcement test in this file is unguarded: {open_hits!r}")
+
+    # ── and both fixture environments the suite actually hands to a subprocess carry them.
+    for label, env in (("_env", _env(tmp_path / "home-a")),
+                       ("_announcing_env",
+                        _announcing_env(tmp_path / "home-b", _make_repo(tmp_path / "l2")))):
+        missing = [name for name in ROOM_MUTE_VARS if env.get(name) != "0"]
+        assert not missing, (
+            f"{label} does not mute {missing}, so a fixture subprocess fans out into the "
+            "machine's journal and desktop — which is the 2026-09-20 accident: 20 breach "
+            "lines, 32 PIDs, for a condition that never happened")
+        assert env.get("DBUS_SESSION_BUS_ADDRESS") == "", (
+            f"{label} leaves a session bus present for `_desktop`, the one channel "
+            "`LLOYD_DESKTOP_ALERTS` alone would not have closed")

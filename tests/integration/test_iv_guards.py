@@ -734,8 +734,12 @@ def _iv_series(path: Path, rates) -> None:
     """The prior nights, written straight to the series file.
 
     Only the newest night's exit code is in question; these are read back through
-    `_prior_rates`, which reads `dropped_rate` and nothing else, so each line is
-    one night's rate rather than a replay of a whole grader report.
+    `_prior_series`, which takes the rates from `dropped_rate` and nothing else, so
+    each line is one night's rate rather than a replay of a whole grader report. Its
+    third return — was-the-newest-row-a-breach — re-derives from that row's own
+    recorded `threshold`, and a row written by this helper carries none, so a breach
+    built here reads as just-started and the recorder tries to announce it. That is
+    why `_iv_record` mutes the room.
     """
     with path.open("w", encoding="utf-8") as fh:
         for i, rate in enumerate(rates):
@@ -754,6 +758,15 @@ def _iv_record(repo: Path, series: Path) -> subprocess.CompletedProcess:
     `HOME` is the fixture root so `cd ~/lloyd` lands in `repo`, and the recorder's
     exit status is the returned status: bash reports the last command in a pipeline,
     which is the recorder — the same thing the nightly's Bash tool sees.
+
+    The two room mutes are load-bearing, not hygiene. The degraded fixture below
+    breaches, and a row written by `_iv_series` carries no `threshold`, so
+    `_prior_breaching` reads that breach as just-started and the recorder reaches its
+    `announce()` — journal and desktop toast, both live channels. Today the fan-out
+    also fails a second way (the throwaway repo has no `agent-services/guardian/` to
+    import), and a run with only that to protect it is how
+    `tests/test_iv_metrics_series.py` put 23 real breach lines into this machine's
+    journal on 2026-09-20.
     """
     since = (datetime.datetime.now() - datetime.timedelta(days=2)).strftime(
         "%Y-%m-%dT%H:%M:%S")
@@ -762,7 +775,8 @@ def _iv_record(repo: Path, series: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, check=False,
         cwd=str(repo.parent),
-        env={"HOME": str(repo.parent), "PATH": "/usr/bin:/bin:/usr/local/bin"})
+        env={"HOME": str(repo.parent), "PATH": "/usr/bin:/bin:/usr/local/bin",
+             "LLOYD_JOURNAL_ALERTS": "0", "LLOYD_DESKTOP_ALERTS": "0"})
 
 
 def test_the_recorder_breaches_a_sustained_00526_median():
