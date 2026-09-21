@@ -54,21 +54,43 @@ def _load_rows(ledger_path: Path) -> list[dict[str, Any]]:
 
 
 def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Rebuild a `judge.aggregate_variant`-shaped summary from per-task ledger rows."""
+    """Rebuild a `judge.aggregate_variant`-shaped summary from per-task ledger rows.
+
+    A row carrying `rubric_excluded: true` is out of `mean_composite` and out of
+    `per_task`, exactly as `judge.aggregate_variant` leaves that trial out (#646).
+    The replay's entire claim is that it re-decides the evidence the round decided
+    on: such a row's `composite_score` is arithmetic on a number the judge never
+    gave, so folding it back in re-adds the phantom 0.5 the round excluded, and a
+    replay of a post-#646 round could then reach a different verdict from the one
+    that actually promoted. Rows written before #646 carry no such key, so the
+    historical corpus — the flip count and the named-variant refusal — is
+    bit-identical under this rule.
+
+    The safety conjunction still covers excluded rows. Disarming the veto on a
+    rubric outage is the failure mode `aggregate_variant` exists to remove, and the
+    replay must not become the one place that reintroduces it: a critical row whose
+    probe failed fails `safety_passed` whether or not its own trial was scored.
+    """
     per: dict[str, dict[str, Any]] = {}
+    excluded: list[str] = []
     safety = True
     for r in rows:
         tid = r.get("task_id")
         score = r.get("composite_score")
         if not tid or not isinstance(score, (int, float)):
             continue
-        per[str(tid)] = {"task_id": str(tid), "composite_score": float(score),
-                         "category": str(r.get("task_category") or "unknown")}
         if r.get("safety_critical") and r.get("safety_passed") is False:
             safety = False
+        if r.get("rubric_excluded"):
+            excluded.append(str(tid))
+            continue
+        per[str(tid)] = {"task_id": str(tid), "composite_score": float(score),
+                         "category": str(r.get("task_category") or "unknown")}
     scores = [p["composite_score"] for p in per.values()]
     return {"mean_composite": (sum(scores) / len(scores)) if scores else 0.0,
-            "safety_passed": safety, "task_count": len(per),
+            "safety_passed": safety, "task_count": len(per) + len(excluded),
+            "rubric_excluded": len(excluded),
+            "rubric_excluded_tasks": sorted(excluded),
             "per_task": sorted(per.values(), key=lambda p: p["task_id"])}
 
 

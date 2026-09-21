@@ -45,7 +45,7 @@ from . import bench_split
 # `promote.slice_metrics(...)` at the call site raised AttributeError on a
 # function object — every real round died before it wrote a report, and only a
 # test that stubbed the decision loop could get that far.
-from .promote import evaluate_promotion, promote, slice_metrics
+from .promote import evaluate_promotion, promote, slice_metrics, validity_report, validity_report_lines
 from .variant_sandbox import AnchorApplyError, materialize, materialize_baseline
 
 logger = logging.getLogger("autoresearch.run_round")
@@ -219,6 +219,54 @@ def materialize_variants(
             dropped, len(variants), _surface_drop_text(dropped_by_surface),
         )
     return variant_pairs, dropped_by_surface
+
+
+def _validity_or_none(cfg: AutoresearchConfig, baseline_summary: dict[str, Any],
+                      variant_summary: dict[str, Any], split: dict[str, Any]) -> dict[str, Any] | None:
+    """`validity_report`, or None if the lint could not run at all.
+
+    Advisory by construction, so a lint that cannot read the bench (a directory
+    that does not exist, a task file whose front matter does not parse) must not
+    end the round: the decision the round reports is the all-task one, and the
+    absence of this field says so. A failure that silently made the two means
+    AGREE would be the worst shape this function could have, so the exception is
+    logged at warning and the round report prints nothing for that variant rather
+    than a number.
+    """
+    try:
+        return validity_report(cfg, baseline_summary, variant_summary, split=split)
+    except Exception as exc:                                  # noqa: BLE001 — advisory
+        logger.warning("bench validity lint failed; reporting the all-task mean alone: %s", exc)
+        return None
+
+
+def _rubric_exclusion_lines(summaries: dict[str, dict[str, Any]]) -> list[str]:
+    """Report lines for trials the judge never scored (#646); empty when there are none.
+
+    A rubric call that could not answer, answered without JSON, or answered with
+    JSON that did not parse used to fold into the composite as a flat 0.5. That is
+    a score the response did not earn and the judge did not give, and the round
+    that loses its rubric engine scores every task at roughly half marks — a
+    uniform shift that reads as a capability collapse rather than an outage. Those
+    trials are excluded now, so the mean is over fewer trials, and the count is
+    printed beside it: an unexplained mean over 6 of 13 is the number this section
+    exists to make impossible.
+
+    Sorted by variant id, then task id, so a diff across two rounds compares line
+    for line — the same reason `_objective_coverage_lines` sorts.
+    """
+    lines: list[str] = []
+    for vid, summ in sorted(summaries.items()):
+        n = summ.get("rubric_excluded", 0)
+        if not n:
+            continue
+        tasks = ", ".join(summ.get("rubric_excluded_tasks") or []) or "(names unavailable)"
+        lines.append(
+            f"- `{vid}`: rubric-excluded={n} of {summ.get('task_count', 0)}; "
+            f"mean_composite is over {summ.get('scored_task_count', 0)} — the rubric judge "
+            f"produced no verdict for these, so the 0.5 it used to contribute is in no mean: "
+            f"{tasks}")
+    return lines
 
 
 def _objective_coverage_lines(summaries: dict[str, dict[str, Any]]) -> list[str]:
@@ -518,6 +566,10 @@ async def run(
             "normalized_gain": m["normalized_gain"],
             "should_promote": should,
             "reason": reason,
+            # #646: the same predicate re-run over only the tasks the validity lint
+            # refuses to call broken. Advisory — `should_promote` is what decides —
+            # and its whole purpose is the case where the two disagree.
+            "validity": _validity_or_none(cfg, baseline_summary, vs, split),
         })
         if should and (best_summary is None or vs["mean_composite"] > best_summary["mean_composite"]):
             best_variant = next(v for v in variants if v["variant_id"] == vid)
@@ -581,11 +633,27 @@ async def run(
     ]
     for vid, summ in summaries.items():
         marker = " (baseline)" if vid == baseline_id else ""
+        # This line's format is a contract, not a preference: `post_promotion.py`
+        # parses it back out of every round report, and
+        # `tests/test_post_promotion.py` extracts the f-string by AST and evaluates
+        # it standalone with only `summ`, `vid` and `marker` in scope. So the number
+        # of trials the mean is over lives in the `## Rubric coverage (#646)`
+        # section below, which is appended rather than parsed, and NOT as a suffix
+        # here — a suffix would need a local variable, and a local variable makes
+        # the extracted template raise NameError.
         lines.append(f"- `{vid}`{marker}: mean={summ.get('mean_composite', 0.0):.4f}, "
                      f"safety={'pass' if summ.get('safety_passed') else 'fail'}, tasks={summ.get('task_count', 0)}")
     # #416: the mean alone cannot show that a variant was ranked on fewer tasks
     # than the round ran, so the gaps are reported under it. Absent when every
     # check was measurable, which is what the sdk arm is meant to make normal.
+    # #646: the other way a trial contributes nothing — the judge never answered.
+    rubric_lines = _rubric_exclusion_lines(summaries)
+    if rubric_lines:
+        lines += ["", "## Rubric coverage (#646)",
+                  "A rubric call that did not answer, answered without JSON, or answered",
+                  "with JSON that did not parse excludes its trial: the 0.5 it used to",
+                  "contribute was arithmetic on a score the judge did not give.",
+                  *rubric_lines]
     coverage_lines = _objective_coverage_lines(summaries)
     if coverage_lines:
         lines += ["", "## Objective coverage (#416)",
@@ -611,6 +679,15 @@ async def run(
     lines.append("## Promotion decisions")
     for d in decisions:
         lines.append(f"- `{d['variant_id']}`: {'PROMOTE' if d['should_promote'] else 'HOLD'} — {d['reason']}")
+    validity_sections = [(d["variant_id"], d.get("validity")) for d in decisions if d.get("validity")]
+    if validity_sections:
+        lines += ["", "## Bench validity (#646)",
+                  "The promotion predicate evaluated twice over the same trial data: once",
+                  "over every task, once over only the tasks `bench_lint` does not call",
+                  "broken. Where they disagree, the gap is the broken-task effect."]
+        for vid, validity in validity_sections:
+            lines.append(f"- variant `{vid}`:")
+            lines += [f"  {line}" for line in validity_report_lines(validity)]
     if promotion_result:
         lines.append("")
         lines.append("## Promoted")
@@ -624,7 +701,8 @@ async def run(
     # Patch ledger with final promotion decisions (cheap second pass — append another entry)
     promoted_vid = promotion_result["variant_id"] if promotion_result and not dry_run else None
     for d in decisions:
-        ledger_append(cfg.paths.ledger_path, {
+        validity = d.get("validity") or {}
+        row = {
             "round_id": rid,
             "event": "decision",
             "variant_id": d["variant_id"],
@@ -632,7 +710,21 @@ async def run(
             "reason": d["reason"],
             "promoted": promoted_vid == d["variant_id"],
             "created_at": now_iso(),
-        })
+        }
+        # #646: the all-task mean beside the lint-valid-task mean, flattened onto
+        # the row that carries the decision. `means_agree` is the field the item
+        # asks for — the ledger line that says the two denominators disagreed on
+        # promote/no-promote, which is the broken-task effect measured rather than
+        # averaged away. Absent entirely when the lint could not run, never a
+        # `True` that means nothing.
+        for key in ("promote_valid", "reason_valid", "means_agree",
+                    "all_task_mean", "valid_task_mean", "valid_tasks",
+                    "excluded_tasks", "safety_outside_valid_pool"):
+            if key in validity:
+                row[key] = validity[key]
+        if validity:
+            row["bench_validity"] = validity
+        ledger_append(cfg.paths.ledger_path, row)
 
     return {
         "round_id": rid,

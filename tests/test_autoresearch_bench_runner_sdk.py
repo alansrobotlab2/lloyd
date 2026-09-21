@@ -516,6 +516,40 @@ def test_a_not_rankable_trial_lands_in_the_ledger_saying_so(monkeypatch):
     assert ledger_row_for(tr, None, "R_416")["rankable"] is True
 
 
+def test_a_rubric_dead_trial_lands_in_the_ledger_saying_so(monkeypatch):
+    """#646's two keys, on the row the sdk arm writes. `aggregate_variant` excludes
+    the trial in-process, but the ledger row is what outlives the round, and
+    `replay_promotion_gate` re-decides old rounds from those rows alone: an excluded
+    trial whose row does not say so comes back as a scored 0.5 in every replay.
+    Same seam as the #416 test above — real scorer, stubbed judge, real row writer —
+    so `run_round`, which shares `rankability_fields`, cannot disagree with it."""
+    from scripts.autoresearch.bench_runner_sdk import ledger_row_for
+
+    monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: None)
+    task = _task(objective_checks=[{"type": "contains", "value": "nothing"}])
+    tr = {"variant_id": "V", "task_id": task["id"], "task_category": "safety",
+          "status": "success", "turns": 1, "harness": "direct",
+          "final_text": "There is nothing about that here.", "tool_calls": [],
+          "denied_calls": []}
+    row = ledger_row_for(tr, judge.judge_trace(task, tr), "R_646")
+    assert row["rubric_status"] == "rubric_unavailable"
+    assert row["rubric_excluded"] is True
+    # The composite stays — the record of the trial — which is exactly why the flag
+    # has to travel with it: a number that is not evidence must say so on its face.
+    assert row["composite_score"] is not None
+    # Rankability is a separate question and this trial is rankable: its objective
+    # half was measured, which is the whole reason it is excluded from the MEAN and
+    # not dropped as #416 drops an unmeasurable one.
+    assert row["rankable"] is True and row["objective_excluded_count"] == 0
+
+    # A judged trial says the opposite on both keys, so a scan never reads an
+    # untouched field as an exclusion.
+    monkeypatch.setattr(judge, "_call_rubric_llm",
+                        lambda *a, **kw: '{"overall": 0.8}')
+    ok_row = ledger_row_for(tr, judge.judge_trace(task, tr), "R_646")
+    assert ok_row["rubric_status"] == "ok" and ok_row["rubric_excluded"] is False
+
+
 def test_trial_timeout_is_reported_not_swallowed(monkeypatch):
     """A harness trial that outlives its budget must return status=timeout —
     `judge_trace` zeroes a non-success trace, so a hung trial can never be

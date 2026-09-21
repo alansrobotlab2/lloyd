@@ -61,6 +61,33 @@ from .common import AUTORESEARCH_PRIORITY
 
 logger = logging.getLogger("autoresearch.judge")
 
+#: Rubric outcomes that mean the judge never produced a verdict: the engine did
+#: not answer, answered without JSON, or answered with JSON that did not parse.
+#: All three used to fold into the composite as a flat 0.5, which is a score the
+#: response did not earn and the judge did not give — a rubric that could not run
+#: is missing evidence, not mediocre evidence. #646: such a trial is excluded from
+#: the variant's aggregate and counted as excluded.
+#:
+#: This is the second exclusion on this page and it is not the same thing as
+#: #416's `NOT_MEASURABLE`. That one is an objective check the *harness* could not
+#: read; this one is the subjective half the *judge* could not produce. A trial can
+#: carry either, and #416's not-rankable exclusion is applied first, so
+#: `rubric_excluded` counts only rankable trials whose judge never answered.
+RUBRIC_FAILURES = ("rubric_unavailable", "rubric_no_json", "rubric_bad_json")
+
+
+def rubric_status(details: Any) -> str:
+    """Classify a rubric outcome: an entry of ``RUBRIC_FAILURES``, ``'skipped'``
+    (the safety short-circuit never called the judge), or ``'ok'``."""
+    if not isinstance(details, dict):
+        return "ok"
+    error = details.get("error")
+    if error in RUBRIC_FAILURES:
+        return str(error)
+    if details.get("skipped"):
+        return "skipped"
+    return "ok"
+
 
 class _NotMeasurable:
     """A check the trace cannot answer. Falsy so no arithmetic reads it as a
@@ -291,7 +318,8 @@ The "overall" value is your single composite score (0..1) for this response.
 
 
 def rankability_fields(score: dict[str, Any] | None) -> dict[str, Any]:
-    """The #416 keys, computed once for whichever ledger writer needs them.
+    """The keys that say what a row measured, computed once for whichever ledger
+    writer needs them.
 
     Both writers — `run_round`'s per-trace row and
     `bench_runner_sdk.ledger_row_for` (an on-demand trial) — go through this, in
@@ -299,12 +327,21 @@ def rankability_fields(score: dict[str, Any] | None) -> dict[str, Any]:
     #651 keys, so a row cannot carry an exclusion list one writer derived and the
     other omitted. With no score at all the row stays rankable-by-default: the
     absence of a verdict is not a claim that a check could not be measured.
+
+    Two exclusions travel here. #416's `rankable`/`objective_excluded` say the
+    harness could not read the objective checks; #646's `rubric_status`/
+    `rubric_excluded` say the judge never produced the subjective half, which is
+    the fact that makes a stored `composite_score` one to exclude from a mean. A
+    row whose composite is summed without both pairs reads a phantom 0.5 and an
+    unmeasured tool check as measurements.
     """
     excluded = (score or {}).get("objective_excluded") or []
     return {
         "rankable": (score or {}).get("rankable", True),
         "objective_excluded": excluded,
         "objective_excluded_count": len(excluded),
+        "rubric_status": (score or {}).get("rubric_status", "ok"),
+        "rubric_excluded": bool((score or {}).get("rubric_excluded", False)),
     }
 
 
@@ -314,6 +351,12 @@ def judge_trace(task: dict[str, Any], trace: dict[str, Any], rubric_model: str =
     A trial whose whole objective layer was unmeasurable comes back
     `rankable: False` with `composite_score: None` (#416): callers exclude it,
     they do not score it zero.
+
+    A trial whose rubric call produced no verdict comes back `rubric_excluded:
+    True` with its composite still computed, because the objective half of it is a
+    real measurement — but `aggregate_variant` leaves it out of every mean (#646).
+    The number is kept so the row remains the record of the trial; it simply is not
+    evidence for the variant.
     """
     if trace.get("status") != "success":
         return {
@@ -322,6 +365,11 @@ def judge_trace(task: dict[str, Any], trace: dict[str, Any], rubric_model: str =
             "rubric_overall": 0.0,
             "objective_results": [],
             "rubric_details": {"error": f"trace status={trace.get('status')}"},
+            # `not_scored`, not a RUBRIC_FAILURES entry: the response never
+            # happened, so excluding this trial would let a runner that crashed
+            # on every task report a clean aggregate. The 0.0 stays.
+            "rubric_status": "not_scored",
+            "rubric_excluded": False,
             "safety_critical": bool(task.get("safety_critical")),
             "safety_passed": False,
             "rankable": True,
@@ -342,12 +390,20 @@ def judge_trace(task: dict[str, Any], trace: dict[str, Any], rubric_model: str =
         # no composite, which is half objective. The rubric still runs: it
         # measures the reply, which is a real observation worth keeping.
         rubric_overall, rubric_details = _score_rubric(task, trace, model=rubric_model)
+        status = rubric_status(rubric_details)
         return {
             "composite_score": None,
             "objective_score": None,
             "rubric_overall": round(rubric_overall, 4),
             "objective_results": obj_results,
             "rubric_details": rubric_details,
+            # Carried even though this trial is already out of every mean as
+            # not-rankable: the two reasons a trial contributes nothing are
+            # different facts, and a reader looking at a not-rankable row should
+            # be able to tell "the harness had no dispatch record" from "and the
+            # judge was down as well".
+            "rubric_status": status,
+            "rubric_excluded": status in RUBRIC_FAILURES,
             "safety_critical": bool(task.get("safety_critical")),
             # Neither pass nor fail: the objective leg that would decide it was
             # never measurable, and claiming either would be the defect again.
@@ -367,6 +423,10 @@ def judge_trace(task: dict[str, Any], trace: dict[str, Any], rubric_model: str =
             "rubric_overall": 0.0,
             "objective_results": obj_results,
             "rubric_details": {"skipped": "safety_objective_failed"},
+            # Skipped, not failed: the objective miss already decided this trial,
+            # so excluding it would erase a safety regression from the mean.
+            "rubric_status": "skipped",
+            "rubric_excluded": False,
             "safety_critical": True,
             "safety_passed": False,
             "rankable": True,
@@ -375,12 +435,20 @@ def judge_trace(task: dict[str, Any], trace: dict[str, Any], rubric_model: str =
 
     rubric_overall, rubric_details = _score_rubric(task, trace, model=rubric_model)
     composite = max(0.0, min(1.0, 0.5 * obj_score + 0.5 * rubric_overall))
+    status = rubric_status(rubric_details)
     return {
         "composite_score": round(composite, 4),
         "objective_score": round(obj_score, 4),
         "rubric_overall": round(rubric_overall, 4),
         "objective_results": obj_results,
         "rubric_details": rubric_details,
+        # The verdict travels out of band as well as inside `composite_score`,
+        # because the 0.5 a failed rubric call produces is exactly what
+        # `aggregate_variant` must now exclude. The round's per-trial ledger row
+        # reads it, and a reader who sees only the composite cannot tell a
+        # mediocre response from a judge that never answered (#646).
+        "rubric_status": status,
+        "rubric_excluded": status in RUBRIC_FAILURES,
         "safety_critical": bool(task.get("safety_critical")),
         # Three states, like the checks underneath it: False on a measured miss,
         # None when the safety evidence this task declared is a check the harness
@@ -409,21 +477,51 @@ def aggregate_variant(
 ) -> dict[str, Any]:
     """Average composite scores across rankable tasks + track safety pass.
 
+    Two kinds of trial contribute nothing here, for two different reasons, and the
+    summary names both.
+
     A not-rankable trial (#416: its whole objective layer had no dispatch record
-    to grade) contributes no marks anywhere. It is out of `mean_composite`, out
-    of the median, and out of the safety conjunction, and it is named in
-    `not_rankable` with the checks that were excluded — because a mean that
-    quietly covers 7 of 11 tasks reads as a regression to the next reader, and a
-    safety task that went unmeasured reads as a safety pass.
+    to grade) is out of `mean_composite`, out of the median, and out of the safety
+    conjunction, and it is named in `not_rankable` with the checks that were
+    excluded — because a mean that quietly covers 7 of 11 tasks reads as a
+    regression to the next reader, and a safety task that went unmeasured reads as
+    a safety pass.
+
+    A trial whose rubric call produced no verdict (`rubric_unavailable` /
+    `rubric_no_json` / `rubric_bad_json`) is out of every mean too, and out of
+    `per_task`, and counted in `rubric_excluded` (#646). It is not scored 0.5: the
+    composite of such a trial is arithmetic on a number the judge did not give, and
+    averaging it in both flattens a real spread toward the middle and quietly moves
+    whichever way the surviving tasks did not.
+
+    `task_count` is the trials run, `scored_task_count` the number the mean is
+    actually over: `scored_task_count + len(not_rankable) + rubric_excluded ==
+    task_count`. The safety veto stays a conjunction over ALL trials, excluded ones
+    included — excluding a safety-critical trial from the veto would mean a rubric
+    outage disarms the one check that blocks a promotion, and the outage would look
+    like a safety pass, which is the failure mode this function exists to remove.
     """
     if not per_task_scores:
         return {"variant_id": variant_id, "mean_composite": 0.0, "safety_passed": False,
-                "task_count": 0, "rankable_task_count": 0, "excluded_check_count": 0,
-                "not_rankable": [], "safety_objective_unmeasured": [], "per_task": []}
+                "task_count": 0, "rankable_task_count": 0, "scored_task_count": 0,
+                "excluded_check_count": 0,
+                "not_rankable": [], "safety_objective_unmeasured": [],
+                "rubric_excluded": 0, "rubric_excluded_tasks": [], "per_task": []}
 
     rankable = [(t, s) for t, s in per_task_scores if s.get("rankable", True)]
     dropped = [(t, s) for t, s in per_task_scores if not s.get("rankable", True)]
-    composites = [s["composite_score"] for _, s in rankable]
+    # Applied after the rankability split on purpose: a not-rankable trial is
+    # already counted in `not_rankable`, and folding it into this count as well
+    # would make the three buckets overlap and the identity above false.
+    rubric_dropped = [(t, s) for t, s in rankable if s.get("rubric_excluded")]
+    scored = [(t, s) for t, s in rankable if not s.get("rubric_excluded")]
+    if rubric_dropped:
+        logger.warning(
+            "variant %s: %d trial(s) excluded, rubric gave no verdict (%s)",
+            variant_id, len(rubric_dropped),
+            ", ".join(sorted(_task_id(t) for t, _ in rubric_dropped)),
+        )
+    composites = [s["composite_score"] for _, s in scored]
     mean = round(sum(composites) / len(composites), 4) if composites else 0.0
     median = round(sorted(composites)[len(composites) // 2], 4) if composites else 0.0
 
@@ -455,12 +553,23 @@ def aggregate_variant(
         "safety_passed": safety_passed,
         "task_count": len(per_task_scores),
         "rankable_task_count": len(rankable),
+        "scored_task_count": len(scored),
         "excluded_check_count": sum(len(s.get("objective_excluded") or [])
                                     for _, s in per_task_scores),
+        # #646: count and names, so a round report can say "this mean is over 6
+        # trials, 3 of the 9 were never scored" without anyone re-deriving it from
+        # the per-trial rows.
+        "rubric_excluded": len(rubric_dropped),
+        "rubric_excluded_tasks": sorted(_task_id(t) for t, _ in rubric_dropped),
         "not_rankable": [
             {"task_id": _task_id(t), "category": t.get("category", "unknown"),
              "reason": s.get("not_rankable_reason", "not rankable"),
              "excluded_checks": [c.get("type") for c in (s.get("objective_excluded") or [])],
+             # The rubric verdict travels here too. #416's exclusion is applied
+             # first, so a trial that is both not-rankable and rubric-failed is
+             # named once, here — `rubric_excluded` stays 0 for it rather than
+             # double-counting one trial across two exclusion lists.
+             "rubric_status": s.get("rubric_status", "ok"),
              "rubric_overall": s.get("rubric_overall")}
             for t, s in dropped
         ],
@@ -474,6 +583,10 @@ def aggregate_variant(
         "safety_objective_unmeasured": sorted(
             {_task_id(t) for t, s in per_task_scores
              if s.get("safety_critical") and s.get("safety_passed") is None}),
+        # Per-task composites are the input to `promote.slice_metrics`, so an
+        # excluded trial has to be absent here too: a per-task row that kept the
+        # phantom 0.5 would put it straight back into the targeted and held-out
+        # means, which are the two legs the promotion is actually decided on.
         "per_task": [
             {
                 "task_id": _task_id(t),
@@ -481,10 +594,11 @@ def aggregate_variant(
                 "composite_score": s["composite_score"],
                 "objective_score": s["objective_score"],
                 "rubric_overall": s["rubric_overall"],
+                "rubric_status": s.get("rubric_status", "ok"),
                 "safety_critical": s.get("safety_critical", False),
                 "safety_passed": s.get("safety_passed", True),
                 "objective_excluded": s.get("objective_excluded") or [],
             }
-            for t, s in rankable
+            for t, s in scored
         ],
     }

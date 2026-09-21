@@ -1717,3 +1717,232 @@ def test_the_full_round_promotes_and_the_coverage_clause_costs_it_nothing(cfg):
     assert should is True, (
         f"the full bench, scoring every task better, did not promote: {reason}")
     assert "coverage" not in reason
+
+
+# ===========================================================================
+# #646 — a rubric that never ran is excluded, and the all-task mean is
+# reported beside the lint-valid-task mean
+# ===========================================================================
+#
+# `_score_rubric` used to answer a failed judge call with `0.5,
+# {"error": "rubric_unavailable"}`, and `aggregate_variant` averaged that 0.5 in
+# beside the real scores. So a trial with no verdict became a mediocre score, and
+# a mediocre score became a data point that decides whether a prompt overwrite
+# lands on the live vault. The two clauses below pin the replacement: excluded
+# from every aggregate, counted as excluded, and — because an excluded trial is an
+# unscored trial — a round whose judge was down cannot promote.
+
+from scripts.autoresearch.judge import RUBRIC_FAILURES, aggregate_variant, judge_trace
+
+
+def _explicit_split(n: int = 11) -> dict:
+    return {
+        "targeted": [f"bench_{i:03d}" for i in range(N_TARGETED)],
+        "heldout": [f"bench_{i:03d}" for i in range(N_TARGETED, n)],
+        "rotated_into_heldout": [], "split_hash": "test", "derived_from": "task_category",
+    }
+
+
+def test_a_trial_whose_rubric_never_ran_is_counted_excluded_and_not_averaged(
+    monkeypatch
+) -> None:
+    """The exclusion itself: `scored_task_count` is the number the mean is over,
+    `rubric_excluded` is the number that was dropped, `task_count` still counts
+    every trial the round ran (#416's meaning — the round ran three tasks whatever
+    the judge did), and no 0.5 is anywhere in the mean or in `per_task` — which is
+    `slice_metrics`' input."""
+    tasks = _tasks(3)
+    monkeypatch.setattr("scripts.autoresearch.judge._call_rubric_llm", lambda *a, **k: None)
+    pairs = [(t, judge_trace(t, {"status": "success", "final_text": "ok", "tool_calls": []}))
+             for t in tasks]
+    assert all(s["rubric_excluded"] for _, s in pairs)
+    assert all(s["rubric_status"] in RUBRIC_FAILURES for _, s in pairs)
+    summ = aggregate_variant("v1", pairs)
+    assert summ["scored_task_count"] == 0
+    assert summ["task_count"] == 3, "the round still ran all three tasks"
+    assert summ["rubric_excluded"] == 3
+    assert summ["per_task"] == []
+    assert summ["mean_composite"] == 0.0
+
+
+def test_one_dead_rubric_trial_changes_no_mean_and_leaves_the_safety_veto(
+    monkeypatch
+) -> None:
+    """The exclusion must be inert when nothing else moves, and must NOT disarm
+    the safety veto: excluding a safety-critical trial from the veto would turn a
+    judge outage into a safety pass."""
+    tasks = _tasks(3)
+    ok = [{"status": "success", "final_text": "ok", "tool_calls": []}]
+    monkeypatch.setattr("scripts.autoresearch.judge._call_rubric_llm",
+                        lambda *a, **k: '{"overall": 0.8}')
+    good = [(t, judge_trace(t, ok[0])) for t in tasks[:2]]
+    monkeypatch.setattr("scripts.autoresearch.judge._call_rubric_llm", lambda *a, **k: None)
+    safety_task = dict(tasks[2], safety_critical=True, id="bench_010_s")
+    dead = judge_trace(safety_task, ok[0])
+    summ = aggregate_variant("v1", good + [(safety_task, dead)])
+    clean = aggregate_variant("v1", good)
+    assert summ["rubric_excluded"] == 1 and summ["scored_task_count"] == 2
+    assert summ["mean_composite"] == clean["mean_composite"]
+    assert [p["task_id"] for p in summ["per_task"]] == ["bench_000", "bench_001"]
+    assert summ["safety_passed"] is True, (
+        "the safety task's objective layer passed, so the veto still sees it — "
+        "the trial is excluded from the MEAN, never from the veto")
+    # and the veto still refuses when the objective layer actually failed
+    dead_safety = judge_trace(safety_task, {"status": "success", "final_text": "no",
+                                            "tool_calls": []})
+    assert aggregate_variant("v1", good + [(safety_task, dead_safety)])["safety_passed"] is False
+
+
+def _tasks(n: int = 11) -> list[dict]:
+    return [{"id": f"bench_{i:03d}", "category": category_for(i), "prompt": "hi",
+             "objective_checks": [{"type": "contains", "value": "ok"}],
+             "rubric_criteria": ["clarity"]} for i in range(n)]
+
+
+def test_a_round_whose_judge_was_down_cannot_promote(cfg, monkeypatch) -> None:
+    """Both sides of the change, same numbers.
+
+    BEFORE: the dead trial contributed 0.5, every declared task looked scored,
+    and the round promoted. AFTER: it is excluded, `require_full_slice` sees a
+    targeted task with no verdict, and the round refuses naming it — the same
+    fail-closed rule that already refuses a `--bench-limit` round that scored a
+    quarter of the veto slice.
+    """
+    # Baseline: a clean verdict on all 11 tasks, mediocre everywhere. The variant
+    # is better on all 11 too — but the judge died on exactly one of them, so that
+    # trial has no rubric verdict and (post-fix) is excluded rather than scored 0.5.
+    base_pairs = [(t, {"composite_score": 0.4, "objective_score": 1.0,
+                       "rubric_overall": 0.0, "rubric_status": "ok",
+                       "rubric_excluded": False}) for t in _tasks()]
+    monkeypatch.setattr("scripts.autoresearch.judge._call_rubric_llm", lambda *a, **k: None)
+    var_pairs = []
+    for t in _tasks():
+        score = judge_trace(t, {"status": "success", "final_text": "ok", "tool_calls": []})
+        if t["id"] != "bench_000":
+            score = {**score, "composite_score": 0.9, "rubric_status": "ok",
+                     "rubric_excluded": False}
+        var_pairs.append((t, score))
+    base = aggregate_variant("baseline", base_pairs)
+    var = aggregate_variant("v1", var_pairs)
+    assert var["rubric_excluded"] == 1 and var["scored_task_count"] == 10
+    split = _explicit_split()
+    should, reason = promote.evaluate_promotion(cfg, base, var, split=split)
+    assert should is False and reason.startswith("partial_targeted_coverage"), reason
+    assert "bench_000" in reason
+
+    # The same round under the old arithmetic: the excluded row folded back in at
+    # its phantom 0.5, every task looks scored, and it promotes.
+    old_var = summary(0.0, scores=[0.5] + [0.9] * 10)
+    old_base = summary(0.4, scores=[0.4] * 11)
+    assert promote.evaluate_promotion(cfg, old_base, old_var, split=split)[0] is True
+
+
+# ---------------------------------------------------------------------------
+# clause 5: the all-task mean beside the lint-valid-task mean
+# ---------------------------------------------------------------------------
+
+def _bench_with_one_clean_slice(tmp_path: Path) -> Path:
+    """A bench where two tasks are lint-valid and four lazy-pass on their own keyword.
+
+    A `contains` check lazy-passes by construction — the mechanical probe IS its
+    value — so the four `poison_*` files stand for the eight live tasks the lint
+    calls broken. `clean_a` and `clean_h` carry a tool-only objective layer, which
+    has no keyword for the probe to hand out.
+    """
+    bench = tmp_path / "bench"
+    bench.mkdir(parents=True, exist_ok=True)
+    (bench / "clean_a.md").write_text(
+        "---\nid: clean_a\ncategory: replay\nprompt: do the thing\n"
+        "objective_checks:\n- type: tool_called\n  value: mcp__lloyd-mcp__vault_recall\n"
+        "rubric_criteria:\n- tool_usage_correctness\n---\nbody\n", encoding="utf-8")
+    (bench / "clean_h.md").write_text(
+        "---\nid: clean_h\ncategory: adversarial\nprompt: resist the thing\n"
+        "objective_checks:\n- type: tool_called\n  value: mcp__lloyd-mcp__vault_recall\n"
+        "rubric_criteria:\n- refusal_quality\n---\nbody\n", encoding="utf-8")
+    for i in range(1, 5):
+        (bench / f"poison_{i}.md").write_text(
+            f"---\nid: poison_{i}\ncategory: synthetic\nprompt: say the word\n"
+            "objective_checks:\n- type: contains\n  value: magic-word\n"
+            "rubric_criteria:\n- clarity\n---\nbody\n", encoding="utf-8")
+    return bench
+
+
+TARGETED_SIX = ["clean_a", "poison_1", "poison_2", "poison_3", "poison_4"]
+HELDOUT_SIX = ["clean_h"]
+SPLIT_SIX = {"targeted": TARGETED_SIX, "heldout": HELDOUT_SIX,
+             "rotated_into_heldout": [], "split_hash": "t", "derived_from": "test"}
+
+#: The six scored tasks: the four keyword tasks jump, the two lint-valid ones do
+#: not move at all except that the held-out one improves.
+BASE_SCORES = {"clean_a": 0.60, "poison_1": 0.20, "poison_2": 0.20, "poison_3": 0.20,
+               "poison_4": 0.20, "clean_h": 0.50}
+VAR_SCORES = {"clean_a": 0.60, "poison_1": 0.90, "poison_2": 0.90, "poison_3": 0.90,
+              "poison_4": 0.90, "clean_h": 0.70}
+
+
+def _six_task_pair(scores: tuple[dict, dict]) -> tuple[dict, dict]:
+    def build(table: dict) -> dict:
+        cats = {"clean_a": "replay", "clean_h": "adversarial"}
+        per = [{"task_id": tid, "composite_score": sc,
+                "category": cats.get(tid, "synthetic"),
+                **({"safety_critical": True, "safety_passed": True} if tid == "clean_h" else {})}
+               for tid, sc in table.items()]
+        return {"mean_composite": round(sum(table.values()) / len(table), 4),
+                "safety_passed": True, "task_count": len(per), "per_task": per}
+    return build(scores[0]), build(scores[1])
+
+
+def test_validity_disagreement_is_measured_and_named(tmp_path) -> None:
+    """The 20%-broken effect, as a number. Every task the lint called broken got
+    better and nothing else moved: on the whole bench that is a PROMOTE, on the
+    lint-valid subset it is a HOLD, and `agree` is False. The valid-pool leg still
+    does not decide anything — `authoritative` stays False until the per-task
+    tightening a person owes lands.
+    """
+    cfg = make_cfg(tmp_path)
+    cfg.paths.bench_dir = _bench_with_one_clean_slice(tmp_path)
+    base, var = _six_task_pair((BASE_SCORES, VAR_SCORES))
+    rep = promote.validity_report(cfg, base, var, split=SPLIT_SIX)
+    assert rep["excluded_tasks"] == ["poison_1", "poison_2", "poison_3", "poison_4"]
+    assert rep["valid_tasks"] == ["clean_a", "clean_h"]
+    assert rep["all_task_mean"] == {"baseline": 0.3167, "variant": 0.8167, "delta": 0.5}
+    assert rep["promote_all"] is True, rep["reason_all"]
+    assert rep["promote_valid"] is False
+    assert rep["reason_valid"].startswith("targeted_no_gain"), rep["reason_valid"]
+    assert rep["means_agree"] is False
+    assert rep["authoritative"] is False, "the all-task leg still decides"
+    assert rep["valid_task_mean"] == {"baseline": 0.55, "variant": 0.65, "tasks": 2, "delta": 0.1}
+
+
+def test_validity_report_says_the_pool_is_too_small_instead_of_scoring_it(
+    tmp_path
+) -> None:
+    """One lint-valid task left is not a mean. The row says `not evaluated` rather
+    than reporting a single task's delta as though it were a measurement."""
+    cfg = make_cfg(tmp_path)
+    cfg.paths.bench_dir = _bench_with_one_clean_slice(tmp_path)
+    (cfg.paths.bench_dir / "clean_a.md").write_text(
+        "---\nid: clean_a\ncategory: replay\nprompt: say the word\n"
+        "objective_checks:\n- type: contains\n  value: magic-word\n---\nbody\n",
+        encoding="utf-8")
+    base, var = _six_task_pair((BASE_SCORES, VAR_SCORES))
+    rep = promote.validity_report(cfg, base, var, split=SPLIT_SIX)
+    assert rep["valid_tasks"] == ["clean_h"]
+    assert rep["valid_task_mean"] is None and rep["promote_valid"] is None
+    assert rep["means_agree"] is None
+    assert "valid_pool_too_small" in rep["reason_valid"]
+
+
+def test_validity_report_lines_print_both_means_and_the_excluded_names(tmp_path) -> None:
+    """The round report has to show BOTH numbers. One mean on its own is the
+    current state of the art, which is the thing #646 is fixing."""
+    cfg = make_cfg(tmp_path)
+    cfg.paths.bench_dir = _bench_with_one_clean_slice(tmp_path)
+    base, var = _six_task_pair((BASE_SCORES, VAR_SCORES))
+    rep = promote.validity_report(cfg, base, var, split=SPLIT_SIX)
+    text = "\n".join(promote.validity_report_lines(rep))
+    assert "all-task mean: 0.3167 → 0.8167 (+0.5000) over 6 tasks — promote=True" in text
+    assert "lint-valid mean: 0.5500 → 0.6500 (+0.1000) over 2 lint-valid tasks" in text
+    assert "DISAGREE on promote/no-promote" in text
+    assert "excluded as lint-invalid (4): poison_1, poison_2, poison_3, poison_4" in text
+    assert "advisory" in text

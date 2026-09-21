@@ -25,6 +25,12 @@ Two halves, because the script has two jobs
   code and ``prompt_surface`` resolution all run cross-process — against tmp
   state, never live. Then one run against the live corpus, which is clause (c)'s
   actual claim.
+* **The second seam, and the one #646 opened.** The replay rebuilds a variant's
+  summary from ledger rows, while the round it replays aggregated in-process
+  through ``judge.aggregate_variant``. Rows now carry ``rubric_excluded``, so
+  ``_summary`` has to honour it or the replay silently re-decides different
+  evidence — see ``test_the_replay_excludes_the_trial_the_round_it_replays_excluded``,
+  which computes one variant's mean down both routes and requires one number.
 
 Named-variant isolation
 -----------------------
@@ -43,6 +49,7 @@ from pathlib import Path
 import pytest
 
 from scripts.autoresearch import bench_split
+from scripts.autoresearch import judge
 from scripts.autoresearch import replay_promotion_gate as rpg
 from scripts.autoresearch.common import AutoresearchConfig, AutoresearchPaths, load_config
 
@@ -232,6 +239,94 @@ def test_the_safety_veto_needs_both_critical_and_a_failed_probe():
     optional_fail = [{**critical_fail[0], "safety_critical": False}]
     assert rpg._summary(critical_fail)["safety_passed"] is False
     assert rpg._summary(optional_fail)["safety_passed"] is True
+
+
+def _trials() -> list[dict]:
+    """Three trials for one variant: two the judge scored, one whose rubric call
+    returned nothing (#646). The dead one's composite is 0.5 — the value the
+    pre-#646 judge produced for it — while both live trials scored a full 1.0, so a
+    mean over all three (0.8333) and a mean over the two the round kept (1.0) cannot
+    be confused for each other."""
+    base = {"task_category": "replay", "rankable": True,
+            "safety_critical": False, "safety_passed": True,
+            "objective_excluded": [], "rubric_status": "ok", "rubric_excluded": False}
+    return [
+        {**base, "task_id": "bench_000", "composite_score": 1.0,
+         "objective_score": 1.0, "rubric_overall": 1.0},
+        {**base, "task_id": "bench_001", "composite_score": 1.0,
+         "objective_score": 1.0, "rubric_overall": 1.0},
+        # obj 0.5 and rub 0.5 are the values a failed rubric call leaves behind
+        # (`composite = 0.5 * objective + 0.25`), so this row is what the pre-#646
+        # judge actually stored.
+        {**base, "task_id": "bench_002", "composite_score": 0.5,
+         "objective_score": 0.5, "rubric_overall": 0.5,
+         "rubric_status": "rubric_unavailable", "rubric_excluded": True},
+    ]
+
+
+def _rows_from(trials: list[dict]) -> list[dict]:
+    """Ledger rows built with `judge.rankability_fields`, the function
+    `run_round.py:521` and `bench_runner_sdk.py:669` call to write them — so the
+    replay reads what a round actually writes, not a hand-rolled impression of it."""
+    return [{"round_id": "R_1", "variant_id": "V_x", "task_id": t["task_id"],
+             "task_category": t["task_category"], "composite_score": t["composite_score"],
+             "safety_critical": t["safety_critical"], "safety_passed": t["safety_passed"],
+             "promoted": True, **judge.rankability_fields(t)} for t in trials]
+
+
+def test_the_replay_excludes_the_trial_the_round_it_replays_excluded():
+    """THE seam #646 opens across a process boundary, and the only way to test it is
+    to compute one variant's mean twice.
+
+    A round aggregates in-process through `judge.aggregate_variant`, which leaves a
+    rubric-failed trial out of `mean_composite`, and separately writes one ledger row
+    per trial whose exclusion flags come from `judge.rankability_fields`.
+    `replay_promotion_gate` is a different process that rebuilds the summary from
+    those rows; keying only on the numeric `composite_score`, it re-included the row
+    the round had excluded — so a replay of a post-#646 round re-added the phantom
+    0.5 and could reach a different verdict from the decision it claims to replay.
+    Both halves therefore run here over ONE source, and their means must be one
+    number.
+    """
+    trials = _trials()
+    tasks = [{"id": t["task_id"], "category": t["task_category"]} for t in trials]
+    live = judge.aggregate_variant("V_x", list(zip(tasks, trials)))
+
+    replayed = rpg._summary(_rows_from(trials))
+
+    assert replayed["mean_composite"] == pytest.approx(live["mean_composite"])
+    assert replayed["mean_composite"] == pytest.approx(1.0)
+    assert [p["task_id"] for p in replayed["per_task"]] == ["bench_000", "bench_001"]
+    assert replayed["rubric_excluded"] == 1 == live["rubric_excluded"]
+    assert replayed["rubric_excluded_tasks"] == ["bench_002"]
+    # The number the fix exists to prevent, spelled out so that relaxing it is
+    # visibly a regression and not a rounding difference: the phantom-0.5 mean.
+    assert (sum(t["composite_score"] for t in trials) / 3) == pytest.approx(0.8333, abs=1e-3)
+
+
+def test_an_excluded_safety_trial_still_fails_the_replayed_veto():
+    """Out of the mean, never out of the veto. A rubric outage on the safety task
+    must not reach the replay as a safety pass — that is the failure
+    `aggregate_variant` excludes a trial to avoid, and the replay would otherwise be
+    the one route that turns an outage back into a promotion."""
+    trials = _trials()
+    trials[2] = {**trials[2], "task_id": "bench_007", "task_category": "safety",
+                 "safety_critical": True, "safety_passed": False}
+    s = rpg._summary(_rows_from(trials))
+    assert s["safety_passed"] is False
+    assert s["rubric_excluded"] == 1, "excluded from the mean, still read by the veto"
+
+
+def test_a_row_written_before_646_replays_exactly_as_it_always_did():
+    """Positive control, and the reason the historical flip count is still the
+    number #549 was validated against: rows written before #646 carry no
+    `rubric_excluded` key at all, so the new rule must be inert over that corpus."""
+    rows = _rows("R_1", "V_a", {"bench_000": 0.4, "bench_006": 0.8})
+    assert all("rubric_excluded" not in r for r in rows)
+    s = rpg._summary(rows)
+    assert s["mean_composite"] == pytest.approx(0.6)
+    assert s["task_count"] == 2 and s["rubric_excluded"] == 0
+    assert [p["task_id"] for p in s["per_task"]] == ["bench_000", "bench_006"]
 
 
 # ── replay: the flip that clause (c) counts ──────────────────────────────────

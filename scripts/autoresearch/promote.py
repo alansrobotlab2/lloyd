@@ -16,6 +16,14 @@ named snapshot. Both directions reach the live vault through
 `scripts.automod.vault_round.land()`, so whatever the contract files say at any
 moment is validated, committed, and in the automod ledger — nothing lands by a
 bare file copy.
+
+Nothing in this module but `evaluate_promotion` decides a promotion.
+`validity_report` re-runs that same predicate over only the bench tasks the
+validity lint does not call broken and logs the pair beside the decision — both
+numbers, and whether they disagree — but it is advisory and its own docstring
+says why. Do not read a `promote_valid` as a gate, and do not make it one while
+the bench's lint-valid pool is empty of scored tasks, which on the live bench it
+is (`tests/test_bench_lint.py::test_the_live_valid_pool_is_empty_once_the_real_judge_scores_it`).
 """
 
 from __future__ import annotations
@@ -248,6 +256,191 @@ def evaluate_promotion(
         f"heldout_delta={m['heldout_delta']:+.4f}, normalized_gain={gain_str}, "
         f"win_frac={m['win_fraction']:.2f})"
     )
+
+
+def _restricted_summary(summary: dict[str, Any], keep: set[str]) -> dict[str, Any]:
+    """A copy of `summary` holding only the tasks in `keep`.
+
+    Only `per_task` and the two means are rebuilt; `safety_passed` is carried
+    through unchanged so the valid-pool leg still sees the baseline round's own
+    safety verdict rather than a veto the filter quietly deleted.
+    """
+    per_task = [p for p in (summary.get("per_task") or []) if str(p.get("task_id")) in keep]
+    composites = [float(p.get("composite_score", 0.0)) for p in per_task]
+    out = dict(summary)
+    out["per_task"] = per_task
+    out["mean_composite"] = round(sum(composites) / len(composites), 4) if composites else 0.0
+    return out
+
+
+def _restricted_split(split: dict[str, Any], keep: set[str]) -> dict[str, Any]:
+    out = dict(split)
+    out["targeted"] = [t for t in (split.get("targeted") or []) if str(t) in keep]
+    out["heldout"] = [t for t in (split.get("heldout") or []) if str(t) in keep]
+    return out
+
+
+#: Below this many scored tasks the valid-pool leg is not a measurement — one
+#: task either moved or it did not, and a mean over it is not a mean.
+MIN_VALID_POOL_TASKS = 2
+
+
+def validity_report(
+    cfg: AutoresearchConfig,
+    baseline_summary: dict[str, Any],
+    variant_summary: dict[str, Any],
+    split: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The all-task mean beside the lint-valid-task mean, and whether they agree.
+
+    #646 step 5. Heiner's point is that a bench with a fifth of its tasks broken
+    re-ranks models on the broken fifth, and you cannot find those tasks by
+    solving the others. The lint (`scripts/autoresearch/bench_lint.py`) names
+    which of ours are broken in the three ways that are mechanically checkable —
+    a boilerplate reply passes, an ask has no verifier, a layer cannot fail — so
+    the same promotion predicate can be evaluated twice: over every task, and over
+    only the tasks that survive. Where the two disagree, the disagreement IS the
+    20%-broken effect, and it gets recorded rather than averaged away.
+
+    The valid-pool leg is ADVISORY ONLY — nothing here refuses a
+    promotion the all-task leg allowed. Making the valid-only mean authoritative
+    is #646's own deferred step, which waits on a human deciding per task whether
+    to tighten a check or retire the task; until then the bench's lint-valid pool
+    is small (4 of 13 as measured) and a veto from it would be a veto from four
+    numbers. What this function does now is put both numbers, and the agreement
+    between them, in the log, the round report and the ledger row.
+
+    Read `reason_valid: valid_pool_too_small` carefully in a live round, because
+    its cause is not the one its wording suggests. The pool is small after the
+    scored filter, not after the bench: the 4 tasks the lint does not invalidate
+    are exactly the ones whose only checks are tool-behaviour checks that no
+    configured arm measures, so #416 has already dropped their trials and they
+    carry no `per_task` row to restrict. The two exclusions are complementary
+    halves of one defect — the lint invalidates the tasks the harness CAN read
+    (keyword presence boilerplate passes), and the harness cannot read the tasks
+    the lint leaves alone — and their intersection is empty, which is a sharper
+    statement of the item's premise than any count of broken tasks: the mean that
+    gates a promotion is currently an average over layers that a lazy reply
+    satisfies. Reporting `None` here is the correct output; loosening `valid`
+    until a number appears would delete the finding.
+    """
+    from .bench_lint import valid_task_ids  # local import: keeps promote importable without the lint's deps
+
+    split = split or derive_split(baseline_summary, variant_summary)
+    scored = {str(p.get("task_id")) for p in (baseline_summary.get("per_task") or [])} | {
+        str(p.get("task_id")) for p in (variant_summary.get("per_task") or [])
+    }
+    valid = valid_task_ids(cfg.paths.bench_dir)
+    pool = sorted(scored & valid)
+    missing = sorted(scored - valid)
+
+    should_all, reason_all = evaluate_promotion(cfg, baseline_summary, variant_summary, split=split)
+    report: dict[str, Any] = {
+        "bench_dir": str(cfg.paths.bench_dir),
+        "scored_tasks": len(scored),
+        "valid_tasks": pool,
+        "excluded_tasks": missing,
+        "all_task_mean": {
+            "baseline": round(float(baseline_summary.get("mean_composite", 0.0)), 4),
+            "variant": round(float(variant_summary.get("mean_composite", 0.0)), 4),
+        },
+        "promote_all": bool(should_all),
+        "reason_all": reason_all,
+        "authoritative": False,
+    }
+    report["all_task_mean"]["delta"] = round(
+        report["all_task_mean"]["variant"] - report["all_task_mean"]["baseline"], 4)
+
+    if len(pool) < MIN_VALID_POOL_TASKS:
+        report.update({
+            "valid_task_mean": None,
+            "promote_valid": None,
+            "reason_valid": f"valid_pool_too_small ({len(pool)} scored lint-valid tasks, need {MIN_VALID_POOL_TASKS})",
+            "means_agree": None,
+        })
+    else:
+        base_v = _restricted_summary(baseline_summary, set(pool))
+        var_v = _restricted_summary(variant_summary, set(pool))
+        should_v, reason_v = evaluate_promotion(
+            cfg, base_v, var_v, split=_restricted_split(split, set(pool)),
+            require_full_slice=False,
+        )
+        report["valid_task_mean"] = {
+            "baseline": round(float(base_v.get("mean_composite", 0.0)), 4),
+            "variant": round(float(var_v.get("mean_composite", 0.0)), 4),
+            "tasks": len(pool),
+        }
+        report["valid_task_mean"]["delta"] = round(
+            report["valid_task_mean"]["variant"] - report["valid_task_mean"]["baseline"], 4)
+        report.update({
+            "promote_valid": bool(should_v),
+            "reason_valid": reason_v,
+            "means_agree": bool(should_v) == bool(should_all),
+        })
+    # A safety-critical task outside the valid pool means the advisory leg has no
+    # veto in it — say so in the row, because "both means say promote" reads very
+    # differently once one of them could not have refused on safety grounds.
+    safety_scored = [str(p.get("task_id")) for p in (variant_summary.get("per_task") or [])
+                     if p.get("safety_critical")]
+    report["safety_outside_valid_pool"] = [t for t in safety_scored if t not in valid]
+
+    if report["means_agree"] is None:
+        logger.info(
+            "bench validity: all-task mean %.4f → %.4f; valid-pool leg not evaluated (%s); excluded: %s",
+            report["all_task_mean"]["baseline"], report["all_task_mean"]["variant"],
+            report["reason_valid"], ", ".join(missing) or "(none)",
+        )
+    else:
+        logger.info(
+            "bench validity: all-task mean %.4f → %.4f (promote=%s) | lint-valid mean %.4f → %.4f "
+            "over %d tasks (promote=%s) | agree=%s%s; excluded: %s",
+            report["all_task_mean"]["baseline"], report["all_task_mean"]["variant"], report["promote_all"],
+            report["valid_task_mean"]["baseline"], report["valid_task_mean"]["variant"],
+            report["valid_task_mean"]["tasks"], report["promote_valid"], report["means_agree"],
+            (f"; safety veto outside valid pool: {', '.join(report['safety_outside_valid_pool'])}"
+             if report["safety_outside_valid_pool"] else ""),
+            ", ".join(missing) or "(none)",
+        )
+    return report
+
+
+def validity_report_lines(report: dict[str, Any]) -> list[str]:
+    """Render `validity_report` for the round report. Both numbers, always both."""
+    a = report["all_task_mean"]
+    lines = [
+        f"- all-task mean: {a['baseline']:.4f} → {a['variant']:.4f} "
+        f"({a['delta']:+.4f}) over {report['scored_tasks']} tasks — promote={report['promote_all']}",
+    ]
+    v = report.get("valid_task_mean")
+    if v is None:
+        lines.append(f"- lint-valid mean: not evaluated — {report['reason_valid']}")
+    else:
+        lines.append(
+            f"- lint-valid mean: {v['baseline']:.4f} → {v['variant']:.4f} ({v['delta']:+.4f}) "
+            f"over {v['tasks']} lint-valid tasks ({', '.join(report['valid_tasks'])}) "
+            f"— promote={report['promote_valid']} ({report['reason_valid']})"
+        )
+    if report.get("means_agree") is None:
+        lines.append("- the two means could not be compared — the valid-pool leg was not evaluated")
+    elif report["means_agree"]:
+        lines.append("- the two means AGREE on promote/no-promote")
+    else:
+        lines.append(
+            "- the two means DISAGREE on promote/no-promote — that gap is the "
+            "broken-task effect #646 is measuring, and it is the finding"
+        )
+    lines.append(
+        f"- excluded as lint-invalid ({len(report['excluded_tasks'])}): "
+        f"{', '.join(report['excluded_tasks']) or '(none)'}"
+    )
+    if report.get("safety_outside_valid_pool"):
+        lines.append(
+            f"- the lint-valid pool holds no safety-critical task: "
+            f"{', '.join(report['safety_outside_valid_pool'])} is excluded from it, so the "
+            "valid-pool leg cannot refuse on safety grounds"
+        )
+    lines.append("- the valid-pool mean is advisory; the all-task leg is what promoted (#646)")
+    return lines
 
 
 def snapshot_current_prompts(cfg: AutoresearchConfig) -> Path:
