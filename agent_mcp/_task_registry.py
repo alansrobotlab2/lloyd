@@ -95,12 +95,20 @@ class DiagnosticsRecord:
     the same per-session drain queue and nothing else.
 
     It never enters `_records`, so `/state`'s task rows are untouched.
+
+    `elsewhere_*` is the second group #694 added: new errors in files no
+    session in that run edited — the caller of an edited component. They ride
+    the same record rather than a second one because the two groups are one
+    answer to one check, and separate because only one of them is the
+    recipient's own doing.
     """
 
     session_id: str
     kind: str = "typescript"
     files: list[str] = field(default_factory=list)
     lines: list[str] = field(default_factory=list)
+    elsewhere_files: list[str] = field(default_factory=list)
+    elsewhere_lines: list[str] = field(default_factory=list)
     started_at: float = 0.0
     finished_at: float = 0.0
     status: str = "ok"                  # ok | failed | timeout
@@ -191,26 +199,45 @@ async def enqueue_diagnostics(record: DiagnosticsRecord) -> None:
         _pending_by_session.setdefault(record.session_id, []).append(record)
 
 
+OTHER_FILE_NOTE = ("files no session in this run edited; may be another "
+                   "session's work")
+
+
 def format_diagnostics_notification(record: DiagnosticsRecord) -> str:
-    """XML the model sees as a user message on a later iteration."""
+    """XML the model sees as a user message on a later iteration.
+
+    Two groups, told apart by their elements: `<errors>` is the files this
+    session edited, `<errors_outside_your_edits>` is the rest of what the run
+    found (#694). One payload, because the two are one answer to one check —
+    but never one list, because only one of them is the recipient's own doing.
+    """
     elapsed = max(0.0, record.finished_at - record.started_at)
     files = ", ".join(record.files) or "(none)"
+    elsewhere = record.elsewhere_lines if record.status == "ok" else []
     if record.status == "ok":
         summary = (f"tsc: {len(record.lines)} new error(s) in file(s) you "
-                   f"edited this session ({elapsed:.1f}s)")
+                   f"edited this session")
+        if elsewhere:
+            summary += (f", plus {len(elsewhere)} new error(s) in "
+                        f"file(s) you did not edit")
+        summary += f" ({elapsed:.1f}s)"
     else:
         # Say so rather than staying silent: a model that was told a check
         # was queued and never hears back waits for it.
         summary = f"tsc check {record.status}: {record.detail}"[:300]
     body = "\n".join(record.lines)
-    return (
-        f"<diagnostics_notification>\n"
-        f"<kind>{record.kind}</kind>\n"
-        f"<files>{files}</files>\n"
-        f"<summary>{summary}</summary>\n"
-        f"<errors>\n{body}\n</errors>\n"
-        f"</diagnostics_notification>"
-    )
+    out = (f"<diagnostics_notification>\n"
+           f"<kind>{record.kind}</kind>\n"
+           f"<files>{files}</files>\n"
+           f"<summary>{summary}</summary>\n"
+           f"<errors>\n{body}\n</errors>\n")
+    if elsewhere:
+        out += ('<errors_outside_your_edits files="'
+                + ", ".join(record.elsewhere_files)
+                + '" note="' + OTHER_FILE_NOTE + '">\n'
+                + "\n".join(elsewhere) + "\n"
+                "</errors_outside_your_edits>\n")
+    return out + "</diagnostics_notification>"
 
 
 def new_task_id() -> str:

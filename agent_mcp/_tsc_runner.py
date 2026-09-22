@@ -18,8 +18,19 @@ Delta, like everything else here
 The tree carries pre-existing tsc errors, and the gate's frontend rung
 judges them as a delta for exactly that reason. A whole-project run is
 turned into a per-session answer by keeping the previous run's per-file
-counts as a baseline and reporting only `run[f] - baseline[f]` for the files
-*that session* edited. Another session's breakage is that session's news.
+counts as a baseline and reporting `run[f] - baseline[f]` for the files
+*that session* edited.
+
+Then, in a separate group of the same payload, for the files nobody in that
+run edited (#694). Renaming a prop in a component breaks its callers and
+nobody edits the callers: the finding was already in `by_file`, and dropping
+it left a session holding a "check queued" hint while the project's error
+count rose. Two guards keep that group trustworthy, because a caller's fresh
+breakage and a concurrent session's half-finished edit are indistinguishable
+from here: it is reported only when the whole-project total rose against the
+baseline, and never for a file another session in the same run is editing —
+that session's breakage is that session's news, and still arrives through its
+own delta.
 
 **Cold start is the trap.** With no baseline, the first run after a restart
 would attribute every pre-existing error in the tree to whoever edited first.
@@ -246,25 +257,62 @@ async def run_once(root: Path, *, seed_only: bool = False) -> dict:
             summary["seeded"] = True
             return summary
 
+        base_total = sum(sum(c.values()) for c in base.values())
+        summary["total_rise"] = summary["errors_total"] - base_total
+        # Whether a finding outside the edited files belongs to THIS run is a
+        # question the whole project answers, not one file: a total that did not
+        # go up means errors moved around, and movement is somebody else's
+        # unfinished edit. That is the rise gate (#694).
+        #
+        # `edited_by_any` is the other half of the same protection. One run
+        # coalesces every session's pending files, so a file another session is
+        # editing is that session's own news — it reaches it through its own
+        # delta above, and repeating it here would attribute one session's
+        # breakage to another, which is the mistake the old filter existed to
+        # prevent.
+        edited_by_any: set[str] = set()
+        for files in pending.values():
+            edited_by_any |= files
+        max_lines = int(_cfg().get("max_lines", MAX_REPORTED_LINES))
+
         for sid, files in pending.items():
             new: Counter = Counter()
             for f in files:
                 new += by_file.get(f, Counter()) - base.get(f, Counter())
-            if not new:
+            elsewhere: Counter = Counter()
+            elsewhere_files: list[str] = []
+            if summary["total_rise"] > 0:
+                for f, counts in by_file.items():
+                    if f in edited_by_any:
+                        continue
+                    gained = counts - base.get(f, Counter())
+                    if gained:
+                        elsewhere += gained
+                        elsewhere_files.append(f)
+            if not new and not elsewhere:
                 continue
-            lines = _display_lines(raw_lines, new,
-                                   int(_cfg().get("max_lines", MAX_REPORTED_LINES)))
-            await _emit(sid, sorted(files), lines, "ok", "", seconds, root)
+            own_lines, elsewhere_lines = _budget(
+                _display_lines(raw_lines, new),
+                _display_lines(raw_lines, elsewhere), max_lines)
+            await _emit(sid, sorted(files), own_lines, "ok", "", seconds, root,
+                        elsewhere_files=sorted(elsewhere_files),
+                        elsewhere_lines=elsewhere_lines)
         return summary
 
 
-def _display_lines(raw_lines: list[str], new: Counter, max_lines: int) -> list[str]:
+def _display_lines(raw_lines: list[str], new: Counter) -> list[str]:
     """Raw tsc lines (with line:col) for the findings the delta says are new.
 
     The delta is computed on normalised findings — position dropped, so a
     file that grew ten lines does not report everything below as new — but
     what the model needs to act on is the position. Same shape as the
     pyflakes block.
+
+    Uncapped: the budget is shared between the two groups, so it is applied by
+    `_budget` once both exist. A normalised finding carries its own path
+    (`path: error TSnnnn: msg`), so two files that share a message can never
+    borrow each other's lines here — which is what makes one call per group
+    safe.
     """
     remaining = Counter(new)
     out: list[str] = []
@@ -274,10 +322,28 @@ def _display_lines(raw_lines: list[str], new: Counter, max_lines: int) -> list[s
             if remaining.get(finding, 0) > 0:
                 remaining[finding] -= 1
                 out.append(line)
-    total = len(out)
-    if max_lines > 0 and total > max_lines:
-        out = out[:max_lines] + [f"... and {total - max_lines} more"]
     return out
+
+
+def _budget(own: list[str], elsewhere: list[str],
+            max_lines: int) -> tuple[list[str], list[str]]:
+    """Split the one notification's line budget across the two groups.
+
+    The cap bounds the payload, not each group inside it: renaming an export in
+    `web/src/api.ts` breaks every page that imports it, so a per-group budget
+    would scale the notification with the size of the tree. The session's own
+    findings are kept first — those it can act on unaided — and a group that
+    lost lines says how many, so the truncation is visible rather than implied.
+    """
+    if max_lines <= 0:
+        return own, elsewhere
+    keep_own = own[:max_lines]
+    keep_else = elsewhere[:max(0, max_lines - len(keep_own))]
+    if len(own) > len(keep_own):
+        keep_own = keep_own + [f"... and {len(own) - len(keep_own)} more"]
+    if len(elsewhere) > len(keep_else):
+        keep_else = keep_else + [f"... and {len(elsewhere) - len(keep_else)} more"]
+    return keep_own, keep_else
 
 
 def _notify_target(session_id: str) -> str:
@@ -297,7 +363,11 @@ def _notify_target(session_id: str) -> str:
 
 
 async def _emit(session_id: str, files: list[str], lines: list[str],
-                status: str, detail: str, seconds: float, root: Path) -> None:
+                status: str, detail: str, seconds: float, root: Path,
+                elsewhere_files: list[str] | None = None,
+                elsewhere_lines: list[str] | None = None) -> None:
+    """Queue one answer. The second group rides the same record: two
+    notifications for one check would read as two checks."""
     target = _notify_target(session_id)
     if not target:
         return
@@ -308,6 +378,8 @@ async def _emit(session_id: str, files: list[str], lines: list[str],
         kind="typescript",
         files=files,
         lines=lines,
+        elsewhere_files=elsewhere_files or [],
+        elsewhere_lines=elsewhere_lines or [],
         started_at=now - seconds,
         finished_at=now,
         status=status,

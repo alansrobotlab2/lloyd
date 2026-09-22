@@ -320,6 +320,12 @@ async def _bg_task_drain(args: dict[str, Any]) -> str:
                 "diagnostics_kind": r.kind,
                 "status": r.status,
                 "files": list(r.files),
+                # Named separately of `files` because they are not the same
+                # claim: `files` is what this session edited, these are the
+                # files its edit broke that it never opened (#694). The router
+                # logs both, so a transcript can tell the two apart without
+                # parsing the XML.
+                "elsewhere_files": list(r.elsewhere_files),
                 "xml": _task_registry.format_diagnostics_notification(r),
             })
             continue

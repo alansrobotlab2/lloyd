@@ -661,6 +661,10 @@ def _build_notification_drain(session_id: str, turn_id: str):
                         "diagnostics_kind": n.get("diagnostics_kind"),
                         "status": n.get("status"),
                         "files": n.get("files"),
+                        # Separate key, same reason as the payload: a caller
+                        # the session never edited is a different fact from a
+                        # file it did (#694).
+                        "elsewhere_files": n.get("elsewhere_files"),
                     },
                     turn_id=turn_id,
                 )
