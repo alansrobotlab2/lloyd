@@ -401,6 +401,29 @@ def find_session_file(session_key: str) -> Optional[Path]:
     return None
 
 
+def evidence_needles(doc: str) -> list[str]:
+    """Every string that counts as evidence a session touched `doc`.
+
+    Always the vault-relative path. A skill doc adds one more: Stage 1
+    normalises a skill access to the 3-part path (`SKILL_ACCESS_TOOLS` maps a
+    `skills_read` to `candidate = f"skills/{skill_name}/SKILL.md"`), but a
+    session file records only the call argument `{"name": "<skill_name>"}` and
+    the skill's own text — never that path. The pair can therefore be
+    *proposed* by Stage 1 and then never *verified* against the session it came
+    from: `cmd_classify` skips a candidate whose `extract_conversation_context`
+    returns nothing, the same shape #420 fixed on the Stage 1 side.
+
+    The bare name is derived only from a 3-part `skills/<name>/SKILL.md`, so a
+    pair of ordinary vault docs gains no new match surface, and an empty name
+    never yields the empty needle, which would match every message.
+    """
+    needles = [doc.lower()]
+    parts = doc.split("/")
+    if len(parts) == 3 and parts[0] == "skills" and parts[2] == "SKILL.md" and parts[1]:
+        needles.append(parts[1].lower())
+    return needles
+
+
 def extract_conversation_context(
     session_path: Path,
     doc_a: str,
@@ -410,7 +433,9 @@ def extract_conversation_context(
     """Extract user/assistant text around co-access of doc_a and doc_b.
 
     Scans session messages for tool calls that accessed doc_a/doc_b,
-    then extracts surrounding user and assistant text.
+    then extracts surrounding user and assistant text. A doc counts as
+    accessed by any of `evidence_needles(doc)` — its path, plus the bare
+    skill name for a skill doc, which is all a session ever carries.
     """
     try:
         data = json.loads(session_path.read_text(encoding="utf-8"))
@@ -422,10 +447,11 @@ def extract_conversation_context(
         return None
 
     # Find message indices that reference either doc
+    needles = evidence_needles(doc_a) + evidence_needles(doc_b)
     hit_indices = set()
     for i, msg in enumerate(messages):
         msg_text = json.dumps(msg).lower()
-        if doc_a.lower() in msg_text or doc_b.lower() in msg_text:
+        if any(needle in msg_text for needle in needles):
             hit_indices.add(i)
 
     if not hit_indices:

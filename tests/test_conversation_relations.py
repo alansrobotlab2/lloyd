@@ -569,3 +569,407 @@ def test_stage2_posts_to_the_resolved_endpoint(cr, tmp_path, monkeypatch):
     assert captured["url"] != cr.LLM_ENDPOINT
     assert captured["body"]["model"] == "secondary"
     assert out["type"] == "supersedes"
+
+
+# ── #1039: a skill doc is verifiable by the bare name its session carries ─────
+#
+# Stage 1 normalises a `skills_read` to the 3-part `skills/<name>/SKILL.md`, but
+# a session file records the call argument `{"name": "<name>"}` and the skill's
+# own text — never that path. The evidence matcher compared full paths only, so
+# a pair of two skill docs could be proposed by Stage 1 and then never verified
+# against the session it came from: `cmd_classify` skips a candidate whose
+# window is empty and never asks the model. #420 fixed the mirror-image defect
+# on the Stage 1 side and left this one.
+#
+# Measured at triage over `_pipeline/conversation-relation-proposals.json`
+# (414 proposals): 83 skill-skill pairs, 81 already find a window because the
+# path text reaches the session some other way (injected skill context, a
+# `skills_search` result, an absolute-path `Read`). The 2 that returned None are
+# reproduced below with their real doc paths and session key:
+# `skills/codebase-inspection` + `skills/requesting-code-review` in session
+# `20260905_151355_iv5174`, and `skills/backlog-premise-triage` +
+# `skills/selfmod-change-own-code` in an e2e session.
+
+
+def _session_file(dir_path: Path, *messages, key: str = "20260922_010101_sess") -> Path:
+    """Write a session file in the shape the session logger emits.
+
+    The tool-call form is copied from
+    `~/lloyd/sessions/20260905_151355_iv5174.json` — one of the two sessions the
+    matcher fails on today — where the assistant message carries a `tool_calls`
+    array whose `arguments` is a JSON *string*. That nesting is the whole point:
+    it is where the bare skill name lives and where no path ever appears.
+    """
+    dir_path.mkdir(parents=True, exist_ok=True)
+    f = dir_path / f"{key}.json"
+    f.write_text(json.dumps({"session_id": key, "messages": list(messages)}),
+                 encoding="utf-8")
+    return f
+
+
+def _asked(text: str) -> dict:
+    return {"id": "u1", "role": "user",
+            "content": [{"type": "text", "text": text}]}
+
+
+def _answered(text: str) -> dict:
+    return {"id": "a1", "role": "assistant",
+            "content": [{"type": "text", "text": text}]}
+
+
+def _tool_says(text: str) -> dict:
+    return {"id": "t1", "role": "tool",
+            "content": [{"type": "text", "text": text}]}
+
+
+def _skills_read(skill: str, call_id: str = "call_1") -> dict:
+    """The assistant message a `skills_read` call leaves behind."""
+    return {"id": call_id, "role": "assistant", "content": [],
+            "tool_calls": [{"id": call_id, "call_id": call_id, "type": "function",
+                            "function": {"name": "skills_read",
+                                         "arguments": json.dumps({"name": skill})}}]}
+
+
+def _needle_test_proposal(source: str, target: str, session_key: str) -> dict:
+    """A Stage-2 candidate: co-access evidence, above the LLM threshold, pending."""
+    return {"source": source, "target": target, "type": None,
+            "confidence": 0.0, "reason": "",
+            "status": "pending", "classification_source": "co-access",
+            "signal_strength": "weak",
+            "evidence": {"sessions": [session_key], "aggregate_weight": 0.9}}
+
+
+def _capturing_llm(monkeypatch, cr) -> dict:
+    """Install a fake `/chat/completions` that records every request.
+
+    Returns the capture dict; `calls` is what a test asserts on to prove whether
+    Stage 2 crossed the HTTP seam at all.
+    """
+    captured = {"calls": []}
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(
+                {"type": "related-to", "reason": "read together",
+                 "confidence": 0.8})}}]}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        captured["calls"].append({"url": req.full_url,
+                                  "body": json.loads(req.data.decode())})
+        return FakeResp()
+
+    # urllib.request is process-global, so the fake goes on only for the call.
+    monkeypatch.setattr(cr.urllib.request, "urlopen", fake_urlopen)
+    # The endpoint is not the subject here, and resolving it reads live config
+    # and the `secondary_enabled` switch (see the endpoint tests above), so the
+    # seam is pinned with a fixed target instead.
+    monkeypatch.setattr(cr, "resolve_llm_target",
+                        lambda: ("http://127.0.0.1:1/v1/chat/completions", "fixture-model"))
+    return captured
+
+
+def test_a_skill_pair_verifies_from_the_bare_name_in_the_call_args(cr, tmp_path):
+    """Clause 1: no path string anywhere, so the argument `{"name": "b"}` is the
+    only trace of either skill. Pre-fix the matcher found no hit message and
+    returned None, and Stage 2 dropped the pair unread.
+
+    With single-letter skill names the derived needle `a` also matches ordinary
+    text (`assistant`, `name`), so on its own this assertion would pass under any
+    matcher that matched generic prose; the needle derivation below is what
+    removes that reading, and `test_the_bare_name_is_the_documents_own_skill_name`
+    — the real pair from the triage measurement, whose names cannot collide by
+    accident — is what pins it behaviourally.
+    """
+    session = _session_file(
+        tmp_path,
+        _asked("compare the two skills I just opened"),
+        _skills_read("b"),
+        _answered("one of them is about review"),
+    )
+    assert cr.evidence_needles("skills/b/SKILL.md") == ["skills/b/skill.md", "b"], (
+        "the needle list is what this matcher searches; pin it before the window")
+    window = cr.extract_conversation_context(
+        session, "skills/a/SKILL.md", "skills/b/SKILL.md")
+    assert window is not None, (
+        "no evidence window: the matcher still knows only the 3-part path, "
+        "which this session never contains")
+    assert "compare the two skills I just opened" in window, window
+
+
+def test_the_bare_name_is_the_documents_own_skill_name(cr, tmp_path):
+    """The 2 real proposals the fix rescues, and the negative that keeps the
+    rescue honest: a session that read a *different* skill is not evidence.
+
+    The names here are the ones in the live proposals file, so no needle can
+    match by accident the way a single-letter name would.
+    """
+    docs = ("skills/codebase-inspection/SKILL.md",
+            "skills/requesting-code-review/SKILL.md")
+
+    hit = _session_file(
+        tmp_path,
+        _asked("how should I review this diff?"),
+        _skills_read("requesting-code-review"),
+        _answered("read one skill"),
+        key="20260905_151355_iv5174",
+    )
+    assert cr.extract_conversation_context(hit, *docs) is not None
+
+    miss = _session_file(
+        tmp_path,
+        _asked("how should I review this diff?"),
+        _skills_read("youtube-transcript"),
+        _answered("read one skill"),
+        key="unrelated",
+    )
+    assert cr.extract_conversation_context(miss, *docs) is None, (
+        "a session that read an unrelated skill is not co-access evidence for "
+        "this pair")
+
+
+def test_the_pair_still_verifies_from_the_three_part_path_alone(cr, tmp_path):
+    """Clause 2: the case the 81 already-verifiable proposals rely on — the
+    3-part path arrives inside an absolute path (injected skill context, a
+    `skills_search` result, an absolute `Read`) and the bare name is nowhere.
+
+    Behaviourally the two needles cannot be separated for a skill doc: any text
+    carrying `skills/<name>/SKILL.md` carries `<name>` as a substring, so no
+    session can present the path without also presenting the name. What this test
+    can pin, and does, is that the path is still a needle at all — pre-fix it was
+    the only one, and a fix that replaced path matching with name matching would
+    leave the behavioural half of this test green. The assertion below is
+    therefore the load-bearing one: the path is the first entry of
+    `evidence_needles`, and the name is an addition to it, not a substitution."""
+    session = _session_file(
+        tmp_path,
+        _asked("which one covers diffs?"),
+        _tool_says("loaded /home/alansrobotlab/obsidian/skills/requesting-code-review/SKILL.md"),
+        _answered("the review skill"),
+    )
+    window = cr.extract_conversation_context(
+        session,
+        "skills/codebase-inspection/SKILL.md",
+        "skills/requesting-code-review/SKILL.md")
+    assert window is not None
+    assert "which one covers diffs?" in window, window
+    assert cr.evidence_needles("skills/requesting-code-review/SKILL.md")[0] == \
+        "skills/requesting-code-review/skill.md"
+
+
+def test_a_bare_name_is_derived_only_from_a_three_part_skill_doc(cr, tmp_path):
+    """Clause 3: the derivation is what makes skill docs verifiable, so it must
+    not be reachable from any other shape of path — otherwise every vault doc
+    pair whose basenames appear in prose would start matching.
+
+    The first pair are vault docs that happen to be named after skills, and the
+    session's only mention of them is a `skills_read` argument carrying exactly
+    those names; the second pair is a 4-part path, which is not a skill doc
+    however it ends.
+    """
+    lookalikes = ("knowledge/codebase-inspection.md",
+                  "knowledge/requesting-code-review.md")
+    named = _session_file(
+        tmp_path,
+        _asked("compare them"),
+        _skills_read("codebase-inspection"),
+        _skills_read("requesting-code-review", call_id="call_2"),
+        key="lookalikes",
+    )
+    assert cr.extract_conversation_context(named, *lookalikes) is None, (
+        "a bare name was derived from a non-skill doc, so prose that merely "
+        "names a file now counts as accessing it")
+
+    too_deep = ("skills/nested/extra/SKILL.md", "knowledge/z.md")
+    deep_session = _session_file(
+        tmp_path,
+        _asked("compare them"),
+        _skills_read("extra"),
+        key="too_deep",
+    )
+    assert cr.extract_conversation_context(deep_session, *too_deep) is None
+
+    # Structural half: the needle list itself, one entry for an ordinary doc and
+    # two for a 3-part skill doc, with the path always first.
+    assert cr.evidence_needles("knowledge/a.md") == ["knowledge/a.md"]
+    assert cr.evidence_needles("skills//SKILL.md") == ["skills//skill.md"], (
+        "an empty skill name would add the empty needle, which matches every "
+        "message in every session")
+    assert cr.evidence_needles("skills/code-review/SKILL.md") == [
+        "skills/code-review/skill.md", "code-review"]
+
+
+def test_no_mention_of_either_skill_still_yields_no_window(cr, tmp_path):
+    """Clause 4: the session names a third skill and neither path, so the pair
+    stays unread and Stage 2 must skip it without spending a classification
+    call. The sibling test below pins that the same skip really does mean no
+    HTTP request."""
+    session = _session_file(
+        tmp_path,
+        _asked("what tooling is out there?"),
+        _skills_read("songsee"),
+        _answered("one skill listed"),
+        key="no_pair",
+    )
+    assert cr.extract_conversation_context(
+        session, "skills/arxiv/SKILL.md", "skills/discord/SKILL.md") is None
+
+
+def test_stage2_skips_an_unverifiable_skill_pair_without_an_llm_call(cr, tmp_path,
+                                                                    monkeypatch):
+    """Clause 4's other half, across the HTTP seam: the skip is what keeps a
+    pair the matcher cannot read from ever reaching the model.
+
+    The spy is what makes `calls == []` mean *the matcher declined*: without it an
+    empty capture is equally a pair that never entered the candidate set."""
+    calls = _capturing_llm(monkeypatch, cr)
+    consulted = []
+    real_matcher = cr.extract_conversation_context
+
+    def spy(session_path, doc_a, doc_b, max_chars=4000):
+        consulted.append((doc_a, doc_b))
+        return real_matcher(session_path, doc_a, doc_b, max_chars)
+
+    monkeypatch.setattr(cr, "extract_conversation_context", spy)
+    key = "no_pair_stage2"
+    _session_file(tmp_path, _asked("what tooling is out there?"),
+                  _skills_read("songsee"), key=key)
+    monkeypatch.setattr(cr, "LLOYD_SESSIONS", tmp_path)
+    props = tmp_path / "proposals.json"
+    props.write_text(json.dumps(
+        {"watermark": {}, "stats": {}, "proposals": [
+            _needle_test_proposal("skills/arxiv/SKILL.md",
+                                  "skills/discord/SKILL.md", key)]}),
+        encoding="utf-8")
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+
+    cr.cmd_classify()
+
+    assert consulted == [("skills/arxiv/SKILL.md", "skills/discord/SKILL.md")], (
+        "the pair never reached the matcher, so the skip proves nothing about it")
+    assert calls["calls"] == [], "Stage 2 classified a pair it could not read"
+    assert json.loads(props.read_text())["proposals"][0]["status"] == "pending"
+
+
+def test_stage2_classifies_a_skill_pair_whose_session_names_it_barely(cr, tmp_path,
+                                                                     monkeypatch):
+    """The payoff, across the same seam: the real rescued proposal — the
+    `codebase-inspection` + `requesting-code-review` pair from session
+    `20260905_151355_iv5174`, reproduced with the messages that session really
+    holds — now reaches the model instead of being skipped. Before the needle
+    derivation this asserted zero calls; the pair was proposed, weighty enough
+    to classify, and silently dropped."""
+    calls = _capturing_llm(monkeypatch, cr)
+    key = "20260905_151355_iv5174"
+    _session_file(tmp_path,
+                  _asked("how should I review this diff?"),
+                  _skills_read("codebase-inspection"),
+                  _skills_read("requesting-code-review", call_id="call_2"),
+                  _answered("both are relevant"),
+                  key=key)
+    monkeypatch.setattr(cr, "LLOYD_SESSIONS", tmp_path)
+    props = tmp_path / "proposals.json"
+    proposal = _needle_test_proposal(
+        "skills/codebase-inspection/SKILL.md",
+        "skills/requesting-code-review/SKILL.md", key)
+    props.write_text(json.dumps({"watermark": {}, "stats": {},
+                                 "proposals": [proposal]}), encoding="utf-8")
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+
+    cr.cmd_classify()
+
+    assert len(calls["calls"]) == 1, calls["calls"]
+    body = calls["calls"][0]["body"]
+    assert body["model"] == "fixture-model"
+    assert "how should I review this diff?" in json.dumps(body), (
+        "the window that reached the model was not the one around the hit")
+    landed = json.loads(props.read_text())["proposals"][0]
+    assert landed["classification_source"] == "llm"
+    assert landed["type"] == "related-to"
+
+
+def test_stage2_posts_the_rescued_window_over_a_real_socket(cr, tmp_path, monkeypatch):
+    """The same seam with nothing faked on it.
+
+    Every other Stage-2 test here fakes `urlopen` at the call site, so the socket,
+    the request line and the *resolved* endpoint were never actually crossed.
+    Nothing on the HTTP path is faked below: `resolve_llm_target()` reads `model:`
+    from the task file, resolves the alias through app.config, and
+    `classify_relationship` posts to whatever it returns. The one thing redirected
+    is the config *value* of `base_url`, pointed at a port this test is listening
+    on — the resolution code and the client code are the production ones.
+
+    For #1039 the assertion that matters is inside the request body: the window
+    that a bare skill name rescued is what a real request carried to a real
+    engine-shaped endpoint.
+    """
+    import http.server
+    import threading
+    from app import config as app_config
+
+    received = {}
+
+    class Responder(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            received["method"] = self.command
+            received["path"] = self.path
+            received["body"] = json.loads(self.rfile.read(length).decode("utf-8"))
+            payload = json.dumps({"choices": [{"message": {"content": json.dumps(
+                {"type": "related-to", "reason": "read together",
+                 "confidence": 0.8})}}]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, fmt, *args):
+            pass  # the default handler logs every request to stderr
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Responder)
+    serve = threading.Thread(target=server.serve_forever, daemon=True)
+    serve.start()
+    key = "20260905_151355_iv5174"
+    props = tmp_path / "proposals.json"
+    try:
+        monkeypatch.setattr(app_config, "_ALIAS_REWRITES_LOGGED", set(), raising=True)
+        monkeypatch.setitem(app_config.MODEL_CONFIGS["primary"], "base_url",
+                            f"http://127.0.0.1:{server.server_address[1]}")
+        adir = tmp_path / "autonomy"
+        _task_file(adir, "primary")
+        monkeypatch.setattr(cr, "AUTONOMY_DIR", adir)
+
+        _session_file(tmp_path,
+                      _asked("how should I review this diff?"),
+                      _skills_read("codebase-inspection"),
+                      _skills_read("requesting-code-review", call_id="call_2"),
+                      _answered("both are relevant"), key=key)
+        monkeypatch.setattr(cr, "LLOYD_SESSIONS", tmp_path)
+        props.write_text(json.dumps(
+            {"watermark": {}, "stats": {}, "proposals": [
+                _needle_test_proposal("skills/codebase-inspection/SKILL.md",
+                                      "skills/requesting-code-review/SKILL.md", key)]}),
+            encoding="utf-8")
+        monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+
+        cr.cmd_classify()
+    finally:
+        server.shutdown()
+        server.server_close()
+        serve.join(timeout=5)
+
+    assert (received.get("method"), received.get("path")) == ("POST", "/v1/chat/completions"), received
+    assert received["body"]["model"] == "primary", (
+        "the body should name the alias the task file declared, resolved by "
+        "app.config — not the module's fallback constant")
+    assert "how should I review this diff?" in json.dumps(received["body"]), (
+        "the window the bare-name needle rescued did not reach the wire")
+    landed = json.loads(props.read_text())["proposals"][0]
+    assert landed["classification_source"] == "llm"
+    assert landed["type"] == "related-to"
