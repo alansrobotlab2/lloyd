@@ -28,6 +28,8 @@ import re
 import sqlite3
 from pathlib import Path
 
+from tests._live_data import require_live_data
+
 REPO = Path(__file__).resolve().parents[1]
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 
@@ -335,7 +337,12 @@ def test_the_state_loaded_memory_describes_is_true_on_disk():
     # "Stop emitting into the live tree" is a move, not a deletion: the migration
     # source of record still has to exist somewhere, or the next rebuild has no
     # pre-migration state to diff against.
-    snapshots = list(LIVE_BACKUPS.rglob("entity-aliases.json")) if LIVE_BACKUPS.is_dir() else []
+    # The backup root itself is gitignored and went with the tree on 2026-09-22, so
+    # "no snapshot here" no longer distinguishes a wrong fate from a deleted one.
+    # Where the root exists the check still bites: a present root holding no
+    # entity-aliases.json is still the migration losing its source of record.
+    require_live_data(LIVE_BACKUPS, "the fact-tree backup root")
+    snapshots = list(LIVE_BACKUPS.rglob("entity-aliases.json"))
     assert snapshots, (
         f"{live_copy} is gone from the fact tree but no snapshot exists under "
         f"{LIVE_BACKUPS} — the fate was 'move to backups', not 'delete'")

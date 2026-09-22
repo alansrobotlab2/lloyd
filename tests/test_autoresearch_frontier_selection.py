@@ -35,6 +35,8 @@ from scripts.autoresearch import replay_frontier_selection as rfs
 from scripts.autoresearch.common import AutoresearchConfig, AutoresearchPaths
 from scripts.autoresearch.promotion_fp_rate import PROMOTE_LINE_RE
 
+from tests._live_data import require_live_volume
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CUTOFF = "2026-09-13T23:59:59Z"
 
@@ -972,6 +974,12 @@ def test_the_census_refuses_to_report_for_a_round_with_no_baseline(tmp_path):
 LIVE = rfs.default_ledger()
 
 
+#: The trial-row count clause 1's published census was measured over (30,953 rows,
+#: of which >25,000 trial and >2,000 decision). Used as the floor under which the
+#: census cannot be recomputed at all rather than recomputed to zero.
+PUBLISHED_ROW_FLOOR = 25_000
+
+
 def live_ledger() -> Path:
     """The ledger the census reads by default — asserted, never skipped.
 
@@ -987,6 +995,18 @@ def live_ledger() -> Path:
         f"no autoresearch ledger at {LIVE}; resolution order was $LLOYD_HOME, "
         f"{rfs.REPO_ROOT}, ~/lloyd — the census numbers below have no corpus to "
         "recompute, which is not the same answer as 0 dominating")
+
+    # The docstring above refuses a *skip* for a missing ledger, and that still
+    # holds — the assert is right above this. What it did not anticipate is a
+    # ledger that is present and nearly empty: after the 2026-09-22 tree deletion
+    # this file holds ~100 rows where the published figures were counted over
+    # 30,953. Every census number below then reads 0, which is not "0 dominating"
+    # either — it is the same "no corpus" answer wearing a number. require_live_volume
+    # names the floor AND the observed count, so this cannot read as satisfied; a
+    # ledger that still holds the corpus keeps failing loudly.
+    rows = LIVE.read_text(encoding="utf-8").splitlines()
+    require_live_volume([r for r in rows if r.strip()], PUBLISHED_ROW_FLOOR, LIVE,
+                        "the autoresearch ledger", noun="rows")
     return LIVE
 
 

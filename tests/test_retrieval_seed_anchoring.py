@@ -23,6 +23,8 @@ sys.path.insert(0, str(ROOT))
 import app.kg_store as ks  # noqa: E402
 from agent_mcp import retrieval  # noqa: E402
 
+from tests._live_data import require_live_data
+
 # `_pipeline/` is gitignored, so a git worktree — the automod round this runs in —
 # has neither `kg.sqlite` nor a fact tree. Same rule `app/uptake.py:lloyd_root` and
 # `tests/test_eval_corpus_guard.py` apply: measure the live tree, because a
@@ -175,10 +177,13 @@ def _run_against_the_live_corpus(script: str) -> dict:
     in the suite, which is the failure `tests/test_kg_store.py` keeps visible. The
     `LLOYD_*` env vars are read at import, so this is the only route in.
     """
-    assert LIVE_FACTS.is_dir() and LIVE_KG_DB.is_file(), (
-        f"no store to measure at {LIVE}. These assertions are about the entity table "
-        "the nightly eval scores against; an absent store is not a verdict about the "
-        "corpus and must not be reported as one")
+    # The assert this replaces said it itself — "an absent store is not a verdict
+    # about the corpus and must not be reported as one" — and then reported it as
+    # one anyway, which after the 2026-09-22 deletion is a red node at base in every
+    # round. The fact markdown was re-derived from the vault; kg.sqlite was not,
+    # because its edges were classified over time and no run reproduces them.
+    require_live_data(LIVE_FACTS, "the derived fact tree")
+    require_live_data(LIVE_KG_DB, "the knowledge-graph store", kind="file")
     env = dict(os.environ)
     env["LLOYD_FACTS_ROOT"] = str(LIVE_FACTS)
     env["LLOYD_KG_DB"] = str(LIVE_KG_DB)

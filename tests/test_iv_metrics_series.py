@@ -40,6 +40,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests._live_data import require_live_data
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 GRADER = SCRIPTS / "iv_grade.py"
@@ -1087,9 +1089,7 @@ def test_the_live_series_has_two_dated_rows_and_a_computable_delta():
     delta is a field read.
     """
     series = Path.home() / "lloyd" / "_pipeline" / "reflection" / "iv-metrics.jsonl"
-    assert series.exists(), (
-        f"no series file at {series} — the one-shot manual verification run is part "
-        "of this round, and clause 2 is not met without it")
+    require_live_data(series, "the inner-voice metrics series", kind="file")
 
     rows = _rows_of(series)
     assert len(rows) >= 2, (
@@ -1162,11 +1162,14 @@ def test_a_consumer_compares_the_timeout_count_against_the_bound():
     # genuinely isn't there, and its message says which happened.
     series = Path.home() / "lloyd" / "_pipeline" / "reflection" / "iv-metrics.jsonl"
     if not series.exists():
-        assert not (Path.home() / "lloyd" / "usage.db").exists(), (
-            f"{series} is missing but the database to grade it is here — a recorder "
-            "that ran against a live db wrote no row")
-        print(f"note: no live series at {series}; checked the consumer against "
-              f"{len(rows)} constructed rows only")
+        # This used to infer "a recorder ran against a live db and wrote no row"
+        # from usage.db being present while the series is not. That inference is
+        # sound only where the series was never written; on 2026-09-22 the tree was
+        # deleted and _pipeline went with it while usage.db (tracked-adjacent, at
+        # the repo root) stayed, so the premise holds and the conclusion is false.
+        # The four constructed rows above already ran and are the discriminating
+        # half; the live half is unanswerable, by name rather than by silence.
+        require_live_data(series, "the inner-voice metrics series", kind="file")
     for row in _rows_of(series) if series.exists() else []:
         assert iv_metrics_record.over_bound(row) is bool(row["flagged"]), (
             f"row since={row['since']} stored flagged={row['flagged']} but the "
