@@ -79,22 +79,58 @@ def test_summarize_shape_matches_what_the_skill_globs(tmp_path):
     assert set(summary["by_category"]) == {"single", "hard"}
 
 
-def test_eval_defaults_are_productions(monkeypatch):
-    """The eval's own defaults must be what vault_recall serves, or the
-    nightly trend measures a configuration nobody runs."""
+def test_eval_defaults_are_productions():
+    """The eval's own CLI defaults must be what vault_recall serves, or the
+    nightly trend measures a configuration nobody runs.
+
+    Every value here comes out of `ev.build_parser()` — the parser `main()`
+    actually parses (eval/run_eval.py:919) — never a parser this test builds.
+    The version #999 replaces constructed its own `argparse.ArgumentParser`,
+    handed it the same `vault.RECALL_*` values it then asserted against, and
+    stayed green with the real `--alpha` default changed to 0.9; both of its
+    assertions were tautologies over its own construction. Reading the real
+    parser is what makes this one able to fail.
+
+    Values are compared to the constants, not to literals: naming 0.3 here
+    would re-create the stale-number problem, and the measured value of each
+    constant is pinned by `test_production_knobs_keep_their_measured_values`.
+    """
     from agent_mcp import vault
-    ap_defaults = {}
-    import argparse
-    parser = argparse.ArgumentParser()
-    # Mirror main()'s parser construction closely enough to read the defaults.
-    parser.add_argument("--no-graph-rerank", dest="graph_rerank", action="store_false",
-                        default=vault.RECALL_GRAPH_RERANK)
-    parser.add_argument("--alpha", type=float, default=vault.RECALL_RERANK_ALPHA)
-    args = parser.parse_args([])
-    ap_defaults["graph_rerank"] = args.graph_rerank
-    ap_defaults["alpha"] = args.alpha
-    assert ap_defaults["graph_rerank"] is vault.RECALL_GRAPH_RERANK
-    assert ap_defaults["alpha"] == vault.RECALL_RERANK_ALPHA
+    # argparse dest -> the constant that default has to be. These are the knobs
+    # of KNOBS below in argparse's dest spelling; the one that differs from the
+    # `run_eval()` parameter it feeds is `--alpha`, which lands on dest `alpha`
+    # while the parameter is `rerank_alpha`.
+    consts = {"graph_rerank": "RECALL_GRAPH_RERANK",
+              "alpha": "RECALL_RERANK_ALPHA",
+              "graph_top_k": "RECALL_GRAPH_TOP_K",
+              "graph_hops": "RECALL_GRAPH_HOPS",
+              # #843's knob: the eval seeded 5 query entities while production
+              # seeded 10, so the seed width is a knob this test also owns.
+              "seed_top_k": "RECALL_SEED_TOP_K"}
+    args = ev.build_parser().parse_args([])
+    for dest, const in consts.items():
+        production = getattr(vault, const)
+        assert getattr(args, dest) == production, f"--{dest.replace('_', '-')} default != {const}"
+        # 0 == False in Python, so a bool knob that quietly became an int would
+        # pass the line above. Pin the kind as well as the value.
+        assert type(getattr(args, dest)) is type(production), const
+
+
+def test_eval_defaults_are_productions_cannot_be_satisfied_by_a_hand_mirrored_parser():
+    """The guard on the guard. #999's defect was structural — a defaults test
+    that read a parser it built itself — and a rewrite that quietly grew a
+    mirrored parser back would stay green forever. So this reads the source of
+    `test_eval_defaults_are_productions` and requires the two properties the
+    clause names: it calls `build_parser()`, and it builds no parser of its own
+    (the original did `import argparse` then `argparse.ArgumentParser()`, which
+    is what either needle catches)."""
+    src = Path(__file__).read_text()
+    marker = "def test_eval_defaults_are_productions():"
+    assert marker in src, "the test this guard protects is gone or renamed"
+    body = src.split(marker, 1)[1].split("\ndef ", 1)[0]
+    assert "ev.build_parser()" in body, "no longer reads the parser main() parses"
+    assert "ArgumentParser()" not in body, "constructs a parser of its own again"
+    assert "import argparse" not in body, "imports argparse to build a parser of its own"
 
 
 # ── the configuration a programmatic caller inherits (#498) ─────────────────
