@@ -169,6 +169,50 @@ def _build_fact_transcript(messages: list, *, start: int = 0,
 #: The single boolean did double duty and the summary half won — see #1159.
 FACT_WATERMARK_KEY = "fact_watermark"
 
+#: Session-file key holding how the one summary call per session turned out: one
+#: of the three values below. #793 — the summary path used to answer "was there
+#: anything worth capturing here?" with a single branch that also swallowed the
+#: engine's own failure: `_sync_secondary_capture_call` returns `None` after
+#: catching every exception (`app/secondary_models.py:147-149`), so a dead, slow or
+#: misrouted secondary read as the prompt's own `TRIVIAL` literal and its lost
+#: daily-note section was indistinguishable from a session legitimately judged
+#: empty. A field rather than a log line is what keeps the two separable after the
+#: fact, because the retained `logs/server.err*` (2026-09-12 → 09-17) carry 0 of
+#: either string against 24 `summary written to daily note` — rotation erases the
+#: evidence long before anyone asks the question.
+CAPTURE_OUTCOME_KEY = "capture_outcome"
+
+#: The summary was fetched and appended to today's daily note.
+CAPTURE_OUTCOME_WRITTEN = "written"
+#: The model answered with the `TRIVIAL` literal its prompt asks for
+#: (`app/secondary_models.py:120`): the session was read, and judged empty.
+CAPTURE_OUTCOME_TRIVIAL = "trivial"
+#: No usable answer came back — the call raised and the exception was swallowed
+#: upstream, or it returned nothing at all. Records a lost section; the session
+#: still latches, because retrying is deliberately NOT part of this change (the
+#: per-turn pass would re-fire at a dead engine, the hazard `mark_topic_attempt()`
+#: exists to stop on the focus path). See `_latch_captured`.
+CAPTURE_OUTCOME_FAILED = "failed"
+
+
+def _latch_captured(outcome: str | None = None):
+    """The `mutate_session` callback that closes a session out, and says how.
+
+    One write carrying both facts, on purpose. Before #793 three separate lambdas
+    set `captured` and none of them recorded whether the secondary was reached or
+    what it answered, so a failed call and a legitimately empty conversation left
+    the same row. `outcome=None` is the path that never called the engine — a
+    non-user platform — and background runs are ~240 a day against ~14 chats, so a
+    default written there would bury the signal this field exists to surface.
+    """
+    def apply(data: dict) -> None:
+        data["captured"] = True
+        if outcome is not None:
+            data[CAPTURE_OUTCOME_KEY] = outcome
+
+    return apply
+
+
 #: New user messages required before another extraction call fires.
 #:
 #: Event-gated rather than per turn because the secondary engine is
@@ -625,9 +669,18 @@ async def _capture_summary_once(session_id: str, data: dict):
 
     At most once per session — the caller skips this entirely when `captured` is
     set — and it writes that latch itself on every path that consumed the
-    summary: a non-user platform, a `TRIVIAL` verdict, or a summary appended.
-    The one path that does not latch is the sub-50-character transcript, where
-    there was nothing to summarise *yet*, so a later pass is still free to try.
+    summary: a non-user platform, a `TRIVIAL` verdict, a summary appended, or a
+    call that brought back nothing. The one path that does not latch is the
+    sub-50-character transcript, where there was nothing to summarise *yet*, so a
+    later pass is still free to try.
+
+    Each of those four paths also says which it was, in the session file
+    (`capture_outcome`, written only where a call was actually made) and in its own
+    log line. That separation is #793: the summary and the engine's failure
+    sentinel used to be tested by one branch, so a secondary that answered nothing
+    was reported as a conversation worth nothing, and the section it should have
+    written went missing with no trace. A failed session stays latched — recording
+    the loss is not the same as undertaking to redo it.
 
     Owns its exception handler so a failing summary cannot also eat the fact
     pass that runs after it.
@@ -649,7 +702,8 @@ async def _capture_summary_once(session_id: str, data: dict):
         # excluded from all of it from the start; `worker` never was, and
         # worker turns arrive through the chat path.
         if not is_user_session(data):
-            await mutate_session(session_id, lambda d: d.__setitem__("captured", True))
+            # No call was made, so no outcome is claimed. See `_latch_captured`.
+            await mutate_session(session_id, _latch_captured())
             return
 
         transcript = _build_capture_transcript(data.get("messages", []))
@@ -660,14 +714,30 @@ async def _capture_summary_once(session_id: str, data: dict):
             None, _sync_secondary_capture_call, transcript
         )
 
-        if not summary or summary.strip().upper() == "TRIVIAL":
+        # Two ways to get nothing back, and #793 is precisely that they used to be
+        # one branch. `None` (or an empty string) is not a verdict: it is what
+        # `_sync_secondary_capture_call` hands over after swallowing the exception
+        # (`app/secondary_models.py:147-149`), and reading it as `TRIVIAL` both
+        # mislabelled the session and hid the section that went missing with it.
+        # `isinstance` rather than a bare falsiness test so a non-string answer is
+        # a recorded failure here instead of an AttributeError two lines down.
+        if not isinstance(summary, str) or not summary.strip():
+            logger.warning(
+                f"Post-session capture: {session_id} — summary call returned no "
+                f"summary; no daily-note section written "
+                f"({CAPTURE_OUTCOME_KEY}={CAPTURE_OUTCOME_FAILED})"
+            )
+            await mutate_session(session_id, _latch_captured(CAPTURE_OUTCOME_FAILED))
+            return
+
+        if summary.strip().upper() == "TRIVIAL":
             logger.info(f"Post-session capture: {session_id} — trivial, skipped")
-            await mutate_session(session_id, lambda d: d.__setitem__("captured", True))
+            await mutate_session(session_id, _latch_captured(CAPTURE_OUTCOME_TRIVIAL))
             return
 
         _append_daily_note(session_id, summary)
 
-        await mutate_session(session_id, lambda d: d.__setitem__("captured", True))
+        await mutate_session(session_id, _latch_captured(CAPTURE_OUTCOME_WRITTEN))
 
         logger.info(f"Post-session capture: {session_id} — summary written to daily note")
 
