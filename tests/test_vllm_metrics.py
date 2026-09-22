@@ -144,13 +144,13 @@ vllm:engine_sleep_state{{engine="0",model_name="Qwen",sleep_state="awake"}} 1.0
 vllm:kv_cache_usage_perc{{engine="0",model_name="Qwen"}} 0.25
 vllm:prompt_tokens_total{{engine="0",model_name="Qwen"}} {prompt}
 vllm:generation_tokens_total{{engine="0",model_name="Qwen"}} {gen}
-vllm:prefix_cache_queries_total{{engine="0",model_name="Qwen"}} 1000.0
+vllm:prefix_cache_queries_total{{engine="0",model_name="Qwen"}} {queries}
 vllm:prefix_cache_hits_total{{engine="0",model_name="Qwen"}} 800.0
 """
 
 
-def _text(running=1.0, prompt=1000.0, gen=500.0) -> str:
-    return _METRICS.format(running=running, prompt=prompt, gen=gen)
+def _text(running=1.0, prompt=1000.0, gen=500.0, queries=1000.0) -> str:
+    return _METRICS.format(running=running, prompt=prompt, gen=gen, queries=queries)
 
 
 def test_first_snapshot_reports_gauges_but_no_rates():
@@ -183,6 +183,36 @@ def test_each_engine_keeps_its_own_baseline():
     vm._snapshot_from_text("secondary", _text(prompt=50.0))
     assert vm._previous["primary"]["vllm:prompt_tokens_total"] == 1000.0
     assert vm._previous["secondary"]["vllm:prompt_tokens_total"] == 50.0
+
+
+def test_prefix_cache_hit_rate_is_token_level_only_because_queries_equals_prompt():
+    """#605. The card's `prefix_cache_hit_rate` means "share of prompt tokens
+    served from cache" only because `prefix_cache_queries_total` counts the same
+    tokens `prompt_tokens_total` does -- the parity both live engines report
+    (2026-09-21: primary 2,635,881,762 vs 2,635,881,523, and djev exact at
+    1,192,427 == 1,192,427). Here the fixture is that shape: 1000 queries over
+    1000 prompt tokens, so 800 hits is 800 of the requests' own prompt tokens
+    cached, which is what a per-request
+    `usage.prompt_tokens_details.cached_tokens` reports."""
+    snap = vm._snapshot_from_text("parity", _text(prompt=1000.0, queries=1000.0))
+    assert snap["prefix_cache_hit_rate"] == pytest.approx(800.0 / 1000.0)
+
+
+def test_a_multi_kv_cache_group_boot_dilutes_the_card_by_the_amplification():
+    """#605, the condition the comment at `_RATIOS` now records. On the
+    2026-09-06 qwen4_exp MTP boot one 60k-token prompt logged 673,179 queries
+    (11.2x its prompt tokens) with the counter summing across every KV cache
+    group. `_ratio` divides hits by queries and never normalises by prompt
+    tokens, so those same 800 cached tokens against 11,200 queries render as
+    7.1% and the card cannot see the multiplication -- which is why the
+    queries-vs-prompt parity check has to come before the number is read. The
+    assertion is the arithmetic, not the prose: if anyone ever normalises the
+    ratio, the reported value stops being hits/queries and fails here."""
+    amplified = 11200.0
+    snap = vm._snapshot_from_text(
+        "multigroup", _text(prompt=1000.0, queries=amplified))
+    assert snap["prefix_cache_hit_rate"] == pytest.approx(800.0 / amplified)
+    assert snap["prefix_cache_hit_rate"] == pytest.approx(0.8 / (amplified / 1000.0))
 
 
 @pytest.mark.asyncio

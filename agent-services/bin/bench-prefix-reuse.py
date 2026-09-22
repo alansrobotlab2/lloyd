@@ -8,11 +8,47 @@ start-qwen38-flash-next.sh for the full result table.
 
 Two traps this script exists to avoid:
 
-  1. vllm:prefix_cache_hits_total is NOT a reuse rate. It sums across every KV
-     cache group, so one 60k-token prompt logs 673,179 queries, and it read ~68%
-     while real cross-request reuse was zero. Use the per-request
-     usage.prompt_tokens_details.cached_tokens instead (needs
-     --enable-prompt-tokens-details, which the start script passes).
+  1. vllm:prefix_cache_hits_total / prefix_cache_queries_total is a token-level
+     reuse rate ONLY while prefix_cache_queries_total == prompt_tokens_total
+     (1:1 parity), so check that parity before reading the number. It is one
+     curl: scrape /metrics and compare those two counters.
+
+     Current builds satisfy it. Re-read 2026-09-22T05:47Z on a primary booted
+     that same day (model Qwen3.8-Flash-Next-nvfp4): prefix_cache_queries_total
+     148,645,180 against prompt_tokens_total 148,644,807 -- 373 tokens apart,
+     1.0000025x -- and the djev engine equal outright, prefix_cache_queries_total
+     6,636,812 == prompt_tokens_total 6,636,812. Earlier reads of the same
+     series: equal outright on 2026-09-13 (both 2,050,518,768) and 423 apart at a
+     3.03-billion-token lifetime (2026-09-21T21:47Z). The gap on every read is a
+     few hundred tokens, never a multiple, so here the counter ratio IS a genuine
+     cross-request token-level reuse rate and the Mission Control card that
+     serves it as prefix_cache_hit_rate is telling the truth. This script's own
+     probe carries the equality down to a single request: pass 2 of the run
+     quoted in #605 logged d_queries 60,005 for that pass's own 60,005-token
+     prompt, and d_hits 54,400 equalled that request's
+     usage.prompt_tokens_details.cached_tokens 54,400. The 2026-09-13 probe read
+     delta-queries over delta-prompt_tokens at 1.000 on all 8 of its windows,
+     with delta-hits equal to that window's cached_tokens on each.
+
+     The 11.2x belonged to the boot this script was written for: the 2026-09-06
+     qwen4_exp MTP run (9a0a1d8, "proof the eagle-group warning is benign"),
+     whose speculative-decode draft head adds a second (eagle) KV cache group.
+     On that MTP boot the counter summed queries across every group, so one
+     60k-token prompt logged 673,179 queries -- an 11.2x amplification -- and the
+     script's note from that 2026-09-06 boot has the ratio reading ~68% while
+     real cross-request reuse was zero. Whether the eagle draft group is the
+     multiplier was never isolated; what is measured is that this build does not
+     multiply.
+
+     Two caveats survive either way. A counter window on a busy engine counts
+     every request inside it, so d_hits / d_queries there is the fleet's reuse
+     rate and not yours -- the loaded 2026-09-21 run read 90.4%, 91.1% and 92.2%
+     on three passes whose own cached_tokens never moved off 54,400. And load
+     evicts: pass 5 of that run read cached_tokens 0 after 1,349,507 tokens of
+     other traffic crossed its window. Use the per-request
+     usage.prompt_tokens_details.cached_tokens as the figure immune to everyone
+     else's traffic (needs --enable-prompt-tokens-details, which the start script
+     passes).
 
   2. Reuse needs TWO warm-up passes before it engages: passes 1-2 cache nothing,
      pass 3+ hits ~96% and runs ~18x faster. A 2-pass A/B reports 0% on both arms

@@ -62,6 +62,52 @@ _LATENCY_HISTOGRAMS = (
 
 # Ratio counters: (name, hits_metric, queries_metric). Reported both
 # since-boot and windowed.
+#
+# `prefix_cache` is a genuine token-level hit rate only while
+# `prefix_cache_queries_total` tracks `prompt_tokens_total` 1:1 — the parity
+# current builds satisfy, and it is one curl to check. Re-read 2026-09-22T05:47Z
+# on a primary booted that same day (`Qwen3.8-Flash-Next-nvfp4`):
+# `prefix_cache_queries_total` 148,645,180 against `prompt_tokens_total`
+# 148,644,807 — 373 tokens apart, 1.0000025x — and djev equal outright at
+# `prefix_cache_queries_total` 6,636,812 == `prompt_tokens_total` 6,636,812.
+# Earlier reads of the same pair: equal outright on 2026-09-13 (both
+# 2,050,518,768), 423 apart at a 3.03-billion-token lifetime (2026-09-21T21:47Z),
+# and exact over a window: a 2026-09-21 probe window carrying production traffic
+# moved Δqueries == Δprompt_tokens at 6,308,395 == 6,308,395. The gap on every
+# read is a few hundred tokens and does not grow with traffic, never a multiple.
+#
+# On that footing hits/queries is the share of prompt tokens served from cache —
+# the bench run of 2026-09-21 logged its own 60,005-token prompt as d_queries
+# 60,005 in a quiet window, with d_hits 54,400 equal to that request's
+# `usage.prompt_tokens_details.cached_tokens` 54,400 — so the card's
+# `prefix_cache_hit_rate` really is a reuse rate. It is the *engine's* rate over
+# that window, though, not one caller's: the window sums every request inside
+# it, so a single-caller reading cannot be reconciled against it on a busy
+# engine — passes 1, 3 and 4 of that same loaded run read 90.4%, 91.1% and 92.2%
+# while the bench's own cached_tokens sat at 54,400.
+#
+# It was not a rate at all on the 2026-09-06 qwen4_exp MTP boot: turning
+# speculative decode on adds a second (eagle draft) KV cache group, and there the
+# counter summed queries across every group — one 60k-token prompt logged
+# 673,179 queries, an 11.2x amplification — while the ratio read ~68% with real
+# cross-request reuse at zero. Whether the eagle draft group is the multiplier
+# was never isolated; what is measured is that this build does not multiply.
+# Nothing in `_ratio` normalises by `prompt_tokens_total`, so on any
+# multi-KV-cache-group boot this card is wrong by exactly that amplification
+# factor; check queries-vs-prompt parity before reading the number. Trap 1 of
+# `agent-services/bin/bench-prefix-reuse.py` carries the same reconciliation
+# (#605).
+#
+# The llama.cpp aliases below do NOT satisfy the parity: llama.cpp's
+# `prompt_tokens_total` excludes cached tokens, so
+# `prompt_tokens_cached_total / prompt_tokens_total` is not a fraction of a
+# total at all, and the card rendered it as "961%" on the 2026-09-13 probe and
+# 343% on the 2026-09-18 re-read. The bullet above `_LLAMACPP_TO_VLLM` still
+# calls that pair "the same quantity vLLM's … pair reports"; #1083 owns
+# correcting both halves. No llama.cpp engine is configured on this box to render
+# it (the secondary slot was retired 2026-09-20 in 551e9044, and
+# `configured_engines()` is primary + djev), so as of this comment the defect is
+# latent in the mapping, not live in a card.
 _RATIOS = (
     ("prefix_cache", "vllm:prefix_cache_hits_total", "vllm:prefix_cache_queries_total"),
     (
