@@ -613,6 +613,13 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
 #: board — and the retired slot cost a nightly run to report the wrong cause.
 EXIT_SLOT_DISABLED = 7
 
+#: Exit code for "no downstream verdict": one of the two 7-day windows holds too
+#: few captured entries for its rates to mean anything, whether that is zero
+#: notes or the 20-entry after-arm of 2026-09-19. Same code as the empty-window
+#: guard it replaces — 5 has always meant "no downstream denominator", and an
+#: under-filled window is that same condition, not a new one (#1262).
+EXIT_NO_DOWNSTREAM = 5
+
 #: The supervisord program that owns the second engine, named through
 #: `app/llm_slots.py` rather than by reading `secondary_enabled` here. That
 #: module is the ONE definition of "should this program be running?"; a sixth
@@ -886,6 +893,46 @@ def set_router_pins(jobs, path: Path) -> Path:
 # ── Downstream check: the defect this item exists to fix ─────────────────
 
 
+#: Fewest captured entries a window must hold before its rates may be printed as
+#: a verdict. Derived, not chosen: the comparison this check makes is one
+#: window's flagged rate against the other's, and the before arm's own flagged
+#: rate on the 2026-09-19 run was 0.024 — 13 flagged entries out of 548. A
+#: window of n entries can only express rates in steps of 1/n, so under n = 42 a
+#: single flagged entry lands above 0.024 by itself and the arm cannot report a
+#: rate that small at all. 42 is the smallest n with 1/n <= 0.024 (1/42 =
+#: 0.0238; 1/41 = 0.0244, which is why it is not 41 or a rounder number): a
+#: floor is a statement about resolution, not about caution. The sample that
+#: motivated it had 20 entries, a quantum of 1/20 = 0.05 — twice the baseline it
+#: was being compared to — and its "8x worse" headline was 4 flagged entries.
+#: `tests/test_secondary_routing_eval.py::test_the_entry_floor_is_the_resolution_bound_it_claims_to_be`
+#: pins that derivation, so moving this number has to move the baseline too.
+MIN_DOWNSTREAM_ENTRIES = 42
+
+#: The one cause this refusal is permitted to name, because it is the one that is
+#: true here and the one a reader is most likely to get wrong. The captured-entry
+#: count falls off a cliff on 2026-09-10 — 341 entries in the note for that day,
+#: then 15 / 8 / 7 on 09-10 / 09-11 / 09-12, and 1 to 6 a day since — and that
+#: reads as a broken capture pipeline or a broken reader. It is neither. Commit
+#: `410e203` (2026-09-10 08:44:13 -07:00, "C+D: bifurcate history, and a
+#: Background tab to read the other half") restricted the daily note, the
+#: secondary summary and fact extraction to user sessions via
+#: `sessions_io.is_user_session` and moved background exports to
+#: `_pipeline/vault-derived/sessions-background/`. Session volume went UP over
+#: the same window; only the population the daily note counts changed. So any
+#: before-window containing a date before the split counts background runs while
+#: the after arm counts user sessions — two different populations, which no
+#: sample size and no floor value makes comparable. Choosing what this arm should
+#: measure post-split (retire it, or point it at the export trees) is a person's
+#: call: backlog #1262 leaves it open deliberately.
+DOWNSTREAM_SPLIT_CAUSE = (
+    "cause: the daily note counts user sessions only from 2026-09-10 (commit "
+    "410e203), which moved background runs to "
+    "_pipeline/vault-derived/sessions-background/ — 341 captured entries on "
+    "2026-09-09, 1-6 a day since. Not a capture-pipeline defect and not a reader "
+    "break: the population the note holds changed, and session volume rose over "
+    "the same window."
+)
+
 #: The heading `_append_daily_note` writes. Auto-captured entries are the
 #: secondary's own output, so they are the only part of a daily note this
 #: measurement may read — a note also holds the user's own prose and other
@@ -965,6 +1012,41 @@ def measure_capture_window(memory_dir: Path, days: list[str]) -> dict[str, Any]:
             "duplicate_rate": (round(sum((d["duplicate_rate"] or 0) * d["entries"] for d in present)
                                      / entries, 3) if entries else None),
             "per_day": per_day}
+
+
+def downstream_verdict_blocker(result: dict[str, Any],
+                               floor: int | None = None) -> list[str]:
+    """The lines to print INSTEAD of a verdict, or [] when both windows are usable.
+
+    Rates over a near-empty window read exactly like rates over a full one, which
+    is how the 2026-09-19 run got to print a flagged rate of 0.20 against 0.024
+    and exit 0: the only guard was `entries == 0`, and 20 is not 0. So the guard
+    is a floor, and the refusal names the under-filled window with the two
+    numbers that make it visible — the entry count and how many of the window's
+    days had a note at all — because a rate without its denominator is the thing
+    this file keeps having to learn twice.
+
+    `floor` is a parameter only so a test can move it and prove the guard reads
+    `MIN_DOWNSTREAM_ENTRIES` rather than a literal in the branch; the caller
+    leaves it `None`.
+    """
+    if floor is None:
+        floor = MIN_DOWNSTREAM_ENTRIES
+    short = [f"the {arm} window holds {result[arm]['entries']} captured entries "
+             f"over {result[arm]['notes_read']}/{result[arm]['days']} notes"
+             for arm in ("after", "before") if result[arm]["entries"] < floor]
+    if not short:
+        return []
+    return [
+        f"NO DOWNSTREAM VERDICT: the floor is {floor} captured entries per window, and "
+        + "; ".join(short),
+        DOWNSTREAM_SPLIT_CAUSE,
+        "consequence: a before-window holding a date before that split counts background "
+        "runs while the after arm counts user sessions, so the two arms are different "
+        "populations at any sample size — do not 'fix' the split, and do not read this "
+        "as a capture outage. What this arm should measure post-split is open on "
+        "backlog #1262.",
+    ]
 
 
 def window_dates(end_day: str, length: int = 7) -> list[str]:
@@ -1329,7 +1411,14 @@ def render_report(summary: dict[str, Any], decisions: list[dict[str, Any]],
               "- after a flip, the downstream check is one command: "
               "`python3 eval/secondary_routing_eval.py --downstream <YYYY-MM-DD>` — "
               "the over-long/duplicate rate over the 7 days ending that date against "
-              "the 7 before it, read from the auto-captured entries in the daily notes.",
+              "the 7 before it, read from the auto-captured entries in the daily notes. "
+              f"It refuses ({EXIT_NO_DOWNSTREAM}, `NO DOWNSTREAM VERDICT`) unless both "
+              f"windows hold at least {MIN_DOWNSTREAM_ENTRIES} captured entries, because "
+              "rates over a near-empty window print exactly like rates over a full one. "
+              "That refusal is the standing answer on a normal week now: the daily note "
+              "counts user sessions only, so a 7-day window realistically holds 1-6 "
+              "entries a day. A refusal is not a regression and not a capture outage — "
+              "read the cause line it prints before reporting it.",
               "",
               "---", "",
               "Interpretation guard: the composite is mechanical, so it measures shape "
@@ -1359,7 +1448,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="skip the sweep and measure the daily-note defect rate over "
                              "the 7 days ending END_DATE against the 7 before it. The "
                              "clause's downstream check, runnable by one command once a "
-                             "job has flipped; prints both windows and exits.")
+                             "job has flipped; prints both windows and exits. Refuses "
+                             f"({EXIT_NO_DOWNSTREAM}) when either window holds under "
+                             f"{MIN_DOWNSTREAM_ENTRIES} captured entries — a rate over a "
+                             "window that thin is not a verdict.")
     parser.add_argument("--memory-dir", default=str(Path.home() / "obsidian" / "memory"),
                         help="daily notes for --downstream")
     parser.add_argument("--pin", metavar="JOB[,JOB]", default=None,
@@ -1468,12 +1560,15 @@ def main(argv: list[str] | None = None) -> int:
                   f"{w['notes_read']}/{w['days']} notes, flagged "
                   f"{w['flagged_rate']}, over-long {w['over_long_rate']}, "
                   f"duplicate {w['duplicate_rate']}")
-        a, b = result["after"], result["before"]
-        if a["entries"] == 0 or b["entries"] == 0:
-            # The seventh instance of the class this item keeps hitting: a
-            # rate over no denominator reads as a result.
-            print("NO DOWNSTREAM VERDICT: a window has 0 captured entries")
-            return 5
+        # Rates print above so the printed JSON and the two arm lines stay
+        # readable; they are NOT the verdict, and exit 5 below is what says
+        # whether they meant anything. The guard used to be `entries == 0`, which
+        # let the 2026-09-19 run exit 0 on a 20-entry after arm.
+        blocker = downstream_verdict_blocker(result)
+        if blocker:
+            for line in blocker:
+                print(line)
+            return EXIT_NO_DOWNSTREAM
         return 0
 
     # The slot switch outranks the sweep, and this is the last place the two

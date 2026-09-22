@@ -12,6 +12,7 @@ zero-claim problem got built.
 """
 import inspect
 import json
+import subprocess
 import sys
 import urllib.request
 from pathlib import Path
@@ -1011,6 +1012,61 @@ def test_the_pin_command_refuses_a_set_the_measurement_did_not_reach(monkeypatch
     assert ev.main(["--pin", "title,capture"]) == 3
 
 
+#: The 2026-09-19 windows, rebuilt as per-day entry counts from the live notes
+#: the run read, so the fixture is the sample the item names rather than an
+#: approximation of it. `--downstream 2026-09-19` printed
+#: `after 2026-09-13..2026-09-19: 20 entries over 6/7 notes` against
+#: `before 2026-09-06..2026-09-12: 548 entries over 7/7 notes` and exited 0 —
+#: a flagged-rate gap of 0.20 against 0.024 carried by 4 flagged entries.
+#: (Re-run today the same command prints 21 entries over 7/7 notes: the 09-19
+#: note took a capture after that run, so the after window grew by one entry
+#: and one note. Both sides of that drift are under the floor, which is the
+#: point.)
+_AFTER_2026_09_19 = {"2026-09-13": 2, "2026-09-14": 1, "2026-09-15": 3,
+                     "2026-09-16": 5, "2026-09-17": 6, "2026-09-18": 3}
+#: 33 + 39 + 105 + 341 + 15 + 8 + 7 = 548. The shape is the finding: ~130 a day
+#: through 09-09 (09-09 alone holds 341), then 15 / 8 / 7 on 09-10 / 09-11 /
+#: 09-12, which is the user-session-only capture split, not a collapse.
+_BEFORE_2026_09_19 = {"2026-09-06": 33, "2026-09-07": 39, "2026-09-08": 105,
+                      "2026-09-09": 341, "2026-09-10": 15, "2026-09-11": 8,
+                      "2026-09-12": 7}
+
+
+def _capture_notes(memory_dir: Path, counts: dict[str, int],
+                   long_on: str | None = None) -> None:
+    """Write daily notes holding exactly `counts[day]` auto-captured entries.
+
+    Bodies are one line each on purpose: `duplicate_rate` compares lines within
+    one body, so a single-line body is duplicate-free by construction and the
+    only signal in the fixture is over length, which is applied to the one entry
+    `long_on` names — one flagged entry, so the rate it produces is 1/entries
+    and can be computed by hand against the floor. Counts are what the floor
+    reads, so they are written exactly rather than roughly.
+    """
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    for day, n in counts.items():
+        blocks = []
+        for i in range(n):
+            if day == long_on and i == 0:
+                body = "x" * (ev.LENGTH_BUDGETS["capture"] + 1)
+            else:
+                body = f"{day} entry {i}: the nightly job landed and recorded its row"
+            blocks.append(f"### Session {day} entry-{i}\n{body}")
+        (memory_dir / f"{day}.md").write_text("\n".join(blocks) + "\n", encoding="utf-8")
+
+
+def _downstream_2026_09_19(tmp_path: Path, *, after: bool = True) -> Path:
+    mem = tmp_path / "memory"
+    if after:
+        _capture_notes(mem, _AFTER_2026_09_19)
+    _capture_notes(mem, _BEFORE_2026_09_19)
+    return mem
+
+
+def _downstream_args(mem: Path) -> list[str]:
+    return ["--downstream", "2026-09-19", "--memory-dir", str(mem)]
+
+
 def test_the_downstream_windows_are_adjacent_and_never_overlap():
     """Seven days against the prior seven. A baseline window that shared a day
     with its own comparison would read a week against itself, and the drift
@@ -1023,3 +1079,141 @@ def test_the_downstream_windows_are_adjacent_and_never_overlap():
     from datetime import date, timedelta
     assert (date.fromisoformat(after[0]) - date.fromisoformat(before[-1])
             == timedelta(days=1))
+
+
+# ── The downstream floor: a rate over a denominator that cannot resolve ───
+
+def test_the_downstream_check_refuses_the_sample_that_carried_the_8x_headline(tmp_path, capsys):
+    """The command that must stop reporting a verdict on 20 entries.
+
+    The 2026-09-19 run printed an after-arm flagged rate of 0.20 against a
+    before-arm 0.024 and exited 0, because the only guard was `entries == 0`
+    and 20 is not 0. Four flagged entries were the entire headline. The fixture
+    is those windows (`_AFTER_2026_09_19`, `_BEFORE_2026_09_19`), so this test
+    fails the moment the guard stops reading the counts.
+    """
+    mem = _downstream_2026_09_19(tmp_path)
+
+    assert ev.main(_downstream_args(mem)) == ev.EXIT_NO_DOWNSTREAM == 5
+    out = capsys.readouterr().out
+    assert "NO DOWNSTREAM VERDICT" in out, out
+    assert "after window holds 20 captured entries over 6/7 notes" in out, out
+    assert f"floor is {ev.MIN_DOWNSTREAM_ENTRIES} captured entries" in out, out
+
+
+def test_a_window_at_the_floor_still_gets_its_verdict(tmp_path, capsys):
+    """The floor disables only the comparison it cannot support, not the check.
+
+    Both arms sit at or above 42 entries here — the after arm exactly at the
+    floor, so the boundary is pinned as inclusive and not accidentally shifted
+    by one — and both rates must still print with exit 0. The after arm's one
+    over-long entry out of 42 is a flagged rate of 0.024, the same number the
+    before arm reported over 548 entries: the coincidence is the lesson, since
+    at 42 entries one entry is the whole rate.
+    """
+    mem = tmp_path / "memory"
+    at_floor = {d: 6 for d in ev.window_dates("2026-09-19", 7)}
+    above = {d: 8 for d in ev.preceding_window("2026-09-19", 7)}
+    assert sum(at_floor.values()) == ev.MIN_DOWNSTREAM_ENTRIES
+    _capture_notes(mem, at_floor, long_on=min(at_floor))
+    _capture_notes(mem, above)
+
+    assert ev.main(_downstream_args(mem)) == 0
+    out = capsys.readouterr().out
+    assert "NO DOWNSTREAM VERDICT" not in out, out
+    assert "after  2026-09-13..2026-09-19: 42 entries over 7/7 notes" in out, out
+    assert "before 2026-09-06..2026-09-12: 56 entries over 7/7 notes" in out, out
+    assert "flagged 0.024" in out, out
+
+
+def test_the_entry_floor_is_the_resolution_bound_it_claims_to_be():
+    """42 is derived, not chosen, and the derivation has to break if the
+    baseline it was derived from moves.
+
+    The rate the check compares against is the before arm's own flagged rate:
+    0.024 on the 2026-09-19 run (13 flagged of 548). A window of n entries can
+    express rates only in steps of 1/n, so below n = 42 a single flagged entry
+    lands above 0.024 on its own and the arm cannot report a rate that small at
+    all. 42 is the smallest n with 1/n <= 0.024; 41 is not (1/41 = 0.0244).
+    """
+    n = ev.MIN_DOWNSTREAM_ENTRIES
+    assert n == 42
+    assert 1 / n <= 0.024 < 1 / (n - 1), "the floor stopped being the resolution bound"
+
+
+def test_the_refusal_moves_when_the_floor_moves(tmp_path, monkeypatch, capsys):
+    """The guard reads the constant, not a literal in the branch. Same 20-entry
+    sample, floor dropped to 20, and the verdict comes back — which is what
+    makes the refusal test above a test of the floor rather than of something
+    else on the path."""
+    mem = _downstream_2026_09_19(tmp_path)
+    monkeypatch.setattr(ev, "MIN_DOWNSTREAM_ENTRIES", 20)
+
+    assert ev.main(_downstream_args(mem)) == 0
+    assert "NO DOWNSTREAM VERDICT" not in capsys.readouterr().out, "the floor is hardcoded"
+
+
+def test_the_refusal_names_the_user_session_split_so_nobody_re_diagnoses_the_drop(
+        tmp_path, capsys):
+    """A refusal that only prints a count gets re-diagnosed; this one has to
+    close the two wrong answers.
+
+    The 96 % fall in captured entries starts on 2026-09-10, which reads as a
+    broken capture pipeline or a broken reader. It is neither: commit `410e203`
+    restricted the daily note, the secondary summary and fact extraction to user
+    sessions and moved background exports to `sessions-background/`. So the
+    refusal names the commit, the date and the split — and says plainly that the
+    population changed, which forecloses both false diagnoses.
+    """
+    mem = _downstream_2026_09_19(tmp_path)
+
+    assert ev.main(_downstream_args(mem)) == 5
+    out = capsys.readouterr().out
+    for needle in ("410e203", "2026-09-10", "user session", "sessions-background"):
+        assert needle in out, (needle, out)
+    assert "Not a capture-pipeline defect" in out, out
+    assert "not a reader break" in out, out
+
+
+def test_an_empty_window_is_refused_by_the_same_floor_and_names_the_same_cause(tmp_path, capsys):
+    """The guard this replaces fired only at zero. Zero still fires — and now
+    says why, instead of printing "a window has 0 captured entries" for a run to
+    report as a capture outage."""
+    mem = _downstream_2026_09_19(tmp_path, after=False)
+
+    assert ev.main(_downstream_args(mem)) == 5
+    out = capsys.readouterr().out
+    assert "after window holds 0 captured entries over 0/7 notes" in out, out
+    assert "410e203" in out, out
+
+
+def test_the_floor_refusal_is_the_process_exit_code_a_run_sees(tmp_path):
+    """Task #85 and the `--pin` confirmation text invoke this as a process, so
+    the refusal has to be a non-zero status and not merely a return value a
+    test can read. This is the argv-in / exit-code-out boundary itself.
+    """
+    mem = _downstream_2026_09_19(tmp_path)
+
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "eval" / "secondary_routing_eval.py"),
+         "--downstream", "2026-09-19", "--memory-dir", str(mem)],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=300)
+
+    assert proc.returncode == 5, proc.stdout[-800:] + proc.stderr[-800:]
+    assert "NO DOWNSTREAM VERDICT" in proc.stdout, proc.stdout[-800:]
+
+
+def test_the_instruction_that_prescribes_downstream_states_the_floor():
+    """#1262's triage note: the operator is told to run `--downstream` by the
+    report `--pin` writes, not by the skill — a grep of the skill's text finds
+    the exit-code list and no command. So a floor the instruction never mentions
+    would still leave the operator reading a refusal as a passed check. The
+    rendered bullet interpolates the constant, which is why this greps for the
+    name rather than a number: the instruction cannot drift from the guard.
+    """
+    source = (ROOT / "eval" / "secondary_routing_eval.py").read_text(encoding="utf-8")
+    at = source.find("the downstream check is one command")
+    assert at != -1, "the --pin confirmation text no longer prescribes the downstream check"
+    block = source[at:at + 1200]
+    assert "MIN_DOWNSTREAM_ENTRIES" in block, block
+    assert "NO DOWNSTREAM VERDICT" in block, block
