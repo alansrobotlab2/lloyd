@@ -32,6 +32,7 @@ form `relations_index.py` requires) before any write.
 
 Usage:
     okf_migrate.py [--repair-only] [--dir NAME] [--apply] [--limit N] [--report PATH]
+                   [--root PATH]
 
     (default = DRY RUN over the whole vault; prints a summary + proposed `type`
      assignments. Add --apply to write. --dir scopes to one top-level dir for
@@ -53,8 +54,13 @@ from agent_mcp._shared import _fold_orphaned_tag_items  # noqa: E402
 from app.paths import VAULT_ROOT  # noqa: E402
 
 # Dirs/files that are utility-only or OKF-reserved — never treated as concept docs.
+# `index.md` / `log.md` are reserved at any depth (§3.1) and §8 forbids frontmatter
+# in them, so backfilling a `type` into one is a spec violation this tool would
+# write: a dry run over a tree holding only a conformant index and log proposed
+# `created index.md [type=note]` / `created log.md [type=note]` before #450. Kept
+# identical to EXCLUDE_FILES in validate_okf.py — the two scripts must agree.
 EXCLUDE_DIRS = {"templates", "images", ".git", ".obsidian", ".trash"}
-EXCLUDE_FILES = {"tags.md"}
+EXCLUDE_FILES = {"tags.md", "index.md", "log.md"}
 STRICT_FM_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
 # Date fields consulted (highest priority first) to derive OKF `timestamp`.
@@ -210,8 +216,13 @@ def emit(fm: dict, body: str) -> str:
 
 # ── type heuristic ───────────────────────────────────────────────────────────
 
-def infer_type(path: Path, fm: dict, body: str) -> str:
-    rel = path.relative_to(VAULT_ROOT)
+def infer_type(path: Path, fm: dict, body: str,
+               root: Path | None = None) -> str:
+    # `None` resolves to this module's VAULT_ROOT at CALL time — a captured
+    # default would freeze the live vault and break the test that points the
+    # global at a fixture. The tree matters: the heuristic below keys on the
+    # top-level directory, so a --root fixture must be resolved against itself.
+    rel = path.relative_to(VAULT_ROOT if root is None else root)
     top = rel.parts[0] if len(rel.parts) > 1 else ""
     name = path.name
     stem = path.stem
@@ -289,8 +300,12 @@ def looks_like_fm(fm_text: str) -> bool:
     return False
 
 
-def process(path: Path, *, repair_only: bool):
+def process(path: Path, *, repair_only: bool, root: Path | None = None):
     """Return (action, new_text|None, inferred_type|None).
+
+    `root` is the tree `path` sits in — pass it when scanning anything other than
+    the live vault, or the type heuristic resolves the file against the wrong
+    tree (see `infer_type`).
 
     action ∈ {ok, repaired, migrated, created, quarantine}
       ok         — already conformant, no write
@@ -330,7 +345,7 @@ def process(path: Path, *, repair_only: bool):
     if not repair_only:
         # type
         if not str(fm.get("type", "") or "").strip():
-            inferred = infer_type(path, fm, body)
+            inferred = infer_type(path, fm, body, root)
             fm["type"] = inferred
             changed_fields = True
         # summary -> description
@@ -389,7 +404,12 @@ def main() -> int:
     ap.add_argument("--report", default=None, help="write a text report to this path")
     ap.add_argument("--quarantine-report", default=None,
                     help="write the full quarantined-file list to this path")
+    ap.add_argument("--root", default=None,
+                    help="tree to migrate instead of the live vault root "
+                         "(app.paths.VAULT_ROOT) — for a fixture, or a copy under "
+                         "review before anything is written to ~/obsidian")
     args = ap.parse_args()
+    root = Path(args.root) if args.root else VAULT_ROOT
 
     counts = Counter()
     type_assign = Counter()
@@ -398,13 +418,14 @@ def main() -> int:
     samples: list[str] = []
     n = 0
 
-    for path in iter_md(VAULT_ROOT, args.dir):
+    for path in iter_md(root, args.dir):
         if args.limit and n >= args.limit:
             break
         n += 1
-        rel = path.relative_to(VAULT_ROOT)
+        rel = path.relative_to(root)
         try:
-            action, new_text, inferred = process(path, repair_only=args.repair_only)
+            action, new_text, inferred = process(path, repair_only=args.repair_only,
+                                                root=root)
         except Exception as e:  # noqa: BLE001
             counts["error"] += 1
             quarantined.append(f"{rel}  (exception: {e})")

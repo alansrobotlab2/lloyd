@@ -12,13 +12,20 @@ frontmatter with a non-empty `type`. It deliberately does NOT fix a taxonomy —
       vocabulary — informational only, not an OKF violation.
 
 Reserved / utility files are skipped, matching the migrator: `templates/`,
-`images/`, `.git/`, `tags.md`, and any `_*.md` (logs/indexes like `_log.md`).
+`images/`, `.git/`, `tags.md`, any `_*.md` (Lloyd's own index convention is
+`_index.md`), and OKF's two RESERVED names — `index.md` and `log.md` at any
+level (§3.1). A reserved file is the opposite of a concept document: §8 says an
+index file "contains no frontmatter" (only a bundle-root `index.md` may carry
+any, and only `okf_version`). Before #450 they were not in EXCLUDE_FILES, so the
+gate FAILED a spec-conformant index — "no parseable frontmatter block" — while
+PASSING `projects/inner-voice-paper/index.md`, which is conformant-looking to
+the gate only because it disobeys §8 by carrying frontmatter.
 
 Run in CI / a healthcheck / the nightly conformance task, and before any bulk
 vault edit.
 
 Usage:
-    python scripts/vault/validate_okf.py [--dir NAME] [--strict]
+    python scripts/vault/validate_okf.py [--dir NAME] [--strict] [--root PATH]
 """
 from __future__ import annotations
 
@@ -34,7 +41,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app.paths import VAULT_ROOT  # noqa: E402
 
 EXCLUDE_DIRS = {"templates", "images", ".git", ".obsidian", ".trash"}
-EXCLUDE_FILES = {"tags.md"}
+# `index.md` / `log.md` are OKF-reserved at any depth (§3.1) and §8 forbids
+# frontmatter in them, so they can never be concept documents — matching on
+# filename is what "at any depth" means here, the same rule as `tags.md`. #450.
+EXCLUDE_FILES = {"tags.md", "index.md", "log.md"}
 STRICT_FM_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
 # The vocabulary is #370's 12 canonical values plus what already exists on disk
@@ -69,16 +79,21 @@ def main() -> int:
     ap.add_argument("--dir", default=None)
     ap.add_argument("--strict", action="store_true",
                     help="treat unknown-type warnings as failure (exit 2)")
+    ap.add_argument("--root", default=None,
+                    help="tree to scan instead of the live vault root "
+                         "(app.paths.VAULT_ROOT) — so a fixture can be graded on "
+                         "the same command line the weekly gate uses")
     args = ap.parse_args()
+    root = Path(args.root) if args.root else VAULT_ROOT
 
     violations: list[str] = []
     warnings: list[str] = []
     type_hist = Counter()
     n = 0
 
-    for p in iter_md(VAULT_ROOT, args.dir):
+    for p in iter_md(root, args.dir):
         n += 1
-        rel = str(p.relative_to(VAULT_ROOT))
+        rel = str(p.relative_to(root))
         content = p.read_text(encoding="utf-8")
         m = STRICT_FM_RE.match(content)
         if not m:
