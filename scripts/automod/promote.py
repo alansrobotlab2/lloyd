@@ -30,7 +30,7 @@ import urllib.request
 from pathlib import Path
 
 from app.supervisor_client import process_info, restart_process, start_process, stop_process
-from scripts.automod import state as S, worktree as W
+from scripts.automod import ram_gate, state as S, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -100,23 +100,25 @@ MCP_HEALTH = "http://127.0.0.1:8500/health"
 #     95.37 GiB host-RAM n-gram table, and a second boot started too soon
 #     put two of them on a 251 GiB box — systemd-oomd then killed the whole
 #     supervisord unit (2026-09-08, twice). The leg waits for MemAvailable
-#     to pass PRIMARY_RAM_FLOOR_GIB and refuses to boot below the abort line;
+#     to pass the boot gate's floor and refuses to boot below its abort line;
 #   - its `environment=` lives in the program's conf, so the leg runs
 #     `reread` + `update` before starting, or an edited KV budget is ignored.
 PRIMARY_PROGRAM = "agent-llm-primary"
 PRIMARY_HEALTH = "http://127.0.0.1:8096/health"
 PRIMARY_HEALTH_BUDGET = 1200.0
-# 150/120 on the first cut, and the first real use (2026-09-15 23:47Z) got
-# through them and still lost the unit: a 16 GiB qemu VM had joined the
-# desktop, MemAvailable read 57 GiB with the engine up, the stop freed the
-# table to just past the floor, and the boot's own transient took the box
-# to pressure — systemd-oomd killed agent-supervisord.service at 23:52:46Z
-# and every program under it came back on autorestart (memwatch snapshot
-# 20260915_235555). The floor is now what a boot actually needs on top of
-# whatever else the desktop holds, and the abort line is the old floor.
-PRIMARY_RAM_FLOOR_GIB = 180
-PRIMARY_RAM_ABORT_GIB = 150
-PRIMARY_RAM_WAIT_SECONDS = 600.0
+# The boot-gate thresholds are READ here, never held: the file that defines them
+# is `agent-services/bin/ram-boot-gate.sh`, which the A/B sweep route shells in
+# and this route reads through `scripts.automod.ram_gate`. The numbers, the oomd
+# history that set them, and why the sweep pair sits lower than this pair all
+# live in that one header. #1340 closed the state where 180/150 stood here and
+# 150/120 stood in the arm script with nothing between them, and where the only
+# pointer to the production pair — in the restart skill — was 596 lines off. The
+# names are bound into this module so the restart-leg tests can still patch them;
+# the values are the definition file's, and a broken definition raises at import
+# rather than falling back to a remembered number.
+PRIMARY_RAM_FLOOR_GIB = ram_gate.PRIMARY_RAM_FLOOR_GIB
+PRIMARY_RAM_ABORT_GIB = ram_gate.PRIMARY_RAM_ABORT_GIB
+PRIMARY_RAM_WAIT_SECONDS = ram_gate.PRIMARY_RAM_WAIT_SECONDS
 # Vite dev server, serving the live tree over HTTPS with a private cert. Not
 # restarted by a landing: HMR picks the fast-forward up on its own.
 FRONTEND_URL = "https://127.0.0.1:5173/"

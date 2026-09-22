@@ -30,6 +30,21 @@ ENVFILE="$ROOT/agent-services/logs/flash-next-arm.env"
 LOG="$ROOT/agent-services/logs/agent-llm-primary.log"
 RESULTS="$ROOT/agent-services/logs/flash-next-arms.jsonl"
 
+# The host-RAM boot gate — its thresholds, its wait and the reason for both —
+# lives in ONE file that the landing route (`round restart --only
+# agent-llm-primary`) reads too. This script is the SWEEP route, so it uses the
+# SWEEP_RAM_* pair, which sits lower than the landing pair by design; the
+# definition's header says why and what the gate cannot do. No number in this
+# file is the boot gate's, and if the definition cannot be read the arm is
+# refused before anything is stopped.
+RAM_GATE_SCRIPT="$ROOT/agent-services/bin/ram-boot-gate.sh"
+if [[ ! -r "$RAM_GATE_SCRIPT" ]]; then
+  echo "!! ABORT $LABEL: cannot read the boot-gate definition at $RAM_GATE_SCRIPT."
+  exit 3
+fi
+# shellcheck source=/dev/null
+source "$RAM_GATE_SCRIPT"
+
 {
   echo "# arm: $LABEL   written $(date -Is)"
   for kv in "$@"; do echo "export $kv"; done
@@ -47,41 +62,13 @@ LOG_OFFSET=$(wc -c < "$LOG")
 echo "--- restarting engine (cold boot reads 170 GiB; expect 3-5 min) ---"
 $SUP stop agent-llm-primary
 
-# WAIT FOR THE HOST TABLE TO BE RELEASED BEFORE STARTING THE NEXT BOOT.
-# `supervisorctl stop` returns when the processes are signalled, not when the
-# kernel has reclaimed their memory, and this engine holds a 95.37 GiB BF16
-# n-gram table in HOST ram. Start the next boot immediately and two of those
-# coexist. On 2026-09-08 that took the box to a 230 GiB peak and systemd-oomd
-# killed the whole agent-supervisord unit -- 953 processes, every service on
-# the machine, not just the engine being restarted. Everything came back on
-# its own, but the arm was lost and the failure looked like the config under
-# test rather than the restart cadence.
-#
-# THIS WAIT IS NOT WHAT KEEPS oomd OFF THE UNIT, and reading it that way is
-# how 2026-09-15 got misattributed to a qemu VM on the desktop. On 2026-09-17
-# this check passed at 198 GiB and the unit was killed 129 seconds later:
-# ONE boot drives its own cgroup to ~226 GiB (a 170 GiB checkpoint read plus a
-# 95 GiB shared mapping, page cache charged to the reader's cgroup), so the
-# boot consumes the very thing this gauge measures -- MemAvailable fell to
-# 79 GiB while the load ran. What keeps oomd off the unit is Slice=lloyd.slice
-# on agent-supervisord.service (oomd watches only app.slice); see the comment
-# there, including the MemoryHigh attempt that must not come back.
-# What this wait IS good for is its original question, which MemAvailable does
-# answer correctly: has the PREVIOUS engine's shared mapping been released yet.
-# Keep it for that, and do not raise the floor expecting it to stop an oomd
-# kill -- it cannot.
-echo -n "waiting for host RAM to be released "
-for _ in $(seq 1 60); do
-  AVAIL=$(awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo)
-  [[ "$AVAIL" -ge 150 ]] && break
-  echo -n "."
-  sleep 5
-done
-echo " ${AVAIL} GiB available"
-if [[ "$AVAIL" -lt 120 ]]; then
-  echo "!! ABORT $LABEL: only ${AVAIL} GiB host RAM free; a 170 GiB load would risk the oomd kill above."
-  exit 3
-fi
+# WAIT FOR THE HOST TABLE TO BE RELEASED BEFORE STARTING THE NEXT BOOT. The
+# gate — what it waits for, for how long, where it refuses, and the oomd
+# history that explains what it is NOT — lives in `bin/ram-boot-gate.sh`, which
+# the landing route reads out of the same file, so the two routes cannot disagree
+# about what "room to boot" means. A non-zero status here means the room never
+# came back: the engine stays stopped, this arm is refused, and nothing starts.
+ram_gate_wait_for_room "$LABEL" || exit 3
 # Backgrounded on purpose: startsecs=300 means `start` does not RETURN for five
 # minutes even though the engine is usually serving by three, and this runs six
 # times in a sweep. The launcher's own comment says it: poll :8096 instead.

@@ -628,8 +628,9 @@ another 140 ms of neighbour latency for +27% prefill and no further KV benefit.
   `agent-supervisord.service` unit** — 953 processes the first time, 793 the
   second. Peak RSS 230.3 GiB. It has happened twice since (2026-09-15 23:52Z,
   620 processes; 2026-09-17 17:09).
-- **The RAM wait is not what keeps oomd off the unit** — read
-  `flash-next-run-arm.sh:62-69` before leaning on it. On 2026-09-17 that wait
+- **The RAM wait is not what keeps oomd off the unit** — read the header of
+  `agent-services/bin/ram-boot-gate.sh`, which says so in full, before leaning on
+  it. On 2026-09-17 that wait
   passed at 198 GiB and the unit was killed 129 s later, because **one** boot
   drives its own cgroup to ~226 GiB (a 170 GiB checkpoint read plus a 95 GiB
   shared mapping, page cache charged to the reader's cgroup) and so consumes the
@@ -638,15 +639,19 @@ another 140 ms of neighbour latency for +27% prefill and no further KV benefit.
   (oomd watches only `app.slice`); the wait answers the narrower question it
   was written for — has the *previous* engine's mapping been released — and
   raising its floor will not stop a kill.
-- **Two floors, two routes, neither derived from the other.** Production
-  restarts go through `scripts.automod.round restart --only agent-llm-primary`,
-  whose `_restart_primary` (`scripts/automod/promote.py:1526`) waits
-  `MemAvailable` back to `PRIMARY_RAM_FLOOR_GIB = 180` and refuses under
-  `PRIMARY_RAM_ABORT_GIB = 150` (:117-118). `flash-next-run-arm.sh` is the A/B
-  sweep runner, waits to 150 and aborts below 120 (:74-83) — a lower bar, so it
-  is not the production restart route even though it restarts the same program.
-  Both numbers are machine- and day-specific; read `/proc/meminfo`, not this
-  page.
+- **Two routes, one definition.** Both thresholds live in
+  `agent-services/bin/ram-boot-gate.sh` and neither route keeps a copy: the
+  landing route reads it through `scripts/automod/ram_gate.py`, the sweep route
+  shells in the same file. Production restarts go through
+  `scripts.automod.round restart --only agent-llm-primary`, whose
+  `_restart_primary` (in `scripts/automod/promote.py` — find it by that symbol,
+  this page used to carry a line number and it was 596 lines wrong) waits
+  `MemAvailable` back to `PRIMARY_RAM_FLOOR_GIB` and refuses under
+  `PRIMARY_RAM_ABORT_GIB`. `flash-next-run-arm.sh` is the A/B sweep runner, and
+  waits to `SWEEP_RAM_WAIT_GIB` and aborts below `SWEEP_RAM_ABORT_GIB` — a lower
+  bar by design (the definition's header says why), so it is not the production
+  restart route even though it restarts the same program. Both pairs are
+  machine- and day-specific; read that file and `/proc/meminfo`, not this page.
 - **A venv switch compiles, and the compile is its own memory event.** Both
   primary venvs carry the same flashinfer, whose `build.ninja` embeds the venv's
   absolute include paths — so every switch between `vllm-flash-next-main` and
