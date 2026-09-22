@@ -29,6 +29,8 @@ from agent_mcp._shared import (
     ErrorCode,
     _ENTITY_STOPWORDS,
     _err,
+    _fit_not_found,
+    _near_match_hint,
     _wrap,
 )
 
@@ -119,7 +121,12 @@ def _memory_replace(params: dict) -> dict:
                 return _err(f"{file} does not exist", ErrorCode.NOT_FOUND)
             content = filepath.read_text(encoding="utf-8")
             if old_text not in content:
-                return _err("old_text not found in file", ErrorCode.NO_MATCH, matched=False)
+                # Same report `Edit` gives, from the bytes already under the lock;
+                # `code` and `matched` are the pre-existing companions callers read.
+                return _err(_fit_not_found(
+                    "old_text not found in file",
+                    _near_match_hint(content, old_text, label="old_text")),
+                    ErrorCode.NO_MATCH, matched=False)
             write_text_durable(filepath, content.replace(old_text, new_text, 1))
     except TimeoutError as exc:
         return _err(str(exc), ErrorCode.LOCK_TIMEOUT)

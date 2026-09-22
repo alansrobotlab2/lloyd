@@ -8,6 +8,8 @@ Contents:
     - Stopword sets (_ENTITY_STOPWORDS, _SCORING_STOPWORDS, _QUERY_STOPWORDS,
       _FACT_QUERY_STOPWORDS, _SKILLS_QUERY_STOPWORDS)
     - Pure helpers (_token_overlap, _levenshtein, _fuzzy_entity_match)
+    - Not-found error payloads (_near_match_hint, _fit_not_found) — name the
+      nearest candidate line for an exact-match refusal, bounded in size
     - Fact frontmatter helpers (_parse_fact_frontmatter, _write_fact_frontmatter)
     - Entity resolution (_find_entity_dir, _load_aliases, _save_aliases,
       _get_entity_dirs_cached, _get_rankable_entity_dirs_cached,
@@ -23,6 +25,7 @@ session memory injection patterns, or fact ranking stays in its owning module
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
@@ -129,6 +132,109 @@ def _err(message: str, code: str = ErrorCode.INTERNAL, **extra: Any) -> dict:
     if len(message) > 500:
         message = message[:500] + " …[truncated]"
     return {"error": message, "code": code, **extra}
+
+
+# ── not-found payloads: name the nearest line ────────────────────────────────
+#
+# An exact-match refusal used to be a dead end. `Edit` answered "old_string not
+# found in file (must match exactly)" and `memory_replace` answered "old_text not
+# found in file" — 49 characters that say only that the bytes differ, with no
+# number, no candidate, and no hint that the file moved. Over the 285 occurrences
+# of the `Edit` body in the 21 days before backlog #849 was filed, the model's
+# next tool call was Bash 143 times, a Read or Grep of the same file 92 times,
+# and the identical unchanged `old_string` 44 times: 82% of these failures paid
+# for a probe call that rediscovered a number this payload can state up front.
+#
+# So the hint is part of the error body — one line of it, bounded. A tool failure
+# should cost a line of context, never a dump of the file.
+#
+# Deliberately *not* here: whether the file moved since the last Read. That case
+# is refused earlier and more precisely by `builtin_fs._gate_check` ("changed on
+# disk since you last Read it"), which runs before the match, so a stale read
+# normally never reaches this payload at all.
+
+_NEAR_PROBE_CHARS = 40        # the window quoted, and the one the fallback names
+_NEAR_CUTOFF = 0.6           # below this a line is unrelated noise, not a near miss
+_NEAR_EXCERPT_CHARS = 50      # how much of the winning line is quoted back
+_NEAR_REPORT_LINES = 2        # how many candidate line numbers to name
+_NEAR_SCAN_MAX_LINES = 4000   # the similarity scan is O(lines): ~0.13 s at this size
+NOT_FOUND_BUDGET = 200        # the most the serialized error body may grow by
+
+
+def _near_match_hint(text: str, needle: str, label: str = "old_string") -> str:
+    """Say which line the failed `needle` most nearly matches, or that none does.
+
+    One of three shapes comes back::
+
+        nearest line 57: 'acceptance_clauses:'
+        nearest lines 57, 112: 'beta = compute(1)'
+        file has 61 lines, none containing the first 40 chars of old_string
+
+    The probe is the first non-blank line of `needle` — its first line, when that
+    one is non-blank — stripped and cut to `_NEAR_PROBE_CHARS`. A leading blank
+    line is exactly what an `Edit` written from memory looks like, and probing for
+    "" would make line 1 the nearest match to everything. Candidates are compared
+    with their indentation stripped, because a drifted indent is the most common
+    near miss and the line number is still the answer the caller needs.
+
+    A line that *contains* the probe outranks one that merely resembles it. That
+    is the multi-line case: the first line of `old_string` is on disk and the
+    mismatch is further down, so naming the line where it starts is the whole
+    answer. The similarity scan is bounded, so on a file longer than the bound the
+    fallback names the window it read instead of claiming none of it matched.
+    """
+    lines = text.splitlines()
+    total = len(lines)
+    probe = ""
+    for raw in needle.splitlines():
+        if raw.strip():
+            probe = raw.strip()[:_NEAR_PROBE_CHARS]
+            break
+    if not probe:
+        return f"file has {total} lines; re-Read it before retrying"
+    scored: list[tuple[float, int, str]] = []
+    for idx, raw in enumerate(lines[:_NEAR_SCAN_MAX_LINES], 1):
+        cand = raw.strip()
+        if not cand:
+            continue
+        if probe in cand:
+            scored.append((2.0, idx, cand))
+            continue
+        ratio = difflib.SequenceMatcher(None, probe, cand[:_NEAR_PROBE_CHARS],
+                                        autojunk=False).ratio()
+        if ratio >= _NEAR_CUTOFF:
+            scored.append((ratio, idx, cand))
+    if not scored:
+        if total <= _NEAR_SCAN_MAX_LINES:
+            missed = f", none containing the first {_NEAR_PROBE_CHARS} chars of {label}"
+        else:
+            missed = (f", none of its first {_NEAR_SCAN_MAX_LINES} containing the "
+                      f"first {_NEAR_PROBE_CHARS} chars of {label}")
+        return f"file has {total} lines{missed}"
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    named = scored[:_NEAR_REPORT_LINES]
+    excerpt = named[0][2]
+    if len(excerpt) > _NEAR_EXCERPT_CHARS:
+        excerpt = excerpt[:_NEAR_EXCERPT_CHARS - 1] + "…"
+    where = ", ".join(str(idx) for _, idx, _ in named)
+    lead = "nearest line " if len(named) == 1 else "nearest lines "
+    return f"{lead}{where}: '{excerpt}'"
+
+
+def _fit_not_found(base: str, hint: str, budget: int = NOT_FOUND_BUDGET) -> str:
+    """Return `base; hint`, trimmed until the JSON error body grows by `budget`.
+
+    Measured on the serialized form, since the cap is about the body the model
+    reads: 50 characters of quotes and backslashes are longer again once
+    `json.dumps` escapes them. Trimming eats the quoted excerpt from the right, so
+    the line number — the actionable half — is the last thing standing.
+    """
+    if not hint:
+        return base
+    while hint and (len(json.dumps({"error": f"{base}; {hint}"}))
+                    - len(json.dumps({"error": base})) > budget):
+        hint = hint[: max(0, len(hint) - 8)].rstrip(" \t,;:")
+    return f"{base}; {hint}" if hint else base
 
 
 def _wrap(result: dict) -> CallToolResult:

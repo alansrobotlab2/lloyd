@@ -29,7 +29,13 @@ from pathlib import Path
 
 from mcp.types import Tool
 
-from agent_mcp._shared import ErrorCode, get_bound_session, text_result
+from agent_mcp._shared import (
+    ErrorCode,
+    _fit_not_found,
+    _near_match_hint,
+    get_bound_session,
+    text_result,
+)
 from app.atomic_io import commit_lock, write_text_durable
 
 logger = logging.getLogger("lloyd-builtin-fs")
@@ -493,7 +499,12 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
 
             count = original.count(old_string)
             if count == 0:
-                return json.dumps({"error": "old_string not found in file (must match exactly)"})
+                # `original` is already held under the commit lock, so naming the
+                # nearest candidate line costs one string scan and no second read
+                # of a file the caller is about to re-Read anyway.
+                return json.dumps({"error": _fit_not_found(
+                    "old_string not found in file (must match exactly)",
+                    _near_match_hint(original, old_string))})
             if count > 1 and not replace_all:
                 return json.dumps({
                     "error": f"old_string occurs {count} times — pass replace_all=True or expand the old_string for uniqueness"

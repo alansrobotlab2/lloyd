@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
 
+from agent_mcp import _shared as SHARED
 from agent_mcp import builtin_fs as FS
 
 SID = "20260908_120000_test"
@@ -258,6 +260,108 @@ async def test_reading_a_directory_records_nothing(bound, tmp_path):
     res = await FS.call_tool("Read", {"file_path": str(tmp_path)})
     assert res.is_error
     assert FS._read_records.get(SID) in (None, {})
+
+
+# ── the not-found payload names a line ──────────────────────────────────────
+#
+# `old_string not found in file (must match exactly)` is 49 characters that say
+# only "the bytes differ". Measured over the 285 occurrences of that one body in
+# the 21 days before backlog #849 was filed, the model's next tool call after one
+# was Bash 143 times, a Read or Grep of the same file 92 times, and the same
+# unchanged `old_string` 44 times: 82% of these failures paid for a probe call
+# that a line number in the payload already answers. So the line number goes in
+# the payload — one line of it, bounded, not a dump of the file.
+
+BASE_NOT_FOUND_BODY = json.dumps(
+    {"error": "old_string not found in file (must match exactly)"})
+
+
+def _named_line(body: str) -> int:
+    """The 1-based line number the payload names, or a failure that quotes it."""
+    m = re.search(r"\bnearest lines? (\d+)", body)
+    assert m, f"the payload names no candidate line: {body}"
+    return int(m.group(1))
+
+
+async def test_a_near_match_names_the_candidate_line(bound, tmp_path):
+    """Clause 1: a near-matching line is reported by its 1-based number.
+
+    The `old_string` differs from line 2 both by one character and by its
+    indent — the two shapes an `Edit` written from memory actually gets wrong,
+    and the reason the comparison is against the *stripped* line.
+    """
+    p = tmp_path / "f.py"
+    p.write_text("alpha\n    beta = compute(1)\ngamma\n")
+    await FS.call_tool("Read", {"file_path": str(p)})
+    res = await FS.call_tool("Edit", {"file_path": str(p),
+                                      "old_string": "  beta = compute(2)",
+                                      "new_string": "beta = compute(2)"})
+    assert res.is_error, _text(res)
+    body = _text(res)
+    assert _named_line(body) == 2
+    assert "beta = compute(1)" in body, "the candidate is quoted so the diff is visible"
+    assert p.read_text() == "alpha\n    beta = compute(1)\ngamma\n"
+
+
+async def test_no_near_match_reports_the_line_count(bound, tmp_path):
+    """Clause 2: nothing close → the total line count and the probe that missed."""
+    p = tmp_path / "f.py"
+    p.write_text("alpha\nbeta\ngamma\n")
+    await FS.call_tool("Read", {"file_path": str(p)})
+    res = await FS.call_tool("Edit", {"file_path": str(p),
+                                      "old_string": "quantum_entanglement_transducer",
+                                      "new_string": "x"})
+    assert res.is_error
+    body = _text(res)
+    assert "file has 3 lines" in body
+    assert "none containing the first 40 chars of old_string" in body
+    assert "nearest line" not in body
+
+
+async def test_the_hint_is_bounded_to_200_extra_chars(bound, tmp_path, monkeypatch):
+    """Clause 3: a long, quote-heavy candidate still lands inside the budget.
+
+    The cap is measured on the encoded body, not the raw hint: an excerpt of `"`
+    and `\\` is longer again once `json.dumps` escapes it, and 200 characters is the
+    ceiling the clause sets on the body the model reads. The shipped excerpt is
+    already short enough not to bind here, so the second half of this node widens
+    it and asks the same question where the budget *is* the constraint: the trim
+    must give up the quote, not the number.
+    """
+    p = tmp_path / "f.py"
+    nasty = 'x = "' + 'quote"delim\\ ' * 40 + '"'
+    p.write_text("alpha\n" + nasty + "\ngamma\n")
+    await FS.call_tool("Read", {"file_path": str(p)})
+    args = {"file_path": str(p), "old_string": nasty.replace("delim", "delim2", 1),
+            "new_string": "x"}
+    body = _text(await FS.call_tool("Edit", args))
+    assert _named_line(body) == 2, body
+    assert len(body) <= len(BASE_NOT_FOUND_BODY) + 200, f"{len(body)} chars: {body}"
+
+    monkeypatch.setattr(SHARED, "_NEAR_EXCERPT_CHARS", 200)
+    widened = _text(await FS.call_tool("Edit", args))
+    assert "nearest line 2" in widened, f"the trim ate the line number: {widened}"
+    assert len(widened) <= len(BASE_NOT_FOUND_BODY) + 200, f"{len(widened)} chars: {widened}"
+
+
+async def test_a_capped_scan_never_claims_a_none_it_did_not_read(bound, tmp_path,
+                                                                monkeypatch):
+    """The fallback says "none" only about the lines the scan actually read.
+
+    The similarity scan is bounded, so on a file longer than the bound the
+    unqualified sentence would be a claim about bytes nobody looked at. Shrinking
+    the bound is how this is checked without shipping a 20,000-line fixture.
+    """
+    monkeypatch.setattr(SHARED, "_NEAR_SCAN_MAX_LINES", 2)
+    p = tmp_path / "f.py"
+    p.write_text("alpha\nbeta\nthe needle line\n")
+    await FS.call_tool("Read", {"file_path": str(p)})
+    res = await FS.call_tool("Edit", {"file_path": str(p),
+                                      "old_string": "quantum_entanglement_transducer",
+                                      "new_string": "x"})
+    assert res.is_error
+    body = _text(res)
+    assert "file has 3 lines, none of its first 2 containing the first 40 chars" in body
 
 
 # ── the contract is in the schema, not only the error ───────────────────────

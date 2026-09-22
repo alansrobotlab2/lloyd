@@ -44,6 +44,7 @@ import json
 import multiprocessing as mp
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -688,6 +689,77 @@ def test_a_writer_killed_mid_write_leaves_the_file_byte_whole(tmp_path, off_tree
         again = SESSION._memory_add({"file": "MEMORY.md",
                                      "entry": "- " + _entry(f"after-kill-{attempt}")})
         assert again.get("success"), f"attempt {attempt}: the write lock wedged after a kill: {again}"
+
+
+# ── the not-found payload names a line (#849 clause 4) ──────────────────────
+#
+# `memory_replace` refused with `old_text not found in file` and nothing else:
+# the same dead end `Edit` had, one probe call away from the line the model was
+# trying to change. It now reports through the same helper `Edit` does, so the
+# answer to "which line did you mean" is inside the failure. The synthetic word
+# `zorkmid` keeps these strings out of the live memory files the module's
+# `_assert_live_memory_files_clean` guards.
+
+ZORKMID = "zorkmid"
+
+
+def _named_line(body: str) -> int:
+    """The 1-based line number the payload names, or a failure that quotes it."""
+    m = re.search(r"\bnearest lines? (\d+)", body)
+    assert m, f"the payload names no candidate line: {body}"
+    return int(m.group(1))
+
+
+def _zorkmid_file() -> Path:
+    mem = SESSION.MEMORIES_ROOT / "MEMORY.md"
+    mem.write_text(HEADER + f"\n- the {ZORKMID} index carries 4 workers\n",
+                   encoding="utf-8")
+    return mem
+
+
+def test_a_failed_memory_replace_names_the_nearest_line():
+    """Clause 4: the same report as `Edit`, with `code` and `matched` intact."""
+    mem = _zorkmid_file()
+    res = SESSION._memory_replace({"file": "MEMORY.md",
+                                   "old_text": f"- the {ZORKMID} index carries 6 workers",
+                                   "new_text": f"- the {ZORKMID} index carries 8 workers"})
+    assert res["code"] == "NO_MATCH", res
+    assert res["matched"] is False, res
+    assert _named_line(res["error"]) == 3, res
+    assert f"- the {ZORKMID} index carries 4 workers" in res["error"], res
+    assert mem.read_text(encoding="utf-8").endswith(
+        f"- the {ZORKMID} index carries 4 workers\n"), "a refused replace touched the file"
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+def test_a_failed_memory_replace_with_nothing_close_reports_the_line_count():
+    """Clause 4's other branch, naming `old_text` rather than `old_string`."""
+    _zorkmid_file()
+    res = SESSION._memory_replace({"file": "MEMORY.md",
+                                   "old_text": "quantum entanglement transducer",
+                                   "new_text": "x"})
+    assert res["code"] == "NO_MATCH" and res["matched"] is False, res
+    assert "file has 3 lines, none containing the first 40 chars of old_text" \
+        in res["error"], res
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+async def test_the_memory_tool_wire_payload_carries_the_line_number():
+    """The seam the model reads: `call_tool` → `_wrap` → the serialized body.
+
+    The two nodes above call the handler. `isError` and the JSON text are set by
+    `_wrap`, and a payload that only looks actionable as a Python dict is not
+    the thing that ships.
+    """
+    _zorkmid_file()
+    res = await SESSION.call_tool("memory_replace", {
+        "file": "MEMORY.md",
+        "old_text": f"- the {ZORKMID} index carries 6 workers",
+        "new_text": f"- the {ZORKMID} index carries 8 workers"})
+    assert res.is_error is True, res
+    body = json.loads(res.content[0].text)
+    assert _named_line(body["error"]) == 3
+    assert body["code"] == "NO_MATCH" and body["matched"] is False
 
 
 # ── clause 4: no .lock beside the target, and not inside the vault ───────────
