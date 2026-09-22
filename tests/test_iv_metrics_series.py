@@ -1883,3 +1883,67 @@ def test_the_mutes_close_the_live_fan_out_and_every_fixture_sets_them(tmp_path):
         assert env.get("DBUS_SESSION_BUS_ADDRESS") == "", (
             f"{label} leaves a session bus present for `_desktop`, the one channel "
             "`LLOYD_DESKTOP_ALERTS` alone would not have closed")
+
+
+# ── #995 clause 4: the grader's new per-call keys must not move this seam ─────
+#
+# `iv_grade.py` now also reports p50/p90/p99 of `latency_ms` per call, because its
+# one printed latency figure was a per-turn SUM and #458 read it as a round-trip
+# ("25.8 s/turn against a 12 s deadline"). The SUM's JSON key is this recorder's
+# input — `iv_metrics_record.py:290` reads `cost["observer_ms_per_turn"]` — so the
+# naming fix had to happen on the PRINTED label, not in the payload. Two series
+# rows already carry that key, and `tests/test_iv_metrics_series.py` fixtures it at
+# `:520`, so a rename would break the trend at the seam and leave the archived rows
+# unjoinable to the new ones. This test is the guard on that decision, run across
+# the real pipe.
+
+
+def test_the_percentile_keys_leave_the_recorder_row_intact(tmp_path):
+    """The documented pipe still appends one row, and `observer_ms_per_turn` is
+    still its name and its value, while the grader adds the per-call keys beside it.
+
+    Fixture: two completed calls, 100 ms and 300 ms, in one turn each — so the
+    grader's SUM is (100+300)/2 = 200 per turn while its per-call percentiles over
+    the same two rows are p50 100 / p90 300 / p99 300 (nearest-rank over n = 2).
+    The two numbers differing by 2× in one fixture is the point: the row keeps the
+    SUM, the new keys carry the round-trip, and neither is quietly redefined into
+    the other. Run as a real `bash -c` pipe with the fixture `HOME`, exactly like
+    every other end-to-end test in this file.
+    """
+    repo = _make_repo(tmp_path)
+    _make_db(repo, [
+        {"created_at": NOW_LOCAL - datetime.timedelta(hours=3), "latency_ms": 100},
+        {"created_at": NOW_LOCAL - datetime.timedelta(hours=2), "latency_ms": 300},
+    ])
+    out = repo / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    since = _iso(NOW_LOCAL - datetime.timedelta(hours=26))
+
+    result = _call(since=since, repo=repo, out=out, extra=["--hours 26"])
+
+    assert result.returncode == 0, (result.returncode, result.stderr[:400])
+    rows = _rows_of(out)
+    assert len(rows) == 1, f"the pipe appended {len(rows)} rows, expected 1"
+    row = rows[0]
+    assert row["llm_calls"] == 2, row
+    assert row["observer_ms_per_turn"] == 200, (
+        "the persisted SUM moved — either the grader redefined its key or the "
+        f"recorder stopped reading it: {row['observer_ms_per_turn']!r}")
+    assert "observer_ms_summed_per_turn" not in row, (
+        "the persisted key was renamed; the archived rows in "
+        "_pipeline/reflection/iv-metrics.jsonl would no longer join to the new ones")
+
+    # The grader, same fixture and same bound, on its own — the keys the recorder
+    # did NOT copy still have to exist for the next consumer, and the two views of
+    # one fixture must agree on the SUM. `sys.executable` rather than the pipe's
+    # `python3` because this call only reads keys; the pipe above is what pins the
+    # interpreter a scheduled run actually gets.
+    graded = subprocess.run(
+        [sys.executable, str(repo / "scripts" / "iv_grade.py"),
+         "--json", "--since", since],
+        capture_output=True, text=True, check=False, cwd=str(repo))
+    assert graded.returncode == 0, graded.stderr[:400]
+    cost = json.loads(graded.stdout)["cost"]
+    assert cost["observer_ms_per_turn"] == row["observer_ms_per_turn"] == 200, cost
+    assert cost["latency_ms_per_call_n"] == 2, cost
+    assert (cost["latency_ms_per_call_p50"], cost["latency_ms_per_call_p90"],
+            cost["latency_ms_per_call_p99"]) == (100, 300, 300), cost

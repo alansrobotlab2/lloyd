@@ -21,6 +21,27 @@ message reads like a correction. Neither is ground truth. They are good
 enough to spot a regression and to compare two prompts, which is what the
 tuning loop actually needs.
 
+UNITS — the one thing that used to be wrong here (backlog #995). Two different
+quantities are reported, and only one of them is a round-trip:
+
+  * `observer ms SUMMED / turn` is a SUM: every LLM millisecond in the window
+    divided by turns. A turn costs several calls (measured 09-01..09-17: 1,189
+    turns over 9,967 LLM calls = 8.4 calls/turn), so this is an order of
+    magnitude larger than any single request.
+  * `observer ms PER CALL` is p50/p90/p99 of `latency_ms` over LLM rows that
+    carry no error — the actual round-trip distribution.
+
+Every deadline in the subsystem (`inner_voice.observer.timeout_seconds`,
+`async_timeout_seconds`) is PER CALL, so only the second pair may be compared
+to it. Printed alone, the summed line caused #458 to argue "mean observer
+latency is 25.8 s/turn against a 12 s deadline … the deadline is arithmetically
+doomed": both halves were unit errors. The deadline sits ABOVE p99 (p50 1.8 s /
+p90 4.1 s / p99 9.2 s over that window).
+
+Percentiles exclude error rows because a failed call's latency is its own
+deadline cut-off (stamped after the request was abandoned), not a completed
+round-trip — 369 error rows in the 09-01 window range 1.6 s to 34.8 s.
+
 Usage:
     python scripts/iv_grade.py                    # all sessions
     python scripts/iv_grade.py --session <id>
@@ -218,9 +239,39 @@ def _was_llm_call(r: dict) -> bool:
     return bool(r.get("input_tokens") or r.get("latency_ms"))
 
 
+def _percentile(sorted_vals: list[int], pct: int) -> int | None:
+    """Nearest-rank percentile of an ascending list; `pct` is a whole percent.
+
+    Nearest-rank (`ceil(pct·n/100)`, 1-based) rather than an interpolated
+    quantile: the value reported is then always a latency the observer really
+    took, and the arithmetic is integer-only, so `p99` of ten fixture rows is
+    pinned exactly the same way in a test as on 9,891 live rows. An empty
+    distribution returns None instead of raising — a window whose every LLM row
+    errored has no completed round-trip to report, which is a measurement of
+    "nothing to measure", not a crash.
+    """
+    n = len(sorted_vals)
+    if not n:
+        return None
+    rank = -(-pct * n // 100)                      # ceil(pct*n/100), 1-based
+    return sorted_vals[min(rank, n) - 1]
+
+
+def _ms_text(value: int | None) -> str:
+    """Milliseconds for the report, or the shape that says 'not measured'."""
+    return "not measured" if value is None else f"{value:,}"
+
+
 def _cost(rows: list[dict]) -> dict[str, Any]:
     turns = {r["turn_id"] for r in rows}
     llm = [r for r in rows if _was_llm_call(r)]
+    # Per-call round-trips, error rows excluded (see the module docstring). A row
+    # that spent tokens but recorded no latency has no duration to place in a
+    # distribution, so it is out of the denominator too — `latency_ms_per_call_n`
+    # prints that denominator beside the percentiles rather than leaving a reader
+    # to assume it is `llm_calls`.
+    lat_ok = sorted(r["latency_ms"] for r in llm
+                    if not r["error"] and r["latency_ms"] is not None)
     in_tok = sum(r["input_tokens"] or 0 for r in rows)
     cached = sum(r["cache_read"] or 0 for r in rows)
     by_trigger: dict[str, dict[str, int]] = defaultdict(
@@ -249,9 +300,20 @@ def _cost(rows: list[dict]) -> dict[str, Any]:
         "cached_input_tokens": cached,
         "cache_hit_rate": round(cached / in_tok, 3) if in_tok else None,
         "input_tokens_per_turn": round(in_tok / len(turns)) if turns else 0,
+        # SUM, not a round-trip: total LLM ms divided by turns (#995). The key
+        # name stays for compatibility — `scripts/iv_metrics_record.py:290` reads
+        # this exact key into the nightly series, and renaming it would break the
+        # trend at the seam and every row already written. Only the PRINTED label
+        # carries the unit.
         "observer_ms_per_turn": round(
             sum(r["latency_ms"] or 0 for r in llm) / len(turns)
         ) if turns else 0,
+        # Per-call percentiles of the same `latency_ms`, over non-error rows. New
+        # keys, so the recorder's existing rows and its fixture are untouched.
+        "latency_ms_per_call_n": len(lat_ok),
+        "latency_ms_per_call_p50": _percentile(lat_ok, 50),
+        "latency_ms_per_call_p90": _percentile(lat_ok, 90),
+        "latency_ms_per_call_p99": _percentile(lat_ok, 99),
         "by_trigger": {k: dict(v) for k, v in sorted(by_trigger.items())},
         "models": dict(Counter(r["model"] or "?" for r in rows)),
         "errors": dict(Counter(
@@ -349,7 +411,17 @@ def main() -> int:
           f"{c['llm_calls']} LLM calls")
     print(f"  fast-path share        {c['fast_path_share']}")
     print(f"  input tokens / turn    {c['input_tokens_per_turn']:,}")
-    print(f"  observer ms / turn     {c['observer_ms_per_turn']:,}")
+    # Two units, spelled out (#995). The SUMMED line is total LLM ms over turns —
+    # a turn costs several calls — and the PER CALL line is the round-trip
+    # distribution the observer's per-call deadlines are actually set against.
+    print(f"  observer ms SUMMED / turn  {c['observer_ms_per_turn']:,}"
+          f"   (sum of {c['llm_calls']} LLM calls / {c['turns']} turns — "
+          f"NOT a round-trip)")
+    print(f"  observer ms PER CALL       "
+          f"p50 {_ms_text(c['latency_ms_per_call_p50'])}"
+          f"  p90 {_ms_text(c['latency_ms_per_call_p90'])}"
+          f"  p99 {_ms_text(c['latency_ms_per_call_p99'])}"
+          f"   (per call, ms; {c['latency_ms_per_call_n']:,} LLM calls with no error)")
     print(f"  cache hit rate         {c['cache_hit_rate']}"
           f"{'   (0.0 means vLLM lacks --enable-prompt-tokens-details)' if not c['cache_hit_rate'] else ''}")
     print(f"  served by              {c['models']}")
