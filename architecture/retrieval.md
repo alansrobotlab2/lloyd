@@ -1,7 +1,7 @@
 ---
 title: Vault recall — the retrieval pipeline and what was measured
 status: implemented
-date: 2026-09-21
+date: 2026-09-22
 ---
 
 # Vault recall — the retrieval pipeline and what was measured
@@ -37,9 +37,13 @@ fallback: djev does not answer ──► the whole recall re-runs on the cross-e
   `RECALL_LEX_MODE = "and"` restores the AND keyword leg (and sends no key);
   `RECALL_QMD_FUSION = "collection"` restores #504's 240-row per-collection request.
 - **Paths arrive decoded.** qmd percent-encodes every path segment; `qmd_file()`
-  decodes at `_qmd_post`, the one door (and in the Mission Control memory search),
-  so `people/Ali Behrouz.md` is citable. 18 indexed notes carry a space, `+`, `#`
-  or `&`.
+  decodes at `_qmd_post` (and again in the Mission Control memory search), so
+  `people/Ali Behrouz.md` is citable. 18 indexed notes carry a space, `+`, `#`
+  or `&`. Two callers open their own sockets and are not doors: the MC memory
+  search reads `results` straight (`app/routers/memory.py:112-117`, it does apply
+  `qmd_file`) and write-time backlog dedupe reads them raw
+  (`agent_mcp/backlog_similar.py:176-190`), so neither's rerank fallback reaches
+  `qmd_health`. See `architecture/qmd.md`.
 - **Tests never reach the live djev.** `tests/conftest.py` pins the recall to
   `"qmd"`; `tests/test_recall_djev_ranker.py` opts in with djev stubbed.
 
@@ -49,6 +53,14 @@ fallback: djev does not answer ──► the whole recall re-runs on the cross-e
 **pinned qmd snapshot** (`scripts/automod/evalpin.PinnedCorpus` with its own
 index name and port, so it never collides with the regression runner's pin), and
 a per-arm wrapper that changes one thing at `_qmd_post` or a module constant.
+**The pin is the arms that ask for it, not `run_eval` itself:** `PinnedCorpus` is
+constructed in `workers/sources/automod_regression.py:803` and nowhere in
+`eval/run_eval.py`, which reaches the daemon through
+`agent_mcp/vault.py:70 QMD_DAEMON_URL` — so the nightly baseline scores the live
+index, and the `corpus` block its artifact records (`eval/run_eval.py:101`) is the
+KG half only: no document or vector count, so `corpus_ok` cannot go false however
+the document corpus re-embeds, and `eval_trend_stats.corpus_diff` prints
+"corpus identical" across a drift that moves every doc-side number (#1374).
 Every comparison is **paired per query** with a 10,000-draw bootstrap 95%
 interval; two arms on different snapshots are only compared through a control arm
 that matches the earlier pin query for query.
@@ -64,6 +76,13 @@ that matches the earlier pin query for query.
 - **Check the pool before the ranker.** A reranker can only reorder what fusion
   hands it. Rerank-off pool ceilings (does the pool contain ANY expected doc)
   are cheap and bound every reranker arm.
+- **A ranker that becomes the decision stops being observable.** The djev
+  `rerank` shadow seam is on an `elif` behind `if ranker == "djev"`
+  (`agent_mcp/vault.py:1889-1903`), so since #1336 it records nothing:
+  `~/.local/state/lloyd-djev/shadow.jsonl` held 30 rerank rows on 09-20, 4 on
+  09-21, none on 09-22, while the `dedupe` and `entity` seams kept flowing, and
+  the same dispatch ignores a caller's `djev_rerank: true` (#1372). Volume, not
+  an error, is how this failure shows.
 
 ### 2.1 The gold set was repaired on 2026-09-21
 
@@ -129,8 +148,11 @@ zero), NDCG +0.065 to +0.076 (each above zero), doc_hit +0.049 to +0.062. The
 model is set in one place, `models.embed` in `~/.config/qmd/index.yml`, which
 beats `QMD_EMBED_MODEL` in `resolveEmbedModel`; `evalpin.yml` must name the same
 model, since the regression pin serves a copy of production's vectors. Changing
-it is a full re-embed (all 14 collections, ~66k chunks, ~55 min on GPU 0), built
-as a side file, caught up, and swapped in.
+it is a full re-embed — every chunk vector in `content_vectors`, all 14
+collections — so read the size before costing it rather than quoting this line:
+`GET :8181/health` → `vecIndex.vectors` read 38,796 on 2026-09-22, and
+`architecture/qmd.md` deliberately pins no count at all. Cost the re-embed from
+that number and from the measured chunks/s.
 
 ### 3.4 Floors, not depth (#1335, `77a30cbb`)
 
@@ -172,3 +194,23 @@ because a broken label misses in every arm.
 - `qmd/src/store.ts` (fork) — `buildFTS5Query(query, mode)`, `searchFTSAcross`, `structuredSearch` options
 - `eval/vault_recall_queries.yaml` — the gold set; `tests/test_eval_corpus_guard.py` guards it
 - tests: `test_recall_first_stage.py`, `test_recall_djev_ranker.py`, `test_recall_global_fusion.py`, `test_doc_candidate_pool.py`
+
+## Review log
+
+- **2026-09-22** — `current`. §1's diagram, the request shape (`limit` 32 /
+  `candidateLimit` 20 / floors `{2,2,2}` / `lexMode "or"` / cross-encoder off),
+  `RECALL_DJEV_*` (160 chars, 1 sample, pool 32, 4 s), the three kill switches,
+  the 11 vault collections, the 81-query gold set with its 139 labels, the 18
+  encoded paths and `eval/stats.N_RESAMPLES = 10000` all re-measure true at
+  `9d4c9ad`; `pytest` on the four recall/corpus test files named in §6 passes.
+  Corrected four things: `_qmd_post` is not the only reader of a qmd reply
+  (`app/routers/memory.py`, `agent_mcp/backlog_similar.py` open their own
+  sockets, so their rerank fallbacks are uncounted); §2's **pinned qmd snapshot**
+  describes the automod arms only — the nightly scores the live index and its
+  artifact records no document-corpus identity, which is what makes the corpus
+  gate blind to a re-embed (#1374); the chunk count that priced a re-embed was
+  stale, so §3.3 now says where to read it; and §2 carries the new measurement
+  trap that djev-as-ranker switches the `rerank` shadow seam off (#1372). Filed,
+  not fixed here: the nightly task's prescribed `run_eval.py` command does not
+  parse, and the baseline it produces is scored graph-on against its own
+  procedure (#1373).
