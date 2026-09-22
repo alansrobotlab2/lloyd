@@ -1,7 +1,7 @@
 ---
 title: qmd — the vault search engine, Lloyd's fork, and how it runs
 status: implemented
-date: 2026-09-21
+date: 2026-09-22
 ---
 
 # qmd — the vault search engine, Lloyd's fork, and how it runs
@@ -36,10 +36,13 @@ every measured change — is `architecture/retrieval.md`.
 - **Editing `src/` changes nothing live.** The daemon serves `dist/`, and a node
   process keeps what it loaded until it restarts.
 
-What the fork adds over upstream, newest first (`WORKLOG.md` has each one):
+What the fork adds over upstream, newest first. `WORKLOG.md` covers the 09-07
+and 09-19 work; the two 2026-09-21 changes are fork commits `fa71e57` and
+`db52729` with no WORKLOG section yet (#1369):
 
 | change | what it does | since |
 |---|---|---|
+| `update` counts pending against the configured model | the hint printed pending against the built-in default, so a non-default embed model read every hash as unembedded — 10,745 of them — on every watcher cycle | 2026-09-21 |
 | `lexMode: "or"` | a lex search ORs its terms; AND stays the default | 2026-09-21 |
 | `collectionFloor` map | under global fusion, each named collection's best N per search join the candidates | 2026-09-19 |
 | `fusion: "global"` | one ranking across collections by score, instead of one RRF list per collection | 2026-09-19 |
@@ -64,8 +67,16 @@ supervisord program agent-qmd-daemon
 - **The index** holds `documents` (path, title, hash, collection, active),
   `content` (whole file text by hash), `documents_fts` (FTS5 over path, title and
   body; BM25 weights 1.5 / 4.0 / 1.0), `content_vectors` + `vectors_vec` (one
-  vector per chunk, keyed `hash_seq`), `llm_cache` (1,000 most recent rerank
-  scores) and `store_config` (the config hash it last synced).
+  vector per chunk, keyed `hash_seq`; `content_vectors` itself is keyed
+  `(hash, seq)` and carries the `model` + `embed_fingerprint` that decide what
+  still counts as pending — §3), `llm_cache` (cached rerank scores and query
+  expansions, pruned to the 1,000 newest) and `store_config` (the config hash it
+  last synced). The cache's *practical* lifetime is far shorter than 1,000
+  entries: `update()` clears it whole before it re-indexes
+  (`qmd/src/index.ts::update → clearCache`), so with the watcher running it is
+  emptied about once a minute — and both cache keys are content-addressed on
+  `{query, model, chunk}`, so nothing about a re-index makes an entry stale
+  (#1366).
 - **What gets indexed.** Every `*.md` under a collection's path, **except any
   path with a dot-prefixed component** (`skills/.archived/**` is never indexed).
   Front matter is NOT stripped: it is in the FTS body and in chunk 0's embedding.
@@ -100,14 +111,24 @@ supervisord program agent-qmd-daemon
   regression pin reads `evalpin.yml`, which must name the same embed model,
   because the pin serves a copy of production's vectors. The committed template
   is `agent-services/conf/qmd-index.yml`; task #81 reports template↔live drift.
-- **Changing the embed model is a full re-embed.** Vectors of two models cannot
-  share `vectors_vec` (the dimension is fixed at creation; 768 → 1024 for Qwen3),
-  and a changed title or model does not change a content hash, so nothing
-  re-embeds by itself. The 2026-09-21 switch built a side copy with every
-  collection re-embedded (~45k chunk vectors, ~1 h at 15–25 chunks/s on the
-  3090), caught it up with `update` + `embed` against a scratch config, and
-  swapped the files with the watcher and daemon stopped; the old index is kept as
-  `index.sqlite.bak-gemma-20260921`.
+- **Changing the embed model is a full re-embed, and it starts by itself.**
+  Pending is counted *per configured model* — `getHashesNeedingEmbedding` joins
+  on `model` + `embed_fingerprint`, not on the content hash — so the moment
+  `models:` names a different embed model every hash in the index reads as
+  unembedded, and the watcher's next `embed` begins rewriting the live index
+  beside the running daemon; task #81's backfill (`pending_embeddings() > 0`, no
+  ceiling) will run the same whole-corpus `qmd embed` whenever it next wakes
+  (#1367). Two models cannot share `vectors_vec`: it is keyed `hash_seq` with no
+  model column, and a dimension change is the only case that gets caught, as a
+  hard error where the vec0 table is created (768 → 1024 for Qwen3) — an
+  interrupted same-dimension re-embed simply leaves both models' vectors in one
+  table. A changed *title* does not change a content hash, so re-titling alone
+  never re-embeds anything. That is why the 2026-09-21 switch was built as a side
+  copy with every collection re-embedded (~45k chunk vectors at the time, ~1 h at
+  15–25 chunks/s on the 3090), caught up with `update` + `embed` against a scratch
+  config, and swapped the files with the watcher and daemon stopped; the old index
+  is kept as `index.sqlite.bak-gemma-20260921`. For the live count, read the
+  daemon's own `GET /health → vecIndex.vectors` rather than any figure here.
 - **Daemon knobs** live in `agent-qmd-daemon.conf`'s `environment=` and nowhere
   else (the regression pin reads them from there):
   - `QMD_RERANK_WINDOW_CHARS=1200` — the reranker reads a 1200-char window of the
@@ -138,12 +159,19 @@ The reply carries `results` (`file` as `qmd://collection/path`, encoded; `title`
 incremental refreshes). Callers in Lloyd:
 
 - `agent_mcp/vault.py` — the recall doc leg (`recall_doc_leg_shape`), `vault_search`,
-  entity lookups; `_qmd_post` is the one door and folds `meta` into
+  entity lookups; `_qmd_post` is the door that folds `meta` into
   `app/qmd_health.py`;
 - `agent_mcp/backlog_similar.py` — write-time dedupe (vec only, reranked, `backlog`);
 - `app/routers/memory.py` — Mission Control's memory search;
 - `scripts/automod/evalpin.py` — the regression pin's warm-up
   (`production_payload`, read from the recall's own shape).
+
+The dedupe and Mission Control callers are **not** behind that door: each opens
+its own `urllib` request (`agent_mcp/backlog_similar.py::semantic_candidates`,
+`app/routers/memory.py::memory_search`), reads only `results`, and so reports no
+`meta` to `qmd_health` — a rerank that could not run on either path is invisible,
+and rule A of the dedupe silently degrades to the lexical rule. `memory_search`
+also sends the raw query without `_qmd_sanitize`. #302.
 
 ## 5. Keeping it healthy
 
@@ -153,8 +181,11 @@ incremental refreshes). Callers in Lloyd:
   file (~7.5 s), so the debounce alone did not bound it while the automod loop
   writes continuously.
 - **Nightly cleanup** (`lloyd-qmd-cleanup.timer`, 04:45): `qmd cleanup` prunes
-  orphaned vectors. Unpruned, they once reached 99.5% of rows and a 24 GB index,
-  and they displace real results.
+  orphaned vectors, drops inactive document records and orphaned content hashes,
+  **empties `llm_cache`** and vacuums — the unit's own log for 2026-09-22 reads
+  3,932 chunks, 48 documents, 24 hashes and 58 cached responses. Unpruned, the
+  vectors once reached 99.5% of rows and a 24 GB index, and they displace real
+  results.
 - **Task #81** (`scripts/maintenance/qmd_index_maintenance.py`): orphan prune,
   embedding backfill, template↔live drift report. It no longer stops the daemon
   (it did on 8 of 8 runs, for one to four documents the watcher would have
@@ -186,14 +217,39 @@ re-titled copy) are served by patching `snapshot()` — the pattern
   refresh it is ~165 ms for a small change.
 - **Measurement traps**: a TTS restart runs a ~4 min compile that pins GPU 0 and
   makes qmd read 4× slow; an eval pin on GPU 0 does the same to production;
-  repeated query text is answered from the rerank cache in ~0.2 s.
+  repeated query text is answered from the rerank cache in ~0.2 s — but only
+  inside one watcher cycle, because every `update` empties the cache (§2), so a
+  re-run that straddled a vault write is not the hit it looks like.
 
 ## 8. Files
 
 - `~/lloyd/qmd` (fork): `src/store.ts` (indexing, FTS, fusion, `structuredSearch`),
   `src/vecindex.ts`, `src/llm.ts` (models), `src/mcp/server.ts` (REST), `WORKLOG.md`
 - `agent-services/supervisor/conf.d/agent-qmd-daemon.conf`, `agent-services/scripts/qmd-watcher.sh`
+- `agent-services/systemd/lloyd-qmd-cleanup.service` + `.timer` (the user-scope pair symlinked into `~/.config/systemd/user/`)
 - `agent-services/conf/qmd-index.yml` (template), `~/.config/qmd/index.yml`, `~/.config/qmd/evalpin.yml`
 - `scripts/maintenance/qmd_index_maintenance.py`, `scripts/qmd_fork_landing.py`, `scripts/automod/evalpin.py`
 - `app/qmd_health.py`, `agent_mcp/vault.py`
-- tests: `test_qmd_single_build.py`, `test_qmd_index_template.py`, `test_qmd_index_maintenance.py`, `test_qmd_fork_landing.py`, `test_qmd_health.py`
+- tests: `test_qmd_single_build.py`, `test_qmd_index_template.py`, `test_qmd_index_maintenance.py`, `test_qmd_fork_landing.py`, `test_qmd_query_shape.py`, `test_qmd_health.py`, `test_service_health_check_qmd.py`
+
+## Review log
+
+- **2026-09-22** — `current`; the mechanism still runs (fork at `db52729` with
+  `dist/` rebuilt and pushed to `origin/lloyd`, daemon serving `[::1]:8181` off
+  that tree, #81 `up_next`, template↔live drift reporting 2 items) but three
+  sentences were wrong, and all three were about *when work starts on its own*:
+  pending embeddings are counted **per configured model**, so an embed-model edit
+  is a trigger rather than inert and task #81's backfill has no ceiling (#1367);
+  `update()` empties `llm_cache` whole on every watcher cycle, so the cache both
+  §2's retention and §7's measurement trap rely on is empty in practice — 0 rows
+  after 13 h and 83 reranked documents (#1366); and `_qmd_post` is not the one
+  door, because `app/routers/memory.py` and `agent_mcp/backlog_similar.py` open
+  their own sockets and read only `results` — their rerank fallbacks go uncounted
+  and `memory_search` sends an unsanitized query (#302). Corrected too: the
+  nightly cleanup also empties the cache and drops inactive documents and orphaned
+  hashes, not only vectors; `lexMode` and the `update` pending-hint fix exist in
+  the tree with no `WORKLOG.md` section (#1369); `agent-qmd-daemon.conf`'s
+  documented one-line revert names the published `@tobilu/qmd` that was
+  uninstalled on 09-19 (#1368); and §8 was missing `test_qmd_query_shape.py` and
+  `test_service_health_check_qmd.py`. No vector or document count is pinned here
+  any more — §3 says to read `GET /health → vecIndex.vectors`.
