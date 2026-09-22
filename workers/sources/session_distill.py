@@ -2,7 +2,9 @@
 
 Each eligible session becomes one queue item; the handler asks the primary
 model to identify repeated failures, unresolved questions, or gap signals, and
-writes findings to pending-research/distill/.
+writes findings to
+`~/lloyd/_pipeline/vault-derived/pending-research/session-distill/{yyyy-mm-dd}/`
+— the leaf is this module's own `NAME`, one dated directory per run.
 
 **A session is distilled once, after it goes quiet.** The three gates below
 each exist because the original selection had none of them, and the cost was

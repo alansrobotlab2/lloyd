@@ -4,8 +4,16 @@ Scans the live facts tree (resolved via app.paths.VAULT_FACTS_ROOT) for
 facts whose frontmatter contains `label: gap` or `provenance: GAP`, dedups
 by fact id, and enqueues one research item per gap. Handler asks the
 primary model to research the topic (via vault tools + web if available),
-writes a resolution note to pending-research/gaps/, and (at high
-confidence) updates the fact.
+and writes a resolution note to
+`~/lloyd/_pipeline/vault-derived/pending-research/gap-fill/{yyyy-mm-dd}/`.
+That is where this source stops: it records nothing back on the gap fact, at
+any confidence. The staged note waits for a human to promote it from the
+Review tab (`GET /api/workers/pending`), and `_scan_gap_facts` only *honours*
+a `resolved_at` something else has already written. The leaf is this module's
+own `NAME`. #705: since 2026-04-18 (`0edaab55`) this docstring promised that
+at high confidence the handler wrote its answer back into the facts tree; no
+path through `execute` does, and the sentence sat two lines under a
+`pending-research/` leaf that has never existed.
 """
 
 from __future__ import annotations

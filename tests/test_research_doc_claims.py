@@ -14,6 +14,7 @@ in the doc match the code.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import re
 from pathlib import Path
@@ -99,8 +100,6 @@ def test_the_retired_checklist_is_archived_and_unreferenced_by_code():
     # Code, not prose: several docstrings still recount what reading that file
     # cost, and that history is worth keeping. What must not survive is a
     # module that still opens it.
-    import ast
-
     for py in (ROOT / "workers").rglob("*.py"):
         tree = ast.parse(py.read_text(encoding="utf-8"))
         docstrings = {
@@ -278,3 +277,244 @@ def test_the_written_row_names_finish_as_the_verifier():
            re.search(r"not in `finish`", line):
             raise AssertionError(
                 f"a sentence still says finish does no disk check: {line.strip()[:100]}")
+
+
+# ---------------------------------------------------------------------------
+# Worker-source docstrings (#705)
+# ---------------------------------------------------------------------------
+
+WORKER_SOURCES = ROOT / "workers" / "sources"
+
+#: The staging root as a checkout-relative path, spelled the way a docstring
+#: spells it. Derived from `app.paths` rather than written as a literal so the
+#: doc can never drift from the constant the writer uses.
+STAGING_CHECKOUT_REL = "lloyd/_pipeline/vault-derived/pending-research"
+
+#: A `~`-anchored path in a worker-source docstring, backticked or not.
+#: `_PATH_RE` above cannot serve here for two reasons: it requires a backtick
+#: on each side, and these modules name paths in RST double-backticks and in
+#: bare prose alike — `_common.py` carried `~/obsidian/pending-research/` in
+#: bare prose, which is the exact string that poisoned #522's acceptance
+#: check; and its class has no braces, so
+#: `…/pending-research/{source}/{yyyy-mm-dd}/` would be cut at the first brace
+#: and the parent directory would resolve for the wrong reason.
+_DOC_PATH_RE = re.compile(r"~/[A-Za-z0-9_./*<>{}-]+")
+
+#: A staging leaf named without its root: `pending-research/gaps/`. Each of the
+#: three staging sources names one, and #705 found all three wrong —
+#: `distill/`, `gaps/` and `bench/` against the real `session-distill/`,
+#: `gap-fill/` and `bench-mine/`. A guard that compiles only the root passes on
+#: every one of those, which is why the leaf is extracted separately.
+_STAGING_LEAF_RE = re.compile(r"pending-research/(?P<leaf>\{[^}]+\}|[A-Za-z0-9_.-]+)")
+
+#: Prose punctuation glued to the end of a path is not part of the path.
+_PATH_TRAILING = ".,;:`'\" "
+
+
+def _doc_claims(py: Path) -> dict:
+    """What one module's OWN docstring asserts about the filesystem.
+
+    Only the module docstring: that is the surface #705 is about — the text a
+    triage or selfmod run reads to decide where to go looking. `NAME` comes
+    from the source text because it is the leaf `write_staging_note` fixes.
+    """
+    src = py.read_text(encoding="utf-8")
+    doc = ast.get_docstring(ast.parse(src)) or ""
+    name = re.search(r'^NAME\s*=\s*["\']([^"\']+)["\']', src, re.M)
+    return {
+        "name": name.group(1) if name else None,
+        "paths": [p.rstrip(_PATH_TRAILING) for p in _DOC_PATH_RE.findall(doc)],
+        "leaves": _STAGING_LEAF_RE.findall(doc),
+    }
+
+
+def _doc_resolves(spec: str) -> bool:
+    """Resolve a docstring path; `{yyyy-mm-dd}` and `<…>` mean "at least one".
+
+    The same rule `_skill_paths` applies to a skill's `<last 3 days>`, and it
+    has to be "at least one" rather than "exists": these are dated directories,
+    written one per run, so no literal path is ever the whole claim.
+    """
+    cleaned = re.sub(r"\{[^}]*\}", "*", spec)
+    cleaned = re.sub(r"<[^>]*>", "*", cleaned).rstrip("/")
+    return _resolves(cleaned)
+
+
+def test_every_path_a_worker_source_docstring_names_resolves():
+    """The regression: `~/obsidian/pending-research/` is not a directory.
+
+    Every knowledge-acquisition source documented its output landing there, so
+    a run that went to look got `No such file or directory` and wrote it down
+    as proof nothing had been staged. #522's triage turned that into an
+    acceptance clause — `≥6 staged bench task files exist under
+    ~/obsidian/pending-research/bench/{yyyy-mm-dd}/` — unsatisfiable by any
+    diff, because no source in the tree writes there, and three run records
+    under `autonomy-runs/65/` (`run_65_20260901_174920`, `run_65_20260906_181631`,
+    `run_65_20260907_221114`) each name the dead path as a finding nobody read.
+    The root the code uses is `app.paths.VAULT_PENDING_RESEARCH_DIR`.
+
+    Four kinds of failure, each with a denominator beside it so a guard that
+    has stopped matching cannot report clean on an empty list:
+
+      * the literal string `obsidian/pending-research` in any worker source,
+        over the whole module and not just the docstring, which is what the
+        item's own grep looks for and what nothing below can see;
+      * every `~/…` path must exist, and sit under the root the code uses — a
+        wrong ROOT;
+      * a bare `pending-research/<leaf>/` must be that module's own `NAME` — a
+        wrong LEAF, which a root-only check waves through;
+      * both extractors must actually extract, one from prose that carries no
+        backticks and one from a leaf that carries no root.
+    """
+    # First the string itself, over the WHOLE module source rather than the
+    # docstring, because that is the check #705's acceptance is written as
+    # (`grep -rn "obsidian/pending-research" workers/sources/*.py` is empty).
+    # Everything below is anchored on `~/`, so a mention that drops the tilde
+    # — `under obsidian/pending-research/` — would sail past every path
+    # assertion in this file while leaving the grep red.
+    scanned = sorted(WORKER_SOURCES.glob("*.py"))
+    assert scanned, f"no worker sources found under {WORKER_SOURCES}"
+    dead_root = sorted(p.name for p in scanned
+                       if "obsidian/pending-research" in p.read_text(encoding="utf-8"))
+    assert not dead_root, (
+        f"these worker sources still name the vault copy of `pending-research/`, "
+        f"which is not a directory and never was ({dead_root} of "
+        f"{len(scanned)} files scanned). Any run that navigates by it gets "
+        f"`No such file or directory` and reads that as an empty staging area.")
+
+    claims = {p.name: _doc_claims(p) for p in scanned}
+    speaking = {m: c for m, c in claims.items() if c["paths"] or c["leaves"]}
+    assert len(speaking) >= 3, (
+        f"the guard extracted path claims from {len(speaking)} of "
+        f"{len(claims)} worker-source docstrings ({sorted(speaking)}); it must "
+        f"find at least 3, or an extractor regression reads as a clean tree")
+
+    missing = sorted({(m, spec) for m, c in speaking.items() for spec in c["paths"]
+                      if not _doc_resolves(spec)})
+    assert not missing, (
+        f"worker-source docstrings name paths that do not exist: {missing}. A "
+        f"module docstring is the map a triage run navigates by, and one wrong "
+        f"path cost #522 a whole unsatisfiable acceptance clause.")
+
+    from app.paths import LLOYD_HOME, VAULT_PENDING_RESEARCH_DIR
+    import app.routers.workers as W
+
+    assert W.PENDING_ROOT == VAULT_PENDING_RESEARCH_DIR, (
+        "the Review tab lists a different root than app.paths names, so the "
+        "root below is not the surface a human promotes from")
+    root_rel = VAULT_PENDING_RESEARCH_DIR.relative_to(LLOYD_HOME)
+    assert f"lloyd/{root_rel.as_posix()}" == STAGING_CHECKOUT_REL, (
+        f"app.paths moved the staging root to {root_rel}; the docstrings and "
+        f"this guard's spelling have to move with it")
+
+    off_root = []
+    for m, c in speaking.items():
+        for spec in c["paths"]:
+            if "pending-research" not in spec:
+                continue
+            parts = [p for p in spec[len("~/"):].split("/") if p]
+            lead = tuple(parts[1:1 + len(root_rel.parts)])
+            if parts[:1] != ["lloyd"] or lead != root_rel.parts:
+                off_root.append((m, spec, f"~/{STAGING_CHECKOUT_REL}"))
+    assert not off_root, (
+        f"these docstrings name a pending-research root that is not "
+        f"app.paths.VAULT_PENDING_RESEARCH_DIR (checkout-relative "
+        f"{root_rel}): {off_root}")
+
+    # Two non-vacuity pins for the extractors themselves, because each half of
+    # #705 is a half a narrower guard cannot see: the poisoned line in
+    # `_common.py` was bare prose (a backtick-requiring regex like `_PATH_RE`
+    # extracts nothing from it), and `distill/`, `gaps/`, `bench/` were leaves,
+    # which a root-only check waves through. A guard that quietly stops
+    # matching one of these reports green on an empty list.
+    assert f"~/{STAGING_CHECKOUT_REL}/{{source}}/{{yyyy-mm-dd}}/" in _doc_claims(
+        WORKER_SOURCES / "_common.py")["paths"], (
+        "the extractor only matches backticked paths, and the line that "
+        "poisoned #522's acceptance check was bare prose — which is why this "
+        "guard does not reuse `_PATH_RE`")
+    staging = {m: c["name"] for m, c in speaking.items() if c["name"] and c["leaves"]}
+    assert len(staging) >= 3, (
+        f"only {len(staging)} worker-source docstrings named a "
+        f"pending-research leaf ({sorted(staging)}); the three staging sources "
+        f"all do, so the leaf extractor has stopped matching and a wrong leaf "
+        f"would sail through while the root check stayed green")
+
+    wrong_leaf = []
+    for m, c in speaking.items():
+        for leaf in c["leaves"]:
+            if leaf.startswith("{"):
+                continue  # a template, not a claim about one directory
+            if leaf != c["name"]:
+                wrong_leaf.append((m, leaf, c["name"]))
+    assert not wrong_leaf, (
+        f"these docstrings stage under a leaf that is not the module's own "
+        f"NAME, while `write_staging_note` fixes the directory to NAME: "
+        f"{wrong_leaf}. `distill/`, `gaps/` and `bench/` were all of these.")
+
+    step3 = [ln for ln in ast.get_docstring(
+        ast.parse((WORKER_SOURCES / "_common.py").read_text(encoding="utf-8"))
+    ).splitlines() if "lands under" in ln]
+    assert len(step3) == 1, f"step 3 of the shared pattern is not stated once: {step3}"
+    assert f" ~/{STAGING_CHECKOUT_REL}/{{source}}/{{yyyy-mm-dd}}/ " in f" {step3[0]} ", (
+        f"step 3 must name the checkout's own staging root with both date and "
+        f"source templates, i.e. `~/{STAGING_CHECKOUT_REL}/"
+        f"{{source}}/{{yyyy-mm-dd}}/`, got {step3[0]!r}")
+
+
+def test_the_staging_leaf_is_the_directory_a_note_actually_lands_in(tmp_path, monkeypatch):
+    """The leaf assertion above compares a docstring to a constant. This one
+    compares the same promise to the only writer that makes the directory.
+
+    Pointing `STAGING_ROOT` at a tmp dir and calling `write_staging_note`
+    proves the layout the three docstrings now claim — `<root>/<NAME>/<date>/`
+    — is what production code produces, and so is what
+    `GET /api/workers/pending` reads back as the source name
+    (`src.relative_to(PENDING_ROOT).parts[0]`). Without it `leaf == NAME`
+    would only be two files agreeing with each other.
+    """
+    import workers.sources._common as C
+    import workers.sources.bench_mine as bench_mine
+    import workers.sources.gap_fill as gap_fill
+    import workers.sources.session_distill as session_distill
+
+    monkeypatch.setattr(C, "STAGING_ROOT", tmp_path)
+    for mod in (bench_mine, gap_fill, session_distill):
+        note = C.write_staging_note(source=mod.NAME, slug="probe", body="body")
+        rel = note.relative_to(tmp_path)
+        assert len(rel.parts) == 3, f"{mod.__name__}: expected root/NAME/date/note.md, got {rel}"
+        assert rel.parts[0] == mod.NAME, f"{mod.__name__}: leaf is {rel.parts[0]}, not NAME"
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", rel.parts[1]), (
+            f"{mod.__name__}: the date directory is {rel.parts[1]!r}, not the "
+            f"{{yyyy-mm-dd}} the docstrings promise")
+        assert rel.parts[2] == f"{note.stem.rsplit('-', 1)[0]}-probe.md"
+        assert note.read_text(encoding="utf-8").startswith("---\n"), (
+            "a staged note without frontmatter is unpromotable: the Review tab "
+            "reads review_status and source out of it")
+
+
+def test_gap_fill_documents_the_staging_step_not_a_fact_write_it_never_makes():
+    """#705's second half, and it sits two lines under the wrong path.
+
+    The docstring said the handler "and (at high confidence) updates the fact".
+    `gap_fill.execute` researches, calls `write_staging_note`, and returns: no
+    path through that module writes a fact, and the whole point of the staging
+    step is that a human promotes the note. A reader who believed the sentence
+    would look for a confidence threshold that does not exist, and a reader of
+    the facts tree would look for a `resolved_at` this source never sets.
+    """
+    src = (WORKER_SOURCES / "gap_fill.py").read_text(encoding="utf-8")
+    doc = (ast.get_docstring(ast.parse(src)) or "").lower()
+
+    for claim in ("updates the fact", "update the fact", "writes the fact",
+                  "wrote the fact"):
+        assert claim not in doc, f"gap_fill's docstring still promises a fact write: {claim!r}"
+    assert "promot" in doc and "human" in doc, (
+        "the docstring must say where the resolution note actually goes: "
+        "staged under the source's own leaf for a human to promote")
+
+    # The prose is only half of it: the claim fails again the moment the module
+    # grows a fact writer, so pin the behaviour side too.
+    for writer in ("fact_add", "fact_invalidate", "kg_store", "remember("):
+        assert writer not in src, (
+            f"gap_fill now uses {writer}; then the docstring is allowed to "
+            f"mention a fact write again, and this test is the one to change")

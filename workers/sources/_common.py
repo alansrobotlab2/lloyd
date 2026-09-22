@@ -4,7 +4,14 @@ All these sources follow the same pattern:
   1. enqueue_if_due scans some watermark / input and enqueues items
   2. execute builds a prompt for the primary model at low vLLM priority (1)
      so interactive chat can preempt it.
-  3. response lands under ~/obsidian/pending-research/{source}/{yyyy-mm-dd}/
+  3. response lands under ~/lloyd/_pipeline/vault-derived/pending-research/{source}/{yyyy-mm-dd}/
+     — under `STAGING_ROOT` below, which is `app.paths.VAULT_PENDING_RESEARCH_DIR`.
+     It is deliberately NOT under the vault: a human promotes each note from
+     the Review tab (`GET /api/workers/pending`) into it, and a note written
+     straight into the vault would skip that gate. #705: this line named the
+     vault copy of `pending-research/` from 2026-04-18 (`0edaab55`) until now,
+     every run that went looking got `No such file or directory`, and three
+     run records under `autonomy-runs/65/` recorded that as the finding.
 """
 
 from __future__ import annotations

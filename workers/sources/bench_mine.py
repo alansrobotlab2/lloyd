@@ -19,14 +19,21 @@ registered, and never once enqueued while both inputs were wide open:
   this copies — a recorded trajectory, *including the failed ones*,
   reconstructed into a task with a deterministic pass/fail check.
 
-Produces candidate bench-task markdown under the configured staging root
-(``workers.staging_root``, i.e. ``_pipeline/vault-derived/pending-research``
-— the one ``GET /api/workers/pending`` lists and a human promotes) under
-``bench/{yyyy-mm-dd}/``. Each candidate carries a ``calibration`` block: N
+Produces candidate bench-task markdown under
+``~/lloyd/_pipeline/vault-derived/pending-research/bench-mine/{yyyy-mm-dd}/``
+— the root is ``app.paths.VAULT_PENDING_RESEARCH_DIR`` (the writer imports it
+as ``STAGING_ROOT``; the ``workers.staging_root`` config key is read by
+nothing), the leaf is this module's own ``NAME``, and it is the directory
+``GET /api/workers/pending`` lists and a human promotes.
+Each candidate carries a ``calibration`` block: N
 trials against the canonical prompt and whether its composite landed strictly
 inside the capability edge, because a task the learner always passes and a
-task it always fails both move the bench mean by noise rather than by signal —
-four of the eleven live tasks are pinned at exactly 0.00 today.
+task it always fails both move the bench mean by noise rather than by signal.
+Which tasks are saturated is a measurement and belongs in the ledger, not
+here: group ``composite_score`` by ``task_id`` over the ``BASELINE_*`` rows of
+``_pipeline/research/ledger.jsonl``. (A dated count lived here until #705
+removed it, measured false against that same ledger; a corpus that moves every
+night cannot be described by one number in permanent prose.)
 
 A human promotion step moves the kept candidates into
 ``~/obsidian/lloyd/bench/``. Lloyd writing the tasks that grade Lloyd is the
