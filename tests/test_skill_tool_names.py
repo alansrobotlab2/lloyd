@@ -10,12 +10,41 @@ skills named Bash + curl as the recovery path.
 That is a class of defect, not one typo: an auto-generated skill can mint a
 plausible tool name at any time, and nothing checked. This test is the check.
 
-Scope note: the vault carries older drift in the nightly-* skills
-(`mem_get`, `mem_write`, `delegate_task`, `execute_code`). Those are recorded
-in KNOWN_UNFIXED rather than silently allowed — they are real and should be
-cleaned up, but they are outside the web-search-and-fetch fix and holding the suite red
-on them would just get the test disabled. Anything NOT in that set fails
-immediately, which is what stops a regression.
+Two classes sat outside the denylist and stayed invisible (item #410), and a
+denylist is structurally unable to see either:
+
+  * a phantom named in **prose or call syntax** rather than as a bare token.
+    `Agent` is the subagent tool of other harnesses; Lloyd's is `Task`. The
+    registry is the authority and `test_phantom_list_is_actually_phantom` asks
+    it on every run, so nothing here has to assert how many tools are served or
+    that `Agent` was never one of them. Five active skills use it as a tool
+    anyway — `deep-research`, `research-agent`, `strict-task-mapping` and
+    `subagent-orchestrate` instruct the call, and `discord-social` forbids it,
+    which is correct prose that any matcher has to survive. Because `Agent` is
+    also ordinary English, and the literal `author: Hermes Agent (adapted from
+    obra/superpowers)` front matter of every Hermes-authored skill, it goes in
+    `_AGENT_AS_TOOL` with a tool-shaped matcher rather than into
+    `PHANTOM_TOOLS` — the rule `_TERMINAL_AS_TOOL` already applies to
+    `terminal`.
+  * a **retired** name, which is neither real nor in the denylist. The
+    `selfmod_*` family became `automod_*`; a skill written against the old
+    names passes a set-membership test forever, which is why #419's own seed set
+    prescribed calls that no longer exist. `_RETIRED_PREFIX` matches the family
+    by prefix instead, so closing it is not an enumeration problem. The corpus
+    holds zero `selfmod_` occurrences today — this matcher exists for the next
+    mined skill, not for a live breakage.
+
+Scope note, re-measured for #410: the older drift this file was written around
+— `mem_get`, `mem_write`, `delegate_task`, `execute_code` in the nightly-*
+skills — is gone from the corpus. `mem_get` survives only in
+`nightly-skill-consolidation`, which is in `ALLOWED_TO_MENTION` because it cites
+the name as the worked example of why a generated skill must validate its tool
+names; the other three are named by no active skill at all. `KNOWN_UNFIXED` is
+therefore empty and, unlike the path ledger below, nothing in this file reads
+it: a phantom name is banned outright and a new one fails immediately. Treat an
+entry added here as a regression, not a grandfathering — and if you are looking
+for the ledgers that actually exempt something, they are `PATH_KNOWN_UNFIXED`
+and `AGENT_MENTION_EXEMPT`, both of which the tests below do consult.
 """
 
 from __future__ import annotations
@@ -53,6 +82,43 @@ PHANTOM_TOOLS = {
 # word ("run it from the terminal"), so only tool-shaped usage counts:
 # a backticked name, or call syntax.
 _TERMINAL_AS_TOOL = re.compile(r"`terminal`|\bterminal\s*\(")
+
+# `Agent` is the subagent-dispatch tool of other harnesses; Lloyd's is `Task`
+# (`agent_mcp.main.list_tools()` serves `Task`, never `Agent`). It is also an
+# ordinary English word, the `author: Hermes Agent (adapted from
+# obra/superpowers)` front matter of every Hermes-authored skill, and the
+# literal `new https.Agent({ rejectUnauthorized: false })` of the TLS skill —
+# so only tool-shaped usage counts, the same rule `_TERMINAL_AS_TOOL` applies
+# to `terminal`: bolded prose, a backticked name, or a call. The lookbehind is
+# what keeps `https.Agent(` out: a preceding word character or dot is an
+# attribute, not a tool.
+_AGENT_AS_TOOL = re.compile(r"\*\*Agent tool\*\*|`Agent`|(?<![\w.])Agent\(")
+
+# A retired tool family: the name is neither served nor in the denylist, so set
+# membership cannot see it however many retired names get written down.
+# `selfmod_*` became `automod_*` after #419's seed set was authored to the old
+# spelling; a skill written to that spelling today must not install green.
+_RETIRED_PREFIX = re.compile(r"\bselfmod_[a-z0-9_]+")
+
+# Skills allowed to carry an `Agent`-tool mention, each because an item already
+# owns its removal or because the sentence is a prohibition. This is the only
+# way to land a matcher for a class the corpus is already covered by (#410
+# clause 5); every entry names its owner, and none may be added to for a skill
+# that has no open item saying what to do with it.
+AGENT_MENTION_EXEMPT: dict[str, str] = {
+    # Archives this whole skill, so the mention leaves with the file.
+    "subagent-orchestrate": "#409 clause 1",
+    # Must name `Task` (or route to pipeline-dispatch) instead; the matcher's
+    # offender list is what makes that visible instead of merely asserted.
+    "deep-research": "#409 clause 3",
+    "research-agent": "#409 clause 3",
+    # Correct prose about a tool that genuinely does not exist: it *forbids*
+    # the Agent tool. #409 clause 3 keeps this sentence intact, so it stays
+    # exempt permanently, not until someone fixes it.
+    "discord-social": "#409 clause 3 (prohibition, keep)",
+    # `Agent`-tool dispatch in four places; named by no other item's clauses.
+    "strict-task-mapping": "#410",
+}
 
 # The debt ledger is empty: every name above is now banned outright, and the
 # 91 skills that carried one have been rewritten onto the real tool or
@@ -109,23 +175,60 @@ def skill_files() -> list[Path]:
     return files
 
 
+_PHANTOM_PATTERN = re.compile(
+    r"\b(" + "|".join(map(re.escape, sorted(PHANTOM_TOOLS))) + r")\b")
+
+
+def _phantom_hits(body: str, *, skip_agent: bool = False) -> list[str]:
+    """Every tool name in `body` that no session could ever have called.
+
+    Three shapes, one per class of defect. A bare token from the denylist;
+    `terminal` or `Agent` used as a tool (prose, backticks or call syntax);
+    and any `selfmod_`-prefixed name, retired when that family became
+    `automod_*`. This is the whole matcher — the corpus test and the fixture
+    probes below both run it, so a probe can never drift from what production
+    checks.
+
+    `skip_agent` is how a skill gets excused for naming the Agent tool and for
+    nothing else. An exemption has to be as narrow as the defect it excuses, or
+    a skill in the debt ledger is free to mint a brand-new phantom name.
+    """
+    hits = sorted(set(_PHANTOM_PATTERN.findall(body)))
+    if _TERMINAL_AS_TOOL.search(body):
+        hits.append("terminal")
+    if _AGENT_AS_TOOL.search(body) and not skip_agent:
+        hits.append("Agent")
+    retired = sorted(set(_RETIRED_PREFIX.findall(body)))
+    if retired:
+        hits.append(",".join(retired))
+    return hits
+
+
+def _phantom_offenders(files: list[Path], *,
+                       agent_exempt: frozenset[str] = frozenset()
+                       ) -> dict[str, list[str]]:
+    """skill-directory-name → phantom names, minus the named exemption sets."""
+    offenders: dict[str, list[str]] = {}
+    for path in files:
+        skill = path.parent.name
+        if skill in ALLOWED_TO_MENTION:
+            continue
+        body = path.read_text(encoding="utf-8", errors="replace")
+        hits = _phantom_hits(body, skip_agent=skill in agent_exempt)
+        if hits:
+            offenders[skill] = hits
+    return offenders
+
+
 def test_no_active_skill_names_a_phantom_tool(skill_files):
     """The regression that started it all: a skill telling the model to call
     a tool the aggregator has never advertised."""
-    pattern = re.compile(r"\b(" + "|".join(map(re.escape, sorted(PHANTOM_TOOLS))) + r")\b")
-    offenders: dict[str, list[str]] = {}
-    for path in skill_files:
-        if path.parent.name in ALLOWED_TO_MENTION:
-            continue
-        body = path.read_text(encoding="utf-8", errors="replace")
-        hits = sorted(set(pattern.findall(body)))
-        if _TERMINAL_AS_TOOL.search(body):
-            hits.append("terminal")
-        if hits:
-            offenders[path.parent.name] = hits
+    offenders = _phantom_offenders(skill_files,
+                                   agent_exempt=frozenset(AGENT_MENTION_EXEMPT))
     assert offenders == {}, (
         "active skills name tools that do not exist: "
-        f"{offenders}. The real tools are http_search / http_fetch / http_request."
+        f"{offenders}. The real tools are http_search / http_fetch / http_request, "
+        "and the subagent tool is Task."
     )
 
 
@@ -144,6 +247,123 @@ def test_phantom_list_is_actually_phantom():
     wrongly_banned = PHANTOM_TOOLS & real
     assert wrongly_banned == set(), (
         f"these are real tools and must not be in PHANTOM_TOOLS: {wrongly_banned}"
+    )
+    # The two matchers added for #410 ban things the denylist does not name, so
+    # the registry is the only independent check that they are not banning a
+    # live tool: `Agent` by exact name (Lloyd's subagent tool is `Task`), and
+    # the retired family by prefix, since the whole point of `_RETIRED_PREFIX`
+    # is that no individual retired name is written down anywhere.
+    assert "Agent" not in real, (
+        "`Agent` has become a served tool; the `_AGENT_AS_TOOL` matcher and the "
+        "AGENT_MENTION_EXEMPT debt must be retired with it"
+    )
+    retired_served = {t for t in real if _RETIRED_PREFIX.fullmatch(t)}
+    assert retired_served == set(), (
+        f"`selfmod_` is served again: {retired_served} — update _RETIRED_PREFIX"
+    )
+
+
+@pytest.mark.parametrize("line", [
+    "Use the **Agent tool** to spawn a subagent.",
+    "Send `Agent` calls in parallel for independent work.",
+    "Agent({\n  prompt: \"do it\",\n  subagent_type: \"general-purpose\",\n})",
+])
+def test_an_agent_tool_mention_fails_the_guard(tmp_path, line):
+    """A phantom named in prose, backticks or call syntax, not a bare token.
+
+    The denylist could never see this, which is why five active skills still
+    tell a session to call a tool that has never been served. Injecting the
+    line into an ordinary active SKILL.md is exactly what this pins: the guard
+    must report it. Remove the line and the same helper goes quiet — that
+    half is the next test.
+    """
+    skill = tmp_path / "some-active-skill" / "SKILL.md"
+    skill.parent.mkdir()
+    skill.write_text("---\nstatus: active\n---\n# SKILL: some-active-skill\n\n",
+                     encoding="utf-8")
+    before = _phantom_offenders([skill])
+    assert before == {}, "fixture must start clean or the probe proves nothing"
+    skill.write_text(skill.read_text(encoding="utf-8") + line + "\n",
+                     encoding="utf-8")
+    offenders = _phantom_offenders([skill])
+    assert offenders == {"some-active-skill": ["Agent"]}, (
+        f"`{line[:40]}` is tool-shaped usage of a tool that does not exist and "
+        f"the guard stayed silent: {offenders}"
+    )
+
+
+def test_the_agent_matcher_survives_the_words_it_is_not(tmp_path):
+    """The matcher is tool-shaped, not word-shaped (#410 clause 2).
+
+    `Agent` is ordinary English, the author line of every Hermes-authored
+    skill, and an HTTP connector's class name. A matcher that fired on these
+    would be deleted within a week, which is the failure mode the clause
+    exists to prevent — so it is pinned on the two literal strings from the
+    live corpus, not on invented lookalikes.
+    """
+    skill = tmp_path / "https-agent-client" / "SKILL.md"
+    skill.parent.mkdir()
+    skill.write_text(
+        "---\nstatus: active\n---\n"
+        "author: Hermes Agent (adapted from obra/superpowers)\n\n"
+        "```js\nconst agent = new https.Agent({ rejectUnauthorized: false });\n"
+        "```\n\n"
+        "Run the agent loop, then read the agent's report.\n",
+        encoding="utf-8")
+    assert _phantom_offenders([skill]) == {}, (
+        "the Hermes author front matter and `https.Agent(` must not read as "
+        "dispatching a phantom tool"
+    )
+
+
+def test_a_retired_selfmod_tool_name_fails_the_guard(tmp_path):
+    """A retired name is neither real nor in the denylist, so a set-membership
+    test cannot flag it however many such names get added (#410 clause 3).
+
+    The `selfmod_*` → `automod_*` rename means a skill written against the old
+    spelling installs and runs green today. Matching the family by prefix is
+    what stops that being an enumeration problem.
+    """
+    skill = tmp_path / "legacy-automod-habits" / "SKILL.md"
+    skill.parent.mkdir()
+    skill.write_text(
+        "---\nstatus: active\n---\n"
+        "Call `selfmod_gate` now, then `selfmod_land` once it reports clean.\n",
+        encoding="utf-8")
+    offenders = _phantom_offenders([skill])
+    assert offenders == {
+        "legacy-automod-habits": ["selfmod_gate,selfmod_land"]
+    }, f"a retired tool name passed green: {offenders}"
+
+
+def test_the_live_corpus_defects_are_all_the_named_ones(skill_files):
+    """The exemption set is a debt ledger, so it needs an upper bound.
+
+    The other half of #410 clause 5. Green under an exemption proves nothing on
+    its own — the ledger could be bigger than the corpus, or shielding a skill
+    that never had the defect, or shielding one class while the skill offends
+    in another. So: run the scan with AGENT_MENTION_EXEMPT switched off (the
+    pre-existing `ALLOWED_TO_MENTION` skills sit outside this ledger — they are
+    exempt from every class and predate #410), and the Agent-class offenders
+    must be *exactly* the keys of AGENT_MENTION_EXEMPT
+    (each of which names the item that owns its removal), and no skill may carry
+    a `selfmod_` name at all, since nothing is exempt from that matcher. A skill
+    that minted a denylist phantom while sitting in the Agent ledger fails the
+    main test instead, because these exemptions excuse one class and nothing
+    else.
+    """
+    raw = _phantom_offenders(skill_files)
+    agent_offenders = {n for n, hits in raw.items() if "Agent" in hits}
+    retired_offenders = {n for n, hits in raw.items()
+                         if any(h.startswith("selfmod_") for h in hits)}
+    assert agent_offenders == set(AGENT_MENTION_EXEMPT), (
+        "the Agent-tool-naming corpus and AGENT_MENTION_EXEMPT have diverged: an "
+        "entry was added for a clean skill, or a skill was fixed and its "
+        f"exemption left behind. offenders={sorted(agent_offenders)} "
+        f"exempt=sorted({sorted(AGENT_MENTION_EXEMPT)})"
+    )
+    assert retired_offenders == set(), (
+        f"active skills name retired selfmod_* tools: {sorted(retired_offenders)}"
     )
 
 

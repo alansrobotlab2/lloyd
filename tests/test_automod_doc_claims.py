@@ -591,8 +591,8 @@ def test_the_automod_skill_states_the_fork_rule_where_a_round_reads_it():
     `app.paths.VAULT_ROOT` is `Path.home() / "obsidian"` (`app/paths.py:11`), so
     every worktree reads the same live vault, and a missing file is a real
     regression rather than an artefact of where the test was run.
-    `tests/test_skill_tool_names.py:35` reads that same tree unguarded, so this
-    test may too."""
+    `tests/test_skill_tool_names.py`'s `SKILLS_DIRS` reads that same tree
+    unguarded, so this test may too."""
     from app.paths import VAULT_ROOT
 
     skill = VAULT_ROOT / "skills" / "automod-change-own-code" / "SKILL.md"
