@@ -140,6 +140,52 @@ def test_reasoning_is_persisted_under_the_role_that_hides_it(store):
     assert thinking[0]["content"] == []
 
 
+def test_the_paired_tool_row_carries_the_size_from_before_the_shaping(store):
+    """`result_chars` is measured on the truncated text, so it saturates at
+    2,014 and a spilled 80 KB answer is indistinguishable from a 2 KB one
+    (#1052). `raw_chars` is what the harness knew before it spilled, and it
+    rides on the event; the recorder's job is to persist it unchanged and
+    leave `result_chars` meaning what it always meant. The dispatch half —
+    where that number is captured — is pinned in
+    `tests/test_tool_result_raw_chars.py`."""
+    from app.transcript_entries import TOOL_RESULT_MAX_CHARS
+
+    preview = "<persisted-output> Output too large " + "z" * 3_000
+    _drive([
+        {"type": "tool_call", "call_id": "c1", "name": "Grep",
+         "args_json": '{"pattern": "x"}', "summary": "Searching"},
+        {"type": "tool_result", "call_id": "c1", "content": preview,
+         "is_error": False, "raw_chars": 81_600},
+        {"type": "result", "stop_reason": "stop", "num_turns": 1, "usage": {}},
+    ])
+    row = next(m for m in _session(store)["messages"] if m["role"] == "tool")
+    assert row["stats"]["raw_chars"] == 81_600
+    assert row["stats"]["result_chars"] == \
+        TOOL_RESULT_MAX_CHARS + len("...(truncated)")
+    assert row["stats"]["result_chars"] < row["stats"]["raw_chars"]
+    assert row["content"][0]["text"] == preview[:TOOL_RESULT_MAX_CHARS] \
+        + "...(truncated)"
+
+
+def test_an_unpaired_tool_row_omits_raw_chars_rather_than_guessing(store):
+    """The result event never arrived, so the pair is rebuilt from the call
+    log at the end of the run. That log holds only the truncated string, so
+    the true size is unknown here — and `0` would read as "the tool answered
+    nothing" and the cap as "it answered exactly 2,014 characters", neither
+    of which was ever measured. Absence is the answer, which is also why
+    `_unpersisted_pairs` invents no `is_error` either."""
+    _drive([
+        {"type": "tool_call", "call_id": "c1", "name": "Bash",
+         "args_json": '{"command": "sleep 900"}', "summary": "Waiting"},
+        {"type": "text_delta", "text": "answer without the result"},
+        {"type": "result", "stop_reason": "stop", "num_turns": 2, "usage": {}},
+    ])
+    row = next(m for m in _session(store)["messages"] if m["role"] == "tool")
+    assert "raw_chars" not in row["stats"]
+    assert "is_error" not in row["stats"]
+    assert row["stats"]["result_chars"] == 0
+
+
 def test_a_run_killed_mid_stream_still_leaves_what_it_had(store):
     """The #60 case, and the reason nothing is buffered until the `result`
     event: a run that ends badly is the run someone will want to read."""

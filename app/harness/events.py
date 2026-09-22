@@ -142,14 +142,34 @@ def tool_call(
     }
 
 
-def tool_result(*, call_id: str, name: str, content: str, is_error: bool = False) -> NormalizedEvent:
-    return {
+def tool_result(*, call_id: str, name: str, content: str, is_error: bool = False,
+                raw_chars: int | None = None) -> NormalizedEvent:
+    """One tool call's result, as the model is about to be shown it.
+
+    ``raw_chars`` is how long ``content`` was BEFORE the caller's spill
+    step replaced it with a ``<persisted-output>`` preview. It has to be
+    carried, not recomputed: on a spilled result ``len(content)`` here is
+    the preview's length, so the size of the tool's actual answer exists
+    nowhere else (#1052). Every early-return site — parse error, disabled
+    tool, hook deny, dispatch failure, in-flight cancel — builds its own
+    short string and is what the default is for; ``None`` from a caller
+    means "there was no shaping step", which is the same number. The key
+    is absent when the size is genuinely unknown (a result that is not
+    text), and the writers downstream omit it from the row rather than
+    inventing a length for it.
+    """
+    evt: NormalizedEvent = {
         "type": "tool_result",
         "call_id": call_id,
         "name": name,
         "content": content,
         "is_error": is_error,
     }
+    if raw_chars is None and isinstance(content, str):
+        raw_chars = len(content)
+    if raw_chars is not None:
+        evt["raw_chars"] = int(raw_chars)
+    return evt
 
 
 def assistant_message(

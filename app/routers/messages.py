@@ -690,6 +690,34 @@ def _build_notification_drain(session_id: str, turn_id: str):
     return drain
 
 
+def _tool_pair(call: dict, *, result_str: str, timestamp: str,
+               iteration_stats: dict, evt: dict | None = None) -> list[dict]:
+    """The tool-call row and its tool-result row, in wire order.
+
+    One builder for the three places that write a pair, so the row shape
+    cannot drift between the streaming path and the paths that rebuild from
+    the call log. `evt` is the harness event when there is one; the cancel
+    and error paths have only `tool_results_log` and pass nothing, which is
+    what omits `raw_chars` on their rows — the log holds the truncated text,
+    so the size the model saw is unknown there, and an invented `0` or the
+    2014 cap would both read as a measurement (#1052). Same reasoning as
+    `run_recorder._unpersisted_pairs`, which does this for background runs.
+    """
+    call_id = call["call_id"]
+    if evt is None:
+        result_row = build_tool_result_entry(call_id, result_str,
+                                             timestamp=timestamp)
+    else:
+        result_row = build_tool_result_entry(
+            call_id, result_str, timestamp=timestamp,
+            is_error=bool(evt.get("is_error", False)),
+            raw_chars=evt.get("raw_chars"))
+    return [
+        build_tool_call_entry(call, timestamp=timestamp, stats=iteration_stats),
+        result_row,
+    ]
+
+
 async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None:
     """Run a single turn through the harness, persisting as we go.
 
@@ -1149,11 +1177,19 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 await _emit(turn, "tool_complete", {
                     "call_id": call_id, "name": evt.get("name", ""), "result": result_str,
                 })
-                _event_log.log_event(session_id, "brain1.tool_result_received", {
+                # `raw_chars` rides here as well as on the row: this call log
+                # is what a later reader reconstructs a turn from, and a size
+                # recorded only on the row is unavailable to anything that
+                # reads the log (#1052).
+                _received = {
                     "tool_call_id": call_id,
                     "result": result_str,
                     "result_chars": len(result_str),
-                }, turn_id=turn.turn_id)
+                }
+                if evt.get("raw_chars") is not None:
+                    _received["raw_chars"] = evt["raw_chars"]
+                _event_log.log_event(session_id, "brain1.tool_result_received",
+                                     _received, turn_id=turn.turn_id)
                 # Eager per-pair persistence. Per-iteration LLM usage
                 # rides on the assistant tool-call row (the LLM produced
                 # the tool_call); the result row carries result_chars
@@ -1161,13 +1197,10 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 tc = next((t for t in tool_calls_log if t["call_id"] == call_id), None)
                 if tc and call_id not in persisted_tool_ids:
                     persisted_tool_ids.add(call_id)
-                    pair_ts = datetime.now().isoformat()
-                    tc_msg = build_tool_call_entry(
-                        tc, timestamp=pair_ts, stats=current_iteration_stats)
-                    result_msg = build_tool_result_entry(
-                        call_id, result_str, timestamp=pair_ts,
-                        is_error=bool(evt.get("is_error", False)))
-                    await _append_messages(session_id, [tc_msg, result_msg])
+                    await _append_messages(session_id, _tool_pair(
+                        tc, result_str=result_str,
+                        timestamp=datetime.now().isoformat(),
+                        iteration_stats=current_iteration_stats, evt=evt))
 
             elif etype == "result":
                 usage = evt.get("usage") or {}
@@ -1275,11 +1308,13 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     cid = tc["call_id"]
                     if cid not in persisted_tool_ids:
                         persisted_tool_ids.add(cid)
-                        result_text_str = results_by_id.get(cid, "")
-                        tail.append(build_tool_call_entry(
-                            tc, timestamp=end_ts, stats=current_iteration_stats))
-                        tail.append(build_tool_result_entry(
-                            cid, result_text_str, timestamp=end_ts))
+                        # No `evt`: this row is rebuilt from
+                        # `tool_results_log`, which holds only the
+                        # truncated text, so `raw_chars` is unknown here.
+                        tail.extend(_tool_pair(
+                            tc, result_str=results_by_id.get(cid, ""),
+                            timestamp=end_ts,
+                            iteration_stats=current_iteration_stats))
 
                 # Ambient turns only: if the agent called `ambient_decide`
                 # to opt out of surfacing, write a muted breadcrumb instead
@@ -1431,11 +1466,13 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 for tc in tool_calls_log:
                     cid = tc["call_id"]
                     if cid not in persisted_tool_ids:
-                        result_text_str = results_by_id.get(cid, "")
-                        tail.append(build_tool_call_entry(
-                            tc, timestamp=err_ts, stats=current_iteration_stats))
-                        tail.append(build_tool_result_entry(
-                            cid, result_text_str, timestamp=err_ts))
+                        # No `evt`, same as the `result`-path rebuild
+                        # above: the call log cannot say how big the
+                        # answer was, so the row omits `raw_chars`.
+                        tail.extend(_tool_pair(
+                            tc, result_str=results_by_id.get(cid, ""),
+                            timestamp=err_ts,
+                            iteration_stats=current_iteration_stats))
                 stream_stats["peak_input_tokens"] = last_turn_input
                 if full_response.strip():
                     tail.append(build_assistant_text_entry(

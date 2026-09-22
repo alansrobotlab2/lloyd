@@ -250,11 +250,18 @@ class _RunRecorder:
             call_id = evt.get("call_id", "")
             result = truncate_tool_result(str(evt.get("content", "") or ""))
             self.results_by_id[call_id] = result
-            self._log("brain1.tool_result_received", {
+            received: dict = {
                 "tool_call_id": call_id, "result": result,
                 "result_chars": len(result),
                 "is_error": bool(evt.get("is_error", False)),
-            })
+            }
+            # Omitted rather than zeroed: `result` above is already
+            # truncated, so a run whose event predates the field has no
+            # true size to report, and a `0` in this log would be read as
+            # one (#1052).
+            if evt.get("raw_chars") is not None:
+                received["raw_chars"] = int(evt["raw_chars"])
+            self._log("brain1.tool_result_received", received)
             tc = next((t for t in self.tool_calls
                        if t["call_id"] == call_id), None)
             if tc and call_id not in self.persisted_pairs:
@@ -263,9 +270,13 @@ class _RunRecorder:
                 await self._append([
                     build_tool_call_entry(tc, timestamp=ts,
                                           stats=self.iteration_stats),
+                    # `raw_chars` comes straight off the event and is
+                    # absent on anything that predates it, which reads as
+                    # unknown downstream — not as a small result.
                     build_tool_result_entry(
                         call_id, result, timestamp=ts,
-                        is_error=bool(evt.get("is_error", False))),
+                        is_error=bool(evt.get("is_error", False)),
+                        raw_chars=evt.get("raw_chars")),
                 ])
 
         elif etype == "result":

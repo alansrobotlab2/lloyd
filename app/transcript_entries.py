@@ -19,7 +19,7 @@ So the shaping lives here, both writers call it, and
 `tests/test_transcript_entries.py` pins that the entries they produce for the
 same events are identical.
 
-Two shapes are deliberately conditional rather than always-present, because
+Three shapes are deliberately conditional rather than always-present, because
 every historical session on disk predates them and must keep reading the same:
 
   * `summary` on a tool call is omitted when empty, never stored as `""`.
@@ -27,6 +27,13 @@ every historical session on disk predates them and must keep reading the same:
     know — the eager per-pair path has the event and passes it; the two
     reconstruct-from-the-log paths do not, and inventing `False` there would
     turn "we never saw the result" into "the result was fine".
+  * `raw_chars` on a tool result's stats is omitted for the same reason. It
+    is the length of the tool's answer before the harness truncated or
+    spilled it, which is the only number that says how big the answer was —
+    `result_chars` is measured on the truncated text and saturates at
+    `TOOL_RESULT_MAX_CHARS + len("...(truncated)")`. A path holding only the
+    truncated string cannot recover it, so absence is the answer it gives,
+    never `0` and never the cap.
 """
 
 from __future__ import annotations
@@ -143,8 +150,18 @@ def build_tool_call_entry(tool_call: dict, *, timestamp: str,
 
 
 def build_tool_result_entry(call_id: str, result: str, *, timestamp: str,
-                            is_error: bool | None = None) -> dict:
+                            is_error: bool | None = None,
+                            raw_chars: int | None = None) -> dict:
+    """The `role="tool"` row. `result` is already truncated.
+
+    `raw_chars` is the length the tool's answer had before the harness
+    shaped it, and only the two eager paths have it — pass nothing on a
+    row reconstructed from the call log, which holds only the truncated
+    text (#1052).
+    """
     stats: dict[str, Any] = {"result_chars": len(result)}
+    if raw_chars is not None:
+        stats["raw_chars"] = int(raw_chars)
     if is_error is not None:
         stats["is_error"] = bool(is_error)
     return {

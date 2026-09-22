@@ -76,8 +76,11 @@ def _events():
          "tool_calls": [{"call_id": "c1"}],
          "usage": {"input_tokens": 10, "output_tokens": 4},
          "duration_ms": 120},
+        # `raw_chars` deliberately differs from the length of `content`: a
+        # writer that dropped it and recomputed from the content would still
+        # agree with the other one, so agreeing would prove nothing (#1052).
         {"type": "tool_result", "call_id": "c1", "name": "Bash",
-         "content": "a\nb", "is_error": False},
+         "content": "a\nb", "is_error": False, "raw_chars": 81_234},
         {"type": "text_delta", "text": "Two files."},
         {"type": "result", "stop_reason": "stop", "num_turns": 2,
          "duration_ms": 400, "response_text": "Two files.",
@@ -140,14 +143,18 @@ def _chat_entries(events: list[dict]) -> list[dict]:
             calls.append(te.build_tool_call(
                 evt["call_id"], evt["name"], evt["args_json"], evt["summary"]))
         elif t == "tool_result":
+            # The chat half of the parity claim goes through the router's own
+            # `_tool_pair`, not a hand-copy of it: a field one writer starts
+            # emitting and the other does not fails here, which is the drift
+            # this file exists to catch. The router's reconstruct-from-log
+            # branch is the `evt=None` call below, in the error path.
+            from app.routers.messages import _tool_pair
             result = te.truncate_tool_result(evt["content"])
             tc = next(c for c in calls if c["call_id"] == evt["call_id"])
             persisted.add(evt["call_id"])
-            written.append(te.build_tool_call_entry(
-                tc, timestamp="T", stats=iteration_stats))
-            written.append(te.build_tool_result_entry(
-                evt["call_id"], result, timestamp="T",
-                is_error=bool(evt["is_error"])))
+            written.extend(_tool_pair(tc, result_str=result, timestamp="T",
+                                      iteration_stats=iteration_stats,
+                                      evt=evt))
         elif t == "result":
             usage = evt["usage"]
             stats = {

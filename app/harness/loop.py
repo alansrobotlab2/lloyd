@@ -2253,6 +2253,12 @@ async def _execute_tool_call(
     #      full file with the Read tool if it needs more than the preview.
     content = result["content"]
     is_error = result["is_error"]
+    # Measured here, on the line above the only step that rewrites it: past
+    # `maybe_spill` the text is a ~2 KB `<persisted-output>` preview of a
+    # 250 KB Grep, and every length taken downstream — including the
+    # `result_chars` in the transcript, which is itself truncated to 2014 —
+    # describes the preview and not the answer (#1052).
+    raw_chars = len(content) if isinstance(content, str) else None
     if not is_error and isinstance(content, str):
         content = fallback_for_empty_result(content, name)
         content = maybe_spill(
@@ -2276,6 +2282,7 @@ async def _execute_tool_call(
         name=name,
         content=content,
         is_error=is_error,
+        raw_chars=raw_chars,
     )
 
 
