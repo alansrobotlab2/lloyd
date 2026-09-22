@@ -81,13 +81,37 @@ def world(tmp_path, monkeypatch):
     retrieval._entity_index_cache = None
 
 
+#: Pass this as a fact's `created_at` or `source_doc` value to leave that key
+#: out of the written front matter entirely. `_read_facts_cached` hands back the
+#: YAML entries verbatim, so a fact whose file never carried a key comes back as
+#: a dict that *omits* the key — which is not the same object as the key present
+#: with value None. That distinction is the live shape, not a hypothetical: the
+#: 2026-09-21 `pass@k` winner row (#1348) had neither `created_at` nor
+#: `source_doc` among its keys (`['category', 'confidence', 'entity',
+#: 'event_date', 'fact', 'id', 'provenance', 'source_file']`), so a guard
+#: written `f["created_at"]` raises `KeyError` on the exact row it exists to
+#: catch, and a fixture that could only write `created_at: None` could not
+#: reproduce it at all.
+OMIT = object()
+
+
 def _write_facts(root, entity, category, facts):
-    """One fact file with explicit per-fact fields (mirrors the real shape)."""
+    """One fact file with explicit per-fact fields (mirrors the real shape).
+
+    `created_at` is required unless it is `OMIT`; `source_doc` defaults to
+    `None` and is written as `None`, so every fixture here has always written a
+    fact that carries `created_at` — the shape the confidence tests in section 2
+    and 2b are built on, and the reason the attribution guard (#1348) does not
+    disturb them. `OMIT` is the only way to write the keyless row the live
+    corpus is mostly made of.
+    """
     d = root / entity
     d.mkdir(parents=True, exist_ok=True)
     prepared = []
     for i, f in enumerate(facts, start=1):
-        prepared.append({
+        created_at = f["created_at"]
+        source_doc = f["source_doc"] if "source_doc" in f else None
+        row = {
             "fact": f["fact"], "confidence": f.get("confidence", 0.9),
             # An explicit id wins: ids are per-file counters, so a test that
             # wants two category files to share `fact-001` — the collision the
@@ -95,10 +119,14 @@ def _write_facts(root, entity, category, facts):
             # override every helper-written id is category-prefixed and
             # collision-free, which is why the collision went untested.
             "category": category, "id": f.get("id") or f"{category[:4]}-{i:03d}",
-            "created_at": f["created_at"], "valid_at": f["created_at"],
             "invalid_at": None, "expired_at": None, "provenance": "STATED",
-            "source_doc": None,
-        })
+        }
+        if created_at is not OMIT:
+            row["created_at"] = created_at
+            row["valid_at"] = created_at
+        if source_doc is not OMIT:
+            row["source_doc"] = source_doc
+        prepared.append(row)
     fm = {"type": "facts", "entity": entity, "category": category, "facts": prepared}
     (d / f"{entity}-{category}.md").write_text(
         f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {entity}\n", encoding="utf-8")
@@ -901,6 +929,161 @@ def test_the_equal_confidence_age_basis_is_unmoved_by_the_floor(world):
     assert action["kind"] == "superseded"
     assert action["loser_fact"] == "The build is working."
     assert "created_at" in action["reason"], action["reason"]
+
+
+# ── 2c. #1348: a bare confidence number may not beat an attributed fact ───────
+#
+# The 2026-09-21 nightly improve pass (`_pipeline/improvement/
+# 20260921-210019-dryrun.json`, and reproducible live through
+# `plan_entity('pass@k')` at this round's base) planned ONE action across 40
+# entities and 207 contradiction pairs, and the action demoted the right row.
+# On `pass@k` the detector paired — both rows read through `app.kg_store`, the
+# only reader of the store:
+#
+#   stat-009  conf 0.9  created_at 2026-09-21T17:50:12.961951+00:00
+#             source_doc knowledge/youtube/AI_Engineer/20260820-your-agent-
+#                       evolved-your-evals-didnt-ameya-bhatawdekar-braintrust.md
+#   fact-001  conf 1.0  created_at NULL  source_doc NULL
+#
+# `loser, winner = (f2, f1) if c1 > c2 else (f1, f2)` ranked them on the bare
+# numbers, so the claim written that afternoon from a named talk note lost to a
+# row with no date and no source document on `0.9 < 1.0`. Both rows read
+# `provenance='EXTRACTED'`, so the provenance column cannot separate them; the
+# two fields that can are `source_doc` and `created_at`, and this module had
+# never consulted either — `grep -c source_doc agent_mcp/fact_improvement.py`
+# returned 0 and `git log -S'source_doc'` on that file is empty, so the
+# condition was never removed, it was never written.
+#
+# The guard is one-sided and has to stay that way. Measured through the store on
+# 2026-09-21: 204,706 of 321,252 active rows (64%) carry neither field, and
+# 162,175 of those sit at confidence >= 0.95. A rule barring every unattributed
+# row from winning would suppress most of the actions the pass can take; what
+# #1348 asks for is narrower — the winner may not be the row with no evidence
+# while the loser has some.
+#
+# The two live claim strings are reused verbatim below, and the third test is
+# the control for the first two: same entity, same texts, same confidences, both
+# rows attributed → the action fires. So a 0-action result in the first two can
+# only come from attribution, never from the pair failing to pair or from
+# `MIN_CONFIDENCE_GAP` declining the 0.1 gap.
+
+_PASSK_UNATTRIBUTED = ("The pass@k metric on a deterministic environment is "
+                       "mathematically equivalent to the success rate of a replay agent.")
+_PASSK_LOSER = ("A system can appear strong on pass@k but weak on pass^k, "
+                "revealing variance as a failure mode.")
+_PASSK_LOSER_SOURCE = ("knowledge/youtube/AI_Engineer/20260820-your-agent-evolved-"
+                       "your-evals-didnt-ameya-bhatawdekar-braintrust.md")
+
+
+def test_an_unattributed_winner_cannot_demote_an_attributed_loser(world):
+    """Clause 1: the live shape, and it yields no action.
+
+    The higher-confidence row carries neither `source_doc` nor `created_at`; the
+    lower-confidence row carries `created_at` — either field alone is enough,
+    which is what "carrying either" means. The pair is a contradiction the
+    detector still reports (its count includes it, and the control test below
+    proves the same pair is actable), it simply stops being actable: a demotion
+    needs evidence on the winning side, and a bare `1.0` is not evidence.
+    """
+    facts_root, st, _ = world
+    _write_facts(facts_root, "pass@k", "state", [
+        {"fact": _PASSK_UNATTRIBUTED, "confidence": 1.0,
+         "created_at": OMIT, "source_doc": OMIT},
+        {"fact": _PASSK_LOSER, "confidence": 0.9, "created_at": _days_ago(1),
+         "source_doc": OMIT},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("pass@k")
+    assert plan["contradictions"] >= 1, plan
+    assert plan["actions"] == [], plan["actions"]
+
+
+def test_two_unattributed_rows_still_demote_on_confidence_alone(world):
+    """Clause 2: the guard is asymmetric, so 64% of the corpus stays actable.
+
+    Both rows lack `source_doc` and `created_at` — nobody can say where either
+    came from — and the ordinary confidence basis decides, demoting the lower
+    one exactly as it did before #1348. This is the majority shape on the board,
+    so a symmetric guard ("no unattributed row ever wins") would have gutted the
+    loop's whole output to fix one wrong line: the pass would report 40 entities
+    and zero actions every night and look healthy doing it.
+    """
+    facts_root, st, _ = world
+    _write_facts(facts_root, "PassBoth", "state", [
+        {"fact": _PASSK_UNATTRIBUTED, "confidence": 1.0,
+         "created_at": OMIT, "source_doc": OMIT},
+        {"fact": _PASSK_LOSER, "confidence": 0.9, "created_at": OMIT, "source_doc": OMIT},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("PassBoth")
+    assert len(plan["actions"]) == 1, plan["actions"]
+    action = plan["actions"][0]
+    assert action["kind"] == "confidence", action
+    assert action["loser_fact"] == _PASSK_LOSER, action
+    assert action["reason"].startswith("opposing_terms:success/failure;"), action["reason"]
+
+
+def test_two_attributed_rows_still_demote_on_confidence_alone(world):
+    """Clause 3: attribution on both sides leaves the confidence basis untouched.
+
+    The same entity, the same two claim texts and the same 1.0 vs 0.9 gap as the
+    test above, with `created_at` restored to both rows — the shape every other
+    fixture in this file writes. The demotion fires and the loser is the
+    lower-confidence row. This is also the control for
+    `test_an_unattributed_winner_cannot_demote_an_attributed_loser`: it shows
+    that pair does reach `opposing_terms`, does clear `MIN_CONFIDENCE_GAP`, and
+    is declined only by the attribution guard.
+    """
+    facts_root, st, _ = world
+    _write_facts(facts_root, "PassSourced", "state", [
+        {"fact": _PASSK_UNATTRIBUTED, "confidence": 1.0, "created_at": _days_ago(20)},
+        {"fact": _PASSK_LOSER, "confidence": 0.9, "created_at": _days_ago(1)},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("PassSourced")
+    assert len(plan["actions"]) == 1, plan["actions"]
+    action = plan["actions"][0]
+    assert action["kind"] == "confidence", action
+    assert action["loser_fact"] == _PASSK_LOSER, action
+
+
+def test_the_attribution_guard_reads_a_row_that_omits_the_keys_entirely(world):
+    """Clause 4: absent key, not `None` key — and reading it must not raise.
+
+    `plan_entity` judges rows handed back by `_read_facts_cached`, which returns
+    the parsed YAML entries verbatim: a fact whose file never carried
+    `created_at` or `source_doc` is a dict that has no such key, exactly the
+    live `fact-001` row. The first assertion is the positive control that this
+    fixture really produced that shape rather than a `None` under the key — a
+    guard written `f["created_at"]` would raise `KeyError` here instead of
+    planning anything, and a guard written `if "created_at" in f` would answer a
+    different question than the one the guard has to answer.
+
+    Here the winner omits both keys and the loser's only evidence is
+    `source_doc` — the other half of "carries either", and the half the live
+    loser also satisfied.
+    """
+    facts_root, st, _ = world
+    _write_facts(facts_root, "PassKeys", "state", [
+        {"fact": _PASSK_UNATTRIBUTED, "confidence": 1.0,
+         "created_at": OMIT, "source_doc": OMIT},
+        {"fact": _PASSK_LOSER, "confidence": 0.9, "created_at": OMIT,
+         "source_doc": _PASSK_LOSER_SOURCE},
+    ])
+    rows = yaml.safe_load((facts_root / "PassKeys" / "PassKeys-state.md")
+                           .read_text(encoding="utf-8").split("---")[1])["facts"]
+    winner_row = [r for r in rows if r["fact"] == _PASSK_UNATTRIBUTED][0]
+    assert "created_at" not in winner_row and "source_doc" not in winner_row, (
+        f"the fixture wrote the keys after all; the live row omits them: "
+        f"{sorted(winner_row)}")
+    loser_row = [r for r in rows if r["fact"] == _PASSK_LOSER][0]
+    assert "created_at" not in loser_row, (
+        f"the loser was meant to be attributed by source_doc alone: {sorted(loser_row)}")
+
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("PassKeys")          # must not raise KeyError
+    assert plan["contradictions"] >= 1, plan
+    assert plan["actions"] == [], plan["actions"]
 
 
 # ── 3. unified surface: remember / recall / forget ───────────────────────────

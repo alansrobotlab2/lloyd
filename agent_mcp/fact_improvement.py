@@ -21,10 +21,14 @@ with extra steps.
 Every action here therefore needs an independent reason *on top of* the
 detector's pairing:
 
-  confidence    the two sides' confidence differs by ≥ MIN_CONFIDENCE_GAP →
-                `fact_resolve`'s case. A smaller gap is extraction noise, and
-                on extracted facts confidence encodes capture kind, not truth
-                (#701), so the 0.9 < 0.95 pair condemns nothing.
+  confidence    the two sides' confidence differs by ≥ MIN_CONFIDENCE_GAP *and*
+                the higher side is attributable — carries `source_doc` or
+                `created_at`. A smaller gap is extraction noise, and on
+                extracted facts confidence encodes capture kind, not truth
+                (#701), so the 0.9 < 0.95 pair condemns nothing; and a row
+                carrying neither field beating one that carries either is the
+                extractor's default `1.0` beating a sourced claim (#1348), so
+                that pair is reported too, never acted on.
   created_at    one was written ≥ MIN_STALE_GAP_DAYS after the other, so the
                 older one is the one a later write superseded → expire it
   same day, same confidence → no basis. Reported, never acted on.
@@ -517,6 +521,38 @@ def _iso(value) -> datetime.datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=datetime.timezone.utc)
 
 
+def _has_attribution(fact: dict) -> bool:
+    """Whether one facts-view row can say where it came from.
+
+    Read with `.get()` and nothing else. `_read_facts_cached` returns the parsed
+    YAML entries verbatim, so a fact whose file never carried `created_at` or
+    `source_doc` is a dict with NO such key rather than one carrying `None`: the
+    2026-09-21 `pass@k` winner row (#1348) came back with keys `['category',
+    'confidence', 'entity', 'event_date', 'fact', 'id', 'provenance',
+    'source_file']` while its loser's carried both. `fact["created_at"]` raises
+    `KeyError` on the winner — the one row this guard exists to catch — and
+    `provenance` is no substitute for the field: both rows read `'EXTRACTED'`,
+    which is why the guard tests attribution and not provenance.
+    """
+    return bool(fact.get("source_doc")) or bool(fact.get("created_at"))
+
+
+def _unattributed_winner(winner: dict, loser: dict) -> bool:
+    """True when the higher-confidence row carries no evidence the lower one does.
+
+    Asymmetric on purpose, because the unattributed side is the majority class:
+    measured through `app.kg_store` on 2026-09-21, 204,706 of 321,252 active
+    rows carry neither `source_doc` nor `created_at`, and 162,175 of those sit at
+    confidence >= 0.95. A rule barring an unattributed row from winning at all
+    would suppress most of the actions this loop can take — the pass would report
+    every entity and plan nothing, which reads as a healthy night. Two rows
+    nobody can source are still decided on confidence, the only signal left to
+    decide on. What is refused here is the one-sided contest: a bare `1.0` with
+    no date and no source document demoting a claim that can name either.
+    """
+    return not _has_attribution(winner) and _has_attribution(loser)
+
+
 def _loser_by_age(f1: dict, f2: dict) -> tuple[dict, dict, str] | None:
     """Return (loser, winner, reason) when write order is evidence."""
     t1, t2 = _iso(f1.get("created_at")), _iso(f2.get("created_at"))
@@ -704,6 +740,19 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
                 # stays in `contradictions` and is reported (#701).
                 continue
             loser, winner = (f2, f1) if c1 > c2 else (f1, f2)
+            if _unattributed_winner(winner, loser):
+                # #1348. The winner's only advantage is a number, and the
+                # loser's is a file or a timestamp. On 2026-09-21 the pass's one
+                # planned action demoted `stat-009` — conf 0.9, `created_at`
+                # 2026-09-21T17:50:12Z, sourced to
+                # `knowledge/youtube/AI_Engineer/20260820-your-agent-evolved-
+                # your-evals-didnt-ameya-bhatawdekar-braintrust.md` — to a row at
+                # conf 1.0 whose `created_at` and `source_doc` are both NULL. A
+                # provenance-free row cannot win that contest on the bare
+                # comparison, so the pair yields no action and stays in
+                # `contradictions`, exactly as a sub-floor gap does (#701): "no
+                # basis to act" is not a verdict that the pair is agreeable.
+                continue
             kind = "confidence"
             reason = (f"{trigger}; contradiction detector paired it with "
                       f"{winner.get('fact', '')[:70]!r}; confidence "
