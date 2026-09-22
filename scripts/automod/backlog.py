@@ -980,11 +980,16 @@ def _write_item(path: Path, fm: dict, body: str) -> None:
     `_unparsed_guard`: it never parses, so it cannot tell a refused read from a
     good one. The invariant lives in its three callers instead — `amend_clause`,
     `settle_amendments` and `orphan_stale_amendments` each parse first, and each
-    raises or returns before reaching here when that parse yielded nothing: an
-    empty `fm` has no `acceptance_clauses` to amend (ValueError), no pending
-    amendment record to settle, and no stale amendment to orphan. That is why the
-    refusal guard sits on the five writers that dump straight back and this sink
-    still cannot destroy a front matter (#1020).
+    refuses before reaching here for a file that opens with a fence and parses to
+    no keys: `amend_clause` calls `_unparsed_guard` by name since #1349 let it
+    seed an empty `fm` from the ledger (before that, an empty `fm` had no
+    `acceptance_clauses` to amend and raised on its own), and the other two have
+    nothing to write — no pending amendment record to settle, no stale amendment
+    to orphan. A file with no opening fence at all is the one shape all three may
+    write, which is exactly what `_unparsed_guard` permits: a plain note a writer
+    may legitimately give front matter. That is why the refusal guard sits on the
+    five writers that dump straight back and this sink still cannot destroy a
+    front matter (#1020).
     """
     path.write_text(
         f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
@@ -999,14 +1004,36 @@ def amend_clause(item_id: int, clause: int, text: str, reason: str, *,
     did not mark `unsatisfiable`, an index off the list, empty text or
     reason, or a clause already amended and awaiting ratification. Returns
     the amendment record, state `pending`.
+
+    An item whose front matter holds no clauses is seeded from the source the
+    grader itself read — `acceptance_clauses_of` over the confirmed triage
+    event — and that seeded list is what lands on disk, so the index being
+    amended is the index the review rung graded (#1349). An item with no
+    clause from either source still refuses, and an item whose front matter
+    parsed to no keys is never rewritten from the ledger (#1020).
     """
     from scripts.automod import state as S
     ledger = ledger or S.LEDGER_PATH
     path = _item_path(item_id)
     if path is None:
         raise ValueError(f"no backlog item #{item_id} on disk")
-    fm, body = _split_frontmatter(path.read_text(encoding="utf-8"))
+    raw = path.read_text(encoding="utf-8")
+    fm, body = _split_frontmatter(raw)
     clauses = clean_clauses(fm.get("acceptance_clauses") or [])
+    seeded_from = ""
+    if not clauses:
+        if _unparsed_guard(path, raw, fm, "amend_clause"):
+            raise ValueError(f"item #{item_id} front matter parsed to no keys; refusing to "
+                             f"rebuild it from the ledger")
+        # The same route `review.item_contract` grades with. An item confirmed
+        # on prose acceptance has its contract in the ledger event and none on
+        # disk — `record_verdict` writes the parsed list only when it is
+        # non-empty — so reading front matter alone left the grader holding a
+        # clause the amendment route could not reach, and the refusal it
+        # issued unexecutable.
+        graded = acceptance_clauses_of(confirmed_verdicts(ledger).get(int(item_id)) or {}, fm)
+        if graded:
+            clauses, seeded_from = graded, "the confirmed triage acceptance"
     if not clauses:
         raise ValueError(f"item #{item_id} has no acceptance_clauses on disk to amend")
     try:
@@ -1037,7 +1064,10 @@ def amend_clause(item_id: int, clause: int, text: str, reason: str, *,
     log = list(fm.get("activity_log") or [])
     log.append(f"**{stamp}** — automod round {round_id} amended clause {idx} (review judged it "
                f"unsatisfiable; awaiting ratification by the next review). Was: {old} — Now: "
-               f"{text} — Reason: {reason}")
+               f"{text} — Reason: {reason}"
+               + (f" — The item held no `acceptance_clauses` on disk; the list was seeded from "
+                  f"{seeded_from}, the same route the review rung grades with, and the seeded "
+                  f"clause is what was replaced." if seeded_from else ""))
     fm["activity_log"] = log
     fm["updated"] = stamp
     _write_item(path, fm, body)

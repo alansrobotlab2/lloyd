@@ -447,6 +447,136 @@ def test_amend_writes_pending_and_the_next_review_ratifies_or_restores(isolated)
     assert B.settle_amendments(601, "SM_b", ratified=True) == [], "settled once"
 
 
+# ── a prose-only contract is still a contract the amender can see ─────────
+#
+# The review rung reads an item's clauses through `acceptance_clauses_of`
+# (front matter, then the confirmed triage event, then the prose acceptance as
+# one clause) while `amend_clause` read the front matter alone. An item
+# confirmed with prose acceptance and an empty parsed list — the shape
+# `record_verdict` writes when triage emits prose — therefore had a grader that
+# could see the clause and an amendment route that could not. Measured
+# 2026-09-21: 6 open confirmed items in that state (#527, #545, #682, #1012,
+# #1173, #1301), and on each one a review-rung `unsatisfiable` refusal on
+# clause 1 was unamendable, which made the round unlandable by construction
+# (#1349; round SM_20260921_204125 on #1012, whose gate.json literally says
+# "amend it with automod_amend_clause and gate again").
+
+PROSE_ACCEPTANCE = ("the survey must not read memory/facts/ and every source_file it "
+                    "emits must resolve on disk")
+PROSE_LETTERED = ("(a) the survey must not read memory/facts/; (b) every source_file it "
+                  "emits must resolve on disk")
+
+
+def _prose_only_confirmed(d: Path, item_id, *, prose=PROSE_ACCEPTANCE, parsed=()):
+    """An item with no `acceptance_clauses` in front matter, confirmed with
+    `acceptance_clauses: []` and prose — #1012's recorded shape."""
+    path = write_item(d, item_id)
+    S.append_event({"event": "backlog_triage", "item_id": item_id, "verdict": "confirmed",
+                    "acceptance": prose, "acceptance_clauses": list(parsed)},
+                   path=S.LEDGER_PATH)
+    return path
+
+
+def test_a_prose_only_clause_can_be_amended_and_seeds_the_front_matter(isolated):
+    """The grader's clause and the amender's clause become one list (#1349)."""
+    path = _prose_only_confirmed(isolated, 640)
+    graded = RV.item_contract(640)["clauses"]          # what the review rung reads
+    assert graded == [PROSE_ACCEPTANCE], "the prose fallback is one clause"
+    _unsat_review("SM_p", 640, 1)
+    rec = B.amend_clause(640, 1, "grep memory/facts/ -> 0, and every emitted source_file "
+                                 "resolves", "the graded arms are both human_clauses",
+                         round_id="SM_p")
+    assert rec["state"] == "pending" and rec["was"] == graded[0], "the seeded index is the graded index"
+    fm = _fm(path)
+    assert fm["acceptance_clauses"] == [rec["now"]], "the seeded list, entry 1 replaced"
+    assert B.pending_amendments(fm) == [rec]
+    assert "amended clause 1" in fm["activity_log"][-1]
+    # the next review reads the amended contract, not the prose it came from
+    after = RV.item_contract(640)["clauses"]
+    assert after == [rec["now"]] and PROSE_ACCEPTANCE not in " ".join(after)
+
+
+def test_seeding_writes_the_grader_s_whole_list_and_only_touches_the_amended_index(isolated):
+    """A lettered prose acceptance is TWO clauses to the grader; seeding must
+    land all of them, so the amended index stays the graded index."""
+    path = _prose_only_confirmed(isolated, 641, prose=PROSE_LETTERED)
+    graded = RV.item_contract(641)["clauses"]
+    assert len(graded) == 2, graded
+    _unsat_review("SM_p", 641, 1)
+    rec = B.amend_clause(641, 1, "grep memory/facts/ -> 0", "clause (a) is graded against a "
+                                                            "human-only arm", round_id="SM_p")
+    assert rec["was"] == graded[0]
+    fm = _fm(path)
+    assert fm["acceptance_clauses"] == [rec["now"], graded[1]]
+    assert RV.item_contract(641)["clauses"] == [rec["now"], graded[1]]
+
+
+def test_a_seeded_amendment_ratifies_or_restores_like_any_other(isolated):
+    """`settle_amendments` reads the on-disk list, so seeding is what lets a
+    refused amendment put the prose clause back (#1349 clause 3)."""
+    path = _prose_only_confirmed(isolated, 642, prose=PROSE_LETTERED)
+    graded = RV.item_contract(642)["clauses"]
+    _unsat_review("SM_p", 642, 2)
+    rec = B.amend_clause(642, 2, "every emitted source_file resolves", "narrowed to the "
+                                                                       "measurement half",
+                         round_id="SM_p")
+    assert rec["was"] == graded[1]
+    assert _fm(path)["acceptance_clauses"] == [graded[0], rec["now"]]
+    assert B.settle_amendments(642, "SM_p", ratified=False, note="weaker") == [2]
+    fm = _fm(path)
+    assert fm["acceptance_clauses"] == graded, "the graded clause restored, not lost"
+    assert fm["clause_amendments"][0]["state"] == "refused" and B.pending_amendments(fm) == []
+    _unsat_review("SM_q", 642, 2)
+    B.amend_clause(642, 2, "every emitted source_file resolves, pinned by test", "again",
+                   round_id="SM_q")
+    assert B.settle_amendments(642, "SM_q", ratified=True) == [2]
+    assert _fm(path)["acceptance_clauses"] == [graded[0], "every emitted source_file resolves, "
+                                                          "pinned by test"]
+
+
+def test_an_item_with_no_clause_from_either_source_still_refuses(isolated):
+    """The #1020 refusal survives: seeding may invent a contract that was never
+    confirmed, so an item with neither on-disk clauses nor prose refuses."""
+    no_prose = _prose_only_confirmed(isolated, 643, prose="none")
+    _unsat_review("SM_p", 643, 1)
+    with pytest.raises(ValueError, match="has no acceptance_clauses on disk to amend"):
+        B.amend_clause(643, 1, "anything", "because", round_id="SM_p")
+    never_confirmed = write_item(isolated, 644)
+    _unsat_review("SM_p", 644, 1)
+    with pytest.raises(ValueError, match="has no acceptance_clauses on disk to amend"):
+        B.amend_clause(644, 1, "anything", "because", round_id="SM_p")
+    assert "acceptance_clauses" not in _fm(no_prose)
+    assert "acceptance_clauses" not in _fm(never_confirmed)
+
+
+def test_seeding_never_rewrites_a_front_matter_that_parsed_to_no_keys(isolated):
+    """Seeding from the ledger makes `_write_item` reachable on an item whose
+    front matter failed to parse — the #1020 destruction shape. It refuses."""
+    path = _prose_only_confirmed(isolated, 645)
+    broken = ('---\nstatus: up_next\nacceptance_clauses: ["unterminated\n'
+              '---\n\n# A thing\n\nDo it.\n')
+    path.write_text(broken, encoding="utf-8")
+    _unsat_review("SM_p", 645, 1)
+    with pytest.raises(ValueError, match="parsed to no keys"):
+        B.amend_clause(645, 1, "anything", "because", round_id="SM_p")
+    assert path.read_text(encoding="utf-8") == broken, "the unparseable front matter stands"
+
+
+def test_the_amend_tool_reports_a_seeded_amendment_instead_of_the_error(isolated, tmp_path):
+    """The seam the refusal actually travels: the round calls
+    `automod_amend_clause`, the MCP tool binds the item from its run spec and
+    calls `amend_clause`. On a prose-only item that call answered with the
+    error #1349 is named for, inside the round that had no way to act on it."""
+    (S.ROUNDS_DIR / "SM_p").mkdir(parents=True)
+    (S.ROUNDS_DIR / "SM_p" / "run_spec.yaml").write_text(yaml.safe_dump(
+        {"code": {"base_commit": "b" * 40}, "item": {"id": 646}}))
+    _prose_only_confirmed(isolated, 646)
+    _unsat_review("SM_p", 646, 1)
+    out = T._amend_clause("SM_p", 1, "the measurement half alone", "both graded arms are human-only")
+    assert out.get("amended", {}).get("now") == "the measurement half alone", out
+    assert out["item_id"] == 646 and "Gate again" in out["next"]
+
+
 def test_decide_names_the_amend_tool_and_a_refused_amendment(tmp_path):
     parsed = RV.parse_review({"premise": "sound", "summary": "", "clauses": [
         {"clause": 1, "verdict": "unsatisfiable", "evidence_path": "", "evidence_line": 0,
