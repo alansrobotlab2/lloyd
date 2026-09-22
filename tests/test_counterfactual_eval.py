@@ -16,8 +16,8 @@ These tests pin the committed perturbation records (one per query, deterministic
 never re-derived from live graph data at eval time so a nightly diff stays a
 diff) and the two metric definitions.
 """
+import os
 import re
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -112,54 +112,298 @@ def test_cli_check_reports_no_drift():
     assert "records match the generator" in out.stdout, out.stdout
 
 
-def test_alias_resolver_indexes_the_distinct_canonical_row(tmp_path):
-    """`select distinct canonical` returns a ROW, not a string.
+# ── the --verify audit, over a real store ────────────────────────────────────
+#
+# Everything under this heading seeds a store; nothing here injects a dict. The
+# audit's entire job is to read the alias map, so a test that hands
+# `verify_siblings` a hand-written resolver proves nothing about the one
+# production uses — which is exactly how `--verify` shipped unable to run at
+# all: `select distinct canonical` returns a one-column ROW, `.lower()` on that
+# tuple raises AttributeError, and every sibling claim in this file rested on a
+# fake that cannot fail that way (#1046).
 
-    `{c.lower() for c in con.execute("select distinct canonical ...")}` calls
-    `.lower()` on a one-column tuple and raises AttributeError, so `--verify` —
-    the only audit of an entity swap's chosen sibling — had never run against a
-    real store. Every sibling claim in this file rested on `_resolver`, a
-    hand-written dict that cannot fail this way. Built on a real sqlite file
-    because the defect IS the row shape.
+#: An alias SURFACE row. Proves the resolver reads the aliases table at all,
+#: and certifies the `tts-voice-cloning` swap by its surface, not by its name.
+SEEDED_ALIAS = ("Piper TTS", "Piper Text-to-Speech")
+#: A canonical registered as an entity with NO alias row: the case the table
+#: alone cannot answer, and the case #762 measured as a manufactured label.
+SEEDED_ENTITY = "Groundskeeper Research"
+#: The two committed swaps those two rows certify, in the order the store
+#: reaches them.
+SEEDED_VERIFIED = ("tts-voice-cloning", "research-queue-to-vault-note")
+
+
+def _entity_axis_records():
+    return [r for r in cf.load_records(RECORDS).values()
+            if r["axis_changed"] == cf.ENTITY_AXIS]
+
+
+def _verify_store(tmp_path, *, alias=SEEDED_ALIAS, entity=SEEDED_ENTITY):
+    """A real, seeded knowledge store, installed as the process default.
+
+    `kg_store.configure` is the provisioning route — it creates the schema,
+    which `store()` deliberately refuses to do for an absent path (#1236) — and
+    conftest's `_isolate_default_store` restores the default path afterwards, so
+    repointing the process default is the documented pattern for wanting a store
+    (tests/test_api_contracts.py:551). This is what lets `main(["--verify"])`
+    audit a graph this file controls: the derived store lives under `_pipeline/`
+    and is gitignored, so it is absent from a self-modification worktree, and
+    the fallback this test used to reach for built a one-table sqlite file no
+    `store()` would ever open.
     """
-    db = tmp_path / "kg.sqlite"
-    con = sqlite3.connect(db)
-    con.execute("create table aliases (surface_lc text, canonical text)")
-    con.executemany("insert into aliases values (?, ?)",
-                    [("thunderbird mcp", "Thunderbird Service"),
-                     ("qwen3-tts", "Qwen3-TTS")])
-    con.commit()
-    con.close()
-    resolve = cf.alias_resolver(db)
-    assert resolve("thunderbird mcp") == "Thunderbird Service"   # via a surface row
-    assert resolve("Qwen3-TTS") == "Qwen3-TTS"                   # via the canonical set
+    from app import kg_store
+
+    db = kg_store.configure(tmp_path / "kg.sqlite")
+    if alias:
+        db.aliases.set(alias[0], alias[1], kind="manual", origin="test")
+    if entity:
+        db.entities.register(entity)
+    return db
+
+
+def _seeded_store_file(path, *, alias=SEEDED_ALIAS, entity=SEEDED_ENTITY):
+    """Provision and seed a store at `path`, then close it so a child owns it.
+
+    `KGStore(path)` is the provisioning constructor — the same one
+    tests/test_kg_store.py:27 builds its `db` fixture with — as opposed to
+    `store()`, which refuses to invent a schema (#1236).
+    """
+    from app.kg_store import KGStore
+
+    db = KGStore(path)
+    if alias:
+        db.aliases.set(alias[0], alias[1], kind="manual", origin="test")
+    if entity:
+        db.entities.register(entity)
+    db.close()
+    return path
+
+
+def _run_verify_script(store):
+    """One real `python eval/counterfactual.py --verify` process.
+
+    `LLOYD_KG_DB` (`app/paths.py:49`) is the documented override for the store
+    path, which is what makes the child deterministic: the derived store under
+    `_pipeline/` is gitignored, so it exists in the main checkout and not in a
+    self-modification worktree, and pointing the child at a file this test wrote
+    means the same assertions hold in both trees.
+    """
+    env = dict(os.environ)
+    if store is not None:
+        env["LLOYD_KG_DB"] = str(store)
+    return subprocess.run([sys.executable, str(GENERATOR), "--verify"],
+                          capture_output=True, text=True, timeout=600, env=env)
+
+
+def _store_where_every_swap_resolves(tmp_path):
+    """A store holding one entity per entity-axis `new_value`, so every
+    swapped-in value is a registered canonical and the audit has nothing to
+    flag — the shape the live store measures today (39 entity-axis pairs,
+    0 unverified, `all_lower()` 27,428 entries, read 2026-09-22)."""
+    db = _verify_store(tmp_path, alias=None, entity=None)
+    for rec in _entity_axis_records():
+        db.entities.register(rec["new_value"])
+    return db
+
+
+def test_no_script_under_eval_opens_the_knowledge_store_file():
+    """`eval/` reaches the graph through `app.kg_store`, never through sqlite3.
+
+    The rule is stated in CLAUDE.md — "Nothing opens the store except
+    `app.kg_store`" — and `--verify` was the last violator: it opened
+    `VAULT_KG_DB` read-only and hand-queried `aliases`. Living that close to raw
+    sqlite is what let one expression — `.lower()` over a one-column ROW instead
+    of the row's field — raise AttributeError on every invocation from the file's
+    first commit (`af1e8c1`, 2026-09-09) until an unrelated gold-set commit
+    hand-indexed it (`98fa216b`, 2026-09-20), with the suite green throughout:
+    no test called the production resolver. Going through the store is also what
+    makes an absent derived store raise `StoreUnavailable` rather than answer
+    zero rows (#1236), so a missing build can never read as a clean audit.
+    """
+    scanned = sorted((p, p.read_text()) for p in (ROOT / "eval").rglob("*.py"))
+    # Denominator first. An empty or renamed `eval/` would leave `offenders`
+    # empty and the assertion below green — a scan whose zero cannot be
+    # distinguished from "the scan saw nothing" is no verdict, so the file this
+    # rule is about has to be among what the scan read.
+    assert "counterfactual.py" in [p.name for p, _ in scanned], scanned
+    offenders = [p.name for p, text in scanned
+                 if "import sqlite3" in text or "sqlite3.connect" in text]
+    assert offenders == [], f"{offenders} open the knowledge store directly"
+    # And the predicate is not vacuous: the module that owns the boundary trips
+    # it, through a different path than the one under audit.
+    kg_text = (ROOT / "app" / "kg_store.py").read_text()
+    assert "import sqlite3" in kg_text or "sqlite3.connect" in kg_text
+
+
+def test_alias_resolver_resolves_a_surface_and_a_canonical_with_no_row(tmp_path):
+    """The production resolver, end-to-end over a seeded store — no fake.
+
+    Both legs of `aliases.all_lower()` have to work, because the audit needs
+    both: a registered alias SURFACE resolves to its canonical, and a canonical
+    with no alias row at all resolves to ITSELF. The second leg is the reason
+    the resolver reads the store's map instead of the `aliases` table — that
+    table stores variant surfaces, so an entity nobody ever aliased is simply
+    absent from it, and a table-only resolver calls it unknown. #762 measured
+    that false negative inventing an `entity_swap_seed_set_unchanged` label for
+    `qmd`, whose five surfaces are all entities with no alias row. Case and
+    surrounding whitespace still fold, and an unknown name is still None.
+    """
+    db = _verify_store(tmp_path)
+    assert db.aliases.for_canonical(SEEDED_ENTITY) == []      # the premise: no row
+    resolve = cf.alias_resolver()
+    assert resolve(SEEDED_ALIAS[0]) == SEEDED_ALIAS[1]        # via the surface row
+    assert resolve(SEEDED_ENTITY) == SEEDED_ENTITY            # via entities.name
+    assert resolve(f"  {SEEDED_ENTITY.lower()}\n") == SEEDED_ENTITY
     assert resolve("no such thing") is None
+    assert resolve("") is None
 
 
 def test_verify_siblings_reaches_a_verdict_on_the_committed_corpus(tmp_path):
-    """The audit runs, and returns 0 unverified swaps, on the real alias table.
+    """The audit runs to a verdict of ZERO over the committed corpus.
 
-    With the resolver fixed, every entity-axis record must name a swapped-in
-    value that is a DISTINCT canonical — the risk-1 rule #537 spells out for
-    exactly these labels. Falls back to a hand-built store when the derived
-    knowledge store is absent, so the assertion is about the code path rather
-    than the build; the entity swaps in the committed corpus are the ones the
-    fallback store cannot vouch for, and it says so by being named here.
+    With one entity registered per entity-axis `new_value`, every swapped-in
+    value is a canonical and each resolves to one its `old_value` does not — the
+    risk-1 rule #537 spells out for exactly these labels, and the verdict the
+    live store returns today (39 entity-axis pairs, 0 unverified, read
+    2026-09-22). This test used to read `cf.kg_db_path()` and, when the derived
+    store was absent — always, inside a worktree — fall back to hand-writing a
+    one-table sqlite file; the audit now reads the store, so the store is what
+    the test seeds.
     """
-    db = cf.kg_db_path()
-    if not db.exists():
-        db = tmp_path / "kg.sqlite"
-        con = sqlite3.connect(db)
-        con.execute("create table aliases (surface_lc text, canonical text)")
-        con.executemany("insert into aliases values (?, ?)",
-                        [(cf._norm(r["new_value"]), r["new_value"])
-                         for r in cf.load_records(RECORDS).values()
-                         if r["axis_changed"] == cf.ENTITY_AXIS])
-        con.commit()
-        con.close()
-    recs = list(cf.load_records(RECORDS).values())
-    unverified = cf.verify_siblings(recs, cf.alias_resolver(db))
+    _store_where_every_swap_resolves(tmp_path)
+    unverified = cf.verify_siblings(list(cf.load_records(RECORDS).values()),
+                                    cf.alias_resolver())
     assert [r["id"] for r in unverified] == [], unverified
+
+
+def test_verify_cli_prints_a_verdict_over_a_seeded_store(tmp_path, capsys):
+    """`main(["--verify"])` prints its verdict line and exits 1 — it used to raise.
+
+    Seeded PARTIALLY — two swaps certified, the rest unresolvable — so the
+    printed fraction is the store's answer and not a tautology. Both the exit
+    code and the `N of M entity-axis pairs unverified against <db>` line are the
+    contract: the AttributeError at the old resolver meant neither was ever
+    printed, against any store, from the day the file landed.
+    """
+    db = _verify_store(tmp_path)
+    rc = cf.main(["--verify"])
+    out = capsys.readouterr().out
+    verdict = re.fullmatch(
+        r"(\d+) of (\d+) entity-axis pairs unverified against (.*)",
+        out.strip().splitlines()[-1])
+    assert verdict, out
+    n_unverified, n_pairs, against = verdict.groups()
+    all_ids = {r["id"] for r in _entity_axis_records()}
+    assert int(n_pairs) == len(all_ids)
+    assert int(n_unverified) == len(all_ids) - len(SEEDED_VERIFIED)
+    assert Path(against) == db.path
+    assert sorted(re.findall(r"UNVERIFIED ([\w-]+):", out)) == sorted(
+        all_ids - set(SEEDED_VERIFIED)), out
+    assert rc == 1, out
+
+
+def test_verify_as_a_script_resolves_through_the_store(tmp_path):
+    """One REAL `python eval/counterfactual.py --verify`, over a store it did not pick.
+
+    This is the boundary the in-process calls cannot reach. Run as a script the
+    file has `sys.path[0] == eval/`, so `from app import kg_store` only works
+    because `_kg_store_module` inserts the repo root first — under pytest the
+    root is already on `sys.path`, so every `cf.main(["--verify"])` call passes
+    with or without that line. And `--verify` is only ever invoked as a script:
+    a whole-checkout grep finds no automated caller, so a broken import here is
+    the audit silently dying again, in the one shape anyone would use.
+
+    Same partial seed as the in-process test — two rows, so two swaps certify and
+    the rest do not — read by the child through `LLOYD_KG_DB`. A failure here
+    reads as a traceback or a `ModuleNotFoundError: app`, which is exactly the
+    class of death #1046 is about.
+    """
+    path = _seeded_store_file(tmp_path / "kg.sqlite")
+    out = _run_verify_script(path)
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert "Traceback" not in out.stderr, out.stderr
+    all_ids = {r["id"] for r in _entity_axis_records()}
+    verdict = re.fullmatch(
+        r"(\d+) of (\d+) entity-axis pairs unverified against (.*)",
+        out.stdout.strip().splitlines()[-1])
+    assert verdict, out.stdout
+    n_unverified, n_pairs, against = verdict.groups()
+    assert int(n_pairs) == len(all_ids)
+    assert int(n_unverified) == len(all_ids) - len(SEEDED_VERIFIED)
+    assert Path(against) == path, out.stdout
+    flagged = set(re.findall(r"UNVERIFIED ([\w-]+):", out.stdout))
+    assert flagged == all_ids - set(SEEDED_VERIFIED), out.stdout
+
+
+def test_verify_as_a_script_reports_an_absent_store_without_a_traceback(tmp_path):
+    """A store that is not there exits 2 with a sentence, not a stack.
+
+    The audit's other real-world state: `_pipeline/vault-derived/kg.sqlite` is
+    gitignored, so in a self-modification worktree — and on any machine where the
+    nightly rebuild has not run — it simply does not exist. The raw-connection
+    version answered that with `db.exists()` and a line of its own; the store
+    raises `StoreUnavailable` instead (#1236), because the connection route could
+    also invent an empty database and report 39 unverified pairs from a file that
+    was never built. So this pins both halves: `main` catches it and exits 2, and
+    nothing escapes as a traceback — an uncaught raise here would exit 1, the
+    same code the audit returns when it genuinely finds an unfair swap.
+    """
+    missing = tmp_path / "not-built" / "kg.sqlite"
+    out = _run_verify_script(missing)
+    assert "Traceback" not in out.stderr, out.stderr
+    assert out.returncode == 2, out.stdout + out.stderr
+    assert "no alias table to audit the siblings against" in out.stdout, out.stdout
+    assert "unverified against" not in out.stdout, out.stdout
+
+
+def test_verify_cli_exits_zero_when_every_swap_resolves(tmp_path, capsys):
+    """`0 of N … unverified` and exit 0 — the audit's quiet branch, also pinned.
+
+    Same route as the failing case above with a store that answers every
+    swapped-in value. Without it the only exit code anyone had ever seen from
+    `--verify` would be the loud one, and `return 1 if bad else 0` has two
+    halves.
+    """
+    _store_where_every_swap_resolves(tmp_path)
+    assert cf.main(["--verify"]) == 0
+    out = capsys.readouterr().out
+    assert re.search(r"^0 of \d+ entity-axis pairs unverified against ", out, re.M), out
+    assert "UNVERIFIED" not in out
+
+
+def test_verify_cli_count_is_the_store_backed_audit_count(tmp_path, capsys):
+    """--verify's number IS `verify_siblings` driven by `aliases.all_lower()`.
+
+    Same store, measured twice: once through the CLI, once here, with a resolver
+    built directly from `store().aliases.all_lower()` — the map, and the one
+    helper that binds a map to the resolver shape, not a re-typed copy of it, so
+    what this compares is the product and not a duplicate of it. The equality is only
+    worth pinning because a third resolver disagrees — one built from the
+    `aliases` table alone, surface_lc to canonical with no entity self-identity,
+    which is what the pre-fix resolver was. It loses
+    `research-queue-to-vault-note`: `Groundskeeper Research` is a registered
+    entity holding no alias row, so the table has nothing to answer with, and
+    #762 measured that exact gap manufacturing a label rather than a verdict.
+    """
+    db = _verify_store(tmp_path)
+    from app import kg_store
+
+    rc = cf.main(["--verify"])
+    out = capsys.readouterr().out
+    printed = int(re.match(r"(\d+) of ", out.strip().splitlines()[-1]).group(1))
+    assert rc == 1, out
+
+    recs = list(cf.load_records(RECORDS).values())
+    direct = {r["id"] for r in cf.verify_siblings(
+        recs, cf._resolver_from_map(kg_store.store().aliases.all_lower()))}
+    assert printed == len(direct)
+    assert direct == {r["id"] for r in cf.verify_siblings(
+        recs, cf.alias_resolver())}, "the CLI and the store disagree on the same file"
+
+    table_only = {r["surface_lc"]: r["canonical"] for r in db.aliases.rows()}
+    only_table = {r["id"] for r in cf.verify_siblings(
+        recs, lambda name: table_only.get((name or "").strip().lower()))}
+    assert only_table == direct | {SEEDED_VERIFIED[1]}, (direct, only_table)
 
 
 def test_a_scored_run_reports_counterfactual_n_over_the_whole_corpus(monkeypatch):

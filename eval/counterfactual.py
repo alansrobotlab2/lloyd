@@ -33,6 +33,7 @@ retrieved projection is built from fact/graph entity attributions and fact text;
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import yaml
@@ -120,10 +121,17 @@ PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
                             ["Entity Graph"], ["autonomy"]),
     "lloyd-vllm-rel": ("entity", "vLLM", "TensorRT-LLM",
                        ["TensorRT-LLM"], ["lloyd"]),
-    # An alias-table normalization pair: 'autonomy pipeline' and 'Data Pipeline'
-    # are both live surfaces for Autonomy Data Pipeline. If retrieval cannot tell
-    # the two surfaces apart, the seed set does not move — and that is the
-    # identity-keying result, not a broken perturbation.
+    # NOT an alias-table normalization pair — the live table says so, which is why
+    # this comment was rewritten on 2026-09-22 (it used to claim both surfaces
+    # routed to `Autonomy Data Pipeline`). Through `aliases.all_lower()` today:
+    # 'data pipeline' is the surface of its OWN canonical `Data Pipeline`, and
+    # 'autonomy pipeline' is a surface of TWO canonicals — `Autonomy Data
+    # Pipeline` (row created 2026-09-10) and `Autonomy Pipeline` (created
+    # 2026-09-04) — and `all_lower()` keeps the earliest-created row, so it
+    # resolves to `Autonomy Pipeline`. So the swap crosses two canonicals, which
+    # is what `--verify` certifies (a swapped-in value that resolves, to a
+    # canonical different from the old one's), and the seed set staying put is
+    # the identity-keying result, not a broken perturbation.
     #
     # #763 clause 2: the pinned leg is dropped, because it was the rater's false
     # alarm. "autonomy" came from `expect_entities`, never from anything the
@@ -456,35 +464,63 @@ def verify_siblings(records: list[dict], resolve) -> list[dict]:
     return bad
 
 
-def alias_resolver(db_path: Path) -> callable:
-    """surface -> canonical, or identity when the name IS a canonical.
+def _kg_store_module():
+    """`app.kg_store`, imported lazily.
 
-    The alias table stores variant surfaces, so a canonical that has no variant
-    is not present as a surface row — resolving through the table alone reports
-    'Knowledge Graph' as unknown. That false negative is what made the first
-    version of this audit flag all eight entity swaps as unverified.
-
-    `select distinct canonical` returns a one-column ROW, so the canonical set
-    has to index it. Reading the row itself calls `.lower()` on a tuple and
-    raises AttributeError, which is why `--verify` had never once run against a
-    real store: the audit that is the ONLY check on an entity swap's chosen
-    sibling could not be invoked at all, and every `verify_siblings` claim in
-    this file's tests was made against a hand-written resolver instead.
+    This file is run BOTH as a script (`python eval/counterfactual.py --verify`,
+    where `sys.path[0]` is `eval/` and `app` is unimportable) and imported as
+    `eval.counterfactual` by `run_eval`, so the repo root is not on `sys.path`
+    at import time. It is the same dance the `kg_db_path` helper used to do to
+    reach `app.paths.VAULT_KG_DB`; that helper is gone now (removed with #1046)
+    because the audit asks the store for its path instead of computing one.
     """
-    import sqlite3
+    if str(HERE.parent) not in sys.path:
+        sys.path.insert(0, str(HERE.parent))
+    from app import kg_store
 
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    surfaces = {s.lower(): c for s, c in
-                con.execute("select surface_lc, canonical from aliases")}
-    canonicals = {row[0].lower() for row in
-                  con.execute("select distinct canonical from aliases")}
-    con.close()
+    return kg_store
 
+
+def _resolver_from_map(surfaces: dict[str, str]) -> callable:
+    """Bind one surface->canonical map into the resolver shape `verify_siblings` takes."""
     def resolve(name: str):
-        key = (name or "").strip().lower()
-        return surfaces.get(key) or (name if key in canonicals else None)
+        return surfaces.get((name or "").strip().lower())
 
     return resolve
+
+
+def alias_resolver() -> callable:
+    """surface -> canonical, from the store's own map (`aliases.all_lower()`).
+
+    `all_lower()` is surface_lc -> canonical **plus every `entities.name` mapped
+    to itself**, which closes the gap that made the first version of this
+    resolver go around the table: the `aliases` table stores variant surfaces, so
+    a canonical no alias row names is present nowhere in it, and a resolver built
+    on that table alone calls such a name unknown. That is not hypothetical —
+    `QMD Reranker`, `QMD Storage`, `qmd watcher`, `QMD memory search` and
+    `QMD Search Pipeline Optimization` are each a registered entity holding zero
+    alias rows (re-checked through `store()` on 2026-09-22), which is how #762
+    measured a table-only resolver manufacturing an
+    `entity_swap_seed_set_unchanged` label for `qmd` out of a seed set that had
+    in fact moved. This function's first docstring gave a different example —
+    that the table reports 'Knowledge Graph' as unknown — and that one is no
+    longer true, since `knowledge graph` is a surface row today; the no-alias-row
+    case above is what remains, and it is enough.
+
+    Reading the store's dict is also what makes the old defect unrepresentable.
+    `select distinct canonical` returns a one-column ROW, and `.lower()` on that
+    tuple raised AttributeError: from this file's first commit (`af1e8c1`,
+    2026-09-09) until `98fa216b` (2026-09-20) hand-indexed the row, `--verify` —
+    the ONLY audit of an entity swap's chosen sibling — could not be invoked at
+    all, and every `verify_siblings` claim in this file's tests had rested on a
+    hand-written resolver that cannot fail that way.
+
+    Going through `app.kg_store` rather than opening the file is the stated
+    boundary — "Nothing opens the store except `app.kg_store`" — and it is what
+    makes an absent derived store raise `StoreUnavailable` instead of reading as
+    an empty alias table (#1236).
+    """
+    return _resolver_from_map(_kg_store_module().store().aliases.all_lower())
 
 
 # ── scoring ──────────────────────────────────────────────────────────────────
@@ -621,18 +657,6 @@ def identity_keying_evidence(labelled: list[dict]) -> list[str]:
             if row.get("label") == "entity_swap_seed_set_unchanged"]
 
 
-def kg_db_path() -> Path:
-    """The store the scored run actually read — the same ``VAULT_KG_DB``
-    run_eval records in corpus_provenance, so an audit never runs against a
-    different graph than the numbers it is checking."""
-    import sys
-
-    sys.path.insert(0, str(HERE.parent))
-    from app.paths import VAULT_KG_DB
-
-    return Path(VAULT_KG_DB)
-
-
 def main(argv: list[str]) -> int:
     specs = yaml.safe_load((HERE / "vault_recall_queries.yaml").read_text())["queries"]
     if "--write" in argv:
@@ -641,19 +665,25 @@ def main(argv: list[str]) -> int:
         print(f"wrote {RECORD_PATH} ({len(records)} records)")
         return 0
     if "--verify" in argv:
-        db = kg_db_path()
-        if not db.exists():
-            print(f"no alias table at {db} — cannot audit the siblings")
+        kg_store = _kg_store_module()
+        try:
+            # The store the scored run reads: `app.kg_store.store()` is the
+            # process default over `app.paths.VAULT_KG_DB`, the same
+            # ``VAULT_KG_DB`` run_eval records in corpus_provenance, so an audit
+            # never runs against a different graph than the numbers it checks.
+            kg = kg_store.store()
+        except kg_store.StoreUnavailable as exc:
+            print(f"no alias table to audit the siblings against: {exc}")
             return 2
         recs = list(load_records().values())
         entity_axis = [r for r in recs if r.get("axis_changed") == ENTITY_AXIS]
-        bad = verify_siblings(recs, alias_resolver(db))
+        bad = verify_siblings(recs, _resolver_from_map(kg.aliases.all_lower()))
         for rec in bad:
             print(f"  UNVERIFIED {rec['id']}: {rec['old_value']!r} -> "
                   f"{rec['new_value']!r} — the swapped-in value is not a "
                   "distinct canonical in the alias table")
         print(f"{len(bad)} of {len(entity_axis)} entity-axis pairs unverified "
-              f"against {db}")
+              f"against {kg.path}")
         return 1 if bad else 0
     if "--check" in argv:
         built = {r["id"]: r for r in build_perturbations(specs)}
@@ -680,5 +710,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    import sys
     raise SystemExit(main(sys.argv[1:]))
