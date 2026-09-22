@@ -35,7 +35,9 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import socket
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +50,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.harness import tool_search_cache  # noqa: E402
 from app.harness.options import RunOptions  # noqa: E402
+from agent_mcp import _tool_sandbox as S  # noqa: E402
 
 _EVAL_PATH = ROOT / "eval" / "run_preserve_thinking_eval.py"
 
@@ -726,4 +729,159 @@ def test_delta_against_a_zero_denominator_is_not_a_crash():
     """
     assert pt._delta_cell(5, 0) == "n/a"
     assert pt._delta_cell(12, 10) == "+20.0%"
+
+
+# ── the trial's session id is sandboxed, and the driver says so ──────────────
+#
+# A trial replays real recorded prompts with the live toolbox, and
+# `app/harness/mcp_pool.py:488-489` stamps `RunOptions.session_id` into the
+# `lloyd/session_id` of every tool call's `_meta` — the value
+# `agent_mcp/main.py:476` feeds to `is_sandboxed_session`. Before #1333 the id
+# was an inline f-string covered only by a hand-typed literal elsewhere in the
+# suite, and the driver never asked whether its own id was sandboxed. These tests
+# pin the mint, the value handed to `RunOptions`, and the fail-closed refusal.
+
+
+def test_the_mint_carries_the_sandboxed_prefix_and_a_fresh_stamp():
+    """The driver mints `pt-eval-<keep>-<epoch seconds>`, and the predicate says yes.
+
+    `SANDBOXED_TRIAL_ID_PREFIX` is the driver's only copy of the prefix: change
+    it to `pte-` and `tests/test_tool_sandbox.py::
+    test_the_eval_driver_mints_ids_the_aggregator_sandboxes` goes red, which is
+    what #1333 was filed to make true.
+    """
+    sid = pt.new_trial_session_id(6, now=1789400000.9)
+    assert sid == f"{pt.SANDBOXED_TRIAL_ID_PREFIX}6-1789400000"
+    assert sid == "pt-eval-6-1789400000"
+    assert S.is_sandboxed_session(sid) is True
+
+
+def test_the_mint_stamps_the_arm_and_the_clock():
+    """The id names the arm and the second, so a printed row stays traceable.
+
+    `now` is injectable because the stamp is whole seconds: two mints inside one
+    second are the same id by construction, exactly as under the inline f-string
+    this helper replaced, so the honest claim about the clock is that moving it
+    moves the id — and that the production call (no `now`) reads the wall clock
+    at all. Same-second collision is recorded on #1333, not fixed here.
+    """
+    assert pt.new_trial_session_id(0, now=1789400000.0) == "pt-eval-0-1789400000"
+    assert pt.new_trial_session_id(6, now=1789400000.9) == "pt-eval-6-1789400000"
+    assert pt.new_trial_session_id(6, now=1789400001.0) != \
+        pt.new_trial_session_id(6, now=1789400000.0)
+
+    stamp = int(pt.new_trial_session_id(6).rsplit("-", 1)[1])
+    assert abs(stamp - time.time()) < 60, "the production mint ignored the clock"
+
+
+def test_the_guard_passes_the_id_through_and_refuses_everything_else():
+    """The sandboxed mint returns itself; anything else raises, naming the list.
+
+    The refusal has to quote `SANDBOXED_ID_PREFIXES` because a run that trips it
+    is mid-invocation with no other clue about which side moved.
+    """
+    sid = pt.new_trial_session_id(6)
+    assert pt.require_sandboxed_trial_session(sid) == sid
+
+    for unsandboxed in ("pte-6-1789400000", "6-1789400000", "pt_eval_6_1", ""):
+        with pytest.raises(RuntimeError) as excinfo:
+            pt.require_sandboxed_trial_session(unsandboxed)
+        msg = str(excinfo.value)
+        assert "refusing to start a trial" in msg, unsandboxed
+        for prefix in S.SANDBOXED_ID_PREFIXES:
+            assert prefix in msg, f"{unsandboxed!r} refused without naming {prefix!r}"
+
+
+def test_the_guard_never_asks_a_socket_or_a_state_url(monkeypatch):
+    """The refusal needs no aggregator: `is_sandboxed_session` is arithmetic.
+
+    This is what keeps the two `pt.main()` CLI tests green untouched — a check
+    that phoned the aggregator first would have to be monkeypatched in each of
+    them, the way `tests/test_bench_invariants.py:312` does for the bench
+    runner's `require_tool_sandbox`, which asks a live server whether the
+    sandbox is enforced.
+    """
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("the sandbox guard reached for a socket")
+
+    monkeypatch.setattr(socket.socket, "connect", no_network)
+    monkeypatch.setattr(socket, "create_connection", no_network)
+    monkeypatch.setattr(socket, "getaddrinfo", no_network)
+    pt.require_sandboxed_trial_session(pt.new_trial_session_id(6))
+    with pytest.raises(RuntimeError):
+        pt.require_sandboxed_trial_session("pte-6-1789400000")
+
+
+def test_an_unsandboxed_mint_refuses_the_trial_before_the_engine_runs(monkeypatch):
+    """Move the prefix and the trial dies naming the guard — never measures.
+
+    The incident of #1333 driven at the driver: patch
+    `SANDBOXED_TRIAL_ID_PREFIX` to `pte-` and the mint leaves
+    `SANDBOXED_ID_PREFIXES`, so `_one_run` must refuse with the offending id and
+    the accepted list in hand rather than replay the recorded prompts with the
+    live toolbox. `engine.requests == []` is the part that matters: nothing
+    reached the model, so nothing was measured under an unsandboxed toolbox.
+    """
+    monkeypatch.setattr(pt, "SANDBOXED_TRIAL_ID_PREFIX", "pte-")
+    engine = _script_engine(monkeypatch)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(pt._one_run(keep=6, max_turns=8, followup_max_turns=3))
+
+    msg = str(excinfo.value)
+    assert "refusing to start a trial" in msg, msg
+    assert "pte-6-" in msg, msg                        # the mint that tripped it
+    for prefix in S.SANDBOXED_ID_PREFIXES:
+        assert prefix in msg, f"refusal did not name {prefix!r}: {msg}"
+    assert engine.requests == [], "a refused trial still reached the engine"
+
+
+def test_the_id_the_guard_blessed_is_the_id_the_harness_receives(monkeypatch):
+    """The value the sandbox tests pin is the value `RunOptions` carries.
+
+    Clause 2 is about `RunOptions.session_id`, not about a string that merely
+    looks alike: `_build_pool(options)` is what `run_query` calls, and
+    `mcp_pool.py:488-489` reads that same field into `_meta`, so a spy there
+    records what a real CLI trial actually handed the harness. The id it saw is
+    the same object `require_sandboxed_trial_session` was asked about — identity,
+    not equality — so no second mint can hide between the guard and the run.
+    """
+    import app.harness.loop as loop
+
+    engine = _script_engine(monkeypatch, per_trial=True)
+
+    blessed: list[str] = []
+    handed: list[str] = []
+
+    real_require = pt.require_sandboxed_trial_session
+
+    def spy_require(session_id: str) -> str:
+        out = real_require(session_id)
+        blessed.append(session_id)
+        return out
+
+    real_build_pool = loop._build_pool       # the scripted fake, installed above
+
+    async def spy_build_pool(options: RunOptions):
+        handed.append(options.session_id)
+        return await real_build_pool(options)
+
+    monkeypatch.setattr(pt, "require_sandboxed_trial_session", spy_require)
+    monkeypatch.setattr(loop, "_build_pool", spy_build_pool)
+    monkeypatch.setattr(sys, "argv", [
+        "run_preserve_thinking_eval.py", "--trials", "1", "--keep", "6",
+        "--carry-all", "999"])
+
+    assert asyncio.run(pt.main()) == 0, "the CLI exited non-zero"
+
+    # Three arms (keep 0, 6, carry-all 999), two turns each, one mint per trial.
+    assert len(blessed) == 3, blessed
+    assert len(handed) == 6, handed
+    assert set(handed) == set(blessed), f"{handed} vs {blessed}"
+    for sid in handed + blessed:
+        assert sid.startswith(pt.SANDBOXED_TRIAL_ID_PREFIX), sid
+        assert S.is_sandboxed_session(sid) is True, sid
+    assert handed[0] is blessed[0]
+    assert engine.requests, "the scripted engine never ran, so the spy proves nothing"
 

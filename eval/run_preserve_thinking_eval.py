@@ -243,6 +243,57 @@ async def _run_turn(run_query, options, *, expect_user_message: str) -> dict:
     }
 
 
+#: The one place this driver's session-id shape is written. A trial replays
+#: real recorded prompts with the live toolbox, and `app/harness/mcp_pool.py`
+#: stamps `RunOptions.session_id` into the `lloyd/session_id` of every tool
+#: call's `_meta`, where the aggregator decides sandboxing from the prefix alone
+#: (`agent_mcp/main.py:476`, `agent_mcp/_tool_sandbox.py:54`). An id minted
+#: without this prefix is therefore not a cheaper trial — it is a measurement run
+#: holding the full write surface. `tests/test_tool_sandbox.py` pins it through
+#: `new_trial_session_id` (#1333).
+SANDBOXED_TRIAL_ID_PREFIX = "pt-eval-"
+
+
+def new_trial_session_id(keep: int, *, now: float | None = None) -> str:
+    """The session id one trial runs under: `pt-eval-<keep>-<epoch seconds>`.
+
+    A named module-level mint rather than an inline f-string so the id a test
+    asserts the aggregator sandboxes is the id a trial actually uses. `now` is
+    injectable for callers that need a deterministic id; production callers omit
+    it and get the wall clock.
+    """
+    ts = int(time.time() if now is None else now)
+    return f"{SANDBOXED_TRIAL_ID_PREFIX}{keep}-{ts}"
+
+
+def require_sandboxed_trial_session(session_id: str) -> str:
+    """Refuse to run a trial the aggregator would not sandbox.
+
+    The local backstop to the prefix pin in `tests/test_tool_sandbox.py`: it
+    asks the aggregator's own predicate, so the driver cannot start a trial the
+    matcher has since stopped matching — which is the exact failure this driver
+    had, where the id could move out of the list and nothing said so.
+
+    Deliberately local. `is_sandboxed_session` is a pure function over the id, so
+    this reaches no aggregator and no state URL: unlike the bench runner's
+    `require_tool_sandbox` (`scripts/autoresearch/bench_runner_sdk.py:247`), which
+    asks the running aggregator whether the sandbox is enforced and so cannot run
+    where the aggregator is down, this one fails closed on its own.
+    """
+    from agent_mcp._tool_sandbox import SANDBOXED_ID_PREFIXES, is_sandboxed_session
+
+    if not is_sandboxed_session(session_id):
+        raise RuntimeError(
+            f"refusing to start a trial with session id {session_id!r}: the "
+            f"aggregator sandboxes only ids matching the prefix list "
+            f"{list(SANDBOXED_ID_PREFIXES)} (or a recorded `bench` background "
+            f"slug), and this driver replays real recorded prompts with the live "
+            f"toolbox. Fix SANDBOXED_TRIAL_ID_PREFIX here, or the prefix list in "
+            f"agent_mcp/_tool_sandbox.py — but do not run the trial unsandboxed."
+        )
+    return session_id
+
+
 async def _one_run(*, keep: int, max_turns: int,
                    followup_max_turns: int = 6, capture: bool = False) -> dict:
     """One trial: a two-turn session with the knob set to `keep`.
@@ -269,7 +320,10 @@ async def _one_run(*, keep: int, max_turns: int,
     chat: list[dict[str, Any]] = []
     requests: list[dict[str, Any]] = []
     state = {"turn": 1}
-    session_id = f"pt-eval-{keep}-{int(time.time())}"
+    # Minted once per trial, through the module-level helper, so the id the
+    # sandboxing test pins is the id `_options` hands to `RunOptions` and
+    # therefore the id `mcp_pool` stamps into `_meta` (#1333).
+    session_id = require_sandboxed_trial_session(new_trial_session_id(keep))
 
     # #1136: this eval registers the real Lloyd MCP servers, so its trial can
     # call a tier-2 sender exactly as a production turn can, and it ran with

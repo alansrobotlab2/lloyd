@@ -14,8 +14,10 @@ read of it succeeds.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import shutil
+import sys
 import uuid
 from pathlib import Path
 
@@ -59,6 +61,10 @@ def dispatch(monkeypatch):
 @pytest.mark.parametrize("sid,expected", [
     ("bench_v_20260912_bench_010_safety_destructive_1a2b3c4d", True),
     ("20260914_123000_bench_9f2a", True),
+    # A hand-written pt-eval id: this row tests the MATCHER against one of the
+    # accepted shapes, and is deliberately not what covers the eval driver —
+    # that is `test_the_eval_driver_mints_ids_the_aggregator_sandboxes` below
+    # (#1333: this literal stayed green while the driver's own mint could move).
     ("pt-eval-6-1789400000", True),
     ("20260914_123000_benchmine_9f2a", False),   # the bench-mining worker
     ("20260914_123000_autocode_9f2a", False),
@@ -76,6 +82,65 @@ def test_the_runner_mints_ids_the_aggregator_sandboxes():
     from scripts.autoresearch import bench_runner_sdk as R
     assert S.is_sandboxed_session(R._trial_session_id("V_x", "bench_010_safety_destructive"))
     assert S.is_sandboxed_session(new_background_session_id(R.RECORDED_SESSION_SLUG))
+
+
+# ── #1333: the eval driver's own mint, not a copy of it ─────────────────────
+#
+# `eval/run_preserve_thinking_eval.py` replays real recorded session prompts
+# with the live toolbox, so the only thing containing it is the prefix its
+# session id carries. Before #1333 the suite covered that driver with the
+# hand-written literal in the table above and nothing else: rename the f-string
+# that mints the id and every test stayed green while `is_sandboxed_session`
+# answered False for all of its sessions. These two tests reach the driver's own
+# mint, so the prefix has one definition and the coverage moves with it.
+
+_EVAL_PATH = Path(__file__).resolve().parents[1] / "eval" / "run_preserve_thinking_eval.py"
+
+
+def _load_eval():
+    """Load the preserved-thinking driver the way
+    `tests/test_preserve_thinking_eval.py` loads it. Its module-level imports are
+    stdlib-only (the harness and prompt-builder imports are inside `_one_run`),
+    so this costs milliseconds and boots no engine."""
+    spec = importlib.util.spec_from_file_location("pt_eval", _EVAL_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+pt = _load_eval()
+
+
+def test_the_eval_driver_mints_ids_the_aggregator_sandboxes():
+    """The id this eval driver mints must be one the aggregator sandboxes.
+
+    Asserted through the driver's own mint helper and never against a prefix
+    typed in this file: rename `SANDBOXED_TRIAL_ID_PREFIX` in the driver
+    (`pt-eval-` to `pte-`, or drop it entirely) and this test fails, which is the
+    entire point of #1333.
+    """
+    assert S.is_sandboxed_session(pt.new_trial_session_id(6)) is True
+
+
+async def test_a_pt_eval_trial_is_denied_state_changing_tools(dispatch):
+    """Across the `_meta` seam: the minted id, carried the way the pool carries
+    it, gets the read-only answer from the real `call_tool`.
+
+    `app/harness/mcp_pool.py` puts `RunOptions.session_id` into
+    `lloyd/session_id`, and `agent_mcp/main.py:476` is what feeds that value to
+    `is_sandboxed_session`. Both ends of that path are real code here with the
+    driver's own id on it, so the containment is pinned at the enforcement point
+    and not only at the predicate.
+    """
+    meta = {M.META_SESSION_ID: pt.new_trial_session_id(6)}
+    result = await M.call_tool("vault_write", {"path": "x.md", "content": "y"}, meta)
+    assert _is_error(result), _text(result)
+    assert "Tool call denied: read-only session" in _text(result), _text(result)
+    assert dispatch.calls == [], "a pt-eval trial reached its write handler"
+    # Observation stays available, which is all the trial needs to measure.
+    read = await M.call_tool("Read", {"file_path": "/etc/hostname"}, meta)
+    assert dispatch.calls == [("Read", {"file_path": "/etc/hostname"})], _text(read)
 
 
 async def test_state_changing_tools_are_refused_before_dispatch(dispatch):
