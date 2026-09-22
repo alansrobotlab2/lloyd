@@ -335,3 +335,186 @@ def test_dry_run_prints_the_drift_and_writes_no_file(monkeypatch, tmp_path, caps
     printed = capsys.readouterr().out
     assert "sessions" in printed
     assert "cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml" in printed
+
+
+# --- #1367: the unattended backfill refuses a corpus-wide re-embed -----------
+# Pending is counted *per configured model*: `getHashesNeedingEmbedding`
+# (qmd/src/store.ts:2561-2580) LEFT-JOINs on `model` + `embed_fingerprint`, not
+# on the content hash. Pointing `models: embed` in ~/.config/qmd/index.yml at a
+# different same-dimension model therefore makes every hash in the index read as
+# unembedded — measured read-only on the live index at triage: 10,798 pending
+# against 16,127 `documents` rows, i.e. 0.67 of the index and every active
+# distinct hash in it. The job used to turn that number straight into
+# `qmd embed --db ~/.cache/qmd/index.sqlite` with a 5400 s timeout, once a day,
+# unattended, beside the serving daemon (stopping the daemon is forbidden by
+# test_qmd_single_build.py). An interrupted run of that leaves two models'
+# vectors in `vectors_vec`, which is keyed `hash_seq` with no model column and
+# only catches a *dimension* change, so cosine search cannot tell them apart.
+# Ordinary pending is 0, 3 or 2 in the three most recent reports — three orders
+# of magnitude below the corpus-wide figure — which is why a fraction of the
+# index size is the right shape for a cap and why the cap must not be tuned down
+# toward the ordinary case.
+
+#: Pending the moment `models: embed` names a different model: every active
+#: distinct hash in the live index (triage 2026-09-22; re-measure before citing).
+CORPUS_WIDE_PENDING = 10_798
+#: `documents` rows behind those hashes — the denominator `inspect_index()`
+#: already reports, so the guard's ratio is auditable from the same report.
+LIVE_DOCUMENT_ROWS = 16_127
+#: The embed model the live config names today.
+EMBED_MODEL = "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+#: A live config in the shape ~/.config/qmd/index.yml has it, `models:` included:
+#: editing that one line is the trigger the guard exists to survive.
+LIVE_WITH_MODELS = LIVE + f"models:\n  embed: {EMBED_MODEL}\n"
+
+
+class _StubSh:
+    """Records every subprocess command `main()` would have run.
+
+    The claim under test is "no `qmd embed` subprocess was invoked", so the
+    assertion is on the command line, not on a flag in the report. Returning
+    rc 0 keeps the daemon-health probe and the restart path inert-but-plausible.
+    """
+
+    def __init__(self):
+        self.cmds: list[list[str]] = []
+
+    def __call__(self, cmd, timeout, env=None):
+        self.cmds.append([str(c) for c in cmd])
+        return 0, "stubbed"
+
+    def qmd(self, verb: str) -> list[list[str]]:
+        return [c for c in self.cmds if str(c[0]).endswith("node") and verb in c]
+
+
+def _guard_run(monkeypatch, tmp_path, *, pending: int, documents: int,
+               live: str | None = LIVE_WITH_MODELS):
+    """Run main() over fixture configs with the index and every subprocess stubbed.
+
+    Returns (rc, report, calls). Nothing here touches ~/.cache/qmd, the daemon or
+    the real config: `inspect_index`/`pending_embeddings` are forced to the
+    numbers under test and `_sh` is replaced by a recorder.
+    """
+    t, l = _pair(tmp_path, live=live)
+    monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
+    monkeypatch.setattr(m, "LIVE_CONFIG", l)
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    monkeypatch.setattr(m, "inspect_index", lambda: {
+        "index_bytes": 901_943_360, "chunks": 44_430, "documents": documents,
+        "collections": 9, "collection_errors": 0, "files_skipped_missing": 0,
+        "vectors_total": 38_665, "vectors_orphaned": 0,
+        "vectors_live": 38_665, "orphan_ratio": 0.0,
+    })
+    monkeypatch.setattr(m, "pending_embeddings", lambda: pending)
+    calls = _StubSh()
+    monkeypatch.setattr(m, "_sh", calls)
+    monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py"])
+    rc = m.main()
+    reports = sorted((tmp_path / "reflection").glob("qmd-index-maintenance-*.json"))
+    assert len(reports) == 1, f"expected exactly one dated report, got {reports}"
+    return rc, json.loads(reports[0].read_text()), calls
+
+
+def test_the_cap_is_one_named_constant_and_it_is_a_quarter():
+    """One knob, worth a quarter of the index — not a scattering of literals.
+
+    The threshold is what a later operator has to reason about, so it is a
+    single module constant and it is pinned here rather than being inferable
+    from a test that trips it.
+    """
+    assert m.EMBED_PENDING_MAX_RATIO == 0.25
+
+
+def test_a_corpus_wide_pending_count_invokes_no_embed_subprocess(monkeypatch, tmp_path, capsys):
+    """Clause 1: 10,798 pending against a 16,127-row index is every hash in it.
+
+    The job runs nightly at hour 5 with nobody reading the number first, so the
+    only thing standing between that config edit and an hour-long rewrite of the
+    live index beside the serving daemon is this comparison.
+    """
+    rc, report, calls = _guard_run(monkeypatch, tmp_path,
+                                   pending=CORPUS_WIDE_PENDING,
+                                   documents=LIVE_DOCUMENT_ROWS)
+    assert rc == 0, "a refused guard is not a failed job"
+    assert calls.qmd("embed") == [], f"the guard let a corpus-wide embed through: {calls.cmds}"
+    assert report["need_embed"] is False
+    assert report["pending_embeddings"] == CORPUS_WIDE_PENDING
+    # Pending counts distinct hashes and `documents` counts rows, so the printed
+    # verdict has to carry the base or the ratio cannot be checked afterwards.
+    printed = capsys.readouterr().out
+    assert "documents" in printed and "25%" in printed, printed
+
+
+def test_the_refused_run_reports_why_and_still_lands_its_report(monkeypatch, tmp_path):
+    """Clause 2: the refusal is the useful output, so it has to be readable.
+
+    The report names the pending count, the denominator the ratio used —
+    `documents` rows, 16,127, not the 10,798 distinct hashes, which are the two
+    numbers most likely to be confused by whoever reads this at 5 a.m. — and the
+    configured embed model, which is the line to go check in the config.
+    """
+    rc, report, _ = _guard_run(monkeypatch, tmp_path,
+                               pending=CORPUS_WIDE_PENDING,
+                               documents=LIVE_DOCUMENT_ROWS)
+    assert rc == 0
+    mc = report["model_change_suspected"]
+    assert mc["pending_embeddings"] == CORPUS_WIDE_PENDING
+    assert "documents" in mc["denominator"]
+    assert mc["denominator_value"] == LIVE_DOCUMENT_ROWS
+    assert mc["configured_embed_model"] == EMBED_MODEL
+    assert mc["threshold_fraction"] == m.EMBED_PENDING_MAX_RATIO
+    assert mc["max_pending"] == int(m.EMBED_PENDING_MAX_RATIO * LIVE_DOCUMENT_ROWS)
+    actions = " | ".join(report["actions"])
+    assert "model_change_suspected" in actions, report["actions"]
+    assert not any("rc=" in a for a in report["actions"]), report["actions"]
+
+
+def test_the_guard_trips_without_a_readable_model_name(monkeypatch, tmp_path):
+    """The refuse decision cannot depend on reading the config.
+
+    The model name is what the report points a human at, not what the guard
+    compares; a missing `models:` block (or an unreadable config) must still
+    stop the rewrite, with the name reported as unknown rather than the check
+    skipped.
+    """
+    rc, report, calls = _guard_run(monkeypatch, tmp_path,
+                                   pending=CORPUS_WIDE_PENDING,
+                                   documents=LIVE_DOCUMENT_ROWS, live=LIVE)
+    assert rc == 0
+    assert calls.qmd("embed") == []
+    assert report["model_change_suspected"]["configured_embed_model"] is None
+
+
+def test_the_cap_bites_only_past_a_quarter_of_the_index(monkeypatch, tmp_path):
+    """The boundary, both ways, so the guard cannot fail to fail.
+
+    At the limit the backfill still runs; one hash past it is refused. A cap
+    whose edge nobody pins is a cap that quietly became 0 or infinity.
+    """
+    limit = int(m.EMBED_PENDING_MAX_RATIO * LIVE_DOCUMENT_ROWS)
+    _, at_limit, calls = _guard_run(monkeypatch, tmp_path,
+                                    pending=limit, documents=LIVE_DOCUMENT_ROWS)
+    assert at_limit["need_embed"] is True
+    assert "model_change_suspected" not in at_limit
+    assert len(calls.qmd("embed")) == 1
+    _, over, calls2 = _guard_run(monkeypatch, tmp_path,
+                                 pending=limit + 1, documents=LIVE_DOCUMENT_ROWS)
+    assert over["need_embed"] is False
+    assert "model_change_suspected" in over
+    assert calls2.qmd("embed") == []
+
+
+def test_an_ordinary_backfill_still_runs_exactly_one_embed(monkeypatch, tmp_path):
+    """Clause 3: this guard exists to leave the 3-document case working.
+
+    Pending is almost never zero while the loop is writing — the nightly run's
+    whole job is clearing one to four documents — so a cap that also blocked
+    those would take the index down to a permanently stale vector leg.
+    """
+    rc, report, calls = _guard_run(monkeypatch, tmp_path, pending=3, documents=16_000)
+    assert rc == 0
+    assert report["need_embed"] is True
+    assert "model_change_suspected" not in report
+    embeds = calls.qmd("embed")
+    assert len(embeds) == 1, f"expected exactly one qmd embed, got {calls.cmds}"
+    assert "embed" in embeds[0]

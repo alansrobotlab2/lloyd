@@ -31,6 +31,15 @@ SAFETY CONTRACT — this runs unattended:
   * A daemon found unhealthy afterwards is still restarted, and still the one
     thing that makes the exit code non-zero.
   * Every subprocess has a timeout.
+  * The embedding backfill refuses a corpus-wide re-embed (#1367). Pending is
+    counted per *configured model*, so editing one line — `models: embed` in
+    ~/.config/qmd/index.yml — makes every hash in the index read as unembedded,
+    and `pending_embeddings() > 0` used to turn that into an hour of
+    `qmd embed` against the live index beside the serving daemon, unattended,
+    nightly. Past EMBED_PENDING_MAX_RATIO of the index the run now records
+    `model_change_suspected` and declines to embed; verify the switch was
+    deliberate and run `qmd embed` by hand. A refused guard exits 0 — it is the
+    check working, not a failed job — and is a report entry like drift.
   * Exit code is non-zero only when the daemon is left unhealthy — a failed
     prune with a healthy daemon is a warning, not a page.
   * Every run also compares the tracked qmd collection template with the config
@@ -100,6 +109,25 @@ ORPHAN_RATIO_TRIGGER = 0.20
 # `need_prune: false`, costing ~49% of every vec query. A threshold that can
 # only fire when the corpus is mostly garbage is not a safety margin.
 ORPHAN_ABS_TRIGGER = 2_000
+# Cap on the unattended embedding backfill (#1367), as a fraction of the
+# `documents` count this job already reports. It exists because `qmd status`'s
+# pending number is counted per *configured model*:
+# `getHashesNeedingEmbedding` (qmd/src/store.ts:2561-2580) LEFT-JOINs on
+# `model` + `embed_fingerprint` rather than on the content hash, so editing the
+# single `models: embed` line in ~/.config/qmd/index.yml to any other
+# same-dimension model makes every hash read as unembedded. Measured read-only
+# against the live index at triage (2026-09-22): 10,798 pending = every active
+# distinct hash, over 16,127 `documents` rows — ratio 0.67. The ordinary nightly
+# figure in the three most recent reports is 0, 3 or 2, so this fraction sits
+# orders of magnitude clear of real work and is nowhere near tuning away: what
+# it separates is a handful of new documents from a full rewrite of the live
+# vector table while the daemon serves from it. Two models cannot share
+# `vectors_vec` — it is keyed `hash_seq` with no model column, and only a
+# *dimension* change is caught (qmd/src/store.ts:1518-1523) — so an interrupted
+# same-dimension re-embed leaves both models' vectors in one cosine table,
+# indistinguishable at query time. That is the state being protected, not the
+# hour of GPU.
+EMBED_PENDING_MAX_RATIO = 0.25
 
 QMD_ENV = {
     "HOME": str(Path.home()),
@@ -163,6 +191,59 @@ def pending_embeddings() -> int:
             digits = "".join(ch for ch in s if ch.isdigit())
             return int(digits) if digits else 0
     return 0
+
+
+def configured_embed_model(path: Path = LIVE_CONFIG) -> str | None:
+    """The embed model from the config's `models: embed`, or None if unreadable.
+
+    Read from the file the daemon actually reads — `~/.config/qmd/index.yml`,
+    which overrides `QMD_EMBED_MODEL` (src/llm.ts::resolveEmbedModel). This is
+    the one line whose edit turns the whole index pending, so it is what a
+    reader of the report needs; None is a legitimate answer and never a reason to
+    skip the guard.
+    """
+    if not path.exists():
+        return None
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except Exception:  # noqa: BLE001 — unreadable config is not this check's failure
+        return None
+    if not isinstance(data, dict):
+        return None
+    models = data.get("models")
+    if not isinstance(models, dict):
+        return None
+    model = models.get("embed")
+    return str(model) if model else None
+
+
+def embed_backfill_guard(pend: int, documents: int | None,
+                         configured_model: str | None) -> dict:
+    """Decide whether `pend` is a backfill or a whole-index re-embed (#1367).
+
+    The denominator is `documents` — the row count `inspect_index` already puts
+    in the report — not the pending count itself, so the ratio stays auditable
+    from the file alone. It is deliberately the *rows* figure and not the
+    distinct-hash figure the pending number counts (16,127 rows over 10,798
+    distinct hashes on the live index: many documents share one hash), which is
+    why the denominator is named in the verdict rather than implied.
+
+    An index of zero documents with something pending trips: with nothing to
+    compare against there is no ratio, and the unattended path is the one that
+    has to fail closed.
+    """
+    docs = documents or 0
+    max_pending = int(EMBED_PENDING_MAX_RATIO * docs)
+    return {
+        "pending_embeddings": pend,
+        "denominator": "documents (rows in the `documents` table, from inspect_index)",
+        "denominator_value": docs,
+        "ratio": round(pend / docs, 4) if docs else None,
+        "threshold_fraction": EMBED_PENDING_MAX_RATIO,
+        "max_pending": max_pending,
+        "configured_embed_model": configured_model,
+        "tripped": pend > max_pending,
+    }
 
 
 def daemon_healthy(retries: int = 10) -> bool:
@@ -338,10 +419,50 @@ def main() -> int:
     # Left in place deliberately — removing it is a separate change — but do
     # not add tuning here expecting it to take effect.
     need_embed = pend > 0
+    # The pending number is per configured model, so it is not a count of new
+    # documents — see EMBED_PENDING_MAX_RATIO. Read fresh, from the same module
+    # global the drift check reads, so a caller that moves LIVE_CONFIG moves this.
+    guard = embed_backfill_guard(pend, before.get("documents"),
+                                 configured_embed_model(LIVE_CONFIG))
+    report["embed_guard"] = guard
+    if need_embed and guard["tripped"]:
+        need_embed = False
+        report["model_change_suspected"] = {
+            "pending_embeddings": guard["pending_embeddings"],
+            "denominator": guard["denominator"],
+            "denominator_value": guard["denominator_value"],
+            "ratio": guard["ratio"],
+            "threshold_fraction": guard["threshold_fraction"],
+            "max_pending": guard["max_pending"],
+            "configured_embed_model": guard["configured_embed_model"],
+            "why": ("pending is counted per configured model, so a number this "
+                    "large means `models: embed` names a model the index's "
+                    "existing vectors were not built with — not that new "
+                    "documents are waiting. An interrupted same-dimension "
+                    "re-embed leaves two models' vectors in one `vectors_vec` "
+                    "table, which has no model column and only catches a "
+                    "dimension change."),
+            "what_to_do": ("confirm the model switch was deliberate, then run "
+                           "`qmd embed` by hand against ~/.cache/qmd/index.sqlite "
+                           "(or rebuild a side copy and swap, as the 2026-09-21 "
+                           "switch did); this job will not do it unattended."),
+        }
+        report["actions"].append(
+            f"embed SKIPPED — model_change_suspected: pending "
+            f"{guard['pending_embeddings']:,} exceeds "
+            f"{guard['threshold_fraction']:.0%} of "
+            f"{guard['denominator']}: {guard['denominator_value']:,} "
+            f"(max {guard['max_pending']:,}); configured embed model "
+            f"{guard['configured_embed_model']}")
     report["need_prune"], report["need_embed"] = need_prune, need_embed
 
     if args.dry_run or not (need_prune or need_embed):
-        report["actions"].append("none — nothing to do" if not args.dry_run else "dry-run")
+        if args.dry_run:
+            report["actions"].append("dry-run")
+        elif not guard["tripped"]:
+            # A refused guard already recorded its own reason; "nothing to do"
+            # would contradict the line above it in the same report.
+            report["actions"].append("none — nothing to do")
         # --dry-run promises to change nothing, so it only prints. Everything
         # else that runs leaves a report, drift included, whether or not it
         # needed the index.
@@ -399,6 +520,16 @@ def _emit(r: dict, as_json: bool) -> None:
           f"({100*b.get('orphan_ratio', 0):.1f}%)"
           + (f"  →  {a.get('vectors_orphaned', 0):,}" if a else ""))
     print(f"  pending embeds    {r.get('pending_embeddings')}")
+    g = r.get("embed_guard")
+    if g:
+        # The denominator has to be printed with the number: pending counts
+        # distinct hashes and `documents` counts rows, and a ratio whose base is
+        # unnamed cannot be audited afterwards from the run's own output.
+        print(f"  embed cap         {g['threshold_fraction']:.0%} of "
+              f"{g['denominator']}: {g['denominator_value']:,} "
+              f"= max {g['max_pending']:,}"
+              + (f"  → REFUSED (model_change_suspected); configured embed model "
+                 f"{g['configured_embed_model']}" if g["tripped"] else ""))
     print(f"  prune needed      {r.get('need_prune')}   embed needed {r.get('need_embed')}")
     cd = r.get("config_drift")
     if cd:

@@ -116,10 +116,18 @@ supervisord program agent-qmd-daemon
   on `model` + `embed_fingerprint`, not on the content hash — so the moment
   `models:` names a different embed model every hash in the index reads as
   unembedded, and the watcher's next `embed` begins rewriting the live index
-  beside the running daemon; task #81's backfill (`pending_embeddings() > 0`, no
-  ceiling) will run the same whole-corpus `qmd embed` whenever it next wakes
-  (#1367). Two models cannot share `vectors_vec`: it is keyed `hash_seq` with no
-  model column, and a dimension change is the only case that gets caught, as a
+  beside the running daemon — the watcher has no cap of its own, so it is still
+  the first responder to that edit (#1367 leaves it open). Task #81's backfill
+  refuses it instead: `scripts/maintenance/qmd_index_maintenance.py` compares
+  `pending_embeddings()` with the `documents` count the same job reports and, past
+  `EMBED_PENDING_MAX_RATIO` — `0.25`, a quarter of the index — invokes no
+  `qmd embed` at all, recording `model_change_suspected` with the pending count,
+  the denominator it used and the configured embed model in its dated report, and
+  exiting 0 because a refused guard is the check working. A deliberate switch is
+  still run by hand (or as a side copy, as below); the cap protects the
+  unattended path, not the operation. Two models cannot share `vectors_vec`: it
+  is keyed `hash_seq` with no model column, and a dimension change is the only
+  case that gets caught, as a
   hard error where the vec0 table is created (768 → 1024 for Qwen3) — an
   interrupted same-dimension re-embed simply leaves both models' vectors in one
   table. A changed *title* does not change a content hash, so re-titling alone
@@ -230,7 +238,7 @@ re-titled copy) are served by patching `snapshot()` — the pattern
 - `agent-services/conf/qmd-index.yml` (template), `~/.config/qmd/index.yml`, `~/.config/qmd/evalpin.yml`
 - `scripts/maintenance/qmd_index_maintenance.py`, `scripts/qmd_fork_landing.py`, `scripts/automod/evalpin.py`
 - `app/qmd_health.py`, `agent_mcp/vault.py`
-- tests: `test_qmd_single_build.py`, `test_qmd_index_template.py`, `test_qmd_index_maintenance.py`, `test_qmd_fork_landing.py`, `test_qmd_query_shape.py`, `test_qmd_health.py`, `test_service_health_check_qmd.py`
+- tests: `test_qmd_single_build.py`, `test_qmd_index_template.py`, `test_qmd_index_maintenance.py`, `test_qmd_fork_landing.py`, `test_qmd_query_shape.py`, `test_qmd_health.py`, `test_service_health_check_qmd.py`, `test_qmd_doc_claims.py`
 
 ## Review log
 
@@ -239,7 +247,8 @@ re-titled copy) are served by patching `snapshot()` — the pattern
   that tree, #81 `up_next`, template↔live drift reporting 2 items) but three
   sentences were wrong, and all three were about *when work starts on its own*:
   pending embeddings are counted **per configured model**, so an embed-model edit
-  is a trigger rather than inert and task #81's backfill has no ceiling (#1367);
+  is a trigger rather than inert and task #81's backfill had then no cap at all —
+  it has one now, `EMBED_PENDING_MAX_RATIO` in §3 (#1367);
   `update()` empties `llm_cache` whole on every watcher cycle, so the cache both
   §2's retention and §7's measurement trap rely on is empty in practice — 0 rows
   after 13 h and 83 reranked documents (#1366); and `_qmd_post` is not the one
