@@ -1,6 +1,7 @@
 """Memory (Obsidian vault) browse/search/read/save endpoints."""
 
 import json
+import re
 import urllib.request
 from datetime import date, datetime
 from pathlib import Path
@@ -25,18 +26,84 @@ def _jsonable(obj):
         return obj.isoformat()
     return obj
 
+
+# The closing delimiter of a YAML front-matter block: `---` alone on its own
+# line. Anchored, because `str.split("---")` also fires on a `---` inside a
+# quoted value — a markdown table row (`|---|---|`) is the common one — which
+# cuts the block mid-scalar and turns a well-formed note into a parse error.
+# Same matcher and same reasoning as `app/routers/dashboard.py::_FM_END_RE`.
+_FM_END_RE = re.compile(r"^---[ \t]*$", re.M)
+
+
+def _fm_span(text: str) -> "tuple[str, str] | None":
+    """Split `text` at its front-matter fence, returning `(raw_yaml, body)`.
+
+    None when the text does not open with a `---` line or that block never
+    closes. Whole-text and per-line by construction: no byte cap, so a note
+    whose front matter runs past any prefix length is still found (measured
+    2026-09-22 over the seven stats segments: 18 notes closed their fence past
+    the 2,000-char cap this file used, the largest past byte 5,152), and no
+    substring match, so a `---` inside a quoted value is not mistaken for the
+    fence.
+    """
+    if not text.startswith("---"):
+        return None
+    opening = text.find("\n")
+    if opening < 0:
+        return None
+    end = _FM_END_RE.search(text, opening)
+    if end is None:
+        return None
+    return text[opening + 1:end.start()], text[end.end():]
+
+
+def _parse_fm(raw: str) -> dict:
+    """Front-matter YAML as a dict; {} if it is not a mapping that parses.
+
+    JSON-safe (`_jsonable`) because every caller here serialises the result:
+    now that the fence is found in long front matter too, a `timestamp:
+    2026-05-20` reaching `title` would otherwise 500 the whole route.
+    """
+    try:
+        fm = yaml.safe_load(raw) or {}
+    except yaml.YAMLError:
+        return {}
+    # A block that parses to a list or a bare string is not front matter;
+    # returning it would blow up on the caller's first `.get`.
+    return _jsonable(fm) if isinstance(fm, dict) else {}
+
+
+def _split_frontmatter(text: str) -> "tuple[dict, str]":
+    """`(frontmatter, body)` for a markdown note, front matter included or not.
+
+    No front matter — or front matter whose YAML will not parse — yields
+    `({}, text)`, which is the caller's existing fallback (filename as title,
+    file as body) and the right answer for both: neither is something the
+    Memory tab can fix. Callers that must tell those two apart parse `_fm_span`
+    themselves, the way `/api/memory/save` has to to keep rejecting invalid
+    YAML.
+    """
+    span = _fm_span(text)
+    if span is None:
+        return {}, text
+    raw, body = span
+    return _parse_fm(raw), body
+
+
 _VAULT = Path.home() / "obsidian"
 _VAULT_SEGMENTS = ["memory", "knowledge", "projects", "agents", "personal", "work", "skills"]
 
-# Cached stats payload. Keyed by a mtime signature over the segment dirs;
-# cold cost is ~600ms (reading 2KB + YAML parse from every .md), warm is <1ms.
+# Cached stats payload. Keyed by a mtime signature over the segment dirs.
+# Cold cost is ~1.9s for the 4,135-file / ~30MB vault the seven segments held
+# on 2026-09-22 (reading every .md in full + YAML parse); ~1.8s of that predates
+# reading whole files. Warm is ~30ms and is the signature walk, not the parse.
 _STATS_CACHE: dict = {"sig": None, "payload": None}
 
 
 def _stats_signature() -> tuple:
     """Cheap signature: per-segment (recursive max mtime, file count). Recomputed
     each call by walking the tree and stat()ing each .md — still much cheaper
-    than re-reading 2KB + parsing YAML from each file."""
+    than re-reading each file and parsing its YAML."""
     parts: list = []
     for seg in _VAULT_SEGMENTS:
         seg_dir = _VAULT / seg
@@ -75,16 +142,13 @@ async def memory_stats():
         for f in seg_dir.rglob("*.md"):
             count += 1
             try:
-                head = f.read_text(encoding="utf-8")[:2000]
-                if head.startswith("---"):
-                    parts = head.split("---", 2)
-                    if len(parts) >= 3:
-                        fm = yaml.safe_load(parts[1]) or {}
-                        for t in (fm.get("tags") or []):
-                            if isinstance(t, str):
-                                tag_counts[t] = tag_counts.get(t, 0) + 1
+                fm, _ = _split_frontmatter(f.read_text(encoding="utf-8"))
             except Exception:
-                pass
+                # Undecodable or unreadable: counted as a document, no tags.
+                continue
+            for t in (fm.get("tags") or []):
+                if isinstance(t, str):
+                    tag_counts[t] = tag_counts.get(t, 0) + 1
         types[seg] = count
         doc_count += count
     top_tags = sorted(tag_counts.items(), key=lambda x: -x[1])[:20]
@@ -136,14 +200,11 @@ async def memory_browse(path: str = ""):
         elif entry.suffix == ".md":
             title = entry.stem
             try:
-                head = entry.read_text(encoding="utf-8")[:500]
-                if head.startswith("---"):
-                    parts = head.split("---", 2)
-                    if len(parts) >= 3:
-                        fm = yaml.safe_load(parts[1]) or {}
-                        title = fm.get("title", title)
+                fm, _ = _split_frontmatter(entry.read_text(encoding="utf-8"))
             except Exception:
-                pass
+                fm = {}
+            if "title" in fm:
+                title = fm["title"]
             entries.append({"name": entry.name, "type": "file", "size": entry.stat().st_size, "title": title})
     return JSONResponse({"path": path, "entries": entries})
 
@@ -157,16 +218,14 @@ async def memory_read(path: str = ""):
     if not filepath.exists():
         raise HTTPException(status_code=404, detail=f"Not found: {path}")
     content = filepath.read_text(encoding="utf-8")
-    fm = {}
-    body = content
-    if content.startswith("---"):
-        parts = content.split("---", 2)
-        if len(parts) >= 3:
-            try:
-                fm = _jsonable(yaml.safe_load(parts[1]) or {})
-            except yaml.YAMLError:
-                fm = {}
-            body = parts[2].strip()
+    span = _fm_span(content)
+    if span is None:
+        # No front matter: the body is the file, unstripped, as before.
+        fm, body = {}, content
+    else:
+        raw, body = span
+        fm = _parse_fm(raw)
+        body = body.strip()
     return JSONResponse({
         "path": path,
         "frontmatter": fm,
@@ -191,12 +250,11 @@ async def memory_save(request: Request):
     else:
         out = content
         # Validate embedded frontmatter when content contains its own --- block
-        if out.startswith("---"):
-            parts = out.split("---", 2)
-            if len(parts) >= 3:
-                try:
-                    yaml.safe_load(parts[1])
-                except yaml.YAMLError as e:
-                    raise HTTPException(status_code=422, detail=f"Invalid frontmatter YAML: {e}")
+        span = _fm_span(out)
+        if span is not None:
+            try:
+                yaml.safe_load(span[0])
+            except yaml.YAMLError as e:
+                raise HTTPException(status_code=422, detail=f"Invalid frontmatter YAML: {e}")
     filepath.write_text(out, encoding="utf-8")
     return JSONResponse({"ok": True})
