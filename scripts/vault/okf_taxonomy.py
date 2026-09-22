@@ -232,6 +232,26 @@ _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(\r?\n|\Z)", r
 # mapping — e.g. one entry of a ``sources:`` list — and is not the page's type.
 _TOP_LEVEL_TYPE_RE = re.compile(r"^type:[ \t]*([^#\r\n]*)", re.M)
 
+# ── the orphan-frontmatter exemption (#478's data half) ──────────────────────
+# Both guards below hand an ABSENT or EMPTY leading ``type`` back untouched.
+# Those files are the stranded-frontmatter corpus: their real type sits in a
+# second block the leading one hides, so rewriting the leading block's
+# vocabulary would be polishing the wrong block. The set is NOT maintained here —
+# it is `okf_stranded`'s checked-in allow-list, the same one ``validate_okf.py``
+# counts as `known-stranded`, so #478's data fix shrinking that file shrinks this
+# view with it. Until #960 the exemption was justified in prose as "#478's 221
+# orphan-frontmatter files" with nothing checking the number; the accessor below
+# is the one source, and ``tests/test_okf_type_taxonomy.py`` fails if the
+# validator's list and this view ever part company.
+from scripts.vault import okf_stranded  # noqa: E402
+
+
+def orphan_frontmatter_files() -> frozenset[str]:
+    """Paths whose absent/empty leading ``type`` is #478's problem, not a
+    vocabulary guard's. Resolved at CALL time through ``okf_stranded`` — a module
+    global here would be a second copy of the thing it is supposed to match."""
+    return okf_stranded.load_allowlist()
+
 
 def normalize_document_type(text: str) -> tuple[str, str | None]:
     """Rewrite a knowledge note's frontmatter ``type`` onto its canonical value.
@@ -242,7 +262,8 @@ def normalize_document_type(text: str) -> tuple[str, str | None]:
 
     Hands the text back unchanged when there is no frontmatter, no top-level
     ``type`` key, or an empty one: an *absent* type is OKF's other complaint and
-    belongs to #478's 221 orphan-frontmatter files, not to a vocabulary guard.
+    belongs to the stranded-frontmatter corpus named by ``orphan_frontmatter_files()``
+    — #478's data half — not to a vocabulary guard.
     Raises ``KnowledgeTypeError`` when a type is present but may not land in
     ``knowledge/`` — the caller must then write nothing.
     """
@@ -282,7 +303,7 @@ def rejected_document_type(text: str) -> str | None:
     ``test_knowledge_frontmatter_uses_only_the_canonical_set`` on the next round.
     So: only a value that is *already* canonical lands, and the refusal names the
     value to write instead. An absent or empty ``type`` is not an answer either
-    way — #478's orphan-frontmatter files must stay landable.
+    way — the files named by ``orphan_frontmatter_files()`` must stay landable.
     """
     fm = _FRONTMATTER_RE.match(text)
     if fm is None:

@@ -860,3 +860,121 @@ def test_the_landed_skill_bodies_still_load_through_the_lander_itself():
     assert vault_round.loader_errors(paths) == [], (
         "the lander's own loader check rejects a path #872 renamed — the skill "
         "bodies or the prompt surface no longer load")
+
+
+# ── the orphan-frontmatter exemption is ONE set, not two counts (#960) ───────
+#
+# Both guards in this module hand an absent/empty leading `type` back untouched,
+# and until #960 each justified that in prose as covering "#478's 221
+# orphan-frontmatter files" — a number nothing read, next to a validator that
+# could not see the body at all, while the real stranded set was 445 files across
+# the vault and 334 inside knowledge/. The tests below fail if the exemption ever
+# goes back to being a hand-maintained tally, or if the validator and this module
+# stop resolving the same set.
+
+def _source(rel: str) -> str:
+    return (ROOT / rel).read_text(encoding="utf-8")
+
+
+def test_the_exemption_is_resolved_through_one_accessor_in_one_module():
+    import inspect
+
+    from scripts.vault import okf_stranded
+
+    assert okf_taxonomy.orphan_frontmatter_files() == okf_stranded.load_allowlist()
+    # One implementation, not two copies that happen to agree today. The accessor
+    # must DELEGATE to okf_stranded's loader — reading its body proves that, where
+    # an equality check on the two results never could (two independent readers of
+    # the same file return equal sets right up until the day they don't).
+    body = inspect.getsource(okf_taxonomy.orphan_frontmatter_files)
+    assert "okf_stranded.load_allowlist" in body, (
+        "orphan_frontmatter_files no longer delegates to okf_stranded — it is a "
+        "second reader of the list, which is the two-copies defect again")
+    for rel in ("scripts/vault/okf_taxonomy.py", "scripts/vault/validate_okf.py"):
+        assert "load_allowlist" in _source(rel), (
+            f"{rel} no longer resolves the exemption through okf_stranded — it is "
+            "back to keeping its own count of the legacy set")
+
+
+def test_no_consumer_keeps_a_hand_maintained_count_of_the_legacy_set():
+    # The shape of the defect: a count in prose that nothing re-measures. It sat
+    # beside a validator that could not see a body block, so it was both wrong and
+    # unverifiable (#478's 221 vs the 445 files the detector names).
+    offenders = [rel for rel in
+                 ("scripts/vault/okf_taxonomy.py", "scripts/vault/validate_okf.py",
+                  "scripts/vault/okf_migrate.py")
+                 if "221 orphan" in _source(rel) or "'221'" in _source(rel)]
+    assert not offenders, f"hand-maintained stranded count back in: {offenders}"
+
+
+def _assert_exemption_matches_tree(listed: frozenset[str],
+                                  detected: set[str]) -> None:
+    """The agreement check itself, as a callable so a test can drive it with a
+    divergent pair and prove it fails. A negative test that only re-applies its
+    own monkeypatch proves monkeypatch semantics, not the check."""
+    assert listed, "an empty exemption would make every guard's deferral dead code"
+    assert detected == listed, (
+        "the checked-in exemption and the tree disagree — regenerate with "
+        "python scripts/vault/okf_stranded.py --write-allowlist; "
+        f"only-in-list={sorted(set(listed) - detected)[:3]} "
+        f"only-in-tree={sorted(detected - set(listed))[:3]}")
+
+
+def test_the_exemption_set_is_the_stranded_set_and_shrinks_with_the_data_fix():
+    # The reason the exemption may exist at all: every file it defers on is a file
+    # the detector independently agrees has a block in its body. When #478's data
+    # fix collapses a file, that file leaves this set, and the guard stops
+    # deferring on it. Asserted over the live vault, so the claim cannot rot into
+    # an unread sentence — this is the machine-checked acceptance #478 lacked.
+    from scripts.vault import okf_stranded
+
+    _assert_exemption_matches_tree(okf_taxonomy.orphan_frontmatter_files(),
+                                   set(okf_stranded.scan(okf_stranded.VAULT_ROOT)))
+
+
+def test_the_agreement_check_fails_when_the_two_views_part_company():
+    # Drives the check above with one path dropped from the exemption, which is
+    # exactly what happens when a file is fixed and the list is not regenerated. If
+    # this test ever passes while the check looks unchanged, the check is a
+    # tautology and the clause it pins is unpinned.
+    from scripts.vault import okf_stranded
+
+    full = okf_taxonomy.orphan_frontmatter_files()
+    one = sorted(full)[0]
+    with pytest.raises(AssertionError, match="regenerate"):
+        _assert_exemption_matches_tree(full - {one}, set(full))
+    # And the other direction: a file the tree flags that the list never named is a
+    # NEW stranded file, which is the violation the allow-list exists to catch.
+    with pytest.raises(AssertionError, match="regenerate"):
+        _assert_exemption_matches_tree(
+            full, set(okf_stranded.scan(okf_stranded.VAULT_ROOT))
+            | {"knowledge/a-file-nobody-listed.md"})
+    # The check passing is not free either: it only holds for the real pair.
+    _assert_exemption_matches_tree(full, set(okf_stranded.scan(okf_stranded.VAULT_ROOT)))
+
+
+def test_sharing_the_set_does_not_widen_what_may_land():
+    # The exemption is about an ABSENT type only. A file that carries a retired
+    # spelling is still rewritten, and one that carries an invented value is still
+    # refused — so pointing both guards at the stranded set cannot let a bad value
+    # through, whichever side of the allow-list a file sits on.
+    aliased = "---\ntype: deep-research\ndescription: d\n---\n\n# A\n"
+    rewritten, replaced = okf_taxonomy.normalize_document_type(aliased)
+    assert replaced == "deep-research"
+    assert "type: research-deep" in rewritten
+    assert okf_taxonomy.rejected_document_type(aliased) == "deep-research"
+    invented = "---\ntype: gap-analysis-plus\ndescription: d\n---\n\n# A\n"
+    with pytest.raises(okf_taxonomy.KnowledgeTypeError):
+        okf_taxonomy.normalize_document_type(invented)
+    assert okf_taxonomy.rejected_document_type(invented) == "gap-analysis-plus"
+
+
+def test_the_deferral_fires_on_an_empty_type_wherever_it_sits():
+    # What the guards defer on, restated now that the justification is a shared set
+    # rather than a number in prose: an empty or absent `type` is not an answer
+    # either way, because the file's real type is in the block the leading one
+    # hides — which is the same fact `orphan_frontmatter_files()` encodes.
+    for text in ("---\ntype:   \ndescription: d\n---\n\n# A\n",
+                 "---\nsegment: knowledge\n---\n\n# A\n"):
+        assert okf_taxonomy.normalize_document_type(text) == (text, None)
+        assert okf_taxonomy.rejected_document_type(text) is None

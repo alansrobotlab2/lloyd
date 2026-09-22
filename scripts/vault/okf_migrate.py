@@ -12,6 +12,20 @@ This migrator (per the approved plan cheerful-purring-narwhal):
     -block corruption families. Re-emit ONE canonical `---\\n...\\n---\\n` block.
     No field values are added or renamed.
 
+    The stacked-block half (#960) is a SECOND frontmatter block stranded in the
+    BODY: its keys merge up into the leading block and the block is excised. The
+    FIRST block wins any repeated key — the rule `repair_skill_frontmatter.py:111`
+    has always applied to `skills/`, and the reason a July stamp's `type: notes`
+    never overwrites the `type: book-note` it buried (205 of those contradictions
+    are still on disk). Detection is `scripts/vault/okf_stranded.py`, shared with
+    `validate_okf.py`, so gate and repairer cannot disagree about the family.
+    Until #960 this promise was false: `split_leniently()` returned `parts[1],
+    parts[2]` and only `parts[1]` was parsed, so repair-only reported
+    `repaired: 0` over 2,574 files. One refusal: a body block whose own text will
+    not parse — #961's flow-glue family — is reported `stranded/undecodable` and
+    left byte-identical, because merging GUESSED values into the strict-parseable
+    leading block is not the same trade as repairing a block already broken.
+
   Phase 2 (default, full): everything in repair, PLUS the field migration —
     * backfill a non-empty `type` (directory+content heuristic, catch-all `note`)
     * rename `summary` -> `description` (code-safe: nothing reads a `summary:` key)
@@ -52,6 +66,9 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from agent_mcp._shared import _fold_orphaned_tag_items  # noqa: E402
 from app.paths import VAULT_ROOT  # noqa: E402
+# The same detector `validate_okf.py` runs, so the gate and this repairer can
+# never disagree about which files have a second block (#960).
+from scripts.vault.okf_stranded import find_stranded_frontmatter  # noqa: E402
 
 # Dirs/files that are utility-only or OKF-reserved — never treated as concept docs.
 # `index.md` / `log.md` are reserved at any depth (§3.1) and §8 forbids frontmatter
@@ -214,6 +231,53 @@ def emit(fm: dict, body: str) -> str:
     return "---\n" + dumped + "\n---\n" + body.lstrip("\n")
 
 
+# ── the second frontmatter block stranded in a body (#960) ───────────────────
+
+def collapse_stranded_frontmatter(content: str, fm: dict) -> str | None:
+    """Merge every body-block stranded in `content` up into the parsed `fm`.
+
+    Returns the rewritten document (leading block plus stranded keys, body with
+    the stranded blocks excised), or None when there is nothing to merge OR the
+    merge is not safe. Detection lives in `scripts/vault/okf_stranded.py`, shared
+    with `validate_okf.py`; the merge rule is the one
+    `scripts/repair_skill_frontmatter.py:111-124` has applied to `skills/` since
+    it was written: the FIRST block wins any repeated key, so the stranded copy
+    contributes only the keys the leading block lacks. A July stamp's
+    `type: notes` therefore never overwrites the `type: book-note` it buried —
+    which is the whole reason #478 counts 205 contradictions.
+
+    None (change nothing) is the answer whenever a stranded block's own text will
+    not parse as a mapping. That is #961's flow-glue family (`tags: [a,b,cdate:
+    2025-07-09`), and this tool already refuses to lossy-guess a corrupt block
+    elsewhere — it QUARANTINES it. Inventing values here would write them into the
+    one place every downstream reader trusts, so the file keeps its
+    `stranded/undecodable` verdict until #478's data pass resolves the glue.
+    """
+    found = find_stranded_frontmatter(content)
+    if not found:
+        return None
+    merged = dict(fm)
+    for block in found:
+        try:
+            values = yaml.safe_load(block.inner)
+        except yaml.YAMLError:
+            return None
+        if not isinstance(values, dict) or not values:
+            return None
+        for key, val in values.items():
+            merged.setdefault(key, val)
+    # Slice the body directly rather than re-splitting: `split_leniently` counts
+    # `---\\n` occurrences, and excising a block changes how many there are, so a
+    # re-split could resolve the fences differently than the ones that produced
+    # `fm`. Offsets are into `content`, and every stranded block lies strictly
+    # after the leading block, so translating by the body's own start is exact.
+    fm_text, body = split_leniently(content)
+    base = len(content) - len(body)
+    for block in reversed(found):
+        body = body[:block.start - base] + body[block.end - base:]
+    return emit(merged, body)
+
+
 # ── type heuristic ───────────────────────────────────────────────────────────
 
 def infer_type(path: Path, fm: dict, body: str,
@@ -307,14 +371,17 @@ def process(path: Path, *, repair_only: bool, root: Path | None = None):
     the live vault, or the type heuristic resolves the file against the wrong
     tree (see `infer_type`).
 
-    action ∈ {ok, repaired, migrated, created, quarantine}
+    action ∈ {ok, repaired, migrated, created, quarantine, stranded/undecodable}
       ok         — already conformant, no write
       repaired   — fence/parse fix only, no field changes
       migrated   — field changes (type/description/timestamp)
       created    — had no real frontmatter block; one was added (full mode only)
       quarantine — genuinely-corrupt frontmatter we won't lossy-guess; untouched
+      stranded/undecodable — a second frontmatter block sits in the body and its
+                   values will not parse, so nothing was merged and nothing was
+                   written (see `collapse_stranded_frontmatter`)
     """
-    content = path.read_text(encoding="utf-8")
+    disk = content = path.read_text(encoding="utf-8")
     fm_text, body = split_leniently(content)
 
     repaired_parse = False
@@ -335,6 +402,26 @@ def process(path: Path, *, repair_only: bool, root: Path | None = None):
         else:
             fm, had_fm = parsed, True
             strict_ok = bool(STRICT_FM_RE.match(content)) and not repaired_parse
+
+    # ── a second frontmatter block stranded in the body (#960) ───────────────
+    # Before this, `split_leniently` handed every stage only parts[1] and the
+    # body where the stacked block lives was read by nothing — so --repair-only
+    # reported `repaired: 0` over a tree with 334 stranded files. Collapsing
+    # happens BEFORE the field logic so a `type:` the stranded block carries is
+    # visible to the checks below, and the merge keeps the leading block's value
+    # on any repeated key.
+    stranded_collapsed = False
+    if had_fm:
+        collapsed = collapse_stranded_frontmatter(content, fm)
+        if collapsed is None and find_stranded_frontmatter(content):
+            return "stranded/undecodable", None, None
+        if collapsed is not None:
+            content = collapsed
+            fm_text, body = split_leniently(content)
+            fm, repaired_parse = load_fm(fm_text)
+            had_fm = isinstance(fm, dict)
+            strict_ok = bool(STRICT_FM_RE.match(content)) and not repaired_parse
+            stranded_collapsed = True
 
     if repair_only and not had_fm:
         return "ok", None, None  # nothing to repair; Phase 2 will add frontmatter
@@ -364,7 +451,7 @@ def process(path: Path, *, repair_only: bool, root: Path | None = None):
 
     if not had_fm and not repair_only:
         return "created", emit(fm, body), inferred
-    if not changed_fields and not needs_fence_fix:
+    if not (changed_fields or needs_fence_fix or stranded_collapsed):
         return "ok", None, inferred
     new_text = emit(fm, body)
     # Safety: verify the emitted block is strict-parseable and round-trips.
@@ -375,6 +462,11 @@ def process(path: Path, *, repair_only: bool, root: Path | None = None):
         yaml.safe_load(m.group(1))
     except yaml.YAMLError:
         return "quarantine", None, inferred
+    if new_text == disk:
+        # A collapse that emit() normalised back to the bytes already on disk is
+        # already in the fixed state — reporting it as `repaired` would promise a
+        # write that does not happen, and the next run would report it again.
+        return "ok", None, inferred
     action = "migrated" if changed_fields else "repaired"
     return action, new_text, inferred
 
@@ -414,6 +506,7 @@ def main() -> int:
     counts = Counter()
     type_assign = Counter()
     quarantined: list[str] = []
+    stranded_undecodable: list[str] = []
     quarantine_by_dir = Counter()
     samples: list[str] = []
     n = 0
@@ -437,6 +530,8 @@ def main() -> int:
         if action == "quarantine":
             quarantined.append(str(rel))
             quarantine_by_dir[rel.parts[0] if len(rel.parts) > 1 else "<root>"] += 1
+        if action == "stranded/undecodable":
+            stranded_undecodable.append(str(rel))
         if action in ("repaired", "migrated", "created"):
             if len(samples) < 25:
                 samples.append(f"  {action:8} {rel}"
@@ -454,6 +549,7 @@ def main() -> int:
         f"  migrated     : {counts['migrated']}",
         f"  created fm   : {counts['created']}",
         f"  QUARANTINED  : {counts['quarantine']}",
+        f"  stranded     : {counts['stranded/undecodable']}",
         f"  errors       : {counts['error']}",
     ]
     if type_assign:
@@ -463,6 +559,12 @@ def main() -> int:
     if samples:
         lines.append("  sample changes:")
         lines.extend(samples)
+    if stranded_undecodable:
+        lines.append("  stranded in body but its values will not parse "
+                     "(nothing merged, nothing written):")
+        lines.extend(f"      {p}" for p in stranded_undecodable[:25])
+        if len(stranded_undecodable) > 25:
+            lines.append(f"      ... and {len(stranded_undecodable) - 25} more")
     if quarantine_by_dir:
         lines.append("  quarantined by dir (pre-existing corruption, untouched):")
         for d, c in quarantine_by_dir.most_common():
