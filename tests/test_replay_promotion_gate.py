@@ -53,6 +53,8 @@ from scripts.autoresearch import judge
 from scripts.autoresearch import replay_promotion_gate as rpg
 from scripts.autoresearch.common import AutoresearchConfig, AutoresearchPaths, load_config
 
+from tests._live_data import require_live_volume
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # The synthetic bench mirrors the live one's axis: 6 tasks in the targeted
@@ -530,8 +532,12 @@ def test_the_live_replay_refuses_the_20260908_negative_constraints_variant():
     cfg = load_config()
     decisions = rpg.replay(cfg, cfg.paths.ledger_path, cfg.paths.variants_dir)
     replayed = [d for d in decisions if not d.get("skipped")]
-    assert len(replayed) >= 65, (
-        f"the acceptance names a 65-promotion corpus; the replay found {len(replayed)}")
+    # The acceptance was measured over the 67-promotion ledger of 2026-09-19. The
+    # 09-22 deletion reset _pipeline/research to a 100-line ledger, so the replay
+    # finds none and every figure below recomputes to 0 — which is the corpus being
+    # gone, not the replay disagreeing with it.
+    require_live_volume(replayed, 65, cfg.paths.ledger_path,
+                        "the recorded-promotion corpus", noun="promotions")
     assert not any(d.get("skipped") for d in decisions), (
         "every recorded promotion has baseline rows; a skip means the replay "
         "silently lost a decision it should have graded")
@@ -561,6 +567,8 @@ def test_the_live_replay_flips_a_substantial_share_of_recorded_promotions():
     cfg = load_config()
     replayed = [d for d in rpg.replay(cfg, cfg.paths.ledger_path, cfg.paths.variants_dir)
                 if not d.get("skipped")]
+    require_live_volume(replayed, 65, cfg.paths.ledger_path,
+                        "the recorded-promotion corpus", noun="promotions")
     flips = [d for d in replayed if not d["would_promote"]]
     assert len(flips) >= 30, f"only {len(flips)} of {len(replayed)} flip"
     assert all(d["refused_by"] in ("score_gate", "contract_guard") for d in flips)
@@ -570,6 +578,11 @@ def test_the_live_replay_flips_a_substantial_share_of_recorded_promotions():
                     reason="no autoresearch ledger on this machine")
 def test_the_script_run_against_live_state_exits_zero():
     """The same command the item's step 4 asks for, as a person would type it."""
+    cfg = load_config()
+    replayed = [d for d in rpg.replay(cfg, cfg.paths.ledger_path, cfg.paths.variants_dir)
+                if not d.get("skipped")]
+    require_live_volume(replayed, 65, cfg.paths.ledger_path,
+                        "the recorded-promotion corpus", noun="promotions")
     proc = subprocess.run(
         [sys.executable, "-m", "scripts.autoresearch.replay_promotion_gate"],
         cwd=REPO_ROOT, capture_output=True, text=True, timeout=300)

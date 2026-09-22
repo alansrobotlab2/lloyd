@@ -20,6 +20,8 @@ sys.path.insert(0, str(ROOT))
 from agent_mcp import retrieval  # noqa: E402
 from app import kg_store  # noqa: E402
 
+from tests._live_data import require_live_data, require_live_volume
+
 SCRIPT = ROOT / "scripts" / "memory" / "conversation_relations.py"
 TRAJECTORY_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
 
@@ -234,10 +236,14 @@ def test_live_trajectories_yield_material_co_access_signal(cr):
     never a silent pass — the same reason #551's vault scan fails loudly on an
     empty tree. The gate deselects this by marker, not by absence.
     """
-    files = sorted(TRAJECTORY_DIR.glob("*.jsonl")) if TRAJECTORY_DIR.is_dir() else []
-    assert len(files) >= 5, (
-        f"expected >=5 trajectory files under {TRAJECTORY_DIR}, found {len(files)} "
-        "— an empty or moved corpus is not a pass")
+    # "Absent or moved must be a failure" was written for a corpus that could be
+    # moved back. The 2026-09-22 deletion took _pipeline/trajectories and the
+    # 09-11..09-22 mining window with it, and no run regenerates mined trajectories
+    # from sessions that are also gone. Absence is now a fact about the machine.
+    # A present corpus below the floor still names both numbers rather than passing.
+    require_live_data(TRAJECTORY_DIR, "the mined trajectory corpus")
+    files = sorted(TRAJECTORY_DIR.glob("*.jsonl"))
+    require_live_volume(files, 5, TRAJECTORY_DIR, "the mined trajectory corpus")
     pairs = cr.extract_co_access_pairs(TRAJECTORY_DIR, since_date=None)
     assert len(pairs) >= 200, f"only {len(pairs)} raw pairs from {TRAJECTORY_DIR}"
     assert len(cr.aggregate_pairs(pairs)) >= 100
