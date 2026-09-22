@@ -449,13 +449,24 @@ def write_eval_last(payload: dict) -> None:
 
 def request_rollback(*, reason: str, trigger: str, target: str | None = None,
                      commit: str | None = None,
-                     changed_paths: list | None = None) -> dict:
+                     changed_paths: list | None = None,
+                     metric_floors: dict | None = None,
+                     noise_floor_stale: bool | None = None) -> dict:
     """Ask the guardian to roll back. Returns the request as written.
 
     `target` is optional: omitted, the guardian resolves it the way it would
     for a crash (the promotion's own recorded rollback_target first). Passing
     one is for a manual revert to a specific commit, and the guardian still
     validates it against the floor and the object store before acting.
+
+    `metric_floors` carries the regression check's justification per triggering
+    metric — floor, sigma, sigma_source, resolution, n_queries, delta and
+    noise_floor_stale — so the alert this request produces can say whether any
+    metric actually moved past a floor the instrument could defend, rather than
+    only that a threshold was crossed (#1352). `reason` is the prose a human
+    quotes; this is the copy a router can branch on, and it survives in the
+    ledger event too, because the rollback that mattered most this loop ever
+    performed was one whose floor nobody could re-derive afterwards.
     """
     payload = {
         "requested_at": now_iso(),
@@ -468,11 +479,15 @@ def request_rollback(*, reason: str, trigger: str, target: str | None = None,
         # reverted surgically: by then `current.json` is gone, and without the
         # bad commit the guardian can only reset bluntly to the target.
         "changed_paths": list(changed_paths or []),
+        "metric_floors": dict(metric_floors or {}),
+        "noise_floor_stale": noise_floor_stale,
         "pid": os.getpid(),
     }
     write_json(ROLLBACK_REQUEST_PATH, payload)
     append_event({"event": "rollback_requested", "trigger": trigger,
-                  "reason": str(reason)[:1000], "target": target, "commit": commit})
+                  "reason": str(reason)[:1000], "target": target, "commit": commit,
+                  "metric_floors": dict(metric_floors or {}),
+                  "noise_floor_stale": noise_floor_stale})
     return payload
 
 

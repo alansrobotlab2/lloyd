@@ -18,7 +18,17 @@ import pytest
 from workers.sources import automod_regression as R
 
 
-ZERO_NOISE = {"metrics": {k: {"stdev": 0.0} for k in R.ARMED_METRICS}}
+# The artifact's provenance, computed from the SAME query file `check_promotion`
+# hashes at runtime, so every fixture below that means "a floor measured against
+# these questions" is fresh, and one that writes a different value is exactly the
+# stale case `test_a_stale_floor_reports_without_asking_for_a_rollback` pins.
+# Without this the field is simply absent, `check_promotion` calls that artifact
+# stale, and #1352 made staleness decision-bearing — a fixture that silently
+# lands on the no-verdict path would stop testing what its name says.
+FINGERPRINT = R.queries_fingerprint()
+
+ZERO_NOISE = {"metrics": {k: {"stdev": 0.0} for k in R.ARMED_METRICS},
+              "queries_fingerprint": FINGERPRINT}
 
 
 def base(**over):
@@ -521,17 +531,32 @@ async def test_a_failed_paired_baseline_does_not_silently_pass(monkeypatch, tmp_
 
 
 def test_the_recorded_noise_floor_is_what_the_code_expects():
-    """If someone re-measures and the eval turns out noisy, this fails loudly."""
+    """Whatever σ the published artifact carries, it must not produce a floor
+    below one question of the denominator that artifact was measured over.
+
+    This guard used to read the other way — assert every stdev under 0.01, so a
+    re-measurement that found the eval noisy failed loudly — and that made it
+    fight the fix. #1352's remedy for a floor narrower than the metric's own
+    quantum is a σ that describes the instrument, published per metric, and a
+    measured σ can legitimately come back at 0.01 or more; the floor then widens
+    to `k·σ`, which is the whole point. What must stay true, and what broke on
+    2026-09-21 with `stdev: 0.0` for all eight metrics, is that the artifact's σ
+    plus its denominator yields a floor at least one question wide. Fails loudly
+    if a future artifact is published without an `n_queries` it can be read
+    against, or with a σ so small it under-floors the metric again.
+    """
     if not R.NOISE_PATH.exists():
         pytest.skip("noise floor not measured on this machine")
     noise = json.loads(R.NOISE_PATH.read_text())
+    n = int((noise.get("metrics") or {}).get("n_queries", {}).get("mean") or 0)
+    assert n > 0, "the artifact publishes no denominator, so no floor can be checked"
     for metric in R.ARMED_METRICS:
-        entry = noise["metrics"].get(metric)
-        if entry is None:
+        if metric not in (noise.get("metrics") or {}):
             continue
-        assert entry["stdev"] < 0.01, (
-            f"{metric} measured stdev {entry['stdev']}; it is armed with a "
-            f"near-zero tolerance and would fire on noise")
+        floor = R.effective_floor(noise, metric, n)["floor"]
+        assert floor >= 1.0 / n, (
+            f"{metric}: artifact yields floor {floor:.6f}, narrower than one "
+            f"question of its own {n}-question set")
 
 
 # ---------------------------------------------------------------------------
@@ -1020,16 +1045,36 @@ def test_djev_not_answering_in_either_arm_is_a_skip_not_a_rollback(monkeypatch, 
 
 def test_a_replayed_ranker_is_judged_on_the_pinned_floor(monkeypatch, tmp_path):
     """Every rank request the change made was one the baseline asked, so djev
-    answered it identically: a drop is the change, on the pinned floor."""
+    answered it identically: a drop is the change, on the pinned floor.
+
+    The drop is THREE questions (Δ-0.04 at n=81), not one, and that is #1352
+    rather than convenience. Under replay a single flipping question is genuinely
+    caused by the code — determinism makes it attributable — but this rung reverts
+    commits, and #1352 set the floor at one question's quantum or wider for every
+    armed metric, so a one-question delta is recorded and not acted on whatever
+    the ranker is doing. Three questions is still past the pinned floor's
+    resolution term (0.0133 at n=81) and past the 0.03 fresh-ranker floor, while
+    the companion test below shows that same fresh floor forgiving a
+    one-question drop at this n — so the pair still contrasts a narrow pinned
+    floor against a wide live one, and the number naming the narrow one is now
+    the metric's own resolution rather than a constant.
+    """
     requested, events = _replay_check_env(monkeypatch, tmp_path)
     seen: list = []
-    drop = _arm(81, [], doc_hit_rate=0.588)
+    drop = _arm(81, [], n_queries=81, doc_hit_rate=0.56)
     monkeypatch.setattr(R, "_run_arm", _replay_arms(
         {"baseline": {"fresh": 81}, "current": {"replayed_anchor": 81},
          "confirm": {"replayed_anchor": 81}},
-        {"baseline": _arm(81, []), "current": drop, "confirm": dict(drop)}, seen))
+        {"baseline": _arm(81, [], n_queries=81), "current": drop,
+         "confirm": dict(drop)}, seen))
     out = R._execute_blocking()
     assert out["regressed"] is True and requested, out
+    # Resolution governs the pinned floor here: 3σ is 0.0030 against 0.0133 for
+    # one question at n=81, and the delta is three times that.
+    floors = out["metric_floors"]["doc_hit_rate"]
+    assert floors["floor_governed_by"] == R.FLOOR_BY_RESOLUTION
+    assert floors["floor"] == pytest.approx(1.0 / 81 + 0.001)
+    assert floors["n_queries"] == 81
     check = next(e for e in events if e.get("event") == "regression_check")
     assert check["ranker"]["reading"] == "replayed"
     assert check["ranker"]["floor"] == "replayed"
@@ -1109,3 +1154,207 @@ def test_measure_noise_drops_a_trial_djev_did_not_answer(monkeypatch, tmp_path):
     noise = R.measure_noise(3, fresh_trials=1)
     assert noise["dropped_trials"] == ["trial-1: djev {'unreachable': 2}"]
     assert noise["metrics"]["doc_hit_rate"]["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# #1352: the floor an instrument cannot defend rolls nothing back
+# ---------------------------------------------------------------------------
+#
+# Two promotions were reverted on 2026-09-21 whose every delta was one question of
+# an 87-question eval flipping. Three defects made that possible and each is
+# pinned once below: the floor was a constant (3 × MIN_SIGMA = 0.0030) with the
+# artifact's `stdev` 0.0 because it had been measured against a DIFFERENT 20-query
+# question set, and the `noise_floor_stale` flag that said so was written into
+# every record and read by nothing; that floor was also narrower than the metric's
+# own quantum (1/87 = 0.0115), so "no change at all" and "one question flipped"
+# were the same number; and the second look decided on SIGN, so the 21:44 pair
+# (ndcg10 Δ-0.0060, then Δ-0.0200 on the same settled commit) was booked as
+# corroboration. The four tests below take the clauses in order, and the fifth
+# pins that a real drop still reverts, so the three guards are not a disarming.
+
+def _floor_noise(**over):
+    """A noise artifact that matches THESE questions, unless `over` says otherwise."""
+    noise = dict(ZERO_NOISE)
+    noise.update(over)
+    return noise
+
+
+def test_a_stale_floor_reports_the_deltas_and_asks_for_nothing(monkeypatch, tmp_path):
+    """A drop past the quantum, judged against a floor from another experiment.
+
+    Same all-zero stdevs the checks of 2026-09-21 carried, a
+    `queries_fingerprint` that is not the live one, and a drop big enough to clear
+    the resolution floor too (doc_hit_rate 0.529 → 0.506 at n=87: Δ-0.023, two and
+    a half questions) — because clause 2 already swallows a one-question flip on
+    arithmetic alone, and this clause is the backstop for what it cannot: a delta
+    the effective floor does flag, on an artifact whose σ was measured against a
+    different question set. The deltas stay recorded and named in the ledger
+    reason; the rollback channel stays shut. A σ for another experiment is not a
+    measurement of this one, so the rung cannot say what its own threshold means.
+    """
+    requested = _fact_check_env(monkeypatch, tmp_path)
+    events: list = []
+    import scripts.automod.state as S
+    monkeypatch.setattr(S, "append_event", lambda payload, **kw: events.append(payload))
+    noise = _floor_noise(queries_fingerprint="000000000000")  # ≠ the live fingerprint
+    (tmp_path / "noise.json").write_text(json.dumps(noise))
+    monkeypatch.setattr(R, "_run_arm", _arms_by_label(
+        baseline=_arm(87, [], n_queries=87, doc_hit_rate=0.529),
+        current=_arm(87, [], n_queries=87, doc_hit_rate=0.506)))
+
+    out = R._execute_blocking()
+    assert requested == [], f"a stale floor asked for a rollback: {requested}"
+    assert out["regressed"] is False, out
+    assert out["noise_floor_stale"] is True, out
+    # The deltas survive into the record — withholding the verdict is not
+    # withholding the observation, and the next reader has to be able to see the
+    # movement that the person who cleared the halt is going to be asked about.
+    assert out["detail"]["doc_hit_rate"]["delta"] == pytest.approx(-0.023)
+    assert out["summary"].startswith("STALE FLOOR"), out["summary"]
+    row = next(e for e in events if e["event"] == "regression_check")
+    assert row["noise_floor_stale"] is True and row["regressed"] is False
+    assert "stale floor" in row["reasons"][0], row["reasons"]
+
+
+def test_the_same_drop_under_a_fresh_floor_still_requests_a_rollback(
+        monkeypatch, tmp_path):
+    """Clauses 1-3 must not disarm the rung: with a σ measured against THESE
+    questions, a drop past the effective floor still reverts."""
+    requested = _fact_check_env(monkeypatch, tmp_path)
+    noise = _floor_noise(metrics={k: {"stdev": 0.0} for k in R.ARMED_METRICS})
+    (tmp_path / "noise.json").write_text(json.dumps(noise))
+    monkeypatch.setattr(R, "_run_arm", _arms_by_label(
+        baseline=_arm(87, [], n_queries=87, doc_hit_rate=0.529),
+        current=_arm(87, [], n_queries=87, doc_hit_rate=0.506)))
+
+    out = R._execute_blocking()
+    assert out["regressed"] is True, out
+    assert out["noise_floor_stale"] is False, out
+    assert len(requested) == 1, requested
+    # Two questions at n=87 (Δ-0.023) against an effective floor of 1/87 + the
+    # rounding step: the narrowest threshold the rung is allowed to use.
+    assert out["metric_floors"]["doc_hit_rate"]["floor"] == pytest.approx(
+        1.0 / 87 + R.SCORE_ROUND_STEP)
+
+
+def test_no_armed_metric_is_judged_on_a_floor_below_one_question():
+    """One question flipping is the smallest event a hit-rate has, so it is the
+    smallest thing the rung may treat as an effect.
+
+    The three values the evening of 2026-09-21 rolled back on — 0.529, 0.517,
+    0.506 — are 46/87, 45/87 and 44/87: the same question, three times, and each
+    cleared the 0.0030 floor by 4x. This asserts the quantum for every armed
+    metric, on both sides of the trade: one question is tolerated, two are not.
+    """
+    n = 87
+    for key in R.ARMED_METRICS:
+        floor = R.effective_floor(ZERO_NOISE, key, n)["floor"]
+        assert floor >= 1.0 / n, f"{key} floor {floor} is below one question"
+        one = base(n_queries=n, **{key: 0.6 - 1.0 / n})
+        regressed, _, detail = R.evaluate(one, base(n_queries=n), ZERO_NOISE)
+        assert regressed is False, f"{key}: one question flipped reverted a commit"
+        assert detail[key]["floor_governed_by"] == R.FLOOR_BY_RESOLUTION
+        assert detail[key]["n_queries"] == n
+        assert detail[key]["sigma_source"] == R.SIGMA_SOURCE_MIN_FLOOR
+        two = base(n_queries=n, **{key: 0.6 - 2.0 / n})
+        regressed2, reasons2, _ = R.evaluate(two, base(n_queries=n), ZERO_NOISE)
+        assert regressed2 is True, f"{key}: two questions cannot register"
+        assert "noise_floor_stale=False" in reasons2[0]
+
+
+def test_a_sigma_measured_against_these_questions_widens_the_floor_further():
+    """`measured` and `min_sigma_floor` are told apart, and a real σ wins when
+    it is the wider term — which is what a published paired σ is for."""
+    measured = {"metrics": {"ndcg10": {"stdev": 0.02}},
+                "queries_fingerprint": FINGERPRINT}
+    ev = R.effective_floor(measured, "ndcg10", 87)
+    assert ev["sigma"] == pytest.approx(0.02)
+    assert ev["sigma_source"] == R.SIGMA_SOURCE_MEASURED
+    assert ev["floor_governed_by"] == R.FLOOR_BY_SIGMA
+    assert ev["floor"] == pytest.approx(3.0 * 0.02)
+    # And the reason text says floor and σ side by side, in those words.
+    _, reasons, _ = R.evaluate(base(n_queries=87, ndcg10=0.5), base(n_queries=87),
+                               measured)
+    assert reasons[0].count("floor=") == 1 and "σ=" in reasons[0]
+    assert "measured" in reasons[0]
+
+
+def test_the_confirm_arm_decides_on_size_not_on_direction(monkeypatch, tmp_path):
+    """Two same-sign draws INSIDE the published paired σ corroborate nothing.
+
+    The 21:44Z pair was ndcg10 Δ-0.0060 then Δ-0.0200 on one settled commit, and
+    the second look accepted it because the metric was "past the threshold again".
+    Here the instrument's own published spread over independent draws is σ=0.01
+    (k·σ = 0.03) while the first pass is judged on the deterministic floor —
+    resolution 0.0133 at n=81 — so a pair of Δ-0.024 observations clears every
+    threshold in the file and is still inside 3σ of what this instrument does to
+    itself. What has to change is the verdict, not the numbers: `unconfirmed`,
+    `regressed: false`, and no request.
+    """
+    requested, events = _replay_check_env(monkeypatch, tmp_path)  # fresh σ 0.01
+    seen: list = []
+    drop = _arm(81, [], n_queries=81, doc_hit_rate=0.576)   # Δ-0.024 = 2 questions
+    monkeypatch.setattr(R, "_run_arm", _replay_arms(
+        {"baseline": {"fresh": 81}, "current": {"replayed_anchor": 81},
+         "confirm": {"replayed_anchor": 81}},
+        {"baseline": _arm(81, [], n_queries=81), "current": drop,
+         "confirm": dict(drop)}, seen))
+    out = R._execute_blocking()
+    assert out["regressed"] is False, out
+    assert requested == [], f"the pair was confirmed on sign: {requested}"
+    assert out["unconfirmed_reasons"], "the pair vanished instead of being refused"
+    assert "size" in out["unconfirmed_reasons"][0]
+    check = next(e for e in events if e.get("event") == "regression_check")
+    assert check["regressed"] is False and check["confirmed_by"] == []
+
+
+def test_two_draws_beyond_the_paired_sigma_still_confirm(monkeypatch, tmp_path):
+    """The same pair with no published paired σ is still an effect: the screen
+    needs a measurement to refuse, and with none it falls back to the floor the
+    first pass was judged on — which these clear by eight times."""
+    requested, _events = _replay_check_env(monkeypatch, tmp_path, fresh_floor=False)
+    seen: list = []
+    drop = _arm(81, [], n_queries=81, doc_hit_rate=0.576)
+    monkeypatch.setattr(R, "_run_arm", _replay_arms(
+        {"baseline": {"fresh": 81}, "current": {"replayed_anchor": 81},
+         "confirm": {"replayed_anchor": 81}},
+        {"baseline": _arm(81, [], n_queries=81), "current": drop,
+         "confirm": dict(drop)}, seen))
+    out = R._execute_blocking()
+    assert out["regressed"] is True, out
+    assert len(requested) == 1, requested
+
+
+def test_a_rollback_request_carries_the_floor_it_claimed(monkeypatch, tmp_path):
+    """The alert a halt is read from has to say whether any metric moved past a
+    floor the instrument could defend — which is the whole difference between the
+    two rollbacks of 2026-09-21 and a real regression.
+
+    Asserted on the payload the guardian consumes (`metric_floors`,
+    `noise_floor_stale`) AND on the prose, because the guardian quotes `reason`
+    verbatim into its alert body and truncates it at 2000 chars: the floors
+    clause therefore has to come FIRST, ahead of the per-metric list it explains.
+    """
+    _fact_check_env(monkeypatch, tmp_path)
+    import scripts.automod.state as S
+    captured: dict = {}
+    monkeypatch.setattr(S, "request_rollback",
+                        lambda **kw: captured.update(kw) or kw)
+    (tmp_path / "noise.json").write_text(json.dumps(_floor_noise(
+        metrics={k: {"stdev": 0.0} for k in R.ARMED_METRICS})))
+    monkeypatch.setattr(R, "_run_arm", _arms_by_label(
+        baseline=_arm(87, [], n_queries=87, doc_hit_rate=0.529),
+        current=_arm(87, [], n_queries=87, doc_hit_rate=0.506)))
+
+    out = R._execute_blocking()
+    assert out["regressed"] is True, out
+    ev = captured["metric_floors"]["doc_hit_rate"]
+    for field in ("floor", "sigma", "sigma_source", "resolution", "n_queries",
+                  "delta", "noise_floor_stale"):
+        assert field in ev, f"{field} missing from the request: {ev}"
+    assert captured["noise_floor_stale"] is False
+    reason = captured["reason"]
+    assert reason.index("[floors]") < reason.index("doc_hit_rate 0."), \
+        "the justification sits behind the list it justifies, where truncation eats it"
+    assert "noise_floor_stale=False" in reason
+    assert out["summary"].count("floor=") >= 1

@@ -947,10 +947,15 @@ def test_the_pin_frees_its_snapshot_even_when_interrupted():
 def test_a_noise_floor_records_the_questions_it_was_measured_against():
     """A floor describes one experiment; retargeting a query changes it.
 
-    Not a gate: under a pinned corpus every armed metric is deterministic, so
-    the measured stdev is 0.0 and the tolerance falls back to MIN_SIGMA either
-    way. A stale floor cannot make the comparison wrong, only its record
-    misleading, so it is reported rather than enforced.
+    And since #1352 the mismatch IS a gate: `check_promotion` compares the
+    artifact's fingerprint with the live one before spending an arm on a second
+    look, and a mismatched artifact reports its deltas without asking for a
+    rollback. The old ruling — "not a gate, because a pinned corpus is
+    deterministic so the floor falls back to MIN_SIGMA either way" — held only
+    while the doc leg was a cross-encoder. djev took over the ranking on
+    2026-09-21, one settled commit measured itself at Δ-0.0090 and Δ+0.0010 on
+    `ndcg10` inside a single check, and two promotions were reverted on a floor
+    that every check that day had already flagged stale.
     """
     from workers.sources import automod_regression as R
     fp = R.queries_fingerprint()

@@ -155,11 +155,24 @@ REPORT_ONLY = ("latency_ms_avg", "n_queries")
 # the whole armed set.
 FACT_LAYER_METRICS = ("entity_hit_rate", "entity_recall_avg",
                       "fact_entity_recall_avg")
-# A floor, not a measurement: the eval contributes zero variance, so this only
-# absorbs float representation wobble. Real tolerance comes from the paired
-# comparison, which removes vault drift rather than budgeting for it.
+# The floor applied to an armed metric is `max(SIGMA_MULTIPLIER × σ, one
+# question's quantum)` — see `effective_floor`. `MIN_SIGMA` is what the σ term
+# falls back to when the published noise artifact carries no measured stdev for
+# the metric, and the resolution term is what stops a floor from being narrower
+# than the number it grades. #1352: on 2026-09-21 a floor of exactly
+# `3 × MIN_SIGMA = 0.0030` rolled back two promotions whose every delta was one
+# question flipping, because 0.0030 is a third of this eval's quantum.
 MIN_SIGMA = 0.001
 SIGMA_MULTIPLIER = 3.0
+
+# The reported score is `round(mean, 3)` (`eval/run_eval.py:601`, inside
+# `summarize.avg`), so a metric cannot move by less than this and have it show.
+SCORE_ROUND_STEP = 0.001
+# Which term won, recorded per metric so a reader never has to re-derive it.
+SIGMA_SOURCE_MEASURED = "measured"
+SIGMA_SOURCE_MIN_FLOOR = "min_sigma_floor"
+FLOOR_BY_SIGMA = "sigma"
+FLOOR_BY_RESOLUTION = "resolution"
 
 # ── the latency budget ──────────────────────────────────────────────────────
 #
@@ -526,6 +539,200 @@ def _floor_for(noise: dict, reading: str) -> dict:
     return {**noise, "floor": "replayed_no_fresh_floor"}
 
 
+def query_count(*arms: dict | None) -> int | None:
+    """The denominator BOTH arms agree on, or None when they do not share one.
+
+    It is the run's own `n_queries`, not a count of the query file: `summarize`
+    averages over `records` (`eval/run_eval.py:617`), so an arm that scored fewer
+    records has a correspondingly coarser score.
+
+    Arms that scored a different number of questions do not have one quantum
+    between them, so the term contributes nothing beyond the rounding step and
+    the comparison keeps the threshold it always had. That is deliberately not
+    treated as a measurement failure here: an arm that dropped a question is
+    already refused upstream as a non-measurement (`unanswered_doc_queries`,
+    `empty_fact_leg`), and the differing counts are reported in `detail` either
+    way.
+    """
+    counts: set[int] = set()
+    for arm in arms:
+        try:
+            n = int((arm or {}).get("n_queries"))
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            counts.add(n)
+    if len(counts) != 1:
+        return None
+    return counts.pop()
+
+
+def score_resolution(n: int | None) -> float:
+    """The smallest reported move that cannot be one question flipping.
+
+    Two terms, both derived rather than chosen:
+
+    * `1/n` — every armed metric is an `avg` over the arm's scored records
+      (`eval/run_eval.py:617`), so ONE question's entire contribution is `1/n`.
+      For the two hit-rates the per-query score IS 0/1, which makes that exactly
+      the smallest non-zero move the metric has at all: the three `doc_hit_rate`
+      values across the evening of 2026-09-21 — 0.529, 0.517, 0.506 — are 46/87,
+      45/87 and 44/87, each one question flipping, and each was reported as a
+      regression "beyond 3σ=0.0030". For the graded averages (`ndcg10`, `mrr_doc`,
+      the two recall averages) one question can move LESS than `1/n`, so this is
+      the ceiling of its effect; taking the ceiling is the side of the trade that
+      keeps a single question from reverting a commit, and it is the trade the
+      loop's own history argues for — every rollback this check has performed was
+      a false positive.
+    * `+ SCORE_ROUND_STEP` — the reported number is `round(mean, 3)`, so each
+      side carries up to 0.0005 of representation error and the difference of two
+      reported values can overstate one question by up to one full step. At n=87 a
+      single flip is truly 0.011494 and was REPORTED as -0.012 (0.529 → 0.517), so
+      a floor of exactly `1/n` would still fire on the very flip it is meant to
+      absorb. `1/n + 0.001` = 0.012494 cannot.
+
+    With no denominator the term degrades to the rounding step alone: a value
+    rounded to 3 dp cannot move by less than 0.001 whatever `n` is.
+    """
+    return (1.0 / n if n else 0.0) + SCORE_ROUND_STEP
+
+
+def metric_sigma(noise: dict | None, key: str) -> tuple[float, str]:
+    """The published paired σ for one metric, and whether it was measured.
+
+    `min_sigma_floor` is reported whenever the artifact has no positive stdev
+    for the metric: that value is a floor chosen by this file, and the record has
+    to say so, because `stdev: 0.0` is also what an arm that could not vary
+    produces — the two are not the same claim.
+    """
+    entry = ((noise or {}).get("metrics") or {}).get(key) or {}
+    raw = entry.get("stdev")
+    sigma = float(raw) if isinstance(raw, (int, float)) else 0.0
+    if sigma > 0:
+        return sigma, SIGMA_SOURCE_MEASURED
+    return MIN_SIGMA, SIGMA_SOURCE_MIN_FLOOR
+
+
+def effective_floor(noise: dict | None, key: str, n: int | None) -> dict:
+    """The one number that decides whether `key` moved: `max(k·σ, 1/n)`.
+
+    Both terms are measurements of a different thing. σ is the spread of this
+    instrument on one settled commit (published per metric by `measure_noise`);
+    `1/n` is the granularity of the number being graded. Neither alone is
+    sufficient: a σ of 0.0 with no resolution floor re-creates #1352 (floor
+    0.0030 on a metric that cannot move by less than 0.0115), and a resolution
+    floor with no σ would treat a genuinely noisy metric as deterministic.
+    """
+    sigma, source = metric_sigma(noise, key)
+    k_sigma = SIGMA_MULTIPLIER * sigma
+    resolution = score_resolution(n)
+    by_sigma = k_sigma >= resolution
+    return {"sigma": sigma, "sigma_source": source, "k_sigma": k_sigma,
+            "resolution": resolution, "n_queries": n,
+            "floor": k_sigma if by_sigma else resolution,
+            "floor_governed_by": FLOOR_BY_SIGMA if by_sigma else FLOOR_BY_RESOLUTION}
+
+
+def paired_sigma(noise: dict | None, key: str) -> tuple[float, str]:
+    """The σ that governs two INDEPENDENT draws of the instrument.
+
+    The confirm arm runs under its own ranker arm name (`ARM_CONFIRM`, see
+    `check_promotion`), so its djev answers are fresh draws rather than replays
+    of the anchor's: the spread between a first pass and a confirm pass is the
+    live-ranker spread, which `measure_noise` publishes separately as
+    `metrics_fresh_ranker`. Measured there on 2026-09-22 over 5 fresh-ranker
+    trials of the 81-question set: `ndcg10` σ 0.010271, `mrr_doc` 0.010183,
+    `doc_recall_avg` 0.005505, `doc_hit_rate` 0.005367 — three to ten times the
+    0.0030 the check rolled back on. The replayed bucket is the fallback, and its
+    source label is what tells a reader no fresh-ranker σ was published.
+    """
+    fresh = ((noise or {}).get("metrics_fresh_ranker") or {}).get(key) or {}
+    raw = fresh.get("stdev")
+    sigma = float(raw) if isinstance(raw, (int, float)) else 0.0
+    if sigma > 0:
+        return sigma, f"{SIGMA_SOURCE_MEASURED}_fresh_ranker"
+    return metric_sigma(noise, key)
+
+
+def magnitude_confirmed(first: dict, second: dict, noise: dict | None,
+                        metrics: list[str]) -> tuple[list[str], list[str]]:
+    """Decide the second look on MAGNITUDE against the paired σ, not on sign.
+
+    `evaluate` answers "is this metric past the floor again?", and for a
+    zero-mean ±0.01 variable two draws of that question is near-guaranteed: on
+    2026-09-21 21:44Z the first pass said `ndcg10` Δ-0.0060 and the confirm pass
+    said Δ-0.0200 — the second draw three times deeper than the first, which is
+    what an independent draw of noise looks like — and the pair was booked as
+    `confirmed_by` and became a rollback. An observation confirms an effect only
+    when BOTH draws clear k·σ of zero; a pair that does not is reported in
+    `unconfirmed_reasons` as a finding about the instrument.
+
+    Returns (confirmed, rejected) metric names.
+    """
+    confirmed: list[str] = []
+    rejected: list[str] = []
+    for key in metrics:
+        sigma, _source = paired_sigma(noise, key)
+        limit = SIGMA_MULTIPLIER * sigma
+        d1 = (first.get(key) or {}).get("delta")
+        d2 = (second.get(key) or {}).get("delta")
+        if d1 is None or d2 is None:
+            rejected.append(key)
+            continue
+        if abs(float(d1)) >= limit and abs(float(d2)) >= limit:
+            confirmed.append(key)
+        else:
+            rejected.append(key)
+    return confirmed, rejected
+
+
+def metric_evidence(detail: dict, reasons: list[str],
+                    noise_floor_stale: bool) -> dict:
+    """Per triggering metric: floor, σ and whether the floor was stale.
+
+    This is what lets the needs-human routing answer the only question that
+    matters about a halt — did any metric actually move past a floor the
+    instrument could justify, or did the instrument grade itself with a ruler it
+    had not measured? Before #1352 the answer was unfindable: `noise_floor_stale`
+    was written on every check and read by no branch, and every armed metric
+    carried the same unmeasured `tolerance: 0.003`.
+    """
+    out: dict[str, dict] = {}
+    for reason in reasons:
+        key = reason.split()[0] if reason.split() else ""
+        entry = detail.get(key)
+        if not isinstance(entry, dict):
+            continue
+        out[key] = {"floor": entry.get("floor"), "sigma": entry.get("sigma"),
+                    "sigma_source": entry.get("sigma_source"),
+                    "floor_governed_by": entry.get("floor_governed_by"),
+                    "resolution": entry.get("resolution"),
+                    "n_queries": entry.get("n_queries"),
+                    "delta": entry.get("delta"),
+                    "noise_floor_stale": bool(noise_floor_stale)}
+    return out
+
+
+def floors_line(evidence: dict, noise_floor_stale: bool) -> str:
+    """One clause per triggering metric: Δ, floor, σ and whether it was stale.
+
+    This string is what makes a rollback the instrument could not justify
+    distinguishable from one it could, on the two surfaces a person actually
+    reads: the check's `summary`, and the guardian's rollback alert, whose body is
+    this request's `reason` verbatim (`Guardian._rollback_once` → `f"Trigger:
+    {trigger}\\n{reason}"`). Before #1352 both said only "beyond 3σ=0.0030" — a
+    number that was identical whether or not the σ behind it had ever been
+    measured, which is how two noise-sized rollbacks came to look like two
+    regressions in the ledger.
+    """
+    parts = [f"{name}: Δ{(ev.get('delta') or 0.0):+.4f} vs floor={ev.get('floor'):.4f}"
+             f" (σ={ev.get('sigma'):.6f} {ev.get('sigma_source') or '?'}, resolution="
+             f"{ev.get('resolution'):.4f} at n={ev.get('n_queries')})"
+             for name, ev in evidence.items() if isinstance(ev, dict)]
+    parts.append(f"noise_floor_stale={bool(noise_floor_stale)}")
+    return "; ".join(parts)
+
+
 def _run_arm(tree: Path, label: str, env: dict, timeout: float = 900.0) -> dict | None:
     """Run the eval from `tree`, scoring the LIVE queries against a pinned corpus.
 
@@ -675,8 +882,18 @@ def _summarise_noise(samples: dict, trials: int, *, dropped: list[str] | None = 
 
 
 def evaluate(current: dict, baseline: dict, noise: dict,
-             context: str = CONTEXT_PAIRED_CHECK) -> tuple[bool, list[str], dict]:
+             context: str = CONTEXT_PAIRED_CHECK,
+             floor_stale: bool = False) -> tuple[bool, list[str], dict]:
     """Pure comparison. Returns (regressed, reasons, per-metric detail).
+
+    `floor_stale` is provenance travelling into the reason text and the
+    per-metric detail, so the string a human reads names the floor, the σ behind
+    it and whether that σ was measured against this question set. It changes what
+    is SAID here and not what is `regressed`: deciding that an unjustified floor
+    is no verdict is `check_promotion`'s job, because that is where the rollback
+    request is made. Each armed metric's threshold is `effective_floor` —
+    `max(k·σ, 1/n_queries)` — so a floor can never be narrower than the number it
+    grades (#1352).
 
     `context` selects the absolute latency ceiling (`LATENCY_BUDGET_MS`) that
     `latency_ms_avg` is read against. It changes what is REPORTED and never what
@@ -688,7 +905,7 @@ def evaluate(current: dict, baseline: dict, noise: dict,
     """
     reasons: list[str] = []
     detail: dict[str, Any] = {}
-    metrics = (noise or {}).get("metrics") or {}
+    n = query_count(current, baseline)
 
     for key in ARMED_METRICS:
         if key not in current or key not in baseline:
@@ -709,14 +926,20 @@ def evaluate(current: dict, baseline: dict, noise: dict,
                            "armed": True, "not_measured": True}
             continue
         now, was = float(current[key]), float(baseline[key])
-        sigma = max(float(metrics.get(key, {}).get("stdev", 0.0)), MIN_SIGMA)
-        tolerance = SIGMA_MULTIPLIER * sigma
+        floor = effective_floor(noise, key, n)
         delta = now - was
         detail[key] = {"before": was, "after": now, "delta": delta,
-                       "tolerance": tolerance, "armed": True}
-        if delta < -tolerance:
-            reasons.append(f"{key} {was:.4f} → {now:.4f} "
-                           f"(Δ{delta:+.4f}, beyond {SIGMA_MULTIPLIER:g}σ={tolerance:.4f})")
+                       # `tolerance` is the historical key and stays: it is the
+                       # same number under the name the ledger already carries.
+                       "tolerance": floor["floor"], "armed": True,
+                       "noise_floor_stale": bool(floor_stale), **floor}
+        if delta < -floor["floor"]:
+            reasons.append(
+                f"{key} {was:.4f} → {now:.4f} (Δ{delta:+.4f}, beyond "
+                f"floor={floor['floor']:.4f} "
+                f"[{SIGMA_MULTIPLIER:g}σ={floor['k_sigma']:.4f} "
+                f"{floor['sigma_source']}, resolution={floor['resolution']:.4f} "
+                f"n={floor['n_queries']}], noise_floor_stale={bool(floor_stale)})")
 
     for key in REPORT_ONLY:
         if key in current and key in baseline:
@@ -1102,10 +1325,20 @@ def _announce_if_given_up(commit: str, reason: str) -> None:
         logger.debug("give-up announcement failed", exc_info=True)
 
 
-def _would_regress(current: dict | None, baseline: dict | None, noise: dict) -> bool:
+def _would_regress(current: dict | None, baseline: dict | None, noise: dict,
+                   floor_stale: bool = False) -> bool:
     """Whether these two arms, as they stand, would be reported as a regression:
     both measurable, and `evaluate` says so. The question `check_promotion` asks
-    while the pinned corpus is still up, to decide whether to look twice."""
+    while the pinned corpus is still up, to decide whether to look twice.
+
+    A stale floor answers this `False` on purpose (#1352): the second look exists
+    to decide whether a rollback request is justified, and `check_promotion`
+    cannot justify one against a floor measured against a different question set,
+    so the extra arm would cost one eval run to confirm a verdict that is already
+    going to be withheld.
+    """
+    if floor_stale:
+        return False
     if not baseline or not current or all_queries_empty(baseline):
         return False
     for blob in (baseline, current):
@@ -1156,6 +1389,15 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                              f"`automod_regression.measure_noise()` once on an unchanged tree",
                      level=logging.WARNING)
 
+    # Decided BEFORE an arm is spent on a second look. A floor whose σ was
+    # measured against a different question set describes a different experiment,
+    # and #1352 made that a verdict-ending fact rather than a note in the record:
+    # every check on 2026-09-21 carried `noise_floor_stale: True` and still asked
+    # for two rollbacks, because nothing read the flag.
+    live_fp = queries_fingerprint()
+    artifact_fp = str(noise.get("queries_fingerprint") or "")
+    stale_floor = artifact_fp != live_fp
+
     # Both arms run inside ONE pinned corpus: a frozen qmd snapshot plus a
     # single grep root. Without that the comparison measures the corpus as
     # much as the code — this retriever searches the repository it ships in,
@@ -1201,7 +1443,8 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                     # (2026-09-07: ndcg -0.006; 2026-09-17: one question lost to
                     # the client's timeout), and a second look costs one arm.
                     if _would_regress(current, baseline, _floor_for(
-                            noise, ranker_reading(replay_stats(replay_db), ARM_CURRENT))):
+                            noise, ranker_reading(replay_stats(replay_db), ARM_CURRENT)),
+                            floor_stale=stale_floor):
                         confirm_ran = True
                         # Its own arm name: a request the change moved is drawn
                         # again rather than replayed from the first current run,
@@ -1284,17 +1527,20 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                                  "the cross-encoder, so the arms ranked differently for a reason "
                                  "that is not the change; cannot evaluate")
 
-    # Provenance, not a gate. Under a pinned corpus every armed metric is
-    # deterministic (re-measured 2026-09-17: five trials agree to 0.0000), so
-    # the measured stdev is 0.0 and the tolerance falls back to the MIN_SIGMA
-    # floor either way — a floor taken against an older question set cannot
-    # make the comparison wrong, only its record misleading. Say so rather
-    # than silently carrying it. What is NOT deterministic is whether the
-    # daemon answers every query, and that is refused above as a
-    # non-measurement rather than budgeted for here: one dropped answer is
-    # -0.05 doc_hit_rate, and a floor wide enough to absorb it would also
-    # absorb a real regression of one query.
-    stale_floor = (noise.get("queries_fingerprint") or "") != queries_fingerprint()
+    # A GATE, not provenance (#1352). A floor whose σ was measured against a
+    # different question set describes a different experiment, so it cannot
+    # license reverting a commit: the deltas get recorded and reported, and the
+    # rollback channel stays shut. This reverses the previous ruling — "provenance,
+    # not a gate", on the reasoning that a pinned corpus is deterministic so the
+    # floor falls back to MIN_SIGMA either way. That premise failed on
+    # 2026-09-21: the doc leg's ranker became djev (`RECALL_RERANKER`, landed
+    # 19:45Z), one settled commit measured itself at Δ-0.0090 and Δ+0.0010 on
+    # `ndcg10` inside one check, and two promotions were reverted on a floor that
+    # was flagged stale on every check that day. What is NOT deterministic is
+    # whether the daemon answers every query, and that stays refused above as a
+    # non-measurement rather than budgeted for here: a dropped answer is not a
+    # low score, and a floor wide enough to absorb it would absorb a real
+    # one-query regression too.
     # Which floor: replayed (the ranker a pure function of its input, so the
     # pinned floor holds) or fresh (the change moved what djev was asked, so its
     # own noise is in the comparison). `ranker_reading` says which.
@@ -1302,7 +1548,7 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
     floor_noise = _floor_for(noise, reading)
 
     regressed, reasons, detail = evaluate(current["overall"], baseline["overall"], floor_noise,
-                                          CONTEXT_PAIRED_CHECK)
+                                          CONTEXT_PAIRED_CHECK, floor_stale=stale_floor)
     unconfirmed: list[str] = []
     confirmed_by: list[str] = []
     if regressed and confirm_ran:
@@ -1333,17 +1579,71 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                    if empty_fact_leg(confirm) else "")
                 + (f", {fact_cov['n_fact_reads_failed_total']} entity fact read(s) failed"
                    if fact_cov.get("n_fact_reads_failed_total") else "no fact read failed"))
-        again, confirmed_by, detail_again = evaluate(
+        confirm_regressed, confirm_reasons, detail_again = evaluate(
             confirm["overall"], baseline["overall"],
-            _floor_for(noise, ranker_reading(ranker, ARM_CONFIRM)), CONTEXT_PAIRED_CHECK)
-        if not again:
-            # Same code, same corpus, same questions, a different answer: that
-            # is a finding about the instrument, and it is recorded as one.
-            logger.warning("regression after %s did NOT reproduce on a second run of the same "
-                           "arm — not a regression: %s", commit[:8], "; ".join(reasons))
-            unconfirmed, regressed, reasons = reasons, False, []
-            current, detail = confirm, detail_again
-    fact_side = [r for r in reasons if r.split()[0] in FACT_LAYER_METRICS]
+            _floor_for(noise, ranker_reading(ranker, ARM_CONFIRM)), CONTEXT_PAIRED_CHECK,
+            floor_stale=stale_floor)
+        # #1352 clause 3: the second look decides on MAGNITUDE against the
+        # published paired σ, not on whether the metric is still past the floor.
+        # `evaluate` answers the sign question, and for two independent draws of a
+        # zero-mean ±0.01 variable that question passes often: at 2026-09-21 21:44Z
+        # the first pass said `ndcg10` Δ-0.0060 and the confirm pass Δ-0.0200
+        # (`mrr_doc` -0.0050 → -0.0340) — the second draw landing three times
+        # deeper than the first, which is what a fresh draw of noise does — and the
+        # pair was booked `confirmed_by` and reverted a commit that had touched no
+        # ranking path. Reasons, detail and the reported arm all come from the
+        # second pass from here, so a reason string and its `detail` entry can
+        # never disagree about which draw they describe.
+        confirm_by = {r.split()[0]: r for r in confirm_reasons if r.split()}
+        first_by = {r.split()[0]: r for r in reasons if r.split()}
+        past_size, size_rejected = magnitude_confirmed(
+            detail, detail_again, floor_noise,
+            [m for m in confirm_by if m in ARMED_METRICS])
+        # A reason that names no armed metric (`eval errors appeared: ...`) is not
+        # a measurement subject to a σ, so it survives the screen unchanged.
+        kept = set(past_size) | {m for m in confirm_by if m not in ARMED_METRICS}
+        reasons = [confirm_by[m] for m in confirm_by if m in kept]
+        confirmed_by = [m for m in confirm_by if m in kept]
+        unconfirmed = [first_by[m] for m in first_by if m not in kept]
+        if size_rejected:
+            # Named in the record, not only in the log: "the drop did not
+            # reproduce" and "it reproduced, and BOTH passes are inside the
+            # instrument's own spread" are different findings about the
+            # instrument, and the second is the one that cost two promotions.
+            unconfirmed = [
+                f"refused on size, not on direction: {', '.join(size_rejected)} "
+                f"cleared the floor on both passes and neither passed "
+                f"{SIGMA_MULTIPLIER:g}σ of the paired σ measured against these "
+                f"questions, so the pair is the instrument's own swing"] + unconfirmed
+        regressed = bool(reasons)
+        current, detail = confirm, detail_again
+        if not regressed:
+            # Same code, same corpus, same questions, a different answer — or an
+            # answer that never left the instrument's own spread: either way this
+            # is a finding about the instrument, recorded as one.
+            logger.warning("regression after %s did NOT reproduce as an effect on a second run "
+                           "of the same arm (second pass regressed=%s, past 3σ of the paired σ=%s, "
+                           "rejected on size=%s) — not a regression: %s",
+                           commit[:8], confirm_regressed, past_size, size_rejected,
+                           "; ".join(first_by.values()))
+    no_verdict = ""
+    if regressed and stale_floor:
+        # Clause 1 of #1352. The floor this verdict rests on was measured against
+        # a different question set, so the verdict is not this check's to make:
+        # record what was seen, report it loudly, and leave the rollback channel
+        # alone. `unconfirmed_reasons` keeps the metric strings so the deltas are
+        # still greppable in the ledger.
+        unconfirmed = reasons + unconfirmed
+        no_verdict = (f"stale floor — no verdict: the published noise floor's queries_fingerprint "
+                      f"{artifact_fp or '(absent)'} is not the live set {live_fp}, so no floor here "
+                      f"is justified for these questions and no rollback is requested; "
+                      f"{len(unconfirmed)} metric delta(s) past it are report-only, re-measure with "
+                      f"`python -m scripts.automod.regression_runner noise`. Were: "
+                      + "; ".join(unconfirmed)[:900])
+        reasons = [no_verdict]
+        regressed = False
+    fact_side_src = reasons + unconfirmed if stale_floor else reasons
+    fact_side = [r for r in fact_side_src if r.split() and r.split()[0] in FACT_LAYER_METRICS]
 
     # The latency verdict, on the same absolute ceiling `evaluate` reports inside
     # its detail. Written into both records a later reader consults — the ledger
@@ -1390,9 +1690,25 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                     "unconfirmed_reasons": unconfirmed,
                     "detail": detail, "commit": commit})
     if not regressed:
+        # A withheld verdict must not read as a clean bill. #1352's shape was an
+        # instrument that reported "no regression" on every check while each of
+        # those checks carried a flag saying its own floor did not apply, because
+        # the no-verdict return was byte-identical to the nothing-moved return.
+        if no_verdict:
+            summary = (f"STALE FLOOR after {commit[:8]}: no verdict — "
+                       f"{len(unconfirmed)} delta(s) report-only, no rollback requested")
+        elif unconfirmed:
+            summary = (f"no regression after {commit[:8]}: reported delta(s) refused "
+                       f"on the second pass")
+        else:
+            summary = (f"no regression after {commit[:8]} vs "
+                       f"{baseline_commit[:8]} ({len(ARMED_METRICS)} armed metrics)")
+        # Deliberately no `reason` key: `_execute_blocking` writes that field with
+        # the QUEUE's routing decision, and a check-level string here would be
+        # silently overwritten before anything read it.
         return {"status": "success", "regressed": False, "stage": stage,
-                "summary": f"no regression after {commit[:8]} vs "
-                           f"{baseline_commit[:8]} ({len(ARMED_METRICS)} armed metrics)",
+                "summary": summary,
+                "unconfirmed_reasons": unconfirmed,
                 "detail": detail, "noise_floor_stale": stale_floor}
 
     logger.error("behavioural regression after %s: %s", commit[:8], "; ".join(reasons))
@@ -1402,13 +1718,25 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
     # its own caller and then never reached `git reset`. The guardian is
     # outside that blast radius, and it also brings evidence preservation,
     # retries, the denylist and flap protection that an inline revert skipped.
+    # Clause 5 of #1352. The floors clause goes FIRST because everything that
+    # carries this string truncates it (`state.request_rollback` at 2000 chars,
+    # the ledger event at 1000) and the per-metric reasons are the long part: the
+    # sentence that says whether any floor was justified must survive the cut that
+    # the list of metric deltas does not. It lands in the rollback ledger event's
+    # `reason`, in the revert commit message, and in this item's summary — the
+    # three places a person reading a halt actually looks.
+    evidence = metric_evidence(detail, reasons, stale_floor)
+    reason = (f"behavioural regression after {commit[:8]} [floors] "
+              f"{floors_line(evidence, stale_floor)} | " + "; ".join(reasons))
     S.request_rollback(
-        reason=f"behavioural regression after {commit[:8]}: " + "; ".join(reasons),
+        reason=reason,
         trigger="regression", target=baseline_commit, commit=commit,
-        changed_paths=subject.get("changed_paths") or [])
+        changed_paths=subject.get("changed_paths") or [],
+        metric_floors=evidence, noise_floor_stale=stale_floor)
     return {"status": "failed", "regressed": True, "reasons": reasons,
-            "summary": f"REGRESSION after {commit[:8]}: " + "; ".join(reasons),
-            "fact_side_reasons": fact_side,
+            "summary": f"REGRESSION after {commit[:8]}: " + reason,
+            "fact_side_reasons": fact_side, "metric_floors": evidence,
+            "noise_floor_stale": stale_floor,
             "rollback_requested_to": baseline_commit}
 
 

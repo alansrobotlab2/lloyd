@@ -2573,6 +2573,40 @@ retriever that returns nothing regresses to zero and is reverted.
 `measure_noise` drops such trials for the same reason.
 `tests/test_automod_regression.py` pins both halves.
 
+**A floor cannot be narrower than the number it grades** (#1352, 2026-09-22). The
+threshold `evaluate` applies is `max(k·σ, 1/n_queries + 0.001)`, where `n_queries`
+is the denominator BOTH arms report — not a constant. Both terms are arithmetic
+about the score, not a budget for noise. Every armed metric is `avg` over the
+arm's scored records, so one question's whole contribution is `1/n`, and for the
+two hit-rates the per-query score IS 0/1, which makes that the smallest non-zero
+move the metric has at all; the reported value is `round(mean, 3)`, so a further
+rounding step is added because the difference of two reported values can overstate
+one question by up to that step. At the 87-question set live on 2026-09-21 the
+floor `3 × MIN_SIGMA` produced was 0.0030 against a quantum of 0.011494, and the
+three `doc_hit_rate` values that evening — 0.529, 0.517, 0.506 — are 46/87, 45/87
+and 44/87: one question flipping three times, each booked as a regression "beyond
+3σ" and two of them spent reverting a commit. Any tolerance below `1/n_queries` on
+a 0/1 metric is guaranteed to fire on a single question, which means the rung
+could not express "no change" at all. The σ and the winning term are published per
+metric in the check's record as `sigma`, `sigma_source` (`measured`, or
+`min_sigma_floor` when the artifact carried none), `resolution`, `n_queries`,
+`floor` and `floor_governed_by`, so the floor and the σ behind it are read side by
+side instead of inferred from a constant. `MIN_SIGMA` survives as the σ term's
+fallback, which is what the `min_sigma_floor` label reports.
+
+**A stale floor is no verdict** (#1352, 2026-09-22). `queries_fingerprint` matched
+against the live question set decides: a mismatched artifact records its deltas and
+names them in the ledger reason, and does not request a rollback — including the
+second look, which is skipped because its only purpose was to justify a request
+that cannot be justified. The summary distinguishes itself (`STALE FLOOR … no
+verdict`) from both a clean pass and a refused-on-second-look pass, for the
+same reason `empty_fact_leg` does: a check that reports "no regression" while its own
+flag says its floor did not apply is a clean bill it cannot issue, and that is
+exactly the state every check on 2026-09-21 was in. What the flag used to be —
+"provenance, not a gate" — is explained in §9. The paired σ the confirm arm screens
+magnitude against comes from the artifact's FRESH-ranker bucket, since that arm
+draws djev independently rather than replaying it.
+
 **And the three fact-layer metrics are named for what they actually read.**
 Two degradation drills against copies of the live store:
 
@@ -2661,7 +2695,11 @@ of 87; and dbec85aa (#939, the scheduler), measured while djev was being
 restarted for an experiment, with recall latency 2.0 s against 0.63 s. Two
 rollbacks in six hours halted promotions. The floor they were judged on was
 measured on 2026-09-17: 20 queries, the cross-encoder, `stdev 0`. Every check
-since had flagged it `noise_floor_stale`, and it was used anyway.
+since had flagged it `noise_floor_stale`, and it was used anyway. That flag is now
+a gate and the confirm arm screens magnitude against a published paired σ rather
+than sign — both are §8.1, and the σ the confirm arm reads is the artifact's
+**fresh-ranker** bucket (`metrics_fresh_ranker`), because `automod-check-confirm`
+draws djev independently instead of replaying the anchor's answers.
 
 - **Every arm runs under one djev replay file** (`app.djev.replay_env`,
   `LLOYD_DJEV_REPLAY`), anchored on the baseline. A rank request the baseline
