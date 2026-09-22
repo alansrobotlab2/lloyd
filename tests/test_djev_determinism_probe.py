@@ -28,7 +28,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from scripts.djev_determinism_probe import (
-    HITS_TOTAL, QUERIES_TOTAL, default_prompt, main, max_abs_delta, parse_counters)
+    HEADER_ROW_PLACEHOLDER, HITS_TOTAL, QUERIES_TOTAL, default_prompt, main, max_abs_delta,
+    parse_counters)
+# The row the probe now emits is graded by the same expression that grades the
+# script header it is pasted into, so the two cannot drift apart.
+from tests.test_start_djev_flags import VARIANT_RE
 
 
 class FakeEngine:
@@ -294,6 +298,91 @@ def test_the_worst_regime_is_the_one_the_row_reports():
     assert rc == 1, out
     row = [line for line in out.splitlines() if line.startswith("row: ")][0]
     assert "variant-under-test" in row and "cold 1.2900" in row, row
+
+
+# ── Clause 2 (#1363): a row the sweep can paste without hand-formatting ──────
+
+def _header_rows(out: str) -> list[str]:
+    """The lines shaped like a `start-djev.sh` header row, placeholder and all."""
+    return [ln for ln in out.splitlines() if ln.startswith("#   ")]
+
+
+def _measured(out: str, regime: str) -> str:
+    m = re.search(rf"^{regime}\s+max \|delta label logprob\| = (\d+\.\d+) nats",
+                  out, re.MULTILINE)
+    assert m, f"no {regime} summary line in:\n{out}"
+    return m.group(1)
+
+
+def test_the_probe_prints_a_row_the_script_header_would_accept():
+    """#1361's attended window transcribes each trial into start-djev.sh's
+    header table by hand, and that table is graded by VARIANT_RE, which is
+    unforgiving: three spaces after the `#`, and the trailing `/ 0` or `/ 1` is
+    mandatory because it is what stops a prose line carrying three numbers from
+    being read as a measurement. The probe printed a human-readable `row:`; the
+    window needs the row itself, with the 81-query p50 the only number left."""
+    with FakeEngine(DRIFTING) as eng:
+        rc, out = _run(eng.url, eng.url, "--runs", "3",
+                       "--variant-label", "triton", "--batch-invariant", "0")
+    assert rc == 1, out
+    rows = _header_rows(out)
+    assert len(rows) == 1, f"exactly one header-ready row expected, got {rows}"
+    row = rows[0]
+    assert VARIANT_RE.match(row) is None, (
+        f"a row whose p50 is a placeholder must not read as measured: {row!r}")
+    filled = row.replace(HEADER_ROW_PLACEHOLDER, "510.5", 1)
+    m = VARIANT_RE.match(filled)
+    assert m, f"substituting a real ms number must yield a valid header row: {filled!r}"
+    # VARIANT_RE's `variant` group runs through the lever pair, so it captures
+    # `triton / 0`; `inv` is the nested BATCH_INVARIANT digit (#1357's row shape).
+    assert m["variant"] == "triton / 0" and m["inv"] == "0", m.groups()
+    assert m["p50"] == "510.5", m.groups()
+
+
+def test_the_header_row_carries_the_numbers_this_run_measured():
+    """A row printing a plausible number the probe never measured is worse than
+    no row at all: it lands in the header table as a trial that happened. Both
+    decimals are read back out of the per-regime summary lines printed in the
+    same run, and the one slot that is genuinely unknown stays non-numeric."""
+    with FakeEngine(DRIFTING) as eng:
+        rc, out = _run(eng.url, eng.url, "--runs", "3", "--variant-label", "triton")
+    assert rc == 1, out
+    row = _header_rows(out)[0]
+    assert row.count(HEADER_ROW_PLACEHOLDER) == 1, row
+    assert not any(c.isdigit() for c in HEADER_ROW_PLACEHOLDER), \
+        "a numeric placeholder would pass for a measured p50"
+    m = VARIANT_RE.match(row.replace(HEADER_ROW_PLACEHOLDER, "510.5", 1))
+    assert m, row
+    assert m["warm"] == _measured(out, "warm"), f"row warm must be the measured warm: {row}"
+    assert m["cold"] == _measured(out, "cold"), f"row cold must be the measured cold: {row}"
+    assert m["inv"] == "0", f"BATCH_INVARIANT defaults to 0, the shipped value: {row}"
+
+
+def test_a_deterministic_boot_prints_the_row_too_because_that_is_the_winner():
+    """The row that matters most is the one a variant earned: exit 0 with
+    0.0000 in both regimes is the pair the defaults get flipped to, and it must
+    reach the header table in the same one-edit form."""
+    with FakeEngine(STABLE) as eng:
+        rc, out = _run(eng.url, eng.url, "--runs", "2",
+                       "--variant-label", "marlin", "--batch-invariant", "1")
+    assert rc == 0, out
+    row = _header_rows(out)[0]
+    m = VARIANT_RE.match(row.replace(HEADER_ROW_PLACEHOLDER, "500", 1))
+    assert m, row
+    assert m["variant"] == "marlin / 1" and m["inv"] == "1", m.groups()
+    assert m["cold"] == "0.0000" and m["warm"] == "0.0000", row
+
+
+def test_a_one_regime_run_emits_no_row_it_cannot_complete():
+    """`--regime warm` measures one of the two numbers the header row needs.
+    Half a row, pasted, is a fabricated cold measurement, so the probe names
+    what is missing instead of printing a line with a slot in it."""
+    for regime in ("warm", "cold"):
+        with FakeEngine(DRIFTING) as eng:
+            rc, out = _run(eng.url, eng.url, "--runs", "2", "--regime", regime)
+        assert rc == 1, out
+        assert not _header_rows(out), f"--regime {regime} has no cold+warm pair:\n{out}"
+        assert "both regimes" in out, f"--regime {regime} should say why: {out}"
 
 
 # ── Clause 3: no engine is not a failure ────────────────────────────────────

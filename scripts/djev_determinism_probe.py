@@ -40,6 +40,15 @@ by mistake:
   every run -- 4768 because only whole 32-token blocks before the generated
   position are reusable, ``floor((4800-1)/32)*32``). A warm baseline of hits on
   run 1 describes no boot, so nothing here asserts one.
+* **It emits the header row in the form the script keeps them in.** A trial's
+  numbers land in ``start-djev.sh``'s variant table, which
+  ``tests/test_start_djev_flags.py::VARIANT_RE`` grades for shape -- three spaces
+  after the ``#``, and a trailing ``/ 0`` or ``/ 1`` that is mandatory because it
+  is what stops a prose line carrying three numbers from being read as a
+  measurement. Hand-transcribing that from a prose line is how a row goes wrong
+  (#1363), so the probe prints the row itself with only its p50 left as
+  ``PASTE_MS``: the one number it genuinely cannot know, in the one slot the
+  window has to fill.
 * **It exits 0, not 1, when the engine is not there.** GPU 2 is single-tenant
   (`start-djev.sh` header): on a host where the Qwen secondary holds the card
   there is no djev to fail on, and a probe that returns failure there turns an
@@ -82,6 +91,15 @@ REGIMES = ("warm", "cold")
 
 QUERIES_TOTAL = "vllm:prefix_cache_queries_total"
 HITS_TOTAL = "vllm:prefix_cache_hits_total"
+
+#: The one slot in a header row this probe cannot know: the 81-query recall p50
+#: comes from `eval/run_eval.py`, in the same attended window but a different
+#: instrument (#1361's step 3). It is deliberately non-numeric — the row is
+#: graded by `tests/test_start_djev_flags.py::VARIANT_RE`, whose p50 group is
+#: `\d+(\.\d+)?`, so a placeholder row cannot be pasted and mistaken for a
+#: measurement. Substituting a real ms number for this is what makes the line a
+#: row; that round-trip is pinned in tests/test_djev_determinism_probe.py.
+HEADER_ROW_PLACEHOLDER = "PASTE_MS"
 
 #: The line `--runs` must be at least this large for the acceptance check to
 #: mean anything ("identical across 5 runs"). Below two there is no pair to
@@ -285,6 +303,21 @@ def run_regime(regime: str, engine_url: str, *, model: str, prompt: str, runs: i
     return worst, changed
 
 
+def header_row(variant: str, batch_invariant: str, cold: float, warm: float,
+               p50: str = HEADER_ROW_PLACEHOLDER) -> str:
+    """One row of `start-djev.sh`'s variant table, in the shape that file's
+    pinning test accepts it.
+
+    The spacing is not cosmetic: `tests/test_start_djev_flags.py::VARIANT_RE`
+    wants three spaces after the `#`, a `<variant> / <0|1>` pair, then cold,
+    warm, p50 -- and the `/ 0` or `/ 1` suffix is load-bearing, because a line
+    with three numbers and no lever pair would otherwise be read as a
+    measurement. `p50` defaults to the non-numeric placeholder, so what this
+    returns is a row that cannot pass for measured data until someone substitutes
+    the recall number (#1361's step 3) for it."""
+    return (f"#   {variant} / {batch_invariant}    {cold:.4f}    {warm:.4f}    {p50}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--engine-url", default=DEFAULT_ENGINE_URL)
@@ -300,6 +333,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="Lines of the built-in fixed prompt (sizes the shape).")
     ap.add_argument("--variant-label", default="incumbent",
                     help="Name of the boot under test; appears in the header row.")
+    ap.add_argument("--batch-invariant", choices=("0", "1"), default="0",
+                    help="BATCH_INVARIANT the engine was booted with; fills the '/ 0' or "
+                         "'/ 1' slot of the header row, which is mandatory and is what "
+                         "distinguishes the row from a prose line. The probe reads the "
+                         "engine over HTTP and cannot see its argv, so this is the "
+                         "boot's own record of that lever — pass 1 for the "
+                         "BATCH_INVARIANT=1 trial and leave it out otherwise.")
     args = ap.parse_args(list(argv) if argv is not None else None)
 
     if args.runs < MIN_RUNS:
@@ -344,6 +384,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"row: {args.variant_label} | "
           + " | ".join(f"{r} {per_regime[r]:.4f}" for r in regimes)
           + " | (paste the 81-query recall p50 here)")
+    cold, warm = per_regime.get("cold"), per_regime.get("warm")
+    if cold is not None and warm is not None:
+        print(f"header row for start-djev.sh (BATCH_INVARIANT={args.batch_invariant} as "
+              f"passed; {HEADER_ROW_PLACEHOLDER} is the only number left to fill in):")
+        print(header_row(args.variant_label, args.batch_invariant, cold, warm))
+    else:
+        print(f"header row: not emitted — the script's table wants cold AND warm and "
+              f"--regime {args.regime} measured one. Run the default of both regimes.")
     reasons = []
     if worst_overall > 0.0:
         reasons.append(f"byte-identical requests disagree by {worst_overall:.4f} nats")

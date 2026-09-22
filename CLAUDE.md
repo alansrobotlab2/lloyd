@@ -416,7 +416,7 @@ error-shaped lines.
   the round it opened, bounded by the boot so the next item's live round is
   never blamed — and the reaper closes it. It does nothing outside the
   backend. `architecture/automod.md` §3.2.
-- **A worker turn may not restart or stop an engine or a service**
+- **A worker turn may not restart, stop, or hand-boot an engine or a service**
   (`app/harness/service_control.py`, the fourth check in
   `safety.check_bash_command`, so hook and dispatch both). On 2026-09-17 an
   autocode turn, continued by hand after its round was reaped, ran
@@ -429,8 +429,17 @@ error-shaped lines.
   session is never refused, since a person restarting the stack from
   Mission Control is the intended operator. Parsed like `protected_paths`
   (`grep 'supervisorctl restart' CLAUDE.md` is an argument to grep) and
-  read inside `bash -c` / `python -c` one-liners.
-  `tests/test_service_control_guard.py` pins the incident command.
+  read inside `bash -c` / `python -c` one-liners. Hand-booting the launcher
+  script counts too (`#1363`, 2026-09-22): `MOE_BACKEND=triton bash
+  agent-services/bin/start-djev.sh` is that program's own `command=` with a
+  bespoke environment, so it is a production engine restart on whatever card the
+  engine holds — which is why the djev kernel bisect (#1361) is an
+  Alan-attended window and not a round. The guarded launcher set is every `.sh`
+  the supervisor's `conf.d` names, and the test derives that corpus from the
+  confs so the set cannot fall behind the tree again the way it did (7
+  supervised launchers, 1 of them guarded, so a hand-boot of the djev launcher
+  was answered ALLOWED). `tests/test_service_control_guard.py` pins the incident
+  command.
 - **A round no implement row names is an orphan, and the reaper closes it.**
   That same continued turn opened SM_20260917_003459 after its `finished`
   row was written; the reaper keys on implement rows, so nothing could close

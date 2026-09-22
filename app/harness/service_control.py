@@ -1,4 +1,13 @@
-"""A background turn may not restart or stop an engine or a service.
+"""A background turn may not restart, stop, or hand-boot an engine or a service.
+
+Hand-booting covers the launcher script: `bash agent-services/bin/start-djev.sh`
+is how supervisorctl itself starts that program, and the env prefix a caller
+adds (`MOE_BACKEND=triton … `) is the lever set, so a hand-boot is a bespoke
+restart of a live engine and not a new command. #1363, 2026-09-22: the djev
+kernel sweep (#1361) is person-attended precisely because every trial boots a
+variant into the GPU 2 ranker, and until then this guard named one of the seven
+launchers supervisor owns — the sweep was unblocked only because the ports were
+busy, which is an accident, not an enforcement.
 
 On 2026-09-17 at 00:37Z an autocode turn, continued by hand after its round
 had been reaped, ran `round restart --only agent-llm-primary` from Bash to
@@ -42,13 +51,103 @@ _ROUND_VERBS = frozenset({"restart", "recover"})
 _ROUND_LAND_VERB = "land"
 _ENGINE_PROCESS_WORDS = ("vllm", "llama-server", "llama_server", "uvicorn", "server.py",
                          "supervisord", "lloyd-mcp", "agent_mcp")
-_LAUNCHERS = frozenset({"flash-next-run-arm.sh", "start-qwen38-flash-next.sh"})
+# Every launcher the supervisor itself owns, plus the armed-boot wrapper for
+# the primary. Hand-running one of these IS service control: the program is
+# already running under supervisorctl, and the script carries the environment
+# the boot will use. The corpus is `command=` in
+# `agent-services/supervisor/conf.d/*.conf` — and
+# tests/test_service_control_guard.py enumerates those confs and refuses this
+# list for falling behind, which is the point: measured 2026-09-22 the confs
+# named 7 launchers and this set named one of them, so a background turn asking
+# `bash agent-services/bin/start-djev.sh` was answered ALLOWED and #1361's
+# kernel sweep was unguarded only because :8010/:8011 were already occupied.
+# A hand-boot of `start-djev.sh` is also the route by which a round could put a
+# *chosen kernel variant* onto the single-tenant GPU 2 ranker, which is the
+# restart an attended window owns (#1363).
+_LAUNCHERS = frozenset({
+    "flash-next-run-arm.sh",        # armed boot of agent-llm-primary (not a conf target)
+    "start-qwen38-flash-next.sh",   # agent-llm-primary
+    "start-secondary.sh",           # agent-llm-secondary
+    "start-djev.sh",                # agent-djev — the GPU 2 recall ranker
+    "start-qwen3-tts.sh",           # agent-tts
+    "start-livekit-server.sh",      # agent-livekit-server
+    "start-obsidian-sync.sh",       # agent-obsidian-sync
+    "qmd-watcher.sh",               # agent-qmd-watcher
+})
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash"})
 _PYTHONS = frozenset({"python", "python3"})
 _MAX_DEPTH = 3
+#: Shell flags that parse a script without running it. The launcher rule below
+#: refuses `bash <launcher>`, and until #1363's review it refused it only when
+#: the path came first: the recursion that finds the launcher name was reached
+#: with `-e`/`-x`/`-o` sitting in argv[0], which matches nothing, so any flag
+#: that *does* execute the script was a way round the rule. Anything not on this
+#: list is assumed to execute, because the non-executing set is the one thing
+#: about a shell flag that is knowable — `bash -n` (a round lints the script with
+#: it, and the #1361 window reads these files) and nothing else here.
+_NOEXEC_SHELL_FLAGS = frozenset({"-n", "--noexec"})
+#: Launcher names without the extension: a supervised launcher's own shell stays
+#: running while its engine lives (`/bin/bash /home/…/start-djev.sh`, pid 465455
+#: on this host at 09:22Z), so killing that shell leaves supervisor watching a
+#: corpse while the vLLM child keeps holding :8010.
+_LAUNCHER_STEMS = tuple(n[:-3] for n in sorted(_LAUNCHERS) if n.endswith(".sh"))
 _INTERPRETER_FORM = re.compile(
     r"\b(supervisorctl|systemctl|scripts\.automod\.round|round\.py)\b\W+(?:[\w.:/-]+\W+){0,6}?"
     r"(restart|stop|start|signal|shutdown|reload|update|kill|daemon-reload|recover)\b")
+
+
+def _proc_identity(cmdline: str) -> str:
+    """The part of a `/proc/<pid>/cmdline` that says what the process *is*: the
+    interpreter and what it was pointed at, or, for `python -m pkg.mod`, the
+    module. The primary engine runs as `.venvs/.../python -m
+    vllm.entrypoints.openai.api_server --port 8096`, the djev engine as
+    `.venvs/vllm-djev/bin/vllm serve … --port 8010`, and its structured front as
+    `python …/server/structured_server.py --upstream http://127.0.0.1:8010`, so
+    the two-word window is what names all three without dragging in the prompt
+    text of whatever process happens to mention them."""
+    fields = [f for f in cmdline.split("\0") if f]
+    if len(fields) >= 3 and fields[1] == "-m":
+        return f"{fields[0]} {fields[2]}"
+    return " ".join(fields[:2])
+
+
+def _is_engine_identity(identity: str) -> bool:
+    """Whether a process identity names an engine or a supervised launcher.
+
+    Matched against what the process *is* (`_proc_identity`), not its whole
+    command line, so `kill <pid>` of a turn that happens to be running
+    `grep -r vllm logs/` is not read as killing the ranker. It deliberately
+    reuses `_ENGINE_PROCESS_WORDS`, the same set `pkill`/`killall` are matched
+    against below: those words already count `server.py` and `agent_mcp` as
+    processes a background turn may not pattern-kill, and `kill <pid>` is the
+    same act through a different door — one list, so the two doors cannot
+    disagree about what an engine is."""
+    import os
+    if any(n in identity for n in _ENGINE_PROCESS_WORDS):
+        return True
+    words = identity.split()
+    if not words:
+        return False
+    return (os.path.basename(words[-1]) in _LAUNCHERS
+            or any(stem in identity for stem in _LAUNCHER_STEMS))
+
+
+def _read_cmdline(pid: str) -> str | None:
+    """`/proc/<pid>/cmdline`, NULs intact, or None if it cannot be read."""
+    from pathlib import Path
+    try:
+        return Path(f"/proc/{int(pid)}/cmdline").read_bytes().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_is_engine(pid: str) -> bool:
+    """Whether the live process with this pid is an engine. A pid that cannot be
+    read is not refused: no such process, one owned by someone else's namespace,
+    or a job-control spec — refusing those would turn a guard that names its
+    evidence into a guard that refuses arithmetic."""
+    cmdline = _read_cmdline(pid)
+    return cmdline is not None and _is_engine_identity(_proc_identity(cmdline))
 
 
 def _segment_label(argv: list[str], depth: int) -> str | None:
@@ -66,6 +165,19 @@ def _segment_label(argv: list[str], depth: int) -> str | None:
             i = argv.index("-c", 1)
             inner = argv[i + 1] if i + 1 < len(argv) else ""
             return find_service_control(inner, _depth=depth + 1)
+        operands = [t for t in argv[1:] if not t.startswith("-")]
+        flags = [t for t in argv[1:] if t.startswith("-")]
+        if flags and all(f in _NOEXEC_SHELL_FLAGS for f in flags):
+            # `bash -n launcher.sh` parses and exits, which is how a round lints
+            # a script it has just read. Only the wholly-inert flag set gets this:
+            # the recursion below used to be reached with whatever flag was in
+            # argv[1], so `-e`, `-x` and `-o pipefail` — all of which run the
+            # script — were indistinguishable from `-n` and answered ALLOWED
+            # (#1363's review named the shape).
+            return None
+        launched = next((t for t in operands if os.path.basename(t) in _LAUNCHERS), None)
+        if launched is not None:
+            return f"engine launcher {os.path.basename(launched)}"
         return _segment_label(argv[1:], depth) if len(argv) > 1 else None
     if base == "supervisorctl":
         verb = next((a for a in argv[1:] if a in _SUPERVISOR_VERBS), None)
@@ -88,8 +200,21 @@ def _segment_label(argv: list[str], depth: int) -> str | None:
         return None
     if base in ("pkill", "killall"):
         for a in argv[1:]:
-            if any(w in a for w in _ENGINE_PROCESS_WORDS):
+            if any(w in a for w in _ENGINE_PROCESS_WORDS) or any(
+                    s in a for s in _LAUNCHER_STEMS):
                 return f"{base} {a[:40]}"
+        return None
+    if base == "kill":
+        # The other door to the same process (#1363's review): `pkill -f
+        # 'vllm.entrypoints'` was refused while `kill 465524` — the pid of that
+        # very engine — was answered ALLOWED, and a worker turn learns pids from
+        # `pgrep`, which stays allowed. The target is resolved from its own
+        # `/proc/<pid>/cmdline` rather than guessed at, so the refusal can name
+        # what it is protecting and an ordinary `kill` of a stray build process
+        # is not caught.
+        for a in argv[1:]:
+            if a.isdigit() and _pid_is_engine(a):
+                return f"kill engine pid {a}"
         return None
     if base in _LAUNCHERS:
         return f"engine launcher {base}"
@@ -157,6 +282,18 @@ def check_service_control(command: str, session_id: str | None, *,
     label = find_service_control(command)
     if not label:
         return None
+    if label.startswith("engine launcher "):
+        # Not the generic sentence: a launcher is not a restart or a stop, and
+        # the turn reading this one was about to start a second engine. Saying
+        # "may not restart a service" to a turn that typed `bash start-djev.sh`
+        # leaves it believing the rule is about supervisorctl and the script is
+        # still a way to do the same thing.
+        return (f"{label} from background session {session_id}: that script boots a "
+                f"program supervisorctl already owns, so hand-running it races the live "
+                f"process — and with an environment of your choosing, it is an unattended "
+                f"engine restart on whatever card that engine holds (GPU 2 is "
+                f"single-tenant). Report the need on the item and leave the boot to a "
+                f"person or the promoter")
     if label == f"round {_ROUND_LAND_VERB}":
         return (f"round land from background session {session_id}: a landing run in the "
                 f"foreground of your own turn waits for that turn to end and is killed by "

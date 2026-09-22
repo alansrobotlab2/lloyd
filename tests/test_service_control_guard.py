@@ -5,9 +5,17 @@ from Bash to fix a grader that had returned empty output, took the primary
 down for five minutes, killed every turn in flight including itself, and
 left its freshly reopened round with no owner. Refused now at both Bash
 enforcement points, for background sessions only.
+
+The same rule covers *booting* a supervised program by hand (`#1363`, 2026-09-22):
+the launcher script is how the supervisor starts it, so hand-running one is
+service control too — and for `agent-djev` it is the route by which a round
+could boot a *chosen kernel variant* into the production GPU 2 ranker, which the
+#1361 sweep reserves for an attended window.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -31,6 +39,17 @@ REFUSED = [
     "pkill -f vllm.entrypoints",
     "killall llama-server",
     "bash agent-services/bin/flash-next-run-arm.sh fp8",
+    # #1363: the djev kernel bisect (#1361) is an Alan-attended window because
+    # every trial boots a different kernel into the production ranker. Step 1 of
+    # that runbook's hand-boot form, in the shape the sweep would actually run
+    # it. Measured 2026-09-22 these four answered ALLOWED for a worker session:
+    # of the 7 launchers supervisord's own conf.d names, exactly one
+    # (`start-qwen38-flash-next.sh`) was guarded, so "no round may boot a
+    # variant" held only because :8010/:8011 were already occupied.
+    "bash agent-services/bin/start-djev.sh",
+    "agent-services/bin/start-djev.sh",
+    "MOE_BACKEND=triton BATCH_INVARIANT=0 agent-services/bin/start-djev.sh",
+    "MOE_BACKEND=triton BATCH_INVARIANT=0 bash agent-services/bin/start-djev.sh",
     "bash -c 'supervisorctl -c x.conf restart lloyd-mc:lloyd-mcp'",
     "python3 -c \"import subprocess; subprocess.run(['supervisorctl', '-c', 'x.conf', 'restart', 'lloyd-mc:lloyd-backend'])\"",
     "nohup timeout 900 .venvs/lloyd/bin/python -m scripts.automod.round restart --only lloyd-backend > /tmp/r.log 2>&1 &",
@@ -51,6 +70,13 @@ ALLOWED = [
     "echo 'run: round restart --only lloyd-backend' >> notes.md",
     "python3 -c \"print('supervisorctl status')\"",
     "git log --oneline -3 -- scripts/automod/round.py",
+    # The guard refuses a boot, never a read. #1363's own triage and every
+    # health probe inspect these scripts by name, and `bash -n` is how a shell
+    # script is linted without executing it.
+    "cat agent-services/bin/start-djev.sh",
+    "grep -n MOE_BACKEND agent-services/bin/start-djev.sh",
+    "head -40 agent-services/bin/start-djev.sh",
+    "bash -n agent-services/bin/start-djev.sh",
 ]
 
 
@@ -110,3 +136,62 @@ def test_the_hook_passes_the_session_id(monkeypatch):
     asyncio.run(safety._safety_pretool_cb(
         {"tool_name": "Bash", "tool_input": {"command": "ls"}, "session_id": WORKER}, None, None))
     assert seen["session_id"] == WORKER
+
+
+CONF_DIR = Path(__file__).resolve().parents[1] / "agent-services" / "supervisor" / "conf.d"
+
+
+def _supervised_launchers() -> list[str]:
+    """Every `*.sh` supervisord launches itself, read out of its own conf.d.
+    That is the corpus the guard has to cover, and the confs — not a hand-kept
+    list — are what says which programs are owned."""
+    found: list[str] = []
+    for conf in sorted(CONF_DIR.glob("*.conf")):
+        for line in conf.read_text().splitlines():
+            if line.startswith("command="):
+                found += [tok for tok in line[len("command="):].split()
+                          if tok.endswith(".sh")]
+    return found
+
+
+def test_every_supervised_launcher_refuses_a_background_hand_boot():
+    """The open-set half of #1363. `bash agent-services/bin/start-djev.sh`
+    answering ALLOWED was not one missing entry so much as a list nobody had
+    checked against the tree: measured 2026-09-22, conf.d names 7 launchers and
+    the guard named one of them. Derived from the confs rather than restated
+    here, so the day a program is added that the guard has never heard of, this
+    test is red instead of the next round discovering it by booting onto a live
+    engine.
+
+    What it covers is the `.sh` programs — 7 of the 12 confs. The other 5 name a
+    python or node entry point (`command=…/python …/server.py`,
+    `…/python -m agent_mcp.main`, `…/node …/qmd.js`, `npm …`, the livekit worker),
+    and this test does not reach them: refusing a hand-run `.py` would catch
+    someone running that module under a test harness, which is a different
+    question from booting an engine, and is left on #1363 rather than taken here.
+    """
+    launchers = _supervised_launchers()
+    assert len(launchers) >= 7, f"expected the 7 supervised launchers, found {launchers}"
+    for target in launchers:
+        command = f"bash {target}"
+        assert check_service_control(command, WORKER), f"{command} boots a supervised program"
+        assert check_service_control(command, AUTONOMY), f"{command} boots it for autonomy too"
+        assert check_service_control(command, CHAT) is None, f"a person may boot {target}"
+
+
+def test_the_djev_sweep_boot_is_refused_because_it_boots_a_supervised_engine():
+    """#1361's kernel sweep cannot be run by a round because every trial boots a
+    different kernel into the production GPU 2 ranker, and #1363's acceptance is
+    that this be enforced rather than incidental. Pinned here are both edges of
+    the clause and the wording: the sweep's own env-prefixed hand-boot is
+    refused for a background session and allowed for a chat session, and the
+    reason names what a hand-boot does. The generic "restart or stop" sentence
+    does not cover a boot, and the reader of this refusal is the turn that was
+    about to run it."""
+    boot = "MOE_BACKEND=triton BATCH_INVARIANT=0 bash agent-services/bin/start-djev.sh"
+    why = check_service_control(boot, WORKER)
+    assert why, f"{boot} must be refused for a background session"
+    assert "start-djev.sh" in why, why
+    assert "supervisorctl" in why, f"a boot races the supervisor that owns the pid: {why}"
+    assert "background session" in why, why
+    assert check_service_control(boot, CHAT) is None, "a person runs the attended window"
