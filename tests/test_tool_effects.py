@@ -37,6 +37,7 @@ from app.harness import policy
 from app.harness import mcp_pool
 from workers.pool import WorkerPool, effect_scope_for, grant_scope_for
 from workers.queue import QueueItem, WorkQueue
+import logging
 
 SCOPE = "item:scheduled-task:7"
 ARGS = {"to": "someone@example.com", "subject": "digest", "body": "hello"}
@@ -248,8 +249,20 @@ async def test_a_suppression_is_logged_with_the_arguments_that_produced_it(
     the arguments; the first cut logged the prefix only."""
     effects: list = []
     _register(monkeypatch, FakeWriter(effects))
-    for _ in range(2):
-        await M.call_tool("fake_writer", dict(ARGS), META)
+
+    # Pin the emitting logger rather than trusting the ambient config. caplog only
+    # sees a record that propagates to the root handler at a level it admits, and
+    # both are process-global: under `-n 8` another file sharing this worker had
+    # already raised "lloyd-mcp" or cleared its propagate flag, so `lines` came back
+    # empty and this read as "no suppression was logged". It passes alone and with
+    # its own file, which is the signature of leaked logging state, not of the code.
+    emitter = logging.getLogger("lloyd-mcp")
+    monkeypatch.setattr(emitter, "propagate", True)
+    monkeypatch.setattr(emitter, "disabled", False)
+    with caplog.at_level(logging.WARNING, logger="lloyd-mcp"):
+        for _ in range(2):
+            await M.call_tool("fake_writer", dict(ARGS), META)
+
     lines = [r.getMessage() for r in caplog.records if "suppressed duplicate" in r.getMessage()]
     assert lines and "someone@example.com" in lines[-1]
 
