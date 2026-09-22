@@ -7,6 +7,12 @@ the host** under supervisord. There is no container in the loop.
 Read [Part 0](#part-0--before-you-wipe) before you reimage. Several things this
 machine depends on exist **only on this disk** and are not in git.
 
+**If the machine is fine and only `~/lloyd` is gone, you want
+[Part 13](#part-13--recovering-a-destroyed-tree-machine-intact), not Part 0.**
+That path is much shorter, and it has one rule that decides whether it is short
+or catastrophic: the services are still running from deleted inodes, so do not
+restart anything until the rebuild is done.
+
 ---
 
 ## Part 0 — Before you wipe
@@ -791,8 +797,41 @@ git apply ../qwen3-tts-local.patch
 hf download Qwen/Qwen3-TTS-12Hz-1.7B-Base --local-dir models/Qwen3-TTS-12Hz-1.7B-Base
 ```
 
-Then restore `voice_library/profiles/dave_cullen/` from backup — that one is not
-reproducible. Re-sync the patch if you change the vendored code:
+Then rebuild `voice_library/profiles/dave_cullen/`. **This does not need a
+backup** — it was called unreproducible here until 2026-09-22, when it was
+rebuilt from assets that live outside the tree and therefore survive it. The
+reference clip, its transcript and the provenance JSON are in the vault, and the
+over-cap source blob is in `~/vault-external` (see
+`~/obsidian/projects/lloyd/voice/voice-source-dave-cullen.md`):
+
+```bash
+cd ~/lloyd/agent-services/services/tts/qwen3-tts
+mkdir -p voice_library/profiles/dave_cullen
+REF=~/obsidian/projects/lloyd/voice/references/dave_cullen
+cp "$REF/dave_cullen_001.wav"    voice_library/profiles/dave_cullen/ref.wav
+cp "$REF/dave_cullen_001.lab"    voice_library/profiles/dave_cullen/ref.lab
+cp "$REF/dave_cullen_source.json" voice_library/profiles/dave_cullen/provenance.json
+python - <<'EOF'
+import json, pathlib
+d = pathlib.Path("voice_library/profiles/dave_cullen")
+json.dump({"name": "dave_cullen", "profile_id": "dave_cullen",
+           "ref_audio_filename": "ref.wav",
+           "ref_text": (d / "ref.lab").read_text().strip(),
+           "x_vector_only_mode": False, "language": "Auto"},
+          (d / "meta.json").open("w"), indent=2)
+EOF
+```
+
+`x_vector_only_mode: false` means ICL, and **ICL requires `ref_text`** — a clip
+with no transcript is a 400 at synthesis time, not a quiet degradation. Verify
+with the real loader rather than by eye:
+
+```bash
+VOICE_LIBRARY_DIR=$PWD/voice_library ~/lloyd/.venvs/qwen3-tts/bin/python \
+  -c "from api.routers.openai_compatible import _load_voice_profile as f; print(f('dave_cullen'))"
+```
+
+Re-sync the patch if you change the vendored code:
 
 ```bash
 git -C qwen3-tts diff > qwen3-tts-local.patch
@@ -1161,6 +1200,119 @@ reaching for either is the usual cause of "I can only connect over HTTP".
 
 ---
 
+## Part 13 — Recovering a destroyed tree (machine intact)
+
+Parts 1–12 rebuild the box. This is the *other* disaster, and the one that
+actually happened on **2026-09-22**: `~/lloyd` is gone but the machine is fine.
+It is far faster than a re-image, because everything outside the tree survives —
+the OS and toolchain, Tailscale's node state, the Obsidian Sync registration
+(`~/.config/obsidian-headless`), the guardian and automod state
+(`~/.local/state/lloyd-guardian`, `~/.local/state/lloyd-automod`), and the HF
+cache.
+
+### Before you restart anything
+
+**Every service is still running, from deleted inodes.** supervisord reports
+`RUNNING`, the site answers, the engine serves — all from files that no longer
+exist. The tell:
+
+```bash
+for p in $(pgrep -u "$USER" -f lloyd); do
+  readlink /proc/$p/cwd | grep -q '(deleted)' && echo "$p $(readlink /proc/$p/cwd)"
+done
+```
+
+That state is an asset, not a symptom. A running process cannot be brought back
+if what it needs is not on disk yet, so **every restart is a one-way door until
+the rebuild is finished**. On 09-22 `agent-llm-primary` was serving a 170 GiB
+checkpoint that no longer existed; restarting it first would have cost hours and
+a full re-download. Rebuild everything below, *then* restart, engines first.
+
+While the old processes are alive, capture `.env` out of their memory. Part 3
+can rebuild a working `.env` without this — the `ANTHROPIC_*` values are
+non-secret and `scripts/gen-livekit-secrets.sh` mints a fresh LiveKit pair — but
+reading it back preserves the exact values and avoids re-keying LiveKit:
+
+```bash
+tr '\0' '\n' < /proc/$(pgrep -f 'python.*server\.py' | head -1)/environ | grep '^ANTHROPIC_'
+tr '\0' '\n' < /proc/$(pgrep -x livekit-server | head -1)/environ   | grep '^LIVEKIT_'
+```
+
+### What `git clone` does not bring back
+
+Restoring the repo does not restore a working system. Each gitignored path has
+its own source, and `git status` stays clean while every one of them is missing:
+
+| Path | Comes back from |
+|---|---|
+| `.env` | Part 3, or the `/proc` capture above |
+| `.venvs/` (4 of them) | Part 4 — and `.venvs/lloyd/bin/playwright install chromium`, which is easy to skip |
+| `agent-services/llm/models/` | `setup/setup-qwen38-flash-next.sh`, `setup/setup-djev.sh` — ~190 GiB, hours |
+| `agent-services/models/{smart-turn,parakeet-tdt-v3,nemo-streaming-480ms}` | `setup/fetch-voice-models.sh` |
+| `agent-services/cert/` | `scripts/gen-cert.sh`, then `tailscale cert` — **fails silently**, see Troubleshooting |
+| `qmd/` | its own repo: `git clone -b lloyd https://github.com/alansrobotlab2/qmd.git qmd && cd qmd && npm install && npm run build` |
+| `agent-services/services/tts/qwen3-tts/` | Part 8 — upstream clone + `qwen3-tts-local.patch` |
+| `…/qwen3-tts/voice_library/profiles/dave_cullen/` | Part 8 — rebuilt from the vault, not a backup |
+| `web/node_modules`, `qmd/dist` | `npm ci` / `npm run build` |
+| runtime dirs (`logs/`, `sessions/`, …) | Part 3 |
+
+Push branches you care about. GitHub had 34 branches on 09-22 while the live
+tree had 210; the other ~177 — every kept round branch the backlog points at —
+survived **only** because `~/lloyd-sandbox` still had them as remote-tracking
+refs, and were recovered with:
+
+```bash
+git --git-dir=~/lloyd-sandbox/.git for-each-ref --format='%(refname)' refs/remotes/live \
+  | grep -vE '/(HEAD|main)$' \
+  | sed -E 's|^refs/remotes/live/(.*)$|+refs/remotes/live/\1:refs/heads/\1|' \
+  | xargs git fetch --no-tags ~/lloyd-sandbox
+```
+
+Anything committed locally but never pushed is gone. The guardian's
+`last_known_good.json` is a good place to find out what you lost: on 09-22 it
+pointed at `3e8748fd`, a commit that no longer existed anywhere.
+
+### Do not restore from `~/lloyd-sandbox`
+
+The sandbox shares heavy directories with the live tree by **symlinking into
+it** — `.env`, `web/node_modules`, and `agent-services/models/*` are all links
+to `/home/alansrobotlab/lloyd/...`. Copy the sandbox over a deleted tree and
+those links land pointing at themselves. `ls -l` shows a plausible symlink,
+`[ -e ]` says missing, and the failures are unhelpful: `npm install` sees a
+`node_modules` it cannot use, and `fetch-voice-models.sh` dies with
+`mkdir: cannot stat ...: Too many levels of symbolic links`.
+
+Clone from GitHub instead, and sweep for the damage if a sandbox copy already
+happened:
+
+```bash
+find . -type l -not -path './.git/*' | while read -r l; do
+  [ "$(readlink "$l")" = "$(realpath -m "$l")" ] && echo "SELF-LINK $l"
+done
+```
+
+### Then restart, engines first
+
+Rebuild everything above, then bring the stack back in dependency order —
+engines, `mcp` + `backend`, then worker / livekit / qmd / sync, TTS last.
+`agent-llm-primary` must go through `scripts.automod.round restart --only
+agent-llm-primary`, which applies the host-RAM gate in
+`agent-services/bin/ram-boot-gate.sh`; a bare `supervisorctl restart` skips it
+and is how the whole supervisord unit was lost to oomd on 09-08 and 09-15.
+
+Two pieces of state need attention afterwards:
+
+- **The pool pause does not survive the backend restart.** It comes back
+  `paused: false` and starts dispatching rounds within seconds. Re-pause with
+  `POST /api/workers/pause {"paused": true}` until the stack is verified.
+- **The guardian's LKG may be a commit that no longer exists**, which fails its
+  selftest every tick. It degrades safely — a rollback onto a missing target
+  escalates instead of resetting — but fix it with
+  `python -m scripts.automod.round bless`, which pins the commit the *running*
+  backend reports rather than whatever is checked out.
+
+---
+
 ## Troubleshooting
 
 **Primary wedges — 200 OK but no tokens.** Recurring. Confirm with
@@ -1194,3 +1346,58 @@ frontmatter fails `yaml.safe_load` with no alert. Run
 
 **Backend `STOPPED` after an agent-initiated restart.** See the warning in
 [Part 11](#part-11--supervisord-and-systemd).
+
+**MC shows `ERR_SSL_PROTOCOL_ERROR`, or loads a blank white page.** Both are
+`agent-services/cert/` missing — it is gitignored, so a fresh tree has no certs
+and **Vite falls back to plain HTTP without failing**, logging one line to
+`logs/frontend.log`:
+
+```
+[vite] server cert missing — falling back to plain HTTP. Run: bash scripts/gen-cert.sh
+```
+
+A browser speaking TLS to that gets `ERR_SSL_PROTOCOL_ERROR`. Regenerating with
+`gen-cert.sh` alone then produces the *second* symptom: the new private CA is
+untrusted, and while a click-through covers the top-level document, browsers
+hard-fail subresources over an untrusted cert — so the HTML shell loads (correct
+tab title) and every module and `/api` call is blocked, giving a blank page and
+`ERR_CERT_AUTHORITY_INVALID` in the console. Fix it with the publicly trusted
+Tailscale cert, which Vite prefers and which needs no CA installed on any device:
+
+```bash
+sudo tailscale set --operator=$USER     # once; lets the cert be minted (and renewed) without root
+tailscale cert --cert-file agent-services/cert/goliath.taile37041.ts.net.crt \
+               --key-file  agent-services/cert/goliath.taile37041.ts.net.key \
+               goliath.taile37041.ts.net
+lsup restart lloyd-mc:lloyd-frontend
+```
+
+Confirm from the log (`[vite] HTTPS using Tailscale public cert`), not by eye.
+`curl -k` cannot verify this — `-k` disables exactly the check the browser
+enforces. The cert is a 90-day Let's Encrypt leaf and **nothing renews it**;
+Vite reads it at startup, so a re-mint needs a frontend restart.
+
+**Builds fail with `No space left on device` while `df -h` shows space free.**
+`/tmp` is a tmpfs with a fixed inode budget (1,048,576 here) independent of its
+126 GB size. Leaked pytest fixture roots exhaust it — on 2026-09-22
+`/tmp/pytest-of-alansrobotlab` held 944,339 files, ~90% of the budget, and every
+`uv`/`pip`/`npm` build failed confusingly. `df -h` looks healthy; check `df -i`:
+
+```bash
+df -i /tmp
+find /tmp/pytest-of-alansrobotlab -maxdepth 1 -name 'pytest-*' \
+  ! -name 'pytest-current' -exec rm -rf {} +
+```
+
+Use `find -exec`, not `ls | xargs` — `ls` is aliased to `eza` here and its
+long-format output corrupts the argument list.
+
+**A `clone:` voice comes out sounding wrong, with no error.** `_base_model_key()`
+(`api/backends/optimized_backend.py`) returns the **first** `type: base` entry in
+the qwen3-tts `config.yaml`, so if `0.6B-Base` precedes `1.7B-Base` every clone
+request is served off the wrong model silently. That file also needs
+`default_model: 1.7B-Base` and an **absolute local path** for the 1.7B `hf_id`.
+It is tracked by the *upstream* repo, so `git status` in that tree reads clean
+while carrying upstream's defaults — which is why `qwen3-tts-local.patch` must
+include `config.yaml`. Regenerate the patch with
+`git -C qwen3-tts diff > qwen3-tts-local.patch` after any change there.
