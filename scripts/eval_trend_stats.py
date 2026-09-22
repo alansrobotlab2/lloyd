@@ -84,6 +84,18 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
+# Run as `python scripts/eval_trend_stats.py`, sys.path[0] is `scripts/`, so the
+# repo root has to be named before `app.` resolves. Tests import this module as
+# `scripts.eval_trend_stats` with the root already on the path, which the guard
+# below leaves alone.
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+# The document half of the corpus diff (#1374). Imported, never restated: what an
+# absent `corpus.doc` key MEANS is the entire content of this item, and a reader
+# that re-implements the writer's rule is the defect recurring one file over.
+from app.doc_corpus import DOC_DRIFT_KEY, doc_drift  # noqa: E402
+
 ALPHA = 0.05
 Z_975 = 1.959963984540054          # two-sided 95 %
 Z_80 = 0.8416212335729143           # one-sided 80 % power
@@ -107,6 +119,13 @@ REPORTING_CONTRACT = (
     "interval and say",
     '"not confident enough to decide", and record the move as an observation.',
 )
+#: The FACT half of the corpus diff. The document half rides in the same dict
+#: under ``DOC_DRIFT_KEY`` (#1374) and is deliberately not folded into this
+#: tuple: its value can be ``None`` meaning *unknown*, and a tuple that can hold
+#: a non-number stops being a list of things you can subtract. Everything here
+#: that iterates these keys is a statement about the KG, and says nothing about
+#: the vectors the document leg actually searched — which is the blind spot
+#: ``corpus_diff`` used to print ``corpus identical`` through.
 CORPUS_KEYS = ("facts", "edges_active", "entities")
 
 #: Nightly claims written into a run summary, re-scored by default. Each is a
@@ -335,10 +354,22 @@ def corpus_diff(prev: Night, cur: Night) -> dict | None:
     ``None`` is what makes the report print ``drift unknown``. A missing block is
     never zero drift — the same rule ``automod_regression.py:35-36`` applies to a
     missing noise file ("cannot evaluate", never "no regression").
+
+    The fact keys are the difference of two counts that are always present in a
+    post-#1129 artifact, so they diff to an int. The document key does not
+    deserve that treatment: an artifact written before ``corpus.doc`` existed
+    records no vector count, and treating that as 0 would manufacture exactly the
+    thing it cannot see — a pair whose vectors clearly moved printed as
+    ``corpus identical`` (#1374). So ``DOC_DRIFT_KEY`` carries an int when both
+    nights recorded one and ``None`` when either did not, and every reader is
+    allowed to ask about it separately.
     """
     if prev.corpus is None or cur.corpus is None:
         return None
-    return {k: (cur.corpus.get(k) or 0) - (prev.corpus.get(k) or 0) for k in CORPUS_KEYS}
+    drift = {k: (cur.corpus.get(k) or 0) - (prev.corpus.get(k) or 0)
+             for k in CORPUS_KEYS}
+    drift[DOC_DRIFT_KEY] = doc_drift(prev.corpus, cur.corpus)
+    return drift
 
 
 @dataclass
@@ -353,10 +384,33 @@ class Transition:
 
     @property
     def drift_moved(self) -> bool | None:
-        """True/False when the corpus block could be diffed, None when unknown."""
+        """True/False when the corpus block could be diffed, None when unknown.
+
+        The FACT half only (#1374). Folding the document term in here would look
+        like the more thorough choice and would quietly re-label the nine
+        transitions this file's acceptance check counts — "9 moved / 3
+        unmeasurable" is a statement about the KG, and it is quoted in
+        ``skills/retrieval-eval/SKILL.md``. The document half is its own term,
+        ``doc_drift_moved``, and ``admissible`` requires both.
+        """
         if self.drift is None:
             return None
         return any(self.drift[k] != 0 for k in CORPUS_KEYS)
+
+    @property
+    def doc_drift_moved(self) -> bool | None:
+        """The DOCUMENT half: True moved, False identical, None unknown.
+
+        None is the common case and the honest one — every artifact written
+        before ``corpus.doc`` existed, and every one whose daemon would not
+        answer, lands here. It is NOT False: "not recorded" and "recorded and
+        equal" are different facts, and the whole defect this term exists for is
+        that the second used to be printed for the first.
+        """
+        if self.drift is None:
+            return None
+        term = self.drift.get(DOC_DRIFT_KEY)
+        return None if term is None else term != 0
 
     @property
     def rejected(self) -> list[str]:
@@ -381,8 +435,20 @@ class Transition:
 
     @property
     def admissible(self) -> bool:
-        """A verdict is admissible only if a test rejected *and* drift cannot explain it."""
-        return bool(self.rejected) and self.drift_moved is False
+        """A verdict is admissible only if a test rejected *and* drift cannot explain it.
+
+        "Drift" is now both halves (#1374). An unknown document term blocks the
+        verdict rather than passing it: the contract this class enforces is "a
+        corpus diff that cannot account for the move", and a corpus whose
+        document half was never recorded is exactly a diff that could account for
+        it — the vectors behind every `doc_hit` in the pair may have differed
+        while every fact count stood still. Tightening this costs nothing that
+        existed: the shipped series has never had an admissible transition
+        (`0 of 12`, pinned by a test below), so the change only ever removes a
+        verdict a reader was about to over-read.
+        """
+        return (bool(self.rejected) and self.drift_moved is False
+                and self.doc_drift_moved is False)
 
 
 def audit_transition(prev: Night, cur: Night, reps: int = BOOT_REPS,
@@ -541,8 +607,23 @@ def required_n(detect: float = DETECT, power: float = POWER_TARGET,
 def fmt_drift(drift: dict | None) -> str:
     if drift is None:
         return "drift unknown (a baseline carries no `corpus` block; never read as 0)"
-    return ", ".join(f"{k} {drift[k]:+d}" for k in CORPUS_KEYS) + \
-        ("  -> corpus moved" if any(drift[k] for k in CORPUS_KEYS) else "  -> corpus identical")
+    doc = drift.get(DOC_DRIFT_KEY)
+    # `unknown`, spelled out, on the same line as the fact terms. The bug this
+    # line is written against is a print statement: 30 pairs in
+    # `eval/baselines/` share an identical fact triple across hour-scale gaps and
+    # used to read `corpus identical` while the daemon re-embedded through all of
+    # them. A reader must not be able to mistake "no artifact recorded a vector
+    # count" for "the vector count did not move", so the absence is a word here
+    # rather than a `+0` that looks like every other term.
+    doc_part = f"{DOC_DRIFT_KEY} unknown" if doc is None else f"{DOC_DRIFT_KEY} {doc:+d}"
+    fact_moved = any(drift[k] for k in CORPUS_KEYS)
+    if fact_moved or (doc not in (None, 0)):
+        tail = "  -> corpus moved"
+    elif doc is None:
+        tail = "  -> corpus identical on the fact half, doc side unknown"
+    else:
+        tail = "  -> corpus identical"
+    return ", ".join(f"{k} {drift[k]:+d}" for k in CORPUS_KEYS) + f", {doc_part}{tail}"
 
 
 def print_transition(t: Transition, alpha: float = ALPHA) -> None:
@@ -581,12 +662,22 @@ def print_transition(t: Transition, alpha: float = ALPHA) -> None:
               f"(resampling approximation, not an exact test; {leg['reps']} replicates, "
               f"seed {leg['seed']}, unit = query) p={leg['p']:.3f} ({call})")
     if t.admissible:
-        verdict = "ADMISSIBLE: a paired test rejected and the corpus block is identical"
+        verdict = ("ADMISSIBLE: a paired test rejected and neither corpus half — "
+                   "facts/edges/entities, nor the recorded vector count — moved")
     elif t.drift_moved is None:
         verdict = "WITHHELD: drift unknown, so no rejection can be attributed to the code"
     elif t.drift_moved:
         verdict = ("WITHHELD: corpus block moved, so the corpus diff can account for the "
                    "move — recorded as an observation, not a verdict")
+    elif t.doc_drift_moved is None:
+        # Ordered after the fact-half branches on purpose: this says something
+        # narrower than "drift unknown", namely that the KG provably did not move
+        # and the only thing that could explain the delta is the document corpus
+        # this pair never recorded (#1374). On the shipped series every pair with
+        # a still fact half lands here, because no artifact on disk predating this
+        # term has a vector count to compare.
+        verdict = ("WITHHELD: the document corpus is unrecorded, so a still fact half "
+                   "cannot make the pair comparable — doc drift unknown, never read as 0")
     else:
         verdict = "WITHHELD: no paired test rejected at 95%"
     print(f"  verdict: {verdict}")
@@ -603,6 +694,13 @@ def print_totals(transitions: list[Transition], alpha: float = ALPHA) -> dict:
     admissible = sum(1 for t in transitions if t.admissible)
     drift_unknown = sum(1 for t in transitions if t.drift_moved is None)
     drift_moved = sum(1 for t in transitions if t.drift_moved is True)
+    # The document half counted separately, and its unknown count printed beside
+    # it, because on the day this landed `doc unknown` is 12 of 12 and that is the
+    # finding — not a zero to be smoothed past. Once artifacts record a vector
+    # count these three numbers start moving independently of the fact half above.
+    doc_moved = sum(1 for t in transitions if t.doc_drift_moved is True)
+    doc_identical = sum(1 for t in transitions if t.doc_drift_moved is False)
+    doc_unknown = sum(1 for t in transitions if t.doc_drift_moved is None)
     print("\n" + "=" * 78)
     print("SUMMARY")
     print(f"  transitions in window:      {total}")
@@ -621,13 +719,23 @@ def print_totals(transitions: list[Transition], alpha: float = ALPHA) -> dict:
           "   <- exact McNemar")
     print(f"  continuous legs rejecting (of {len(audited) * len(CONT_LEGS)}): {cont_sig}"
           "   <- paired bootstrap, resampling")
-    print(f"  corpus block moved: {drift_moved}; drift unknown: {drift_unknown}")
+    print(f"  corpus block moved: {drift_moved}; drift unknown: {drift_unknown}"
+          "   <- fact half (facts / edges_active / entities)")
+    # A separate line, not a clause on the one above: folding the two halves into
+    # one number is how the audit could print a fact-half verdict and have it read
+    # as the whole corpus. Until artifacts carry `corpus.doc` the unknown count is
+    # every transition, which is the honest answer and must be visible as such.
+    print(f"  {DOC_DRIFT_KEY}: moved {doc_moved}; identical {doc_identical}; "
+          f"unknown {doc_unknown}"
+          "   <- document half (qmd vectors the doc leg searched)")
     print(f"  verdicts admissible under the drift-controlled contract: {admissible} of {total}")
     return {"total": total, "audited": len(audited), "withheld": withheld,
             "rejected": len(rejected), "marginal_only": len(marginal_only),
             "binary_sig": binary_sig, "cont_sig": cont_sig,
             "admissible": admissible, "drift_unknown": drift_unknown,
-            "drift_moved": drift_moved}
+            "drift_moved": drift_moved,
+            "doc_moved": doc_moved, "doc_identical": doc_identical,
+            "doc_unknown": doc_unknown}
 
 
 def rescore_claim(claim: dict, by_label: dict[str, Night], reps: int, seed: int,

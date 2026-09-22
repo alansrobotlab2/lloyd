@@ -1109,6 +1109,51 @@ def test_env_for_pins_both_halves_of_the_corpus(tmp_path):
     assert env["LLOYD_CODE_ROOT"] == "/some/tree"
 
 
+def test_env_for_names_the_pinned_index_file(tmp_path, monkeypatch):
+    """The THIRD half of a pinned arm's corpus, and the one #1374 found unclaimed.
+
+    A pinned arm reaches its daemon over HTTP and cannot tell which file that daemon
+    was served (`evalpin.py:183-196` passes `--index <name>`; `pin_index_path` at
+    `:133` puts the pin at `~/.cache/qmd/<name>.sqlite`). Without this key the arm's
+    artifact records the LIVE index's path, mtime and row count as the identity of a
+    frozen snapshot — a provenance field that reads as precise and is wrong, which is
+    the defect #1374 was filed under rather than one it repairs. `app.doc_corpus`
+    refuses the live default under an overlay and writes null plus a reason instead;
+    this is what makes the null not happen.
+
+    The key is asserted against `doc_corpus.INDEX_PATH_ENV` rather than as a literal,
+    because the two sides sit across a process boundary and a renamed constant on one
+    side would otherwise silently disable the whole mechanism.
+    """
+    from app import doc_corpus
+    from scripts.automod import evalpin
+
+    # Redirect the pin's home into the fixture dir: `pin_index_path` resolves through
+    # the module's QMD_CACHE, and this test must not create a file beside the real
+    # ~/.cache/qmd/index.sqlite that a concurrent evalpin could then serve.
+    monkeypatch.setattr(evalpin, "QMD_CACHE", tmp_path)
+    pin = evalpin.PinnedCorpus(tmp_path, name="evalpin-smoke")
+    pin.overlay = tmp_path / "o.yaml"
+    env = pin.env_for({}, code_root="/some/tree")
+    assert env[doc_corpus.INDEX_PATH_ENV] == str(evalpin.pin_index_path("evalpin-smoke"))
+    assert env[doc_corpus.INDEX_PATH_ENV].endswith("evalpin-smoke.sqlite")
+
+    # And the consumer agrees: the env this produces is exactly the one under which
+    # `index_identity` stops refusing the path, so the arm's artifact carries the
+    # pin's identity instead of `PIN_UNNAMED_REASON`.
+    monkeypatch.setenv(doc_corpus.CONFIG_OVERLAY_ENV, str(pin.overlay))
+    monkeypatch.delenv(doc_corpus.INDEX_PATH_ENV, raising=False)
+    refused = doc_corpus.index_identity()
+    assert refused["index_path"] is None and refused["content_vectors"] is None
+    monkeypatch.setenv(doc_corpus.INDEX_PATH_ENV, env[doc_corpus.INDEX_PATH_ENV])
+    # The named snapshot has to exist for its identity to be readable — a missing
+    # file is the OTHER refusal reason, asserted separately above.
+    Path(env[doc_corpus.INDEX_PATH_ENV]).write_bytes(b"VACUUM INTO copy")
+    named = doc_corpus.index_identity()
+    assert named["index_path"] == env[doc_corpus.INDEX_PATH_ENV]
+    assert named["index_reason"] is None, named
+
+
 def test_the_retargeted_eval_query_is_satisfiable():
     """The old `qwen35-users` expected files from ~/lloyd while qmd indexes
     ~/obsidian, so no retrieval quality could satisfy it."""

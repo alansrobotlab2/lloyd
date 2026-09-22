@@ -442,6 +442,12 @@ LLOYD_HOME = Path(__file__).resolve().parent.parent
 # them. Unset, behaviour is exactly as before: grep this checkout.
 _CODE_ROOT = Path(os.environ["LLOYD_CODE_ROOT"]).resolve() \
     if os.environ.get("LLOYD_CODE_ROOT") else LLOYD_HOME
+# The same tree, named. `eval/run_eval.py` records it in its artifact (#1374)
+# because it is the second half of the document corpus: two runs whose qmd
+# vector counts agree but whose keyword leg grepped different checkouts did not
+# score the same thing. It is a public name so the recorder reads THE value the
+# grep below uses rather than re-deriving it from the env a second way.
+LLOYD_CODE_ROOT = _CODE_ROOT
 LLOYD_CODE_ROOTS = [
     _CODE_ROOT / "agent_mcp",
     _CODE_ROOT / "app",

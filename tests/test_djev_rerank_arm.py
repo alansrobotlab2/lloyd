@@ -63,6 +63,12 @@ def test_the_pinned_corpus_env_mutes_it_too():
     from scripts.automod import evalpin
     pin = evalpin.PinnedCorpus.__new__(evalpin.PinnedCorpus)
     pin.overlay = "/tmp/overlay.yaml"
+    # `name` because `env_for` now also names the index FILE the daemon was started
+    # on (#1374); it read only `overlay` before, so a hand-built pin could leave the
+    # rest of the object unset. Set here rather than defaulted inside `env_for`: a
+    # silently-defaulted name there is how a genuinely missing name would end up
+    # recorded as a corpus identity.
+    pin.name = evalpin.PIN_INDEX_NAME
     assert pin.env_for({})["LLOYD_DJEV_SHADOW"] == "0"
 
 

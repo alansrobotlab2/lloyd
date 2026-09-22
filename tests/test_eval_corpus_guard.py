@@ -26,11 +26,15 @@ this tree in-process. `SCRIPT`, `cwd` and the `LLOYD_*` env overrides still poin
 every subprocess at THIS tree, so only the interpreter is borrowed, never the
 code under test.
 """
+import contextlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -83,7 +87,8 @@ def _provision_store(db: Path, env: dict) -> None:
 
 def _run(tmp_path: Path, *args: str,
          kg_db: Path | None = None,
-         facts_root: Path | None = None) -> subprocess.CompletedProcess:
+         facts_root: Path | None = None,
+         env_extra: dict | None = None) -> subprocess.CompletedProcess:
     """Run the eval against an empty facts root unless one is named.
 
     `facts_root` exists for the #1250 tests below, which need the readable fact
@@ -98,6 +103,10 @@ def _run(tmp_path: Path, *args: str,
     env["LLOYD_FACTS_ROOT"] = str(facts)
     env["LLOYD_KG_DB"] = str(db)
     env["LLOYD_VOICE_ALERTS"] = "0"
+    # `env_extra` exists for #1374: the document-corpus probe is pointed at a
+    # health URL the test controls, so the assertions below are about what the
+    # run RECORDED rather than about how busy the live index happens to be.
+    env.update(env_extra or {})
     if not db.exists():
         _provision_store(db, env)
     return subprocess.run(
@@ -151,6 +160,429 @@ def test_allow_empty_corpus_completes_and_records_corpus_ok_false(tmp_path):
         assert "[info] corpus" in proc.stdout
     finally:
         _cleanup(label)
+
+
+# ---------------------------------------------------------------------------
+# The document half of the corpus (#1374)
+#
+# Everything above this line is about the fact half: an empty graph made a run
+# indistinguishable from a healthy one. This section is about the OTHER input the
+# headline numbers come from. `doc_hit`, `ndcg10` and `mrr_doc` are scored against
+# the qmd daemon, which re-embeds continuously — 38 768 vectors at 14:11Z and
+# 39 210 at 14:41Z on 2026-09-22, same process, up 54,860 s, no restart — and the
+# artifact recorded none of it. So two nightlies could be compared as if the
+# document corpus had held still when it had not. The keyword leg of the same
+# score reads a checkout (`LLOYD_CODE_ROOT`), and that was never recorded either.
+#
+# A local HTTP server stands in for the daemon rather than a patched `urlopen`,
+# because the thing under test is a run's answer about a service: a mock that
+# replaces the client also removes the failure mode (no answer at all) that most
+# of the nightly artifacts will eventually hit.
+# ---------------------------------------------------------------------------
+
+#: A daemon's `/health` body in the shape the live qmd answers with.
+HEALTHY_HEALTH = {
+    "status": "ok", "uptime": 57241,
+    "rerank": {"ranked": 117, "fallbacks": 0},
+    "vecIndex": {"vectors": 39_210, "fullBuilds": 1, "incrementalRefreshes": 243},
+}
+
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    """Answers GET /health with whatever body its server was handed."""
+
+    def do_GET(self):
+        body = json.dumps(self.server.body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        """Silence: a test fixture getting a request is not a log line."""
+
+
+def _make_qmd_index(path: Path, *, rows: int = 7,
+                    table: str = "content_vectors") -> Path:
+    """Build a sqlite file shaped like qmd's index: a `content_vectors` table
+    holding `rows` rows.
+
+    A fixture that only *looks* like a database — a byte blob wearing a .sqlite
+    suffix — makes the row-count probe return None forever. Then a renamed or
+    missing table in production would be recorded as `unknown`, and every
+    assertion written against the blob would still pass. The real qmd index has
+    this table under this name; the recorder opens it `mode=ro`, exactly as it
+    opens the live file while qmd's watcher is writing it.
+    """
+    import sqlite3
+
+    con = sqlite3.connect(str(path))
+    try:
+        con.execute(f"create table {table} (id integer primary key, hash text)")
+        con.executemany(f"insert into {table} (hash) values (?)",
+                        [(f"row-{i}",) for i in range(rows)])
+        con.commit()
+    finally:
+        con.close()
+    return path
+
+
+@contextlib.contextmanager
+def _health_server(body: dict):
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _HealthHandler)
+    srv.body = body
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}/health"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+@contextlib.contextmanager
+def _closed_health_port():
+    """A health URL on a port nothing is listening on.
+
+    Bound then released, so the address is real and the connection is refused —
+    what a stopped or restarting daemon looks like from the eval's side.
+    """
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    yield f"http://127.0.0.1:{port}/health"
+
+
+def _provision_healthy_corpus(tmp_path: Path) -> tuple[Path, Path]:
+    """A populated fact tree AND a store that indexes it — and it stays populated.
+
+    `test_a_zero_vector_count_...` needs the two halves of `corpus_ok` to be
+    separable: the fact side has to be genuinely non-zero so that a false flag can
+    only have come from the document side. `_provision_fact_tree` below is the same
+    fixture emptied on purpose, which is the wrong world for that test.
+    """
+    facts = tmp_path / "healthy-facts"
+    (facts / "lloyd").mkdir(parents=True)
+    (facts / "lloyd" / "Lloyd-state.md").write_text(
+        "---\n"
+        "entity: Lloyd\n"
+        "facts:\n"
+        "- fact: Lloyd is the agent that runs this box\n"
+        "  confidence: 0.9\n"
+        "  provenance: STATED\n"
+        "  created_at: '2026-09-01T00:00:00'\n"
+        "---\n"
+        "\n"
+        "# Lloyd\n",
+        encoding="utf-8")
+    db = tmp_path / "kg-healthy.sqlite"
+    env = dict(os.environ)
+    env["LLOYD_FACTS_ROOT"] = str(facts)
+    env["LLOYD_KG_DB"] = str(db)
+    _provision_store(db, env)
+    subprocess.run(
+        [str(PY), "-c",
+         "import sys, pathlib\n"
+         "from app.kg_store import KGStore\n"
+         "s = KGStore(sys.argv[1])\n"
+         "s.entities.register('Lloyd', kind='system')\n"
+         "s.edges.add({'source': 'Lloyd', 'target': 'Mission Control',"
+         " 'type': 'documents', 'origin': 'test'})\n"
+         "s.facts_idx.reindex(root=pathlib.Path(sys.argv[2]))\n"
+         "st = s.stats()\n"
+         "assert st['facts'] == 1 and st['edges_active'] == 1, st\n"
+         "assert st['entities'] >= 1, st\n"
+         "s.close()\n",
+         str(db), str(facts)],
+        cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=180,
+        check=True)
+    return facts, db
+
+
+def test_a_completed_run_records_the_document_it_scored(tmp_path):
+    """Clause 1: the artifact names the corpus the document leg actually searched.
+
+    Three things had no home in the artifact before this: how many vectors the
+    daemon held, which index answered, and which checkout the keyword leg grepped.
+    Each is asserted with a value only the probe could have produced — a vector
+    count from the fixture daemon's own body, and a code root the child was told
+    about through the same env var `agent_mcp/vault.py` reads, so the recorder
+    cannot be quietly reading a different tree than the scorer did.
+    """
+    label = "pytest-doc-corpus"
+    _cleanup(label)
+    facts, db = _provision_healthy_corpus(tmp_path)
+    # A REAL sqlite index carrying a `content_vectors` table, not a byte blob with
+    # a .sqlite suffix — see `_make_qmd_index`. Seven rows, asserted below.
+    index = _make_qmd_index(tmp_path / "evalpin-snapshot.sqlite", rows=7)
+    pinned_code_root = tmp_path / "armed-tree"
+    with _health_server(HEALTHY_HEALTH) as url:
+        proc = _run(tmp_path, "--label", label, kg_db=db, facts_root=facts,
+                    env_extra={"LLOYD_QMD_HEALTH_URL": url,
+                               "LLOYD_QMD_INDEX": str(index),
+                               "LLOYD_CODE_ROOT": str(pinned_code_root)})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = list(BASELINES.glob(f"{label}-*.json"))
+        assert len(written) == 1, written
+        rec = json.loads(written[0].read_text())
+
+    doc = rec["corpus"]["doc"]
+    assert doc["vectors"] == HEALTHY_HEALTH["vecIndex"]["vectors"], doc
+    assert doc["health_url"] == url, doc
+    # The index by three identities, because the path alone does not prove the
+    # file did not change underneath the run: `index_mtime` does, and
+    # `content_vectors` is the file's own count beside the daemon's — the pair is
+    # what distinguishes "the corpus grew and was re-embedded" from "the file grew
+    # and the daemon has not read it yet".
+    assert doc["index_path"] == str(index), doc
+    assert doc["index_size_bytes"] == index.stat().st_size, doc
+    assert doc["index_mtime"], "the index has to be identifiable by more than its path"
+    assert doc["index_reason"] is None, doc
+    # The file's OWN row count, recorded beside the daemon's: the pair is what
+    # tells "the corpus grew and was re-embedded" from "the file grew and the
+    # daemon has not read it yet". Seven is what the fixture was built with, so
+    # this asserts through a read-only sqlite open of a real database — the seam
+    # production crosses against a file its watcher is writing.
+    assert doc["content_vectors"] == 7, doc
+    assert Path(doc["code_root"]) == pinned_code_root, doc
+    # Identity, not liveness — the third contract in `app/doc_corpus.py`. `uptime`,
+    # the rerank leg's counters and the vecIndex's fullBuilds/incrementalRefreshes
+    # all count the daemon PROCESS: a restart over an index that did not move resets
+    # incrementalRefreshes to 0 and takes fullBuilds to 1 while `vectors` stands
+    # still. `eval/ci_backtest.py:125` canonicalises this whole block to decide
+    # whether a pair gets a PAIRED test, so shipping any of them would cost the
+    # instrument its power on exactly the same-day pairs #1374 is about.
+    assert "uptime" not in doc and "uptime_s" not in doc, doc
+    assert not [k for k in doc if k.startswith("rerank_")], doc
+    assert "full_builds" not in doc and "incremental_refreshes" not in doc, doc
+    assert rec["corpus_ok"] is True
+    # Stdout too: the line is where an operator reading a nightly log sees the
+    # corpus, and a fact-only line is what let this go unnoticed for a month.
+    assert f"vectors={HEALTHY_HEALTH['vecIndex']['vectors']}" in proc.stdout, proc.stdout
+
+
+def test_a_zero_vector_count_empties_the_corpus_even_with_a_healthy_graph(tmp_path):
+    """Clause 2: the document half can empty the corpus on its own.
+
+    The fixture's fact side is provably populated (the assertions below), so a
+    false `corpus_ok` here has exactly one possible source — the daemon that
+    answered 0 vectors. That is the case the fact-only guard could never see: an
+    index that was wiped or rebuilt-empty scores every document query as a miss
+    and reported, until now, `corpus_ok: true`.
+    """
+    empty = {**HEALTHY_HEALTH, "vecIndex": {**HEALTHY_HEALTH["vecIndex"],
+                                           "vectors": 0}}
+    label = "pytest-zero-vectors"
+    _cleanup(label)
+    facts, db = _provision_healthy_corpus(tmp_path)
+    with _health_server(empty) as url:
+        proc = _run(tmp_path, "--label", label, kg_db=db, facts_root=facts,
+                    env_extra={"LLOYD_QMD_HEALTH_URL": url})
+        out = proc.stdout + proc.stderr
+        assert proc.returncode != 0, out
+        assert "empty corpus" in out, out
+        # The refusal names the half that emptied, with the address and the index
+        # it looked at: the fact half of this world is intact, so a message that
+        # only said "empty corpus" would send the operator to the wrong store.
+        assert "doc corpus = vectors=0" in out, out
+        assert url in out, out
+        assert "empty-document-corpus baseline" in out, out
+        # Refused before scoring: an empty index would produce a run of all-miss
+        # document scores, which is the indistinguishable-from-real artifact this
+        # file exists to prevent.
+        assert not list(BASELINES.glob(f"{label}-*.json")), out
+
+        # The flag means "measure the empty corpus deliberately" and now governs
+        # the document half as it has always governed the fact half.
+        proc = _run(tmp_path, "--label", label, "--allow-empty-corpus",
+                    kg_db=db, facts_root=facts,
+                    env_extra={"LLOYD_QMD_HEALTH_URL": url})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = list(BASELINES.glob(f"{label}-*.json"))
+        assert len(written) == 1, written
+        rec = json.loads(written[0].read_text())
+
+    # The fact half is populated in this world: one indexed fact, one active edge,
+    # and the two entities that edge joins. Every term `corpus_ok` used to consult
+    # is non-zero here, so the false flag below has one possible cause.
+    assert rec["corpus"]["facts"] == 1, rec["corpus"]
+    assert rec["corpus"]["edges_active"] == 1, rec["corpus"]
+    assert rec["corpus"]["entities"] >= 1, rec["corpus"]
+    assert rec["corpus"]["doc"]["vectors"] == 0
+    assert rec["corpus_ok"] is False, (
+        "an empty document corpus is an empty corpus: every doc_hit, ndcg10 and "
+        "mrr_doc in the artifact would be a miss scored against nothing")
+
+
+def test_an_unanswerable_probe_records_null_and_still_scores(tmp_path):
+    """Clause 3 at the writer's end: no answer is recorded as null, never as 0.
+
+    The daemon being down is not an empty corpus — it is an unanswered question —
+    and the two must not land in the same place in the artifact. `0` here would
+    make a stopped daemon look like a wiped index (and, three days later, would
+    make the pair `doc_vectors +0` and read as a still corpus on both sides).
+    """
+    label = "pytest-doc-unanswerable"
+    _cleanup(label)
+    facts, db = _provision_healthy_corpus(tmp_path)
+    with _closed_health_port() as url:
+        proc = _run(tmp_path, "--label", label, kg_db=db, facts_root=facts,
+                    env_extra={"LLOYD_QMD_HEALTH_URL": url})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = list(BASELINES.glob(f"{label}-*.json"))
+        assert len(written) == 1, "an unanswerable probe must not stop the run"
+        rec = json.loads(written[0].read_text())
+
+    assert rec["corpus"]["doc"] is None, rec["corpus"]
+    assert rec["corpus_ok"] is True, (
+        "an unmeasured document corpus is unknown, not empty: the fact half still "
+        "stands and the run still scored something")
+    assert "vectors=unknown" in proc.stdout, proc.stdout
+    assert "vectors=0" not in proc.stdout, proc.stdout
+
+
+def test_the_document_block_is_the_identity_ci_backtest_pairs_on(tmp_path):
+    """The process boundary #1374 does not name: this block is also a fingerprint.
+
+    `eval/ci_backtest.py:125` canonicalises the WHOLE `corpus` dict and runs a PAIRED
+    test only when two artifacts' fingerprints match; anything else falls back to an
+    independent test with far less power. So the block has a second consumer with a
+    demand the trend audit never made of it: equal fingerprints for an unchanged
+    corpus, different ones when the vectors moved. The +442 drift this item measured
+    on 2026-09-22 was invisible to that consumer as well.
+
+    All three artifacts are REAL `run_eval` runs against the fixture daemon — two on
+    one health answer, one on an answer 442 vectors higher. A `paired` assertion
+    proves nothing if the artifacts it compares were assembled by this test instead
+    of by the writer under test.
+    """
+    sys.path.insert(0, str(ROOT))
+    import eval.ci_backtest as ci_backtest
+
+    facts, db = _provision_healthy_corpus(tmp_path)
+    index = _make_qmd_index(tmp_path / "index.sqlite", rows=7)
+    # ONE daemon for all three runs, its body mutated in place between them. The
+    # block records the `health_url` it reached as part of the corpus's identity, and
+    # a fresh fixture server per run hands each run a different ephemeral port — the
+    # fingerprint would then move while the corpus stood still, which is the same
+    # defect as shipping `uptime` and is precisely what the equality assertion below
+    # exists to catch. One daemon, one port, three answers.
+    daemon_body = json.loads(json.dumps(HEALTHY_HEALTH))
+
+    def _artifact(url: str, label: str) -> Path:
+        _cleanup(label)
+        proc = _run(tmp_path, "--label", label, kg_db=db, facts_root=facts,
+                    env_extra={"LLOYD_QMD_HEALTH_URL": url,
+                               "LLOYD_QMD_INDEX": str(index)})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = list(BASELINES.glob(f"{label}-*.json"))
+        assert len(written) == 1, written
+        return written[0]
+
+    with _health_server(daemon_body) as url:
+        paths = [_artifact(url, "pytest-bt-a"), _artifact(url, "pytest-bt-b")]
+        daemon_body["vecIndex"] = dict(
+            HEALTHY_HEALTH["vecIndex"],
+            vectors=HEALTHY_HEALTH["vecIndex"]["vectors"] + 442)
+        paths.append(_artifact(url, "pytest-bt-c"))
+    try:
+        a, b, c = (ci_backtest.Run(pth) for pth in paths)
+        assert a.corpus is not None and a.records, a.path
+        # The pair has to be joinable on query ids, or `paired` below is the default
+        # answer `corpus_state` falls to rather than one it earned.
+        assert set(a.records) == set(b.records), "the artifacts join on ids"
+        assert a.corpus == b.corpus, (
+            "two runs on an unchanged corpus must produce the same fingerprint. This "
+            "is the assertion that breaks if anyone re-adds a per-process counter "
+            "like `uptime` or `incrementalRefreshes` to `collect`: these runs are "
+            "seconds apart, so any elapsed-time or process-lifetime field would "
+            "differ while the corpus did not, and the backtest would quietly stop "
+            "pairing nightlies.")
+        assert ci_backtest.corpus_state(a, b) == "paired"
+        # +442 vectors is the drift measured between 14:11Z and 14:41Z on
+        # 2026-09-22 inside one daemon process that never restarted. The backtest
+        # could not see it; now it refuses the pair instead of scoring it as change.
+        assert ci_backtest.corpus_state(a, c) == "unpaired-corpus", (
+            "a daemon that re-embedded 442 vectors is a different corpus")
+    finally:
+        for pth in paths:
+            pth.unlink(missing_ok=True)
+
+
+def test_the_health_url_follows_the_recall_to_the_pin_port(monkeypatch):
+    """The probe must describe the daemon the RECALL used, not a port named here.
+
+    Every subprocess test above reaches the probe through `LLOYD_QMD_HEALTH_URL`, so
+    none of them exercises the derivation at all: the branch that survives a
+    `PinnedCorpus` — whose daemon answers on :8182 while the live one answers on
+    :8181 — would never be seen. If the two ever disagreed, one artifact would carry
+    two corpora's provenance and look entirely healthy, which is the failure #1374 is
+    filed under rather than one it fixes.
+    """
+    from app import doc_corpus
+
+    monkeypatch.delenv(doc_corpus.HEALTH_URL_ENV, raising=False)
+    assert doc_corpus.health_url_for("http://localhost:8181/query") == \
+        "http://localhost:8181/health"
+    assert doc_corpus.health_url_for("http://localhost:8182/query") == \
+        "http://localhost:8182/health", "the PIN port, not the live one"
+    # An explicit override still wins, and an unusable URL falls back to the live
+    # daemon rather than raising inside a run that is about to score 87 queries.
+    monkeypatch.setenv(doc_corpus.HEALTH_URL_ENV, "http://127.0.0.1:9/health")
+    assert doc_corpus.health_url_for("http://localhost:8181/query") == \
+        "http://127.0.0.1:9/health"
+    monkeypatch.delenv(doc_corpus.HEALTH_URL_ENV, raising=False)
+    # An empty URL yields an empty answer, not a raise and not a guessed port: the
+    # run records `doc: null` and the audit prints `unknown`, rather than dying over
+    # a provenance field or describing a daemon it never queried.
+    assert doc_corpus.health_url_for("") == ""
+    assert doc_corpus.collect(query_url="") is None
+
+
+def test_a_pinned_run_never_inherits_the_live_index_path(monkeypatch, tmp_path):
+    """Under an overlay, the DEFAULT index file belongs to a different daemon.
+
+    `PinnedCorpus.env_for` names the snapshot through `LLOYD_QMD_INDEX`; when that
+    did not happen, recording `~/.cache/qmd/index.sqlite` would put the live index's
+    path, mtime and row count on an artifact whose every doc number came from a
+    frozen copy — a provenance field that reads as precise and is wrong. So the
+    answer is null plus a reason, and the reason is a sentence a reader of the
+    artifact can act on.
+    """
+    from app import doc_corpus
+
+    named = tmp_path / "evalpin.sqlite"
+    named.write_bytes(b"x" * 64)
+    monkeypatch.setenv(doc_corpus.INDEX_PATH_ENV, str(named))
+    monkeypatch.setenv(doc_corpus.CONFIG_OVERLAY_ENV, str(tmp_path / "o.yaml"))
+    assert doc_corpus.index_identity()["index_path"] == str(named), \
+        "an explicitly named pin is used, overlay or not"
+
+    monkeypatch.delenv(doc_corpus.INDEX_PATH_ENV)
+    ident = doc_corpus.index_identity()
+    assert ident["index_path"] is None, ident
+    assert doc_corpus.PIN_UNNAMED_REASON in ident["index_reason"]
+    assert ident["content_vectors"] is None and ident["index_size_bytes"] is None
+
+    monkeypatch.delenv(doc_corpus.CONFIG_OVERLAY_ENV)
+    assert doc_corpus.index_identity()["index_path"] == str(doc_corpus.LIVE_INDEX), \
+        "with no overlay the live default is correct, and is still used"
+
+
+def test_a_missing_content_vectors_table_records_unknown_not_zero(tmp_path):
+    """The row count is a probe, and a probe with no table is *unknown*.
+
+    Recording 0 here would sit beside a live daemon's `vectors: 39575` in the same
+    artifact and read as "the file has nothing in it", which is a stronger and
+    falsler claim than "I could not count".
+    """
+    from app import doc_corpus
+
+    index = _make_qmd_index(tmp_path / "no-table.sqlite", rows=3, table="other_stuff")
+    ident = doc_corpus.index_identity(index)
+    assert ident["content_vectors"] is None, ident
+    assert ident["index_path"] == str(index), "the file is still identifiable"
 
 
 def _production_knobs() -> dict:

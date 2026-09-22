@@ -36,9 +36,15 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# The document-corpus vocabulary is imported, not restated: a test that typed
+# `"doc"` and `"doc_vectors"` as literals would keep passing if the writer and
+# the reader came to disagree about either string, and which key MEANS what is
+# the substance of backlog #1374.
+from app.doc_corpus import DOC_DRIFT_KEY, DOC_KEY  # noqa: E402
 from scripts.eval_trend_stats import (  # noqa: E402
     ALPHA,
     CONT_LEGS,
+    CORPUS_KEYS,
     UnjoinableQueries,
     audit_transition,
     corpus_diff,
@@ -335,7 +341,15 @@ def test_every_transition_carries_the_corpus_diff_with_facts_edges_and_entities(
     _write(tmp_path, "nightly-b.json", b)
     n0, n1 = load_window(d)
     drift = corpus_diff(n0, n1)
-    assert drift == {"facts": 45906, "edges_active": 28340, "entities": 690}
+    # Three fact terms and the document term. The document term is None HERE
+    # because CORPUS_A/CORPUS_B are written in the pre-#1374 shape — a corpus
+    # block with no `doc` key — and "no artifact recorded a vector count" is a
+    # different answer from 0. #1374 is the item that split the two halves; the
+    # fact terms keep their exact values so a change to the KG diff is still
+    # caught by this test, and the fourth key is what stops the split being
+    # silently reverted.
+    assert drift == {"facts": 45906, "edges_active": 28340, "entities": 690,
+                     DOC_DRIFT_KEY: None}
     t = audit_transition(n0, n1)
     print_transition(t)
     out = capsys.readouterr().out
@@ -373,7 +387,153 @@ def test_a_missing_corpus_block_prints_drift_unknown_and_never_zero(tmp_path, ca
 
 
 def test_an_identical_corpus_is_reported_as_identical_not_as_a_missing_term():
-    assert "corpus identical" in fmt_drift({"facts": 0, "edges_active": 0, "entities": 0})
+    assert "corpus identical" in fmt_drift(
+        {"facts": 0, "edges_active": 0, "entities": 0, DOC_DRIFT_KEY: 0})
+
+
+# ===========================================================================
+# #1374 — the DOCUMENT half of the corpus diff. `eval/run_eval.py` used to record
+# only the fact half, so a pair could print `corpus identical` while the qmd
+# daemon had re-embedded between the two runs and every `doc_hit` in the pair was
+# scored against a different set of vectors. The four tests below are the four
+# things that must now be true, in the order the acceptance clauses list them.
+# ===========================================================================
+
+#: Vector counts this section uses, from the item's own measurement: one daemon
+#: process, up 54 860 s, no restart, 38 768 vectors at 14:11Z and 39 210 at
+#: 14:41Z. The drift term for that pair is therefore +442, and the fact triple
+#  behind it did not move at all.
+VECTORS_THEN = 38_768
+VECTORS_NOW = 39_210
+VECTORS_DELTA = VECTORS_NOW - VECTORS_THEN
+
+
+def _doc_corpus(vectors: int | None) -> dict:
+    """A ``corpus`` block in the shape ``run_eval.py`` writes after #1374.
+
+    ``vectors=None`` is the artifact's ``doc: null`` — the probe could not answer
+    — which is a different shape from ``vectors=0`` (a daemon that answered and
+    counted nothing) and a different shape again from the key being absent (an
+    artifact written before the key existed). All three read as *unknown* or not,
+    and that distinction is what these tests are for.
+    """
+    return {**CORPUS_A,
+            DOC_KEY: None if vectors is None else {
+                "vectors": vectors,
+                "health_url": "http://localhost:8181/health",
+                "code_root": str(ROOT)}}
+
+
+def _rejecting_pair_with_vectors(tmp_path: Path, vectors_prev, vectors_cur):
+    """Two nights whose ``entity_hit`` leg REJECTS at 95 % (six one-sided flips of
+    eight, exact McNemar p = 0.03125) on a fact corpus that never moves.
+
+    The leg has to reject or ``admissible`` is vacuously False and the test proves
+    nothing: the clause is "cannot reach the ADMISSIBLE verdict", which is only a
+    claim about a pair that would otherwise have reached it. Same scores both
+    nights, same ``facts``/``edges_active``/``entities`` — only the recorded
+    vector count differs.
+    """
+    a = _night("nightly-20260101", 1, [1] * 8, [1] * 8,
+               [0.5] * 8, [0.5] * 8, _doc_corpus(vectors_prev))
+    b = _night("nightly-20260102", 2, [1, 1, 0, 0, 0, 0, 0, 0], [1] * 8,
+               [0.5] * 8, [0.5] * 8, _doc_corpus(vectors_cur))
+    d = _write(tmp_path, "nightly-a.json", a)
+    _write(tmp_path, "nightly-b.json", b)
+    return load_window(d)
+
+
+def test_vectors_moving_on_a_still_fact_triple_is_corpus_moved_and_never_admissible(tmp_path, capsys):
+    """Clause 4: the pair the old code printed as `corpus identical`.
+
+    Same 200,000 facts, same 4,000 active edges, same 23,600 entities — and 442
+    more vectors in the index the document leg searched. Before #1374 that pair
+    was `corpus identical`, and a rejecting leg on it was ADMISSIBLE.
+    """
+    n0, n1 = _rejecting_pair_with_vectors(tmp_path, VECTORS_THEN, VECTORS_NOW)
+    drift = corpus_diff(n0, n1)
+    assert {k: drift[k] for k in CORPUS_KEYS} == {
+        "facts": 0, "edges_active": 0, "entities": 0}, "the fact half must stay still"
+    assert drift[DOC_DRIFT_KEY] == VECTORS_DELTA
+
+    t = audit_transition(n0, n1)
+    assert t.rejected, "the fixture is only dispositive if a leg actually rejects"
+    assert t.drift_moved is False, "the fact half is unchanged; that count is not the finding"
+    assert t.doc_drift_moved is True
+    assert t.admissible is False
+
+    print_transition(t)
+    out = capsys.readouterr().out
+    assert f"{DOC_DRIFT_KEY} +{VECTORS_DELTA}" in out, out
+    assert "corpus moved" in out and "corpus identical" not in out
+    assert "WITHHELD" in out and "ADMISSIBLE" not in out
+
+
+def test_a_rejection_on_a_pair_whose_both_halves_are_still_is_still_admissible(tmp_path):
+    """The gate must tighten without breaking: same fixture, same recorded vector
+    count on both nights, so nothing moved and the verdict is allowed.
+
+    Without this the four clauses could be satisfied by a change that made
+    `admissible` a constant False, which would be a stricter report and a worse
+    instrument.
+    """
+    n0, n1 = _rejecting_pair_with_vectors(tmp_path, VECTORS_THEN, VECTORS_THEN)
+    t = audit_transition(n0, n1)
+    assert t.rejected and t.drift_moved is False and t.doc_drift_moved is False
+    assert t.admissible is True
+
+
+def test_an_unanswerable_doc_probe_prints_unknown_and_never_zero(tmp_path, capsys):
+    """Clauses 3 and 5 together, at the reader's end.
+
+    ``doc: null`` (a daemon that would not answer) and a key that is absent
+    altogether (an artifact from before #1374) are the two ways a pair can have no
+    document term. Both print `unknown`. Neither may print `+0`: on the shipped
+    series 30 groups of baselines share an identical fact triple across hour-scale
+    gaps, and a `doc_vectors +0` on those pairs would be the same fabricated
+    "the document corpus did not move" that this item exists to stop.
+    """
+    # The artifact wrote `doc: null`: the probe ran and could not be answered.
+    n0, n1 = _rejecting_pair_with_vectors(tmp_path, VECTORS_THEN, None)
+    assert corpus_diff(n0, n1)[DOC_DRIFT_KEY] is None
+    t = audit_transition(n0, n1)
+    assert t.doc_drift_moved is None
+    assert t.admissible is False, "an unrecorded doc half can account for the move"
+    print_transition(t)
+    out = capsys.readouterr().out
+    assert f"{DOC_DRIFT_KEY} unknown" in out, out
+    assert f"{DOC_DRIFT_KEY} +0" not in out, out
+    assert "doc drift unknown, never read as 0" in out, out
+
+    # A pre-#1374 artifact (no `doc` key at all) behaves the same way, and so does
+    # a pair where BOTH nights are pre-#1374 shape — the case every historical
+    # transition in `eval/baselines/` is.
+    a = _night("nightly-20260101", 1, [1] * 8, [1] * 8, [0.5] * 8, [0.5] * 8, CORPUS_A)
+    b = _night("nightly-20260102", 2, [1] * 8, [1] * 8, [0.5] * 8, [0.5] * 8, CORPUS_A)
+    d = _write(tmp_path, "nightly-a.json", a)
+    _write(tmp_path, "nightly-b.json", b)
+    n0, n1 = load_window(d)
+    drift_line = fmt_drift(corpus_diff(n0, n1))
+    assert f"{DOC_DRIFT_KEY} unknown" in drift_line, drift_line
+    assert f"{DOC_DRIFT_KEY} +0" not in drift_line, drift_line
+    assert "doc side unknown" in drift_line, \
+        "a still fact half must not be printed as a still corpus"
+
+
+def test_no_transition_in_the_live_series_is_read_as_zero_doc_drift(capsys):
+    """Clause 5 on the artifacts that actually exist, not on fixtures.
+
+    Every baseline on disk predates ``corpus.doc``, so the audit's own summary must
+    account for all twelve transitions of #608's window as document-side *unknown*
+    — the count that used to be silently 0 and let a pair read as
+    ``corpus identical``.
+    """
+    _live_baselines_in_window()
+    assert main(["--since", AUDIT_WINDOW[0], "--until", AUDIT_WINDOW[1],
+                 "--no-claims"]) == 0
+    out = capsys.readouterr().out
+    assert f"{DOC_DRIFT_KEY}: moved 0; identical 0; unknown 12" in out, out
+    assert "verdicts admissible under the drift-controlled contract: 0 of 12" in out
 
 
 # ===========================================================================

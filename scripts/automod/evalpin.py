@@ -581,6 +581,16 @@ class PinnedCorpus:
         env["LLOYD_DJEV_SHADOW"] = "0"
         if code_root is not None:
             env["LLOYD_CODE_ROOT"] = str(code_root)
+        # The index FILE, named for the same reason the code root is named just
+        # above. qmd is served its index by filename, and an eval arm that reaches it
+        # over HTTP cannot tell which file the daemon it queried is serving. Without
+        # this line the arm's artifact records the LIVE index's path, mtime and row
+        # count as the identity of a corpus that was a snapshot — a provenance field
+        # that reads as precise and is wrong, which is the defect #1374 exists to
+        # prevent rather than one it fixes. Literal like the two above, because it
+        # crosses a process boundary; `test_env_for_names_the_pinned_index_file` pins
+        # the string to `doc_corpus.INDEX_PATH_ENV` so the two cannot drift apart.
+        env["LLOYD_QMD_INDEX"] = str(pin_index_path(self.name))
         return env
 
     def warm_up(self, *, timeout: float = WARM_TIMEOUT, target_s: float = WARM_TARGET_S,

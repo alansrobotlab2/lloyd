@@ -35,6 +35,8 @@ sys.path.insert(0, str(LLOYD_HOME))
 os.environ.setdefault("LLOYD_DJEV_SHADOW", "0")
 
 from agent_mcp.vault import (
+    LLOYD_CODE_ROOT,
+    QMD_DAEMON_URL,
     RECALL_DEMOTE_DAILY_LOGS,
     RECALL_DJEV_RERANK,
     RECALL_DJEV_RERANK_TOP,
@@ -75,6 +77,12 @@ try:
 except ImportError:  # pragma: no cover - script-dir invocation
     import stats as evstats
 
+# The DOCUMENT half of the corpus this run scores (#1374). Owned by its own
+# stdlib module because `scripts/eval_trend_stats.py` has to read the same key
+# with the same meaning: the writer and the reader disagreeing about what an
+# absent key means is exactly the defect this is filed under.
+from app import doc_corpus
+
 
 def _corpus_provenance() -> dict:
     """What was actually scored, not just how it was scored.
@@ -91,6 +99,17 @@ def _corpus_provenance() -> dict:
     Raises StoreUnavailable if the store cannot be opened — that is a
     different failure from "opened and empty" and the caller must not
     collapse the two.
+
+    Under ``doc`` sits the OTHER half of what this run scored (#1374). Every
+    ``doc_hit`` / ``ndcg10`` / ``mrr_doc`` in the artifact came from the qmd
+    daemon and from grepping a checkout, and neither was ever recorded: the
+    recall reaches qmd over HTTP at whatever that daemon holds at that minute,
+    and it re-embeds continuously (38 768 → 39 210 vectors inside one daemon
+    process on 2026-09-22, no restart, no artifact that says so). So the eight
+    fact keys below could tell a reader which KG produced a number and never
+    which document corpus did. ``None`` for the block means the probe could not
+    answer, and every reader downstream is required to call that *unknown* —
+    never 0, never "identical".
     """
     facts_root = Path(VAULT_FACTS_ROOT)
     entity_dirs = 0
@@ -106,14 +125,27 @@ def _corpus_provenance() -> dict:
         "aliases": int(stats.get("aliases", 0)),
         "entities": int(stats.get("entities", 0)),
         "facts": int(stats.get("facts", 0)),
+        # The document half, probed at the moment the run scores it. `None` is a
+        # value, not an omission: it is how "the daemon would not answer" reaches
+        # a reader seven days later.
+        doc_corpus.DOC_KEY: doc_corpus.collect(
+            QMD_DAEMON_URL, code_root=LLOYD_CODE_ROOT),
     }
 
 
 def _corpus_line(corpus: dict) -> str:
+    doc = corpus.get(doc_corpus.DOC_KEY)
+    # The doc half is printed beside the fact half because the line is the only
+    # place a human sees both in one glance; `vectors=unknown` has to be
+    # readable as unknown right there, in the same words the artifact uses.
+    doc_part = ("vectors=unknown" if not isinstance(doc, dict) else
+                f"vectors={doc['vectors']} mode={doc['corpus_mode']} "
+                f"code_root={doc['code_root']}")
     return (f"[info] corpus facts_root={corpus['facts_root']} "
             f"entity_dirs={corpus['entity_dirs']} kg_db={corpus['kg_db']} "
             f"entities={corpus['entities']} edges_active={corpus['edges_active']} "
-            f"aliases={corpus['aliases']} facts={corpus['facts']}")
+            f"aliases={corpus['aliases']} facts={corpus['facts']} "
+            f"doc[{doc_part}]")
 
 
 # The fact-leg guard is IMPORTED, never restated here (#1250).
@@ -965,7 +997,16 @@ def main() -> int:
               "open at all.", file=sys.stderr)
         return 3
 
-    corpus_ok = bool(corpus["edges_active"]) and bool(corpus["entities"])
+    # Two halves, one flag. The fact half is exactly the rule that has always
+    # been here — an empty graph scores like a healthy one on the document
+    # metrics. The doc half is #1374: a run whose vector count is zero scored
+    # every `doc_hit` against an index that could not answer, which is the same
+    # indistinguishability one directory over. An *unknown* count is neither:
+    # `doc_corpus.doc_ok` answers True for it and the artifact says `doc: null`,
+    # so a daemon that is simply down cannot fail a run it never served.
+    fact_half_ok = bool(corpus["edges_active"]) and bool(corpus["entities"])
+    doc_half_ok = doc_corpus.doc_ok(corpus)
+    corpus_ok = fact_half_ok and doc_half_ok
     if not corpus_ok:
         if not args.allow_empty_corpus:
             sys.stdout.flush()
@@ -973,12 +1014,25 @@ def main() -> int:
                   "scores identically to a healthy one on mrr_doc, ndcg10 and "
                   "doc_hit_rate, so the result would be indistinguishable from "
                   "a real run.", file=sys.stderr)
-            print(f"        facts_root = {VAULT_FACTS_ROOT}  "
-                  f"(entity_dirs={corpus['entity_dirs']})", file=sys.stderr)
-            print(f"        kg_db      = {VAULT_KG_DB}  "
-                  f"(entities={corpus['entities']}, "
-                  f"edges_active={corpus['edges_active']})", file=sys.stderr)
-            print("        Pass --allow-empty-corpus to measure the no-graph "
+            if not fact_half_ok:
+                print(f"        facts_root = {VAULT_FACTS_ROOT}  "
+                      f"(entity_dirs={corpus['entity_dirs']})", file=sys.stderr)
+                print(f"        kg_db      = {VAULT_KG_DB}  "
+                      f"(entities={corpus['entities']}, "
+                      f"edges_active={corpus['edges_active']})", file=sys.stderr)
+            if not doc_half_ok:
+                # Named separately, because the two halves need different fixes
+                # and the operator reading this decides which one to chase.
+                print(f"        doc corpus = vectors=0 on the daemon at "
+                      f"{(corpus.get(doc_corpus.DOC_KEY) or {}).get('health_url')} "
+                      f"(index={(corpus.get(doc_corpus.DOC_KEY) or {}).get('index_path')}) "
+                      "— every doc_hit in this run is an empty index, not a "
+                      "retrieval result (#1374).", file=sys.stderr)
+            # The half named here is the half the flag is being offered for:
+            # "measure the no-graph baseline" is the wrong advice when the graph is
+            # intact and the vector index is what came back empty.
+            print("        Pass --allow-empty-corpus to measure the "
+                  f"{'no-graph' if not fact_half_ok else 'empty-document-corpus'} "
                   "baseline deliberately.", file=sys.stderr)
             return 2
         print("[warn] empty corpus, proceeding under --allow-empty-corpus; "
