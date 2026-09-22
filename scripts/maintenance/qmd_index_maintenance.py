@@ -28,8 +28,11 @@ SAFETY CONTRACT — this runs unattended:
     real work" meant every run: eight of the last eight took retrieval down
     and brought it back cold -- models reloaded, vector index rebuilt -- to
     embed one to four documents the watcher would have reached anyway.
-  * A daemon found unhealthy afterwards is still restarted, and still the one
-    thing that makes the exit code non-zero.
+  * A daemon found unhealthy after the mutating branch is still restarted, and
+    being left unhealthy is still the one thing that makes the exit code non-zero.
+    A daemon found unhealthy on a run that did nothing is NOT restarted: this run
+    did not break it, and a quiet night is not the job's moment to restart a
+    service it never touched. It reports and exits 1.
   * Every subprocess has a timeout.
   * The embedding backfill refuses a corpus-wide re-embed (#1367). Pending is
     counted per *configured model*, so editing one line — `models: embed` in
@@ -41,7 +44,12 @@ SAFETY CONTRACT — this runs unattended:
     deliberate and run `qmd embed` by hand. A refused guard exits 0 — it is the
     check working, not a failed job — and is a report entry like drift.
   * Exit code is non-zero only when the daemon is left unhealthy — a failed
-    prune with a healthy daemon is a warning, not a page.
+    prune with a healthy daemon is a warning, not a page. Every run probes for it,
+    including one that decided there was nothing to do (#958): before that, the
+    no-op path returned 0 having never measured, which was the case that quietly
+    passed. "Unhealthy" means the daemon answered no HTTP request on
+    DAEMON_PROBE_URL within NOOP_HEALTH_RETRIES tries -- a listening-but-wedged
+    daemon still reads healthy, and this job's probe does not claim otherwise.
   * Every run also compares the tracked qmd collection template with the config
     the daemon actually reads, and records it as `config_drift` in the dated
     report (#1298). Drift is a report entry and never an exit code: the job that
@@ -246,12 +254,30 @@ def embed_backfill_guard(pend: int, documents: int | None,
     }
 
 
+#: The daemon endpoint both health probes hit. It is a named constant because the
+#: no-op path probes it too (#958), and the test that pins "the health line came
+#: from a real probe" has to assert on the same string the probe sends.
+DAEMON_PROBE_URL = "http://localhost:8181/mcp"
+
+#: Tries the *no-op* path spends on that probe. The mutating path's default of 10
+#: (with a 3 s sleep between tries) exists to wait out a restart it just performed;
+#: a run that pruned and embedded nothing restarted nothing, so the ~30 s that
+#: default can cost was pure waiting on a daemon that was already down. A few tries
+#: still ride out a transient blip instead of turning a 3 s hiccup into a failed
+#: nightly run.
+NOOP_HEALTH_RETRIES = 3
+
+
 def daemon_healthy(retries: int = 10) -> bool:
-    """True once the daemon answers a trivial query."""
+    """True once the daemon answers an HTTP request on its MCP endpoint.
+
+    *Answers*, not "retrieval verified": curl exits 0 on any HTTP response, and the
+    MCP endpoint replies 405 to a GET, so a listening-but-wedged daemon reads
+    healthy here. Telling that apart needs a real query (`qmd vsearch`), which is a
+    different change than the one that asked for this probe.
+    """
     for _ in range(retries):
-        rc, _ = _sh(
-            ["curl", "-s", "-m", "3", "-o", "/dev/null", "http://localhost:8181/mcp"], 10
-        )
+        rc, _ = _sh(["curl", "-s", "-m", "3", "-o", "/dev/null", DAEMON_PROBE_URL], 10)
         if rc == 0:
             return True
         time.sleep(3)
@@ -463,13 +489,23 @@ def main() -> int:
             # A refused guard already recorded its own reason; "nothing to do"
             # would contradict the line above it in the same report.
             report["actions"].append("none — nothing to do")
+        # Doing nothing is not evidence that retrieval is up, so this branch
+        # measured it too: it used to `return 0` without ever calling
+        # `daemon_healthy()`, whose only call sat in the mutating section's
+        # `finally`, and the exit line's `True` default turned that absence into a
+        # pass. A daemon that died on a quiet night was a green nightly run (#958).
+        # One curl, NOOP_HEALTH_RETRIES tries, no lock, no stop, no restart: a
+        # daemon found unhealthy on a no-work day is reported and exited on, and
+        # the decision to restart it stays with the branch that touched the index.
+        report["daemon_healthy"] = daemon_healthy(retries=NOOP_HEALTH_RETRIES)
         # --dry-run promises to change nothing, so it only prints. Everything
         # else that runs leaves a report, drift included, whether or not it
-        # needed the index.
+        # needed the index. A probe changes nothing either, which is why `--dry-run`
+        # shares this branch instead of getting its own health semantics.
         if not args.dry_run:
             _write_report(report, started)
         _emit(report, args.json)
-        return 0
+        return 0 if report["daemon_healthy"] else 1
 
     # ---- Mutating section. The daemon stays up throughout (see the contract). ----
     try:
@@ -501,8 +537,10 @@ def main() -> int:
     _write_report(report, started)
 
     _emit(report, args.json)
-    # Only fail loudly if retrieval is actually down.
-    return 0 if report.get("daemon_healthy", True) else 1
+    # Only fail loudly if retrieval is actually down. Indexed, not `.get(..., True)`:
+    # the `finally` above always sets the key, and both exits now read a measured
+    # boolean, so a missing measurement crashes instead of passing.
+    return 0 if report["daemon_healthy"] else 1
 
 
 def _emit(r: dict, as_json: bool) -> None:

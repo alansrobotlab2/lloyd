@@ -280,12 +280,21 @@ def _run_main(monkeypatch, tmp_path, template: Path, live: Path) -> dict:
 
     `inspect_index`/`pending_embeddings` are forced to "nothing to do" so no
     test touches ~/.cache/qmd or the daemon, and REPORT_DIR points at tmp_path.
+
+    That last promise is why `daemon_healthy` is stubbed here. "Nothing to do" is
+    the branch #958 added the health probe to, so an unstubbed probe would have
+    every case in this file curling localhost:8181 — green only on a box with the
+    daemon up, and 30 s of retries on one without it. What the probe is *for* is
+    pinned in tests/test_qmd_maintenance_health.py; here it is an unrelated
+    collaborator, forced healthy so the `rc == 0` below keeps testing the thing it
+    says it tests: drift never changes the exit code.
     """
     monkeypatch.setattr(m, "TEMPLATE_CONFIG", template)
     monkeypatch.setattr(m, "LIVE_CONFIG", live)
     monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
     monkeypatch.setattr(m, "inspect_index", lambda: {"orphan_ratio": 0.0, "vectors_orphaned": 0})
     monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
+    monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
     monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py"])
     rc = m.main()
     assert rc == 0, "drift must not change the job's exit code"
@@ -329,6 +338,11 @@ def test_dry_run_prints_the_drift_and_writes_no_file(monkeypatch, tmp_path, caps
     monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
     monkeypatch.setattr(m, "inspect_index", lambda: {"orphan_ratio": 0.0, "vectors_orphaned": 0})
     monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
+    # #958 put a health probe on the branch --dry-run shares with the no-op case, so
+    # the rc below now follows that probe. Stubbed healthy, because this case is
+    # about drift being printed and no file being written; the shared-branch choice
+    # and the dry run's own health line are pinned in test_qmd_maintenance_health.py.
+    monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
     monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py", "--dry-run"])
     assert m.main() == 0
     assert not (tmp_path / "reflection").exists(), "--dry-run promises to change nothing"
