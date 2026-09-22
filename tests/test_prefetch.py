@@ -940,3 +940,99 @@ def test_ambient_fact_lines_are_never_prefixed_by_a_filename_shaped_entity(
                for p in unfixed_prefixed), (
         f"the fixture can no longer fail: no filename-shaped entity spoke even "
         f"unfiltered — {unfixed}")
+
+
+# ── #1025: a digit directory may not take an ambient slot for a task id ──────
+
+NUMERIC_TASK_ROWS = ("Task #294", "294", "Backlog Item #294")
+
+
+def _numeric_task_facts_tree(tmp_path, monkeypatch):
+    """One task id, three rows, and every ranking input pinned.
+
+    Three rows because the width is what makes the harm. `Task #294` is the
+    entity the query asks about; `294` is the digit directory the fact
+    extractor minted from notes that named the item by number alone; `Backlog
+    Item #294` is a row that names the same item and lands on the same 0.5.
+    Before the guard `294` scored 10.0 beside the canonical, so with
+    `FACT_MAX_ENTITIES = 2` it took the second slot and `Backlog Item #294`
+    never appeared; after it the tie at 0.5 breaks on name length — the sort's
+    own second key — and the digit row loses the slot it never earned.
+
+    All three carry one confidence-1.0 fact whose text says which row is
+    speaking, so no confidence filter can be doing the choosing.
+    `_alias_surface_map` and `_edge_counts_or_empty` are emptied because the
+    tie-break at equal score consults graph degree: a run from a tree with the
+    live store reachable would let live edges decide what this test asserts.
+    """
+    import yaml
+    import agent_mcp._shared as shared
+    from agent_mcp import retrieval, facts as facts_mod
+
+    facts_root = tmp_path / "facts"
+    facts_root.mkdir()
+    for mod in (shared, retrieval, facts_mod):
+        monkeypatch.setattr(mod, "FACTS_ROOT", facts_root)
+    shared._invalidate_entity_dirs_cache()
+    retrieval.invalidate_fact_file_cache()
+    retrieval._entity_index_cache = None
+    monkeypatch.setattr(retrieval, "_alias_surface_map", lambda: {})
+    monkeypatch.setattr(retrieval, "_edge_counts_or_empty", lambda *a, **k: {})
+
+    says = {
+        "Task #294": "Task #294 is the PPR rescoping item.",
+        "294": "294 was a YAML scanner false positive on 2026-08-30.",
+        "Backlog Item #294": "Backlog Item #294 is Memory Graph.",
+    }
+    for i, entity in enumerate(NUMERIC_TASK_ROWS):
+        d = facts_root / entity
+        d.mkdir(parents=True, exist_ok=True)
+        fm = {"type": "facts", "entity": entity, "category": "activity",
+              "facts": [{"fact": says[entity], "id": f"n{i:03d}",
+                         "confidence": 1.0}]}
+        (d / f"{entity}-activity.md").write_text(
+            f"---\n{yaml.dump(fm, sort_keys=False)}---\n")
+
+
+def test_ambient_fact_lines_are_never_prefixed_by_a_bare_task_id(tmp_path,
+                                                                 monkeypatch):
+    """The consumer the harm was measured on. `_search_facts` runs on every
+    message ≥ MIN_MESSAGE_LEN, takes the extractor's top
+    `FACT_MAX_ENTITIES` names and quotes each one's best facts with no query
+    token filter of its own — so on the live tree `what is task 294 about` put
+    3 of its 6 ambient bullets' facts about a YAML scanner bug under the prefix
+    `[294]`, beside the canonical `[Task #294]` lines.
+
+    The seam is the same import-identity one as #1024 and #839: `prefetch`
+    binds `_extract_entities_from_query` from `agent_mcp.facts`, which
+    re-exports `agent_mcp.retrieval.extract_entities_from_query`. The cap lives
+    in retrieval's `_bump`, so this is the test that shows it reaches the block
+    that is actually injected.
+    """
+    _numeric_task_facts_tree(tmp_path, monkeypatch)
+    assert prefetch.FACT_MAX_ENTITIES == 2, (
+        f"the clause is stated at a budget of 2; it is now "
+        f"{prefetch.FACT_MAX_ENTITIES}, so this test no longer measures it")
+
+    bullets = prefetch._search_facts("what is task 294 about")
+    assert bullets, "the task has a fact; silence here is not the fix"
+    prefixed = [b.split("]")[0].lstrip("- [") for b in bullets]
+    numeric = [p for p in prefixed if re.fullmatch(r"#?\d+", p)]
+    assert not numeric, (
+        f"{len(numeric)} of {len(bullets)} ambient fact lines speak as a bare "
+        f"task id {numeric}: {bullets}")
+    assert "Task #294 is the PPR rescoping item." in " ".join(bullets), (
+        f"the task's own fact is missing from the ambient block: {bullets}")
+
+    # Positive control: with the name-shape guard answering False — what this
+    # path did before #1025 — the digit row must take a slot again. If the
+    # fixture ever stops producing that, this fires instead of letting the
+    # assert above pass for the wrong reason.
+    from agent_mcp import retrieval
+    monkeypatch.setattr(retrieval, "_is_numeric_seed_name", lambda _n: False)
+    retrieval._entity_index_cache = None
+    unfixed = prefetch._search_facts("what is task 294 about")
+    unfixed_prefixed = [b.split("]")[0].lstrip("- [") for b in unfixed]
+    assert any(re.fullmatch(r"#?\d+", p) for p in unfixed_prefixed), (
+        f"the fixture can no longer fail: `[294]` did not speak even with the "
+        f"guard disabled — {unfixed}")

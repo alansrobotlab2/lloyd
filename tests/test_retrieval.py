@@ -130,6 +130,246 @@ def test_task_ids_dispatch_to_the_canonical_form(world):
     assert ranked["Task #67"] == 10.0
 
 
+# ── A numeric-named row never takes a task-id or full-name score (#1025) ─────
+
+# The population the guard has to cover is entity directories whose entire name
+# is an id — `294`, `002`, `#344` — every one of them inside the extractor's
+# reach: `_get_rankable_entity_dirs_cached` drops `.md`-suffixed and
+# `^\d{4}-\d{2}-\d{2}` rows for #839, and neither shape matches `294` or `#344`,
+# so no filter deeper than this one reaches them. How many there are moves with
+# every nightly rebuild (53/101 at filing, 58/113 at the 09-18 triage, 61/178 on
+# 2026-09-22 — each with its probe in `backlog/1025-*.md`), so the count is
+# re-run from there rather than repeated here; what the three tests below pin is
+# the shape, which the fixture itself supplies and verifies.
+NUMERIC_SEED = "294"
+# Same 3-character width as `294`, so the two rows can differ ONLY by name
+# shape: any behavioural gap between them is the shape, not the length.
+WORD_SEED = "zig"
+TASK_ID_QUERY = "what is task 294 about"
+# 0.5 is not an arbitrary cap — it is branch 3's own score for a name of one
+# token that overlaps the query on that one token (`max(score, 0.5)` in
+# `extract_entities_from_query`). Capping at it leaves a numeric row exactly
+# where an ordinary token-overlap match would have put it.
+NUMERIC_ROW_MAX = 0.5
+
+
+def _numeric_shaped(names) -> list[str]:
+    """The acceptance check's own predicate, restated rather than borrowed.
+
+    Asking the product what a numeric name is would let a guard that stopped
+    matching take the assertion with it, the failure mode #839's control
+    documents one section down.
+    """
+    return [n for n in names if re.fullmatch(r"#?\d+", n)]
+
+
+def _numeric_seed_tree(root):
+    """The canonical row, the numeric row that imitates it, and a word control.
+
+    The fixture has to be capable of failing: before the fix the task-id branch
+    passed the bare number as a candidate and `_bump`ed every hit to 10.0, so
+    `294` arrived tied with `Task #294`. `zig` is what proves a pass below is
+    the guard discriminating by name shape and not branch 2 simply never
+    firing — the canonical's own 10.0 is the equivalent control for branch 1.
+    """
+    _write_facts(root, "Task #294", "state",
+                 [{"fact": "Task #294 is PPR, doc-augmentation retry",
+                   "id": "can-001"}])
+    _write_facts(root, NUMERIC_SEED, "state",
+                 [{"fact": "294 was a YAML scanner false positive on 2026-08-30",
+                   "id": "num-001"}])
+    _write_facts(root, WORD_SEED, "state",
+                 [{"fact": "zig is a test subject", "id": "ctl-001"}])
+
+
+def test_a_numeric_row_never_ranks_at_the_task_id_score(world):
+    """Clause 1: a row named `294` may not be scored as if the query had
+    dispatched to it. The task-id branch's candidate tuple ended with the bare
+    number, so on `what is task 294 about` it `_bump`ed the pure-digit
+    directory to 10.0 — the ceiling of the whole function, tied with the
+    canonical `Task #294` row (branch 2's full-name bonus tops out at
+    `5.0 + min(len / 20, 2.0)` = 7.0). At `prefetch.py`'s budget of
+    `FACT_MAX_ENTITIES = 2` that tie spent half the injected facts on a row
+    that is a directory name, not an entity."""
+    root, _ = world
+    _numeric_seed_tree(root)
+    ranked = retrieval.extract_entities_from_query(TASK_ID_QUERY)
+    scores = dict(ranked)
+
+    numeric = _numeric_shaped(scores)
+    over = [(n, scores[n]) for n in numeric if scores[n] > NUMERIC_ROW_MAX]
+    assert not over, (
+        f"numeric-named rows scored past the ordinary token-overlap cap at "
+        f"{over}: the task-id dispatch must not hand a bare number the 10.0 it "
+        f"earns for a canonical task name")
+
+    # Positive control against a vacuous pass: the branch that mis-scored the
+    # numeric row is the branch this query exercises, so the canonical row's
+    # 10.0 is the evidence it fired at all.
+    assert scores["Task #294"] == 10.0, (
+        "the task-id dispatch stopped firing, so the assertion above is "
+        "passing on a query that seeds nothing")
+    assert ranked[0][0] == "Task #294", (
+        f"the canonical row is no longer the top seed: {ranked[:3]}")
+
+
+def test_the_canonical_task_row_keeps_its_score_across_every_task_id_phrasing(world):
+    """Clause 2: removing the numeric tie must not cost the dispatch one
+    phrasing. `#294`, `task 294` and `backlog_294` are the three shapes
+    `_TASK_ID_RE` matches that reach a canonical directory, and each must
+    still land `Task #294` at the full 10.0 — the same guarantee
+    `test_task_ids_dispatch_to_the_canonical_form` makes for `Task #67`.
+    `backlog_294` is the legacy directory convention the bare-number candidate
+    was originally kept for, which is why the candidate list stays and only
+    its score is gated."""
+    root, _ = world
+    _numeric_seed_tree(root)
+    for query in ("what happened with #294",
+                  "what happened with task 294",
+                  "status of backlog_294 today"):
+        scores = dict(retrieval.extract_entities_from_query(query))
+        assert scores.get("Task #294") == 10.0, (
+            f"{query!r} lost the canonical dispatch: {scores}")
+        numeric = _numeric_shaped(scores)
+        assert all(scores[n] <= NUMERIC_ROW_MAX for n in numeric), (
+            f"{query!r} still scores a numeric row as a task id: "
+            f"{[(n, scores[n]) for n in numeric]}")
+
+
+def test_a_numeric_row_keeps_only_its_overlap_score_and_a_word_row_its_bonus(world):
+    """Clause 3: the filter is name-shape and de-scores rather than evicts.
+
+    `tell me about 294` is a query `_TASK_ID_RE` cannot even match — every one
+    of its alternatives requires a `#`/`task`/`backlog` prefix — so dropping
+    the bare number from the dispatch tuple would leave branch 2's full-name
+    bonus free to hand the same row 5.15 and keep it at the top of the seed
+    slice anyway. Both leaks are one predicate inside `_bump`, and the shape
+    has to stay: the digit rows hold the only facts about 20 recent ids, so a
+    numeric row evicted from the candidate set would make those ids
+    unretrievable by id (the scope call a person owns).
+    """
+    root, _ = world
+    _numeric_seed_tree(root)
+
+    only_number = dict(retrieval.extract_entities_from_query("tell me about 294"))
+    assert only_number.get(NUMERIC_SEED) == NUMERIC_ROW_MAX, (
+        f"`294` should survive at exactly the single-token token-overlap score "
+        f"it would earn with no name-shape guard at all, got "
+        f"{only_number.get(NUMERIC_SEED)} from {only_number}")
+
+    both = dict(retrieval.extract_entities_from_query("tell me about 294 and zig"))
+    # Branch 2's length-scaled bonus, derived: a 3-character word name earns
+    # 5.0 + 3/20. `294` is the same width and earns 0.5, so the difference
+    # between the two is the name shape and nothing else.
+    assert both[WORD_SEED] == 5.0 + len(WORD_SEED) / 20.0, (
+        f"a word-named row of the same width lost its length bonus, so the "
+        f"guard is evicting by width, not de-scoring by shape: {both}")
+    assert both[NUMERIC_SEED] == NUMERIC_ROW_MAX, both
+    assert max(both, key=both.get) == WORD_SEED, both
+
+
+def test_no_gold_entity_in_the_eval_corpus_is_numeric_shaped():
+    """Clause 4's precondition, pinned rather than asserted in prose.
+
+    `eval/vault_recall_queries.yaml` scores `entity_hit_rate` by asking whether
+    a query's gold entities reached the seed set. If any gold entity were a
+    bare number, de-scoring numeric rows would lower that metric and the
+    paired check would report the fix as a retrieval regression — which is the
+    only way this change can move the corpus at all. Zero numeric-shaped names
+    appear among the corpus's gold entities as it runs — that is what the assert
+    below measures, so the claim is re-measured on every run rather than
+    remembered, and `entity_hit_rate` cannot fall because of this guard.
+
+    The corpus grows nightly, so this is the check that keeps that argument
+    true: the day someone files a query whose gold entity is `294`, this fires
+    and the pairing has to be re-reasoned, not discovered by the regression
+    gate.
+    """
+    corpus = yaml.safe_load((ROOT / "eval" / "vault_recall_queries.yaml").read_text())
+    queries = corpus["queries"] if isinstance(corpus, dict) else corpus
+    gold = [str(e) for q in queries for e in (q.get("expect_entities") or [])]
+
+    assert gold, "the eval corpus carries no gold entities, so entity_hit_rate is vacuous"
+    assert len(queries) >= 20, f"corpus shrank to {len(queries)} queries"
+    assert not _numeric_shaped(gold), (
+        f"gold entities are now numeric-shaped: {sorted(set(_numeric_shaped(gold)))} — "
+        "de-scoring numeric rows would then lower entity_hit_rate")
+
+
+def test_a_hash_prefixed_id_row_is_de_scored_too(world):
+    """The predicate covers `#N` as well as bare digits, and that half is reached
+    by a DIFFERENT branch — narrowed to digits, every other test here stays green
+    and the `#N` shape keeps firing.
+
+    Branch 1 can never produce `#344`: the dispatch builds its candidates from
+    the captured number (`f"Task #{tid}"`, `tid`), never `#<tid>`, so that row
+    cannot take the 10.0. What it can take is branch 2's full-name bonus —
+    `_entity_pattern` turns `#344` into a word-boundary match on `344` — scoring
+    it `5.0 + len('#344')/20` = 5.2, above every 0.5 competitor. The facts tree
+    holds both shapes, so the guard names both.
+    """
+    root, _ = world
+    _write_facts(root, "#344", "activity",
+                 [{"fact": "y", "id": "f2", "confidence": 0.7}])
+    _write_facts(root, "scanner bug", "activity",
+                 [{"fact": "z", "id": "f3", "confidence": 0.7}])
+    ranked = dict(retrieval.extract_entities_from_query(
+        "tell me about #344 scanner bug"))
+
+    assert ranked["#344"] == NUMERIC_ROW_MAX, (
+        f"the `#N` half of the predicate is uncovered: {ranked}")
+    # The control shares the query AND the branch — both rows are named in full
+    # by the same query, so the only difference between them is name shape and
+    # the gap can be nothing else.
+    assert ranked["scanner bug"] > NUMERIC_ROW_MAX, (
+        f"a word-named row lost its length bonus beside the `#N` row, so the "
+        f"guard is not name-shape scoped: {ranked}")
+
+
+# ── The alias fold must not have the cap carried down it (#1025) ─────────────
+
+def test_a_digit_directory_that_is_an_alias_folds_at_the_score_it_earned(world):
+    """`_bump` caps the row it is scoring; the store's alias fold carries the
+    PRE-cap score, because the cap is a statement about a directory named by an
+    id, not about the entity the alias table says it is.
+
+    That fold is why the bare candidate stays in the dispatch tuple: the legacy
+    `backlog_18`-era directory is named by id alone and the alias row is the only
+    thing that says `294` IS `PPR Rescoping`, so a cap that rode down the fold
+    would silently un-alias every one of them. Note the predicate reads
+    `canonical` — the resolved directory name — not the incoming candidate, so a
+    candidate spelled `task #294` that resolves to `Task #294` keeps its 10.0
+    however the query spelled it.
+    """
+    root, st = world
+    _write_facts(root, "294", "activity",
+                 [{"fact": "digit directory", "id": "f1", "confidence": 1.0}])
+    _write_facts(root, "PPR Rescoping", "activity",
+                 [{"fact": "canonical", "id": "f2", "confidence": 1.0}])
+    st.aliases.set("294", "PPR Rescoping", kind="punct", origin="manual")
+    # `aliases.all_lower()` memoises on the store's `PRAGMA data_version`, which a
+    # commit from THIS connection does not move — the same reason the `world`
+    # fixture bumps the version by hand after configuring its aliases.
+    st.invalidate_caches()
+
+    ranked = dict(retrieval.extract_entities_from_query(TASK_ID_QUERY))
+    assert ranked.get("PPR Rescoping") == 10.0, (
+        f"the cap rode down the alias fold instead of stopping at the surface: "
+        f"{ranked}")
+    assert ranked[NUMERIC_SEED] == NUMERIC_ROW_MAX, (
+        f"the numeric surface itself must stay capped: {ranked}")
+
+    # Control: with the alias row gone the same directory has nowhere to fold, so
+    # it stands alone at its cap and no canonical appears — the fold, not the cap,
+    # is what delivered the 10.0 above.
+    st.aliases.remove("294")
+    st.invalidate_caches()
+    unfolded = dict(retrieval.extract_entities_from_query(TASK_ID_QUERY))
+    assert unfolded == {NUMERIC_SEED: NUMERIC_ROW_MAX}, (
+        f"without the alias the digit row should stand alone at its cap: "
+        f"{unfolded}")
+
+
 # ── Filename-shaped rows never rank as seeds (#839) ──────────────────────────
 
 # The two shapes, each isolated: one `.md`-suffixed, one date-prefixed with no

@@ -380,6 +380,52 @@ def _is_generic_seed_name(e_lower: str) -> bool:
     return all(t in generic for t in toks)
 
 
+# A name whose entire spelling is an id: `294`, `002`, `#344`. They are what the
+# fact extractor mints when a note names a backlog item by number
+# (`_pipeline/vault-derived/facts/294/…`), so the row's name is one item's id and
+# its facts are that item's — but the name is a directory, not an entity:
+# `Task #294` is the entity, and for some of these ids BOTH rows exist.
+#
+# Deliberately no count here. The population moves every nightly rebuild — the
+# item filed on 53 rows/101 facts, its 09-18 triage measured 58/113, this round
+# 61/178 — and a number in a comment is a number nobody reading the comment can
+# re-measure. The probe, through `from app.kg_store import store` and never
+# `sqlite3`: `SELECT name FROM entities WHERE name GLOB '[0-9]*'`, joined to
+# `facts_idx` on `expired_at IS NULL`.
+_NUMERIC_SEED_NAME_RE = re.compile(r"#?\d+")
+
+# The ceiling a numeric-named row may earn, and it is not an arbitrary number:
+# 0.5 is what branch 3 already gives a one-token entity that overlaps the query
+# on that one token. The two scores this cap removes are both far above it and
+# both were measured live — the task-id dispatch's 10.0 (`what is task 294
+# about` → `[('Task #294', 10.0), ('294', 10.0)]`, the maximum the function
+# produces) and branch 2's full-name bonus, 5.15 for a 3-character name
+# (`tell me about 294` → `[('294', 5.15), …]`, above every other competitor's
+# 0.5). At `prefetch.py`'s `FACT_MAX_ENTITIES = 2` either one put a directory
+# name into a seed slot and half of the injected facts came from a row that is
+# an id, not an entity — 3 of the 6 lines `_search_facts` returned for that
+# query were `294`'s YAML-scanner facts, about a different subject entirely.
+#
+# De-scored, deliberately, not evicted: for the ids with no canonical twin the
+# digit row holds the ONLY facts about that item in the tree, so dropping the
+# name from the candidate set would make those ids unretrievable by id until
+# the write-side twin (#743) stops minting them. Whether a digit row should
+# hold a prefetch slot at all is a scope call a person owns, not this filter.
+_NUMERIC_SEED_MAX_SCORE = 0.5
+
+
+def _is_numeric_seed_name(e_lower: str) -> bool:
+    """True when a candidate name is nothing but an id, so it cannot BE one.
+
+    Name-shape, not length: `294`, `002`, `272`, `522` and `1122` are all ≥3
+    characters, which is why a minimum-length rule would have caught none of
+    the rows that actually fire. `Task #294` and `Backlog Item #294` carry a
+    non-digit word and are untouched — they are what the id refers to, and
+    branch 1 exists to dispatch to them.
+    """
+    return _NUMERIC_SEED_NAME_RE.fullmatch(e_lower.strip()) is not None
+
+
 def _alias_surface_map() -> dict:
     """lowercased surface → canonical, for every surface and entity the store knows.
 
@@ -404,7 +450,9 @@ def extract_entities_from_query(query: str) -> list:
 
     New scoring:
       - Task-ID references (#299, backlog_18, task_310) dispatch to canonical
-        `Task #N` / legacy forms with a fixed high score.
+        `Task #N` / legacy forms with a fixed high score — capped for a row
+        whose whole name is the number itself, which is a directory the id was
+        minted into, not the entity (#1025; see `_NUMERIC_SEED_MAX_SCORE`).
       - Full-name substring (entity name appears verbatim in query) gets a
         strong bonus scaled by length.
       - Token overlap is scored (overlap^2) / (entity_tokens * query_tokens)
@@ -465,6 +513,30 @@ def extract_entities_from_query(query: str) -> list:
     def _bump(name: str, score: float) -> None:
         # Resolve to canonical case if we have a directory for it.
         canonical = entity_lookup.get(name.lower(), name)
+        # A row whose entire name is an id cannot earn more than the ordinary
+        # single-token overlap score, whichever branch offered it more. One
+        # predicate at this choke point covers both leaks #1025 measured — the
+        # task-id dispatch's 10.0 and branch 2's full-name bonus — because
+        # fixing only the dispatch tuple leaves the second one open: `tell me
+        # about 294` is a query `_TASK_ID_RE` cannot match, and branch 2 still
+        # ranked that row first at 5.15. Same reason the class-row rule below
+        # lives here rather than in one branch (#1024).
+        #
+        # The cap is on the ROW, not on the score's route to it, so it applies to
+        # the resolved name and not to the incoming candidate: a candidate that
+        # arrives as `task #294` and resolves to `Task #294` must keep 10.0 no
+        # matter how it was spelled. And it is the surface that is capped, never
+        # the entity behind it: when a digit directory is registered as an alias
+        # of a real entity, #1260's fold below scores that entity identically to
+        # "the alias surface that earned it", and the alias table is the one
+        # thing that says this directory IS an entity — so the fold carries the
+        # pre-cap score and the legacy `backlog_18`-era directory still delivers
+        # its canonical at the task-id score. A numeric row with no alias folds
+        # to itself and keeps its cap, which is the whole population the item
+        # measured.
+        fold_score = score
+        if score > _NUMERIC_SEED_MAX_SCORE and _is_numeric_seed_name(canonical.lower()):
+            score, fold_score = _NUMERIC_SEED_MAX_SCORE, score
         # A query that names one record is not asking about the class that
         # record's facts are also filed under. Checked here, at the one scoring
         # choke point, so it covers the full-name bump AND token overlap: a class
@@ -497,14 +569,26 @@ def extract_entities_from_query(query: str) -> list:
         # — the additive case and the displacing case — are pinned through
         # `vault._vault_recall`, the real consumer of the width, by
         # `tests/test_retrieval_seed_anchoring.py`.
+        # The one exception to "never above it" is #1025's cap: a numeric surface
+        # folds at the score it earned before being capped, because the cap is a
+        # statement about a directory NAMED by an id, not about the entity the
+        # alias table says it is. Fold at the capped value and the cap would
+        # silently un-alias every legacy digit directory.
         seed = _seed_canonical(canonical)
-        if seed != canonical and scores.get(seed, 0.0) < score:
-            scores[seed] = score
+        if seed != canonical and scores.get(seed, 0.0) < fold_score:
+            scores[seed] = fold_score
 
     # 1. Task-ID direct dispatch (highest-priority signal).
     for m in _TASK_ID_RE.finditer(q_lower):
         tid = m.group(1)
-        # Try every known naming convention in the vault.
+        # Try every known naming convention in the vault. The last candidate is
+        # the bare number, kept for the legacy `backlog_18`-era directories that
+        # are named by id alone — and it is the reason a row named `294` used to
+        # arrive tied with `Task #294` at 10.0 (#1025). It stays and its score
+        # does not: `_bump` caps a numeric-named row at an ordinary token-overlap
+        # score, which is what the bare form can honestly claim, and the alias
+        # fold inside `_bump` still gets to route a bare-id directory to the
+        # entity it is an alias for.
         for candidate in (
             f"Task #{tid}", f"Task {tid}", f"Task_{tid}",
             f"backlog_{tid}", f"backlog_item_{tid}", f"backlog_task_{tid}",
