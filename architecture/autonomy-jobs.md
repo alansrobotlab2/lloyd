@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, autonomy]
 type: reference
 status: implemented
-date: 2026-09-12
+date: 2026-09-22
 ---
 
 # The autonomy jobs
@@ -35,7 +35,7 @@ job is for, what it reads and writes, what it must not do, and what has already
 gone wrong with it.
 
 Jobs are numbered by their task id and that numbering is historical, not
-ordered: the fleet runs 24 through 85 with gaps where tasks were retired.
+ordered: the fleet runs 24 through 86 with gaps where tasks were retired.
 
 ## The functions
 
@@ -47,7 +47,7 @@ ordered: the fleet runs 24 through 85 with gaps where tasks were retired.
 | [Canonicalize](#canonicalize-48-67-84) | #48 #67 #84 | make what is already stored agree with itself |
 | [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
 | [Bound entropy](#bound-entropy-79-81-78-80) | #79 #81 #78 #80 | stop the stores rotting or growing without limit |
-| [Measure](#measure-60-82-70-36-76-85) | #60 #82 #70 #36 #76 #85 | say whether any of it is working |
+| [Measure](#measure-60-82-70-36-76-85-86) | #60 #82 #70 #36 #76 #85 #86 | say whether any of it is working |
 
 ### Write authority is the fault line
 
@@ -59,7 +59,7 @@ changing any of these. Four tiers, and they do not follow the function groups:
 |---|---|---|
 | Writes durable state unattended | #68 #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 | 21 |
 | Proposes; an operator applies | #48 #67 #84 | 3 |
-| Reports only | #60 #82 #70 #78 #80 #36 #85 | 7 |
+| Reports only | #60 #82 #70 #78 #80 #36 #85 #86 | 8 |
 | Acts on the fleet itself | #76 | 1 |
 
 Two consequences the function grouping makes visible and the chain grouping did
@@ -472,7 +472,7 @@ a grandfathering.
 **The other half of "wrong skill" is measured, not written.** When the body is
 fine and the *description* is not, retrieval fires the skill on the wrong request
 or fails to fire it on the right one; that is #70's `MISSING_DESC` and `DRIFT`,
-advisory only, and it lives in [Measure](#measure-60-82-70-36-76-85). When the
+advisory only, and it lives in [Measure](#measure-60-82-70-36-76-85-86). When the
 procedure itself has rotted, that is #83's Stage 3, which appends a correction
 rather than rewriting.
 
@@ -548,7 +548,7 @@ unattended applies.
 
 **#84 exits 2 rather than report zero** when the graph cannot be read — the
 monitor rule it shares with #60, stated under
-[Measure](#measure-60-82-70-36-76-85).
+[Measure](#measure-60-82-70-36-76-85-86).
 
 ---
 
@@ -603,13 +603,13 @@ this, `groundskeeper-survey.py`, and `groundskeeper-weekly-summary.py`.
 [What the fleet actually costs](#what-the-fleet-actually-costs). Both are
 report-only by design: neither has ever been asked to fix what it names, and the
 reports have no scheduled consumer, which puts them in the same position as three
-of the six jobs in Measure.
+of the seven jobs in Measure.
 
 ---
 
-## Measure: #60, #82, #70, #36, #76, #85
+## Measure: #60, #82, #70, #36, #76, #85, #86
 
-Say whether any of it is working. Five of the six change nothing; #76 is the only
+Say whether any of it is working. Six of the seven change nothing; #76 is the only
 monitor in the fleet with authority to act on what it finds.
 
 | ID | Freq | Watches | Role |
@@ -620,12 +620,13 @@ monitor in the fleet with authority to act on what it finds.
 | #36 | daily | the vault | Read the groundskeeper queue and report counts, health score, and whether the timer ran |
 | #76 | daily | the fleet | Queue health: per-task failure rate, timeouts, empty runs, `[SILENT]` rate, GPU-hours; clears poisoned items and pauses failing tasks |
 | #85 | daily | routing | Paired primary-vs-secondary eval over the jobs routed to the secondary engine. **Cannot run** |
+| #86 | daily | the Inner Voice observer | Nightly grader run appended to a metrics series; flags a sustained `dropped_rate` breach |
 
-**Half of this group has no consumer.** #36's queue holds 31,291 items and
+**Three of the seven have no consumer.** #36's queue holds 31,291 items and
 nothing reads it back (below). #85 cannot run at all. #70's findings are
 advisory and reach #83 only if #83 happens to look — there is no `depends_on`
 between them. Under the chain grouping those were three unrelated facts in three
-different sections; grouped by function they are three of six, which is a pattern
+different sections; grouped by function they are three of seven, which is a pattern
 rather than three incidents.
 
 **A monitor that reports success when it cannot see the thing it monitors is
@@ -682,7 +683,29 @@ its declared `alias` values, and a `skill_name`/`skill_path` with no `SKILL.md`
 (or, for a path-valued reference, no file) behind it — the three that used to
 validate clean and fail only at dispatch (backlog **#811**). #85's own `model:`
 was changed `eco` → `primary` on 2026-09-17, so on today's board these checks are
-regression guards rather than alarms: all 33 task files pass them.
+regression guards rather than alarms: every task file passes them.
+
+**#86 measures the observer, not the model.** It runs `scripts/iv_grade.py
+--json` — which opens `usage.db` with `mode=ro` and writes nothing in it — and
+pipes the result into `scripts/iv_metrics_record.py`, which appends **one row
+per night** to `_pipeline/reflection/iv-metrics.jsonl`; it has run nightly since
+2026-09-15. What it watches is whether the observer's verdicts arrive at all:
+`dropped_rate` is dropped verdicts over `llm_calls`, the share of the observer's
+judgment calls that returned nothing because the deadline expired or the call
+errored, so it turns "the observer seems quiet today" into a trend with a bound
+on it. Where that bound sits is a ruling and not an implementation detail, so it
+lives in `DEFAULT_THRESHOLD` in the recorder and is deliberately not copied here.
+This is the group's rarest shape — a report that has a consumer, and the consumer
+is its own recorder: the median over the last `DEFAULT_WINDOW_ROWS` rows decides a
+sustained breach and `announce`s it once, so the series is read back by the thing
+that alerts on it. Two prohibitions are contract rather than taste. **Nothing in
+this job writes `usage.db`** — `scripts/iv_grade.py` keeps its read-only open, and
+`tests/test_iv_metrics_series.py::test_run_leaves_usage_db_byte_untouched`
+compares the store's SHA-256, mtime and `sqlite_master` dump across a full run.
+**A night whose grader emitted no JSON is never hand-written into the series**:
+exit 3 means nothing was appended, and an invented row is an outage dressed as a
+datapoint that also moves the next median. A missing night is supposed to stay
+visible as a gap.
 
 ### #36 and the groundskeeper queue
 
