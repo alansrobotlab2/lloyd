@@ -29,6 +29,11 @@ from app.entity_naming import ENTITY_CANDIDATES_PATH, SCHEMA_TYPES
 # on every alias miss — is what produced the sibling families the schema now
 # declares; it stays available for callers outside this write path.
 from app.entity_naming import gate_entity_name as _identity_gate
+# #743: a tracker citation is refused as its own verdict rather than folded into
+# `junk`, so the name reaches the candidates sidecar and the fact is dropped
+# instead of refiled under the document's primary entity.
+from app.entity_naming import is_backlog_citation_entity as _is_citation_entity
+from app.entity_naming import record_entity_candidate as _record_candidate
 from app.atomic_io import atomic_write_text, locked_file
 from app.fact_ids import assign_ids as _assign_fact_ids
 from app.kg_store import StoreUnavailable, text_hash, store as _kg_store
@@ -377,7 +382,22 @@ class FactExtractor:
         entity = re.sub(r'[<>:"|?*]', '', entity)
         # Collapse whitespace
         entity = re.sub(r'\s+', ' ', entity).strip()
-        if not entity or _is_junk_entity(entity, source_doc):
+        if not entity:
+            return "", "junk"
+        if _is_citation_entity(entity):
+            # A tracker citation (#743), checked before the junk predicate and
+            # before the gate, and answered `candidate` rather than `junk` for
+            # two reasons. `extract_from_document` drops a fact whose verdict is
+            # `candidate`; on `junk` it keeps the fact with an empty entity, and
+            # `nightly_extraction.py:340` turns an empty entity into the
+            # document's primary, which files the fact against the wrong thing.
+            # And the sidecar line is the record that this name was seen — a
+            # guard that drops a whole class of names in silence stops
+            # remembering things and nobody notices.
+            _record_candidate(entity, reason="backlog/board-item citation",
+                              source_doc=source_doc, declared_type=declared_type)
+            return "", "candidate"
+        if _is_junk_entity(entity, source_doc):
             return "", "junk"
         return _identity_gate(entity, declared_type=declared_type,
                               source_doc=source_doc, enforce=enforce)

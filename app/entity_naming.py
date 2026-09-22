@@ -91,6 +91,40 @@ _EXHAUST_RE = re.compile(
     r"\breport\s+\d|\bbatch\s*\d+)",
     re.IGNORECASE,
 )
+# ── Tracker citations (#743) ────────────────────────────────────────────────
+# "see backlog #1095" names a row in a tracker, not a thing the graph knows
+# about, yet the extractor minted an entity for every number it saw in prose:
+# the 2026-09-15 triage measured 187 entity rows carrying 641 active facts, 12
+# of them created on 09-13 alone, and rows were still being created on
+# 2026-09-22, the day this rule was written. (The population grows daily, so the
+# post-landing check is rows created after the landing sha, never a flat total.)
+# Every extension-based rule above is blind to it (there is no extension), and
+# `_EXHAUST_RE` covers `task #N` but no other tracker noun.
+#
+# Anchored to the WHOLE name, with digits REQUIRED, because `Backlog`,
+# `Backlog Item` and `Backlog System` are live entities — `Backlog System` is
+# the gold entity of the backlog-overview eval — and a name that merely
+# mentions a citation mid-string ("Triage of backlog item #338") is prose about
+# one, not the citation itself.
+#
+# Unlike `_EXHAUST_RE` this rule is NOT relaxed under `projects/`: a citation is
+# a citation whoever wrote the note, and two of the rows the 09-15 triage
+# counted came from `projects/` prose.
+_CITATION_RE = re.compile(
+    r"^(?:backlog|board)[\s_-]*(?:item|task)?[\s_-]*#?\d+$", re.IGNORECASE)
+
+
+def is_backlog_citation_entity(name: str) -> bool:
+    """True if the WHOLE name is a backlog / board-item citation.
+
+    The narrow, digits-required, both-ends-anchored test behind the entry in
+    :func:`looks_like_junk_entity`. Exposed because the mint site needs to
+    distinguish "this name is a pointer" from "this name is junk" — a pointer
+    belongs in the candidates sidecar for review, a filename does not.
+    """
+    return bool(_CITATION_RE.match((name or "").strip()))
+
+
 # An identifier, not a name: `_fact_add`, `run_query`, `handle_tool_use`.
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)+\(?\)?$")
 # A date-prefixed stem: `2026-09-03 sweep`, `2026-09-03-incident`.
@@ -107,7 +141,8 @@ def looks_like_junk_entity(name: str, source_doc: str | None = None) -> bool:
     names, and single-token doc slugs ending in `.md` with no interior space.
 
     `source_doc` (a vault-relative path) relaxes the pipeline-exhaust rule:
-    a note under `projects/` may legitimately be about a task or a run.
+    a note under `projects/` may legitimately be about a task or a run. That
+    rule only — a tracker citation is refused whatever `source_doc` says (#743).
     """
     if not name:
         return True
@@ -119,6 +154,11 @@ def looks_like_junk_entity(name: str, source_doc: str | None = None) -> bool:
         return True
     # Template / placeholder markers.
     if "{" in s or "}" in s or "<" in s or "YYYY-MM-DD" in s or "YYYY-MM" in s:
+        return True
+    # A tracker citation. Checked here, above the `.md` short-circuit and above
+    # the `projects/` exemption below, because neither may excuse it: this rule
+    # ignores `source_doc` entirely (#743).
+    if _CITATION_RE.match(s):
         return True
     # Function/method-call fragment: `query()`, `models.load_lora_adapter()`.
     m = _CODE_CALL_RE.search(s)
@@ -879,6 +919,18 @@ def gate_entity_name(name: str, *, declared_type=None, source_doc: str | None = 
         hit = None
     if hit:
         return hit, "alias"
+    if is_backlog_citation_entity(raw):
+        # This is the mint site, so the refusal lives here too and not only in
+        # the extractor's junk check (#743): `task` is a legal `SCHEMA_TYPES`
+        # value and the extraction prompt asks for a type on every entity, so a
+        # citation carrying `declared_type='task'` walked into `typed_new` and
+        # registered. It is refused on the `register` branch as well, so
+        # `enforce=False` cannot mint one either. A name the store ALREADY has
+        # resolves to `alias` above and still files: expiring the rows this minted
+        # is a person's call on live graph data, not a side effect of a gate.
+        record_entity_candidate(raw, reason="backlog/board-item citation",
+                                source_doc=source_doc, declared_type=declared_type)
+        return "", "candidate"
     type_ = normalize_declared_type(declared_type)
     if type_ is not None:
         _ensure_entity(raw, type_)

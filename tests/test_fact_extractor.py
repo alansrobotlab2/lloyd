@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts" / "memory"))
 sys.path.insert(0, str(ROOT / "scripts" / "memory" / "next-gen-memory"))
 
+from app import entity_naming as en  # noqa: E402
 from app import kg_store  # noqa: E402
 from app.fact_ids import assign_ids, next_fact_id, category_prefix  # noqa: E402
 
@@ -902,3 +903,225 @@ def test_the_cli_update_route_still_hashes_files_it_never_extracted(tmp_path):
     assert stored[str(note)]["sha256"] == _sha(note), (
         "`--update` recorded something other than the file on disk; it has no "
         "digest to carry and must keep hashing")
+
+
+# ── backlog-citation entities (#743) ────────────────────────────────────────
+# Prose that says "see backlog #1095" names a row in a tracker, not a thing the
+# graph knows about. The extractor minted an entity for every such number: the
+# The 2026-09-15 triage measured 187 rows carrying 641 active facts, every one
+# `provenance='EXTRACTED'`, 12 of them created on 09-13 alone, and new rows were
+# still being created on 2026-09-22, the day this rule was written — a live mint,
+# not legacy. (Live counts move daily and cannot be re-measured from a worktree;
+# the post-landing check is rows created after the landing sha, not a flat
+# total.) The name is a plain multi-word Capitalized string with no extension, so
+# every extension-based rule in `looks_like_junk_entity` is blind to it, and
+# `task #N` was the only tracker shape the pipeline-exhaust rule covered.
+
+#: Every whole-name spelling the clause demands refused.
+CITATION_SPELLINGS = (
+    "Backlog Item #338",   # triage's own example
+    "backlog item 338",    # no sigil, all lowercase
+    "backlog #1095",       # the newest row at triage, created 2026-09-15
+    "Backlog #945",        # bare board noun plus a sigil
+    "Board Item #12",      # the other tracker noun
+)
+
+#: The escape hatch `looks_like_junk_entity` carries, exercised on both sides.
+PROJECT_NOTE = "projects/lloyd/voice/x.md"
+
+
+@pytest.fixture
+def sidecar(tmp_path, monkeypatch):
+    """The candidates sidecar, redirected off the real tree."""
+    p = tmp_path / "entity-candidates.jsonl"
+    monkeypatch.setattr(en, "ENTITY_CANDIDATES_PATH", p)
+    # The seen-name set is process-wide, so a name an earlier test recorded
+    # would be silently dropped here and this file's sidecar assertions would
+    # pass on nothing.
+    monkeypatch.setattr(en, "_KNOWN_CANDIDATES", set())
+    monkeypatch.setattr(en, "_KNOWN_CANDIDATES_LOADED", False)
+    en.reset_identity_schema_cache()
+    yield p
+    en.reset_identity_schema_cache()
+
+
+def _candidates(path):
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _answer(prompt_payload):
+    """A stand-in `_call_llm` that answers every chunk with one canned JSON."""
+    body = json.dumps(prompt_payload)
+    return lambda prompt: body
+
+
+# ── clause 1: the predicate refuses the whole name, in every spelling ────────
+
+def test_a_backlog_citation_is_junk_in_every_spelling():
+    for name in CITATION_SPELLINGS:
+        assert en.looks_like_junk_entity(name) is True, name
+    assert en.is_valid_entity_name("Backlog Item #338") is False
+
+
+# ── clause 2: no projects/ exemption for a citation ──────────────────────────
+
+def test_the_citation_rule_is_not_exempted_by_a_project_note():
+    """`_EXHAUST_RE` stands down when `source_doc` starts with `projects/`,
+    because a project note may legitimately be about a task. A citation is a
+    citation whoever wrote the note — two of the rows counted at triage came
+    from `projects/` prose — so this rule ignores the argument."""
+    for source_doc in (None, "", PROJECT_NOTE):
+        for name in CITATION_SPELLINGS:
+            assert en.looks_like_junk_entity(name, source_doc) is True, (name, source_doc)
+    # Positive control that the argument is not simply ignored everywhere, which
+    # would make the loop above pass without the citation rule existing: the
+    # exhaust rule still bends for a project note.
+    assert en.looks_like_junk_entity("Sweep Run 313") is True
+    assert en.looks_like_junk_entity("Sweep Run 313", PROJECT_NOTE) is False
+
+
+# ── clause 3: precision ──────────────────────────────────────────────────────
+
+def test_the_citation_rule_keeps_the_names_the_graph_and_the_eval_need():
+    """Digits are required and the pattern is anchored at both ends, because
+    `Backlog System` is the gold entity for the backlog-overview eval, and
+    `Backlog` / `Backlog Item` are live digitless entities the 2026-09-15 triage
+    counted at 82 and 89 active facts."""
+    for name in ("Backlog", "Backlog Item", "Backlog System", "Lloyd Backlog",
+                 "Autonomy Backlog Pipeline"):
+        assert en.looks_like_junk_entity(name) is False, name
+    # A citation inside a longer name is a mention of one, not the entity's own
+    # name, so it stays writable.
+    assert en.looks_like_junk_entity("Summary for backlog item #338 in review") is False
+    assert en.looks_like_junk_entity("Triage of backlog item #338") is False
+
+
+def test_a_long_name_merely_containing_a_citation_is_not_refused_by_this_rule():
+    """Nine words is a sentence to this module, and this name is nine words: the
+    composite predicate does refuse it, but by the pre-existing
+    whole-name-is-a-sentence rule (`len(s.split()) >= 8`), not by the citation
+    rule, which this change does not let reach that far. The citation sits
+    mid-string, so only an anchored whole name is a citation."""
+    name = "Triage of backlog item #338 in the nightly chain"
+    assert en.is_backlog_citation_entity(name) is False
+    assert en.looks_like_junk_entity(name) is True
+
+
+# ── clause 4: the mint is refused before the typed_new branch ────────────────
+
+def test_extraction_refuses_a_fresh_backlog_citation_typed_as_a_task(extractor, sidecar,
+                                                                     monkeypatch):
+    """The model may assert any legal `entity_type` — the extraction prompt
+    demands one for every fact and `task` is a legal `SCHEMA_TYPES` value, which
+    is precisely how these rows were minted — and the name still must not reach
+    `gate_entity_name`'s `typed_new` branch, and must not be dropped silently."""
+    e = extractor
+    citation = "Backlog Item #744001"
+    monkeypatch.setattr(e, "_call_llm", _answer({
+        "entity": "Lloyd", "entity_type": "system", "category": "state",
+        "facts": [_fact("the triage note cites a board row",
+                        entity=citation, entity_type="task")]}))
+
+    out = e.extract_from_document(Path(PROJECT_NOTE), "cites backlog item 744001\n")
+
+    assert out["facts"] == [], "the citation fact was filed anyway"
+    assert not (e.facts_dir / citation).exists()
+    assert kg_store.store().entities.lookup(citation) is None
+    cands = _candidates(sidecar)
+    assert [c["name"] for c in cands] == [citation]
+    assert cands[0]["declared_type"] == "task"
+    assert "citation" in cands[0]["reason"]
+    # A caller that skips extraction is refused a second time, and under a
+    # projects/ source_doc, which is the write_fact_file route's `enforce=False`.
+    assert e.write_fact_file(citation, "state", {"facts": [_fact("x")]},
+                             source_doc=PROJECT_NOTE) is None
+    assert not (e.facts_dir / citation).exists()
+
+
+def test_the_gate_itself_refuses_a_citation_before_its_typed_new_branch(extractor,
+                                                                        sidecar):
+    """The seam one level down: `gate_entity_name` is the mint site, so no
+    caller reaching it directly — with a legal type, from any source document —
+    can register the name either."""
+    for name, declared in (("Board Item #744002", "task"),
+                           ("backlog #744003", "concept"),
+                           ("Backlog Item #744004", None)):
+        entity, verdict = en.gate_entity_name(name, declared_type=declared,
+                                              source_doc=PROJECT_NOTE)
+        assert (entity, verdict) == ("", "candidate"), name
+        assert kg_store.store().entities.lookup(name) is None
+    assert sorted(c["name"] for c in _candidates(sidecar)) == [
+        "Backlog Item #744004", "Board Item #744002", "backlog #744003"]
+
+
+def test_the_mcp_fact_add_route_refuses_a_citation_name(tmp_path, monkeypatch):
+    """The seam one process further out. `fact_add` runs in the MCP server
+    process, and its own junk check (`agent_mcp/facts.py:455`) is the predicate
+    clause 1 widens — so a caller filing interactively under a whole-name
+    citation is now refused where it previously registered a row. Driven through
+    the real handler, because the facts tree and the store are on the far side of
+    that boundary and a call to the predicate is not a call across it.
+
+    The handler resolves every path from ITS OWN module-global `FACTS_ROOT`
+    (imported from `agent_mcp._shared`, which `app.paths` anchors at the real
+    vault facts tree), so both copies are redirected here. Asserting against the
+    extraction fixture's directory instead would be an assertion that cannot
+    fail: nothing on this path ever writes there.
+
+    The second half is the positive control, and it is load-bearing: one accepted
+    non-citation name proves the directory and store assertions below CAN fail,
+    which is the only thing that makes their negations evidence."""
+    from agent_mcp import _shared, facts as mcp_facts
+
+    root = tmp_path / "mcp-facts"
+    root.mkdir()
+    kg_store.configure(tmp_path / "kg.sqlite")
+    monkeypatch.setattr(_shared, "FACTS_ROOT", root)
+    monkeypatch.setattr(mcp_facts, "FACTS_ROOT", root)
+    _shared._invalidate_entity_dirs_cache()
+
+    control = "Zephyr Widget Framework"
+    ok = mcp_facts._fact_add({"entity": control, "category": "state",
+                              "fact": "the control entity got its fact"})
+    assert ok.get("success") and "error" not in ok, ok
+    assert (root / control).is_dir(), "the control wrote no directory, so the " \
+        "assertions below would pass on an unwritable tree and prove nothing"
+    assert kg_store.store().entities.lookup(control) is not None
+
+    citation = "Backlog Item #744005"
+    result = mcp_facts._fact_add({"entity": citation, "category": "state",
+                                  "fact": "the triage note cites a board row",
+                                  "source_doc": PROJECT_NOTE})
+    assert result.get("code") == "INVALID_PARAM", result
+    assert citation in result["error"]
+    assert not (root / citation).exists()
+    assert kg_store.store().entities.lookup(citation) is None
+    monkeypatch.undo()
+    kg_store.reset()
+    _shared._invalidate_entity_dirs_cache()
+
+
+# ── clause 5: purpose preserved ──────────────────────────────────────────────
+
+def test_extraction_still_mints_a_genuinely_new_typed_entity(extractor, sidecar,
+                                                             monkeypatch):
+    """Widening the junk predicate must not turn `typed_new` into a blanket
+    refusal: an undeclared, non-citation entity named by the model with a legal
+    type still gets its row and its fact file."""
+    e = extractor
+    monkeypatch.setattr(e, "_call_llm", _answer({
+        "entity": "Lloyd", "entity_type": "system", "category": "state",
+        "facts": [_fact("the router fronts the alert channel",
+                        entity="Foghorn Signal Router", entity_type="system")]}))
+
+    out = e.extract_from_document(Path("knowledge/software/x.md"), "the router\n")
+
+    assert [f["entity"] for f in out["facts"]] == ["Foghorn Signal Router"]
+    assert kg_store.store().entities.lookup("Foghorn Signal Router") == "Foghorn Signal Router"
+    assert kg_store.store().entities.kinds().get("Foghorn Signal Router") == "system"
+    written = e.write_fact_file("Foghorn Signal Router", "state",
+                               {"facts": out["facts"]})
+    assert written is not None and written.exists()
+    assert _candidates(sidecar) == []
