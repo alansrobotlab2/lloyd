@@ -23,7 +23,7 @@ handing it to the executor makes things worse — says the value is in accumulat
 already-adjudicated knowledge, not in rewriting skills more often. So this ledger is
 a development-side instrument. It must never be injected into a runtime prompt.
 
-Two invariants:
+Five invariants:
 
 * **Append-only, latest-wins per key.** A verdict is never edited or deleted; a
   reopen is a new line. Rollback is asymmetric the way WikiSkill's is: a skill can
@@ -31,6 +31,25 @@ Two invariants:
 * **`evidence_cmd` is required.** A prose verdict is an assertion the next run can
   only inherit. A re-executable check is what lets a later run *falsify* it, which is
   the weakness #525 records on the worker-evidence path.
+* **A new line never weakens the row it supersedes (#736 clause 1).**
+  `occurrences_at_decision` is the baseline the growth reopen measures against, and
+  `reopen_reason` requires a baseline above 0 — so a correction line that stores 0
+  permanently disarms the >10x reopen for that key while looking like a routine
+  append. Appending is the only sanctioned way to fix a wrong phrase in a prior line,
+  so the act of correcting prose was itself what disarmed the cap: 10 live keys read
+  `occurrences_at_decision: 0` on 2026-09-15 for exactly that reason. An omitted
+  `--occurrences` therefore carries the superseded row's count forward; an explicit
+  `0` is still honoured, because `cmd_seed` passes one deliberately for a merged
+  candidate whose units cannot be compared.
+* **`evidence_cmd` has to observe something (#736 clauses 2-3).** Presence was the
+  only requirement, so a command that runs and prints nothing satisfied it: `true`,
+  `false`, `test $(…) -eq 0`, and a `grep -rl` for a string the target file does not
+  contain are all silent on success. 12 of the ledger's 41 live keys printed nothing
+  when every one was executed on 2026-09-13. `record` now runs the command once,
+  refuses an append whose combined stdout+stderr is empty, and stores the first line
+  it printed as `evidence_observed` — a required field becomes a required observation,
+  and a later run sees the measurement that justified the decision beside the command
+  that re-makes it.
 * **The ledger exists in two trees (#772).** This store lives under `_pipeline/`,
   which `.gitignore` excludes from every repo on the box and no backup job reads, so
   one truncated append or one `rm -rf _pipeline` used to erase every decision with no
@@ -40,7 +59,11 @@ Two invariants:
   time it is written so no pre-existing verdict is missing, and copies beside it any
   script a stored `evidence_cmd` names that no repo already tracks. `check` reads the
   mirror when this file is gone and says it did, so a wiped ledger is an announced
-  incident rather than `skipped_by_verdict: 0`. Seeding and appending keep the copy a
+  incident rather than `skipped_by_verdict: 0` — and when it is gone while the corpus
+  still holds a candidate whose `status:` only this ledger mints, `check` prints
+  `LEDGER_ABSENT` and exits non-zero (#736 clause 4), because a fresh install and a
+  wiped decision history otherwise print the identical quiet night. Seeding and
+  appending keep the copy a
   superset of the live file; neither keeps the *live* file honest, so `check` also
   compares the two latest-per-key tables every run and prints `MIRROR_MISSING`,
   `LEDGER_LOST` or `LEDGER_MIRROR_CONFLICT` per disagreeing key
@@ -122,12 +145,22 @@ REOPEN_OCCURRENCE_GROWTH = 10.0
 # The status the miner writes instead of `pending_review` when a key is terminal.
 SUPERSEDED_STATUS = "superseded_by_verdict"
 
+# A candidate `status:` that only this ledger can mint: the terminal verdicts, plus
+# `superseded_by_verdict`, which `mine-trajectories.py` writes *because* a verdict blocked
+# the key. Finding one in the corpus while the store is absent is therefore proof that a
+# ledger existed and is gone, which is the difference between an incident and a fresh
+# install (#736 clause 4). `noise` and `consolidated` are deliberately not here: they are
+# candidate dispositions that predate #530 and need no ledger row, so counting them would
+# alarm on a corpus that never had a verdict to lose.
+MINTED_BY_LEDGER = TERMINAL_VERDICTS | {SUPERSEDED_STATUS}
+
 # Frontmatter keys, in order. `pattern_key` is the join key everywhere.
 FIELDS = (
     "pattern_key",
     "verdict",
     "reason",
     "evidence_cmd",
+    "evidence_observed",
     "occurrences_at_decision",
     "decided_at",
     "decided_by",
@@ -429,13 +462,31 @@ def terminal_verdict(
     return row
 
 
+def carried_forward_occurrences(store: Path | str | None, pattern_key: str) -> int:
+    """The count the row about to be appended would otherwise lose (#736 clause 1).
+
+    Read through `resolve_verdict_source`, not the live file alone: after a wipe the row
+    this append supersedes exists only in the durable copy, and a baseline recovered from
+    there is still the baseline the reopen rule needs. No row for the key — a genuinely
+    new pattern — is the one case where 0 is the honest answer, because there is nothing
+    to disarm.
+    """
+    prior = load_verdicts(resolve_verdict_source(store)[0]).get(pattern_key.strip())
+    if not prior:
+        return 0
+    try:
+        return int(prior.get("occurrences_at_decision") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def record_verdict(
     store: Path | str | None = None,
     pattern_key: str = "",
     verdict: str = "",
     reason: str = "",
     evidence_cmd: str = "",
-    occurrences: int = 0,
+    occurrences: int | None = None,
     decided_by: str = "agent",
     source_candidate: str = "",
     decided_at: str | None = None,
@@ -443,7 +494,15 @@ def record_verdict(
     """Append one decision. Never mutates an earlier line.
 
     `reason` and `evidence_cmd` are required: without the second, a verdict is an
-    assertion a later run can only inherit.
+    assertion a later run can only inherit. The command is *executed* before anything is
+    written and an append whose combined output is empty is refused (#736 clause 2), and
+    the first line it printed is stored as `evidence_observed` (clause 3).
+
+    `occurrences` is `None` when the caller did not name a count, which is not the same
+    fact as `0`: an omitted count is carried forward from the row this line supersedes,
+    so a correction appended without it cannot disarm the growth reopen (#736 clause 1).
+    An explicit `0` is stored as given — `cmd_seed` passes one for a merged candidate
+    whose units are not comparable with a one-bucket baseline.
 
     The line lands in two trees (#772): the ledger, then the durable copy, which is
     seeded from the ledger first so a verdict recorded before the mirror existed is in
@@ -464,11 +523,25 @@ def record_verdict(
             "evidence_cmd is required — a verdict with no re-executable check cannot "
             "be falsified by a later run, only inherited (#525)"
         )
+    if occurrences is None:
+        occurrences = carried_forward_occurrences(store, pattern_key)
+    rc, observed = run_evidence(evidence_cmd)
+    if not observed:
+        raise ValueError(
+            "evidence_cmd observed nothing: it ran (exit code "
+            f"{rc}) and printed neither stdout nor stderr, so it cannot falsify this "
+            f"verdict, only decorate it — {evidence_cmd!r}. Print the measurement the "
+            "decision rests on (a `grep -c`, an `echo` of the counts you compared); "
+            "`true`, `false` and `test $(…) -eq 0` are silent on success, which is why "
+            "12 of the ledger's 41 live keys were unfalsifiable prose with a `cmd` key "
+            "attached (#736 clause 2)"
+        )
     row = {
         "pattern_key": pattern_key,
         "verdict": verdict,
         "reason": " ".join(reason.split()),
         "evidence_cmd": evidence_cmd,
+        "evidence_observed": observed,
         "occurrences_at_decision": int(occurrences or 0),
         "decided_at": decided_at or now_iso(),
         "decided_by": decided_by,
@@ -519,6 +592,50 @@ def read_candidate(file: Path) -> tuple[str, str, int, int]:
 # cannot be executed at all" — as opposed to rc 1, which is the check running and
 # reporting its assertion false, which is a falsification and not a defect.
 UNRUNNABLE = 127
+
+
+#: An `evidence_observed` value is a quotation, not a log. The first line is what
+#: identifies the measurement; a falsifier that prints a 200-row diff would bury the
+#: ledger line it is quoted in.
+EVIDENCE_OBSERVED_MAX = 200
+
+
+def run_evidence(evidence_cmd: str, timeout: int = EVIDENCE_TIMEOUT_SECONDS) -> tuple[int, str]:
+    """Execute a check the way `record` needs it: `(rc, observed)`, `observed` being the
+    first non-empty line of its real output, truncated to `EVIDENCE_OBSERVED_MAX` and
+    empty when the command printed nothing at all.
+
+    Two differences from `evidence_cmd_status`, which answers a different question. That
+    one asks whether an *already stored* check can still run, so it keeps the exit code
+    and reports `UNRUNNABLE`; this one asks whether a check is worth storing, so it keeps
+    the output. rc 1 beside a printed count is a falsification and a perfectly good
+    verdict; rc 0 with no output is the vacuous assertion #736 is about, which is why
+    emptiness, not rc, is what `record_verdict` refuses on.
+
+    stdin is DEVNULL, never inherited: `grep -c x` with no file blocks on stdin forever,
+    and `record` runs synchronously inside a nightly turn — an inherited terminal would
+    hang the job that is trying to write a verdict. With DEVNULL that command sees EOF at
+    once and its emptiness is the answer the clause wants.
+    """
+    try:
+        proc = subprocess.run(["bash", "-c", evidence_cmd], capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Nothing printed within the bound is the same observation as nothing printed at
+        # all: the caller refuses, and the rc names the shape of the silence.
+        return UNRUNNABLE, ""
+    except OSError as exc:  # no usable bash: the check cannot observe anything
+        raise ValueError(f"evidence_cmd could not be executed at all: {exc}") from exc
+    stdout, stderr = proc.stdout or "", proc.stderr or ""
+    if not (stdout + stderr).strip():
+        return proc.returncode, ""
+    # stdout first: that is where a measurement goes. stderr is the only answer for a
+    # command that reports through it, and quoting it is what makes the falsifier's own
+    # failure visible at the moment the decision is made rather than months later.
+    source = stdout if stdout.strip() else stderr
+    line = next(ln.strip() for ln in source.splitlines() if ln.strip())
+    return proc.returncode, (line[:EVIDENCE_OBSERVED_MAX] + "…"
+                             if len(line) > EVIDENCE_OBSERVED_MAX else line)
 
 
 def evidence_cmd_status(row: dict, timeout: int = EVIDENCE_TIMEOUT_SECONDS):
@@ -631,7 +748,28 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(f"REOPEN {row['pattern_key']} :: {row['reopened']}")
         else:
             print(f"PROCEED {row['pattern_key']}")
-    # Both findings print above the totals, and the totals stay the last line: the
+    # `LEDGER_ABSENT` first: it is the one finding that changes the exit status, and a
+    # reader who sees only `skipped_by_verdict: 0` cannot tell a quiet night from a
+    # deleted decision history. An empty candidates dir mints no alarm — with nothing
+    # adjudicated, an absent ledger is a fresh install, and alarming there is how a
+    # warning becomes noise (#736 clause 4).
+    exit_code = 0
+    if not live.exists():
+        minted = [r["status"] for r in rows if r["status"] in MINTED_BY_LEDGER]
+        if minted:
+            exit_code = 1
+            counts: dict[str, int] = {}
+            for status in minted:
+                counts[status] = counts.get(status, 0) + 1
+            tally = ", ".join(f"{s}: {counts[s]}" for s in sorted(counts))
+            print(
+                f"LEDGER_ABSENT {live} :: the store is gone while {len(minted)} candidate "
+                f"file(s) still carry a status only this ledger mints ({tally}); every key "
+                "behind them now reads as undecided, so the consolidator and the miner "
+                "resume proposing what was already rejected — the empty ledger is the "
+                "incident, not a quiet night (#736 clause 4)"
+            )
+    # The findings below print above the totals, and the totals stay the last line: the
     # runbook and the nightly greps read the counts off `splitlines()[-1]`, so a
     # warning that displaced them would break a reader that is not looking for it.
     if not fell_back:  # when the copy *is* the source there is nothing to compare it with
@@ -644,7 +782,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     if fell_back:
         print(f"verdict source: {source} (live ledger {live} is absent)")
     print(f"checked: {len(rows)}  skipped_by_verdict: {len(skipped)}")
-    return 0
+    return exit_code
 
 
 def cmd_record(args: argparse.Namespace) -> int:
@@ -662,7 +800,9 @@ def cmd_record(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
-    print(f"recorded {row['pattern_key']} -> {row['verdict']} at {row['decided_at']}")
+    print(f"recorded {row['pattern_key']} -> {row['verdict']} at {row['decided_at']} "
+          f"(occurrences {row['occurrences_at_decision']}, "
+          f"observed: {row['evidence_observed']})")
     return 0
 
 
@@ -746,7 +886,11 @@ def main(argv: list[str] | None = None) -> int:
     p_record.add_argument("--verdict", required=True)
     p_record.add_argument("--reason", required=True)
     p_record.add_argument("--evidence-cmd", dest="evidence_cmd", required=True)
-    p_record.add_argument("--occurrences", type=int, default=0)
+    p_record.add_argument(
+        "--occurrences", type=int, default=None,
+        help="pattern count at the decision, the baseline for the >10x growth reopen. "
+             "Omit it on a correction: the count is carried forward from the row this "
+             "line supersedes, so fixing a phrase cannot disarm that reopen (#736).")
     p_record.add_argument("--decided-by", dest="decided_by", default="agent")
     p_record.add_argument("--source-candidate", dest="source_candidate", default="")
     p_record.set_defaults(func=cmd_record)

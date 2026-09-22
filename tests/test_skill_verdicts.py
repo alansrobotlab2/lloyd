@@ -45,6 +45,34 @@ def _load(name: str, rel: str):
 sv = _load("skill_verdicts", "scripts/skill_verdicts.py")
 mt = _load("mine_trajectories_530", "scripts/mine-trajectories.py")
 
+#: An `evidence_cmd` fixture that observes something: a real grep, printing its count.
+#: Since #736 clause 2 `record` refuses a command whose combined output is empty, so the
+#: fixtures that used to read `true`, `false` and `grep x` (which blocks on stdin) can no
+#: longer be recorded at all. A test that needs a particular exit code, or a particular
+#: silence, builds its own command and says why in its docstring.
+PRINTING_CMD = f"grep -c '^def ' {_ROOT / 'scripts' / 'skill_verdicts.py'}"
+
+
+def stored_row(store: Path, pattern_key: str, evidence_cmd: str,
+               verdict: str = "reviewed_no_skill", reason: str = "stored grounds",
+               occurrences: int = 0) -> dict:
+    """Append one ledger line straight to the store, bypassing `record`.
+
+    Only for a row a *reader* has to see that `record` would refuse, or would pay a real
+    timeout to write: since #736 clause 2 a command that prints nothing cannot be
+    recorded, and rows exactly like that already sit in the live ledger, written before
+    the clause landed. The `evidence_cmd_status` tests are about reading a stored command,
+    not about the write that now refuses one, so they state their row the way the
+    pre-#736 ledger did.
+    """
+    row = {"pattern_key": pattern_key, "verdict": verdict, "reason": reason,
+           "evidence_cmd": evidence_cmd, "occurrences_at_decision": occurrences,
+           "decided_at": sv.now_iso(), "decided_by": "test"}
+    store.parent.mkdir(parents=True, exist_ok=True)
+    with store.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+    return row
+
 
 def error_pattern(tool="Bash", error_type="timeout", calls=13):
     return {
@@ -221,7 +249,8 @@ def test_decisions_track_lines_one_to_one(seeded, store):
     does not re-adjudicate a key that already has a line."""
     assert len(store.read_text().strip().splitlines()) == 1
     sv.record_verdict(store=store, pattern_key="Edit/not_found", verdict="reviewed_no_skill",
-                      reason="owned by file-mutation-safety", evidence_cmd="grep x", occurrences=10)
+                      reason="owned by file-mutation-safety", evidence_cmd=PRINTING_CMD,
+                      occurrences=10)
 
     lines = store.read_text().strip().splitlines()
     assert len(lines) == 2 == len({json.loads(ln)["pattern_key"] for ln in lines})
@@ -231,7 +260,7 @@ def test_latest_line_per_key_wins(store):
     """Append-only with a reopen as its own line — history is never rewritten, so a
     wrong verdict stays auditable."""
     sv.record_verdict(store=store, pattern_key="Bash/logic", verdict="rejected_unverifiable",
-                      reason="no error text to ground a skill in", evidence_cmd="grep x")
+                      reason="no error text to ground a skill in", evidence_cmd=PRINTING_CMD)
     sv.record_verdict(store=store, pattern_key="Bash/logic", verdict="reviewed_no_skill",
                       reason="mechanised since: error_tools[] now carries result_summary",
                       evidence_cmd="grep result_summary scripts/mine-trajectories.py")
@@ -252,7 +281,7 @@ def test_verdict_reopens_after_its_ttl(store):
     old = (datetime.now(tz=timezone.utc) - timedelta(days=sv.REOPEN_AFTER_DAYS + 5)
            ).strftime("%Y-%m-%dT%H:%M:%SZ")
     sv.record_verdict(store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
-                      reason="owned elsewhere", evidence_cmd="grep x", occurrences=13,
+                      reason="owned elsewhere", evidence_cmd=PRINTING_CMD, occurrences=13,
                       decided_at=old)
 
     assert sv.terminal_verdict("Bash/timeout", store=store, occurrences=13) is None
@@ -262,7 +291,7 @@ def test_verdict_reopens_when_the_pattern_grew(store):
     """>10x the occurrences at the decision means the evidence moved; re-ask."""
     sv.record_verdict(store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
                       reason="n=1 signature over 3 sessions is not a pattern",
-                      evidence_cmd="grep x", occurrences=3)
+                      evidence_cmd=PRINTING_CMD, occurrences=3)
 
     assert sv.terminal_verdict("Bash/timeout", store=store, occurrences=30)
     assert sv.terminal_verdict("Bash/timeout", store=store, occurrences=31) is None
@@ -272,7 +301,7 @@ def test_unparseable_stamp_does_not_silently_reopen(store):
     """The reopen path is the one that can re-mint a rejected skill, so a verdict whose
     date cannot be read stays binding rather than failing open."""
     sv.record_verdict(store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
-                      reason="owned elsewhere", evidence_cmd="grep x", occurrences=13,
+                      reason="owned elsewhere", evidence_cmd=PRINTING_CMD, occurrences=13,
                       decided_at="not-a-timestamp")
 
     assert sv.terminal_verdict("Bash/timeout", store=store, occurrences=13)
@@ -607,7 +636,7 @@ def test_the_mirror_is_seeded_with_verdicts_recorded_before_it_existed(store, tm
     """
     for key in ("Bash/timeout", "Edit/not_found"):
         sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
-                          reason="pre-existing decision", evidence_cmd="true")
+                          reason="pre-existing decision", evidence_cmd=PRINTING_CMD)
     before = store.read_text()
     assert len(before.splitlines()) == 2, "two verdicts exist before any copy does"
 
@@ -617,7 +646,8 @@ def test_the_mirror_is_seeded_with_verdicts_recorded_before_it_existed(store, tm
     monkeypatch.setenv("SKILL_VERDICTS_MIRROR", str(durable))
 
     sv.record_verdict(store=store, pattern_key="Bash/logic", verdict="rejected_false_positive",
-                      reason="decided after the mirror existed", evidence_cmd="true")
+                      reason="decided after the mirror existed",
+                      evidence_cmd=PRINTING_CMD)
 
     assert durable.read_text().splitlines() == store.read_text().splitlines(), \
         "the new copy must hold the two pre-change verdicts as well as the new one"
@@ -626,7 +656,7 @@ def test_the_mirror_is_seeded_with_verdicts_recorded_before_it_existed(store, tm
     # over the copy's own history.
     durable.write_text(durable.read_text() + '{"pattern_key":"only-in-the-mirror"}\n')
     sv.record_verdict(store=store, pattern_key="Read/missing", verdict="reviewed_no_skill",
-                      reason="fourth decision", evidence_cmd="true")
+                      reason="fourth decision", evidence_cmd=PRINTING_CMD)
     assert "only-in-the-mirror" in durable.read_text()
     assert len(durable.read_text().splitlines()) == 5
 
@@ -657,19 +687,25 @@ def test_check_answers_from_the_mirror_and_says_it_did(store, mirror, tmp_path, 
     assert with_live == "checked: 1  skipped_by_verdict: 1"
 
     store.unlink()
-    assert sv.main(["check", "--candidates", str(cands), "--store", str(store)]) == 0
+    # #736 clause 4 rides along on this route: the corpus holds a key only a ledger can
+    # mint (`superseded_by_verdict`, written because a verdict blocked it), so the absent
+    # store is reported as an incident and fails — even though the mirror-rescued counts
+    # are still what the runbook parses off the last line.
+    assert sv.main(["check", "--candidates", str(cands), "--store", str(store)]) == 1
     lines = capsys.readouterr().out.splitlines()
     assert lines[-1] == with_live, "the mirror must answer the same counts, not zero"
     naming = [ln for ln in lines if ln.startswith("verdict source:")]
     assert naming == [f"verdict source: {mirror} (live ledger {store} is absent)"]
+    assert any(ln.startswith("LEDGER_ABSENT") for ln in lines), lines
 
 
 def test_check_reports_a_verdict_whose_check_can_no_longer_run(tmp_path, store, mirror, capsys):
     """Clause 4: an unexecutable falsifier is an incident; rc 0 and rc 1 are results.
 
-    Four keys, four outcomes. `false` exiting 1 is the falsifier *doing its job* —
-    reporting that the verdict's grounds no longer hold — and printing a warning for it
-    would train the nightly to ignore the warning. The absent-script key is the #772
+    Four keys, four outcomes. The echoing key that exits 1 is the falsifier *doing its
+    job* — reporting that the verdict's grounds no longer hold — and printing a warning
+    for it would train the nightly to ignore the warning. (Both commands print, since
+    #736 clause 2 refuses to record one that does not.) The absent-script key is the #772
     fail-shut case: the verdict keeps suppressing candidates while nothing can overturn
     it, which nothing could see before because `scan_candidates` never executed these
     commands. The fourth is not hypothetical: the live ledger's `seq-2-read-edit` command
@@ -679,8 +715,8 @@ def test_check_reports_a_verdict_whose_check_can_no_longer_run(tmp_path, store, 
     """
     cands = tmp_path / "candidates"
     cands.mkdir()
-    for key, cmd in (("Bash/timeout", "true"),
-                     ("Edit/not_found", "false"),
+    for key, cmd in (("Bash/timeout", "echo 'bash-timeout owns this signature'"),
+                     ("Edit/not_found", "echo 'the grounds are gone'; exit 1"),
                      ("Bash/logic", f"{tmp_path}/gone/falsifier.sh"),
                      ("Write/logic", 'echo "unbalanced')):
         sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
@@ -705,9 +741,12 @@ def test_a_hung_falsifier_is_reported_too(tmp_path, store, mirror):
     `EVIDENCE_TIMEOUT_SECONDS` is 15 against a live ledger whose 75 blocking commands
     re-execute in 2.0 s together, so this fires on a wedged grep, not on a slow pipeline.
     """
-    sv.record_verdict(store=store, pattern_key="Bash/sleepy", verdict="reviewed_no_skill",
-                      reason="grounds that cannot be re-checked while the box waits",
-                      evidence_cmd="sleep 5")
+    # Stated as a stored row, not through `record`: #736 clause 2 refuses a command that
+    # prints nothing, and `record` would itself block the full 5 s on a hanging one. A
+    # wedged falsifier is a condition of a *stored* line — including the ones the live
+    # ledger holds from before the clause.
+    stored_row(store, "Bash/sleepy", "sleep 5",
+               reason="grounds that cannot be re-checked while the box waits")
     rc, detail = sv.evidence_cmd_status(sv.load_verdicts(store)["Bash/sleepy"], timeout=1)
     assert rc == sv.UNRUNNABLE
     assert "still running after 1s" in detail
@@ -774,7 +813,10 @@ def test_the_stored_check_is_run_by_a_real_child_process(tmp_path, store, mirror
     """
     marker = tmp_path / "child-pid"
     script = tmp_path / "falsifier.sh"
-    script.write_text(f'echo "$$" > {marker}\n', encoding="utf-8")
+    # It prints as well as writes: since #736 clause 2 a falsifier whose output is empty
+    # cannot be recorded at all, and writing a marker file is not output.
+    script.write_text(f'echo "$$" > {marker}; echo "child $$ wrote {marker}"\n',
+                      encoding="utf-8")
     sv.record_verdict(store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
                       reason="grounds with a real re-executable check",
                       evidence_cmd=f"bash {script}")
@@ -794,10 +836,13 @@ def test_the_stored_check_is_run_by_a_real_child_process(tmp_path, store, mirror
 
     # And the same child executes against the caller-supplied bound, in a process whose
     # wall clock the test cannot see: the bound must stop the child, not merely describe it.
+    # Stated as a stored row rather than recorded: `record` would itself block the whole
+    # 5 s executing it, and #736 clause 2 refuses a command that has printed nothing by the
+    # time it is refused. Reading a stored bound is the half under test.
     slow = tmp_path / "slow.sh"
     slow.write_text('sleep 5\n', encoding="utf-8")
-    sv.record_verdict(store=store, pattern_key="Edit/not_found", verdict="reviewed_no_skill",
-                      reason="grounds whose check cannot finish", evidence_cmd=f"bash {slow}")
+    stored_row(store, "Edit/not_found", f"bash {slow}",
+               reason="grounds whose check cannot finish")
     started = time.monotonic()
     rc, detail = sv.evidence_cmd_status(sv.load_verdicts(store)["Edit/not_found"], timeout=1)
     elapsed = time.monotonic() - started
@@ -812,11 +857,13 @@ def test_the_shipped_cli_writes_both_trees_and_answers_from_a_child(tmp_path, st
     invokes `record`, as subprocesses. So the ledger file, the env-derived mirror path
     and the printed counts cross an interpreter boundary, and nothing about the durable
     half has ever been exercised that way — an in-process `sv.main` call proves the
-    function, not the shipped CLI. This spawns the real module out of this checkout three
+    function, not the shipped CLI. This spawns the real module out of this checkout four
     times with `$SKILL_VERDICTS_MIRROR` aimed at the tmp copy: one `record` (which must
-    leave the identical line in both trees from the child), one `check` (whose last
-    stdout line is the count line the runbook parses), and one more `check` after the live
-    ledger is deleted under a fresh child process.
+    leave the identical line in both trees from the child), one `record` that must be
+    refused and leave both trees untouched (#736 clause 2's exit status is only a
+    refusal if it survives `sys.exit`), one `check` (whose last stdout line is the count
+    line the runbook parses), and one more `check` after the live ledger is deleted under
+    a fresh child process.
     """
     cands = tmp_path / "candidates"
     cands.mkdir()
@@ -828,12 +875,23 @@ def test_the_shipped_cli_writes_both_trees_and_answers_from_a_child(tmp_path, st
 
     proc = run("record", "--pattern", "Bash/timeout", "--verdict", "reviewed_no_skill",
                "--reason", "installed skill bash-timeout Pattern 3 cites this exact signature",
-               "--evidence-cmd", "grep -c 'command timed out' x", "--occurrences", "13",
+               "--evidence-cmd", PRINTING_CMD, "--occurrences", "13",
                "--store", str(store))
     assert proc.returncode == 0, proc.stderr
     assert len(store.read_text().splitlines()) == 1, "the child wrote the live ledger"
     assert durable.read_text().splitlines() == store.read_text().splitlines(), \
         "a child-process `record` must leave the identical line in both trees"
+    assert json.loads(store.read_text())["evidence_observed"], \
+        "the measurement the decision rested on belongs in the row"
+
+    refused = run("record", "--pattern", "Edit/not_found", "--verdict", "reviewed_no_skill",
+                  "--reason", "grounds a silent command cannot support",
+                  "--evidence-cmd", "true", "--store", str(store))
+    assert refused.returncode != 0, "a vacuous falsifier must fail the shipped CLI too"
+    assert "observed nothing" in refused.stderr and "true" in refused.stderr, refused.stderr
+    assert len(store.read_text().splitlines()) == 1, "a refusal writes no line"
+    assert durable.read_text().splitlines() == store.read_text().splitlines(), \
+        "a refusal must not reach the durable copy either"
 
     mt.write_candidate_file(error_pattern(), cands, verdict_store=store)
     proc = run("check", "--candidates", str(cands), "--store", str(store))
@@ -843,10 +901,13 @@ def test_the_shipped_cli_writes_both_trees_and_answers_from_a_child(tmp_path, st
 
     store.unlink()
     proc = run("check", "--candidates", str(cands), "--store", str(store))
-    assert proc.returncode == 0, proc.stderr
+    # Non-zero: the corpus still holds `superseded_by_verdict`, a status only a ledger
+    # mints, so the missing store is an incident (#736 clause 4) even with the copy in place.
+    assert proc.returncode == 1, proc.stderr
     lines = proc.stdout.strip().splitlines()
     assert lines[-1] == with_live, "a second child process must answer from the copy alone"
     assert f"verdict source: {durable} (live ledger {store} is absent)" in "\n".join(lines[:-1])
+    assert any(ln.startswith("LEDGER_ABSENT") for ln in lines), proc.stdout
 
 
 def test_check_names_a_verdict_the_two_trees_do_not_agree_on(tmp_path, store, mirror, capsys):
@@ -864,9 +925,9 @@ def test_check_names_a_verdict_the_two_trees_do_not_agree_on(tmp_path, store, mi
     the state `test_agreeing_trees_and_a_scratch_ledger_print_no_divergence` pins as silent.
     """
     sv.record_verdict(store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
-                      reason="decided in both trees", evidence_cmd="true")
+                      reason="decided in both trees", evidence_cmd=PRINTING_CMD)
     sv.record_verdict(store=store, pattern_key="Edit/not_found", verdict="reviewed_no_skill",
-                      reason="decided before the copy lagged", evidence_cmd="true")
+                      reason="decided before the copy lagged", evidence_cmd=PRINTING_CMD)
     # A third verdict appended straight to the live file, bypassing `record`: the nightly
     # running pre-change code, `skill_verdicts.py seed`, or a hand `>>`.
     with store.open("a", encoding="utf-8") as fh:
@@ -922,7 +983,7 @@ def test_agreeing_trees_and_a_scratch_ledger_print_no_divergence(tmp_path, store
     scratch run into a false alarm.
     """
     sv.record_verdict(store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
-                      reason="decided in both trees", evidence_cmd="true")
+                      reason="decided in both trees", evidence_cmd=PRINTING_CMD)
     capsys.readouterr()
     assert sv.main(["check", "--candidates", str(tmp_path), "--store", str(store)]) == 0
     out = capsys.readouterr().out.splitlines()
@@ -936,7 +997,7 @@ def test_agreeing_trees_and_a_scratch_ledger_print_no_divergence(tmp_path, store
         "an off-default ledger with no mirror env gets no durable copy"
     assert sv._mirror_target(sv.DEFAULT_STORE) == sv.DEFAULT_MIRROR
     sv.record_verdict(store=unmirrored, pattern_key="Write/logic", verdict="reviewed_no_skill",
-                      reason="scratch decision", evidence_cmd="true")
+                      reason="scratch decision", evidence_cmd=PRINTING_CMD)
     capsys.readouterr()
     assert sv.main(["check", "--candidates", str(tmp_path), "--store", str(unmirrored)]) == 0
     silent = capsys.readouterr().out.splitlines()
@@ -1075,3 +1136,285 @@ def test_the_emitted_candidate_files_carry_no_nonzero_exit_example(tmp_path):
         text = p.read_text(encoding="utf-8")
         assert "nonzero_exit" not in text, p.name
         assert "timeout_or_signal" in text or "structured_error" in text, p.name
+
+
+# ── #736: a new line may not weaken the row it supersedes ────────────────────
+
+def test_a_correction_without_a_new_count_keeps_the_reopen_baseline(store):
+    """Clause 1: an omitted `--occurrences` carries the superseded row's count forward.
+
+    The failure this pins happened on 2026-09-15. A wrong phrase in a prior line has to
+    be superseded by an appended correction — never edited — and the corrections that
+    night omitted `--occurrences`, so each stored `occurrences_at_decision: 0` through
+    `int(occurrences or 0)`. `reopen_reason`'s growth guard is
+    `if baseline > 0 and occurrences > baseline * 10`, so a zero baseline turns growth
+    reopen off permanently for that key: 10 live keys, including one whose decision count
+    was 367, went on binding their full 60 days however far the pattern grew. The act of
+    correcting the ledger silently disarmed the cap that exists to stop a stale verdict
+    burying real work — in the one file whose purpose is that a later run can check it.
+    """
+    key = "seq-2-bash-explore-bash-fs"
+    sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                      reason="names the wrong owning skill",
+                      evidence_cmd="echo '367 occurrences over 41 sessions'",
+                      occurrences=367)
+    sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                      reason="correction: the owning skill is bash-fs, not bash-explore",
+                      evidence_cmd="echo '367 occurrences over 41 sessions'",
+                      decided_by="self-correction")
+
+    row = sv.load_verdicts(store)[key]
+    assert row["decided_by"] == "self-correction", "the correction is still the latest line"
+    assert row["occurrences_at_decision"] == 367, \
+        "an omitted count is carried forward, never reset to 0"
+    # And the cap it protects fires again: past 10x the carried baseline the verdict
+    # reopens. With a zero baseline both of these would report the verdict still binding.
+    assert sv.terminal_verdict(key, store=store, occurrences=3670), "3670 is not yet >10x"
+    assert sv.terminal_verdict(key, store=store, occurrences=3671) is None, \
+        "3671 is past 10x of the carried baseline, so the verdict must reopen"
+
+
+def test_an_explicit_zero_count_is_still_stored_as_zero(store):
+    """The counterpart to the carry-forward: `None` means 'not named', `0` means 0.
+
+    `cmd_seed` passes 0 deliberately for a merged candidate (#515), whose `occurrences:`
+    sums every signature bucket behind the key and so cannot be compared with a baseline
+    recorded from one bucket. Rewriting that 0 into a carried-forward count would put two
+    units on the same axis and re-arm a growth ratio that measures nothing.
+    """
+    key = "Bash/network"
+    sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                      reason="one signature's count, recorded first",
+                      evidence_cmd="echo '90 over 6 sessions'", occurrences=90)
+    sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                      reason="re-seeded as a merged unit; units not comparable",
+                      evidence_cmd=PRINTING_CMD,
+                      occurrences=0)
+    assert sv.load_verdicts(store)[key]["occurrences_at_decision"] == 0
+
+
+def test_the_cli_carries_the_count_forward_when_the_flag_is_omitted(store, capsys):
+    """The same clause across the surface the runbook actually uses.
+
+    `--occurrences` had an argparse default of 0, so an omitted flag was indistinguishable
+    from `--occurrences 0` before the value ever reached `record_verdict` — a fix in the
+    function alone would leave the CLI writing zeros. This calls `main`, so the default is
+    part of what is under test.
+    """
+    base = ["record", "--pattern", "Bash/timeout", "--verdict", "reviewed_no_skill",
+            "--evidence-cmd", "echo '13 over 3 sessions'", "--store", str(store)]
+    assert sv.main([*base, "--reason", "installed skill bash-timeout owns this signature",
+                    "--occurrences", "13"]) == 0
+    assert sv.main([*base, "--reason", "correction: it is Pattern 3, not Pattern 4",
+                    "--decided-by", "self-correction"]) == 0
+    capsys.readouterr()
+    assert sv.load_verdicts(store)["Bash/timeout"]["occurrences_at_decision"] == 13
+
+
+def test_a_check_that_observes_nothing_is_refused_and_writes_no_line(store, mirror, capsys):
+    """Clause 2: `--evidence-cmd` enforced presence, and presence was never the point.
+
+    #530's stated purpose is that a re-executable check lets a later run *falsify* a
+    verdict; a command that runs successfully and prints nothing satisfies "re-executable"
+    while falsifying nothing. Measured on the live ledger 2026-09-13: 12 of its 41 live
+    keys printed nothing at all — `test $(grep -c …) -eq 0`, silent on success, and
+    `grep -rl` for a string the target file does not contain. The symptom was a
+    `skipped_by_verdict: 0` line that read as a quiet night.
+    """
+    for cmd in ("true",
+                "false",
+                "test $(grep -c 'never-written-token' /etc/hostname) -eq 0"):
+        rc = sv.main(["record", "--pattern", "Bash/timeout", "--verdict", "reviewed_no_skill",
+                      "--reason", "grounds a silent command cannot support",
+                      "--evidence-cmd", cmd, "--occurrences", "5", "--store", str(store)])
+        err = capsys.readouterr().err
+        assert rc != 0, f"a check that prints nothing must not be recordable: {cmd}"
+        assert "observed nothing" in err, err
+        assert cmd in err, f"the refusal has to name the command it refused: {err}"
+        assert not store.exists(), "a refusal writes no line to either tree"
+        assert not mirror.exists()
+
+    # The same call with a command that prints a measurement is accepted.
+    assert sv.main(["record", "--pattern", "Bash/timeout", "--verdict", "reviewed_no_skill",
+                    "--reason", "installed skill bash-timeout owns this signature",
+                    "--evidence-cmd", "echo '13 occurrences over 3 sessions'",
+                    "--occurrences", "13", "--store", str(store)]) == 0
+    assert len(store.read_text().splitlines()) == 1
+
+
+def test_a_check_that_times_out_observes_nothing_either(store, capsys):
+    """The bound has to be a refusal, not a pass: a command still running when the
+    15 s cap fires has printed nothing, which is the same observation gap clause 2
+    refuses — and `record` runs synchronously inside a nightly turn, so it may not hang."""
+    started = time.monotonic()
+    rc = sv.main(["record", "--pattern", "Bash/timeout", "--verdict", "reviewed_no_skill",
+                  "--reason", "grounds a wedged command cannot support",
+                  "--evidence-cmd", "sleep 30", "--store", str(store)])
+    elapsed = time.monotonic() - started
+    err = capsys.readouterr().err
+    assert rc != 0 and "observed nothing" in err, err
+    assert elapsed < sv.EVIDENCE_TIMEOUT_SECONDS + 10, \
+        f"record waited out the bound rather than bounding it: {elapsed:.1f}s"
+    assert not store.exists()
+
+
+def test_an_accepted_row_stores_what_the_check_printed(tmp_path, store):
+    """Clause 3: the decision carries the measurement it was made on.
+
+    A later run sees `evidence_observed` beside the `evidence_cmd` that re-makes it, so a
+    falsifier whose *value* has since moved is visible as a disagreement rather than as a
+    green check. Only the first line is kept, and truncated: the ledger is a JSONL of
+    decisions, not a log.
+    """
+    script = tmp_path / "seq_falsifier.py"
+    script.write_text("print('sess=7 steps_ok=4 steps_err=3 has_error_recovery=True')\n"
+                      "print('this line is not quoted')\n", encoding="utf-8")
+    assert sv.main(["record", "--pattern", "seq-2-read-write", "--verdict", "reviewed_no_skill",
+                    "--reason", "3 of 7 steps have no recovery, under the threshold",
+                    "--evidence-cmd", f"{sys.executable} {script}",
+                    "--occurrences", "275", "--store", str(store)]) == 0
+    row = sv.load_verdicts(store)["seq-2-read-write"]
+    assert row["evidence_observed"] == "sess=7 steps_ok=4 steps_err=3 has_error_recovery=True"
+    assert "not quoted" not in row["evidence_observed"], "the first line only"
+    assert row["evidence_cmd"] == f"{sys.executable} {script}", "the command is unchanged"
+
+    # A command reporting through stderr is stored with what it printed, not with nothing.
+    assert sv.main(["record", "--pattern", "Write/logic", "--verdict", "reviewed_no_skill",
+                    "--reason", "the check itself fails on this box, and says so",
+                    "--evidence-cmd", "grep -c 'x' /nope/nothing-here",
+                    "--occurrences", "4", "--store", str(store)]) == 0
+    assert "No such file" in sv.load_verdicts(store)["Write/logic"]["evidence_observed"]
+
+    # A long first line is a quotation, not an attachment.
+    long_line = "M" * (sv.EVIDENCE_OBSERVED_MAX + 50)
+    assert sv.main(["record", "--pattern", "Bash/logic", "--verdict", "reviewed_no_skill",
+                    "--reason", "a falsifier that prints a wall of text",
+                    "--evidence-cmd", f"printf '{long_line}\\n'",
+                    "--occurrences", "2", "--store", str(store)]) == 0
+    observed = sv.load_verdicts(store)["Bash/logic"]["evidence_observed"]
+    assert len(observed) == sv.EVIDENCE_OBSERVED_MAX + 1, \
+        f"expected the cap plus an ellipsis, got {len(observed)}"
+
+
+def test_a_missing_ledger_is_an_alarm_when_the_corpus_still_carries_its_verdicts(tmp_path,
+                                                                                capsys):
+    """Clause 4: a wiped ledger and a fresh install used to print the same quiet night.
+
+    `load_verdicts` returns an empty dict for a missing store, which is right for the
+    empty case and indistinguishable from the deleted one — so an empty ledger answers
+    "no verdicts" for every key and the consolidator and the miner both resume proposing
+    content rejected months ago, with `skipped_by_verdict: 0` as the only symptom. The
+    2026-08-22 entity-graph incident is the precedent: a nightly writer deleted
+    `_pipeline/memory-graph/` and `_pipeline/` is gitignored, so nothing was recoverable.
+    """
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+    raw_candidate(cands, "candidate-bash-timeout-20260922.md", "reviewed_no_skill")
+    capsys.readouterr()
+
+    rc = sv.main(["check", "--candidates", str(cands),
+                  "--store", str(tmp_path / "gone" / "verdicts.jsonl")])
+    out = capsys.readouterr().out
+    assert rc != 0, "a missing ledger beside adjudicated candidates must fail, not shrug"
+    assert any(ln.startswith("LEDGER_ABSENT") for ln in out.splitlines()), out
+    assert "reviewed_no_skill" in out, "the alarm names the statuses that prove a ledger existed"
+    assert out.splitlines()[-1] == "checked: 1  skipped_by_verdict: 0", \
+        "the counts stay the last line: the runbook parses them off splitlines()[-1]"
+
+
+def test_a_missing_ledger_with_nothing_adjudicated_is_a_quiet_zero(tmp_path, capsys):
+    """The other half of clause 4: a fresh install is not an alarm.
+
+    `noise` is a candidate disposition the pipeline writes about a candidate's own
+    content — 923 of the live corpus's files carry it, and the great majority never had a
+    ledger row — so counting it here would turn every scratch run over that corpus into a
+    false alarm, which is how a warning becomes the thing people skip.
+    """
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+    raw_candidate(cands, "candidate-bash-noise-20260922.md", "noise")
+    raw_candidate(cands, "candidate-read-pending-20260922.md", "pending_review")
+    capsys.readouterr()
+
+    rc = sv.main(["check", "--candidates", str(cands),
+                  "--store", str(tmp_path / "gone" / "verdicts.jsonl")])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "LEDGER_ABSENT" not in out, out
+    assert out.splitlines()[-1] == "checked: 2  skipped_by_verdict: 0"
+
+
+def raw_candidate(candidates_dir: Path, name: str, status: str) -> Path:
+    """One candidate file with a hand-written frontmatter `status:`.
+
+    The shape the corpus actually holds after a runbook dispositions a pattern by hand —
+    which is what a wiped ledger has to be compared against, and which the miner's own
+    writer cannot produce any more once a key carries a verdict.
+    """
+    file = candidates_dir / name
+    file.write_text(f"---\npattern: Bash/timeout\nstatus: {status}\noccurrences: 9\n---\n\n"
+                    "## Examples\n\n- one mined example\n", encoding="utf-8")
+    return file
+
+
+# ── #736 clause 5: the runbook half, pinned from the code tree ───────────────
+
+#: The mined-skill runbook. Read live, the way
+#: `tests/test_consolidation_source_gate.py:43` reads the consolidator's: step 3.5 of this
+#: file is the write-back that populates the ledger under test, so its shape is this
+#: module's contract as much as the code's.
+MINING_RUNBOOK = (Path.home() / "obsidian" / "skills" / "trajectory-skill-mining"
+                  / "SKILL.md")
+
+
+def _unclosed_span_before_heading(lines: list[str]) -> list[tuple[int, str]]:
+    """Lines that end inside an inline-code span with a heading as the next paragraph.
+
+    Prose wraps, so an odd backtick count on its own is legal: a span opened at the end of
+    one line closes on the next, and `documentation-digester`, `service-health-check`,
+    `skill-lint` and `task-notification-handling` all trip that crude reading today from
+    tables and wrapped prose. What a reader cannot recover from is a span still open when
+    the next paragraph is a heading — the sentence ended, and whatever token was going to
+    close the span is gone. Fenced blocks are skipped: their backticks are delimiters.
+    """
+    fence = False
+    offenders = []
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            fence = not fence
+            continue
+        if fence or line.count("`") % 2 == 0:
+            continue
+        nxt = next((n for n in lines[i + 1:] if n.strip()), "")
+        if nxt.lstrip().startswith("#"):
+            offenders.append((i + 1, line))
+    return offenders
+
+
+def test_the_runbook_install_step_names_the_status_token_to_write():
+    """Clause 5: step 3 told the miner to mark candidates as something, and not what.
+
+    The bullet read `- Mark source candidates as `` — an unterminated inline-code span with
+    a heading next, which renders as a swallowed token for the model consuming this file as
+    a runbook. #530 then introduced two vocabularies (`status: superseded_by_verdict` in the
+    corpus, `verdict:` values in the ledger), so a reader could not even tell whether the
+    lost token predates #530 or names one of them.
+
+    The token is `reviewed_authored`, not an invention: step 3.5's own example records
+    `--verdict reviewed_authored` for an authored skill, and the corpus carries the
+    on-disk precedent `status: reviewed_authored — skill bash-transient-error-handling
+    authored from this candidate (08-27 mining)`. Nothing earlier was recoverable — the
+    bullet is already truncated in `05ce35ae`, the vault's 2026-08-22 baseline commit, so
+    every version the vault history holds ends mid-sentence.
+    """
+    assert MINING_RUNBOOK.exists(), \
+        f"{MINING_RUNBOOK} is absent: the runbook this clause binds is not here"
+    lines = MINING_RUNBOOK.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    bullets = [ln for ln in lines if ln.strip().startswith("- Mark source candidates")]
+    assert len(bullets) == 1, f"step 3 must state the disposition exactly once: {bullets}"
+    assert bullets[0].count("`") == 2, f"the code span must be closed: {bullets[0]!r}"
+    assert "reviewed_authored" in bullets[0], \
+        f"the bullet must name the status token to write: {bullets[0]!r}"
+
+    assert _unclosed_span_before_heading(lines) == []
