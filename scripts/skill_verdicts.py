@@ -129,12 +129,35 @@ _BASH_PARSE_ERROR_RE = re.compile(r"bash: -c: line \d+: (unexpected EOF|syntax e
 # Verdicts that mean "this pattern has been adjudicated; do not propose it again".
 # `reviewed_no_skill` covers "real signal, an installed skill already owns it", which
 # is the most common one on this board and the one that kept coming back.
+#
+# The last three are the values the runbooks themselves tell a run to write, which is
+# what made their absence a defect and not a spare corner of the vocabulary:
+# `nightly-skill-consolidation` Phase 5.1 routes `consolidated` and `noise` to this
+# ledger precisely because "the frontmatter status is per-file and gets regenerated with
+# the next dated snapshot; the ledger is what survives", and `trajectory-skill-mining`
+# step 3.5 records `reviewed_authored` once a skill has been authored from the pattern.
+# `record_verdict` validates only non-emptiness, so it accepted all three, appended the
+# line, and `is_terminal` then honoured nothing: 5 `reviewed_authored` rows and 1 `noise`
+# row bound no key (#830 triage, 2026-09-18), while the 248 of 1,132 keys whose `noise`
+# lived only in frontmatter were re-emitted `pending_review` by the next mining run. A
+# decision that binds nothing is worse than no decision, because the next run reads the
+# ledger and sees a verdict already recorded.
+#
+# Stickiness is what the reopen rules below exist for. An authored pattern is *more*
+# disposed than a `reviewed_no_skill` one, and a key is coarse (`Bash/timeout`, not one
+# signature), so making these terminal must not bury a genuinely new failure mode that
+# later shares the key — the 60-day expiry and the >10x growth trigger are what lift it,
+# and they are unchanged. `proposed` stays non-terminal by design: a patch below the
+# auto-apply threshold has to keep accumulating evidence (Phase 5.1).
 TERMINAL_VERDICTS = frozenset({
     "rejected_false_positive",
     "reviewed_no_skill",
     "rejected_unverifiable",
     "rejected_artifact_class",
     "archived_content",
+    "reviewed_authored",
+    "noise",
+    "consolidated",
 })
 
 # A terminal verdict that has aged out or whose evidence has grown >10x is reopened
@@ -145,14 +168,29 @@ REOPEN_OCCURRENCE_GROWTH = 10.0
 # The status the miner writes instead of `pending_review` when a key is terminal.
 SUPERSEDED_STATUS = "superseded_by_verdict"
 
-# A candidate `status:` that only this ledger can mint: the terminal verdicts, plus
-# `superseded_by_verdict`, which `mine-trajectories.py` writes *because* a verdict blocked
-# the key. Finding one in the corpus while the store is absent is therefore proof that a
-# ledger existed and is gone, which is the difference between an incident and a fresh
-# install (#736 clause 4). `noise` and `consolidated` are deliberately not here: they are
-# candidate dispositions that predate #530 and need no ledger row, so counting them would
-# alarm on a corpus that never had a verdict to lose.
-MINTED_BY_LEDGER = TERMINAL_VERDICTS | {SUPERSEDED_STATUS}
+# A candidate `status:` that only this ledger can mint: the original terminal verdicts,
+# plus `superseded_by_verdict`, which `mine-trajectories.py` writes *because* a verdict
+# blocked the key. Finding one in the corpus while the store is absent is therefore proof
+# that a ledger existed and is gone, which is the difference between an incident and a
+# fresh install (#736 clause 4).
+#
+# Deliberately a literal, not `TERMINAL_VERDICTS | {SUPERSEDED_STATUS}`: #830 widened that
+# set with three values a runbook writes straight into a candidate's own frontmatter about
+# its own content — `status: noise` on 930 of the live corpus's files, 3 files carrying
+# `status: reviewed_authored` — and the great majority of those never had a ledger row to
+# lose. Counting them as ledger-minted would turn every scratch run over that corpus into
+# a false `LEDGER_ABSENT` alarm, and an alarm that always fires is the alarm that gets
+# skipped. A future terminal verdict that is likewise hand-written in frontmatter belongs
+# here and nowhere else in this file; `tests/test_skill_verdicts.py` pins that widening
+# `TERMINAL_VERDICTS` does not silently widen this set.
+LEDGER_MINTED_STATUSES = frozenset({
+    "rejected_false_positive",
+    "reviewed_no_skill",
+    "rejected_unverifiable",
+    "rejected_artifact_class",
+    "archived_content",
+})
+MINTED_BY_LEDGER = LEDGER_MINTED_STATUSES | {SUPERSEDED_STATUS}
 
 # Frontmatter keys, in order. `pattern_key` is the join key everywhere.
 FIELDS = (
@@ -821,6 +859,15 @@ def cmd_seed(args: argparse.Namespace) -> int:
     counts recorded in one bucket's units. `reopen_reason` requires a baseline above 0,
     so a seeded merged key reopens on the 60-day expiry and not on a growth ratio it
     cannot measure — the same asymmetry `scan_candidates` and `verdict_for` apply.
+
+    The filter below is `is_terminal`, so this harvest covers exactly the terminal set and
+    nothing wider. That is what #830 unlocked: while `noise`, `consolidated` and
+    `reviewed_authored` were absent from `TERMINAL_VERDICTS` a candidate carrying one of
+    them could not be seeded at all, and the dispositions written by hand into
+    frontmatter — roughly 125 keys on `status: noise`, measured at triage 2026-09-18 — had
+    no path into the store that survives the next dated snapshot. Re-running this over
+    `_pipeline/skills/candidates/` after that widening is what moves them in, and it is a
+    human step because `_pipeline/` is gitignored and no round can commit its result.
     """
     table = load_verdicts(resolve_verdict_source(args.store)[0])
     newest: dict[str, tuple[Path, str, int]] = {}

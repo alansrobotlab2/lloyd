@@ -186,8 +186,13 @@ def test_pattern_with_no_verdict_still_reaches_pending_review(store, tmp_path):
 
 
 def test_non_terminal_verdict_does_not_block(store, tmp_path):
-    """`consolidated`/`proposed` are dispositions, not verdicts — a below-threshold
-    patch must keep accumulating evidence."""
+    """`proposed` is the one disposition that must not end a pattern's life: a patch
+    below the auto-apply threshold keeps accumulating evidence until it crosses it
+    (`nightly-skill-consolidation` Phase 5.1).
+
+    It used to be asserted beside `consolidated`, which was non-terminal here and
+    terminal nowhere — #830 moved `consolidated` into `TERMINAL_VERDICTS`, and the
+    paragraph below pins the three values that went with it."""
     sv.record_verdict(
         store=store, pattern_key="Bash/timeout", verdict="proposed",
         reason="patch below auto-apply threshold", evidence_cmd="ls ~/x", occurrences=13,
@@ -328,7 +333,16 @@ def test_check_reports_skipped_by_verdict_with_reasons(seeded, tmp_path, capsys)
 
 def test_seed_harvests_the_dispositions_already_on_disk(tmp_path, store, capsys):
     """Re-seed source named by the acceptance: per-file `status:` lines from the 09-08
-    and 09-09 candidates, keyed on the (tool, error_type) slug."""
+    and 09-09 candidates, keyed on the (tool, error_type) slug.
+
+    The `status: noise` file is harvested too, and that is #830 rather than a slipped
+    assertion: the filter below is `is_terminal`, so widening `TERMINAL_VERDICTS` with the
+    three runbook-prescribed dispositions is what let the ~125 live keys on `status: noise`
+    into the store at all. Before it, `seed` silently skipped every one of them — the
+    disposition had nowhere to go, which is the ledger half of the defect this file exists
+    to close. `reviewed_no_skill` is still the case that was always harvestable, so both
+    halves of the vocabulary are asserted here: the one that bound before #830 and the one
+    that only binds now."""
     cands = tmp_path / "candidates"
     cands.mkdir()
     (cands / "candidate-read-logic-20260909.md").write_text(
@@ -343,15 +357,18 @@ def test_seed_harvests_the_dispositions_already_on_disk(tmp_path, store, capsys)
     assert sv.main(["seed", "--candidates", str(cands), "--store", str(store)]) == 0
     rows = sv.load_verdicts(store)
 
-    assert list(rows) == ["Read/logic"], "only terminal statuses are verdicts"
+    assert sorted(rows) == ["Read/logic", "seq-2-bash-fs-read"], (
+        "both statuses this corpus carries are terminal: `reviewed_no_skill` always was, "
+        "`noise` since #830 widened `TERMINAL_VERDICTS` with it")
     assert rows["Read/logic"]["verdict"] == "reviewed_no_skill"
     assert "file-path-resolution" in rows["Read/logic"]["reason"]
     assert rows["Read/logic"]["evidence_cmd"].startswith("grep ")
+    assert rows["seq-2-bash-fs-read"]["verdict"] == "noise"
 
     capsys.readouterr()
     sv.main(["seed", "--candidates", str(cands), "--store", str(store)])
     assert "keep: Read/logic already in the ledger" in capsys.readouterr().out
-    assert len(store.read_text().strip().splitlines()) == 1, "re-seeding must not re-adjudicate"
+    assert len(store.read_text().strip().splitlines()) == 2, "re-seeding must not re-adjudicate"
 
 
 def test_body_prose_is_not_mistaken_for_the_status_field(tmp_path, store):
@@ -1418,3 +1435,258 @@ def test_the_runbook_install_step_names_the_status_token_to_write():
         f"the bullet must name the status token to write: {bullets[0]!r}"
 
     assert _unclosed_span_before_heading(lines) == []
+
+
+# ── #830: the ledger has to honour the dispositions the runbooks already write ─
+#
+# The defect, in one sentence: `nightly-skill-consolidation` Phase 5.1 routes `consolidated`
+# and `noise` to this ledger, `trajectory-skill-mining` step 3.5 records `reviewed_authored`,
+# and `record_verdict` validates only that a verdict is non-empty — so the store accepted all
+# three, appended the line, and `is_terminal` honoured none of them. A run that followed the
+# runbook wrote a decision that bound nothing: 5 `reviewed_authored` rows and 1 `noise` row
+# in the 116-row ledger as measured at triage (2026-09-18), and the 248 of 1,132 candidate
+# keys whose `noise` lived only in frontmatter were re-emitted `pending_review` by the next
+# mining run. Nothing pinned the set before this section, which is why it stayed at five.
+
+#: The dispositions the runbooks prescribe, inert until #830. Each is a stronger statement
+#: about a pattern than the weakest binding verdict (`reviewed_no_skill`): a skill was
+#: authored from it, its evidence folded into a proposal, or it is not skill-worthy at all.
+RUNBOOK_PRESCRIBED_VERDICTS = ("reviewed_authored", "noise", "consolidated")
+
+#: One candidate key per prescribed verdict, so every test here iterates one mapping
+#: instead of zipping the constant against a literal of the same length — a zip against a
+#: literal 3-tuple truncates silently the moment a fourth disposition joins the vocabulary,
+#: and the set-pin test would then be forcing a value these tests never exercised.
+RUNBOOK_CASES = {
+    "reviewed_authored": "Edit/not_found",
+    "noise": "Bash/timeout",
+    "consolidated": "Read/validation",
+}
+
+
+def hand_candidate(candidates_dir: Path, name: str, pattern_key: str,
+                   occurrences: int) -> Path:
+    """One undecided candidate file, with the key and count this section needs.
+
+    `raw_candidate` above pins a hand-written `status:` and fixes both the key and the
+    count, which is what its own clause needs; the reopen rules below are about a count, so
+    these tests say theirs. `pending_review` is what the miner regenerates every night, so
+    it is the state a verdict has to survive in production: with a disposition already
+    written into the file, a run could read a non-`PROCEED` outcome as the ledger working
+    when it was only the file agreeing with itself.
+    """
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    file = candidates_dir / name
+    file.write_text(f"---\npattern: {pattern_key}\nstatus: pending_review\n"
+                    f"occurrences: {occurrences}\n---\n\n## Examples\n\n- one\n",
+                    encoding="utf-8")
+    return file
+
+
+def test_the_terminal_set_is_pinned_to_the_whole_disposition_vocabulary():
+    """Clause 1: the set is exactly the eight values that end a pattern's life, and `proposed`
+    is still not among them.
+
+    Exact equality, not containment, is the pin the item asked for: before #830 nothing in
+    this file named `TERMINAL_VERDICTS` at all, and the defect was the set stopping at five
+    while the runbooks prescribed eight — `rejected_false_positive`, `reviewed_no_skill`,
+    `rejected_unverifiable`, `rejected_artifact_class` and `archived_content` bound, while
+    `reviewed_authored`, `noise` and `consolidated` were written by the runbooks and
+    honoured by nobody.
+
+    `proposed` is asserted away from the set explicitly because it is the one disposition
+    that must keep accumulating evidence: a patch below the auto-apply threshold stays live
+    until it crosses the threshold (`nightly-skill-consolidation` Phase 5.1), and a set that
+    swept it up would freeze every proposed patch at its proposal count.
+    """
+    assert sv.TERMINAL_VERDICTS == frozenset({
+        "rejected_false_positive",
+        "reviewed_no_skill",
+        "rejected_unverifiable",
+        "rejected_artifact_class",
+        "archived_content",
+        "reviewed_authored",
+        "noise",
+        "consolidated",
+    }), "the terminal set is the adjudicated vocabulary; changing it is a deliberate edit"
+    assert "proposed" not in sv.TERMINAL_VERDICTS
+
+
+def test_each_runbook_prescribed_verdict_supersedes_the_candidate(store, tmp_path):
+    """Clause 2: a latest row of each of the three values stamps a re-mined candidate
+    `superseded_by_verdict`, exactly as the five values that already bound do.
+
+    The seam is `mine-trajectories.write_candidate_file`, not the ledger: the nightly's
+    symptom was a candidate arriving as `status: pending_review` after a decision had been
+    recorded, so the assertion has to be about the file the next phase reads. One store
+    holds all three rows, each on its own key, which is also the shape that proves the
+    latest-per-key table is consulted per key rather than once per run.
+    """
+    assert set(RUNBOOK_CASES) == set(RUNBOOK_PRESCRIBED_VERDICTS), \
+        "every prescribed verdict needs its own key here, or clause 2 stops covering it"
+    for verdict, key in RUNBOOK_CASES.items():
+        tool, error_type = key.split("/", 1)
+        sv.record_verdict(
+            store=store, pattern_key=key, verdict=verdict,
+            reason=f"{verdict}: adjudicated during the #830 widening",
+            evidence_cmd=PRINTING_CMD, occurrences=13,
+        )
+        path = Path(mt.write_candidate_file(
+            error_pattern(tool=tool, error_type=error_type), tmp_path / "c",
+            verdict_store=store))
+
+        assert status_of(path) == "superseded_by_verdict", (verdict, path.read_text())
+        assert "status: pending_review" not in path.read_text(), verdict
+        assert f"verdict: {verdict}" in frontmatter(path.read_text()), verdict
+
+
+def test_check_skips_a_candidate_whose_only_row_is_a_runbook_verdict(tmp_path, capsys):
+    """Clause 3: `check` prints `SKIP <key> :: <verdict>` for each of the three values and
+    counts it in `skipped_by_verdict:`.
+
+    This is the Phase 0 command the runbook actually runs, so it is asserted through
+    `main` on stdout rather than through `is_terminal`: the nightly report carries the SKIP
+    lines and the count, and a value that prints `PROCEED` while a decision sits in the
+    store is the exact failure this item closes — `automod_gate/logic` was recorded
+    `reviewed_authored` on 2026-09-11 when a skill was authored from it and `check` still
+    printed `PROCEED` for it, which is what the item's own proof command was.
+
+    One candidate per key, one ledger row per key: `pending_review` on disk and nothing
+    else, so the only thing that can produce a SKIP is the verdict itself.
+    """
+    cands = tmp_path / "candidates"
+    for verdict, key in RUNBOOK_CASES.items():
+        hand_candidate(cands, f"candidate-{key.replace('/', '-')}-20260922.md", key, 13)
+        sv.record_verdict(store=tmp_path / "verdicts.jsonl", pattern_key=key,
+                          verdict=verdict, reason=f"decided: {verdict}",
+                          evidence_cmd=PRINTING_CMD, occurrences=13)
+
+    assert sv.main(["check", "--candidates", str(cands),
+                    "--store", str(tmp_path / "verdicts.jsonl")]) == 0
+    out = capsys.readouterr().out
+
+    for verdict, key in RUNBOOK_CASES.items():
+        assert f"SKIP {key} :: {verdict} ::" in out, (verdict, out)
+    assert out.splitlines()[-1] == "checked: 3  skipped_by_verdict: 3", out
+
+
+def test_a_runbook_verdict_still_reopens_on_age_or_growth(tmp_path, capsys):
+    """Clause 4: making the three values terminal must not make them permanent — the same
+    two triggers that lift the original five lift them.
+
+    Four rows, and the point of the fourth is that each value is shown lifting on exactly
+    one trigger at a time. `reopen_reason` returns on expiry before it looks at growth, so
+    a row that is both aged and grown only ever demonstrates the age lift: `noise` and
+    `reviewed_authored` are one trigger each, and `consolidated` — the strongest disposal
+    in the vocabulary, and the one added on the argument that the reopen path is what makes
+    stickiness safe — gets a row per trigger. The grown rows carry the live shape: the two
+    keys sitting mis-disposed at triage held 23 and 38 occurrences at decision, so
+    `REOPEN_OCCURRENCE_GROWTH` could already lift them.
+
+    Each assertion names the key beside the reason it expects, so a lift that fired for the
+    wrong reason on the wrong row cannot pass; and every lift must print `REOPEN`, never a
+    silent `PROCEED`, because a report that cannot tell a lifted verdict from a missing
+    ledger is the report that hides a wipe.
+    """
+    aged = (datetime.now(tz=timezone.utc)
+            - timedelta(days=sv.REOPEN_AFTER_DAYS + 1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    decision_count = 13
+    grew = int(decision_count * sv.REOPEN_OCCURRENCE_GROWTH) + 1
+    plan = [
+        # verdict, key, decided_at (None = now), candidate occurrences, lift expected
+        ("noise", RUNBOOK_CASES["noise"], aged, decision_count, "expired"),
+        ("reviewed_authored", RUNBOOK_CASES["reviewed_authored"], None, grew, "grew"),
+        ("consolidated", RUNBOOK_CASES["consolidated"], aged, decision_count, "expired"),
+        ("consolidated", "Write/permission", None, grew, "grew"),
+    ]
+    cands = tmp_path / "candidates"
+    for i, (verdict, key, decided_at, occurrences, _) in enumerate(plan):
+        hand_candidate(cands, f"candidate-{i}-{key.replace('/', '-')}-20260922.md",
+                       key, occurrences)
+        sv.record_verdict(store=tmp_path / "verdicts.jsonl", pattern_key=key,
+                          verdict=verdict, reason=f"decided: {verdict}",
+                          evidence_cmd=PRINTING_CMD, occurrences=decision_count,
+                          **({"decided_at": decided_at} if decided_at else {}))
+
+    assert sv.main(["check", "--candidates", str(cands),
+                    "--store", str(tmp_path / "verdicts.jsonl")]) == 0
+    out = capsys.readouterr().out
+
+    for verdict, key, _, _, lift in plan:
+        expected = (f"REOPEN {key} :: expired after {sv.REOPEN_AFTER_DAYS}d" if lift == "expired"
+                    else f"REOPEN {key} :: occurrences grew {grew}>")
+        assert expected in out, (verdict, key, lift, out)
+    assert out.splitlines()[-1] == f"checked: {len(plan)}  skipped_by_verdict: 0", out
+
+
+#: The consolidator's runbook, read the way `tests/test_consolidation_source_gate.py:43`
+#: reads it and `MINING_RUNBOOK` above reads the mining one: Phase 1.3 is the filter that
+#: re-admits an authored pattern every night, and it lives in this tree's contract because
+#: the code's `TERMINAL_VERDICTS` is what it is supposed to mirror.
+CONSOLIDATION_RUNBOOK = (Path.home() / "obsidian" / "skills"
+                         / "nightly-skill-consolidation" / "SKILL.md")
+
+
+def test_phase_1_3_skips_every_status_the_ledger_considers_terminal():
+    """Clause 5: Phase 1.3's skip-list and `TERMINAL_VERDICTS` name the same endings.
+
+    `reviewed_authored` is the token this item added: `trajectory-skill-mining` step 3
+    writes it into a candidate's frontmatter when a skill was authored from it, so the most
+    disposed outcome in the vocabulary was the one status the work-list filter did not skip
+    — and the pattern came back every night, which is the title of this item.
+
+    The list is derived from the code rather than repeated here for the reason
+    `test_terminal_statuses_are_read_from_the_ledger_not_listed_here` gives: the next value
+    added to `TERMINAL_VERDICTS` must fail here and get the runbook line written, instead of
+    binding in Phase 0 while Phase 1.3 walks past it. `superseded_by_verdict` is in the
+    expected set because the runbook skips the status the miner writes, even though it is
+    not itself a verdict value.
+
+    Asserted, never skipped: this clause's subject is a tree outside the gated repo, and a
+    guard that can go quietly unverified repeats the defect it guards.
+    """
+    assert CONSOLIDATION_RUNBOOK.is_file(), \
+        f"clause 5's subject is absent: {CONSOLIDATION_RUNBOOK} does not exist"
+    body = CONSOLIDATION_RUNBOOK.read_text(encoding="utf-8", errors="replace")
+    start = body.index("### 1.3 Build work list")
+    section = body[start:body.index("## Phase 2:", start)]
+
+    expected = set(sv.TERMINAL_VERDICTS) | {sv.SUPERSEDED_STATUS}
+    missing = sorted(status for status in expected if f"`{status}`" not in section)
+    assert missing == [], (
+        f"Phase 1.3's skip-list does not name {missing}, so a pattern carrying one of "
+        f"them is skipped by Phase 0's ledger and re-admitted by this filter: {section}")
+    assert "`proposed`" in section, \
+        "the filter must keep stating that a proposed patch is not skipped"
+
+
+def test_widening_the_terminal_set_did_not_make_a_hand_written_status_ledger_minted(
+        tmp_path, capsys):
+    """The regression #830 could have introduced, pinned: three of the newly terminal
+    dispositions are statuses a runbook writes into a candidate's own frontmatter about the
+    candidate's own content, so their presence proves a decision was made, never that a
+    verdict store existed.
+
+    `MINTED_BY_LEDGER` is what turns an absent ledger into `LEDGER_ABSENT` and a non-zero
+    exit. Deriving it from `TERMINAL_VERDICTS` — which is what it used to do, and every
+    value in the old five plus `superseded_by_verdict` was ledger-only — would have made a
+    scratch run over the real corpus alarm on its own 930 `status: noise` files and 3
+    `status: reviewed_authored` ones, most of which never had a ledger row to lose. That is
+    the same fail-loud-when-nothing-is-wrong shape as a `LEDGER_ABSENT` that fires on a
+    fresh install, and it would train a run to ignore the one alarm that means a decision
+    history is gone.
+    """
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+    for status in RUNBOOK_PRESCRIBED_VERDICTS:
+        raw_candidate(cands, f"candidate-{status}-20260922.md", status)
+    capsys.readouterr()
+
+    rc = sv.main(["check", "--candidates", str(cands),
+                  "--store", str(tmp_path / "gone" / "verdicts.jsonl")])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "LEDGER_ABSENT" not in out, out
+    assert set(RUNBOOK_PRESCRIBED_VERDICTS).isdisjoint(sv.MINTED_BY_LEDGER), (
+        "a runbook-written frontmatter status must not count as proof a ledger existed")
