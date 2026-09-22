@@ -41,7 +41,7 @@ def _gate(tmp_path, monkeypatch, *, workers=8, xdist=True):
     (wt / "tests").mkdir(parents=True)
     g = G.Gate("SM_T", wt, "b" * 40, live_root=tmp_path)
     g.python = Path(sys.executable)
-    monkeypatch.setattr(g, "_child_env", lambda root=None: {})
+    monkeypatch.setattr(g, "_child_env", lambda root=None, *, isolate_home=False: {})
     calls: list[list[str]] = []
     script: list[tuple[int, str]] = []
 
