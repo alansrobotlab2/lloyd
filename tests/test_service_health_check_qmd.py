@@ -341,19 +341,35 @@ def test_skill_no_longer_probes_the_frontend_over_plain_http(skill_text):
     assert "localhost:3000" not in skill_text
 
 
-def test_skill_step_four_probes_the_https_frontend_with_k(skill_text):
-    """Clause 5: Step 4's curl targets https://localhost:5173/ with -k."""
+def test_skill_step_four_probes_the_https_frontend_verifying_a_derived_name(skill_text):
+    """Step 4 probes the frontend over https, verification ON, name derived.
+
+    This used to require `-k`, from when vite served only the private lloyd.crt and
+    the probe could not verify it. Both halves of that are now wrong and the skill
+    says so itself: `-k` is the verification switch, so it prints a clean status code
+    for an expired leaf and for a chain no client trusts — the two ways this port
+    actually stops working for the people using it. A failed verification IS the
+    finding.
+
+    The name must be derived, not hardcoded. `localhost` is a name the leaf carries
+    only while lloyd.crt is served; the Tailscale (Let's Encrypt) leaf names the
+    MagicDNS host alone. That leaf was provisioned on 2026-09-22, and the hardcoded
+    probe then returned 000 / curl exit 60 while every browser on the tailnet loaded
+    the page — a false DOWN, which is what #1044 is about.
+    """
     marker = "### Step 4"
     assert marker in skill_text
     step4 = skill_text.split(marker, 1)[1].split("### Step 5", 1)[0]
-    assert "https://localhost:5173/" in step4, step4
-    line = next(
-        (l for l in step4.splitlines() if "https://localhost:5173/" in l), ""
-    )
-    # `-k` may arrive alone or combined (`-sk`), so match the flag inside the
-    # option token rather than the string "-k".
+
+    line = next((l for l in step4.splitlines()
+                 if l.startswith("curl") and ":5173/" in l), "")
+    assert line, f"Step 4 runs no curl against :5173 — {step4}"
+    assert "https://" in line, f"the frontend probe is not over https: {line!r}"
+
     flags = [t for t in line.split() if t.startswith("-")]
-    assert any("k" in f for f in flags), (
-        f"self-signed cert needs -k, options were {flags}: {line!r}"
-    )
+    assert not any("k" in f for f in flags), (
+        f"the frontend probe switches verification off, which erases the finding it "
+        f"exists to make; options were {flags}: {line!r}")
+    assert "https://localhost:5173/" not in line, (
+        f"the probe hardcodes localhost, which the served leaf need not carry: {line!r}")
     assert "http://localhost:5173" not in step4, "plain-HTTP probe of a TLS service"

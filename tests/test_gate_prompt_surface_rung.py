@@ -33,7 +33,7 @@ def _gate(changed, item_id=None):
     g.item_id = item_id
     g.live = G.LIVE_ROOT
     g.python = G.LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
-    g._child_env = lambda: {}
+    g._child_env = lambda root=None, **_kw: {}
     return g
 
 

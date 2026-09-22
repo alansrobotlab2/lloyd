@@ -399,7 +399,14 @@ SKILL_LOCAL_PREFIXES = ("scripts/", "references/", "assets/")
 
 RUNTIME_FIRST = ("_pipeline/", "autonomy-runs/", "sessions/", "data/", "logs/",
                  ".venvs/", ".local/")
-RUNTIME_SUFFIXES = (".db", ".sqlite", ".jsonl", ".log", ".csv", ".lock", ".pid")
+#: Host material a checkout never carries. Certificates and keys join the list
+#: because `agent-services/cert/` is gitignored by design — a private key in git
+#: is the thing the ignore exists to prevent — so a doc naming ca.crt is naming
+#: a file on the machine, not drift. Before this, `system-health-check` naming
+#: the CA it signs client certs with was reported as an unresolved reference in
+#: every worktree, which is a red node at base rather than a fixable claim.
+RUNTIME_SUFFIXES = (".db", ".sqlite", ".jsonl", ".log", ".csv", ".lock", ".pid",
+                    ".crt", ".key", ".pem", ".srl")
 
 _LLOYD_PATH = re.compile(r"(?<![\w/.~-])(?:~|/home/[A-Za-z0-9_.-]+)/lloyd/([A-Za-z0-9_.\-/*]+)")
 _OBSIDIAN_PATH = re.compile(r"(?<![\w/.~-])(?:~|/home/[A-Za-z0-9_.-]+)/obsidian/([A-Za-z0-9_.\-/*]+)")

@@ -46,6 +46,26 @@ def _skill_paths(path: Path) -> list[str]:
     return out
 
 
+#: Roots whose contents a job writes and rewrites. A doc naming something under one
+#: of these is naming an output, not a file in the checkout, so its absence is a
+#: statement about the machine. All four are gitignored; `_pipeline/` and `sessions/`
+#: were emptied by the 2026-09-22 tree deletion and are refilled by the jobs that
+#: produce them, so a hard failure here is a red node at base in every round for a
+#: path no commit broke.
+RUNTIME_ROOTS = ("_pipeline/", "sessions/", "logs/", "data/")
+
+
+def _is_runtime_absence(spec: str) -> bool:
+    """True when `spec` names a job's output under a root that holds none yet.
+
+    Deliberately narrow: it does not ask whether the path exists (the caller already
+    knows it does not), only whether the thing named is regenerable output. A typo in
+    a `scripts/` or `app/` path is still drift and still fails.
+    """
+    rel = spec.replace("~/lloyd/", "", 1).replace(f"{Path.home()}/lloyd/", "", 1)
+    return rel.startswith(RUNTIME_ROOTS)
+
+
 def _resolves(spec: str) -> bool:
     p = Path(spec.replace("~", str(Path.home()), 1))
     if "*" not in spec:
@@ -69,9 +89,15 @@ def test_the_skill_exists(skill):
 def test_every_path_a_skill_names_resolves(skill):
     """The regression: three of four signal paths pointed at nothing."""
     missing = [spec for spec in _skill_paths(skill) if not _resolves(spec)]
-    assert not missing, (
-        f"{skill.name} names paths that do not exist: {missing}. A skill is a "
+    drift = [spec for spec in missing if not _is_runtime_absence(spec)]
+    assert not drift, (
+        f"{skill.name} names paths that do not exist: {drift}. A skill is a "
         f"prompt with no compiler; this is the compiler.")
+    if missing:
+        pytest.skip(
+            f"{skill.name} names only regenerable output that this machine holds "
+            f"none of yet: {missing}. The 2026-09-22 deletion emptied these roots "
+            "and the producing jobs refill them; nothing here is a wrong claim.")
 
 
 def test_the_generator_names_the_four_live_signals():
@@ -391,10 +417,15 @@ def test_every_path_a_worker_source_docstring_names_resolves():
 
     missing = sorted({(m, spec) for m, c in speaking.items() for spec in c["paths"]
                       if not _doc_resolves(spec)})
-    assert not missing, (
-        f"worker-source docstrings name paths that do not exist: {missing}. A "
+    drift = [(m, spec) for m, spec in missing if not _is_runtime_absence(spec)]
+    assert not drift, (
+        f"worker-source docstrings name paths that do not exist: {drift}. A "
         f"module docstring is the map a triage run navigates by, and one wrong "
         f"path cost #522 a whole unsatisfiable acceptance clause.")
+    if missing:
+        pytest.skip(
+            f"the only unresolved docstring paths name regenerable output this "
+            f"machine holds none of yet: {missing}")
 
     from app.paths import LLOYD_HOME, VAULT_PENDING_RESEARCH_DIR
     import app.routers.workers as W

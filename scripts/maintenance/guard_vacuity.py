@@ -502,7 +502,19 @@ def build_guards(autonomy, ers, kgr, gate_mod, shc, promote_mod, common):
         g.python, g.live = sys.executable, ROOT
         g.base, g.round_id = "0" * 40, "GUARD_VACUITY_PROBE"
         g._tests_delta_only = lambda: []
-        g._child_env = lambda root=None: {}
+        # Gate.__new__ skips __init__, so every attribute rung_tests reads has to be
+        # planted here. c0f12db added `home_isolation` to __init__ and reads it when
+        # it composes the rung's detail line; the stubbed _child_env below skips the
+        # branch that would otherwise set it, so without this the driver raised
+        # AttributeError and both verdicts printed ERROR — scoring a live guard
+        # VACUOUS for a reason that had nothing to do with the guard.
+        g.home_isolation = "not requested"
+        # Tolerant of the real signature's keyword-only args: c0f12db added
+        # `isolate_home` to Gate._child_env and updated its call sites but not
+        # the stubs that fake it, so rung_tests raised TypeError in here and
+        # both verdicts printed ERROR — a probe that cannot run its guard
+        # scores it as neither passing nor blocking.
+        g._child_env = lambda root=None, **_kw: {}
         text = (f"{counts['passed']} passed, {counts['tests_skipped']} skipped, "
                 f"{counts['collected']} collected")
         g._run_suite = lambda only: (types.SimpleNamespace(returncode=0), text, counts)
