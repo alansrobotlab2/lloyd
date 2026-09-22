@@ -399,11 +399,14 @@ def reverted_commits(events: Iterable[dict]) -> set[str]:
     gone from `main` and read as settled, so #763 was closed as landed a minute
     after its change was reverted, and #939 the same way an hour later.
 
-    So a `reset` row counts every promotion on the `parent` chain from
-    `head_before` back to `restored`, plus the commit its `rollback_requested`
-    named. A `revert` route removes exactly its commit. The walk only runs when
-    the row says where it stopped; a row with no `restored` counts its own
-    commit, because walking to the root would mark every ancestor reverted.
+    So a row that says `route: reset` counts every promotion on the `parent`
+    chain from `head_before` back to `restored`, plus the commit its
+    `rollback_requested` named. Anything else counts its own commit only: a
+    `revert` removes exactly that; the promoter's inline rollback resets to the
+    commit it merged onto; and rows written before `route` existed (2026-09-06,
+    09-07) name no `head_before`, so walking them would guess. Only promoted
+    commits are counted. The first cut walked the 09-06 row through a human
+    commit that a later hand restore put back on `main`.
     """
     rows = list(events)
     parent_of = {str(e.get("commit")): str(e.get("parent") or "")
@@ -421,18 +424,16 @@ def reverted_commits(events: Iterable[dict]) -> set[str]:
         if bad:
             out.add(bad)
         blamed, requested = requested, ""
-        if e.get("route") == "revert":
-            continue
         stop = str(e.get("restored") or "")
-        if not stop:
+        if e.get("route") != "reset" or not stop or not e.get("head_before"):
             continue
-        if blamed and blamed != stop:
+        if blamed and blamed != stop and blamed in parent_of:
             out.add(blamed)
-        cur, seen = str(e.get("head_before") or bad), set()
-        while cur and cur != stop and cur not in seen:
+        cur, seen = str(e["head_before"]), set()
+        while cur in parent_of and cur != stop and cur not in seen:
             seen.add(cur)
             out.add(cur)
-            cur = parent_of.get(cur, "")
+            cur = parent_of[cur]
     out.discard("")
     return out
 

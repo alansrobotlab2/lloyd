@@ -3423,6 +3423,19 @@ def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BO
 REVERTED_MARKER = "automod_reverted"
 
 
+def _on_live_main(commit: str) -> bool:
+    """True when `commit` is an ancestor of the live tree's HEAD. False when it
+    is not, or when git cannot say (an unknown object cannot be on `main`)."""
+    import subprocess
+    from app.paths import LLOYD_HOME
+    try:
+        r = subprocess.run(["git", "-C", str(LLOYD_HOME), "merge-base", "--is-ancestor",
+                            commit, "HEAD"], capture_output=True, timeout=10)
+    except Exception:  # noqa: BLE001 — no git, no claim
+        return False
+    return r.returncode == 0
+
+
 def reopen_reverted_landings(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
                              enabled: bool = True) -> list[dict]:
     """Reopen an item this loop closed on a landing the guardian then reverted.
@@ -3469,6 +3482,10 @@ def reopen_reverted_landings(ledger: Path, boards: tuple[str, ...] | None = DEFA
         if not marked or not _same_commit(marked, commit):
             continue
         if not any(_same_commit(commit, r) for r in reverted):
+            continue
+        # The ledger says it was reverted; git says whether it is gone. A
+        # commit a person put back on `main` by hand has landed after all.
+        if _on_live_main(commit):
             continue
         if outcomes is None:
             outcomes = implement_outcomes(ledger)

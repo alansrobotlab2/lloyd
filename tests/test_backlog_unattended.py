@@ -3528,3 +3528,33 @@ def test_board_pass_reopens_a_reverted_landing(isolated, monkeypatch):
     out = RD.board_pass()
     assert out["reopened_reverted"] == [941]
     assert _fm(p)["status"] == "up_next"
+
+
+def test_a_rollback_row_without_a_route_counts_only_its_commit():
+    """The 2026-09-06 row: `restored` but no `route` and no `head_before`. The
+    first cut walked it through the promotion's human parent, which a hand
+    restore had put back on `main`, and called that commit reverted."""
+    rows = [{"event": "promoted", "commit": "a6c0ebae", "parent": "7b86ffd4"},
+            {"event": "rollback_succeeded", "commit": "a6c0ebae", "restored": "fc253ffe",
+             "trigger": "crash"}]
+    assert S.reverted_commits(rows) == {"a6c0ebae"}
+
+
+def test_a_reset_walk_never_counts_a_commit_the_loop_did_not_promote():
+    rows = [{"event": "promoted", "commit": A8, "parent": "hand0001"},
+            {"event": "promoted", "commit": E1, "parent": A8},
+            {"event": "rollback_succeeded", "commit": E1, "restored": C1, "route": "reset",
+             "head_before": E1}]
+    assert S.reverted_commits(rows) == {A8, E1}
+
+
+def test_a_reverted_landing_back_on_main_is_not_reopened(isolated, monkeypatch):
+    """The ledger says reverted; git says it is on `main` again (a hand
+    restore). The item stays closed."""
+    p = write_item(isolated, 942, status="up_next")
+    _promote(942, "SM_942", DB, C1)
+    B.close_settled_items(S.LEDGER_PATH)
+    _regression_rollback(DB, DB, C1)
+    monkeypatch.setattr(B, "_on_live_main", lambda c: True)
+    assert B.reopen_reverted_landings(S.LEDGER_PATH) == []
+    assert _fm(p)["status"] == "done"
