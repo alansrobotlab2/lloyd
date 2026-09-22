@@ -641,10 +641,16 @@ def _local(**delta):
     return datetime.now() + timedelta(**delta)
 
 
+@pytest.fixture
+def no_live_turns(monkeypatch):
+    """For the tests that are about the disk scan, not the run queue."""
+    monkeypatch.setattr(dash.sessions_io, "active_sessions_snapshot", lambda: [])
+
+
 def test_recent_chats_are_ordered_by_last_active_not_mtime(sessions, no_live_turns):
     """A background writer — the titler, post-session capture, TodoWrite —
     touches a session file long after the talking stopped. Under an mtime
-    sort that silently promotes an old chat to the top of the panel."""
+    sort each of those silently promotes an old chat to the top."""
     import time
 
     now = time.time()
@@ -660,7 +666,7 @@ def test_recent_chats_are_ordered_by_last_active_not_mtime(sessions, no_live_tur
 
 def test_recent_chats_exclude_sessions_with_a_live_turn(sessions, monkeypatch):
     """A running or queued chat is already on the panel beside this one.
-    Showing it in both costs the operator what this half is for."""
+    Rendering it in both costs the operator what this half is for."""
     _session(sessions, "live", _local(minutes=-1))
     _session(sessions, "finished", _local(minutes=-2))
     monkeypatch.setattr(
@@ -670,6 +676,23 @@ def test_recent_chats_exclude_sessions_with_a_live_turn(sessions, monkeypatch):
 
     out = dash._recent_sessions()
     assert [s["session_id"] for s in out["sessions"]] == ["finished"]
+
+
+def test_a_chat_that_starts_a_turn_leaves_the_panel_immediately(
+    sessions, monkeypatch
+):
+    """The scan is cached for 10s; the live filter must not be, or a chat
+    that just started reads as finished until the cache expires."""
+    _session(sessions, "a", _local(minutes=-1))
+    _session(sessions, "b", _local(minutes=-2))
+    live: list[dict] = []
+    monkeypatch.setattr(
+        dash.sessions_io, "active_sessions_snapshot", lambda: list(live)
+    )
+
+    assert [s["session_id"] for s in dash._recent_sessions()["sessions"]] == ["a", "b"]
+    live.append({"session_id": "a", "running": True})
+    assert [s["session_id"] for s in dash._recent_sessions()["sessions"]] == ["b"]
 
 
 def test_a_chat_that_starts_a_turn_leaves_the_panel_within_the_poll(
@@ -756,121 +779,6 @@ def test_a_background_platform_is_dropped_even_with_a_chat_shaped_name(
     assert [r["session_id"] for r in rows] == ["20260910_110001_def456"]
 
 
-# ── Recent chats ───────────────────────────────────────────────────────
-
-
-@pytest.fixture
-def sessions(tmp_path, monkeypatch):
-    """Point SESSIONS_DIR at a scratch tree."""
-    d = tmp_path / "sessions"
-    d.mkdir()
-    monkeypatch.setattr("app.paths.SESSIONS_DIR", d)
-    return d
-
-
-def _session(sessions, session_id, last_active, *, mtime=None, **extra):
-    """Write one session file. `last_active` is naive local, as on disk."""
-    import json
-    import os
-
-    data = {
-        "session_id": session_id,
-        "last_active": last_active.replace(tzinfo=None).isoformat(),
-        "preview": "hello",
-        "message_count": 2,
-        "platform": "mission-control",
-        "messages": [],
-        **extra,
-    }
-    path = sessions / f"{session_id}.json"
-    path.write_text(json.dumps(data))
-    if mtime is not None:
-        os.utime(path, (mtime, mtime))
-    return path
-
-
-def _local(**delta):
-    return datetime.now() + timedelta(**delta)
-
-
-@pytest.fixture
-def no_live_turns(monkeypatch):
-    """For the tests that are about the disk scan, not the run queue."""
-    monkeypatch.setattr(dash.sessions_io, "active_sessions_snapshot", lambda: [])
-
-
-def test_recent_chats_are_ordered_by_last_active_not_mtime(sessions):
-    """A background writer — the titler, post-session capture, TodoWrite —
-    touches a session file long after the talking stopped. Under an mtime
-    sort each of those silently promotes an old chat to the top."""
-    import time
-
-    now = time.time()
-    _session(sessions, "old_but_touched", _local(hours=-9), mtime=now)
-    _session(sessions, "actually_recent", _local(minutes=-5), mtime=now - 3600)
-
-    out = dash._recent_sessions()
-    assert [s["session_id"] for s in out["sessions"]] == [
-        "actually_recent",
-        "old_but_touched",
-    ]
-
-
-def test_recent_chats_exclude_sessions_with_a_live_turn(sessions, monkeypatch):
-    """A running or queued chat is already on the panel beside this one.
-    Rendering it in both costs the operator what this half is for."""
-    _session(sessions, "live", _local(minutes=-1))
-    _session(sessions, "finished", _local(minutes=-2))
-    monkeypatch.setattr(
-        dash.sessions_io, "active_sessions_snapshot",
-        lambda: [{"session_id": "live", "running": True}],
-    )
-
-    out = dash._recent_sessions()
-    assert [s["session_id"] for s in out["sessions"]] == ["finished"]
-
-
-def test_a_chat_that_starts_a_turn_leaves_the_panel_immediately(
-    sessions, monkeypatch
-):
-    """The scan is cached for 10s; the live filter must not be, or a chat
-    that just started reads as finished until the cache expires."""
-    _session(sessions, "a", _local(minutes=-1))
-    _session(sessions, "b", _local(minutes=-2))
-    live: list[dict] = []
-    monkeypatch.setattr(
-        dash.sessions_io, "active_sessions_snapshot", lambda: list(live)
-    )
-
-    assert [s["session_id"] for s in dash._recent_sessions()["sessions"]] == ["a", "b"]
-    live.append({"session_id": "a", "running": True})
-    assert [s["session_id"] for s in dash._recent_sessions()["sessions"]] == ["b"]
-
-
-def test_scheduled_tasks_are_not_chats(sessions):
-    """Autonomy runs have their own panel."""
-    _session(sessions, "task", _local(minutes=-1), platform="autonomy")
-    _session(sessions, "chat", _local(minutes=-2))
-
-    out = dash._recent_sessions()
-    assert [s["session_id"] for s in out["sessions"]] == ["chat"]
-
-
-def test_last_active_is_serialised_as_explicit_utc(sessions):
-    """`last_active` on disk is a naive *local* stamp. Handing that
-    straight to `new Date()` shifts every row by the box's offset."""
-    _session(sessions, "chat", _local(minutes=-1))
-
-    stamp = dash._recent_sessions()["sessions"][0]["last_active"]
-    assert stamp.endswith("Z")
-    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-    assert abs((datetime.now(timezone.utc) - parsed).total_seconds() - 60) < 5
-
-
-def test_only_two_chats_are_shown(sessions):
-    for i in range(5):
-        _session(sessions, f"s{i}", _local(minutes=-i - 1))
-    assert len(dash._recent_sessions()["sessions"]) == 2
 
 
 def test_a_dependency_hidden_by_broken_front_matter_is_still_a_hold(vault):
@@ -958,4 +866,56 @@ def test_a_failing_board_health_costs_the_sub_object_only(vault, monkeypatch):
     out = dash._backlog()
     assert out["health"] is None
     assert out["by_status"] == {"draft": 1} and out["open_total"] == 1
+
+
+# ── The file pins itself (#1219) ───────────────────────────────────────
+
+
+def test_no_module_level_def_in_this_file_is_shadowed_by_a_second_copy():
+    """#1219. A second module-level `def` of the same name retires the first
+    one without an argument: Python binds the later name, so the earlier
+    copy's assertions run zero times while the file still reads as covered
+    and the suite stays green. Both copies of the chat-section block arrived
+    inside one commit on 2026-09-06, and for two weeks nothing collected the
+    earlier one — so this reads its own source with `ast` rather than
+    trusting a lint run no gate requires."""
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).read_text(encoding="utf-8")
+    names = [
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    shadowed = sorted({name for name in names if names.count(name) > 1})
+    assert shadowed == [], (
+        f"later module-level defs shadow these earlier ones, so they are "
+        f"never collected: {shadowed}"
+    )
+
+
+CHAT_SECTION_TESTS = (
+    "test_recent_chats_are_ordered_by_last_active_not_mtime",
+    "test_recent_chats_exclude_sessions_with_a_live_turn",
+    "test_a_chat_that_starts_a_turn_leaves_the_panel_within_the_poll",
+    "test_a_chat_that_starts_a_turn_leaves_the_panel_immediately",
+    "test_scheduled_tasks_are_not_chats",
+    "test_last_active_is_serialised_as_explicit_utc",
+    "test_only_two_chats_are_shown",
+    "test_background_runs_do_not_starve_the_panel",
+    "test_a_background_platform_is_dropped_even_with_a_chat_shaped_name",
+)
+
+
+def test_every_chat_section_test_survives_as_a_live_def():
+    """#1219. Deleting a shadowed copy must not quietly delete coverage with
+    it: each chat-section test named here has to be a live module-level
+    function. Given no duplicate defs, a live def is exactly what pytest
+    collects once — which is the coverage this file claims."""
+    missing = [
+        name for name in CHAT_SECTION_TESTS
+        if not callable(globals().get(name))
+    ]
+    assert missing == [], f"these chat-section tests are no longer defined: {missing}"
 
