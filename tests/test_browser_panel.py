@@ -831,3 +831,289 @@ def test_url_bar_does_not_bind_the_input_to_the_live_frame():
         "the frame must only re-seed the input while it is clean"
     assert re.search(r"value=\{urlInput\}", src), \
         "the input must be driven by its own state, not frame.url"
+
+
+# ── Backlog #1087: an error document is not a successful fetch ─────────────────
+#
+# `browser_navigate` returned `{"ok": true, ..., "status": 404}` for a document
+# that was not there, and `browser_snapshot` then handed back that 404 page's
+# accessibility tree — banner, nav links, "Skip to content" — as the page's
+# content. Both are stored tool results in
+# `sessions/20260910_020748_deeprese_bba8.json`, twice, in a session researching
+# moved Nav2 documentation. The four clauses: an error document reads as not-ok
+# with the code and title named in a non-error field; a 2xx/3xx or a goto that
+# hands back no response handle still reads as ok; a snapshot of an error
+# document says which status it is; and the human's URL bar still shows the page
+# rather than a red banner.
+
+_ERR_TITLE = "Page moved · Nav2 documentation"
+
+
+class _ErrorDocPage:
+    """A page whose `goto` hands back the document status the test asks for.
+
+    Faked at the same boundary the rest of this file fakes Playwright — the
+    response handle. `status=None` is the case the module guards today with
+    `resp.status if resp else 0`: Playwright returns no handle at all.
+    """
+
+    def __init__(self, status=404, title=_ERR_TITLE,
+                 url="http://127.0.0.1:45547/gone"):
+        self.url = url
+        self._title = title
+        self._status = status
+        self.goto_calls: list[str] = []
+
+    async def goto(self, url, **kw):
+        self.goto_calls.append(url)
+        self.url = url
+        if self._status is None:
+            return None
+        return type("R", (), {"status": self._status})()
+
+    async def title(self):
+        return self._title
+
+    def locator(self, selector):
+        return self
+
+    async def aria_snapshot(self):
+        if self._status is not None and self._status >= 400:
+            return '- heading "404 Not Found" [level=1]\n- banner: Site chrome'
+        return '- paragraph: the real document'
+
+
+class _FakePost:
+    """The aggregator route reads only `await request.json()`."""
+
+    def __init__(self, body):
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_doc_status():
+    """Which document the last navigation landed on is module state.
+
+    No test in this file may read a status another one recorded.
+    """
+    browser_module._forget_doc_status()
+    yield
+    browser_module._forget_doc_status()
+
+
+async def test_an_error_document_is_not_reported_as_a_successful_fetch(monkeypatch):
+    """Clause 1: ok is False, and a non-error field names code and title."""
+    page = _ErrorDocPage(status=404)
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_navigate(page.url))
+
+    assert out["ok"] is False, out
+    assert "error" not in out, \
+        "an `error` key turns BrowserPage.tsx:82 into a red banner over a page " \
+        "the human asked to see — the verdict belongs in `warning`"
+    assert out["status"] == 404, out
+    assert out["title"] == _ERR_TITLE, out
+    assert out["url"] == page.url, out
+    warning = out["warning"]
+    assert warning.startswith("HTTP 404 — "), warning
+    assert _ERR_TITLE in warning, warning
+
+
+async def test_a_normal_status_or_a_missing_response_handle_still_reads_as_ok(monkeypatch):
+    """Clause 2: nothing about a good navigation changes.
+
+    The `status=None` case is the trap in the current line
+    (`resp.status if resp else 0`): a branch written as a bare
+    `status >= 400` would report every handle-less navigation as a failure.
+    """
+    for status in (200, 204, 301, 302, 399):
+        page = _ErrorDocPage(status=status, title="Fine",
+                             url=f"http://127.0.0.1:45547/ok/{status}")
+        monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+        out = json.loads(await browser_module._browser_navigate(page.url))
+        assert out.get("ok") is True, (status, out)
+        assert out["status"] == status, (status, out)
+        assert out["title"] == "Fine" and out["url"] == page.url, (status, out)
+        assert "warning" not in out, (status, out)
+
+    page = _ErrorDocPage(status=None, title="Fine", url="http://127.0.0.1:45547/same-doc")
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    out = json.loads(await browser_module._browser_navigate(page.url))
+    assert out.get("ok") is True, out
+    assert out["status"] == 0, out
+    assert "warning" not in out, out
+
+
+async def test_a_snapshot_of_an_error_page_names_the_status(monkeypatch):
+    """Clause 3: the tree says it is an error page, and is still delivered."""
+    page = _ErrorDocPage(status=404)
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    await browser_module._browser_navigate(page.url)
+
+    snap = json.loads(await browser_module._browser_snapshot())
+    assert "error" not in snap, snap
+    assert "[HTTP 404" in snap["snapshot"], snap["snapshot"][:200]
+    # The label annotates the tree rather than replacing it: which error page
+    # this is stays readable, and a caller that already knows can still parse it.
+    assert 'heading "404 Not Found"' in snap["snapshot"], snap["snapshot"][:200]
+
+
+async def test_a_snapshot_of_a_normal_page_carries_no_error_label(monkeypatch):
+    """Clause 3, other half: the label is not a permanent prefix."""
+    page = _ErrorDocPage(status=200, title="Real page",
+                         url="http://127.0.0.1:45547/here")
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    await browser_module._browser_navigate(page.url)
+
+    snap = json.loads(await browser_module._browser_snapshot())
+    assert "[HTTP " not in snap["snapshot"], snap["snapshot"][:200]
+    assert snap["snapshot"].startswith(
+        "[Page] Real page — http://127.0.0.1:45547/here"), snap["snapshot"][:200]
+
+
+async def test_the_error_label_does_not_outlive_the_document_it_describes(monkeypatch):
+    """The label is a claim about one document, so it is keyed to that document.
+
+    A click that follows a link replaces the document without going through
+    `_browser_navigate`, and a tab switch moves the focus to a page that was
+    never navigated to this way. Either one has to lose the label, or a healthy
+    page starts reading as an error page — the false half of the same defect.
+    """
+    page = _ErrorDocPage(status=404)
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    await browser_module._browser_navigate(page.url)
+    assert "[HTTP 404" in json.loads(
+        await browser_module._browser_snapshot())["snapshot"]
+
+    page.url = "http://127.0.0.1:45547/moved-to"   # a link was followed
+    snap = json.loads(await browser_module._browser_snapshot())
+    assert "[HTTP " not in snap["snapshot"], snap["snapshot"][:200]
+
+    other = _ErrorDocPage(status=200, title="Real page",
+                          url="http://127.0.0.1:45547/other")
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(other))
+    await browser_module._browser_navigate("http://127.0.0.1:45547/other")
+    page.url = "http://127.0.0.1:45547/gone"       # switched back to tab one
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    assert "[HTTP " not in json.loads(
+        await browser_module._browser_snapshot())["snapshot"]
+
+
+async def test_the_url_bar_shows_an_error_page_instead_of_a_red_banner(monkeypatch):
+    """Clause 4: the document facts reach the viewer, and no `error` key does.
+
+    `BrowserPage.tsx:82` is `if (res.error) setNavError(res.error)`, so a 404
+    reported through `error` would blank a page the human chose to look at.
+    The scheme fallback keys on `error` too, so this also pins that a 404 does
+    not spend a second goto over http.
+    """
+    page = _ErrorDocPage(status=404)
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    monkeypatch.setattr(browser_module, "_push_browser_state", lambda *_: _async(None))
+
+    res = await browser_module.navigate_from_ui("127.0.0.1:45547/gone")
+
+    assert "error" not in res, res
+    assert res["status"] == 404, res
+    assert res["title"] == _ERR_TITLE, res
+    assert res["url"] == "https://127.0.0.1:45547/gone", res
+    assert page.goto_calls == ["https://127.0.0.1:45547/gone"], page.goto_calls
+
+
+async def test_the_url_bar_route_hands_the_error_document_through_unchanged(monkeypatch):
+    """The same drive, across the aggregator's route.
+
+    `POST /browser/navigate` is the seam the Browser tab crosses into the
+    process that owns Playwright (`agent_mcp/main.py:757`), and its docstring
+    promises that a failed navigation is a 200 carrying the page's own facts.
+    This runs the real `navigate_from_ui` behind that route, so a route that
+    started minting an `error` for `ok: false` fails here rather than in the UI.
+    """
+    from agent_mcp import main as mcp_main
+
+    page = _ErrorDocPage(status=404)
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    monkeypatch.setattr(browser_module, "_push_browser_state", lambda *_: _async(None))
+
+    resp = await mcp_main.browser_navigate(_FakePost({"url": "127.0.0.1:45547/gone"}))
+    body = json.loads(resp.body)
+
+    assert resp.status_code == 200, resp.status_code
+    assert "error" not in body, body
+    assert body["status"] == 404, body
+    assert body["title"] == _ERR_TITLE, body
+    assert body["warning"].startswith("HTTP 404 — "), body
+
+
+async def test_the_backend_proxy_forwards_the_error_document_without_minting_one(monkeypatch):
+    """One hop further out: the backend's proxy into the aggregator process.
+
+    `app/routers/browser.py:140` mints an `error` when the aggregator answers
+    4xx, so a proxy that learned to read `ok: false` as a broken request would
+    put the red banner back for a page that only the *site* failed to find. The
+    aggregator answers 200 with the document's own facts, and this pins that
+    they arrive at the browser with nothing added.
+    """
+    sent: list[str] = []
+    payload = {"ok": False, "url": "http://127.0.0.1:45547/gone",
+               "title": _ERR_TITLE, "status": 404,
+               "warning": "HTTP 404 — " + _ERR_TITLE}
+
+    class _FakeResponse:
+        status_code = 200
+        text = ""
+        def json(self):
+            return payload
+
+    class _FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def post(self, url, json=None, headers=None):
+            sent.append(url)
+            return _FakeResponse()
+
+    monkeypatch.setattr(browser_router.httpx, "AsyncClient", _FakeClient)
+    resp = await browser_router.post_browser_navigate(
+        {"url": "http://127.0.0.1:45547/gone"})
+
+    body = json.loads(resp.body)
+    assert sent == [browser_router._MCP_NAVIGATE_URL]
+    assert "error" not in body, body
+    assert body["status"] == 404 and body["title"] == _ERR_TITLE, body
+    assert body["warning"].startswith("HTTP 404 — "), body
+
+
+async def test_the_error_verdict_crosses_the_mcp_seam(monkeypatch):
+    """What the model actually reads: `call_tool`'s wrapped payload.
+
+    `text_result` sniffs a top-level `error` key into `is_error`, which the MCP
+    wire spells `isError`. So the choice of `warning` over `error` is also the
+    choice that keeps an ordinary 404 out of the harness's tool-failure list —
+    the transport worked and a document was fetched. The verdict has to be
+    readable in the JSON instead, which is what `ok: false` and the warning are
+    for.
+    """
+    page = _ErrorDocPage(status=503, title="503 Bad Gateway",
+                         url="http://127.0.0.1:45547/down")
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    monkeypatch.setattr(browser_module, "_schedule_state_push", lambda name: None)
+
+    res = await browser_module.call_tool(
+        "browser_navigate", {"url": "http://127.0.0.1:45547/down"})
+
+    payload = json.loads(res.content[0].text)
+    assert payload["ok"] is False, payload
+    assert payload["status"] == 503, payload
+    assert "503 Bad Gateway" in payload["warning"], payload
+    assert res.is_error is False, \
+        "a fetched error document is not a failed tool call"
+    # And on the wire, which is the form the harness's error bookkeeping reads.
+    assert res.model_dump(by_alias=True, exclude_none=True)["isError"] is False

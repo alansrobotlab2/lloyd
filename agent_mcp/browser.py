@@ -334,6 +334,16 @@ _browser = None   # Browser instance
 _context = None   # BrowserContext
 _active_page = None  # Currently focused Page
 _ref_map: dict[str, dict] = {}  # "e1" -> {"role": ..., "name": ..., "occurrence": ...}
+# Which document the last tool-driven navigation actually landed on, and what
+# the server said about it. `browser_snapshot` cannot otherwise tell a 404
+# wearing normal site chrome from the page it was fetched for: the accessibility
+# tree of both looks clean. Bound to the page *and* its URL rather than kept as
+# a bare scalar, because both move under it — a tab switch changes the page, a
+# clicked link changes the document — and a label that outlived the navigation
+# that earned it would brand a healthy page an error page. One page is held at a
+# time: every navigation overwrites the row, so a closed page is dropped at the
+# next one rather than held open.
+_nav_doc: dict = {"page": None, "url": "", "status": 0}
 # Serializes launch/teardown: concurrent turns (user + ambient + autonomy)
 # could otherwise interleave _ensure_browser() and launch two Chromiums,
 # leaking one.
@@ -417,6 +427,30 @@ async def _get_page():
     return _active_page
 
 
+def _remember_doc_status(page, status: int) -> None:
+    """Record what the server said about the document `page` is showing now."""
+    _nav_doc.update(page=page, url=page.url, status=int(status))
+
+
+def _forget_doc_status() -> None:
+    """Drop the record. Every path that does not end on a fetched document
+    takes this, so a label can only ever describe a navigation that happened."""
+    _nav_doc.update(page=None, url="", status=0)
+
+
+def _doc_status_for(page) -> int:
+    """The document status of what `page` is showing right now; 0 when unknown.
+
+    Answers 0 — no label — whenever the page or its URL has moved since the
+    navigation that recorded it, because the recorded status then describes a
+    different document. 0 also covers the handle-less goto, where nothing was
+    measured; guessing there would be the same invented verdict #1087 is about.
+    """
+    if _nav_doc["page"] is page and _nav_doc["url"] == page.url:
+        return int(_nav_doc["status"] or 0)
+    return 0
+
+
 # ── Accessibility tree snapshot ────────────────────────────────────────────────
 
 def _parse_aria_snapshot(text: str, ref_map: dict) -> tuple[str, int]:
@@ -498,18 +532,43 @@ async def _browser_navigate(url: str, wait_until: str = "domcontentloaded") -> s
 
     page = await _get_page()
     _ref_map.clear()
+    # Until a document is fetched, nothing here knows what this page is.
+    _forget_doc_status()
     seq = _block_log["seq"]
     try:
         resp = await page.goto(url, wait_until=wait_until, timeout=30000)
         landed = await _enforce_landing(page)
         if landed:
             return json.dumps({"error": f"{landed} (redirected from {url[:100]})"})
-        return json.dumps({
+        # `resp` is None when Playwright hands back no response handle — a
+        # same-document navigation among them — so the status there is
+        # *unmeasured*, not a failure. Testing the handle as well as the code is
+        # what keeps those navigations reading as the success they are.
+        status = resp.status if resp is not None else 0
+        title = await page.title()
+        result = {
             "ok": True,
             "url": page.url,
-            "title": await page.title(),
-            "status": resp.status if resp else 0,
-        })
+            "title": title,
+            "status": status,
+        }
+        if resp is not None and status >= 400:
+            # A 4xx/5xx document used to come back `ok: true` with the code in
+            # a field next to it, leaving the model to notice and interpret it
+            # while `browser_snapshot` served the error page as the content.
+            result["ok"] = False
+            # `warning`, never `error`: `BrowserPage.tsx` turns any `error`
+            # field into a red banner over the URL bar, and `navigate_from_ui`
+            # keys its https→http fallback on one. A human who asked to see a
+            # 404 wants the 404 on screen; a fallback retry on a page that
+            # answered is a second navigation bought with no new information.
+            result["warning"] = (
+                f"HTTP {status} — {title or '(untitled page)'}. The document that "
+                "answered is an error page, not the target content: its title and "
+                "url are the error page's own."
+            )
+        _remember_doc_status(page, status)
+        return json.dumps(result)
     except Exception as exc:
         # Only on failure: a block during a navigation that still loaded was a
         # subresource, and reporting that as the navigation's error would turn
@@ -536,7 +595,17 @@ async def _browser_snapshot(full: bool = False) -> str:
 
     annotated, ref_count = _parse_aria_snapshot(raw, _ref_map)
     title = await page.title()
-    full_text = f"[Page] {title} — {page.url}\n{annotated}"
+    header = f"[Page] {title} — {page.url}"
+    doc_status = _doc_status_for(page)
+    if doc_status >= 400:
+        # The tree cannot show that it is an error page — a moved-docs 404 comes
+        # with the real site's banner and nav links, which snapshots completely
+        # clean. It goes first so it survives the truncation below.
+        header = (
+            f"[HTTP {doc_status}] This document is an error page, "
+            f"not the target content.\n{header}"
+        )
+    full_text = f"{header}\n{annotated}"
 
     if len(full_text) > MAX_SNAPSHOT_CHARS:
         full_text = (
@@ -878,6 +947,10 @@ async def list_tools():
         # ── Phase 1: Core browse-read-interact loop ────────────────────────────
         Tool(name="browser_navigate", description=(
             "Navigate the browser to a URL. Returns the page title and HTTP status. "
+            "A document that responds 4xx/5xx comes back with ok:false and a `warning` "
+            "naming the status and the page title: the fetch reached a server, but what "
+            "answered is an error page, not the target. A moved or missing page still "
+            "has to be re-found. "
             "Always call browser_snapshot after navigating to see the page content."
         ), inputSchema={
             "type": "object",
@@ -893,6 +966,9 @@ async def list_tools():
         }),
         Tool(name="browser_snapshot", description=(
             "Get the accessibility tree of the current page as structured text. "
+            "A document whose navigation returned an error status is labelled with that "
+            "status on the first line, because its tree otherwise looks like the "
+            "target's. "
             "Interactive elements (links, buttons, form fields) are assigned ref IDs like e1, e2, e3. "
             "Use these refs with browser_click, browser_type, etc. "
             "Refs are invalidated after each new snapshot or navigation."
