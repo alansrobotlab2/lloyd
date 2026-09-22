@@ -70,6 +70,70 @@
 #
 # GPU 2 IS SINGLE-TENANT. It holds this or the Qwen3.6 secondary, never both.
 # The preflight refuses rather than racing it onto the card.
+#
+# DETERMINISM: WHAT IS SHIPPED, AND WHAT EACH VARIANT MEASURED  (#1357)
+#
+#   djev does not answer a byte-identical request twice. The argmax is stable,
+#   but the label logprobs a rank score is built from move by nats between
+#   identical requests, with the prefix cache measured constant — which is why
+#   two promotions that touched no retrieval code were rolled back for the
+#   difference, and why the eval replays djev per request (LLOYD_DJEV_REPLAY,
+#   app/djev.py) instead of trusting a paired comparison. Ruled out with the
+#   engine's own counters and by flag: the prefix cache, CUDA graphs, compile,
+#   async scheduling, the seed canvas and sampling. What is left is the kernels
+#   — the Marlin NvFp4 MoE path (the boot logs it: "Weight-only FP4 compression
+#   will be used leveraging the Marlin kernel") and TRITON_ATTN.
+#
+#   Two levers below reach those kernels, so a variant boots by env override
+#   with no edit to this file:
+#
+#       MOE_BACKEND=triton BATCH_INVARIANT=1 ./start-djev.sh
+#
+#   and one probe measures it, printing each request's prefix_cache hits/queries
+#   delta so a cache effect cannot be mistaken for a kernel effect:
+#
+#       .venvs/lloyd/bin/python -m scripts.djev_determinism_probe --variant-label "my variant"
+#
+#   EVERY VARIANT BOOTED ON THIS BOX, one row each, with the probe's max |Δ
+#   label logprob| in nats over 5 byte-identical runs and the recall p50 in ms on
+#   the 81-query pinned eval (eval/vault_recall_queries.yaml), worst of the two
+#   pinned trials in eval/baselines/automod-noise-*-20260921-*.json. The variant
+#   column is `MOE_BACKEND / BATCH_INVARIANT`, and an empty MOE_BACKEND is
+#   written `auto` because that is what vLLM resolves it to. `cold` is a fresh
+#   cache_salt per request, so every run reports hits+0. `warm` repeats one
+#   prompt: run 1 is the request that POPULATES the cache and also reports
+#   hits+0, and from run 2 on every run reports queries+4800 hits+4768 — the
+#   reusable prefix is whole 32-token blocks up to the boundary before the
+#   position being generated, floor((4800-1)/32)*32 = 4768. So the warm regime
+#   holds the cache constant across the runs it compares, which is what the
+#   printed per-request delta is there to prove; read run 1 as the fill, not as
+#   a miss that makes the pair incomparable. Both regimes must
+#   print 0.0000: a config that passes one and not the other has hidden a regime,
+#   not fixed the kernels. Measured at the probe's default shape, prompt_tokens
+#   4800, 2026-09-22.
+#
+#   variant                             cold nats  warm nats  recall p50 ms
+#   auto (Marlin FP4 MoE) / 0              5.0156     8.2064       510.5
+#
+#   That is the only row anyone has measured. The variants still unbooted —
+#   MOE_BACKEND=triton, batched_triton, triton_unfused, marlin; BATCH_INVARIANT=1
+#   (which needs MAX_MODEL_LEN under ~100k, since 131072 OOMs the KV pool, so
+#   that trial also costs production context); and the two the live boot config
+#   points at that no one has touched (enable_flashinfer_autotune,
+#   fuse_act_quant) — are owed by backlog #1361, because each boot is a ~2 min
+#   window in which the recall falls back to qmd's cross-encoder
+#   (app/qmd_health.py counts djev_fallbacks) and GPU 2 is single-tenant, and a
+#   self-modification round may not restart an engine at all. The two
+#   #1357 triage runs saw the same signature at a shorter prompt (2176 tokens,
+#   warm 2.91 / cold 11.07 nats), so the sign is not an artefact of this shape;
+#   the rows are this probe's numbers.
+#
+#   So the defaults below are the INCUMBENT, not a winner of a sweep. When a row
+#   prints 0.0000 in both regimes, flip both this line and the defaults;
+#   tests/test_start_djev_flags.py refuses a shipped default that has no row, so
+#   an unmeasured boot cannot become production by editing one of the two.
+#
+# shipped defaults: MOE_BACKEND="" BATCH_INVARIANT="0"
 
 set -euo pipefail
 
@@ -104,6 +168,25 @@ ATTN="${ATTN:-TRITON_ATTN}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-bfloat16}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
 EXTRA_ARGS="${EXTRA_ARGS:---async-scheduling}"
+# ── Determinism levers (#1357) ────────────────────────────────────────
+# Both reach the kernels the label logprobs are made of, and both are EMPTY/OFF
+# by default so the production boot is byte-identical to the one measured in the
+# header. They exist so a variant can be booted without editing this file:
+#
+#   MOE_BACKEND        vLLM's --moe-backend, forwarded verbatim when non-empty.
+#       Empty means vLLM's own "auto", which on this card picks Marlin for the
+#       weight-only NvFp4 weights (vllm/config/kernel.py MoEBackend; the boot
+#       logs the choice). Candidate spellings for the bisect: triton,
+#       batched_triton, triton_unfused, marlin. vLLM's argparse rejects anything
+#       it does not know, so a typo fails at boot rather than silently booting
+#       the incumbent.
+#   BATCH_INVARIANT    exported as VLLM_BATCH_INVARIANT, vLLM's batch-invariant
+#       mode: deterministic reductions (single-split attention, the deterministic
+#       scaled_mm/layernorm paths) instead of the fastest ones. 0 or 1 only —
+#       vLLM parses it with int(), so an empty or "true" value raises at import.
+#       Needs MAX_MODEL_LEN under ~100k; at 131072 the KV pool does not fit.
+MOE_BACKEND="${MOE_BACKEND:-}"
+BATCH_INVARIANT="${BATCH_INVARIANT:-0}"
 # CUDA graphs and the driver context, and ONLY those. It is deliberately not
 # an activations budget: the sampler transient below is the dominant
 # activation and is already counted, so adding a second activations figure
@@ -132,6 +215,19 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 export TOKENIZERS_PARALLELISM=false
 
 die() { echo "start-djev: $*" >&2; exit 2; }
+
+# Both levers are refused loudly rather than passed through, because a boot that
+# silently fell back to the incumbent would produce a header row that reports a
+# variant's numbers for a boot that was not that variant — which is the exact
+# failure this file exists to avoid measuring.
+case "$BATCH_INVARIANT" in
+    0|1) ;;
+    *) die "BATCH_INVARIANT must be 0 or 1 (vLLM parses VLLM_BATCH_INVARIANT with int()), got '$BATCH_INVARIANT'" ;;
+esac
+if [[ -n "$MOE_BACKEND" && ! "$MOE_BACKEND" =~ ^[a-z0-9_]+$ ]]; then
+    die "MOE_BACKEND must be one vLLM kernel name (triton, batched_triton, triton_unfused, marlin, ...), got '$MOE_BACKEND'"
+fi
+export VLLM_BATCH_INVARIANT="$BATCH_INVARIANT"
 
 # ── Preflight ─────────────────────────────────────────────────────────
 [[ -x "$PY" ]] || die "no venv at $VENV — run setup/setup-djev.sh"
@@ -164,6 +260,7 @@ cat <<EOF
 ==> djev: DiffusionGemma 26B-A4B NVFP4
     gpu            $GPU  $GPU_NAME  (${FREE_MIB} MiB free of ${TOTAL_MIB})
     context        $MAX_MODEL_LEN    canvas $CANVAS    max seqs $MAX_SEQS
+    kernels        moe ${MOE_BACKEND:-auto}    batch-invariant $VLLM_BATCH_INVARIANT
     kv dtype       $KV_CACHE_DTYPE    pool ${KV_CACHE_GB:-auto (the remainder)}
     ports          $PORT vllm, $STRUCTURED_PORT structured
     budget         weights ${WEIGHTS_MIB} + KV ${KV_MIB} + transient ${TRANSIENT_MIB}
@@ -201,6 +298,7 @@ fi
     --max-num-seqs "$MAX_SEQS" \
     --max-model-len "$MAX_MODEL_LEN" \
     --attention-backend "$ATTN" \
+    ${MOE_BACKEND:+--moe-backend "$MOE_BACKEND"} \
     --kv-cache-dtype "$KV_CACHE_DTYPE" \
     --gpu-memory-utilization "$GPU_UTIL" \
     ${KV_CACHE_GB:+--kv-cache-memory $(( ${KV_CACHE_GB:-0} * 1073741824 ))} \
