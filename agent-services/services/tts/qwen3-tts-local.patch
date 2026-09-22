@@ -1,7 +1,7 @@
-diff --git a/api/backends/optimized_backend.py b/api/backends/optimized_backend.py
+diff --git i/api/backends/optimized_backend.py w/api/backends/optimized_backend.py
 index 8b527c3..71a0138 100644
---- a/api/backends/optimized_backend.py
-+++ b/api/backends/optimized_backend.py
+--- i/api/backends/optimized_backend.py
++++ w/api/backends/optimized_backend.py
 @@ -127,8 +127,32 @@ class OptimizedQwen3TTSBackend(TTSBackend):
  
          logger.info(f"Loading {model_key!r} ({hf_id})…")
@@ -37,11 +37,11 @@ index 8b527c3..71a0138 100644
  
          from qwen_tts import Qwen3TTSModel
          torch.set_float32_matmul_precision("high")
-diff --git a/api/routers/openai_compatible.py b/api/routers/openai_compatible.py
-index 781f1f2..73aa099 100644
---- a/api/routers/openai_compatible.py
-+++ b/api/routers/openai_compatible.py
-@@ -654,6 +654,9 @@ async def create_speech(
+diff --git i/api/routers/openai_compatible.py w/api/routers/openai_compatible.py
+index c24a149..5107e92 100644
+--- i/api/routers/openai_compatible.py
++++ w/api/routers/openai_compatible.py
+@@ -822,6 +822,9 @@ async def create_speech(
              )
  
          # Encode audio to requested format (offloaded – pydub MP3 encoding is CPU-heavy)
@@ -51,3 +51,42 @@ index 781f1f2..73aa099 100644
          audio_bytes = await asyncio.to_thread(encode_audio, audio, request.response_format, sample_rate)
  
          # Return audio response
+diff --git i/config.yaml w/config.yaml
+index a913ded..61e5484 100644
+--- i/config.yaml
++++ w/config.yaml
+@@ -3,7 +3,7 @@
+ # The optimized backend reads this file at startup.
+ 
+ # Model to load on first request (must match a key in the `models` section below)
+-default_model: 0.6B-CustomVoice
++default_model: 1.7B-Base
+ 
+ # Available models.  Each entry maps a short name to a HuggingFace repo id (or
+ # a local path) and a model type ("customvoice" or "base").
+@@ -14,15 +14,22 @@ models:
+   0.6B-CustomVoice:
+     hf_id: Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
+     type: customvoice
++  # LOAD-BEARING ORDER: 1.7B-Base must stay the FIRST `type: base` entry.
++  # _base_model_key() returns the first one it finds, and every clone: request
++  # needs this model.  Restored 2026-09-22 after the tree was deleted; upstream's
++  # config.yaml ships 0.6B-Base first, which silently serves clones off the wrong
++  # model.
++  1.7B-Base:
++    # Absolute local path, NOT a hub id: the HF cache holds only the 0.6B, so a
++    # hub id here pulls ~4 GB mid-request on the first cloned utterance.
++    hf_id: /home/alansrobotlab/lloyd/agent-services/services/tts/qwen3-tts/models/Qwen3-TTS-12Hz-1.7B-Base
++    type: base
+   0.6B-Base:
+     hf_id: Qwen/Qwen3-TTS-12Hz-0.6B-Base
+     type: base
+   1.7B-CustomVoice:
+     hf_id: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+     type: customvoice
+-  1.7B-Base:
+-    hf_id: Qwen/Qwen3-TTS-12Hz-1.7B-Base
+-    type: base
+ 
+ # Performance optimizations (only used with TTS_BACKEND=optimized)
+ optimization:

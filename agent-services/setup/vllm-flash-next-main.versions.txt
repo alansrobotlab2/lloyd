@@ -1,4 +1,4 @@
-# vllm-flash-next-main venv — resolved 2026-09-18T00:45:38Z
+# vllm-flash-next-main venv — resolved 2026-09-22T19:21:51Z
 # rebuild: bash setup/setup-vllm-flash-next-main.sh
 # base wheel: vllm==0.2.1.dev19+gdff1bde84 (per-commit, main@dff1bde84dd6)
 # overlay:    none (PR #55557 merged upstream as dff1bde84dd6, 2026-09-16)
@@ -9,7 +9,7 @@ aiohttp==3.14.3
 aiosignal==1.4.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
-anthropic==1.6.0
+anthropic==1.8.0
 anyio==4.15.1
 apache-tvm-ffi==0.1.11
 astor==0.8.1
@@ -42,10 +42,10 @@ fastapi-cli==0.0.32
 fastapi-cloud-cli==0.26.0
 fastar==0.12.0
 fastsafetensors==0.4.0
-filelock==4.0.0
+filelock==4.0.1
 flashinfer-python==0.6.18.post1
 frozenlist==1.8.0
-fsspec==2026.7.0
+fsspec==2026.9.0
 googleapis-common-protos==1.75.3
 grpcio==1.84.0
 h11==0.16.0
@@ -77,14 +77,14 @@ MarkupSafe==3.0.3
 mcp==2.2.0
 mcp-types==2.2.0
 mdurl==0.1.2
-mistral_common==1.11.7
+mistral_common==1.12.0
 ml_dtypes==0.6.0
 model-hosting-container-standards==0.1.16
 mpmath==1.3.0
 msgspec==0.21.1
-multidict==6.8.0
+multidict==6.9.1
 nccl4py==0.5.0
-networkx==3.7rc0
+networkx==3.7
 ninja==1.13.2
 numba==0.65.0
 numpy==2.3.5
@@ -116,7 +116,7 @@ nvidia-nvshmem-cu13==3.4.5
 nvidia-nvtx==13.0.85
 nvidia-nvvm==13.4.92
 nvtx==0.2.15
-openai==3.14.1
+openai==3.18.0
 openai-harmony==0.0.8
 opencv-python-headless==5.0.0.93
 opentelemetry-api==1.44.0
@@ -177,7 +177,7 @@ tiktoken==0.14.0
 tilelang==0.1.12
 tokenizers==0.23.2
 tokenspeed-mla==0.1.8
-tokenspeed-triton==3.8.10.post20260906
+tokenspeed-triton==3.8.10.post20260920
 torch==2.13.0+cu130
 torch_c_dlpack_ext==0.1.5
 torchaudio==2.11.0+cu130
@@ -194,7 +194,7 @@ urllib3==2.8.0
 uvicorn==0.53.0
 uvloop==0.22.1
 vllm==0.2.1.dev19+gdff1bde84
-watchfiles==1.2.0
+watchfiles==1.3.0
 websockets==17.1
 xgrammar==0.2.7
 yarl==1.25.1
