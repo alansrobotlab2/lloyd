@@ -33,7 +33,7 @@ from agent_mcp._shared import (
     _FACT_QUERY_STOPWORDS,
     _SCORING_STOPWORDS,
     _find_entity_dir,
-    _get_entity_dirs_cached,
+    _get_rankable_entity_dirs_cached,
     _parse_fact_frontmatter,
     _resolve_entity,
 )
@@ -298,8 +298,11 @@ _ENTITY_PATTERN_CACHE_MAX = 4096
 def _entity_match_index(entities: list) -> tuple[dict, dict, dict]:
     """Return (first_token→names, token→names, name→token_set) for `entities`.
 
-    Cached on the identity of the list returned by `_get_entity_dirs_cached()`,
-    which is stable for the 60s TTL and replaced wholesale on refresh.
+    Cached on the identity of the list returned by
+    `_get_rankable_entity_dirs_cached()`, which is stable for the 60s TTL and
+    replaced wholesale on refresh. That slice carries the entity-dir scan minus
+    the filename-shaped rows, so a `.md` or dated name is absent from every
+    branch below and not merely scored down (#839).
     """
     global _entity_index_cache
     if _entity_index_cache is not None and _entity_index_cache[0] is entities:
@@ -418,7 +421,19 @@ def extract_entities_from_query(query: str) -> list:
         if w not in _SCORING_STOPWORDS and len(w) >= 2
     }
 
-    entities = _get_entity_dirs_cached()
+    # Candidate universe: every entity directory EXCEPT the filename-shaped ones
+    # (`.md`-suffixed or date-prefixed). Those two shapes were in here until #839,
+    # and the scoring below is length-scaled — `5.0 + min(len(name)/20, 2.0)` for
+    # a full-name hit, so a long token-rich filename is structurally favoured over
+    # a short canonical — which is how note filenames took seed slots behind
+    # `RECALL_SEED_TOP_K` and `FACT_MAX_ENTITIES`. 654 `.md` and 146 dated rows
+    # out of 26,354 directories, measured 2026-09-22 at HEAD a335979.
+    #
+    # The filter is at this boundary and nowhere deeper: `_get_facts_sync` and
+    # `fact_get` still read a `.md`-named entity, because those rows carry facts
+    # (627 of the 654) and only 41 have a canonical sibling to fold into. A row
+    # here is unreachable by query, not gone.
+    entities = _get_rankable_entity_dirs_cached()
     entity_lookup = {e.lower(): e for e in entities}
 
     scores: dict[str, float] = {}

@@ -10,7 +10,8 @@ Contents:
     - Pure helpers (_token_overlap, _levenshtein, _fuzzy_entity_match)
     - Fact frontmatter helpers (_parse_fact_frontmatter, _write_fact_frontmatter)
     - Entity resolution (_find_entity_dir, _load_aliases, _save_aliases,
-      _get_entity_dirs_cached, _resolve_entity) — aliases live in
+      _get_entity_dirs_cached, _get_rankable_entity_dirs_cached,
+      is_filename_shaped_entity, _resolve_entity) — aliases live in
       app.kg_store since the 2026-09 migration; the two helpers are
       store-backed shims kept for their callers' shape.
     - Cache invalidation (_invalidate_entity_dirs_cache)
@@ -614,9 +615,43 @@ def _write_fact_frontmatter(data: dict) -> str:
 
 # ── Entity directory cache ──────────────────────────────────────────────────
 
+# A directory whose name is a note filename, or a note dated by prefix, is a
+# rendering of some note — not a thing a query can be asking to learn about.
+# Fact extraction writes an entity for the note it came from, so the facts tree
+# holds both `Stompy Robotics` and `stompy-robotics.md`, and a dated note
+# becomes `2026-09-08-stompy-robotics`. Measured 2026-09-22 against the live
+# store at HEAD a335979: of 26,354 entity directories, 654 end in `.md` and 146
+# begin with an ISO date.
+#
+# Retrieval-side on purpose. These rows are NOT deleted and NOT folded: #839's
+# triage counted 627 of the 635 `.md` rows then present carrying facts, and only
+# 41 of those 635 having a sibling directory to fold into — so deleting them
+# would silently drop facts. What a row loses here is the right to compete for a
+# seed slot, nothing more.
+_MD_SUFFIX = ".md"
+_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def is_filename_shaped_entity(name: str) -> bool:
+    """True when an entity-dir name is a note filename or a date-prefixed note.
+
+    The offline twin is `is_artifact_name()` in
+    `scripts/memory/semantic-entity-resolution.py:202` (#729), which drops the
+    same two shapes at candidate generation so the LLM judge never sees them.
+    The two definitions are deliberately separate — that script is a standalone
+    CLI and must not import the running read path — and deliberately identical
+    in shape, because the read path needs no judge: it runs on every query.
+    """
+    n = (name or "").strip()
+    return n.endswith(_MD_SUFFIX) or bool(_DATE_PREFIX_RE.match(n))
+
+
 _entity_dirs_cache: Optional[tuple[float, list[str]]] = None
 # Lowercased name → on-disk name, rebuilt whenever _entity_dirs_cache is.
 _entity_dirs_index: Optional[dict[str, str]] = None
+# Names allowed to RANK as query seeds: _entity_dirs_cache[1] minus the
+# filename-shaped ones. Rebuilt in the same pass as that list, never on its own.
+_entity_dirs_rankable: Optional[list[str]] = None
 # st_mtime_ns of FACTS_ROOT at the last real scan; lets TTL expiry skip the
 # 64k-entry rescan when no entity dir was added or removed.
 _entity_dirs_mtime: Optional[int] = None
@@ -632,14 +667,22 @@ def _get_entity_dirs_cached() -> list[str]:
     rebuilding the match index costs ~500ms, so without this probe one query
     per minute paid that toll even when nothing had changed. Now the common
     case is a single stat().
+
+    Every name is in here, including the filename-shaped ones. Resolution
+    (`_find_entity_dir`, `get_facts_sync`) and fuzzy candidate bounds need them:
+    a `.md`-named row is usually where a note's facts actually live. A caller
+    that wants names to RANK a query against must call
+    `_get_rankable_entity_dirs_cached` instead (#839).
     """
-    global _entity_dirs_cache, _entity_dirs_index, _entity_dirs_mtime
+    global _entity_dirs_cache, _entity_dirs_index, _entity_dirs_rankable
+    global _entity_dirs_mtime
     now = time.monotonic()
     if _entity_dirs_cache is not None and (now - _entity_dirs_cache[0]) < _ENTITY_DIRS_TTL:
         return _entity_dirs_cache[1]
     if not FACTS_ROOT.exists():
         _entity_dirs_cache = (now, [])
         _entity_dirs_index = {}
+        _entity_dirs_rankable = []
         _entity_dirs_mtime = None
         return []
     try:
@@ -661,9 +704,19 @@ def _get_entity_dirs_cached() -> list[str]:
     # case-colliding dirs (OpenClaw/openclaw, Schema/schema, ...) to the other
     # directory — worth 0.005 MRR when it changed which facts got loaded.
     idx: dict[str, str] = {}
+    rankable: list[str] = []
     for n in names:
         idx.setdefault(n.lower(), n)
+        # One pass, so the shape test costs one scan per cache refresh (60s) and
+        # nothing at all per query. Filtering here rather than inside
+        # `extract_entities_from_query` is what keeps the 26k-entry loop off the
+        # hot path; filtering inside `_find_entity_dir`/`_get_facts_sync` instead
+        # would make the 627 fact-carrying `.md` rows unreadable, which #839's
+        # acceptance explicitly forbids.
+        if not is_filename_shaped_entity(n):
+            rankable.append(n)
     _entity_dirs_index = idx
+    _entity_dirs_rankable = rankable
     return names
 
 
@@ -673,11 +726,34 @@ def _get_entity_dirs_index() -> dict[str, str]:
     return _entity_dirs_index or {}
 
 
+def _get_rankable_entity_dirs_cached() -> list[str]:
+    """Entity-dir names allowed to RANK as query→entity seeds. Same 60s cache as
+    `_get_entity_dirs_cached`, minus every name `is_filename_shaped_entity`
+    rejects (#839).
+
+    This is a candidate-set boundary, not a resolution boundary: `_find_entity_dir`
+    and `get_facts_sync` still read a `.md`-named entity's facts, because those
+    rows carry facts (627 of the 654 `.md` rows do) and only 41 have a canonical
+    sibling to fold into. What a filename row loses is the length-scaled
+    full-name bonus — `5.0 + min(len(name)/20, 2.0)` in `retrieval.py` — that a
+    long token-rich filename collects over a short canonical name, and with it
+    the seed slots behind `RECALL_SEED_TOP_K` and `FACT_MAX_ENTITIES`.
+
+    The slice is never filtered independently: it is rebuilt in the same pass
+    over `names`, so no call can see a candidate list that is stale relative to
+    the scan the lowercase index came from.
+    """
+    _get_entity_dirs_cached()  # refreshes the cache, the index and this slice
+    return _entity_dirs_rankable or []
+
+
 def _invalidate_entity_dirs_cache() -> None:
     """Clear the entity-dir cache. Call after creating a new entity dir."""
-    global _entity_dirs_cache, _entity_dirs_index, _entity_dirs_mtime
+    global _entity_dirs_cache, _entity_dirs_index, _entity_dirs_rankable
+    global _entity_dirs_mtime
     _entity_dirs_cache = None
     _entity_dirs_index = None
+    _entity_dirs_rankable = None
     _entity_dirs_mtime = None
 
 

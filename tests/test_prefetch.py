@@ -857,3 +857,86 @@ def test_ambient_facts_are_empty_rather_than_wrong_for_an_unwritten_item(
     bullets = prefetch._search_facts("tell me about backlog item 363")
     wrong = [b for b in bullets if any(f"#{n}" in b for n in named)]
     assert not wrong, f"ambient block carried other items' facts: {wrong}"
+
+
+# ── #839: a filename-shaped row may never speak in the ambient block ─────────
+
+FILENAME_FACT_ENTITIES = ("Stompy Robotics", "stompy-robotics-build.md",
+                          "2026-09-08-stompy-robotics")
+
+
+def _filename_shape_facts_tree(tmp_path, monkeypatch):
+    """Facts tree over the query's subject plus one filename-shaped row of each
+    shape, every one carrying a confidence-1.0 fact, so all three are eligible
+    at the same confidence and only the seed ranking can choose between them.
+
+    The subject's fact is written so the test can tell the three apart by
+    content as well as by the `[entity]` prefix.
+    """
+    import yaml
+    import agent_mcp._shared as shared
+    from agent_mcp import retrieval, facts as facts_mod
+
+    facts_root = tmp_path / "facts"
+    facts_root.mkdir()
+    for mod in (shared, retrieval, facts_mod):
+        monkeypatch.setattr(mod, "FACTS_ROOT", facts_root)
+    shared._invalidate_entity_dirs_cache()
+    retrieval.invalidate_fact_file_cache()
+    retrieval._entity_index_cache = None
+
+    for entity in FILENAME_FACT_ENTITIES:
+        d = facts_root / entity
+        d.mkdir(parents=True, exist_ok=True)
+        fm = {"type": "facts", "entity": entity, "category": "activity",
+              "facts": [{"fact": f"{entity} says this", "id": "f-000",
+                         "confidence": 1.0}]}
+        (d / f"{entity}-activity.md").write_text(
+            f"---\n{yaml.dump(fm, sort_keys=False)}---\n")
+    return facts_root
+
+
+def test_ambient_fact_lines_are_never_prefixed_by_a_filename_shaped_entity(
+        tmp_path, monkeypatch):
+    """Clause 3. `prefetch._search_facts` takes the extractor's top
+    `FACT_MAX_ENTITIES` names and quotes each one's best facts with no query
+    token filter of its own, so on this consumer a filename-shaped seed is not
+    a wasted slot — it is a line in the prompt that speaks as the note's own
+    entity. The budget is 2, which is what makes one bad seed half the block.
+
+    The seam is the same import-identity one as #1024: `prefetch` binds
+    `_extract_entities_from_query` from `agent_mcp.facts`, which re-exports
+    `agent_mcp.retrieval.extract_entities_from_query`. The filter lives in the
+    candidate list retrieval reads, so this test is what shows the boundary
+    holds across the import.
+    """
+    _filename_shape_facts_tree(tmp_path, monkeypatch)
+    assert prefetch.FACT_MAX_ENTITIES == 2, (
+        f"the clause is stated at a budget of 2; it is now "
+        f"{prefetch.FACT_MAX_ENTITIES}, so this test no longer measures it")
+
+    bullets = prefetch._search_facts("stompy robotics")
+    assert bullets, "the subject has a fact; silence here is not the fix"
+    prefixed = [b.split("]")[0].lstrip("- [") for b in bullets]
+    shaped = [p for p in prefixed
+              if p.endswith(".md") or re.match(r"^\d{4}-\d{2}-\d{2}", p)]
+    assert not shaped, (
+        f"{len(shaped)} of {len(bullets)} ambient fact lines speak as a "
+        f"filename-shaped entity {shaped}: {bullets}")
+    assert "Stompy Robotics says this" in " ".join(bullets), (
+        f"the subject's own fact is missing from the ambient block: {bullets}")
+
+    # Positive control: over the UNFILTERED candidate list — what this path read
+    # before #839 — one of the two slots must go to a filename row. If the
+    # fixture ever stops producing that, this fires rather than letting the
+    # assert above pass for the wrong reason.
+    from agent_mcp import retrieval
+    import agent_mcp._shared as shared
+    monkeypatch.setattr(retrieval, "_get_rankable_entity_dirs_cached",
+                        shared._get_entity_dirs_cached)
+    unfixed = prefetch._search_facts("stompy robotics")
+    unfixed_prefixed = [b.split("]")[0].lstrip("- [") for b in unfixed]
+    assert any(p.endswith(".md") or re.match(r"^\d{4}-\d{2}-\d{2}", p)
+               for p in unfixed_prefixed), (
+        f"the fixture can no longer fail: no filename-shaped entity spoke even "
+        f"unfiltered — {unfixed}")

@@ -7,6 +7,7 @@ penalty stayed a no-op for four months and `fact_profile` kept returning
 import asyncio
 import inspect
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -127,6 +128,121 @@ def test_task_ids_dispatch_to_the_canonical_form(world):
     _write_facts(root, "Task #67", "state", [{"fact": "x", "id": "stat-001"}])
     ranked = dict(retrieval.extract_entities_from_query("what happened with task 67"))
     assert ranked["Task #67"] == 10.0
+
+
+# ── Filename-shaped rows never rank as seeds (#839) ──────────────────────────
+
+# The two shapes, each isolated: one `.md`-suffixed, one date-prefixed with no
+# suffix. A fixture whose dated row also ended in `.md` could pass on the suffix
+# branch alone and report nothing about the date branch. Measured 2026-09-22 at
+# HEAD a335979, the live facts tree held 654 `.md`-suffixed and 146 date-prefixed
+# entity directories out of 26,354 — rows like `autonomy-system.md` and
+# `2026-06-25-scalable-robot-evaluation-benchmarks.md`.
+FILENAME_SEEDS = ("stompy-robotics-build.md", "2026-09-08-stompy-robotics")
+SEED_QUERY = "stompy robotics"
+
+
+def _filename_shaped(names) -> list[str]:
+    """#839's acceptance check, restated here rather than borrowed.
+
+    The test must not ask the product's own `is_filename_shaped_entity` what a
+    filename is: a predicate that stopped matching would then take the assertion
+    with it and the test would report a pass from inside its own failure.
+    """
+    return [n for n in names
+            if n.endswith(".md") or re.match(r"^\d{4}-\d{2}-\d{2}", n)]
+
+
+def _filename_shaped_tree(root):
+    """The query's subject plus one row of each filename shape naming it.
+
+    Both shapes have to rank BEFORE the filter, or the test below cannot fail.
+    Token-overlap scores `(overlap^2) / (entity_tokens * query_tokens)`, so a
+    long name falls under the 0.25 floor and never reaches the list even
+    unfixed. At this width both clear it: over the unfiltered candidate list
+    `stompy-robotics-build.md` ranks 0.5 and `2026-09-08-stompy-robotics` 0.4
+    beside `Stompy Robotics`'s 5.75 — 2 of the 3 slots the query produced went
+    to rows that are a rendering of a note, which is the harm #839 measures.
+    """
+    _write_facts(root, "Stompy Robotics", "state",
+                 [{"fact": "Stompy Robotics is the biped project",
+                   "id": "sub-001"}])
+    for i, name in enumerate(FILENAME_SEEDS):
+        _write_facts(root, name, "state",
+                     [{"fact": f"{name} is a note rendering",
+                       "id": f"note-{i:03d}"}])
+
+
+def test_a_filename_shaped_row_never_ranks_as_a_seed(world, monkeypatch):
+    """Clause 1: neither shape may appear in `extract_entities_from_query`'s
+    output. The extractor used to take its whole candidate universe from
+    `_get_entity_dirs_cached`, and branch 2's full-name bonus is scaled by name
+    length — `5.0 + min(len(name) / 20, 2.0)` — which structurally favours a
+    long token-rich filename over the short canonical name of the same note."""
+    root, _ = world
+    _filename_shaped_tree(root)
+    ranked = retrieval.extract_entities_from_query(SEED_QUERY)
+    leaked = _filename_shaped([n for n, _ in ranked])
+    assert not leaked, (
+        f"filename-shaped rows reached the seed ranking at "
+        f"{[(n, s) for n, s in ranked if n in leaked]}: the candidate boundary "
+        "is where #839 filters, so neither shape may be scored at all")
+
+    # Positive control, so the pass above cannot be vacuous. Handing the
+    # extractor the UNFILTERED list — what it read before #839 — must rank both
+    # rows. If the fixture ever stops producing a rankable filename candidate
+    # (a rename, a scoring change), this fires instead of the assert above.
+    import agent_mcp._shared as shared
+    monkeypatch.setattr(retrieval, "_get_rankable_entity_dirs_cached",
+                        shared._get_entity_dirs_cached)
+    unfiltered = [n for n, _ in retrieval.extract_entities_from_query(SEED_QUERY)]
+    missing = [n for n in FILENAME_SEEDS if n not in unfiltered]
+    assert not missing, (
+        f"the fixture is no longer capable of failing: {missing} did not rank "
+        f"even over the unfiltered candidate list {unfiltered}")
+
+
+def test_the_entity_a_filename_names_still_ranks_after_the_filter(world):
+    """Clause 2: filtering de-noises the seed slice, it does not evict the
+    subject. `stompy-robotics-build.md` and `2026-09-08-stompy-robotics` both
+    name the note whose entity is `Stompy Robotics`; dropping the renderings
+    must leave that entity ranked at the score it always earned."""
+    root, _ = world
+    _filename_shaped_tree(root)
+    ranked = dict(retrieval.extract_entities_from_query(SEED_QUERY))
+    assert "Stompy Robotics" in ranked, (
+        "the query's subject disappeared with the filename rows that named it")
+    # Derived, not a magic number: branch 2's full-name bonus for a 15-char
+    # canonical name is 5.0 + 15/20.
+    assert ranked["Stompy Robotics"] == 5.0 + len("stompy robotics") / 20.0
+    assert max(ranked, key=ranked.get) == "Stompy Robotics"
+
+
+def test_a_filename_named_entity_is_still_readable(world):
+    """Clause 4: the filter is a candidate-set boundary, not a resolution one.
+
+    Deleting the `.md` rows is the tempting fix and it is wrong — #839's triage
+    counted 627 of the 635 `.md` rows then present carrying facts, with only 41
+    of those 635 having a canonical sibling to fold into, so the removal would
+    drop facts with nothing to receive them. A row may be unreachable by query
+    and still readable by name, and `fact_get` is the read a person and the
+    agent both make, so it is pinned through the tool handler as well."""
+    root, _ = world
+    for name in FILENAME_SEEDS:
+        _write_facts(root, name, "state",
+                     [{"fact": f"{name} is a note rendering", "id": "note-000"}])
+    for name in FILENAME_SEEDS:
+        expected = [f"{name} is a note rendering"]
+        direct = [f["fact"] for f in
+                  (facts_mod._get_facts_sync(name).get("facts") or [])]
+        assert direct == expected, (
+            f"_get_facts_sync({name!r}) read {direct}: the filter must not reach "
+            "into entity resolution, where these rows are where a note's facts "
+            "actually live")
+        through_tool = [f["fact"] for f in
+                        (facts_mod._fact_get({"entity": name}).get("facts") or [])]
+        assert through_tool == expected, (
+            f"fact_get({name!r}) read {through_tool} through the same read path")
 
 
 # ── How many query entities become seeds (#843) ──────────────────────────────
