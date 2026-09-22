@@ -3822,3 +3822,251 @@ def test_the_miner_still_mines_rows_that_carry_the_new_field(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     fm = graphex_candidate(out)
     assert re.search(r"^sessions: 2$", fm, re.MULTILINE), fm
+
+
+# ── INDEX.md indexes the corpus, not the run that wrote it (backlog #720) ────
+#
+# `write_index(candidate_files, output_dir)` was fed `[os.path.basename(p) for p in
+# written]` — only the files the *current* run wrote — so the one document Phase 1.1
+# of the consolidation runbook reads first reported that batch as the corpus.
+# Measured on the live tree the hour this round opened: `INDEX.md` carried
+# `**Total candidates:** 3` over 3 rows while the same directory held **3,936**
+# `candidate-*.md` (`ls … | wc -l`). Task #58 had logged the same mismatch on
+# 2026-09-17 with the batch empty: `Total candidates: 0` against 3,919 files. So the
+# defect is the row-set source, not the miner's output volume, and it reproduces
+# today precisely because a nightly run writes almost nothing.
+#
+# Three further defects lived in the same function:
+#   * the Summary counted a filename containing the substring `error`, and **0** of
+#     the live corpus's filenames contain it (`ls candidate-*.md | grep -c error` → 0),
+#     so `Error patterns` was structurally 0 and every error candidate was charged to
+#     `Success patterns`: run over the 3,936-file store the old lines report
+#     `Error patterns: 0 / Success patterns: 466`, where the counts read from the files'
+#     own `type:` keys are 126 error and 340 success, and both sum to the same 466
+#     (#516, closed by an expiry sweep on 2026-09-15 and never fixed);
+#   * the input list was emitted row-per-entry with no dedupe, so one file named
+#     twice produced two rows (the emitter de-dupes upstream since #1131 clause 5,
+#     but `scripts/rebuild-skill-candidates-index.py` builds its own list);
+#   * a file whose front matter has no `status:` line rendered `Status: ?`.
+#
+# The denominator everywhere below is `candidate-*.md`, never `*.md`: the latter
+# counts `INDEX.md` itself and would be off by one forever.
+
+CANDIDATE_GLOB = "candidate-*.md"
+
+
+def seed_candidate(out_dir, name, *, type_, pattern="Bash/timeout", sessions=3,
+                   status=None):
+    """Write one candidate file the way `write_candidate_file` writes one: YAML
+    front matter, then a body. `status=None` omits the `status:` key entirely,
+    which is the state clause 4 is about."""
+    lines = ["---", "candidate: true", f"pattern: {pattern}",
+             f"type: {type_}", f"sessions: {sessions}"]
+    if status is not None:
+        lines.append(f"status: {status}")
+    lines += ["---", "", "# Skill Candidate: seeded for #720"]
+    (Path(out_dir) / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def index_field(index_text, label):
+    m = re.search(rf"\*\*{re.escape(label)}:\*\* (\d+)", index_text)
+    assert m, f"{label!r} missing from the index Summary:\n{index_text[:400]}"
+    return int(m.group(1))
+
+
+def index_rows(index_text, name=None):
+    """The candidate rows, optionally narrowed to one filename."""
+    pat = r"^- \[candidate-" if name is None else r"^- \[" + re.escape(name) + r"\]"
+    return re.findall(pat, index_text, re.MULTILINE)
+
+
+def index_statuses(index_text):
+    """basename -> the Status column of its row, for every candidate row."""
+    return {m.group(1): m.group(2) for m in re.finditer(
+        r"^- \[([^\]]+)\]\([^\)]*\) — Pattern: `[^`]*` — Sessions: \S+ — Status: (.+)$",
+        index_text, re.MULTILINE)}
+
+
+def test_the_index_lists_every_candidate_on_disk_when_this_run_wrote_none(tmp_path):
+    """Clause 1, and the exact reproduction triage left behind: three
+    `candidate-*.md` files already in the output dir, an empty batch handed to the
+    emitter. Pre-fix this printed `Total candidates: 0` over 0 rows with 3 files on
+    disk — which is how the live index came to report 3 against 3,936."""
+    out = tmp_path / "cands"
+    out.mkdir()
+    seed_candidate(out, "candidate-bash-timeout-20260101.md", type_="error")
+    seed_candidate(out, "candidate-read-logic-20260102.md", type_="error",
+                   status="reviewed_no_skill")
+    seed_candidate(out, "candidate-seq-3-a-b-c-20260103.md", type_="sequence",
+                   pattern="seq-3-a-b-c")
+
+    mt.write_index([], out)
+
+    index = (out / "INDEX.md").read_text(encoding="utf-8")
+    on_disk = len(list(out.glob(CANDIDATE_GLOB)))
+    assert on_disk == 3, "the fixture seeded the wrong number of files"
+    assert index_field(index, "Total candidates") == on_disk, index
+    assert len(index_rows(index)) == on_disk, index
+
+
+def test_the_index_type_counts_come_from_each_indexed_files_own_type_field(tmp_path):
+    """Clause 2. The old Summary grepped the *filename* for the substring `error`,
+    and no candidate filename contains it (0 of the live corpus's 3,936), so every
+    error candidate was charged to `Success patterns` and `Error patterns` was
+    structurally 0. The counts now come from each indexed file's own `type:` front
+    matter — the field `write_candidate_file` already writes — and sum to Total."""
+    errs = tmp_path / "err-only"
+    errs.mkdir()
+    for day in ("20260101", "20260102", "20260103"):
+        seed_candidate(errs, f"candidate-bash-timeout-{day}.md", type_="error")
+    mt.write_index([], errs)
+    index = (errs / "INDEX.md").read_text(encoding="utf-8")
+    assert index_field(index, "Error patterns") == 3, index
+    assert index_field(index, "Success patterns") == 0, index
+    assert index_field(index, "Sequence patterns") == 0, index
+    assert (index_field(index, "Error patterns")
+            + index_field(index, "Success patterns")
+            + index_field(index, "Sequence patterns")) == index_field(
+                index, "Total candidates"), index
+
+    # All three classes in one dir, the shape the live corpus is actually in
+    # (126 error / 340 success / 3470 sequence measured 2026-09-22).
+    mixed = tmp_path / "mixed"
+    mixed.mkdir()
+    seed_candidate(mixed, "candidate-bash-timeout-20260101.md", type_="error")
+    seed_candidate(mixed, "candidate-read-usage-20260101.md", type_="success",
+                   pattern="Read/usage")
+    seed_candidate(mixed, "candidate-write-usage-20260102.md", type_="success",
+                   pattern="Write/usage")
+    for day in ("20260101", "20260102", "20260103", "20260104"):
+        seed_candidate(mixed, f"candidate-seq-3-a-b-c-{day}.md", type_="sequence",
+                       pattern="seq-3-a-b-c")
+    mt.write_index([], mixed)
+    index = (mixed / "INDEX.md").read_text(encoding="utf-8")
+    assert (index_field(index, "Error patterns"),
+            index_field(index, "Success patterns"),
+            index_field(index, "Sequence patterns")) == (1, 2, 4), index
+    assert index_field(index, "Total candidates") == 7, index
+
+    # The falsifier that the counts read the field and not the name: a file named
+    # like a sequence whose own `type:` says error, and the converse. A filename
+    # heuristic is wrong in both directions here; the front matter is right in both.
+    odd = tmp_path / "odd"
+    odd.mkdir()
+    seed_candidate(odd, "candidate-seq-3-a-b-c-20260101.md", type_="error")
+    seed_candidate(odd, "candidate-read-usage-20260102.md", type_="sequence",
+                   pattern="seq-2-read-edit")
+    mt.write_index([], odd)
+    index = (odd / "INDEX.md").read_text(encoding="utf-8")
+    assert (index_field(index, "Error patterns"),
+            index_field(index, "Success patterns"),
+            index_field(index, "Sequence patterns")) == (1, 0, 1), index
+
+
+def test_one_candidate_name_named_twice_by_the_input_still_yields_one_row(tmp_path):
+    """Clause 3. `emit_candidates` de-dupes upstream since #1131 clause 5, so
+    `main()` cannot hand a repeated path today, but the emitter's own loop had no
+    guard and `write_index` has a second caller-shaped writer —
+    `scripts/rebuild-skill-candidates-index.py` builds its own list from a glob.
+    Pre-fix, one name passed twice emitted 2 rows for 1 file."""
+    out = tmp_path / "cands"
+    out.mkdir()
+    name = "candidate-bash-timeout-20260101.md"
+    seed_candidate(out, name, type_="error")
+
+    mt.write_index([name, name], out)
+
+    index = (out / "INDEX.md").read_text(encoding="utf-8")
+    assert len(index_rows(index, name)) == 1, index
+    assert index_field(index, "Total candidates") == 1, index
+    assert len(index_rows(index)) == len(list(out.glob(CANDIDATE_GLOB))), index
+
+
+def test_a_candidate_with_no_status_line_is_listed_not_yet_dispositioned(tmp_path):
+    """Clause 4. A candidate whose front matter carries no `status:` line is one
+    nobody has dispositioned, and `Status: ?` read as a parsing artifact rather
+    than a verdict. A file that does carry one still reports its own value — this
+    is about the missing key, never about overriding a decision."""
+    out = tmp_path / "cands"
+    out.mkdir()
+    seed_candidate(out, "candidate-read-logic-20260101.md", type_="error")
+    seed_candidate(out, "candidate-bash-timeout-20260102.md", type_="error",
+                   status="reviewed_no_skill")
+
+    mt.write_index([], out)
+
+    index = (out / "INDEX.md").read_text(encoding="utf-8")
+    listed = index_statuses(index)
+    assert listed == {"candidate-read-logic-20260101.md": "not-yet-dispositioned",
+                      "candidate-bash-timeout-20260102.md": "reviewed_no_skill"}, index
+    assert "Status: ?" not in index, index
+    assert "pending_review" not in index, index
+
+
+def test_a_live_mining_run_indexes_the_candidates_earlier_runs_left_behind(tmp_path):
+    """#720 across the process boundary the nightly actually crosses: the real
+    command line, its own candidate files, the index it regenerates. Two files from
+    an earlier run sit in the output dir untouched — one already dispositioned
+    (`superseded_by_verdict`), one never dispositioned. Pre-fix the regenerated
+    index listed only this run's batch, so the store's three files appeared as one
+    and the older evidence vanished from the only document Phase 1.1 reads."""
+    corpus = write_traj_corpus(tmp_path / "corpus", [])
+    rows = [miner_row("i1", "interactive"), miner_row("i2", "interactive")]
+    (corpus / CORPUS_BUCKET).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    out = tmp_path / "cands"
+    out.mkdir()
+    seeded = {"candidate-olderror-20260101.md": "error",
+              "candidate-oldseq-20260101.md": "sequence"}
+    seed_candidate(out, "candidate-olderror-20260101.md", type_="error",
+                   pattern="Old/error", status="superseded_by_verdict")
+    seed_candidate(out, "candidate-oldseq-20260101.md", type_="sequence",
+                   pattern="seq-2-old-error")
+
+    proc = run_miner(corpus, out)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    index = (out / "INDEX.md").read_text(encoding="utf-8")
+    on_disk = sorted(p.name for p in out.glob(CANDIDATE_GLOB))
+    new = [n for n in on_disk if n not in seeded]
+    assert len(new) == 1, f"expected the corpus to mine exactly one candidate, got {new}"
+    assert index_field(index, "Total candidates") == len(on_disk), index
+    assert len(index_rows(index)) == len(on_disk), index
+    # Both older files are still indexed, with their own status.
+    assert len(index_rows(index, "candidate-olderror-20260101.md")) == 1, index
+    assert len(index_rows(index, "candidate-oldseq-20260101.md")) == 1, index
+    listed = index_statuses(index)
+    assert listed["candidate-olderror-20260101.md"] == "superseded_by_verdict", index
+    assert listed["candidate-oldseq-20260101.md"] == "not-yet-dispositioned", index
+    # The two seeded files plus the one this run wrote (`Graphex493/not_found`, an
+    # error pattern), attributed by their own `type:` fields across the boundary.
+    assert "type: error" in graphex_candidate(out), graphex_candidate(out)[:200]
+    assert (index_field(index, "Error patterns"),
+            index_field(index, "Success patterns"),
+            index_field(index, "Sequence patterns")) == (2, 0, 1), index
+
+
+def test_the_consolidation_runbook_says_which_index_columns_are_advisory():
+    """Clause 5. §1.1 of `skills/nightly-skill-consolidation/SKILL.md` is a bare
+    `cat …/INDEX.md`, and the Status column it presents is a pre-disposition
+    snapshot by design: §5.1 writes dispositions *after* the mining run regenerated
+    the index, so that column is a lower bound however correct the generator is.
+    The clause asks for the `cat` to stay with a caveat naming the advisory column,
+    so the assertion is that §1.1 names Status and says it is advisory — and that
+    the `cat` is still there, because replacing it was the other allowed answer and
+    a test that passed on both would not pin the caveat.
+
+    No skip when the file is missing: this clause's subject is a tree outside the
+    gated repo, and a guard that could go quietly unverified would repeat the defect
+    it is guarding (`tests/test_automod_doc_claims.py` reads the same tree
+    unguarded for the same reason)."""
+    from app.paths import VAULT_ROOT
+
+    skill = VAULT_ROOT / "skills" / "nightly-skill-consolidation" / "SKILL.md"
+    assert skill.is_file(), f"clause 5's subject is absent: {skill} does not exist"
+    text = skill.read_text(encoding="utf-8")
+    section = text[text.index("### 1.1"):text.index("### 1.2")]
+    assert "INDEX.md" in section, section
+    assert "Status" in section and "advisory" in section.lower(), (
+        "§1.1 still presents the index as authoritative with no caveat naming the "
+        f"advisory column:\n{section}")

@@ -668,8 +668,13 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker",
     `window`, when given a dict, is filled with `{"files": n, "rows": n}`: how many
     dated JSONL buckets fell in the window and how many rows they held. That is what
     lets a caller tell an empty window from a filter that selected nothing (#998) —
-    without it the two empties print identically, and a mis-set filter exits 0 while
-    `write_index` rewrites the live candidate index to `Total candidates: 0`.
+    without it the two empties print identically and a mis-set filter exits 0. The
+    reason that mattered was `write_index`: a zero run reached it with an empty batch
+    and the live index reported `Total candidates: 0` over 3,920 files on disk, which
+    was #998's symptom and is #720's cause. `write_index` now reports the store rather
+    than the batch and the guard below still stops a zero run from rewriting the index
+    at all, so neither half of that sentence is reachable — but the window dict is
+    still the only thing that distinguishes the two empties, which is what this is for.
     """
     trajectories = []
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
@@ -1809,10 +1814,106 @@ This pattern should be encoded as a skill with:
     return str(filepath)
 
 
+#: The `type:` values `write_candidate_file` writes. The index Summary counts over
+#: exactly these keys, so a candidate whose `type:` is absent or foreign is reported
+#: under `Uncoded patterns` instead of being folded into Success — #516's miscount,
+#: absorbed into #720 because #516 was closed by an expiry sweep on 2026-09-15.
+INDEX_TYPES = ("error", "success", "sequence")
+
+#: What a candidate nobody has dispositioned yet is listed as. Chosen over `?`, which
+#: reads as a parsing artifact rather than a state of the file (#720 clause 4).
+NOT_DISPOSITIONED = "not-yet-dispositioned"
+
+
+def candidate_front_matter(filepath: Path) -> str | None:
+    """The YAML front matter block of one candidate file, or None if it cannot be read.
+
+    Stops at the closing `---`, so a 3 KB body is never read for one metadata line. The
+    scan is the one the index always used, lifted out so the row loop and the type
+    counts read the same bytes once.
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            lines = []
+            for line in f:
+                lines.append(line)
+                if line.strip() == '---' and len(lines) > 1:
+                    break
+            return ''.join(lines)
+    except Exception:
+        return None
+
+
+def front_field(front_matter: str, key: str) -> str | None:
+    """One top-level front-matter key, or None when the file does not carry it.
+
+    Anchored to line start on purpose: unanchored, `type:` also matches the
+    `type: success` sitting inside a quoted `review_reason` sentence, and the live
+    candidate corpus carries that shape (`grep -c 'type: success'` returns 2 on
+    `_pipeline/skills/candidates/candidate-ambient-decide-reasoning-session-id-summary-surfac-20260908.md`).
+    """
+    m = re.search(rf'^{key}:\s*(\S+)', front_matter, re.MULTILINE)
+    return m.group(1) if m else None
+
+
 def write_index(candidates: list[str], output_dir: Path) -> None:
-    """Write/update the INDEX.md file."""
+    """Write/update INDEX.md over **every candidate in `output_dir`**, not over the
+    batch the calling run wrote.
+
+    The corpus on disk is the unit because of who reads the file: Phase 1.1 of
+    `nightly-skill-consolidation` starts from this index, and an index of one run
+    presented as the store is worse than no index. `candidates` — the files this run
+    wrote — survives as a per-run figure and nothing else. It used to be both the row
+    set and the totals, which is how the live index came to report
+    `Total candidates: 3` over 3 rows while **3,936** `candidate-*.md` files sat in the
+    same directory, and `Total candidates: 0` against 3,919 the morning of 2026-09-17
+    (#720; `autonomy-runs/58/run_58_20260917_095443.md:100` logged that second reading
+    independently).
+
+    Three further defects in the same function, each now pinned by a node in
+    `tests/test_trajectory_extraction.py`:
+
+      * the Summary counted filenames containing the substring `error`, which no
+        candidate filename contains, so `Error patterns` was structurally 0 and every
+        error candidate was charged to `Success patterns`;
+      * the row loop had no dedupe, so one name passed twice emitted two rows —
+        `emit_candidates` de-dupes upstream since #1131 clause 5, but
+        `scripts/rebuild-skill-candidates-index.py` builds its own list;
+      * a file with no `status:` key rendered `Status: ?`.
+
+    Cost of indexing the whole store rather than a batch was measured on that corpus:
+    3,936 files, 12.5 MB, **0.06 s** to read every front-matter block.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
     index_path = output_dir / "INDEX.md"
-    
+    # The glob is the row set, the dedupe and the denominator, all three by
+    # construction. `candidate-*.md` and not `*.md`: INDEX.md is not a candidate, so a
+    # check worded on `*.md` is off by one forever.
+    rows = sorted(p.name for p in output_dir.glob("candidate-*.md"))
+
+    type_counts = dict.fromkeys(INDEX_TYPES, 0)
+    uncoded = 0
+    body = []
+    for candidate in rows:
+        front_matter = candidate_front_matter(output_dir / candidate)
+        if front_matter is None:
+            uncoded += 1
+            body.append(f"- [{candidate}]({candidate}) — (could not read)\n")
+            continue
+        pattern = front_field(front_matter, "pattern") or "unknown"
+        sessions = front_field(front_matter, "sessions") or "?"
+        status = front_field(front_matter, "status") or NOT_DISPOSITIONED
+        file_type = front_field(front_matter, "type")
+        if file_type in type_counts:
+            type_counts[file_type] += 1
+        else:
+            # Counted as its own line, never folded into Success: a file whose `type:`
+            # is missing or foreign is a gap in the writer, and the Summary has to
+            # show it rather than hide it in the nearest plausible bucket.
+            uncoded += 1
+        body.append(f"- [{candidate}]({candidate}) — Pattern: `{pattern}` — "
+                    f"Sessions: {sessions} — Status: {status}\n")
+
     content = """---
 type: index
 scope: skill-candidates
@@ -1823,53 +1924,30 @@ scope: skill-candidates
 This index tracks all skill candidates discovered through trajectory mining.
 Generated by `mine-trajectories.py`.
 
+Every `candidate-*.md` in this directory is listed, whichever run wrote it. `Status`
+is the value each file carried **when this index was generated**, so a disposition
+written after that point — which is what `nightly-skill-consolidation` §5.1 does — is
+not reflected here; that runbook reads each file's own front matter for the verdict.
+
 ## Summary
 
 """
-    
-    error_count = sum(1 for c in candidates if "error" in c and "seq-" not in c)
-    sequence_count = sum(1 for c in candidates if c.startswith("candidate-seq-"))
-    success_count = len(candidates) - error_count - sequence_count
 
-    content += f"""- **Total candidates:** {len(candidates)}
-- **Error patterns:** {error_count}
-- **Success patterns:** {success_count}
-- **Sequence patterns:** {sequence_count}
+    content += f"""- **Total candidates:** {len(rows)}
+- **Error patterns:** {type_counts['error']}
+- **Success patterns:** {type_counts['success']}
+- **Sequence patterns:** {type_counts['sequence']}
+"""
+    if uncoded:
+        content += f"- **Uncoded patterns:** {uncoded}\n"
+    content += f"""- **Written by this run:** {len({Path(c).name for c in candidates})}
 - **Last updated:** {datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}
 
 ## Candidates
 
 """
-    
-    for candidate in sorted(candidates):
-        filepath = output_dir / candidate
-        if filepath.exists():
-            # Try to extract frontmatter
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    first_lines = []
-                    in_frontmatter = False
-                    for line in f:
-                        first_lines.append(line)
-                        if line.strip() == '---' and len(first_lines) > 1:
-                            if not in_frontmatter:
-                                in_frontmatter = True
-                            else:
-                                break
-                    # Parse frontmatter
-                    frontmatter = ''.join(first_lines)
-                    pattern_match = re.search(r'pattern:\s*(\S+)', frontmatter)
-                    pattern = pattern_match.group(1) if pattern_match else "unknown"
-                    sessions_match = re.search(r'sessions:\s*(\d+)', frontmatter)
-                    sessions = sessions_match.group(1) if sessions_match else "?"
-                    status_match = re.search(r'status:\s*(\S+)', frontmatter)
-                    status = status_match.group(1) if status_match else "?"
-                    
-                    content += f"- [{candidate}]({candidate}) — Pattern: `{pattern}` — Sessions: {sessions} — Status: {status}\n"
-            except Exception:
-                content += f"- [{candidate}]({candidate}) — (could not parse)\n"
-        else:
-            content += f"- [{candidate}]({candidate}) — (file missing)\n"
+
+    content += "".join(body)
     
     content += f"""
 
@@ -1972,12 +2050,19 @@ def print_stats(trajectories: list[dict],
 #
 # A run that loads nothing used to be indistinguishable from a productive one in
 # three ways at once: it printed an ordinary SUMMARY, it exited 0, and it
-# rewrote `INDEX.md` to `Total candidates: 0`. The third is the damaging one —
-# `write_index` lists only what the current run emitted, so a zero run replaces
+# rewrote `INDEX.md` to `Total candidates: 0`. The third was the damaging one —
+# `write_index` listed only what the current run emitted, so a zero run replaced
 # the index a reader or downstream agent consults, and `_pipeline/` is
 # gitignored (`.gitignore:25`), so no diff ever shows it. Measured 2026-09-16:
 # the live index read `Total candidates: 0` while 3,920 `candidate-*.md` files
 # sat in the same directory.
+#
+# #720 removed that third symptom at its source: `write_index` now lists every
+# `candidate-*.md` in the directory, so an empty batch reports the store instead of
+# erasing it. The guard below is still load-bearing for the other two symptoms, and for
+# a third reason #720 makes visible — a zero run's index would also re-snapshot every
+# `Status:` value, and the runbook's §1.1 treats those as "as of generation", so a run
+# that mined nothing has no business restating them.
 #
 # The two empties are different events and must not share an exit status:
 #   * no trajectory rows in the window at all — a legitimately quiet day. Exit 0,
