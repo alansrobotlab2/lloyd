@@ -131,6 +131,12 @@ from app.harness.bench_corpus import (
     DENY_MARKER as BENCH_DENY_MARKER,
     corpus_read_attempts, corpus_reads_succeeded, probe_ledger_fields, rubric_probes,
 )
+# Also module-level: recognising a delivered skill body is pure text work on the
+# events the stream already handed us, so the field cannot depend on a harness
+# being importable at the moment the trace is post-processed. `injected_skill_names`
+# is the same module's other half — the turn-start route — and both are the
+# single source for which skill reached a trial by which route (#779).
+from app.harness.skill_dispatch import delivered_skill_names, injected_skill_names
 
 logger = logging.getLogger("autoresearch.bench_runner_sdk")
 
@@ -374,6 +380,12 @@ async def _consume(messages: list[dict[str, Any]], options: Any, trace: dict[str
 
     pending: dict[str, dict[str, Any]] = {}
     text_parts: list[str] = []
+    # #779: written incrementally rather than at the end, because a trial that
+    # times out has this coroutine cancelled mid-stream and anything still held
+    # locally dies with it — and a body delivered before the timeout is exactly
+    # the leak the without-arm record has to show. `setdefault` so a caller that
+    # hands `_consume` a bare trace (a harness-faithful unit test) does not raise.
+    trace.setdefault("skills_delivered", [])
 
     prompt = messages[-1].get("content", "") if messages else ""
     events = record_events(run_query(messages, options),
@@ -412,6 +424,20 @@ async def _consume(messages: list[dict[str, Any]], options: Any, trace: dict[str
                 trace["denied_calls"].append(entry)
             else:
                 trace["tool_calls"].append(entry)
+
+            # #779 — the second skill-delivery route, made visible. A held call
+            # is answered with a synthetic tool_result carrying the body and the
+            # `<skill-dispatch name="…">` marker `render_delivery` writes; a
+            # without-arm that has one of these reached its model withheld
+            # nothing, and the Δ it measures is void. Read off the full content,
+            # not `entry["result_excerpt"]`: the excerpt is capped at 500 chars,
+            # and an excerpt that stopped short of the marker would report a
+            # delivered body as a withheld one — the inversion of what this field
+            # is for. First-seen order, deduped: the field lists the bodies that
+            # arrived, not how many times the module noticed them.
+            for skill in sorted(delivered_skill_names(content)):
+                if skill not in trace["skills_delivered"]:
+                    trace["skills_delivered"].append(skill)
         elif etype == "text_delta":
             if evt.get("text"):
                 text_parts.append(evt["text"])
@@ -504,6 +530,18 @@ async def run_trial(
         "bench_probes": [],
         "corpus_read_attempts": 0,
         "corpus_reads_succeeded": 0,
+        # #779 — the skill-delivery regime, one field per route, because #536
+        # made it two routes. A body can reach this trial's model at turn start
+        # (the `<skill name="…">` block a caller hands as `prefetched_text`) or
+        # mid-turn at the tool call (the deliverer's synthetic tool_result), and
+        # an arm that controls only the first can leak through the second: the
+        # measured Δ then collapses for exactly the skills whose rules fire, and
+        # the experiment reports "inert" for a body it never withheld. `None` on
+        # the row means the trace had no skill channel at all; an empty list here
+        # means a route was checked and delivered nothing.
+        "skills_injected": [],
+        "skills_delivered": [],
+        "skill_dispatch_installed": False,
     }
     if not prompt:
         trace["status"] = "error"
@@ -529,6 +567,20 @@ async def run_trial(
     # trace instead of silently disagreeing with a constant here — the whole
     # point being that the regime a score was measured under is attributable.
     trace["tool_search_enabled"] = bool(getattr(options, "tool_search_enabled", False))
+    # #779, same reasoning and same shape. Whether the dispatch deliverer is on
+    # the registry this trial is about to run with is a property of the object
+    # `build_options` settled — a caller's factory may return anything, and
+    # `install_skill_dispatch_hook` declines on a config it cannot see from here.
+    # Read off the built registry, so the arm that thinks it withheld a body sees
+    # `False` only when the registry agrees it built no deliverer.
+    trace["skill_dispatch_installed"] = bool(
+        getattr(getattr(options, "hooks", None), "skill_dispatch_installed", False))
+    # The turn-start route, parsed out of the text this trial was actually
+    # handed — the argument is the record, so an arm cannot claim an injection the
+    # injector did not put in front of the model. Sorted because the parse is a
+    # set: a row that reordered between two runs of the same input could not be
+    # diffed.
+    trace["skills_injected"] = sorted(injected_skill_names(prefetched_text or ""))
     messages = [{"role": "user", "content": prefetched_text or prompt}]
 
     started = time.time()
@@ -577,6 +629,7 @@ async def run_bench_sdk(
     max_agent_turns: int = DEFAULT_MAX_AGENT_TURNS,
     hooks_factory: Any | None = None,
     probe_prompt: str = "",
+    prefetched_text: str | None = None,
 ) -> list[dict[str, Any]]:
     """Fan out (variant × task) harness trials through a semaphore.
 
@@ -595,6 +648,15 @@ async def run_bench_sdk(
     also run the one trial that proves the detector fires. Empty by default: a
     scored round never plants it.
 
+    `prefetched_text` is forwarded to every trial as its turn-start context — the
+    channel `app/routers/messages.py` hands the prefetch block, and therefore the
+    route #548's with-arm would have to hand a SKILL.md body to a trial to inject
+    it the way production does. Nothing here builds it: an arm that injects must
+    say so by passing the text, because `skills_injected` is parsed out of exactly
+    what was passed and a fan-out that invented one would be crediting a turn-start
+    injection nobody asked for. `None` (the default, and what every current caller
+    passes) leaves the trial with the bare task prompt.
+
     Concurrency stays low by default. Each trial is a real agent loop against
     the same vLLM slot the direct runner caps at 3
     (`bench_runner.run_bench` docstring), and an agent loop holds that slot
@@ -611,6 +673,7 @@ async def run_bench_sdk(
                 per_task_timeout=per_task_timeout,
                 max_agent_turns=max_agent_turns,
                 hooks=hooks, probe_prompt=probe_prompt,
+                prefetched_text=prefetched_text,
             )
             traces.append(trace)
 
@@ -639,6 +702,19 @@ def ledger_row_for(trace: dict[str, Any], score: dict[str, Any] | None,
     return {
         "round_id": round_id,
         "variant_id": trace["variant_id"],
+        # The skill-delivery regime, beside `variant_id` because a with/without
+        # pair is read down one column at a time and a Δ is only interpretable
+        # next to the route each arm ran (#779). One field per route plus the
+        # registry's own answer: `skills_injected` is the turn-start body list,
+        # `skills_delivered` the mid-turn one, `skill_dispatch_installed` whether
+        # the deliverer was on the registry the trial ran with at all. All three
+        # `None` on a trace with no skill channel — the direct runner's rows, and
+        # every row written before #779 — for the same reason `tool_search_enabled`
+        # below is `None` there: an empty list would claim a measured withhold on a
+        # trial that had no skill axis to withhold from.
+        "skills_injected": trace.get("skills_injected"),
+        "skills_delivered": trace.get("skills_delivered"),
+        "skill_dispatch_installed": trace.get("skill_dispatch_installed"),
         "task_id": trace["task_id"],
         "task_category": trace.get("task_category"),
         "harness": trace.get("harness", HARNESS),

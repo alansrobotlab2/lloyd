@@ -376,6 +376,18 @@ def trial_ledger_row(round_id: str, trace: dict[str, Any],
     return {
         "round_id": round_id,
         "variant_id": trace["variant_id"],
+        # #779: the same three skill-delivery fields `bench_runner_sdk.ledger_row_for`
+        # puts in the same position, because
+        # `test_the_ondemand_writer_emits_the_same_per_trial_keys` pins both writers to
+        # one key set — a round's row and a CLI trial's row must be readable the same
+        # way, and the paired measurement #548 wants to run is a round. `None` on a
+        # direct trace, which has no skill channel at all, exactly as
+        # `tool_search_enabled` below is `None` on one; an empty list appears only on
+        # an sdk trace, where it is the measured withhold a without-arm has to show
+        # before its Δ means anything.
+        "skills_injected": trace.get("skills_injected"),
+        "skills_delivered": trace.get("skills_delivered"),
+        "skill_dispatch_installed": trace.get("skill_dispatch_installed"),
         "task_id": trace["task_id"],
         "task_category": trace.get("task_category"),
         "harness": trace.get("harness", "direct"),

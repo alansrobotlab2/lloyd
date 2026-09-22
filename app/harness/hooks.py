@@ -68,6 +68,30 @@ class HookRegistry:
         # OnEvent callbacks fire on every NormalizedEvent the loop yields.
         # Used by the Inner Voice observer to tap the primary's stream.
         self._on_event: list[Callable[[dict[str, Any]], Awaitable[None]]] = []
+        self._skill_dispatch_installed = False
+
+    # ------------------------------------------------------------------
+    # What is registered here (set by the installer, read by anything that
+    # has to report the regime this registry produced — #779)
+    # ------------------------------------------------------------------
+
+    def mark_skill_dispatch_installed(self) -> None:
+        """Say that the dispatch-time SKILL.md deliverer is on this registry.
+
+        Called by `skill_dispatch.install_skill_dispatch_hook` and by nothing
+        else. The registry cannot detect it: `add_pre_tool_use` takes an
+        anonymous callback, so a deliverer and a safety gate are the same object
+        shape from here. Without this, a paired skill experiment could not tell
+        a without-arm that withheld the body from one that leaked it at the tool
+        call (#536's second delivery route), and a collapsed Δ would read as an
+        inert skill.
+        """
+        self._skill_dispatch_installed = True
+
+    @property
+    def skill_dispatch_installed(self) -> bool:
+        """Whether the #536 deliverer is registered here. Reported, never inferred."""
+        return self._skill_dispatch_installed
 
     # ------------------------------------------------------------------
     # Registration

@@ -19,6 +19,7 @@ from app.harness import skill_dispatch as sd
 from app.harness.hooks import HookRegistry
 from app.harness.loop import _pre_dispatch
 from app.harness.options import RunOptions
+from app.harness.safety import install_default_safety_hook
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -528,3 +529,173 @@ def test_dispatch_path_references_skill_bodies():
     ]
     assert hits, "no SKILL.md/skill_body reference in app/harness/ — the deliverer is gone"
     print(f"test_dispatch_path_references_skill_bodies: OK ({len(hits)} file(s))")
+
+
+# ===========================================================================
+# #779 — the deliverer must be attributable to the registry it sits on
+#
+# A paired with/without-skill bench arm withholds a SKILL.md body by not
+# installing this deliverer on the without-arm's registry. Until the registry
+# could report it, and until a caller could read which bodies the deliverer
+# handed over, a without-arm that leaked was indistinguishable from a skill that
+# did nothing — the experiment reported "inert" for a body it never withheld.
+# `STATS` answers neither question: it is one process-global dict and
+# `run_bench_sdk` runs trials concurrently under a semaphore, so a snapshot delta
+# spans two trials. Hence two surfaces: a flag on the registry, and a set the
+# caller owns.
+# ===========================================================================
+
+
+def test_registry_reports_the_dispatch_deliverer_registered_on_it():
+    """Clause 3. The registry is the only possible witness.
+
+    `add_pre_tool_use` takes an anonymous callback, so a deliverer and a safety
+    gate are the same shape from the outside — nothing downstream of the
+    installer can tell them apart by looking. The installer therefore says so,
+    and a trial's trace reads the registry's answer instead of restating what
+    the caller hoped it had built.
+    """
+    assert HookRegistry().skill_dispatch_installed is False
+
+    safety_only = HookRegistry()
+    install_default_safety_hook(safety_only)
+    assert safety_only.skill_dispatch_installed is False, (
+        "a registry carrying only the safety gate IS the without-arm condition; a "
+        "trace that stamped True here would claim a deliverer it never built"
+    )
+
+    armed = HookRegistry()
+    assert sd.install_skill_dispatch_hook(
+        armed, rules=sd.DISPATCH_RULES, force_enabled=True) is True
+    assert armed.skill_dispatch_installed is True
+
+
+def test_a_refused_install_does_not_claim_the_deliverer():
+    """The false half of the flag must be as trustworthy as the true half.
+
+    Every case where the installer declines — config off, forced off, an empty
+    rule set — is a trial that has to read `skill_dispatch_installed: false`, or
+    the flag records intent rather than what was built.
+    """
+    forced_off = HookRegistry()
+    assert sd.install_skill_dispatch_hook(
+        forced_off, rules=sd.DISPATCH_RULES, force_enabled=False) is False
+    assert forced_off.skill_dispatch_installed is False
+    assert forced_off._pre == []
+
+    no_rules = HookRegistry()
+    assert sd.install_skill_dispatch_hook(
+        no_rules, rules=(), force_enabled=True) is False
+    assert no_rules.skill_dispatch_installed is False
+
+
+def test_a_caller_owned_delivered_set_names_exactly_the_bodies_handed_over(stub_body):
+    """Clause 4: per-trial attribution, which `STATS` structurally cannot give.
+
+    The set belongs to the caller: the installer fills it, the caller reads it
+    after the turn. One delivery per skill per turn already holds
+    (`test_a_skill_is_held_at_most_once_per_turn`), so this is a list of bodies
+    that arrived and not a count — and a skill the deliverer declined to hand
+    over never appears in it.
+    """
+    mine: set[str] = set()
+    hooks = _install(HookRegistry(), delivered=mine)
+    assert mine == set(), "installing must not pre-populate what has not been delivered"
+
+    first = _run(hooks.fire_pre_tool_use(
+        session_id="t", tool_name="Bash", tool_input={"command": "yt-dlp x"},
+    ))
+    assert first.get("hookSpecificOutput", {}).get("skillDeliver"), first
+    assert mine == {"youtube-transcript"}
+
+    # The re-issued call runs: a second entry for the same skill would turn the
+    # set into a count of deliveries rather than a list of bodies that arrived.
+    _run(hooks.fire_pre_tool_use(
+        session_id="t", tool_name="Bash", tool_input={"command": "yt-dlp x"},
+    ))
+    assert mine == {"youtube-transcript"}
+
+    # A different rule in the same turn is a second body; a call no rule matches
+    # is not a body at all.
+    _run(hooks.fire_pre_tool_use(
+        session_id="t", tool_name="Bash",
+        tool_input={"command": "supervisorctl -c c.conf restart agent-tts"},
+    ))
+    assert mine == {"youtube-transcript", "voice-mode"}
+    _run(hooks.fire_pre_tool_use(
+        session_id="t", tool_name="Read", tool_input={"file_path": "/tmp/x"},
+    ))
+    assert mine == {"youtube-transcript", "voice-mode"}
+
+
+def test_a_skill_already_injected_at_turn_start_never_enters_the_delivered_set(stub_body):
+    """The set is the leak channel, not a log of everything the module saw.
+
+    A with-arm whose body came from turn-start prefetch was correctly not
+    delivered again, and must show `skills_delivered: []`. Otherwise the two
+    routes blur into one number and the artifact cannot name the route that
+    delivered, which is the thing #779 asks the row to say.
+    """
+    mine: set[str] = set()
+    hooks = _install(HookRegistry(), delivered=mine,
+                     already_injected={"youtube-transcript"})
+    out = _run(hooks.fire_pre_tool_use(
+        session_id="t", tool_name="Bash", tool_input={"command": "yt-dlp x"},
+    ))
+    assert out == {}
+    assert mine == set()
+    assert sd.STATS["skipped_already_injected"] == 1
+
+
+def test_a_caller_that_passes_nothing_behaves_exactly_as_before(stub_body):
+    """The parameter is additive: production's one install site
+    (`app/routers/messages.py:install_skill_dispatch_hook`) passes no set and
+    keeps today's behaviour, held call included."""
+    hooks = _install(HookRegistry())
+    out = _run(hooks.fire_pre_tool_use(
+        session_id="t", tool_name="Bash", tool_input={"command": "yt-dlp x"},
+    ))
+    assert out.get("hookSpecificOutput", {}).get("skillDeliver"), out
+    assert sd.STATS["delivered"] == 1
+
+
+def test_a_declined_install_leaves_a_supplied_set_untouched():
+    """A caller reading its set after a refused install reads an empty one, not a
+    leftover: nothing was installed, so nothing can arrive."""
+    mine: set[str] = set()
+    assert sd.install_skill_dispatch_hook(
+        HookRegistry(), rules=sd.DISPATCH_RULES, force_enabled=False, delivered=mine
+    ) is False
+    assert mine == set()
+
+
+def test_a_body_with_no_skill_body_on_disk_is_not_reported_as_delivered(monkeypatch):
+    """`skipped_no_body` is a withhold, so it must not land in the delivered set —
+    a set that counted attempts would call a missing file a delivered protocol."""
+    monkeypatch.setattr(sd, "skill_body", lambda name: "")
+    mine: set[str] = set()
+    hooks = _install(HookRegistry(), delivered=mine)
+    out = _run(hooks.fire_pre_tool_use(
+        session_id="t", tool_name="Bash", tool_input={"command": "yt-dlp x"},
+    ))
+    assert out == {}
+    assert mine == set()
+    assert sd.STATS["skipped_no_body"] == 1
+
+
+def test_the_dispatch_marker_and_its_recogniser_cannot_drift():
+    """The bench recognises a dispatch-time body by the marker `render_delivery`
+    writes, so the two are one contract: a body whose marker changed shape is a
+    delivered skill the trial record silently omits — a leak reported as a
+    withhold, the exact inversion #779 exists to prevent.
+    """
+    body = sd.render_delivery(sd.DISPATCH_RULES[2], "THE BODY")
+    assert '<skill-dispatch name="youtube-transcript"' in body
+    assert sd.delivered_skill_names(body) == {"youtube-transcript"}
+
+    # The turn-start tag is NOT dispatch delivery: keyed on the shared regex, an
+    # arm that injected at turn start would report a delivery it never made.
+    assert sd.delivered_skill_names(
+        '<skill name="restart-lloyd" score="9">\nBODY\n</skill>'
+    ) == set()
+    assert sd.delivered_skill_names("") == set()

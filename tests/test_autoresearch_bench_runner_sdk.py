@@ -770,3 +770,213 @@ def test_bash_resolution_needs_a_real_path_not_a_substring(corpus_home, monkeypa
     assert deny_reason("Bash", {"command": "grep -rn bench /etc/hostname"}) is None
     assert deny_reason("Bash", {"command": "echo bench corpus"}) is None
     assert deny_reason("Bash", {"command": f"cat {corpus_home['note']}"}) is None
+
+
+# ===========================================================================
+# #779 — the skill-delivery regime a trial ran under has to be on the record
+#
+# #548's paired with/without-skill arm withholds a SKILL.md body by not
+# installing the dispatch deliverer on the without-arm's registry. Since #536
+# shipped a SECOND route — the body delivered at the tool call, not only at turn
+# start — an arm that controls only the turn-start path can leak the body into
+# its own without-side mid-turn. The measured Δ then collapses toward zero for
+# precisely the skills whose rules fire, and the experiment reports "inert" for a
+# skill it never withheld: the false null #548's control-arm clause exists to
+# prevent. `force_enabled` (`skill_dispatch.install_skill_dispatch_hook`) means
+# an arm can arm the deliverer with no config key at all, so this is reachable
+# inside an experiment while production stays dark.
+#
+# The three fields each answer one route's question, all read off what was
+# actually built rather than restated: `skills_injected` (turn-start, parsed from
+# the text the trial was handed), `skills_delivered` (dispatch-time, recognised by
+# the `<skill-dispatch name="…">` marker in the tool_result), and
+# `skill_dispatch_installed` (whether the deliverer was on the registry at all —
+# the registry's own answer, per `tests/unit/test_skill_dispatch.py`).
+# ===========================================================================
+
+from app.harness.skill_dispatch import install_skill_dispatch_hook  # noqa: E402
+
+
+def _hooks_with_dispatch_deliverer() -> HookRegistry:
+    """The with-arm registry: production's safety gate plus the deliverer forced
+    on, the way `app/routers/messages.py` installs it after the safety hook.
+
+    `force_enabled=True` is why the leak does not wait for a config flip: a
+    bench arm that passes it arms the deliverer while `harness.skill_dispatch`
+    is absent from both `config.yaml` and `data/tool_overrides.yaml`.
+    """
+    reg = _hooks_with_safety_gate()
+    assert install_skill_dispatch_hook(reg, force_enabled=True) is True
+    return reg
+
+
+@pytest.fixture
+def stub_dispatch_body(monkeypatch):
+    """Real SKILL.md bodies are ~10 KB and live in the vault; a sentinel says the
+    same thing about the plumbing without reading either."""
+    monkeypatch.setattr("app.harness.skill_dispatch.skill_body",
+                        lambda name: f"BODY-OF[{name}]")
+    return stub_dispatch_body
+
+
+def _transcript_trial(monkeypatch, hooks_factory):
+    """One trial whose single tool call is the exact command the
+    `youtube-transcript` dispatch rule exists to hold back on this box."""
+    _patch_off_vault(monkeypatch)
+    pool = _FakePool("lloyd-mcp", [_mcp_tool("Bash")])
+    script = _StreamScript([
+        ("", [{"id": "d1", "name": "Bash",
+               "arguments": {"command": "yt-dlp https://youtu.be/x -o /tmp/x.vtt"}}]),
+        ("Transcript is in /tmp/x.vtt.", []),
+    ])
+    _patch_harness(monkeypatch, pool, script)
+    traces = asyncio.run(run_bench_sdk(
+        None, [("VARIANT_X", Path("/nonexistent-overlay"))],
+        [_task(prompt="Get the transcript of https://youtu.be/x and summarize it.",
+               category="research", safety_critical=False)],
+        model="primary", hooks_factory=hooks_factory,
+    ))
+    return traces[0], pool
+
+
+def test_a_with_arm_trial_names_the_body_the_deliverer_handed_over(monkeypatch, stub_dispatch_body):
+    """Clause 2 — the leak, made visible. This is the trial record that #548's
+    control-arm clause cannot do without: a without-arm built this way LOOKED
+    clean and was not.
+
+    The call is held, so `Bash` never reaches dispatch — and the body that
+    arrived in its place is attributed to the dispatch route by name, because it
+    is tagged with the marker `render_delivery` writes.
+    """
+    tr, pool = _transcript_trial(monkeypatch, _hooks_with_dispatch_deliverer)
+
+    assert tr["skill_dispatch_installed"] is True
+    assert tr["skills_delivered"] == ["youtube-transcript"], (
+        "the body reached the model mid-turn: this arm withheld nothing"
+    )
+    assert pool.call_log == [], "a held call must never reach dispatch"
+    assert tr["skills_injected"] == [], "no body was injected at turn start here"
+
+
+def test_the_same_call_on_a_safety_only_registry_runs_and_reports_no_delivery(
+        monkeypatch, stub_dispatch_body):
+    """The other half of the same trial, which is what makes the flag a
+    measurement rather than a constant: one command, two registries, two answers.
+
+    This is the correctly-withheld without-arm — deliverer absent, so the call
+    runs and the record says nothing was delivered. Read together with
+    `test_a_with_arm_trial_names_the_body_the_deliverer_handed_over`, a collapsed
+    Δ is separable from a genuinely inert skill: the without-arm row either shows
+    the body arriving (leak) or shows it did not (withheld).
+    """
+    tr, pool = _transcript_trial(monkeypatch, _hooks_with_safety_gate)
+
+    assert tr["skill_dispatch_installed"] is False
+    assert tr["skills_delivered"] == []
+    assert [name for name, _args in pool.call_log] == ["Bash"], (
+        "with no deliverer installed the call dispatches; the withheld arm is "
+        "distinguishable from the armed one only if it really ran"
+    )
+
+
+def test_a_default_trial_records_no_skill_channel(monkeypatch):
+    """The runner's own default (`hooks_factory=None` → registry built by
+    `build_options`) installs the safety gate and the corpus hook, never the
+    deliverer. Today the route is dark for production too, so the honest row is
+    `installed: false` with an empty delivered list — which is exactly the pair
+    the item's post-fix check names.
+    """
+    _patch_off_vault(monkeypatch)
+    _patch_harness(monkeypatch,
+                   _FakePool("lloyd-mcp", [_mcp_tool("Read")]),
+                   _StreamScript([("all clear", [])]))
+    tr = asyncio.run(run_bench_sdk(None, [("V", Path("/no"))], [_task()],
+                                   model="primary"))[0]
+    assert tr["skill_dispatch_installed"] is False
+    assert tr["skills_delivered"] == []
+    assert tr["skills_injected"] == []
+
+
+def _quiet_trial(monkeypatch, prefetched_text):
+    """A one-completion trial, handed `prefetched_text` as its user message —
+    the same channel `app/routers/messages.py` hands the turn-start `<context>`
+    block whose `<skill name="…">` tags the deliverer is supposed to defer to."""
+    _patch_off_vault(monkeypatch)
+    _patch_harness(monkeypatch,
+                   _FakePool("lloyd-mcp", [_mcp_tool("Read")]),
+                   _StreamScript([("all clear", [])]))
+    return asyncio.run(run_bench_sdk(
+        None, [("V", Path("/no"))], [_task()], model="primary",
+        hooks_factory=lambda: HookRegistry(), prefetched_text=prefetched_text,
+    ))[0]
+
+
+def test_turn_start_injection_is_recorded_from_the_text_the_trial_was_handed(monkeypatch):
+    """Clause 1. Parsed from the prefetch block, not from a caller's claim about
+    it — the same reason #427 reads `tool_search_enabled` off the built options
+    instead of restating the pin.
+
+    Two bodies in one block is the normal shape: `prefetch.py` injects its top
+    scorer plus anything the `<context>` block carries.
+    """
+    tr = _quiet_trial(monkeypatch, (
+        '<context>\n<skill name="web-search-and-fetch" score="29.7">\nBODY\n</skill>\n'
+        '<skill name="youtube-transcript" score="4.1" excerpt="true">\nEXCERPT\n</skill>\n'
+        "</context>"
+    ))
+    assert tr["skills_injected"] == ["web-search-and-fetch", "youtube-transcript"]
+    assert tr["skills_delivered"] == [], "injection is not delivery — the routes stay separate"
+
+
+def test_a_trial_handed_no_prefetch_reports_no_injected_skill(monkeypatch):
+    """The empty case, and its parse source pinned at the same time.
+
+    The task's own prompt here carries a `<skill name=…>` tag while the trial is
+    handed no prefetch block: `skills_injected` must be empty, because the field
+    answers "which bodies did the injector put in this turn", not "which skill
+    id appears anywhere in the text the model saw".
+    """
+    _patch_off_vault(monkeypatch)
+    _patch_harness(monkeypatch,
+                   _FakePool("lloyd-mcp", [_mcp_tool("Read")]),
+                   _StreamScript([("all clear", [])]))
+    tr = asyncio.run(run_bench_sdk(
+        None, [("V", Path("/no"))],
+        [_task(prompt='do the thing <skill name="restart-lloyd">not injected</skill>')],
+        model="primary", hooks_factory=lambda: HookRegistry(),
+    ))[0]
+    assert tr["skills_injected"] == []
+
+
+def test_the_skill_provenance_fields_sit_beside_variant_id_in_the_ledger_row():
+    """Clause 5, and the position is literal: a reader scanning a with/without
+    pair scans one column group, the same way #651's probe fields sit beside
+    `denied_call_count`."""
+    trace = {
+        "variant_id": "V", "task_id": "bench_010", "task_category": "safety",
+        "harness": "sdk", "tool_search_enabled": False, "status": "success",
+        "turns": 2, "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0,
+        "skills_injected": ["youtube-transcript"],
+        "skills_delivered": ["restart-lloyd"],
+        "skill_dispatch_installed": True,
+    }
+    row = ledger_row_for(trace, None, round_id="R_779")
+    keys = list(row)
+    assert keys.index("skills_injected") == keys.index("variant_id") + 1
+    assert keys.index("skills_delivered") == keys.index("variant_id") + 2
+    assert keys.index("skill_dispatch_installed") == keys.index("variant_id") + 3
+    assert row["skills_injected"] == ["youtube-transcript"]
+    assert row["skills_delivered"] == ["restart-lloyd"]
+    assert row["skill_dispatch_installed"] is True
+
+
+def test_a_trace_with_no_skill_channel_reports_none_not_empty():
+    """`None` means the runner never had a channel to report — the direct
+    runner's rows, and any trace written before #779. An empty list there would
+    claim a measured withhold on a trial that had no skill axis at all, which is
+    the same false-null shape as the leak, only quieter."""
+    row = ledger_row_for({"variant_id": "V", "task_id": "t", "status": "success"},
+                         None, round_id="R_779")
+    assert row["skills_injected"] is None
+    assert row["skills_delivered"] is None
+    assert row["skill_dispatch_installed"] is None

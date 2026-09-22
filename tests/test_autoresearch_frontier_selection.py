@@ -377,8 +377,8 @@ def test_promote_defines_no_new_threshold_constant():
 
 #: Every key either per-trial ledger writer emits, and a superset of every key
 #: `ledger.jsonl` has ever carried. Measured, not remembered: the live ledger held
-#: 30,868 per-trial rows on 2026-09-21 whose keys union to all 27 — #646's
-#: `rubric_status` and `rubric_excluded` were absent from the file until its first
+#: 30,868 per-trial rows on 2026-09-21 whose keys union to the 27 that predate #779 —
+#: #646's `rubric_status` and `rubric_excluded` were absent from the file until its first
 #: round ran, which is why the pin is the writers' own output
 #: (`test_the_round_writer_emits_the_published_per_trial_keys` /
 #: `test_the_ondemand_writer_emits_the_same_per_trial_keys`) cross-checked against the
@@ -386,12 +386,19 @@ def test_promote_defines_no_new_threshold_constant():
 #: rather than one number transcribed from one era's rows. #595 clause 6:
 #: a per-trial transcript field is #884's change, and it has to be added HERE, with
 #: #884 named, in the commit that also moves #428's denominator.
+#:
+#: The 3-keys-over-27 delta is #779's skill-delivery trio, which no row written before
+#: it landed can carry. That is the case the census assertion is written for: it checks
+#: published ⊇ file, not equality, because a writer gaining an honest provenance field
+#: is not the same event as a row losing one — and a set pinned by equality to one
+#: era's rows would have to be edited to pass, which is how a key disappears.
 PUBLISHED_TRIAL_KEYS = {
     "bench_probe_count", "bench_probes", "composite_score", "corpus_read_attempts",
     "corpus_reads_succeeded", "created_at", "denied_call_count", "duration_seconds",
     "harness", "objective_excluded", "objective_excluded_count", "objective_score",
     "promoted", "rankable", "round_id", "rubric_excluded", "rubric_overall",
-    "rubric_status", "safety_critical", "safety_passed", "task_category", "task_id",
+    "rubric_status", "safety_critical", "safety_passed", "skill_dispatch_installed",
+    "skills_delivered", "skills_injected", "task_category", "task_id",
     "tool_call_count", "tool_search_enabled", "trace_status", "turns", "variant_id",
 }
 
@@ -617,9 +624,11 @@ def test_the_published_key_sets_cover_every_key_the_ledger_already_carries():
     measurement and not an allow-list somebody forgot to widen.
 
     Counted in the live ledger on 2026-09-21: 30,868 per-trial rows and 2,407 decision
-    rows. The trial keys union to all 27 of `PUBLISHED_TRIAL_KEYS` — #646's
-    `rubric_status`/`rubric_excluded` are in the file now, so that arm holds with
-    equality today while the assertion stays a subset check. The decision keys union to
+    rows. The trial keys union to 27 of the 30 `PUBLISHED_TRIAL_KEYS`: #646's
+    `rubric_status`/`rubric_excluded` are in the file now, but the three #779
+    skill-delivery fields cannot be, because no row written before it landed carried a
+    skill channel — which is why this arm is a subset check and not an equality, and why
+    widening the published set needs no edit to the file. The decision keys union to
     the seven published keys plus the conditional #646 validity fields: 7 of those
     2,407 rows carry a validity key, the first being round `R_20260921_175534` at
     2026-09-21T17:59:34Z, the first decision written after #646 landed its writer. So

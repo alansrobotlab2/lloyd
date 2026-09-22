@@ -257,6 +257,18 @@ def cap_body(body: str, limit: int = MAX_DELIVERY_CHARS) -> str:
     return body[:limit] + "\n[... truncated for dispatch-time delivery]"
 
 
+#: Opens every delivered body. One function writes it and one regex reads it
+#: (`delivered_skill_names`), so the tag that identifies a delivered protocol and
+#: the thing that recognises one cannot drift apart — the failure that would make
+#: a leak read as a withhold, which is the inversion #779 exists to prevent.
+DISPATCH_MARKER_PREFIX = '<skill-dispatch name="'
+
+
+def dispatch_marker(rule: DispatchRule) -> str:
+    """The tag `render_delivery` opens the synthetic tool_result with."""
+    return f'{DISPATCH_MARKER_PREFIX}{rule.skill}" rule="{rule.label}">'
+
+
 def render_delivery(rule: DispatchRule, body: str) -> str:
     """The synthetic tool_result content.
 
@@ -269,7 +281,7 @@ def render_delivery(rule: DispatchRule, body: str) -> str:
         f"the protocol Lloyd uses for it (matched rule: {rule.label}; skill: "
         f"{rule.skill}). Follow it, then re-issue the call — with the arguments "
         f"the protocol actually calls for.\n\n"
-        f'<skill-dispatch name="{rule.skill}" rule="{rule.label}">\n'
+        f"{dispatch_marker(rule)}\n"
         f"{body}\n"
         f"</skill-dispatch>"
     )
@@ -319,6 +331,28 @@ def reset_stats() -> None:
 
 
 _SKILL_TAG_RE = re.compile(r'<skill(?:-dispatch)? name="([^"]+)"')
+
+#: Reads `dispatch_marker` back out of a tool_result body. Deliberately NOT
+#: `_SKILL_TAG_RE`: that one matches the turn-start `<skill name=…>` tag as well,
+#: because the deliverer has to defer to a body that already arrived. A report of
+#: *what the deliverer handed over* keyed on it would credit this route with
+#: every prefetch injection in the same turn.
+_DISPATCH_TAG_RE = re.compile(re.escape(DISPATCH_MARKER_PREFIX) + r'([^"]+)"')
+
+
+def delivered_skill_names(text: str) -> set[str]:
+    """Skill ids whose body reached the transcript through dispatch delivery.
+
+    Recognised by the marker `render_delivery` writes into the synthetic
+    tool_result, so it works on anything that carries the delivery whole: a
+    `NormalizedEvent`'s content, a recorded transcript. Feed it the full body — a
+    field truncated before the marker (a bench trace caps its excerpt at 500
+    chars) would report a delivered skill as a withheld one. Nothing restates the
+    skill list: the tag is the record.
+    """
+    if not text:
+        return set()
+    return set(_DISPATCH_TAG_RE.findall(text))
 
 
 def injected_skill_names(context_text: str) -> set[str]:
@@ -410,6 +444,7 @@ def install_skill_dispatch_hook(
     already_injected: set[str] | None = None,
     force_enabled: bool | None = None,
     rules: tuple[DispatchRule, ...] | None = None,
+    delivered: set[str] | None = None,
 ) -> bool:
     """Install the dispatch-time deliverer on a turn's HookRegistry.
 
@@ -420,6 +455,19 @@ def install_skill_dispatch_hook(
 
     `force_enabled` exists for the probe harness and the tests; production
     callers pass nothing and get the config flag.
+
+    `delivered` is a set the CALLER owns, filled with the skills whose bodies
+    this registry actually handed over. Omit it and behaviour is as before. Pass
+    it when deliveries have to be attributable to one run — `STATS` cannot do
+    that, being one process-global dict, so a caller fanning trials out under a
+    semaphore (`bench_runner_sdk.run_bench_sdk`) reads a delta spanning two
+    trials out of a snapshot. Left empty when the install is refused: nothing
+    installed, nothing can arrive.
+
+    A registry the install lands on reports it afterwards
+    (`HookRegistry.skill_dispatch_installed`), which is what lets a paired
+    with/without-skill experiment show that its without-arm withheld the body
+    instead of leaking it mid-turn (#779).
     """
     on = force_enabled if force_enabled is not None else enabled()
     if not on:
@@ -430,6 +478,7 @@ def install_skill_dispatch_hook(
     hooks.add_pre_tool_use(None, build_pretool_cb(
         rules=active,
         already_injected=set(already_injected or ()),
-        delivered=set(),
+        delivered=delivered if delivered is not None else set(),
     ))
+    hooks.mark_skill_dispatch_installed()
     return True
