@@ -809,3 +809,100 @@ def test_the_ci95_block_survives_the_baseline_round_trip():
     assert "NaN" not in blob and "Infinity" not in blob
     back = _json.loads(blob)["summary"]["overall"]["ci95"]
     assert back["entity_hit_rate"]["ci"] == [0.2993, 0.7007]
+
+
+# ── #1000: the one knob whose default is deliberately NOT production's ───────
+
+def test_expand_graph_default_is_named_by_one_production_constant():
+    """Production's default for graph-expanded recall has a single source.
+
+    Before #1000 it was a bare literal at the read site in `_vault_recall`, with
+    no constant for anything to compare against — which is why the eval's
+    parity check could substitute a self-comparison and stay undetected for
+    eight months. Three surfaces have to agree now, and each is pinned because
+    each drifts on its own:
+
+    - `_vault_recall` applies `RECALL_EXPAND_GRAPH` when the key is absent, so
+      the constant IS the value rather than a description of it;
+    - the `vault_recall` schema states the default through the same constant, so
+      what a caller is told cannot drift from what is applied (the schema's
+      neighbours already worked this way; this knob was the exception);
+    - `eval/run_eval.py` imports it, which is what makes its honesty assertion a
+      comparison against production instead of against its own flag.
+    """
+    import asyncio
+
+    import agent_mcp.vault as vault
+
+    assert vault.RECALL_EXPAND_GRAPH is False, (
+        "the eval's parity claim is pinned to this value; if production starts "
+        "expanding the graph by default, re-read "
+        "tests/test_eval_corpus_guard.py::"
+        "test_the_written_baseline_never_claims_graph_parity_it_lacks first")
+    src = inspect.getsource(vault._vault_recall)
+    assert 'params.get("expand_graph", RECALL_EXPAND_GRAPH)' in src, (
+        "_vault_recall defaults the knob from a literal again, so the constant "
+        "can drift from what production actually serves")
+    tool = next(t for t in asyncio.run(vault.list_tools())
+                if t.name == "vault_recall")
+    desc = tool.input_schema["properties"]["expand_graph"]["description"]
+    assert f"(default {vault.RECALL_EXPAND_GRAPH})" in desc, (
+        f"the schema advertises a default not derived from the constant: {desc!r}")
+    assert ev.RECALL_EXPAND_GRAPH is vault.RECALL_EXPAND_GRAPH, (
+        "the eval compares against its own copy of the number, which is how "
+        "#1000 became invisible in the first place")
+
+
+def test_matches_production_defaults_never_claims_graph_parity():
+    """#1000: no term of the conjunction may compare a CLI flag with itself.
+
+    `and not args.no_graph` closed that expression — a `store_true` flag against
+    its own absence, so it could only ever turn the verdict off and could never
+    disagree with production, while production defaults the knob to the opposite
+    of what the eval runs.
+
+    Pinned in both directions, because either alone is gameable. The term is
+    gone and every remaining term is `args.<knob> == RECALL_<KNOB>`; and the
+    eval still runs the graph expanded, with the parity claim living in its own
+    `expand_graph_matches_production` field. Widening the conjunction instead
+    would satisfy the first half by calling every nightly run a non-production
+    configuration — a different claim, not an honest one.
+    """
+    def cfg(argv=None):
+        return ev.build_run_config(ev.build_parser().parse_args(list(argv or [])))
+
+    default = cfg([])
+    assert default["expand_graph"] is True, (
+        "the fix makes the claim honest and must not also flip what the eval "
+        "measures: the graph stays expanded by default")
+    assert default["expand_graph_matches_production"] is False
+    assert default["matches_production_defaults"] is True, (
+        "the knob moved out of the conjunction; a default run still matches "
+        "production on the six knobs that remain in it")
+
+    production_shaped = cfg(["--no-graph"])
+    assert production_shaped["expand_graph"] is False
+    assert production_shaped["expand_graph_matches_production"] is True, (
+        "the field must be a real comparison, not a constant restatement: it "
+        "has to be able to say true when the run does match production")
+    assert production_shaped["matches_production_defaults"] is True
+
+    body = inspect.getsource(ev.build_run_config).split("return {", 1)[1]
+    assert "args.no_graph" not in body, (
+        "a self-comparison is back inside the parity record")
+    conjunction = body.split('"matches_production_defaults": (', 1)[1]
+    conjunction = conjunction.split("),", 1)[0]
+    terms = [ln.strip() for ln in conjunction.splitlines()
+             if "==" in ln and not ln.strip().startswith("#")]
+    assert len(terms) == 6, f"parity terms changed shape: {terms}"
+    for term in terms:
+        # Each term is one parsed CLI value against one imported production
+        # constant — the only shape that can disagree with production, which is
+        # what the self-comparison could not do.
+        assert ("args." in term and "RECALL_" in term
+                and term.startswith(("args.", "and args."))), term
+
+    # And the call site must not be "fixed" by matching production there: the
+    # graph has to stay expanded, which is precisely why the claim moved to its
+    # own field instead of into the conjunction.
+    assert "expand_graph=not args.no_graph," in inspect.getsource(ev.main)

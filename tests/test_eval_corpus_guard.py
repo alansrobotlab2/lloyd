@@ -180,10 +180,11 @@ def test_a_default_run_records_production_config(tmp_path):
     --allow-empty-corpus is here solely so the run completes without depending on
     the live fact tree; every knob asserted is still the default.
 
-    `matches_production_defaults` is asserted True because a default run is
-    exactly the case that flag exists for. #1000 may make a graph-on run report
-    False — production defaults expand_graph False while the eval runs it on —
-    and when that lands, this line moves with it."""
+    `matches_production_defaults` is asserted True because a default run matches
+    production on every knob the flag compares. Graph expansion is the exception
+    and is no longer hidden inside that flag: production defaults it False, the
+    eval runs it on, and #1000 moved the disagreement into its own
+    `expand_graph_matches_production` field."""
     label = "pytest-default-config"
     _cleanup(label)
     try:
@@ -197,9 +198,12 @@ def test_a_default_run_records_production_config(tmp_path):
             assert knob in rec, knob
             assert rec[knob] == value, (knob, rec[knob], value)
         assert rec["matches_production_defaults"] is True
-        # The graph leg runs expanded by the eval's own choice, not production's:
-        # there is no RECALL_EXPAND_GRAPH to compare it against (#1000).
+        # The graph leg runs expanded by the eval's own choice, not production's.
+        # Since #1000 the artifact says so beside the value rather than claiming
+        # parity: RECALL_EXPAND_GRAPH is False, so this run matches production on
+        # the six compared knobs and explicitly does not on this one.
         assert rec["expand_graph"] is True
+        assert rec["expand_graph_matches_production"] is False
     finally:
         _cleanup(label)
 
@@ -1223,3 +1227,70 @@ def _nightly_task_timeout() -> dict:
             "ceiling is undeclared, so nothing bounds the grown corpus")
     return {"path": str(path), "timeout_seconds": float(timeout),
             "n_matches": len(matches)}
+
+
+def _production_expand_graph() -> bool:
+    """`RECALL_EXPAND_GRAPH`, read in a subprocess like `_production_knobs`.
+
+    Deliberately not folded into that helper: its caller asserts that every
+    entry equals what the run recorded, and the whole claim #1000 exists to make
+    honest is that this is the one knob the eval does NOT run at production's
+    default. Folding it in would either fail that caller or force the eval's
+    default to flip.
+    """
+    code = ("import json; from agent_mcp import vault; "
+            "print(json.dumps(vault.RECALL_EXPAND_GRAPH))")
+    proc = subprocess.run([str(PY), "-c", code], cwd=str(ROOT),
+                          capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("argv, expect_expanded, expect_match", [
+    # The default invocation: graph expanded (the eval's own measurement choice),
+    # production defaults it closed, so the honest claim is "does not match".
+    ([], True, False),
+    # A run that does match production says so — the field is a comparison, not
+    # a constant restatement, so it has to be able to go both ways.
+    (["--no-graph"], False, True),
+])
+def test_the_written_baseline_never_claims_graph_parity_it_lacks(
+        tmp_path, argv, expect_expanded, expect_match):
+    """Unconstructable pair (#1000): the run's `expand_graph` differs from
+    `RECALL_EXPAND_GRAPH` while the artifact claims production-match for it.
+
+    Before the fix the artifact carried the run's value plus a conjunction whose
+    graph term was `and not args.no_graph` — a `store_true` flag compared with
+    its own absence, true on every run that did not pass the flag. Every
+    baseline in the tree therefore stamped graph parity that production does not
+    have, and `app/uptake.py`'s `retrieval_gate()` picks its retrieval
+    non-regression pool off that field, while `scripts/memory/kg_rebuild.py`
+    reports it as before/after evidence.
+
+    Written through the real CLI to a real baseline file, because the defect was
+    in the artifact rather than in a function: reading it back off disk is the
+    only way a test can catch the claim rather than the code that makes it.
+    """
+    label = "pytest-expand-graph-honesty"
+    _cleanup(label)
+    try:
+        proc = _run(tmp_path, "--label", label, "--allow-empty-corpus", *argv)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = list(BASELINES.glob(f"{label}-*.json"))
+        assert len(written) == 1, written
+        rec = json.loads(written[0].read_text())
+
+        production = _production_expand_graph()
+        assert rec["expand_graph"] is expect_expanded
+        assert (rec["expand_graph"] == production) is expect_match
+        assert rec["expand_graph_matches_production"] is expect_match
+        # Both rows still match production on the six compared knobs: the knob
+        # moved OUT of the conjunction, it was not folded into it. Folding it in
+        # would make every nightly run report a non-production configuration.
+        assert rec["matches_production_defaults"] is True
+        assert not (rec["expand_graph"] != production
+                    and rec["expand_graph_matches_production"] is not False), (
+            "the artifact claims graph parity while running the opposite of "
+            "production's default")
+    finally:
+        _cleanup(label)

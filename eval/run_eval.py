@@ -38,6 +38,7 @@ from agent_mcp.vault import (
     RECALL_DEMOTE_DAILY_LOGS,
     RECALL_DJEV_RERANK,
     RECALL_DJEV_RERANK_TOP,
+    RECALL_EXPAND_GRAPH,
     RECALL_GRAPH_HOPS,
     RECALL_GRAPH_RERANK,
     RECALL_GRAPH_TOP_K,
@@ -338,6 +339,14 @@ def count_overreach_regressions(before: list[dict], after: list[dict]) -> list[d
     return out
 
 
+# `expand_graph` is the one knob whose signature default is deliberately NOT
+# the production constant. Production defaults it False (`RECALL_EXPAND_GRAPH`);
+# the eval scores recall with the graph expanded on purpose, and scoring it
+# closed is a different measurement, not a parity fix (#498 fixed the signature
+# for the other knobs, #1000 makes only the claim about this one honest). What
+# the eval applies is recorded in the baseline as `expand_graph`, and whether
+# that equals production is recorded beside it as
+# `expand_graph_matches_production`.
 def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
              graph_rerank: bool = RECALL_GRAPH_RERANK,
              rerank_alpha: float = RECALL_RERANK_ALPHA,
@@ -830,7 +839,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--limit", type=int, default=20)
     # Defaults ARE production's, imported from agent_mcp.vault — see the
     # build_parser() docstring for why naming a value here would go stale.
-    ap.add_argument("--no-graph", action="store_true", help="Disable expand_graph (default: on)")
+    # Deliberately not defaulted to production: `RECALL_EXPAND_GRAPH` is False,
+    # and the eval scores recall with the graph expanded on purpose. Whether
+    # this run equals production is stated by `expand_graph_matches_production`
+    # instead of by the parity flag (#1000).
+    ap.add_argument("--no-graph", action="store_true",
+                    help=f"Disable expand_graph (eval default: on; production: {RECALL_EXPAND_GRAPH})")
     ap.add_argument("--no-graph-rerank", dest="graph_rerank", action="store_false",
                     default=RECALL_GRAPH_RERANK,
                     help=f"Disable graph-vote re-ranking (production: {RECALL_GRAPH_RERANK})")
@@ -880,13 +894,27 @@ def build_run_config(args: argparse.Namespace) -> dict:
     missing it while every artifact it stamped read `true`.
 
     `matches_production_defaults` is a conjunction over the parsed values
-    against the constants — never one constant against itself. `expand_graph`
-    is recorded but not compared: production defaults it False while the eval
-    runs it on as a measurement choice, and #1000 owns the `not args.no_graph`
-    term still sitting in the conjunction.
+    against the constants — never one constant against itself, and never a CLI
+    flag against itself. `and not args.no_graph` used to sit at the end of it: a
+    `store_true` flag compared with its own absence, true on every run that did
+    not pass the flag, so it could only ever turn the verdict off and could
+    never disagree with production (#1000). Every term below is now a parsed
+    value against an imported `RECALL_*` constant.
+
+    `expand_graph` is deliberately NOT a term of that conjunction. Production
+    defaults it False while the eval runs it on as a measurement choice, so the
+    honest claim is its own field, `expand_graph_matches_production`, computed
+    against `RECALL_EXPAND_GRAPH` — false on the default invocation, true only
+    for a `--no-graph` run. Folding it into the conjunction instead would label
+    every nightly run a non-production configuration, which is a different claim
+    from the honest one.
     """
+    expand_graph = not args.no_graph
     return {
-        "expand_graph": not args.no_graph,
+        "expand_graph": expand_graph,
+        # Computed against production's constant, not against the flag that set
+        # it. The default run expands the graph; production does not.
+        "expand_graph_matches_production": expand_graph == RECALL_EXPAND_GRAPH,
         "graph_rerank": args.graph_rerank,
         "rerank_alpha": args.alpha,
         "graph_top_k": args.graph_top_k,
@@ -910,7 +938,6 @@ def build_run_config(args: argparse.Namespace) -> dict:
             # nothing while the arm is off, and a conjunction that can be
             # falsified by an inert knob is #1000's defect one constant over.
             and args.djev_rerank == RECALL_DJEV_RERANK
-            and not args.no_graph
         ),
     }
 
@@ -959,6 +986,9 @@ def main() -> int:
 
     records = run_eval(
         queries, limit=args.limit,
+        # NOT `== RECALL_EXPAND_GRAPH`: production defaults the knob off, and
+        # scoring the eval with the graph closed is a different measurement, not
+        # a parity fix. #1000 makes only the claim honest.
         expand_graph=not args.no_graph,
         graph_rerank=args.graph_rerank,
         rerank_alpha=args.alpha,

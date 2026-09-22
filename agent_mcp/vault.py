@@ -363,6 +363,14 @@ RECALL_DJEV_RERANK_TOP = 12
 RECALL_DEMOTE_DAILY_LOGS = True
 RECALL_GRAPH_TOP_K = 5
 RECALL_GRAPH_HOPS = 1
+# Production's default for graph-expanded recall, named so a claim about it can
+# be checked against something. `_vault_recall` reads exactly this when the
+# caller omits `expand_graph`, and `eval/run_eval.py` compares its own run
+# against it. The eval runs the graph expanded as a deliberate measurement
+# choice, so production-match for this knob is false on every default eval run —
+# it used to be asserted true by a conjunction term that compared a `store_true`
+# flag with itself (#1000).
+RECALL_EXPAND_GRAPH = False
 # How many of the query's ranked entities become seeds. Raised from 5 to 10 in
 # the graph-consistency work: ties at low scores can knock out the canonical
 # entity — "Knowledge Graph Consistency" and "Knowledge Graph System" both
@@ -1557,7 +1565,7 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
         return _err("query is required", ErrorCode.MISSING_PARAM, documents=[], facts=[])
     limit = int(params.get("limit", 20))
     include_facts = params.get("include_facts", True)
-    expand_graph = params.get("expand_graph", False)
+    expand_graph = bool(params.get("expand_graph", RECALL_EXPAND_GRAPH))
     # graph_rerank default-on as of 2026-05-12 — the perf optimization
     # (regex over voters instead of full entity scan) drops latency from
     # ~2s extra to near-zero, while the MRR lift (+6-13%) is consistent.
@@ -1941,7 +1949,7 @@ async def list_tools():
                 "query": {"type": "string", "description": "Natural-language query; entities mentioned in it are resolved and their facts returned alongside documents"},
                 "limit": {"type": "integer", "description": "Documents returned (default 20)"},
                 "include_facts": {"type": "boolean", "description": "Include entity facts (default true)"},
-                "expand_graph": {"type": "boolean", "description": "Also return facts from graph neighbours (default false)"},
+                "expand_graph": {"type": "boolean", "description": f"Also return facts from graph neighbours (default {RECALL_EXPAND_GRAPH})"},
                 "graph_rerank": {"type": "boolean", "description": f"Re-rank documents by graph votes (default {RECALL_GRAPH_RERANK})"},
                 "rerank_alpha": {"type": "number", "description": f"1.0 = pure search score, 0.0 = pure graph (default {RECALL_RERANK_ALPHA})"},
                 "graph_top_k": {"type": "integer", "description": f"Graph expansion breadth (default {RECALL_GRAPH_TOP_K})"},
