@@ -61,6 +61,7 @@ from scripts.autoresearch import promotion_fp_rate as pfr
 # spec" in one place. Cross-test-module imports are already how that file gets
 # its contract fixture (`from tests.test_prompt_surface_guard import
 # GOOD_CONTRACT`, four times, inside test bodies).
+from tests._live_data import require_live_data, require_live_volume
 from tests.test_autoresearch_promotion import make_cfg
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -900,6 +901,13 @@ LIVE_ROUNDS = LIVE_RESEARCH / "rounds"
 #: ``round_id <= WINDOW_CUTOFF`` — the store may grow past it freely.
 WINDOW_CUTOFF = "R_20260908_181458"
 
+#: The lookahead each non-promoted round needs before it can contribute a null
+#: value. Named here because the volume floor below is derived from it, not
+#: typed twice: under ``WINDOW + 1`` rounds no round in the window has a full
+#: lookahead, so `pfr.measure` cannot form a null population at all and raises
+#: rather than returning a figure this file could compare.
+WINDOW = 3
+
 NOTE_PATH = (
     Path.home()
     / "obsidian"
@@ -920,6 +928,50 @@ NOISE_FLOOR_SOURCE = (
 )
 
 
+def _ledger_round_ids(ledger_path: Path) -> set[str]:
+    """Every ``round_id`` the ledger names, for counting the published window.
+
+    Deliberately tolerant of a malformed line: this reads a live append-only log to
+    decide whether there is anything to measure, and a half-written final row is a
+    property of a writer that was interrupted, not an answer about the window.
+    """
+    ids: set[str] = set()
+    for line in ledger_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rid = json.loads(line).get("round_id")
+        except json.JSONDecodeError:
+            continue
+        if rid:
+            ids.add(rid)
+    return ids
+
+
+def require_published_window(ledger_path: Path = None) -> None:
+    """The one gate for every check that recomputes a published figure.
+
+    The note's figures were derived over the frozen window ending
+    ``WINDOW_CUTOFF``. After the 2026-09-22 tree deletion the live store holds
+    nothing inside it, so `pfr.measure` raises rather than returning a number to
+    compare and the note's jq block prints 0 for counts published as 66/2217/30953.
+    Neither is the note drifting from the store — it is the store no longer holding
+    the window — so both answer with a named skip carrying the two counts.
+
+    The floor is ``WINDOW + 1`` and not "any rounds at all": below it no round in
+    the window has a full lookahead, so no null value can form. A store that still
+    holds the window keeps failing loudly, which is what catches real drift.
+    """
+    ledger_path = LIVE_LEDGER if ledger_path is None else ledger_path
+    require_live_data(ledger_path, "autoresearch ledger", kind="file")
+    in_window = sorted(rid for rid in _ledger_round_ids(ledger_path)
+                       if rid <= WINDOW_CUTOFF)
+    require_live_volume(in_window, WINDOW + 1, ledger_path,
+                        f"the autoresearch window ending {WINDOW_CUTOFF}",
+                        noun="rounds")
+
+
 def live_measure(*, ledger_path: Path = LIVE_LEDGER, rounds_dir: Path = LIVE_ROUNDS):
     """The published derivation, over the frozen window.
 
@@ -932,11 +984,13 @@ def live_measure(*, ledger_path: Path = LIVE_LEDGER, rounds_dir: Path = LIVE_ROU
     the same recipe at a different copy of the store without editing this file's
     constants.
     """
+    require_published_window(ledger_path)
+
     kwargs = dict(
         ledger_path=ledger_path,
         rounds_dir=rounds_dir,
         data_cutoff=WINDOW_CUTOFF,
-        window=3,
+        window=WINDOW,
         alpha=0.05,
     )
     one_sigma = pfr.measure(**kwargs)["null_population"]["std"]
@@ -1288,6 +1342,7 @@ def test_the_note_s_reproduce_block_commands_agree_with_the_numbers_beside_them(
     window. The second is what stops this test from going green again by bumping a
     comment to match an unbounded command — the failure #1193 was about.
     """
+    require_published_window()
     assert shutil.which("jq"), "the note publishes jq commands; jq must be installed to check them"
     setup, pairs = note_reproduce_block()
     window_setup = [line for line in setup if line.startswith("W=")]
@@ -1312,6 +1367,7 @@ def test_a_hand_edited_count_in_the_note_s_reproduce_block_fails_the_check(tmp_p
     today, not that the check can catch it being wrong — which is the difference between
     a published check and a caption.
     """
+    require_published_window()
     assert shutil.which("jq"), "the note publishes jq commands; jq must be installed to check them"
     text = NOTE_PATH.read_text(encoding="utf-8")
     setup, pairs = note_reproduce_block(text)

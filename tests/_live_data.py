@@ -64,7 +64,8 @@ def require_live_data(path: Path, what: str, kind: str = "dir") -> None:
         assert path.is_file(), f"{what} at {path} exists but is not a file"
 
 
-def require_live_volume(items, floor: int, root: Path, what: str) -> None:
+def require_live_volume(items, floor: int, root: Path, what: str,
+                        noun: str = "files") -> None:
     """Skip a guard whose sample is below the size it needs to discriminate.
 
     Distinct from `require_live_data`: here the root is present and small, which is
@@ -72,8 +73,13 @@ def require_live_volume(items, floor: int, root: Path, what: str) -> None:
     and the observed count, because "vacuous" without the two numbers is unattributable
     — the whole reason `assert len(files) > 500, "so this is vacuous"` failed a round
     with no way to tell a 58-file store from a 0-file one.
+
+    `noun` names what is being counted, because not every live store is counted in
+    files: the autoresearch guards count *rounds* inside a frozen window, and a reason
+    reading "holds 0 files" of a ledger would name the wrong unit. It defaults to
+    "files" so the callers pinned before it existed keep their exact wording.
     """
     count = len(items)
     if count < floor:
-        pytest.skip(f"{what} at {root} holds {count} files, below the {floor}-file "
+        pytest.skip(f"{what} at {root} holds {count} {noun}, below the {floor}-{noun[:-1]} "
                     "floor under which this guard cannot discriminate either way")
