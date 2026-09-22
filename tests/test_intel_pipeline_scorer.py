@@ -990,8 +990,19 @@ def _cli_home(tmp_path):
     return home, feeds
 
 
+def _today_str() -> str:
+    """The calendar-day key the CLI derives for itself, as this process sees it.
+
+    The subprocess computes its own `today`; a test that names a *different* day
+    asserts about both files, so one helper has to be where that key comes from.
+    Across UTC midnight the two processes can disagree — the pre-existing hazard of
+    this harness, not one these tests add.
+    """
+    return __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d")
+
+
 def _run_cli(home, relevance, *flags, extra_env=None):
-    today = __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d")
+    today = _today_str()
     server = ThreadingHTTPServer(("127.0.0.1", 0), _StubModel)
     server.relevance = relevance
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1021,7 +1032,7 @@ def test_cli_run_scores_a_day_end_to_end_over_the_http_seam(tmp_path):
     """Crosses the two seams the unit tests cannot: the `python -m intel_pipeline`
     subprocess the autonomy worker spawns, and the loopback POST to the model."""
     home, feeds = _cli_home(tmp_path)
-    today = __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d")
+    today = _today_str()
     (feeds / "raw" / f"{today}.jsonl").write_text(_RAW_DAY)
 
     day, proc = _run_cli(home, 6, "--score")
@@ -1059,7 +1070,7 @@ def test_cli_run_writes_only_what_clears_the_floor(tmp_path):
     item the model put below the floor is not — while a noise file that already
     exists does not grow by one section, which is how it reached 2,545."""
     home, feeds = _cli_home(tmp_path)
-    today = __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d")
+    today = _today_str()
     (feeds / "raw" / f"{today}.jsonl").write_text(_RAW_DAY)
     noise = _seed_noise_file(home)
 
@@ -1086,7 +1097,7 @@ def test_cli_run_writes_a_graded_item_it_liked(tmp_path):
     fact from the one clause 5 states — the count is *unchanged across a run*.
     """
     home, feeds = _cli_home(tmp_path)
-    today = __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d")
+    today = _today_str()
     (feeds / "raw" / f"{today}.jsonl").write_text(_RAW_DAY)
     noise = _seed_noise_file(home)
 
@@ -1106,6 +1117,167 @@ def test_cli_run_writes_a_graded_item_it_liked(tmp_path):
 
 def _knowledge_sections_for(knowledge: Path) -> int:
     return sum(_sections(p) for p in knowledge.rglob("*.md"))
+
+
+# --- backlog #853: `--date D` must select day D for EVERY stage --------------
+#
+# The scoring stage keyed its raw read and its scored write on `today`
+# (`__main__.py` `state.load_raw_items(today)` / `intel-{today}.jsonl`) while the
+# write stage keyed on `date_str` (`write_all_to_vault(date_str)`, whose
+# `load_scored_items(date_str)` reads `intel-<date_str>.jsonl`). So
+# `--date D --score --write` scored today into `intel-<today>.jsonl` and then read
+# `intel-D.jsonl`: the day just scored never reached the vault, and a stale day's
+# scored file could be re-published instead. Back-filling a day — the obvious
+# recovery move after a bad run — silently paired two days in one invocation.
+# These tests hold the whole CLI in one subprocess, HOME redirected, so both ends
+# of the day key are visible: which raw file was opened, and which intel file and
+# which vault notes came out of it.
+
+_NAMED_DAY = "2026-09-10"
+_NAMED_DAY_ITEMS = "\n".join([
+    _item("d1", source="youtube", title="vllm continuous batching",
+          summary="vllm").to_json(),
+]) + "\n"
+_TODAY_ITEMS = "\n".join([
+    _item("t1", source="youtube", title="vllm chunked prefill",
+          summary="vllm").to_json(),
+]) + "\n"
+
+
+def test_cli_date_names_the_day_the_scorer_reads(tmp_path):
+    """Clause 1: `--date <D> --score` scores the items in D's raw file.
+
+    The scratch HOME holds a distinct raw file for the named day and for today, so
+    only one of the two titles can legitimately appear — and before the fix the
+    named day's title could not, because the stage opened today's file.
+    """
+    home, feeds = _cli_home(tmp_path)
+    (feeds / "raw" / f"{_NAMED_DAY}.jsonl").write_text(_NAMED_DAY_ITEMS)
+    (feeds / "raw" / f"{_today_str()}.jsonl").write_text(_TODAY_ITEMS)
+
+    _, proc = _run_cli(home, 6, "--date", _NAMED_DAY, "--score")
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert (feeds / f"intel-{_NAMED_DAY}.jsonl").exists(), (
+        f"the named day's scored file was never written; stdout said:\n"
+        f"{proc.stdout[-2000:]}")
+    rows = [json.loads(l) for l in
+            (feeds / f"intel-{_NAMED_DAY}.jsonl").read_text().splitlines()
+            if l.strip()]
+    titles = {r["title"] for r in rows}
+
+    assert titles == {"vllm continuous batching"}, (
+        f"the run must score the named day's items and none of today's: {rows}\n"
+        f"{proc.stdout[-2000:]}")
+
+
+def test_cli_date_writes_the_scored_file_the_writer_will_read(tmp_path):
+    """Clause 2: scoring emits `intel-<D>.jsonl` and creates no `intel-<today>.jsonl`.
+
+    The day key has to be one value across the whole invocation, not merely a
+    correct read: `write_all_to_vault(D)` calls `load_scored_items(D)`, so the
+    scored file scoring produced has to BE `intel-D.jsonl`. Seeding a stale
+    `intel-D.jsonl` makes the re-publish failure visible — the run must overwrite
+    it with the day's fresh scores.
+    """
+    home, feeds = _cli_home(tmp_path)
+    (feeds / "raw" / f"{_NAMED_DAY}.jsonl").write_text(_NAMED_DAY_ITEMS)
+    (feeds / "raw" / f"{_today_str()}.jsonl").write_text(_TODAY_ITEMS)
+    stale = feeds / f"intel-{_NAMED_DAY}.jsonl"
+    stale.write_text(ScoredItem(**{**_item("old", source="youtube",
+                                           title="STALE DAY SCORE",
+                                           summary="vllm").to_dict(),
+                                   "relevance": 9, "urgency": "low",
+                                   "why": "written by an earlier run",
+                                   "projects": ["Lloyd"],
+                                   "category": "ai-llms"}).to_json() + "\n")
+
+    _, proc = _run_cli(home, 6, "--date", _NAMED_DAY, "--score")
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    titles = {json.loads(l)["title"] for l in stale.read_text().splitlines()
+              if l.strip()}
+
+    assert titles == {"vllm continuous batching"}, (
+        f"the day's scored file must hold the scores this run produced: "
+        f"{titles}\n{proc.stdout[-2000:]}")
+    assert [q.name for q in feeds.glob("intel-*.jsonl")] == [
+            f"intel-{_NAMED_DAY}.jsonl"], (
+        "a run that named one day left a second scored file behind — the write stage "
+        "picks a day by filename, so a stray file is a day it would publish unasked. "
+        "Asserted against the directory listing rather than `intel-<today>` by name so "
+        "it cannot pass or fail on a UTC midnight boundary\n"
+        f"{proc.stdout[-2000:]}")
+
+
+def test_cli_date_write_stage_publishes_the_day_it_named(tmp_path):
+    """The two halves meeting: `--date D --score --write` reaches the vault.
+
+    The defect's worse consequence — narrower than "re-scores the wrong day":
+    the writer read `intel-D.jsonl`, which scoring had not written, so today's
+    fresh scores never reached the vault at all (`No scored items found for D`).
+    After the fix the named day's item is in the knowledge tree, and today's item
+    is nowhere in it.
+    """
+    home, feeds = _cli_home(tmp_path)
+    (feeds / "raw" / f"{_NAMED_DAY}.jsonl").write_text(_NAMED_DAY_ITEMS)
+    (feeds / "raw" / f"{_today_str()}.jsonl").write_text(_TODAY_ITEMS)
+
+    _, proc = _run_cli(home, 6, "--date", _NAMED_DAY, "--score", "--write")
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    bodies = "\n".join(p.read_text()
+                       for p in (home / "obsidian" / "knowledge").rglob("*.md"))
+
+    assert "vllm continuous batching" in bodies, (
+        f"the day the run named never reached the vault\n{proc.stdout[-2500:]}")
+    assert "vllm chunked prefill" not in bodies, (
+        f"today's item was written on a run that named {_NAMED_DAY}\n"
+        f"{proc.stdout[-2500:]}")
+
+
+def test_cli_named_day_with_no_raw_file_says_so(tmp_path):
+    """A named day that has no raw file is announced, and no scored file is written.
+
+    Writing an empty `intel-D.jsonl` would be the louder-seeming fix and the worse
+    one: for a day whose raw file has rotated away, that file is the last record of
+    what was scored. So the run prints the day it could not score — the silence was
+    what let a stale scored file reach the vault unnoticed — and leaves it standing.
+    """
+    home, feeds = _cli_home(tmp_path)
+    (feeds / "raw" / f"{_today_str()}.jsonl").write_text(_TODAY_ITEMS)
+
+    _, proc = _run_cli(home, 6, "--date", _NAMED_DAY, "--score", "--write")
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert f"NO RAW ITEMS FOR {_NAMED_DAY}" in proc.stdout, (
+        f"a day with nothing to score must be named, not skipped silently\n"
+        f"{proc.stdout[-2000:]}")
+    assert not (feeds / f"intel-{_NAMED_DAY}.jsonl").exists(), (
+        "an empty scored file would have replaced whatever the day had")
+
+
+def test_cli_refuses_a_malformed_date_before_running_any_stage(tmp_path):
+    """`--date` is not a day → exit 2, before any stage runs.
+
+    The value became part of a filename two directories deep (`raw/<X>.jsonl`,
+    `intel-<X>.jsonl`) with nothing checking it, so a typo'd day — `09-10-2026` —
+    walked the stages, found nothing, and still printed `Pipeline Complete`.
+    """
+    home, feeds = _cli_home(tmp_path)
+    (feeds / "raw" / f"{_today_str()}.jsonl").write_text(_TODAY_ITEMS)
+
+    _, proc = _run_cli(home, 6, "--date", "09-10-2026", "--score", "--write")
+
+    assert proc.returncode == 2, (
+        f"a malformed --date must be refused, not run: rc={proc.returncode}\n"
+        f"{proc.stdout[-1500:]}")
+    assert "expected YYYY-MM-DD" in proc.stdout, proc.stdout[-1500:]
+    assert "Pipeline Complete" not in proc.stdout, (
+        f"the stages ran anyway:\n{proc.stdout[-1500:]}")
+    assert not list(feeds.glob("intel-*.jsonl")), (
+        f"a refused run wrote scored output: "
+        f"{sorted(p.name for p in feeds.iterdir())}")
 
 
 # --- backlog #739: YouTube feed coverage is a signal, not a silence ---------
@@ -1846,7 +2018,7 @@ def test_the_cli_drops_a_substring_only_item_before_the_day_file(tmp_path):
     """
     home, feeds = _cli_home(tmp_path)
     (home / "obsidian" / "interests.md").write_text(INTERESTS_LIVE_MD)
-    today = __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d")
+    today = _today_str()
     (feeds / "raw" / f"{today}.jsonl").write_text("\n".join([
         _item(HANDOFF_CRON_ITEM, source="github",
               title="fix(cron): honor tool allowlists across harnesses (#149375)",
@@ -2085,7 +2257,7 @@ def test_the_cli_keeps_the_ai_video_into_the_day_file(tmp_path):
     """
     home, feeds = _cli_home(tmp_path)
     (home / "obsidian" / "interests.md").write_text(INTERESTS_852_MD)
-    (feeds / "raw" / f"{__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d')}.jsonl"
+    (feeds / "raw" / f"{_today_str()}.jsonl"
      ).write_text("\n".join([
          _feed_video(MCP_APPS_ITEM, MCP_APPS_TITLE, "aiDotEngineer").to_json(),
          _feed_video(LANTERN_ITEM, LANTERN_TITLE, "Nerdist").to_json(),
@@ -2104,3 +2276,86 @@ def test_the_cli_keeps_the_ai_video_into_the_day_file(tmp_path):
     assert (rows[0]["relevance"], rows[0]["category"]) == (10, "ai-llms"), (
         f"the surviving item keeps the keyword-fallback grade, filed under its own "
         f"topic: {rows[0]}")
+
+# --- autonomy task #30's own text (#853 finding 2) -------------------------------
+#
+# `autonomy/30-intelligence-pipeline-scan-score.md` is the operating instruction the
+# scheduled worker reads, and its prose is what clauses 3 and 4 are about. Same
+# convention as tests/test_automod_doc_claims.py: fail when the vault is present and
+# the claim is stale, skip only when the vault is genuinely absent.
+
+AUTONOMY_TASK_30 = Path.home() / "obsidian" / "autonomy" / (
+    "30-intelligence-pipeline-scan-score.md")
+
+
+def _task_30_text() -> str:
+    if not AUTONOMY_TASK_30.exists():
+        pytest.skip(f"no vault checkout at {AUTONOMY_TASK_30.parent}")
+    return AUTONOMY_TASK_30.read_text(encoding="utf-8")
+
+
+def test_autonomy_task_30_names_the_scorer_that_ships():
+    """Clause 3: the task file names the model that scores, and claims no 122B.
+
+    `scoring.py:43-45` sends model `"primary"` to `localhost:8096/v1/chat/completions`,
+    and that endpoint answers `{"id": "Qwen3.8-Flash-Next-nvfp4"}` (re-read live at
+    `/v1/models` on 2026-09-22). The worker running this task reads this file, so a
+    stale model name in it is what makes a later run re-derive #570 from scratch.
+    """
+    text = _task_30_text()
+
+    assert "122B" not in text, (
+        "the task still names the retired scorer:\n"
+        + "\n".join(line for line in text.splitlines() if "122B" in line))
+    assert "`primary`" in text, "the task never names the model that scores"
+    assert "Qwen3.8-Flash-Next-nvfp4" in text, (
+        "the task does not name the model behind `primary`")
+    front = text.split("---")[1] if text.startswith("---") else ""
+    assert "primary" in front, (
+        "the front-matter `description:` is what the scheduler board and the MCP "
+        f"reader show, and it does not name the scorer:\n{front}")
+
+
+def test_autonomy_task_30_states_the_write_floor():
+    """Clause 4: stage 4 and Notes state the floor gate; the stale lines are gone.
+
+    `vault_writer.py:44` is the 4, and the writer prints
+    `Held N item(s) below relevance floor 4` — the file has to say the same thing.
+    """
+    text = _task_30_text()
+
+    for stale in ("writes all scored items", "No threshold"):
+        assert stale not in text, (
+            f"the task still teaches {stale!r}:\n"
+            + "\n".join(line for line in text.splitlines() if stale in line))
+    assert "vault_writer.RELEVANCE_FLOOR" in text, (
+        "the task never names the constant that gates writes")
+    assert "(4)" in text, "the task does not state the floor's value"
+
+
+def test_autonomy_task_30_still_parses_as_scheduler_config():
+    """The seam another process reads: the prose edit must not damage the schema.
+
+    This file is live configuration — `autonomy._parse_task_file` feeds the scheduler
+    and the Mission Control board. A rewrite that renames `id:` to `task_id:` or drops
+    `timeout_seconds:` leaves the task dispatching on defaults, or listed on a board
+    with values only one reader can see, with nothing red about it. So the schema is
+    asserted, not assumed.
+    """
+    if not AUTONOMY_TASK_30.exists():
+        pytest.skip(f"no vault checkout at {AUTONOMY_TASK_30.parent}")
+    import autonomy
+
+    parsed = autonomy._parse_task_file(AUTONOMY_TASK_30)
+    assert parsed is not None, "the scheduler's parser returns nothing for task 30"
+    assert not parsed.get("_yaml_broken"), (
+        "task 30 parses degraded: the scheduler then recovers fields by regex, and a "
+        "degraded read can silently drop the schedule or the turn budget")
+
+    for field, expected in {"id": 30, "skill_name": "intelligence-pipeline",
+                            "frequency": "daily", "timeout_seconds": 1800,
+                            "agent_id": "researcher"}.items():
+        assert parsed.get(field) == expected, (
+            f"task 30 lost or changed {field}: want {expected!r}, "
+            f"got {parsed.get(field)!r}")
+    assert parsed["body"].strip(), "task 30 has no body for the worker to read"

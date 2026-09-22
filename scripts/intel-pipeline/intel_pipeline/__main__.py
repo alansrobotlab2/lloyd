@@ -29,9 +29,23 @@ def main():
     profile = load_profile()
     print(f"Loaded profile from: {PROFILE_FILE}")
     
+    # One day key for the whole invocation (backlog #853). The scoring stage used
+    # to key its raw read and its scored write on `today` while the write stage
+    # keyed on `date_str`, so `--date D --score --write` scored today into
+    # `intel-<today>.jsonl` and then had `load_scored_items(D)` read
+    # `intel-D.jsonl`: the day just scored never reached the vault, and a stale
+    # day's scored file could be re-published in its place. A malformed `--date`
+    # is refused here rather than becoming a filename two directories deep.
     today = datetime.utcnow().strftime("%Y-%m-%d")
+    if args.date:
+        try:
+            datetime.strptime(args.date, "%Y-%m-%d")
+        except ValueError:
+            print(f"Invalid --date {args.date!r}: expected YYYY-MM-DD "
+                  f"(e.g. {today})")
+            sys.exit(2)
     date_str = args.date if args.date else today
-    
+
     # Run scanners
     youtube_coverage = None  # None until the YouTube scanner reports its feeds
     if run_all or args.scan:
@@ -66,17 +80,31 @@ def main():
         # NOTE: each scanner saves its own items to the raw JSONL already
         # (github_scanner / youtube_scanner call state.save_raw_items internally).
         # Do NOT save the combined list here — that would double-write every item.
+        # The scanners key that write on their OWN `today`, which `--date` does not
+        # move, so this line prints today even when `--date D` asked for another
+        # day. Naming the day here would print a path the run never wrote; the raw
+        # write key is a scanner-side change this round did not make (#853 findings).
         print(f"Scanners saved raw items to: {state.get_raw_path(today)}")
     
     # Run scoring
     if run_all or args.score:
         print("\n--- Running Scoring Pipeline ---\n")
         
-        # Load raw items for today
-        raw_items = state.load_raw_items(today)
-        print(f"Loaded {len(raw_items)} raw items")
-        
-        if raw_items:
+        # Load raw items for the day this invocation named — the same key the write
+        # stage uses, which is the whole of #853.
+        raw_items = state.load_raw_items(date_str)
+        print(f"Loaded {len(raw_items)} raw items for {date_str}")
+
+        if not raw_items:
+            # A day with nothing to score gets said out loud. Writing an empty
+            # `intel-<D>.jsonl` here would be worse than saying it: for a day whose
+            # raw file has since rotated away, that file is the last record of what
+            # was scored, and a following `--write` would then publish nothing.
+            print(f"NO RAW ITEMS FOR {date_str}: no scored file written for it. A "
+                  f"--write in this same run re-publishes whatever "
+                  f"intel-{date_str}.jsonl already holds, or nothing if it does not "
+                  f"exist (raw: {state.get_raw_path(date_str)})")
+        else:
             # Score items
             from .models import FeedItem, ScoredItem
             scored = run_scoring_pipeline(raw_items, profile)
@@ -84,7 +112,7 @@ def main():
             
             # Save scored items
             from ._paths import FEEDS_DIR
-            intel_path = FEEDS_DIR / f"intel-{today}.jsonl"
+            intel_path = FEEDS_DIR / f"intel-{date_str}.jsonl"
             with open(intel_path, "w") as f:
                 for item in scored:
                     f.write(item.to_json() + "\n")
