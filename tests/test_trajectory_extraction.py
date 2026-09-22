@@ -387,6 +387,202 @@ def test_category_precedence_follows_the_declared_order():
     assert et.categorize_error("timeout: permission denied") == "permission"
 
 
+# ── the error label comes from the error signal, not the stdout prose (#1055) ─
+#
+# `error_type` is half the skill-candidate pattern key, so a keyword sitting in
+# a program's own printed output picks a candidate's identity. Two rows from
+# the 2026-09-13 mining run, verbatim, both minted as `Bash/permission`
+# (occ=2) and both adjudicated `rejected_false_positive`: a skill-lint pass
+# whose command ended in `echo "--- forbidden ---"; grep -c -E ...` — grep
+# matched nothing, exit 1, i.e. a *successful* check reporting a zero count —
+# and a mutation test reporting an intended kill. Neither record contains
+# `EPERM`, `EACCES` or `Permission denied`.
+
+@pytest.mark.parametrize("text", [
+    "ERROR: 1 3 1 --- forbidden --- 0  [exit code: 1]",
+    "FAILS  M2 forbidden rule always says clean",
+])
+def test_the_word_forbidden_in_command_output_is_not_a_permission_error(text):
+    assert et.categorize_error(text) != "permission"
+
+
+@pytest.mark.parametrize("text,category", [
+    ("Permission denied: /etc/shadow", "permission"),
+    ("open /x: access denied", "permission"),
+    ("unlink /mnt: Operation not permitted (EPERM)", "permission"),
+    ("chmod: failed, errno EACCES", "permission"),
+])
+def test_a_permission_label_still_needs_a_permission_form(text, category):
+    """Dropping bare `forbidden` must not narrow what a real denial maps to:
+    each of these is the form the item names as still required."""
+    assert et.categorize_error(text) == category
+
+
+@pytest.mark.parametrize("text", [
+    "not found",
+    "timeout",
+    "DNS",
+    "schema",
+    "the key was not found in the mapping, which is expected",
+    "timeout handler registered for SIGTERM",
+    "DNS names appear in the echoed config header",
+    "schema column listed in the migration report",
+])
+def test_a_bare_prose_word_does_not_choose_the_label(text):
+    """Each of these words appears in ordinary program output — an echoed
+    header, a test name, a column list — so none of them may select a class.
+    Every alternative left in `ERROR_CATEGORIES` is an errno or a phrase that
+    only a failure says."""
+    assert et.categorize_error(text) == "logic"
+
+
+@pytest.mark.parametrize("text,category", [
+    # The labels pinned by `test_error_categories` above, restated here so this
+    # diff is the thing that proves they survived the narrowing.
+    ("404 Not Found", "not_found"),
+    ("request timed out after 30s", "timeout"),
+    ("invalid JSON payload", "validation"),
+    # Phrase forms the bare words used to cover by accident.
+    ("bash: rg: command not found", "not_found"),
+    ("open /x: ETIMEDOUT", "timeout"),
+    ("curl: (6) Could not resolve host: example.com", "network"),
+])
+def test_errno_and_phrase_forms_keep_their_labels(text, category):
+    assert et.categorize_error(text) == category
+
+
+# The real shape of the MCP transport failure the same run hit: eleven copies
+# of this body across 2026-09-10/11, `error_source=protocol`, categorised
+# `logic` because nothing in `ERROR_CATEGORIES` matched — so a protocol failure
+# presented itself as a behaviour problem in the tool's own logic. It is
+# already covered by the installed skill `mcp-transport-error-recovery`, whose
+# Pattern 2 names `automod_gate`.
+TRANSPORT_BODY = ("automod_gate: transport error: unhandled errors "
+                  "in a TaskGroup (1 sub-exception)")
+# How that body reaches the trajectory record: `result_summary()` prefixes it.
+TRANSPORT_SUMMARY = f"ERROR: {TRANSPORT_BODY}"
+
+
+def test_a_transport_failure_gets_a_label_of_its_own():
+    assert et.categorize_error(TRANSPORT_SUMMARY) == "transport"
+
+
+def test_a_lost_dispatch_is_labelled_transport_end_to_end(tmp_path):
+    """Across the extractor seam: the label on the row the miner keys on, not
+    just the helper's return value."""
+    traj = first_tool(tmp_path, [("automod_gate", {}, TRANSPORT_BODY, True)])
+    tool = traj["tools"][0]
+    assert tool["error_source"] == "protocol"
+    assert tool["result_summary"] == TRANSPORT_SUMMARY
+    assert traj["error_tools"][0]["error_type"] == "transport"
+
+
+# The label only matters because of what happens one process further out: the
+# miner groups on `(tool_name, error_type)` and `candidate_pattern_key` turns
+# that into the string `skill_verdicts.py` joins the adjudication ledger on.
+# These two cross that boundary — extract, then mine, then key — because the
+# item's whole claim is about the key, not the helper's return value.
+
+def test_the_prose_rows_mine_no_bash_permission_candidate(tmp_path):
+    """The 2026-09-13 run emitted `candidate-bash-permission-20260913.md`
+    (`Bash/permission`, occ=2, `status: pending_review`) off exactly these two
+    bodies. Mined again after the fix neither can reach that key: the mutation
+    test's body keys as `Bash/logic`, a label an adjudicator can derive from
+    the record in front of them, and the lint pass's `[exit code: 1]` row is
+    `nonzero_exit`, which #500's mining gate rejects before keying.
+    `Bash/permission` is left to bodies that actually say `Permission denied`."""
+    lint_body = "ERROR: 1 3 1 --- forbidden --- 0  [exit code: 1]"
+    mutant_body = "FAILS  M2 forbidden rule always says clean"
+
+    lint = et.parse_session(write_session(
+        tmp_path, [("Bash", {"command": "./lint.sh"}, lint_body, True)],
+        name="forbidden-prose-lint"))
+    assert lint["error_tools"][0]["error_type"] == "logic"
+    assert not mt.is_corroborated_error(lint["error_tools"][0])   # the #500 gate
+
+    rows = [et.parse_session(write_session(
+               tmp_path, [("Bash", {"command": f"./mutants.py {n}"}, mutant_body, True)],
+               name=f"forbidden-prose-mutant-{n}"))
+            for n in (1, 2)]
+    assert [r["error_tools"][0]["error_type"] for r in rows] == ["logic", "logic"]
+    keys = {mt.candidate_pattern_key(p)
+            for p in mt.mine_error_patterns(rows + [lint], threshold=2)}
+    assert keys == {"Bash/logic"}
+
+
+def test_a_transport_row_keys_its_own_pattern_key(tmp_path):
+    """The other direction of the same fall-through: eleven TaskGroup failures
+    on 2026-09-10/11 reached the key `automod_gate/logic`, which is what made a
+    lost dispatch read as a behaviour problem. After the fix the mined key is
+    `automod_gate/transport` — the key a person can match against the installed
+    `mcp-transport-error-recovery`, whose Pattern 2 names this tool."""
+    rows = [et.parse_session(write_session(
+               tmp_path, [("automod_gate", {}, TRANSPORT_BODY, True)],
+               name=f"transport-lost-dispatch-{n}"))
+            for n in (1, 2)]
+    keys = {mt.candidate_pattern_key(p)
+            for p in mt.mine_error_patterns(rows, threshold=2)}
+    assert keys == {"automod_gate/transport"}
+
+
+@pytest.mark.parametrize("body,expected", [
+    ("active\n", "logic"),
+    ("Permission denied: /etc/shadow\n", "permission"),
+])
+def test_the_protocol_marker_never_selects_the_label(tmp_path, body, expected):
+    """#500: `error_source="protocol"` is `stats.is_error` — a non-zero-exit
+    turn marker that reads `protocol` on effectively every flagged step, clean
+    health-check output included. If the label consulted it, every failed probe
+    would become a transport failure; these rows carry the marker and the
+    phrase decides nothing."""
+    traj = first_tool(tmp_path, [("Bash", {"command": "true"}, body, True)])
+    tool = traj["tools"][0]
+    assert tool["error_source"] == "protocol"
+    assert traj["error_tools"][0]["error_type"] == expected
+    assert traj["error_tools"][0]["error_type"] != "transport"
+
+
+def test_a_keyword_past_the_persisted_prefix_does_not_choose_the_label(tmp_path):
+    """`result_summary()` keeps MAX_ERROR_LEN characters, so a keyword beyond
+    that cap is invisible to everyone who later reads the record — including
+    the person adjudicating the candidate the label keys. #1055 found exactly
+    that on a 2026-09-14 row labelled `resource` whose stored summary matches no
+    pattern at all."""
+    assert et.MAX_ERROR_LEN == 200
+    body = "health check output " * 20 + "out of memory while loading model"
+    assert "out of memory" in body[et.MAX_ERROR_LEN:]
+    traj = first_tool(tmp_path, [("Bash", {"command": "./probe.sh"}, body, True)])
+    tool = traj["tools"][0]
+    assert "out of memory" not in tool["result_summary"]
+    assert traj["error_tools"][0]["error_type"] == "logic"
+    assert (traj["error_tools"][0]["error_type"]
+            == et.categorize_error(tool["result_summary"]))
+
+
+def test_the_miner_keeps_no_second_error_categorizer():
+    """`scripts/mine-trajectories.py` carried `ERROR_CATEGORIES` and a pair of
+    categorizers with zero call sites — it keys on the extractor's
+    `error_tool["error_type"]` — so a fix applied there changed nothing while
+    the copy sat looking like the thing to edit. It must not come back: a
+    second derivation of the value the verdict ledger joins on would disagree
+    with the first. The module still has to import."""
+    path = _ROOT / "scripts" / "mine-trajectories.py"
+    source = path.read_text(encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(
+        "mine_trajectories_no_categorizer", path
+    )
+    miner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(miner)
+    assert not hasattr(miner, "ERROR_CATEGORIES")
+    assert not hasattr(miner, "categorize_error")
+    assert not hasattr(miner, "categorize_result_summary")
+    # The clause's own check is this literal grep, run over the whole file and
+    # not over a filtered slice of it: it is clean today because the comment
+    # above the deletion names the two functions without call parentheses, so
+    # the pattern can only start matching again by a matcher coming back.
+    assert not re.search(r"(categorize_error|categorize_result_summary)\(", source)
+
+
 @pytest.mark.parametrize("text", [
     "Traceback (most recent call last):", "ValueError: bad input",
     "bash: foo: command not found", "No such file or directory",

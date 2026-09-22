@@ -169,13 +169,48 @@ COMMAND_HEAD_KEEP = 60
 
 
 # ── Error categorization ──────────────────────────────────────────────────────
+#
+# The label is half of a skill candidate's pattern key (`<tool>/<error_type>`,
+# keyed in `mine-trajectories.py` off `error_tool["error_type"]`, joined by
+# `scripts/skill_verdicts.py`), so an over-eager pattern does not just mis-file
+# one row: it either attaches new evidence to a key a person has already
+# adjudicated, or mints a fresh key that has to be hand-rejected. Backlog #1055
+# measured both from one mining run (2026-09-13): a skill-lint pass whose
+# command echoed its own `--- forbidden ---` header (grep returned 0 matches,
+# exit 1 — a *successful* check), and a mutation test whose report line read
+# `FAILS  M2 forbidden rule always says clean` (an intended mutant kill). Each
+# minted a `Bash/permission` candidate with no `EPERM`, no `EACCES` and no
+# `Permission denied` anywhere in the record; both were later adjudicated
+# `rejected_false_positive`. The same run bucketed a transport failure into
+# `logic` because nothing here matched it.
+#
+# So: errno forms and known phrases, never a bare conversational word. Five
+# alternatives were dropped as the ones that fired in prose — bare `forbidden`,
+# bare `not found` (the phrase forms plus `404`/`ENOENT` stay, and shell's
+# `command not found` is now named explicitly), bare `timeout` (`timed out` /
+# `ETIMEDOUT` / `deadline exceeded` stay), bare `DNS` (curl's own
+# `Could not resolve host` replaces it) and bare `schema` (`invalid` /
+# `malformed` / `parse error` / `syntax error` / `validation` stay).
+# `network` and `invalid` are kept deliberately: they name a failure mode
+# rather than a program's ordinary output, and the labels pinned at
+# `tests/test_trajectory_extraction.py` depend on them. Exception *names* are
+# not added — the matcher wants the phrase, which is what
+# `test_python_exception_names_are_not_categorised_by_themselves` pins (#389).
+#
+# `transport` is declared first because the harness writes the whole body of a
+# lost dispatch, so such a body often quotes the words of the call it lost and
+# the marker has to win. `error_source` is *not* consulted here: per #500 it is
+# `stats.is_error`, a non-zero-exit turn marker that reads `protocol` on
+# effectively every flagged step, so keying off it would label every failed
+# health check a transport failure. Only the phrase picks the class.
 
 ERROR_CATEGORIES = [
-    ("permission",  re.compile(r"permission denied|access denied|forbidden|EPERM|EACCES", re.IGNORECASE)),
-    ("not_found",   re.compile(r"file not found|no such file|not found|404|ENOENT", re.IGNORECASE)),
-    ("timeout",     re.compile(r"timeout|timed out|ETIMEDOUT|deadline exceeded", re.IGNORECASE)),
-    ("network",     re.compile(r"connection refused|ECONNREFUSED|DNS|ENOTFOUND|network|EHOSTUNREACH", re.IGNORECASE)),
-    ("validation",  re.compile(r"invalid|malformed|parse error|syntax error|schema|validation", re.IGNORECASE)),
+    ("transport",   re.compile(r"transport error|unhandled errors in a TaskGroup", re.IGNORECASE)),
+    ("permission",  re.compile(r"permission denied|access denied|EPERM|EACCES", re.IGNORECASE)),
+    ("not_found",   re.compile(r"file not found|no such file|command not found|404|ENOENT", re.IGNORECASE)),
+    ("timeout",     re.compile(r"timed out|ETIMEDOUT|deadline exceeded", re.IGNORECASE)),
+    ("network",     re.compile(r"connection refused|ECONNREFUSED|could not resolve host|ENOTFOUND|network|EHOSTUNREACH", re.IGNORECASE)),
+    ("validation",  re.compile(r"invalid|malformed|parse error|syntax error|validation", re.IGNORECASE)),
     ("resource",    re.compile(r"out of memory|disk full|quota|ENOMEM|ENOSPC|resource exhausted", re.IGNORECASE)),
 ]
 
@@ -402,6 +437,16 @@ def classify_failure(content_text: str, exit_code: int | None) -> str:
 
 
 def categorize_error(text: str) -> str:
+    """Label a failed step, from the words that name a failure mode.
+
+    Callers pass the *persisted* `result_summary`, not the raw tool body.
+    `result_summary()` keeps only `MAX_ERROR_LEN` characters, so a keyword
+    beyond that cap would choose a label that no reader of the record can
+    justify — #1055 found a row labelled `resource` whose stored summary
+    matches no pattern at all, because the keyword lived past the cap. Taking
+    the label from the same text an adjudicator sees is what keeps a
+    candidate's key re-derivable from its own evidence.
+    """
     for name, pattern in ERROR_CATEGORIES:
         if pattern.search(text):
             return name
@@ -747,7 +792,11 @@ def parse_session(path: Path) -> dict | None:
             error_tools.append({
                 "name": name,
                 "sequence": seq,
-                "error_type": categorize_error(content_text),
+                # Read from `res_summary` — the text this row persists — never
+                # from `content_text`, so no candidate can carry a keyword that
+                # the record it keys hides from the person adjudicating it
+                # (#1055; `result_summary()` caps the body at MAX_ERROR_LEN).
+                "error_type": categorize_error(res_summary),
                 "error_source": error_source,
                 "failure_class": failure_class,
                 "exit_code": exit_code,

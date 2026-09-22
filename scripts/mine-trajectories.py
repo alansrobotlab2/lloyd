@@ -32,39 +32,14 @@ def set_trajectory_dir(path: Path) -> None:
     TRAJECTORY_DIR = path
 
 
-# ── Error categorization ─────────────────────────────────────────────────────
-
-ERROR_CATEGORIES = [
-    ("permission", re.compile(r"permission denied|access denied|forbidden|EPERM|EACCES", re.IGNORECASE)),
-    ("not_found", re.compile(r"file not found|no such file|not found|404|ENOENT", re.IGNORECASE)),
-    ("timeout", re.compile(r"timeout|timed out|ETIMEDOUT|deadline exceeded", re.IGNORECASE)),
-    ("network", re.compile(r"connection refused|ECONNREFUSED|DNS|ENOTFOUND|network|EHOSTUNREACH", re.IGNORECASE)),
-    ("validation", re.compile(r"invalid|malformed|parse error|syntax error|schema|validation", re.IGNORECASE)),
-    ("resource", re.compile(r"out of memory|disk full|quota|ENOMEM|ENOSPC|resource exhausted", re.IGNORECASE)),
-]
-
-
-def categorize_error(text: str) -> str:
-    """Categorize an error message into a type."""
-    if not text:
-        return "logic"
-    text_lower = text.lower()
-    for name, pattern in ERROR_CATEGORIES:
-        if pattern.search(text):
-            return name
-    return "logic"
-
-
-def categorize_result_summary(result_summary: str) -> str:
-    """Categorize based on result_summary field."""
-    if not result_summary:
-        return "logic"
-    result_lower = result_summary.lower()
-    for name, pattern in ERROR_CATEGORIES:
-        if pattern.search(result_lower):
-            return name
-    return "logic"
-
+# Error *types* are not derived here. The label is written once, by the
+# extractor (`categorize_error` in `scripts/extract-trajectories.py`), and the
+# miner reads it off the row it keys on (`error_tool["error_type"]`). This file
+# used to carry its own `ERROR_CATEGORIES` and a matching pair of
+# `categorize_error` / `categorize_result_summary` with zero call sites: the
+# place a fix looked like it belonged while changing nothing, and a second
+# derivation of a value the verdict ledger joins on (#1055). Do not re-add a
+# matcher here.
 
 # ── Tool name normalization (for sequence mining) ────────────────────────────
 
