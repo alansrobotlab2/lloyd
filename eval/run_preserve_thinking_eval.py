@@ -81,6 +81,11 @@ table, `MemAvailable` gate before boot), which is an operator scheduling
 decision. `tests/test_preserve_thinking_eval.py` pins the
 session shape and the window's effect on a scripted engine, so the
 mechanism is checked without a GPU.
+
+The last live run under the shipped mechanism (2026-09-21, 3 trials, folded
+into a primary restart as #617 asked) is in
+`eval/measurements/yarn-2026-09-21.md`: against `off`, `window=6` cut output
+tokens 34% and tool calls 11%, `all` 34% and 18%, with the same answers.
 """
 
 from __future__ import annotations

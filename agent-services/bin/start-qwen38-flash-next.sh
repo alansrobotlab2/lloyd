@@ -225,7 +225,10 @@ MODEL_DIR="${MODEL_DIR:-$PROJECT_DIR/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP
 #   The KV pool bounds it — vLLM refuses a length one request cannot hold:
 #   ~398k tokens in BF16, ~692k with KV_CACHE_DTYPE=fp8 at the 11.5 GiB below,
 #   so 1M is not reachable on one card and factor 2.0 (524,288) needs fp8.
-#   Static YaRN also taxes short prompts (model card), so it stays an opt-in arm.
+#   Static YaRN reaches every request. Measured 2026-09-21 on this build
+#   (eval/measurements/yarn-2026-09-21.md): no text-quality or retrieval cost,
+#   480k safe at the 14.0 GiB KV budget, but tool choice leaned 95 vs 89 of 105
+#   against it, unsettled. It stays an opt-in arm until that is.
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
 # The yarn shadow config already derives 262144*factor, so this is belt and
 # braces for a hand-edited one; vLLM refuses a longer max-model-len otherwise.

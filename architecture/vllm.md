@@ -327,18 +327,37 @@ Three things about it are worth not rediscovering:
   where the QSA attention, the MTP draft and the `max_model_len` derivation
   read it. The generator refuses a source config whose rope is already scaled,
   rather than stacking.
-- **It is static, so it taxes every request.** The model card warns YaRN
-  "potentially impact[s] performance on shorter texts" and recommends factor
-  2.0 over 4.0 when 524k is the real need. Only 12 of the 48 layers use RoPE,
-  on a quarter of each head (`partial_rotary_factor: 0.25`), so the hit is
-  probably small — **but it is unmeasured on this box**, and almost every turn
-  here is far short of 262k. That is why it stays opt-in.
+- **It is static, so it reaches every request — and on text quality that
+  costs nothing measurable** (2026-09-21,
+  `eval/measurements/yarn-2026-09-21.md`). The model card warns YaRN
+  "potentially impact[s] performance on shorter texts"; only 12 of the 48
+  layers use RoPE, on a quarter of each head. Measured on the production build
+  against production reproducing itself bit-for-bit: mean NLL on 450 short
+  windows +0.0014 [−0.004, +0.007]; next-token NLL at 2k/20k/150k/250k inside
+  zero; exact-match retrieval 160/160 vs 160/160 (1 code among 4) and 79/80 vs
+  78/80 (1 among 24 confusable names) from 16k to 250k, and 72/72 at 300k,
+  400k and 480k. What it does do is flip close calls: 19% of short-window
+  top-1 tokens, the same rate as changing the request's window length.
+- **The one signal against it is tool choice.** Across the 35 web and
+  code-nav tool-choice queries, three runs each, production 95/105 and YaRN
+  89/105: five queries worse, one better (sign test p ≈ 0.22), with one flip
+  persistent under an identical prompt ("is `_prune_reasoning` dead code?" →
+  `graph_explain` 3/3 on production, grep 3/3 on YaRN). Because it is static,
+  that would reach every worker round, not only long threads. Settling it
+  needs a few hundred distinct decisions; until then it stays opt-in.
 
-Capacity, if it is ever turned on: ~398k tokens in BF16, ~692k with FP8 at the
-11.5 GiB pool above, ~845k at the 14.0 GiB the conf carries since 2026-09-15.
-YaRN×2 with FP8 has been booted to 480k. Past that needs
-more card — 2× RTX PRO 6000 at TP=2 measured a 3.12M-token pool upstream;
-1M on one card is impossible.
+Capacity and cost, if it is turned on: ~845k tokens at the 14.0 GiB the conf
+carries since 2026-09-15 (the YaRN boot *reports* 940,884 from the same memory
+and block size — unexplained). On `dff1bde` a 480k prefill peaks at 95.4 GiB
+with 2.4 GiB free, so the production budget is safe to full length, and
+prefill is 26 s at 300k, 35 s at 400k, 43 s at 480k (61/74/129 s on the 09-10
+build — the page-count cliff is gone). A chat decoding beside a cold 400k
+prefill stays responsive (max gap 0.32 s) but runs at 5.2 tok/s for 37 s, where
+a 200k one costs 7.3 tok/s for 18 s. Turning it on does not by itself raise
+`models.primary.context_length`, which is what compaction keys off; raising
+that moves every session's truncation from ~210k to ~472k and is a separate
+decision. Past 480k needs more card — 2× RTX PRO 6000 at TP=2 measured a
+3.12M-token pool upstream; 1M on one card is impossible.
 
 ## 5. The tuning knobs
 
@@ -701,7 +720,10 @@ has still not been run as of 2026-09-11.
   With no group annotated as the drafter's, every group — all four Mamba
   groups included — is treated as a draft group, and "prefix-cache reuse
   across requests will be disabled".
-- **YaRN's short-prompt cost is unmeasured** (§4), which is the only thing
+- **YaRN's tool-choice effect is unsettled** (§4). Its short-prompt,
+  long-context, retrieval, memory and prefill costs were measured on
+  2026-09-21 and are nil or acceptable; 35 tool-choice queries leaned 95 vs
+  89 of 105 against it, which is not conclusive and is the only thing
   standing between the staged arm and a decision.
 - **The ≤2400 MHz clock cap from the only configuration described as stable
   on GPU 1 is not set** (§2.3), and the unit now clamps the card at 450 W, not
