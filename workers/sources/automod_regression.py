@@ -1,4 +1,9 @@
-"""Nightly behavioural-regression check for a landed self-modification.
+"""Nightly retrieval-quality regression check for a landed self-modification.
+
+**The axis, said first.** Retrieval quality, not behaviour. Every metric this
+file arms scores a retrieval query, and none of them observes a tool call, a
+turn count or a model decision — see the limit beside the edge-set limit under
+`ARMED_METRICS`, and `architecture/automod.md` §13.
 
 **What this deliberately does not do.** It does not compare the autoresearch
 composite score. Three identical baseline runs of that metric scored
@@ -145,6 +150,24 @@ REPORT_ONLY = ("latency_ms_avg", "n_queries")
 # healthy because it was never looking. Edge quality has no armed metric and is
 # a stated limit in architecture/automod.md §13, not a covered case.
 #
+# THE SAME STATEMENT, ONE AXIS OVER — the agent loop. No armed metric observes a
+# tool call, a turn count or a model decision: `eval/run_eval.py` issues no model
+# request at all (it calls `agent_mcp.vault._vault_recall` directly and scores
+# against a fixed YAML), so a landed change to the agent loop — dropping a tool
+# from the set, changing turn accounting, compaction, or skill injection — moves
+# none of the seven, and this check reports green by construction. Name the
+# disproof: dropping `Grep` from the baseline tool set changes no metric here.
+#
+# This is NOT "nothing observes the loop". The gate has a scored loop-side rung,
+# `prompt_surface` (`scripts/automod/gate.py`, `rung_prompt_surface`), which runs
+# `eval/run_tool_choice_eval.py` then `eval/compare_tool_choice.py` — but ONLY
+# pre-landing, and ONLY when the diff touches one of five path names:
+# `prompt_builder.py`, `prefetch.py`, and the vault `SOUL.md`, `MEMORY.md`,
+# `USER.md`. So a loop-side change that is not one of those five has no
+# pre-landing check and no post-landing one. `AXIS_*` below carries that into the
+# measurement itself, because this file's output lands in the LKG record's `eval`
+# slot, where every later "observed healthy in production" claim reads it.
+#
 # `test_automod_doc_claims` pins the split. The four metrics outside this
 # subset are armed too, and the pin is what makes that honest: `PinnedCorpus`
 # (`scripts/automod/evalpin.py`) freezes the qmd index and fixes one shared
@@ -155,6 +178,33 @@ REPORT_ONLY = ("latency_ms_avg", "n_queries")
 # the whole armed set.
 FACT_LAYER_METRICS = ("entity_hit_rate", "entity_recall_avg",
                       "fact_entity_recall_avg")
+
+# The coverage of this measurement, written INTO the measurement (#829). The
+# `eval` slot of `last_known_good.json` is the slot every later "observed healthy
+# in production" claim reads, and until now it stated a set of numbers and no
+# axis — so a retrieval-quality pass over seven query scores could be read as
+# evidence about behaviour. A reader of the green result should not have to know
+# what an eval is to know what it did not look at, and `app/routers/automod.py`
+# serves this record straight to Mission Control.
+AXIS_FIELD = "axis"
+AXIS_MEASURES = ("retrieval quality, paired A/B: the promotion's parent and the "
+                 "landed commit score the same pinned questions on the same "
+                 "pinned corpus in the same window")
+AXIS_DOES_NOT_MEASURE = (
+    "agent-loop behaviour: no armed metric observes a tool call, a turn count or a "
+    "model decision — the only loop-side check is the PRE-landing gate rung "
+    "`prompt_surface`, and only for prompt_builder.py / prefetch.py / SOUL.md / "
+    "MEMORY.md / USER.md",
+    "graph edge quality: expiring 70% of the active edge set moved no metric, "
+    "armed or reported",
+)
+
+
+def axis_coverage() -> dict:
+    """What this check measured and what it cannot see, as one artifact field."""
+    return {"measures": AXIS_MEASURES, "does_not_measure": list(AXIS_DOES_NOT_MEASURE)}
+
+
 # The floor applied to an armed metric is `max(SIGMA_MULTIPLIER × σ, one
 # question's quantum)` — see `effective_floor`. `MIN_SIGMA` is what the σ term
 # falls back to when the published noise artifact carries no measured stdev for
@@ -1362,6 +1412,39 @@ def all_queries_empty(arm: dict) -> bool:
     return total > 0 and len(arm.get("empty_doc_queries") or []) >= total
 
 
+def eval_last_payload(*, commit: str, measured_at: str, baseline_commit: str,
+                      stage: str, current: dict, pin: dict, regressed: bool,
+                      reasons: list, latency_reading: dict | None,
+                      latency_verdict: dict | None) -> dict:
+    """The record the guardian folds into `last_known_good.json`'s `eval` slot.
+
+    Built here, as one function with one call site, so the field list is
+    assertable without running an eval arm. Two fields exist because of what a
+    reader of the green result cannot see in it: `AXIS_FIELD` names what this
+    measurement covered and what it did not (#829), and `commit` is the commit it
+    was measured on — which is NOT necessarily the commit the guardian ends up
+    recording, and `gstate.set_lkg` stamps that distinction into the slot rather
+    than leaving a three-day-old measurement to read as this promotion's
+    baseline.
+    """
+    return {
+        "commit": commit, "measured_at": measured_at,
+        "baseline_commit": baseline_commit, "stage": stage,
+        "overall": current["overall"], "corpus": current.get("corpus") or {},
+        "pin": pin,
+        # What this number is a measurement OF, and the two axes it cannot see
+        # (agent-loop behaviour, graph edge quality). See `axis_coverage`.
+        AXIS_FIELD: axis_coverage(),
+        "regressed": regressed, "reasons": reasons,
+        # Two keys, two meanings: `latency_budget` is the reading (present for
+        # every measurable run, inside or out, so a reader can tell "fast enough"
+        # from "never measured"), and `latency_over_budget` is the verdict — null
+        # unless this run actually went past the ceiling.
+        "latency_budget": latency_reading,
+        OVER_BUDGET_FIELD: latency_verdict,
+    }
+
+
 def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
     """The paired comparison for ONE promotion: `subject["commit"]` against
     `subject["parent"]`, both checked out, both on live data, one pinned corpus.
@@ -1662,20 +1745,13 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
     # Hand the measurement to the guardian, which folds it into the LKG record
     # when this promotion settles. Written here rather than into
     # last_known_good.json directly: that file has exactly one writer, and
-    # that is what makes "last known good" mean observed-healthy.
-    S.write_eval_last({
-        "commit": commit, "measured_at": S.now_iso(),
-        "baseline_commit": baseline_commit, "stage": stage,
-        "overall": current["overall"], "corpus": current.get("corpus") or {},
-        "pin": pin_provenance,
-        "regressed": regressed, "reasons": reasons,
-        # Two keys, two meanings: `latency_budget` is the reading (present for
-        # every measurable run, inside or out, so a reader can tell "fast enough"
-        # from "never measured"), and `latency_over_budget` is the verdict — null
-        # unless this run actually went past the ceiling.
-        "latency_budget": latency_reading,
-        OVER_BUDGET_FIELD: latency_verdict,
-    })
+    # that is what makes "last known good" mean observed-healthy. The field list
+    # lives in `eval_last_payload`, which carries the axis this measured.
+    S.write_eval_last(eval_last_payload(
+        commit=commit, measured_at=S.now_iso(), baseline_commit=baseline_commit,
+        stage=stage, current=current, pin=pin_provenance, regressed=regressed,
+        reasons=reasons, latency_reading=latency_reading,
+        latency_verdict=latency_verdict))
     S.append_event({"event": "regression_check", "regressed": regressed,
                     "reasons": reasons, "fact_side_reasons": fact_side,
                     "stage": stage, "baseline_commit": baseline_commit,
@@ -1711,7 +1787,8 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                 "unconfirmed_reasons": unconfirmed,
                 "detail": detail, "noise_floor_stale": stale_floor}
 
-    logger.error("behavioural regression after %s: %s", commit[:8], "; ".join(reasons))
+    logger.error("retrieval-quality regression after %s: %s", commit[:8],
+                 "; ".join(reasons))
 
     # Requested, never performed here. A rollback stops the backend — this
     # process — so an inline `_rollback_inline` call issued the stop that kills
@@ -1726,7 +1803,7 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
     # `reason`, in the revert commit message, and in this item's summary — the
     # three places a person reading a halt actually looks.
     evidence = metric_evidence(detail, reasons, stale_floor)
-    reason = (f"behavioural regression after {commit[:8]} [floors] "
+    reason = (f"retrieval-quality regression after {commit[:8]} [floors] "
               f"{floors_line(evidence, stale_floor)} | " + "; ".join(reasons))
     S.request_rollback(
         reason=reason,
@@ -1749,7 +1826,7 @@ def main(argv: list[str] | None = None) -> int:
     (`measure_noise`) under the same lock, so no check reads a half-written
     floor or shares the pinned daemon with the measurement."""
     import argparse
-    ap = argparse.ArgumentParser(description="Paired behavioural-regression check")
+    ap = argparse.ArgumentParser(description="Paired retrieval-quality regression check")
     ap.add_argument("command", choices=("run", "pending", "latest", "noise"))
     ap.add_argument("--max", type=int, default=None, help="stop after this many checks")
     ap.add_argument("--trials", type=int, default=5, help="noise: replayed trials")

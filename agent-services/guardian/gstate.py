@@ -148,14 +148,41 @@ class AutomodState:
 
     def set_lkg(self, commit: str, *, health: dict | None = None,
                 eval_baseline: dict | None = None) -> None:
+        """Advance the pointer, carrying `health` and `eval` unless told otherwise.
+
+        Pass `eval_baseline` only when the measurement was taken for THIS commit;
+        otherwise the previous slot is carried over. Carrying is correct — a
+        promotion that has not been measured yet must not lose the measurement
+        that exists — but a carried number is not this promotion's baseline, and
+        until #829 nothing in the record could tell the two apart.
+        `eval_for_recorded_commit` is the record's own answer to "is the quality
+        baseline beside me the one for the commit named above?", computed here
+        rather than left to the reader: read 2026-09-18, the live record held
+        `commit` 4a3ac776 recorded 2026-09-17T23:51Z carrying an `eval` for
+        fadbc235 measured 2026-09-14T11:03Z, with nothing marking it stale.
+
+        Stamped even when the slot is empty, so a reader can ask the question of
+        every record — an absent field and a `false` look alike at a glance.
+        """
         existing = read_json(self.lkg_path) or {}
+        carried = eval_baseline is None
+        stored = eval_baseline if eval_baseline is not None else existing.get("eval", {})
         write_json_atomic(self.lkg_path, {
             "schema": 1,
             "commit": commit,
             "recorded_at": now_iso(),
             "floor": existing.get("floor") or commit,
             "health": health if health is not None else existing.get("health", {}),
-            "eval": eval_baseline if eval_baseline is not None else existing.get("eval", {}),
+            "eval": stored,
+            # Attribution of the slot, beside the slot. True only for a
+            # measurement of this exact commit; False for a carry-over of an
+            # earlier one; null where no measurement exists at all.
+            "eval_for_recorded_commit": (
+                None if not stored else
+                (not carried and stored.get("commit") == commit)
+            ),
+            "eval_commit": stored.get("commit") or None,
+            "eval_measured_at": stored.get("measured_at") or None,
         })
 
     def clear_current(self) -> None:

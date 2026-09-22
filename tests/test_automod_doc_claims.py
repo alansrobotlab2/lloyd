@@ -603,3 +603,128 @@ def test_the_automod_skill_states_the_fork_rule_where_a_round_reads_it():
     # A round that cannot edit the fork still has to close the item, so the
     # skill has to say what to do instead of silently reporting a change.
     assert "human_paths" in boundaries[:4000], "skill does not name the route out"
+
+
+# --- the axis the post-landing check cannot see (#829) ----------------------
+
+def _prose(src: str) -> str:
+    """Lowercase with comment sigils and line wraps collapsed away.
+
+    Both prose surfaces here are hand-wrapped, so a phrase pin written against the
+    raw text would break on a reflow that changed nothing about the claim.
+    `test_the_worker_states_what_the_pinned_corpus_cannot_see` collapses the same
+    way for the same reason; a wrapped sentence and an absent sentence are
+    different findings and the test must not confuse them.
+    """
+    return re.sub(r"\s+", " ", src.replace("#", " ").replace("*", " ")).lower()
+
+
+def test_the_post_landing_check_no_longer_calls_itself_behavioural():
+    """Clause 1 of #829. The one differential post-landing check opened with
+    "Nightly behavioural-regression check" and logged a rollback reason reading
+    "behavioural regression", while `ARMED_METRICS` is the seven retrieval metrics
+    and `eval/run_eval.py` issues no model request at all. So the name promised an
+    axis no armed metric can move: dropping `Grep` from the baseline tool set
+    leaves every one of the seven exactly where it was.
+
+    Pinned on the whole module text rather than the docstring's first line,
+    because the word sat in four places at once — the docstring, the
+    `logger.error`, the rollback `reason` and the argparse description — and a pin
+    on one of them leaves the other three claiming coverage the file does not
+    have. The `config.yaml` comment naming the same job is a human path (the loop
+    may not write that file) and is not asserted here.
+    """
+    src = REGRESSION_SRC.read_text(encoding="utf-8")
+    assert "behavioural" not in src.lower(), "the worker still describes itself as behavioural"
+    assert "behavioral" not in src.lower(), "the US spelling of the same overclaim"
+    # What replaced the word, at each of the four sites.
+    assert src.splitlines()[0].startswith(
+        '"""Nightly retrieval-quality regression check'), src.splitlines()[0]
+    assert 'logger.error("retrieval-quality regression after' in src
+    assert 'reason = (f"retrieval-quality regression after' in src
+    assert 'description="Paired retrieval-quality regression check"' in src
+
+
+def test_the_worker_states_the_agent_loop_limit_beside_the_edge_set_limit():
+    """Clause 2 of #829: the loop-side blindness has to be in the file a reader of
+    the green result opens, next to the coverage statement that file already
+    carries for graph edges.
+
+    It must say two things, and the second is what stops the rewrite
+    overcorrecting. A scored loop-side check DOES exist — the gate's
+    `prompt_surface` rung — but only pre-landing, and only when the diff names one
+    of five paths. Those names are compared against the gate's own tuples, so the
+    prose cannot drift from the trigger the way a hand-copied list drifts from the
+    code it describes.
+    """
+    from scripts.automod.gate import Gate
+
+    src = REGRESSION_SRC.read_text(encoding="utf-8")
+    low = _prose(src)
+    assert "tool call" in low and "turn count" in low and "model decision" in low, \
+        "the worker never says what it cannot observe on the loop side"
+    assert "prompt_surface" in src, "the one loop-side check is not named"
+    surface = Gate.PROMPT_SURFACE_PATHS + Gate.PROMPT_SURFACE_VAULT
+    assert len(surface) == 5, f"the five-path claim no longer matches the gate: {surface}"
+    for name in surface:
+        assert name in src, f"{name} is a prompt-surface path but is not named in the worker"
+
+    # Beside the edge-set limit: after the edge-blind measurement, inside the same
+    # coverage block (which ends at FACT_LAYER_METRICS).
+    armed = src.index("ARMED_METRICS = (")
+    edge = src.index("unchanged  <-- blind")
+    loop = src.index("THE SAME STATEMENT, ONE AXIS OVER")
+    end = src.index("FACT_LAYER_METRICS = (")
+    assert armed < edge < loop < end, (
+        f"the loop-side limit is not beside the edge-set limit "
+        f"(armed={armed}, edge={edge}, loop={loop}, end={end})")
+    # And it must not claim that nothing observes the loop.
+    assert "nothing observes the loop" in low, \
+        "the correction that a pre-landing loop-side check exists is missing"
+    assert "pre-landing" in low, "the loop-side check is not marked as pre-landing only"
+
+
+def test_architecture_states_the_loop_axis_and_stops_naming_the_check_behavioural():
+    """Clause 3 of #829, in the two places a human reads instead of the source.
+
+    §8's detector table row and the §8.1 heading both called this check
+    behavioural, which is what made the gap invisible from the doc: the section
+    was honest about retrieval *scope* ("did this commit make retrieval worse",
+    not "is retrieval good") while its title promised the loop. §13 is where a
+    reader goes to ask what the loop cannot see, so the new bullet goes there,
+    beside the existing edge-quality one — and it has to name the pre-landing
+    `prompt_surface` rung, because "nothing observes the agent loop" would be a
+    false sentence about a gate that scores tool choice today.
+    """
+    text = DOC.read_text(encoding="utf-8")
+    rows = [ln for ln in text.splitlines() if ln.startswith("| retrieval-quality regression")]
+    assert len(rows) == 1, f"the detector table row is gone or duplicated: {rows}"
+    row = rows[0].lower()
+    assert "behavioural" not in row and "behavioral" not in row
+    assert "loop" in row, "the table row does not point at the axis it cannot see"
+    assert "### 8.1 Retrieval-quality regression: measured, not assumed" in text
+    assert "### 8.1 Behavioural" not in text and "### 8.1 Behavioral" not in text
+
+    sec13 = text.split("## 13. Known limits")[1]
+    # Asserted against the NEW BULLET, not all of §13. 'tool call' already
+    # appeared in §13's edge-quality bullet before this change ("a change that
+    # adds a tool call or a retrieval behaviour is invisible to every detector
+    # here"), so a phrase pin on the section could be satisfied by the pre-existing
+    # text and report the gap closed while the new bullet was absent. The exact
+    # conjunction — all three things in one clause — belongs to the new bullet
+    # alone, so that is what gets pinned, and it is pinned inside the bullet.
+    marker = "- **Agent-LOOP behaviour is not covered after landing either**"
+    assert marker in sec13, "no §13 bullet names the agent-loop axis"
+    bullet = _prose(sec13.split(marker, 1)[1].split("\n- ", 1)[0])
+    assert "a tool call, a turn count or a model decision" in bullet, \
+        "the §13 loop bullet never says what no armed metric can observe"
+    assert "pre" in bullet and "landing" in bullet, \
+        "the §13 loop bullet does not mark the surviving check as pre-landing only"
+    assert "prompt_surface" in sec13, "§13 does not name the loop-side check that does exist"
+    for name in ("prompt_builder.py", "prefetch.py", "SOUL.md", "MEMORY.md", "USER.md"):
+        assert name in sec13, f"{name} is a prompt-surface path §13 does not name"
+    # The last-known-good `eval` slot is the reader's endpoint: §13 has to say
+    # what it covers and that a carried-over number is not this commit's.
+    assert "eval` slot" in sec13, "§13 does not address the last-known-good eval slot"
+    assert "eval_for_recorded_commit" in sec13, \
+        "§13 does not name the field that says whether the eval is this commit's"

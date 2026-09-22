@@ -332,7 +332,18 @@ def read_lkg() -> dict | None:
 
 def write_lkg(commit: str, *, floor: str | None = None, health: dict | None = None,
               eval_baseline: dict | None = None) -> dict:
+    """Advance the pointer. Carries the same `eval` attribution as
+    `gstate.set_lkg`, which it must: two writers produce this one record — the
+    guardian at settle, `bless` here — and a field one of them can erase is a field
+    a reader cannot trust.
+
+    `bless` passes no `eval_baseline`, so it carries the previous slot over, and
+    without the stamp a hand-bless would sit a stale measurement beside a new
+    commit with nothing marking it as somebody else's number (#829).
+    """
     existing = read_lkg() or {}
+    carried = eval_baseline is None
+    stored = eval_baseline if eval_baseline is not None else existing.get("eval", {})
     payload = {
         "schema": SCHEMA,
         "commit": commit,
@@ -341,7 +352,15 @@ def write_lkg(commit: str, *, floor: str | None = None, health: dict | None = No
         # land on a tree that predates the guardian's own existence.
         "floor": floor or existing.get("floor") or commit,
         "health": health if health is not None else existing.get("health", {}),
-        "eval": eval_baseline if eval_baseline is not None else existing.get("eval", {}),
+        "eval": stored,
+        # True only for a measurement of THIS commit; False for a carry-over of an
+        # earlier one; null where no measurement exists at all.
+        "eval_for_recorded_commit": (
+            None if not stored else
+            (not carried and stored.get("commit") == commit)
+        ),
+        "eval_commit": stored.get("commit") or None,
+        "eval_measured_at": stored.get("measured_at") or None,
     }
     return write_verified(LKG_PATH, payload)
 

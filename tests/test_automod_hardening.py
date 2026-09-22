@@ -516,6 +516,221 @@ def test_the_guardian_reads_the_eval_baseline_and_never_writes_it(tmp_path):
 
     st.set_lkg("b" * 40, eval_baseline=st.read_eval_last())
     assert gstate.read_json(st.lkg_path)["eval"]["overall"]["ndcg10"] == 0.5
+    # A measurement of THIS commit reads as this commit's.
+    assert gstate.read_json(st.lkg_path)["eval_for_recorded_commit"] is True
+
+
+def test_the_measurement_states_which_axis_it_measured(tmp_path):
+    """Clause 4 of #829, across the seam the number actually travels.
+
+    The worker's measurement is handed to the guardian, folded into
+    `last_known_good.json`'s `eval` slot, and served by `app/routers/automod.py` to
+    Mission Control as the green mark beside a promotion. That slot carried seven
+    query scores and nothing stating what they were scores OF, so a retrieval pass
+    over pinned questions — an eval that issues no model request at all — could be
+    read as evidence about behaviour. The payload is built by one function with one
+    call site, so the field list is assertable without running an arm, and the
+    assertion here runs the real fold into the record rather than stopping at the
+    payload: a field the guardian dropped on the way in would satisfy a
+    payload-only test and tell a reader nothing.
+    """
+    import workers.sources.automod_regression as R
+
+    payload = R.eval_last_payload(
+        commit="b" * 40, measured_at="2026-09-22T00:00:00Z", baseline_commit="a" * 40,
+        stage="detached", current={"overall": {"ndcg10": 0.5}, "corpus": {}},
+        pin={"queries_fingerprint": "deadbeef"}, regressed=False, reasons=[],
+        latency_reading={"latency_ms_avg": 20.0}, latency_verdict=None)
+
+    axis = payload[R.AXIS_FIELD]
+    measures = axis["measures"].lower()
+    assert "retrieval" in measures, axis
+    assert "paired" in measures, "the paired A/B design is not stated"
+    refused = " ".join(axis["does_not_measure"]).lower()
+    for phrase in ("tool call", "turn count", "model decision"):
+        assert phrase in refused, f"the payload never lists a {phrase} as unmeasured"
+    assert "edge" in refused, "graph edge quality is not listed as uncovered"
+    assert "prompt_surface" in refused, (
+        "the uncovered-axis line must also say where the only loop-side check is")
+
+    # Parity with the live gate, not just with the worker source. The worker's
+    # limit block is asserted against `Gate.PROMPT_SURFACE_PATHS + PROMPT_SURFACE_
+    # VAULT` in `test_automod_doc_claims`, so without this the constant shipped
+    # into the record could sit on its own and drift from the trigger it describes.
+    # It is partial by construction and stays that way: the gate also matches the
+    # vault paths by BASENAME (`_touches_prompt_surface` tests `base` as well as
+    # `path`), so no assertion here proves that every name a future rung adds was
+    # written into the constant. What IS provable — and is the asymmetry worth
+    # guarding — is that the record never lists a path the rung does not trigger
+    # on, since a false "we did check that surface" is the misleading direction.
+    from scripts.automod.gate import Gate
+
+    surfaces = Gate.PROMPT_SURFACE_PATHS + Gate.PROMPT_SURFACE_VAULT
+    assert len(surfaces) == 5, f"the five-path claim no longer matches the gate: {surfaces}"
+    named = [name for name in surfaces if name.split("/")[-1].lower() in refused]
+    assert len(named) == len(surfaces), (
+        f"the payload omits a trigger the gate actually fires on: "
+        f"{[n for n in surfaces if n not in named]}")
+    for bogus in ("run_eval.py", "loop.py", "gate.py", "messages.py"):
+        assert bogus not in refused, f"the payload claims {bogus} is a prompt surface"
+
+    st = gstate.AutomodState(tmp_path)
+    st.set_lkg("b" * 40, eval_baseline=payload)
+    stored = gstate.read_json(st.lkg_path)["eval"]
+    assert stored[R.AXIS_FIELD]["measures"] == axis["measures"], "the fold dropped the axis"
+    assert stored["pin"]["queries_fingerprint"] == "deadbeef", (
+        "a test that only looked at the axis would pass while the fold dropped "
+        "the measurement beside it")
+
+
+def test_a_carried_over_eval_says_so_in_the_record(tmp_path):
+    """Clause 5 of #829: the slot must not be able to pose as this promotion's
+    baseline.
+
+    `guardian.py` folds a measurement only when it was taken for exactly the commit
+    being recorded, and `set_lkg` otherwise keeps the previous slot — carrying is
+    right, a promotion that has not been measured yet must not lose the measurement
+    that exists. What was missing is that nothing said which of the two a reader
+    was looking at. Read 2026-09-18T04:39Z the live record held commit 4a3ac776
+    recorded 2026-09-17T23:51Z carrying an eval for fadbc235 measured
+    2026-09-14T11:03Z: a three-day-old measurement of a different commit, in the
+    slot every later "observed healthy in production" claim reads, unmarked.
+    """
+    st = gstate.AutomodState(tmp_path)
+    st.set_lkg("a" * 40, eval_baseline={"commit": "a" * 40,
+                                        "measured_at": "2026-09-14T11:03:59Z",
+                                        "overall": {"ndcg10": 0.5}})
+    assert gstate.read_json(st.lkg_path)["eval_for_recorded_commit"] is True
+
+    # The next promotion settles with no measurement of its own.
+    st.set_lkg("b" * 40, health={"mcp_degraded_modules": []})
+    rec = gstate.read_json(st.lkg_path)
+    assert rec["commit"] == "b" * 40
+    assert rec["eval"]["overall"]["ndcg10"] == 0.5, "the measurement must still be carried"
+    assert rec["eval_for_recorded_commit"] is False, (
+        "a carried-over eval reads as this promotion's baseline")
+    assert rec["eval_commit"] == "a" * 40, "the record does not say whose measurement it holds"
+    assert rec["eval_measured_at"] == "2026-09-14T11:03:59Z"
+
+
+def test_a_record_with_no_measurement_says_it_was_never_measured(tmp_path):
+    """The third case, which a `False` would swallow.
+
+    An empty slot and a measurement of another commit are different facts — one is
+    "nobody has measured this", the other is "here is a number from somewhere else"
+    — and a reader who has to infer which one happened infers wrong. `None`, not
+    `False`, and the field is present either way so the question can be asked of
+    every record.
+    """
+    st = gstate.AutomodState(tmp_path)
+    st.set_lkg("a" * 40)
+    rec = gstate.read_json(st.lkg_path)
+    assert rec["eval"] == {}
+    assert "eval_for_recorded_commit" in rec, "a fresh record must answer the question too"
+    assert rec["eval_for_recorded_commit"] is None
+    assert rec["eval_commit"] is None
+
+
+def test_the_bless_route_stamps_the_same_attribution_the_guardian_does(isolated_state,
+                                                                      monkeypatch):
+    """Clause 5 on the OTHER writer of the record.
+
+    `bless` advances the pointer by hand when settle will not, and it writes through
+    `scripts/automod/state.py:write_lkg`, not `gstate.set_lkg` — two writers, one
+    file. A stamp only one of them computes would make the field answer "who wrote
+    this" instead of "is this measurement of this commit", and the hand route is
+    exactly where it matters: bless passes no `eval_baseline`, so it carries the
+    previous slot over, and an unattributed bless would sit a stale measurement
+    beside a fresh commit with nothing marking it — the #829 defect reintroduced by
+    the escape hatch. The bless CLI tests stub `write_lkg` out entirely, so the
+    mirror was asserted by nothing.
+
+    Driven through the real `bless` on isolated state; the only stub is the
+    backend's reported commit, an outside-world read that is not the seam.
+    """
+    import scripts.automod.round as R
+
+    a = "a" * 40
+    measurement = {"commit": a, "measured_at": "t1", "overall": {"ndcg10": 0.4}}
+    S.write_lkg(a, eval_baseline=measurement)
+    assert S.read_lkg()["eval_for_recorded_commit"] is True, (
+        "a promotion that settled with its own number must say so first")
+
+    # bless verifies against the RUNNING process before it moves the pointer, so
+    # the one outside-world read is `/health`'s `commit`. Answering "the service
+    # reports nothing" is the honest stub: bless then blesses `git rev-parse HEAD`
+    # of the live root, and the branch under test — what `write_lkg` stamps — is
+    # reached either way. Left unstubbed the test would ask the running production
+    # backend which commit it serves and then bless whatever fell out.
+    import scripts.automod.promote as P
+
+    monkeypatch.setattr(P, "_get", lambda url, *a, **k: (200, {"commit": None}))
+    R.bless("by hand for the test")
+
+    rec = S.read_lkg()
+    assert rec["commit"] not in (a, None), "bless did not advance the pointer"
+    assert rec["eval"]["overall"]["ndcg10"] == 0.4, "bless dropped the measurement"
+    assert rec["eval_for_recorded_commit"] is False, (
+        "a bless carrying somebody else's measurement reads as this commit's baseline")
+    assert rec["eval_commit"] == a, "the carried number no longer names its own commit"
+    assert rec["eval_measured_at"] == "t1"
+
+    # Parity with the guardian's route on the same facts: two writers, one record,
+    # so the stamp must not depend on which one held the pen.
+    guardian_route = gstate.AutomodState(isolated_state / "guardian-parity")
+    guardian_route.set_lkg(a, eval_baseline=measurement)
+    guardian_route.set_lkg(rec["commit"])
+    theirs = gstate.read_json(guardian_route.lkg_path)
+    for field in ("eval_for_recorded_commit", "eval_commit", "eval_measured_at"):
+        assert rec[field] == theirs[field], (
+            f"{field}: bless says {rec[field]!r}, the guardian says {theirs[field]!r}")
+
+
+@pytest.mark.parametrize("settling", ["a" * 40, "b" * 40])
+def test_settling_attributes_the_eval_slot_it_hands_out(tmp_path, monkeypatch, settling):
+    """The same seam end to end, through the guardian rather than around it.
+
+    The worker leaves a measurement for commit `a…` in `eval_last.json`; the
+    guardian settles a promotion and is the only writer of the record. When it
+    settles `a…` the slot is its own; when it settles `b…` the compare at
+    `guardian.maybe_settle` refuses the fold, the previous slot is carried, and the
+    record now says which of those happened. Asserted through `maybe_settle` on
+    purpose: the comparison and the stamp live in different files, and pinning the
+    stamp alone would let the two disagree without a test noticing.
+    """
+    import guardian as G
+    import probes as P
+
+    # Arguments from the real parser, not a hand-written namespace: this is the
+    # settle path that hands out the eval slot, and a constructor that starts
+    # reading a new option should make this test fail loudly rather than run
+    # against a fixture that quietly stops describing a real daemon. Same route
+    # the tick test uses for the same reason.
+    g = G.Guardian(G.build_parser().parse_args([
+        "--repo", str(tmp_path),
+        "--state", str(tmp_path / "state"),
+        "--guardian-state", str(tmp_path / "gstate"),
+        "--supervisor-sock", "/nonexistent",
+        "--programs", "lloyd-mc:lloyd-backend",
+        "--no-external-alerts",
+    ]))
+    monkeypatch.setattr(P, "probe", lambda url, t: {
+        "ok": True, "status": 200,
+        "body": {"status": "ok", "degraded_modules": []}, "error": None,
+        "latency_ms": 1.0})
+    monkeypatch.setattr(G.gstate, "append_event", lambda *a, **k: None)
+
+    g.state.set_lkg("a" * 40, eval_baseline={"commit": "a" * 40, "measured_at": "t1",
+                                             "overall": {"ndcg10": 0.4}})
+    gstate.write_json_atomic(g.state.eval_last, {"commit": "a" * 40, "measured_at": "t1",
+                                                 "overall": {"ndcg10": 0.4}})
+    g.maybe_settle({"commit": settling, "errors_until_ts": time.time() - 1_000_000})
+
+    rec = gstate.read_json(g.state.lkg_path)
+    assert rec["commit"] == settling
+    assert rec["eval"]["overall"]["ndcg10"] == 0.4, "the measurement must survive either way"
+    assert rec["eval_for_recorded_commit"] is (settling == "a" * 40)
+    assert rec["eval_commit"] == "a" * 40
 
 
 def test_installed_units_are_compared_against_the_repo():
@@ -1332,3 +1547,100 @@ def test_the_two_unobserved_paths_are_deliberate_and_say_so():
     # Observation stays wired in `app/routers/messages.py` and nowhere else.
     assert "Recorded, not observed" in common
     assert "no Inner Voice" in common
+
+
+def test_the_state_route_hands_out_the_axis_and_the_attribution(isolated_state):
+    """The record's new fields have to survive the route a person actually reads.
+
+    `GET /api/automod/status` is Mission Control's banner feed and it passes
+    `S.read_lkg()` through inside a hand-built response dict
+    (`app/routers/automod.py`, `get_status`). A passthrough that picked keys — or a
+    later refactor that re-projected the record — would leave the axis claim and the
+    attribution on disk and off the screen, which is the half of the gap a reader
+    can see. So this drives the real route over an in-process ASGI transport and
+    asserts the served JSON, not the file: `isolated_state` repoints `LKG_PATH`, and
+    the suite-wide `LLOYD_AUTOMOD_STATE` isolation (`tests/conftest.py:63-81`) keeps
+    the route off the real state directory regardless.
+
+    The file-writing tests in `tests/test_landing_without_restart.py` drive a route
+    by POSTing to the live backend, which is exactly what a gated change must not
+    do — the restart it triggers is what the round is waiting for. In-process is the
+    only honest way to reach a GET here.
+    """
+    import asyncio
+
+    import httpx
+
+    import server  # the root ASGI app; `tests/test_api_contracts.py:22` imports it the same way
+    import scripts.automod.state as S
+
+    measurement = {
+        "commit": "b" * 40, "measured_at": "2026-09-22T00:00:00Z",
+        "axis": {"measures": "retrieval quality, paired A/B",
+                 "does_not_measure": ["agent-loop behaviour"]},
+        "overall": {"ndcg10": 0.4},
+    }
+    S.write_lkg("b" * 40, eval_baseline=measurement)
+
+    transport = httpx.ASGITransport(app=server.app, client=("127.0.0.1", 9999))
+
+    async def call():
+        async with httpx.AsyncClient(transport=transport, timeout=30) as client:
+            return await client.get("http://127.0.0.1:8096/api/automod/status")
+
+    resp = asyncio.run(call())
+    assert resp.status_code == 200, resp.text[:200]
+    served = resp.json()["last_known_good"]
+    assert served["eval"]["axis"]["measures"] == "retrieval quality, paired A/B", (
+        "the axis claim does not reach the surface a human reads")
+    assert served["eval_for_recorded_commit"] is True, (
+        "the attribution does not reach the surface a human reads")
+    assert served["eval_commit"] == "b" * 40
+
+
+def test_the_production_write_carries_the_axis_into_the_record(monkeypatch, tmp_path):
+    """The axis has to be in the payload the REAL write path emits.
+
+    `test_the_measurement_states_which_axis_it_measured` builds the payload through
+    `eval_last_payload`, which would still pass if `check_promotion` had kept its own
+    inline literal and never called the function — a field declared on one side of a
+    seam and never handed over, the bug shape this file keeps writing tests for. So
+    here the worker's own blocking run executes, with only the two arms, the noise
+    floor, the pin and the worktree stubbed, and the payload captured from
+    `write_eval_last` is what gets asserted.
+
+    The fakes are imported from `tests/test_automod_regression.py` rather than
+    re-implemented: they encode what a well-formed arm looks like to `check_promotion`
+    (81 answered questions, a corpus that is fine, a fingerprint matching the live
+    query file), and a second copy would drift from the harness that already pins
+    those preconditions.
+    """
+    import json
+
+    import scripts.automod.state as S
+    import test_automod_regression as T
+    import workers.sources.automod_regression as R
+
+    noise = tmp_path / "noise.json"
+    noise.write_text(json.dumps(T.ZERO_NOISE), encoding="utf-8")
+    monkeypatch.setattr(R, "NOISE_PATH", noise)
+    monkeypatch.setattr(R, "_run_arm", lambda *a, **k: T._arm(20, []))
+    monkeypatch.setattr(R, "PinnedCorpus", lambda *a, **k: T._FakePin())
+    monkeypatch.setattr(R, "_baseline_worktree", T._fake_worktree)
+    monkeypatch.setattr(S, "read_current", lambda: T._observing())
+    monkeypatch.setattr(S, "read_events", lambda **k: [])
+    monkeypatch.setattr(S, "append_event", lambda *a, **k: None)
+    monkeypatch.setattr(S, "request_rollback", lambda **k: k)
+    captured: dict = {}
+    monkeypatch.setattr(S, "write_eval_last", lambda p: captured.update(p))
+
+    out = R._execute_blocking()
+    assert out.get("status") == "success", out
+    assert captured, "the run wrote no measurement at all"
+    assert captured[R.AXIS_FIELD]["measures"], (
+        "the production write emitted no axis, so the LKG eval slot still states "
+        "numbers with no stated coverage")
+    refused = " ".join(captured[R.AXIS_FIELD]["does_not_measure"]).lower()
+    assert "tool call" in refused and "turn count" in refused and "model decision" in refused
+    assert captured["commit"] == "b" * 40 and captured["baseline_commit"] == "a" * 40, (
+        "the axis arrived but the measurement it describes lost its subject")

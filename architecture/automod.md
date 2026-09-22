@@ -2394,7 +2394,7 @@ autonomous agent running half-reverted code.
 | crash / won't boot | ~2 min | supervisord state + `/health` |
 | error-rate spike | ~15 min | `logs/server.err` by byte offset |
 | data damage | ~15 min | KG row count, vault note count (`vaultwatch.measure`, `.git/**` excluded) |
-| behavioural regression | nightly | paired `eval/run_eval.py` |
+| retrieval-quality regression | nightly | paired `eval/run_eval.py` — retrieval only; no post-landing agent-loop axis (§8.1, §13) |
 
 **Errors come from `server.err`, not `server.log`.** `server.py`'s
 `basicConfig` writes to stderr, so all application logs land in `.err`;
@@ -2423,7 +2423,7 @@ old evidence.
 gitignored, so a change that deletes rows or notes boots fine, logs nothing,
 passes every eval, and *survives* the revert. Two counts cover it.
 
-### 8.1 Behavioural regression: measured, not assumed
+### 8.1 Retrieval-quality regression: measured, not assumed
 
 The autoresearch composite is **not** used. Three identical baseline runs
 scored 0.719 / 0.542 / 0.624 — spread 0.177 against a 0.05 threshold, and 61
@@ -2620,6 +2620,20 @@ armed metric at all: a change that expires most of the edge set walks past
 this check in silence, and that is a stated limit rather than a covered case.
 Naming them for the graph would have been the same overclaim the detector
 exists to prevent.
+
+**And the section used to be named for an axis it cannot see.** This check was
+called the behavioural detector while every metric in `ARMED_METRICS` scored a
+retrieval query. No armed metric observes a tool call, a turn count or a model
+decision — `eval/run_eval.py` issues no model request, so a change that dropped
+`Grep` from the baseline tool set, moved the compaction thresholds or changed
+turn accounting left all seven metrics unmoved and produced a clean report which
+then became the promotion's quality baseline. Not "nothing observes the loop":
+the gate runs a scored loop-side check (`prompt_surface`, §4) — but only
+*pre*-landing, and only for the five path names `prompt_builder.py`,
+`prefetch.py`, `SOUL.md`, `MEMORY.md`, `USER.md`. A loop-side change outside
+those five has no check at either end, which is why §13 states it and why the
+measurement artifact itself now carries the claim (`axis`: what it measured, and
+the two axes it did not).
 
 This is also why `eval/run_eval.py` now records **which corpus it scored**
 (`corpus_ok`, the resolved paths, entity and edge counts) and refuses an empty
@@ -3021,6 +3035,23 @@ from `denied.json` first).
   three fact-layer metrics read the fact tree and fact index, and the armed
   document metrics read the pinned document corpus, not the edges. Covering
   edges needs a metric that traverses them, and there isn't one.
+- **Agent-LOOP behaviour is not covered after landing either**, and the check
+  that used to be named *behavioural* is the reason the gap was invisible
+  (§8.1). No armed metric observes a tool call, a turn count or a model
+  decision — `eval/run_eval.py` issues no model request — so a change to tool
+  choice, turn accounting, compaction or skill injection passes the nightly
+  check by construction, and that green report is what the guardian folds into
+  `last_known_good.json`'s `eval` slot as the promotion's quality baseline. Not
+  "nothing observes the loop": the gate's `prompt_surface` rung scores tool
+  choice, but only *pre*-landing and only when the diff names one of five paths
+  (`prompt_builder.py`, `prefetch.py`, `SOUL.md`, `MEMORY.md`, `USER.md`), so a
+  tool-set or compaction change has no loop-side check at either end. Arming a
+  post-landing loop-side axis needs a measured noise band first — a loop-side
+  measurement carries variance the retrieval eval contributes none of, so
+  `MIN_SIGMA`-style floors would roll it back on itself. The `eval` slot now
+  states its own coverage in an `axis` field (`axis.measures`,
+  `axis.does_not_measure`) and `eval_for_recorded_commit` says whether the
+  number even belongs to the commit sitting beside it.
 - **The pinned corpus is a snapshot of a moving vault.** Both arms see the
   same documents, which is what makes them comparable, but two comparisons run
   a week apart are not comparable to each other. The check answers "did this
