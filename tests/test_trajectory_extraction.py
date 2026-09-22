@@ -22,6 +22,7 @@ production trajectory data except the one read-only integrity guard.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -32,7 +33,12 @@ from pathlib import Path
 
 import pytest
 
+from tests._live_data import require_live_data, require_live_volume
+
 _ROOT = Path(__file__).resolve().parent.parent
+#: This module's own namespace, so a pin test can redirect a live root by name and
+#: the guard under test reads the redirected value on its next global lookup.
+_THIS = sys.modules[__name__]
 _spec = importlib.util.spec_from_file_location(
     "extract_trajectories", _ROOT / "scripts" / "extract-trajectories.py"
 )
@@ -1801,10 +1807,12 @@ def test_the_live_corpus_emits_one_file_per_sequence_pattern(tmp_path):
     317 files."""
     # `LIVE_CORPUS` is defined further down this file, against the real data root
     # rather than the checkout — `_pipeline/` is gitignored, so a worktree-relative
-    # path reads as absent forever. Asserted, never skipped: clause 1 *is* a count
-    # over this corpus, and a check that can pass by not finding the data is not a
-    # check. Read-only; the emitted files go into `tmp_path`.
-    assert LIVE_CORPUS.is_dir(), f"live corpus absent: {LIVE_CORPUS}"
+    # path reads as absent forever. Absent skips and the reason names the path
+    # (#1377); *present* always counts, which is what
+    # `test_a_present_corpus_that_admits_nothing_fails_rather_than_skips` pins, so no
+    # run goes green on the corpus not having been read. Read-only; the
+    # emitted files go into `tmp_path`.
+    require_live_data(LIVE_CORPUS, "live trajectory corpus")
     rows = mt.load_trajectories(days=7, agent_filter="all", exclude_machine=False)
     assert rows, f"live corpus at {LIVE_CORPUS} loaded no rows"
     seqs = mt.mine_sequence_patterns(rows, threshold=2)
@@ -2014,11 +2022,14 @@ def test_the_verdict_ledger_join_still_resolves_every_coarse_error_key():
     matching the stored one, so this fails — which is the point: that widening needs
     a migration of the existing rows, not just of the filename.
     """
-    ledger = Path.home() / "lloyd" / "_pipeline" / "skills" / "reviews" / "verdicts.jsonl"
-    # Hard assert, not a skip: this is the clause that guards a human's reserved
-    # decision, so a run that does not look at the ledger must fail rather than pass
-    # without having checked.
-    assert ledger.is_file(), f"no verdict ledger at {ledger} — nothing was kept reachable"
+    ledger = LIVE_VERDICT_LEDGER
+    # Absent skips with the path in the reason (#1377) — an append-only ledger that
+    # was never regenerated is a fact about the machine, and the same absence that
+    # made this node red at base made every other round's `tests` rung red too. What
+    # still fails is a ledger that EXISTS and has lost rows, which is the migration
+    # defect this clause guards: pinned by
+    # `test_a_present_ledger_below_its_coarse_key_floor_still_fails`.
+    require_live_data(ledger, "verdict ledger", kind="file")
     rows = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines()
             if ln.strip()]
     coarse = {}
@@ -2224,6 +2235,11 @@ def test_the_merge_moves_nobody_out_of_suppression():
     def bucket_id(q: dict) -> tuple:
         return (q["tool_name"], q["error_type"], q["params_signature"])
 
+    # Absence of the corpus used to arrive here as `assert mined` failing on an empty
+    # list, which reads the same as a corpus that mined nothing (#1377). Skipping on
+    # the path, not on the count, is what keeps those two states distinct: an
+    # existing corpus that yields no pattern still fails below.
+    require_live_data(LIVE_CORPUS, "live trajectory corpus")
     previous = mt.TRAJECTORY_DIR
     mt.set_trajectory_dir(LIVE_CORPUS)
     try:
@@ -2263,12 +2279,16 @@ def test_a_live_week_emits_one_merged_candidate_per_error_key(tmp_path):
     2026-09-14 the same run returned 73 paths for 25 files and `Bash/logic` reported
     one bucket while gating 19.
 
-    No skip paths: this machine is the machine the corpus is on, and a green run over an
-    empty pattern list would prove nothing about a collision. `exclude_machine=False` is
+    The corpus is skipped when the path does not exist (#1377 — `_pipeline/` is
+    gitignored, and after the 2026-09-22 wipe it did not exist on the machine that
+    runs this), and everything below that skip runs whenever it does: a green run over
+    an empty pattern list still proves nothing about a collision, which is what
+    `test_a_corpus_whose_error_keys_never_collide_fails_rather_than_skips` pins.
+    `exclude_machine=False` is
     deliberate — since #493 the nightly default drops worker/autonomy/inner-voice/browser
     sessions, and over a quiet week that corpus holds no qualifying error pattern at all.
     """
-    assert LIVE_CORPUS.is_dir(), f"live corpus absent: {LIVE_CORPUS}"
+    require_live_data(LIVE_CORPUS, "live trajectory corpus")
     previous = mt.TRAJECTORY_DIR
     mt.set_trajectory_dir(LIVE_CORPUS)
     try:
@@ -2322,9 +2342,13 @@ def test_a_full_live_week_emits_one_file_per_path_across_every_class(tmp_path):
     `emit_candidates()`" about the LIST, and clause 3 says "each written candidate",
     so both are asserted here across every class the nightly feeds the writer.
 
-    Read-only over `_pipeline/trajectories`; both emissions go to a temp dir.
+    Read-only over `_pipeline/trajectories`; both emissions go to a temp dir. The
+    corpus is skipped when the path is absent (#1377) and every assertion below still
+    fires on a corpus that exists but writes no sequence candidate — which is the
+    review's own failure shape from round SM_20260914_140724, and is pinned by
+    `test_a_corpus_that_writes_no_sequence_candidate_fails_rather_than_skips`.
     """
-    assert LIVE_CORPUS.is_dir(), f"live corpus absent: {LIVE_CORPUS}"
+    require_live_data(LIVE_CORPUS, "live trajectory corpus")
     previous = mt.TRAJECTORY_DIR
     mt.set_trajectory_dir(LIVE_CORPUS)
     try:
@@ -3381,10 +3405,19 @@ def test_the_exclusion_can_be_turned_off_for_a_full_corpus_view(tmp_path):
 
 # Resolved against the real data root, not the checkout: `_pipeline/` and
 # `sessions/` are gitignored, so a worktree copy of this file would skip forever
-# and the clause it pins would never be graded. Read-only against both.
+# and the clause it pins would never be graded. Read-only against both, and each is
+# gated by `tests/_live_data.py`: absent -> named skip, present -> every assertion
+# below still runs (#1377).
 LIVE_CORPUS = Path.home() / "lloyd" / "_pipeline" / "trajectories"
 LIVE_STORE = Path.home() / "lloyd" / "sessions"
+LIVE_VERDICT_LEDGER = (Path.home() / "lloyd" / "_pipeline" / "skills"
+                       / "reviews" / "verdicts.jsonl")
 MACHINE_PLATFORMS = {"worker", "autonomy", "e2e-harness"}
+#: The smallest session store the classifier oracle below can discriminate on.
+#: #1143 wrote it as `assert len(files) > 500`; as a floor that is 501, and this is
+#: the number a skip reason quotes. Measured 3,000 files on 2026-09-18, 58 after the
+#: 2026-09-22 wipe.
+SESSION_STORE_MIN_FILES = 501
 
 
 def test_no_live_corpus_row_is_interactive_on_a_machine_platform():
@@ -3408,11 +3441,14 @@ def test_no_live_corpus_row_is_interactive_on_a_machine_platform():
     extraction run. `machine_rows` is asserted non-zero so neither half can pass on
     an empty store.
     """
-    # No skip here, unlike the pre-existing guards in this file: these two are the
-    # only tests that read the real corpus, so a skip would mean the acceptance
-    # check was never graded and nothing downstream could tell.
-    assert LIVE_CORPUS.is_dir(), f"live corpus absent: {LIVE_CORPUS}"
-    assert LIVE_STORE.is_dir(), f"session store absent: {LIVE_STORE}"
+    # Absent roots skip and the reason names them both (#1377), which is what let a
+    # wiped `_pipeline` red-block every promotion for a day. Present roots always run
+    # the join, and `rows`/`machine_rows` below are asserted non-zero, so a corpus that
+    # exists but joins to nothing still fails — and a row labelled interactive over a
+    # machine platform still fails:
+    # `test_a_corpus_row_labelled_interactive_on_a_machine_platform_fails`.
+    require_live_data(LIVE_CORPUS, "live trajectory corpus")
+    require_live_data(LIVE_STORE, "session store")
     cache: dict = {}
     violations: list[str] = []
     emitted_violations: list[str] = []
@@ -3472,9 +3508,15 @@ def test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session():
     traffic and no human chat.
     """
     from app import sessions_io
-    assert LIVE_STORE.is_dir(), f"session store absent: {LIVE_STORE}"
+    # Absent store -> named skip; a store that exists but is too thin to discriminate
+    # -> a named skip carrying BOTH the floor and the observed count (#1377 clause 2).
+    # Neither skip can fire over a full store whose classifier disagrees: the oracle
+    # below still runs and still fails there, which is what
+    # `test_a_full_store_with_a_disagreeing_classifier_fails_rather_than_skips` pins by
+    # putting the pre-#1143 rule back over a store above the floor.
+    require_live_data(LIVE_STORE, "session store")
     files = sorted(LIVE_STORE.glob("*.json"))
-    assert len(files) > 500, f"only {len(files)} session files, so this is vacuous"
+    require_live_volume(files, SESSION_STORE_MIN_FILES, LIVE_STORE, "session store")
     violations: list[str] = []
     human = 0
     human_with_observer_on = 0
@@ -4070,3 +4112,335 @@ def test_the_consolidation_runbook_says_which_index_columns_are_advisory():
     assert "Status" in section and "advisory" in section.lower(), (
         "§1.1 still presents the index as authoritative with no caveat naming the "
         f"advisory column:\n{section}")
+
+
+# ── #1377: the absence rule, pinned from both directions ────────────────────
+#
+# Seven guards in this file, plus one in `test_skill_verdicts.py`, read data the
+# checkout does not hold: `.gitignore:22` ignores `/sessions/` and `.gitignore:25`
+# ignores `/_pipeline/`, so neither path exists in a round's worktree — and after the
+# 2026-09-22 fixture-teardown wipe neither exists on the live tree either. Each of them
+# hard-asserted that data's presence, so each reproduced as a failure *at base* in every
+# round: `base_probe: probed 21 file(s) at base 1842b8cf: 106 already failing` with
+# `external_blocker: true`, copied from
+# `~/.local/state/lloyd-automod/rounds/SM_20260922_201206/gate.json`. That is how eight
+# nodes about a missing directory came to block every promotion, #1055 included.
+#
+# The rule itself is `tests/_live_data.py`: absence of a live-data root becomes a named
+# skip, everything else stays a failure. The tests below pin BOTH edges. That matters
+# more than the red-run it fixes: the review's own finding on round SM_20260914_140724
+# was that a corpus guard skipping over present-but-empty data reported green while
+# executing nothing, so a skip that could fire over present data would trade eight loud
+# failures for eight silent nothings.
+
+#: Each live root: the name this module holds it under, and the miner's own mirror of
+#: the same path. `load_trajectories` reads `mt.TRAJECTORY_DIR` and
+#: `effective_session_class` reads `mt.SESSION_STORE_DIR`, so redirecting a root has to
+#: move the code beneath the guard as well as the guard's own statement of it.
+LIVE_ROOTS = {
+    "corpus": ("LIVE_CORPUS", "TRAJECTORY_DIR"),
+    "store": ("LIVE_STORE", "SESSION_STORE_DIR"),
+    "ledger": ("LIVE_VERDICT_LEDGER", None),
+}
+
+
+def redirect_live_root(monkeypatch, root: str, path) -> Path:
+    """Point one live root, and the miner's copy of it, at `path`."""
+    here, mirror = LIVE_ROOTS[root]
+    target = Path(path)
+    monkeypatch.setattr(_THIS, here, target)
+    if mirror is not None:
+        monkeypatch.setattr(mt, mirror, target)
+    return target
+
+
+def guard_arguments(fn, tmp_path) -> dict:
+    """How to invoke a guard whose body is being run directly. Every live-data guard
+    here declares at most one fixture, `tmp_path`, and the directories it writes are
+    created by the code under test, not by pytest."""
+    return ({"tmp_path": tmp_path / "out"}
+            if "tmp_path" in inspect.signature(fn).parameters else {})
+
+
+def utc_bucket() -> str:
+    """Today's date: `load_trajectories` keeps a `YYYY-MM-DD.jsonl` file whose date is
+    not before `utc now - days`, so a bucket named this is inside every window below."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def synthetic_corpus(tmp_path, rows, name=None) -> Path:
+    """A `_pipeline/trajectories` stand-in in a tmp root, holding `rows`."""
+    root = tmp_path / "corpus"
+    root.mkdir()
+    (root / f"{name or utc_bucket()}.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return root
+
+
+def synthetic_store(tmp_path, count: int, **fields) -> Path:
+    """A `~/lloyd/sessions` stand-in of `count` chat-shaped session files.
+
+    Files are named `<session_id>.json` because that is how the real store names them
+    and how both readers reach a session: `effective_session_class` opens
+    `SESSION_STORE_DIR / f"{session_key}.json"` and the #493 join does the same."""
+    root = tmp_path / "sessions"
+    root.mkdir()
+    for i in range(count):
+        data = {"platform": "mission-control", "inner_voice": True}
+        data.update(fields)
+        data["session_id"] = data.get("session_id") or f"20260920_120000_chat{i}"
+        (root / f"{data['session_id']}.json").write_text(
+            json.dumps(data), encoding="utf-8")
+    return root
+
+
+def synthetic_ledger(tmp_path, rows) -> Path:
+    """A `_pipeline/skills/reviews/verdicts.jsonl` stand-in."""
+    root = tmp_path / "reviews"
+    root.mkdir()
+    path = root / "verdicts.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return path
+
+
+#: A present stand-in for every root, so an absence row can leave exactly ONE root
+#: missing. Each builder writes to its own directory name under `tmp_path`, so one call
+#: per root per test never collides. The synthetic keys are names no real ledger holds.
+_PRESENT_ROOTS = {
+    "corpus": lambda tp: synthetic_corpus(tp, [
+        error_traj(f"present1377_{i}", "Present1377", "not_found", "protocol")
+        for i in (1, 2)]),
+    "store": lambda tp: synthetic_store(tp, 1),
+    "ledger": lambda tp: synthetic_ledger(tp, [
+        {"pattern_key": "Present1377/not_found", "verdict": "rejected",
+         "decided_at": "2026-09-22T00:00:00+00:00"}]),
+}
+
+
+#: One row per (guard, root) edge that used to be a bare `assert` — the eight nodes the
+#: 2026-09-22 `base_probe` listed, with `test_no_live_corpus_row_...` carrying two
+#: because it reads both the corpus and the session store.
+ABSENCE_EDGES = [
+    pytest.param(test_the_live_corpus_emits_one_file_per_sequence_pattern, "corpus",
+                 id="sequence-pattern-per-file/corpus"),
+    pytest.param(test_the_verdict_ledger_join_still_resolves_every_coarse_error_key,
+                 "ledger", id="verdict-ledger-join/ledger"),
+    pytest.param(test_the_merge_moves_nobody_out_of_suppression, "corpus",
+                 id="merge-suppression/corpus"),
+    pytest.param(test_a_live_week_emits_one_merged_candidate_per_error_key, "corpus",
+                 id="merged-candidate-per-error-key/corpus"),
+    pytest.param(test_a_full_live_week_emits_one_file_per_path_across_every_class,
+                 "corpus", id="one-file-per-path-every-class/corpus"),
+    pytest.param(test_no_live_corpus_row_is_interactive_on_a_machine_platform, "corpus",
+                 id="classifier-join/corpus"),
+    pytest.param(test_no_live_corpus_row_is_interactive_on_a_machine_platform, "store",
+                 id="classifier-join/store"),
+    pytest.param(test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session,
+                 "store", id="classifier-oracle/store"),
+]
+
+
+@pytest.mark.parametrize("guard,root", ABSENCE_EDGES)
+def test_an_absent_live_root_skips_every_guard_that_reads_it_by_name(
+        guard, root, tmp_path, monkeypatch):
+    """Clauses 1 and 4, as one row per edge: redirecting the root a guard reads to a
+    path that does not exist must produce a SKIP whose reason NAMES that path.
+
+    Run by name rather than by a marker, so a guard that hard-asserts again fails here
+    with `DID NOT RAISE Skipped` instead of silently joining the skips, and so the
+    reason text — which is the only thing a reader of a skipped run gets — is checked,
+    not assumed. The root is redirected, not merely assumed-missing, so this pins the
+    rule on a machine that has the corpus too.
+    """
+    # The other roots are put in place first, so the reason can only name THIS one:
+    # with the corpus absent as well, a guard that reads both would have skipped on the
+    # corpus and this row would pass having said nothing about the store.
+    for other in LIVE_ROOTS:
+        if other != root:
+            redirect_live_root(monkeypatch, other, _PRESENT_ROOTS[other](tmp_path))
+    missing = redirect_live_root(monkeypatch, root, tmp_path / "gone" / root)
+    with pytest.raises(pytest.skip.Exception) as caught:
+        guard(**guard_arguments(guard, tmp_path))
+    assert str(missing) in str(caught.value), (
+        f"{guard.__name__} skipped for a reason that does not name the missing root "
+        f"{missing}: {caught.value}")
+
+
+def test_a_present_but_empty_corpus_directory_fails_rather_than_skips(
+        tmp_path, monkeypatch):
+    """The sharpest form of clause 3: the root EXISTS and is empty.
+
+    `require_live_data` is satisfied — the path is there, and it is a directory — so the
+    guard has to reach its own `loaded no rows` assert. This is the case a
+    `if not live.exists(): skip` written against the directory *contents* would get
+    wrong: emptying `_pipeline/trajectories` would then read exactly like losing it, and
+    a guard that cannot tell those two states apart is not reporting on the data."""
+    empty = tmp_path / "corpus"
+    empty.mkdir()
+    redirect_live_root(monkeypatch, "corpus", empty)
+    with pytest.raises(AssertionError) as caught:
+        test_the_live_corpus_emits_one_file_per_sequence_pattern(tmp_path / "out")
+    assert "loaded no rows" in str(caught.value), caught.value
+
+
+def test_the_rule_skips_on_absence_and_fails_on_the_wrong_kind_of_path(tmp_path):
+    """The helper's own two answers, so a guard cannot get them by writing its own
+    `if not path.exists()` and losing the second one."""
+    missing = tmp_path / "absent-corpus"
+    with pytest.raises(pytest.skip.Exception) as caught:
+        require_live_data(missing, "live trajectory corpus")
+    assert str(missing) in str(caught.value)
+
+    a_file = tmp_path / "corpus"
+    a_file.write_text("not a directory\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="not a directory"):
+        require_live_data(a_file, "live trajectory corpus")
+
+    a_dir = tmp_path / "reviews"
+    a_dir.mkdir()
+    with pytest.raises(AssertionError, match="not a file"):
+        require_live_data(a_dir, "verdict ledger", kind="file")
+
+
+def test_the_volume_skip_reason_carries_the_floor_and_the_observed_count(tmp_path):
+    """Clause 2's reason shape: `assert len(files) > 500, "so this is vacuous"` said
+    neither number, so a 58-file store and an empty one were indistinguishable in the
+    log. The reason has to hold both, beside the root it counted."""
+    root = tmp_path / "sessions"
+    with pytest.raises(pytest.skip.Exception) as caught:
+        require_live_volume([1, 2, 3], SESSION_STORE_MIN_FILES, root, "session store")
+    reason = str(caught.value)
+    assert "holds 3 files" in reason, reason
+    assert f"the {SESSION_STORE_MIN_FILES}-file floor" in reason, reason
+    assert str(root) in reason, reason
+
+
+def test_a_store_below_the_floor_skips_naming_both_numbers(tmp_path, monkeypatch):
+    """Clause 2, first half, over the real guard: the post-wipe store (3 synthetic
+    files) skips, and the skip says the floor and the count."""
+    redirect_live_root(monkeypatch, "store", synthetic_store(tmp_path, 3))
+    with pytest.raises(pytest.skip.Exception) as caught:
+        test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session()
+    reason = str(caught.value)
+    assert "holds 3 files" in reason, reason
+    assert f"the {SESSION_STORE_MIN_FILES}-file floor" in reason, reason
+
+
+def test_a_full_store_with_a_disagreeing_classifier_fails_rather_than_skips(
+        tmp_path, monkeypatch):
+    """Clause 2, second half, and the one that keeps the two skips honest.
+
+    A synthetic store ABOVE the floor — `SESSION_STORE_MIN_FILES` chat-shaped session
+    files, every one a mission-control chat typed with the observer on, which is the
+    shape the ruled rule admits as `interactive` — and the classifier replaced by the
+    rule #1143 overturned: `interactive` only when the observer switch is off. Every
+    row then disagrees with the rule the guard reads, so the guard must FAIL. A skip
+    that could fire here would mean the oracle stopped being an oracle.
+    """
+    redirect_live_root(
+        monkeypatch, "store", synthetic_store(tmp_path, SESSION_STORE_MIN_FILES))
+
+    def pre_1143_rule(data, session_id=None):
+        if data.get("platform") == "mission-control" and not data.get("inner_voice"):
+            return et.INTERACTIVE_CLASS
+        return et.UNKNOWN_CLASS
+
+    monkeypatch.setattr(et, "classify_session", pre_1143_rule)
+    with pytest.raises(AssertionError) as caught:
+        test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session()
+    assert "classifier disagrees with the ruled rule" in str(caught.value), caught.value
+
+
+def test_a_present_corpus_that_admits_nothing_fails_rather_than_skips(
+        tmp_path, monkeypatch):
+    """Clause 3 for `test_the_live_corpus_emits_one_file_per_sequence_pattern`.
+
+    Present corpus, three copies of `adjacent_next_step_traj`: its n-grams are the
+    refused half of the #1181 gate (the next step after a failure is a different call
+    that merely touches the same file), so every mined sequence is refused, the mined
+    and written sequence sets are both empty, and the counts that guard compares would
+    agree. It must fail on `the live window must hold both kinds`, not skip.
+    """
+    rows = [adjacent_next_step_traj(f"alias1377_{i}") for i in (1, 2, 3)]
+    redirect_live_root(monkeypatch, "corpus", synthetic_corpus(tmp_path, rows))
+    with pytest.raises(AssertionError) as caught:
+        test_the_live_corpus_emits_one_file_per_sequence_pattern(tmp_path / "out")
+    assert "must hold both kinds" in str(caught.value), caught.value
+
+
+def test_a_present_ledger_below_its_coarse_key_floor_still_fails(
+        tmp_path, monkeypatch):
+    """Clause 3 for the verdict-ledger join: a ledger that EXISTS but has lost rows is
+    the defect that guard was written for, so 3 coarse keys against the recorded 21 must
+    fail, not skip. `pattern_key`s are synthetic so no real verdict can satisfy it."""
+    rows = [{"pattern_key": f"Guardtest1377{i}/not_found", "verdict": "rejected",
+             "decided_at": "2026-09-22T00:00:00+00:00"} for i in range(3)]
+    redirect_live_root(monkeypatch, "ledger", synthetic_ledger(tmp_path, rows))
+    with pytest.raises(AssertionError) as caught:
+        test_the_verdict_ledger_join_still_resolves_every_coarse_error_key()
+    assert "coarse keys in a ledger that held 21" in str(caught.value), caught.value
+
+
+def test_a_corpus_the_verdict_ledger_gates_none_of_fails_rather_than_skips(
+        tmp_path, monkeypatch):
+    """Clause 3 for the suppression-set guard: one mined error pattern whose key no
+    ledger row knows, so the gated-before set is empty. The guard's own invariant is
+    that a judged pattern is still gated after the merge, and an ungated corpus cannot
+    demonstrate that — it must fail on `the ledger gates none of`, not skip."""
+    rows = [error_traj(f"gate1377_{i}", "Ungated1377", "not_found", "protocol")
+            for i in (1, 2)]
+    redirect_live_root(monkeypatch, "corpus", synthetic_corpus(tmp_path, rows))
+    with pytest.raises(AssertionError) as caught:
+        test_the_merge_moves_nobody_out_of_suppression()
+    assert "gates none of" in str(caught.value), caught.value
+
+
+def test_a_corpus_whose_error_keys_never_collide_fails_rather_than_skips(
+        tmp_path, monkeypatch):
+    """Clause 3 for the merged-candidate guard: a present corpus that mines two error
+    patterns under two distinct keys, each with ONE signature behind it, so the merge is
+    never exercised and the summed totals below would compare a bucket with itself. It
+    must fail on `more than one signature`, not skip."""
+    rows = ([error_traj(f"collide1377_{i}", "Solo1377a", "not_found", "protocol")
+             for i in (1, 2)]
+            + [error_traj(f"collide1377_{i}", "Solo1377b", "not_found", "protocol")
+               for i in (1, 2)])
+    redirect_live_root(monkeypatch, "corpus", synthetic_corpus(tmp_path, rows))
+    with pytest.raises(AssertionError) as caught:
+        test_a_live_week_emits_one_merged_candidate_per_error_key(tmp_path / "out")
+    assert "more than one signature" in str(caught.value), caught.value
+
+
+def test_a_corpus_that_writes_no_sequence_candidate_fails_rather_than_skips(
+        tmp_path, monkeypatch):
+    """Clause 3 for the every-class path guard, in the review's own words.
+
+    Round SM_20260914_140724 refused this guard because a corpus that mined error
+    patterns and no sequence pattern left `assert "error" in kinds` green while the
+    sequence half of the check never ran. So: a present corpus of single-tool error
+    rows — error patterns mine, sequences cannot exist by construction — must fail on
+    `no sequence candidate was written`, the assert that half of that finding put
+    there."""
+    rows = [error_traj(f"noseq1377_{i}", "Solo1377", "not_found", "protocol")
+            for i in (1, 2)]
+    redirect_live_root(monkeypatch, "corpus", synthetic_corpus(tmp_path, rows))
+    with pytest.raises(AssertionError) as caught:
+        test_a_full_live_week_emits_one_file_per_path_across_every_class(tmp_path / "out")
+    assert "no sequence candidate was written" in str(caught.value), caught.value
+
+
+def test_a_corpus_row_labelled_interactive_on_a_machine_platform_fails(
+        tmp_path, monkeypatch):
+    """Clause 3 for the #493 join guard, on a present corpus and a present store: one
+    row stamped `session_class: interactive` whose session file says `platform: worker`.
+    That is a bad re-extraction, the exact thing this guard exists to catch, so it must
+    fail on the emitted-class half of its own check rather than skip."""
+    key = "20260920_120000_guard1377"
+    row = dict(adjacent_next_step_traj(key), session_class="interactive")
+    redirect_live_root(monkeypatch, "corpus", synthetic_corpus(tmp_path, [row]))
+    redirect_live_root(monkeypatch, "store",
+                       synthetic_store(tmp_path, 1, session_id=key, platform="worker"))
+    with pytest.raises(AssertionError) as caught:
+        test_no_live_corpus_row_is_interactive_on_a_machine_platform()
+    assert "onto a machine-platform session" in str(caught.value), caught.value
+    assert key in str(caught.value), caught.value

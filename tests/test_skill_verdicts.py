@@ -32,7 +32,12 @@ from pathlib import Path
 
 import pytest
 
+from tests._live_data import require_live_data
+
 _ROOT = Path(__file__).resolve().parents[1]
+#: This module's own namespace, so a pin test can redirect `LIVE_LEDGER` by name and
+#: the guard beneath it reads the redirected value on its next global lookup.
+_THIS = sys.modules[__name__]
 
 
 def _load(name: str, rel: str):
@@ -478,13 +483,16 @@ def test_every_stored_sequence_verdict_still_resolves_after_the_widening(tmp_pat
     asserted away rather than filtered in silence, because it is precisely the class a
     widened key would orphan without this loop ever noticing.
 
-    The ledger is asserted, never skipped: a guard against orphaning existing rows
-    that can pass by not finding the ledger is not that guard. `_pipeline/` is
-    gitignored, so this reads the machine's real append-only ledger rather than a
-    committed fixture — the same convention as `LIVE_CORPUS` in
-    `test_trajectory_extraction.py`.
+    An absent ledger skips and names its path; a ledger that EXISTS always runs the
+    loop. `_pipeline/` is gitignored, so this reads the machine's real append-only
+    ledger rather than a committed fixture — the same convention as `LIVE_CORPUS` in
+    `test_trajectory_extraction.py`, and the same #1377 rule. After the 2026-09-22 wipe
+    this assert was not guarding against orphaning; it was one of the nodes making every
+    round's `tests` rung refuse to promote onto a tree it had not broken. What still
+    fails over a present ledger is the orphaning itself —
+    `test_a_legacy_truncated_seq_key_in_a_present_ledger_still_fails` is that proof.
     """
-    assert LIVE_LEDGER.is_file(), f"verdict ledger absent: {LIVE_LEDGER}"
+    require_live_data(LIVE_LEDGER, "verdict ledger", kind="file")
     store = copy_live_ledger(tmp_path)
     rows = [json.loads(l) for l in store.read_text(encoding="utf-8").splitlines()
             if l.strip()]
@@ -533,6 +541,69 @@ def test_every_stored_sequence_verdict_still_resolves_after_the_widening(tmp_pat
             assert joined["verdict"] == row["verdict"]
         else:
             assert joined is None, f"{key}: a non-terminal row now blocks a candidate"
+
+
+def test_the_sequence_verdict_guard_skips_when_the_verdict_ledger_is_absent(
+        tmp_path, monkeypatch):
+    """Clause 4 of backlog #1377, from the same rule as the seven guards in
+    `test_trajectory_extraction.py`.
+
+    This node asserted the ledger's presence, and after the 2026-09-22 wipe the ledger
+    did not exist, so it reproduced as a failure *at base* in every round's `tests` rung
+    — one of the 106 in `base_probe: probed 21 file(s) at base 1842b8cf: 106 already
+    failing`, copied from
+    `~/.local/state/lloyd-automod/rounds/SM_20260922_201206/gate.json`. Absence of
+    derived data is a property of the machine and becomes a named skip; the reason has
+    to name the path, because a bare `skipped` would hide which root went missing.
+
+    Run by calling the guard with `LIVE_LEDGER` redirected, so this pins the rule on a
+    machine that HAS a ledger too rather than only on one that lost it.
+    """
+    missing = tmp_path / "gone" / "verdicts.jsonl"
+    monkeypatch.setattr(_THIS, "LIVE_LEDGER", missing)
+    with pytest.raises(pytest.skip.Exception) as caught:
+        test_every_stored_sequence_verdict_still_resolves_after_the_widening(tmp_path)
+    assert str(missing) in str(caught.value), (
+        f"skipped for a reason that does not name the missing ledger: {caught.value}")
+
+
+def test_a_legacy_truncated_seq_key_in_a_present_ledger_still_fails(
+        tmp_path, monkeypatch):
+    """The other side of that skip, and the invariant the guard was written for.
+
+    A synthetic ledger in a tmp root holding one `seq-*` row whose slug is cut to
+    exactly `SLUG_CAP` — the legacy truncation's signature, the class a widened key
+    would silently orphan — must make the guard FAIL, not skip. A skip that could fire
+    over a ledger that is present would convert a red orphaning-detector into a green
+    nothing.
+    """
+    legacy_key = f"seq-3-{'reuse1377' + 'x' * 41}"
+    assert len(seq_slug_of(legacy_key)) == SLUG_CAP, "the fixture must be the legacy shape"
+    ledger = tmp_path / "reviews" / "verdicts.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(json.dumps({
+        "pattern_key": legacy_key, "verdict": "rejected",
+        "reason": "fixture", "decided_at": "2026-09-22T00:00:00+00:00",
+    }) + "\n", encoding="utf-8")
+    monkeypatch.setattr(_THIS, "LIVE_LEDGER", ledger)
+    with pytest.raises(AssertionError) as caught:
+        test_every_stored_sequence_verdict_still_resolves_after_the_widening(tmp_path)
+    assert "legacy truncated" in str(caught.value), caught.value
+
+
+def test_an_empty_but_present_ledger_fails_rather_than_skips(tmp_path, monkeypatch):
+    """Clause 3's shape for this guard: the ledger EXISTS and holds nothing, so the
+    skip's precondition is not met and the row floors below have to fire. Emptying the
+    file and deleting it are different events — `skill_verdicts.resolve_verdict_source`
+    says so for the same reason — and a guard that skipped on both would report green
+    over a ledger whose rows had been lost."""
+    ledger = tmp_path / "reviews" / "verdicts.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text("", encoding="utf-8")
+    monkeypatch.setattr(_THIS, "LIVE_LEDGER", ledger)
+    with pytest.raises(AssertionError) as caught:
+        test_every_stored_sequence_verdict_still_resolves_after_the_widening(tmp_path)
+    assert "under-cap seq-* rows" in str(caught.value), caught.value
 
 
 def test_a_widened_sequence_key_survives_the_candidate_round_trip(tmp_path, store):
