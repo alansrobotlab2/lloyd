@@ -16,6 +16,7 @@ These tests pin the committed perturbation records (one per query, deterministic
 never re-derived from live graph data at eval time so a nightly diff stays a
 diff) and the two metric definitions.
 """
+import re
 import sqlite3
 import subprocess
 import sys
@@ -39,13 +40,17 @@ def _specs():
     return yaml.safe_load(QUERIES.read_text())["queries"]
 
 
-# The rater is sized against the live corpus, never a literal. MIN_CORPUS_N is
-# the floor the trend audit's 80%-power claim needs (#1319): the exact McNemar
-# search in scripts/eval_trend_stats.py reports n = 78 for a 0.10 paired change
-# at 80% power, alpha 0.05, so a corpus under it cannot support the verdicts the
-# nightly writes no matter how well the rater covers it.
+# The rater is sized against the live corpus, never a literal (#763 clause 4).
+# This used to carry `MIN_CORPUS_N = 78` — the floor the trend audit's 80%-power
+# claim needs (#1319, the exact McNemar search in scripts/eval_trend_stats.py) —
+# and that assertion belonged where the corpus is under review, not in the
+# rater's suite: here it could only fail for a reason this file has no power to
+# fix, so every corpus resize reddened the counterfactual tests, and a suite
+# that reddens on an unrelated change is a suite nobody reads. The power floor is
+# still enforced, once, in tests/test_eval_corpus_guard.py::
+# test_the_gold_set_is_big_enough_for_its_own_power_claim via
+# GOLD_SET_MIN_QUERIES.
 CORPUS_N = len(_specs())
-MIN_CORPUS_N = 78
 
 
 # ── the committed perturbation set ───────────────────────────────────────────
@@ -55,17 +60,18 @@ def test_one_perturbation_per_query_with_the_declared_shape():
 
     The count is the live corpus size, never a literal 20. The generator was
     written for the 20-query corpus and its records raise `ValueError` for an id
-    with no PLAN entry, so a corpus growth that forgets the rater leaves the
-    nightly scoring 87 queries while its summary still reports
-    `counterfactual_n_moved: 20` — one summary describing two different corpora.
+    with no PLAN entry, so a corpus change that forgets the rater leaves the
+    nightly scoring one number of queries while its summary reports
+    `counterfactual_n_moved` for another — one summary describing two different
+    corpora. The corpus-size floor behind the trend audit's power claim (#1319)
+    is guarded in `tests/test_eval_corpus_guard.py`, where resizing the corpus is
+    the change under review; asserting it here could only redden the rater's own
+    suite for a reason this file has no power to fix (#763 clause 4).
     """
     specs = {s["id"]: s for s in _specs()}
     recs = cf.load_records(RECORDS)
     assert len(recs) == len(specs) == CORPUS_N, (
         f"records {len(recs)}, corpus {CORPUS_N}")
-    assert CORPUS_N >= MIN_CORPUS_N, (
-        f"corpus is {CORPUS_N}; the trend audit needs at least {MIN_CORPUS_N} "
-        "paired queries for 80% power on a 0.10 change")
     assert set(recs) == set(specs)
     for qid, rec in recs.items():
         for key in ("axis_changed", "old_value", "new_value",
@@ -77,14 +83,19 @@ def test_one_perturbation_per_query_with_the_declared_shape():
 
 
 def test_plan_covers_every_query_and_nothing_outside_it():
-    """The PLAN/corpus join, as a set difference that names EVERY gap.
+    """The PLAN/corpus join, as a set difference that names EVERY gap, plus the
+    size comparison a corpus resize moves together with it (#763 clause 4).
 
     `build_perturbations` raises on the first id with no plan entry, so it stops
     there; a growth that added 67 queries would be reported one id at a time.
     """
-    ids = {s["id"] for s in _specs()}
+    specs = _specs()
+    ids = {s["id"] for s in specs}
     assert sorted(set(cf.PLAN) - ids) == [], "PLAN entries with no query in the corpus"
     assert sorted(ids - set(cf.PLAN)) == [], "corpus queries with no PLAN entry"
+    assert len(cf.PLAN) == len(specs), (
+        f"the plan holds {len(cf.PLAN)} entries, the live corpus "
+        f"{len(specs)} — the rater and the eval are describing different sets")
 
 
 def test_cli_check_reports_no_drift():
@@ -435,3 +446,214 @@ def test_failure_labels_name_the_swaps_that_left_the_seed_set_alone():
     assert "swap-seen" not in cf.identity_keying_evidence(labelled)
     assert by_id["swap-seen"]["label"] is None
     assert by_id["pinned-churn"]["label"] == "pinned_axis_churned"
+
+
+# ── #763: the pinned leg's two coverage errors, and its denominator ──────────
+
+# The three entity swaps whose swapped-in sibling keeps part of the original
+# term, so the surviving part is a constraint the perturbed query really does
+# still name. `backlog-363` pins "Backlog" rather than the two-word
+# "Backlog Item" for a measured reason, recorded at the PLAN entry: the original
+# arm attributes `backlogtask363`, in which the normalized "backlogitem" is not a
+# substring, so the two-word form scores `present=False->True` — the clause-2
+# defect imported instead of removed.
+SURVIVING_TYPE_PINS = {"qmd": "QMD", "backlog-363": "Backlog",
+                       "entity-resolution-sweep": "Entity Resolution"}
+
+# The rows each arm attributed for these three queries in
+# `eval/baselines/nightly-20260921-20260921-063958.json`
+# (`counterfactual.retrieved` and `.retrieved_variant`), copied here so the
+# non-vacuity claim below is checkable without a store: a pin must match a row on
+# BOTH sides, because `score_pair` also passes a pin that matched nothing in
+# either arm (`present=False->False`) — the vacuity #763 leaves to a person.
+MEASURED_ROWS = {
+    "qmd": (["bun", "ldlibrarypath", "lexicalsearchbackend", "qmd",
+             "qwen3embedding", "structuredsearch"],
+            ["industrialaiassistant", "ldlibrarypath", "lexicalsearchbackend",
+             "qmd", "qmdsearch", "qwen3embedding", "structuredsearch"]),
+    "backlog-363": (["backlogtask363", "currenttask", "task363",
+                     "task363tgsragmultihopreasoning", "task380kgdensification",
+                     "tgsrag", "tgsragretrievallevers"],
+                    ["313", "backlogitem313", "task313"]),
+    "entity-resolution-sweep": (
+        ["aliastable", "cleanup", "entityresolution", "entityresolutionscript",
+         "entityresolutionsweep", "lloydv4classifier", "task320"],
+        ["autonomytask67", "cleanup", "entityresolution", "entityresolutionscript",
+         "lloydv4classifier", "robomd",
+         "semanticentityresolutionviagraphembeddings"]),
+}
+
+
+def _perturbed_text(qid: str) -> str:
+    """The variant text the generator produces for one corpus query."""
+    spec = next(s for s in _specs() if s["id"] == qid)
+    _axis, old, new, _move, _pins = cf.PLAN[qid]
+    return cf.apply_perturbation(spec["query"],
+                                 {"old_value": old, "new_value": new, "id": qid})
+
+
+def _stubbed_run(monkeypatch, specs):
+    """The production loop with only the retriever injected.
+
+    The stub echoes the query text as the ATTRIBUTED ENTITY, so presence is
+    judged against each arm's own text and nothing else — the same shape
+    `test_a_scored_run_reports_counterfactual_n_over_the_whole_corpus` uses.
+    """
+    def retrieve(params):
+        return {"documents": [{"path": "knowledge/whatever.md"}],
+                "entities": [], "entity_facts": [],
+                "facts": [{"entity": params["query"], "text": "one fact"}],
+                "graph_neighbors_used": []}
+
+    monkeypatch.setattr(ev, "_vault_recall", lambda params, **kw: retrieve(params))
+    records = ev.run_eval(specs, limit=len(specs))
+    return records, ev.summarize(records)
+
+
+def test_the_three_entity_swaps_whose_type_survives_their_swap_are_scored(monkeypatch):
+    """Clause 1: `qmd`, `backlog-363` and `entity-resolution-sweep` each carry a
+    non-empty `expected_pinned` that survives into its own perturbed query, so
+    those three ids no longer score `nothing_pinned`.
+
+    Three things are asserted, because the first alone would pass on a pin
+    invented out of thin air:
+
+      * the pin is the PLAN's declared pin, and a case-insensitive substring of
+        the variant text the generator will actually run;
+      * it matches a row BOTH arms attributed in the shipping baseline, so the
+        pass is evidence about retrieval rather than a pin that matched nothing
+        in either arm;
+      * the production loop now returns a non-null pinned leg for the id, which
+        is what takes it out of `nothing_pinned` in `counterfactual_failures`.
+    """
+    specs = _specs()
+    for qid, pin in SURVIVING_TYPE_PINS.items():
+        assert cf.PLAN[qid][4] == [pin], (qid, cf.PLAN[qid][4])
+        perturbed = _perturbed_text(qid)
+        assert pin.lower() in perturbed.lower(), (qid, pin, perturbed)
+        orig_rows, var_rows = MEASURED_ROWS[qid]
+        assert cf._match(pin, {cf._norm(r) for r in orig_rows}), (qid, orig_rows)
+        assert cf._match(pin, {cf._norm(r) for r in var_rows}), (qid, var_rows)
+
+    records, summary = _stubbed_run(monkeypatch, specs)
+    by_id = {r["id"]: r for r in records}
+    labels = {row["id"]: row["label"] for row in cf.label_failures(records)}
+    for qid in SURVIVING_TYPE_PINS:
+        block = by_id[qid]["counterfactual"]
+        assert block["pinned_unscored"] is False, qid
+        assert block["counterfactual_pinned"] is not None, qid
+        assert labels[qid] != "nothing_pinned", (qid, labels[qid])
+    # The denominator still means "actually scored", so it equals the entries
+    # that declare a pin — derived from the plan, never a number in this file.
+    declared = sum(1 for entry in cf.PLAN.values() if entry[4])
+    o = summary["overall"]
+    assert o["counterfactual_n_pinned"] == declared, (o["counterfactual_n_pinned"],
+                                                     declared)
+    assert o["counterfactual_n_moved"] == len(specs), o["counterfactual_n_moved"]
+
+
+def test_no_plan_entry_pins_a_term_its_own_swap_deletes_beyond_the_five_named():
+    """Clause 2: the only entries whose declared pin is absent from their own
+    perturbed query are the five enumerated non-entity ones, so
+    `autonomy-pipeline` no longer pins "autonomy".
+
+    `autonomy-pipeline` is the live false alarm this clause closes. Its swap
+    rewrites "describe the autonomy pipeline end to end" into "describe the Data
+    Pipeline end to end", so the variant text holds no "autonomy" to hold
+    constant, and `nightly-20260917` and `nightly-20260921` each booked the row as
+    `pinned_axis_churned / autonomy: present=True->False` — a defect reported on
+    the one axis that was supposed to move. The five survivors are qualifier and
+    artifact entries whose pin names an entity the query implies rather than
+    repeats; they are legitimate expectations and `PINS_ABSENT_BY_DESIGN` says so
+    per entry. No ENTITY-axis entry may be in that set, because on that axis a pin
+    outside the variant text is by construction the constraint that moved.
+    """
+    specs = _specs()
+    offenders = cf.pins_absent_from_their_own_swap(specs)
+    assert sorted(offenders) == sorted(cf.PINS_ABSENT_BY_DESIGN), offenders
+    assert set(cf.PINS_ABSENT_BY_DESIGN) == {
+        "qwen38-local-serving", "yaml-scalar-block-indent",
+        "check-that-cannot-see-its-input", "self-referential-check-catalogue",
+        "skill-mining-to-promotion"}
+    assert cf.PLAN["autonomy-pipeline"][4] == [], cf.PLAN["autonomy-pipeline"]
+    assert "autonomy-pipeline" not in offenders
+    # The pin is gone; the swap's own `old_value` keeps the word, because the
+    # word is what the swap moves.
+    assert "autonomy" not in str(cf.PLAN["autonomy-pipeline"][4]), \
+        cf.PLAN["autonomy-pipeline"][4]
+    for qid in cf.PINS_ABSENT_BY_DESIGN:
+        assert cf.PLAN[qid][0] != cf.ENTITY_AXIS, (
+            qid, "an entity-axis entry pins a term its own swap deletes")
+
+    # The audit must be able to FAIL. `autonomy-pipeline` is the offender this
+    # clause removes, so it is injected back as a synthetic sixth entry here and
+    # has to come back named — otherwise the five could be passing because the
+    # function never finds anything.
+    probe_specs = [{"id": "probe", "query": "describe the autonomy pipeline"}]
+    probe_plan = {"probe": ("entity", "autonomy pipeline", "Data Pipeline",
+                            ["Data Pipeline"], ["autonomy"])}
+    assert cf.pins_absent_from_their_own_swap(probe_specs, probe_plan) == {
+        "probe": ["autonomy"]}
+    # ... and a pin that DOES survive its own swap is not reported.
+    ok_plan = {"probe": ("entity", "autonomy pipeline", "Data Pipeline",
+                         ["Data Pipeline"], ["pipeline"])}
+    assert cf.pins_absent_from_their_own_swap(probe_specs, ok_plan) == {}
+
+
+def test_the_printed_counterfactual_line_shows_each_rate_out_of_the_query_set(monkeypatch,
+                                                                              capsys):
+    """Clause 3: the console summary prints `pinned=0.90 (n=50/81)`, and moved's
+    out-of-total is on the same line.
+
+    `(n=50)` alone — what `eval/run_eval.py` has printed since `af1e8c1`
+    (2026-09-09) — shows the count but not the coverage. The two legs of this
+    rater are scored over DIFFERENT query populations by design (an entry with no
+    `expected_pinned` feeds moved only), so without the out-of-total a reader
+    comparing the two trend lines is comparing an unknown pair of populations,
+    which is the reading #763 was filed on. The unscored remainder has to stay
+    VISIBLE: the fraction carries the shortfall, and the residual pair is not
+    quietly promoted into the denominator.
+    """
+    specs = _specs()
+    records, summary = _stubbed_run(monkeypatch, specs)
+    ev.print_table(records, summary)
+    out = capsys.readouterr().out
+    o = summary["overall"]
+    total = o["n_queries"]
+    line = next((ln for ln in out.splitlines() if "counterfactual:" in ln), None)
+    assert line is not None, out
+    # Both denominators are fractions of the run's own query total, in the order
+    # (moved, pinned), with no bare `(n=N)` left behind.
+    assert re.findall(r"\(n=(\d+)/(\d+)\)", line) == [
+        (str(o["counterfactual_n_moved"]), str(total)),
+        (str(o["counterfactual_n_pinned"]), str(total))], line
+    # The residual unscored pair shows as a shortfall rather than as coverage:
+    # the pinned denominator is strictly under the total, and the two entries the
+    # item leaves to a person are why.
+    assert o["counterfactual_n_pinned"] < total, line
+    for qid in ("inner-voice", "vault-recall"):
+        assert cf.PLAN[qid][4] == [], qid
+
+
+def test_the_counterfactual_suite_is_sized_by_the_corpus_it_reads():
+    """Clause 4: no hard-coded corpus size anywhere in this file, so a corpus
+    resize cannot redden the rater's suite.
+
+    This file used to carry `MIN_CORPUS_N = 78` and assert the live corpus was at
+    least it, which meant the rater's own tests failed whenever an unrelated job
+    trimmed or grew `eval/vault_recall_queries.yaml`. 78 is the exact-McNemar
+    floor for a 0.10 paired change at 80 % power (`scripts/eval_trend_stats.py`),
+    a property of the CORPUS, and it is guarded once in
+    `tests/test_eval_corpus_guard.py::test_the_gold_set_is_big_enough_for_its_own_power_claim`,
+    where a resize is the change under review. What belongs HERE is agreement:
+    plan entries, committed records and corpus queries all one size.
+    """
+    specs = _specs()
+    assert len(cf.PLAN) == len(specs), (len(cf.PLAN), len(specs))
+    assert len(cf.load_records(RECORDS)) == len(specs), (
+        len(cf.load_records(RECORDS)), len(specs))
+    src = Path(__file__).read_text()
+    literals = re.findall(r"^(?:MIN_)?CORPUS_N\s*=\s*\d+", src, re.MULTILINE)
+    assert literals == [], (
+        f"the suite hard-codes a corpus size: {literals} — assert against "
+        "`len(_specs())` instead")

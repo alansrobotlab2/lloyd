@@ -60,18 +60,62 @@ AXES_REQUIRE_MOVE_TARGET = {ENTITY_AXIS}
 #                      same rows in both arms. Anything not named here is not
 #                      scored, so a query with one constraint contributes to
 #                      moved_rate only — a vacuous pin would inflate pinned_rate
+#
+#   "still names" is a testable phrase, and #763 is what made it one: a pin must
+#   be a case-insensitive substring of `apply_perturbation(query, entry)`, the
+#   variant's OWN text. A pin the swap deletes is not an unchanged constraint,
+#   it is the constraint that changed, and scoring it reports a defect on every
+#   nightly that behaves correctly (`autonomy-pipeline` pinned "autonomy" while
+#   its swap rewrote "the autonomy pipeline" to "the Data Pipeline", and
+#   `nightly-20260917` / `nightly-20260921` each booked it as
+#   `pinned_axis_churned / autonomy: present=True->False`). The audit that keeps
+#   that from recurring is `pins_absent_from_their_own_swap`, run by `--check`
+#   and by the suite; the five entries whose pin is knowingly not in their own
+#   variant text are enumerated in `PINS_ABSENT_BY_DESIGN` with the reason.
 # PLAN[id] = (axis, old_value, new_value, expected_to_move, expected_pinned)
 PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
     # entity swaps — the axis whose failure mode is the direct evidence for or
     # against #537's typed-identity-key premise.
+    # #763 option 1: the pin is the surviving half of the swapped term — the
+    # artifact TYPE, whose number is what changed. Measured, not guessed:
+    # "Backlog Item" was the obvious string and it MANUFACTURES a churn — the
+    # original arm attributes `backlogtask363`, which normalized does not
+    # contain "backlogitem", so `score_pair` would have read
+    # `Backlog Item: present=False->True` on a retriever that behaved (the
+    # clause-2 defect, imported rather than removed). "Backlog" is the nearest
+    # string that both survives into "tell me about Backlog Item #313" and is
+    # attributed by BOTH arms — `backlogtask363` original, `backlogitem313`
+    # variant, same attributed text — scored live 2026-09-22 through
+    # `run_eval._vault_recall`, pinned=True, moved=True.
     "backlog-363": ("entity", "backlog item 363", "Backlog Item #313",
-                    ["Backlog Item #313"], []),
+                    ["Backlog Item #313"], ["Backlog"]),
+    # Same shape: "Entity Resolution" is the shared stem of the sweep and its
+    # sibling, it survives into "what does the Semantic Entity Resolution skill
+    # do?", and the row `entityresolution` is attributed by BOTH arms of
+    # nightly-20260919/20/21 — a pin with row evidence on each side, not a
+    # substring accident.
     "entity-resolution-sweep": ("entity", "entity resolution sweep",
                                "Semantic Entity Resolution",
-                               ["Semantic Entity Resolution"], []),
+                               ["Semantic Entity Resolution"], ["Entity Resolution"]),
+    # The residual pair: these two stay unscored and visible in the printed
+    # fraction, and #763 leaves them to a person. Each candidate pin was tested
+    # and each failed. The two arms' attributed rows are DISJOINT for `inner-voice`
+    # in every recent nightly (`inner-voice`/`inner-voice-event-log` against
+    # `voice-mode`/`agent-voice-mode`/`port-8096`), so any pin taken from the
+    # original arm is absent from the variant arm by construction — which is a
+    # manufactured churn, risk 1, not a measurement. For `vault-recall` the only
+    # string that scores a pass is "Vault Recall", and it passes by matching a
+    # generic `vault` row through `_match`'s bidirectional-substring tolerance
+    # rather than the recall row it means. The remaining route is widening each
+    # query in `eval/vault_recall_queries.yaml` to name a second constraint, and
+    # #541 reserved that ground-truth file against perturbation work.
     "inner-voice": ("entity", "inner voice", "Voice Mode", ["Voice Mode"], []),
     "vault-recall": ("entity", "vault_recall", "Vault Index", ["Vault Index"], []),
-    "qmd": ("entity", "QMD", "QMD Search", ["QMD Search"], []),
+    # "QMD" is the shared stem of `QMD` and `QMD Search`, so it survives the
+    # swap into "what is QMD Search?", and the row `qmd` is attributed by both
+    # arms of nightly-20260919/20/21 — the pin asks that naming one QMD
+    # subsystem not drop the others (#763 option 1).
+    "qmd": ("entity", "QMD", "QMD Search", ["QMD Search"], ["QMD"]),
     "kg-maintenance-tasks": ("entity", "knowledge graph", "Entity Graph",
                             ["Entity Graph"], ["autonomy"]),
     "lloyd-vllm-rel": ("entity", "vLLM", "TensorRT-LLM",
@@ -80,8 +124,19 @@ PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
     # are both live surfaces for Autonomy Data Pipeline. If retrieval cannot tell
     # the two surfaces apart, the seed set does not move — and that is the
     # identity-keying result, not a broken perturbation.
+    #
+    # #763 clause 2: the pinned leg is dropped, because it was the rater's false
+    # alarm. "autonomy" came from `expect_entities`, never from anything the
+    # swap leaves alone — the perturbation rewrites "the autonomy pipeline" into
+    # "the Data Pipeline", so the variant text contains no "autonomy" to pin, and
+    # `nightly-20260917` and `nightly-20260921` each booked the row as
+    # `pinned_axis_churned / autonomy: present=True->False`: a defect reported on
+    # the one axis that legitimately moved. The moved leg is untouched and still
+    # scores this query against `Data Pipeline`, so the #537 evidence the entry
+    # exists for is unaffected; only the unsatisfiable pin goes, and the entry
+    # moves from `pinned_axis_churned` to `nothing_pinned` in the label column.
     "autonomy-pipeline": ("entity", "autonomy pipeline", "Data Pipeline",
-                          ["Data Pipeline"], ["autonomy"]),
+                          ["Data Pipeline"], []),
     # artifact-type changes: "the daily note" -> "the knowledge note" family
     "harness-tools": ("artifact", "tool calls", "tool results", [], ["agent harness"]),
     "nightly-reflection": ("artifact", "skills", "autonomy tasks", [],
@@ -282,6 +337,68 @@ def build_perturbations(specs: list[dict]) -> list[dict]:
     planned = set(PLAN) - {s["id"] for s in specs}
     if planned:
         raise ValueError(f"plan entries with no query: {sorted(planned)}")
+    return out
+
+
+# Every entry whose declared pin is knowingly NOT a substring of its own
+# perturbed query, with why it is still the right expectation. These are
+# non-entity axes whose pin was taken from the query's `expect_entities` rather
+# than from its prose — e.g. `qwen38-local-serving` asks "how do we serve a
+# hybrid linear-attention model on a single 24GB GPU?" and pins "Qwen3.8", a
+# model name the query only implies. That is a legitimate thing to ask retrieval
+# to hold across a qualifier swap, so the pins stay; what must not happen again
+# is the ENTITY axis doing it, because there the pin then names the very
+# constraint the swap moved (#763 clause 2, `autonomy-pipeline` / "autonomy").
+# `pins_absent_from_their_own_swap` returns exactly this set, and the suite
+# asserts it — a sixth offender fails the test rather than joining the
+# baseline's `counterfactual_failures` as a manufactured defect.
+PINS_ABSENT_BY_DESIGN = (
+    "qwen38-local-serving",       # pins "Qwen3.8"; the swap moves the VRAM qualifier
+    "yaml-scalar-block-indent",   # pins "YAML Parser"; the swap moves "last"/"first"
+    "check-that-cannot-see-its-input",   # pins "guard"; named in no query text
+    "self-referential-check-catalogue",  # pins "note"; named in no query text
+    "skill-mining-to-promotion",  # pins "promotion step"; prose says "which loop decides"
+)
+
+
+def pins_absent_from_their_own_swap(specs: list[dict],
+                                    plan: dict[str, tuple] | None = None,
+                                    ) -> dict[str, list[str]]:
+    """{query id: the declared pins that its OWN variant text does not contain}.
+
+    The mechanical reading of "constraints the query still names": for every
+    entry with a non-empty `expected_pinned`, build the variant exactly as the
+    rater will (`apply_perturbation`, case-insensitive first occurrence) and ask
+    whether each pin survives into it. A pin that does not is an expectation the
+    perturbed query cannot satisfy, so scoring it reports a defect on a retriever
+    that behaved — which is what `autonomy-pipeline` has been doing on every
+    nightly since it was written.
+
+    Pure: reads no store, runs no retrieval. Entries with no pin are not
+    reported — they are the unscored half, visible in the denominator, not a
+    defect.
+    """
+    plan = PLAN if plan is None else plan
+    out: dict[str, list[str]] = {}
+    for spec in specs:
+        qid = spec["id"]
+        entry = plan.get(qid)
+        if not entry:
+            continue
+        _axis, old, new, _to_move, pins = entry
+        if not pins:
+            continue
+        try:
+            perturbed = apply_perturbation(spec["query"],
+                                           {"old_value": old, "new_value": new,
+                                            "id": qid})
+        except ValueError:
+            # build_perturbations raises on this with a better message; the
+            # audit has no opinion on a plan that cannot be applied.
+            continue
+        missing = [p for p in pins if p.lower() not in perturbed.lower()]
+        if missing:
+            out[qid] = missing
     return out
 
 
@@ -543,7 +660,21 @@ def main(argv: list[str]) -> int:
         committed = load_records()
         drift = [i for i, r in built.items() if committed.get(i) != r]
         print(f"{'DRIFT ' + str(drift) if drift else 'records match the generator'}")
-        return 1 if drift else 0
+        # The #763 clause-2 audit, on the same entry point a person runs before
+        # committing a plan edit: an entry that pins a term its own swap deletes
+        # can only ever be reported as a defect by a nightly that behaved, so it
+        # belongs next to the drift check rather than only in the suite.
+        offenders = pins_absent_from_their_own_swap(specs)
+        unexpected = {q: p for q, p in offenders.items()
+                      if q not in PINS_ABSENT_BY_DESIGN}
+        for qid, missing in sorted(offenders.items()):
+            flag = "by design" if qid in PINS_ABSENT_BY_DESIGN else "UNEXPECTED"
+            print(f"  {flag:<11} {qid}: pins {missing} absent from its own "
+                  f"perturbed query")
+        print(f"pin audit: {len(offenders)} entries pin a term their own swap "
+              f"deletes, {len(unexpected)} of them outside "
+              f"PINS_ABSENT_BY_DESIGN")
+        return 1 if (drift or unexpected) else 0
     print("usage: counterfactual.py --write | --check | --verify")
     return 2
 

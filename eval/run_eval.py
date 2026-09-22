@@ -774,9 +774,21 @@ def print_table(records: list[dict], summary: dict) -> None:
     # Printed beside entity_hit/doc_hit because that gap is what #541 exists to
     # explain: retrieval finds a relevant document far more reliably than it
     # finds the right entity row.
+    #
+    # Each denominator prints OUT OF TOTAL — `pinned=0.90 (n=50/81)`, not `(n=50)`
+    # (#763 clause 3). The bare count has been on this page since `af1e8c1`
+    # (2026-09-09), and it shows how many queries were scored without saying how
+    # many there were. The two legs are deliberately scored over different
+    # populations — an entry with no `expected_pinned` feeds moved only — so
+    # `(n=66)` beside `(n=50)` reads as one population with 16 rows missing for no
+    # stated reason, and a nightly reader comparing the two trend lines compares
+    # two unknown sets. The run's own `n_queries` is the out-of-total, so the
+    # fraction also names which corpus was scored.
     mv, pn = o.get("counterfactual_moved_rate"), o.get("counterfactual_pinned_rate")
-    print(f"         counterfactual: moved={_fmt_rate(mv)} (n={o.get('counterfactual_n_moved', 0)})  "
-          f"pinned={_fmt_rate(pn)} (n={o.get('counterfactual_n_pinned', 0)})")
+    total = o.get("n_queries", 0)
+    print(f"         counterfactual: moved={_fmt_rate(mv)} "
+          f"(n={o.get('counterfactual_n_moved', 0)}/{total})  "
+          f"pinned={_fmt_rate(pn)} (n={o.get('counterfactual_n_pinned', 0)}/{total})")
     print("\nBy category:")
     for cat, s in summary["by_category"].items():
         print(f"  {cat:<10} n={s['n']:<3} entity_hit={s['entity_hit_rate']:.2f}  "
