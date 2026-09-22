@@ -1010,6 +1010,8 @@ import inspect  # noqa: E402
 
 import yaml  # noqa: E402
 
+from tests._live_data import require_live_data
+
 CORPUS = ROOT / "eval" / "vault_recall_queries.yaml"
 # `_pipeline/` is gitignored (.gitignore:25), so a git worktree — including the
 # automod round the gate runs this suite in — has no `kg.sqlite` at all. The
@@ -1067,6 +1069,17 @@ def _entity_store_names(getter=None, *, allow_live_fallback: bool = True) -> tup
                     return list(st.entities.all()), str(st.path)
                 finally:
                     st.close()
+
+        # Neither route holds a store. The refusal below is still the right answer
+        # for a caller that switched the fallback OFF — that caller is asserting the
+        # refusal happens — but for the live route it became permanent on
+        # 2026-09-22: kg.sqlite went with the tree and no copy exists on the box
+        # (`find ~ -name kg.sqlite` returns nothing), so this reproduced red at base
+        # in every round. The skip keeps the distinction clause 5 is about: an
+        # unavailable store still does not become an unsatisfiable corpus, it just
+        # says so by name instead of by blocking every promotion.
+        require_live_data(LIVE_KG_DB, "the knowledge-graph store the eval scores "
+                          f"against (also looked at {Path(VAULT_KG_DB)})", kind="file")
 
     # Nothing readable on either path (or a caller switched the fallback off):
     # the sanctioned reader produces the refusal, and it names the path it looked
