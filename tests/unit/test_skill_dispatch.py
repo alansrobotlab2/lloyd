@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,78 @@ from app.harness.loop import _pre_dispatch
 from app.harness.options import RunOptions
 
 REPO = Path(__file__).resolve().parents[2]
+
+# The voice-mode verb/unit gap as it shipped in #536: unbounded, so it reached
+# across shell statement separators (#751). The negatives below are pinned
+# against THIS and only this, so `test_benign_dispatches_do_not_trigger` can
+# never rot into a list of commands that no rule ever wanted to hold — a
+# negative that the old rule also passed pins nothing.
+_LEGACY_VOICE_PATTERNS = (
+    re.compile(
+        r"\b(?:restart|stop|start|enable|disable|signal|kill)\b[^\n]*"
+        r"\b(?:agent-(?:tts|livekit-server)|lloyd-voice-mode\.service)\b"
+    ),
+    re.compile(
+        r"\b(?:agent-(?:tts|livekit-server)|lloyd-voice-mode\.service)\b[^\n]*"
+        r"\b(?:restart|stop|start|enable|disable)\b"
+    ),
+)
+
+# Diagnostic reads lifted byte-for-byte out of the session transcripts, each one
+# held by the old rule because an `echo` header naming a control verb sat in a
+# different statement from the unit name the read was aimed at. The session file
+# is named per entry so a later reader can re-harvest them.
+TRANSCRIPT_READS_HELD_BY_THE_OLD_RULE: tuple[tuple[str, str], ...] = (
+    # `tail -25 agent-livekit-server.err` under an
+    # `echo "=== livekit rtc/bind lines since restart ==="` header.
+    ("20260907_220430_iv15a0.json",
+     'cd ~/lloyd/agent-services/logs; echo "=== livekit.err tail 25 ==="; tail -25 agent-livekit-server.err 2>/dev/null; echo; echo "=== livekit rtc/bind lines since restart ==="; grep -iE "rtc|udp|node_ip|Starting|error|port" agent-livekit-server.log 2>/dev/null | tail -12; echo; echo "=== voice worker (agent-worker) tail 15 ==="; tail -15 lloyd-agent-worker.err 2>/dev/null || tail -15 lloyd-agent-worker.log 2>/dev/null; echo; echo "=== compute apps ==="; nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory,process_name --format=csv 2>&1 | head -10; echo; echo "=== GPU uuid map ==="; nvidia-smi --query-gpu=index,uuid --format=csv,noheader'),
+    # `cat bin/start-qwen3-tts.sh` — the verb is inside a filename.
+    ("20260907_220430_iv15a0.json",
+     'cd ~/lloyd/agent-services; echo "=== TTS start script ==="; cat bin/start-qwen3-tts.sh 2>/dev/null; echo; echo "=== TTS supervisor program block ==="; awk \'/\\[program:agent-tts\\]/,/^\\[/\' supervisor/*.conf 2>/dev/null | head -30; echo; echo "=== TTS env in running proc ==="; tr \'\\0\' \'\\n\' < /proc/1937169/environ 2>/dev/null | grep -iE \'TTS|CUDA|LAZY|MODEL|PORT\' | head -20'),
+    # `curl -s http://localhost:8090/health | python3 -m json.tool`, multi-line,
+    # held by the last line's `since restart ===` header reaching `agent-tts.log`.
+    ("20260907_220430_iv15a0.json",
+     'echo "=== TTS /health device block ==="; curl -s -m 10 http://localhost:8090/health | python3 -m json.tool\necho; echo "=== which physical GPU per pid ==="; nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader\necho "--- gpu uuid map ---"; nvidia-smi --query-gpu=index,name,uuid,memory.used --format=csv,noheader\necho; echo "=== TTS proc env + CPU/GPU split ==="; TTS_PID=$(pgrep -f "uvicorn api.main:app" | head -1); echo "pid=$TTS_PID"\ntr \'\\0\' \'\\n\' < /proc/$TTS_PID/environ | grep -E "CUDA_VISIBLE|TTS_|TTS_BACKEND|OMP_NUM|CUDA_MPS"\necho "--- cpu% and thread count ---"; ps -o pid,%cpu,nlwp,rss,etime -p $TTS_PID\necho; echo "=== TTS log: device / compile lines since restart ==="; grep -iE "device|cuda|cpu|compile|warmup|lazy|load" ~/lloyd/agent-services/logs/agent-tts.log | tail -20'),
+    # the `ss -lnu` UDP block, held by `after last start) ===` reaching the
+    # `grep -vE ... agent-livekit-server.err` two statements later.
+    ("20260910_014618_iv6a62.json",
+     'timeout 40 bash -c \'cd ~/lloyd/agent-services/logs; echo "=== any UDP >=50000 in full list ==="; ss -lnu | grep -oE ":5[0-9]{4}$" | sort -u | head; echo "(total UDP listeners: $(ss -lnu | grep -c UNCONN))"; echo; echo "=== livekit boot block (first 25 non-ListRooms lines after last start) ==="; grep -vE "ListRooms|GetNodeMetrics|service/twirp" agent-livekit-server.err | tail -25\''),
+)
+
+# Synthetic one-separator-per-case pins: the same leak shape, reduced to the
+# separator that carried it. All four are reads; none may reach voice-mode.
+STATEMENT_SEPARATED_READS: tuple[tuple[str, str], ...] = (
+    (";", 'echo "=== livekit err lines since the restart ==="; tail -25 agent-livekit-server.err'),
+    ("|", "journalctl --user -u agent-livekit-server --since -10m | grep -i restart"),
+    ("&&", "awk '/agent-tts/ {print $1}' agent-services/supervisor/supervisord.conf "
+           "&& systemctl --user list-units | grep -i start"),
+    # The old gap already excluded a newline, so this one is a restatement of
+    # the guarantee rather than a case it held. Pinned so the narrowed class
+    # cannot drop it.
+    ("newline", 'echo "=== a restart is not what this call does ==="\n'
+                "tail -25 agent-livekit-server.err"),
+)
+
+# A genuine control call, multi-line, from 20260907_220430_iv15a0.json: the
+# restart sits on its own line, so bounding the gap to one statement must not
+# touch it.
+TRANSCRIPT_CONTROL_CALL = (
+    "cd ~/lloyd; CONF=agent-services/supervisor/supervisord.conf\n"
+    "supervisorctl -c $CONF restart agent-tts 2>&1\n"
+    "for i in $(seq 1 40); do\n"
+    "  code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://localhost:8090/v1/health 2>/dev/null)\n"
+    '  [ "$code" = "200" ] && { echo "health 200 after ${i}0s-ish (iter $i)"; break; }\n'
+    "  sleep 3\n"
+    "done\n"
+    'echo "final health: $(curl -s -m 5 http://localhost:8090/v1/health)"\n'
+    "supervisorctl -c $CONF status agent-tts"
+)
+
+
+def _held_skill(command: str) -> str | None:
+    rule = sd.match_rule("Bash", {"command": command}, rules=sd.DISPATCH_RULES)
+    return rule.skill if rule else None
 
 
 def _run(coro):
@@ -92,10 +165,19 @@ def test_rule_matches_argument_shape():
         "python3 -c \"import subprocess; subprocess.run(['yt-dlp', url])\"": "youtube-transcript",
         "cd /tmp && python3 -m youtube_transcript_api --video X": "youtube-transcript",
         "page.evaluate(() => page.transcriptExtractor())": "youtube-transcript",
-        # The restart that has to name the right unit.
+        # The restart that has to name the right unit. Adjacency inside one
+        # shell statement is what the voice-mode gate keys on (#751), so these
+        # carry the realistic `-c <conf>` prefix: verb and unit in the same
+        # statement, which is every control call in the transcripts.
         "supervisorctl -c cfg.conf restart lloyd-mc:lloyd-backend": "restart-lloyd",
         "systemctl --user restart lloyd-voice-mode.service": "voice-mode",
         "supervisorctl restart agent-tts": "voice-mode",
+        "supervisorctl -c agent-services/supervisor/supervisord.conf restart agent-tts": "voice-mode",
+        "supervisorctl -c cfg.conf restart agent-livekit-server": "voice-mode",
+        TRANSCRIPT_CONTROL_CALL: "voice-mode",
+        # The guard that outlives the narrowing: launching the script directly
+        # is the failure the skill forbids, so the invocation alone triggers.
+        "~/lloyd/.venvs/lloyd/bin/python ~/lloyd/voice_mode.py --serve": "voice-mode",
     }
     for command, expected in cases.items():
         rule = sd.match_rule("Bash", {"command": command}, rules=sd.DISPATCH_RULES)
@@ -118,10 +200,67 @@ def test_benign_dispatches_do_not_trigger():
         "grep -Rn voice_mode.py ~/lloyd/",
         "curl -s http://127.0.0.1:8092/v1/status",
         "curl -s http://127.0.0.1:8096/v1/models",
+        # #751: a control verb in one shell statement and a voice unit in the
+        # next is a diagnosis, not a control call. First the four reads as they
+        # appear in the transcripts, then one synthetic case per separator.
+        *(cmd for _session, cmd in TRANSCRIPT_READS_HELD_BY_THE_OLD_RULE),
+        *(cmd for _separator, cmd in STATEMENT_SEPARATED_READS),
     ]
     for command in benign:
         assert sd.match_rule("Bash", {"command": command}, rules=sd.DISPATCH_RULES) is None, command
     print("test_benign_dispatches_do_not_trigger: OK")
+
+
+def test_the_voice_read_negatives_are_the_dispatches_the_old_rule_held():
+    """A negative that the old rule also passed would pin nothing, so each one
+    is checked against the #536 pattern set — the unbounded `[^\n]*` gap — and
+    against the shipped one. 4 transcript-exact reads + 3 synthetic separators
+    are legacy leaks; the `newline` case is the exception named in its own
+    comment (the old gap already excluded it) and is pinned only as must-not-fire.
+    """
+    legacy_leaks = [cmd for _session, cmd in TRANSCRIPT_READS_HELD_BY_THE_OLD_RULE]
+    legacy_leaks += [cmd for sep, cmd in STATEMENT_SEPARATED_READS if sep != "newline"]
+    assert len(legacy_leaks) == 7, f"fixture shape changed: {len(legacy_leaks)} cases"
+    for command in legacy_leaks:
+        assert any(p.search(command) for p in _LEGACY_VOICE_PATTERNS), (
+            f"{command[:70]!r} was never held by the old rule: this negative pins nothing"
+        )
+        assert _held_skill(command) != "voice-mode", f"still held: {command[:70]!r}"
+    for _sep, command in STATEMENT_SEPARATED_READS:
+        assert _held_skill(command) != "voice-mode", f"{_sep}: still held"
+    print("test_the_voice_read_negatives_are_the_dispatches_the_old_rule_held: OK")
+
+
+def test_voice_mode_verb_unit_gap_is_bounded_to_one_statement():
+    """#751 clause 3: the narrowing is adjacency, not deletion.
+
+    Both word orders have to survive — deleting the reverse-order pattern alone
+    would stop these leaks too, and would silently un-gate `agent-tts stop` —
+    and the gap between verb and unit must exclude the shell statement
+    separators and carry a bounded repeat.
+    """
+    rule = next(r for r in sd.DISPATCH_RULES if r.skill == "voice-mode")
+    verb_unit, unit_verb, direct_script = rule.patterns
+    unit_src = "agent-(?:tts"
+    assert verb_unit.pattern.index("restart") < verb_unit.pattern.index(unit_src), (
+        "the verb -> unit order is gone"
+    )
+    assert unit_verb.pattern.index(unit_src) < unit_verb.pattern.index("restart"), (
+        "the unit -> verb order is gone"
+    )
+    gap_class = re.compile(r"\[\^([^\]]+)\]\{(\d+),(\d+)\}")
+    for pattern in (verb_unit, unit_verb):
+        match = gap_class.search(pattern.pattern)
+        assert match, f"{pattern.pattern!r} carries no bounded gap class"
+        excluded, low, high = match.group(1), int(match.group(2)), int(match.group(3))
+        for separator in (r"\n", "|", ";", "&"):
+            assert separator in excluded, f"[^{excluded}] does not exclude {separator!r}"
+        assert low == 0 and 0 < high <= 60, match.group(0)
+        assert "[^\\n]*" not in pattern.pattern, "the unbounded gap is back"
+    # And the guard the narrowing must not reach: launching the script directly,
+    # whole invocation, unbounded gap intact.
+    assert direct_script.pattern == r"\bpython\S*[^\n]*\bvoice_mode\.py\b"
+    print("test_voice_mode_verb_unit_gap_is_bounded_to_one_statement: OK")
 
 
 def test_rule_does_not_read_arguments_it_did_not_ask_for():
@@ -205,6 +344,37 @@ def test_non_matching_call_is_not_held(stub_body):
     ))
     assert evt is None, "a pass means dispatch proceeds, unchanged"
     print("test_non_matching_call_is_not_held: OK")
+
+
+def test_a_voice_diagnosis_read_reaches_the_loop_and_a_control_call_does_not(stub_body):
+    """#751's consequence crosses a process boundary, so it is checked there.
+
+    `match_rule` is a pure function, but its verdict decides whether a drafted
+    `Bash` is executed at all: a held call never reaches the shell and comes back
+    as a synthetic tool result (~2.7 s round-trip here), an unheld one dispatches.
+    Both halves therefore go through `_pre_dispatch` — the real PreToolUse walk —
+    with a transcript-exact diagnosis on one side and a same-statement restart on
+    the other.
+    """
+    hooks = _install(HookRegistry())
+    diagnosis = TRANSCRIPT_READS_HELD_BY_THE_OLD_RULE[0][1]
+    evt = _run(_pre_dispatch(
+        tc=_tc("Bash", {"command": diagnosis}),
+        options=RunOptions(model="m", hooks=hooks),
+        session_id="s", loaded_set=_StubLoadedSet(),
+    ))
+    assert evt is None, "a diagnostic read must reach Bash, not be held for a protocol"
+
+    control = "supervisorctl -c agent-services/supervisor/supervisord.conf restart agent-tts"
+    held = _run(_pre_dispatch(
+        tc=_tc("Bash", {"command": control}),
+        options=RunOptions(model="m", hooks=hooks),
+        session_id="s2", loaded_set=_StubLoadedSet(),
+    ))
+    assert held is not None, "the restart must still be held for the voice protocol"
+    assert held["is_error"] is False, held
+    assert "BODY-OF[voice-mode]" in held["content"], held
+    print("test_a_voice_diagnosis_read_reaches_the_loop_and_a_control_call_does_not: OK")
 
 
 def test_deny_beats_deliver_regardless_of_registration_order(stub_body):

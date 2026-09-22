@@ -116,17 +116,28 @@ DISPATCH_RULES: tuple[DispatchRule, ...] = (
         tool="Bash",
         fields=("command",),
         patterns=(
-            # Action-gated, in either word order. `supervisorctl status
-            # agent-tts` is every health check on this box, and delivering a
-            # protocol card on a read is a pure false positive — the acceptance
-            # bounds spurious triggers at ~10% of dispatches precisely because
-            # each one costs a round-trip.
+            # Action-gated, in either word order, and ADJACENT: the verb and the
+            # unit name have to sit in the same shell statement, within 60
+            # characters of each other. `supervisorctl status agent-tts` is every
+            # health check on this box, and delivering a protocol card on a read
+            # is a pure false positive — the acceptance bounds spurious triggers
+            # at ~10% of dispatches precisely because each one costs a
+            # round-trip. The gap class therefore excludes the statement
+            # separators (newline, `|`, `;`, `&`) and is bounded (#751): the old
+            # unbounded `[^\n]*` reached out of an `echo "=== ... restart ==="`
+            # header across a `;` into a `tail -25 agent-livekit-server.err`, so
+            # voice diagnosis — the traffic that names these units constantly —
+            # was held for a read. Genuine control needs no reach: every
+            # `supervisorctl ... restart agent-tts` shape puts the unit right
+            # after the verb.
             re.compile(
-                r"\b(?:restart|stop|start|enable|disable|signal|kill)\b[^\n]*"
+                r"\b(?:restart|stop|start|enable|disable|signal|kill)\b"
+                r"[^\n|;&]{0,60}"
                 r"\b(?:agent-(?:tts|livekit-server)|lloyd-voice-mode\.service)\b"
             ),
             re.compile(
-                r"\b(?:agent-(?:tts|livekit-server)|lloyd-voice-mode\.service)\b[^\n]*"
+                r"\b(?:agent-(?:tts|livekit-server)|lloyd-voice-mode\.service)\b"
+                r"[^\n|;&]{0,60}"
                 r"\b(?:restart|stop|start|enable|disable)\b"
             ),
             # Launching the script directly is itself the thing the skill
