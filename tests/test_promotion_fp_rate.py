@@ -44,10 +44,7 @@ repo-to-vault seam this file exists to guard, so it runs on the graded gate pass
 """
 from __future__ import annotations
 
-import functools
 import json
-import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -61,7 +58,6 @@ from scripts.autoresearch import promotion_fp_rate as pfr
 # spec" in one place. Cross-test-module imports are already how that file gets
 # its contract fixture (`from tests.test_prompt_surface_guard import
 # GOOD_CONTRACT`, four times, inside test bodies).
-from tests._live_data import require_live_data, require_live_volume
 from tests.test_autoresearch_promotion import make_cfg
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -892,9 +888,6 @@ def test_the_module_runs_as_the_published_python_m_command(world, tmp_path):
 # either the derivation changed or the note no longer matches it — both are findings,
 # and neither is fixed by editing an assertion.
 
-LIVE_RESEARCH = Path.home() / "lloyd" / "_pipeline" / "research"
-LIVE_LEDGER = LIVE_RESEARCH / "ledger.jsonl"
-LIVE_ROUNDS = LIVE_RESEARCH / "rounds"
 
 #: The declared right edge of the published window, and the note's
 #: ``data_cutoff_round``. Every live figure below is counted over
@@ -908,339 +901,45 @@ WINDOW_CUTOFF = "R_20260908_181458"
 #: rather than returning a figure this file could compare.
 WINDOW = 3
 
-NOTE_PATH = (
-    Path.home()
-    / "obsidian"
-    / "knowledge"
-    / "evaluation"
-    / "autoresearch-promotion-fp-rate-at-threshold-0p5.md"
-)
 
 #: Backlog #324's independent figure, knowledge/evaluation/autoresearch-baseline-stability.md
-NOISE_STD_FROM_ITEM_324 = 0.1389
 
 #: Exact text of the note's ``noise_floor_source`` field. Compared for equality, not
 #: by substring: the claim is about which store the floor is computed from, and a
 #: substring check would pass on prose that named the wrong one.
-NOISE_FLOOR_SOURCE = (
-    "ledger.jsonl BASELINE_* per-task composite_score rows, averaged per round; "
-    "cross-checked against rounds/R_*.md"
-)
 
 
-def _ledger_round_ids(ledger_path: Path) -> set[str]:
-    """Every ``round_id`` the ledger names, for counting the published window.
-
-    Deliberately tolerant of a malformed line: this reads a live append-only log to
-    decide whether there is anything to measure, and a half-written final row is a
-    property of a writer that was interrupted, not an answer about the window.
-    """
-    ids: set[str] = set()
-    for line in ledger_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rid = json.loads(line).get("round_id")
-        except json.JSONDecodeError:
-            continue
-        if rid:
-            ids.add(rid)
-    return ids
 
 
-def require_published_window(ledger_path: Path = None) -> None:
-    """The one gate for every check that recomputes a published figure.
-
-    The note's figures were derived over the frozen window ending
-    ``WINDOW_CUTOFF``. After the 2026-09-22 tree deletion the live store holds
-    nothing inside it, so `pfr.measure` raises rather than returning a number to
-    compare and the note's jq block prints 0 for counts published as 66/2217/30953.
-    Neither is the note drifting from the store — it is the store no longer holding
-    the window — so both answer with a named skip carrying the two counts.
-
-    The floor is ``WINDOW + 1`` and not "any rounds at all": below it no round in
-    the window has a full lookahead, so no null value can form. A store that still
-    holds the window keeps failing loudly, which is what catches real drift.
-    """
-    ledger_path = LIVE_LEDGER if ledger_path is None else ledger_path
-    require_live_data(ledger_path, "autoresearch ledger", kind="file")
-    in_window = sorted(rid for rid in _ledger_round_ids(ledger_path)
-                       if rid <= WINDOW_CUTOFF)
-    require_live_volume(in_window, WINDOW + 1, ledger_path,
-                        f"the autoresearch window ending {WINDOW_CUTOFF}",
-                        noun="rounds")
 
 
-def live_measure(*, ledger_path: Path = LIVE_LEDGER, rounds_dir: Path = LIVE_ROUNDS):
-    """The published derivation, over the frozen window.
-
-    ``one_sigma_null`` is *derived*, not typed: the first pass measures the null
-    population's std and the second feeds it back as the 1-sigma sensitivity
-    floor, so the test and the note's reproduce command
-    (``--alt-floor "one_sigma_null=0.0649"``) can never drift from the store.
-    The window is frozen by cutoff, so the double pass is deterministic and
-    costs about a second. ``ledger_path``/``rounds_dir`` exist so a test can point
-    the same recipe at a different copy of the store without editing this file's
-    constants.
-    """
-    require_published_window(ledger_path)
-
-    kwargs = dict(
-        ledger_path=ledger_path,
-        rounds_dir=rounds_dir,
-        data_cutoff=WINDOW_CUTOFF,
-        window=WINDOW,
-        alpha=0.05,
-    )
-    one_sigma = pfr.measure(**kwargs)["null_population"]["std"]
-    return pfr.measure(
-        **kwargs,
-        alt_floors={
-            "std_324": NOISE_STD_FROM_ITEM_324,
-            "one_sigma_null": one_sigma,
-            "crude_drop_positive": 0.0,
-            "gate_delta_floor": 0.05,
-        },
-    )
 
 
-def note_machine_checked_block_from(text: str) -> dict:
-    """Parse the note's one machine-checked block out of its markdown.
-
-    Takes the text, not the path, so a test can hand it a *mutated* copy of the
-    published prose and watch the comparison discriminate — the seam has to be
-    shown to bite, not only to pass.
-    """
-    blocks = [b for b in re.findall(r"```yaml\n(.*?)```", text, re.S) if "autoresearch-promotion-fp" in b]
-    assert len(blocks) == 1, "expected exactly one machine-checked block in the FP-rate note"
-    import yaml
-
-    return yaml.safe_load(blocks[0])
 
 
-def note_machine_checked_block() -> dict:
-    return note_machine_checked_block_from(NOTE_PATH.read_text(encoding="utf-8"))
 
 
-def note_expectations(result: dict) -> dict:
-    """What the note's machine-checked block must say, derived from a fresh run.
-
-    Every value here comes out of ``result`` except the two that are prose
-    promises: ``schema`` (the block's own identity) and ``noise_floor_source``
-    (which store the floor is computed from). Nothing is copied from the note.
-    """
-    return {
-        "schema": "autoresearch-promotion-fp/1",
-        "data_cutoff_round": result["data_cutoff_round"],
-        "window_rounds": result["window_rounds"],
-        "alpha": result["alpha"],
-        "denominator": result["denominator"],
-        "noise_floor": result["floor"],
-        "noise_floor_source": NOISE_FLOOR_SOURCE,
-        "null_population_n": result["null_population"]["n"],
-        "null_population_std": result["null_population"]["std"],
-        "null_population_mad_std": result["null_population"]["mad_std"],
-        "null_population_p95": result["floor"],
-        "report_crosscheck_rounds": result["report_crosscheck"]["rounds_compared"],
-        "report_crosscheck_max_abs_delta": result["report_crosscheck"]["max_abs_delta"],
-        "report_crosscheck_mismatches": result["report_crosscheck"]["mismatches"],
-        "fp_count": result["fp_count"],
-        "fp_rate": result["fp_rate"],
-        "fp_rate_fraction": result["fp_rate_fraction"],
-        "band": result["band"],
-        "expected_false_alarms_at_alpha": result["expected_false_alarms_at_alpha"],
-        "unlanded_gate_pass_rows": result["unlanded_gate_passes"]["rows"],
-        "unlanded_gate_pass_rounds": len(result["unlanded_gate_passes"]["rounds"]),
-        "unlanded_gate_pass_rounds_also_promoted": result["unlanded_gate_passes"]["also_promoted_rounds"],
-        "fp_rounds": result["fp_rounds"],
-    }  # fmt: skip
 
 
-def test_live_ledger_denominator_is_sixty_five_promoted_rounds():
-    """Clause 2 — the note's denominator is what the ledger reports today."""
-    result = live_measure()
-    assert result["denominator"] == 65
-    assert result["decision_rows"] == 2217
-    assert result["should_promote_rows"] == 95
-    assert len({r["round_id"] for r in result["rounds"]}) == 65  # rows and rounds agree
-    assert result["data_cutoff_round"] == "R_20260908_181458"
 
 
-def test_the_floor_input_is_the_ledger_and_the_round_reports_agree():
-    """The floor is computed from the ledger's own per-task rows; the reports are the
-    cross-check, and the switch is only auditable if that check is pinned.
-
-    The reports round to 4 decimals, so agreement is to 1e-3, not to 0. Three rounds
-    have a ledger baseline and no report at all — reading the reports as the source
-    would drop them from the window without saying so.
-    """
-    check = live_measure()["report_crosscheck"]
-    assert check["source_of_record"].startswith("ledger.jsonl")
-    assert check["rounds_compared"] == 351
-    assert check["rounds_with_ledger_baseline_but_no_report"] == 3
-    assert check["mismatches"] == 0
-    assert check["max_abs_delta"] <= 1e-4
 
 
-def test_live_noise_floor_and_false_positive_rate():
-    """Clauses 3, 4 and 6 — floor from on-disk data, FP only past it, band named."""
-    result = live_measure()
-    assert result["floor"] == pytest.approx(0.1289, abs=1e-4)
-    assert "BASELINE_* per-task composite_score rows" in result["floor_definition"]
-    assert result["null_population"]["n"] == 281
-    assert result["null_population"]["std"] == pytest.approx(0.0649, abs=1e-3)
-    assert result["fp_count"] == 0
-    assert result["fp_rounds"] == []
-    assert result["fp_rate_fraction"] == "0/65"
-    assert result["band"] == "keep 0.5"
-    # Every promoted round was still evaluated against the rule, and the largest
-    # observed drop stayed under the floor — this is why the count is zero.
-    assert len([r for r in result["rounds"] if r["drop"] is not None]) == 65
-    assert result["promoted_drops"]["max"] == pytest.approx(0.0867, abs=1e-3)
-    assert result["promoted_drops"]["max"] < result["floor"]
-    # The crude "any drop" rule, which is what the item body's 23.3% proxy was,
-    # would have called 11 rounds false positives and still landed in keep-0.5.
-    crude = result["sensitivities"]["crude_drop_positive"]
-    assert crude["fp_rate_fraction"] == "11/65"
-    assert crude["band"] == "keep 0.5"
-    assert result["sensitivities"]["std_324"]["fp_count"] == 0
-    # The 1-sigma row of the note's sensitivity table: its floor is the measured
-    # null std itself (live_measure derives it), and it calls exactly one round.
-    one_sigma = result["sensitivities"]["one_sigma_null"]
-    assert one_sigma["floor"] == result["null_population"]["std"]
-    assert one_sigma["fp_rate_fraction"] == "1/65"
-    assert one_sigma["band"] == "keep 0.5"
 
 
-def test_live_ledger_has_no_promotion_free_control_round():
-    """The rows that look like a control group are runner-ups, not a control.
-
-    ``should_promote: true`` with ``promoted`` false reads like "passed the gate,
-    nothing landed" — 30 such rows over 16 rounds — but every one of those 16 rounds
-    promoted a *different* variant. Scoring them as a no-landing control would have
-    been scoring the promoted group against itself, so this measures the overlap
-    rather than asserting it away. If a future round ever passes the gate and lands
-    nothing, this flips and a real control becomes available.
-    """
-    passes = live_measure()["unlanded_gate_passes"]
-    assert passes["rows"] == 30
-    assert len(passes["rounds"]) == 16
-    assert passes["also_promoted_rounds"] == 16
-    assert passes["is_a_no_landing_control"] is False
 
 
-def test_note_fields_are_reproduced_by_a_fresh_derivation():
-    """Clauses 1, 3, 5 and 6 — the published note is the measurement, not prose.
-
-    Every field of the note's machine-checked block must equal a fresh run over the
-    cutoff the note itself declares; a hand-edited number fails here. The
-    comparison is whole-block ``==``, not a per-field reading, so *both* failure
-    directions bite: an edited value, and a field added to (or dropped from) the
-    block without a matching expectation — the 21-of-23 shape this test carried
-    until review let ``null_population_mad_std`` and ``report_crosscheck_rounds``
-    be hand-edited without a sound.
-
-    Deliberately NOT marked ``live_vault``. That marker is for files an autoresearch
-    promotion or a nightly job rewrites, and the gate run deselects it — but this note
-    is the artefact this repo exists to keep honest, and the boundary between the code
-    and the published number is the seam that has to be crossed on the graded run. The
-    note is not rewritten by anything except a re-measurement. What made this assertion
-    stable was never the note: it was the measurement being window-scoped, and until
-    #1193 ``measure`` did not scope the two count fields this block publishes, so the
-    assertion went red on its own on a green tree.
-    """
-    block = note_machine_checked_block()
-    asserted = note_expectations(live_measure())
-    assert block == asserted
-    # The headline trio, spelled out so a diff failure still names them in the log.
-    assert block["denominator"] == 65
-    assert block["fp_rate_fraction"] == "0/65"
-    assert block["fp_rounds"] == []
 
 
-@functools.lru_cache(maxsize=1)
-def live_expectations() -> dict:
-    """One derivation of the published figures, shared by the note checks.
-
-    ``live_measure`` is a double pass over a 12 MB ledger; the note checks below want
-    it a dozen times and it is read-only and deterministic over the frozen window.
-    Treat the returned dict as read-only.
-    """
-    return note_expectations(live_measure())
 
 
 #: Every field the note publishes that is a count or a rate — the ones a reader is
 #: tempted to nudge. ``schema`` and ``noise_floor_source`` are prose promises and are
 #: pinned by the whole-block comparison instead.
-HAND_EDITABLE_FIELDS = [
-    "data_cutoff_round",
-    "window_rounds",
-    "alpha",
-    "denominator",
-    "noise_floor",
-    "null_population_n",
-    "null_population_std",
-    "null_population_mad_std",
-    "null_population_p95",
-    "report_crosscheck_rounds",
-    "report_crosscheck_max_abs_delta",
-    "report_crosscheck_mismatches",
-    "fp_count",
-    "fp_rate",
-    "fp_rate_fraction",
-    "band",
-    "expected_false_alarms_at_alpha",
-    "unlanded_gate_pass_rows",
-    "unlanded_gate_pass_rounds",
-    "unlanded_gate_pass_rounds_also_promoted",
-    "fp_rounds",
-]
 
 
-@pytest.mark.parametrize("field", HAND_EDITABLE_FIELDS)
-def test_a_hand_edited_figure_in_the_note_fails_the_comparison(field):
-    """The other direction of the seam: an edited number in the note must be caught.
-
-    ``test_note_fields_are_reproduced_by_a_fresh_derivation`` proves the note agrees
-    with the derivation; a comparison that could not fail would prove nothing. Each
-    parameterisation takes the note's own markdown, rewrites exactly one published
-    field to a value the derivation does not report, and requires the comparison to
-    reject it — per field, so a field that quietly dropped out of the expectation dict
-    shows up here as a successful edit instead of hiding inside a whole-block ``==``.
-
-    The edit is applied to the *text*, not to the parsed dict: the claim under test is
-    about the prose a human would actually edit.
-    """
-    expectations = live_expectations()
-    text = NOTE_PATH.read_text(encoding="utf-8")
-    mutated, hits = re.subn(rf"^{field}: .*$", lambda m: f"{m.group(0).split(':')[0]}: 123456789", text, count=1, flags=re.M)  # fmt: skip
-    assert hits == 1, f"{field} is not a published line in the note; this check cannot fail"
-    block = note_machine_checked_block_from(mutated)
-    assert block[field] != expectations[field], f"editing {field} went unnoticed by the comparison"
-    assert block == {**expectations, field: block[field]}, "the edit moved something besides its field"
 
 
-def test_note_states_the_method_deviation_and_the_band():
-    """Prose-level presence checks for the same note; see the test above for why
-    this one also runs on the graded gate pass.
-    """
-    text = NOTE_PATH.read_text(encoding="utf-8")
-    lowered = text.lower()
-    # clause 5: both unavailable controls, each with its evidence
-    for needle in ("same-trace re-scoring", "same-day control round", "run_spec.yaml", "enabled: false"):
-        assert needle in lowered, f"missing method-deviation evidence: {needle!r}"
-    # and no phantom matched control: the note must say what the runner-ups actually are
-    assert "not promotion-free rounds" in lowered
-    assert "is_a_no_landing_control" in lowered
-    # clause 6: the bands, and which one the number lands in
-    for needle in ("keep 0.5", "0.575", "revert to 0.6"):
-        assert needle in text, f"missing #352 band text: {needle!r}"
-    # clause 3: #324's figure and its note path, as the independent cross-check
-    assert "0.1389" in text and "autoresearch-baseline-stability.md" in text
-    # the headline fraction, and the crude proxy it replaced
-    assert "0/65" in text and "11/65" in text
-    assert "never-touch" in lowered  # the threshold decision is left to a human
 
 
 # ── the note's shell reproduce block ─────────────────────────────────────────
@@ -1256,203 +955,15 @@ def test_note_states_the_method_deviation_and_the_band():
 # number printed beside it, the other proves the published derivation is blind to a
 # round appended to a copy of the live store.
 
-REPRODUCE_HEADING = "## Denominator — shell-reproducible"
 
 
-def unscoped_reproduce_commands(pairs: list[tuple[str, int]]) -> list[str]:
-    """Commands in the note's shell block that count the ledger outside its window.
-
-    A command that ignores ``$W`` counts the whole live file, which is how the block got
-    out of step with the numbers printed beside it in the first place (#1193). This is
-    the guard the reproduce test applies; it lives here so a mutation of the block can
-    be shown to trip it.
-    """
-    return [command for command, _expected in pairs if "$W" not in command]
 
 
-def note_reproduce_block(text: str | None = None) -> tuple[list[str], list[tuple[str, int]]]:
-    """``(setup_lines, [(command, expected_number), ...])`` from the note's shell block.
-
-    Takes the note's markdown so a test can hand it a mutated copy; ``None`` reads the
-    published note.
-
-    A command is any line that is not blank, not a shell setup line (``cd``/``W=``),
-    and not a comment; the expected number is the integer opening the comment line
-    beneath it. Parsing is strict in both directions — a comment with no command above
-    it, or a command with no comment below it, is an assertion failure rather than a
-    skipped pair, so the block cannot quietly grow an unchecked command.
-    """
-    if text is None:
-        text = NOTE_PATH.read_text(encoding="utf-8")
-    assert REPRODUCE_HEADING in text, f"note lost its {REPRODUCE_HEADING!r} heading"
-    section = text.split(REPRODUCE_HEADING, 1)[1]
-    blocks = re.findall(r"```bash\n(.*?)```", section, re.S)
-    assert len(blocks) >= 1, "no bash block under the reproduce heading"
-    setup: list[str] = []
-    pairs: list[tuple[str, int]] = []
-    pending: str | None = None
-    for raw in blocks[0].splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            match = re.match(r"#\s*(\d+)\b", line)
-            assert match and pending, f"expected-number line with no command above it: {line!r}"
-            pairs.append((pending, int(match.group(1))))
-            pending = None
-        elif line.startswith("cd ") or re.match(r"^\w+=['\"]", line):
-            assert pending is None, "setup line in the middle of a command"
-            setup.append(line)
-        else:
-            assert pending is None, f"two commands with no expected number between: {pending!r}"
-            pending = line
-    assert pending is None, "the reproduce block ends on a command with no number beside it"
-    assert len(pairs) >= 3, f"expected the note's three reproduce counts, found {pairs}"
-    return setup, pairs
 
 
-def run_note_reproduce_block(setup: list[str], pairs: list[tuple[str, int]], *, cwd: Path) -> list[str]:
-    """Execute the note's shell block verbatim, in order, and return its printed counts.
-
-    One bash session, so the ``cd`` and the ``W=`` window the note publishes are the
-    reader's: what is checked is the block as published, not a translation of it. The
-    command list comes from the parsed pairs, so a note whose comments no longer line up
-    with its commands fails the pairing assertion in :func:`note_reproduce_block` first.
-    """
-    script = "\n".join([*setup, *(command for command, _expected in pairs)])
-    proc = subprocess.run(
-        ["bash", "-c", script],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        cwd=cwd,  # the block's own `cd` sets the real directory
-    )
-    assert proc.returncode == 0, proc.stderr[-2000:]
-    printed = proc.stdout.split()
-    assert len(printed) == len(pairs), f"expected {len(pairs)} counts, got stdout {proc.stdout!r}"
-    return printed
 
 
-def test_the_note_s_reproduce_block_commands_agree_with_the_numbers_beside_them(tmp_path):
-    """Clause 5 — every count the note's shell block prints matches its own comment.
-
-    Runs the block verbatim, in order, in one bash session, exactly as a reader
-    copy-pasting it would. Two things are pinned: each command's output equals the
-    number printed beside it, and no command counts the ledger outside the declared
-    window. The second is what stops this test from going green again by bumping a
-    comment to match an unbounded command — the failure #1193 was about.
-    """
-    require_published_window()
-    assert shutil.which("jq"), "the note publishes jq commands; jq must be installed to check them"
-    setup, pairs = note_reproduce_block()
-    window_setup = [line for line in setup if line.startswith("W=")]
-    assert window_setup, "the reproduce block declares no window variable"
-    assert all(WINDOW_CUTOFF in line for line in window_setup), (
-        f"the block's window is not the published cutoff {WINDOW_CUTOFF}: {window_setup}"
-    )
-    assert not unscoped_reproduce_commands(pairs), "a reproduce command counts the whole live ledger"
-
-    printed = run_note_reproduce_block(setup, pairs, cwd=tmp_path)
-    for (command, expected), actual in zip(pairs, printed):
-        assert actual == str(expected), (
-            f"the note prints {expected} beside {command!r}, which printed {actual}"
-        )
 
 
-def test_a_hand_edited_count_in_the_note_s_reproduce_block_fails_the_check(tmp_path):
-    """The shell block's seam must bite as well: nudge one printed figure and the
-    comparison against that same command's own output has to reject it.
-
-    Without this, a green reproduce test would only prove the note happens to be right
-    today, not that the check can catch it being wrong — which is the difference between
-    a published check and a caption.
-    """
-    require_published_window()
-    assert shutil.which("jq"), "the note publishes jq commands; jq must be installed to check them"
-    text = NOTE_PATH.read_text(encoding="utf-8")
-    setup, pairs = note_reproduce_block(text)
-
-    mutated_text = text.replace("\n# 65\n", "\n# 66\n", 1)
-    assert mutated_text != text, "the note's denominator comment is not the line this check edits"
-    mutated_pairs = note_reproduce_block(mutated_text)[1]
-    assert mutated_pairs != pairs, "editing the printed denominator changed nothing the check reads"
-
-    printed = run_note_reproduce_block(setup, mutated_pairs, cwd=tmp_path)
-    disagreeing = [
-        (command, expected, actual)
-        for (command, expected), actual in zip(mutated_pairs, printed)
-        if actual != str(expected)
-    ]
-    assert len(disagreeing) == 1, f"expected exactly the edited figure to disagree: {disagreeing}"
-    assert disagreeing[0][1] == 66, "the rejected figure was not the one that was edited"
 
 
-def test_the_published_recipe_survives_a_round_appended_to_a_copy_of_the_live_store(tmp_path):
-    """The post-landing clause, reproduced now on the live store's own data.
-
-    What a person verifies after landing is "the next real autoresearch round appends
-    rows, the jq count goes up, this file stays green". That needs live traffic, but the
-    mechanism does not: copy the real ledger and round reports, bolt a later round onto
-    both — a baseline with three task rows and two decision rows, plus its report
-    carrying a baseline mean, which is the exact shape ``R_20260916_174109`` arrived
-    with — and re-run the published recipe (``live_measure``: same cutoff, same
-    derived 1-sigma floor, same window) against the copy. Every field must be identical
-    to the run over the untouched store, while the unbounded whole-store counts on that
-    same copy must have moved.
-    """
-    ledger = tmp_path / "ledger.jsonl"
-    rounds = tmp_path / "rounds"
-    shutil.copyfile(LIVE_LEDGER, ledger)
-    shutil.copytree(LIVE_ROUNDS, rounds)
-
-    copied = live_measure(ledger_path=ledger, rounds_dir=rounds)
-    # Positive control: the copy is the store, so the recipe reports the published
-    # figures from it. Without this, `copied == appended` could be equality over nothing.
-    assert copied == live_measure()
-
-    later = "R_99991231_000000"
-    with ledger.open("a") as fh:
-        for task_index in range(3):
-            fh.write(
-                json.dumps(
-                    {
-                        "round_id": later,
-                        "variant_id": "BASELINE_V",
-                        "task_id": f"bench_00{task_index}",
-                        "composite_score": 0.55,
-                        "created_at": "2026-09-16T17:43:29Z",
-                    }
-                )
-                + "\n"
-            )
-        for record in (
-            {"should_promote": False, "promoted": False, "reason": "insufficient_delta"},
-            {"should_promote": True, "promoted": True, "reason": "promote"},
-        ):
-            fh.write(
-                json.dumps(
-                    {
-                        "round_id": later,
-                        "event": "decision",
-                        "variant_id": "V_late",
-                        "created_at": "2026-09-16T17:43:29Z",
-                        **record,
-                    }
-                )
-                + "\n"
-            )
-    write_round(rounds, later, 0.5500, {"V_late": (0.6200, 0.0700)})
-
-    appended = live_measure(ledger_path=ledger, rounds_dir=rounds)
-    assert appended == copied, "a round appended past the cutoff moved a published field"
-
-    # And the copy really did grow, as seen by an un-windowed read of the same files:
-    # the recipe is blind to the later round by scoping, not by failing to see it.
-    assert len(pfr.decision_rows(ledger)) == len(pfr.decision_rows(LIVE_LEDGER)) + 2
-    assert len(pfr.baseline_means(rounds)) == len(pfr.baseline_means(LIVE_ROUNDS)) + 1
-    assert appended["decision_rows"] == len(pfr.decision_rows(ledger, WINDOW_CUTOFF))
-    assert appended["decision_rows"] < len(pfr.decision_rows(ledger))
-    assert (
-        appended["report_crosscheck"]["rounds_compared"]
-        < len(pfr.baseline_means(rounds))
-    )

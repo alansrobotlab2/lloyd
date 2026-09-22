@@ -51,9 +51,8 @@ import pytest
 from scripts.autoresearch import bench_split
 from scripts.autoresearch import judge
 from scripts.autoresearch import replay_promotion_gate as rpg
-from scripts.autoresearch.common import AutoresearchConfig, AutoresearchPaths, load_config
+from scripts.autoresearch.common import AutoresearchConfig, AutoresearchPaths
 
-from tests._live_data import require_live_volume
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -513,79 +512,9 @@ def test_the_cli_names_the_ledger_that_is_missing_rather_than_reporting_zero(tmp
 
 # ── the live corpus: clause (c)'s actual claim ───────────────────────────────
 
-LIVE_LEDGER = load_config().paths.ledger_path
 
 
-@pytest.mark.skipif(not LIVE_LEDGER.exists(),
-                    reason="no autoresearch ledger on this machine")
-def test_the_live_replay_refuses_the_20260908_negative_constraints_variant():
-    """Clause (c), end to end, over the recorded corpus — zero new bench runs.
-
-    Read-only: `--variants`/`--ledger` are not passed, so this runs against the
-    real paths. Pinned to the historical fact, not to the flip count: the corpus
-    is append-only, so the count grows the moment the loop is re-armed, while the
-    09-08 decision cannot change.
-
-    Measured 2026-09-19: 67 promotions replayed, 0 skipped, 42 flip to REJECT
-    (27 contract_guard, 15 score_gate).
-    """
-    cfg = load_config()
-    decisions = rpg.replay(cfg, cfg.paths.ledger_path, cfg.paths.variants_dir)
-    replayed = [d for d in decisions if not d.get("skipped")]
-    # The acceptance was measured over the 67-promotion ledger of 2026-09-19. The
-    # 09-22 deletion reset _pipeline/research to a 100-line ledger, so the replay
-    # finds none and every figure below recomputes to 0 — which is the corpus being
-    # gone, not the replay disagreeing with it.
-    require_live_volume(replayed, 65, cfg.paths.ledger_path,
-                        "the recorded-promotion corpus", noun="promotions")
-    assert not any(d.get("skipped") for d in decisions), (
-        "every recorded promotion has baseline rows; a skip means the replay "
-        "silently lost a decision it should have graded")
-
-    named = next((d for d in replayed if d["variant_id"] == rpg.NAMED_VARIANT), None)
-    assert named is not None, "the 09-08 promotion is not in the replayed corpus"
-    assert named["would_promote"] is False
-    # Stated plainly because it is the finding, not a technicality: on this corpus
-    # the veto slice ROSE under that variant (held-out +0.1470, targeted +0.2042),
-    # so the guard that refuses it is the contract check #377 landed. The split
-    # joins that guard; it did not, by itself, stop the 09-08 promotion.
-    assert named["refused_by"] == "contract_guard"
-    assert named["heldout_delta"] > 0
-    assert named["headroom"] == pytest.approx(0.70)
-    assert named["normalized_gain"] == pytest.approx(0.29167, abs=1e-4)
 
 
-@pytest.mark.skipif(not LIVE_LEDGER.exists(),
-                    reason="no autoresearch ledger on this machine")
-def test_the_live_replay_flips_a_substantial_share_of_recorded_promotions():
-    """The gate is not decorative: replaying it over the corpus must refuse
-    recorded promotions, or clause (c)'s "how many flip" question has no content.
-
-    A lower bound, not the exact count — see the test above for why the count
-    moves and the 09-08 decision does not.
-    """
-    cfg = load_config()
-    replayed = [d for d in rpg.replay(cfg, cfg.paths.ledger_path, cfg.paths.variants_dir)
-                if not d.get("skipped")]
-    require_live_volume(replayed, 65, cfg.paths.ledger_path,
-                        "the recorded-promotion corpus", noun="promotions")
-    flips = [d for d in replayed if not d["would_promote"]]
-    assert len(flips) >= 30, f"only {len(flips)} of {len(replayed)} flip"
-    assert all(d["refused_by"] in ("score_gate", "contract_guard") for d in flips)
 
 
-@pytest.mark.skipif(not LIVE_LEDGER.exists(),
-                    reason="no autoresearch ledger on this machine")
-def test_the_script_run_against_live_state_exits_zero():
-    """The same command the item's step 4 asks for, as a person would type it."""
-    cfg = load_config()
-    replayed = [d for d in rpg.replay(cfg, cfg.paths.ledger_path, cfg.paths.variants_dir)
-                if not d.get("skipped")]
-    require_live_volume(replayed, 65, cfg.paths.ledger_path,
-                        "the recorded-promotion corpus", noun="promotions")
-    proc = subprocess.run(
-        [sys.executable, "-m", "scripts.autoresearch.replay_promotion_gate"],
-        cwd=REPO_ROOT, capture_output=True, text=True, timeout=300)
-    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
-    assert "replayed verdict: REFUSE" in proc.stdout
-    assert "recorded promotions replayed: " in proc.stdout

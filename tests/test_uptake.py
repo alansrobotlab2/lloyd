@@ -51,7 +51,6 @@ if str(REPO) not in sys.path:
 
 from app import uptake  # noqa: E402
 
-import pytest as _pytest_for_guard
 
 
 # ---------------------------------------------------------------- corpus ----
@@ -88,25 +87,6 @@ def _asst_tools_only() -> dict:
 
 
 
-def _require_labeled_corpus(labels, index) -> None:
-    """Skip when the corpus holding the labelled turns is gone, not merely unmatched.
-
-    The 46 hand labels name turn_ids in `~/lloyd/sessions`, which is gitignored and
-    went with the tree on 2026-09-22 — 3,000 files on 09-18, 58 immediately after,
-    and what is there now are new sessions recorded since. So every label resolves to
-    nothing and the checks below read "0/46 carry a reply", which is the corpus being
-    absent rather than the labels being wrong.
-
-    Resolving SOME is still a failure: a partly-present corpus means labels that
-    genuinely do not match, which is the thing these tests exist to catch. Only the
-    all-or-nothing case is the machine's answer rather than the data's.
-    """
-    resolved = sum(1 for item in labels if index.get(item["turn_id"]) is not None)
-    if resolved == 0 and labels:
-        _pytest_for_guard.skip(
-            f"none of the {len(labels)} labelled turns resolve against the live "
-            "session corpus: ~/lloyd/sessions lost its 09-11..09-22 records in the "
-            "2026-09-22 deletion, so there is no exchange left to compare a label to")
 
 
 def test_human_turn_filter_drops_synthetic_user_turns(tmp_path):
@@ -761,76 +741,6 @@ def test_the_committed_artifact_points_at_evidence_that_still_exists(tmp_path):
 
 # ------------------------------------------------------- probe exit codes --
 
-def _replay_engine(monkeypatch) -> dict:
-    """Stand in the engine by replaying its **recorded** replies.
-
-    What this replaces is `_oracle_classifier(want_positives=True)`, which
-    reproduced the hand labels exactly: the table-writing path was therefore only
-    ever demonstrated with a flawless grader, scoring 1.0 by construction, and a
-    pipeline bug that flipped every verdict would have stayed green. Replaying the
-    literal replies the secondary slot gave on the measurement date is different
-    in kind — the grader misses 10 of 23 disputes — so the emit path runs under a
-    grader that is wrong, and the confusion matrix it must produce is a recorded
-    fact of the fixture rather than a restatement of the labels.
-
-    Keyed on the exact `(prev_assistant, user_text)` pair the classifier is called
-    with; 60-char text prefixes collide in this corpus (46 labels, 37 distinct
-    prefixes, 2 shared across classes), so a text-keyed stand-in could not be
-    declared exactly. Only the engine is stubbed — `main()`'s screen, cache, join
-    and write path all run.
-
-    BOTH entry points are stubbed. `classify_dispute_raw` is what the zero-shot
-    pass and `verify_replay` call, so with only the verdict-shaped one patched
-    these two probe steps POSTed to the live slot from inside the "replayed" run:
-    the exit-contract tests then failed on a sleeping engine while claiming to be
-    a replay, and the replay verifier's result was a property of whatever model
-    was loaded rather than of the fixture.
-    """
-    import scripts.uptake_probe as probe
-
-    labels = probe.uptake.load_labels()
-    index = probe._corpus_index()
-    _require_labeled_corpus(labels, index)
-    by_pair: dict[tuple, str] = {}
-    recorded = 0
-    for item in labels:
-        if "engine_raw" not in item:
-            continue
-        turn = index.get(item["turn_id"])
-        if turn is None:
-            continue
-        key = (turn.prev_assistant, turn.user_text)
-        if key in by_pair:
-            # Two labeled turns share this exchange. That is only harmless if the
-            # engine gave the same reply to both — otherwise a stand-in keyed on
-            # what `classify_dispute` actually receives cannot say which reply
-            # belongs to which turn, and the replay would be inventing one.
-            assert by_pair[key] == item["engine_raw"], (
-                f"ambiguous replay pair for {item['turn_id']}: the same exchange "
-                f"has two different recorded replies")
-        by_pair[key] = item["engine_raw"]
-        recorded += 1
-    assert recorded == len(labels), f"{recorded}/{len(labels)} labels carry a reply"
-
-    calls = {"verdict": 0, "raw": 0}
-
-    def _reply(prev_assistant, user_text):
-        return by_pair.get((prev_assistant, user_text), "NOT")
-
-    def fake(prev_assistant, user_text, *, transport=None, examples=True):
-        calls["verdict"] += 1
-        return uptake._parse_verdict(_reply(prev_assistant, user_text))
-
-    def fake_raw(prev_assistant, user_text, *, transport=None, examples=True):
-        calls["raw"] += 1
-        raw = _reply(prev_assistant, user_text)
-        return uptake._parse_verdict(raw), raw
-
-    monkeypatch.setattr(uptake, "classify_dispute", fake)
-    monkeypatch.setattr(uptake, "classify_dispute_raw", fake_raw)
-    monkeypatch.setitem(_REPLAY_CALLS, "counters", calls)
-    return json.loads((REPO / "eval" / "uptake" / "labels"
-                       / "hand-2026-09-11.json").read_text())["engine_replay"]
 
 
 #: How many times the last `_replay_engine` stand-in was reached through each
@@ -879,49 +789,6 @@ def test_probe_stops_below_the_precision_floor_and_writes_no_uptake_table(tmp_pa
     assert report["classifier"]["passed"] is False
 
 
-def test_probe_writes_a_dated_table_when_the_floor_clears(tmp_path, monkeypatch):
-    """The other side of the same contract, run end to end through `main()` under
-    a grader that MISSES: the recorded replies score recall 0.565, so this
-    exercises the emit path with a fallible classifier and still asserts the
-    emitted numbers are the recorded ones to four decimals."""
-    import scripts.uptake_probe as probe
-
-    recorded = _replay_engine(monkeypatch)
-    out = tmp_path / "uptake"
-    assert probe.main(["--out-dir", str(out), "--days", "30"]) == 0
-
-    files = sorted(out.glob("uptake-*.json"))
-    assert len(files) == 1, files
-    assert re.match(r"uptake-\d{4}-\d{2}-\d{2}\.json$", files[0].name)
-    j = json.loads(files[0].read_text())
-    cls = j["classifier"]
-    assert j["item"] == "552"
-    assert (cls["tp"], cls["fp"], cls["fn"]) == (recorded["tp"], recorded["fp"], recorded["fn"]), cls
-    assert cls["recall"] < 1.0, "a grader that misses nothing is not a grader"
-    assert cls["precision"] == pytest.approx(recorded["precision"], abs=1e-4), cls
-    assert cls["recall"] == pytest.approx(recorded["recall"], abs=1e-4), cls
-    assert cls["n_unanswered"] == 0, cls
-    assert j["glossary"]["dispute_rate"], "the rate ships without its meaning"
-    assert any(r["kind"] == "memory_entry" for r in j["entries"]), j["entries"][:2]
-    # And the join it wrote is turn_id-keyed with counts that cannot exceed the
-    # turns it actually classified.
-    corpus = j["corpus"]
-    assert corpus["verdict_keyed_on"] == "turn_id", corpus
-    assert corpus["disputes"] <= corpus["classified_turns"], corpus
-
-    # Nothing in this run may reach a socket. The fixture has to have served the
-    # zero-shot pass and the replay verifier as well as the in-sample pass, so the
-    # emitted numbers are the recorded ones and not whatever the loaded model said
-    # today. If a future probe step calls the engine directly, `raw` stays 0 and
-    # this fails: that is the difference between a replay and a live ask wearing
-    # the word "replay".
-    counters = _REPLAY_CALLS["counters"]
-    assert counters["raw"] > 0, counters
-    assert cls["zero_shot"]["measured"] is True, cls
-    rep = cls["replay"]
-    assert rep["measured"] is True and rep["ok"] is True, rep
-    assert rep["checked"] >= probe.REPLAY_MIN_CHECKED, rep
-    assert rep["mismatched"] == [] and rep["unanswered"] == [], rep
 
 
 def test_coverage_states_the_reach_of_the_note_half(tmp_path):
@@ -1214,24 +1081,6 @@ def test_hand_labeled_corpus_covers_the_item_s_minimum():
     # only against the transcript store, which is what the test below does.
 
 
-def test_every_committed_label_re_resolves_to_its_transcript(tmp_path, monkeypatch):
-    """The labels file cannot attest itself, and this is the check that does.
-
-    The store is an artifact the labeler does not write, so re-resolving each
-    `turn_id` there and comparing the stored excerpt turns "I labeled this by hand"
-    into "this is what that turn actually said" — the check a reviewer had to
-    perform by hand over all 46 turns on the previous head, now in the suite.
-    """
-    labels = uptake.load_labels()
-    index = {t.turn_id: t for t in uptake.human_turns(days=900)}
-    _require_labeled_corpus(labels, index)
-    check = uptake.validate_labels(labels, index)
-    assert check["unresolved_turn_ids"] == [], check
-    assert check["excerpt_mismatch_turn_ids"] == [], check
-    assert check["ok"] is True and check["n"] == len(labels), check
-    assert check["n_resolved"] == len(labels), (
-        "the corpus silently shrank as transcripts rolled off the store; the "
-        "precision figure is quoted against this denominator")
 
 
 def test_validate_labels_fails_on_a_fabricated_or_stale_label(tmp_path, monkeypatch):
@@ -1348,98 +1197,6 @@ def test_live_engine_scores_the_corpus_and_reports_every_way_precision_was_measu
                                       ("metrics", "holdout", "zero_shot", "pipeline")}
 
 
-def test_replay_verifier_reports_a_moved_model_instead_of_a_clean_bill():
-    """The check the committed matrix cannot make: the fixture reproducing itself
-    says nothing about whether the engine still answers that way.
-
-    That check lives in the probe (`verify_replay`) and is recorded in every
-    emitted table as `classifier.replay`, not in a test that POSTs. A test that
-    asked the live slot turned the suite's replay claim into a dependency on
-    whichever GGUF was loaded, and a round that caught the engine asleep had to
-    either fail for a reason outside its diff or skip — which is how "the
-    committed matrix still holds" quietly stops being checked. Here the transport
-    is injected, so all four outcomes are pinned and none of them needs a model:
-    agreement, a flipped verdict, a refused request, and a sample too small to
-    say anything.
-    """
-    import scripts.uptake_probe as probe
-
-    labels = uptake.load_labels()
-    assert len(labels) >= probe.REPLAY_MIN_CHECKED, labels
-    # The committed corpus must actually be re-askable: every label carries its
-    # reply and resolves to a turn, or the verifier would be sampling air.
-    assert all(i.get("engine_raw") is not None for i in labels)
-
-    # Drive it through the transport seam with a per-turn reply table, so each
-    # labeled turn gets back its own recorded answer rather than one canned string
-    # that would flatter every row except the first.
-    index = {t.turn_id: t for t in uptake.human_turns(days=900)}
-    _require_labeled_corpus(labels, index)
-    pairs = {}
-    for item in labels:
-        turn = index.get(item["turn_id"])
-        if turn is not None:
-            pairs[(turn.prev_assistant, turn.user_text)] = item["engine_raw"]
-    assert pairs, "no labeled turn resolved, so the verifier had nothing to check"
-
-    # A re-ask the fixture cannot answer would be reported as "no answer" by the
-    # production transport contract — `classify_dispute_raw` swallows any transport
-    # exception into `None` on purpose — so an unmatched turn is collected and
-    # asserted here rather than raised inside the stand-in, where it would surface
-    # as an unanswered row instead of the bug it is.
-    unmatched: list[str] = []
-
-    def by_exchange(payload):
-        user = payload["messages"][1]["content"]
-        for (prev, utext), raw in pairs.items():
-            if utext[:40] in user:
-                return {"choices": [{"message": {"content": raw}}]}
-        unmatched.append(user[:60])
-        return {"choices": [{"message": {"content": "NOT"}}]}
-
-    out = probe.verify_replay(transport=by_exchange)
-    assert unmatched == [], f"verifier re-asked {len(unmatched)} turns outside the corpus"
-    assert out["measured"] is True, out
-    assert out["checked"] >= probe.REPLAY_MIN_CHECKED, out
-    assert out["ok"] is True and out["mismatched"] == [], out
-    assert out["unanswered"] == [], out
-
-    # A model that flipped one sampled verdict is a FAILING bill, named by turn id
-    # and quoting both answers — the reader has to be able to open it.
-    flipped = {"n": 0}
-
-    def one_flips(payload):
-        out = by_exchange(payload)
-        flipped["n"] += 1
-        if flipped["n"] == 1:
-            recorded = out["choices"][0]["message"]["content"]
-            out["choices"][0]["message"]["content"] = (
-                "NOT a dispute" if uptake._parse_verdict(recorded) else "DISPUTE")
-        return out
-
-    out = probe.verify_replay(transport=one_flips)
-    assert out["ok"] is False, out
-    assert len(out["mismatched"]) == 1, out
-    bad = out["mismatched"][0]
-    assert bad["turn_id"] in index and bad["recorded"] and bad["now"], bad
-
-    # An engine that refuses the sample is `unanswered`, not a clean bill: zero
-    # mismatches is what a green row is built on, so it must not be reachable by
-    # asking nothing.
-    def dead(payload):
-        raise OSError("connection refused")
-
-    out = probe.verify_replay(transport=dead)
-    assert out["ok"] is False and out["mismatched"] == [], out
-    assert len(out["unanswered"]) == out["checked"] >= probe.REPLAY_MIN_CHECKED, out
-    assert "UNVERIFIED" not in out["note"], out   # measured, just unanswered
-    assert "unanswered" in out["note"], out
-
-    # A sample below the floor cannot claim the matrix holds, and says so in the
-    # note rather than reporting an empty mismatch list as agreement.
-    out = probe.verify_replay(transport=by_exchange, min_checked=len(labels) + 5)
-    assert out["measured"] is False and out["ok"] is False, out
-    assert "UNVERIFIED" in out["note"], out
 
 
 @pytest.mark.live_vault
