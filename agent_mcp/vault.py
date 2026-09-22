@@ -486,7 +486,12 @@ def _grep_lloyd_code(query: str, limit: int = 8, timeout: float = 2.0) -> list[d
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):
             continue
-        for path in (proc.stdout or "").splitlines():
+        # Sorted before the `limit` cut. rg searches in parallel and prints
+        # files as its threads finish, so the same query on the same tree
+        # admitted a different 8 files from run to run (7 of 81 gold queries
+        # on 2026-09-21). That made the recall's pool, and so djev's input,
+        # vary, and the regression check read the difference as a change.
+        for path in sorted((proc.stdout or "").splitlines()):
             if not path:
                 continue
             rel = path.removeprefix(LLOYD_CODE_PREFIX)

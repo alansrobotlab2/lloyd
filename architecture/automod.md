@@ -2681,6 +2681,13 @@ since had flagged it `noise_floor_stale`, and it was used anyway.
   daemon did not answer is. Those recalls fell back to the cross-encoder, so
   the arm measured a different ranker. A 4xx is a schema the client built
   wrong, which a change can do, so it is scored.
+- **The recall's pool was not deterministic either, and replay is what showed
+  it.** The first replayed noise trial still drew 19 of 162 djev requests
+  fresh on identical code. All of them came from the grep leg
+  (`_grep_lloyd_code`): rg prints matching files as its threads finish, and the
+  leg kept the first 8, so 7 of 81 gold queries admitted different files run to
+  run. It sorts before the cut now. That was live recall's behaviour too, not
+  just the eval's (`tests/test_recall_first_stage.py`).
 - **Re-measure the floors when the eval changes:**
   `python -m scripts.automod.regression_runner noise` takes `regression.lock`
   and writes `eval-noise.json`. **Anything that restarts or loads djev or the

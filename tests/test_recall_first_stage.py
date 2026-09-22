@@ -83,3 +83,28 @@ def test_post_decodes_every_result(monkeypatch):
     monkeypatch.setattr(vault.urllib.request, "urlopen", lambda req, timeout=None: _Resp(body))
     rows = vault._qmd_post({"searches": [{"type": "lex", "query": "ali"}], "rerank": False})
     assert rows[0]["file"] == "qmd://people/Ali Behrouz.md"
+
+
+def test_the_grep_leg_admits_the_same_files_whatever_order_rg_prints_them(monkeypatch):
+    """rg prints files as its threads finish. Before the sort, the same query on
+    the same tree admitted a different 8 files from run to run (7 of 81 gold
+    queries, 2026-09-21), which moved djev's input and the regression check
+    read the difference as a change."""
+    import random
+    import subprocess
+    import agent_mcp.vault as V
+
+    files = [f"{V.LLOYD_CODE_PREFIX}app/f{i:02d}.py" for i in range(20)]
+    orders = []
+
+    def fake_run(argv, **kw):
+        shuffled = files[:]
+        random.Random(len(orders)).shuffle(shuffled)
+        orders.append(shuffled)
+        return subprocess.CompletedProcess(argv, 0, stdout="\n".join(shuffled) + "\n", stderr="")
+
+    monkeypatch.setattr(V.subprocess, "run", fake_run)
+    first = [d["file"] for d in V._grep_lloyd_code("where is vault_recall defined", limit=8)]
+    second = [d["file"] for d in V._grep_lloyd_code("where is vault_recall defined", limit=8)]
+    assert orders[0] != orders[1], "the fake must print two different orders"
+    assert first == second == [f"app/f{i:02d}.py" for i in range(8)]

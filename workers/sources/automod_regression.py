@@ -926,7 +926,7 @@ def runner_alive() -> bool:
 # Older than any check can be: two arms at `_run_arm`'s 900 s each, the pin's
 # start-up and its warm-up. Scratch this old has no owner.
 STALE_SCRATCH_AGE_S = 2 * 3600.0
-SCRATCH_PREFIXES = ("automod-eval-", "automod-pin-")
+SCRATCH_PREFIXES = ("automod-eval-", "automod-pin-", "automod-noise-pin-")
 
 
 def sweep_stale_scratch(now: float | None = None) -> list[str]:
