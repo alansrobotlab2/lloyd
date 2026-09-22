@@ -478,6 +478,33 @@ settled promotion (or vault landing) whose item is still open and not yet
 marked, it writes `automod_landed: <sha>` and an activity line, and sets
 `status: done` **only when every clause said `met`**.
 
+**A landing a rollback took off `main` is not a landing, whatever the row
+names** (2026-09-21). `rollback_succeeded` names one commit: the promotion the
+guardian was observing, or HEAD. A `reset` removes everything between HEAD and
+the commit it restored, and seven readers took the named commit as the whole
+of it. That day a regression check blamed a802b979 (#763) while 1e219da9
+(#1038) was under observation on top of it. The guardian reset both away and
+wrote `commit: 1e219da9`, so a802b979 read as settled and #763 closed as
+landed, a minute after its change was reverted. #939 (dbec85aa) went the same
+way an hour later. `state.reverted_commits` is the one definition now: a
+`reset` counts every promotion on the `parent` chain from `head_before` back to
+`restored`, plus the commit the `rollback_requested` named. Every reader of
+"reverted" uses it (`backlog`, `scorecard`, `review_tools`, the regression
+queue). The regression check reads a promotion after it settles, so its
+rollback usually lands on an item this closer already closed.
+`reopen_reverted_landings` runs beside the closer in autocode's housekeeping and
+in `round board-pass`. It reopens an item that is `done`, whose
+`automod_landed` names a reverted commit, and whose newest `item_landed` row is
+this loop's own close of that commit. It moves the item to `up_next` (the
+`rolled_back` re-offer) or `draft`, swaps the marker for `automod_reverted`, and
+writes `item_reopened {by: rollback}`. An item a human closed is never touched.
+The `rolled_back` re-offer names the commit to cherry-pick: the landed commit
+outlives the rollback, held by the guardian tag, and a squashed round's history
+is at `refs/automod/rounds/<round>`. Switch
+`workers.sources.autocode.reopen_reverted`. Why the guardian reset past the
+newer promotion at all is #1358. `tests/test_backlog_unattended.py` pins it
+with the incident's rows.
+
 The acceptance is **clauses** since the review rung (§4.5): triage writes
 `acceptance_clauses` (schema field, `ACCEPTANCE_CLAUSES:` numbered lines in
 the text block, and the item's front matter), the implementer reports per
@@ -2620,6 +2647,47 @@ running reads exactly like one that finds nothing.
 `tests/test_regression_runner.py`.
 
 ---
+
+#### 8.1b djev in the loop: replay per request, two floors (2026-09-21)
+
+The pinned corpus made the check deterministic, and #1336 undid that without
+anyone noticing: djev began ranking every recall at 20:07Z, and djev does not
+repeat itself (`architecture/djev.md` §8.2, label logprobs 1-3 nats apart on
+identical requests). The first check after it found −0.009 NDCG between two
+arms of identical retrieval code, and its confirm run came back clean. The next
+two checks each rolled back a promotion that touched no retrieval code:
+a802b979 (#763, counterfactual scoring), for doc_hit 0.529 → 0.517, one query
+of 87; and dbec85aa (#939, the scheduler), measured while djev was being
+restarted for an experiment, with recall latency 2.0 s against 0.63 s. Two
+rollbacks in six hours halted promotions. The floor they were judged on was
+measured on 2026-09-17: 20 queries, the cross-encoder, `stdev 0`. Every check
+since had flagged it `noise_floor_stale`, and it was used anyway.
+
+- **Every arm runs under one djev replay file** (`app.djev.replay_env`,
+  `LLOYD_DJEV_REPLAY`), anchored on the baseline. A rank request the baseline
+  asked is answered with the baseline's answer, so identical code compares
+  identically again. A request only the current arm asks (the change moved
+  djev's input) is a fresh draw, and counted as one. The confirm arm is its own
+  arm, so what the change moved is drawn again rather than replayed from the
+  first look.
+- **Two floors, chosen per check** (`ranker_reading`, `_floor_for`). `replayed`
+  (no fresh draw) is judged on `metrics`, the pinned floor. `fresh` or
+  `unknown` (an arm from before replay leaves no record) is judged on
+  `metrics_fresh_ranker`, djev's own spread. `measure_noise` records both: trial
+  0 plus replayed trials, and trial 0 plus fresh trials. The ledger row carries
+  `ranker {arms, reading, floor}`.
+- **An arm djev did not answer is a non-measurement** (`REPLAY_FAILURES`:
+  unreachable, 5xx, malformed), in either arm, exactly as an arm the pinned
+  daemon did not answer is. Those recalls fell back to the cross-encoder, so
+  the arm measured a different ranker. A 4xx is a schema the client built
+  wrong, which a change can do, so it is scored.
+- **Re-measure the floors when the eval changes:**
+  `python -m scripts.automod.regression_runner noise` takes `regression.lock`
+  and writes `eval-noise.json`. **Anything that restarts or loads djev or the
+  qmd daemon holds that lock too**; the second rollback was the author's own
+  canvas experiment running under a check.
+- `tests/test_automod_regression.py` (the check) and `tests/test_djev_replay.py`
+  (the client) pin it.
 
 ## 9. Incident: the false-positive rollback, 2026-09-06
 

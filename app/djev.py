@@ -63,8 +63,11 @@ here carries it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -359,6 +362,113 @@ def _record(seam: str, outcome: str, latency_ms: float | None) -> None:
             ring.append(latency_ms)
 
 
+# ---------------------------------------------------------------------------
+# Replay: one answer per request inside one comparison (eval arms only)
+# ---------------------------------------------------------------------------
+#
+# djev does not give the same answer twice. Measured 2026-09-21 on a 32-row
+# recall rank replayed straight at vLLM: the argmax at all 123 canvas positions
+# was identical on every run, while the label logprobs the rank score is built
+# from moved by 1-3 nats between identical requests. Not the prefix cache (a
+# fresh `cache_salt` per request varies as much), not CUDA graphs or compile
+# (`--enforce-eager` varies), not async scheduling, not the seed canvas (applied
+# identically) and not sampling (the read-only path draws nothing): the kernels.
+#
+# That is harmless for a recall and fatal for a paired eval. The regression
+# check runs the same questions through two arms and reads any difference as
+# the change; with djev in the loop two arms running identical code differed by
+# a query, and two promotions that touched no retrieval code were rolled back
+# for it. So inside one comparison an identical request is answered once: each
+# arm names itself, one arm is the anchor, and a request the anchor already
+# asked is replayed from its answer. A request only this arm asks (the change
+# moved the ranker's input) is a fresh draw, and counted as one, so the caller
+# knows the ranker's own noise is in the comparison. Failures are counted and
+# never cached. Unset in production; `LLOYD_DJEV_REPLAY` is the eval's switch.
+
+REPLAY_ENV = "LLOYD_DJEV_REPLAY"            # sqlite file shared by one comparison's arms
+REPLAY_ARM_ENV = "LLOYD_DJEV_REPLAY_ARM"    # this arm's name
+REPLAY_ANCHOR_ENV = "LLOYD_DJEV_REPLAY_ANCHOR"  # the arm whose answers every arm reuses
+
+#: Outcomes that mean djev did not rank: the recall fell back to the
+#: cross-encoder, so the arm measured a different ranker for a reason that is
+#: not the code under test.
+REPLAY_FAILURES = ("unreachable", "http_5xx", "malformed")
+
+
+def replay_env(path: Any, arm: str, anchor: str = "baseline") -> dict[str, str]:
+    """The environment that puts one eval arm under replay."""
+    return {REPLAY_ENV: str(path), REPLAY_ARM_ENV: arm, REPLAY_ANCHOR_ENV: anchor}
+
+
+def _replay_conf() -> tuple[str, str, str] | None:
+    path = os.environ.get(REPLAY_ENV)
+    if not path:
+        return None
+    arm = os.environ.get(REPLAY_ARM_ENV) or "arm"
+    return path, arm, os.environ.get(REPLAY_ANCHOR_ENV) or arm
+
+
+def _replay_db(path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, timeout=30)
+    conn.execute("CREATE TABLE IF NOT EXISTS answers (key TEXT, arm TEXT, payload TEXT, "
+                 "PRIMARY KEY (key, arm))")
+    conn.execute("CREATE TABLE IF NOT EXISTS outcomes (arm TEXT, outcome TEXT, n INTEGER, "
+                 "PRIMARY KEY (arm, outcome))")
+    return conn
+
+
+def _replay_key(url_path: str, data: bytes) -> str:
+    return hashlib.sha256(url_path.encode() + b"\0" + data).hexdigest()
+
+
+def _replay_lookup(conf: tuple[str, str, str], key: str) -> tuple[dict, str] | None:
+    path, arm, anchor = conf
+    try:
+        with _replay_db(path) as conn:
+            for who, source in ((anchor, "replayed_anchor"), (arm, "replayed_own")):
+                row = conn.execute("SELECT payload FROM answers WHERE key=? AND arm=?",
+                                   (key, who)).fetchone()
+                if row:
+                    return json.loads(row[0]), source
+    except Exception as exc:  # noqa: BLE001 — replay is an eval aid, never a failure
+        logger.warning("djev replay lookup failed: %s", exc)
+    return None
+
+
+def _replay_note(conf: tuple[str, str, str], outcome: str, key: str | None = None,
+                 payload: dict | None = None) -> None:
+    path, arm, _anchor = conf
+    try:
+        with _replay_db(path) as conn:
+            if key is not None and payload is not None:
+                conn.execute("INSERT OR REPLACE INTO answers VALUES (?, ?, ?)",
+                             (key, arm, json.dumps(payload)))
+            conn.execute("INSERT INTO outcomes VALUES (?, ?, 1) ON CONFLICT (arm, outcome) "
+                         "DO UPDATE SET n = n + 1", (arm, outcome))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("djev replay write failed: %s", exc)
+
+
+def replay_stats(path: Any) -> dict[str, dict[str, int]]:
+    """`{arm: {outcome: n}}` for one comparison's replay file; `{}` if absent.
+
+    `fresh` is a request djev answered for this arm and no earlier arm asked;
+    `replayed_anchor` / `replayed_own` were answered from the file; the
+    `REPLAY_FAILURES` outcomes are requests djev did not answer. An arm with no
+    row at all ran code that predates replay, and says nothing either way.
+    """
+    out: dict[str, dict[str, int]] = {}
+    try:
+        if not os.path.exists(str(path)):
+            return out
+        with _replay_db(str(path)) as conn:
+            for arm, outcome, n in conn.execute("SELECT arm, outcome, n FROM outcomes"):
+                out.setdefault(arm, {})[outcome] = int(n)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("djev replay stats unreadable: %s", exc)
+    return out
+
+
 def ask_sync(state: Any, questions: Mapping[str, Mapping], *,
              timeout: float = DEFAULT_TIMEOUT_S, seam: str = "",
              floor: float | None = None, samples: int | None = None,
@@ -381,6 +491,19 @@ def ask_sync(state: Any, questions: Mapping[str, Mapping], *,
     url = structured_url() + "/v1/systemone"
     data = json.dumps(_body(state, questions, samples=samples,
                             instructions=instructions, seed=seed)).encode()
+    replay = _replay_conf()
+    key = _replay_key("/v1/systemone", data) if replay else None
+    if replay:
+        hit = _replay_lookup(replay, key)
+        if hit is not None:
+            payload, source = hit
+            _replay_note(replay, source)
+            try:
+                out = _build(payload, 0.0, floor, seam)
+            except Exception:  # noqa: BLE001 — only a payload that built once is stored
+                return None
+            _record(seam, "replayed", 0.0)
+            return out if out.answers else None
     req = urllib.request.Request(
         url, data=data, headers={"Content-Type": "application/json"},
         method="POST")
@@ -392,10 +515,14 @@ def ask_sync(state: Any, questions: Mapping[str, Mapping], *,
         # 422 is a schema this client built wrong and is worth seeing; 500 is
         # the shape a hung upstream read takes, since there is no 504 here.
         _record(seam, "http_error", None)
+        if replay:
+            _replay_note(replay, "http_5xx" if exc.code >= 500 else "http_4xx")
         logger.debug("djev %s: HTTP %s", seam or "-", exc.code)
         return None
     except Exception as exc:  # noqa: BLE001 — every failure is `None`
         _record(seam, "unreachable", None)
+        if replay:
+            _replay_note(replay, "unreachable")
         logger.debug("djev %s: %s", seam or "-", exc)
         return None
     latency_ms = (time.perf_counter() - t0) * 1e3
@@ -403,8 +530,14 @@ def ask_sync(state: Any, questions: Mapping[str, Mapping], *,
         out = _build(payload, latency_ms, floor, seam)
     except Exception as exc:  # noqa: BLE001 — a malformed body is a failure
         _record(seam, "malformed", None)
+        if replay:
+            _replay_note(replay, "malformed")
         logger.debug("djev %s: malformed response: %s", seam or "-", exc)
         return None
+    if replay:
+        # Stored even when it holds no answers: `empty` is djev's answer to
+        # this input, not a failure to give one.
+        _replay_note(replay, "fresh", key, payload)
     if not out.answers:
         _record(seam, "empty", latency_ms)
         return None
@@ -508,7 +641,8 @@ def rank(query: str, candidates: Sequence[str], *,
     candidate the state carries and `samples` the number of reads; that recall
     measured 160 chars and one read as both the fastest and the best-ordered
     of the shapes it tried (full text and `samples: "auto"` were slower and
-    ranked worse), and one read is deterministic.
+    ranked worse). One read's top pick is stable; its lower ranks are not
+    exactly repeatable (see Replay, above).
     """
     if max_n > CANVAS_CHUNK_QUESTIONS:
         raise ValueError(f"max_n {max_n} is past the canvas split ({CANVAS_CHUNK_QUESTIONS})")

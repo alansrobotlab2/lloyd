@@ -805,9 +805,10 @@ has to match it (Alan: equal accuracy plus throughput is a win).
 - **On the same ≤32 rows, djev beat qmd's cross-encoder** (87-query pinned eval):
   doc_hit 0.471 vs 0.425 (+0.046 [+0.011, +0.092]), NDCG@10 0.274 vs 0.214
   (+0.060 [+0.004, +0.114]), 0.51 s vs 1.04 s per recall. Full-length
-  candidates ranked worse than 160 chars, `samples: "auto"` was 200 ms slower
-  and worse than one read, and one read is deterministic (87/87 identical on a
-  repeat).
+  candidates ranked worse than 160 chars, and `samples: "auto"` was 200 ms slower
+  and worse than one read. A repeat of one read gave the same recall outcome on
+  87/87 queries, which is not the same thing as a deterministic read: the
+  scores behind it do not repeat (§8.2).
 - **Deployed shape:** global fusion's 20-row head + floors 2/2/2 for autonomy,
   architecture and skills, cross-encoder off, `rank(chars=160, samples=1,
   max_n=32, timeout=4)`, seam `recall_rank`. Against the cross-encoder path on
@@ -821,6 +822,35 @@ has to match it (Alan: equal accuracy plus throughput is a win).
   ranks, nor inside that fallback.
 - **The line holds:** this orders documents and gates nothing. `RANK_MAX_N`
   stays 16 for every other caller.
+
+### 8.2 djev does not repeat itself (2026-09-21)
+
+Identical requests get different scores. Replayed straight at vLLM `:8010` with
+the structured server's own body for one 32-row recall rank:
+
+- the argmax at all 123 canvas positions was identical on every run, and the
+  seeded canvas came back the same (91 of 123 positions reproduce it, every run);
+- the label logprobs the rank score is built from moved by **1-3 nats** between
+  identical requests (slot 0, second label: -6.96, -5.67, -5.81). The top pick
+  holds; ranks 3 and below shuffle;
+- **ruled out, by booting djev by hand with one change each:** the prefix cache
+  (a fresh `cache_salt` per request varies as much), CUDA graphs and compile
+  (`--enforce-eager` varies), async scheduling (removed, still varies), and
+  sampling (the read-only path draws nothing; one denoise step);
+- **left:** the kernels, the MARLIN NvFp4 MoE backend (weight-only FP4 on the
+  3090) or TRITON_ATTN. The bisect is #1357, and it needs djev down for about
+  two minutes a variant.
+
+For a recall this costs little: the top result is stable. For a paired eval it
+is fatal, because two arms running the same code ask djev the same questions
+and get different answers. On 2026-09-21 the regression check rolled back two
+promotions that touched no retrieval code, for one query's worth of doc_hit.
+So `app/djev.py` has a **replay**, used only by evals. One comparison's arms
+share an sqlite file (`LLOYD_DJEV_REPLAY`); a request the anchor arm already
+asked is answered from its answer, a request only this arm asks is drawn fresh
+and counted, and a failure is counted and never stored. The regression check
+reads those counts to pick its noise floor and to refuse an arm djev did not
+answer (`architecture/automod.md` §8.1b). Production never sets the variable.
 
 ---
 
@@ -978,6 +1008,9 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
   defaults to 1, which is wrong: omitted, it is `"auto"`.
 - **Engine contention** between shadow reads and tool calls (§5.3). It is
   harmless while every consumer is advisory.
+- **Scores do not repeat across identical requests** (§8.2, #1357). Evals
+  that compare arms must replay (`app.djev.replay_env`), or they measure djev's
+  noise as the change.
 
 ### Closed 2026-09-21 — test runs wrote to production's shadow log (#1324)
 
@@ -1065,6 +1098,9 @@ move only with production traffic.
 - djev stays out of `models:` and out of `resolve_model_alias`.
 - djev orders the vault recall (#1336); qmd's cross-encoder is its fallback,
   and the fallback is counted, never silent.
+- djev's scores do not repeat. An eval that compares two arms replays its
+  answers per request (§8.2), and never takes djev down while a regression
+  check holds `regression.lock`.
 
 ## Review log
 

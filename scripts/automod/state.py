@@ -37,6 +37,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 
 STATE_DIR = Path(
@@ -384,6 +385,56 @@ def regression_measured(event: dict) -> bool:
     """
     hit = (event.get("detail") or {}).get("doc_hit_rate")
     return not (isinstance(hit, dict) and hit.get("before") == 0.0)
+
+
+def reverted_commits(events: Iterable[dict]) -> set[str]:
+    """Every promoted commit a rollback took off `main`. The one definition.
+
+    A `rollback_succeeded` row names one commit — the promotion the guardian was
+    observing, or HEAD — and seven readers took that commit as the whole of it.
+    A `reset` route removes everything between HEAD and the commit it restored.
+    On 2026-09-21 a regression check blamed a802b979 (#763) while 1e219da9
+    (#1038) sat on top of it under observation; the guardian reset from
+    1e219da9 to their common parent and wrote `commit: 1e219da9`. a802b979 was
+    gone from `main` and read as settled, so #763 was closed as landed a minute
+    after its change was reverted, and #939 the same way an hour later.
+
+    So a `reset` row counts every promotion on the `parent` chain from
+    `head_before` back to `restored`, plus the commit its `rollback_requested`
+    named. A `revert` route removes exactly its commit. The walk only runs when
+    the row says where it stopped; a row with no `restored` counts its own
+    commit, because walking to the root would mark every ancestor reverted.
+    """
+    rows = list(events)
+    parent_of = {str(e.get("commit")): str(e.get("parent") or "")
+                 for e in rows if e.get("event") == "promoted" and e.get("commit")}
+    out: set[str] = set()
+    requested = ""
+    for e in rows:
+        kind = e.get("event")
+        if kind == "rollback_requested":
+            requested = str(e.get("commit") or "")
+            continue
+        if kind != "rollback_succeeded":
+            continue
+        bad = str(e.get("commit") or "")
+        if bad:
+            out.add(bad)
+        blamed, requested = requested, ""
+        if e.get("route") == "revert":
+            continue
+        stop = str(e.get("restored") or "")
+        if not stop:
+            continue
+        if blamed and blamed != stop:
+            out.add(blamed)
+        cur, seen = str(e.get("head_before") or bad), set()
+        while cur and cur != stop and cur not in seen:
+            seen.add(cur)
+            out.add(cur)
+            cur = parent_of.get(cur, "")
+    out.discard("")
+    return out
 
 
 def write_eval_last(payload: dict) -> None:

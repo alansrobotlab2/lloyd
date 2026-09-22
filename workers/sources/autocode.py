@@ -1221,6 +1221,15 @@ def _housekeeping(src_cfg: dict) -> None:
                         "closed" if r["closed"] else "noted, left open", r["acceptance"])
     except Exception as exc:
         logger.warning("close_settled_items failed: %s", exc)
+    try:
+        # The regression check reads a promotion after it settles, so its
+        # rollback lands on an item the closer above already closed.
+        for r in B.reopen_reverted_landings(S.LEDGER_PATH,
+                                            enabled=bool(src_cfg.get("reopen_reverted", True))):
+            logger.info("backlog #%s reopened to %s: landing %s was reverted",
+                        r["item_id"], r["to"], r["commit"][:8])
+    except Exception as exc:
+        logger.warning("reopen_reverted_landings failed: %s", exc)
     tri = _source_cfg("autotriage")
     try:
         # Before the reconcile, so a released member is judged in the same

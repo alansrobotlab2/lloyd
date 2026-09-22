@@ -678,6 +678,8 @@ def board_pass() -> dict:
     before = B.board_health(S.LEDGER_PATH)
     closed = B.close_settled_items(S.LEDGER_PATH, enabled=bool(auto.get("close_on_settle", True)),
                                    close_members=bool(auto.get("close_members_on_settle", True)))
+    reopened = B.reopen_reverted_landings(S.LEDGER_PATH,
+                                          enabled=bool(auto.get("reopen_reverted", True)))
     unfolded = B.unfold_spent_umbrellas(S.LEDGER_PATH,
                                         enabled=bool(tri.get("unfold_spent_umbrellas", True)))
     retriaged = B.retriage_spent_items(S.LEDGER_PATH, enabled=bool(auto.get("retriage_spent", True)))
@@ -688,6 +690,7 @@ def board_pass() -> dict:
     expired = B.expire_stale_spawns(S.LEDGER_PATH, enabled=bool(auto.get("expire_spawns", True)))
     after = B.board_health(S.LEDGER_PATH)
     out = {"closed_settled": [r["item_id"] for r in closed if r.get("closed")],
+           "reopened_reverted": [r["item_id"] for r in reopened],
            "unfolded": {r["umbrella_id"]: r["released"] for r in unfolded},
            "retriaged": [r["item_id"] for r in retriaged],
            "status_moves": len(moved),
@@ -696,8 +699,8 @@ def board_pass() -> dict:
            "before": {k: before.get(k) for k in _HEALTH_KEYS},
            "after": {k: after.get(k) for k in _HEALTH_KEYS}}
     S.append_event({"event": "board_pass", "by": "human",
-                    **{k: out[k] for k in ("closed_settled", "retriaged", "status_moves",
-                                           "released_from_hold", "expired")},
+                    **{k: out[k] for k in ("closed_settled", "reopened_reverted", "retriaged",
+                                           "status_moves", "released_from_hold", "expired")},
                     "unfolded": {str(k): v for k, v in out["unfolded"].items()},
                     "draft_before": before.get("draft"), "draft_after": after.get("draft"),
                     "self_spawned_before": before.get("self_spawned_open"),

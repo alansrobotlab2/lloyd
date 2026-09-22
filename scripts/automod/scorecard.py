@@ -444,7 +444,7 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
 
     # ── 1 acceptance hit rate ───────────────────────────────────────────
     promoted = {str(e.get("round_id") or ""): e for e in by("promoted") if e.get("round_id")}
-    reverted = {str(e.get("commit") or "") for e in by("rollback_succeeded")}
+    reverted = S.reverted_commits(ev)
     finished = [e for e in by("backlog_implement") if e.get("phase") == "finished"]
     landed = [e for e in finished
               if str(e.get("round_id") or "") in promoted

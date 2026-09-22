@@ -1538,9 +1538,16 @@ def implement_history(ledger: Path, marks: dict[int, float] | None = None) -> di
     return {iid: rows for iid, rows in out.items() if rows}
 
 
+def _reverted_commits(ledger: Path) -> set[str]:
+    """`state.reverted_commits` over this ledger: every promoted commit a
+    rollback took off `main`, including the ones a `reset` removed without
+    naming them."""
+    from scripts.automod import state as S
+    return S.reverted_commits(_ledger_rows(ledger))
+
+
 def _live_promoted_rounds(ledger: Path) -> set[str]:
-    reverted = {str(d.get("commit") or "") for d in
-                _ledger_events(ledger, "rollback_succeeded", require_item=False)}
+    reverted = _reverted_commits(ledger)
     return {str(d.get("round_id") or "") for d in
             _ledger_events(ledger, "promoted", require_item=False)
             if d.get("round_id") and str(d.get("commit") or "") not in reverted}
@@ -1893,9 +1900,7 @@ def rolled_back_rounds(ledger: Path) -> set[str]:
     for re-offering rather than against it — and the landing deletes the
     branch, so the redo really is a redo. The guardian tag holds the tree.
     """
-    reverted = {str(d.get("commit") or "") for d in
-                _ledger_events(ledger, "rollback_succeeded", require_item=False)}
-    reverted.discard("")
+    reverted = _reverted_commits(ledger)
     return {str(d.get("round_id") or "") for d in
             _ledger_events(ledger, "promoted", require_item=False)
             if str(d.get("commit") or "") in reverted and d.get("round_id")}
@@ -2004,9 +2009,18 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
             out[iid] = ("spent", "")
             continue
         if rid and rid in reverted and n <= ROLLED_BACK_RETRY_CAP:
+            # The landed commit outlives the rollback: the guardian tags the
+            # tree it reverted, and a squashed round's working history is kept
+            # at `refs/automod/rounds/<round>` (a one-commit round has no ref;
+            # its commit is the whole of it). A round told "the branch is gone"
+            # redoes work that is one cherry-pick away.
+            sha = str((promoted_ev.get(rid) or {}).get("commit") or "")
             out[iid] = ("rolled_back",
-                        f"round {rid} landed and the guardian reverted it; the branch "
-                        f"was deleted at landing, so the tree is in the guardian tag")
+                        f"round {rid} landed as `{sha[:12] or '?'}` and the guardian reverted "
+                        f"it; that commit still exists (the guardian tag holds it, and a "
+                        f"squashed round's history is at `refs/automod/rounds/{rid}`), so "
+                        f"cherry-pick it onto live main in the new round rather than "
+                        f"redoing the work")
             continue
         if phase == "infra_failed" or (phase == "finished" and _never_ran(ev)):
             if n <= 1 + INCOMPLETE_RETRY_CAP:
@@ -2350,8 +2364,7 @@ def settled_landings(ledger: Path) -> list[dict]:
     settled = {str(d.get("commit") or ""): d
                for d in _ledger_events(ledger, "settled", require_item=False)}
     settled.pop("", None)
-    reverted = {str(d.get("commit") or "") for d in
-                _ledger_events(ledger, "rollback_succeeded", require_item=False)}
+    reverted = _reverted_commits(ledger)
     promoted_any = {str(d.get("round_id") or "")
                     for d in _ledger_events(ledger, "promoted", require_item=False)}
     promoted = {str(d.get("round_id") or ""): d
@@ -3214,7 +3227,7 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     for d in _ledger_events(ledger, "backlog_implement"):
         latest_phase[int(d["item_id"])] = str(d.get("phase") or "")
     in_flight = {i for i, ph in latest_phase.items() if ph == "started"} | set(open_round_items)
-    reverted = {str(d.get("commit") or "") for d in _ledger_events(ledger, "rollback_succeeded", require_item=False)}
+    reverted = _reverted_commits(ledger)
     live_promoted = {str(d.get("round_id") or "") for d in _ledger_events(ledger, "promoted", require_item=False)
                      if str(d.get("commit") or "") not in reverted}
     observing: set[int] = set()
@@ -3405,6 +3418,75 @@ def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BO
                             "to": status, "reason": why[:200]}, path=ledger)
             moved.append({"item_id": iid, "from": current.get(iid), "to": status})
     return moved
+
+
+REVERTED_MARKER = "automod_reverted"
+
+
+def reopen_reverted_landings(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                             enabled: bool = True) -> list[dict]:
+    """Reopen an item this loop closed on a landing the guardian then reverted.
+
+    `close_settled_items` closes an item when its promotion settles, and the
+    detached regression check reads the promotion minutes later. When that check
+    asks for a rollback, the item is already `done`, and `done` is terminal for
+    the loop's status writer, so nothing ever looked at it again. On 2026-09-21
+    #763 and #939 were both closed as landed with their commits reverted off
+    `main` (#939 six minutes before its rollback, #763 a minute after, because
+    the reverted-commit join missed a reset that named only the commit above).
+
+    Narrow on purpose: the item must be `done`, its landed marker must name a
+    commit `state.reverted_commits` says is gone, and the ledger's newest
+    `item_landed` row for it must be this loop's own close of that commit. An
+    item a human closed carries no such row and stays closed. It goes back to
+    `up_next` when `implement_outcomes` re-offers it (the `rolled_back` verdict,
+    whose detail names the reverted commit and its kept history), else to
+    `draft` for triage.
+    """
+    if not enabled:
+        return []
+    from scripts.automod import state as S
+    reverted = _reverted_commits(ledger)
+    if not reverted:
+        return []
+    last_landed: dict[int, dict] = {}
+    for d in _ledger_events(ledger, "item_landed"):
+        last_landed[int(d["item_id"])] = d
+    outcomes: dict[int, tuple[str, str]] | None = None
+    out: list[dict] = []
+    for item in all_items(boards):
+        if item.status != "done":
+            continue
+        row = last_landed.get(item.id)
+        if not row or not row.get("closed"):
+            continue
+        text = item.path.read_text(encoding="utf-8")
+        fm, body = _split_frontmatter(text)
+        if _unparsed_guard(item.path, text, fm, "reopen_reverted_landings"):
+            continue
+        marked = str(fm.get(LANDED_MARKER) or "")
+        commit = str(row.get("commit") or "")
+        if not marked or not _same_commit(marked, commit):
+            continue
+        if not any(_same_commit(commit, r) for r in reverted):
+            continue
+        if outcomes is None:
+            outcomes = implement_outcomes(ledger)
+        verdict, detail = outcomes.get(item.id, ("", ""))
+        to = "up_next" if verdict and verdict != "spent" else "draft"
+        why = (f"its landing `{commit[:8]}` was reverted by the guardian after the item was "
+               f"closed; " + (detail or "offered back to triage"))
+        if not record_status_move(fm, to, why):
+            continue
+        fm.pop(LANDED_MARKER, None)
+        fm[REVERTED_MARKER] = commit
+        item.path.write_text(
+            f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
+            f"---\n{body}", encoding="utf-8")
+        S.append_event({"event": "item_reopened", "item_id": item.id, "by": "rollback",
+                        "commit": commit, "to": to, "verdict": verdict}, path=ledger)
+        out.append({"item_id": item.id, "commit": commit, "to": to, "verdict": verdict})
+    return out
 
 
 def reopen_item(item_id: int, reason: str, *, ledger: Path | None = None) -> dict:

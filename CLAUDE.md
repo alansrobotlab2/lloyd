@@ -1301,6 +1301,18 @@ On 2026-09-18 the behavioural-regression check had measured 8 of 17 promotions
 - Scorecard row 10 shows how many promotions were actually measured;
   `python -m scripts.automod.regression_runner pending` lists what is still
   owed one, and `… run` measures it (what the promoter spawns).
+- **djev's answers are replayed per request inside one check** (2026-09-21).
+  djev does not repeat itself, and two promotions that touched no retrieval
+  code were rolled back for it, which halted promotions. Every arm now runs
+  under one replay file anchored on the baseline. An arm djev did not answer
+  is `cannot evaluate`, and a change that moved djev's input is judged on the
+  fresh-ranker floor. `regression_runner noise` re-measures both floors.
+  **Anything that restarts or loads djev or the qmd daemon holds
+  `regression.lock`.** `architecture/automod.md` §8.1b.
+- **A landing a reset took off `main` is not a landing.** `rollback_succeeded`
+  names one commit and a reset removes several. `state.reverted_commits` is
+  the one definition, and `backlog.reopen_reverted_landings` reopens an item
+  closed on a landing that was later reverted (#763 and #939, 2026-09-21).
 
 ### One commit on main per landing
 

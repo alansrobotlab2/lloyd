@@ -46,6 +46,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from app.djev import REPLAY_FAILURES, replay_env, replay_stats
 from scripts.automod.evalpin import PinError, PinnedCorpus
 from workers.queue import WorkQueue, QueueItem
 
@@ -482,6 +483,49 @@ def _baseline_worktree(commit: str):
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+# The arms of one comparison, as the djev replay file names them.
+ARM_BASELINE, ARM_CURRENT, ARM_CONFIRM = "baseline", "current", "confirm"
+
+
+def _replayed(env: dict, db: Path, arm: str, anchor: str = ARM_BASELINE) -> dict:
+    """`env` with one arm put under the comparison's djev replay file."""
+    return {**env, **replay_env(db, arm, anchor)}
+
+
+def ranker_reading(stats: dict, arm: str) -> str:
+    """Whether djev's own noise is in this arm's comparison with its anchor.
+
+    `replayed`: every rank request the arm made was one the anchor had already
+    asked, so djev answered it identically and cannot be the difference. `fresh`:
+    the change moved what djev was asked for at least one recall, and that
+    answer is one draw of a ranker that does not repeat itself. `unknown`: the
+    arm left no replay record, because its code predates replay or it never
+    asked djev at all.
+    """
+    row = stats.get(arm) or {}
+    if not row:
+        return "unknown"
+    return "fresh" if row.get("fresh", 0) > 0 else "replayed"
+
+
+def _floor_for(noise: dict, reading: str) -> dict:
+    """The noise record `evaluate` should read for a ranker reading.
+
+    Replayed arms compare deterministically, so the pinned floor (`metrics`) is
+    the right one. An arm that drew djev fresh is compared against the spread
+    djev produces on its own (`metrics_fresh_ranker`, measured by
+    `measure_noise` without replay); with no such measurement the pinned floor
+    is used and the record says so.
+    """
+    noise = dict(noise or {})
+    if reading == "replayed":
+        return {**noise, "floor": "replayed"}
+    fresh = noise.get("metrics_fresh_ranker")
+    if fresh:
+        return {**noise, "metrics": fresh, "floor": "fresh_ranker"}
+    return {**noise, "floor": "replayed_no_fresh_floor"}
+
+
 def _run_arm(tree: Path, label: str, env: dict, timeout: float = 900.0) -> dict | None:
     """Run the eval from `tree`, scoring the LIVE queries against a pinned corpus.
 
@@ -519,7 +563,7 @@ def _run_arm(tree: Path, label: str, env: dict, timeout: float = 900.0) -> dict 
     return _load_run(tree / "eval" / "baselines", label)
 
 
-def measure_noise(trials: int = 5) -> dict:
+def measure_noise(trials: int = 5, fresh_trials: int = 5) -> dict:
     """Record mean/stdev per metric on an unchanged tree. Run once, by hand.
 
     Runs inside the pinned corpus, because that is the condition the armed
@@ -527,16 +571,35 @@ def measure_noise(trials: int = 5) -> dict:
     describes a different experiment from the one it is used to judge — which
     is exactly how the doc-side metrics came to be armed on a "stdev 0.0000"
     that did not hold when it mattered.
+
+    Two floors, because the check has two conditions (`ranker_reading`):
+
+    * `metrics` — trial 0 plus `trials - 1` arms replaying trial 0's djev
+      answers: the condition of a comparison whose change left the ranker's
+      input alone. Deterministic when the pin is, and that is what it checks.
+    * `metrics_fresh_ranker` — trial 0 plus `fresh_trials - 1` arms that each
+      draw djev afresh: the spread djev's own answers put on the metrics, used
+      when the change moved what djev is asked.
+
+    A trial that the daemon or djev did not fully answer is dropped, not
+    scored, exactly as `check_promotion` refuses to score one.
     """
     import tempfile as _tf
     samples: dict[str, list[float]] = {}
+    fresh_samples: dict[str, list[float]] = {}
     dropped: list[str] = []
     work = Path(_tf.mkdtemp(prefix="automod-noise-pin-"))
+    db = work / "djev-replay.sqlite"
+    anchor = "trial-0"
+    ranker: dict = {}
     try:
         with PinnedCorpus(work) as pin:
             env = pin.env_for(code_root=LIVE_ROOT)
-            for i in range(trials):
-                run = _run_arm(LIVE_ROOT, f"automod-noise-{i}", env)
+            plan = [(f"trial-{i}", anchor, i == 0, True) for i in range(trials)]
+            plan += [(f"fresh-{j}", f"fresh-{j}", False, False) for j in range(1, fresh_trials)]
+            for arm, arm_anchor, is_anchor, replayed in plan:
+                run = _run_arm(LIVE_ROOT, f"automod-noise-{arm}",
+                               _replayed(env, db, arm, arm_anchor))
                 overall = (run or {}).get("overall")
                 if not overall:
                     continue
@@ -544,13 +607,24 @@ def measure_noise(trials: int = 5) -> dict:
                 # the eval's noise, exactly as `execute` refuses to score it.
                 unanswered = unanswered_doc_queries(run)
                 if unanswered:
-                    dropped.append(f"trial {i}: {', '.join(unanswered)}")
+                    dropped.append(f"{arm}: {', '.join(unanswered)}")
                     continue
-                _accumulate(samples, overall)
+                failed = {k: v for k, v in (replay_stats(db).get(arm) or {}).items()
+                          if k in REPLAY_FAILURES and v}
+                if failed:
+                    dropped.append(f"{arm}: djev {failed}")
+                    continue
+                if replayed:
+                    _accumulate(samples, overall)
+                if is_anchor or not replayed:
+                    _accumulate(fresh_samples, overall)
+            ranker = replay_stats(db)
             pin.discard()
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    return _summarise_noise(samples, trials, dropped=dropped)
+    return _summarise_noise(samples, trials, dropped=dropped,
+                            fresh_samples=fresh_samples, fresh_trials=fresh_trials,
+                            ranker=ranker)
 
 
 def _accumulate(samples: dict, overall: dict) -> None:
@@ -573,20 +647,28 @@ def queries_fingerprint() -> str:
         return ""
 
 
-def _summarise_noise(samples: dict, trials: int, *, dropped: list[str] | None = None) -> dict:
+def _summarise_noise(samples: dict, trials: int, *, dropped: list[str] | None = None,
+                     fresh_samples: dict | None = None, fresh_trials: int | None = None,
+                     ranker: dict | None = None) -> dict:
+    def summary(bucket: dict) -> dict:
+        return {k: {"mean": statistics.fmean(v),
+                    "stdev": (statistics.stdev(v) if len(v) > 1 else 0.0),
+                    "min": min(v), "max": max(v), "n": len(v)}
+                for k, v in bucket.items() if v}
+
     noise = {
         "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "trials": trials,
         "dropped_trials": list(dropped or []),
         "queries_fingerprint": queries_fingerprint(),
         "pinned": True,
-        "metrics": {
-            k: {"mean": statistics.fmean(v),
-                "stdev": (statistics.stdev(v) if len(v) > 1 else 0.0),
-                "min": min(v), "max": max(v), "n": len(v)}
-            for k, v in samples.items() if v
-        },
+        "metrics": summary(samples),
     }
+    if fresh_samples:
+        noise["fresh_trials"] = fresh_trials
+        noise["metrics_fresh_ranker"] = summary(fresh_samples)
+    if ranker:
+        noise["ranker"] = ranker
     NOISE_PATH.parent.mkdir(parents=True, exist_ok=True)
     NOISE_PATH.write_text(json.dumps(noise, indent=2), encoding="utf-8")
     return noise
@@ -809,7 +891,7 @@ def pending_promotions(now: float | None = None) -> list[dict]:
     events = S.read_events(limit=4000)
     checked = {str(e.get("commit") or "") for e in events
                if e.get("event") == "regression_check" and S.regression_measured(e)}
-    reverted = {str(e.get("commit") or "") for e in events if e.get("event") == "rollback_succeeded"}
+    reverted = S.reverted_commits(events)
     skips: dict[str, int] = {}
     for e in events:
         if e.get("event") == "regression_skipped" and e.get("commit"):
@@ -1082,6 +1164,7 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
     work = Path(tempfile.mkdtemp(prefix="automod-pin-"))
     baseline = current = confirm = None
     confirm_ran = False
+    ranker: dict = {}
     try:
         with PinnedCorpus(work) as pin:
             # Before anything is timed against it: the first query loads the
@@ -1100,8 +1183,15 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                         return _skip(commit, "worktree of the promoted commit failed — cannot evaluate")
                     # The baseline tree is the shared grep corpus for BOTH arms.
                     env = {**pin.env_for(code_root=wt), QMD_TIMEOUT_ENV: str(EVAL_QMD_TIMEOUT_S)}
-                    baseline = _run_arm(wt, "automod-paired-lkg", env)
-                    current = _run_arm(cur, "automod-check", env)
+                    # djev answers the same request differently each time, so
+                    # every arm runs under one replay file anchored on the
+                    # baseline: an identical rank request gets the baseline's
+                    # answer, a changed one a fresh draw (`ranker_reading`).
+                    replay_db = work / "djev-replay.sqlite"
+                    baseline = _run_arm(wt, "automod-paired-lkg",
+                                        _replayed(env, replay_db, ARM_BASELINE))
+                    current = _run_arm(cur, "automod-check",
+                                       _replayed(env, replay_db, ARM_CURRENT))
                     # A regression has to reproduce before anyone acts on it.
                     # Under a pinned corpus the armed metrics are deterministic,
                     # so a real one comes back the same; what does not is the
@@ -1110,9 +1200,15 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                     # false positive, this check's own two among them
                     # (2026-09-07: ndcg -0.006; 2026-09-17: one question lost to
                     # the client's timeout), and a second look costs one arm.
-                    if _would_regress(current, baseline, noise):
+                    if _would_regress(current, baseline, _floor_for(
+                            noise, ranker_reading(replay_stats(replay_db), ARM_CURRENT))):
                         confirm_ran = True
-                        confirm = _run_arm(cur, "automod-check-confirm", env)
+                        # Its own arm name: a request the change moved is drawn
+                        # again rather than replayed from the first current run,
+                        # so the second look is an independent draw of the ranker.
+                        confirm = _run_arm(cur, "automod-check-confirm",
+                                           _replayed(env, replay_db, ARM_CONFIRM))
+                    ranker = replay_stats(replay_db)
             pin.discard()
     except PinError as exc:
         # A comparison that quietly fell back to the live daemon would be the
@@ -1174,6 +1270,20 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                          f"{f', first: {first}' if first else ', no failure reported'}) — "
                          "cannot evaluate")
 
+    # djev not answering is the instrument, whichever arm it happened in: the
+    # recall falls back to the cross-encoder, so that arm ranked with a
+    # different ranker. On 2026-09-21 a check ran while djev was being
+    # restarted for an experiment (recall latency 2.0 s against 0.63 s) and
+    # rolled back a scheduler change for the difference.
+    for arm_label, arm_name in (("baseline", ARM_BASELINE), ("current", ARM_CURRENT)):
+        failed = {k: v for k, v in (ranker.get(arm_name) or {}).items()
+                  if k in REPLAY_FAILURES and v}
+        if failed:
+            return _skip(commit, f"djev did not answer {sum(failed.values())} rank request(s) "
+                                 f"in the {arm_label} arm ({failed}) — those recalls fell back to "
+                                 "the cross-encoder, so the arms ranked differently for a reason "
+                                 "that is not the change; cannot evaluate")
+
     # Provenance, not a gate. Under a pinned corpus every armed metric is
     # deterministic (re-measured 2026-09-17: five trials agree to 0.0000), so
     # the measured stdev is 0.0 and the tolerance falls back to the MIN_SIGMA
@@ -1185,8 +1295,13 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
     # -0.05 doc_hit_rate, and a floor wide enough to absorb it would also
     # absorb a real regression of one query.
     stale_floor = (noise.get("queries_fingerprint") or "") != queries_fingerprint()
+    # Which floor: replayed (the ranker a pure function of its input, so the
+    # pinned floor holds) or fresh (the change moved what djev was asked, so its
+    # own noise is in the comparison). `ranker_reading` says which.
+    reading = ranker_reading(ranker, ARM_CURRENT)
+    floor_noise = _floor_for(noise, reading)
 
-    regressed, reasons, detail = evaluate(current["overall"], baseline["overall"], noise,
+    regressed, reasons, detail = evaluate(current["overall"], baseline["overall"], floor_noise,
                                           CONTEXT_PAIRED_CHECK)
     unconfirmed: list[str] = []
     confirmed_by: list[str] = []
@@ -1218,8 +1333,9 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                    if empty_fact_leg(confirm) else "")
                 + (f", {fact_cov['n_fact_reads_failed_total']} entity fact read(s) failed"
                    if fact_cov.get("n_fact_reads_failed_total") else "no fact read failed"))
-        again, confirmed_by, detail_again = evaluate(confirm["overall"], baseline["overall"],
-                                                     noise, CONTEXT_PAIRED_CHECK)
+        again, confirmed_by, detail_again = evaluate(
+            confirm["overall"], baseline["overall"],
+            _floor_for(noise, ranker_reading(ranker, ARM_CONFIRM)), CONTEXT_PAIRED_CHECK)
         if not again:
             # Same code, same corpus, same questions, a different answer: that
             # is a finding about the instrument, and it is recorded as one.
@@ -1264,6 +1380,8 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                     "reasons": reasons, "fact_side_reasons": fact_side,
                     "stage": stage, "baseline_commit": baseline_commit,
                     "pin": pin_provenance, "noise_floor_stale": stale_floor,
+                    "ranker": {"arms": ranker, "reading": reading,
+                               "floor": floor_noise.get("floor")},
                     "latency_budget": latency_reading,
                     OVER_BUDGET_FIELD: latency_verdict,
                     # What a second run of the same arm said about a regression
@@ -1295,18 +1413,35 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`python -m scripts.automod.regression_runner run|pending|latest`.
+    """`python -m scripts.automod.regression_runner run|pending|latest|noise`.
 
     `run` is what `start_runner` and the promoter spawn, detached. It logs to
     stderr (the caller points that at `regression.log`) and prints one JSON
-    line per promotion it measured."""
+    line per promotion it measured. `noise` re-measures both noise floors
+    (`measure_noise`) under the same lock, so no check reads a half-written
+    floor or shares the pinned daemon with the measurement."""
     import argparse
     ap = argparse.ArgumentParser(description="Paired behavioural-regression check")
-    ap.add_argument("command", choices=("run", "pending", "latest"))
+    ap.add_argument("command", choices=("run", "pending", "latest", "noise"))
     ap.add_argument("--max", type=int, default=None, help="stop after this many checks")
+    ap.add_argument("--trials", type=int, default=5, help="noise: replayed trials")
+    ap.add_argument("--fresh-trials", type=int, default=5, help="noise: fresh-ranker trials")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    if args.command == "noise":
+        from scripts.automod import state as S
+        try:
+            lock = S.Lock(S.STATE_DIR / REGRESSION_LOCK,
+                          owner=f"regression-noise-{os.getpid()}").acquire()
+        except S.LockHeld:
+            print("a regression runner holds regression.lock; try again when it is done")
+            return 3
+        try:
+            print(json.dumps(measure_noise(args.trials, args.fresh_trials), indent=2))
+        finally:
+            lock.release()
+        return 0
     if args.command == "pending":
         print(json.dumps(pending_promotions(), indent=2))
         return 0

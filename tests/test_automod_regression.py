@@ -622,10 +622,10 @@ def test_measure_noise_drops_a_trial_the_daemon_did_not_answer(monkeypatch, tmp_
     monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "noise.json")
     runs = iter([_arm(2, []), _arm(2, ["q1"], doc_hit_rate=0.3), _arm(2, [])])
     monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(runs))
-    noise = R.measure_noise(3)
+    noise = R.measure_noise(3, fresh_trials=1)
     assert noise["metrics"]["doc_hit_rate"]["n"] == 2
     assert noise["metrics"]["doc_hit_rate"]["stdev"] == 0.0
-    assert noise["dropped_trials"] == ["trial 1: q1"]
+    assert noise["dropped_trials"] == ["trial-1: q1"]
 
 
 # ---------------------------------------------------------------------------
@@ -953,3 +953,159 @@ def test_a_null_armed_metric_is_never_compared_and_never_crashes():
     # out of nowhere.
     assert R.evaluate(base(**{"fact_entity_recall_avg": 0.375}), null_current,
                       ZERO_NOISE)[0] is False
+
+
+# ---------------------------------------------------------------------------
+# djev in the loop (2026-09-21): replay, refusal, and which floor
+# ---------------------------------------------------------------------------
+#
+# Two promotions that touched no retrieval code were rolled back that day for a
+# doc_hit drop of one query. djev had begun ranking every recall a few hours
+# earlier, and it does not repeat itself: identical requests came back with
+# label logprobs 1-3 nats apart. The first check compared two draws of it; the
+# second ran while djev was being restarted for an experiment, so part of one
+# arm fell back to the cross-encoder. Each arm now runs under a replay file
+# (`app.djev.replay_env`) and these tests pin what the check does with it.
+
+from app import djev as _djev  # noqa: E402
+
+FRESH_FLOOR = {k: {"stdev": 0.01} for k in R.ARMED_METRICS}
+
+
+def _replay_arms(outcomes: dict, blobs: dict, seen: list | None = None):
+    """`_run_arm` that records djev outcomes for its arm in the check's replay
+    file, as the real client would, and returns the arm by label."""
+    def run(_tree, label, env):
+        arm = env[_djev.REPLAY_ARM_ENV]
+        if seen is not None:
+            seen.append((label, arm, env[_djev.REPLAY_ANCHOR_ENV]))
+        conf = (env[_djev.REPLAY_ENV], arm, env[_djev.REPLAY_ANCHOR_ENV])
+        for outcome, n in (outcomes.get(arm) or {}).items():
+            for _ in range(n):
+                _djev._replay_note(conf, outcome)
+        if "lkg" in label:
+            return blobs["baseline"]
+        return blobs["confirm" if "confirm" in label else "current"]
+    return run
+
+
+def _replay_check_env(monkeypatch, tmp_path, *, fresh_floor: bool = True):
+    import scripts.automod.state as S
+    requested = _fact_check_env(monkeypatch, tmp_path)
+    noise = dict(ZERO_NOISE)
+    if fresh_floor:
+        noise["metrics_fresh_ranker"] = FRESH_FLOOR
+    (tmp_path / "noise.json").write_text(json.dumps(noise))
+    events: list = []
+    monkeypatch.setattr(S, "append_event", lambda e, *a, **k: events.append(e))
+    monkeypatch.setattr(S, "write_eval_last", lambda payload: None)
+    return requested, events
+
+
+@pytest.mark.parametrize("failing", ["baseline", "current"])
+def test_djev_not_answering_in_either_arm_is_a_skip_not_a_rollback(monkeypatch, tmp_path, failing):
+    """2026-09-21 21:44Z: dbec85aa changed only the scheduler and was rolled back
+    for doc_hit -0.011, measured while djev was down for an experiment."""
+    requested, _ = _replay_check_env(monkeypatch, tmp_path)
+    outcomes = {"baseline": {"fresh": 81}, "current": {"replayed_anchor": 81}}
+    outcomes[failing] = {"fresh": 70, "unreachable": 11}
+    monkeypatch.setattr(R, "_run_arm", _replay_arms(outcomes, {
+        "baseline": _arm(81, []), "current": _arm(81, [], doc_hit_rate=0.589),
+        "confirm": _arm(81, [], doc_hit_rate=0.589)}))
+    out = R._execute_blocking()
+    assert out["status"] == "skipped", out
+    assert f"djev did not answer 11 rank request(s) in the {failing} arm" in out["skipped"]
+    assert requested == [], "an arm djev did not answer must never request a rollback"
+
+
+def test_a_replayed_ranker_is_judged_on_the_pinned_floor(monkeypatch, tmp_path):
+    """Every rank request the change made was one the baseline asked, so djev
+    answered it identically: a drop is the change, on the pinned floor."""
+    requested, events = _replay_check_env(monkeypatch, tmp_path)
+    seen: list = []
+    drop = _arm(81, [], doc_hit_rate=0.588)
+    monkeypatch.setattr(R, "_run_arm", _replay_arms(
+        {"baseline": {"fresh": 81}, "current": {"replayed_anchor": 81},
+         "confirm": {"replayed_anchor": 81}},
+        {"baseline": _arm(81, []), "current": drop, "confirm": dict(drop)}, seen))
+    out = R._execute_blocking()
+    assert out["regressed"] is True and requested, out
+    check = next(e for e in events if e.get("event") == "regression_check")
+    assert check["ranker"]["reading"] == "replayed"
+    assert check["ranker"]["floor"] == "replayed"
+    # Every arm is anchored on the baseline, and the confirm run is its own arm,
+    # so a request the change moved is drawn again rather than replayed.
+    assert [(arm, anchor) for _l, arm, anchor in seen] == [
+        ("baseline", "baseline"), ("current", "baseline"), ("confirm", "baseline")]
+
+
+def test_a_changed_ranker_input_is_judged_on_the_fresh_floor(monkeypatch, tmp_path):
+    """The change moved what djev was asked for five recalls, so those answers
+    are single draws of a ranker that does not repeat itself: one query's worth
+    of movement is inside the fresh floor and rolls nothing back."""
+    requested, events = _replay_check_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(R, "_run_arm", _replay_arms(
+        {"baseline": {"fresh": 81}, "current": {"fresh": 5, "replayed_anchor": 76}},
+        {"baseline": _arm(81, []), "current": _arm(81, [], doc_hit_rate=0.588),
+         "confirm": _arm(81, [], doc_hit_rate=0.588)}))
+    out = R._execute_blocking()
+    assert out["regressed"] is False and requested == [], out
+    check = next(e for e in events if e.get("event") == "regression_check")
+    assert check["ranker"] == {"arms": {"baseline": {"fresh": 81},
+                                        "current": {"fresh": 5, "replayed_anchor": 76}},
+                               "reading": "fresh", "floor": "fresh_ranker"}
+
+
+def test_a_fresh_draw_with_no_fresh_floor_says_so(monkeypatch, tmp_path):
+    """A floor file measured before replay existed has no fresh floor; the check
+    keeps the pinned one and records that it had nothing better."""
+    _requested, events = _replay_check_env(monkeypatch, tmp_path, fresh_floor=False)
+    monkeypatch.setattr(R, "_run_arm", _replay_arms(
+        {"baseline": {"fresh": 81}, "current": {"fresh": 81}},
+        {"baseline": _arm(81, []), "current": _arm(81, []), "confirm": _arm(81, [])}))
+    R._execute_blocking()
+    check = next(e for e in events if e.get("event") == "regression_check")
+    assert check["ranker"]["floor"] == "replayed_no_fresh_floor"
+
+
+def test_ranker_reading_is_unknown_for_an_arm_that_left_no_record():
+    """Code from before replay writes nothing, and says nothing either way."""
+    assert R.ranker_reading({}, "current") == "unknown"
+    assert R.ranker_reading({"current": {"replayed_anchor": 3}}, "current") == "replayed"
+    assert R.ranker_reading({"current": {"replayed_anchor": 3, "fresh": 1}}, "current") == "fresh"
+
+
+def test_measure_noise_records_both_floors(monkeypatch, tmp_path):
+    """Replayed trials anchor on trial 0 and must agree; fresh trials each draw
+    djev on their own and carry its spread."""
+    monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _FakePin())
+    monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "noise.json")
+    seen: list = []
+
+    def run(_tree, label, env):
+        seen.append((env[_djev.REPLAY_ARM_ENV], env[_djev.REPLAY_ANCHOR_ENV]))
+        if "fresh" in label:
+            return _arm(2, [], doc_hit_rate=0.6 + 0.02 * len(seen))
+        return _arm(2, [])
+
+    monkeypatch.setattr(R, "_run_arm", run)
+    noise = R.measure_noise(3, fresh_trials=3)
+    assert seen == [("trial-0", "trial-0"), ("trial-1", "trial-0"), ("trial-2", "trial-0"),
+                    ("fresh-1", "fresh-1"), ("fresh-2", "fresh-2")]
+    assert noise["metrics"]["doc_hit_rate"] == {"mean": 0.6, "stdev": 0.0, "min": 0.6,
+                                                "max": 0.6, "n": 3}
+    fresh = noise["metrics_fresh_ranker"]["doc_hit_rate"]
+    assert fresh["n"] == 3 and fresh["stdev"] > 0.0
+    assert json.loads((tmp_path / "noise.json").read_text())["metrics_fresh_ranker"]
+
+
+def test_measure_noise_drops_a_trial_djev_did_not_answer(monkeypatch, tmp_path):
+    monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _FakePin())
+    monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "noise.json")
+    monkeypatch.setattr(R, "_run_arm", _replay_arms(
+        {"trial-1": {"unreachable": 2}},
+        {"baseline": _arm(2, []), "current": _arm(2, [], doc_hit_rate=0.1),
+         "confirm": _arm(2, [])}))
+    noise = R.measure_noise(3, fresh_trials=1)
+    assert noise["dropped_trials"] == ["trial-1: djev {'unreachable': 2}"]
+    assert noise["metrics"]["doc_hit_rate"]["n"] == 2

@@ -226,8 +226,9 @@ RECALL_COLLECTION_FLOOR = {"autonomy": 5, "architecture": 5, "skills": 5}
 #       paired: doc_hit +0.023 [-0.057,+0.103]  doc_recall -0.005 [-0.067,+0.058]
 #               MRR +0.055 [-0.011,+0.122]      NDCG +0.041 [-0.028,+0.109]
 #
-# Equivalent on every metric and 4x faster, which is a win by Alan's rule. One
-# read is deterministic (a repeat was identical on 87/87 queries); `samples:
+# Equivalent on every metric and 4x faster, which is a win by Alan's rule. A
+# repeat of one read gave the same outcome on 87/87 queries, though its scores
+# do not repeat exactly (`architecture/djev.md` §8.2); `samples:
 # "auto"` cost 200 ms and ranked worse; 100 chars lost hits and 240 ranked
 # worse. The ceiling is the pool, not djev: no ~32-row pool holds as many
 # findable documents as collection-240 did, and djev cannot rank more than the

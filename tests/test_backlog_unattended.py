@@ -1321,7 +1321,9 @@ def test_a_reverted_promotion_gives_the_item_one_more_go(isolated):
                     "restored": "cafe123"}, path=S.LEDGER_PATH)
     verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[395]
     assert verdict == "rolled_back"
-    assert "guardian tag" in detail, "the branch is deleted at landing; say where the tree is"
+    assert "guardian tag" in detail and "deadbee" in detail, (
+        "the landed commit outlives the rollback; say which one to cherry-pick")
+    assert "refs/automod/rounds/SM_395" in detail
     assert 395 not in B.implemented_ids(S.LEDGER_PATH)
 
 
@@ -3396,3 +3398,133 @@ def test_no_board_reader_keeps_a_private_unanchored_fence_split():
             f"{rel} no longer calls the shared anchored rule; the two checks above "
             "would also pass on a module that had stopped reading board markdown, "
             "which is not the guarantee this test is for")
+
+
+# ===========================================================================
+# A landing a reset took off main is not a landing (2026-09-21)
+#
+# A regression check blamed a802b979 (#763) while 1e219da9 (#1038) sat on top of
+# it under observation. The guardian reset from 1e219da9 to their common parent
+# c1ca704e and wrote `rollback_succeeded {commit: 1e219da9}`, so every reader
+# that took that one commit as "what was reverted" still saw a802b979 as a
+# settled landing. #763 closed as landed a minute after its change was gone;
+# an hour later #939 (dbec85aa) closed six minutes before the same thing
+# happened to it. `state.reverted_commits` is the one definition now, and
+# `reopen_reverted_landings` gives back what was already closed.
+# ===========================================================================
+
+C1, A8, E1 = "c1ca704e" + "0" * 32, "a802b979" + "0" * 32, "1e219da9" + "0" * 32
+DB, ED = "dbec85aa" + "0" * 32, "edc8ec60" + "0" * 32
+MET = {"acceptance": "met", "landed": True, "deferred_to": [], "summary": "done", "spawned": []}
+
+
+def _promote(item_id, rid, commit, parent, *, settle=True):
+    S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "finished",
+                    "round_id": rid, "stop_reason": "stop", "num_turns": 40, "outcome": MET},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "promoted", "round_id": rid, "commit": commit, "parent": parent},
+                   path=S.LEDGER_PATH)
+    if settle:
+        S.append_event({"event": "settled", "commit": commit}, path=S.LEDGER_PATH)
+
+
+def _regression_rollback(blamed, head, target):
+    """What the check and the guardian wrote, field for field."""
+    S.append_event({"event": "rollback_requested", "trigger": "regression",
+                    "target": target, "commit": blamed}, path=S.LEDGER_PATH)
+    S.append_event({"event": "rollback_succeeded", "trigger": "regression", "commit": head,
+                    "restored": target, "target": target, "route": "reset",
+                    "head_before": head}, path=S.LEDGER_PATH)
+
+
+def test_reverted_commits_counts_what_a_reset_removed_without_naming_it():
+    rows = [{"event": "promoted", "commit": C1, "parent": "e7bb4280"},
+            {"event": "promoted", "commit": A8, "parent": C1},
+            {"event": "promoted", "commit": E1, "parent": A8},
+            {"event": "rollback_requested", "commit": A8, "target": C1},
+            {"event": "rollback_succeeded", "commit": E1, "restored": C1,
+             "route": "reset", "head_before": E1}]
+    assert S.reverted_commits(rows) == {A8, E1}
+
+
+def test_a_revert_route_takes_only_its_commit():
+    rows = [{"event": "promoted", "commit": A8, "parent": C1},
+            {"event": "promoted", "commit": E1, "parent": A8},
+            {"event": "rollback_requested", "commit": A8, "target": C1},
+            {"event": "rollback_succeeded", "commit": A8, "restored": "f00d", "route": "revert",
+             "head_before": E1}]
+    assert S.reverted_commits(rows) == {A8}
+
+
+def test_a_rollback_that_names_no_restore_point_does_not_walk_to_the_root():
+    """The promoter's inline rollback carries `restored`; an older row may not,
+    and walking the parent chain without a stop would revert every ancestor."""
+    rows = [{"event": "promoted", "commit": C1, "parent": "e7bb4280"},
+            {"event": "promoted", "commit": A8, "parent": C1},
+            {"event": "rollback_succeeded", "commit": A8}]
+    assert S.reverted_commits(rows) == {A8}
+
+
+def test_a_landing_reset_away_under_a_later_promotion_does_not_close(isolated):
+    """The first incident's order: the rollback is on the ledger before the
+    closer runs. Neither item closes, and #763 is re-offered naming its commit."""
+    write_item(isolated, 763, status="up_next")
+    write_item(isolated, 1038, status="up_next")
+    _promote(763, "SM_763", A8, C1)
+    _promote(1038, "SM_1038", E1, A8, settle=False)
+    _regression_rollback(A8, E1, C1)
+    assert B.close_settled_items(S.LEDGER_PATH) == []
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[763]
+    assert verdict == "rolled_back" and A8[:12] in detail
+    assert B.implement_outcomes(S.LEDGER_PATH)[1038][0] == "rolled_back"
+    assert B.reopen_reverted_landings(S.LEDGER_PATH) == []
+
+
+def test_an_item_closed_before_its_landing_was_reverted_is_reopened(isolated):
+    """The second incident's order: #939 closed on settle, then the check
+    reverted it. It goes back to `up_next` with the commit to cherry-pick."""
+    p = write_item(isolated, 939, status="up_next")
+    _promote(939, "SM_939", DB, C1)
+    assert B.close_settled_items(S.LEDGER_PATH)[0]["closed"] is True
+    assert _fm(p)["status"] == "done"
+    _promote(1038, "SM_1038b", ED, DB, settle=False)
+    _regression_rollback(DB, ED, C1)
+
+    out = B.reopen_reverted_landings(S.LEDGER_PATH)
+    assert out == [{"item_id": 939, "commit": DB, "to": "up_next", "verdict": "rolled_back"}]
+    fm = _fm(p)
+    assert fm["status"] == "up_next"
+    assert fm[B.REVERTED_MARKER] == DB and B.LANDED_MARKER not in fm
+    assert "was reverted by the guardian" in fm["activity_log"][-1]
+    assert "cherry-pick" in fm["activity_log"][-1]
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_reopened"]
+    assert ev and ev[-1]["item_id"] == 939 and ev[-1]["by"] == "rollback"
+    assert B.reopen_reverted_landings(S.LEDGER_PATH) == [], "once"
+    assert 939 in {i.id for i in B.open_items(None)}
+
+
+def test_an_item_a_human_closed_is_never_reopened(isolated):
+    """No `item_landed` close of that commit on the ledger, no reopen: the loop
+    will not reopen an item a person closed."""
+    p = write_item(isolated, 940, status="up_next")
+    _promote(940, "SM_940", DB, C1)
+    B.set_status(940, "draft", "test")
+    fm, body = B._split_frontmatter(p.read_text())
+    fm["status"], fm[B.LANDED_MARKER] = "done", DB
+    p.write_text(f"---\n{yaml.dump(fm)}---\n{body}")
+    _regression_rollback(DB, DB, C1)
+    assert B.reopen_reverted_landings(S.LEDGER_PATH) == []
+    assert _fm(p)["status"] == "done"
+
+
+def test_board_pass_reopens_a_reverted_landing(isolated, monkeypatch):
+    from scripts.automod import round as RD
+    p = write_item(isolated, 941, status="up_next")
+    _promote(941, "SM_941", DB, C1)
+    B.close_settled_items(S.LEDGER_PATH)
+    _regression_rollback(DB, DB, C1)
+    out = RD.board_pass()
+    assert out["reopened_reverted"] == [941]
+    assert _fm(p)["status"] == "up_next"

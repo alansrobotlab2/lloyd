@@ -62,7 +62,8 @@ def landed_rounds(ledger: Path) -> list[dict]:
                 if e.get("event") == "backlog_implement" and e.get("phase") == "finished"
                 and e.get("round_id")}
     settled = {e.get("commit") for e in events if e.get("event") == "settled"}
-    reverted = {e.get("commit") for e in events if e.get("event") == "rollback_succeeded"}
+    from scripts.automod import state as S
+    reverted = S.reverted_commits(events)
     out = []
     for e in events:
         if e.get("event") != "promoted":
