@@ -239,6 +239,21 @@ TTS_VOICE="$PROJECT_DIR/services/tts/qwen3-tts/voice_library/profiles/dave_culle
 step "9/9  supervisord + systemd"
 run bash "$PROJECT_DIR/setup/install-services.sh"
 
+# Thunderbird MCP bridge — the gitignored Node bridge (mcp-bridge.cjs) that
+# backs the aggregator's 40 email/calendar/contacts/to-do tools. Its directory
+# is gitignored and `thunderbird.list_tools()` degrades to an EMPTY list — still
+# "ok", no degraded_module, no alert — when the file is absent, so a fresh clone
+# serves 117 tools instead of 157 with `git status` clean. Nothing else surfaces
+# this. SETUP.md Part 13, "Thunderbird bridge".
+TB_BRIDGE="$PROJECT_DIR/services/thunderbird-mcp/mcp-bridge.cjs"
+if [[ ! -f "$TB_BRIDGE" ]]; then
+    todo "Thunderbird MCP bridge missing — 40 email/calendar/contacts tools will be absent. Run: bash agent-services/setup/setup-thunderbird-mcp.sh"
+elif ss -ltn 2>/dev/null | grep -qE '[:.]8765( |$)'; then
+    ok "thunderbird-mcp bridge present, Thunderbird MCP extension live on :8765"
+else
+    warn "thunderbird-mcp bridge present but nothing on :8765 — Thunderbird or its MCP extension is down; those 40 tools will not be served (systemctl --user status thunderbird)"
+fi
+
 echo
 echo "============================================"
 if (( ${#MANUAL[@]} )); then

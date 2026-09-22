@@ -1253,6 +1253,7 @@ its own source, and `git status` stays clean while every one of them is missing:
 | `qmd/` | its own repo: `git clone -b lloyd https://github.com/alansrobotlab2/qmd.git qmd && cd qmd && npm install && npm run build` |
 | `agent-services/services/tts/qwen3-tts/` | Part 8 — upstream clone + `qwen3-tts-local.patch` |
 | `…/qwen3-tts/voice_library/profiles/dave_cullen/` | Part 8 — rebuilt from the vault, not a backup |
+| `agent-services/services/thunderbird-mcp/` | `setup/setup-thunderbird-mcp.sh` — clones + builds the Node bridge; **gitignored, and its absence silently drops 40 email/calendar/contacts/to-do tools with `git status` clean** (see the Thunderbird bridge subsection below) |
 | `web/node_modules`, `qmd/dist` | `npm ci` / `npm run build` |
 | runtime dirs (`logs/`, `sessions/`, …) | Part 3 |
 
@@ -1271,6 +1272,43 @@ git --git-dir=~/lloyd-sandbox/.git for-each-ref --format='%(refname)' refs/remot
 Anything committed locally but never pushed is gone. The guardian's
 `last_known_good.json` is a good place to find out what you lost: on 09-22 it
 pointed at `3e8748fd`, a commit that no longer existed anywhere.
+
+### Thunderbird bridge (email / calendar / contacts — 40 tools)
+
+The aggregator's `thunderbird` module re-exports a **Node MCP bridge**
+(`mcp-bridge.cjs`, from [TKasperczyk/thunderbird-mcp](https://github.com/TKasperczyk/thunderbird-mcp))
+that talks to the Thunderbird MCP extension over stdio → `127.0.0.1:8765`.
+That bridge directory is **gitignored** (`agent-services/.gitignore` →
+`services/thunderbird-mcp/`), and the module degrades to an *empty* tool list —
+still `ok`, no alert — when the bridge file is missing.
+
+**This is the single easiest thing to lose silently in a restore.** On 09-22 a
+fresh `git clone` produced a clean tree whose aggregator served **117 tools**
+instead of **157**: the missing 40 were all of Thunderbird's
+(`email_*`, `calendar_*`, `tasks_*`, `contacts_*`). `git status` was clean,
+`degraded_modules` was `[]`, and the tool count simply read low.
+
+Restore (needs Thunderbird 102+ running with the `.xpi` on `:8765`, and Node 18+):
+
+```bash
+bash agent-services/setup/setup-thunderbird-mcp.sh   # clones + npm-installs → mcp-bridge.cjs + dist/thunderbird-mcp.xpi
+# The .xpi only needs installing into Thunderbird once (Add-ons → Install from
+# File → dist/thunderbird-mcp.xpi). Verify the extension is live before
+# restarting the aggregator — a bridge with nothing to talk to returns 0 too:
+ss -ltnp | grep 8765                                   # expect thunderbird LISTEN
+( echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'; sleep 3 ) \
+  | node agent-services/services/thunderbird-mcp/mcp-bridge.cjs | head -c 200  # expect "tools":40 names
+.venvs/lloyd/bin/python -m scripts.automod.round restart --only lloyd-mcp \
+  --reason "restored thunderbird-mcp bridge"           # re-discovers the 40 tools
+curl -s localhost:8500/health | python -c "import json,sys; d=json.load(sys.stdin); print(d['tools'], d['discovery']['thunderbird'])"
+# expect: 157 {'tools': 40, 'ok': True, 'error': None}
+```
+
+If `:8765` is not listening, Thunderbird or its extension is not up
+(`systemctl --user status thunderbird`; the MCP extension is a separate install
+from the bridge — the bridge is only the stdio↔socket proxy). `setup-all.sh
+--check` does **not** test for this path; nothing else surfaces it either, which
+is the whole reason it was missed once.
 
 ### Do not restore from `~/lloyd-sandbox`
 
