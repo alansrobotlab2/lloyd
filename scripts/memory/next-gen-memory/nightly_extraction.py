@@ -15,9 +15,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-# Content hashing for incremental processing
-sys.path.insert(0, str(Path.home() / "lloyd" / "scripts" / "memory"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
+# Import resolution follows THIS file, never the live checkout (#755). The
+# `content_hasher` insert used to be hardcoded to `Path.home() / "lloyd" /
+# "scripts" / "memory"`, so a run from a self-mod worktree or any copy of the
+# checkout measured a hybrid: a worktree `nightly_extraction` hashing with a
+# live-tree `content_hasher`. That is the shape of a paired before/after
+# extraction run, and it is silent — both modules import cleanly.
+#
+# State paths further down (log, pre-clean backups, graph dir, lock) stay
+# home-absolute on purpose: a worktree that runs the nightly must still write
+# the live `_pipeline`, so only import resolution is tree-relative.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_REPO_ROOT / "scripts" / "memory"))  # content_hasher
+sys.path.insert(0, str(_REPO_ROOT))                         # app.*
 from app.atomic_io import hash_bytes  # noqa: E402
 from fact_extractor import ExtractionFailed  # noqa: E402
 
@@ -29,10 +39,9 @@ except ImportError:
 
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
+sys.path.insert(0, str(_REPO_ROOT))
 from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 VAULT = Path.home() / "obsidian"
-MEMORY_DIR = VAULT / "memory"
 # No index path belongs here (#1148). This module reaches both indexes through
 # `self.rel_generator`: `rebuild()` writes that module's own
 # `_pipeline/relations-index-typed.json`, and the derived
@@ -41,9 +50,14 @@ MEMORY_DIR = VAULT / "memory"
 # here while two scripts still wrote it, which is exactly the kind of pointer
 # that re-arms a clobber.
 
-# Import local modules
-sys.path.insert(0, str(VAULT / "agents" / "memory" / "scripts" / "next-gen-memory"))
-
+# Local sibling modules. These resolve off the directory this file runs from:
+# as a script that is this directory; loaded by path, the caller injects it
+# (`scripts/memory/kg_rebuild.py::_corpus_size` does). The insert of
+# `VAULT / "agents" / "memory" / "scripts" / "next-gen-memory"` that used to sit
+# here pointed at a directory that does not exist, and while it was inert its
+# mere presence put a tree outside the checkout ahead of the caller's entry —
+# so which `fact_extractor` these three names bound to depended on which tree
+# invoked the script (#755).
 from fact_extractor import FactExtractor
 from relations_index import RelationsIndexGenerator
 from profile_generator import ProfileGenerator

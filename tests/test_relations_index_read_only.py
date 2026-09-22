@@ -427,12 +427,14 @@ def test_no_write_target_falls_under_the_vault_or_the_live_index(generator, vaul
 
 # --- clause 5: the nightly path ---------------------------------------------
 
-# The four names `nightly_extraction.py` resolves off its own directory rather
-# than as a package: `from content_hasher import …` at :25,
-# `from fact_extractor import …` at :22/:41, `from relations_index import …` at
-# :42, `from profile_generator import …` at :43. A `sys.modules` hit under any of
-# them is used *before* `sys.path` is consulted, so injecting a path is not enough
-# to decide which file the nightly binds — the cache has to be cleared first.
+# The four names `nightly_extraction.py` imports by bare name rather than as a
+# package, line numbers as of #755: `from content_hasher import …` at :35 — one
+# directory up, reached by the `scripts/memory` insert at :29, which #755 made
+# `__file__`-derived — and `from fact_extractor import …` at :32/:61,
+# `from relations_index import …` at :62, `from profile_generator import …` at :63.
+# A `sys.modules` hit under any of them is used *before* `sys.path` is consulted,
+# so injecting a path is not enough to decide which file the nightly binds — the
+# cache has to be cleared first.
 SIBLING_IMPORTS = ("content_hasher", "fact_extractor", "relations_index", "profile_generator")
 
 
@@ -441,7 +443,7 @@ def nightly_module():
     """`nightly_extraction.py` actually imported, for the clause-5 seam.
 
     The file is a script, not an importable package module: it binds
-    `RelationsIndexGenerator` with a bare `from relations_index import …` at :42,
+    `RelationsIndexGenerator` with a bare `from relations_index import …` at :62,
     which resolves only because running it as a script puts its own directory on
     `sys.path`. `importlib` does not do that for a file loaded by path, so this
     fixture injects the directory first — and then evicts the four sibling names
@@ -463,12 +465,16 @@ def nightly_module():
     Teardown restores `sys.path` to the list it found and each sibling name to
     whatever was cached before (or to absent, if nothing was), so a later test
     still gets exactly the module it would have got had this fixture never run.
-    Anything else the exec pulled off the injected directory goes with it. The
-    nightly's own :39 insert of
-    `~/obsidian/agents/memory/scripts/next-gen-memory` — deleted from the vault on
-    2026-09-03 — lands *ahead* of this fixture's entry, which is the second reason
-    eviction rather than insertion carries this: if that directory ever comes back
-    with these modules in it, the origin assert is what says so.
+    Anything else the exec pulled off the injected directory goes with it. Until
+    #755 the nightly also built two of its own `sys.path` entries from outside this
+    tree — a hardcoded `~/lloyd/scripts/memory` for `content_hasher`, and an insert
+    of `~/obsidian/agents/memory/scripts/next-gen-memory`, a path that does not
+    exist here — either of which lands *ahead* of this fixture's entry and can bind
+    a worktree run to live-checkout modules. #755 made every entry
+    `__file__`-derived and dropped the dead one;
+    `tests/test_nightly_extraction_import_paths.py` pins that. The eviction above is
+    still what carries this fixture, because a `sys.modules` hit from
+    `tests/test_extraction_single_instance.py` beats any injected path.
     """
     injected = str(NIGHTLY.parent)
     injected_dir = Path(injected).resolve()
