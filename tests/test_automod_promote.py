@@ -135,6 +135,30 @@ def test_promote_refuses_uncommitted_live_edits_only_in_the_rounds_own_files(mon
     ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "land_failed"]
     assert ev and ev[-1]["external_blocker"] is True and ev[-1]["overlap"] == ["app/x.py"]
 
+    # #1038, pinned two ways. (a) With TWO overlapping paths both the raised
+    # message and the `land_failed` row name every one of them: the ledger line
+    # is the only thing a person reading it days later has for finding the other
+    # author. (b) Neither may tell the round to get the dirt out of the way. The
+    # way to do that is the live checkout's one global LIFO stash stack, shared
+    # by every author, and following the old wording is what cost #573 its only
+    # recovered copy of a 136-line diff when an unrelated round popped it.
+    monkeypatch.setattr(P.W, "changed_paths", lambda wt, base: ["app/x.py", "app/y.py"])
+    monkeypatch.setattr(P.W, "dirty_paths",
+                        lambda repo, limit=None: ["app/x.py", "app/y.py", "docs/n.md"])
+    with pytest.raises(P.PromoteError, match=r"app/y\.py") as two:
+        P.promote("SM_X", tmp_path, "a" * 40, dry_run=True)
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "land_failed"]
+    assert ev[-1]["external_blocker"] is True
+    assert ev[-1]["overlap"] == ["app/x.py", "app/y.py"]
+    assert "app/x.py" in str(two.value) and "app/y.py" in str(two.value), \
+        f"the refusal names only some of the overlapping paths: {two.value}"
+    assert "app/x.py" in ev[-1]["detail"] and "app/y.py" in ev[-1]["detail"], \
+        f"the ledger row names only some: {ev[-1]['detail']}"
+    assert "stash" not in str(two.value).lower(), \
+        f"the refusal may ask for a report, never for a stash: {two.value}"
+    assert "stash" not in ev[-1]["detail"].lower(), \
+        f"the ledger row must not tell anyone to stash: {ev[-1]['detail']}"
+
     monkeypatch.setattr(P.W, "dirty_paths", lambda repo, limit=None: ["docs/n.md"])
     out = P.promote("SM_X", tmp_path, "a" * 40, dry_run=True)
     assert out["would_promote"] is True

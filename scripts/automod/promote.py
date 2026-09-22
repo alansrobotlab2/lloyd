@@ -1114,9 +1114,20 @@ def promote(round_id: str, worktree: Path, base: str, *,
     live_dirty = W.dirty_paths(live)
     overlap = sorted(set(live_dirty) & set(changed))
     if overlap:
+        # Same contract as the gate's preflight refusal, same reason the wording
+        # is pinned by a test (#1038). This string is what a person reads in the
+        # ledger days later to find the other author, so it names every
+        # overlapping path and asks for a report. It must never suggest getting
+        # the dirt out of the way: that route is the live checkout's one global
+        # LIFO working-tree stack, shared by every author, from which a round
+        # implementing an unrelated item already popped #573's only recovered
+        # copy of a 136-line diff on 2026-09-11.
         _land_failed(round_id,
                      f"live tree has uncommitted edits in paths this round also changes: "
-                     f"{overlap} — commit or stash the live edit, then land again",
+                     f"{overlap} — two writers on one file. Report the paths and who is "
+                     f"editing them; the live edit is not yours to commit and not yours "
+                     f"to move out of the tree, and nothing here needs a clean live "
+                     f"tree to land again",
                      external=True, overlap=overlap)
 
     result: dict = {"round_id": round_id, "commit": head, "parent": live_head,

@@ -1030,16 +1030,35 @@ def test_uncommitted_live_edits_outside_the_diff_are_tolerated_and_recorded(live
 
 def test_uncommitted_live_edits_in_the_rounds_own_files_are_refused_by_name(live_repo, tmp_path, monkeypatch):
     """Two writers on one file. git would refuse the fast-forward anyway; the
-    gate says which file, before the pool is paused for a landing."""
+    gate says which file, before the pool is paused for a landing.
+
+    #1038 added the three assertions at the end. The refusal used to end "commit
+    or stash the live edit, then gate again", and that second option is a hazard
+    wearing a fix: the live checkout's stash stack is ONE global LIFO list shared
+    by every author, so obeying the sentence has already destroyed work — on
+    2026-09-11 a round implementing an unrelated item popped #573's recovered
+    136-line diff out of it, leaving a hand-written re-stash as the only copy.
+    Naming EVERY overlapping path is the other half of the pin: one path plus an
+    implication is what sends a reader to the wrong editor when two people are
+    mid-edit, which is exactly the case the refusal exists for."""
     base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
     wt = _round(live_repo, tmp_path, "r5", base)
+    (wt / "app" / "second.py").write_text("S = 2\n", encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "round r5 also changes app/second.py")
     (live_repo / "app" / "m.py").write_text("V = 1  # being edited live\n", encoding="utf-8")
+    (live_repo / "app" / "second.py").write_text("S = 'theirs'\n", encoding="utf-8")
 
     g = _gate_for(live_repo, wt, base, monkeypatch)
     ok, detail, data = g.rung_preflight()
     assert ok is False
     assert data.get("external_blocker") is True
-    assert data["overlap"] == ["app/m.py"] and "app/m.py" in detail
+    assert data["overlap"] == ["app/m.py", "app/second.py"]
+    assert all(p in detail for p in data["overlap"]), \
+        f"the refusal names only some of the two-writer paths: {detail}"
+    assert "stash" not in detail.lower(), (
+        "the live tree's stash stack is shared by every author, so this refusal "
+        f"may only ask for a report. Got: {detail}")
 
 
 def test_an_untracked_live_file_the_round_creates_is_an_overlap(live_repo, tmp_path, monkeypatch):

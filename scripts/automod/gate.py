@@ -869,9 +869,23 @@ class Gate:
         dirty = W.dirty_paths(self.live)
         overlap = sorted(set(dirty) & set(changed))
         if overlap:
+            # The wording is part of this refusal's contract (#1038). It used to
+            # tell the round to get that edit out of the way and retry, which in
+            # practice meant the live checkout's one global LIFO working-tree
+            # stack — a structure every author of this checkout shares, so a
+            # round that writes there is rearranging somebody else's in-flight
+            # work. That has already cost somebody their only copy: on
+            # 2026-09-11 a round implementing an unrelated item popped #573's
+            # recovered 136-line diff off the stack and it had to be rebuilt by
+            # hand. The rule, with the command spelled out, is the read-only
+            # bullet in the automod skill's Boundaries. And nothing in this rung
+            # needs a clean live tree — the paragraph above tolerates disjoint
+            # dirt — so there is never anything worth moving.
             return False, (f"live tree has uncommitted edits in paths this round also "
-                           f"changes: {overlap} — two writers on one file; commit or "
-                           f"stash the live edit, then gate again"), {
+                           f"changes: {overlap} — two writers on one file. Report the "
+                           f"paths and who is editing them: the live edit is not yours "
+                           f"to commit and not yours to move out of the tree, and this "
+                           f"gate needs no clean live tree to run again"), {
                                **data, "external_blocker": True,
                                "dirty_paths": dirty[:20], "overlap": overlap}
         if dirty:

@@ -130,6 +130,72 @@ def test_the_skill_procedure_stays_numbered_in_order():
     assert "graph_affected" in s[start:end]
 
 
+# ── the skill must never point a round at the SHARED live stash stack ─────────
+#
+# #1038. "Before starting" step 3 read: "The live tree must be clean. Uncommitted
+# work is somebody else's in-flight change — stash it and say so, or wait." The
+# first sentence has been false since 649193f ("the tree is shared — rebase and
+# retest instead of refusing"): `round.py` records live dirt instead of refusing
+# it, and gate/promote refuse only when a dirty path is one the round also
+# changes. The second sentence was the hazard. The live checkout's stash stack is
+# ONE global LIFO list shared by every author, and on 2026-09-11 a round
+# implementing an unrelated item popped #573's recovered 136-line diff out of it,
+# so the only copy survived as a hand-written re-stash. A second pop with nobody
+# watching is a permanent loss — which is why the instruction, not just the
+# wording, had to go. Vault e86ef0a7 reworded step 3; this is the pin that keeps
+# it reworded.
+
+STASH_INSTRUCTION = re.compile(
+    r"stash it\b|commit or stash|stash the live edit|\bgit stash\b", re.I)
+
+
+def _before_starting_item(n: int) -> str:
+    """Item `n` of the skill's "Before starting" list, exactly as written."""
+    body = VAULT_SKILL.read_text()
+    start, end = body.find("## Before starting"), body.find("## Procedure")
+    assert -1 not in (start, end), "the skill lost its 'Before starting' section"
+    parts = re.split(r"(?m)^(\d+)\.\s", body[start:end])
+    items = {int(parts[i]): parts[i + 1] for i in range(1, len(parts) - 1, 2)}
+    assert n in items, f"'Before starting' has no step {n}: {sorted(items)}"
+    return items[n]
+
+
+@pytest.mark.live_vault
+@pytest.mark.skipif(not VAULT_SKILL.exists(), reason="vault not present")
+def test_the_skill_step3_never_tells_a_round_to_use_the_live_stash_stack():
+    """Runs on every pytest invocation where the skill file exists on disk.
+
+    `live_vault` is the file's existing convention for vault-reading tests and
+    only keeps them off the automod gate's hard rung (`-m "not live_vault"`),
+    where a prompt promotion landing an hour later would fail an unrelated round
+    for the previous writer's edit. The skip that could hide this pin is the one
+    that fires when `~/obsidian` is genuinely absent.
+    """
+    step3 = _before_starting_item(3)
+    assert "stash" not in step3.lower(), (
+        "step 3 tells a round to write the shared live tree's stash stack, which "
+        f"one round has already eaten a recovered diff: {step3}")
+    # Take the instruction out and the behaviour must stay, or the edit is
+    # amnesia rather than a fix: disjoint dirt is tolerated, overlap is not.
+    low = step3.lower()
+    assert "tolerat" in low and "proceed" in low, (
+        f"step 3 no longer says disjoint live dirt is tolerated: {step3}")
+    assert "stop and report" in low, (
+        f"step 3 no longer says an overlapping path means stop and report: {step3}")
+
+
+@pytest.mark.live_vault
+@pytest.mark.skipif(not VAULT_SKILL.exists(), reason="vault not present")
+def test_the_skill_carries_no_stash_instruction_but_keeps_the_prohibition():
+    body = VAULT_SKILL.read_text()
+    hits = STASH_INSTRUCTION.findall(body)
+    assert not hits, f"the skill instructs a stash write somewhere: {hits}"
+    # The prohibition and its incident stay; only the imperative goes. Delete the
+    # explanation and the next author re-derives the pop instead of avoiding it.
+    assert "stash stack" in body.lower(), \
+        "the skill lost the rule that the live stash stack is read-only to a round"
+
+
 PATCH = "scripts/maintenance/vault-automod-skill-blast-radius.patch"
 APPLY = f"git -C ~/obsidian apply {PATCH}"
 
