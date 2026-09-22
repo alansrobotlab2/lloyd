@@ -302,9 +302,16 @@ before you read its proposal.
 - **`git log -S'<symbol>'` and `git log --oneline -- <path>`** are how you tell \
 `already_done` (a commit fixed it) from `stale` (the area was rewritten or \
 removed). Name the commit.
-- **Ask whether the surface the item targets has any traffic.** Grep \
-`sessions/*.json` for the tool it improves. Work aimed at a surface with zero \
-calls is `stale` whatever its premise says.
+- **Ask whether the surface the item targets has any traffic** — and count \
+*calls*, not mentions. From `~/lloyd/sessions`, \
+`grep -oh '"name": "<tool>"' *.json | wc -l` is the only valid count. The store \
+echoes every offered tool's definition, and every sentence that names a tool, \
+into the same text a call is recorded in, so a bare grep for the tool name \
+returns files for tools with zero calls (`mc_navigate`: 150 files, 0 calls at the \
+2026-09-22 probe), and the same pattern with the space taken out of `"name": ` \
+returns 0 for every tool that exists. The commands, both false zeros and the \
+probe dates: `knowledge/software/session-tool-traffic-counting.md`. Work aimed at \
+a surface with zero calls is `stale` whatever its premise says.
 - **If it proposes a retrieval or graph change, name the metric in \
 `eval/run_eval.py` that would move.** Edge-only changes move nothing there \
 (measured); such an item is `unverifiable` until a harness exists, and you \

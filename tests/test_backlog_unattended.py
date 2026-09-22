@@ -218,6 +218,168 @@ def test_the_prompt_teaches_what_the_hand_driven_triages_learned():
 
 
 # ===========================================================================
+# Counting a surface's traffic (#940)
+#
+# The triage prompt told the triager to "Grep `sessions/*.json` for the tool it
+# improves", and that grep counts the tool-definition echo and every sentence
+# naming the tool, not calls: `mc_navigate` is named in 150 transcripts and has
+# never been called, while `http_fetch` has 807 calls. The fix is a note in the
+# vault fixing the method (a tree outside this repo) plus a bullet that points at
+# it, so these tests cover both halves and the seam between them.
+# ===========================================================================
+
+TRAFFIC_NOTE_REL = "knowledge/software/session-tool-traffic-counting.md"
+
+
+def _note_text() -> str:
+    """The note's text, read from the live vault — no skip when it is absent.
+
+    `app.paths.VAULT_ROOT` is `Path.home() / "obsidian"`, so every worktree and
+    every candidate tree reads the same live vault; a missing note is a real
+    regression, not an artefact of where the test ran. `test_automod_doc_claims`
+    guards a vault skill the same way, and
+    `test_the_note_guards_cannot_go_quiet_when_the_note_is_absent` proves this
+    helper cannot pass on an empty tree.
+    """
+    from app.paths import VAULT_ROOT
+
+    note = VAULT_ROOT / TRAFFIC_NOTE_REL
+    assert note.is_file(), f"#940's subject is absent: {note} does not exist"
+    return note.read_text(encoding="utf-8")
+
+
+def _wrap(text: str) -> str:
+    """Reflow only: markdown and backslashes kept, line wraps collapsed.
+
+    The note is hand-wrapped and the prompt is backslash-wrapped, so a pin written
+    against raw text would break on a reflow that changed no claim. A wrapped
+    sentence and an absent sentence are different findings.
+    """
+    return re.sub(r"\s+", " ", text)
+
+
+def _flow(text: str) -> str:
+    """`_wrap`, lowercased, with markdown sigils and shell escapes stripped.
+
+    Emphasis markers and backslashes go, globs stay. The invocation shape is
+    written two ways in a shell command — `\\"name\\": \\"$t\\"` inside double
+    quotes, `'"name": "$t"'` inside single ones — and a pin that matched only one
+    spelling would pass on a note that dropped the other, so `**` becomes a space
+    and the double-quoted form is un-escaped until both land on one string. A bare
+    `*` survives, because it is also the glob in `*.json` and that is part of every
+    command being pinned here.
+    """
+    text = text.replace("#", " ").replace("**", " ").replace("`", " ")
+    text = text.replace("\\", "").replace('""', '"')
+    return _wrap(text).lower()
+
+
+def _traffic_bullet(prompt: str) -> str:
+    """The one traffic bullet of a triage prompt, up to the next bullet."""
+    assert "Ask whether the surface" in prompt, "the traffic bullet is gone"
+    rest = prompt[prompt.index("Ask whether the surface"):]
+    end = rest.find("\n- ")
+    return rest[:end] if end >= 0 else rest
+
+
+def test_the_traffic_note_fixes_the_method_in_both_error_directions():
+    """Clause 1: the valid command and the two invalid ones, verbatim and
+    labelled, beside a dated table pairing the two counts."""
+    note = _note_text()
+    flowed, wrapped = _flow(note), _wrap(note)
+    assert 'grep -oh "name": "$t" *.json | wc -l' in flowed, "the valid command is absent"
+    assert 'grep -l "$t" *.json *.tool-results | wc -l' in flowed, \
+        "the invalid presence command is absent"
+    assert 'grep -oh "name":"$t" *.json | wc -l' in flowed, \
+        "the invalid no-space command is absent"
+    assert "valid — invocation shape" in flowed, "the valid pattern is not labelled valid"
+    assert flowed.count("invalid") >= 2, "both invalid patterns must be labelled invalid"
+    assert "plain-string presence" in flowed and "no-space" in flowed
+
+    assert "2026-09-17" in note, "the dated table has no date"
+    for tool, plain, calls in (("mc_navigate", "105", "0"),
+                               ("browser_evaluate", "212", "12"),
+                               ("http_fetch", "—", "611")):
+        assert re.search(rf"\|\s*`{tool}`\s*\|\s*{plain}\s*\|\s*\*\*{calls}\*\*\s*\|", wrapped), \
+            f"the 2026-09-17 row for {tool} is not the pair 940 recorded"
+
+
+def test_the_traffic_note_validates_the_grep_against_an_independent_parse():
+    """Clause 2: the invocation pattern is written down as the text form of the
+    structured field, with both figures — the parse and the grep — recorded."""
+    wrapped = _wrap(_note_text())
+    assert "messages[].tool_calls[].function.name" in wrapped
+    assert "136,134" in wrapped, "the 2026-09-22 parse total is not recorded"
+    assert "72,486" in wrapped, "the 2026-09-17 parse total is not recorded"
+    for tool, n in (("http_fetch", "807"), ("backlog_write_task", "2,819"),
+                    ("mc_navigate", "0")):
+        assert re.search(rf"`{tool}`\s*\*\*{n}\*\*\s+vs(?:\s+grep)?\s*\*\*{n}\*\*", wrapped), \
+            f"{tool}: the parse and grep figures are not both written down"
+
+
+def test_the_traffic_note_records_both_false_zeros_and_the_definition_echo():
+    """Clause 3: the zero that comes from the no-space pattern, the non-zero that
+    comes from presence, and a line of what the echo actually looks like."""
+    note = _note_text()
+    flowed, wrapped = _flow(note), _wrap(note)
+    assert 'grep -oh \'"name":"browser_evaluate"\' *.json | wc -l' in flowed, \
+        "the no-space false-zero command is absent"
+    assert "611" in flowed, "the no-space zero is not paired with a busy tool"
+    assert 'grep -l "mc_navigate" *.json *.tool-results' in flowed, \
+        "the presence-counting command is absent"
+    assert "150" in flowed, "the presence count for a tool with zero calls is not recorded"
+    assert 'tool(name=\\"browser_navigate\\"' in wrapped.lower(), \
+        "no definition-echo sample line"
+    assert "descript" in flowed, "the echo sample is not identified as the definition repr"
+
+
+def test_the_traffic_note_binds_the_rule_on_both_triage_consumers():
+    """Clause 4: the rule is imperative, carries its probe date, and names the two
+    places the traffic tie-breaker actually runs."""
+    flowed = _flow(_note_text())
+    assert "must cite an invocation-shape count" in flowed, "the rule is not imperative"
+    assert "never cite a plain-string count" in flowed, "the forbidden pattern is not named"
+    assert "probe date" in flowed, "the rule does not bind the date to the count"
+    assert "backlog-premise-triage" in flowed, "the triage skill is not named as a consumer"
+    assert "autotriage" in flowed, "the unattended triage prompt is not named as a consumer"
+
+
+def test_the_traffic_bullet_counts_calls_not_mentions():
+    """Clause 5: the bullet keeps the phrase its sibling test pins, prescribes the
+    invocation-shape count, cites the note, and drops the contaminated grep —
+    whose closing sentence is the assertion that fails before this change."""
+    bullet = _traffic_bullet(M.PROMPT)
+    assert "any traffic" in bullet, "the pinned phrase left the bullet"
+    assert '"name": "' in bullet, "the bullet does not prescribe the invocation shape"
+    assert TRAFFIC_NOTE_REL in bullet, "the bullet does not cite the note"
+    assert "for the tool it improves" not in bullet, \
+        "the bullet still tells the triager to grep sessions/*.json for the bare name"
+    assert "stale" in bullet and "zero" in bullet, "the tie-breaker itself was dropped"
+
+
+def test_the_prompt_and_the_note_prescribe_one_counting_method():
+    """The seam: the prompt lives in this repo, the note lives in the live vault,
+    and a bullet that cites a path which does not resolve, or prescribes a
+    different pattern than the one the note fixes, is the gap 940 exists to close."""
+    note = _note_text()
+    bullet = _traffic_bullet(M.PROMPT)
+    assert TRAFFIC_NOTE_REL in bullet
+    assert "\"name\": \"" in _wrap(note) and "\"name\": \"" in bullet, \
+        "the prompt and the note name different counting patterns"
+
+
+def test_the_note_guards_cannot_go_quiet_when_the_note_is_absent(tmp_path, monkeypatch):
+    """A guard that passes while its subject is missing guards nothing — these
+    tests read a tree outside the gated repo, so the absent-file path is asserted
+    to raise rather than to be silently skipped."""
+    import app.paths as P
+
+    monkeypatch.setattr(P, "VAULT_ROOT", tmp_path)
+    with pytest.raises(AssertionError):
+        _note_text()
+
+
+# ===========================================================================
 # The stream endpoint's budget
 # ===========================================================================
 
