@@ -37,6 +37,75 @@ def worktree_path(round_id: str) -> Path:
     return round_dir(round_id) / "home" / "lloyd"
 
 
+def round_home(round_id: str) -> Path:
+    """`HOME` for a child process that runs CANDIDATE code.
+
+    The layout in this module's docstring exists for exactly this and nothing
+    else set it. With `HOME=<round>/home`, `Path.home()/"lloyd"` and
+    `app.paths.LLOYD_HOME` are the same directory — the worktree — so a test
+    that resolves its tree off `Path.home()` addresses the candidate.
+
+    Until 2026-09-22 `gate._child_env` handed every child the real home, so the
+    redirection this layout was built to provide was never actually applied: a
+    candidate test that deleted `Path.home()/"lloyd"` deleted production, and on
+    that day something did — the whole tree, `.git`, `.venvs`, `qmd`, the model
+    weights, in about 35 seconds. `Path.home()` is the name the isolation turns
+    on; `LLOYD_HOME` was already safe because `app/paths.py` resolves it from
+    `__file__`.
+    """
+    return round_dir(round_id) / "home"
+
+
+#: Never linked into a round's home. `lloyd` is the worktree itself, and it must
+#: stay a real directory — `app/paths.py` calls `.resolve()`, and a symlink here
+#: would resolve straight back to production, silently undoing the redirection.
+HOME_LINK_SKIP = frozenset({"lloyd"})
+
+
+def ensure_round_home(round_id: str) -> Path:
+    """Make `<round>/home` usable as a home, and return it.
+
+    A directory holding only a checkout is not a home. The vault
+    (`~/obsidian`), `~/.gitconfig`, and the caches every tool writes all live in
+    the real one and are genuinely shared, so every entry but `lloyd` is
+    symlinked across. Symlinks rather than copies because the goal is
+    redirecting ONE name, not isolating the machine — and because `shutil.rmtree`
+    refuses a symlink to a directory, so the same farm that keeps the vault
+    readable also makes `rmtree(Path.home() / "obsidian")` raise instead of run.
+
+    Raises if the redirection cannot be proved, because the caller's fallback is
+    the real home and that has to be a decision somebody recorded rather than a
+    thing that quietly happened.
+    """
+    wt = worktree_path(round_id)
+    if not wt.is_dir():
+        raise RuntimeError(f"no worktree at {wt} — cannot build a round home")
+    home = round_home(round_id)
+    home.mkdir(parents=True, exist_ok=True)
+    real = Path.home()
+    for entry in sorted(real.iterdir()):
+        if entry.name in HOME_LINK_SKIP:
+            continue
+        link = home / entry.name
+        # `is_symlink()` as well as `exists()`: a link whose target has gone is
+        # still an entry, and `symlink_to` on top of it raises FileExistsError.
+        if link.is_symlink() or link.exists():
+            continue
+        try:
+            link.symlink_to(entry)
+        except OSError:
+            # One unlinkable entry is a missing convenience; failing the whole
+            # farm over it would return the caller to the real home, which is
+            # the outcome this exists to prevent.
+            pass
+    resolved = (home / "lloyd").resolve()
+    if resolved != wt.resolve():
+        raise RuntimeError(
+            f"round home is not redirecting: {home / 'lloyd'} resolves to "
+            f"{resolved}, expected {wt.resolve()}")
+    return home
+
+
 def create(round_id: str, base: str = "HEAD", repo: Path | None = None) -> Path:
     """Create `<work>/<round_id>/home/lloyd` on branch `automod/<round_id>`."""
     repo = repo or LIVE_ROOT

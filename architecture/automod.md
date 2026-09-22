@@ -2121,6 +2121,76 @@ to a scratch dir at import when the caller set none, so a model's plain
 `tests/test_automod_state_isolation.py` pins all four, the first as a child
 pytest session.
 
+### 4.3a The suite's own tree, and the HOME the layout was built for
+
+On 2026-09-22 the production tree was deleted from inside a round — `.git`,
+`.venvs`, `qmd`, `data`, `web/node_modules`, the model weights, every tracked
+file, in about 35 seconds at 11:18:50. Three directories survived with their
+original inodes (`~/lloyd`, `web/`, `event_logs/`) because live writers
+re-created files inside them mid-walk and the closing `rmdir` hit `ENOTEMPTY` —
+which is what identifies it as a recursive delete of the root rather than a
+`git clean`, and the only reason the shape could be reconstructed at all: the
+transcripts were among the files it removed.
+
+What had reach: round `SM_20260922_174331`'s gate `tests` rung failed at
+11:18:17 with 24 errors, and the turn re-ran the **whole suite against
+production** to decide whether those failures were pre-existing — 9,716 node
+ids, rootdir `/home/alansrobotlab/lloyd`, from 11:15:57 (`.pytest_cache`
+re-created at 11:19:14 is the record; the run's own reasoning says "At the live
+tree (base 3e8748fd)"). The exact call that deleted the tree cannot be named,
+because naming it needs the transcript.
+
+Two anchors decide which tree a test addresses, and both were production there:
+`app.paths.LLOYD_HOME`, which resolves from `__file__`, and
+`Path.home()/"lloyd"`. Two holes, closed separately:
+
+- **The suite refuses production as its own tree**
+  (`tests/conftest.py::_refuse_the_production_tree`, opt-out
+  `LLOYD_ALLOW_LIVE_TREE_TESTS=1`). It runs at conftest import, before a single
+  fixture, because that is the one point every invocation passes through
+  however it is spelled. It cannot live lower down: `protected_paths` parses
+  Bash COMMAND STRINGS, `pytest tests/` is not destructive on its face, and the
+  deletion happened inside the test process, in Python, which is not a tool
+  call. The refusal names the supported route and the opt-out — a guard whose
+  exit is undocumented gets deleted rather than used. Not conditional on the
+  selection: one file is the same fixtures with the same teardowns, and "how
+  much of the suite" was never what made this safe.
+- **The gate redirects `HOME` for candidate code** (`W.ensure_round_home`,
+  `Gate._child_env(isolate_home=True)`). `worktree.py` has laid a round out as
+  `<round>/home/lloyd` since the beginning *so that* `HOME=<round>/home` makes
+  `Path.home()/"lloyd"` the worktree — its module docstring says exactly that —
+  and `_child_env` set `"HOME": str(Path.home())` anyway, so the isolation the
+  layout exists to provide was never applied. The round home is a symlink farm
+  over the real one, every entry but `lloyd`: a directory holding only a
+  checkout is not a home, the vault and `~/.gitconfig` are genuinely shared, and
+  `shutil.rmtree` refuses a symlink to a directory, so the same farm that keeps
+  the vault readable makes a teardown aimed at `Path.home()/"obsidian"` raise
+  instead of run. On for the three rungs that execute candidate test code (the
+  suite, the base probe, the flake re-confirm) and off elsewhere, because the
+  other rungs run scripts this repo controls and `tool_choice` deliberately
+  works from the live tree. Fails open to the real home and puts the reading on
+  the rung's data on the pass as well as the failure — a silent downgrade here
+  is indistinguishable from the isolation working.
+
+**The two fixes collide if the guard reads production through `Path.home()`,
+and the collision is worse than the bug.** Under the new `HOME`,
+`Path.home()/"lloyd"` IS the worktree, so such a guard fires on every gate run
+and on nothing else: the loop stops running its tests. `_production_tree()`
+reads the passwd entry, the one anchor `$HOME` cannot move.
+`tests/test_live_tree_isolation.py::test_a_round_worktree_is_never_refused` is
+that case; if it ever fails the gate cannot test anything.
+
+The implement prompt carries the rule as contract (`never from ~/lloyd`, and
+the `base_probe` detail is where "is this pre-existing?" is already answered) —
+the prompt is what stops the attempt, the refusal is what stops the damage. It
+cost +190 chars and the template's bound went 5.9k -> 6.1k, the third such raise
+and recorded like the other two in
+`tests/test_prompt_pacing_and_ordering.py::test_the_template_stays_bounded`.
+
+Note what this does **not** claim to fix: a test that resolves a path from
+neither anchor, and anything running outside a gate with a plain environment,
+still reach production if they try. The refusal is the backstop for both.
+
 ### 4.4 The canary smoke asserts only what is deterministic
 
 It requires: a `Bash` tool_start, a sentinel round-tripping through a real

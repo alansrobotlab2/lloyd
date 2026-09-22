@@ -416,6 +416,29 @@ error-shaped lines.
   the round it opened, bounded by the boot so the next item's live round is
   never blamed — and the reaper closes it. It does nothing outside the
   backend. `architecture/automod.md` §3.2.
+- **The test suite may not run with production as its own tree, and the gate
+  now sets the `HOME` its worktree layout was built for.** On 2026-09-22 a
+  round whose `tests` rung had failed with 24 errors re-ran the whole suite
+  against `~/lloyd` to ask whether those failures were pre-existing, and the
+  tree went under it — `.git`, `.venvs`, `qmd`, the model weights, every
+  tracked file, ~35 s. Two anchors decide which tree a test addresses and both
+  were production: `app.paths.LLOYD_HOME` (from `__file__`) and
+  `Path.home()/"lloyd"`. `tests/conftest.py::_refuse_the_production_tree`
+  refuses the run at conftest import, before a fixture runs (opt-out
+  `LLOYD_ALLOW_LIVE_TREE_TESTS=1`); it has to sit there because
+  `protected_paths` parses Bash *command strings* and `pytest tests/` is not
+  destructive on its face — the delete happened inside the test process, which
+  is not a tool call. And `Gate._child_env(isolate_home=True)` points `HOME` at
+  `<round>/home` for the three rungs that run candidate test code, which is
+  what `worktree.py`'s `<round>/home/lloyd` layout has always been *for* (its
+  docstring says so; `_child_env` passed the real home anyway). The round home
+  is a symlink farm over the real one, every entry but `lloyd` — so the vault
+  stays readable and `shutil.rmtree` on it raises instead of running. **The
+  guard must read production off the passwd entry, never `Path.home()`**: under
+  the new `HOME` that name IS the worktree, so a guard using it refuses every
+  gate run and nothing else, which is worse than the bug. Fails open to the
+  real home with the reading on the rung's data either way.
+  `architecture/automod.md` §4.3a; `tests/test_live_tree_isolation.py`.
 - **A worker turn may not restart, stop, or hand-boot an engine or a service**
   (`app/harness/service_control.py`, the fourth check in
   `safety.check_bash_command`, so hook and dispatch both). On 2026-09-17 an

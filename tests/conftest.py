@@ -83,6 +83,92 @@ def _default_state_dirs_to_scratch() -> None:
 
 _default_state_dirs_to_scratch()
 
+#: Set to "1" to run the suite against the production checkout anyway. Named on
+#: the refusal below, because a guard whose way past it is undocumented gets
+#: worked around by deleting the guard.
+LIVE_TREE_OPT_IN = "LLOYD_ALLOW_LIVE_TREE_TESTS"
+
+
+def _production_tree() -> Path | None:
+    """`~/lloyd` as the ACCOUNT defines it, not as `$HOME` says it.
+
+    `Path.home()` honours `$HOME`, and since 2026-09-22 `gate._child_env` sets
+    `$HOME` to the round's own home precisely so that `Path.home()/"lloyd"` is
+    the WORKTREE — that is the other half of this incident's fix. Reading
+    production through `Path.home()` would therefore make this guard fire on
+    every gate run and on nothing else: the loop would stop running its tests,
+    which is the one failure worse than the one being prevented. The passwd
+    entry is the anchor `$HOME` cannot move.
+
+    `None` rather than a guess when the entry cannot be read: this guard exists
+    to refuse a specific directory, and a guard that cannot name it has nothing
+    to refuse.
+    """
+    try:
+        import pwd
+        return (Path(pwd.getpwuid(os.getuid()).pw_dir) / "lloyd").resolve()
+    except Exception:  # pragma: no cover - no passwd entry, or an unresolvable home
+        return None
+
+
+def _refuse_the_production_tree() -> None:
+    """The suite may not run with `~/lloyd` as its own tree.
+
+    Every test that builds a repo, a home or a store resolves it from somewhere,
+    and the two anchors are `app.paths.LLOYD_HOME` (from `__file__`) and
+    `Path.home()/"lloyd"`. Both are the PRODUCTION tree when the suite is
+    launched from `~/lloyd`, so a fixture's teardown is aimed at the running
+    system rather than at a checkout nobody minds losing.
+
+    On 2026-09-22 that happened. An implement round's gate `tests` rung had
+    failed with 24 errors, and the model re-ran the full suite **in the live
+    tree** to decide whether those failures were pre-existing — 9,716 node ids,
+    rootdir `/home/alansrobotlab/lloyd`, starting 11:15:57. At 11:18:50
+    something under it removed the tree: `.git`, `.venvs`, `qmd`, `data`,
+    `web/node_modules`, the model weights, every tracked file, in about 35
+    seconds. Three directories survived with their original inodes — `~/lloyd`,
+    `web/` and `event_logs/` — because live writers re-created files inside them
+    mid-walk and the closing `rmdir` hit ENOTEMPTY, which is the signature that
+    identifies it as a recursive delete of the root rather than a `git clean`.
+
+    No layer below could see it. `app/harness/protected_paths.py` parses Bash
+    COMMAND STRINGS, and `pytest tests/` is not destructive on its face; the
+    deletion happened inside the test process, in Python, which is not a tool
+    call. So the refusal belongs at the one place every invocation passes
+    through however it is spelled — conftest import, before a single fixture
+    runs.
+
+    Anchored on the passwd entry, not on `$HOME` — see `_production_tree`. A
+    round's worktree is never refused, which is what keeps the gate working.
+
+    The supported route is a throwaway checkout: `git worktree add --detach
+    <path> HEAD` and run there. The gate already does exactly this
+    (`gate._failures_at_base`), which is what makes "is this failure
+    pre-existing?" a question nobody needs the live tree to answer.
+
+    Not a `pytest.skip` and not a warning: both leave the run going. Not
+    conditional on the selection either — a single file is the same fixtures
+    with the same teardowns, and "how much of the suite" was never what made
+    this safe or unsafe.
+    """
+    if os.environ.get(LIVE_TREE_OPT_IN) == "1":
+        return
+    production = _production_tree()
+    if production is None or ROOT.resolve() != production:
+        return
+    raise pytest.UsageError(
+        f"refusing to run the suite against the production tree at {production}. "
+        f"A fixture teardown here deletes the running system, and on 2026-09-22 "
+        f"one did — the whole tree in 35 seconds. Run from a throwaway checkout "
+        f"instead: `git worktree add --detach /tmp/lloyd-check HEAD && cd "
+        f"/tmp/lloyd-check && pytest ...`. To answer 'does this failure already "
+        f"exist at base?', that IS the supported route (see "
+        f"scripts/automod/gate.py::_failures_at_base). If you are a human and "
+        f"you mean it, set {LIVE_TREE_OPT_IN}=1.")
+
+
+_refuse_the_production_tree()
+
 
 @pytest.fixture(autouse=True)
 def _no_voice_alerts_in_tests(monkeypatch):

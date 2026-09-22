@@ -3166,7 +3166,7 @@ def test_the_implement_prompt_says_abort_on_a_late_refusal_and_never_restart():
     assert "A review refusal with under 25 iterations left is an abort" in p
     assert "`automod_abort` (branch kept" in p
     assert "Never restart an engine or a service from a round" in p
-    assert len(I.PROMPT) < 5_900, "the template's bound (tests/test_prompt_pacing_and_ordering.py)"
+    assert len(I.PROMPT) < 6_100, "the template's bound (tests/test_prompt_pacing_and_ordering.py)"
 
 
 def test_the_triage_prompt_forbids_pinning_an_invariant_the_tree_does_not_hold():

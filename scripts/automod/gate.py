@@ -507,10 +507,12 @@ class Gate:
         self._smoke_skip_reason = "not requested"
         self._smoke_skip_refused = ""
         self.python = self.live / ".venvs" / "lloyd" / "bin" / "python"
+        self.home_isolation = "not requested"
         self.report = GateReport(round_id=round_id, base=base,
                                  head=W.head(self.worktree) or "")
 
-    def _child_env(self, root: Path | None = None) -> dict:
+    def _child_env(self, root: Path | None = None, *,
+                   isolate_home: bool = False) -> dict:
         """Environment for rungs that execute CANDIDATE code outside the canary.
 
         Only the canary redirected the self-modification state dir. The static,
@@ -523,12 +525,33 @@ class Gate:
         `LLOYD_VOICE_ALERTS=0` for the same class of reason: `tests/conftest.py`
         sets it precisely because a test process that outlives itself will
         otherwise talk to the room.
+
+        `isolate_home` points `HOME` at `<round>/home`, which makes
+        `Path.home()/"lloyd"` the worktree — the whole reason `worktree.py` lays
+        a round out that way, and a thing this function did not do until
+        2026-09-22. It is ON for the rungs that execute CANDIDATE TEST CODE
+        (`tests`, the base probe, the flake re-confirm) and off elsewhere: the
+        other rungs run scripts this repo controls, and two of them
+        (`tool_choice`) deliberately work from the live tree. Fails open to the
+        real home, loudly and on the record — `self.home_isolation` rides onto
+        the tests rung's data, because a silent downgrade here is
+        indistinguishable from the isolation working.
         """
         scratch = W.round_dir(self.round_id) / "gate-state"
         (scratch / "automod").mkdir(parents=True, exist_ok=True)
         (scratch / "guardian").mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        if isolate_home:
+            try:
+                home = W.ensure_round_home(self.round_id)
+                self.home_isolation = f"round home ({home})"
+            except Exception as exc:
+                self.home_isolation = (f"FELL BACK to the real home "
+                                       f"({type(exc).__name__}: {exc})")
+                print(f"[warn] {self.home_isolation}: candidate tests can reach "
+                      f"{Path.home() / 'lloyd'} through Path.home()")
         return {
-            "PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
+            "PATH": "/usr/bin:/bin", "HOME": str(home),
             "PYTHONPATH": str(root or self.worktree),
             "LLOYD_AUTOMOD_STATE": str(scratch / "automod"),
             "LLOYD_GUARDIAN_STATE": str(scratch / "guardian"),
@@ -1206,7 +1229,7 @@ class Gate:
         a re-gate gets — is seconds long and stays serial.
         """
         base_cmd = [str(self.python), "-m", "pytest", "-q", "-m", TESTS_MARK_EXPR]
-        env = self._child_env()
+        env = self._child_env(isolate_home=True)
 
         def serial(extra: list[str]):
             done = _run(base_cmd + list(extra), cwd=self.worktree, env=env, timeout=1800)
@@ -1270,7 +1293,7 @@ class Gate:
             node_ids = _failed_node_ids(text)
             base_failed, probe_note = _failures_at_base(
                 self.python, self.live, self.base, node_ids,
-                W.round_dir(self.round_id), self._child_env())
+                W.round_dir(self.round_id), self._child_env(isolate_home=True))
             external, new = _classify_test_failure(node_ids, base_failed)
             # One run is one sample. The base probe above is a single
             # invocation, so a node that flickers clears it often enough to
@@ -1290,9 +1313,9 @@ class Gate:
                 flaky, flaky_note = _reconfirm_candidate_failures(
                     self.python, self.worktree, to_reconfirm,
                     repeats=int(_gate_cfg("test_repeat_runs", REPEAT_RUNS) or 0),
-                    env=self._child_env())
+                    env=self._child_env(isolate_home=True))
             data = {**counts, "failed_node_ids": node_ids,
-                    "base_probe": probe_note}
+                    "base_probe": probe_note, "home": self.home_isolation}
             if flaky:
                 # What was actually asked again, not everything that failed: a
                 # node the base probe reproduced was never in the repeat batch.
@@ -1398,6 +1421,10 @@ class Gate:
         if removed:
             return False, f"test files removed: {removed}", counts
         flinched = counts.get("parallel_only_failures") or []
+        # On the pass too, not only on the failure branches: the one reading that
+        # says whether the suite ran redirected is worth nothing if it is absent
+        # from every report where nothing went wrong.
+        counts["home"] = self.home_isolation
         return True, (f"{counts['passed']} passed, {counts['xfailed']} xfailed, "
                       f"{counts['tests_skipped']} skipped"
                       + (f" ({counts['workers']} workers)" if counts.get("workers", 1) > 1 else "")

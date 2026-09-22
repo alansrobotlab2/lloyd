@@ -182,8 +182,11 @@ and passes when you finish.
 takes about {gate_minutes} minutes now (measured), so: `automod_start` by
 iteration 6; the failing test by iteration 25; the first
 `automod_gate` by minute {first_gate_by}. Run the tests you changed, never the
-whole suite — the gate runs it. Commit before every gate: re-gating the same
-commit is answered from the ledger without a review. If a `<context>` or
+whole suite — the gate runs it — **from your worktree, never from `~/lloyd`**:
+that tree is the running system, and on 2026-09-22 a suite run there deleted
+it. The suite refuses to start there now. A failure that looks pre-existing is
+already answered by the `tests` rung's `base_probe`. Commit before every gate:
+re-gating the same commit is answered from the ledger without a review. If a `<context>` or
 `<budget>` anchor fires, it is not advice — commit and gate, however late: a
 gate that passes after your turn ends is landed by the loop, a refused one
 comes back with its findings. When a gate passes, `automod_land` at once.

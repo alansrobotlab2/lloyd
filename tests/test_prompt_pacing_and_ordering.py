@@ -57,8 +57,19 @@ def test_the_template_stays_bounded():
     not on whether it has been promoted — two turns reported every clause
     `not_met` for a finished, gated change. What `landed` means went into the
     finalizer's own prompt and `automod_land`'s result, which cost nothing here.
+
+    5.9k -> 6.1k on 2026-09-22 (+190), for the other half of "never the whole
+    suite": never from `~/lloyd`. The 09-18 raise bought the rule and a round
+    broke the machine anyway by obeying it in the wrong tree — its gate `tests`
+    rung had failed with 24 errors and it re-ran the suite against production to
+    ask whether they were pre-existing, which deleted the tree. Contract, not
+    procedure, on the same test as the 09-18 line: a re-offered round re-derives
+    from this template, and the question it went looking for an answer to is one
+    the `tests` rung already answers, so the prompt has to say where that answer
+    is. `tests/conftest.py` refuses the run as well — the prompt is what stops
+    the attempt, the refusal is what stops the damage.
     """
-    assert len(I.PROMPT) < 5_900, f"{len(I.PROMPT)} chars"
+    assert len(I.PROMPT) < 6_100, f"{len(I.PROMPT)} chars"
 
 
 SKILL_PATH = Path.home() / "obsidian" / "skills" / "automod-change-own-code" / "SKILL.md"

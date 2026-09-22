@@ -610,9 +610,12 @@ def _counted_gate(tmp_path, monkeypatch, *, add_broken: bool):
     g = _gate_for(repo, wt, base, monkeypatch)
     g.python = Path(sys.executable)
     real_env = g._child_env
+    # `**kw` so the stub follows the real signature rather than pinning one
+    # moment of it: `isolate_home` arrived on 2026-09-22 and these four tests
+    # failed on the keyword, not on anything they are about.
     monkeypatch.setattr(g, "_child_env",
-                        lambda root=None: {**real_env(root),
-                                           "FLAKE_RUNS_FILE": str(counter)})
+                        lambda root=None, **kw: {**real_env(root, **kw),
+                                                 "FLAKE_RUNS_FILE": str(counter)})
     return g, counter, repo, wt
 
 
