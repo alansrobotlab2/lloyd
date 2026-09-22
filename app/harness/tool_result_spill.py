@@ -6,8 +6,9 @@ to ``<SESSIONS_DIR>/<session_id>.tool-results/<tool_use_id>.{txt,json}``
 and the in-prompt content is replaced with a ``<persisted-output>``
 block containing:
 
-  * total size + filepath (so the model can read it back via the ``Read``
-    tool if it needs more detail)
+  * total size + filepath, and the recovery the reading turn can actually
+    take — the ``Read`` tool when it owns one, a narrower re-run when the
+    turn's deny list has that tool (#1066)
   * a short preview (first ``PREVIEW_CHARS`` chars, cut at a newline)
   * a "...(more)" marker
 
@@ -16,8 +17,9 @@ This solves two problems at once:
   1. **Context overflow.** A 250KB Grep result no longer crowds out the
      working set; the model sees ~2KB inline and can re-read on demand.
   2. **Information loss.** Inline truncation drops everything past the
-     cut point. Spill keeps the full result on disk — the model can
-     Grep/Read into it for the bits it actually wants.
+     cut point. Spill keeps the full result on disk — a turn with Read or
+     Grep can page into it for the bits it actually wants, and one that
+     has neither still gets the preview and a path out of the file.
 
 Empty-result guard: a tool that returns ``""`` / whitespace can cause
 some local models to emit a stop token and end the turn with no output.
@@ -30,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from app.paths import SESSIONS_DIR
@@ -86,6 +89,61 @@ def _generate_preview(content: str, max_chars: int) -> tuple[str, bool]:
     return content[:cut], True
 
 
+#: The one tool both spill notices assumed every turn owns. It does not:
+#: ``workers/sources/deep_research.py`` denies ``Read`` on purpose, because a
+#: research turn fetches arbitrary web pages and a page must not be able to
+#: steer it into reading the local filesystem. That is also the source that
+#: spills most, so its harness was the loudest one promising a call its own
+#: policy refused (#1066).
+READ_TOOL = "Read"
+
+#: Two recoveries, chosen per turn, because the honest one depends on a fact
+#: about the turn rather than about the file.
+_RECOVERY_WITH_READ = (
+    "Read the full file with the Read tool if you need more than the preview. "
+    "If you don't actually need it all, narrow your next query "
+    "(smaller hops, higher min_confidence, --glob, --type, head_limit, etc.).\n"
+)
+_RECOVERY_WITHOUT_READ = (
+    "The Read tool is not available on this turn, so the path above cannot be "
+    "opened from here — do not reach for it. Re-run the call with a narrower "
+    "query (smaller hops, higher min_confidence, --glob, --type, head_limit, "
+    "etc.); that is the only way to see more of it from here.\n"
+)
+
+
+def tool_is_denied(name: str, disallowed) -> bool:
+    """Whether ``name`` is off the menu for the turn that is asking.
+
+    Dispatch is stricter than this: `_pre_dispatch` refuses on an exact hit in
+    ``options.disallowed_tools``. This asks the weaker question — is *any*
+    spelling of the tool on the list — because the two directions of error are
+    not equal here. A miss prints the false promise this function exists to
+    withhold; a surplus sentence takes a real tool off the menu for one turn,
+    and the turn still has the re-run this notice names. Deny lists carry both
+    spellings anyway (bare names for builtins, `mcp__<server>__<tool>` for MCP
+    ones), so on the paths that matter the two answers agree.
+    """
+    if not disallowed:
+        return False
+    deny = set(disallowed)
+    if name in deny:
+        return True
+    return any(t.endswith(f"__{name}") for t in deny)
+
+
+def recovery_notice(disallowed) -> str:
+    """The sentence that closes a spilled-result notice for this turn.
+
+    Lives apart from both renderers because two call sites need it — the
+    ``<persisted-output>`` block and the context-pressure notice — and the
+    pair that drifted is exactly how a model ends up being told to do
+    something it cannot.
+    """
+    return _RECOVERY_WITHOUT_READ if tool_is_denied(READ_TOOL, disallowed) \
+        else _RECOVERY_WITH_READ
+
+
 def maybe_spill(
     content: str,
     *,
@@ -93,6 +151,7 @@ def maybe_spill(
     tool_use_id: str,
     session_id: str,
     threshold: int = SPILL_THRESHOLD_CHARS,
+    disallowed_tools: Sequence[str] | None = None,
 ) -> str:
     """Persist ``content`` to disk if it exceeds ``threshold`` chars.
 
@@ -101,6 +160,13 @@ def maybe_spill(
     threshold. On filesystem error, logs and returns the original
     content (no truncation) — losing forensic data is worse than
     sending too much in this rare case.
+
+    ``disallowed_tools`` is the turn's own deny list. The block tells the
+    model how to get the rest of its result back, and until #1066 it said
+    ``Read`` unconditionally while deep-research has that tool denied —
+    ``Read`` and ``Bash`` denials on the ``<sid>.tool-results/`` path it was
+    just pointed at, seven Bash and three Read of them in the 09-14→09-17
+    window. Pass the turn's list and the block offers only what it can do.
     """
     if not isinstance(content, str):
         return content   # type: ignore[return-value]
@@ -133,12 +199,7 @@ def maybe_spill(
         msg += "\n...\n"
     else:
         msg += "\n"
-    msg += (
-        "Read the full file with the Read tool if you need more than the preview. "
-        "If you don't actually need it all, narrow your next query "
-        "(smaller hops, higher min_confidence, --glob, --type, head_limit, etc.).\n"
-        f"{PERSISTED_OUTPUT_CLOSING_TAG}"
-    )
+    msg += recovery_notice(disallowed_tools) + PERSISTED_OUTPUT_CLOSING_TAG
     return msg
 
 
@@ -191,6 +252,9 @@ __all__ = [
     "PERSISTED_OUTPUT_TAG",
     "PERSISTED_OUTPUT_CLOSING_TAG",
     "maybe_spill",
+    "READ_TOOL",
+    "recovery_notice",
+    "tool_is_denied",
     "persist_for_compaction",
     "fallback_for_empty_result",
 ]

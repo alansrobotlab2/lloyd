@@ -364,7 +364,11 @@ def test_the_anchor_rides_the_loop_appended_and_position_zero_unchanged(monkeypa
     heads = [msgs[0] for msgs in requests]
     assert all(h["role"] == "system" for h in heads), heads
     assert len({h["content"] for h in heads}) == 1, "position 0 changed mid-turn"
-    assert heads[0]["content"] == "WORKER SYSTEM PROMPT"
+    # A prefix, not the whole thing: `_worker_run_options` appends the turn's
+    # deny-list block to the system prompt (#1066), and what this test is about
+    # is that position 0 is written once, before iteration 1, and never rewritten
+    # — which the line above still asserts on the full string.
+    assert heads[0]["content"].startswith("WORKER SYSTEM PROMPT"), heads[0]["content"][:80]
     for earlier, later in zip(requests, requests[1:]):
         assert later[:len(earlier)] == earlier, "history was rewritten, not appended"
     # Iteration 6 is the first the model can have seen the warning in.

@@ -835,7 +835,14 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # conversation each turn, fit it to the model's context window via
     # the compaction stack (microcompact → summary → truncate), and
     # append the current user message.
-    comp = await load_and_compact_session(meta_path, model=model)
+    comp = await load_and_compact_session(
+        meta_path, model=model,
+        # The deny list travels to the compaction stack because the markers it
+        # rewrites are read back by this turn: a worker session's own earlier
+        # spill notices are in its history, and one that points at `Read`
+        # orders a call this turn's policy refuses (#1066).
+        disallowed_tools=list(options.disallowed_tools or []),
+    )
     if comp["truncated"] or comp.get("summarized") or comp.get("microcompacted"):
         logger.info(
             "[compaction] %s: %d→%d tokens "
@@ -2280,7 +2287,14 @@ async def post_message(request: Request):
     options.state_anchor = _build_state_anchor(
         session_id, context_meter=options.context_meter)
 
-    comp = await load_and_compact_session(meta_path, model=model)
+    comp = await load_and_compact_session(
+        meta_path, model=model,
+        # The deny list travels to the compaction stack because the markers it
+        # rewrites are read back by this turn: a worker session's own earlier
+        # spill notices are in its history, and one that points at `Read`
+        # orders a call this turn's policy refuses (#1066).
+        disallowed_tools=list(options.disallowed_tools or []),
+    )
     if comp["truncated"] or comp.get("summarized") or comp.get("microcompacted"):
         logger.info(
             "[compaction] %s: %d→%d tokens "

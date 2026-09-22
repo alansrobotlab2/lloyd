@@ -7,7 +7,7 @@
 #
 # How it is scored: the runner stops at the FIRST tool_call event, which the
 # harness yields before dispatch. The single-call site is
-# app/harness/loop.py:763-774, where `tc_evt = events.tool_call(...)` is built,
+# app/harness/loop.py:764-776, where `tc_evt = events.tool_call(...)` is built,
 # `yield tc_evt` hands it out, and only then
 # `result_evt = await _dispatch_one_tool_call(...)` runs. The parallel-batch
 # site is the same shape: Phase 1 builds and yields `events.tool_call` for every
@@ -19,9 +19,12 @@
 #
 # The line range is a convenience; the symbols are the claim, and the claim is
 # structural: no `events.tool_call` is emitted after its own dispatch. Numbers
-# rot — this file has been wrong twice, first citing the context-overflow
+# rot — this file has been wrong three times, first citing the context-overflow
 # recovery block (378-388, the defect #748 fixed), then citing 737-748 which a
-# later loop.py edit slid nine lines down without touching the mechanism.
+# later loop.py edit slid nine lines down without touching the mechanism, and
+# then 763-774 which #1066 slid two lines down the same way: two `import` lines
+# added at the top of `loop.py` for the spill-notice deny check, the third
+# author to move the code and leave this number behind.
 # `grep -n "events.tool_call\|yield tc_evt\|_dispatch_one_tool_call"
 # app/harness/loop.py` re-derives them; tests/test_tool_choice_eval_cost.py
 # fails on a stale range AND on a real reordering, so a wrong number here is a

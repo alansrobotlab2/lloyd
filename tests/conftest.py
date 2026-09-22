@@ -351,3 +351,62 @@ def _isolate_djev_shadow(tmp_path_factory):
     djev_shadow.STATE_DIR = root
     djev_shadow.SHADOW_LOG = root / "shadow.jsonl"
     djev_shadow.PENDING_DROPS = root / "dropped_at_shutdown.json"
+
+
+@pytest.fixture
+def worker_turn_post(monkeypatch):
+    """Capture the body of a worker's loopback POST, with no backend to POST to.
+
+    `workers.sources._common.run_prompt_in_session` is the one entry every
+    session-backed source uses (`deep-research`, `youtube-digest`, `autotriage`,
+    `autocode`), and what it puts in `payload["text"]` is the whole of the
+    instruction the turn gets. A test cannot assert that from a stubbed
+    `run_prompt_in_session` — the source's own test replaces that function, so
+    anything it does downstream is invisible there. This swaps only the
+    transport: the function runs unpatched through its payload build, and the
+    list returned is the JSON body in request order.
+
+    Not autouse: it replaces `httpx.AsyncClient` globally for the test, which
+    is exactly what a test that is verifying a real POST wants and what every
+    other test would choke on. `tests/test_session_platform_checks.py` owns the
+    variant that crosses the wire for real.
+    """
+    import httpx
+
+    captured: list[dict] = []
+
+    class _Streamed:
+        """A finished turn, in the SSE shape `_aiter_sse` parses."""
+
+        status_code = 200
+
+        async def aread(self) -> bytes:
+            return b""
+
+        async def aiter_lines(self):
+            yield "event: done"
+            yield 'data: {"response": "stubbed", "stop_reason": "end_turn", ' \
+                  '"num_turns": 1}'
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def stream(self, method, url, json=None, headers=None):
+            captured.append(dict(json or {}))
+            return _Streamed()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    return captured

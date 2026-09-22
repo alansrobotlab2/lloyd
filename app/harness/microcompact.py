@@ -88,7 +88,9 @@ from typing import Any, Callable, Iterable
 
 from app.harness.tool_result_spill import (
     PERSISTED_OUTPUT_TAG,
+    READ_TOOL,
     persist_for_compaction,
+    tool_is_denied,
 )
 
 logger = logging.getLogger("lloyd-microcompact")
@@ -138,16 +140,28 @@ def _args_digest(raw_args: Any, cap: int = 120) -> str:
 
 def _cleared_marker(
     tool_name: str, raw_args: Any, size: int, path: Any = None,
+    read_denied: bool = False,
 ) -> str:
     """Build a marker that says what was cleared and where it went.
 
     The model's only route back to this content is what this string says,
     so it names the call and — when the content was persisted — the file.
+    Naming the file is only half a route: the turn has to be able to open
+    it. ``read_denied`` comes from the caller's deny list, and a turn with
+    ``Read`` on it gets the re-run it can perform instead of a path it
+    cannot open (#1066).
     """
     if not tool_name:
         return CLEARED_MARKER
     digest = _args_digest(raw_args)
     head = f"{tool_name} {digest}".strip()
+    if path is not None and read_denied:
+        return (
+            f"[{head} — {size:,} chars cleared from context; full content at "
+            f"{path}. The Read tool is not available on this turn, so that "
+            f"path cannot be opened from here — re-run the call with a "
+            f"narrower query for the part you need.]"
+        )
     if path is not None:
         return (
             f"[{head} — {size:,} chars cleared from context; "
@@ -235,6 +249,7 @@ def microcompact(
     min_chars_to_clear: int = DEFAULT_MIN_CHARS_TO_CLEAR,
     session_id: str = "",
     legacy_count_rule: bool = True,
+    disallowed_tools: Iterable[str] | None = None,
 ) -> tuple[list[dict], int]:
     """Replace stale compactable tool results with a cleared marker.
 
@@ -260,6 +275,11 @@ def microcompact(
       session_id: enables spill-before-clear. Without it, content that
         is not already on disk is cleared irrecoverably, so callers that
         have a session id should always pass it.
+      disallowed_tools: the reading turn's deny list, so a marker can name
+        a recovery that turn can actually take. ``app.compaction`` has no
+        turn to answer for and leaves it unset, which reads as
+        everything-allowed — the conservative direction, since the
+        alternative is withholding a Read from a chat turn that has one.
 
     Recoverability: with ``session_id`` set, each result is written to
     the session's spill dir before its content leaves the prompt, and the
@@ -271,6 +291,9 @@ def microcompact(
         return list(messages), 0
 
     allow: set[str] = {t for t in compactable_tools}
+    # One lookup for the whole pass: every marker this pass writes answers
+    # the same question about the same tool menu.
+    read_denied = tool_is_denied(READ_TOOL, disallowed_tools)
 
     # Pass 1: build tool_call_id → tool_name map. Assistant messages
     # carry tool_calls; we trust that mapping over any name on the tool
@@ -404,7 +427,9 @@ def microcompact(
                 continue
 
         out.append(_replace_tool_content(
-            msg, _cleared_marker(tool_name, tc_id_to_args.get(cid), len(text), path),
+            msg,
+            _cleared_marker(tool_name, tc_id_to_args.get(cid), len(text), path,
+                            read_denied=read_denied),
         ))
         cleared += 1
 

@@ -430,6 +430,40 @@ async def test_the_turn_cannot_reach_what_a_fetched_page_would_want(
         assert name in denied, name
 
 
+async def test_the_turn_is_told_what_it_may_not_call(worker_turn_post):
+    """The list above is correct policy; the turn's blindness is the defect.
+
+    `Tool 'Bash' is disabled by configuration.` fired 22 times from 09-09 to
+    09-12 — and only from the two sources that pass a list, never from a source
+    that passes none — with the model in `20260912_173635_deepresearch_360b`
+    retrying the *same* denied tool once more before moving on. So the refusal
+    spends a call and a reasoning turn to teach the model something the code
+    already knew.
+
+    `D.execute` cannot be the subject of this assertion: every test in this file
+    replaces `run_prompt_in_session` with a stub, so anything it does after
+    receiving the prompt is invisible here. The real one runs, with this
+    source's real `DISALLOWED`, and only its transport is swapped — see
+    `worker_turn_post` in `tests/conftest.py`.
+    """
+    await C.run_prompt_in_session(
+        "Topic #1: speculative decoding for local agent loops\n",
+        title="probe", source=D.NAME, extra_disallowed=list(D.DISALLOWED))
+
+    text = worker_turn_post[0]["text"]
+    _, heading, block = text.partition(C.DENIED_TOOLS_HEADING)
+    assert block, "the turn's prompt never names the deny list gating its calls"
+    for name in D.DISALLOWED:
+        assert name in block, f"{name} gates dispatch and is missing from the prompt"
+    # The job's own tools stay out of the block. This is the half a hand-written
+    # copy in the skill would have got wrong by construction: the same skill
+    # (`deep-dive-research`) is retrieved interactively, where every one of
+    # these is legal, so the block is only ever true of the turn that carries it.
+    for name in ("http_search", "http_fetch", "vault_recall", "vault_write"):
+        assert name not in block, name
+    assert text.startswith("Topic #1"), "the topic was replaced, not appended to"
+
+
 def test_the_tools_the_job_needs_are_not_denied():
     for name in ("http_search", "http_fetch", "browser_navigate", "browser_snapshot",
                  "vault_recall", "vault_search", "vault_write", "fact_add"):

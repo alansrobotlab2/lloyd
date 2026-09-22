@@ -31,8 +31,10 @@ from app.harness.errors import (
 )
 from app.harness.microcompact import microcompact as _intra_microcompact
 from app.harness.tool_result_spill import (
+    READ_TOOL,
     fallback_for_empty_result,
     maybe_spill,
+    tool_is_denied,
 )
 from app.harness.events import NormalizedEvent
 from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS, MCPPool, get_or_open_pool
@@ -1313,6 +1315,9 @@ def _relieve_context(
                 min_chars=int(
                     getattr(options, "intra_turn_microcompact_min_chars", 2_000)
                 ),
+                disallowed_tools=list(
+                    getattr(options, "disallowed_tools", None) or []
+                ),
             )
             if truncated:
                 meter.resync(chat_messages)
@@ -1453,6 +1458,11 @@ def _intra_turn_microcompact(
         ),
         session_id=getattr(options, "session_id", "") or "",
         legacy_count_rule=False,
+        # The marker ends by telling the model how to get the result back.
+        # Same reason as `maybe_spill` above: this pass is what produces that
+        # marker on a long turn, and the turn that clears most is the one
+        # with `Read` denied (#1066).
+        disallowed_tools=list(getattr(options, "disallowed_tools", None) or []),
     )
     if cleared:
         chat_messages[:] = compacted
@@ -2266,6 +2276,12 @@ async def _execute_tool_call(
             tool_name=name,
             tool_use_id=call_id,
             session_id=session_id,
+            # The block closes by telling the model how to get the rest of
+            # this result back, and that has to be a call the turn can make.
+            # `deep-research` spills constantly — every http_fetch of a page
+            # — and has `Read` denied (#1066), so the old unconditional
+            # sentence sent it reaching for a tool its own deny list refuses.
+            disallowed_tools=list(options.disallowed_tools or []),
         )
 
     if options.hooks is not None:
@@ -2392,6 +2408,7 @@ def _truncate_largest_tool_results(
     target_chars: int,
     session_id: str = "",
     min_chars: int = 4096,
+    disallowed_tools: list[str] | None = None,
 ) -> tuple[int, int]:
     """Replace the largest tool-result message contents with a truncation
     notice until at least ``target_chars`` of content has been freed.
@@ -2412,9 +2429,13 @@ def _truncate_largest_tool_results(
     which at the wall is advice the turn has no room to take. When a
     ``session_id`` is available the content goes to the same per-session
     spill directory microcompaction uses and the notice names the path, so
-    the evidence survives as a file the model can Read. A failed spill
-    still truncates — this rung runs when the alternative is the request
-    being rejected outright — but says so.
+    the evidence survives as a file. Whether the notice then says "Read that
+    path" is a fact about the turn, not about the file: ``disallowed_tools``
+    is that turn's deny list, and a turn with ``Read`` on it gets the only
+    recovery it can take — re-run narrower — instead of an instruction its
+    own policy refuses (#1066; deep-research takes this branch on every long
+    turn). A failed spill still truncates — this rung runs when the
+    alternative is the request being rejected outright — but says so.
     """
     from app.harness.tool_result_spill import persist_for_compaction
 
@@ -2435,6 +2456,10 @@ def _truncate_largest_tool_results(
         if size > min_chars:
             candidates.append((size, i))
     candidates.sort(reverse=True)
+
+    # Computed once for the turn, not per message: every notice this pass
+    # writes answers the same question about the same tool menu.
+    read_denied = tool_is_denied(READ_TOOL, disallowed_tools)
 
     freed = 0
     truncated = 0
@@ -2460,10 +2485,23 @@ def _truncate_largest_tool_results(
                     logger.warning("loop: truncation spill failed: %s", exc)
                     path = None
         if path is not None:
+            # Two endings, because the honest one depends on the turn's menu.
+            # "Re-run the call with a narrower query" is what this notice said
+            # before 2026-09-11, when there was no spill to point at — see the
+            # docstring. It comes back on this branch not as a regression but
+            # as the only recovery left to a turn that cannot open the file.
+            recovery = (
+                "the Read tool is not available on this turn, so that path "
+                "cannot be opened from here — re-run the call with a narrower "
+                "query (fewer hops, higher min_confidence, fewer max_results) "
+                "for the part you need.]"
+                if read_denied else
+                "Read that path if you need it again.]"
+            )
             notice = (
                 f"[harness: tool result cleared under context pressure — "
                 f"{original_size:,} chars, full content at {path}. "
-                f"Read that path if you need it again.]"
+                f"{recovery}"
             )
         else:
             notice = (

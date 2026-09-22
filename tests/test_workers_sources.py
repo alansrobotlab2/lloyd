@@ -1017,6 +1017,95 @@ async def test_an_overrunning_turn_is_cancelled_in_the_backend(monkeypatch, tmp_
     assert cancelled[0] in str(excinfo.value)
 
 
+#: Every assertion below reads the heading off the renderer itself and the tool
+#: names off the caller's value, so a block that renders with a stale list fails
+#: the name assertion while the heading assertion holds — the drift this pins.
+DENY_HEADING = C.DENIED_TOOLS_HEADING
+
+
+async def test_the_deny_list_is_named_in_the_turn_it_denies(worker_turn_post):
+    """#1066: the refusal said "disabled by configuration" and the turn had no
+    idea it existed, so it retried the same denied tool. In
+    `20260912_173635_deepresearch_360b` that cost a call and a reasoning turn on
+    the *same* tool twice; 22 occurrences across 09-09 to 09-12 came from the
+    two sources that pass a list, and zero from any source that does not.
+
+    The list must arrive *as the value*, not as prose written next to it: the
+    tool name below is one no source declares, so nothing could have typed it.
+    """
+    await C.run_prompt_in_session(
+        "classify the item", title="t", source="autotriage",
+        extra_disallowed=["Zzz_Tool", "Yyy_Tool"])
+
+    text = worker_turn_post[0]["text"]
+    assert DENY_HEADING in text, "the turn was never told a deny list exists"
+    assert "Zzz_Tool" in text and "Yyy_Tool" in text, text
+    # And nothing else: a stale `Bash` pasted into the renderer would render for
+    # every worker, which is the per-source restriction the deny list exists to
+    # keep per-source.
+    assert "Bash" not in text, "the block names a tool this turn was not denied"
+    assert text.startswith("classify the item"), "the job's own prompt was displaced"
+
+
+async def test_the_digest_turn_is_told_its_own_list_and_not_the_research_one(
+    worker_turn_post,
+):
+    """The other half of #1066's 22 refusals — 10 of them `Bash`, 3 `Edit` — and
+    the reason one renderer has to read the caller's value rather than one
+    shared sentence: this source denies `Bash`, `Edit`, `Task` and the browser
+    actuation tools, and keeps `Read`, `Grep` and `Glob`, which is the exact
+    opposite of deep-research's list. A single hand-written paragraph about
+    "the worker tools" would be wrong for one of the two, whichever it named.
+    """
+    from workers.sources import youtube_digest as Y
+
+    await C.run_prompt_in_session(
+        "digest this video\n", title="probe", source=Y.NAME,
+        extra_disallowed=list(Y.DISALLOWED))
+
+    text = worker_turn_post[0]["text"]
+    _, heading, block = text.partition(C.DENIED_TOOLS_HEADING)
+    assert block, "the digest turn was never told its deny list"
+    for name in ("Bash", "Edit", "Task", "http_request", "browser_click"):
+        assert name in block, name
+    for name in ("Read", "Grep", "Glob", "Write"):
+        assert name not in block, f"{name} is available to this source"
+
+
+async def test_a_turn_with_no_deny_list_gets_no_such_block(worker_turn_post):
+    """The chat and ambient paths pass no `extra_disallowed`, and the skills
+    library is shared by every agent — a per-worker restriction rendered onto a
+    chat turn is the opposite of what that source's deny list is for.
+
+    Asserted as equality on the text, not absence of a phrase: the block is
+    *absent* for a turn with no list, not merely empty.
+    """
+    out = await C.run_prompt_in_session("classify the item", title="t",
+                                        source="autotriage")
+
+    assert worker_turn_post[0]["text"] == "classify the item"
+    assert out["stop_reason"] == "end_turn", "the stub did not close the turn"
+
+
+def test_the_direct_worker_turn_is_told_the_policy_it_is_under():
+    """The second path, same fix. `_worker_run_options` is where the automod and
+    grant-mint bans are baked in, and until #1066 they were the only ban in the
+    system enforced without being announced — `test_worker_turns_cannot_drive_the_loop`
+    pins that a worker cannot start a round, which is not the same as a worker
+    knowing it cannot."""
+    from workers.sources._common import WORKER_AUTOMOD_BAN
+
+    opts = C._worker_run_options(20, source="bench-mine")
+    for name in (*WORKER_AUTOMOD_BAN, "grant_create"):
+        assert name in opts.system_prompt, name
+    assert DENY_HEADING in opts.system_prompt
+    # The names appear exactly as dispatch holds them. This list carries both
+    # the bare and the `mcp__lloyd-mcp__` spelling of every ban, because
+    # `_pre_dispatch` matches on the exact string; a renderer that rewrote one
+    # into the other would promise a refusal the gate does not perform.
+    assert opts.system_prompt.count("mcp__lloyd-mcp__automod_start") == 1
+
+
 def test_a_worker_session_is_marked_as_one(tmp_path, monkeypatch):
     """`sessions_io.NON_USER_PLATFORMS` is what keeps a worker turn from being
     mistaken for the user's session by the morning brief and by

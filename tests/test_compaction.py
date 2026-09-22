@@ -340,6 +340,89 @@ def test_microcompact_marker_names_the_call_and_the_spill_file():
             spill_dir.rmdir()
 
 
+def test_microcompact_marker_names_a_route_the_turn_can_take():
+    """The same false promise in the pass that fires most.
+
+    `microcompact` writes the marker half of the corpus's denials were answering
+    — deep-research's second turn opens with its own first turn's markers — and
+    it holds the spilled file at the path it names, so the file is real and only
+    the offer is false. With `Read` denied the marker still names the path: the
+    path is evidence for whoever reads the transcript, and it is the argument the
+    notice is answering. What changes is the verb.
+    """
+    from app.harness.microcompact import microcompact
+    from app.paths import SESSIONS_DIR
+
+    sid = "test_microcompact_marker_denied"
+    spill_dir = SESSIONS_DIR / f"{sid}.tool-results"
+    est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
+
+    def _first_marker(disallowed):
+        try:
+            out, cleared = microcompact(
+                _tool_pairs(20, chars=4_000), token_budget=1, estimate_fn=est,
+                keep_recent_tools=5, session_id=sid, legacy_count_rule=False,
+                disallowed_tools=disallowed,
+            )
+            assert cleared > 0
+            return _marker_text([m for m in out if m.get("role") == "tool"][0])
+        finally:
+            if spill_dir.exists():
+                for f in spill_dir.iterdir():
+                    f.unlink()
+                spill_dir.rmdir()
+
+    denied = _first_marker(["Read", "Bash", "Grep"])
+    assert "Read that path" not in denied, "the marker still orders a refused call"
+    assert "re-run the call" in denied, denied[:200]
+    assert ".tool-results" in denied, "the path is still named, as it should be"
+    # The chat turn that owns Read keeps the wording every other test here pins.
+    assert "Read that path if you need it again." in _first_marker(["Bash"])
+
+
+def test_the_pre_turn_pass_carries_the_turn_s_deny_list(monkeypatch):
+    """The kwarg has to survive the hop, or the fix stops at the live turn.
+
+    A worker session's own earlier markers are in its stored history, and this
+    is the pass that rewrites them before the model reads them again — so the
+    deny list has to travel with the call, not just with the turn that produced
+    the spill. Asserted at the forwarding rather than on a cleared marker:
+    clearing for real needs a history over the trigger fraction, which would
+    make the assertion about the threshold instead of about the argument.
+    """
+    import app.compaction as comp_mod
+    import app.harness.microcompact as mc_mod
+
+    seen: dict = {}
+
+    def _spy(*args, **kwargs):
+        seen.update(kwargs)
+        return list(args[0]), 0
+
+    monkeypatch.setattr(mc_mod, "microcompact", _spy)
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "worker.json"
+        _write_session(p, [
+            {"role": "user", "content": "research X"},
+            {"role": "assistant", "content": "done"},
+        ])
+        _run(comp_mod.load_and_compact_session(
+            p, model="qwen", disallowed_tools=["Read", "Bash"]))
+
+    assert seen.get("disallowed_tools") == ["Read", "Bash"], seen
+    # And a caller that passes nothing — every chat, ambient and UI call site —
+    # forwards nothing, which the pass reads as everything-allowed.
+    seen.clear()
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "chat.json"
+        _write_session(p, [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        _run(comp_mod.load_and_compact_session(p, model="qwen"))
+    assert seen.get("disallowed_tools") is None, seen
+
+
 def test_microcompact_refuses_to_clear_what_it_could_not_persist():
     """Staying over budget is recoverable; deleting evidence is not."""
     from app.harness import microcompact as mc_mod
@@ -481,6 +564,98 @@ def test_intra_turn_microcompact_fires_when_actually_near_the_wall():
     assert all("cleared from context" not in _marker_text(m) for m in tool_msgs[-15:])
 
 
+# ---------------------------------------------------------------------------
+# A recovery notice must not offer a tool the turn cannot use (#1066)
+# ---------------------------------------------------------------------------
+
+
+def _clean_spill_dir(sid: str) -> None:
+    from app.paths import SESSIONS_DIR
+
+    d = SESSIONS_DIR / f"{sid}.tool-results"
+    if d.exists():
+        for f in d.iterdir():
+            f.unlink()
+        d.rmdir()
+
+
+def _spill_block(disallowed):
+    """One spilled `<persisted-output>` block, with the turn's deny list."""
+    from app.harness.tool_result_spill import maybe_spill
+
+    # One fixed session id: the two calls in the "unchanged" test below must
+    # produce byte-identical blocks, and a per-call id would put a different
+    # spill path in each and make that comparison always fail.
+    sid = "spill_notice_probe"
+    try:
+        return maybe_spill(
+            "y" * 60_000, tool_name="Grep", tool_use_id="call_spill",
+            session_id=sid, disallowed_tools=disallowed,
+        )
+    finally:
+        _clean_spill_dir(sid)
+
+
+def test_spill_notice_stops_offering_read_to_a_turn_that_cannot_use_it():
+    """The notice ordered a call the same turn's policy refused.
+
+    10 of the 25 deep-research denials in the 09-14→09-17 window were the
+    harness instructing the denied call: `Read` is on that source's deny list
+    (`workers/sources/deep_research.py` denies it), and both notices tell the model to
+    Read the path. Reproduced in `sessions/20260917_004805_deepresearch_4032.json`
+    — a cleared-under-pressure notice, then a `Read` denial on
+    `…tool-results/chatcmpl-tool-97eab20b3d3646c1.truncated.json`, then a `Bash`
+    denial against the same directory.
+    """
+    for denied in (["Read", "Bash"], ["mcp__lloyd-mcp__Read"]):
+        block = _spill_block(denied)
+        assert "Read the full file" not in block, f"{denied}: the false promise stands"
+        assert "narrower query" in block, "the recovery it offers is not a real one"
+        assert "saved to:" in block, "the file itself is still named, as it should be"
+
+
+def test_the_spill_notice_is_unchanged_for_a_turn_that_has_read():
+    """The chat agent owns Read, and the wording it relies on must not move —
+    this rung fires on every oversized result a chat turn produces."""
+    with_read = _spill_block(["Bash"])
+    assert "Read the full file with the Read tool" in with_read
+    assert "narrow your next query" in with_read
+    # Omitting the argument is the other shape of "allowed": a caller that
+    # passes nothing must not read as a turn with everything denied.
+    assert _spill_block(None) == with_read
+
+
+def test_context_pressure_notice_stops_offering_read_to_a_turn_that_cannot_use_it():
+    """`_truncate_largest_tool_results` is the notice the corpus actually shows,
+    so it gets the same treatment as the spill block — and the same test: a
+    turn with `Read` allowed keeps its wording."""
+    from app.harness.loop import _truncate_largest_tool_results
+
+    def _notice(disallowed, sid):
+        msgs = _tool_pairs(4, chars=30_000)
+        try:
+            truncated, _freed = _truncate_largest_tool_results(
+                msgs, target_chars=10_000, session_id=sid, min_chars=4_096,
+                disallowed_tools=disallowed,
+            )
+            assert truncated > 0, "nothing was truncated, so the notice never rendered"
+            for m in msgs:
+                if m.get("role") == "tool" and "cleared under context pressure" in _marker_text(m):
+                    return _marker_text(m)
+            raise AssertionError("no cleared-under-pressure notice was produced")
+        finally:
+            _clean_spill_dir(sid)
+
+    denied = _notice(["Read"], "truncate_read_denied_probe")
+    assert "Read that path" not in denied
+    assert "narrower query" in denied, "the recovery it offers is not a real one"
+    assert ".tool-results/" in denied, "the spilled evidence is still named"
+
+    allowed = _notice([], "truncate_read_allowed_probe")
+    assert "Read that path if you need it again." in allowed, (
+        "the wording a turn that owns Read depends on moved")
+
+
 _TESTS = [
     test_estimate_tokens_returns_int,
     test_estimate_tokens_empty_string,
@@ -505,6 +680,11 @@ _TESTS = [
     test_intra_turn_microcompact_is_silent_without_pressure,
     test_intra_turn_microcompact_fires_when_actually_near_the_wall,
     test_truncation_threshold_math,
+    test_microcompact_marker_names_a_route_the_turn_can_take,
+    test_the_pre_turn_pass_carries_the_turn_s_deny_list,
+    test_spill_notice_stops_offering_read_to_a_turn_that_cannot_use_it,
+    test_the_spill_notice_is_unchanged_for_a_turn_that_has_read,
+    test_context_pressure_notice_stops_offering_read_to_a_turn_that_cannot_use_it,
 ]
 
 

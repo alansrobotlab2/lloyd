@@ -332,6 +332,7 @@ async def load_and_compact_session(
     system_prompt: str = "",
     *,
     mode_override: str | None = None,
+    disallowed_tools: list[str] | None = None,
 ) -> dict[str, Any]:
     """Read a persisted session, apply the compaction stack, and return
     ready-to-send history plus metadata.
@@ -340,6 +341,12 @@ async def load_and_compact_session(
 
       1. Load + filter to conversation roles.
       2. Microcompact pre-pass (clears stale tool results).
+         ``disallowed_tools`` is the reading turn's deny list, threaded to the
+         markers this pass rewrites: a worker's second turn reads its own first
+         turn's markers out of the session file, and a marker that says ``Read
+         that path`` to a turn whose policy refuses ``Read`` is an instruction
+         the history itself is issuing (#1066). Unset reads as
+         everything-allowed, which is the chat case and the safe direction.
       3. If still over threshold and ``mode == "summarize"``:
          try LLM summarization; on success, replace dropped block with
          the summary and re-inject recent files (Layer C).
@@ -435,6 +442,7 @@ async def load_and_compact_session(
                 ),
                 min_chars_to_clear=int(mc_cfg.get("min_chars_to_clear", 2_000)),
                 session_id=path.stem,
+                disallowed_tools=disallowed_tools,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("microcompact pre-pass failed: %s", e)

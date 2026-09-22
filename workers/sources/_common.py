@@ -86,6 +86,50 @@ def build_skill_prompt(skill_text: str, *, job: str, task_block: str) -> str:
     ])
 
 
+#: Heading of the block that names a turn's deny list to the turn itself.
+#: Rendered, never written. The two sources whose `DISALLOWED` lists produce
+#: every observed denial — `workers/sources/deep_research.py` and
+#: `workers/sources/youtube_digest.py` — are the two prompts that never
+#: mentioned them, which is #1066.
+DENIED_TOOLS_HEADING = "Tools this turn may not call"
+
+
+def build_denied_tools_block(disallowed) -> str:
+    """Name the calls dispatch will refuse, to the turn they are refused on.
+
+    `extra_disallowed` reaches `RunOptions.disallowed_tools` in
+    `_worker_run_options` or the stream payload's `extra_disallowed` key in
+    `run_prompt_in_session`, which the stream endpoint folds into the same
+    `disallowed_tools` before dispatch — and the refusal is the harness saying
+    no after the model already spent the call. Counted from `stats.is_error` on
+    the stored tool results: 22 refusals from 09-09 to 09-12, all of them from
+    the two sources that pass a list and none from a source that passes none,
+    and in `20260912_173635_deepresearch_360b` the model retried the *same*
+    denied tool once more before moving on.
+
+    The names come from the caller's value and nothing else. A prose copy of
+    the list — in a skill, or in this function — is stale the moment a source
+    edits its `DISALLOWED`, and wrong by construction for half the readers:
+    the `deep-dive-research` skill this feeds is also retrieved interactively,
+    where the chat agent legitimately has `Bash`.
+
+    Returns "" for a turn with no list, which is the chat and ambient path:
+    nothing is appended, so a per-worker restriction has no way to leak onto
+    the turn that owns every tool.
+    """
+    names = sorted({str(t).strip() for t in (disallowed or []) if str(t).strip()})
+    if not names:
+        return ""
+    return (
+        f"\n\n{DENIED_TOOLS_HEADING}: {', '.join(names)}.\n"
+        "They are refused before anything runs, whatever the arguments, and a "
+        "refusal is not a transient failure — retrying the same tool is not a "
+        "recovery. The tools this job left available are the ones that work "
+        "here; if none of them can do the step, drop the step and say why in "
+        "the output."
+    )
+
+
 def parse_confidence(response: str, default: float = 0.5) -> float:
     """Pull `## Confidence\\n<0.0-1.0>` out of a research response.
 
@@ -325,6 +369,14 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
         disallowed.append(f"mcp__lloyd-mcp__{tname}")
 
     disallowed.extend(extra_disallowed)
+
+    # The list is now stated to the turn that carries it, from the same value
+    # that lands on `RunOptions` below. The `if "Task" in disallowed` clause in
+    # the tool description a few lines down is the reason this belongs after the
+    # list is final rather than near `system_prompt`: an instruction written for
+    # one banned tool already had to read the list to know whether to speak, so
+    # a turn banned from six things was told about one of them.
+    system_prompt += build_denied_tools_block(disallowed)
 
     # Every non-interactive turn is built here, and until #534 every one of
     # them ran with `hooks=None` — no safety hook, no grant gate, so
@@ -729,7 +781,15 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     # test_session_platform_checks.py::
     # test_the_worker_s_loopback_post_arrives_with_its_platform, which drives the
     # real `_post_stream` through the real endpoint rather than calling the helper.
-    payload = {"session_id": session_id, "text": prompt, "model": model,
+    # The turn is told the list that will be enforced on it, from this same
+    # value. `extra_disallowed` is the only tool policy this path has — see the
+    # docstring — so on this path there is nowhere else a worker can learn what
+    # it may not call, which is why 22 refusals in four days all came from the
+    # two sources that pass a list and none from a source that passes none
+    # (#1066).
+    payload = {"session_id": session_id,
+               "text": prompt + build_denied_tools_block(extra_disallowed),
+               "model": model,
                # Also read by the endpoint's lazy create
                # (`sessions_io._save_session_meta`), the only writer of a
                # session's platform with no file to read one from. A worker that
