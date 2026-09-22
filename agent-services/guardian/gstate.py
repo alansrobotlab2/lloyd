@@ -70,6 +70,16 @@ def read_events(ledger: Path, limit: int = 200) -> list[dict]:
     return out[-limit:]
 
 
+# The halt transition names, spelled exactly as
+# `scripts.automod.state.HALT_SET_EVENT` / `HALT_CLEAR_EVENT` spells them. This
+# module may not import that one (it writes state while the repo holding it is
+# mid-rewrite), so the duplication is deliberate and a test pins the two pairs
+# equal: `tests/test_guardian_rollback.py`
+# `test_the_two_halt_writers_share_one_event_vocabulary`.
+HALT_SET_EVENT = "promotion_halt_set"
+HALT_CLEAR_EVENT = "promotion_halt_clear"
+
+
 class AutomodState:
     def __init__(self, state_dir: Path):
         self.dir = Path(state_dir)
@@ -196,9 +206,45 @@ class AutomodState:
         self.broken.parent.mkdir(parents=True, exist_ok=True)
         self.broken.write_text(f"{now_iso()} {reason}\n", encoding="utf-8")
 
-    def set_halted(self, reason: str) -> None:
+    def set_halted(self, reason: str, *, by: str = "guardian") -> None:
+        """Freeze promotions and record the freeze in the automod ledger.
+
+        This is the only halt writer that runs in production: the flap
+        quarantine and the vault tripwire both call it, and the flag they
+        write is what `is_halted()` gates the liveness predicate on and what
+        the dashboard publishes as `halted`. Until now the flag was the entire
+        record — no ledger row named a halt transition, so the 2026-09-21
+        21:44Z quarantine survived only as prose inside an `alert` row. The
+        sibling `escalate` already shows the shape: set the flag, then append
+        the event. A re-assertion of an already-set halt carries
+        `already_halted: true` so the first set row remains the start time.
+        """
+        already = self.halted.exists()
         self.halted.parent.mkdir(parents=True, exist_ok=True)
         self.halted.write_text(f"{now_iso()} {reason}\n", encoding="utf-8")
+        append_event(self.ledger, {"event": HALT_SET_EVENT, "by": str(by)[:100],
+                                   "reason": str(reason)[:2000],
+                                   "already_halted": already,
+                                   "path": str(self.halted)})
+
+    def clear_halted(self, *, by: str) -> bool:
+        """Lift the freeze with a record of who lifted it. True if it was set.
+
+        The guardian never calls this: clearing a quarantine is a human act,
+        and the flap alert tells that human to delete the flag by hand, which
+        leaves no trace at all. The flag this class owns therefore has to be
+        liftable *with* a record from this same surface, or the only object
+        that can set the freeze is not the object that can end it on the
+        ledger. `by` is required for that reason — an anonymous clear is the
+        gap, not an acceptable default.
+        """
+        try:
+            self.halted.unlink()
+        except FileNotFoundError:
+            return False
+        append_event(self.ledger, {"event": HALT_CLEAR_EVENT, "by": str(by)[:100],
+                                   "path": str(self.halted)})
+        return True
 
     def deny(self, commit: str, tree_hash: str | None = None) -> None:
         """Record a reverted change by SHA *and* by content.

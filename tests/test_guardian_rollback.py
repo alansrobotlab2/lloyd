@@ -386,6 +386,99 @@ def test_the_26_commit_regression(tmp_path):
 # The rollback alert says what was reverted, in words
 # ---------------------------------------------------------------------------
 
+def _halt_rows(ledger: Path, event: str) -> list[dict]:
+    """Ledger rows whose *subject* is the given halt transition."""
+    if not ledger.exists():
+        return []
+    return [r for r in (json.loads(line) for line in
+                        ledger.read_text(encoding="utf-8").splitlines() if line.strip())
+            if r.get("event") == event]
+
+
+# ---------------------------------------------------------------------------
+# Halting promotions is a transition, so it belongs in the ledger too.
+# #1365 clause 2: gstate.AutomodState.set_halted — the only halt writer with a
+# production caller (guardian.py's flap quarantine and vault tripwire) — appends
+# a halt-set row carrying its reason, and its clear names who cleared.
+# ---------------------------------------------------------------------------
+
+def test_guardian_halt_set_appends_a_row_whose_subject_is_the_halt(tmp_path):
+    """The only halt writer that runs in production must leave a trace.
+
+    `guardian.py` halts promotions from the flap quarantine (two thresholds)
+    and from the vault tripwire, all through `AutomodState.set_halted`, and
+    `is_halted()` gates the liveness predicate and the dashboard's `halted`
+    flag on that same file, and before this change no row of the ledger named a
+    halt transition at all: the 2026-09-21 21:44Z quarantine, 3 h 36 m with no
+    promotions, survived only as prose inside the `alert` row appended at
+    21:45:06Z. `escalate` beside it already appends after setting its flag; the
+    halt path does the same now.
+    """
+    st = gstate.AutomodState(tmp_path)
+    st.set_halted("4 rollbacks in 6h")
+    assert st.is_halted()
+    rows = _halt_rows(st.ledger, "promotion_halt_set")
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "4 rollbacks in 6h"
+    assert rows[0]["by"] == "guardian"
+    assert rows[0]["path"] == str(st.halted), "so a reader can say what to clear"
+    assert rows[0]["already_halted"] is False, "this row is the start of the freeze"
+
+
+def test_guardian_halt_clear_names_the_clearer_and_skips_a_clear_that_did_nothing(tmp_path):
+    """The flap alert tells a human to delete the flag; the clear must be visible.
+
+    Clearing a quarantine is a human act and the guardian never does it, so the
+    route that does exist has to record who took it — and a clear against an
+    unset halt must not invent a transition that never happened.
+    """
+    st = gstate.AutomodState(tmp_path)
+    assert st.clear_halted(by="alan, after checking the snapshot") is False
+    assert not st.ledger.exists(), "no freeze was lifted, so nothing is on the record"
+    st.set_halted("vault tripwire: 4,000 files deleted")
+    assert st.clear_halted(by="alan, after checking the snapshot") is True
+    assert not st.is_halted()
+    assert [r["by"] for r in _halt_rows(st.ledger, gstate.HALT_CLEAR_EVENT)] == \
+        ["alan, after checking the snapshot"]
+
+
+def test_the_two_halt_writers_share_one_event_vocabulary(tmp_path, monkeypatch):
+    """Two processes, one flag, one ledger — so the event names must not drift.
+
+    `gstate` is deliberately unable to import `scripts.automod.state`: it has
+    to write this state while the repo holding that module is mid-rewrite. The
+    event names are therefore duplicated by hand, and a drifted spelling would
+    file the guardian's halts in a bucket no reader looks at — which is the
+    exact defect #1365 is about, re-opened quietly. Both writers are pointed at
+    ONE ledger here, so the pairing is checked the way a reader would do it:
+    one bucket over `event`.
+    """
+    from scripts.automod import state as S
+
+    # Literals, not the modules' own constants: renaming both in lockstep must
+    # fail here, or a reader greps the names the item named and finds nothing.
+    assert (gstate.HALT_SET_EVENT, gstate.HALT_CLEAR_EVENT) == \
+        ("promotion_halt_set", "promotion_halt_clear")
+    assert (S.HALT_SET_EVENT, S.HALT_CLEAR_EVENT) == \
+        ("promotion_halt_set", "promotion_halt_clear")
+
+    st = gstate.AutomodState(tmp_path)
+    monkeypatch.setattr(S, "HALTED_PATH", st.halted)
+    monkeypatch.setattr(S, "LEDGER_PATH", st.ledger)
+
+    S.set_halted("automod-side freeze", by="automod test")
+    assert st.is_halted(), "both writers address the same flag"
+    assert S.clear_halted(by="automod test") is True
+    st.set_halted("guardian-side freeze")
+    assert st.clear_halted(by="guardian test") is True
+
+    events = [json.loads(line)["event"] for line in
+              st.ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert events == ["promotion_halt_set", "promotion_halt_clear",
+                      "promotion_halt_set", "promotion_halt_clear"], \
+        "one bucket, both writers, the names the item named"
+
+
 def test_rollback_title_prefers_the_items_name_and_falls_back_to_hashes():
     """Read aloud, "Rolled back 1a2b3c4d to 5e6f7a8b" is sixteen letters of
     noise. The promoter writes the item's name onto current.json as `title`

@@ -628,13 +628,18 @@ def bless(note: str = "") -> dict:
             "docs_only_ahead": docs_only}
 
 
-def recover(clear_broken: bool = True, clear_halt: bool = True) -> dict:
+def recover(clear_broken: bool = True, clear_halt: bool = True,
+            by: str | None = None) -> dict:
     """Come back from BROKEN: clear the flags and start the stack again.
 
     The guardian deliberately leaves services STOPPED when it escalates — an
     honestly-dead system beats a half-reverted one. Nothing then started them
     again, and the documented recovery was "clear the flag", which leaves the
     box down. This is the other half.
+
+    `by` is who is clearing, for the ledger: the flap alert tells a human to
+    clear the flag, and a name on the halt-clear row is what makes that act
+    attributable instead of a file that silently disappeared.
     """
     from app.supervisor_client import start_process
     out: dict = {"cleared": [], "started": []}
@@ -642,7 +647,14 @@ def recover(clear_broken: bool = True, clear_halt: bool = True) -> dict:
         S.BROKEN_PATH.unlink()
         out["cleared"].append("BROKEN")
     if clear_halt and S.is_halted():
-        S.clear_halted()
+        # `by` names whoever cleared it, because this is the one production
+        # route that lifts a halt and the halt-clear ledger row is where that
+        # is on the record: the `recovered` row beside it carries no actor and
+        # no round_id, and still does. A caller who was told to clear the flag
+        # passes their own name (`--by`); with none, the row at least names the
+        # call.
+        who = (by or "").strip() or f"round recover pid {os.getpid()}"
+        S.clear_halted(by=who)
         out["cleared"].append("promotions-halted")
     S.clear_rollback_request()
     for program in ("lloyd-mcp", "lloyd-backend"):
@@ -729,7 +741,9 @@ def main(argv=None) -> int:
     sub.add_parser("status")
     b = sub.add_parser("bless", help="record the running commit as last-known-good")
     b.add_argument("--note", default="")
-    sub.add_parser("recover", help="clear BROKEN/halted and start the stack")
+    rc = sub.add_parser("recover", help="clear BROKEN/halted and start the stack")
+    rc.add_argument("--by", default=None,
+                    help="who is clearing, for the halt-clear ledger row (e.g. alan)")
     # A restart by hand looked like a crash to the guardian and fired every
     # alert channel, and the pause-drain-restart procedure was five manual
     # steps in CLAUDE.md. This is that procedure, with the lease the promoter
@@ -791,7 +805,11 @@ def main(argv=None) -> int:
     elif args.cmd == "bless":
         print(json.dumps(bless(args.note), indent=2, default=str))
     elif args.cmd == "recover":
-        print(json.dumps(recover(), indent=2, default=str))
+        # `--by` has to be forwarded or the flag is a lie in `--help`: the whole
+        # point of the halt-clear ledger row is to name whoever lifted a freeze,
+        # and dispatching `recover()` here dropped the name on the floor and
+        # recorded the pid fallback instead (#1365, review round 2).
+        print(json.dumps(recover(by=args.by), indent=2, default=str))
     elif args.cmd == "restart":
         programs = tuple(args.only) if args.only else ("lloyd-mcp", "lloyd-backend")
         print(json.dumps(P.restart_stack(programs, reason=args.reason, force=args.force,

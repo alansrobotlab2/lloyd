@@ -510,16 +510,54 @@ def is_halted() -> bool:
     return HALTED_PATH.exists()
 
 
-def set_halted(reason: str) -> None:
+# The event names are shared with the guardian's own halt writer
+# (`agent-services/guardian/gstate.py`), which cannot import this module — it
+# has to write the flag while the repo these modules live in is mid-rewrite.
+# Two writers, one ledger, one vocabulary: `tests/test_guardian_rollback.py`
+# pins the two constants to each other, because a reader buckets on `event`
+# and a drifted spelling is a halt that silently stops being on the record.
+HALT_SET_EVENT = "promotion_halt_set"
+HALT_CLEAR_EVENT = "promotion_halt_clear"
+
+
+def set_halted(reason: str, *, by: str = "automod") -> None:
+    """Freeze promotions, and put the freeze in the ledger as well as the file.
+
+    The file alone used to be the whole record, and `is_halted()` is a bare
+    `exists()` on it, so a pass that read `halted: true` could not say when the
+    freeze began, why, or who owns clearing it. The 2026-09-21 21:44Z freeze —
+    3 h 36 m of no promotions — survived only as prose inside a guardian
+    `alert` row and as one field of a later `recovered` row. `request_rollback`
+    already appends for exactly the reason its docstring gives: the record has
+    to outlive whatever file happened to be open. A re-assertion of an
+    already-set halt is recorded too, with `already_halted: true`, so the first
+    `promotion_halt_set` row stays the start time.
+    """
+    already = HALTED_PATH.exists()
     HALTED_PATH.parent.mkdir(parents=True, exist_ok=True)
     HALTED_PATH.write_text(f"{now_iso()} {reason}\n", encoding="utf-8")
+    append_event({"event": HALT_SET_EVENT, "by": str(by)[:100],
+                  "reason": str(reason)[:2000], "already_halted": already,
+                  "path": str(HALTED_PATH)})
 
 
-def clear_halted() -> None:
+def clear_halted(*, by: str) -> bool:
+    """Lift the freeze and record it — True only if a freeze was lifted.
+
+    `by` is required because a clear with no actor is the exact gap this
+    closes: the one production clear (``round.recover``) leaves a `recovered`
+    row that names neither actor nor round, and a hand-clear left nothing at
+    all. Callers that want to say who, can; nobody gets to be anonymous. The
+    row is appended only when the unlink actually removed the flag — a clear
+    against an unset halt records no transition, because none happened.
+    """
     try:
         HALTED_PATH.unlink()
     except FileNotFoundError:
-        pass
+        return False
+    append_event({"event": HALT_CLEAR_EVENT, "by": str(by)[:100],
+                  "path": str(HALTED_PATH)})
+    return True
 
 
 def is_broken() -> bool:
