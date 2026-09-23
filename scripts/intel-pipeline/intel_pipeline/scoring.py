@@ -19,7 +19,8 @@ import urllib.request
 from datetime import datetime
 from typing import Callable, List, Optional, Dict, Any
 
-from .models import FeedItem, ScoredItem
+from .models import (FeedItem, ScoredItem, GRADE_CALL_CAP, GRADE_KEYWORD,
+                     GRADE_MODEL, GRADE_NO_USABLE_GRADE)
 from .profile import load_profile, keyword_match, keyword_score, get_all_projects
 
 # Stage 2 only runs for items the keyword stage already rates above this.
@@ -191,9 +192,10 @@ def stage2_score(
 
     An item the keyword stage rated above LLM_KEYWORD_THRESHOLD is sent to the
     model, which returns a graded 1-10 plus why/projects/category. Anything below
-    the threshold, and anything past `max_llm_calls`, keeps its keyword-derived
-    score — so the scale is continuous where a model looked and honest about
-    where it did not.
+    the threshold keeps its keyword-derived score, and anything past
+    `max_llm_calls` keeps that score too but is recorded as never graded, so the
+    scale is continuous where a model looked and the run says out loud where it
+    did not.
 
     Args:
         items: List of FeedItem objects
@@ -202,9 +204,21 @@ def stage2_score(
             so the call/No-call decision is testable without a running engine.
         max_llm_calls: Per-run budget; see LLM_MAX_CALLS.
 
-    Sets ``stage2_score.last_llm_calls`` to the number of model calls made and
-    ``stage2_score.last_graded`` to how many came back as a usable grade, so the
-    run summary can tell "the model judged nothing" from "the model was not asked".
+    Every item carries ``grade_source`` naming which of these produced its
+    relevance: ``model`` (a usable grade), ``no_usable_grade`` (asked, nothing
+    usable came back), ``call_cap`` (eligible, but the budget was already spent —
+    so the model was never consulted about it), or ``keyword`` (never a candidate:
+    the engine is off, or stage 1's score was at or below LLM_KEYWORD_THRESHOLD).
+    Only ``model`` is a grade. The vault writer refuses ``call_cap`` and writes the
+    other two, because the keyword fallback is the designed behaviour when the
+    engine is unavailable and turning an outage into a zero-write day is not what
+    the fallback is for.
+
+    Sets ``stage2_score.last_llm_calls`` to the number of model calls made,
+    ``stage2_score.last_graded`` to how many came back as a usable grade, and
+    ``stage2_score.last_cap_refused`` to how many eligible survivors the budget
+    never reached, so the run summary can tell "the model judged nothing" from "the
+    model was not asked" from "the model ran out of calls".
 
     Returns:
         List of ScoredItem objects
@@ -216,6 +230,7 @@ def stage2_score(
     all_projects = get_all_projects(profile)
     llm_calls = 0
     graded_calls = 0  # of those calls, how many produced a usable grade
+    cap_refused = 0   # eligible survivors the budget never reached
 
     for item in items:
         # Combine title and summary for matching
@@ -229,10 +244,21 @@ def stage2_score(
         why = fallback["why"]
         matched_projects = match_projects(item, all_projects)
         category = determine_category(matched_topics)
+        # The fallback score until something replaces it, with the cause named:
+        # an item is GRADE_KEYWORD here only when it was never a candidate for a
+        # call at all (engine off, or rated at/below the threshold).
+        grade_source = GRADE_KEYWORD
 
-        wants_model = (use_model and kw_score > LLM_KEYWORD_THRESHOLD
-                       and llm_calls < max_llm_calls)
+        eligible = use_model and kw_score > LLM_KEYWORD_THRESHOLD
+        wants_model = eligible and llm_calls < max_llm_calls
+        if eligible and not wants_model:
+            # Same eligibility test as `wants_model`, so the one thing that can
+            # have failed here is the budget: this item's relevance is a stand-in
+            # for a grade that was never taken, which is what the writer refuses.
+            grade_source = GRADE_CALL_CAP
+            cap_refused += 1
         if wants_model:
+            grade_source = GRADE_NO_USABLE_GRADE
             llm_calls += 1
             try:
                 graded = _parse_score_json(scorer(_score_prompt(item, profile)))
@@ -242,6 +268,7 @@ def stage2_score(
             if graded:
                 model_relevance = _clamp_relevance(graded.get("relevance"))
                 if model_relevance is not None:
+                    grade_source = GRADE_MODEL
                     relevance = model_relevance
                     why = (graded.get("why") or "").strip() or why
                     projects = graded.get("projects")
@@ -266,14 +293,18 @@ def stage2_score(
             why=why,
             projects=matched_projects,
             category=category,
+            grade_source=grade_source,
         ))
 
-    # Both numbers, because they answer different questions: calls made says the
-    # budget was spent, grades produced says the model contributed. Collapsed into
-    # one, a model that answers with prose reads exactly like a model that scored
-    # everything. Reported by run_scoring_pipeline.
+    # Three numbers, because they answer three questions: calls made says the
+    # budget was spent, grades produced says the model contributed, and cap
+    # refused says how much of the day the budget did not cover at all. Collapsed
+    # into one, a model that answers with prose reads exactly like a model that
+    # scored everything, and a 40-call budget spent on 258 survivors reads exactly
+    # like a day with 40 items. Reported by run_scoring_pipeline.
     stage2_score.last_llm_calls = llm_calls
     stage2_score.last_graded = graded_calls
+    stage2_score.last_cap_refused = cap_refused
     return scored_items
 
 
@@ -327,6 +358,7 @@ def run_scoring_pipeline(
     items: List[FeedItem],
     profile: Optional[dict] = None,
     llm_call: Optional[Callable[[str], str]] = None,
+    max_llm_calls: Optional[int] = None,
 ) -> List[ScoredItem]:
     """
     Run the full two-stage scoring pipeline.
@@ -335,10 +367,16 @@ def run_scoring_pipeline(
         items: List of FeedItem objects
         profile: Interest profile (optional, loads default if not provided)
         llm_call: Optional stand-in for the local model (tests)
+        max_llm_calls: stage-2 call budget, defaulting to LLM_MAX_CALLS. Passable
+            because the summary's survivor-vs-cap gap is the thing under test and
+            `stage2_score`'s own default binds at import time: without this, the
+            only way to put a run over the cap is to wait for a real day that
+            reaches it.
     
     Returns:
         List of ScoredItem objects
     """
+    cap = LLM_MAX_CALLS if max_llm_calls is None else max_llm_calls
     if profile is None:
         profile = load_profile()
     
@@ -350,7 +388,7 @@ def run_scoring_pipeline(
               f"({dropped} matched no interest keyword)")
     
     # Stage 2: Score
-    scored = stage2_score(filtered, profile, llm_call=llm_call)
+    scored = stage2_score(filtered, profile, llm_call=llm_call, max_llm_calls=cap)
 
     # Calls and grades are different numbers, and the old line conflated them: an
     # engine that answered with prose made it say "LLM scored 1 of 1" while every
@@ -358,8 +396,18 @@ def run_scoring_pipeline(
     # judged", and read a calls>grades gap as the engine misbehaving.
     calls = getattr(stage2_score, "last_llm_calls", 0)
     graded = getattr(stage2_score, "last_graded", 0)
+    cap_refused = getattr(stage2_score, "last_cap_refused", 0)
     print(f"LLM scored {graded} of {calls} items it was asked about "
           f"(threshold {LLM_KEYWORD_THRESHOLD}); the rest kept their keyword score")
+    # Said separately, because the line above cannot carry it: `calls` is the
+    # budget, not the survivor count, so on 2026-09-22 a fully-spent budget over
+    # 258 survivors printed "LLM scored 40 of 40" — a sentence that reads as a
+    # graded day while 218 items were never put to the model at all.
+    if cap_refused:
+        print(f"  NEVER ASKED: {cap_refused} of {len(scored)} survivors went "
+              f"ungraded because the stage-2 call budget of {cap} was already "
+              f"spent. Their relevance is an ungraded keyword score, and the vault "
+              f"writer refuses them (grade_source={GRADE_CALL_CAP}).")
     if calls and not graded:
         print(f"  WARNING: the model at {LLM_URL} answered {calls} request(s) "
               "without a usable grade — every relevance below is keyword-only. "

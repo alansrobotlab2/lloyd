@@ -43,6 +43,7 @@ INTEL_DIR = REPO_ROOT / "scripts" / "intel-pipeline"
 if str(INTEL_DIR) not in sys.path:
     sys.path.insert(0, str(INTEL_DIR))
 
+from intel_pipeline import models as models_mod  # noqa: E402
 from intel_pipeline import profile as profile_mod  # noqa: E402
 from intel_pipeline import scoring as scoring_mod  # noqa: E402
 from intel_pipeline import state as state_mod  # noqa: E402
@@ -2359,3 +2360,336 @@ def test_autonomy_task_30_still_parses_as_scheduler_config():
             f"task 30 lost or changed {field}: want {expected!r}, "
             f"got {parsed.get(field)!r}")
     assert parsed["body"].strip(), "task 30 has no body for the worker to read"
+
+
+# --- Backlog #1380: an item the call cap left ungraded is not a written item ----
+#
+# `stage2_score` assigned `_keyword_fallback`'s score *before* it decided whether to
+# spend a model call, and the fallback is `max_weight * 10` against a profile where
+# no topic sets `**Weight:**` — so every whole-word match scored the loader's 1.0
+# default × 10 = 10. Measured over `intel-2026-09-22.jsonl`: 258 stage-1 survivors
+# against `LLM_MAX_CALLS = 40`, relevance `{10: 222, 9: 10, 8: 5, 6: 2, 3: 2, 2: 12,
+# 1: 5}`, 40 rows carrying a model `why` and 218 carrying `Matches: <topic>`. Cross-
+# referenced against `vault-written.json`: 104 writes, **101 of them keyword-only at
+# relevance 10**, and of the 19 items `RELEVANCE_FLOOR` held, 0 were keyword-only —
+# the floor is arithmetically inert on an ungraded item, which scores exactly 10 or
+# exactly 1 and never anything between 4 and 10. The run summary made that day read
+# as fully graded, because `LLM scored {graded} of {calls}` prints "40 of 40":
+# `calls` is the budget, not the survivor count.
+#
+# The fix is by *cause*, not magnitude: each scored item carries `grade_source`
+# naming what produced its relevance, and the writer bars exactly
+# `call_cap` — eligible for a call, budget already spent. `no_usable_grade` and
+# `keyword` keep writing, because the case below named `INTEL_DISABLE_LLM=1` is what
+# the keyword fallback exists for, and a bar that reached it turns an engine outage
+# into a zero-write day.
+#
+# Deliberately untouched: `interests.md`. A `**Weight:**` below ~0.4 skips the
+# stage-2 call *and* cannot clear the floor, so weights are an off switch and their
+# relative values are Alan's call (see the #852 note above).
+
+CAP_OUTCOMES = ("model", "no_usable_grade", "call_cap", "keyword")
+
+
+def _knowledge_text(tmp_path) -> str:
+    root = tmp_path / "obsidian" / "knowledge"
+    return "\n".join(p.read_text() for p in root.rglob("*.md")) if root.exists() else ""
+
+
+def test_stage2_score_names_which_outcome_produced_each_relevance(redirect_paths):
+    """Clause 1: four outcomes, one run, and two of them score identically.
+
+    `max_llm_calls=2` over four items: the first is asked and answers with a usable
+    5; the second is asked and answers 97, which `_clamp_relevance` refuses as a
+    failed grade; the third is eligible but the budget is spent; the fourth matches
+    only the 0.2-weight Wearables topic, so stage 2 never considers asking. Their
+    relevance is 5, 9, 9, 2 — and the two 9s are the point: identical numbers with
+    different causes, one of which must never be written.
+    """
+    profile = _profile(redirect_paths)
+
+    def model(prompt):
+        model.n += 1
+        return _reply(relevance=97 if model.n == 2 else 5)(prompt)
+    model.n = 0
+
+    scored = scoring_mod.stage2_score(
+        [_item("asked-clean", source="youtube", title="vllm speculative decoding",
+               summary="vllm"),
+         _item("asked-junk", source="youtube", title="vllm mixture of experts",
+               summary="vllm"),
+         _item("cap-refused", source="youtube", title="vllm quantization notes",
+               summary="vllm"),
+         _item("never-eligible", source="youtube", title="IMU wrist calibration",
+               summary="imu drift on the wrist mount")],
+        profile, llm_call=model, max_llm_calls=2)
+
+    assert [s.grade_source for s in scored] == list(CAP_OUTCOMES)
+    assert [s.relevance for s in scored] == [5, KW_SCORE_09, KW_SCORE_09, 2], (
+        "the junk grade must keep the fallback score, as it did before #1380; only "
+        f"the cause it is filed under is new: {[s.relevance for s in scored]}")
+    assert scoring_mod.stage2_score.last_cap_refused == 1
+    assert scoring_mod.stage2_score.last_llm_calls == 2
+    assert set(CAP_OUTCOMES) == {models_mod.GRADE_MODEL,
+                                 models_mod.GRADE_NO_USABLE_GRADE,
+                                 models_mod.GRADE_CALL_CAP,
+                                 models_mod.GRADE_KEYWORD}
+
+
+def test_write_all_to_vault_refuses_the_item_the_call_cap_left_ungraded(redirect_paths,
+                                                                       capsys):
+    """Clause 2, across the seam the unit tests cannot fake: the day file.
+
+    One item graded 6 and one left at the keyword 9 by a 1-call budget, both above
+    `RELEVANCE_FLOOR = 4` — so the floor is *not* what holds the second one, and the
+    only thing that can is `refused_by_call_cap`. The score then goes out through
+    `to_json` and comes back through `load_scored_items`, because in production the
+    writer is a different process from the scorer.
+    """
+    profile = _profile(redirect_paths)
+    llm = RecordingLLM(relevance=6)
+    scored = scoring_mod.stage2_score(
+        [_item("graded", source="youtube", title="vllm speculative decoding",
+               summary="vllm"),
+         _item("ungraded", source="youtube", title="vllm mixture of experts",
+               summary="vllm")],
+        profile, llm_call=llm, max_llm_calls=1)
+
+    assert [s.grade_source for s in scored] == ["model", "call_cap"]
+    assert [s.relevance for s in scored] == [6, KW_SCORE_09]
+
+    day = _write_day(redirect_paths, scored)
+    reloaded = vw_mod.load_scored_items(day)
+    assert [vw_mod.refused_by_call_cap(i) for i in reloaded] == [False, True], (
+        "the cause did not survive the JSONL round trip")
+
+    written = vw_mod.write_all_to_vault(day)
+
+    assert written == 1, "the ungraded item was written"
+    assert _knowledge_sections(redirect_paths) == 1
+    text = _knowledge_text(redirect_paths)
+    assert "https://example.com/ungraded" not in text
+    assert "https://example.com/graded" in text
+    out = capsys.readouterr().out
+    assert "Held 1 item(s) the stage-2 model was never asked about" in out, out
+
+
+def test_run_summary_names_the_survivors_the_call_cap_never_asked(redirect_paths,
+                                                                 capsys):
+    """Clause 3: `LLM scored 40 of 40` was the sentence that hid 218 items.
+
+    Four eligible survivors, a 2-call budget. The old summary printed "LLM scored 2
+    of 2 items it was asked about", which is true and useless: it names the budget,
+    not the day. The gap must be its own figure, and the graded line must not be
+    able to read as a full grading of the four.
+    """
+    profile = _profile(redirect_paths)
+    items = [_item(f"v{i}", source="youtube", title="vllm thing", summary="vllm")
+             for i in range(4)]
+
+    scored = scoring_mod.run_scoring_pipeline(items, profile,
+                                              llm_call=RecordingLLM(relevance=6),
+                                              max_llm_calls=2)
+
+    out = capsys.readouterr().out
+    assert len(scored) == 4
+    assert "LLM scored 2 of 2 items it was asked about" in out
+    assert "NEVER ASKED: 2 of 4" in out, out
+    assert "stage-2 call budget of 2" in out, out
+    assert "LLM scored 4" not in out, "the graded line still reads as a full grading"
+
+
+def test_a_day_the_call_cap_reaches_no_prints_no_unasked_figure(redirect_paths, capsys):
+    """Guards the line above against passing by always printing something.
+
+    The same four items with a 4-call budget: every survivor is asked, so there is
+    no gap to name and the summary must say nothing about one.
+    """
+    profile = _profile(redirect_paths)
+    items = [_item(f"v{i}", source="youtube", title="vllm thing", summary="vllm")
+             for i in range(4)]
+
+    scoring_mod.run_scoring_pipeline(items, profile,
+                                     llm_call=RecordingLLM(relevance=6),
+                                     max_llm_calls=4)
+
+    out = capsys.readouterr().out
+    assert "LLM scored 4 of 4 items it was asked about" in out
+    assert "NEVER ASKED" not in out, out
+
+
+def test_a_model_outage_still_writes_every_keyword_graded_item(redirect_paths,
+                                                              monkeypatch, capsys):
+    """Clause 4, the purpose clause: the bar is scoped to cap overflow.
+
+    Five eligible items, a 2-call budget, and the engine off by env — the shape of a
+    batch run taken while the model is down. Not one of the five may be filed as
+    `call_cap`, because the model was not run short of calls, it was never asked to
+    run at all; and all five must reach the vault at the keyword fallback score the
+    sibling test above pins at 10/urgent for the scorer alone. A bar that leaked into
+    this path would turn an engine outage into a zero-write day.
+    """
+    profile = _profile(redirect_paths)
+    monkeypatch.setenv("INTEL_DISABLE_LLM", "1")
+    items = [_item(f"k{i}", source="youtube", title="vllm speculative decoding",
+                   summary="vllm") for i in range(5)]
+
+    scored = scoring_mod.stage2_score(items, profile, max_llm_calls=2)
+
+    assert scoring_mod.stage2_score.last_llm_calls == 0
+    assert scoring_mod.stage2_score.last_cap_refused == 0
+    assert {s.grade_source for s in scored} == {"keyword"}
+
+    written = vw_mod.write_all_to_vault(_write_day(redirect_paths, scored))
+
+    assert written == 5, "an engine outage must not become a zero-write day"
+    out = capsys.readouterr().out
+    assert "never asked about" not in out.lower(), out
+
+
+def test_a_feed_file_predating_the_grade_cause_still_writes(redirect_paths):
+    """The default on a missing `grade_source` is a behaviour, not a label.
+
+    `intel-<date>.jsonl` files written before #1380 carry no cause at all. Were the
+    missing key read as `call_cap`, re-running `--write` over such a day would write
+    nothing — the zero-write day this change must never cause — so both directions
+    are pinned: a cause that is there survives the round trip, and one that is not
+    there is `keyword`, which is writable.
+    """
+    graded = ScoredItem(**{**_item("rt1", source="youtube", title="vllm thing",
+                                   summary="vllm").to_dict(),
+                           "relevance": 6, "urgency": "morning",
+                           "why": "Directly relevant", "projects": [],
+                           "category": "ai-llms", "grade_source": "model"})
+    assert "call_cap" not in graded.to_json()
+    assert ScoredItem.from_json(graded.to_json()).grade_source == "model"
+
+    legacy = {**_item("rt2", source="youtube", title="vllm thing",
+                      summary="vllm").to_dict(), "relevance": 10,
+              "urgency": "urgent", "why": "Matches: vllm", "projects": [],
+              "category": "ai-llms"}
+    assert "grade_source" not in legacy
+    day = "2026-09-11"
+    (redirect_paths / "lloyd" / "_pipeline" / "vault-derived" / "memory" / "feeds"
+     / f"intel-{day}.jsonl").write_text(json.dumps(legacy) + "\n")
+
+    reloaded = vw_mod.load_scored_items(day)
+
+    assert [i.grade_source for i in reloaded] == ["keyword"]
+    assert not vw_mod.refused_by_call_cap(reloaded[0])
+    assert vw_mod.write_all_to_vault(day) == 1
+
+
+def test_cli_run_past_the_call_cap_writes_only_what_the_model_graded(tmp_path):
+    """The whole acceptance check, across both real process boundaries.
+
+    `python -m intel_pipeline --score` is the process autonomy task #30 spawns, and
+    the model is a loopback HTTP peer; `--write` then runs as a **second** process,
+    which is what makes this the seam test rather than a unit test with extra steps:
+    `write_all_to_vault` re-reads `intel-<date>.jsonl` from disk, so a cause held
+    only in the scoring process would be absent exactly where the refusal has to
+    act. `LLM_MAX_CALLS + 2` eligible items, the stub grading each 6 — above the
+    floor — so every refusal is attributable to the cap and to nothing else.
+    """
+    home, feeds = _cli_home(tmp_path)
+    today = _today_str()
+    cap = scoring_mod.LLM_MAX_CALLS
+    items = [_item(f"yt{i}", source="youtube", title="vllm speculative decoding",
+                   summary="vllm") for i in range(cap + 2)]
+    (feeds / "raw" / f"{today}.jsonl").write_text(
+        "\n".join(i.to_json() for i in items) + "\n")
+
+    day, score_proc = _run_cli(home, 6, "--score")
+
+    assert score_proc.returncode == 0, score_proc.stderr[-2000:]
+    rows = [json.loads(l) for l in
+            (feeds / f"intel-{day}.jsonl").read_text().splitlines() if l.strip()]
+    assert len(rows) == cap + 2
+    causes = [r["grade_source"] for r in rows]
+    assert causes.count("model") == cap, "the budget did not get spent before it cut off"
+    assert causes.count("call_cap") == 2
+    assert f"NEVER ASKED: 2 of {cap + 2}" in score_proc.stdout, score_proc.stdout[-1500:]
+
+    day2, write_proc = _run_cli(home, 6, "--write")
+
+    assert day2 == day and write_proc.returncode == 0, write_proc.stderr[-2000:]
+    assert "Held 2 item(s) the stage-2 model was never asked about" in write_proc.stdout
+    knowledge = home / "obsidian" / "knowledge"
+    assert sum(_sections(p) for p in knowledge.rglob("*.md")) == cap, (
+        "the digest grew past the graded set")
+    text = "\n".join(p.read_text() for p in knowledge.rglob("*.md"))
+    refused_urls = [r["url"] for r in rows if r["grade_source"] == "call_cap"]
+    assert len(refused_urls) == 2
+    assert not [u for u in refused_urls if u in text], (
+        f"a cap-refused item reached the vault: {refused_urls}")
+
+    # The triage measure itself: written ids cross-referenced against the day file,
+    # split on the `Matches:` prefix that only the keyword fallback emits. Today it
+    # is 101; after this change it must be 0.
+    written_ids = json.loads((feeds / "vault-written.json").read_text())["written"]
+    by_id = {r["id"]: r for r in rows}
+    assert [i for i in written_ids
+            if (by_id[i].get("why") or "").startswith("Matches:")] == [], (
+        f"keyword-only writes reached the vault: {written_ids}")
+
+
+def test_write_item_to_vault_refuses_the_cap_item_on_its_own_surface(redirect_paths,
+                                                                    capsys):
+    """The refusal belongs on every route into the vault, not just the batch one.
+
+    `write_all_to_vault` filters the day before it prints the held count, but
+    `write_item_to_vault` is public and reachable with no filter in front of it, so
+    a guard living only on the batch path is a guard on one of two write surfaces.
+    Called directly with a cap-refused item, it must write nothing and leave no
+    digest behind — and the floor must not be what stops it, or the test would pass
+    for the wrong reason.
+    """
+    profile = _profile(redirect_paths)
+    ungraded = ScoredItem(**{**_item("cap1", source="youtube",
+                                     title="vllm mixture of experts",
+                                     summary="vllm").to_dict(),
+                             "relevance": KW_SCORE_09, "urgency": "urgent",
+                             "why": "Matches: vllm", "projects": [],
+                             "category": "ai-llms",
+                             "grade_source": models_mod.GRADE_CALL_CAP})
+    assert not vw_mod.below_floor(ungraded), (
+        "a floor-refused item cannot test the call-cap refusal")
+
+    assert vw_mod.write_item_to_vault(ungraded, profile) is False
+    assert _knowledge_sections(redirect_paths) == 0, (
+        "the direct write surface wrote an ungraded item")
+    assert "https://example.com/cap1" not in _knowledge_text(redirect_paths)
+    assert "Refusing" in capsys.readouterr().out
+
+
+def test_a_spent_budget_refuses_the_unasked_and_keeps_the_asked_junk(redirect_paths,
+                                                                    capsys):
+    """Where clause 2 stops and clause 4 begins, told apart by cause alone.
+
+    Four eligible survivors, a 2-call budget, and a model answering 97 — a grade
+    `_clamp_relevance` refuses, so the two asked items keep the keyword 9 and the
+    two the budget never reached carry the same 9. All four scores are identical,
+    which is the point: the only difference between writing and refusing is whether
+    a call was ever made. The asked-but-junk pair must still be written, because
+    refusing them is what turns a degraded engine into a zero-write day; the
+    unasked pair must not be.
+    """
+    profile = _profile(redirect_paths)
+    scored = scoring_mod.stage2_score(
+        [_item(f"j{i}", source="youtube", title="vllm thing", summary="vllm")
+         for i in range(4)],
+        profile, llm_call=RecordingLLM(relevance=97), max_llm_calls=2)
+
+    assert [s.grade_source for s in scored] == [
+        models_mod.GRADE_NO_USABLE_GRADE, models_mod.GRADE_NO_USABLE_GRADE,
+        models_mod.GRADE_CALL_CAP, models_mod.GRADE_CALL_CAP]
+    assert [s.relevance for s in scored] == [KW_SCORE_09] * 4, (
+        "if the four differ by score the writer's split is not being attributed to "
+        f"the cause: {[s.relevance for s in scored]}")
+
+    written = vw_mod.write_all_to_vault(_write_day(redirect_paths, scored))
+
+    assert written == 2, f"the asked-but-junk items did not survive: {written}"
+    assert _knowledge_sections(redirect_paths) == 2
+    out = capsys.readouterr().out
+    assert "Held 2 item(s) the stage-2 model was never asked about" in out, out

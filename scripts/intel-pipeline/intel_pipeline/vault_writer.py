@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from .models import ScoredItem
+from .models import ScoredItem, GRADE_CALL_CAP, GRADE_KEYWORD
 from .profile import load_profile, get_all_keywords, keyword_match
 
 
@@ -50,6 +50,27 @@ def below_floor(item: ScoredItem) -> bool:
         return int(item.relevance) < RELEVANCE_FLOOR
     except (TypeError, ValueError):
         return True  # an unscored item is not evidence of relevance
+
+
+def refused_by_call_cap(item: ScoredItem) -> bool:
+    """True when the stage-2 model was never consulted about this item.
+
+    The floor cannot do this job, and for a specific arithmetic reason: no topic
+    in `interests.md` sets `**Weight:**`, so `_keyword_fallback` scores any
+    whole-word match the loader's 1.0 default × 10 = 10. Measured over
+    `intel-2026-09-22.jsonl`, the 19 items `RELEVANCE_FLOOR` held were all
+    model-graded and 0 were ungraded — an ungraded item scores exactly 10 or
+    exactly 1, so there is nothing between 4 and 10 for a floor to bite on, and 101
+    ungraded items went into the vault at `Relevance: 10/10`.
+
+    So the refusal is by *cause* rather than by magnitude, and it is deliberately
+    narrow: only `GRADE_CALL_CAP` — eligible for a call, but the budget was spent
+    before the model got there — is barred. `GRADE_NO_USABLE_GRADE` (asked, junk
+    came back) and `GRADE_KEYWORD` (engine off, e.g. `INTEL_DISABLE_LLM=1`) keep
+    writing, because refusing those would turn an engine outage into a zero-write
+    day, and surviving one is exactly what the keyword fallback is for.
+    """
+    return getattr(item, "grade_source", GRADE_KEYWORD) == GRADE_CALL_CAP
 
 
 def load_scored_items(date_str: str) -> List[ScoredItem]:
@@ -321,6 +342,15 @@ def _digest_target(item: ScoredItem, vault_path: Path) -> Path:
 
 def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
     """Write a single scored item to the vault."""
+    # The refusal is enforced here as well as in the batch filter above
+    # `write_all_to_vault`, because this is the other public route into the vault
+    # and a guard on one of two write surfaces is not a guard: the batch filter
+    # prints the count, but any caller that reaches this function directly would
+    # otherwise get an ungraded item written with no filter in its way.
+    if refused_by_call_cap(item):
+        print(f"  Refusing (never asked about): {item.url}")
+        return False
+
     vault_path = _digest_target(item, determine_vault_path(item, profile))
 
     # Ensure parent directory exists
@@ -409,10 +439,21 @@ def write_all_to_vault(date_str: Optional[str] = None) -> int:
     
     print(f"Loaded {len(items)} scored items")
 
+    # The call-cap refusal runs *before* the floor, and says its own number: an
+    # item the model was never asked about has no relevance to measure, so letting
+    # it reach a relevance comparison is what put 101 ungraded items in the vault
+    # on 2026-09-22 (see refused_by_call_cap).
+    gradeable = [item for item in items if not refused_by_call_cap(item)]
+    cap_refused = len(items) - len(gradeable)
+    if cap_refused:
+        print(f"Held {cap_refused} item(s) the stage-2 model was never asked about: "
+              f"the call budget was spent before them, so their relevance is an "
+              f"ungraded keyword score (grade_source={GRADE_CALL_CAP})")
+
     # Relevance floor: noise never enters the vault, so the feed files stop
     # growing one section per junk item per day.
-    keepers = [item for item in items if not below_floor(item)]
-    held = len(items) - len(keepers)
+    keepers = [item for item in gradeable if not below_floor(item)]
+    held = len(gradeable) - len(keepers)
     if held:
         print(f"Held {held} item(s) below relevance floor {RELEVANCE_FLOOR} "
               f"(set in vault_writer.RELEVANCE_FLOOR)")
