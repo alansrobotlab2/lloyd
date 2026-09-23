@@ -94,7 +94,9 @@ screenshot pixels of the capture it came from. `Capture.to_screen` maps a
 coordinate back through that capture's origin and scale.
 `desktop.coordinate_space: norm1000` switches both directions to a 0–1000 grid
 per axis instead, which is how Qwen3-VL-family models ground. Which of the two
-to use is decided by `eval/desktop_grounding/`.
+is in force is simply the key's default (`pixels`): `eval/desktop_grounding/`,
+the instrument the code comment beside it says chose that default, is not built
+(§7), so nothing has measured which space this primary actually grounds in.
 
 ### Accessibility coverage
 
@@ -106,8 +108,11 @@ with accessibility on.** Flipping `org.a11y.Status.IsEnabled` or
 
 For those apps to have element lists, two things are needed:
 
-- Hyprland must export `ACCESSIBILITY_ENABLED=1`, with `env =
-  ACCESSIBILITY_ENABLED,1` in the Hyprland config;
+- Hyprland must export `ACCESSIBILITY_ENABLED=1`. This seat's Hyprland config
+  is Lua, so the line is `hl.env("ACCESSIBILITY_ENABLED", "1")` in
+  `~/.config/hypr/hyprland.lua`; the `env = ACCESSIBILITY_ENABLED,1` form
+  belongs to a `hyprland.conf` and does nothing here. Nothing under
+  `~/.config/hypr/` set it as of 2026-09-23;
 - the apps must then be restarted.
 
 Until then those windows are pixel-only. `desktop_capture` says so ("the app
@@ -196,7 +201,10 @@ This is what made any of the above visible to a model, and it also fixed
     described with Hermes's prompt.
   - **drop** otherwise, with a note to the model.
 - A 400 that names image input raises `MultimodalRejectedError`. The loop
-  strips every image and retries once.
+  strips every image and retries once — once *per turn*, while the rejection is
+  per request: `_tool_history_message` re-attaches refs to every later
+  image-bearing result, so a second capture in the same turn re-arms the
+  condition and the next rejection ends the turn (#1419).
 - Budget:
   - At most 20 images or 24 MiB per request. Past either, the oldest 8
     image-bearing messages are evicted to `[screenshot removed to save
@@ -204,22 +212,38 @@ This is what made any of the above visible to a model, and it also fixed
     per crossing.
   - Relief rung 0 keeps the newest 3 images.
   - Microcompaction and truncation drop refs.
-  - Each image is estimated at 1,500 tokens. A 1456×819 frame is ~1,200 on
-    this ViT (patch 16, merge 2).
+  - Each image is estimated at `models.<alias>.image_token_estimate` where the
+    slot declares one (primary: 1,300, since `b3dc8bf`), and at
+    `harness.images.token_estimate` (1,500) otherwise. A 1456×819 frame is
+    ~1,160 real tokens on this ViT (patch 16, merge 2 — 32×32 px per token).
 - The chat renders refs from `GET /api/sessions/{sid}/tool-results/{name}`.
+- Every capture is mirrored to the Desktop tab as well: `_push_frame` POSTs the
+  JPEG and up to 300 element names to the desktop state route, and the backend
+  holds the latest frame in a process global that the frame route returns to any
+  loopback or trusted-network peer. That path checks neither the lease nor the
+  session, and the frame outlives the turn, which makes it a different surface
+  from the tools §4 gates (#1418).
 
 ## 6. Turning it on
 
 1. `desktop.enabled: true`.
-2. The primary sees images only after Phase 2:
+2. Phase 2 — the primary actually taking images — landed on 2026-09-23, so
+   nothing here is pending. These three had to agree and all three do:
    - `agent-llm-primary.conf` sets `LANGUAGE_MODEL_ONLY="0"` and
-     `MM_IMAGES_PER_PROMPT="20"`;
-   - one `round restart --only agent-llm-primary`;
-   - then `models.primary.supports_vision: true`.
+     `MM_IMAGES_PER_PROMPT="20"` (`7c7d6d6`);
+   - one `round restart --only agent-llm-primary`, which is what puts
+     `--limit-mm-per-prompt {"image": 20}` on the live process;
+   - `models.primary.supports_vision: true` (`b3dc8bf`).
 
-   The tower costs ~0.84 GiB, which is ~29k KV tokens.
-   `expect_kv_pool_tokens_min` must allow for that. Until then captures reach
-   the model as the element list only, which already works for GTK apps.
+   The tower costs ~0.84 GiB, which is ~29k KV tokens, and
+   `expect_kv_pool_tokens_min` must allow for that. Nothing probes that
+   agreement: the launcher's own defaults are text-only, `model_identity`
+   checks the served model name and the KV cache and nothing else, and the
+   engine is never asked whether it accepts image input (#1420). Until that
+   lands, read the live command line
+   (`pgrep -fa vllm | grep -o 'limit-mm-per-prompt.*'`) before believing
+   `supports_vision`. When it is false, captures reach the model as the element
+   list only, which already works for GTK apps.
 3. Accessibility for Chromium, Electron and Firefox apps: see §2.
 
 ## 7. Not built yet
@@ -228,4 +252,26 @@ This is what made any of the above visible to a model, and it also fixed
   backend, for unattended work. It needs `tigervnc` and `xfce4` from pacman,
   which requires sudo, so it is blocked on Alan installing them.
 - Capturing without a toplevel id (every current client has one).
+- `eval/desktop_grounding/`, the instrument §2 says decides
+  `desktop.coordinate_space` (#1421).
 - An agent-cursor overlay on the real seat.
+
+## Review log
+
+- 2026-09-23 — **stale**. Checked every path, key, count and route in the doc
+  against the tree at `30e5d989`; the mechanism descriptions (lease fields,
+  tripwire, refusal sites, annotations, guards, grim/wtype/uinput paths, image
+  budget, eviction and dedup numbers) all hold. Four things had moved: the
+  vision cutover landed after this doc was written (`7c7d6d6` at +18 min,
+  `b3dc8bf` at +50 min), so §6 described a finished change as pending; the
+  image token estimate is a per-model key now (primary 1,300, not a flat
+  1,500); §2's accessibility instruction gives `hyprland.conf` syntax on a box
+  whose Hyprland config is Lua (and whose compositor env carries no
+  `ACCESSIBILITY_ENABLED` — 0 hits over 72 env lines); and
+  `eval/desktop_grounding/` does not exist, so §2 was citing an
+  authority for `coordinate_space` that nothing built. Also added the capture →
+  Desktop-tab frame mirror, which §4's gating claim does not cover. Filed
+  #1418 (frame route serves the last capture lease-free), #1419 (rejection
+  recovery is one-shot but re-arms), #1420 (nothing probes an engine for image
+  input), #1421 (no grounding eval), #1422 (hypr.py docstring names the wrong
+  grim path).
