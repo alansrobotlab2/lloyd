@@ -160,8 +160,24 @@ opt-in as the tree guard. The live-data cross-checks in `tests/` read through
     header has the three `sudo` lines.
   - The snapshot script refuses while the data tripwire is set, or when the root
     shrank below its last healthy measurement. A refusal exits 0 on purpose, so
-    the timer never shows as failed — and nothing else reads the directory, so
-    no monitor notices if the snapshots stop arriving (#1416).
+    the timer never shows as failed — and the unit is `Type=oneshot`, so
+    `systemctl --user show lloyd-data-snapshot.service` still reads
+    `Result=success ExecMainStatus=0` after refusing. Neither the timer nor
+    systemd is a surface for a silent refusal.
+  - **What watches it:** the guardian's data check asks that directory how old
+    its newest snapshot is every `policy.SNAPSHOT_CHECK_SECONDS` (900 s) and
+    alerts `error` past `policy.SNAPSHOT_MAX_AGE_SECONDS` (3 h — three hourly
+    periods, so one skipped hour is not an alarm), naming the stamp and its age.
+    It stays quiet while the data tripwire is set, because that refusal is
+    intended and already paged, and it is not armed on a machine with no data
+    root at all — that box has nothing to snapshot and its own alert. An empty
+    directory is reported when the root exists: present and listable is not the
+    same as restorable.
+  - A count of the directory cannot stand in for that age check. Pruning never
+    deletes the newest snapshot whatever its age, so the entry count stays at 1
+    or more through any length of outage. `datawatch.py snapshot-age [--tsv <dir>]`
+    is the one measurement; `restore-data.sh` with no arguments prints the newest
+    stamp's age through it, so what an operator sees is what would have alerted.
 - **Tripwire.** `agent-services/guardian/datawatch.py` runs every guardian tick.
   It uses `vaultwatch`'s measurement and thresholds, and trips when:
   - the root is missing or was replaced;

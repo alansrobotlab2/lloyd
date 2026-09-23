@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Restore a data-root snapshot into a SIDE directory. Never touches ~/lloyd-data.
 #
-#   scripts/backup/restore-data.sh                  # list snapshots
+#   scripts/backup/restore-data.sh                  # list snapshots + newest age
 #   scripts/backup/restore-data.sh <stamp> [dest]   # copy one out
 #
 # The copy is `cp -a --reflink=always`: instant and space-free on btrfs, and
@@ -18,8 +18,46 @@ set -euo pipefail
 
 SNAPS="${LLOYD_DATA_SNAPSHOTS:-$HOME/.lloyd-data-snapshots}"
 LIVE="${LLOYD_DATA:-$HOME/lloyd-data}"
+# This checkout, resolved from the script's own path, so the age check has a
+# copy of `datawatch.py` to fall back on when the pinned one cannot answer.
+REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 if [[ $# -eq 0 ]]; then
   ls -1 "$SNAPS" 2>/dev/null | tail -n 60
+  # Say how old the newest one is, not only that a name is there. The hourly
+  # timer refuses with `exit 0` and its `Type=oneshot` unit reports success
+  # afterwards, so a store whose newest snapshot is a week old lists exactly
+  # like a healthy one, and pruning never deletes the newest entry, so a count
+  # cannot tell them apart either. The age rule lives in `datawatch` — the same
+  # measurement the guardian alerts on, read rather than re-derived here (#1416).
+  GSTATE="${LLOYD_GUARDIAN_STATE:-$HOME/.local/state/lloyd-guardian}"
+  REPO_WATCH="$REPO_DIR/agent-services/guardian/datawatch.py"
+  # The pinned copy first — it is the module the running watchdog judged — and
+  # fall back to the checkout when it cannot answer. It is re-staged only at
+  # unit start (`ExecStartPre=guardian-stage.sh`), so a subcommand that has
+  # landed in the tree is measurable there a moment before it exists in the
+  # pinned copy; withholding the age for that window would hide precisely the
+  # staleness this line exists to show. Same order `snapshot-data.sh` uses.
+  line=""
+  for WATCH in "$GSTATE/bin/datawatch.py" "$REPO_WATCH"; do
+    [[ -f "$WATCH" ]] || continue
+    line="$(/usr/bin/python3 "$WATCH" snapshot-age --tsv "$SNAPS" 2>/dev/null)" || line=""
+    [[ -n "$line" ]] && break
+  done
+  if [[ -n "$line" ]]; then
+    IFS=$'\t' read -r newest age stale <<<"$line"
+    if [[ "$newest" == "-" ]]; then
+      echo "restore-data: NO SNAPSHOTS under $SNAPS — there is nothing here to restore from"
+    else
+      echo "restore-data: newest $newest is $age old"
+      if [[ "$stale" == 1 ]]; then
+        echo "restore-data: that is past the hourly timer's limit — snapshots have stopped arriving."
+        echo "              The refusal reason is in \`journalctl --user -u lloyd-data-snapshot.service -n 40 --no-pager\`"
+      fi
+    fi
+  else
+    echo "restore-data: could not work out the newest snapshot's age from" >&2
+    echo "              $GSTATE/bin/datawatch.py or $REPO_WATCH (needs python3)" >&2
+  fi
   exit 0
 fi
 SRC="$SNAPS/$1"

@@ -121,6 +121,17 @@ FLAP_STOP_AFTER = 3      # also stop the backend
 DATA_ROOT = __import__("os").environ.get("LLOYD_DATA", "/home/alansrobotlab/lloyd-data")
 # How often the tree is checked for a runtime name that came back into it.
 STRAY_CHECK_SECONDS = 3600.0
+# How often the snapshot directory is asked how old its newest snapshot is. The
+# snapshots arrive hourly, so asking faster than a quarter of that buys nothing.
+SNAPSHOT_CHECK_SECONDS = 900.0
+# A snapshot older than this means the hourly timer has stopped delivering:
+# three periods, so one skipped hour — a refusal while the data tripwire is set,
+# a machine that was asleep — is not an alarm. A run of silent refusals is what
+# this catches and nothing else does: `snapshot-data.sh` exits 0 on a refusal by
+# design, its `Type=oneshot` unit still reports `Result=success`, and pruning
+# never deletes the newest snapshot, so the entry count stays >= 1 forever
+# (backlog #1416).
+SNAPSHOT_MAX_AGE_SECONDS = 3 * 3600.0
 
 # ── Error-rate detection ───────────────────────────────────────────────────
 LOG_FILES = (
@@ -176,6 +187,13 @@ AUTOMOD_STATE = _Path(
 GUARDIAN_STATE = _Path(
     _os.environ.get("LLOYD_GUARDIAN_STATE", _Path.home() / ".local/state/lloyd-guardian")
 )
+# Where `snapshot-data.sh` writes the hourly read-only snapshots of DATA_ROOT:
+# the same resolution as the script's `${LLOYD_DATA_SNAPSHOTS:-$HOME/.lloyd-data-snapshots}`,
+# because the alert that sends a person to look for a restore point has to name
+# a directory that exists. The literal this replaces,
+# `/home/.lloyd-data-snapshots`, has never existed on any machine (#1416).
+DATA_SNAPSHOTS = _os.environ.get("LLOYD_DATA_SNAPSHOTS",
+                                 str(_Path.home() / ".lloyd-data-snapshots"))
 SUPERVISOR_SOCK = _os.environ.get("LLOYD_SUPERVISOR_SOCK", "/tmp/agent-supervisor.sock")
 # Must exceed stopwaitsecs (15s) — a blocking stopProcess(wait=True) legitimately
 # takes that long, and a shorter client timeout reports "error: timed out" for a

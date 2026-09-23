@@ -113,6 +113,7 @@ class Guardian:
         self.vault = vaultwatch.VaultWatch(policy.VAULT_ROOT, self.gdir)
         self.data = datawatch.DataWatch(policy.DATA_ROOT, self.gdir)
         self._strays_checked_at = 0.0
+        self._snapshots_checked_at = 0.0
         self.mem = memwatch.MemWatch(self.gdir, memwatch.unit_cgroup(policy.SUPERVISORD_UNIT))
 
         self.tick_n = 0
@@ -677,7 +678,10 @@ class Guardian:
     def check_data(self) -> None:
         """Trip on a wipe of `~/lloyd-data`: pause workers, halt promotions,
         keep evidence, alert. Hourly, also name any runtime path that came
-        back into the code tree. Never raises into the tick."""
+        back into the code tree, and ask the snapshot directory how old its
+        newest snapshot is — the layer the tripwire cannot watch, and the one
+        that refuses without leaving a trace anywhere else. Never raises into
+        the tick."""
         now = time.time()
         if now - self._strays_checked_at >= policy.STRAY_CHECK_SECONDS:
             self._strays_checked_at = now
@@ -693,6 +697,37 @@ class Guardian:
                            + f"\n\nSomething still resolves a data path off the code "
                            f"instead of app.paths.DATA_ROOT ({policy.DATA_ROOT}). Find the "
                            "writer, move the data across, and remove the in-tree copy.")
+        # Is the hourly snapshot still arriving? That layer catches what the
+        # tripwire cannot — a root eaten slowly enough never to trip it — and it
+        # fails silently: both refusals in `scripts/backup/snapshot-data.sh`
+        # `exit 0` by design, the unit is `Type=oneshot` and reports
+        # `Result=success` after refusing, and pruning never deletes the newest
+        # snapshot, so the entry count keeps looking alive (#1416). Not while the
+        # data tripwire is set: refusing then is the intended behaviour and the
+        # critical alert for it has already been paged.
+        if (now - self._snapshots_checked_at >= policy.SNAPSHOT_CHECK_SECONDS
+                and not self.data.tripped()
+                and os.path.isfile(os.path.join(policy.DATA_ROOT, datawatch.ROOT_MARKER))):
+            self._snapshots_checked_at = now
+            try:
+                snap_fresh, snap_why = datawatch.snapshot_report(
+                    policy.DATA_SNAPSHOTS, policy.SNAPSHOT_MAX_AGE_SECONDS)
+            except Exception as exc:  # noqa: BLE001
+                log(f"snapshot freshness check failed (continuing): {exc}")
+                snap_fresh, snap_why = True, ""
+            if not snap_fresh:
+                self.alert("error", "Data snapshots are not arriving",
+                           f"{snap_why}.\n\nThe hourly read-only snapshot of {policy.DATA_ROOT} is "
+                           "layer 2 under the data tripwire, and a stream that stopped is "
+                           "invisible from the outside: a refusal exits 0 so the timer never "
+                           "flaps, and `Type=oneshot` reports success either way. So the newest "
+                           "stamp is the only evidence left that the timer is delivering at all — "
+                           "refusing, disabled, masked or a machine that slept through the hour "
+                           "all look the same from here. What it said is in the journal:\n"
+                           "  journalctl --user -u lloyd-data-snapshot.service -n 40 --no-pager\n"
+                           "The script refuses while the data tripwire is set, or when the root "
+                           "shrank below its last healthy measurement. `~/lloyd/scripts/backup/"
+                           "restore-data.sh` lists the store and prints the newest stamp's age.")
         try:
             why, snap = self.data.tick()
         except Exception as exc:  # noqa: BLE001
@@ -727,7 +762,7 @@ class Guardian:
             "critical", "Lloyd data root damaged — promotions halted",
             f"{why}\n\nFiles: {before} → {after}.\nWorker pool: {actions['workers']}\n"
             f"Promotions: {actions['promotions']}\nEvidence: {actions['evidence']}\n\n"
-            "Hourly read-only snapshots are in /home/.lloyd-data-snapshots. Restore into "
+            f"Hourly read-only snapshots are in {policy.DATA_SNAPSHOTS}. Restore into "
             "a side directory with `~/lloyd/scripts/backup/restore-data.sh` (never in "
             "place), check it, swap it in with the stack stopped, then clear with\n"
             f"  /usr/bin/python3 {Path(datawatch.__file__).resolve()} clear\n"

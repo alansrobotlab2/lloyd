@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -161,6 +162,32 @@ def _data_root(root: Path, sessions: int = 400) -> Path:
     return root
 
 
+#: The stamp format `snapshot-data.sh` writes (`date -u +%Y%m%dT%H%M%SZ`) and
+#: `prune-data-snapshots.sh` matches with `-name '20*T*Z'`.
+SNAP_FMT = "%Y%m%dT%H%M%SZ"
+
+
+def _snap_store(dirs: Path, *ages_seconds: float) -> list[str]:
+    """Rebuild `dirs` holding one snapshot subvolume per age, returning the
+    stamps in chronological order — newest last, which is the entry
+    `ls | sort | tail -1` selects. Ages are seconds before now, so the age a
+    reader computes matches the clock the check reads.
+    """
+    import datetime as dt
+    import shutil
+    now = dt.datetime.now(dt.timezone.utc)
+    if dirs.is_dir():
+        for p in dirs.iterdir():
+            shutil.rmtree(p)
+    dirs.mkdir(parents=True, exist_ok=True)
+    stamps = []
+    for age in ages_seconds:
+        stamp = (now - dt.timedelta(seconds=age)).strftime(SNAP_FMT)
+        (dirs / stamp).mkdir()
+        stamps.append(stamp)
+    return sorted(stamps)
+
+
 def test_the_watch_is_not_armed_before_there_is_anything_to_lose(tmp_path):
     w = DW.DataWatch(str(tmp_path / "lloyd-data"), tmp_path / "gstate")
     assert w.tick() == (None, None)
@@ -193,6 +220,10 @@ def guardian(tmp_path, monkeypatch):
     monkeypatch.setattr(policy, "DATA_ROOT", str(root))
     monkeypatch.setattr(policy, "LOG_FILES", ())
     monkeypatch.setattr(policy, "REPO", str(tmp_path / "lloyd"))
+    # A box that has been snapshotting: one fresh subvolume, so the snapshot
+    # freshness check has a store to read and reports nothing on its own.
+    monkeypatch.setattr(policy, "DATA_SNAPSHOTS", str(tmp_path / "snaps"))
+    _snap_store(tmp_path / "snaps", 60.0)
     (tmp_path / "lloyd").mkdir()
     args = types.SimpleNamespace(
         repo=str(tmp_path / "lloyd"), state=str(tmp_path / "state"),
@@ -233,6 +264,129 @@ def test_the_guardian_names_runtime_data_that_came_back_into_the_tree(guardian):
     g.check_data()
     [(level, title, body)] = acted["alerts"]
     assert level == "error" and "/sessions" in body
+
+
+# ── is the hourly snapshot still arriving? (backlog #1416) ───────────────────
+
+TWO_DAYS = 2 * 24 * 3600.0
+
+
+def test_a_stale_snapshot_store_alerts_once_and_a_fresh_one_is_quiet(guardian):
+    """`snapshot-data.sh` refuses with `exit 0` and the `Type=oneshot` unit
+    still reports `Result=success`, so neither the timer nor systemd can show a
+    stopped snapshot stream. The data tick is the surface that can (#1416)."""
+    g, _, acted = guardian
+    snaps = Path(policy.DATA_SNAPSHOTS)
+    g.check_data()
+    assert not acted["alerts"]                       # a snapshot from a minute ago
+    [stale] = _snap_store(snaps, TWO_DAYS)
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    [(level, title, body)] = acted["alerts"]
+    assert level == "error"
+    assert stale in body and "2 d" in body           # names the stamp and its age
+    assert str(snaps) in body                        # and the directory to look in
+    g.check_data()
+    assert len(acted["alerts"]) == 1                 # throttled, not every 5 s tick
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    assert len(acted["alerts"]) == 2                 # and it keeps re-checking
+    _snap_store(snaps, 60.0)                         # a snapshot arrives again
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    assert len(acted["alerts"]) == 2                 # quiet from here on
+
+
+def test_the_snapshot_alert_is_quiet_while_the_data_tripwire_is_set(guardian):
+    """The refusal the tripwire causes is intended and already paged critical;
+    a second alarm for the same incident is how an alert gets ignored."""
+    g, _, acted = guardian
+    _snap_store(Path(policy.DATA_SNAPSHOTS), TWO_DAYS)
+    (g.gdir / "data-tripped.json").write_text(
+        json.dumps({"reason": "900 of 1000 data files disappeared"}), encoding="utf-8")
+    assert g.data.tripped()
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    assert not acted["alerts"]
+    (g.gdir / "data-tripped.json").unlink()
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    assert [a[0] for a in acted["alerts"]] == ["error"]   # the marker was all that muted it
+
+
+def test_an_empty_snapshot_directory_alerts_where_a_data_root_exists(guardian):
+    """`prune-data-snapshots.sh` never deletes the newest snapshot whatever its
+    age, so entry *count* can never report this: only the newest stamp against
+    the clock separates an alive store from a deleted one."""
+    g, _, acted = guardian
+    snaps = Path(policy.DATA_SNAPSHOTS)
+    _snap_store(snaps)                               # present, holding nothing
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    [(level, title, body)] = acted["alerts"]
+    assert level == "error" and str(snaps) in body
+
+
+def test_the_snapshot_check_is_not_armed_on_a_box_without_a_data_root(guardian):
+    """No marked data root means nothing to take snapshots of — the same
+    not-armed rule `datawatch` applies to the tripwire, so a round home or an
+    un-cut-over box is never paged for a missing snapshot store. The store is left
+    stale on purpose: with the marker back it alerts, which says the marker guard
+    is what muted it and not the state of the directory."""
+    g, root, acted = guardian
+    _snap_store(Path(policy.DATA_SNAPSHOTS), TWO_DAYS)
+    marker = root / DW.ROOT_MARKER
+    marker.unlink()
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    assert not acted["alerts"]
+    marker.write_text("{}", encoding="utf-8")               # the root is marked again
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    assert [a[0] for a in acted["alerts"]] == ["error"]
+
+
+def test_the_data_tripwire_alert_names_the_snapshot_directory_that_exists(guardian):
+    """This alert exists for the one incident in which a human goes looking for
+    a snapshot, and it named `/home/.lloyd-data-snapshots` — a path that has
+    never existed on this machine."""
+    g, root, acted = guardian
+    g.check_data()
+    import shutil
+    shutil.rmtree(root / "sessions")
+    g.check_data()
+    [(level, title, body)] = acted["alerts"]
+    assert level == "critical" and "restore-data.sh" in body
+    assert str(policy.DATA_SNAPSHOTS) in body
+    assert "/home/.lloyd-data-snapshots" not in body
+
+
+def test_only_stamp_shaped_directories_count_as_snapshots(tmp_path):
+    """Same shape `prune-data-snapshots.sh` matches (`-name '20*T*Z'`), so a
+    stray file neither gets pruned nor silences the freshness check."""
+    snaps = tmp_path / "snaps"
+    (snaps / "not-a-snapshot").mkdir(parents=True)
+    (snaps / "2026-09-22").mkdir()
+    (snaps / "20260922T000000Z-not").mkdir()
+    assert DW.newest_snapshot(str(snaps)) is None
+
+
+def test_the_snapshot_report_and_its_cli_read_one_measurement(tmp_path):
+    """The guardian's alert, the CLI and the restore listing all come from
+    `snapshot_state`, so the age an operator prints cannot disagree with the age
+    the watchdog alerted on."""
+    snaps = tmp_path / "snaps"
+    stamps = _snap_store(snaps, TWO_DAYS + 7200.0, TWO_DAYS)     # oldest first
+    fresh, why = DW.snapshot_report(str(snaps), 3 * 3600.0)
+    assert not fresh and "2 d 0 h" in why and str(snaps) in why
+    fresh, why = DW.snapshot_report(str(snaps), 3 * 24 * 3600.0)
+    assert fresh and "2 d 0 h" in why
+    out = subprocess.run([sys.executable, str(GUARDIAN_DIR / "datawatch.py"),
+                          "snapshot-age", "--tsv", str(snaps)],
+                         capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    stamp, age, stale = out.stdout.strip().split("\t")
+    assert stamp == stamps[-1] and age == "2 d 0 h" and stale == "1"
 
 
 # ── snapshot, prune, restore ─────────────────────────────────────────────────
@@ -281,6 +435,138 @@ def test_restore_refuses_the_live_root(tmp_path):
     r = _run("restore-data.sh", {"LLOYD_DATA": str(live), "LLOYD_DATA_SNAPSHOTS": str(tmp_path / "snaps")},
              "20260922T000000Z", str(live / "sub"))
     assert r.returncode == 1 and "refusing" in r.stderr
+
+
+def _listing(tmp_path, snaps):
+    return _run("restore-data.sh", {"LLOYD_DATA_SNAPSHOTS": str(snaps),
+                                    "LLOYD_GUARDIAN_STATE": str(tmp_path / "gstate")})
+
+
+def test_listing_snapshots_prints_the_age_of_the_newest_one(tmp_path):
+    """The bare listing is how an operator checks what is restorable, and a list
+    of names read as healthy after a week of silent refusals. The age printed
+    here is `datawatch.age_text`, the same one the guardian alerts with."""
+    snaps = tmp_path / "snaps"
+    ten_days = 10 * 24 * 3600.0
+    _, newest = _snap_store(snaps, ten_days + 3600.0, ten_days)
+    r = _listing(tmp_path, snaps)
+    assert r.returncode == 0, r.stderr
+    assert newest in r.stdout
+    assert f"newest {newest} is 10 d 0 h old" in r.stdout
+    assert "stopped arriving" in r.stdout             # and what to do about it
+
+
+def test_listing_a_fresh_snapshot_store_prints_its_age_without_an_alarm(tmp_path):
+    snaps = tmp_path / "snaps"
+    [newest] = _snap_store(snaps, 120.0)
+    r = _listing(tmp_path, snaps)
+    assert r.returncode == 0, r.stderr
+    assert re.search(rf"newest {newest} is \d+ m old", r.stdout)
+    assert "stopped arriving" not in r.stdout
+
+
+def test_listing_an_empty_snapshot_directory_says_so(tmp_path):
+    snaps = tmp_path / "snaps"
+    snaps.mkdir()
+    r = _listing(tmp_path, snaps)
+    assert r.returncode == 0, r.stderr
+    assert "NO SNAPSHOTS" in r.stdout
+
+
+def test_the_listing_ages_the_store_through_the_checkout_when_the_pinned_copy_is_older(tmp_path):
+    """`restore-data.sh` asks the pinned copy first, because that is the module
+    the running watchdog judged — and that copy is re-staged only at unit start
+    (`ExecStartPre=guardian-stage.sh`), so a landed change can go minutes without
+    the subcommand in it. A listing that printed no age during exactly that
+    window would hide the staleness the age line exists to show."""
+    snaps = tmp_path / "snaps"
+    [newest] = _snap_store(snaps, TWO_DAYS)
+    pinned = tmp_path / "gstate" / "bin"
+    pinned.mkdir(parents=True)
+    # What a pinned copy from before `snapshot-age` does with the command.
+    (pinned / "datawatch.py").write_text(
+        "import sys\n"
+        "print('usage: datawatch.py status|clear|snapshot-gate|strays', file=sys.stderr)\n"
+        "sys.exit(2)\n", encoding="utf-8")
+    r = _run("restore-data.sh", {"LLOYD_DATA_SNAPSHOTS": str(snaps),
+                                 "LLOYD_GUARDIAN_STATE": str(tmp_path / "gstate")})
+    assert r.returncode == 0, r.stderr
+    assert f"newest {newest} is 2 d 0 h old" in r.stdout
+    assert "stopped arriving" in r.stdout
+
+
+def test_the_pinned_copy_is_the_one_that_answers_when_it_can(tmp_path):
+    """Order matters, not just the fallback: the pinned copy is the rule the
+    running watchdog applies, so an operator reading a listing should see what
+    that process would have alerted on, not what an unrelated checkout says."""
+    snaps = tmp_path / "snaps"
+    _snap_store(snaps, 60.0)                                # genuinely fresh
+    pinned = tmp_path / "gstate" / "bin"
+    pinned.mkdir(parents=True)
+    (pinned / "datawatch.py").write_text(
+        "import sys\nprint('PINNED\\t1 d\\t1')\n", encoding="utf-8")
+    r = _run("restore-data.sh", {"LLOYD_DATA_SNAPSHOTS": str(snaps),
+                                 "LLOYD_GUARDIAN_STATE": str(tmp_path / "gstate")})
+    assert r.returncode == 0, r.stderr
+    assert "newest PINNED is 1 d old" in r.stdout
+    assert "is 0 m old" not in r.stdout              # the store's own fresh age did not answer
+
+
+def test_an_age_line_is_never_silently_missing(tmp_path):
+    """The fallback is tried too, and if neither copy can answer the listing says
+    so instead of printing a bare list that reads like a checked one."""
+    snaps = tmp_path / "snaps"
+    _snap_store(snaps, TWO_DAYS)
+    # A copy of the script in a directory with no checkout two levels above it:
+    # the only way both candidate `datawatch.py` paths can be absent at once.
+    lone = tmp_path / "sbin"
+    lone.mkdir()
+    script = lone / "restore-data.sh"
+    script.write_text((ROOT / "scripts/backup/restore-data.sh").read_text(encoding="utf-8"),
+                      encoding="utf-8")
+    pinned = tmp_path / "gstate" / "bin"
+    pinned.mkdir(parents=True)
+    (pinned / "datawatch.py").write_text("import sys\nsys.exit(2)\n", encoding="utf-8")
+    r = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=60,
+                       env={**os.environ, "LLOYD_DATA_SNAPSHOTS": str(snaps),
+                            "LLOYD_GUARDIAN_STATE": str(tmp_path / "gstate")})
+    assert r.returncode == 0, r.stderr
+    assert "could not work out the newest snapshot's age" in r.stderr
+
+
+def test_the_bash_listing_and_the_python_alert_default_to_the_same_directory(tmp_path):
+    """Clause 4 says the alert must name the directory the running system uses,
+    and the two resolve it independently: bash with
+    `${LLOYD_DATA_SNAPSHOTS:-$HOME/.lloyd-data-snapshots}`, Python with
+    `policy.DATA_SNAPSHOTS` (env, then `Path.home()`). Nothing but this test says
+    those two defaults land in one place, and every other test passes a directory
+    explicitly — so neither the agreement nor its failure would show up anywhere
+    else."""
+    home = tmp_path / "home"
+    snaps = home / ".lloyd-data-snapshots"
+    stamps = _snap_store(snaps, TWO_DAYS + 7200.0, TWO_DAYS)   # oldest first
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LLOYD_")}
+    env["HOME"] = str(home)
+
+    def _py(code):
+        return subprocess.run([sys.executable, "-c", code], cwd=str(GUARDIAN_DIR), env=env,
+                              capture_output=True, text=True, timeout=60)
+
+    listed = subprocess.run(["bash", str(ROOT / "scripts/backup/restore-data.sh")],
+                            env=env, capture_output=True, text=True, timeout=60)
+    assert listed.returncode == 0, listed.stderr
+    assert f"newest {stamps[-1]}" in listed.stdout          # bash found the store by default
+    assert "2 d 0 h" in listed.stdout
+
+    resolved = _py("import policy; print(policy.DATA_SNAPSHOTS)")
+    assert resolved.returncode == 0, resolved.stderr
+    assert resolved.stdout.strip() == str(snaps), (
+        "policy.DATA_SNAPSHOTS and restore-data.sh's default snapshot directory "
+        "disagreed: the alert would name a directory the timer does not write")
+
+    env["LLOYD_DATA_SNAPSHOTS"] = str(tmp_path / "elsewhere")
+    assert _py("import policy; print(policy.DATA_SNAPSHOTS)").stdout.strip() \
+        == str(tmp_path / "elsewhere")                     # and the override agrees too
 
 
 # ── the migration ────────────────────────────────────────────────────────────
