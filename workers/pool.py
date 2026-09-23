@@ -226,6 +226,12 @@ def _positive_int(value: Any) -> Optional[int]:
     return n if n > 0 else None
 
 
+# Where an operator pause is kept: the queue's own watermark table, so it lives
+# in the same database as the rows it holds back.
+PAUSE_WM_SOURCE = "_pool"
+PAUSE_WM_KEY = "operator_paused"
+
+
 class WorkerPool:
     def __init__(
         self,
@@ -248,7 +254,17 @@ class WorkerPool:
         self.poll_idle_seconds = poll_idle_seconds
 
         self._running = False
-        self._paused = False
+        # Two pauses, because they end differently. An OPERATOR pause (a person,
+        # Mission Control, the guardian's vault trip) is persisted in the queue's
+        # own database and survives a backend restart: it lived only in this
+        # process until 2026-09-22, and three times a restart brought the pool
+        # back running and it claimed 3-6 jobs, 4 of them autocode rounds, before
+        # anyone could re-pause it. An AUTOMOD pause (the promoter's idle wait,
+        # `round restart`) stays in memory, because the promoter relies on a
+        # landing's own restart to clear it (`promote._POOL_PAUSED_BY_US`); made
+        # durable, every landing would leave the pool paused for good.
+        self._paused_operator = self._load_operator_pause()
+        self._paused_automod = False
         self._workers: list[asyncio.Task] = []
         self._scheduler_task: Optional[asyncio.Task] = None
         self._in_flight: dict[int, dict[str, Any]] = {}
@@ -318,18 +334,54 @@ class WorkerPool:
         self._scheduler_task = None
         logger.info("Worker pool stopped")
 
-    def pause(self, paused: bool = True) -> None:
-        self._paused = paused
-        logger.info("Worker pool %s", "paused" if paused else "resumed")
+    def _load_operator_pause(self) -> bool:
+        try:
+            return self.queue.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_KEY) == "1"
+        except Exception:
+            logger.exception("Worker pool: could not read the persisted pause; starting unpaused")
+            return False
+
+    def pause(self, paused: bool = True, owner: str = "operator") -> None:
+        """Pause or resume. `owner` is `operator` (persisted) or `automod` (not).
+
+        An automod resume lifts only its own pause, so a person's pause taken
+        during a landing outlives the landing. An operator resume lifts both, as
+        a resume always has: a person resuming the pool means it.
+        """
+        if owner == "automod":
+            self._paused_automod = paused
+        else:
+            self._paused_operator = paused
+            if not paused:
+                self._paused_automod = False
+            try:
+                self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY, "1" if paused else "0")
+            except Exception:
+                # The pause still holds for this process; only its survival of
+                # a restart is lost, and that is worth a loud line, not a refusal.
+                logger.exception("Worker pool: pause not persisted; a restart will clear it")
+        logger.info("Worker pool %s by %s (operator=%s automod=%s)",
+                    "paused" if paused else "resumed", owner,
+                    self._paused_operator, self._paused_automod)
+
+    @property
+    def _paused(self) -> bool:
+        return self._paused_operator or self._paused_automod
 
     @property
     def paused(self) -> bool:
         return self._paused
 
+    @property
+    def paused_by(self) -> list[str]:
+        return [o for o, on in (("operator", self._paused_operator),
+                                ("automod", self._paused_automod)) if on]
+
     def status(self) -> dict:
         return {
             "running": self._running,
             "paused": self._paused,
+            "paused_by": self.paused_by,
             "slots": self.slots,
             "in_flight": {
                 str(k): {

@@ -227,8 +227,11 @@ async def workers_pause(request: Request):
         raise HTTPException(status_code=503, detail="pool not running")
     data = await request.json() if (await request.body()) else {}
     paused = bool(data.get("paused", True))
-    pool.pause(paused)
-    return JSONResponse({"paused": pool.paused})
+    # `owner: automod` is the promoter's transient pause; anything else is an
+    # operator's and survives a restart (`WorkerPool.pause`).
+    owner = "automod" if data.get("owner") == "automod" else "operator"
+    pool.pause(paused, owner=owner)
+    return JSONResponse({"paused": pool.paused, "paused_by": getattr(pool, "paused_by", None)})
 
 
 @router.post("/api/workers/enable")

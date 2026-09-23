@@ -185,7 +185,7 @@ class _FakePool:
     def paused(self) -> bool:
         return self._paused
 
-    def pause(self, paused: bool = True) -> None:
+    def pause(self, paused: bool = True, owner: str = "operator") -> None:
         self._paused = paused
         self._calls.append(("workers/pause", paused))
 

@@ -278,6 +278,81 @@ async def test_a_paused_pool_claims_nothing(q, monkeypatch):
     assert claimed == [1], "resuming did not release the item"
 
 
+# ---------------------------------------------------------------------------
+# A pause outlives a restart when a person took it, and not when a landing did
+# ---------------------------------------------------------------------------
+#
+# 2026-09-22: three restarts with the pool paused by hand each came back running
+# and claimed 3-6 jobs (4 of them autocode rounds) before a re-pause could land.
+# A "restart" here is what it is in production: a new WorkerPool on the same
+# workers.db.
+
+
+async def test_an_operator_pause_survives_a_restart_and_the_new_pool_claims_nothing(q, monkeypatch):
+    claimed = []
+
+    async def execute(item):
+        claimed.append(item.id)
+        return {"summary": "ran"}
+
+    import workers.sources as sources
+    monkeypatch.setattr(sources, "SOURCE_REGISTRY",
+                        {"s": SimpleNamespace(NAME="s", execute=execute)}, raising=False)
+    monkeypatch.setattr(sources, "get_sources_config", lambda: {"s": {}}, raising=False)
+
+    WorkerPool(q, slots=1).pause(True)
+    q.enqueue("s", "k")
+    reborn = WorkerPool(q, slots=1, poll_idle_seconds=0.01)
+    assert reborn.paused is True and reborn.paused_by == ["operator"]
+    await reborn.start()
+    try:
+        await asyncio.sleep(0.2)
+        assert claimed == [], "the restarted pool claimed work under a persisted pause"
+    finally:
+        await reborn.stop()
+
+
+def test_an_operator_resume_is_persisted_too(q):
+    WorkerPool(q, slots=1).pause(True)
+    WorkerPool(q, slots=1).pause(False)
+    assert WorkerPool(q, slots=1).paused is False
+
+
+def test_an_automod_pause_does_not_survive_a_restart(q):
+    """The promoter leaves its pause for the landing's restart to clear
+    (`promote._POOL_PAUSED_BY_US`); persisted, every landing would leave the
+    pool paused for good."""
+    pool = WorkerPool(q, slots=1)
+    pool.pause(True, owner="automod")
+    assert pool.paused is True and pool.paused_by == ["automod"]
+    assert WorkerPool(q, slots=1).paused is False
+
+
+def test_an_automod_resume_does_not_lift_a_persons_pause(q):
+    pool = WorkerPool(q, slots=1)
+    pool.pause(True, owner="automod")
+    pool.pause(True)                        # a person pauses during the landing
+    pool.pause(False, owner="automod")      # the landing gives up and releases its own
+    assert pool.paused is True and pool.paused_by == ["operator"]
+    assert WorkerPool(q, slots=1).paused is True
+
+
+def test_an_operator_resume_lifts_both(q):
+    pool = WorkerPool(q, slots=1)
+    pool.pause(True, owner="automod")
+    pool.pause(True)
+    pool.pause(False)
+    assert pool.paused is False and pool.paused_by == []
+
+
+def test_the_promoter_pauses_as_automod(monkeypatch):
+    from scripts.automod import promote
+    sent = []
+    monkeypatch.setattr(promote, "_post", lambda url, payload, timeout=5.0: sent.append(payload) or True)
+    promote.set_pool_paused(True)
+    assert sent == [{"paused": True, "owner": "automod"}]
+
+
 async def test_in_flight_state_is_reported_while_a_job_runs_and_cleared_after(q, monkeypatch):
     """The dashboard's live worker panel reads exactly this."""
     running = asyncio.Event()

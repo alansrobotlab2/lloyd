@@ -203,11 +203,15 @@ def pool_paused() -> bool | None:
 
 
 def set_pool_paused(paused: bool) -> bool:
-    return _post(f"{BACKEND}/api/workers/pause", {"paused": paused})
+    # `owner: automod`: a transient pause the restart clears. An unowned one is
+    # an operator's, persisted across restarts — and a landing's pause made
+    # durable would leave the pool paused after every landing.
+    return _post(f"{BACKEND}/api/workers/pause", {"paused": paused, "owner": "automod"})
 
 
-# True while a pause THIS promoter set is in force. The pause is in-memory in
-# the backend, so a successful landing's restart clears it; the paths that
+# True while a pause THIS promoter set is in force. It is sent as
+# `owner: automod`, which the backend keeps in memory only (an operator's pause
+# is persisted), so a successful landing's restart clears it; the paths that
 # matter are the ones that never restart — give-up, and every PromoteError
 # before the restart — where a pause we set must be released. A pause a human
 # set is never touched: Alan pauses the queue by hand before restarts, and a

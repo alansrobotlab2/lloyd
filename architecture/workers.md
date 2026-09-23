@@ -574,6 +574,20 @@ promotion. That is the 2026-09-06 20:14 false-positive rollback exactly. The
 promoter now drains the pool itself, and `run_prompt_on_primary` refuses to
 start a turn while a landing is draining.
 
+**A person's pause survives a restart; a landing's does not.** Until
+2026-09-22 the pause lived only in the backend process, so every restart came
+back running, and three times that day the pool claimed 3-6 jobs (4 of them
+autocode rounds) before a re-pause could land. Now `WorkerPool.pause` has two
+owners. An **operator** pause (the default: the route, Mission Control, the
+guardian's vault trip) is written to `workers.db` (`watermarks`, source `_pool`)
+and read back when the pool is built, so a restarted pool claims nothing. An
+**automod** pause (`{"owner": "automod"}`, sent only by
+`promote.set_pool_paused`) stays in memory, because the promoter leaves its pause
+for the landing's own restart to clear; persisted, every landing would leave
+the pool paused for good. An automod resume lifts only its own pause, and an
+operator resume lifts both. `status().paused_by` says which is holding.
+`vaultwatch.py clear` does not resume the pool; it prints the command.
+
 The dashboard reads the pool through `app/routers/dashboard.py::_workers`,
 off the loop via `asyncio.to_thread`; `completed` is excluded from the "open"
 counts because it dominates the depth table.

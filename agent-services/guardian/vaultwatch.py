@@ -254,6 +254,12 @@ def main(argv: list[str]) -> int:
         existed = w.clear()
         print("tripwire cleared; baseline reset to the vault as it is now" if existed
               else "tripwire was not set; baseline refreshed")
+        if existed:
+            # The trip paused the worker pool, and since 2026-09-22 that pause
+            # survives backend restarts (it used to be undone by the first one).
+            print("the worker pool the trip paused stays paused; resume it when ready: "
+                  "curl -X POST localhost:8080/api/workers/pause "
+                  "-H 'content-type: application/json' -d '{\"paused\": false}'")
         return 0
     if cmd == "sync-gate":
         ok, why = sync_gate()
