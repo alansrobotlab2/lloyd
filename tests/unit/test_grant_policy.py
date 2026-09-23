@@ -44,13 +44,16 @@ from app.harness.policy import (  # noqa: E402
     tool_tier,
 )
 
-# Frozen for the pure-policy tests, which pass `now=NOW` to `check_grants`.
-# A fixture expiry derived from it must NOT be read by a code path that uses
-# the real clock: `install_policy_hook` does, so from 2026-09-11T12:00Z every
-# grant minted from `_iso` was already expired on the hook path and
-# `test_hook_allows_granted_call` went red for good — blocking every automod
-# round at the `tests` rung (#848/#853). Hook-path tests mint with `expires_at`
-# against the real clock.
+# The single clock every fixture in this file is derived from. The pure-policy
+# tests pass it as `now=NOW` to `check_grants`; the hook-path tests pass it as
+# `now=NOW` to `install_policy_hook`, which forwards it to the same check (#973).
+# No fixture here reads the wall clock, which is the point: before the hook took
+# a clock, a hook-path fixture had to be minted against the real one while its
+# siblings stayed frozen, and one test quietly did neither — every grant it
+# minted from `_iso` was already expired by the time the hook read it, so it
+# turned red on its own at 2026-09-11T12:00Z and blocked every automod round at
+# the `tests` rung for the rest of that day (#848/#853). A parameter cannot be
+# forgotten the way that convention was.
 NOW = dt.datetime(2026, 9, 10, 12, 0, tzinfo=dt.timezone.utc)
 
 
@@ -66,18 +69,16 @@ def store(tmp_path) -> GrantStore:
 
 
 def _mint(store, *, scope="autonomy-task:39", tool="email_send",
-          predicate="", quota=None, expires=+24.0, issued_by="alan",
-          expires_at=None):
+          predicate="", quota=None, expires=+24.0, issued_by="alan"):
+    """Mint a grant whose expiry is always `NOW + expires` hours. There is no
+    `expires_at` passthrough: an expiry that came from anywhere else would have
+    to be read by a clock that is not `NOW`, and that split is the bug (#973).
+    Anything needing a literal expiry calls `store.mint` directly."""
     return store.mint(
         scope=scope, tool_pattern=tool, arg_predicate=predicate,
         quota=quota, issued_by=issued_by,
-        expires_at=expires_at or _iso(expires),
+        expires_at=_iso(expires),
     )
-
-
-def _real_clock_expiry(hours: float = 24.0) -> str:
-    """For the hook path, which checks against the real clock."""
-    return (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=hours)).isoformat()
 
 
 def _check(store, *, scope="autonomy-task:39", tool="email_send",
@@ -330,21 +331,61 @@ def test_an_existing_database_gets_the_table_on_next_init(tmp_path):
 def test_hook_denies_ungranted_tier2_from_worker_scope(store, monkeypatch):
     monkeypatch.setenv("LLOYD_GRANT_DB", str(store.db_path))
     hooks = HookRegistry()
-    install_policy_hook(hooks, store=store, scope="worker:scheduled-task")
+    install_policy_hook(hooks, store=store, scope="worker:scheduled-task",
+                        now=NOW)
     assert _denied(_fire(hooks, "email_send", {"to": "x@y.z"}))
 
 
 def test_hook_allows_granted_call(store, monkeypatch):
+    """The seam's positive half: the hook is installed at an instant inside the
+    grant's life and the fixture expiry is derived from the frozen `NOW` like
+    every other fixture in this file, so the granted tier-2 call goes through.
+
+    This is the case that could not be written hermetically before #973 — the
+    hook read the wall clock, so the same fixture was a grant that expired on
+    2026-09-11 and this assertion has been red ever since. It also cannot pass
+    if `now` is accepted but not forwarded: the wall clock is past NOW + 24 h,
+    which is why the ledger line below names the instant the decision was made
+    at rather than merely that the decision was allow."""
     monkeypatch.setenv("LLOYD_GRANT_DB", str(store.db_path))
-    _mint(store, scope="worker:scheduled-task", expires_at=_real_clock_expiry())
+    g = _mint(store, scope="worker:scheduled-task")      # expires NOW + 24 h
     hooks = HookRegistry()
-    install_policy_hook(hooks, store=store, scope="worker:scheduled-task")
+    install_policy_hook(hooks, store=store, scope="worker:scheduled-task",
+                        now=NOW)
     assert not _denied(_fire(hooks, "email_send", {"to": "x@y.z"}))
+    assert store.get(g["id"])["consumed"] == 1
+    rows = store.dispatch_rows()
+    assert [(r["decision"], r["at"]) for r in rows] == [("allow", _iso(0.0))]
+
+
+def test_hook_denies_granted_call_once_the_injected_instant_is_past_the_expiry(
+        store, monkeypatch):
+    """The seam's negative half. Same fixture, installed two days later: the
+    grant has expired, so the call is denied and the reason names that grant's
+    own expiry.
+
+    The ledger line is what makes this a test of the seam rather than a test of
+    the calendar. Deny is also what the wall clock would answer here (it is past
+    NOW + 24 h too), so a hook that accepted `now` and ignored it would still
+    satisfy the deny; the recorded instant cannot be faked that way."""
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(store.db_path))
+    g = _mint(store, scope="worker:scheduled-task")      # expires NOW + 24 h
+    hooks = HookRegistry()
+    install_policy_hook(hooks, store=store, scope="worker:scheduled-task",
+                        now=NOW + dt.timedelta(hours=48))
+    out = _fire(hooks, "email_send", {"to": "x@y.z"})
+    assert _denied(out)
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "expired at" in reason
+    assert store.get(g["id"])["expires_at"] in reason
+    assert [(r["decision"], r["at"]) for r in store.dispatch_rows()] == [
+        ("deny", _iso(48.0))]
 
 
 def test_hook_passes_tier1_through(store):
     hooks = HookRegistry()
-    install_policy_hook(hooks, store=store, scope="worker:scheduled-task")
+    install_policy_hook(hooks, store=store, scope="worker:scheduled-task",
+                        now=NOW)
     assert not _denied(_fire(hooks, "vault_write", {"path": "a.md"}))
 
 
@@ -354,7 +395,8 @@ def test_store_failure_fails_closed(store, tmp_path):
     must therefore deny on its own errors rather than raise."""
     broken = GrantStore(tmp_path / "gone" / ".." / "nope.db")
     hooks = HookRegistry()
-    install_policy_hook(hooks, store=broken, scope="worker:scheduled-task")
+    install_policy_hook(hooks, store=broken, scope="worker:scheduled-task",
+                        now=NOW)
     assert _denied(_fire(hooks, "email_send", {"to": "x@y.z"}))
 
 
@@ -575,7 +617,7 @@ def test_unattended_schedule_write_is_denied_without_a_grant(store, monkeypatch)
 
     monkeypatch.setattr(policy, "default_store", lambda: store)
     hooks = HookRegistry()
-    policy.install_policy_hook(hooks, scope="autonomy-task:68")
+    policy.install_policy_hook(hooks, scope="autonomy-task:68", now=NOW)
     out = _fire(hooks, "autonomy_write_task", SCHED_CALL)
     assert _denied(out) is True
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]

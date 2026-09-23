@@ -976,12 +976,25 @@ def _deny(reason: str) -> dict:
 
 
 def install_policy_hook(hooks: HookRegistry, *, store: GrantStore | None = None,
-                        scope: str | None = None) -> None:
+                        scope: str | None = None,
+                        now: dt.datetime | None = None) -> None:
     """Gate tier-2/tier-3 tools on a live grant, for one turn.
 
     `scope` names whose authority this turn is borrowing (`worker:<source>`,
     `autonomy-task:<id>`); omit it and the hook reads `current_scope` when it
     fires, which the worker pool sets per job.
+
+    `now` is the instant the expiry check runs against, and it is forwarded to
+    `check_grants`, which has always taken one. Production omits it, and the
+    default is `None` — *not* `_now()` — so the clock is read fresh inside
+    `check_grants` on every call: this callback is installed once and fires for
+    the life of the turn, so an instant captured at install time would let a
+    long unattended turn keep spending a grant that expired mid-run. The seam
+    exists for the test, and for the trap a missing one sets: a hook-path test
+    that cannot name a time has to mint its fixtures against the wall clock to
+    stay green, which is how `test_hook_allows_granted_call` came to be red
+    forever from 2026-09-11T12:00Z and cost two automod rounds their review
+    attempts (#848/#853, closed at the test layer only; #973 is this parameter).
 
     The callback denies rather than raises. `HookRegistry.fire_pre_tool_use`
     treats a raising callback as a pass — correct for observers, exactly wrong
@@ -1002,6 +1015,7 @@ def install_policy_hook(hooks: HookRegistry, *, store: GrantStore | None = None,
                 scope=scope or current_scope.get(),
                 tool_name=tool_name,
                 tool_input=input_data.get("tool_input") or {},
+                now=now,
             )
         except Exception as exc:
             reason = (f"grant: authority gate could not be evaluated "

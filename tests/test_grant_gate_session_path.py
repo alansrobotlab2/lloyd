@@ -18,13 +18,24 @@ tests pin: a caller cannot forget, because a caller is not asked.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 
 import pytest
 
-from app.harness import HookRegistry
+from app.harness import HookRegistry, policy
 from app.harness.policy import GRANT_MINT_TOOL, GrantStore, install_policy_hook
 from app.routers import messages as M
+
+#: A fixed instant, for the cases that inject a clock (`install_policy_hook(…,
+#: now=FROZEN)`). Two cases are about the wall clock and are named in their own
+#: docstrings: one mints from `dt.datetime.now` (an expired grant must still
+#: deny with no clock injected), one patches `policy._now` (the default must be
+#: read afresh on every call). Everything else derives from this constant, so it
+#: cannot rot into a permanent red the way the hook-path fixtures in
+#: `tests/unit/test_grant_policy.py` did on 2026-09-11 (#848/#853; #973 is the
+#: seam that made that shape unwriteable).
+FROZEN = dt.datetime(2026, 9, 10, 12, 0, tzinfo=dt.timezone.utc)
 
 
 @pytest.fixture
@@ -101,11 +112,21 @@ async def _decide(hooks: HookRegistry, tool: str, args: dict | None = None):
         session_id="s1", tool_name=tool, tool_input=args or {})
 
 
-def _gated(tmp_path, scope="worker:autotriage"):
+def _gated(tmp_path, scope="worker:autotriage", **hook_kwargs):
+    """Build the turn's hooks the way the router does.
+
+    The clock is spelled as `**hook_kwargs` and not as a `now=None` parameter on
+    this helper because a helper that always forwarded `now=now` would re-supply
+    the keyword on the real-clock calls too — and a default value captured when
+    `policy.py` was imported, the wrong shape of this seam, would then be
+    indistinguishable from reading the wall clock on every call. Calling
+    `install_policy_hook(hooks, store=…, scope=…)` with nothing else is the only
+    way to exercise what `app/routers/messages.py` actually gets.
+    """
     hooks = HookRegistry()
     store = GrantStore(tmp_path / "grants.sqlite")
     store.ensure_schema()
-    install_policy_hook(hooks, store=store, scope=scope)
+    install_policy_hook(hooks, store=store, scope=scope, **hook_kwargs)
     return hooks, store
 
 
@@ -119,15 +140,63 @@ async def test_an_ungranted_tier_two_call_is_denied(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_live_grant_allows_the_same_call(tmp_path):
-    hooks, store = _gated(tmp_path)
-    import datetime as _dt
+    """The positive control, now hermetic: the instant the gate reads is the
+    instant the test names, so "live" means live against `FROZEN` and this case
+    says the same thing on every date it is run (#973 is the seam; the case
+    before it was `expires_at=now()+10min`, which is green until it isn't)."""
+    hooks, store = _gated(tmp_path, now=FROZEN)
     store.mint(scope="worker:autotriage", tool_pattern="email_send",
                quota=1, issued_by="alan",
-               expires_at=_dt.datetime.now(_dt.timezone.utc)
-                          + _dt.timedelta(minutes=10),
+               expires_at=FROZEN + dt.timedelta(minutes=10),
                note="pinned by a test")
     out = await _decide(hooks, "email_send", {"to": "a@b.c"})
     assert out == {}
+
+
+@pytest.mark.asyncio
+async def test_an_expired_grant_denies_when_no_clock_is_injected(tmp_path):
+    """`now` is optional and production never passes it, so the default has to
+    be the wall clock: a grant that ran out a minute ago denies a tier-2 call.
+
+    Minted from `dt.datetime.now` on purpose, and that is not the habit this
+    file otherwise keeps — the frozen `FROZEN` fixtures are behind the wall
+    clock, so deriving this one from them would deny for the wrong reason and
+    prove nothing about the default. What is under test is precisely that
+    omitting the argument still means *today*."""
+    hooks, store = _gated(tmp_path)          # no `now=` — production shape
+    store.mint(scope="worker:autotriage", tool_pattern="email_send",
+               issued_by="alan",
+               expires_at=dt.datetime.now(dt.timezone.utc)
+                          - dt.timedelta(minutes=1),
+               note="ran out a minute ago")
+    out = await _decide(hooks, "email_send", {"to": "a@b.c"})
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_the_real_clock_is_asked_again_on_every_call(tmp_path, monkeypatch):
+    """Omitting `now` must mean "the wall clock, read at this call" — not a value
+    captured when `policy.py` was imported. The hook is installed once and fires
+    for the whole turn, so a clock read at install time is a clock that never
+    notices an expiry, and a long unattended turn keeps spending a grant that
+    died mid-run.
+
+    `now: dt.datetime = _now()` as the default satisfies every other case in
+    this file and in `tests/unit/test_grant_policy.py` (those inject a clock, so
+    the default never shows) and is caught only here. `_now` is patched rather
+    than the calendar waited on: the case is one call after the expiry, and a
+    test may not sleep through it."""
+    fake = {"at": FROZEN}
+    monkeypatch.setattr(policy, "_now", lambda: fake["at"])
+    hooks, store = _gated(tmp_path)          # no `now=` — production shape
+    store.mint(scope="worker:autotriage", tool_pattern="email_send",
+               issued_by="alan",
+               expires_at=fake["at"] + dt.timedelta(minutes=10),
+               note="live at the patched instant")
+    assert await _decide(hooks, "email_send", {"to": "a@b.c"}) == {}
+    fake["at"] += dt.timedelta(minutes=20)   # past the expiry, still no `now=`
+    out = await _decide(hooks, "email_send", {"to": "a@b.c"})
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 @pytest.mark.asyncio
