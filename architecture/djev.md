@@ -144,7 +144,14 @@ selection order.
 
 A **VRAM preflight** refuses to start unless the card has room for the weights
 (measured from the safetensors on disk), a KV floor, the sampler transient and
-overhead. When it refuses, it prints what is on the card.
+overhead. When it refuses, it prints what is on the card. `start-secondary.sh`
+carried the reciprocal from #1316, and both read free and total memory from one
+helper, `agent-services/bin/gpu-mem.sh`, so the two guards cannot disagree about
+one card. What they do on an **unreadable** card differs on purpose: djev refuses,
+because an unread card is not evidence of a free one and this is the live ranker;
+the secondary warns and boots anyway, because that slot is optional
+(`secondary_enabled: false` is the designed state) and a dead driver must not
+become an engine outage.
 
 **The tuning knobs live in the program's `environment=`**, not in
 config.yaml. A few more (`EXTRA_ARGS` = `--async-scheduling`, `KV_CACHE_GB`,
@@ -193,7 +200,11 @@ the sampler transient.
   entity sweep picks the flag up on its next run.
 - **GPU 2 holds djev or the secondary, never both.** `secondary_enabled` and
   `djev.enabled` are an either/or. With both true, `server.py` stops both
-  programs and logs an ERROR, and `start-djev.sh` refuses on the VRAM check.
+  programs and logs an ERROR — but that arbitrates the *config file*, not the
+  card, so a start that bypasses the reconcile (a bare `supervisorctl start`, a
+  hand-run script, an engine launched while a migration is mid-landing) still has
+  to be caught at the card: since #1316 **both** `start-djev.sh` and
+  `start-secondary.sh` refuse on their own VRAM check instead of only djev's.
 - **`app/llm_slots.py::is_enabled("agent-djev")` is the one reader** for the
   boot reconcile, the client, the shadow recorder, the Services tab and the
   agent's own service view. Six surfaces disagreeing about the secondary is the

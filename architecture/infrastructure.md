@@ -42,8 +42,10 @@ half is exactly the half you would check. Four programs set it in the
 supervisord `environment=`: `agent-tts`, `lloyd-agent-worker`,
 `agent-qmd-daemon`, `agent-qmd-watcher`. The three engine launchers export it
 themselves instead — `start-qwen38-flash-next.sh:558` (with
-`CUDA_VISIBLE_DEVICES=1`), `start-secondary.sh:39` (taking the conf's
-`GPU="2"`) and `start-qwen3-tts.sh:23`. **Neither LLM program names it in
+`CUDA_VISIBLE_DEVICES=1`), `start-secondary.sh` (taking the conf's
+`GPU="2"`; before either exec it reads the card through
+`agent-services/bin/gpu-mem.sh` — see the preflight in `architecture/djev.md`) and
+`start-qwen3-tts.sh:23`. **Neither LLM program names it in
 `environment=` at all**, so a `supervisorctl` dump of the primary's
 environment shows no pin and the pin is nonetheless there. `agent-tts` is the
 one pinned twice, in both places, to the same device.

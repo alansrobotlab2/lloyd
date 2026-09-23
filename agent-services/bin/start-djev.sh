@@ -252,9 +252,21 @@ TRANSIENT_MIB=$(( MAX_SEQS * CANVAS * 10 ))
 KV_MIB=$(( ${KV_CACHE_GB:-0} * 1024 ))
 (( KV_MIB > 0 )) || KV_MIB=$MIN_KV_MIB
 NEED_MIB=$(( WEIGHTS_MIB + KV_MIB + TRANSIENT_MIB + OVERHEAD_MIB ))
-FREE_MIB=$(nvidia-smi --id="$GPU" --query-gpu=memory.free --format=csv,noheader,nounits | tr -d ' ')
-TOTAL_MIB=$(nvidia-smi --id="$GPU" --query-gpu=memory.total --format=csv,noheader,nounits | tr -d ' ')
-GPU_NAME=$(nvidia-smi --id="$GPU" --query-gpu=name --format=csv,noheader)
+# One reading, shared with start-secondary.sh (#1316). The three lines this
+# replaced were this script's own `nvidia-smi ... | tr -d ' '` copies of the same
+# question the other GPU 2 tenant asks, and the file carried no comment saying
+# which way round the two disagree when the card cannot be read — so the answer
+# here, stated rather than inherited, is: djev does not boot. It is the live recall
+# ranker (app/djev.py); an unreadable card is not evidence of a free one, and
+# putting a chosen kernel variant onto a card it cannot see is the unattended
+# restart an attended window owns (#1363). `set -euo pipefail` already took the
+# script down on this failure — with no message at all — so staying down is the
+# incumbent behaviour; what the guard adds is the sentence.
+#
+# shellcheck source=./gpu-mem.sh
+source "$PROJECT_DIR/bin/gpu-mem.sh"
+FREE_MIB="" TOTAL_MIB="" GPU_NAME=""
+gpu_mem_read FREE_MIB TOTAL_MIB GPU_NAME "$GPU" || die "no readable GPU $GPU: nvidia-smi is missing, failing, or answering non-numerically; not booting into a card it cannot measure"
 
 cat <<EOF
 ==> djev: DiffusionGemma 26B-A4B NVFP4
@@ -270,11 +282,10 @@ EOF
 if (( FREE_MIB < NEED_MIB )); then
     echo >&2
     echo "refusing to start: GPU $GPU has ${FREE_MIB} MiB free, this needs ${NEED_MIB}." >&2
-    if nvidia-smi --id="$GPU" --query-compute-apps=pid,used_memory,process_name \
-         --format=csv,noheader 2>/dev/null | grep -q .; then
+    GPU_HOLDERS=$(gpu_mem_holders "$GPU")
+    if [[ -n "$GPU_HOLDERS" ]]; then
         echo "what is on the card:" >&2
-        nvidia-smi --id="$GPU" --query-compute-apps=pid,used_memory,process_name \
-            --format=csv,noheader | sed 's/^/  /' >&2
+        printf '%s\n' "$GPU_HOLDERS" | sed 's/^/  /' >&2
         echo >&2
         echo "If that is llama.cpp, the Qwen3.6 secondary still holds GPU $GPU." >&2
         echo "They are an either/or: set secondary_enabled: false in config.yaml and" >&2
