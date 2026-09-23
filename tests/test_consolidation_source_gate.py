@@ -455,7 +455,7 @@ def phase_1_3() -> str:
 def test_phase_1_3_names_the_source_gate_and_its_report_line(phase_1_3):
     """Clause 2: the drop, the command, and the count, between the two anchors."""
     assert "consolidation_source_gate.py" in phase_1_3
-    assert "check --candidates ~/lloyd/_pipeline/skills/candidates/" in phase_1_3
+    assert "check --candidates ~/lloyd-data/_pipeline/skills/candidates/" in phase_1_3
     assert "dropped_by_source_gate:" in phase_1_3
     assert "eligible_after_source_gate" in phase_1_3
     assert "script_absent" in phase_1_3, "an unavailable gate must be reported, not skipped"

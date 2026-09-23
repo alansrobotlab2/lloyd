@@ -45,8 +45,8 @@ Two loops, both inside the **backend** process (`server.py`):
 - **The workers** — `workers.slots` of them — claim one item at a time and
   await its source's `execute`.
 
-`workers.db` lives beside the repo (`~/lloyd-data/workers.db`, gitignored by the
-`*.db` rule) and is opened in WAL mode, because the **MCP aggregator is a
+`workers.db` lives in the data root (`~/lloyd-data/workers.db`, outside the
+code tree, [[data-home]]) and is opened in WAL mode, because the **MCP aggregator is a
 second process** that writes to it: `autoresearch_round` enqueues a round from
 there, the effect ledger writes `tool_effects` rows from inside a tool call,
 and the authority gate reads its grants. A process outside the backend never

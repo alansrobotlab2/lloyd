@@ -38,6 +38,7 @@ SUFFIXES = {".py", ".sh", ".conf", ".yaml", ".yml", ".service", ".timer", ".ts",
 ALLOWED = {
     "scripts/migrate_data_home.py",
     "scripts/maintenance/rewrite_vault_data_paths.py",
+    "scripts/maintenance/cutover_data_home.sh",
     "tests/test_no_runtime_paths_in_code.py",
 }
 #: Dated measurement scripts are a record of how a number was taken, not code

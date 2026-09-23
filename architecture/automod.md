@@ -2448,8 +2448,10 @@ are copied aside. A rollback that erases the bug guarantees you fix it twice.
 This is not decorative — it is how `a6c0eba` and a set of in-flight nightly
 changes were both recovered after the incident in §9.
 
-`git clean` is **path-scoped**, never repo-root: the root holds `usage.db`,
-`workers.db`, `.env` and `.venvs/`, all gitignored and none replaceable.
+`git clean` is **path-scoped**, never repo-root: the root holds `.env` and
+`.venvs/`, gitignored and not replaceable. (The databases, sessions and logs
+used to sit there too; since 2026-09-22 they live in `~/lloyd-data`,
+[[data-home]].)
 
 If rollback fails twice, services are left **stopped** and `BROKEN` is
 written. With no human in the loop, an honestly-dead system is safer than an
@@ -2926,8 +2928,9 @@ of the venv plus a `uv pip install` of the delta, booted by the canary.
 ## 11. State
 
 Everything under `~/.local/state/lloyd-automod/` — outside the repo, so
-`git reset --hard` and `git clean -fdx` cannot reach it. `_pipeline/` would
-not do: gitignored but still inside the tree.
+`git reset --hard` and `git clean -fdx` cannot reach it. (`_pipeline/` was
+ruled out when it was gitignored but still inside the tree; it has lived in
+`~/lloyd-data` since 2026-09-22, [[data-home]].)
 
 | File | Written by | Purpose |
 |---|---|---|
