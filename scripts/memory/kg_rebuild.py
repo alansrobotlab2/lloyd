@@ -140,7 +140,19 @@ def cmd_freeze(args) -> int:
     if not args.dry_run and not args.keep_writes:
         _set_write_enabled(False)
 
-    baseline = _run_eval("rebuild-before", run_dir)
+    # A dry run has paused nothing, so it must not leave a state file saying it
+    # did: `unfreeze`, `rollback` and `swap` read that list back and act on it.
+    if args.dry_run:
+        print(f"\ndry run: nothing paused, no state written (snapshot at {run_dir})")
+        return 0
+
+    # The baseline is the graph being replaced, however little is left of it.
+    # After 2026-09-22's deletion the live store held 30 entities and no edges,
+    # and the eval refuses an empty corpus by default — so the baseline came
+    # back empty and `gate` could never pass. Scoring the no-graph state on
+    # purpose is the honest "before": the rebuild must at least beat it.
+    # `rebuild-after` never gets this allowance.
+    baseline = _run_eval("rebuild-before", run_dir, allow_empty_corpus=True)
     state = save_state(run_dir=str(run_dir), frozen_at=_now(),
                        store_before=before, paused=paused,
                        eval_before=baseline, ledger=invocation_ledger())
@@ -242,12 +254,13 @@ def _corpus_size() -> int:
     return len(mod.NightlyExtraction()._eligible_files(full_mode=True))
 
 
-def _run_eval(label: str, run_dir: Path) -> dict:
+def _run_eval(label: str, run_dir: Path, *, allow_empty_corpus: bool = False) -> dict:
     """Run the retrieval eval against whatever is live now."""
     try:
         out = subprocess.run(
             [_venv_python(), str(LLOYD / "eval" / "run_eval.py"),
-             "--label", label, "--notes", f"kg rebuild: {label}"],
+             "--label", label, "--notes", f"kg rebuild: {label}",
+             *(["--allow-empty-corpus"] if allow_empty_corpus else [])],
             cwd=str(LLOYD), capture_output=True, text=True, timeout=1800)
         if out.returncode != 0:
             print(f"  [eval] failed rc={out.returncode}: {out.stderr[-500:]}")

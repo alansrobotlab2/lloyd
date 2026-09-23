@@ -139,3 +139,53 @@ def test_skip_eval_cannot_authorise_a_swap():
     body = src.split("def cmd_gate")[1].split("def _facts_written_since_export")[0]
     assert "authorises_swap = results[\"pass\"] and not args.skip_eval" in body
     assert "save_state(gate=authorises_swap" in body
+
+
+# ── the baseline after the 2026-09-22 deletion ────────────────────────────────
+#
+# The live store held 30 entities and no edges. The eval refuses an empty corpus
+# by default, `freeze` recorded an empty baseline, and `gate` records "eval: no
+# result" on an empty baseline, so the rebuild that would have repopulated the
+# graph could never swap in.
+
+
+def _freeze_in(tmp_path, monkeypatch, *, dry_run: bool):
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(kg_rebuild, "RUN_ROOT", tmp_path / "backups")
+    monkeypatch.setattr(kg_rebuild, "STATE_PATH", tmp_path / "rebuild-state.json")
+    monkeypatch.setattr(kg_rebuild, "VAULT_KG_DB", tmp_path / "kg.sqlite")
+    monkeypatch.setattr(kg_rebuild, "PAUSED_TASKS", ())
+    monkeypatch.setattr(kg_rebuild, "_set_write_enabled", lambda enabled: None)
+    monkeypatch.setattr(kg_rebuild, "invocation_ledger", lambda: {})
+
+    def fake_eval(label, run_dir, **kw):
+        calls.append((label, kw))
+        return {"mrr_doc": 0.1, "ndcg10": 0.1}
+    monkeypatch.setattr(kg_rebuild, "_run_eval", fake_eval)
+    rc = kg_rebuild.cmd_freeze(SimpleNamespace(dry_run=dry_run, keep_writes=True))
+    return rc, calls
+
+
+def test_freeze_scores_an_empty_graph_on_purpose(tmp_path, monkeypatch):
+    rc, calls = _freeze_in(tmp_path, monkeypatch, dry_run=False)
+    assert rc == 0
+    assert calls == [("rebuild-before", {"allow_empty_corpus": True})]
+    import json
+    state = json.loads((tmp_path / "rebuild-state.json").read_text())
+    assert state["eval_before"]["mrr_doc"] == 0.1, "the gate needs a baseline to compare against"
+
+
+def test_the_after_eval_never_gets_the_empty_corpus_allowance():
+    import inspect
+    src = inspect.getsource(kg_rebuild.cmd_gate)
+    assert '_run_eval("rebuild-after", run_dir)' in src
+    assert "allow_empty_corpus" not in src
+
+
+def test_a_dry_run_writes_no_state_that_claims_a_pause(tmp_path, monkeypatch):
+    rc, calls = _freeze_in(tmp_path, monkeypatch, dry_run=True)
+    assert rc == 0
+    assert not (tmp_path / "rebuild-state.json").exists(), (
+        "unfreeze/rollback/swap read the paused list back and act on it")
+    assert calls == [], "a dry run does not need a baseline"
