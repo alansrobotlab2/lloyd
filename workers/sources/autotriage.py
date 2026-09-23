@@ -303,7 +303,7 @@ before you read its proposal.
 `already_done` (a commit fixed it) from `stale` (the area was rewritten or \
 removed). Name the commit.
 - **Ask whether the surface the item targets has any traffic** — and count \
-*calls*, not mentions. From `~/lloyd/sessions`, \
+*calls*, not mentions. From `~/lloyd-data/sessions`, \
 `grep -oh '"name": "<tool>"' *.json | wc -l` is the only valid count. The store \
 echoes every offered tool's definition, and every sentence that names a tool, \
 into the same text a call is recorded in, so a bare grep for the tool name \

@@ -1,0 +1,12 @@
+[Unit]
+Description=Snapshot the Lloyd data root every hour
+
+[Timer]
+# An hour bounds what a wipe can take with it; a snapshot costs only what
+# changed since the last one.
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

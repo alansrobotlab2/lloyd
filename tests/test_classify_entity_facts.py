@@ -47,6 +47,7 @@ import pytest
 import yaml
 
 from tests._live_data import require_live_volume
+from app.paths import production_data_root  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 CLASSIFY = ROOT / "scripts" / "memory" / "classify-relationships.py"
@@ -250,7 +251,7 @@ def _find_live_facts_root() -> Path | None:
     """
     from app.paths import VAULT_FACTS_ROOT
     for candidate in (VAULT_FACTS_ROOT,
-                      Path.home() / "lloyd" / "_pipeline" / "vault-derived" / "facts"):
+                      production_data_root() / "_pipeline" / "vault-derived" / "facts"):
         if candidate.is_dir():
             return candidate
     return None

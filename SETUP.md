@@ -45,15 +45,15 @@ What it captures, and why each matters:
 |---|---|---|
 | `~/obsidian/` (whole vault, incl. `.git` and `.obsidian`) | 89 MB | The vault has **no git remote** — local history dies with the disk. Obsidian Sync restores notes but not git history or plugin state. |
 | `~/lloyd/.env` | tiny | Gitignored. LiveKit key/secret. |
-| `~/lloyd/data/tool_overrides.yaml` | tiny | Gitignored UI tool toggles, merged over config.yaml at boot. |
+| `~/lloyd-data/data/tool_overrides.yaml` | tiny | Gitignored UI tool toggles, merged over config.yaml at boot. |
 | `~/lloyd/agent-services/services/tts/qwen3-tts/voice_library/profiles/dave_cullen/` | 1.5 MB | The **`clone:dave_cullen` voice** referenced by `config.yaml` → `livekit.tts.voice`. Untracked and not reproducible. |
 | `~/lloyd/agent-services/cert/` | 84 KB | mTLS CA + server cert + minted client bundles. Regenerating the CA invalidates every enrolled device. |
-| `~/lloyd/_pipeline/vault-derived/kg.sqlite` | 76 MB | **The knowledge graph.** Edges, aliases, the entity registry and the fact index. Fact *content* can be re-extracted from the vault over a few GPU-nights; the edges, the merge history and the hand-review state cannot be reproduced at all. Copy it with `sqlite3 kg.sqlite ".backup out.sqlite"` or the daily tarball — a plain `cp` of a WAL database taken mid-write is not restorable. |
-| `~/lloyd/_pipeline/vault-derived/facts/` | 282 MB | The fact layer, 61,392 markdown files. Re-extractable, but that is ~5 GPU-hours. |
-| `~/lloyd/_pipeline/memory-graph/` | small | Merge plans, apply reports, semantic verdicts, `graph-baseline.json`. This is the evidence that makes a bad merge revertable. |
+| `~/lloyd-data/_pipeline/vault-derived/kg.sqlite` | 76 MB | **The knowledge graph.** Edges, aliases, the entity registry and the fact index. Fact *content* can be re-extracted from the vault over a few GPU-nights; the edges, the merge history and the hand-review state cannot be reproduced at all. Copy it with `sqlite3 kg.sqlite ".backup out.sqlite"` or the daily tarball — a plain `cp` of a WAL database taken mid-write is not restorable. |
+| `~/lloyd-data/_pipeline/vault-derived/facts/` | 282 MB | The fact layer, 61,392 markdown files. Re-extractable, but that is ~5 GPU-hours. |
+| `~/lloyd-data/_pipeline/memory-graph/` | small | Merge plans, apply reports, semantic verdicts, `graph-baseline.json`. This is the evidence that makes a bad merge revertable. |
 | `~/lloyd/qmd/` — branch `lloyd` | small (the branch; `node_modules` reinstalls) | **The qmd fork the daemon runs** ([Part 6](#part-6--qmd-vault-search)). The clone is gitignored by this repo and its `lloyd` branch exists only on this disk until pushed: `git -C ~/lloyd/qmd push -u origin lloyd` (origin = `alansrobotlab2/qmd`). Its `WORKLOG.md`/`GAMEPLAN.md` are force-added to that branch, so the push carries them. |
-| `~/lloyd/_pipeline/research/` — `ledger.jsonl`, `rounds/`, `snapshots/` | ~19 MB | **Autoresearch history.** Gitignored and single-copy: the ledger and round reports are the only record of past promotions (the May 2026 threshold data is already gone, #430), and `snapshots/` is what a promotion is restored from. `variants/` regenerates and is skipped. |
-| `~/lloyd/sessions/` | 725 MB | Conversation history. Gitignored. Optional but not recoverable. |
+| `~/lloyd-data/_pipeline/research/` — `ledger.jsonl`, `rounds/`, `snapshots/` | ~19 MB | **Autoresearch history.** Gitignored and single-copy: the ledger and round reports are the only record of past promotions (the May 2026 threshold data is already gone, #430), and `snapshots/` is what a promotion is restored from. `variants/` regenerates and is skipped. |
+| `~/lloyd-data/` (everything else in it) | varies | **All runtime data** since 2026-09-22 ([data-home](architecture/data-home.md)): `sessions/` (conversation history, not recoverable), `usage.db`, `workers.db`, `research.db`, `event_logs/`, `autonomy-runs/`, `eval/baselines/`, logs. Simplest: back up the whole directory. A btrfs snapshot (`~/.lloyd-data-snapshots/`) is a consistent copy of all of it, databases included. |
 | `~/backups/backup_*.tar.gz` (latest + `.sha256`) | varies | The daily archive itself. |
 
 Five things that **used** to live only on this disk are now tracked in the repo,
@@ -230,15 +230,20 @@ and need no secrets (`ANTHROPIC_API_KEY=no-key-required`).
 
 ### Runtime directories
 
-Gitignored, so create them:
+Runtime data lives outside the tree, in `~/lloyd-data`
+([architecture/data-home.md](architecture/data-home.md)). It is a btrfs
+subvolume so it can be snapshotted, and it must carry `.lloyd-data-root`: the
+production checkout refuses to start without it rather than fall back to
+writing into the tree.
 
 ```bash
-mkdir -p logs sessions event_logs data voice_profiles \
-         _pipeline/vault-derived/facts _pipeline/research \
-         agent-services/logs
+btrfs subvolume create ~/lloyd-data      # or restore it from backup
+touch ~/lloyd-data/.lloyd-data-root
+mkdir -p ~/lloyd-data/{logs/services,sessions,event_logs,data,voice_profiles} \
+         ~/lloyd-data/_pipeline/{vault-derived/facts,research}
 ```
 
-Restore `data/tool_overrides.yaml` from backup if you have it. Without it, the
+`setup-all.sh` does the same. Restore `~/lloyd-data/data/tool_overrides.yaml` from backup if you have it. Without it, the
 tool enable/disable state falls back to the `config.yaml` defaults, which is a
 valid (if slightly different) starting point.
 
@@ -654,13 +659,29 @@ mkdir -p ~/.config/qmd
 cp agent-services/conf/qmd-index.yml ~/.config/qmd/index.yml
 ```
 
-It defines 15 collections: 14 rooted under `~/obsidian` (`facts`, `memory`,
-`knowledge`, `projects`, `lloyd`, `personal`, `work`, `skills`, `people`,
-`subliminal`, `backlog`, `autonomy`, `sessions`, `architecture`) plus
-`autonomy-runs`, which points into `~/lloyd/autonomy-runs`. Two of them —
-`facts` and `sessions` — are **empty** on disk; the real fact tree is
-`_pipeline/vault-derived/facts` and reaches retrieval through the knowledge
-graph, not qmd. The `models:` block pins the embed/expand/rerank GGUFs.
+That direction is for a **fresh host**. On a machine that has been running, the
+live config is the one that is true — copying the tracked copy onto it retargets
+whole collections — so check the nightly `config_drift` entry in
+`~/lloyd-data/_pipeline/reflection/qmd-index-maintenance-<date>.json` first, and re-sync the
+other way (below) if it reports a difference.
+
+It defines **14 collections**, every one of which is live: 12 rooted under
+`~/obsidian` (`memory`, `knowledge`, `projects`, `lloyd`, `personal`, `work`,
+`skills`, `people`, `subliminal`, `backlog`, `autonomy`, `architecture`) plus
+two that point into the data root (`~/lloyd-data`, [data-home](architecture/data-home.md)) —
+
+| collection | path | what it is |
+|---|---|---|
+| `autonomy-runs` | `~/lloyd-data/autonomy-runs` | task run records, `*/run_*.md` |
+| `sessions` | `~/lloyd-data/_pipeline/vault-derived/sessions` | the session-recall corpus: `app/post_capture.py` writes each finished session there through `app.paths.VAULT_SESSIONS_DIR`, which is why qmd indexes that path and not `~/obsidian/sessions` (a directory that exists but is empty) |
+
+The `models:` block pins the embed/expand/rerank GGUFs.
+
+The tracked copy also still lists `facts` at `~/obsidian/facts`, an empty
+directory; the daemon dropped that collection in the 2026-09-19 edit, and the
+real fact tree is `_pipeline/vault-derived/facts`, which reaches retrieval
+through the knowledge graph rather than qmd. Dropping it from the template is
+open in #1298 — until then the nightly drift report names it.
 
 If you change collections later, re-sync the tracked copy:
 
@@ -1089,6 +1110,20 @@ which writes into a side directory only. The vault was deleted twice in
 September 2026 together with its own `.git`, so this repository is the copy a
 wipe cannot reach: back it up off-box with the rest of Part 0.
 
+### Data snapshots (not optional)
+
+```bash
+systemctl --user enable --now lloyd-data-snapshot.timer  # ~/lloyd-data → read-only btrfs snapshot, hourly
+# pruning (48 hourly + 14 daily) needs root, because the user cannot delete a
+# read-only snapshot — which is the point:
+sudo install -m 0755 -o root -g root scripts/backup/prune-data-snapshots.sh /usr/local/sbin/
+sudo install -m 0644 agent-services/systemd/system/lloyd-data-snapshot-prune.* /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now lloyd-data-snapshot-prune.timer
+```
+
+Snapshots land in `~/.lloyd-data-snapshots/<UTC stamp>`. Restore with
+`scripts/backup/restore-data.sh <stamp>` (into a side directory).
+
 ### Optional timers
 
 ```bash
@@ -1255,7 +1290,7 @@ its own source, and `git status` stays clean while every one of them is missing:
 | `…/qwen3-tts/voice_library/profiles/dave_cullen/` | Part 8 — rebuilt from the vault, not a backup |
 | `agent-services/services/thunderbird-mcp/` | `setup/setup-thunderbird-mcp.sh` — clones + builds the Node bridge; **gitignored, and its absence silently drops 40 email/calendar/contacts/to-do tools with `git status` clean** (see the Thunderbird bridge subsection below) |
 | `web/node_modules`, `qmd/dist` | `npm ci` / `npm run build` |
-| runtime dirs (`logs/`, `sessions/`, …) | Part 3 |
+| runtime data (`~/lloyd-data`: sessions, databases, logs) | outside the tree since 2026-09-22 — survives a destroyed tree; else `~/.lloyd-data-snapshots` / Part 0 backup |
 
 Push branches you care about. GitHub had 34 branches on 09-22 while the live
 tree had 210; the other ~177 — every kept round branch the backlog points at —
@@ -1355,7 +1390,7 @@ Two pieces of state need attention afterwards:
 
 **Primary wedges — 200 OK but no tokens.** Recurring. Confirm with
 `grammar_matcher.cc:612` stop-token loop in
-`agent-services/logs/agent-llm-primary.err` plus a hung POST. Fix:
+`~/lloyd-data/logs/services/agent-llm-primary.err` plus a hung POST. Fix:
 `lsup restart agent-llm-primary`. If it recurs constantly, bisect by disabling
 MTP (drop `--speculative-config` from the start script).
 
@@ -1388,7 +1423,7 @@ frontmatter fails `yaml.safe_load` with no alert. Run
 **MC shows `ERR_SSL_PROTOCOL_ERROR`, or loads a blank white page.** Both are
 `agent-services/cert/` missing — it is gitignored, so a fresh tree has no certs
 and **Vite falls back to plain HTTP without failing**, logging one line to
-`logs/frontend.log`:
+`~/lloyd-data/logs/frontend.log`:
 
 ```
 [vite] server cert missing — falling back to plain HTTP. Run: bash scripts/gen-cert.sh

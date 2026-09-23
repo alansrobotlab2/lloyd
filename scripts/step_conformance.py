@@ -93,8 +93,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DEFAULT_TRAJECTORIES = "~/lloyd/_pipeline/trajectories"
-DEFAULT_DB = "~/lloyd/workers.db"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.paths import PIPELINE_DIR, WORKERS_DB  # noqa: E402
+
+DEFAULT_TRAJECTORIES = str(PIPELINE_DIR / "trajectories")
+DEFAULT_DB = str(WORKERS_DB)
 # Empty means "the whole ledger": the structural check is driven by the *trace* store, and
 # baselines are keyed by the trace's `session_source`, so no run is ever judged against
 # another pipeline's shape (his per-client rule) whether or not the ledger is filtered here.

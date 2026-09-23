@@ -892,7 +892,10 @@ def run_grader(*, prompt: str, item_id: int, round_id: str, backend: str | None 
     grading of one commit rather than as three.
     """
     backend = (backend or backend_url()).rstrip("/")
-    sessions_dir = Path(sessions_dir or (LIVE_ROOT / "sessions"))
+    # The live backend grades, so the session goes in the live data root, whatever
+    # tree or LLOYD_DATA this process runs under.
+    from app.paths import production_data_root
+    sessions_dir = Path(sessions_dir or (production_data_root() / "sessions"))
     session_id = write_session(sessions_dir, item_id=item_id, round_id=round_id, model=model)
     report: dict = {"ok": False, "error": "", "session_id": session_id, "structured": None,
                     "structured_error": "", "text": "", "stop_reason": None, "duration_s": 0.0,

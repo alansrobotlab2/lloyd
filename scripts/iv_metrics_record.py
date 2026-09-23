@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Append one row to the Inner Voice metrics series: `~/lloyd/_pipeline/reflection/iv-metrics.jsonl`.
+"""Append one row to the Inner Voice metrics series: `~/lloyd-data/_pipeline/reflection/iv-metrics.jsonl`.
 
 Backlog #460. `scripts/iv_grade.py` can compute intervention rate, landed rate,
 miss rate, tokens/turn, latency and the observer's dropped-verdict count, and has
@@ -83,6 +83,8 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+from app.paths import PIPELINE_DIR  # noqa: E402
 
 #: Dropped verdicts / LLM calls. **0.05 is Alan's ruling (#460), applied to this
 #: constant by #1288 on 2026-09-20; the task file had said 0.05 since vault
@@ -536,8 +538,7 @@ def main(argv: list[str] | None = None) -> int:
                          f"{DEFAULT_THRESHOLD}, or $IV_METRICS_DROPPED_THRESHOLD)")
     ap.add_argument("--window-rows", type=int, default=DEFAULT_WINDOW_ROWS,
                     help="rows the median is taken over")
-    ap.add_argument("--out", default=str(REPO_ROOT / "_pipeline" / "reflection"
-                                         / "iv-metrics.jsonl"),
+    ap.add_argument("--out", default=str(PIPELINE_DIR / "reflection" / "iv-metrics.jsonl"),
                     help="series file to append one row to")
     args = ap.parse_args(argv)
 

@@ -280,7 +280,11 @@ def main():
     print(f"{'='*60}\n")
 
     # Save
-    out_file = args.output_file or f"/home/alansrobotlab/lloyd/logs/benchmarks/bench_{args.tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    if not args.output_file:
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from app.paths import LOGS_DIR
+    out_file = args.output_file or str(LOGS_DIR / "benchmarks" / f"bench_{args.tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
     with open(out_file, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"Saved → {out_file}")

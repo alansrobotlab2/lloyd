@@ -75,7 +75,7 @@ from agent_mcp._shared import AUTONOMY_TASK_FIELDS, parse_frontmatter_text
 logger = logging.getLogger("lloyd-autonomy")
 
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
-from app.paths import AUTONOMY_RUNS_DIR  # anchored to LLOYD_HOME
+from app.paths import AUTONOMY_RUNS_DIR  # anchored to DATA_ROOT
 LLOYD_HOME = Path(__file__).parent
 
 def recover_stuck_tasks() -> list:

@@ -1,13 +1,13 @@
 """Per-session NDJSON event log + content-addressed blob store (#345 Stage 0).
 
-The chat-transcript JSON (`~/lloyd/sessions/<id>.json`) is the human-facing
+The chat-transcript JSON (`~/lloyd-data/sessions/<id>.json`) is the human-facing
 record. This module is the *machine-facing* record — every machination on
 both the agent and the critic sides is captured here, append-only, never
 overwritten.
 
 Storage layout:
-    ~/lloyd/event_logs/<session_id>.events.jsonl   # one JSON object per line
-    ~/lloyd/event_logs/blobs/<sha256>.txt          # large fields by hash
+    <DATA_ROOT>/event_logs/<session_id>.events.jsonl   # one JSON object per line
+    <DATA_ROOT>/event_logs/blobs/<sha256>.txt          # large fields by hash
 
 Why:
     SQLite tables (`inner_voice_critiques`, `inner_voice_interventions`)
@@ -36,16 +36,12 @@ import json
 import logging
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("lloyd-server")
 
-# Layout. Resolved relative to the lloyd repo root via paths.py would be
-# tidier but creating a circular import isn't worth it — the layout has
-# been stable since project inception.
-_LLOYD_ROOT = Path(__file__).resolve().parent.parent  # ~/lloyd
-EVENT_LOGS_DIR = _LLOYD_ROOT / "event_logs"
+from app.paths import EVENT_LOGS_DIR
+
 BLOBS_DIR = EVENT_LOGS_DIR / "blobs"
 
 # Default threshold: fields larger than this go to the blob store and the
@@ -126,7 +122,7 @@ def log_event(
     turn_id: str | None = None,
     blob_threshold_bytes: int = DEFAULT_BLOB_THRESHOLD_BYTES,
 ) -> int | None:
-    """Append one event to `~/lloyd/event_logs/<session_id>.events.jsonl`.
+    """Append one event to `<DATA_ROOT>/event_logs/<session_id>.events.jsonl`.
 
     Schema:
         {

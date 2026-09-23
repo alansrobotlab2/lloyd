@@ -27,7 +27,7 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from app.paths import VAULT_FACTS_ROOT
+from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT
 from scripts.groundskeeper.queue_io import QueueWriteError, write_queue_atomic
 
 VAULT_ROOT = "/home/alansrobotlab/obsidian"
@@ -35,7 +35,7 @@ VAULT_ROOT = "/home/alansrobotlab/obsidian"
 # fixture. Unset, the nightly timer's path is unchanged.
 QUEUE_OUTPUT = os.path.expanduser(os.environ.get(
     'GROUNDKEEPER_QUEUE',
-    "~/lloyd/_pipeline/groundskeeper-queue.json"))
+    str(PIPELINE_DIR / "groundskeeper-queue.json")))
 FACTS_DIR = str(VAULT_FACTS_ROOT)
 MEMORY_MD = os.path.join(VAULT_ROOT, "lloyd/MEMORY.md")
 

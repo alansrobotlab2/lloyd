@@ -89,9 +89,12 @@ def build_rig(rig: Path) -> Path:
 
 
 def start_worker(rig: Path, wt: Path) -> subprocess.Popen:
+    from scripts.automod.canary_config import canary_data_root
     env = dict(os.environ)
     env.update({
         "HOME": str(rig / "home"),
+        # The canary's data root, so the worker and the backend it talks to agree.
+        "LLOYD_DATA": str(canary_data_root(rig)),
         "LLOYD_BACKEND_URL": f"http://127.0.0.1:{BACKEND_PORT}",
         "LLOYD_LIVEKIT_ROOM_PREFIX": PREFIX,
         "PYTHONUNBUFFERED": "1",
@@ -330,7 +333,9 @@ def main() -> int:
         if not args.keep:
             canary.stop()
 
-    msgs = json.loads((wt / "sessions" / f"{session}.json").read_text()).get("messages", [])
+    from scripts.automod.canary_config import canary_data_root
+    msgs = json.loads((canary_data_root(rig) / "sessions" / f"{session}.json")
+                      .read_text()).get("messages", [])
     users = [c.get("text", "") for m in msgs if m.get("role") == "user"
              for c in (m.get("content") or []) if c.get("type") == "text"]
     print("\n=== injected user turns ===")

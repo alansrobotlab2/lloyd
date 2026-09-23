@@ -42,7 +42,9 @@ _spec.loader.exec_module(_v4)
 classify_edge_v4 = _v4.classify_edge_v4
 _v2 = _v4._v2  # _load_relationships, _load_fact_snippets, defaults
 
-CLASSIFIED_DIR = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
+from app.paths import PIPELINE_DIR  # noqa: E402  (importable: the v4 module put the root on sys.path)
+
+CLASSIFIED_DIR = PIPELINE_DIR / "memory-graph"
 DEFAULT_OUTPUT = CLASSIFIED_DIR / "classified-v4-batch.jsonl"
 
 # Provenance values whose `mentions` edges are eligible for re-typing.

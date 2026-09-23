@@ -8,7 +8,7 @@ Before swapping, we snapshot the current state
 (SOUL.md, MEMORY.md, USER.md) into `_pipeline/research/snapshots/<ts>/`.
 After swap, we write the winning experiment as a fact under
 `cfg.paths.facts_experiments_dir/<variant_id>/` (configured in config.yaml,
-currently `~/lloyd/_pipeline/vault-derived/facts/experiments/`) so it's
+currently `~/lloyd-data/_pipeline/vault-derived/facts/experiments/`) so it's
 queryable via the normal memory pipeline.
 
 `rollback(snapshot_ts)` reverses a promotion by restoring files from the

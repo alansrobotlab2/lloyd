@@ -26,10 +26,6 @@ import httpx
 BASE_URL = "http://127.0.0.1:8096"
 MODEL = "primary"
 
-# Default event log to replay (the iv69fa session that v3 IV mishandled).
-DEFAULT_EVENTS = Path(
-    "/home/alansrobotlab/lloyd/event_logs/20260503_192424_iv69fa.events.jsonl"
-)
 SYSTEM_PROMPT_PATH = Path(
     "/home/alansrobotlab/obsidian/lloyd/inner_voice/system_prompt.md"
 )
@@ -37,6 +33,11 @@ SYSTEM_PROMPT_PATH = Path(
 # Import the canonical tool schemas — same source of truth observer.py uses.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.inner_voice.lever_tools import LEVER_TOOLS, LEVER_NAMES  # noqa: E402
+from app.paths import production_data_root  # noqa: E402
+
+# Default event log to replay (the iv69fa session that v3 IV mishandled).
+DEFAULT_EVENTS = (production_data_root() / "event_logs"
+                  / "20260503_192424_iv69fa.events.jsonl")
 
 
 def _strip_fm(c: str) -> str:

@@ -848,10 +848,11 @@ def test_main_writes_the_report_the_note_publishes(world, tmp_path, capsys):
     # stdout carries the identical report (the command prints what it writes)
     assert json.loads(capsys.readouterr().out) == report
     # The bare published command passes no --ledger/--rounds-dir, so its
-    # defaults — resolved here from REPO_ROOT — are part of the published
+    # defaults — resolved from the data root — are part of the published
     # contract; a move of the store must fail a test, not the reader.
-    assert pfr.DEFAULT_LEDGER == pfr.REPO_ROOT / "_pipeline" / "research" / "ledger.jsonl"
-    assert pfr.DEFAULT_ROUNDS_DIR == pfr.REPO_ROOT / "_pipeline" / "research" / "rounds"
+    from app.paths import PIPELINE_DIR
+    assert pfr.DEFAULT_LEDGER == PIPELINE_DIR / "research" / "ledger.jsonl"
+    assert pfr.DEFAULT_ROUNDS_DIR == PIPELINE_DIR / "research" / "rounds"
 
 
 def test_the_module_runs_as_the_published_python_m_command(world, tmp_path):

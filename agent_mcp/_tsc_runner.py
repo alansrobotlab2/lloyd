@@ -115,7 +115,14 @@ def _tsc_bin(root: Path) -> Path | None:
 
 
 def _baseline_path(root: Path) -> Path:
-    return root / "_pipeline" / "tsc" / "baseline.json"
+    """The running tree's data root for its own baseline; any other tree (a
+    round's worktree) keeps one in its own data root, apart from live's."""
+    from app import paths
+    if os.path.realpath(root) == os.path.realpath(paths.LLOYD_HOME):
+        base = paths.PIPELINE_DIR
+    else:
+        base = paths.data_root_for_tree(Path(root)) / "_pipeline"
+    return base / "tsc" / "baseline.json"
 
 
 def _load_baseline(root: Path) -> dict[str, Counter] | None:

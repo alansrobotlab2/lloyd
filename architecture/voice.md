@@ -449,7 +449,7 @@ configured 0.4.
 cosine is a dot product — and it does two different jobs with one encoder:
 
 - **Enrolled recognition.** `*.npy` files in `livekit.voiceprint.profiles_dir`
-  (`~/lloyd/voice_profiles`). `identify()` returns the best profile above
+  (`~/lloyd-data/voice_profiles`). `identify()` returns the best profile above
   `profile_threshold` (0.75) or `unknown_label`. That name becomes the
   `[Alan]: …` prefix on the injected turn.
 - **Anchor matching** for the continuation window above, against
@@ -1102,7 +1102,7 @@ voice.
 | `voice_library/profiles/dave_cullen/` | **no** — back up; not reproducible |
 | `qwen3-tts/models/` (4.3 GB of Base weights) | **no** — re-downloadable, slowly |
 | `.env` (`LIVEKIT_API_*`) | **no** — regenerate with `gen-livekit-secrets.sh` |
-| `~/lloyd/voice_profiles/*.npy` | **no** — re-enroll from Settings |
+| `~/lloyd-data/voice_profiles/*.npy` | **no** — re-enroll from Settings |
 
 ### Tests and tools
 

@@ -773,7 +773,7 @@ def test_the_default_paths_cannot_be_moved_by_the_environment(tmp_path):
     import os
 
     from app import paths as paths_mod
-    expected = paths_mod.LLOYD_HOME / "_pipeline" / "vault-derived"
+    expected = paths_mod.DATA_ROOT / "_pipeline" / "vault-derived"
     saved = {k: os.environ.get(k) for k in ("LLOYD_FACTS_ROOT", "LLOYD_KG_DB")}
     try:
         os.environ["LLOYD_FACTS_ROOT"] = str(tmp_path / "copy-facts")

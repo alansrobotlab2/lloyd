@@ -33,6 +33,7 @@ from pathlib import Path
 import pytest
 
 from tests._live_data import require_live_data
+from app.paths import production_data_root  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parents[1]
 #: This module's own namespace, so a pin test can redirect `LIVE_LEDGER` by name and
@@ -413,7 +414,7 @@ def test_missing_ledger_is_an_empty_answer_not_an_error(tmp_path, capsys):
 # through the miner's own join, and one written candidate that carries a widened
 # key read back by the ledger's own reader.
 
-LIVE_LEDGER = Path.home() / "lloyd" / "_pipeline" / "skills" / "reviews" / "verdicts.jsonl"
+LIVE_LEDGER = production_data_root() / "_pipeline" / "skills" / "reviews" / "verdicts.jsonl"
 
 # Measured 2026-09-15 on the ledger above: 53 seq-* rows under 28 distinct keys,
 # every one of them under 48 characters, so none of them is touched by a

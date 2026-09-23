@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """validate_skill_patch_queue.py — fail-loud checker for the skill-patch queue.
 
-The queue at `~/lloyd/_pipeline/skills/proposed/` has no code writer and no code
+The queue at `~/lloyd-data/_pipeline/skills/proposed/` has no code writer and no code
 reader: both are agents following prose (`nightly-skill-consolidation` Phase 3.1
 writes entries, `nightly-skills-management` Stage 6 selects them), and before
 this script nothing under `~/lloyd` parsed the directory at all — `grep -rn
@@ -42,20 +42,24 @@ on it. `scripts/autonomy/validate_tasks.py` is the closer precedent.
 
 Usage:
     ~/lloyd/.venvs/lloyd/bin/python ~/lloyd/scripts/validate_skill_patch_queue.py \
-        [--dir ~/lloyd/_pipeline/skills/proposed]
+        [--dir ~/lloyd-data/_pipeline/skills/proposed]
 """
 from __future__ import annotations
 
 import argparse
 import collections.abc
+import sys
 from pathlib import Path
 
 import yaml
 
-# Repo-relative default: scripts/ sits one level under the checkout root, and
-# the queue is `_pipeline/skills/proposed/` in that same root. `_pipeline/` is
-# gitignored, which is why the tests run against fixture dirs instead of here.
-DEFAULT_DIR = Path(__file__).resolve().parents[1] / "_pipeline" / "skills" / "proposed"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.paths import PIPELINE_DIR  # noqa: E402
+
+# Data-root default: the queue is `_pipeline/skills/proposed/` under the runtime
+# data root (`app.paths.PIPELINE_DIR`), outside the tree, which is why the tests
+# run against fixture dirs instead of here.
+DEFAULT_DIR = PIPELINE_DIR / "skills" / "proposed"
 
 APPLIED_KEY = "applied"
 

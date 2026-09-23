@@ -5,6 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.paths import LOGS_DIR, SERVICE_LOGS_DIR
 from app.supervisor_client import (
     all_services,
     infra_services,
@@ -54,7 +55,7 @@ async def get_service_detail(id: str = ""):
     proc = procs.get(id, {})
     active, sub = _sup_state(proc)
     pid = proc.get("pid") or None
-    log_path = f"/home/alansrobotlab/lloyd/agent-services/logs/{id}.log"
+    log_path = str(SERVICE_LOGS_DIR / f"{id}.log")
     log_lines = _read_log_tail(log_path)
     raw = f"state={proc.get('statename','?')} pid={pid} desc={proc.get('description','')}"
     return JSONResponse({
@@ -142,7 +143,7 @@ async def get_agent_service_detail(unit: str = ""):
     procs = _supervisor_all_lenient()
     proc = procs.get(unit, {})
     pid = proc.get("pid") or None
-    log_path = f"/home/alansrobotlab/lloyd/logs/{unit.replace('lloyd-', '')}.log"
+    log_path = str(LOGS_DIR / f"{unit.replace('lloyd-', '')}.log")
     log_lines = _read_log_tail(log_path)
     raw = f"state={proc.get('statename','?')} pid={pid} desc={proc.get('description','')}"
     return JSONResponse({

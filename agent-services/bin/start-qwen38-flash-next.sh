@@ -187,7 +187,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # documented three sections below as "an A/B knob" and was never once
 # movable by an arm. Every `${VAR:-default}` below now sees the arm.
 # Nothing above this line may read one of those variables.
-ARM_ENV="${ARM_ENV:-$PROJECT_DIR/logs/flash-next-arm.env}"
+ARM_ENV="${ARM_ENV:-${LLOYD_DATA:-$HOME/lloyd-data}/logs/services/flash-next-arm.env}"
 if [[ -f "$ARM_ENV" ]]; then
   echo "consuming one-shot arm env: $ARM_ENV"
   cat "$ARM_ENV"

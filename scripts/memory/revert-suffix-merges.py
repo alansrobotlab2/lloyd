@@ -54,7 +54,7 @@ import yaml
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent.parent))
-from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB  # noqa: E402
+from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT, VAULT_KG_DB  # noqa: E402
 from app.fact_ids import dedupe_ids
 from app.atomic_io import atomic_write_text  # noqa: E402
 from app.kg_store import KGStore  # noqa: E402
@@ -328,7 +328,7 @@ def main() -> int:
     ap.add_argument("--fix-edges", action="store_true")
     ap.add_argument("--facts-dir", type=Path, default=VAULT_FACTS_ROOT)
     ap.add_argument("--db", type=Path, default=VAULT_KG_DB)
-    ap.add_argument("--out-dir", type=Path, default=Path.home() / "lloyd" / "_pipeline" / "memory-graph")
+    ap.add_argument("--out-dir", type=Path, default=PIPELINE_DIR / "memory-graph")
     args = ap.parse_args()
 
     report = json.loads(args.applied.read_text(encoding="utf-8"))

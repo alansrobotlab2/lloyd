@@ -41,6 +41,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 GRADER = ROOT / "scripts" / "iv_grade.py"
 
@@ -73,14 +75,27 @@ def _make_repo(tmp_path: Path) -> Path:
     """A throwaway repo root holding a copy of the grader and its own `usage.db`.
 
     Copied, not symlinked: `iv_grade.py` anchors `DB_PATH` at
-    `Path(__file__).resolve().parents[1]`, and a symlink resolves back to the real
+    the data root of `Path(__file__).resolve().parents[1]`, and a symlink resolves back to the real
     checkout — which would have the suite reading, and asserting against, the
     production table instead of the fixture.
     """
     repo = tmp_path / "lloyd"
     (repo / "scripts").mkdir(parents=True)
     shutil.copy2(GRADER, repo / "scripts" / "iv_grade.py")
+    # The grader reads `usage.db` through `app.paths`; a fixture repo that is not
+    # the live checkout keeps its data under `<repo>/.lloyd-data` (rule 3).
+    (repo / "app").mkdir()
+    (repo / "app" / "__init__.py").write_text("")
+    shutil.copy2(GRADER.parents[1] / "app" / "paths.py", repo / "app" / "paths.py")
+    (repo / ".lloyd-data").mkdir()
     return repo
+
+
+@pytest.fixture(autouse=True)
+def _fixture_repo_owns_its_data(monkeypatch):
+    """The copied grader must resolve `usage.db` inside the fixture repo, so the
+    suite's own `LLOYD_DATA` is not handed to the child."""
+    monkeypatch.delenv("LLOYD_DATA", raising=False)
 
 
 def _make_db(repo: Path, rows: list[dict]) -> Path:
@@ -92,7 +107,7 @@ def _make_db(repo: Path, rows: list[dict]) -> Path:
     makes "an error row is a real call whose duration is not a round-trip" the
     property under test rather than an artefact of row selection.
     """
-    db = repo / "usage.db"
+    db = repo / ".lloyd-data" / "usage.db"
     conn = sqlite3.connect(str(db))
     conn.execute("""CREATE TABLE inner_voice_observations (
         id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
@@ -287,7 +302,7 @@ def test_a_window_with_no_llm_rows_at_all_does_not_raise(tmp_path):
     fabricated.
     """
     repo = _make_repo(tmp_path)
-    db = repo / "usage.db"
+    db = repo / ".lloyd-data" / "usage.db"
     conn = sqlite3.connect(str(db))
     conn.execute("""CREATE TABLE inner_voice_observations (
         id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,

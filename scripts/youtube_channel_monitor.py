@@ -1422,7 +1422,18 @@ _VLLM_WANTED = (
     "vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc",
     "vllm:num_requests_running", "vllm:num_requests_waiting",
 )
-EVAL_BASELINES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "eval", "baselines")
+
+def _eval_baselines_dir():
+    """`app.paths.EVAL_BASELINES_DIR`: baselines live under the runtime data root."""
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from app.paths import EVAL_BASELINES_DIR as d
+    return str(d)
+
+
+EVAL_BASELINES_DIR = _eval_baselines_dir()
 
 
 def _fetch_text(url, timeout=6):

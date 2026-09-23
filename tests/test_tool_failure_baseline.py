@@ -293,9 +293,9 @@ def test_the_default_output_is_inferior_to_the_scorer_test_glob(tmp_path):
     output has to be one level deeper — which `glob('*.json')` cannot see."""
     out = tfb.default_out_path({"date": "2026-09-22"})
     assert out.parent == tfb.DEFAULT_OUT_DIR
-    assert out == tfb.ROOT / "eval" / "baselines" / "tool-failures" / "2026-09-22.json"
+    assert out == tfb.EVAL_BASELINES_DIR / "tool-failures" / "2026-09-22.json"
     assert out.parent.name not in ("", ".")
-    assert out.parent.relative_to(tfb.ROOT / "eval" / "baselines").parts == ("tool-failures",)
+    assert out.parent.relative_to(tfb.EVAL_BASELINES_DIR).parts == ("tool-failures",)
 
     # The glob's own semantics, demonstrated rather than asserted about: a
     # non-recursive `*.json` cannot reach a subdirectory, `**/*.json` can.
@@ -313,7 +313,7 @@ def test_the_scorer_test_still_passes_with_a_newer_file_in_the_output_dir(tmp_pa
     glob were recursive the nested test would pick this file up and die on
     `matches_production_defaults`; it is not, so the newest top-level baseline
     is still what it reads."""
-    baselines = ROOT / "eval" / "baselines"
+    baselines = tfb.EVAL_BASELINES_DIR
     shadow_dir = tfb.DEFAULT_OUT_DIR
     shadow_dir.mkdir(parents=True, exist_ok=True)
     made_top_level = None
@@ -373,13 +373,13 @@ def test_an_explicit_out_that_would_become_the_newest_top_level_baseline_is_refu
     file it never mentions, so it is refused rather than warned about."""
     corpus = tmp_path / "sessions"
     _session(corpus, "a", _pairs(("Edit", EDIT_NO_MATCH, True)))
-    collide = ROOT / "eval" / "baselines" / "zz-tfb-collision-probe.json"
+    collide = tfb.EVAL_BASELINES_DIR / "zz-tfb-collision-probe.json"
     try:
         assert tfb.main(["--sessions-dir", str(corpus), "--out", str(collide)]) == 2
         assert not collide.exists(), "the refusal still wrote the colliding file"
     finally:
         collide.unlink(missing_ok=True)
-    assert not (ROOT / "eval" / "baselines" / "zz-tfb-collision-probe.json").exists()
+    assert not (tfb.EVAL_BASELINES_DIR / "zz-tfb-collision-probe.json").exists()
 
 
 def test_nothing_outside_eval_reads_the_aggregate(tmp_path):

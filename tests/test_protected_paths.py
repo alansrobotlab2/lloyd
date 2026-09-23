@@ -30,15 +30,20 @@ def tree(tmp_path, monkeypatch):
     home = tmp_path / "home"
     vault = home / "obsidian"
     lloyd = home / "lloyd"
+    data = home / "lloyd-data"
     for d in (vault / "backlog", vault / "skills" / "old-skill", vault / "lloyd",
               vault / ".trash", lloyd / "sessions", lloyd / "eval" / "baselines",
+              data / "sessions", data / "_pipeline" / "tmp", data / "eval" / "baselines",
               home / ".cache" / "x"):
         d.mkdir(parents=True)
     (vault / "backlog" / "509-x.md").write_text("x")
+    (data / "workers.db").write_text("x")
     monkeypatch.setenv("HOME", str(home))
     import app.paths as paths
     monkeypatch.setattr(paths, "VAULT_ROOT", vault)
     monkeypatch.setattr(paths, "LLOYD_HOME", lloyd)
+    monkeypatch.setattr(paths, "PRODUCTION_DATA_ROOT", data)
+    monkeypatch.setattr(paths, "DATA_ROOT", data)
     return home
 
 
@@ -65,6 +70,14 @@ BYPASSES = [
     "cd ~/obsidian/skills && rm -rf *",
     "cd ~/lloyd && rm -r sessions",
     "ls ~/obsidian | xargs rm -r",
+    # The runtime data root, outside the tree since the 2026-09-22 deletion.
+    "rm -rf ~/lloyd-data",
+    "cd ~/lloyd-data && rm -r sessions",
+    "rm -rf ~/lloyd-data/*",
+    "find ~/lloyd-data -type f -delete",
+    "mv ~/lloyd-data /tmp/gone",
+    "python3 -c \"import shutil; shutil.rmtree('@HOME@/lloyd-data')\"",
+    "rsync -a --delete /tmp/empty/ ~/lloyd-data/",
 ]
 
 ALLOWED = [
@@ -81,6 +94,9 @@ ALLOWED = [
     "grep -r rm ~/obsidian/skills | head",
     'find /tmp -maxdepth 1 -name "ab472*" -exec rm -rf {} +',
     "cd ~/obsidian && git status",
+    "rm ~/lloyd-data/_pipeline/tmp/abc.txt",
+    "cd ~/lloyd-data && rm -f eval/baselines/item472-*.json",
+    "sqlite3 ~/lloyd-data/workers.db 'select 1'",
     # The fd number of a redirect is not an operand: read as one, this
     # became a move OF .trash (found replaying the session corpus).
     "cd ~/obsidian && mv backlog/509-x.md .trash/ 2>/dev/null",

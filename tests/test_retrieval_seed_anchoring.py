@@ -24,12 +24,13 @@ import app.kg_store as ks  # noqa: E402
 from agent_mcp import retrieval  # noqa: E402
 
 from tests._live_data import require_live_data
+from app.paths import production_data_root  # noqa: E402
 
 # `_pipeline/` is gitignored, so a git worktree — the automod round this runs in —
 # has neither `kg.sqlite` nor a fact tree. Same rule `app/uptake.py:lloyd_root` and
 # `tests/test_eval_corpus_guard.py` apply: measure the live tree, because a
 # worktree's absence of the store is not a measurement of the corpus.
-LIVE = Path.home() / "lloyd" / "_pipeline" / "vault-derived"
+LIVE = production_data_root() / "_pipeline" / "vault-derived"
 LIVE_FACTS = LIVE / "facts"
 LIVE_KG_DB = LIVE / "kg.sqlite"
 

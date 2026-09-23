@@ -102,7 +102,8 @@ def _probe(tree: Path, *, probe_in: Path | None = None) -> dict:
     env["PYTHONPATH"] = str(tree)
     # Env overrides would repoint the derived dirs and the probe would then be
     # measuring the override, not the tree.
-    for var in ("LLOYD_FACTS_ROOT", "LLOYD_KG_DB", "LLOYD_RESEARCH_DB", "LLOYD_ROOT"):
+    for var in ("LLOYD_FACTS_ROOT", "LLOYD_KG_DB", "LLOYD_RESEARCH_DB", "LLOYD_ROOT",
+                "LLOYD_DATA"):
         env.pop(var, None)
     proc = subprocess.run(
         [sys.executable, str(script)],
@@ -197,9 +198,10 @@ def test_every_path_still_resolves_inside_the_worktree(worktree_tree):
     for name, value in resolved.items():
         assert value == str(tree / {
             "LLOYD_HOME": "",
-            "SESSIONS_DIR": "sessions",
-            "AUTONOMY_RUNS_DIR": "autonomy-runs",
-            "VAULT_DERIVED_ROOT": "_pipeline/vault-derived",
+            # The worktree's own data root (app.paths rule 3), never production's.
+            "SESSIONS_DIR": ".lloyd-data/sessions",
+            "AUTONOMY_RUNS_DIR": ".lloyd-data/autonomy-runs",
+            "VAULT_DERIVED_ROOT": ".lloyd-data/_pipeline/vault-derived",
         }[name]).rstrip("/"), f"{name} moved off the imported tree: {value}"
 
     live = str(LIVE_CHECKOUT.resolve())

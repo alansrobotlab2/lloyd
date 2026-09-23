@@ -516,7 +516,8 @@ def test_the_artifact_records_the_seed_count_it_scored_with():
 def test_a_run_record_declares_whether_it_matched_production(tmp_path):
     """Every baseline file now says whether its config was production's, so a
     later reader cannot compare two runs that measured different systems."""
-    latest = sorted((ROOT / "eval" / "baselines").glob("*.json"),
+    from app.paths import EVAL_BASELINES_DIR
+    latest = sorted(EVAL_BASELINES_DIR.glob("*.json"),
                     key=lambda p: p.stat().st_mtime)
     if not latest:
         pytest.skip("no baseline runs recorded yet")

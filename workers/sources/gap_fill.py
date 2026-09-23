@@ -5,7 +5,7 @@ facts whose frontmatter contains `label: gap` or `provenance: GAP`, dedups
 by fact id, and enqueues one research item per gap. Handler asks the
 primary model to research the topic (via vault tools + web if available),
 and writes a resolution note to
-`~/lloyd/_pipeline/vault-derived/pending-research/gap-fill/{yyyy-mm-dd}/`.
+`~/lloyd-data/_pipeline/vault-derived/pending-research/gap-fill/{yyyy-mm-dd}/`.
 That is where this source stops: it records nothing back on the gap fact, at
 any confidence. The staged note waits for a human to promote it from the
 Review tab (`GET /api/workers/pending`), and `_scan_gap_facts` only *honours*

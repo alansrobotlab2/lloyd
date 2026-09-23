@@ -1,3 +1,20 @@
+# qmd collection definitions — TRACKED REFERENCE COPY.
+#
+# The file the qmd daemon actually reads is ~/.config/qmd/index.yml. Nothing at
+# runtime opens this one — there is no installer (git grep -n qmd-index HEAD
+# finds only SETUP.md, architecture/subliminal.md and a report filename), so the
+# only thing keeping the two files agreeing is the manual re-sync SETUP.md
+# prescribes, in this direction, from the repo root, AFTER editing the live file:
+#
+#   cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml
+#
+# scripts/maintenance/qmd_index_maintenance.py compares them nightly and writes
+# the verdict into _pipeline/reflection/qmd-index-maintenance-<date>.json as
+# `config_drift` (#1298). Between 2026-09-07 and 2026-09-19 nobody ran the
+# re-sync: two hand-edits to the live file retargeted `sessions` onto the real
+# export directory and dropped `facts`, and neither was recorded here, so the
+# one file a restore or a new host reads described a collection set the daemon
+# had stopped serving.
 collections:
   facts:
     path: /home/alansrobotlab/obsidian/facts
@@ -43,10 +60,15 @@ collections:
   # tasks #67, #78 and #80 were unsearchable. Only current-format run_*.md
   # records; the 844 legacy epoch-named files are retention fodder, not knowledge.
   autonomy-runs:
-    path: /home/alansrobotlab/lloyd/autonomy-runs
+    path: /home/alansrobotlab/lloyd-data/autonomy-runs
     pattern: "*/run_*.md"
   sessions:
-    path: /home/alansrobotlab/obsidian/sessions
+    # The real session-recall export target: app/post_capture.py writes records
+    # under app.paths.VAULT_SESSIONS_DIR (the data root, architecture/data-home.md) — not
+    # ~/obsidian/sessions, which exists but is empty. ~650 indexed documents
+    # live on this path; pointing the collection at the vault directory drops
+    # every one of them from both the FTS and the vector legs (#1298).
+    path: /home/alansrobotlab/lloyd-data/_pipeline/vault-derived/sessions
     pattern: "**/*.md"
   architecture:
     path: /home/alansrobotlab/obsidian/architecture

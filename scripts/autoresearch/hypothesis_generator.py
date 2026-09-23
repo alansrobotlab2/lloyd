@@ -41,6 +41,8 @@ from typing import Any
 
 import requests
 
+from app.paths import PIPELINE_DIR
+
 from . import bench_split
 from .common import AUTORESEARCH_PRIORITY, LLOYD_HOME, AutoresearchConfig, now_iso, variant_id
 
@@ -50,8 +52,8 @@ SOUL_PATH = LLOYD_HOME.parent / "obsidian" / "lloyd" / "SOUL.md"
 MEMORY_PATH = LLOYD_HOME.parent / "obsidian" / "lloyd" / "MEMORY.md"
 USER_PATH = LLOYD_HOME.parent / "obsidian" / "lloyd" / "USER.md"
 CORRECTIONS_PATH = LLOYD_HOME.parent / "obsidian" / "memory" / "corrections.md"
-KNOWLEDGE_HEALTH_PATH = LLOYD_HOME / "_pipeline" / "reports" / "knowledge-health-latest.md"
-DEBUG_DIR = LLOYD_HOME / "_pipeline" / "research" / "_debug"
+KNOWLEDGE_HEALTH_PATH = PIPELINE_DIR / "reports" / "knowledge-health-latest.md"
+DEBUG_DIR = PIPELINE_DIR / "research" / "_debug"
 
 # ── the bounded variant contract (#446) ──────────────────────────────────────
 #

@@ -22,7 +22,7 @@ VAULT="$HOME/obsidian"
 # leave indexing to whatever unrelated vault write happened next -- usually
 # the daily-note append from the same capture, except when that capture is
 # skipped as TRIVIAL and no vault write follows the export at all.
-SESSIONS="$HOME/lloyd/_pipeline/vault-derived/sessions"
+SESSIONS="${LLOYD_DATA:-$HOME/lloyd-data}/_pipeline/vault-derived/sessions"
 DEBOUNCE_SEC=2
 # A no-op `qmd update` is not cheap: it re-hashes all ~15,800 files across all
 # 15 collections to discover that one of them changed, and that costs 7.5s

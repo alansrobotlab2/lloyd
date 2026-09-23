@@ -8,7 +8,7 @@
 # fell back to the previous kernel looks identical in the throughput numbers to
 # one that did nothing, so read this before believing an arm.
 set -uo pipefail
-LOG="${1:-/home/alansrobotlab/lloyd/agent-services/logs/agent-llm-primary.log}"
+LOG="${1:-${LLOYD_DATA:-$HOME/lloyd-data}/logs/services/agent-llm-primary.log}"
 
 echo "=== boot facts: $LOG ==="
 grep -a -E \

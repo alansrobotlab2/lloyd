@@ -67,10 +67,13 @@ class Root:
 def protected_roots() -> list[Root]:
     """Resolved at call time, so tests can point HOME and the vault elsewhere."""
     home = os.path.normpath(os.path.expanduser("~"))
+    data_roots: list[str] = []
     try:
-        from app.paths import LLOYD_HOME, VAULT_ROOT
+        from app.paths import DATA_ROOT, LLOYD_HOME, PRODUCTION_DATA_ROOT, VAULT_ROOT
         vault = os.path.normpath(str(VAULT_ROOT))
         lloyd_here = os.path.normpath(str(LLOYD_HOME))
+        data_roots = [os.path.normpath(str(PRODUCTION_DATA_ROOT)),
+                      os.path.normpath(str(DATA_ROOT))]
     except Exception:  # noqa: BLE001 — a checker that cannot import still checks
         vault = os.path.join(home, "obsidian")
         lloyd_here = os.path.join(home, "lloyd")
@@ -80,6 +83,15 @@ def protected_roots() -> list[Root]:
     # same protection as the live tree it will become.
     if lloyd_here not in {r.path for r in roots}:
         roots.append(Root(lloyd_here, "lloyd tree", True))
+    # The runtime data root (sessions, databases, logs) lives outside the tree
+    # since the 2026-09-22 deletion, so it is a root of its own: the account's
+    # `~/lloyd-data`, and whatever this process resolved if that differs.
+    # Its snapshots too: read-only subvolumes nothing here can delete, but a
+    # `mv` of the directory holding them would still hide every one.
+    for path in [os.path.join(home, "lloyd-data"), *data_roots,
+                 os.path.join(home, ".lloyd-data-snapshots")]:
+        if path not in {r.path for r in roots}:
+            roots.append(Root(path, "lloyd data", True))
     roots.append(Root(home, "home directory", False))
     return roots
 

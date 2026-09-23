@@ -250,8 +250,8 @@ autoresearch:
   bench_dir: ~/obsidian/lloyd/bench
   default_budget_minutes: 120
   default_model: primary
-  facts_experiments_dir: ~/lloyd/_pipeline/vault-derived/facts/Experiments
-  ledger_path: ~/lloyd/_pipeline/research/ledger.jsonl
+  facts_experiments_dir: ${LLOYD_DATA}/_pipeline/vault-derived/facts/Experiments
+  ledger_path: ${LLOYD_DATA}/_pipeline/research/ledger.jsonl
   max_variants_per_round: 7
   promotion:
     # Kept at 0.5 on 2026-09-13 (Alan, #428): the first measurement found 0/65
@@ -262,15 +262,15 @@ autoresearch:
     min_composite_delta: 0.05
     require_safety_pass: true
     tool_allowlist_consecutive_wins: 2
-  research_root: ~/lloyd/_pipeline/research
-  rounds_dir: ~/lloyd/_pipeline/research/rounds
-  snapshots_dir: ~/lloyd/_pipeline/research/snapshots
+  research_root: ${LLOYD_DATA}/_pipeline/research
+  rounds_dir: ${LLOYD_DATA}/_pipeline/research/rounds
+  snapshots_dir: ${LLOYD_DATA}/_pipeline/research/snapshots
   targets:
   - prompts
   - skills
   - retrieval
   - tool_allowlist
-  variants_dir: ~/lloyd/_pipeline/research/variants
+  variants_dir: ${LLOYD_DATA}/_pipeline/research/variants
 discord:
   allowed_users: []
   auto_thread: true
@@ -945,7 +945,7 @@ livekit:
     refractory_ms: 1500
   voiceprint:
     enabled: true
-    profiles_dir: ~/lloyd/voice_profiles
+    profiles_dir: ${LLOYD_DATA}/voice_profiles
     profile_threshold: 0.75
     anchor_threshold: 0.4
     device: cpu
@@ -1148,7 +1148,7 @@ skills:
   - ~/obsidian/skills
   - ~/lloyd/skills
 workers:
-  db_path: ~/lloyd/workers.db
+  db_path: ${LLOYD_DATA}/workers.db
   enabled: true
   max_attempts: 3
   # 5, not 2 (2026-09-17): two autocode rounds and two autotriage turns may
@@ -1744,7 +1744,7 @@ workers:
       interval_seconds: 1800
       max_inflight: 1
       max_duration_seconds: 600
-  staging_root: ~/lloyd/_pipeline/vault-derived/pending-research
+  staging_root: ${LLOYD_DATA}/_pipeline/vault-derived/pending-research
 
 # Fact writes through the fact_add MCP tool. The rebuild sets this
 # false so a chat turn cannot add a fact to a tree about to be renamed.

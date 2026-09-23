@@ -7,7 +7,7 @@ Tools:
     (5 tools)
 
 Memory files: ~/obsidian/lloyd/MEMORY.md, ~/obsidian/lloyd/USER.md
-Session transcripts: ~/lloyd/sessions/*.json
+Session transcripts: ~/lloyd-data/sessions/*.json
 
 Split out of agent_mcp/memory.py as part of Task #340 PR 5. Owns:
     - The agent's persistent self-memory (MEMORY.md / USER.md)

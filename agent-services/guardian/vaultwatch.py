@@ -111,21 +111,22 @@ def measure(root: str, now: float | None = None) -> Snapshot | None:
 
 def evaluate(history: list[Snapshot], current: Snapshot | None, *,
              window: float = WINDOW_SECONDS, drop_fraction: float = DROP_FRACTION,
-             drop_min: int = DROP_MIN, topdir_min: int = TOPDIR_MIN_FILES) -> str | None:
-    """Why the vault looks wiped, or None. Pure."""
+             drop_min: int = DROP_MIN, topdir_min: int = TOPDIR_MIN_FILES,
+             what: str = "vault") -> str | None:
+    """Why the tree (the vault, or `datawatch`'s data root) looks wiped, or None. Pure."""
     if current is None:
-        return "the vault root is missing"
+        return f"the {what} root is missing"
     if not history:
         return None
     recent = [s for s in history if current.ts - s.ts <= window] or history[-1:]
     last = history[-1]
     if last.inode is not None and current.inode is not None and last.inode != current.inode:
-        return (f"the vault directory was replaced (inode {last.inode} → {current.inode}); "
-                "sync keeps watching the tree that was moved away")
+        return (f"the {what} directory was replaced (inode {last.inode} → {current.inode})"
+                + ("; sync keeps watching the tree that was moved away" if what == "vault" else ""))
     peak = max(recent, key=lambda s: s.total)
     lost = peak.total - current.total
     if peak.total and lost >= drop_min and lost >= drop_fraction * peak.total:
-        return (f"{lost} of {peak.total} vault files disappeared "
+        return (f"{lost} of {peak.total} {what} files disappeared "
                 f"({lost / peak.total:.0%}) within {current.ts - peak.ts:.0f}s")
     for name, count in sorted(last.top.items()):
         if name == "." or count < topdir_min:
@@ -140,6 +141,10 @@ def evaluate(history: list[Snapshot], current: Snapshot | None, *,
 class VaultWatch:
     """The guardian-side state machine: history, latch, persistence."""
 
+    what = "vault"
+    state_file = STATE_FILE
+    marker_file = MARKER_FILE
+
     def __init__(self, root: str = VAULT_ROOT, state_dir: Path = GUARDIAN_STATE):
         self.root = root
         self.state_dir = Path(state_dir)
@@ -149,7 +154,7 @@ class VaultWatch:
 
     @property
     def marker(self) -> Path:
-        return self.state_dir / MARKER_FILE
+        return self.state_dir / self.marker_file
 
     def tripped(self) -> dict | None:
         try:
@@ -159,7 +164,7 @@ class VaultWatch:
 
     def _load(self) -> None:
         try:
-            data = json.loads((self.state_dir / STATE_FILE).read_text(encoding="utf-8"))
+            data = json.loads((self.state_dir / self.state_file).read_text(encoding="utf-8"))
             last = data.get("last_good")
             if isinstance(last, dict):
                 self.history = [Snapshot.from_dict(last)]
@@ -168,10 +173,10 @@ class VaultWatch:
 
     def _persist(self, snap: Snapshot) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.state_dir / f"{STATE_FILE}.{os.getpid()}.tmp"
+        tmp = self.state_dir / f"{self.state_file}.{os.getpid()}.tmp"
         tmp.write_text(json.dumps({"root": self.root, "last_good": snap.to_dict()}),
                        encoding="utf-8")
-        os.replace(tmp, self.state_dir / STATE_FILE)
+        os.replace(tmp, self.state_dir / self.state_file)
         self._persisted_at = snap.ts
 
     def tick(self, now: float | None = None) -> tuple[str | None, Snapshot | None]:
@@ -180,7 +185,7 @@ class VaultWatch:
         snap = measure(self.root, now)
         if self.tripped():
             return None, snap
-        why = evaluate(self.history, snap)
+        why = self.judge(snap)
         if why:
             return why, snap
         self.history.append(snap)
@@ -194,6 +199,9 @@ class VaultWatch:
             except OSError:
                 pass
         return None, snap
+
+    def judge(self, snap: Snapshot | None) -> str | None:
+        return evaluate(self.history, snap, what=self.what)
 
     def trip(self, reason: str, snap: Snapshot | None, actions: dict) -> Path:
         self.state_dir.mkdir(parents=True, exist_ok=True)

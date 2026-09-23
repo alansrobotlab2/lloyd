@@ -26,9 +26,9 @@ shift
 
 ROOT=/home/alansrobotlab/lloyd
 SUP="/home/alansrobotlab/.local/share/uv/tools/supervisor/bin/supervisorctl -c $ROOT/agent-services/supervisor/supervisord.conf"
-ENVFILE="$ROOT/agent-services/logs/flash-next-arm.env"
-LOG="$ROOT/agent-services/logs/agent-llm-primary.log"
-RESULTS="$ROOT/agent-services/logs/flash-next-arms.jsonl"
+ENVFILE="${LLOYD_DATA:-$HOME/lloyd-data}/logs/services/flash-next-arm.env"
+LOG="${LLOYD_DATA:-$HOME/lloyd-data}/logs/services/agent-llm-primary.log"
+RESULTS="${LLOYD_DATA:-$HOME/lloyd-data}/logs/services/flash-next-arms.jsonl"
 
 # The host-RAM boot gate — its thresholds, its wait and the reason for both —
 # lives in ONE file that the landing route (`round restart --only

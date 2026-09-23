@@ -28,11 +28,9 @@ import logging
 import yaml
 
 from app.atomic_io import atomic_write_text
-from app.paths import LLOYD_HOME
+from app.paths import DATA_ROOT, LLOYD_HOME, TOOL_OVERRIDES_PATH
 
 logger = logging.getLogger("lloyd-config")
-
-TOOL_OVERRIDES_PATH = LLOYD_HOME / "data" / "tool_overrides.yaml"
 
 
 _ENV_VAR_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
@@ -69,10 +67,15 @@ def _expand(value: Any) -> Any:
     """Recursively expand `${VAR}` placeholders in any string within a config tree.
 
     Unknown vars expand to empty string (matches shell behaviour). Other
-    types pass through unchanged.
+    types pass through unchanged. `${LLOYD_DATA}` is the data root this process
+    resolved (`app.paths.DATA_ROOT`), whether or not the variable is exported —
+    production never exports it, so a Bash child running a worktree's code
+    cannot inherit the live root.
     """
     if isinstance(value, str):
-        return _ENV_VAR_RE.sub(lambda m: os.environ.get(m.group(1), ""), value)
+        return _ENV_VAR_RE.sub(
+            lambda m: str(DATA_ROOT) if m.group(1) == "LLOYD_DATA"
+            else os.environ.get(m.group(1), ""), value)
     if isinstance(value, dict):
         return {k: _expand(v) for k, v in value.items()}
     if isinstance(value, list):

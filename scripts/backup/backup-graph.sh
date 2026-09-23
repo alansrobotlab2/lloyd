@@ -16,7 +16,9 @@
 set -euo pipefail
 
 LLOYD="$HOME/lloyd"
-PIPELINE="$LLOYD/_pipeline"
+# Runtime data lives outside the code tree (app/paths.py DATA_ROOT).
+DATA="${LLOYD_DATA:-$HOME/lloyd-data}"
+PIPELINE="$DATA/_pipeline"
 FACTS="$PIPELINE/vault-derived/facts"
 KG_DB="$PIPELINE/vault-derived/kg.sqlite"
 DEST="$PIPELINE/backups/daily"

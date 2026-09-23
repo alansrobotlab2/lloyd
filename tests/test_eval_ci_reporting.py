@@ -18,9 +18,10 @@ ROOT = Path(__file__).resolve().parent.parent
 _VENV = ROOT / ".venvs" / "lloyd" / "bin" / "python"
 PY = _VENV if _VENV.exists() else Path(sys.executable)
 SCRIPT = ROOT / "eval" / "run_eval.py"
-BASELINES = ROOT / "eval" / "baselines"
 
 sys.path.insert(0, str(ROOT))
+# run_eval.py writes its record under the data root the child inherits.
+from app.paths import EVAL_BASELINES_DIR as BASELINES  # noqa: E402
 import eval.run_eval as ev  # noqa: E402
 
 #: printed label -> overall-metric key, in the order the summary prints them

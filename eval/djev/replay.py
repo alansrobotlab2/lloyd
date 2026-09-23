@@ -70,17 +70,17 @@ sys.path.insert(0, str(LLOYD_HOME))
 os.environ.setdefault("LLOYD_DJEV_SHADOW", "0")
 
 from app import djev  # noqa: E402
-from app.paths import VAULT_FACTS_ROOT  # noqa: E402
+from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT  # noqa: E402
 from eval.djev import schemas  # noqa: E402
 
-#: The recorded corpora. `_pipeline/` is gitignored derived data, so it exists
-#: only in the tree that produced it — a checkout, a worktree or the sandbox
+#: The recorded corpora. `_pipeline/` is runtime data under the data root, so it
+#: exists only in the root that produced it — a worktree's or the sandbox's root
 #: has an empty one and every corpus here silently reads as "no rows", which
 #: is indistinguishable from a corpus that ran out. `LLOYD_DJEV_CORPUS_ROOT`
 #: is how a run outside the live tree names the tree that HOLDS the data, and
 #: `--corpus` prints where it looked when it finds nothing.
 PIPELINE = Path(os.environ.get("LLOYD_DJEV_CORPUS_ROOT",
-                               str(LLOYD_HOME / "_pipeline" / "memory-graph")))
+                               str(PIPELINE_DIR / "memory-graph")))
 AUTOMOD_STATE = Path.home() / ".local" / "state" / "lloyd-automod"
 SHADOW_LOG = Path.home() / ".local" / "state" / "lloyd-djev" / "shadow.jsonl"
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"

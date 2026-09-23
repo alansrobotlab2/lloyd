@@ -81,6 +81,15 @@ def write_overlay(round_dir: Path, *, backend_port: int = BACKEND_PORT,
     return path
 
 
+def canary_data_root(round_dir: Path) -> Path:
+    """The canary's own data root (`LLOYD_DATA`): sessions, workers.db, logs.
+
+    Runtime data lives outside the code tree, so the worktree no longer keeps a
+    canary's state apart by being where it is; this does. Never production's.
+    """
+    return round_dir / "canary-home" / "lloyd-data"
+
+
 def materialize_home(round_dir: Path, worktree: Path,
                      live_root: Path | None = None) -> Path:
     """Build the scratch HOME the canary runs under. Returns its path.
@@ -119,6 +128,7 @@ def materialize_home(round_dir: Path, worktree: Path,
     (vault / "skills").mkdir(parents=True, exist_ok=True)
     (vault / "memory").mkdir(parents=True, exist_ok=True)
     (vault / "backlog").mkdir(parents=True, exist_ok=True)
+    canary_data_root(round_dir).mkdir(parents=True, exist_ok=True)
 
     # Copy the prompt surface so the canary's system prompt resembles the real
     # one. Copied, not symlinked — a canary must not be able to write to the
@@ -167,6 +177,7 @@ def canary_env(round_dir: Path, worktree: Path, *, overlay: Path,
         "LLOYD_SUPERVISOR_SOCK": str(round_dir / "no-such-supervisor.sock"),
         "LLOYD_AUTOMOD_STATE": str(round_dir / "automod-state"),
         "LLOYD_GUARDIAN_STATE": str(round_dir / "guardian-state"),
+        "LLOYD_DATA": str(canary_data_root(round_dir)),
         "PATH": f"{python.parent}:{env.get('PATH', '')}",
     })
     # No DISPLAY/WAYLAND_DISPLAY: a headful Chromium launch should fail fast

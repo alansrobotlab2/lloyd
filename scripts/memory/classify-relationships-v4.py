@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Reuse helpers from v2 classifier
-CLASSIFIER_V2 = Path.home() / "lloyd" / "scripts" / "memory" / "classify-relationships.py"
+CLASSIFIER_V2 = Path(__file__).resolve().parent / "classify-relationships.py"  # this tree's, never the live one
 _spec = importlib.util.spec_from_file_location("classifier_v2", str(CLASSIFIER_V2))
 _v2 = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_v2)
@@ -46,7 +46,6 @@ DEFAULT_ENDPOINT = _v2.DEFAULT_ENDPOINT
 DEFAULT_MODEL = _v2.DEFAULT_MODEL
 DEFAULT_MAX_CTX_CHARS = _v2.DEFAULT_MAX_CTX_CHARS
 DEFAULT_TIMEOUT_SEC = _v2.DEFAULT_TIMEOUT_SEC
-DEFAULT_OUTPUT = Path.home() / "lloyd" / "_pipeline" / "memory-graph" / "classified-v4.jsonl"
 
 ASYMMETRIC_VERBS = {"uses", "depends_on", "implements", "supersedes", "part_of", "created_by", "discusses"}
 
@@ -62,7 +61,10 @@ ROLE_BLOCKED_VERBS = {"created_by", "implements", "supersedes", "part_of", "depe
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import VAULT_FACTS_ROOT as _FACTS_ROOT
+from app.paths import PIPELINE_DIR  # noqa: E402
 from app.kg_store import StoreUnavailable, store as _kg_store
+
+DEFAULT_OUTPUT = PIPELINE_DIR / "memory-graph" / "classified-v4.jsonl"
 
 
 def _load_aliases() -> dict[str, str]:

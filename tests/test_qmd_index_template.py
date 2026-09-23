@@ -11,15 +11,13 @@ session exports really are and where ~650 indexed documents were being served, a
 `facts` was dropped. Following SETUP.md's install direction during that window
 retargeted a live collection at an empty directory (#1298).
 
-Why a patch file is checked in here: `agent-services/**` and `SETUP.md` are in
-neither `ALLOWED_GLOBS` nor `PROTECTED_GLOBS` (`scripts/automod/spec.py`), so
-`spec.check_scope` refuses a round that edits them — the change has to be applied
-by a person or by the backlog task the round spawns (#1301). A pointer in prose
-would be the same claim with more steps, so the exact patch the round authored is
-the artifact, and every test here applies it to copies of HEAD's two files.
+The reconciliation #1298 wrote as a patch (`agent-services/**` and `SETUP.md`
+are outside what a round may land) was applied by hand on 2026-09-22, together
+with the data-home move that put both checkout-rooted collections under
+`~/lloyd-data` (`architecture/data-home.md`). These tests read the files as
+they now stand.
 """
 import re
-import subprocess
 from pathlib import Path
 
 import yaml
@@ -29,11 +27,10 @@ from app.paths import ACCOUNT_HOME
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "agent-services/conf/qmd-index.yml"
 SETUP = ROOT / "SETUP.md"
-PATCH = ROOT / "scripts/maintenance/qmd-index-template-1298.patch"
 
-# Where the session exports actually live: app/paths.py:71 VAULT_SESSIONS_DIR,
-# written by app/post_capture.py, indexed as the `sessions` collection.
-SESSIONS_PATH = "/home/alansrobotlab/lloyd/_pipeline/vault-derived/sessions"
+# Where the session exports actually live: app.paths.VAULT_SESSIONS_DIR under the
+# production data root, written by app/post_capture.py, indexed as `sessions`.
+SESSIONS_PATH = "/home/alansrobotlab/lloyd-data/_pipeline/vault-derived/sessions"
 # The one collection whose direction a person still has to decide: the daemon
 # dropped it in the 2026-09-19 edit, SETUP.md says facts reach retrieval through
 # the knowledge graph rather than qmd. Until that call is made it stays in the
@@ -41,62 +38,9 @@ SESSIONS_PATH = "/home/alansrobotlab/lloyd/_pipeline/vault-derived/sessions"
 UNDECIDED = "facts"
 
 
-def _head_file(rel: str) -> str:
-    """The file as it stands at HEAD — not the working tree this round edited."""
-    return subprocess.run(
-        ["git", "-C", str(ROOT), "show", f"HEAD:{rel}"],
-        capture_output=True, text=True, check=True,
-    ).stdout
-
-
-def _reconcile(dest: Path) -> None:
-    """Reconcile the copies under `dest`, accepting either starting state.
-
-    Two states are legitimate and the suite has to survive both. Patch pending:
-    HEAD's files are pre-reconciliation and the patch applies. Patch landed by a
-    person (#1301 is a human path, so this is the steady state the day someone
-    runs it): the files already contain the change and applying again fails — a
-    suite that went red at exactly that moment would be an argument against ever
-    doing the thing it exists to verify. Anything else is real damage: the patch
-    fits neither way means HEAD moved away from it, and every assertion below
-    would then be graded against text nobody wrote.
-    """
-    apply = subprocess.run(
-        ["git", "apply", "-p1", "--whitespace=nowarn", str(PATCH)],
-        cwd=dest, capture_output=True, text=True,
-    )
-    if apply.returncode == 0:
-        return
-    landed = subprocess.run(
-        ["git", "apply", "-p1", "--reverse", "--check", str(PATCH)],
-        cwd=dest, capture_output=True, text=True,
-    )
-    assert landed.returncode == 0, (
-        "scripts/maintenance/qmd-index-template-1298.patch fits HEAD's files "
-        "neither forwards nor in reverse, so HEAD moved away from it and this "
-        f"suite is asserting against stale text.\n{apply.stderr[:500]}"
-    )
-
-
 def _patched(root: Path) -> tuple[Path, Path]:
-    """HEAD's template and SETUP.md under `root/lloyd`, reconciled.
-
-    Returns the two paths. Everything runs against copies because an assertion
-    written against the working tree would pass on a round that landed nothing,
-    and one written against HEAD alone would fail on a round that did: copies plus
-    the patch make every assertion about the file a person would actually have.
-    """
-    dest = root / "lloyd"
-    dest.mkdir(parents=True)
-    written = []
-    for target in (TEMPLATE, SETUP):
-        rel = str(target.relative_to(ROOT))
-        p = dest / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(_head_file(rel))
-        written.append(p)
-    _reconcile(dest)
-    return written[0], written[1]
+    """The template and SETUP.md as landed (the name is kept from the patch era)."""
+    return TEMPLATE, SETUP
 
 
 def _collections_section(setup_text: str) -> str:
@@ -121,65 +65,6 @@ def _live_like(tmp_path: Path, colls: dict, drop: tuple[str, ...] = ()) -> Path:
 
 # --- the patch itself ------------------------------------------------------
 
-def test_the_reconciliation_patch_applies_to_the_head_files(tmp_path):
-    """The patch is the artifact a person applies, so it must apply to HEAD.
-
-    `git apply` is context-matched: this fails the moment SETUP.md's Collections
-    section or the template's `sessions` block moves under it, which is the point.
-    A hand-off patch that silently stops applying is how an unreconciled template
-    stays unreconciled. `_reconcile` raises when the patch fits neither forwards
-    nor in reverse, which is the only state that makes the assertions below
-    meaningless.
-    """
-    tmpl, setup = _patched(tmp_path)
-    assert tmpl.exists() and setup.exists()
-    assert isinstance(yaml.safe_load(tmpl.read_text())["collections"], dict)
-
-
-def test_a_landed_reconciliation_does_not_turn_the_suite_red(tmp_path):
-    """#1301 is a person's edit; the day they perform it must not be a regression.
-
-    A suite that goes red exactly when its own human path is carried out argues
-    against the path, so `_reconcile` accepts "the patch is already in the file".
-    Here that branch is exercised on files that carry the change — HEAD's state
-    after #1301 — and the reconciled copies still satisfy the same clause, rather
-    than merely failing to raise.
-    """
-    staged = tmp_path / "staged"
-    dest = tmp_path / "landed"
-    for target in (TEMPLATE, SETUP):
-        rel = str(target.relative_to(ROOT))
-        for d in (staged, dest):
-            p = d / rel
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(_head_file(rel))
-    # Land it in the first tree by hand, then ask the helper to reconcile the
-    # identical second tree: forwards now fails, reverse-check must pass.
-    subprocess.run(
-        ["git", "apply", "-p1", "--whitespace=nowarn", str(PATCH)],
-        cwd=staged, capture_output=True, text=True, check=True,
-    )
-    for target in (TEMPLATE, SETUP):
-        rel = str(target.relative_to(ROOT))
-        (dest / rel).write_text((staged / rel).read_text())
-
-    _reconcile(dest)
-
-    tmpl = yaml.safe_load((dest / str(TEMPLATE.relative_to(ROOT))).read_text())
-    assert tmpl["collections"]["sessions"]["path"] == SESSIONS_PATH
-    setup = (dest / str(SETUP.relative_to(ROOT))).read_text()
-    assert "15 collections" not in _collections_section(setup)
-
-
-def test_the_patch_changes_only_the_two_files_it_names(tmp_path):
-    """A reconciliation hand-off that also touched something else is a surprise."""
-    names = set()
-    for line in PATCH.read_text().splitlines():
-        if line.startswith("diff --git "):
-            names.add(line.split(" b/")[-1])
-    assert names == {"SETUP.md", "agent-services/conf/qmd-index.yml"}, names
-
-
 # --- clause 1: the template says where sessions really is ------------------
 
 def test_the_patched_template_points_sessions_at_the_real_export_directory(tmp_path):
@@ -187,15 +72,6 @@ def test_the_patched_template_points_sessions_at_the_real_export_directory(tmp_p
     colls = yaml.safe_load(tmpl.read_text())["collections"]
     assert colls["sessions"]["path"] == SESSIONS_PATH
     assert "/home/alansrobotlab/obsidian/sessions" not in tmpl.read_text()
-
-
-def test_the_patch_retargets_sessions_and_no_other_collection(tmp_path):
-    """`sessions` moves to where the exports are; the vault roots must not move."""
-    before = yaml.safe_load(_head_file(str(TEMPLATE.relative_to(ROOT))))["collections"]
-    after = yaml.safe_load(_patched(tmp_path)[0].read_text())["collections"]
-    assert set(after) == set(before)
-    moved = {n for n in after if after[n].get("path") != before[n].get("path")}
-    assert moved == {"sessions"}, f"patch moved collections beyond sessions: {moved}"
 
 
 # --- clause 4: the contract is visible in the file it describes ------------

@@ -281,25 +281,24 @@ def summarise(auth: list[dict], all_decisions: list[dict], runs: list[Run],
 
 
 def default_baselines_dir() -> Path:
-    """The gitignored `eval/baselines` this backtest replays.
+    """The runtime `eval/baselines` this backtest replays.
 
-    `.gitignore:95` excludes the whole directory, so an automod worktree has an
-    empty one and a backtest reading its own tree would report zero prior
-    verdicts and look like a clean result. Same resolution
-    `scripts/eval_trend_stats.py:default_baselines_dir` uses for the same reason:
-    `LLOYD_ROOT` wins, else this checkout when it actually has nightly files,
-    else the live checkout.
+    Baselines live under the data root (`app.paths.EVAL_BASELINES_DIR`), and an
+    automod worktree's data root has an empty one, so a backtest reading its own
+    root would report zero prior verdicts and look like a clean result. Same
+    resolution `scripts/eval_trend_stats.py:default_baselines_dir` uses for the
+    same reason: `LLOYD_ROOT` wins (read as a data root), else this process's
+    data root when it actually has nightly files, else production's.
     """
+    from app.paths import EVAL_BASELINES_DIR, production_data_root
     override = os.environ.get("LLOYD_ROOT")
     if override:
         return Path(override).expanduser() / "eval" / "baselines"
-    own = ROOT / "eval" / "baselines"
-    if any(own.glob("nightly-*.json")):
-        return own
-    # Off the account home: a gate's `HOME=<round>/home` makes `~/lloyd` the
-    # worktree whose empty baselines sent us here (`app.paths.LIVE_CHECKOUT`).
-    from app.paths import LIVE_CHECKOUT
-    return LIVE_CHECKOUT / "eval" / "baselines"
+    if any(EVAL_BASELINES_DIR.glob("nightly-*.json")):
+        return EVAL_BASELINES_DIR
+    # Off the passwd home, never `$HOME`: a gate's `HOME=<round>/home` would name
+    # the round's own empty root that sent us here.
+    return production_data_root() / "eval" / "baselines"
 
 
 def render(rep: dict) -> str:

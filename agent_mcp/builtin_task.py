@@ -118,7 +118,7 @@ def _child_notification_drain(child_session_id: str):
 
     Same shape as the chat turn's drain in `app.routers.messages`, minus the
     session-message persistence: a subagent transcript is in-process (the
-    registry row and the resume ring), not a `~/lloyd/sessions/<id>.json` file,
+    registry row and the resume ring), not a `~/lloyd-data/sessions/<id>.json` file,
     so there is no home to persist a `bg_task_notification` message to. The
     record still reaches the model, the transcript and a resumed run — that is
     what the Bash tool's own wording promises ("a `<task_notification>` will
@@ -347,7 +347,7 @@ async def _task(args: dict[str, Any]) -> str:
         # Deliberately NOT the chat builder in app.routers.messages: that one
         # also appends a session message to the session it is handed, and a
         # subagent transcript lives in this process, not in
-        # `~/lloyd/sessions/<id>.json`.
+        # `~/lloyd-data/sessions/<id>.json`.
         notification_drain=_child_notification_drain(sub_session_id),
         parallel_tool_calls_max_concurrency=max(1, int(
             ((CONFIG.get("harness") or {}).get("parallel_tool_calls") or {})

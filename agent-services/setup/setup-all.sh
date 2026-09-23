@@ -73,9 +73,20 @@ fi
 
 # ── 2. Runtime directories ──────────────────────────────────────────
 step "2/9  Runtime directories"
-for d in logs sessions event_logs data voice_profiles \
-         _pipeline/vault-derived/facts _pipeline/research agent-services/logs; do
-    if [[ -d "$d" ]]; then ok "$d"; else run mkdir -p "$d"; ok "$d (created)"; fi
+# Runtime data lives outside the tree since 2026-09-22 (architecture/data-home.md):
+# its own btrfs subvolume, so it can be snapshotted and no delete aimed at the
+# code reaches it. The marker is what app.paths requires before production boots.
+DATA="${LLOYD_DATA:-$HOME/lloyd-data}"
+if [[ -d "$DATA" ]]; then ok "$DATA"
+elif [[ "$(findmnt -no FSTYPE -T "$HOME")" == btrfs ]]; then
+    run btrfs subvolume create "$DATA"; ok "$DATA (btrfs subvolume created)"
+else
+    run mkdir -p "$DATA"; warn "$DATA created as a plain directory (not btrfs: no snapshots)"
+fi
+[[ -f "$DATA/.lloyd-data-root" ]] || run touch "$DATA/.lloyd-data-root"
+for d in logs/services sessions event_logs data voice_profiles \
+         _pipeline/vault-derived/facts _pipeline/research; do
+    if [[ -d "$DATA/$d" ]]; then ok "$DATA/$d"; else run mkdir -p "$DATA/$d"; ok "$DATA/$d (created)"; fi
 done
 
 # ── 3. Secrets ──────────────────────────────────────────────────────
@@ -97,8 +108,8 @@ if [[ -f agent-services/cert/ca.crt ]]; then
 else
     todo "No mTLS certs. Restore agent-services/cert/ from backup, or run: bash scripts/gen-cert.sh"
 fi
-[[ -f data/tool_overrides.yaml ]] && ok "tool_overrides.yaml present" \
-    || warn "data/tool_overrides.yaml absent — tool state falls back to config.yaml defaults"
+[[ -f "$DATA/data/tool_overrides.yaml" ]] && ok "tool_overrides.yaml present" \
+    || warn "$DATA/data/tool_overrides.yaml absent — tool state falls back to config.yaml defaults"
 
 # ── 4. Python venvs ─────────────────────────────────────────────────
 step "4/9  Python venvs"

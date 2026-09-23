@@ -27,16 +27,19 @@ from itertools import combinations
 from pathlib import Path
 from typing import Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import PIPELINE_DIR, SESSIONS_DIR, VAULT_FACTS_ROOT_DEFAULT  # noqa: E402
+
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
 VAULT = Path.home() / "obsidian"
-# Fact graph lives under ~/lloyd, NOT the vault (migrated 2026-06-03).
-FACTS_ROOT = Path.home() / "lloyd" / "_pipeline" / "vault-derived" / "facts"
-TRAJECTORY_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
-PROPOSALS_FILE = Path.home() / "lloyd" / "_pipeline" / "conversation-relation-proposals.json"
-RELATIONS_INDEX = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
-LLOYD_SESSIONS = Path.home() / "lloyd" / "sessions"
+# Fact graph lives under the data root, NOT the vault (migrated 2026-06-03).
+FACTS_ROOT = VAULT_FACTS_ROOT_DEFAULT
+TRAJECTORY_DIR = PIPELINE_DIR / "trajectories"
+PROPOSALS_FILE = PIPELINE_DIR / "conversation-relation-proposals.json"
+RELATIONS_INDEX = PIPELINE_DIR / "relations-index.json"
+LLOYD_SESSIONS = SESSIONS_DIR
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 
 # The skill_name of the autonomy task that runs this script. Its frontmatter is

@@ -40,14 +40,18 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
+# Runtime data lives under the data root (app.paths is stdlib-only).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from app.paths import PIPELINE_DIR, SESSIONS_DIR as _SESSIONS_DIR  # noqa: E402
+
 # Constants
-SESSIONS_DIR = os.path.expanduser("~/lloyd/sessions/")
+SESSIONS_DIR = os.path.join(str(_SESSIONS_DIR), "")
 CORRECTIONS_FILE = os.path.expanduser("~/obsidian/memory/corrections.md")
-METRICS_DIR = os.path.expanduser("~/lloyd/_pipeline/metrics/")
+METRICS_DIR = os.path.join(str(PIPELINE_DIR / "metrics"), "")
 QUALITY_SCORE_FILE = os.path.join(METRICS_DIR, "quality-score.jsonl")
-WATERMARKS_FILE = os.path.expanduser("~/lloyd/_pipeline/autonomy-watermarks.json")
+WATERMARKS_FILE = str(PIPELINE_DIR / "autonomy-watermarks.json")
 OBSIDIAN_DIR = os.path.expanduser("~/obsidian")
-PENDING_IMPROVEMENTS_FILE = os.path.expanduser("~/lloyd/_pipeline/metrics/pending-improvements.jsonl")
+PENDING_IMPROVEMENTS_FILE = str(PIPELINE_DIR / "metrics" / "pending-improvements.jsonl")
 
 # Diff-size guard (validate_proposal check 5): proposals beyond these caps
 # are queued for human review instead of auto-evaluated.

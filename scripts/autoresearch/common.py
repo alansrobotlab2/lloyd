@@ -63,6 +63,15 @@ class AutoresearchConfig:
 
 
 def _expand(p: str) -> Path:
+    # config.yaml spells the research tree `${LLOYD_DATA}/_pipeline/research/...`,
+    # and nothing exports LLOYD_DATA in production, so substitute the resolved
+    # data root first rather than leave expandvars a literal `${LLOYD_DATA}`.
+    if "LLOYD_DATA" in p:
+        import sys
+        if str(LLOYD_HOME) not in sys.path:
+            sys.path.insert(0, str(LLOYD_HOME))
+        from app.paths import DATA_ROOT
+        p = p.replace("${LLOYD_DATA}", str(DATA_ROOT)).replace("$LLOYD_DATA", str(DATA_ROOT))
     return Path(os.path.expandvars(os.path.expanduser(p)))
 
 

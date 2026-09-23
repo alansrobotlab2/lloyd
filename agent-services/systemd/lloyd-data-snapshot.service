@@ -1,0 +1,9 @@
+[Unit]
+Description=Lloyd data-root snapshot (read-only btrfs, outside the data root)
+Documentation=file:///home/alansrobotlab/lloyd/scripts/backup/snapshot-data.sh
+
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=idle
+ExecStart=/home/alansrobotlab/lloyd/scripts/backup/snapshot-data.sh

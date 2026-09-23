@@ -6,14 +6,19 @@ Reads the iteration log and produces a weekly summary markdown file.
 """
 
 import os
+import sys
 import json
 import glob
 from datetime import datetime, timedelta
 from collections import defaultdict
+from pathlib import Path
 
-LOG_FILE = "/home/alansrobotlab/lloyd/_pipeline/groundskeeper-log.jsonl"
-OUTPUT_FILE = "/home/alansrobotlab/lloyd/_pipeline/groundskeeper-weekly-summary.md"
-QUEUE_FILE = "/home/alansrobotlab/lloyd/_pipeline/groundskeeper-queue.json"
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from app.paths import PIPELINE_DIR  # noqa: E402
+
+LOG_FILE = str(PIPELINE_DIR / "groundskeeper-log.jsonl")
+OUTPUT_FILE = str(PIPELINE_DIR / "groundskeeper-weekly-summary.md")
+QUEUE_FILE = str(PIPELINE_DIR / "groundskeeper-queue.json")
 
 def parse_log_entries():
     """Read and parse the JSONL log file."""

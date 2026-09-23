@@ -3,7 +3,7 @@
 
 WHY THIS EXISTS
 ---------------
-`data/tool_overrides.yaml` is gitignored runtime state, merged OVER config.yaml
+`data/tool_overrides.yaml` (under the data root, `app.paths.TOOL_OVERRIDES_PATH`) is runtime state, merged OVER config.yaml
 at load (`app/config.py::_merge_tool_overrides`). The Tools page rewrites the
 whole `harness.tool_search` block on every toggle, so the override shadows
 `baseline_tools` **wholesale** — which means a change to that list in the
@@ -34,14 +34,34 @@ import sys
 
 import yaml
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+from app import paths  # noqa: E402
+
 BLOCK = "tool_search"
+
+
+def overrides_path(root: pathlib.Path) -> pathlib.Path:
+    """The override file served for the checkout at `root`.
+
+    It lives in that checkout's data root, not the tree: the running tree's is
+    `paths.TOOL_OVERRIDES_PATH` (so `LLOYD_DATA` is honoured), the live checkout's
+    is under `production_data_root()`, and any other checkout keeps its own under
+    `data_root_for_tree(root)`.
+    """
+    rel = paths.TOOL_OVERRIDES_PATH.relative_to(paths.DATA_ROOT)
+    resolved = pathlib.Path(root).resolve()
+    if resolved == paths.LLOYD_HOME:
+        return paths.TOOL_OVERRIDES_PATH
+    if resolved == paths.LIVE_CHECKOUT.resolve():
+        return paths.production_data_root() / rel
+    return paths.data_root_for_tree(resolved) / rel
 
 
 def drift(root: pathlib.Path) -> tuple[dict, dict, dict]:
     """(served, tracked, drift) for the tool_search block under `root`."""
     cfg = yaml.safe_load((root / "config.yaml").read_text()) or {}
     tracked = ((cfg.get("harness") or {}).get(BLOCK) or {})
-    ovr_path = root / "data" / "tool_overrides.yaml"
+    ovr_path = overrides_path(root)
     if not ovr_path.exists():
         return {}, tracked, {}
     ovr = yaml.safe_load(ovr_path.read_text()) or {}
@@ -71,7 +91,7 @@ def describe(served: dict, tracked: dict, d: dict) -> list[str]:
 
 
 def sync(root: pathlib.Path, *, check: bool = False) -> int:
-    ovr_path = root / "data" / "tool_overrides.yaml"
+    ovr_path = overrides_path(root)
     served, tracked, d = drift(root)
     if not ovr_path.exists():
         print(f"no override at {ovr_path} — config.yaml is the served state")
@@ -101,7 +121,7 @@ def sync(root: pathlib.Path, *, check: bool = False) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("root", nargs="?", default=str(pathlib.Path.home() / "lloyd"))
+    ap.add_argument("root", nargs="?", default=str(paths.LIVE_CHECKOUT))
     ap.add_argument("--check", action="store_true",
                     help="report drift and exit 1 without writing")
     args = ap.parse_args()

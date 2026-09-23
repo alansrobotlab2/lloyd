@@ -71,7 +71,11 @@ from typing import Any, NamedTuple
 import yaml
 
 HERE = Path(__file__).resolve().parent
-BASELINE_DIR = HERE / "baselines" / "tool-choice"
+if str(HERE.parent) not in sys.path:
+    sys.path.insert(0, str(HERE.parent))
+from app.paths import EVAL_BASELINES_DIR  # noqa: E402
+
+BASELINE_DIR = EVAL_BASELINES_DIR / "tool-choice"
 FLOOR_RECORD = HERE / "noise_floor_tool_choice.yaml"
 
 # Metric -> whether higher is better. `shelled_to_web_rate` and

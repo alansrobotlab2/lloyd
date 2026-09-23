@@ -23,10 +23,11 @@ from scripts.groundskeeper.queue_io import (  # noqa: E402
     append_process_log,
     write_queue_atomic,
 )
+from app.paths import PIPELINE_DIR  # noqa: E402
 
 QUEUE_PATH = Path(
     os.environ.get(
-        "GROUNDKEEPER_QUEUE", "/home/alansrobotlab/lloyd/_pipeline/groundskeeper-queue.json"
+        "GROUNDKEEPER_QUEUE", str(PIPELINE_DIR / "groundskeeper-queue.json")
     )
 )
 LOG_PATH = QUEUE_PATH.parent / PROCESS_LOG_NAME

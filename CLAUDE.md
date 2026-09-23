@@ -101,6 +101,39 @@ their cgroup into `~/.local/state/lloyd-guardian/mem-pressure/`. After a kill,
 `/usr/bin/python3 ~/.local/state/lloyd-guardian/bin/memwatch.py latest` first.
 `architecture/infrastructure.md` has the rest.
 
+## Runtime data lives in ~/lloyd-data, never in the tree
+
+`architecture/data-home.md` is the long version. On 2026-09-22 a pytest fixture
+teardown deleted `~/lloyd`, and everything gitignored inside it went with the
+code: sessions, `_pipeline/`, the three databases, baselines and logs. Now
+`~/lloyd` holds code only. The data is in `~/lloyd-data`, under the same names
+it had in the tree (`~/lloyd/X` → `~/lloyd-data/X`; the engines' logs moved from
+`agent-services/logs/` to `logs/services/`). `~/lloyd-data` is its own btrfs
+subvolume.
+
+- **One resolver.** `app.paths.DATA_ROOT` decides the root:
+  - `LLOYD_DATA` if set;
+  - else the production checkout gets `~/lloyd-data`, read off passwd, and only
+    if the root carries `.lloyd-data-root`. Without the marker it **raises**
+    rather than falling back to the tree;
+  - else any other checkout gets `<tree>/.lloyd-data`.
+
+  Write a new data path as a `paths` constant, and in `config.yaml` as
+  `${LLOYD_DATA}/…`. Never write `Path.home()/"lloyd"/…` or `__file__`-relative.
+  `tests/test_no_runtime_paths_in_code.py` greps for those.
+- **Never export `LLOYD_DATA` in production.** A Bash child running a
+  worktree's code would inherit the live root. The gate (`<round>/home/lloyd-data`),
+  the canary (`<round>/canary-home/lloyd-data`) and conftest (a mkdtemp) set it.
+  The round-home symlink farm skips `lloyd-data`.
+- **Guarded three ways:**
+  - `protected_paths` refuses wholesale deletes of it;
+  - hourly read-only btrfs snapshots go to `~/.lloyd-data-snapshots`. The user
+    cannot delete them, so pruning is a root system timer;
+  - the guardian's `datawatch` trips on a wipe and alerts hourly if a runtime
+    name reappears in the tree.
+
+  Restore with `scripts/backup/restore-data.sh` (into a side directory).
+
 ## The vault is protected at the tool layer
 
 `architecture/vault-protection.md` is the long version and the incident record.
@@ -269,7 +302,7 @@ Things worth knowing before touching any of it:
   it, because the promoter holds that pause across its own supervisord
   restart and the window for that very deploy opens seconds later.
 
-Errors are read from `logs/server.err`, never `server.log` — `basicConfig`
+Errors are read from `~/lloyd-data/logs/server.err`, never `server.log` — `basicConfig`
 writes to stderr, so `server.log` is uvicorn's access log and holds zero
 error-shaped lines.
 
@@ -1571,8 +1604,12 @@ and #1218 was filed against a bug that was already fixed on disk. The rule:
 │   └── components/pages/
 │       └── ToolsPage.tsx
 │
-├── .venvs/lloyd/        # Python venv (use this python for all lloyd scripts)
-└── logs/                # server.log, server.err, frontend.log
+└── .venvs/lloyd/        # Python venv (use this python for all lloyd scripts)
+
+~/lloyd-data/            # runtime data, NOT in the tree (architecture/data-home.md)
+├── sessions/  event_logs/  _pipeline/  autonomy-runs/  eval/baselines/
+├── usage.db  workers.db  research.db  mc-state.json  data/tool_overrides.yaml
+└── logs/                # server.log, server.err, mcp.*, frontend.*; services/ = engines
 ```
 
 ## Agent Harness

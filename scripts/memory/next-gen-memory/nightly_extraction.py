@@ -22,9 +22,11 @@ from pathlib import Path
 # live-tree `content_hasher`. That is the shape of a paired before/after
 # extraction run, and it is silent — both modules import cleanly.
 #
-# State paths further down (log, pre-clean backups, graph dir, lock) stay
-# home-absolute on purpose: a worktree that runs the nightly must still write
-# the live `_pipeline`, so only import resolution is tree-relative.
+# State paths further down (log, pre-clean backups, graph dir, lock) address the
+# live data root on purpose (`_STATE_PIPELINE`): a worktree that runs the nightly
+# must still write the live `_pipeline`, so only import resolution is
+# tree-relative. An explicit `LLOYD_DATA` (the gate, the canary, the suite) is
+# the one thing that moves them.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO_ROOT / "scripts" / "memory"))  # content_hasher
 sys.path.insert(0, str(_REPO_ROOT))                         # app.*
@@ -41,6 +43,8 @@ import yaml
 
 sys.path.insert(0, str(_REPO_ROOT))
 from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
+from app.paths import production_data_root  # noqa: E402
+_STATE_PIPELINE = Path(os.environ.get("LLOYD_DATA") or production_data_root()) / "_pipeline"
 VAULT = Path.home() / "obsidian"
 # No index path belongs here (#1148). This module reaches both indexes through
 # `self.rel_generator`: `rebuild()` writes that module's own
@@ -102,7 +106,7 @@ class NightlyExtraction:
         self.extractor = FactExtractor(model_port=8096)  # Uses primary for deep extraction
         self.rel_generator = RelationsIndexGenerator()
         self.profile_generator = ProfileGenerator(model_port=8096)
-        self.log_file = Path.home() / "lloyd" / "_pipeline" / "nightly-extraction.log"
+        self.log_file = _STATE_PIPELINE / "nightly-extraction.log"
         # Thread-safe locks per entity for parallel processing
         self.entity_locks = {}
         self.locks_lock = threading.Lock()
@@ -141,7 +145,7 @@ class NightlyExtraction:
         """Timestamped copy of the irreplaceable files before a destructive pass."""
         import shutil
         stamp = datetime.now().strftime("%Y%m%dT%H%M%SZ")
-        dest = Path.home() / "lloyd" / "_pipeline" / "backups" / f"pre-clean-{stamp}"
+        dest = _STATE_PIPELINE / "backups" / f"pre-clean-{stamp}"
         saved = []
         for name in ("_relationships.json", "entity-aliases.json"):
             src = FACTS_DIR / name
@@ -149,7 +153,7 @@ class NightlyExtraction:
                 dest.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dest / name)
                 saved.append(name)
-        graph_dir = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
+        graph_dir = _STATE_PIPELINE / "memory-graph"
         if graph_dir.is_dir() and any(graph_dir.iterdir()):
             dest.mkdir(parents=True, exist_ok=True)
             shutil.copytree(graph_dir, dest / "memory-graph", dirs_exist_ok=True)
@@ -564,7 +568,7 @@ class NightlyExtraction:
 # a night) held it while the automod gate ran the suite — two tests red for
 # every round that gated during that window, none of them about the round.
 _LOCK_PATH = Path(os.environ.get("LLOYD_EXTRACTION_LOCK")
-                  or (Path.home() / "lloyd" / "_pipeline" / "nightly_extraction.lock"))
+                  or (_STATE_PIPELINE / "nightly_extraction.lock"))
 
 
 def acquire_single_instance_lock():

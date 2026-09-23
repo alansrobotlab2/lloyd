@@ -57,13 +57,14 @@ import sys
 from pathlib import Path
 
 import pytest
+from app.paths import production_data_root  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 SCRIPT = ROOT / "scripts" / "memory" / "next-gen-memory" / "relations_index.py"
 NIGHTLY = ROOT / "scripts" / "memory" / "next-gen-memory" / "nightly_extraction.py"
-LIVE_INDEX = Path.home() / "lloyd" / "_pipeline" / "relations-index.json"
+LIVE_INDEX = production_data_root() / "_pipeline" / "relations-index.json"
 
 
 def _load(name: str):
@@ -616,13 +617,13 @@ def _gen_at(tmp_path, ri, derived_payload=None, typed_payload=None):
 @pytest.fixture
 def scratch_home(tmp_path):
     """A fake ``$HOME`` laid out like the live box — empty vault, and a
-    ``~/lloyd/_pipeline/relations-index.json`` holding the derived shape with a
-    sentinel in it. Every path the CLI resolves off ``Path.home()`` lands here,
+    ``~/lloyd-data/_pipeline/relations-index.json`` holding the derived shape with a
+    sentinel in it. Every path the CLI resolves off ``Path.home()`` or ``LLOYD_DATA`` lands here,
     so "production state did not move" becomes "these bytes did not change"."""
     home = tmp_path / "home"
     (home / "obsidian").mkdir(parents=True)
-    (home / "lloyd" / "_pipeline").mkdir(parents=True)
-    (home / "lloyd" / "_pipeline" / DERIVED_NAME).write_text(json.dumps(DERIVED_SHAPED))
+    (home / "lloyd-data" / "_pipeline").mkdir(parents=True)
+    (home / "lloyd-data" / "_pipeline" / DERIVED_NAME).write_text(json.dumps(DERIVED_SHAPED))
     return home
 
 
@@ -631,7 +632,8 @@ def _run_cli(args, home, tmp_path):
     inside ``tmp_path`` so the self-test's own temp dir is visible to the caller."""
     tmp = tmp_path / "tmp"
     tmp.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, HOME=str(home), TMPDIR=str(tmp))
+    env = dict(os.environ, HOME=str(home), TMPDIR=str(tmp),
+               LLOYD_DATA=str(home / "lloyd-data"))
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True, text=True, env=env, timeout=300, cwd=str(ROOT),
@@ -648,7 +650,7 @@ def test_test_flag_leaves_the_live_index_alone(scratch_home, tmp_path):
     replaced the production index with an ``edges`` file. The whole
     ``_pipeline`` directory is compared, not just the derived file: any file
     appearing there means the self-test wrote outside the temp dir it prints."""
-    pipeline = scratch_home / "lloyd" / "_pipeline"
+    pipeline = scratch_home / "lloyd-data" / "_pipeline"
     before = {p.name: p.read_bytes() for p in pipeline.iterdir()}
     assert before == {DERIVED_NAME: json.dumps(DERIVED_SHAPED).encode()}, (
         "the fixture did not seed a sentinel-bearing derived index; the byte "
@@ -680,7 +682,7 @@ def test_rebuild_in_the_scratch_home_writes_only_the_typed_index(scratch_home, t
     HOME redirect did not work, "nothing in _pipeline changed" would be vacuous —
     this is the run that must write, and it must write only the file this module
     owns."""
-    pipeline = scratch_home / "lloyd" / "_pipeline"
+    pipeline = scratch_home / "lloyd-data" / "_pipeline"
     derived = pipeline / DERIVED_NAME
     before = derived.read_bytes()
 
@@ -939,7 +941,7 @@ def derived_writer(request, scratch_home):
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     mod.VAULT = scratch_home / "obsidian"
-    mod.RELATIONS_INDEX = scratch_home / "lloyd" / "_pipeline" / DERIVED_NAME
+    mod.RELATIONS_INDEX = scratch_home / "lloyd-data" / "_pipeline" / DERIVED_NAME
     yield mod
     sys.modules.pop(spec.name, None)
 
@@ -976,7 +978,7 @@ def test_the_scheduled_task_cycle_leaves_both_indexes_readable(scratch_home, tmp
     # Step 1 — nightly_extraction's call, via the CLI, in its own process.
     step1 = _run_cli(["--rebuild"], scratch_home, tmp_path)
     assert step1.returncode == 0, f"step 1 failed: {step1.stderr[-800:]}"
-    typed_path = scratch_home / "lloyd" / "_pipeline" / TYPED_NAME
+    typed_path = scratch_home / "lloyd-data" / "_pipeline" / TYPED_NAME
     typed_after_step1 = typed_path.read_bytes()
     typed_rows = json.loads(typed_after_step1)["edges"]
     assert len(typed_rows) == 2, (
@@ -991,7 +993,7 @@ def test_the_scheduled_task_cycle_leaves_both_indexes_readable(scratch_home, tmp
         f"step 2 wrote {result}; expected one wiki-link relationship from two notes "
         "linking the same target — with no rows the clobber check is vacuous"
     )
-    derived_path = scratch_home / "lloyd" / "_pipeline" / DERIVED_NAME
+    derived_path = scratch_home / "lloyd-data" / "_pipeline" / DERIVED_NAME
     assert typed_path.read_bytes() == typed_after_step1, (
         "step 2 rewrote the typed index: the two writers are back on one path (#1148)"
     )

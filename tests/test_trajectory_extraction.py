@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from tests._live_data import require_live_data, require_live_volume
+from app.paths import production_data_root  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parent.parent
 #: This module's own namespace, so a pin test can redirect a live root by name and
@@ -3408,9 +3409,9 @@ def test_the_exclusion_can_be_turned_off_for_a_full_corpus_view(tmp_path):
 # and the clause it pins would never be graded. Read-only against both, and each is
 # gated by `tests/_live_data.py`: absent -> named skip, present -> every assertion
 # below still runs (#1377).
-LIVE_CORPUS = Path.home() / "lloyd" / "_pipeline" / "trajectories"
-LIVE_STORE = Path.home() / "lloyd" / "sessions"
-LIVE_VERDICT_LEDGER = (Path.home() / "lloyd" / "_pipeline" / "skills"
+LIVE_CORPUS = production_data_root() / "_pipeline" / "trajectories"
+LIVE_STORE = production_data_root() / "sessions"
+LIVE_VERDICT_LEDGER = (production_data_root() / "_pipeline" / "skills"
                        / "reviews" / "verdicts.jsonl")
 MACHINE_PLATFORMS = {"worker", "autonomy", "e2e-harness"}
 #: The smallest session store the classifier oracle below can discriminate on.
@@ -3817,12 +3818,12 @@ def test_the_stats_command_prints_only_run_emitted_tokens(tmp_path, monkeypatch)
     Both halves are the code under test: the rows come from `parse_session` over two
     hand-authored sessions (one that inherited `BLOCKED` from its dispatched skill
     body, one that emitted `TASK_COMPLETE` in assistant text), and `--stats` runs as
-    a subprocess. `OUTPUT_DIR` derives from `Path.home()`, so `HOME` is redirected to
-    a directory holding what the extractor wrote. Expected histogram: 1
+    a subprocess. `OUTPUT_DIR` derives from the data root, so `LLOYD_DATA` is pointed
+    at a directory holding what the extractor wrote. Expected histogram: 1
     `TASK_COMPLETE`, and no `BLOCKED` row at all — which is how "0 BLOCKED" prints.
     """
     home = tmp_path / "home"
-    bucket_dir = home / "lloyd" / "_pipeline" / "trajectories"
+    bucket_dir = home / "lloyd-data" / "_pipeline" / "trajectories"
     bucket_dir.mkdir(parents=True)
     monkeypatch.setattr(et, "OUTPUT_DIR", bucket_dir)
     et.append_trajectories([
@@ -3838,7 +3839,7 @@ def test_the_stats_command_prints_only_run_emitted_tokens(tmp_path, monkeypatch)
     proc = subprocess.run(
         [sys.executable, str(EXTRACTOR_PATH), "--stats"],
         capture_output=True, text=True, timeout=180, cwd=tmp_path,
-        env={**os.environ, "HOME": str(home)})
+        env={**os.environ, "HOME": str(home), "LLOYD_DATA": str(home / "lloyd-data")})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     counts = stats_signal_counts(proc.stdout)
     assert counts.get("TASK_COMPLETE") == 1, counts

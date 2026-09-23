@@ -123,8 +123,8 @@ def measure(sessions_dir: pathlib.Path) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--sessions", default=str(
-        pathlib.Path(__file__).resolve().parent.parent / "sessions"))
+    from app.paths import SESSIONS_DIR
+    ap.add_argument("--sessions", default=str(SESSIONS_DIR))
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 

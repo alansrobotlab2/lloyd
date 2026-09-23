@@ -24,11 +24,11 @@ SCRIPT = ROOT / "scripts" / "backup" / "backup-graph.sh"
 
 
 def _baseline_path(home: Path) -> Path:
-    return home / "lloyd" / "_pipeline" / "memory-graph" / "graph-baseline.json"
+    return home / "lloyd-data" / "_pipeline" / "memory-graph" / "graph-baseline.json"
 
 
 def _tarballs(home: Path) -> list[Path]:
-    return sorted((home / "lloyd" / "_pipeline" / "backups" / "daily").glob("graph-*.tar.gz"))
+    return sorted((home / "lloyd-data" / "_pipeline" / "backups" / "daily").glob("graph-*.tar.gz"))
 
 
 def _fake_home(tmp_path: Path, *, active: int = 0, expired: int = 0,
@@ -42,7 +42,7 @@ def _fake_home(tmp_path: Path, *, active: int = 0, expired: int = 0,
     and wins over `baseline`.
     """
     home = tmp_path / "home"
-    pipeline = home / "lloyd" / "_pipeline"
+    pipeline = home / "lloyd-data" / "_pipeline"
     facts = pipeline / "vault-derived" / "facts"
     facts.mkdir(parents=True)
     (pipeline / "memory-graph").mkdir()
@@ -69,7 +69,8 @@ def _fake_home(tmp_path: Path, *, active: int = 0, expired: int = 0,
 
 
 def _run(home: Path, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    env = dict(os.environ, HOME=str(home), LLOYD_PYTHON=sys.executable)
+    env = dict(os.environ, HOME=str(home), LLOYD_PYTHON=sys.executable,
+               LLOYD_DATA=str(home / "lloyd-data"))
     env.update(extra_env or {})
     return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True,
                           cwd=str(ROOT))
@@ -89,7 +90,8 @@ def test_the_script_is_executable_because_systemd_execs_it_directly(tmp_path):
     # And the exec path itself: same invocation shape as the unit, no shell
     # named in front of it. A missing bit surfaces here as EACCES.
     home = _fake_home(tmp_path / "direct", active=5, baseline=None)
-    env = dict(os.environ, HOME=str(home), LLOYD_PYTHON=sys.executable)
+    env = dict(os.environ, HOME=str(home), LLOYD_PYTHON=sys.executable,
+               LLOYD_DATA=str(home / "lloyd-data"))
     result = subprocess.run([str(SCRIPT)], env=env, capture_output=True, text=True,
                             cwd=str(ROOT))
     assert result.returncode == 1, result.stdout + result.stderr
@@ -103,7 +105,7 @@ def _guard_line(result: subprocess.CompletedProcess) -> str:
 
 def test_refuses_below_half_baseline_and_keeps_previous_tarball(tmp_path):
     home = _fake_home(tmp_path, active=100, baseline=3894)
-    dest = home / "lloyd" / "_pipeline" / "backups" / "daily"
+    dest = home / "lloyd-data" / "_pipeline" / "backups" / "daily"
     dest.mkdir(parents=True)
     previous = dest / "graph-20260101.tar.gz"
     previous.write_bytes(b"previous snapshot")
@@ -134,7 +136,7 @@ def test_refuses_when_no_baseline_exists_and_keeps_previous_tarball(tmp_path):
     snapshot window not rotated.
     """
     home = _fake_home(tmp_path, active=5, baseline=None)
-    dest = home / "lloyd" / "_pipeline" / "backups" / "daily"
+    dest = home / "lloyd-data" / "_pipeline" / "backups" / "daily"
     dest.mkdir(parents=True)
     previous = dest / "graph-20260101.tar.gz"
     previous.write_bytes(b"previous snapshot")
@@ -216,7 +218,7 @@ def test_writes_snapshot_when_at_baseline(tmp_path):
     home = _fake_home(tmp_path, active=3900, baseline=3894)
     result = _run(home)
     assert result.returncode == 0, result.stderr
-    dest = home / "lloyd" / "_pipeline" / "backups" / "daily"
+    dest = home / "lloyd-data" / "_pipeline" / "backups" / "daily"
     tarballs = list(dest.glob("graph-*.tar.gz"))
     assert len(tarballs) == 1
     assert "3900 active edges" in result.stdout
@@ -301,7 +303,7 @@ def test_snapshot_contains_a_restorable_store_and_a_json_export(tmp_path):
 def test_staging_dir_is_cleaned_up(tmp_path):
     home = _fake_home(tmp_path, active=120, baseline=100)
     assert _run(home).returncode == 0
-    backups = home / "lloyd" / "_pipeline" / "backups"
+    backups = home / "lloyd-data" / "_pipeline" / "backups"
     assert not list(backups.glob(".staging-*"))
 
 

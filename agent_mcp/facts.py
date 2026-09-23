@@ -8,7 +8,7 @@ Tools:
     fact_path, fact_neighbors  (11 tools)
 
 Data root: app.paths.VAULT_FACTS_ROOT
-    (currently ~/lloyd/_pipeline/vault-derived/facts/)
+    (currently ~/lloyd-data/_pipeline/vault-derived/facts/)
 Edge graph, aliases, entity registry, fact index: app.kg_store
 
 Split out of agent_mcp/memory.py as part of Task #340 PR 5. Owns the

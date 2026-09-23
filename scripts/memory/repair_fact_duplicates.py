@@ -64,12 +64,12 @@ import yaml  # noqa: E402
 from app.atomic_io import atomic_write_text, locked_file  # noqa: E402
 from app.kg_store import KGStore, parse_fact_file, text_hash  # noqa: E402
 from app.paths import (  # noqa: E402
-    VAULT_FACTS_ROOT, VAULT_FACTS_ROOT_DEFAULT, VAULT_KG_DB, VAULT_KG_DB_DEFAULT,
+    PIPELINE_DIR, VAULT_FACTS_ROOT, VAULT_FACTS_ROOT_DEFAULT, VAULT_KG_DB, VAULT_KG_DB_DEFAULT,
 )
 
 FENCE = "---"
 FACT_COUNT_MARK = "**Fact Count:** "
-MANIFEST_DIR = LLOYD / "_pipeline" / "fact-repair"
+MANIFEST_DIR = PIPELINE_DIR / "fact-repair"
 SCHEMA = "lloyd.fact-duplicate-repair/1"
 
 # The child process the retrieval gate runs. `eval/run_eval.py` is loaded by path

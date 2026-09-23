@@ -55,12 +55,13 @@ sys.path.insert(0, str(ROOT))
 from app import engine_pressure, prefix_miss, vllm_metrics  # noqa: E402
 from app.harness.client import stream_chat  # noqa: E402
 from app.harness.loop import _merge_usage  # noqa: E402
+from app.paths import SERVICE_LOGS_DIR  # noqa: E402
 
 BASE = os.environ.get("BENCH_BASE", "http://127.0.0.1:8096")
 MODEL = "primary"
 PRIORITY = 1
 NO_THINK = {"chat_template_kwargs": {"enable_thinking": False}}
-DEFAULT_OUT = ROOT / "agent-services" / "logs" / "admission-bench.jsonl"
+DEFAULT_OUT = SERVICE_LOGS_DIR / "admission-bench.jsonl"
 
 METRIC_KEYS = (
     "vllm:iteration_tokens_total_sum", "vllm:iteration_tokens_total_count",

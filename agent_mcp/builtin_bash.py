@@ -15,7 +15,7 @@ deny ruleset is bound to a Lloyd session_id and lives at the agent
 layer, not the tool layer.
 
 Background mode (``run_in_background=true``) spawns the command with
-stdout/stderr redirected to a file under ``~/lloyd/_pipeline/tasks/``,
+stdout/stderr redirected to a file under ``~/lloyd-data/_pipeline/tasks/``,
 returns the task id and output path immediately, and lets the harness
 loop drain a completion notification on a later turn. See
 ``agent_mcp/_task_registry.py`` for the registry and the harness drain

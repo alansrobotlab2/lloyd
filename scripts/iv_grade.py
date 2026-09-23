@@ -63,8 +63,9 @@ from typing import Any
 _LLOYD_HOME = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_LLOYD_HOME))
 
-DB_PATH = _LLOYD_HOME / "usage.db"
-SESSIONS_DIR = _LLOYD_HOME / "sessions"
+from app.paths import SESSIONS_DIR, USAGE_DB  # noqa: E402
+
+DB_PATH = USAGE_DB
 
 INTERVENTIONS = ("inject", "cancel", "ambient", "clarify")
 

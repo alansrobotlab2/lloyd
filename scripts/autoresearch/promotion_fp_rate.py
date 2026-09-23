@@ -64,13 +64,17 @@ import argparse
 import json
 import re
 import statistics
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+from app.paths import PIPELINE_DIR  # noqa: E402
 
-DEFAULT_LEDGER = REPO_ROOT / "_pipeline" / "research" / "ledger.jsonl"
-DEFAULT_ROUNDS_DIR = REPO_ROOT / "_pipeline" / "research" / "rounds"
+DEFAULT_LEDGER = PIPELINE_DIR / "research" / "ledger.jsonl"
+DEFAULT_ROUNDS_DIR = PIPELINE_DIR / "research" / "rounds"
 
 #: Backlog #352's decision bands, carried verbatim so no reader re-invents them.
 BANDS = (

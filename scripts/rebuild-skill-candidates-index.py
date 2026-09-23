@@ -3,9 +3,13 @@
 import re
 import glob
 import os
+import sys
 from datetime import datetime, timezone
 
-cdir = os.path.expanduser("~/lloyd/_pipeline/skills/candidates")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from app.paths import PIPELINE_DIR  # noqa: E402
+
+cdir = str(PIPELINE_DIR / "skills" / "candidates")
 candidates = sorted(os.path.basename(p) for p in glob.glob(os.path.join(cdir, "candidate-*.md")))
 
 error_count = sum(1 for c in candidates if "error" in c and "seq-" not in c)

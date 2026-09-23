@@ -111,7 +111,11 @@ def _top_level(module: Path) -> tuple[dict, list[str]]:
         "sys": types.SimpleNamespace(path=head),
     }
     for node in tree.body:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)) or _is_path_insert(node):
+        # `from app.paths import …` is executed too: the state paths are built
+        # from the data root it names, and it opens nothing.
+        is_paths_import = isinstance(node, ast.ImportFrom) and node.module == "app.paths"
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) or _is_path_insert(node) \
+                or is_paths_import:
             exec(
                 compile(ast.Module(body=[node], type_ignores=[]), str(module), "exec"),
                 ns,
@@ -325,8 +329,8 @@ def _assigned_value(tree: ast.Module, target: str) -> str | None:
 
 def test_state_paths_still_address_the_live_pipeline():
     """Clause 4: only import resolution changed — the log, the pre-clean backup
-    dir, the graph working dir and the single-instance lock still land under
-    ``~/lloyd/_pipeline``.
+    dir, the graph working dir and the single-instance lock still land under the
+    live data root's ``_pipeline`` (``~/lloyd-data``, or an explicit ``LLOYD_DATA``).
 
     The scope trap this pins: "make the paths tree-relative" applied to these four
     would relocate the live nightly's log, lock and backups into whatever tree
@@ -347,8 +351,8 @@ def test_state_paths_still_address_the_live_pipeline():
         # Checked against `ast.unparse` output, which quotes with single quotes:
         # match the bare word, not a quoted literal, or the assert is testing the
         # unparser's formatting instead of the path.
-        assert "Path.home()" in source and "_pipeline" in source, (
-            f"`{target}` no longer addresses ~/lloyd/_pipeline; it reads: {source}"
+        assert "_STATE_PIPELINE" in source, (
+            f"`{target}` no longer addresses the live data root's _pipeline; it reads: {source}"
         )
         assert fragment in source, f"`{target}` no longer names {fragment}: {source}"
         assert "_REPO_ROOT" not in source and "__file__" not in source, (
@@ -362,7 +366,10 @@ def test_state_paths_still_address_the_live_pipeline():
     finally:
         if monkeypatched is not None:
             os.environ["LLOYD_EXTRACTION_LOCK"] = monkeypatched
-    assert ns["_LOCK_PATH"] == LIVE_CHECKOUT / "_pipeline" / "nightly_extraction.lock", (
+    from app.paths import production_data_root
+    live_pipeline = Path(os.environ.get("LLOYD_DATA") or production_data_root()) / "_pipeline"
+    assert ns["_STATE_PIPELINE"] == live_pipeline
+    assert ns["_LOCK_PATH"] == live_pipeline / "nightly_extraction.lock", (
         f"the default single-instance lock is {ns['_LOCK_PATH']}, not the live one — "
         "two extractors from two trees would then each hold their own lock and race "
         "on _pipeline/content-hashes.json"

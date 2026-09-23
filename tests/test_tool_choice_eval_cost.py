@@ -485,7 +485,7 @@ def _run_prefetch_end_to_end(tmp_path, monkeypatch):
         "    expect_docs: [knowledge/example-note.md]\n",
         encoding="utf-8")
     (tmp_path / "baselines").mkdir()
-    monkeypatch.setattr(mod, "HERE", tmp_path)      # where main() writes
+    monkeypatch.setattr("app.paths.EVAL_BASELINES_DIR", tmp_path / "baselines")  # where main() writes
     monkeypatch.setattr(sys, "argv", [
         "run_prefetch_eval.py", "--queries", str(queries),
         "--label", "pinned", "--skip-hybrid"])

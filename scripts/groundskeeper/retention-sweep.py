@@ -5,14 +5,14 @@ Bounds the unbounded-growth stores — the two from the 2026-06-11
 architecture review (Tier 3.1), the autonomy stores added in June, and
 the transcript scratch home from backlog #566:
 
-1. ~/lloyd/_pipeline/tasks/   — background-bash task logs, never evicted
+1. ~/lloyd-data/_pipeline/tasks/ — background-bash task logs, never evicted
    by the harness. DELETE entries older than TASK_LOG_MAX_AGE_DAYS.
-2. ~/lloyd/sessions/*.json    — session transcripts. GZIP (never delete —
+2. ~/lloyd-data/sessions/*.json — session transcripts. GZIP (never delete —
    nightly trajectory extraction has long since processed them, and the
    .gz keeps them recoverable) sessions whose `last_active` is older than
    SESSION_ARCHIVE_AGE_DAYS. Live consumers all glob *.json, so archived
    sessions intentionally drop out of session lists and session_recall.
-3. ~/lloyd/_pipeline/tmp/     — raw YouTube transcript scratch, the one
+3. ~/lloyd-data/_pipeline/tmp/ — raw YouTube transcript scratch, the one
    directory skills/youtube-transcript and skills/youtube-content name as
    TRANSCRIPT_DIR (backlog #566). DELETE files older than
    TRANSCRIPT_MAX_AGE_DAYS. Deleting is safe here specifically because
@@ -23,7 +23,7 @@ the transcript scratch home from backlog #566:
    directory wrote into /tmp, where systemd-tmpfiles-clean.timer reaps
    them on a clock nobody in Lloyd controls.
 
-7. ~/lloyd/sessions/*.tool-results/ — the tool-result spill dirs the harness
+7. ~/lloyd-data/sessions/*.tool-results/ — the tool-result spill dirs the harness
    writes BESIDE the transcripts (app/harness/tool_result_spill.py names them
    `<session_id>.tool-results`, and rung 2's `*.json` glob cannot see them).
    DELETE a directory whose NEWEST inner file is older than
@@ -46,6 +46,7 @@ Usage:
 import argparse
 import gzip
 import json
+import os
 import re
 from datetime import datetime, timezone
 import shutil
@@ -53,17 +54,20 @@ import sys
 import time
 from pathlib import Path
 
-TASKS_DIR = Path.home() / "lloyd" / "_pipeline" / "tasks"
-SESSIONS_DIR = Path.home() / "lloyd" / "sessions"
-AUTONOMY_RUNS_DIR = Path.home() / "lloyd" / "autonomy-runs"
+# The runtime data root (`app.paths.DATA_ROOT`), resolved without importing `app`
+# because this script is stdlib-only and runs from cron with no venv.
+DATA_ROOT = Path(os.environ.get("LLOYD_DATA") or Path.home() / "lloyd-data")
+TASKS_DIR = DATA_ROOT / "_pipeline" / "tasks"
+SESSIONS_DIR = DATA_ROOT / "sessions"
+AUTONOMY_RUNS_DIR = DATA_ROOT / "autonomy-runs"
 AUTONOMY_TASKS_DIR = Path.home() / "obsidian" / "autonomy"
-CANDIDATES_DIR = Path.home() / "lloyd" / "_pipeline" / "skills" / "candidates"
+CANDIDATES_DIR = DATA_ROOT / "_pipeline" / "skills" / "candidates"
 # The one transcript scratch home. Both youtube skills name it as TRANSCRIPT_DIR, so this
 # constant and that literal are the same directory — tests/test_youtube_artifact_phase.py
 # pins the pair, because a scratch dir the sweep has never heard of is an unbounded store
 # that reads as bounded. Deliberately not under /tmp (systemd-tmpfiles-clean.timer reaps it
 # daily) and not in the vault (raw inputs are not what the Obsidian Sync quota is for).
-TRANSCRIPT_SCRATCH_DIR = Path.home() / "lloyd" / "_pipeline" / "tmp"
+TRANSCRIPT_SCRATCH_DIR = DATA_ROOT / "_pipeline" / "tmp"
 
 TASK_LOG_MAX_AGE_DAYS = 30
 SESSION_ARCHIVE_AGE_DAYS = 90

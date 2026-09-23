@@ -49,8 +49,9 @@ class PreemptionController:
         return False
 
 # Configuration
-STATE_DIR = Path.home() / "lloyd/agent-services/services/idle-worker"
-LOG_DIR = Path.home() / "lloyd/agent-services/logs"
+DATA_DIR = Path(os.environ.get("LLOYD_DATA") or Path.home() / "lloyd-data")
+STATE_DIR = DATA_DIR / "idle-worker"
+LOG_DIR = DATA_DIR / "logs" / "services"
 LOG_FILE = LOG_DIR / "idle-worker.log"
 PID_FILE = STATE_DIR / "idle-worker.pid"
 STATE_FILE = STATE_DIR / "task-queue.json"
@@ -67,6 +68,7 @@ MODEL_HEALTH_URL = f"http://127.0.0.1:{MODEL_PORT}/health"
 
 # Setup logging - ensure log directory exists
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,

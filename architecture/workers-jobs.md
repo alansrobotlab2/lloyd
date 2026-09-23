@@ -547,7 +547,7 @@ shared shape, one shared defect — §2 has the numbers.
 
 ### `session-distill` — mine a finished chat for patterns
 
-**Wakes** every 1800 s, scans `~/lloyd/sessions/*.json` and enqueues one item
+**Wakes** every 1800 s, scans `~/lloyd-data/sessions/*.json` and enqueues one item
 per eligible session. **Executes** a direct turn on the primary (`max_turns=15`)
 and writes findings to `pending-research/session-distill/<date>/`.
 

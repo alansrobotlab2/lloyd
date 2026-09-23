@@ -15,8 +15,7 @@ from mcp.types import Tool
 
 from agent_mcp._shared import text_result
 
-from app.paths import LLOYD_HOME  # the running code dir, not $HOME/lloyd
-SESSIONS_DIR = LLOYD_HOME / "sessions"
+from app.paths import SESSIONS_DIR
 
 
 def _list_sessions() -> str:

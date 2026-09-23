@@ -33,7 +33,7 @@ is the `agent_id:` field, still written on every task file (23 `memory`, 4
 
 **Storage:** Vault markdown files (migrated from SQLite 2026-03-29). Task files
 at `~/obsidian/autonomy/{id}-{slug}.md`,run records at
-`~/lloyd/autonomy-runs/{task_id}/run_{task_id}_{YYYYmmdd_HHMMSS}.md`
+`~/lloyd-data/autonomy-runs/{task_id}/run_{task_id}_{YYYYmmdd_HHMMSS}.md`
 (`app.paths.AUTONOMY_RUNS_DIR`, anchored to the repo rather than the vault),and
 a small key/value block at `~/obsidian/autonomy/_config.md` that only the
 `autonomy_config` MCP tool reads or writes. qmd indexes both collections —

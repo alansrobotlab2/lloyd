@@ -51,13 +51,13 @@ from pathlib import Path
 
 import yaml
 
-from app.paths import ACCOUNT_HOME, LIVE_CHECKOUT
+from app.paths import ACCOUNT_HOME, production_data_root
 
 # The vault is read through `$HOME` (a symlink to the real one inside a gate); the
 # sync log and the out-of-vault blob are production files named absolutely, so they
 # come off the account home, which a gate's `HOME=<round>/home` does not move.
 VAULT = Path.home() / "obsidian"
-SYNC_LOG_DIR = LIVE_CHECKOUT / "agent-services" / "logs"
+SYNC_LOG_DIR = production_data_root() / "logs" / "services"
 SYNC_ERR = SYNC_LOG_DIR / "agent-obsidian-sync.err"
 
 #: Obsidian Sync's per-file ceiling. The client divides by 1024**2: it printed a

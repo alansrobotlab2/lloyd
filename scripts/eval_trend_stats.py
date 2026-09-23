@@ -914,25 +914,23 @@ def _rate_series(nights: list[Night], key: str) -> list[tuple[str, float]]:
 
 
 def default_baselines_dir() -> Path:
-    """The gitignored ``eval/baselines`` this audit is about.
+    """The runtime ``eval/baselines`` this audit is about.
 
-    ``eval/baselines/`` is gitignored, so an automod worktree has an empty one and
-    an audit that read its own tree would cheerfully compare zero nights. Same
-    resolution ``app/uptake.py:224 lloyd_root()`` uses for the same reason:
-    ``LLOYD_ROOT`` wins, else this checkout if it actually has nightly files, else
-    the live checkout.
+    Baselines live under the data root (``app.paths.EVAL_BASELINES_DIR``), and an
+    automod worktree's data root has an empty one, so an audit that read its own
+    root would cheerfully compare zero nights. ``LLOYD_ROOT`` wins (read as a data
+    root: ``<LLOYD_ROOT>/eval/baselines``), else this process's data root if it
+    actually has nightly files, else production's (``production_data_root()``).
     """
-    checkout = Path(__file__).resolve().parents[1]
+    from app.paths import EVAL_BASELINES_DIR, production_data_root
     override = _env_root()
     if override:
         return override / "eval" / "baselines"
-    own = checkout / "eval" / "baselines"
-    if any(own.glob("nightly-*.json")):
-        return own
-    # Off the account home: a gate's `HOME=<round>/home` makes `~/lloyd` the
-    # worktree whose empty baselines sent us here (`app.paths.LIVE_CHECKOUT`).
-    from app.paths import LIVE_CHECKOUT
-    return LIVE_CHECKOUT / "eval" / "baselines"
+    if any(EVAL_BASELINES_DIR.glob("nightly-*.json")):
+        return EVAL_BASELINES_DIR
+    # Off the passwd home, never `$HOME`: a gate's `HOME=<round>/home` would name
+    # the round's own empty root that sent us here.
+    return production_data_root() / "eval" / "baselines"
 
 
 def _env_root() -> Path | None:

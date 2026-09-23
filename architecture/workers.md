@@ -45,7 +45,7 @@ Two loops, both inside the **backend** process (`server.py`):
 - **The workers** — `workers.slots` of them — claim one item at a time and
   await its source's `execute`.
 
-`workers.db` lives beside the repo (`~/lloyd/workers.db`, gitignored by the
+`workers.db` lives beside the repo (`~/lloyd-data/workers.db`, gitignored by the
 `*.db` rule) and is opened in WAL mode, because the **MCP aggregator is a
 second process** that writes to it: `autoresearch_round` enqueues a round from
 there, the effect ledger writes `tool_effects` rows from inside a tool call,
@@ -506,7 +506,7 @@ Follow-ups, not done: schemas for `deep_research.parse_result` and
 
 ```yaml
 workers:
-  db_path: ~/lloyd/workers.db
+  db_path: ~/lloyd-data/workers.db
   enabled: true
   slots: 2                      # concurrent workers
   max_attempts: 3               # before an item is poisoned
@@ -562,7 +562,7 @@ curl -s localhost:8080/api/workers/health | jq       # per-source outcomes + rec
 curl -s 'localhost:8080/api/workers/runs?limit=20' | jq
 curl -s 'localhost:8080/api/background/sessions?limit=20' | jq   # the transcripts
 curl -sX POST localhost:8080/api/workers/pause -d '{"paused":true}'
-sqlite3 ~/lloyd/workers.db \
+sqlite3 ~/lloyd-data/workers.db \
   "SELECT source,state,COUNT(*) FROM queue GROUP BY source,state;"
 ```
 

@@ -2,7 +2,7 @@
 """
 One-time backfill: export Lloyd session JSONs to vault markdown for QMD indexing.
 
-Converts ~/lloyd/sessions/*.json → ~/lloyd/_pipeline/vault-derived/sessions/{date}/*.md
+Converts ~/lloyd-data/sessions/*.json → ~/lloyd-data/_pipeline/vault-derived/sessions/{date}/*.md
 for a conversation and → .../sessions-background/{date}/*.md for everything else,
 skipping sessions that already have a markdown export.
 
@@ -80,10 +80,9 @@ _import_root_on_path()
 # two corpora. Both imported: a restated platform rule here is exactly how 469
 # machine transcripts got embedded, and a private copy of a corpus path would
 # write into a directory the watcher no longer watches.
-from app.paths import VAULT_BACKGROUND_SESSIONS_DIR, VAULT_SESSIONS_DIR  # noqa: E402
+from app.paths import SESSIONS_DIR, VAULT_BACKGROUND_SESSIONS_DIR, VAULT_SESSIONS_DIR  # noqa: E402
 from app.sessions_io import is_conversation_session  # noqa: E402
 
-SESSIONS_DIR = Path.home() / "lloyd" / "sessions"
 PST = ZoneInfo("America/Los_Angeles")
 
 

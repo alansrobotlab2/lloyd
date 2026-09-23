@@ -16,7 +16,7 @@ Key facts about the data layout:
   entity table mirrors that set.
 
 The facts root lives at `app.paths.VAULT_FACTS_ROOT` (currently
-`~/lloyd/_pipeline/vault-derived/facts/`).
+`~/lloyd-data/_pipeline/vault-derived/facts/`).
 """
 
 from __future__ import annotations

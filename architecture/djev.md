@@ -112,7 +112,7 @@ instead of measuring:
 | Start script | `agent-services/bin/start-djev.sh`: upstream's `entrypoint.sh` adapted from a DGX Spark to a discrete 24 GiB card |
 | Program | `agent-djev` in `agent-services/supervisor/conf.d/agent-djev.conf` |
 | Ports | `:8010` vLLM (OpenAI API + `/metrics`), `:8011` structured decisions, `5300` vLLM's internal ZMQ port (moved so it cannot collide with the primary's default) |
-| Logs | `agent-services/logs/agent-djev.log`, `.err` |
+| Logs | `~/lloyd-data/logs/services/agent-djev.log`, `.err` |
 
 **Why an SM86 card can serve NVFP4 at all.** `hf_quant_config.json` excludes
 `lm_head`, `*self_attn*`, `*mlp*` and `*router*`. Only the 128 routed experts
@@ -946,7 +946,7 @@ the flag is the last step, after all of these hold:
 ```bash
 curl -s http://127.0.0.1:8011/health                       # {"status": "ok"}
 ~/.local/share/uv/tools/supervisor/bin/supervisorctl -c agent-services/supervisor/supervisord.conf status agent-djev
-tail -f agent-services/logs/agent-djev.log
+tail -f ~/lloyd-data/logs/services/agent-djev.log
 
 # reproduce the tables above
 .venvs/lloyd/bin/python agent-services/bin/bench-djev.py all

@@ -2,7 +2,8 @@
 # Start the idle worker service
 
 SERVICE_DIR="/home/alansrobotlab/lloyd/agent-services/services/idle-worker"
-LOG_DIR="/home/alansrobotlab/lloyd/agent-services/logs"
+DATA_DIR="${LLOYD_DATA:-$HOME/lloyd-data}"
+LOG_DIR="$DATA_DIR/logs/services"
 LOG_FILE="$LOG_DIR/idle-worker.log"
 
 echo "=== Lloyd Idle Worker Service Starter ==="
@@ -14,7 +15,7 @@ if systemctl is-active --quiet lloyd-idle-worker.service 2>/dev/null; then
 fi
 
 # Check for stale PID file
-PID_FILE="$SERVICE_DIR/idle-worker.pid"
+PID_FILE="$DATA_DIR/idle-worker/idle-worker.pid"
 if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE")
     if kill -0 "$PID" 2>/dev/null; then
@@ -34,7 +35,7 @@ if [ ! -f "$SERVICE_DIR/idle-worker.py" ]; then
 fi
 
 # Create log directory
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$DATA_DIR/idle-worker"
 
 echo "Starting monitoring daemon..."
 echo "Log file: $LOG_FILE"

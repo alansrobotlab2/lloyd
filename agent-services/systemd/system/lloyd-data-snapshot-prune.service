@@ -1,0 +1,10 @@
+[Unit]
+Description=Prune Lloyd data-root snapshots (48 hourly + 14 daily)
+Documentation=file:///home/alansrobotlab/lloyd/scripts/backup/prune-data-snapshots.sh
+
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=idle
+# A root-owned copy: the repo file is editable by the agent, this one is not.
+ExecStart=/usr/local/sbin/prune-data-snapshots.sh /home/alansrobotlab/.lloyd-data-snapshots

@@ -274,24 +274,21 @@ def _has_sessions(base: Path) -> bool:
 
 
 def lloyd_root() -> Path:
-    """The checkout whose *logs* this measures.
+    """The DATA root whose *logs* this measures.
 
-    `sessions/`, `event_logs/` and `eval/baselines/nightly-*.json` are all
-    untracked, so an automod round running from a worktree would otherwise look
-    at an empty tree and report a perfect uptake score over zero turns. Falling
-    back to the live checkout is what makes the probe mean the same thing from
-    either place; `LLOYD_ROOT` overrides for tests.
+    `sessions/`, `event_logs/` and `eval/baselines/nightly-*.json` are runtime
+    data, so an automod round running from a worktree would otherwise look at
+    its own empty data root and report a perfect uptake score over zero turns.
+    Falling back to the production data root is what makes the probe mean the
+    same thing from either place; `LLOYD_ROOT` overrides for tests.
     """
     env = os.environ.get("LLOYD_ROOT")
     if env:
         return Path(env).expanduser()
-    if _has_sessions(REPO):
-        return REPO
-    # Not `Path.home() / "lloyd"`: inside a gate that IS the worktree (see
-    # `app.paths.LIVE_CHECKOUT`), so the fallback would land on the tree it
-    # just found empty.
-    from app.paths import LIVE_CHECKOUT
-    return LIVE_CHECKOUT
+    from app import paths
+    if _has_sessions(paths.DATA_ROOT):
+        return paths.DATA_ROOT
+    return paths.production_data_root()
 
 
 @dataclass
@@ -1045,7 +1042,7 @@ def memory_entries(root: Path | str | None = None,
     names USER.md specifically: one flat tally lets a clean MEMORY.md carry a
     USER.md the grammar barely reads.
     """
-    root = Path(root) if root else lloyd_root()
+    root = Path(root) if root else REPO
     vault = Path.home() / "obsidian"
     out: list[Entry] = []
     seen: set[str] = set()

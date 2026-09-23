@@ -94,36 +94,32 @@ def test_a_written_override_leaves_the_live_tree_clean():
     Writing is also the stronger check. The old assertion could only observe
     a file somebody else had already written and reverted; it could not have
     caught a writer that dirtied the tree, which is the entire failure this
-    module exists to prevent. `app.paths.LLOYD_HOME` resolves from `__file__`,
-    so the writer and this test address the same tree in a worktree too —
-    asserted below rather than assumed, because that is the coupling that
-    makes writing here safe.
+    module exists to prevent. Since 2026-09-22 the file lives under the data
+    root, outside the tree (`architecture/data-home.md`); the check is the same
+    one — the whole tree's `git status` does not move — and holds either way.
     """
     from app.config import TOOL_OVERRIDES_PATH, save_tool_overrides
+    from app.paths import DATA_ROOT
 
-    assert TOOL_OVERRIDES_PATH == ROOT / OVERRIDES, (
-        f"the writer targets {TOOL_OVERRIDES_PATH} but this test guards "
-        f"{ROOT / OVERRIDES}; a worktree would be checked against the live tree"
-    )
+    assert TOOL_OVERRIDES_PATH == DATA_ROOT / OVERRIDES, (
+        f"the writer targets {TOOL_OVERRIDES_PATH}, not the data root's {DATA_ROOT / OVERRIDES}")
+    status_before = _git("status", "--porcelain").stdout
     existed = TOOL_OVERRIDES_PATH.exists()
     before = TOOL_OVERRIDES_PATH.read_bytes() if existed else None
     try:
         save_tool_overrides()
         assert TOOL_OVERRIDES_PATH.exists(), "the writer produced no file"
-        assert not _git("status", "--porcelain", OVERRIDES).stdout.strip(), (
+        assert _git("status", "--porcelain").stdout == status_before, (
             "writing the override file must not register in `git status` at all"
         )
 
         # The atomic writer lands a sibling `.<pid>.tmp` and renames it. A
-        # write killed in between leaves that behind, and an unignored stray
-        # dirties the tree exactly as the tracked file used to — same outage,
-        # one filename over.
+        # write killed in between leaves that behind; it must not dirty the tree.
         stray = TOOL_OVERRIDES_PATH.with_name(
             f"{TOOL_OVERRIDES_PATH.name}.{os.getpid()}.tmp")
         stray.write_text("", encoding="utf-8")
         try:
-            assert not _git("status", "--porcelain",
-                            str(stray.relative_to(ROOT))).stdout.strip(), (
+            assert _git("status", "--porcelain").stdout == status_before, (
                 "a half-written override temp file dirties the tree"
             )
         finally:

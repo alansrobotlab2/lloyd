@@ -34,10 +34,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from app.paths import VAULT_KG_DB
+from app.paths import PIPELINE_DIR, VAULT_KG_DB
 from app.kg_store import KGStore
 
-CLASSIFIED_DIR = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "memory-graph"
+CLASSIFIED_DIR = PIPELINE_DIR / "memory-graph"
 DEFAULT_GLOB = "classified-v4*.jsonl"
 DEFAULT_MIN_CONF = 0.6
 

@@ -59,7 +59,19 @@ def round_home(round_id: str) -> Path:
 #: Never linked into a round's home. `lloyd` is the worktree itself, and it must
 #: stay a real directory — `app/paths.py` calls `.resolve()`, and a symlink here
 #: would resolve straight back to production, silently undoing the redirection.
-HOME_LINK_SKIP = frozenset({"lloyd"})
+#: `lloyd-data` is production's runtime data (sessions, workers.db, logs); a
+#: round gets an empty one of its own, which `round_data_root` names.
+HOME_LINK_SKIP = frozenset({"lloyd", "lloyd-data"})
+
+
+def round_data_root(round_id: str) -> Path:
+    """The round's own data root: `<round>/home/lloyd-data`, never production's.
+
+    What `LLOYD_DATA` is set to for every rung that runs candidate code, so a
+    candidate's `sessions/`, `workers.db` and logs land beside its worktree —
+    the isolation a data dir inside the tree used to give for free.
+    """
+    return round_home(round_id) / "lloyd-data"
 
 
 def ensure_round_home(round_id: str) -> Path:
@@ -98,6 +110,7 @@ def ensure_round_home(round_id: str) -> Path:
             # farm over it would return the caller to the real home, which is
             # the outcome this exists to prevent.
             pass
+    round_data_root(round_id).mkdir(parents=True, exist_ok=True)
     resolved = (home / "lloyd").resolve()
     if resolved != wt.resolve():
         raise RuntimeError(

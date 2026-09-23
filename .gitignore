@@ -17,6 +17,11 @@ __pycache__/
 /agent-services/benchmarks/
 
 # ─── Runtime state ──────────────────────────────────
+# Production's runtime data lives in ~/lloyd-data since 2026-09-22
+# (architecture/data-home.md); any other checkout keeps its own under
+# .lloyd-data/. The rules after it stay as a second layer: a writer that still
+# resolves a path off the tree must not also dirty it.
+/.lloyd-data/
 /logs/
 /event_logs/
 /sessions/

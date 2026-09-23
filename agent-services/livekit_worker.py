@@ -105,10 +105,17 @@ def _load_env_file(path: Path) -> None:
         pass
 
 
+def _data_root() -> str:
+    """The runtime data root, as app.paths resolves it for production."""
+    return os.environ.get("LLOYD_DATA") or os.path.expanduser("~/lloyd-data")
+
+
 def _expand_env(value):
     """Recursively expand ${VAR} in strings within a dict/list tree."""
     if isinstance(value, str):
-        return _ENV_VAR_RE.sub(lambda m: os.environ.get(m.group(1), ""), value)
+        return _ENV_VAR_RE.sub(
+            lambda m: _data_root() if m.group(1) == "LLOYD_DATA"
+            else os.environ.get(m.group(1), ""), value)
     if isinstance(value, dict):
         return {k: _expand_env(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -136,7 +143,7 @@ def _build_speaker_id(vp_cfg: dict):
     try:
         from speaker_id import SpeakerIdentifier
         return SpeakerIdentifier(
-            profiles_dir=vp_cfg.get("profiles_dir", "~/lloyd/voice_profiles"),
+            profiles_dir=vp_cfg.get("profiles_dir", os.path.join(_data_root(), "voice_profiles")),
             threshold=float(vp_cfg.get("profile_threshold", 0.75)),
             unknown_label=str(vp_cfg.get("unknown_label", "Unknown")),
             device=str(vp_cfg.get("device", "cpu")),

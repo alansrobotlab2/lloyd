@@ -36,6 +36,7 @@ CI, and are excluded from the gate's ``-m "not live_vault"`` rung for the same r
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -134,7 +135,7 @@ ARTIFACT_PHASE_REQUIREMENTS: dict[str, re.Pattern[str]] = {
     # skill named a location, so sessions invented one: `~/lloyd/_pipeline/tmp/` in some,
     # `/tmp/yt/` in others (measured 2026-09-13: both trees live the same week).
     "the one named transcript scratch dir":
-        re.compile(r'TRANSCRIPT_DIR\s*=\s*"?\$HOME/lloyd/_pipeline/tmp'),
+        re.compile(r'TRANSCRIPT_DIR\s*=\s*"?\$HOME/lloyd-data/_pipeline/tmp'),
     # Naming a directory is not saving to it: yt-dlp needs `-o "$TRANSCRIPT_DIR/%(id)s"`
     # rather than the bare cwd-relative `%(id)s`, and the stdout-only helper script needs a
     # redirect. This is the half that actually moves the bytes.
@@ -228,14 +229,14 @@ _CANONICAL = """
 ## Artifact Phase — Persist the digest (HARD — backlog #448)
 
 A digest that exists only in the chat transcript does not exist. Auto-capture compresses
-whole days and `~/lloyd/_pipeline/tmp/` is gitignored, so neither one is persistence.
+whole days and `~/lloyd-data/_pipeline/tmp/` is gitignored, so neither one is persistence.
 Write the derived output to `~/obsidian/knowledge/youtube/<Channel>/<YYYYMMDD>-<slug>.md`
 **before** reporting anything.
 
 The raw transcript goes to the one scratch dir — never a bare `-o "%(id)s"`, never `/tmp`:
 
 ```bash
-TRANSCRIPT_DIR="$HOME/lloyd/_pipeline/tmp"
+TRANSCRIPT_DIR="$HOME/lloyd-data/_pipeline/tmp"
 mkdir -p "$TRANSCRIPT_DIR"
 yt-dlp --write-auto-sub --skip-download --sub-lang en -o "$TRANSCRIPT_DIR/%(id)s" "$URL"
 ```
@@ -245,7 +246,7 @@ The vault note is the durable artifact; the scratch file is disposable.
 ```yaml
 type: video-note
 video_id: <videoId>
-transcript_path: /home/alansrobotlab/lloyd/_pipeline/tmp/<videoId>.txt
+transcript_path: /home/alansrobotlab/lloyd-data/_pipeline/tmp/<videoId>.txt
 transcript_md5: <md5sum computed at write time>
 ---
 ```
@@ -276,9 +277,9 @@ def test_checker_is_not_vacuous():
     "type: video-note\nvideo_id: <videoId>\n",
     "grep -rl \"<videoId>\" ~/obsidian/",
     "Final message ends with the path, e.g. `Saved: /home/alansrobotlab/obsidian/...md`.",
-    'TRANSCRIPT_DIR="$HOME/lloyd/_pipeline/tmp"\n',
+    'TRANSCRIPT_DIR="$HOME/lloyd-data/_pipeline/tmp"\n',
     '-o "$TRANSCRIPT_DIR/%(id)s" ',
-    "transcript_path: /home/alansrobotlab/lloyd/_pipeline/tmp/<videoId>.txt\n",
+    "transcript_path: /home/alansrobotlab/lloyd-data/_pipeline/tmp/<videoId>.txt\n",
     "transcript_md5: <md5sum computed at write time>\n",
     "The vault note is the durable artifact; the scratch file is disposable.",
 ])
@@ -293,7 +294,7 @@ def test_removing_one_requirement_is_caught(strip: str):
     assert missing, f"stripping {strip!r} should have been caught, but the checker passed"
 
 
-_KEY_LINES = ("transcript_path: /home/alansrobotlab/lloyd/_pipeline/tmp/<videoId>.txt\n"
+_KEY_LINES = ("transcript_path: /home/alansrobotlab/lloyd-data/_pipeline/tmp/<videoId>.txt\n"
               "transcript_md5: <md5sum computed at write time>\n")
 
 
@@ -410,7 +411,14 @@ def _load_sweep_module():
     spec = importlib.util.spec_from_file_location(
         "retention_sweep_under_artifact_test", _SWEEP_SCRIPT)
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    # The seam is production's: the sweep resolves its data root from `LLOYD_DATA`,
+    # which the suite points at scratch, so load it the way cron does — without one.
+    saved = os.environ.pop("LLOYD_DATA", None)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        if saved is not None:
+            os.environ["LLOYD_DATA"] = saved
     return mod
 
 

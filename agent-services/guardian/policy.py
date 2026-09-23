@@ -96,9 +96,9 @@ PAUSE_MAX_SECONDS = 1800.0
 # ── Rollback ───────────────────────────────────────────────────────────────
 REPO = "/home/alansrobotlab/lloyd"
 # Paths cleaned after a reset. PATH-SCOPED, never the repo root: the root
-# holds usage.db, workers.db, mc-state.json, .env and .venvs/, all gitignored
-# and none of them replaceable. A bare `git clean -fdx` here is a data-loss
-# event.
+# holds .env and .venvs/, gitignored and not replaceable. A bare
+# `git clean -fdx` here is a data-loss event. (The runtime data — sessions,
+# the databases, logs — moved out to DATA_ROOT after 2026-09-22.)
 CLEAN_PATHS = ("app", "agent_mcp", "workers", "scripts", "eval", "tests")
 PYCACHE_PATHS = ("app", "agent_mcp", "workers", "scripts")
 ROLLBACK_MAX_ATTEMPTS = 2
@@ -115,10 +115,17 @@ FLAP_WINDOW_SECONDS = 6 * 3600.0
 FLAP_HALT_AFTER = 2      # halt promotions
 FLAP_STOP_AFTER = 3      # also stop the backend
 
+# ── Runtime data root ──────────────────────────────────────────────────────
+# Sessions, databases and logs, outside the code tree since 2026-09-22
+# (`app/paths.py` resolves the same place; `datawatch.py` guards it).
+DATA_ROOT = __import__("os").environ.get("LLOYD_DATA", "/home/alansrobotlab/lloyd-data")
+# How often the tree is checked for a runtime name that came back into it.
+STRAY_CHECK_SECONDS = 3600.0
+
 # ── Error-rate detection ───────────────────────────────────────────────────
 LOG_FILES = (
-    "/home/alansrobotlab/lloyd/logs/server.err",
-    "/home/alansrobotlab/lloyd/logs/mcp.err",
+    f"{DATA_ROOT}/logs/server.err",
+    f"{DATA_ROOT}/logs/mcp.err",
 )
 # NOT server.log / mcp.log. server.py's logging.basicConfig writes to stderr,
 # which supervisord maps to *.err, so all application logs (INFO through
@@ -149,7 +156,7 @@ ROLLBACK_REQUEST_MAX_AGE_SECONDS = 900.0
 # and the vault are gitignored, so a change that deletes rows or notes boots
 # fine, logs nothing, and survives the revert.
 DATA_DROP_FRACTION = 0.05
-KG_DB = "/home/alansrobotlab/lloyd/_pipeline/vault-derived/kg.sqlite"
+KG_DB = f"{DATA_ROOT}/_pipeline/vault-derived/kg.sqlite"
 VAULT_ROOT = "/home/alansrobotlab/obsidian"
 
 # ── Vault tripwire (every tick, not only while observing) ──────────────────

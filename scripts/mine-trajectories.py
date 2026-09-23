@@ -19,11 +19,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # for app.paths
+from app.paths import PIPELINE_DIR, SESSIONS_DIR  # noqa: E402
 # ── Paths ────────────────────────────────────────────────────────────────────
-
-TRAJECTORY_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
-OUTPUT_DIR = Path.home() / "lloyd" / "_pipeline" / "skills" / "candidates"
+TRAJECTORY_DIR = PIPELINE_DIR / "trajectories"
+OUTPUT_DIR = PIPELINE_DIR / "skills" / "candidates"
 
 
 def set_trajectory_dir(path: Path) -> None:
@@ -540,14 +540,14 @@ def is_corroborated_error(step: dict) -> bool:
     return source in CORROBORATED_ERROR_SOURCES
 
 
-SESSION_STORE_DIR = Path.home() / "lloyd" / "sessions"
+SESSION_STORE_DIR = SESSIONS_DIR
 
 
 def set_session_store_dir(path: Path) -> None:
     """Override the session store the class join reads.
 
     Exists so a test can drive the real command line against a fixture store
-    instead of the live 2,800-file `~/lloyd/sessions/`: the class of every row is
+    instead of the live 2,800-file `~/lloyd-data/sessions/`: the class of every row is
     resolved by that join, so without it no subprocess test could state which
     session a row was classified from. `set_trajectory_dir` is its twin.
     """
@@ -2146,12 +2146,12 @@ def main() -> int:
     parser.add_argument(
         "--trajectory-dir", type=str, default=None,
         help="Override the trajectory JSONL directory "
-             "(default: ~/lloyd/_pipeline/trajectories)"
+             "(default: <data root>/_pipeline/trajectories)"
     )
     parser.add_argument(
         "--sessions-dir", type=str, default=None,
         help="Override the session store the session-class join reads "
-             "(default: ~/lloyd/sessions). Every row's class is resolved through "
+             "(default: <data root>/sessions). Every row's class is resolved through "
              "that store, so this is what decides what the exclusion filters on."
     )
     parser.add_argument(

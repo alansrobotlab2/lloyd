@@ -512,7 +512,7 @@ class Gate:
                                  head=W.head(self.worktree) or "")
 
     def _child_env(self, root: Path | None = None, *,
-                   isolate_home: bool = False) -> dict:
+                   isolate_home: bool = False, live_data: bool = False) -> dict:
         """Environment for rungs that execute CANDIDATE code outside the canary.
 
         Only the canary redirected the self-modification state dir. The static,
@@ -536,6 +536,12 @@ class Gate:
         real home, loudly and on the record — `self.home_isolation` rides onto
         the tests rung's data, because a silent downgrade here is
         indistinguishable from the isolation working.
+
+        `LLOYD_DATA` is the round's own data root on every call, whatever
+        `isolate_home` says: runtime data lives outside the tree, so the
+        worktree no longer isolates it by being where it is. `live_data` leaves
+        it unset for the live-tree scripts that write live baselines on purpose
+        (`tool_choice`), which then resolve production the way the backend does.
         """
         scratch = W.round_dir(self.round_id) / "gate-state"
         (scratch / "automod").mkdir(parents=True, exist_ok=True)
@@ -550,13 +556,18 @@ class Gate:
                                        f"({type(exc).__name__}: {exc})")
                 print(f"[warn] {self.home_isolation}: candidate tests can reach "
                       f"{Path.home() / 'lloyd'} through Path.home()")
-        return {
+        env = {
             "PATH": "/usr/bin:/bin", "HOME": str(home),
             "PYTHONPATH": str(root or self.worktree),
             "LLOYD_AUTOMOD_STATE": str(scratch / "automod"),
             "LLOYD_GUARDIAN_STATE": str(scratch / "guardian"),
             "LLOYD_VOICE_ALERTS": "0",
         }
+        if not live_data:
+            data = W.round_data_root(self.round_id)
+            data.mkdir(parents=True, exist_ok=True)
+            env["LLOYD_DATA"] = str(data)
+        return env
 
     # ── rung reuse ─────────────────────────────────────────────────────
     #
@@ -1103,13 +1114,13 @@ class Gate:
         # deleted with it (SM_20260908_165950's was).
         run = _run([str(self.python), "eval/run_tool_choice_eval.py",
                     "--label", label],
-                   cwd=self.live, env=self._child_env(), timeout=1800)
+                   cwd=self.live, env=self._child_env(live_data=True), timeout=1800)
         if run.returncode != 0:
             tail = "\n".join((run.stdout + run.stderr).strip().splitlines()[-15:])
             return False, f"tool-choice eval failed to run: {tail}", {"label": label}
         cmp_ = _run([str(self.python), "eval/compare_tool_choice.py",
                      "--label", label],
-                    cwd=self.live, env=self._child_env(), timeout=600)
+                    cwd=self.live, env=self._child_env(live_data=True), timeout=600)
         text = (cmp_.stdout + cmp_.stderr).strip()
         tail = "\n".join(text.splitlines()[-15:])
         data = {"label": label, "compare_exit": cmp_.returncode}

@@ -2,13 +2,13 @@
 """
 extract-trajectories.py — Parse session files into structured trajectory logs.
 
-Reads Lloyd session JSON files from ~/lloyd/sessions/*.json
+Reads Lloyd session JSON files from ~/lloyd-data/sessions/*.json
 
 Use --agent worker to process only autonomy sessions (autonomy_*.json)
 Use --agent main  to process only interactive sessions (non-autonomy *.json)
 
-Output: ~/lloyd/_pipeline/trajectories/YYYY-MM-DD.jsonl
-State:  ~/lloyd/_pipeline/trajectories/.watermark.json
+Output: ~/lloyd-data/_pipeline/trajectories/YYYY-MM-DD.jsonl
+State:  ~/lloyd-data/_pipeline/trajectories/.watermark.json
 """
 
 import argparse
@@ -28,10 +28,9 @@ from pathlib import Path
 
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-
-LLOYD_SESSIONS = Path.home() / "lloyd" / "sessions"
-OUTPUT_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
-WATERMARK_PATH = OUTPUT_DIR / ".watermark.json"
+#
+# LLOYD_SESSIONS, OUTPUT_DIR and WATERMARK_PATH are bound from `app.paths` below
+# `_import_root_on_path()`, which has to run before any `app.*` import.
 
 # ── Session class (#493) ─────────────────────────────────────────────────────
 #
@@ -98,6 +97,11 @@ def _import_root_on_path() -> None:
 _import_root_on_path()
 
 from app.sessions_io import is_user_session  # noqa: E402
+from app.paths import PIPELINE_DIR, SESSIONS_DIR  # noqa: E402
+
+LLOYD_SESSIONS = SESSIONS_DIR
+OUTPUT_DIR = PIPELINE_DIR / "trajectories"
+WATERMARK_PATH = OUTPUT_DIR / ".watermark.json"
 
 #: A chat id is `<8 digits>_<6 digits>_<suffix>` — `20260912_101010_9f2a1c` for a
 #: Mission Control chat, `..._iv0484` for one the inner voice was enabled on. The
@@ -554,7 +558,7 @@ def classify_session(data: dict, session_id: str | None = None) -> str:
     Takes the parsed object, not a path: the filename is exactly what must not be
     an input (#493 clauses 1-2). `session_id` is a fallback for a caller that has
     a key but not the file's own field — the miner's join to
-    `~/lloyd/sessions/<session_key>.json`, whose rows are keyed on the name and
+    `~/lloyd-data/sessions/<session_key>.json`, whose rows are keyed on the name and
     whose legacy rows predate any id being emitted.
 
     Three decisions, in the order they are applied (#1143):
@@ -807,7 +811,7 @@ def save_watermark(state: dict) -> None:
 # ── Session discovery ─────────────────────────────────────────────────────────
 
 def discover_sessions(agent_filter: str | None = None) -> list[Path]:
-    """Return sorted list of session JSON paths from ~/lloyd/sessions/.
+    """Return sorted list of session JSON paths from <data root>/sessions/.
 
     agent_filter:
       'worker' / 'autonomy' → only autonomy_*.json files

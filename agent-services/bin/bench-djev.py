@@ -58,10 +58,11 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from app import vllm_metrics  # noqa: E402
+from app.paths import SERVICE_LOGS_DIR  # noqa: E402
 
 STRUCTURED = os.environ.get("BENCH_DJEV_URL", "http://127.0.0.1:8011")
 ENGINE = os.environ.get("BENCH_DJEV_ENGINE", "http://127.0.0.1:8010")
-DEFAULT_OUT = ROOT / "agent-services" / "logs" / "djev-bench.jsonl"
+DEFAULT_OUT = SERVICE_LOGS_DIR / "djev-bench.jsonl"
 
 # Upstream's own GB10 DGX Spark figures, for the comparison column. They are
 # the reason the headline table exists: this is an SM86 card running the

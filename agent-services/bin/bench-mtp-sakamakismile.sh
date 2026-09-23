@@ -21,7 +21,7 @@ START_SCRIPT="$PROJECT_DIR/bin/start-27b-nvfp4-sakamakismile-mtp.sh"
 VLLM_PYTHON="$HOME/lloyd/.venvs/vllm-experimental/bin/python"
 BASE_URL="http://127.0.0.1:8096"
 MODEL="primary"
-LOG_FILE="/home/alansrobotlab/lloyd/logs/sakamakismile-mtp-sweep.log"
+LOG_FILE="${LLOYD_DATA:-$HOME/lloyd-data}/logs/sakamakismile-mtp-sweep.log"
 RESULTS_DIR="/tmp/sakamakismile-mtp-sweep"
 
 # Sweep these values by default; override with: N_VALUES="1 2 3" ./bench-mtp-sakamakismile.sh

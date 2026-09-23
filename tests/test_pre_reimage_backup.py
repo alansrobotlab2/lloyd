@@ -35,7 +35,8 @@ def _fake_home(tmp_path: Path, dailies: dict[str, bytes] | None = None) -> Path:
     """
     home = tmp_path / "home"
     repo = home / "lloyd"
-    pipeline = repo / "_pipeline"
+    # Runtime data lives in the data root (`~/lloyd-data`), not the tree.
+    pipeline = home / "lloyd-data" / "_pipeline"
 
     # The live store, WAL-mode. A raw copy of a database mid-write is not
     # restorable (SETUP.md Part 0), so these two files are what the script must
@@ -86,7 +87,8 @@ def _fake_home(tmp_path: Path, dailies: dict[str, bytes] | None = None) -> Path:
 
 def _run(home: Path, dest: Path, env_extra: dict[str, str] | None = None
          ) -> subprocess.CompletedProcess:
-    env = {k: v for k, v in os.environ.items() if k not in SWITCHES}
+    env = {k: v for k, v in os.environ.items()
+           if k not in SWITCHES and k not in ("LLOYD_DATA", "LLOYD_DATA_SNAPSHOTS")}
     env["HOME"] = str(home)
     env.update(env_extra or {})
     return subprocess.run(
@@ -113,12 +115,10 @@ def test_the_graph_reaches_the_destination_only_as_the_daily_tarball(tmp_path):
     result = _run(home, dest)
     assert result.returncode == 0, _fail(result)
 
-    shipped = dest / "lloyd/_pipeline/backups/daily/graph-20260101.tar.gz"
+    shipped = dest / "lloyd-data/_pipeline/backups/daily/graph-20260101.tar.gz"
     assert shipped.is_file(), f"daily graph tarball missing\n{_fail(result)}"
     assert shipped.read_bytes() == b"CONSISTENT SNAPSHOT"
 
-    assert not (dest / "lloyd/_pipeline/vault-derived").exists(), \
-        "the live store tree must not be rsynced; the tarball is the vehicle"
     raw = sorted(p.name for p in dest.rglob("*")
                  if p.name in {"kg.sqlite", "kg.sqlite-wal", "kg.sqlite-shm"})
     assert raw == [], f"raw store files reached the destination: {raw}"
@@ -134,7 +134,7 @@ def test_the_newest_daily_tarball_is_the_one_copied(tmp_path):
         "graph-20260101.tar.gz": b"OLD SNAPSHOT",
         "graph-20260920.tar.gz": b"NEWEST SNAPSHOT",
     })
-    daily = home / "lloyd/_pipeline/backups/daily"
+    daily = home / "lloyd-data/_pipeline/backups/daily"
     os.utime(daily / "graph-20260101.tar.gz", (1767225600, 1767225600))  # 2026-01-01
     os.utime(daily / "graph-20260920.tar.gz", (1789862400, 1789862400))  # 2026-09-20
     dest = tmp_path / "dest"
@@ -142,9 +142,9 @@ def test_the_newest_daily_tarball_is_the_one_copied(tmp_path):
     result = _run(home, dest)
     assert result.returncode == 0, _fail(result)
 
-    landed = sorted(p.name for p in (dest / "lloyd/_pipeline/backups/daily").iterdir())
+    landed = sorted(p.name for p in (dest / "lloyd-data/_pipeline/backups/daily").iterdir())
     assert landed == ["graph-20260920.tar.gz"], landed
-    assert (dest / "lloyd/_pipeline/backups/daily/graph-20260920.tar.gz").read_bytes() \
+    assert (dest / "lloyd-data/_pipeline/backups/daily/graph-20260920.tar.gz").read_bytes() \
         == b"NEWEST SNAPSHOT"
 
 
@@ -163,7 +163,7 @@ def test_a_default_run_carries_the_merge_evidence_trajectories_and_metrics(tmp_p
                                "INCLUDE_PIPELINE_BULK": "0"})
     assert result.returncode == 0, _fail(result)
 
-    pipeline_dest = dest / "lloyd/_pipeline"
+    pipeline_dest = dest / "lloyd-data/_pipeline"
     for rel in ("memory-graph/graph-baseline.json", "memory-graph/merge-plan.json",
                 "trajectories/run.jsonl", "metrics/routing.json",
                 "research/ledger.jsonl", "research/rounds/round-1.md",
@@ -181,14 +181,14 @@ def test_regenerable_bulk_is_absent_by_default_and_present_on_the_opt_in(tmp_pat
     default_dest = tmp_path / "default"
     result = _run(home, default_dest)
     assert result.returncode == 0, _fail(result)
-    research = default_dest / "lloyd/_pipeline/research"
+    research = default_dest / "lloyd-data/_pipeline/research"
     assert not (research / "variants").exists()
     assert not (research / "_debug").exists()
 
     opt_in_dest = tmp_path / "opt_in"
     result = _run(home, opt_in_dest, {"INCLUDE_PIPELINE_BULK": "1"})
     assert result.returncode == 0, _fail(result)
-    research = opt_in_dest / "lloyd/_pipeline/research"
+    research = opt_in_dest / "lloyd-data/_pipeline/research"
     assert (research / "variants" / "variant-a.json").is_file()
     assert (research / "_debug" / "dump.txt").is_file()
 
@@ -213,4 +213,22 @@ def test_a_missing_daily_tarball_is_recorded_and_not_reported_as_captured(tmp_pa
     manifest = (dest / "MANIFEST.txt").read_text(encoding="utf-8")
     assert "NOT captured" in manifest, manifest
     assert "_pipeline/backups/daily" in manifest, manifest
-    assert not (dest / "lloyd/_pipeline/backups").exists()
+    assert not list((dest / "lloyd-data/_pipeline").rglob("graph-*.tar.gz"))
+
+
+def test_a_snapshot_is_the_source_when_one_exists(tmp_path):
+    """The data root goes whole, and from the newest read-only snapshot when one
+    exists: a btrfs snapshot is atomic, so its WAL databases are restorable."""
+    home = _fake_home(tmp_path)
+    snaps = home / ".lloyd-data-snapshots"
+    older = snaps / "20260101T000000Z" / "_pipeline" / "vault-derived"
+    newer = snaps / "20260920T000000Z" / "_pipeline" / "vault-derived"
+    for d, body in ((older, b"OLD STORE"), (newer, b"SNAPSHOT STORE")):
+        d.mkdir(parents=True)
+        (d / "kg.sqlite").write_bytes(body)
+    dest = tmp_path / "dest"
+
+    result = _run(home, dest)
+    assert result.returncode == 0, _fail(result)
+    assert (dest / "lloyd-data/_pipeline/vault-derived/kg.sqlite").read_bytes() \
+        == b"SNAPSHOT STORE"

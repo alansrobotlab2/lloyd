@@ -51,7 +51,11 @@ from typing import Any
 # Allow running directly from any cwd. Walk up to find the lloyd root.
 _THIS = Path(__file__).resolve()
 _LLOYD_ROOT = _THIS.parent.parent.parent
-DB_PATH = _LLOYD_ROOT / "usage.db"
+if str(_LLOYD_ROOT) not in sys.path:
+    sys.path.insert(0, str(_LLOYD_ROOT))
+from app.paths import USAGE_DB  # noqa: E402
+
+DB_PATH = USAGE_DB
 
 
 def _conn() -> sqlite3.Connection:

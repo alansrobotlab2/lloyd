@@ -41,6 +41,7 @@ import pytest
 import yaml
 
 from tests._live_data import require_live_data
+from app.paths import production_data_root  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -174,6 +175,7 @@ def _make_repo(tmp_path: Path) -> Path:
     (repo / "scripts").mkdir(parents=True)
     for name in ("iv_grade.py", "iv_metrics_record.py"):
         shutil.copy2(SCRIPTS / name, repo / "scripts" / name)
+    _copy_app_paths(repo)
     # The announcement reaches the guardian through a path computed from the recorder's
     # own `__file__`, so a fixture repo with no `agent-services/guardian/notify.py` takes
     # the "no notify.py" fallback and every announcement test would pass while proving
@@ -193,9 +195,25 @@ def _make_repo(tmp_path: Path) -> Path:
     return repo
 
 
+@pytest.fixture(autouse=True)
+def _fixture_repo_owns_its_data(monkeypatch):
+    """The copied scripts must resolve their data inside the fixture repo, so the
+    suite's own `LLOYD_DATA` is not handed to the children they run as."""
+    monkeypatch.delenv("LLOYD_DATA", raising=False)
+
+
+def _copy_app_paths(repo: Path) -> None:
+    """Both scripts resolve their data through `app.paths`; a fixture repo that is
+    not the live checkout keeps its data under `<repo>/.lloyd-data` (rule 3)."""
+    (repo / "app").mkdir(parents=True, exist_ok=True)
+    (repo / "app" / "__init__.py").write_text("")
+    shutil.copy2(ROOT / "app" / "paths.py", repo / "app" / "paths.py")
+
+
 def _make_db(repo: Path, rows: list[dict]) -> Path:
     """A fixture `usage.db` carrying the live `inner_voice_observations` schema."""
-    db = repo / "usage.db"
+    db = repo / ".lloyd-data" / "usage.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db))
     conn.execute("""CREATE TABLE inner_voice_observations (
         id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
@@ -266,7 +284,7 @@ def _rows_of(path: Path) -> list[dict]:
 
 
 def test_the_default_out_is_the_path_the_nightly_writes(tmp_path):
-    """The recorder with no `--out` lands in `<repo>/_pipeline/reflection/iv-metrics.jsonl`.
+    """The recorder with no `--out` lands in `<data root>/_pipeline/reflection/iv-metrics.jsonl`.
 
     The task file's Step 1 command passes no `--out`, so the default *is* the nightly's
     destination and the item's acceptance names that exact path. `REPO_ROOT` derives
@@ -277,6 +295,7 @@ def test_the_default_out_is_the_path_the_nightly_writes(tmp_path):
     fake = tmp_path / "repo"
     (fake / "scripts").mkdir(parents=True)
     shutil.copy(RECORDER, fake / "scripts" / "iv_metrics_record.py")
+    _copy_app_paths(fake)
     report = json.dumps({"meta": {}, "scope": {"since": "2026-09-12T00:00:00",
                                                "until": "2026-09-13T00:00:00",
                                                "first": None, "last": None},
@@ -291,7 +310,7 @@ def test_the_default_out_is_the_path_the_nightly_writes(tmp_path):
                             capture_output=True, text=True, check=False, cwd=str(fake))
 
     assert result.returncode == 0, (result.returncode, result.stderr)
-    written = fake / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    written = fake / ".lloyd-data" / "_pipeline" / "reflection" / "iv-metrics.jsonl"
     assert written.exists(), (
         "no --out was passed and the default wrote nowhere near "
         f"{written}; stdout={result.stdout[:160]!r}")
@@ -605,8 +624,8 @@ def test_run_leaves_usage_db_byte_untouched(tmp_path):
     assert hashlib.sha256(db.read_bytes()).hexdigest() == before_bytes
     assert db.stat().st_mtime_ns == before_mtime
     assert _schema_fingerprint() == before_schema
-    assert not (repo / "usage.db-wal").exists(), "a WAL sidecar means a write happened"
-    assert not (repo / "usage.db-shm").exists()
+    assert not (db.parent / "usage.db-wal").exists(), "a WAL sidecar means a write happened"
+    assert not (db.parent / "usage.db-shm").exists()
 
 
 def test_the_recorder_itself_opens_no_database():
@@ -1088,7 +1107,7 @@ def test_the_live_series_has_two_dated_rows_and_a_computable_delta():
     claimed here; what this pins is that the file exists, every row is dated, and the
     delta is a field read.
     """
-    series = Path.home() / "lloyd" / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    series = production_data_root() / "_pipeline" / "reflection" / "iv-metrics.jsonl"
     require_live_data(series, "the inner-voice metrics series", kind="file")
 
     rows = _rows_of(series)
@@ -1160,7 +1179,7 @@ def test_a_consumer_compares_the_timeout_count_against_the_bound():
     # time, which is only meaningful where the file is. It cannot silently be a
     # no-op: the assert below is satisfied by an empty file only when the file
     # genuinely isn't there, and its message says which happened.
-    series = Path.home() / "lloyd" / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    series = production_data_root() / "_pipeline" / "reflection" / "iv-metrics.jsonl"
     if not series.exists():
         # This used to infer "a recorder ran against a live db and wrote no row"
         # from usage.db being present while the series is not. That inference is
@@ -1302,7 +1321,7 @@ def _night(home: Path, *, rate: float, since: str, out: Path, repo: Path,
     blank = {"action": "noop", "created_at": stamp}
     dropped = dict(blank, error="observer refused")
     rows = [dict(dropped)] * n_dropped + [dict(blank)] * (100 - n_dropped)
-    (repo / "usage.db").unlink(missing_ok=True)   # one night's db, never a growing one
+    (repo / ".lloyd-data" / "usage.db").unlink(missing_ok=True)   # one night's db, never a growing one
     _make_db(repo, rows)
     env = _announcing_env(home, repo)
     env.update(env_extra or {})

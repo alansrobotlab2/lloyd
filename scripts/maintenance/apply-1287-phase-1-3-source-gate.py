@@ -33,7 +33,7 @@ CLAUSE = """- **Source gate — ask the emitter whether it would still write thi
   where they are. Consult the gate *after* the four filters above and *before* the cap:
   ```bash
   ~/lloyd/.venvs/lloyd/bin/python ~/lloyd/scripts/consolidation_source_gate.py \\
-      check --candidates ~/lloyd/_pipeline/skills/candidates/ | tee /tmp/source-gate.txt
+      check --candidates ~/lloyd-data/_pipeline/skills/candidates/ | tee /tmp/source-gate.txt
   ```
   It prints `DROP <pattern> :: not_emittable :: <the emitter's own reason>` per key, and
   its last line is `scanned: N  eligible: N  dropped_by_source_gate: N

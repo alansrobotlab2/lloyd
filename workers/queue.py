@@ -1149,9 +1149,10 @@ def configured_db_path() -> Path:
     database. A process that wants the shared queue asks for the configured
     path instead of inventing one, and WAL makes the sharing safe.
     """
+    from app import paths
     from app.config import CONFIG
-    raw = (CONFIG.get("workers") or {}).get("db_path") or "~/lloyd/workers.db"
-    return Path(str(raw)).expanduser()
+    raw = (CONFIG.get("workers") or {}).get("db_path") or str(paths.WORKERS_DB)
+    return Path(str(raw).replace("${LLOYD_DATA}", str(paths.DATA_ROOT))).expanduser()
 
 
 def configured_max_attempts() -> int:

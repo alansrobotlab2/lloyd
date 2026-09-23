@@ -8,10 +8,11 @@ for the Usage dashboard (4-hour window, 7-day window, time-series).
 import sqlite3
 import threading
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Optional
 
-DB_PATH = Path(__file__).parent / "usage.db"
+from app.paths import USAGE_DB
+
+DB_PATH = USAGE_DB
 
 _local = threading.local()
 

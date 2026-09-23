@@ -61,10 +61,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT
+from app.paths import PIPELINE_DIR  # noqa: E402
 
 from app.kg_store import store as _kg_store  # noqa: E402
 
-PIPELINE_ROOT = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
+PIPELINE_ROOT = PIPELINE_DIR / "memory-graph"
 CANDIDATE_LOG = PIPELINE_ROOT / f"semantic-entity-candidates-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
 JUDGMENT_LOG = PIPELINE_ROOT / f"semantic-entity-judgments-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
 PROPOSAL_LOG = PIPELINE_ROOT / f"semantic-proposals-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
@@ -81,7 +82,7 @@ PROPOSAL_LATEST = PIPELINE_ROOT / "semantic-proposals-latest.jsonl"
 # definitions actually changed.
 VERDICT_CACHE = PIPELINE_ROOT / "semantic-verdicts-pairs.jsonl"
 
-CLASSIFIER_V2 = Path.home() / "lloyd" / "scripts" / "memory" / "classify-relationships.py"
+CLASSIFIER_V2 = Path(__file__).resolve().parent / "classify-relationships.py"  # this tree's, never the live one
 _spec = importlib.util.spec_from_file_location("classifier_v2", str(CLASSIFIER_V2))
 _v2 = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_v2)

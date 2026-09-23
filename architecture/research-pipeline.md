@@ -68,7 +68,7 @@ Bounding the file would have fixed that and left the real problems:
   `(no response)`, and every one of those topics is now closed on disk. The
   source was retired with this change on 2026-09-08 and is gone from both
   `config.yaml` and `SOURCE_REGISTRY`, but its notes are not: all 142 are still
-  staged under `~/lloyd/_pipeline/vault-derived/pending-research/domain-research/`
+  staged under `~/lloyd-data/_pipeline/vault-derived/pending-research/domain-research/`
   — `app/paths.py::VAULT_PENDING_RESEARCH_DIR`, under `LLOYD_HOME` and not in the
   vault — unpromoted, and untriaged since 09-08 (#1278). That is why
   `app/routers/workers.py::_DEFAULT_DEST` still maps
@@ -85,7 +85,7 @@ never appears in `recent()`.
 
 ## 2. The registry
 
-`app/research_store.py` owns `~/lloyd/research.db`. **Nothing else opens it.**
+`app/research_store.py` owns `~/lloyd-data/research.db`. **Nothing else opens it.**
 
 It follows `workers/queue.py` rather than `app/kg_store.py` — a short-lived
 connection per call under one lock — because two processes write it: the
@@ -221,7 +221,7 @@ passes its `run_id` into `execute`, so the queue id is the link.
 - **2026-09-19.** Every mechanism in the unit is live and the
   registry is doing its job (391 topics, 33 `written` since the 09-08 cutover,
   last note 09-19 05:20Z, #65 succeeding nightly). Corrections: the retired
-  source's staging root is `~/lloyd/_pipeline/...`, not vault-relative; the
+  source's staging root is `~/lloyd-data/_pipeline/...`, not vault-relative; the
   pool's inversion now cites `workers/pool.py:717` / `:744` / `:773` and names
   the retry ladder's real numbers; §4's `compute_health` analogy is stated as
   the joined-row task-id recovery it actually is; the shell read path is

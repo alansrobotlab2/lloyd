@@ -7,10 +7,10 @@ health report. Designed to be run by the nightly cron system.
 
 Inputs:
   - Facts dir + relationships index resolved via app.paths.VAULT_FACTS_ROOT
-    (currently ~/lloyd/_pipeline/vault-derived/facts/)
+    (currently ~/lloyd-data/_pipeline/vault-derived/facts/)
 
 Output:
-  - ~/lloyd/_pipeline/reflection/knowledge-health-YYYY-MM-DD.md
+  - ~/lloyd-data/_pipeline/reflection/knowledge-health-YYYY-MM-DD.md
 """
 
 import argparse
@@ -24,10 +24,10 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from app.paths import VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB
+from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB
 from app.kg_store import StoreUnavailable, store as _kg_store
 
-DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "reflection"
+DEFAULT_OUTPUT_DIR = PIPELINE_DIR / "reflection"
 
 # Rows rendered per long section. The report is read by a human and by the
 # morning briefing; a 23,564-row table is neither. The count is always given
@@ -821,7 +821,7 @@ def main():
 
     baseline = 0
     try:
-        baseline_path = Path.home() / "lloyd" / "_pipeline" / "memory-graph" / "graph-baseline.json"
+        baseline_path = PIPELINE_DIR / "memory-graph" / "graph-baseline.json"
         baseline = int(json.loads(baseline_path.read_text())["active_edges"])
     except Exception:
         pass

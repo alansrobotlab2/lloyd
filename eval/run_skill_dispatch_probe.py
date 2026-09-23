@@ -34,10 +34,11 @@ sys.path.insert(0, str(HERE.parent))
 
 from app.harness import skill_dispatch as sd  # noqa: E402
 
-# NOT `app.paths.SESSIONS_DIR`: that resolves relative to the package, so from a
+# NOT `app.paths.SESSIONS_DIR`: that follows this process's data root, so from a
 # self-mod worktree it points at the worktree's empty `sessions/` and the probe
 # silently reports zero dispatches. Transcripts are a fact about the live box.
-DEFAULT_SESSIONS_DIR = Path.home() / "lloyd" / "sessions"
+from app.paths import production_data_root  # noqa: E402
+DEFAULT_SESSIONS_DIR = production_data_root() / "sessions"
 CHARS_PER_TOKEN = 4.0
 
 # What the protocol requires, expressed as the argument shape that shows the
@@ -157,7 +158,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sessions", type=int, default=400, help="Newest N session transcripts")
     ap.add_argument("--sessions-dir", default=str(DEFAULT_SESSIONS_DIR),
-                    help="Directory of session JSON transcripts (default: the live box's ~/lloyd/sessions)")
+                    help="Directory of session JSON transcripts (default: the live box's ~/lloyd-data/sessions)")
     ap.add_argument("--json", default="", help="Also write the report here")
     args = ap.parse_args()
 

@@ -66,11 +66,15 @@ import argparse
 import json
 import sqlite3
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from app.paths import PIPELINE_DIR  # noqa: E402
 
 # The fork in ~/lloyd/qmd -- the build the daemon serves this index with, and
 # since 2026-09-19 the only qmd on the machine. Until then this was the
@@ -82,7 +86,7 @@ INDEX = Path.home() / ".cache/qmd/index.sqlite"
 SUPERVISORCTL = Path.home() / ".local/share/uv/tools/supervisor/bin/supervisorctl"
 SUPERVISOR_CONF = Path.home() / "lloyd/agent-services/supervisor/supervisord.conf"
 SERVICE = "agent-qmd-daemon"
-REPORT_DIR = Path.home() / "lloyd/_pipeline/reflection"
+REPORT_DIR = PIPELINE_DIR / "reflection"
 
 # The two qmd collection definitions. `LIVE_CONFIG` is the one the daemon reads
 # and serves; `TEMPLATE_CONFIG` is the tracked copy an operator, a restore or a

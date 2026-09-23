@@ -8,7 +8,7 @@ sees them on the next iteration.
 
 Lifetime: process-scoped. The lifecycle.shutdown_cleanup terminator
 walks `list_active()` and kills outstanding subprocesses so a backend
-restart doesn't leak. Output files at ``~/lloyd/_pipeline/tasks/<id>.log``
+restart doesn't leak. Output files at ``~/lloyd-data/_pipeline/tasks/<id>.log``
 are NOT auto-evicted — operators can prune them out-of-band.
 """
 
@@ -27,7 +27,7 @@ from typing import Any
 logger = logging.getLogger("lloyd-task-registry")
 
 # Where bg-task output logs live. Created on first use.
-from app.paths import TASKS_DIR  # anchored to LLOYD_HOME
+from app.paths import TASKS_DIR  # anchored to DATA_ROOT
 
 
 # Session correlation. Set by the harness wrapper before each MCP

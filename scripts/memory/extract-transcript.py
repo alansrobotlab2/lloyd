@@ -4,7 +4,7 @@ Extract clean user+assistant transcript from Lloyd session JSON files.
 Uses a watermark (state.json) to only output new content since last run.
 Exits with empty output if nothing new.
 
-Reads ~/lloyd/sessions/*.json
+Reads ~/lloyd-data/sessions/*.json
 
 Output format (stdout):
 ---
@@ -21,7 +21,10 @@ import sys
 import glob
 from datetime import datetime, timezone
 
-LLOYD_SESSIONS_DIR = os.path.expanduser("~/lloyd/sessions")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+from app.paths import SESSIONS_DIR  # noqa: E402
+
+LLOYD_SESSIONS_DIR = str(SESSIONS_DIR)
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 
 
@@ -65,7 +68,7 @@ def _extract_text_from_content(content) -> str:
 
 def process_lloyd_session(filepath, last_run_ts):
     """
-    Process a Lloyd session JSON file (~/lloyd/sessions/*.json).
+    Process a Lloyd session JSON file (~/lloyd-data/sessions/*.json).
     Returns (session_id, session_ts, entries).
     """
     try:

@@ -67,6 +67,11 @@ def _is_runtime_absence(spec: str) -> bool:
 
 
 def _resolves(spec: str) -> bool:
+    # `~/lloyd-data` is the live data root however `$HOME` is set: under a gate
+    # it would otherwise name the round's own, empty one (app.paths).
+    from app.paths import production_data_root
+    if spec.startswith("~/lloyd-data"):
+        spec = str(production_data_root()) + spec[len("~/lloyd-data"):]
     p = Path(spec.replace("~", str(Path.home()), 1))
     if "*" not in spec:
         return p.exists()

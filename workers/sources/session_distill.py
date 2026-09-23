@@ -1,9 +1,9 @@
-"""session-distill source — mines ~/lloyd/sessions/*.json for patterns.
+"""session-distill source — mines ~/lloyd-data/sessions/*.json for patterns.
 
 Each eligible session becomes one queue item; the handler asks the primary
 model to identify repeated failures, unresolved questions, or gap signals, and
 writes findings to
-`~/lloyd/_pipeline/vault-derived/pending-research/session-distill/{yyyy-mm-dd}/`
+`~/lloyd-data/_pipeline/vault-derived/pending-research/session-distill/{yyyy-mm-dd}/`
 — the leaf is this module's own `NAME`, one dated directory per run.
 
 **A session is distilled once, after it goes quiet.** The three gates below
@@ -44,7 +44,7 @@ logger = logging.getLogger("lloyd-workers.session_distill")
 
 NAME = "session-distill"
 DEFAULT_PRIORITY = 70
-from app.paths import SESSIONS_DIR  # anchored to LLOYD_HOME, not $HOME/lloyd
+from app.paths import SESSIONS_DIR  # anchored to DATA_ROOT, not $HOME/lloyd
 
 _MAX_ENQUEUE_PER_TICK = 3
 

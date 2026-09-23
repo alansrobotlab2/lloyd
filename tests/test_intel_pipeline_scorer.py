@@ -982,7 +982,7 @@ class _StubModel(BaseHTTPRequestHandler):
 def _cli_home(tmp_path):
     """A scratch HOME with the paths `_paths`/PROFILE/config resolve to."""
     home = tmp_path / "home"
-    feeds = home / "lloyd" / "_pipeline" / "vault-derived" / "memory" / "feeds"
+    feeds = home / "lloyd-data" / "_pipeline" / "vault-derived" / "memory" / "feeds"
     (feeds / "raw").mkdir(parents=True)
     (home / "obsidian").mkdir(parents=True)
     (home / "obsidian" / "interests.md").write_text(PROFILE_MD)
@@ -1008,7 +1008,7 @@ def _run_cli(home, relevance, *flags, extra_env=None):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        env = dict(os.environ, HOME=str(home),
+        env = dict(os.environ, HOME=str(home), LLOYD_DATA=str(home / "lloyd-data"),
                    INTEL_DISABLE_LLM="0",
                    INTEL_LLM_URL=f"http://127.0.0.1:{server.server_port}/v1/chat/completions")
         env.update(extra_env or {})

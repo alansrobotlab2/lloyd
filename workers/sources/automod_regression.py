@@ -33,8 +33,8 @@ exist for exactly this purpose), and run both arms in the same window. Drift
 cancels; what is left is the code.
 
 A missing noise file means "cannot evaluate", never "no regression".
-`eval/baselines/` is gitignored, so it is untracked runtime state that can
-simply be absent.
+`eval/baselines/` is runtime state under the data root, so it can simply be
+absent.
 """
 
 from __future__ import annotations
@@ -798,11 +798,17 @@ def _run_arm(tree: Path, label: str, env: dict, timeout: float = 900.0) -> dict 
       the difference as a code regression, which is how a change to the
       MEASUREMENT gets attributed to the thing being measured.
     """
+    from app import paths
     from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB
 
+    # The run record lands in the arm's own data root: this process's for the
+    # running tree, the scratch worktree's own for any other.
+    data_root = (paths.DATA_ROOT if Path(tree).resolve() == paths.LLOYD_HOME
+                 else paths.data_root_for_tree(Path(tree)))
     env = {
         **env,
         "PYTHONPATH": str(tree),
+        "LLOYD_DATA": str(data_root),
         "LLOYD_FACTS_ROOT": str(VAULT_FACTS_ROOT),   # live data, whichever code
         "LLOYD_KG_DB": str(VAULT_KG_DB),
     }
@@ -817,7 +823,9 @@ def _run_arm(tree: Path, label: str, env: dict, timeout: float = 900.0) -> dict 
     if r.returncode != 0:
         logger.error("eval arm %s failed: %s", label, (r.stdout + r.stderr)[-500:])
         return None
-    return _load_run(tree / "eval" / "baselines", label)
+    # A commit older than the data root writes its record inside its tree.
+    return (_load_run(data_root / "eval" / "baselines", label)
+            or _load_run(Path(tree) / "eval" / "baselines", label))
 
 
 def measure_noise(trials: int = 5, fresh_trials: int = 5) -> dict:

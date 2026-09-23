@@ -496,7 +496,8 @@ def main() -> int:
     # Own subdirectory: these records have a different shape from the vault
     # retrieval baselines, and tests/test_eval_scorer.py reads the newest
     # file directly under eval/baselines/ expecting that shape.
-    out_path = HERE / "baselines" / "tool-choice" / f"{args.label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    from app.paths import EVAL_BASELINES_DIR
+    out_path = EVAL_BASELINES_DIR / "tool-choice" / f"{args.label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=2, default=str))
     print(f"[info] wrote {out_path}")

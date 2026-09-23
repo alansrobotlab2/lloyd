@@ -31,7 +31,7 @@ from app.config import (
     _resolve_model_name,
 )
 from app.harness import HookRegistry, RunOptions, install_default_safety_hook
-from app.paths import SESSIONS_DIR
+from app.paths import SESSIONS_DIR, VOICE_PROFILES_DIR
 from app.sessions_io import (
     SessionTurn,
     _save_session_meta,
@@ -592,7 +592,7 @@ def _get_speaker_identifier():
             detail="voiceprint matching is disabled in config (livekit.voiceprint.enabled)",
         )
     return SpeakerIdentifier(
-        profiles_dir=vp_cfg.get("profiles_dir", "~/lloyd/voice_profiles"),
+        profiles_dir=vp_cfg.get("profiles_dir", str(VOICE_PROFILES_DIR)),
         threshold=float(vp_cfg.get("profile_threshold", 0.75)),
         unknown_label=str(vp_cfg.get("unknown_label", "Unknown")),
         device=str(vp_cfg.get("device", "cpu")),

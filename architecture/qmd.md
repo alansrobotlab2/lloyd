@@ -59,7 +59,7 @@ supervisord program agent-qmd-daemon
   index  ~/.cache/qmd/index.sqlite        (the default index name, "index")
   config ~/.config/qmd/index.yml          (collections + models)
   REST   POST /query, GET /health          MCP  /mcp
-  log    agent-services/logs/agent-qmd-daemon.err — one line per /query with phase ms
+  log    ~/lloyd-data/logs/services/agent-qmd-daemon.err — one line per /query with phase ms
 ```
 
 - **Binds `[::1]:8181` only.** An IPv4-literal probe cannot see it

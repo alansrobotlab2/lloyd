@@ -21,9 +21,10 @@ from agent_mcp import retrieval  # noqa: E402
 from app import kg_store  # noqa: E402
 
 from tests._live_data import require_live_data, require_live_volume
+from app.paths import production_data_root  # noqa: E402
 
 SCRIPT = ROOT / "scripts" / "memory" / "conversation_relations.py"
-TRAJECTORY_DIR = Path.home() / "lloyd" / "_pipeline" / "trajectories"
+TRAJECTORY_DIR = production_data_root() / "_pipeline" / "trajectories"
 
 
 def _load(name: str):

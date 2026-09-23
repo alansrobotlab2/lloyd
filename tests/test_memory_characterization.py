@@ -211,17 +211,17 @@ def test_query_stopwords_superset_of_entity():
 # ---------------------------------------------------------------------------
 
 def test_path_constants_follow_the_running_code_not_the_home_dir():
-    """State follows LLOYD_HOME, not `$HOME/lloyd`.
+    """State follows the resolved data root, not `$HOME/lloyd`.
 
     This test used to assert `Path.home()/"lloyd"`, which was the same thing in
     the live checkout and silently wrong everywhere else: a second checkout
     shared the first one's fact tree, and a self-modification canary would have
-    written into live state. The constants now anchor to the directory the
-    running code lives in (app/paths.py), so a worktree gets its own.
+    written into live state. The constants anchor to `app.paths.DATA_ROOT`,
+    which gives each checkout its own (architecture/data-home.md).
     """
-    from app.paths import LLOYD_HOME, VAULT_ROOT
+    from app.paths import DATA_ROOT, VAULT_ROOT
 
-    assert memory.FACTS_ROOT == LLOYD_HOME / "_pipeline" / "vault-derived" / "facts"
+    assert memory.FACTS_ROOT == DATA_ROOT / "_pipeline" / "vault-derived" / "facts"
     assert memory.ALIASES_PATH == memory.FACTS_ROOT / "entity-aliases.json"
     assert memory.VAULT == VAULT_ROOT
 

@@ -718,7 +718,7 @@ The survey is the only vault-health number this machine produces, and it is
 `lloyd-groundskeeper-survey.timer` systemd user unit and takes about 40 minutes.
 Three roots, and the distinction matters for reading any item it emits:
 `VAULT_ROOT` is `~/obsidian`, `FACTS_DIR` is
-`~/lloyd/_pipeline/vault-derived/facts` — **outside the vault** — and `MEMORY_MD`
+`~/lloyd-data/_pipeline/vault-derived/facts` — **outside the vault** — and `MEMORY_MD`
 is `~/obsidian/lloyd/MEMORY.md`.
 
 **The scan belongs on a timer and not in a turn, and that is an incident.** Until
@@ -770,7 +770,7 @@ Four properties worth knowing before touching any of it:
 - **79% of the queue names a path that does not exist.** `check_thin_profiles`
   writes `source_file: memory/facts/<entity>/`, vault-relative;
   `~/obsidian/memory/facts/` is gone and the fact tree moved to
-  `~/lloyd/_pipeline/vault-derived/facts/`. That is 15,299 `THIN_PROFILE` plus
+  `~/lloyd-data/_pipeline/vault-derived/facts/`. That is 15,299 `THIN_PROFILE` plus
   9,559 `ENRICH_THIN_PROFILE` items each naming a directory nothing can open.
   `STALE_FACT` is wrong more loudly: `relpath` against `VAULT_ROOT` on a path
   outside it yields a `../lloyd/...` escape.

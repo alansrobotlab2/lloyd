@@ -79,15 +79,17 @@ MAX_BUNDLE_CLAIMS = 20
 
 
 def default_root() -> Path:
-    """The checkout a relative `path` is resolved against.
+    """The data root a relative `path` is resolved against.
 
-    `Path(__file__)` and not `os.getcwd()`: the backend, the pool and the MCP
+    `app.paths` and not `os.getcwd()`: the backend, the pool and the MCP
     aggregator all run from different directories, and a relative claim that
     resolves against whichever cwd happened to be set is a check that silently
-    points at nothing. Inside a self-modification worktree this is the worktree,
-    which is the tree under test.
+    points at nothing. The claims are about runtime artifacts (`_pipeline/…`),
+    which live under the data root; inside a self-modification worktree that is
+    the worktree's own.
     """
-    return Path(__file__).resolve().parents[1]
+    from app.paths import DATA_ROOT
+    return DATA_ROOT
 
 
 def gaps_key(task_id: Any) -> str:
@@ -407,7 +409,7 @@ claims your summary makes:
 ```
 
 Rules:
-- `path` is relative to the lloyd checkout. `kind` is one of `file_exists`,
+- `path` is relative to the lloyd data root (`_pipeline/`, `autonomy-runs/`, …). `kind` is one of `file_exists`,
   `count_eq` (`measure`: `files` with an optional `glob`, `bytes`, `lines`,
   `matches` with a `pattern`), `json_key` (dotted `key`, optional `expected`),
   `regex` (`expect`: `match` or `absent`).

@@ -4,7 +4,7 @@ Holds the frontend's reported {tab, focus_by_tab} so MCP tools can read
 what the user is currently looking at. Pushes navigate commands back to
 subscribed frontend clients via an asyncio fan-out.
 
-Persists to ~/lloyd/mc-state.json so state survives backend restarts —
+Persists to <DATA_ROOT>/mc-state.json so state survives backend restarts —
 the bus itself is in-memory only (subscribers reattach on reconnect).
 """
 
@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from app.paths import LLOYD_HOME
+from app.paths import MC_STATE_PATH
 
 logger = logging.getLogger("lloyd-server")
 
@@ -35,7 +35,7 @@ VALID_TABS = {
     "settings", "graph", "ide", "browser",
 }
 
-_STATE_PATH = LLOYD_HOME / "mc-state.json"
+_STATE_PATH = MC_STATE_PATH
 
 _state_lock = asyncio.Lock()
 _state: dict[str, Any] = {

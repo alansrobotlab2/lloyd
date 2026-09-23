@@ -43,14 +43,16 @@ LLOYD = HERE.parent.parent
 sys.path.insert(0, str(LLOYD))
 sys.path.insert(0, str(HERE))
 
-from app.paths import VAULT_DERIVED_ROOT, VAULT_FACTS_ROOT, VAULT_KG_DB  # noqa: E402
+from app.paths import (  # noqa: E402
+    EVAL_BASELINES_DIR, PIPELINE_DIR, VAULT_DERIVED_ROOT, VAULT_FACTS_ROOT, VAULT_KG_DB,
+)
 from app.kg_store import KGStore  # noqa: E402
 from _invocation import invocation_ledger  # noqa: E402
 
 REBUILD_FACTS = VAULT_DERIVED_ROOT / "facts-rebuild"
 REBUILD_DB = VAULT_DERIVED_ROOT / "kg-rebuild.sqlite"
-RUN_ROOT = LLOYD / "_pipeline" / "backups"
-MEMORY_GRAPH = LLOYD / "_pipeline" / "memory-graph"
+RUN_ROOT = PIPELINE_DIR / "backups"
+MEMORY_GRAPH = PIPELINE_DIR / "memory-graph"
 STATE_PATH = VAULT_DERIVED_ROOT / "rebuild-state.json"
 
 # The gate. Every one of these must hold before the new tree replaces the old.
@@ -250,7 +252,8 @@ def _run_eval(label: str, run_dir: Path) -> dict:
         if out.returncode != 0:
             print(f"  [eval] failed rc={out.returncode}: {out.stderr[-500:]}")
             return {}
-        newest = max((LLOYD / "eval" / "baselines").glob(f"{label}-*.json"),
+        # run_eval.py inherits this environment, so it resolves the same data root.
+        newest = max(EVAL_BASELINES_DIR.glob(f"{label}-*.json"),
                      key=lambda p: p.stat().st_mtime)
         rec = json.loads(newest.read_text())
         shutil.copy2(newest, run_dir / newest.name)

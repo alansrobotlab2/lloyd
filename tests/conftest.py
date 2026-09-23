@@ -83,6 +83,36 @@ def _default_state_dirs_to_scratch() -> None:
 
 _default_state_dirs_to_scratch()
 
+
+def _data_root_to_scratch() -> None:
+    """No pytest run writes into the machine's data root (`~/lloyd-data`).
+
+    `app.paths.DATA_ROOT` resolves at import and, in the production checkout,
+    names the live sessions, `workers.db` and logs. Pointing `LLOYD_DATA` at a
+    scratch directory here, before any test module imports `app.paths`, is what
+    keeps every store the suite touches — including those no fixture isolates —
+    off the live one. A caller that chose a root of its own (the gate sets the
+    round's) keeps it; a caller that chose the LIVE root is refused, with the
+    same opt-in as the tree guard below.
+    """
+    try:
+        import pwd
+        live = (Path(pwd.getpwuid(os.getuid()).pw_dir) / "lloyd-data").resolve()
+    except Exception:  # pragma: no cover
+        live = None
+    chosen = os.environ.get("LLOYD_DATA")
+    if chosen:
+        if (live is not None and Path(chosen).expanduser().resolve() == live
+                and os.environ.get(LIVE_TREE_OPT_IN) != "1"):
+            raise pytest.UsageError(
+                f"refusing to run the suite with LLOYD_DATA={chosen}, the live data "
+                f"root. Leave LLOYD_DATA unset and conftest gives the run a scratch "
+                f"root. If you are a human and you mean it, set {LIVE_TREE_OPT_IN}=1.")
+        return
+    scratch = Path(tempfile.mkdtemp(prefix="lloyd-test-data-"))
+    atexit.register(shutil.rmtree, scratch, ignore_errors=True)
+    os.environ["LLOYD_DATA"] = str(scratch)
+
 #: Set to "1" to run the suite against the production checkout anyway. Named on
 #: the refusal below, because a guard whose way past it is undocumented gets
 #: worked around by deleting the guard.
@@ -168,6 +198,7 @@ def _refuse_the_production_tree() -> None:
 
 
 _refuse_the_production_tree()
+_data_root_to_scratch()
 
 
 @pytest.fixture(autouse=True)

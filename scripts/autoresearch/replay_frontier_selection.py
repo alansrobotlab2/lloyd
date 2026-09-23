@@ -74,26 +74,28 @@ from scripts.autoresearch.judge import aggregate_variant
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+from app.paths import PIPELINE_DIR, data_root_for_tree, production_data_root  # noqa: E402
+
 #: The path named by `--help` when nothing else holds a ledger.
-DEFAULT_LEDGER = REPO_ROOT / "_pipeline" / "research" / "ledger.jsonl"
+DEFAULT_LEDGER = PIPELINE_DIR / "research" / "ledger.jsonl"
 LEDGER_RELPATH = Path("_pipeline") / "research" / "ledger.jsonl"
 
 
 def default_ledger() -> Path:
     """The real ledger, resolved lazily so importing this module touches no disk.
 
-    `_pipeline/` is gitignored, so an automod worktree has no ledger and a census run
-    from inside a round would resolve to a path that does not exist. Search order: the
-    tree named by `LLOYD_HOME`, this module's own checkout, then `~/lloyd` — the first
-    that actually holds the file. Lazy rather than module-level, because an
-    import-time `exists()` is a filesystem probe inside every import of this module,
-    including the gate's.
+    The ledger lives under the runtime data root, and an automod worktree's root has
+    none, so a census run from inside a round would resolve to a path that does not
+    exist. Search order: the data root of the tree named by `LLOYD_HOME`, this
+    process's data root, then production's — the first that actually holds the file.
+    Lazy rather than module-level, because an import-time `exists()` is a filesystem
+    probe inside every import of this module, including the gate's.
     """
-    for root in (os.environ.get("LLOYD_HOME", ""), str(REPO_ROOT),
-                 str(Path.home() / "lloyd")):
-        if not root:
-            continue
-        candidate = Path(root).expanduser() / LEDGER_RELPATH
+    env_tree = os.environ.get("LLOYD_HOME", "")
+    roots = ([data_root_for_tree(Path(env_tree).expanduser())] if env_tree else []) + [
+        PIPELINE_DIR.parent, production_data_root()]
+    for root in roots:
+        candidate = root / LEDGER_RELPATH
         if candidate.exists():
             return candidate
     return DEFAULT_LEDGER

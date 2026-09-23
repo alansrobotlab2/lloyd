@@ -60,9 +60,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 
-# Where `app.paths` points by default. Refusing it is the only thing standing
-# between "measure on a copy" and "expire facts on the live corpus".
-LIVE_FACTS_ROOT = REPO / "_pipeline" / "vault-derived" / "facts"
+# Where `app.paths` points by default is `app.paths.VAULT_FACTS_ROOT_DEFAULT`
+# (and production's is under `production_data_root()`). Refusing both is the only
+# thing standing between "measure on a copy" and "expire facts on the live
+# corpus". Read in `main`, after the environment is set: importing `app.paths`
+# here would freeze `VAULT_FACTS_ROOT` before `LLOYD_FACTS_ROOT` points it away.
 
 # Alpha's query and the four tokens `fact_query_tokens` extracts from it; every
 # score below is (tokens present in the fact's text) / 4.
@@ -196,10 +198,6 @@ def main(argv: list[str] | None = None) -> int:
         facts_root = Path(tmp) / "facts"
         facts_root.mkdir(parents=True)
         build_fixture(facts_root)
-    if facts_root == LIVE_FACTS_ROOT.resolve():
-        print(f"refusing to run against the live fact tree: {facts_root}",
-              file=sys.stderr)
-        return 2
     kg_db = Path(args.kg_db) if args.kg_db else facts_root.parent / "kg.sqlite"
 
     # Set before anything imports `app.paths`, which reads these at import time.
@@ -207,6 +205,13 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["LLOYD_KG_DB"] = str(kg_db)
     if str(REPO) not in sys.path:
         sys.path.insert(0, str(REPO))
+    from app.paths import VAULT_FACTS_ROOT_DEFAULT, production_data_root
+    live_roots = {VAULT_FACTS_ROOT_DEFAULT.resolve(),
+                  (production_data_root() / "_pipeline" / "vault-derived" / "facts").resolve()}
+    if facts_root in live_roots:
+        print(f"refusing to run against the live fact tree: {facts_root}",
+              file=sys.stderr)
+        return 2
 
     result = measure(facts_root, kg_db)
     result["fixture_facts"] = sum(len(fs) for cs in _FIXTURE.values() for fs in cs.values())

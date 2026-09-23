@@ -1,0 +1,10 @@
+[Unit]
+Description=Prune Lloyd data-root snapshots daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

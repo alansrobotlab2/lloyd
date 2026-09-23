@@ -78,7 +78,7 @@ lesson. Newly mined candidates carry the new meaning, so the pool this gate keep
 shrinks towards the keys that really recovered.
 
 Usage:
-  consolidation_source_gate.py check --candidates ~/lloyd/_pipeline/skills/candidates/
+  consolidation_source_gate.py check --candidates ~/lloyd-data/_pipeline/skills/candidates/
   consolidation_source_gate.py drop-reason --frontmatter '<yaml-ish dict>'   # debug
 """
 from __future__ import annotations
@@ -93,7 +93,10 @@ from types import ModuleType
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MINER_PATH = REPO_ROOT / "scripts" / "mine-trajectories.py"
 VERDICTS_PATH = REPO_ROOT / "scripts" / "skill_verdicts.py"
-DEFAULT_CANDIDATES = REPO_ROOT / "_pipeline" / "skills" / "candidates"
+sys.path.insert(0, str(REPO_ROOT))
+from app.paths import PIPELINE_DIR  # noqa: E402
+
+DEFAULT_CANDIDATES = PIPELINE_DIR / "skills" / "candidates"
 
 # The front-matter scalars a reader may meet for a boolean field. Anything else is
 # not a flag and must not be guessed at: an unrecognised value keeps the key.

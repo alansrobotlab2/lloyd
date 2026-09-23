@@ -2462,7 +2462,7 @@ autonomous agent running half-reverted code.
 | Trigger | Window | Source |
 |---|---|---|
 | crash / won't boot | ~2 min | supervisord state + `/health` |
-| error-rate spike | ~15 min | `logs/server.err` by byte offset |
+| error-rate spike | ~15 min | `~/lloyd-data/logs/server.err` by byte offset |
 | data damage | ~15 min | KG row count, vault note count (`vaultwatch.measure`, `.git/**` excluded) |
 | retrieval-quality regression | nightly | paired `eval/run_eval.py` — retrieval only; no post-landing agent-loop axis (§8.1, §13) |
 

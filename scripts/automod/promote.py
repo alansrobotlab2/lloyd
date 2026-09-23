@@ -442,7 +442,8 @@ def wait_idle(max_wait: float | None = None, *, drain: bool = True,
 
 def count_kg_rows() -> int | None:
     import sqlite3
-    db = LIVE_ROOT / "_pipeline" / "vault-derived" / "kg.sqlite"
+    from app.paths import production_data_root
+    db = production_data_root() / "_pipeline" / "vault-derived" / "kg.sqlite"
     if not db.exists():
         return None
     try:

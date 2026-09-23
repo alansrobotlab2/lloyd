@@ -52,7 +52,7 @@ import yaml
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT, VAULT_KG_DB
+from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_ROOT, VAULT_KG_DB
 from app.entity_naming import looks_like_junk_entity
 # The two sub-rules behind `looks_like_junk_entity` that mean "this string is a
 # code artifact", imported bare rather than via the composite predicate: an alias
@@ -66,7 +66,7 @@ from app.atomic_io import atomic_write_text
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _invocation import invocation_ledger  # noqa: E402
 
-OUT_DIR = Path.home() / "lloyd" / "_pipeline" / "memory-graph"
+OUT_DIR = PIPELINE_DIR / "memory-graph"
 BASELINE_PATH = OUT_DIR / "graph-baseline.json"
 # --apply refuses when the graph holds less than this fraction of the largest
 # active-edge count ever recorded here, unless --allow-degraded. On 2026-09-03

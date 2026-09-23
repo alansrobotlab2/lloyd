@@ -6,7 +6,7 @@ import os
 import re
 import sys
 
-SESSIONS_DIR = os.path.expanduser("~/lloyd/sessions")
+SESSIONS_DIR = os.path.join(os.environ.get("LLOYD_DATA") or os.path.expanduser("~/lloyd-data"), "sessions")
 OUTPUT_FILE = "/tmp/mtp-bench-prompts.jsonl"
 MAX_SESSIONS = 8
 MAX_CHARS = 80_000

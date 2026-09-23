@@ -308,7 +308,7 @@ def test_a_topic_slug_inside_the_note_tree_writes_to_the_feed_digest(
 def _cli_home(tmp_path: Path) -> tuple:
     """A scratch HOME with the paths `_paths` and the profile resolve to."""
     home = tmp_path / "home"
-    feeds = home / "lloyd" / "_pipeline" / "vault-derived" / "memory" / "feeds"
+    feeds = home / "lloyd-data" / "_pipeline" / "vault-derived" / "memory" / "feeds"
     (feeds / "raw").mkdir(parents=True)
     (home / "obsidian" / "knowledge").mkdir(parents=True)
     (home / "obsidian" / "interests.md").write_text(
@@ -345,7 +345,7 @@ def test_cli_write_links_the_five_videos_the_2026_09_19_run_stubbled(tmp_path):
     proc = subprocess.run(
         [sys.executable, "-m", "intel_pipeline", "--write", "--date", DAY],
         cwd=str(INTEL_DIR),
-        env=dict(os.environ, HOME=str(home)),
+        env=dict(os.environ, HOME=str(home), LLOYD_DATA=str(home / "lloyd-data")),
         capture_output=True, text=True, timeout=180)
 
     assert proc.returncode == 0, proc.stderr[-2000:]

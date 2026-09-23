@@ -221,7 +221,7 @@ class Canary:
         from scripts.automod import canary_smoke
         return canary_smoke.run(
             backend=f"http://127.0.0.1:{self.backend_port}",
-            sessions_dir=self.worktree / "sessions",
+            sessions_dir=cc.canary_data_root(self.round_dir) / "sessions",
             timeout=timeout,
         )
 

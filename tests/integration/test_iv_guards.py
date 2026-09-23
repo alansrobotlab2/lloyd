@@ -693,6 +693,12 @@ def _iv_repo(root: str) -> Path:
     (repo / "scripts").mkdir(parents=True)
     for name in RECORDER_SCRIPTS:
         shutil.copy2(LLOYD_HOME / "scripts" / name, repo / "scripts" / name)
+    # The scripts resolve their paths through app.paths; a checkout that is not
+    # production keeps its data under `<repo>/.lloyd-data` (rule 3).
+    (repo / "app").mkdir()
+    (repo / "app" / "__init__.py").write_text("")
+    shutil.copy2(LLOYD_HOME / "app" / "paths.py", repo / "app" / "paths.py")
+    (repo / ".lloyd-data").mkdir()
     return repo
 
 
@@ -791,7 +797,7 @@ def test_the_recorder_breaches_a_sustained_00526_median():
     """
     with tempfile.TemporaryDirectory() as td:
         repo, series = _iv_repo(td), Path(td) / "lloyd" / "iv-metrics.jsonl"
-        _iv_db(repo / "usage.db", healthy=18, dropped=1)
+        _iv_db(repo / ".lloyd-data" / "usage.db", healthy=18, dropped=1)
         _iv_series(series, IV_DEGRADED_PRIOR_RATES)
         p = _iv_record(repo, series)
         assert p.returncode == 2, (
@@ -820,7 +826,7 @@ def test_the_recorder_stays_quiet_on_the_recorded_healthy_history():
     """
     with tempfile.TemporaryDirectory() as td:
         repo, series = _iv_repo(td), Path(td) / "lloyd" / "iv-metrics.jsonl"
-        _iv_db(repo / "usage.db", healthy=66, dropped=1)
+        _iv_db(repo / ".lloyd-data" / "usage.db", healthy=66, dropped=1)
         _iv_series(series, IV_RECORDED_HEALTHY_RATES)
         p = _iv_record(repo, series)
         assert p.returncode == 0, (

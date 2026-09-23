@@ -50,7 +50,7 @@ from agent_mcp.vault import (
 )
 from agent_mcp.facts import _extract_entities_from_query
 from app.kg_store import StoreUnavailable, store
-from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB
+from app.paths import EVAL_BASELINES_DIR, VAULT_FACTS_ROOT, VAULT_KG_DB
 # The absolute latency ceiling for THIS run's context, read from the one module
 # that owns it. Before #1129 the runner wrote `latency_ms_avg` into every
 # artifact and nothing anywhere read it, which is how a 708 ms → 4,230 ms step
@@ -1132,7 +1132,7 @@ def main() -> int:
         # compares quality and this compares against a fixed number.
         "latency_budget": over_budget(summary["overall"], CONTEXT_NIGHTLY),
     }
-    out_path = HERE / "baselines" / f"{args.label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    out_path = EVAL_BASELINES_DIR / f"{args.label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=2, default=str))
     print(f"[info] wrote {out_path}")

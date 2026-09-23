@@ -61,7 +61,7 @@ from pathlib import Path
 
 from app import paths as _paths
 from app.gitinfo import head_commit as _head_commit
-from app.paths import LLOYD_HOME, VAULT_FACTS_ROOT, VAULT_ROOT
+from app.paths import LLOYD_HOME, PIPELINE_DIR, VAULT_FACTS_ROOT, VAULT_ROOT
 from agent_mcp._shared import _find_entity_dir
 from agent_mcp.facts import _apply_fact_marks, _detect_contradictions_sync
 from agent_mcp.retrieval import get_facts_sync as _get_facts_sync
@@ -101,7 +101,7 @@ def corrections_paths() -> list[Path]:
 # in every run, permanently. Entries outside the window are counted in the record
 # and contribute no entity.
 CORRECTIONS_WINDOW_DAYS = 30
-RECORD_DIR = LLOYD_HOME / "_pipeline" / "improvement"
+RECORD_DIR = PIPELINE_DIR / "improvement"
 
 # Entity dirs whose mtime is inside this window count as "a writer has been
 # here recently, and that fresh claim is the one most likely to already be

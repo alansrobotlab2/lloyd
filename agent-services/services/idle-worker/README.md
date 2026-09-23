@@ -10,7 +10,7 @@ A systemd-managed background task executor that runs when the local LLM is idle.
 
 **State:** `/home/alansrobotlab/lloyd/agent-services/services/idle-worker/task-queue.json`
 
-**Logs:** `/home/alansrobotlab/lloyd/agent-services/logs/idle-worker.log`
+**Logs:** `/home/alansrobotlab/lloyd-data/logs/services/idle-worker.log`
 
 ## Installation
 

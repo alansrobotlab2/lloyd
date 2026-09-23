@@ -100,9 +100,12 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Append-only. `~/lloyd/_pipeline` is gitignored, same as `REVIEW-LOG.md` beside it.
-DEFAULT_STORE = Path.home() / "lloyd" / "_pipeline" / "skills" / "reviews" / "verdicts.jsonl"
-DEFAULT_CANDIDATES = Path.home() / "lloyd" / "_pipeline" / "skills" / "candidates"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.paths import PIPELINE_DIR  # noqa: E402
+
+# Append-only. Under the data root's `_pipeline/`, same as `REVIEW-LOG.md` beside it.
+DEFAULT_STORE = PIPELINE_DIR / "skills" / "reviews" / "verdicts.jsonl"
+DEFAULT_CANDIDATES = PIPELINE_DIR / "skills" / "candidates"
 
 # The durable copy (#772), derived from the vault root like every other vault writer
 # (`scripts/skill_lint.py:34`, `app/paths.py:10`). Deliberately NOT under

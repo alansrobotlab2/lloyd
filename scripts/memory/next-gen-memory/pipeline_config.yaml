@@ -83,11 +83,11 @@ hashing:
   # Algorithm for content hashing
   algorithm: "sha256"
   # Path to store hashes
-  hash_store: "~/lloyd/_pipeline/content-hashes.json"
+  hash_store: "~/lloyd-data/_pipeline/content-hashes.json"
 
 logging:
   # Log file path
-  log_file: "~/lloyd/_pipeline/nightly-extraction.log"
+  log_file: "~/lloyd-data/_pipeline/nightly-extraction.log"
   # Log level (DEBUG, INFO, WARNING, ERROR)
   level: "INFO"
   # Print progress every N files

@@ -27,9 +27,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from app.paths import VAULT_FACTS_ROOT  # noqa: E402
+from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT  # noqa: E402
 
-DEFAULT_CACHE = Path.home() / "lloyd" / "_pipeline" / "memory-graph" / "semantic-verdicts.jsonl"
+DEFAULT_CACHE = PIPELINE_DIR / "memory-graph" / "semantic-verdicts.jsonl"
 
 SYSTEM_PROMPT = (
     "You decide whether two entity names from a personal knowledge graph refer to the SAME "

@@ -29,6 +29,7 @@ import sqlite3
 from pathlib import Path
 
 from tests._live_data import require_live_data
+from app.paths import production_data_root  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
@@ -300,8 +301,8 @@ def test_paths_comment_states_the_fate_chosen():
 # test_automod_hardening reads the live skills tree).
 
 LOADED_MEMORY = Path.home() / "obsidian" / "lloyd" / "USER.md"
-LIVE_FACT_TREE = Path.home() / "lloyd" / "_pipeline" / "vault-derived" / "facts"
-LIVE_BACKUPS = Path.home() / "lloyd" / "_pipeline" / "backups"
+LIVE_FACT_TREE = production_data_root() / "_pipeline" / "vault-derived" / "facts"
+LIVE_BACKUPS = production_data_root() / "_pipeline" / "backups"
 # A line counts as history if it is marked closed/retired or carries a date in
 # either form this vault uses: `2026-09-03`, or the `08-22` bullet prefix the
 # incident notes use. Loose by design — it asks "is this line standing on a

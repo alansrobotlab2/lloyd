@@ -170,7 +170,7 @@ agent-services/logs/<service>.err   # stderr
 agent-services/logs/supervisord.log # supervisord itself
 ```
 
-The three `lloyd-mc` services log to `~/lloyd/logs/` instead
+The three `lloyd-mc` services log to `~/lloyd-data/logs/` instead
 (`server.log`, `server.err`, `mcp.log`, `mcp.err`, `frontend.log`).
 
 All are capped at 10 MB with rotation.

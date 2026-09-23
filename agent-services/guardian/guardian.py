@@ -49,6 +49,7 @@ import policy            # noqa: E402
 import probes            # noqa: E402
 import rollback as rb    # noqa: E402
 import vaultwatch        # noqa: E402
+import datawatch         # noqa: E402
 import memwatch          # noqa: E402
 from supervisor import SupervisorClient, SupervisordUnreachable  # noqa: E402
 
@@ -110,6 +111,8 @@ class Guardian:
         self._alert_seen: dict[str, float] = {}
         self.cursor = logtail.LogCursor(self.gdir / "logcursors.json")
         self.vault = vaultwatch.VaultWatch(policy.VAULT_ROOT, self.gdir)
+        self.data = datawatch.DataWatch(policy.DATA_ROOT, self.gdir)
+        self._strays_checked_at = 0.0
         self.mem = memwatch.MemWatch(self.gdir, memwatch.unit_cgroup(policy.SUPERVISORD_UNIT))
 
         self.tick_n = 0
@@ -668,6 +671,66 @@ class Guardian:
             f"  /usr/bin/python3 {Path(vaultwatch.__file__).resolve()} clear\n"
             f"Sync will not start until then. Marker: {marker}")
 
+    # ── data-root tripwire ─────────────────────────────────────────────
+    def check_data(self) -> None:
+        """Trip on a wipe of `~/lloyd-data`: pause workers, halt promotions,
+        keep evidence, alert. Hourly, also name any runtime path that came
+        back into the code tree. Never raises into the tick."""
+        now = time.time()
+        if now - self._strays_checked_at >= policy.STRAY_CHECK_SECONDS:
+            self._strays_checked_at = now
+            try:
+                strays = datawatch.stray_in_tree(policy.REPO)
+            except Exception as exc:  # noqa: BLE001
+                log(f"stray check failed (continuing): {exc}")
+                strays = []
+            if strays and self.data.armed:
+                self.alert("error", "Runtime data is being written into the code tree",
+                           "These exist inside the tree again:\n  "
+                           + "\n  ".join(f"{policy.REPO}/{n}" for n in strays)
+                           + f"\n\nSomething still resolves a data path off the code "
+                           f"instead of app.paths.DATA_ROOT ({policy.DATA_ROOT}). Find the "
+                           "writer, move the data across, and remove the in-tree copy.")
+        try:
+            why, snap = self.data.tick()
+        except Exception as exc:  # noqa: BLE001
+            log(f"datawatch failed (continuing): {exc}")
+            return
+        if not why:
+            return
+        log(f"DATA TRIPWIRE: {why}")
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        actions: dict = {"evidence": None}
+        try:
+            self.data.trip(why, snap, actions)
+        except OSError as exc:
+            log(f"could not write data marker: {exc}")
+        actions["workers"] = self._pause_workers()
+        try:
+            self.state.set_halted(f"data tripwire: {why}")
+            actions["promotions"] = "halted"
+        except Exception as exc:  # noqa: BLE001
+            actions["promotions"] = f"halt failed: {exc}"
+        actions["evidence"] = self._vault_evidence(stamp)
+        try:
+            marker = self.data.trip(why, snap, actions)
+        except OSError:
+            marker = self.data.marker
+        before = self.data.history[-1].total if self.data.history else "?"
+        after = snap.total if snap else "missing"
+        gstate.append_event(self.state.ledger, {"event": "data_tripwire", "reason": why,
+                                                "files_before": before, "files_after": after,
+                                                "actions": actions})
+        self.alert(
+            "critical", "Lloyd data root damaged — promotions halted",
+            f"{why}\n\nFiles: {before} → {after}.\nWorker pool: {actions['workers']}\n"
+            f"Promotions: {actions['promotions']}\nEvidence: {actions['evidence']}\n\n"
+            "Hourly read-only snapshots are in /home/.lloyd-data-snapshots. Restore into "
+            "a side directory with `~/lloyd/scripts/backup/restore-data.sh` (never in "
+            "place), check it, swap it in with the stack stopped, then clear with\n"
+            f"  /usr/bin/python3 {Path(datawatch.__file__).resolve()} clear\n"
+            f"Snapshots are refused until then. Marker: {marker}")
+
     def _stop_sync(self) -> str:
         try:
             ok, detail = self.sup.stop(policy.OBSIDIAN_SYNC_PROGRAM, wait=False)
@@ -798,6 +861,7 @@ class Guardian:
         # caught while paused, while BROKEN, with supervisord unreachable and
         # with nothing under observation — every state the returns below mean.
         self.check_vault()
+        self.check_data()
         # And again: pressure building while supervisord is unreachable or the
         # stack is BROKEN is the moment the evidence is for.
         self.check_memory()

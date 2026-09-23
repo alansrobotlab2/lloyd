@@ -29,9 +29,8 @@ import yaml
 from app.atomic_io import atomic_write_text
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
-# Direct path — avoid importing app.* (triggers full FastAPI router chain → uvloop dep)
-from pathlib import Path as _P
-FACTS_DIR = _P("/home/alansrobotlab/lloyd/_pipeline/vault-derived/facts")
+# app.paths is stdlib-only (app/__init__.py is empty), so this pulls in no router.
+from app.paths import VAULT_FACTS_ROOT_DEFAULT as FACTS_DIR  # noqa: E402
 HOME = Path.home()
 
 # Entities whose facts fall into these categories are treated as personal

@@ -58,6 +58,7 @@ VAULT = HOME / "obsidian"
 MEMORY_DIR = VAULT / "memory"
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
+from app.paths import PIPELINE_DIR
 # RELATIONS_INDEX is written by THIS script and by nothing else in the checkout
 # (#1148). It used to have a second writer: `RelationsIndexGenerator.rebuild()`
 # in `scripts/memory/next-gen-memory/relations_index.py` wrote the same path with
@@ -84,8 +85,8 @@ from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 # The ownership text starts here rather than in the module docstring because
 # `tests/test_yaml_fix_skill_claims.py` pins the line the fallback `class yaml`
 # sits at, and the skill prose cites that line by number.
-RELATIONS_INDEX = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "relations-index.json"
-FACTS_INDEX = Path(__file__).resolve().parent.parent.parent / "_pipeline" / "facts-index.json"
+RELATIONS_INDEX = PIPELINE_DIR / "relations-index.json"
+FACTS_INDEX = PIPELINE_DIR / "facts-index.json"
 
 
 def rebuild_relations_index() -> dict:

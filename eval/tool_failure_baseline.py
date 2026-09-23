@@ -55,12 +55,16 @@ from collections import Counter, defaultdict
 
 DEFAULT_DAYS = 21
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-# The live box's transcripts, not a path relative to this checkout: `sessions/`
-# is gitignored, so a worktree has none, and the aggregate describes production
-# traffic whichever tree the script is invoked from. Precedent:
-# `eval/run_skill_dispatch_probe.py:40`, `eval/secondary_routing_eval.py:1176`.
-DEFAULT_SESSIONS_DIR = pathlib.Path.home() / "lloyd" / "sessions"
-DEFAULT_OUT_DIR = ROOT / "eval" / "baselines" / "tool-failures"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from app.paths import EVAL_BASELINES_DIR, production_data_root  # noqa: E402
+
+# The live box's transcripts, not this process's data root: a worktree's has
+# none, and the aggregate describes production traffic whichever tree the script
+# is invoked from. Precedent: `eval/run_skill_dispatch_probe.py:40`,
+# `eval/secondary_routing_eval.py:1176`.
+DEFAULT_SESSIONS_DIR = production_data_root() / "sessions"
+DEFAULT_OUT_DIR = EVAL_BASELINES_DIR / "tool-failures"
 
 # Longest signature kept. Two bodies that differ only past this point are the
 # same cause, and an unbounded signature turns a ranked list into a log tail.
@@ -379,7 +383,7 @@ def main(argv=None) -> int:
         sys.stdout.write("\n")
         return 0
     out = pathlib.Path(args.out).expanduser() if args.out else default_out_path(record)
-    if out.resolve().parent == (ROOT / "eval" / "baselines").resolve():
+    if out.resolve().parent == EVAL_BASELINES_DIR.resolve():
         # Writing here would make this record the newest `eval/baselines/*.json`
         # that `tests/test_eval_scorer.py::test_a_run_record_declares_whether_it_matched_production`
         # reads by mtime, and this record carries none of the retrieval knobs it

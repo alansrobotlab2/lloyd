@@ -18,13 +18,13 @@ import pytest
 import yaml
 
 from eval.measure_parallel_dispatch import iterations, measure, qualifies
-from scripts.maintenance.sync_tool_overrides import drift, sync
+from scripts.maintenance.sync_tool_overrides import drift, overrides_path, sync
 
 
 # ── sync_tool_overrides ─────────────────────────────────────────────────────
 
 def _tree(tmp_path, tracked_baseline, served_baseline=None, extra=None):
-    (tmp_path / "data").mkdir(exist_ok=True)
+    overrides_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
     (tmp_path / "config.yaml").write_text(yaml.dump(
         {"harness": {"tool_search": {"enabled": False, "threshold_tools": 30,
                                      "baseline_tools": tracked_baseline}}}))
@@ -34,7 +34,7 @@ def _tree(tmp_path, tracked_baseline, served_baseline=None, extra=None):
             "baseline_tools": served_baseline,
             "max_results_default": 5}}}
         payload.update(extra or {})
-        (tmp_path / "data" / "tool_overrides.yaml").write_text(yaml.dump(payload))
+        overrides_path(tmp_path).write_text(yaml.dump(payload))
     return tmp_path
 
 
@@ -56,9 +56,9 @@ def test_it_is_idempotent(tmp_path):
 
 def test_check_reports_without_writing(tmp_path):
     root = _tree(tmp_path, ["Read", "graph_explain"], ["Read"])
-    before = (root / "data" / "tool_overrides.yaml").read_text()
+    before = overrides_path(root).read_text()
     assert sync(root, check=True) == 1, "--check must exit non-zero on drift"
-    assert (root / "data" / "tool_overrides.yaml").read_text() == before
+    assert overrides_path(root).read_text() == before
 
 
 def test_check_is_quiet_and_zero_when_in_sync(tmp_path):
@@ -72,7 +72,7 @@ def test_every_other_key_in_the_override_survives(tmp_path):
                  extra={"mcp_servers": {"lloyd-mcp": {"disabled_tools": ["discord_send"]}},
                         "workers": {"enabled": True}})
     sync(root)
-    after = yaml.safe_load((root / "data" / "tool_overrides.yaml").read_text())
+    after = yaml.safe_load(overrides_path(root).read_text())
     assert after["mcp_servers"]["lloyd-mcp"]["disabled_tools"] == ["discord_send"]
     assert after["workers"]["enabled"] is True
 
@@ -81,7 +81,7 @@ def test_a_missing_override_is_not_an_error(tmp_path):
     """A fresh clone has none; config.yaml is the served state there."""
     root = _tree(tmp_path, ["Read"])
     assert sync(root) == 0
-    assert not (root / "data" / "tool_overrides.yaml").exists()
+    assert not overrides_path(root).exists()
 
 
 def test_it_only_compares_keys_the_override_actually_shadows(tmp_path):
@@ -95,8 +95,8 @@ def test_it_only_compares_keys_the_override_actually_shadows(tmp_path):
 
 def test_the_live_tree_is_in_sync_right_now():
     """Guards the merge step: if this fails in live, run the script."""
-    from app.paths import LLOYD_HOME
-    if not (LLOYD_HOME / "data" / "tool_overrides.yaml").exists():
+    from app.paths import LLOYD_HOME, TOOL_OVERRIDES_PATH
+    if not TOOL_OVERRIDES_PATH.exists():
         pytest.skip("no override file (a worktree or a fresh clone)")
     assert drift(LLOYD_HOME)[2] == {}, \
         "run `python -m scripts.maintenance.sync_tool_overrides`"

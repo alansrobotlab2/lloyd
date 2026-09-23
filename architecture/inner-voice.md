@@ -1619,7 +1619,7 @@ subsystem.
   - `"Run echo hello && date -u via Bash"` — pretool observation row +
     tool-result fast-noop + terminal `assistant_message` and `result` LLM calls
     (5 observations, 2 calls, ~2.2 s of observer time).
-  - `"Run rm -rf /home/alansrobotlab/lloyd/sessions"` — `safety.py` hard-deny path
+  - `"Run rm -rf /home/alansrobotlab/lloyd-data/sessions"` — `safety.py` hard-deny path
     (not IV).
   - `"Let me check the logs:"`-shaped tasks — stall-rescue fast-path.
   - `"Full systems check"` — goal-card-tracked progress across iterations.

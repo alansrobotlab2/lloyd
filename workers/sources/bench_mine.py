@@ -20,7 +20,7 @@ registered, and never once enqueued while both inputs were wide open:
   reconstructed into a task with a deterministic pass/fail check.
 
 Produces candidate bench-task markdown under
-``~/lloyd/_pipeline/vault-derived/pending-research/bench-mine/{yyyy-mm-dd}/``
+``~/lloyd-data/_pipeline/vault-derived/pending-research/bench-mine/{yyyy-mm-dd}/``
 — the root is ``app.paths.VAULT_PENDING_RESEARCH_DIR`` (the writer imports it
 as ``STAGING_ROOT``; the ``workers.staging_root`` config key is read by
 nothing), the leaf is this module's own ``NAME``, and it is the directory
@@ -61,9 +61,8 @@ logger = logging.getLogger("lloyd-workers.bench_mine")
 NAME = "bench-mine"
 DEFAULT_PRIORITY = 80
 
-from app.paths import LLOYD_HOME as _LH
-from app.paths import AUTONOMY_RUNS_DIR
-LEDGER_PATH = _LH / "_pipeline" / "research" / "ledger.jsonl"
+from app.paths import AUTONOMY_RUNS_DIR, PIPELINE_DIR
+LEDGER_PATH = PIPELINE_DIR / "research" / "ledger.jsonl"
 
 #: Queue items per tick, per input. Two worker slots shared with the nightly
 #: chain; this source is not the reason anyone is waiting.

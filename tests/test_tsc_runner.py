@@ -357,7 +357,7 @@ async def test_a_clean_run_emits_nothing(tree, monkeypatch):
 async def test_the_baseline_persists_across_a_restart(tree, monkeypatch):
     _fake_output(tree, ONE_ERROR, monkeypatch)
     await T.run_once(tree, seed_only=True)
-    assert (tree / "_pipeline" / "tsc" / "baseline.json").exists()
+    assert T._baseline_path(tree).exists()
 
     T._baseline.clear()                       # simulate a process restart
     T._pending[str(tree)] = {SID: {"src/A.tsx"}}

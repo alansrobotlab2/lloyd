@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Inner Voice (#345) — pretty-print a session's event log.
 
-Reads `~/lloyd/event_logs/<session_id>.events.jsonl` and renders each
+Reads `~/lloyd-data/event_logs/<session_id>.events.jsonl` and renders each
 event chronologically with terminal coloring + abbreviated payloads.
 Used for ad-hoc forensics: "what did Brain 1 do during this session?"
 
@@ -30,7 +30,9 @@ from typing import Any
 # rely on an installed package.
 _THIS = Path(__file__).resolve()
 _LLOYD_ROOT = _THIS.parent.parent.parent
-EVENT_LOGS_DIR = _LLOYD_ROOT / "event_logs"
+if str(_LLOYD_ROOT) not in sys.path:
+    sys.path.insert(0, str(_LLOYD_ROOT))
+from app.paths import EVENT_LOGS_DIR  # noqa: E402
 BLOBS_DIR = EVENT_LOGS_DIR / "blobs"
 
 

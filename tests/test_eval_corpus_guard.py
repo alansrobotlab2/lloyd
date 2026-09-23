@@ -38,12 +38,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from app.paths import production_data_root  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 _VENV = ROOT / ".venvs" / "lloyd" / "bin" / "python"
 PY = _VENV if _VENV.exists() else Path(sys.executable)
 SCRIPT = ROOT / "eval" / "run_eval.py"
-BASELINES = ROOT / "eval" / "baselines"
+# run_eval.py writes its record under the data root the child inherits.
+from app.paths import EVAL_BASELINES_DIR as BASELINES  # noqa: E402
 
 
 def _queries_file(tmp_path: Path) -> Path:
@@ -1020,7 +1022,7 @@ CORPUS = ROOT / "eval" / "vault_recall_queries.yaml"
 # absence of them is not a measurement of anything. Without it this file's entity
 # guard would refuse in every worktree, which is a red suite that tells you
 # nothing about the corpus.
-LIVE_KG_DB = Path.home() / "lloyd" / "_pipeline" / "vault-derived" / "kg.sqlite"
+LIVE_KG_DB = production_data_root() / "_pipeline" / "vault-derived" / "kg.sqlite"
 
 
 def _entity_store_names(getter=None, *, allow_live_fallback: bool = True) -> tuple[list[str], str]:

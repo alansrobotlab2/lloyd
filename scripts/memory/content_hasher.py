@@ -2,7 +2,7 @@
 """
 Content Hasher — SHA256-based change detection for nightly processing.
 
-Maintains a hash index at ~/lloyd/_pipeline/content-hashes.json.
+Maintains a hash index at ~/lloyd-data/_pipeline/content-hashes.json.
 Before processing a file, check if its hash has changed since last run.
 Unchanged files can be skipped entirely.
 
@@ -28,14 +28,17 @@ from pathlib import Path
 from typing import Iterable, Optional, Union
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.paths import production_data_root  # noqa: E402
 
 
 # LLOYD_CONTENT_HASHES lets a rebuild keep its own index. Without it the
 # rebuild would skip every file the LIVE tree had already extracted and
-# produce an empty tree.
+# produce an empty tree. The default is the live data root, as the nightly's
+# lock that guards it is (nightly_extraction._STATE_PIPELINE), unless
+# LLOYD_DATA explicitly names another.
 DEFAULT_INDEX_PATH = Path(os.environ["LLOYD_CONTENT_HASHES"]) \
     if os.environ.get("LLOYD_CONTENT_HASHES") \
-    else Path.home() / "lloyd" / "_pipeline" / "content-hashes.json"
+    else Path(os.environ.get("LLOYD_DATA") or production_data_root()) / "_pipeline" / "content-hashes.json"
 
 
 class ContentHasher:

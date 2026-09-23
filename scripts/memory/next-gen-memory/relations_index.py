@@ -122,7 +122,8 @@ VALID_RELATION_TYPES = set(INVERSE_RELATIONS.keys())
 # the same file — so pointing a write back at the derived path fails a test
 # instead of quietly re-opening the clobber. Consolidating the two schemas into
 # one index is a retrieval design call and is deliberately NOT made here.
-PIPELINE_DIR = Path.home() / "lloyd" / "_pipeline"
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from app.paths import PIPELINE_DIR  # noqa: E402
 DERIVED_INDEX_FILE = PIPELINE_DIR / "relations-index.json"
 TYPED_INDEX_FILE = PIPELINE_DIR / "relations-index-typed.json"
 

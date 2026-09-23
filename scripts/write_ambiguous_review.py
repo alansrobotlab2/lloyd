@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Write ambiguous entity clusters to hand-review markdown."""
 import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.paths import PIPELINE_DIR  # noqa: E402
+
+MEMORY_GRAPH = PIPELINE_DIR / "memory-graph"
 
 # Read the merge log
 clusters = []
-with open('/home/alansrobotlab/lloyd/_pipeline/memory-graph/entity-merges-2026-08-04.jsonl') as f:
+with open(MEMORY_GRAPH / 'entity-merges-2026-08-04.jsonl') as f:
     for line in f:
         entry = json.loads(line)
         if entry['status'] == 'AMBIGUOUS':
@@ -12,7 +19,7 @@ with open('/home/alansrobotlab/lloyd/_pipeline/memory-graph/entity-merges-2026-0
 
 # Write hand-review markdown
 date = '2026-08-04'
-output_path = f'/home/alansrobotlab/lloyd/_pipeline/memory-graph/entity-ambiguous-{date}.md'
+output_path = MEMORY_GRAPH / f'entity-ambiguous-{date}.md'
 
 with open(output_path, 'w') as out:
     out.write('# Entity Resolution — Ambiguous Clusters for Hand Review\n')

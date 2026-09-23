@@ -208,7 +208,8 @@ def main() -> int:
         "cost_note": summary["cost_note"],
         "summary": summary, "records": records,
     }
-    out_path = HERE / "baselines" / f"{args.label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    from app.paths import EVAL_BASELINES_DIR
+    out_path = EVAL_BASELINES_DIR / f"{args.label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=2, default=str))
     print(f"[info] wrote {out_path}")

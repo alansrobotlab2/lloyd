@@ -68,6 +68,7 @@ if str(ROOT) not in sys.path:
 # arms on the same harness; `grep -rln _sync_secondary_capture_call eval/`
 # is the acceptance check that this file still does that.
 import app.secondary_models as secondary_models  # noqa: E402  — the router itself
+from app.paths import production_data_root  # noqa: E402
 from app.secondary_models import (  # noqa: E402
     _sync_secondary_capture_call,
     _sync_secondary_fact_extraction,
@@ -1173,7 +1174,7 @@ def focus_transcript(messages: list[dict], window: int = 10, cap: int = 200) -> 
 #: turns would rebuild to a different string every run.
 MIN_SESSION_AGE_HOURS = 48
 
-LIVE_SESSIONS_DIR = Path.home() / "lloyd" / "sessions"
+LIVE_SESSIONS_DIR = production_data_root() / "sessions"
 
 
 def job_inputs(job: str, data: dict[str, Any]) -> str:
