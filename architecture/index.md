@@ -61,6 +61,7 @@ turns out to describe something gone or never built is moved to
 | [[autonomy]] | the scheduled-task mechanism: the five due-gates, failure backoff, the deadline anchor, run records, fleet health |
 | [[autonomy-jobs]] | what each scheduled job is *for* — the reflection chain, trace2skill, the graph chain, vault hygiene, inbound signal |
 | [[automod]] | self-modification: worktree, the gate ladder, review rung, promoter, guardian rollback, triage/implement, clustering, group triage |
+| [[testing]] | the ~8,700-test suite: synthetic vs live-data tests and the rule for the second, when a live check is retired rather than skipped, the gate's three floors and why the skip cap is not the thing to raise, marks the gate deselects, parallel isolation |
 | [[backlog]] | the markdown kanban at `~/obsidian/backlog/` and its tools |
 | [[arch-review]] | the pass that keeps these docs honest: a picklist of docs and functional groups, one session each, the doc edits itself |
 
