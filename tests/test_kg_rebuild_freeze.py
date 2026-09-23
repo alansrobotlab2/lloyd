@@ -176,11 +176,26 @@ def test_freeze_scores_an_empty_graph_on_purpose(tmp_path, monkeypatch):
     assert state["eval_before"]["mrr_doc"] == 0.1, "the gate needs a baseline to compare against"
 
 
-def test_the_after_eval_never_gets_the_empty_corpus_allowance():
+def test_the_after_eval_measures_the_rebuild_and_gets_no_empty_corpus_allowance():
+    """2026-09-23: without the rebuild env the gate's eval scored the 30-entity
+    LIVE store, refused it as empty, and failed a rebuild it never measured."""
     import inspect
     src = inspect.getsource(kg_rebuild.cmd_gate)
-    assert '_run_eval("rebuild-after", run_dir)' in src
+    assert '_run_eval("rebuild-after", run_dir, env=_rebuild_env())' in src
     assert "allow_empty_corpus" not in src
+
+
+def test_run_eval_hands_the_env_to_the_eval_process(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        from types import SimpleNamespace
+        return SimpleNamespace(returncode=2, stderr="stop here", stdout="")
+    monkeypatch.setattr(kg_rebuild.subprocess, "run", fake_run)
+    env = {"LLOYD_KG_DB": str(tmp_path / "kg-rebuild.sqlite")}
+    assert kg_rebuild._run_eval("x", tmp_path, env=env) == {}
+    assert seen["env"] is env
 
 
 def test_a_dry_run_writes_no_state_that_claims_a_pause(tmp_path, monkeypatch):

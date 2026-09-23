@@ -254,14 +254,16 @@ def _corpus_size() -> int:
     return len(mod.NightlyExtraction()._eligible_files(full_mode=True))
 
 
-def _run_eval(label: str, run_dir: Path, *, allow_empty_corpus: bool = False) -> dict:
-    """Run the retrieval eval against whatever is live now."""
+def _run_eval(label: str, run_dir: Path, *, allow_empty_corpus: bool = False,
+              env: dict | None = None) -> dict:
+    """Run the retrieval eval. `env=None` measures whatever is live now; the
+    gate passes `_rebuild_env()` so it measures the tree it is about to swap in."""
     try:
         out = subprocess.run(
             [_venv_python(), str(LLOYD / "eval" / "run_eval.py"),
              "--label", label, "--notes", f"kg rebuild: {label}",
              *(["--allow-empty-corpus"] if allow_empty_corpus else [])],
-            cwd=str(LLOYD), capture_output=True, text=True, timeout=1800)
+            cwd=str(LLOYD), capture_output=True, text=True, timeout=1800, env=env)
         if out.returncode != 0:
             print(f"  [eval] failed rc={out.returncode}: {out.stderr[-500:]}")
             return {}
@@ -669,9 +671,14 @@ def cmd_gate(args) -> int:
                f"{junk} missing" if junk else "hand-stated facts re-added")
     st.close()
 
-    # 9. Retrieval, against the tree we are about to swap in.
+    # 9. Retrieval, against the tree we are about to swap in. Under the rebuild
+    # env, or the eval scores the LIVE tree and store: on 2026-09-23 it read the
+    # 30-entity live store, refused it as an empty corpus, and failed a gate the
+    # rebuild (98k facts) was never measured for. Only `extract` and `import`
+    # had ever set this env.
     before = state.get("eval_before") or {}
-    after = _run_eval("rebuild-after", run_dir) if not args.skip_eval else {}
+    after = (_run_eval("rebuild-after", run_dir, env=_rebuild_env())
+             if not args.skip_eval else {})
     results["eval_before"], results["eval_after"] = before, after
     if after and before:
         for key, gate_key in (("mrr_doc", "eval_mrr_slack"), ("ndcg10", "eval_ndcg_slack")):
