@@ -1012,7 +1012,8 @@ import inspect  # noqa: E402
 
 import yaml  # noqa: E402
 
-from tests._live_data import require_live_data
+from tests._live_data import (KG_ENTITY_FLOOR, require_live_data,
+                              require_live_entity_volume)
 
 CORPUS = ROOT / "eval" / "vault_recall_queries.yaml"
 # `_pipeline/` is gitignored (.gitignore:25), so a git worktree — including the
@@ -1068,9 +1069,21 @@ def _entity_store_names(getter=None, *, allow_live_fallback: bool = True) -> tup
             if path.is_file():
                 st = ks.KGStore(path)
                 try:
-                    return list(st.entities.all()), str(st.path)
+                    names = list(st.entities.all())
+                    where = str(st.path)
                 finally:
                     st.close()
+                # Present-but-stub is a third case that neither `require_live_data`
+                # (which asks only whether the file is there) nor the zero-row
+                # refusal below can see, and it is the one that blocks a promotion:
+                # a 30-entity stub of unrelated rows makes 96 of this corpus's 100
+                # `expect_entities` entries look unreachable, so the failure reads
+                # as a corpus defect when it is a measurement of the store. The
+                # helper owns the number; zero rows deliberately falls through to
+                # the refusal below, and a caller that passed its own getter never
+                # reaches this line, so no synthetic store can ever be skipped.
+                require_live_entity_volume(names, path)
+                return names, where
 
         # Neither route holds a store. The refusal below is still the right answer
         # for a caller that switched the fallback OFF — that caller is asserting the
@@ -1089,6 +1102,29 @@ def _entity_store_names(getter=None, *, allow_live_fallback: bool = True) -> tup
     # forbids — an unavailable store must not become an unsatisfiable corpus.
     st = ks.store()
     return list(st.entities.all()), str(st.path)
+
+
+def _named_store(names):
+    """A synthetic store holding exactly `names`, for a guard that must not read the graph.
+
+    A guard that supplies its own corpus (`tmp_path`) has to supply its own store too.
+    Before #1394 the ones below did not, so their verdict depended on how many rows
+    the machine's live store happened to hold — and once a 30-row stub appeared, the
+    non-vacuity probes were reading that stub and could not tell a working checker
+    from a broken one. Passing a getter also puts them on the route where the live
+    volume floor does not apply, which is the point: a probe that must fail can never
+    be skipped out of existence by a stub on disk.
+    """
+    class _Entities:
+        @staticmethod
+        def all():
+            return list(names)
+
+    class _Store:
+        path = Path("synthetic-kg.sqlite")
+        entities = _Entities()
+
+    return _Store
 
 
 def _entity_satisfiability_report(corpus: Path = CORPUS, getter=None, *,
@@ -1169,7 +1205,7 @@ def test_the_guard_loops_the_whole_corpus_and_names_no_query_id():
     the shape — every expectation examined, no corpus query id written into the
     checker's source — not just the current verdict.
     """
-    report = _entity_satisfiability_report()
+    report = _entity_satisfiability_report(getter=_named_store(["Knowledge Graph"]))
     specs = yaml.safe_load(CORPUS.read_text())["queries"]
     per_query = {str(s["id"]): len(s.get("expect_entities") or []) for s in specs}
     assert report["expectations"] == sum(per_query.values()), (
@@ -1198,7 +1234,8 @@ def test_the_guard_fails_on_a_synthetic_query_no_entity_can_satisfy(tmp_path):
         "    expect_entities: [\"Backlog Item #363\"]\n"
         "    expect_docs: [lloyd]\n"
     )
-    report = _entity_satisfiability_report(corpus)
+    report = _entity_satisfiability_report(
+        corpus, getter=_named_store(["Knowledge Graph", "Lloyd Backlog System"]))
     assert report["expectations"] == 1, report
     with pytest.raises(AssertionError) as exc:
         _assert_entity_expectations_satisfiable(report)
@@ -1350,6 +1387,168 @@ def test_a_store_that_opens_with_no_entity_rows_is_refused_as_a_verdict(monkeypa
         _entity_satisfiability_report(getter=EmptyStore)
     assert "0 entity rows" in str(exc.value), exc.value
     assert "not a verdict" in str(exc.value), exc.value
+
+
+class _RowStore:
+    """A stand-in `KGStore` opened at `path`, holding exactly `n_rows` entity rows.
+
+    #1394 needs to exercise the LIVE route at a chosen row count — the count is the
+    thing that decides skip versus verdict — and the only live store on the box is the
+    30-row stub left by the 2026-09-22 loss. So the sanctioned opener is patched, which
+    is the same pair `test_an_unreadable_store_raises_rather_than_reporting_every_name_absent`
+    patches: `app.kg_store` stays the one module that opens the file.
+    """
+
+    opened: list = []
+
+    def __init__(self, path, n_rows=30, prefix="Leftover Stub Entity"):
+        self.path = Path(path)
+        self._n = n_rows
+        self._prefix = prefix
+        _RowStore.opened.append(str(path))
+
+    class _E:
+        def __init__(self, owner):
+            self._owner = owner
+
+        def all(self):
+            return [f"{self._owner._prefix} {i:05d}" for i in range(self._owner._n)]
+
+    @property
+    def entities(self):
+        return _RowStore._E(self)
+
+    def close(self):
+        return None
+
+
+def _patch_live_store(monkeypatch, n_rows, prefix="Leftover Stub Entity"):
+    """Point the sanctioned opener at a store of `n_rows` rows; `store()` still refuses."""
+    import app.kg_store as ks
+
+    def refusing(*_a, **_k):
+        raise ks.StoreUnavailable("the process-wide default is not this test's store")
+
+    monkeypatch.setattr(ks, "store", refusing)
+    monkeypatch.setattr(ks, "KGStore",
+                        lambda path: _RowStore(path, n_rows, prefix))
+    _RowStore.opened = []
+
+
+def test_a_below_floor_live_store_skips_naming_floor_count_and_path(monkeypatch):
+    """Clause 1: a present store below the floor is a named skip, not a red node.
+
+    The failure this removes is the one that blocked every promotion on 2026-09-23: a
+    30-entity / 0-edge stub sat at the live path, `require_live_data` saw a file and
+    said nothing, and the guard reported 96 of 100 corpus expectations as unreachable
+    — a statement about the store, reproduced red at base in four consecutive rounds.
+    The skip has to carry all three numbers a reader needs (floor, observed rows, the
+    path it opened) or it is indistinguishable from the guard having not looked.
+    """
+    _patch_live_store(monkeypatch, 30)
+
+    with pytest.raises(pytest.skip.Exception) as exc:
+        _entity_satisfiability_report()
+    reason = str(exc.value)
+    assert "holds 30 entity rows" in reason, reason
+    assert f"the {KG_ENTITY_FLOOR}-entity floor" in reason, reason
+    assert _RowStore.opened, "the guard never opened a store, so the path in its " \
+        "skip reason could not have come from the route that read it"
+    assert _RowStore.opened[0] in reason, f"{_RowStore.opened[0]!r} missing from {reason}"
+
+
+def test_a_below_floor_store_reached_through_a_getter_is_a_verdict_not_a_skip(monkeypatch):
+    """Clause 3's other half: the floor lives on the live route only.
+
+    A caller that names its own store is asserting something about a store it built.
+    If the machine's stub could skip that call, the probe would be reading the graph
+    behind its own fake and passing for the wrong reason — the rule the getter branch
+    of `_entity_store_names` already states for refusals, extended to skips.
+    """
+    _patch_live_store(monkeypatch, 30)
+
+    try:
+        report = _entity_satisfiability_report(getter=_named_store(["Knowledge Graph"]))
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"a one-row getter store was skipped by the live volume floor, "
+                    f"which means the guard read the machine's graph behind its own "
+                    f"fake: {exc}")
+    assert report["entity_names"] == 1, report
+    # And it is a verdict, not a shrug: one row against the shipped corpus leaves most
+    # expectations unreachable, the containment rule still reaches the rest, and the
+    # failure names BOTH halves of an offender — its corpus query id and the expectation
+    # text. The offender is read out of the report instead of written here: `9b028e9`
+    # re-pointed 22 gold names against the rebuilt graph and dropped 5, so a hard-coded
+    # `query -> 'name'` pair in this assert would go red on the next re-extraction for a
+    # reason that has nothing to do with this clause. What must not move is that the
+    # message renders the pair the report holds, with the denominator beside it.
+    assert report["dead"], report
+    assert len(report["dead"]) < report["expectations"], (
+        f"with one row named `Knowledge Graph`, containment should still reach "
+        f"several expectations; every one was reported dead instead: {report}")
+    offender = report["dead"][0]
+    with pytest.raises(AssertionError) as exc:
+        _assert_entity_expectations_satisfiable(report)
+    msg = str(exc.value)
+    assert f"{offender['query']} -> {offender['expect']!r}" in msg, (
+        f"the failure did not name both halves of the offender it reported "
+        f"({offender}): {msg}")
+    assert f"{len(report['dead'])} of {report['expectations']}" in msg, msg
+
+
+def test_a_live_store_at_the_floor_reports_a_verdict_and_does_not_skip(monkeypatch):
+    """The floor is a floor, not an off-switch: at the floor the guard answers.
+
+    Without this pair the skip could be widened to "always skip" and every node in
+    this file would still be green, which is the failure #878 was filed against.
+    """
+    _patch_live_store(monkeypatch, KG_ENTITY_FLOOR)
+
+    try:
+        report = _entity_satisfiability_report()
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"a store holding exactly the {KG_ENTITY_FLOOR}-entity floor "
+                    f"skipped instead of answering: {exc}")
+    assert report["entity_names"] == KG_ENTITY_FLOOR, report
+    # The stub names are not in the corpus, so the verdict here is a failing one —
+    # a floor-passing store must still be able to lose.
+    assert report["dead"], report
+    with pytest.raises(AssertionError) as exc:
+        _assert_entity_expectations_satisfiable(report)
+    assert "expect_entities" in str(exc.value), exc.value
+
+
+def test_both_kg_guards_route_through_the_one_floor_helper():
+    """Clause 4: one floor, defined once, called by both guard files.
+
+    Source-shape in this file's existing `inspect.getsource` style, because the thing
+    to pin is that the two guards cannot disagree: a second literal anywhere in either
+    guard is a floor someone can change in one place, which is how a guard silently
+    becomes an always-skip.
+    """
+    import tests._live_data as live_data
+
+    assert live_data.KG_ENTITY_FLOOR == KG_ENTITY_FLOOR == 1000, live_data.KG_ENTITY_FLOOR
+
+    helper = inspect.getsource(live_data.require_live_entity_volume)
+    assert "KG_ENTITY_FLOOR" in helper, helper
+    assert "pytest.skip" in helper, helper
+    assert "0 < count < KG_ENTITY_FLOOR" in helper, (
+        f"the helper must skip only ABOVE zero rows — an empty store is a failing "
+        f"verdict, not a skip: {helper}")
+
+    guard_a = inspect.getsource(_entity_store_names)
+    assert "require_live_entity_volume(" in guard_a, guard_a
+    assert "KG_ENTITY_FLOOR" not in guard_a and "1000" not in guard_a, (
+        f"the corpus guard re-states the floor instead of calling the helper: {guard_a}")
+
+    import tests.test_retrieval_seed_anchoring as seed_anchoring
+
+    guard_b = inspect.getsource(seed_anchoring._run_against_the_live_corpus)
+    assert "require_live_entity_volume(" in guard_b, guard_b
+    assert "KG_ENTITY_FLOOR" not in guard_b and "1000" not in guard_b, (
+        f"the seed-anchoring runner re-states the floor instead of calling the "
+        f"helper: {guard_b}")
 
 
 # ── #1319: the DOCUMENT leg gets the same guard the entity leg has ───────────

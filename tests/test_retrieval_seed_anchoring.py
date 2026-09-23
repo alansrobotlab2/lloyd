@@ -20,10 +20,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import pytest  # noqa: E402
+
 import app.kg_store as ks  # noqa: E402
 from agent_mcp import retrieval  # noqa: E402
 
-from tests._live_data import require_live_data, require_live_volume
+from tests._live_data import (KG_ENTITY_FLOOR, require_live_data,
+                              require_live_entity_volume, require_live_volume)
 from app.paths import production_data_root  # noqa: E402
 
 # `_pipeline/` is gitignored, so a git worktree — the automod round this runs in —
@@ -185,6 +188,21 @@ def _run_against_the_live_corpus(script: str) -> dict:
     # because its edges were classified over time and no run reproduces them.
     require_live_data(LIVE_FACTS, "the derived fact tree")
     require_live_data(LIVE_KG_DB, "the knowledge-graph store", kind="file")
+    # Absent and present-but-stub are different facts, and only the first was handled.
+    # With a 30-entity / 0-edge sqlite at this path every gold `expect_entities` name
+    # resolves to nothing (`unresolvable` listed 96 of 100 on 2026-09-23) and the
+    # anchorless residue is a measurement of the stub, so all three guards that read
+    # the live corpus reported red at base and blocked the automod `tests` rung on
+    # every tree. The row count is read through `app.kg_store`, the one opener, and
+    # handed to the SAME floor the corpus guard uses, so the two files cannot
+    # disagree about what "too small to discriminate" means. Zero rows is not taken
+    # here: an empty table stays the caller's failing verdict, never a skip.
+    _store = ks.KGStore(LIVE_KG_DB)
+    try:
+        _rows = list(_store.entities.all())
+    finally:
+        _store.close()
+    require_live_entity_volume(_rows, LIVE_KG_DB)
     env = dict(os.environ)
     env["LLOYD_FACTS_ROOT"] = str(LIVE_FACTS)
     env["LLOYD_KG_DB"] = str(LIVE_KG_DB)
@@ -441,3 +459,113 @@ def test_every_gold_entity_name_resolves_to_an_entity_the_store_can_return():
     """
     out = _run_against_the_live_corpus(_CORPUS_SCRIPT)
     assert out["unresolvable"] == [], out["unresolvable"]
+
+
+# ── #1394: a store that exists but is too small to discriminate ───────────────
+#
+# These three guards call the same runner, so one gate covers all three, and the
+# three below pin that gate. They are deliberately hermetic — the roots are pointed
+# at a tmp file and the sanctioned opener is patched — because the point is the
+# runner's DECISION at a given row count, not what the machine's store happens to
+# hold today. `tests/test_eval_corpus_guard.py::
+# test_both_kg_guards_route_through_the_one_floor_helper` pins that both files reach
+# this through the one shared helper rather than a second copy of the number.
+
+class _RowCountStore:
+    """A stand-in store opened at `path`, holding exactly `n_rows` entity rows."""
+
+    def __init__(self, path, n_rows: int = 30):
+        self.path = Path(path)
+        self.n_rows = n_rows
+
+    class _Entities:
+        def __init__(self, owner):
+            self._owner = owner
+
+        def all(self):
+            return [f"Leftover Stub Entity {i:05d}" for i in range(self._owner.n_rows)]
+
+    @property
+    def entities(self):
+        return _RowCountStore._Entities(self)
+
+    def close(self):
+        return None
+
+
+def _point_the_runner_at_a_stub_store(monkeypatch, tmp_path, n_rows):
+    """Give the runner a present fact tree, a present sqlite file, and `n_rows` rows."""
+    facts = tmp_path / "facts"
+    facts.mkdir()
+    db = tmp_path / "kg.sqlite"
+    db.write_text("not really sqlite\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "LIVE_FACTS", facts)
+    monkeypatch.setattr(sys.modules[__name__], "LIVE_KG_DB", db)
+    monkeypatch.setattr(ks, "KGStore", lambda path: _RowCountStore(path, n_rows))
+    return db
+
+
+_LIVE_CORPUS_NODES = (
+    test_the_fold_never_costs_a_seed_that_outscored_the_canonical_that_replaced_it,
+    test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned,
+    test_every_gold_entity_name_resolves_to_an_entity_the_store_can_return,
+)
+
+
+@pytest.mark.parametrize("node", _LIVE_CORPUS_NODES, ids=lambda f: f.__name__)
+def test_a_below_floor_live_store_skips_the_guard_naming_floor_count_and_path(
+        node, monkeypatch, tmp_path):
+    """Clause 2: each of the three seed guards skips by name, with all three numbers.
+
+    The defect this pins is narrower than the one it replaces. Total absence already
+    skipped: `SM_20260923_034250` promoted at 03:51:45Z with `kg.sqlite` missing and
+    39 named skips. It was the 30-entity stub appearing at that same path that turned
+    those skips into five hard failures — this file's three plus two in
+    `test_eval_corpus_guard.py` — so a guard that only asks "is the file there" is the
+    guard that blocks every promotion after a partial rebuild.
+    """
+    db = _point_the_runner_at_a_stub_store(monkeypatch, tmp_path, 30)
+
+    with pytest.raises(pytest.skip.Exception) as exc:
+        node()
+    reason = str(exc.value)
+    assert "holds 30 entity rows" in reason, f"{node.__name__}: {reason}"
+    assert f"the {KG_ENTITY_FLOOR}-entity floor" in reason, f"{node.__name__}: {reason}"
+    assert str(db) in reason, f"{node.__name__} skipped without naming the store: {reason}"
+
+
+def test_a_store_at_the_floor_answers_rather_than_skipping(monkeypatch, tmp_path):
+    """The floor admits a real index: at the number, the runner runs.
+
+    Paired with the skip above so the gate cannot be widened to "always skip" without
+    going red here — the same non-vacuity discipline the corpus guard holds itself to.
+    """
+    _point_the_runner_at_a_stub_store(monkeypatch, tmp_path, KG_ENTITY_FLOOR)
+
+    try:
+        out = _run_against_the_live_corpus("import json; print(json.dumps({'ran': True}))")
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"a store holding exactly the {KG_ENTITY_FLOOR}-entity floor "
+                    f"skipped instead of answering: {exc}")
+    assert out == {"ran": True}, out
+
+
+def test_a_zero_row_live_store_is_not_skipped_by_this_gate(monkeypatch, tmp_path):
+    """Zero rows is a failing verdict in the caller, never a skip in the gate.
+
+    `sqlite3.connect` CREATES an absent database and `_init_schema()` fills it with
+    empty tables — the false-clean `tests/test_kg_store.py::
+    test_default_store_refuses_an_absent_database_and_creates_no_file` exists to stop.
+    So "the file is there and holds no rows" is a fact worth failing on, and this gate
+    hands the count to the shared helper and stays out of the way; the guard's own
+    refusal is what answers.
+    """
+    _point_the_runner_at_a_stub_store(monkeypatch, tmp_path, 0)
+
+    # The script is trivial on purpose: this pins that the GATE does not fire at 0
+    # rows, so the verdict it lets through is the guard's own, downstream.
+    try:
+        out = _run_against_the_live_corpus("import json; print(json.dumps({'ran': True}))")
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"a 0-row store must not skip: {exc}")
+    assert out == {"ran": True}, out

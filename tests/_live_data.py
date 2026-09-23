@@ -1,13 +1,16 @@
 """The one rule for a read-only guard whose live data is gone (backlog #1377).
 
-Imported by `test_trajectory_extraction.py` and `test_skill_verdicts.py`; not a
+Imported by every `test_*.py` that reads data on the machine — run
+`grep -l "from tests._live_data import" tests/` for the list. No count of it is
+written here: every enumeration has been stale by the next importer, and a number in
+this file cannot be re-measured by the reader who needs it. Not a
 `test_*.py` file, for the reason `tests/_relief_harness.py` gives — pytest does not
-collect it, so a broken helper is a collection error in both suites rather than a
-mysterious red run.
+collect it, so a broken helper is a collection error in every importing suite rather
+than a mysterious red run.
 
 Why a shared rule
 -----------------
-The guards in those two files read *data on the machine*, not files in the checkout:
+Every guard in the importing files reads *data on the machine*, not files in the checkout:
 `.gitignore` ignores `/sessions/` and `/_pipeline/`, so neither path is in git and
 neither exists in a round's worktree. On 2026-09-22 a fixture teardown deleted the
 production tree in 35 seconds (`tests/conftest.py:159-170` states it in code); the
@@ -83,3 +86,55 @@ def require_live_volume(items, floor: int, root: Path, what: str,
     if count < floor:
         pytest.skip(f"{what} at {root} holds {count} {noun}, below the {floor}-{noun[:-1]} "
                     "floor under which this guard cannot discriminate either way")
+
+
+# Declared ONCE, here, because two guards ask the same question of the same store:
+# the corpus entity guard (`tests/test_eval_corpus_guard.py`) and the seed-anchoring
+# guards (`tests/test_retrieval_seed_anchoring.py`). Two literals would let them
+# disagree about what "below floor" means, which is the defect this line exists to
+# prevent — pinned by
+# `tests/test_eval_corpus_guard.py::test_both_kg_guards_route_through_the_one_floor_helper`.
+# The number is the suite's own pre-existing bar (`test_the_default_route_is_the_live_store_the_eval_scores_against`
+# asserted `len(names) > 1000` before this helper existed) and it sits two orders of
+# magnitude under the last whole store — 26,390 entity rows, per `backlog/1381`'s close
+# note — so it admits a plausible partial index and refuses a stub.
+KG_ENTITY_FLOOR = 1000
+
+
+def require_live_entity_volume(entity_names, root,
+                               what: str = "the knowledge-graph store") -> None:
+    """Skip a KG guard whose store is present but too small to discriminate.
+
+    The third answer a live knowledge-graph store gets, after `require_live_data`'s
+    two (absent -> named skip, wrong kind -> failing assert): a store that OPENS and
+    holds a handful of entity rows. On 2026-09-22 a 30-entity / 0-edge stub appeared
+    at `_pipeline/vault-derived/kg.sqlite`. Because the file existed, the absent-skip
+    stopped firing: across the two guard files the whole-suite delta recorded in
+    `backlog/1394` is 39 -> 30 skipped, 8722 -> 8731 passed, 0 -> 5 failed, the five
+    naming 96 of the corpus's 100 `expect_entities` entries as unreachable or
+    unresolvable, and the automod `tests` rung could not go green on any tree —
+    verbatim from `~/.local/state/lloyd-automod/rounds/SM_20260923_033853/gate.json`:
+    "every failure reproduces at base c2bd72b6 with this round's diff absent —
+    PRE-EXISTING BREAKAGE", `external_blocker: true`. Total absence had NOT blocked
+    it: `SM_20260923_034250` promoted at 03:51:45Z with `kg.sqlite` missing and 39
+    skips. So it is the partial stub, not the data loss, that fails a guard, and
+    deleting the stub to get the absence back would be the wrong move.
+
+    Zero rows is deliberately NOT taken here. An empty `entities` table stays a
+    FAILING verdict in the caller
+    (`test_a_store_that_opens_with_no_entity_rows_is_refused_as_a_verdict`), because
+    `KGStore(path)` CREATES an absent database and "no rows" is the created-empty
+    false-clean that once made a worktree record `duplicate_rows: 0` about a store
+    that was not there (`app/uptake.py`). This skips only on `0 < count < floor`.
+
+    The reason names the floor, the observed count and the store path — the same
+    attribution rule `require_live_volume` states, since a bare "vacuous" cannot be
+    checked against the filesystem in the same breath as the skip.
+    """
+    count = len(entity_names)
+    if 0 < count < KG_ENTITY_FLOOR:
+        pytest.skip(f"{what} at {root} holds {count} entity rows, below the "
+                    f"{KG_ENTITY_FLOOR}-entity floor under which this guard cannot "
+                    "discriminate either way: rows left over from an unrelated stub "
+                    "make every corpus expectation look unreachable, which is a "
+                    "statement about the store, not about the corpus")
