@@ -3,9 +3,13 @@
 Lloyd MCP Server: Facts — knowledge-graph facts and typed relationships.
 
 Tools:
-    fact_get, fact_add, fact_profile, fact_check, fact_resolve,
-    fact_resolve_apply, fact_invalidate, fact_relate, fact_relationships,
-    fact_path, fact_neighbors  (11 tools)
+    fact_get, fact_add, fact_resolve, fact_resolve_apply, fact_invalidate,
+    fact_relate, fact_relationships, fact_path, fact_neighbors  (9 tools)
+
+`fact_profile` and `fact_check` were retired on 2026-09-23: `fact_get` took the
+profile's per-category cap and `query` ranking, and `fact_check` was
+`fact_resolve` under a second name. `_fact_check` stays as a function, the
+contradiction detector's direct entry point for tests.
 
 Data root: app.paths.VAULT_FACTS_ROOT
     (currently ~/lloyd-data/_pipeline/vault-derived/facts/)
@@ -134,7 +138,7 @@ def _reindex_files(paths) -> None:
     """Re-read written fact files into the store's index.
 
     Every writer of a fact file owes the index this call: the markdown is
-    the fact layer, but `facts_idx` is what the router, `fact_profile` and
+    the fact layer, but `facts_idx` is what the router, `fact_get` and
     the health report actually read. A write that skips it leaves the two
     disagreeing until the next full reindex.
     """
@@ -410,17 +414,61 @@ def _detect_contradictions_sync(entity: str, category: str = None, *,
 # ── Tool handlers ────────────────────────────────────────────────────────────
 
 def _fact_get(params: dict) -> dict:
+    """An entity's facts, capped per category and optionally ranked by `query`.
+
+    This absorbed `fact_profile` (2026-09-23), which existed only to add the
+    cap and the ranking: uncapped, a read of a hub entity returned every fact
+    it had — `Lloyd` alone carries 5,489 — straight into the model's context.
+    Each category keeps `limit_per_category` facts (default
+    `FACT_RANK_CAP_SEED`; 0 means no cap), the most relevant to `query` when
+    one is given and the most recent otherwise, and a capped category is named
+    in `truncated_categories` so the cut is never silent.
+    """
     entity = params.get("entity", "").strip()
     if not entity:
         return _err("entity is required", ErrorCode.MISSING_PARAM, facts=[])
     category = params.get("category") or None
     as_of = params.get("as_of") or None
     include_expired = bool(params.get("include_expired", False))
+    query = (params.get("query") or "").strip()
     try:
-        return _get_facts_sync(entity, category, as_of=as_of,
-                               include_expired=include_expired)
+        cap = int(params.get("limit_per_category", FACT_RANK_CAP_SEED))
+    except (TypeError, ValueError):
+        return _err("limit_per_category must be an integer", ErrorCode.INVALID_PARAM, facts=[])
+    try:
+        result = _get_facts_sync(entity, category, as_of=as_of,
+                                 include_expired=include_expired)
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL, facts=[])
+    facts = result.get("facts") or []
+    if not facts or (cap <= 0 and not query):
+        return result
+    by_cat: dict = {}
+    for fact in facts:
+        by_cat.setdefault(fact.get("category", "general"), []).append(fact)
+    tokens = _fact_query_tokens(query) if query else []
+    truncated: dict = {}
+    kept: list = []
+    for cat, cat_facts in by_cat.items():
+        if tokens:
+            cat_facts.sort(key=lambda f: (-_fact_score(f, tokens),
+                                          str(f.get("created_at") or "")))
+        else:
+            cat_facts.sort(key=lambda f: str(f.get("created_at") or ""), reverse=True)
+        if cap > 0 and len(cat_facts) > cap:
+            truncated[cat] = len(cat_facts)
+            cat_facts = cat_facts[:cap]
+        kept.extend(cat_facts)
+    result = dict(result)
+    result["facts"] = kept
+    result["fact_count"] = len(facts)
+    if truncated:
+        result["truncated_categories"] = truncated
+        result["hint"] = (
+            f"{entity} has {len(facts)} facts; each category is capped at {cap}. "
+            "Pass `query` to rank by relevance, `category` to read one slice, "
+            "or limit_per_category=0 for everything.")
+    return result
 
 
 def _writes_enabled() -> bool:
@@ -534,60 +582,6 @@ def _fact_add(params: dict) -> dict:
             result["warning"] = f"fact written; store index not updated ({exc})"
         if entity != raw_entity:
             result["resolved_from"] = raw_entity
-        return result
-    except Exception as exc:
-        return _err(str(exc), ErrorCode.INTERNAL)
-
-
-def _fact_profile(params: dict) -> dict:
-    """All of an entity's facts, grouped by category.
-
-    Capped at `FACT_RANK_CAP_SEED` per category. Uncapped, `fact_profile` on
-    a god node returned every fact it had — `Lloyd` alone carries 5,489, and
-    the whole list went into the model's context to answer one question.
-    With a `query`, each category is ranked by token overlap and the cap
-    keeps the most relevant; without one it keeps the most recent.
-    """
-    entity = params.get("entity", "").strip()
-    if not entity:
-        return _err("entity is required", ErrorCode.MISSING_PARAM)
-    query = (params.get("query") or "").strip()
-    cap = int(params.get("limit_per_category", FACT_RANK_CAP_SEED))
-    try:
-        facts = _get_facts_sync(entity).get("facts", [])
-        categories: dict = {}
-        for fact in facts:
-            cat = fact.get("category", "general")
-            categories.setdefault(cat, []).append(fact)
-
-        tokens = _fact_query_tokens(query) if query else []
-        truncated: dict = {}
-        for cat, cat_facts in categories.items():
-            if tokens:
-                cat_facts.sort(key=lambda f: (-_fact_score(f, tokens),
-                                              str(f.get("created_at") or "")), reverse=False)
-            else:
-                cat_facts.sort(key=lambda f: str(f.get("created_at") or ""), reverse=True)
-            if len(cat_facts) > cap:
-                truncated[cat] = len(cat_facts)
-                categories[cat] = cat_facts[:cap]
-
-        lines = [f"Profile for: {entity}"]
-        for cat, cat_facts in categories.items():
-            total = truncated.get(cat, len(cat_facts))
-            header = f"\n{cat.upper()}:" + (f"  (showing {len(cat_facts)} of {total})" if cat in truncated else "")
-            lines.append(header)
-            for f in cat_facts[:3]:
-                lines.append(f"  - {f.get('fact', '')}")
-        result = {"entity": entity, "categories": categories, "fact_count": len(facts),
-                  "summary": "\n".join(lines)}
-        if truncated:
-            result["truncated_categories"] = truncated
-            result["hint"] = (
-                f"{entity} has {len(facts)} facts; each category is capped at {cap}. "
-                "Pass `query` to rank by relevance, or `fact_get(entity, category=…)` "
-                "for one category in full."
-            )
         return result
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL)
@@ -733,13 +727,23 @@ def _fact_resolve_apply(params: dict) -> dict:
 
 def _fact_invalidate(params: dict) -> dict:
     """Expire facts that are no longer current (were true, now outdated)."""
-    entity = params.get("entity", "").strip()
-    ended = params.get("ended", "").strip()
-    if not entity or not ended:
-        return _err("entity and ended (ISO date) are required", ErrorCode.MISSING_PARAM)
+    entity = (params.get("entity") or "").strip()
+    if not entity:
+        return _err("entity is required", ErrorCode.MISSING_PARAM, expired_count=0)
     category = params.get("category") or None
-    fact_substring = params.get("fact_substring", "").strip().lower()
-    reason = params.get("reason", "").strip()
+    fact_substring = (params.get("fact_substring") or "").strip().lower()
+    # An unscoped call would expire every fact the entity has: naming an entity
+    # is not a decision about its whole history. This refusal and the default
+    # date below are what `forget` added on top of this tool, folded in when
+    # `forget` was retired (2026-09-23).
+    if not fact_substring and not category:
+        return _err("fact_invalidate needs a scope: pass `fact_substring` (text of "
+                    "the fact to expire) or `category`. Refusing to expire every "
+                    "fact an entity has on the strength of naming it.",
+                    ErrorCode.MISSING_PARAM, expired_count=0)
+    ended = (params.get("ended") or "").strip() or datetime.datetime.now(
+        datetime.timezone.utc).date().isoformat()
+    reason = (params.get("reason") or "").strip()
     try:
         resolved, _ = _resolve_entity(entity, mode="read")
         entity_dir = _find_entity_dir(resolved)
@@ -977,18 +981,10 @@ def _fact_neighbors(params: dict) -> dict:
 
 async def list_tools():
     return [
-        Tool(name="fact_get", description="Retrieve structured facts for a named entity. Supports temporal queries with as_of and include_expired.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "as_of": {"type": "string", "description": "ISO date — return facts valid at this point in time"}, "include_expired": {"type": "boolean", "description": "If true, include expired/invalidated facts"}}, "required": ["entity"]}),
+        Tool(name="fact_get", description=f"Use to read what is known about one entity; for a question across documents and facts use vault_recall instead. Returns the entity's facts, at most {FACT_RANK_CAP_SEED} per category (most recent, or most relevant to `query`); a capped category is named in truncated_categories.", inputSchema={
+            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "query": {"type": "string", "description": "Rank each category by relevance to this text instead of recency"}, "limit_per_category": {"type": "integer", "description": f"Facts kept per category (default {FACT_RANK_CAP_SEED}; 0 = no cap)"}, "as_of": {"type": "string", "description": "ISO date — return facts valid at this point in time"}, "include_expired": {"type": "boolean", "description": "If true, include expired/invalidated facts"}}, "required": ["entity"]}),
         Tool(name="fact_add", description="Add a structured fact for a named entity and category. Writes a line to the entity's markdown fact file and indexes it; use one clear sentence per call rather than a paragraph. An entity that already carries that text verbatim is refused: the result reports success with skipped=true and the surviving copy in `duplicate_of`, and nothing is written, whatever category was asked for.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "fact": {"type": "string", "description": "The fact, as one self-contained sentence that will still make sense read on its own"}, "confidence": {"type": "number", "description": "0.0-1.0 belief in the fact (default 0.9); the weaker side loses a contradiction"}, "valid_at": {"type": "string", "description": "ISO date the fact started being true (default: today)"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the fact was derived (default: STATED)"}, "source_doc": {"type": "string", "description": "Vault path this fact came from, for provenance"}}, "required": ["entity", "category", "fact"]}),
-        Tool(name="fact_profile", description=f"Synthesized profile for an entity: facts grouped by category, capped at {FACT_RANK_CAP_SEED} per category. Pass `query` to rank each category by relevance instead of recency.", inputSchema={
-            "type": "object", "properties": {
-                "entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"},
-                "query": {"type": "string", "description": "Rank facts by relevance to this text"},
-                "limit_per_category": {"type": "integer", "description": f"Facts kept per category (default {FACT_RANK_CAP_SEED})"},
-            }, "required": ["entity"]}),
-        Tool(name="fact_check", description=f"Detect contradictions in an entity's facts. Pairwise and O(n squared), so it is refused above {FACT_GODNODE_THRESHOLD} facts — pass `category` to scan a slice.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Scan one category instead of the whole entity"}}, "required": ["entity"]}),
         Tool(name="fact_resolve", description=f"Report contradictions between an entity's facts. Reports only — it marks nothing; `fact_resolve_apply` is the call that marks. Refused above {FACT_GODNODE_THRESHOLD} facts; pass `category` to scan a slice.", inputSchema={
             "type": "object", "properties": {
                 "entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"},
@@ -999,8 +995,8 @@ async def list_tools():
                 "entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"},
                 "category": {"type": "string", "description": "Apply within one category instead of the whole entity"},
             }, "required": ["entity"]}),
-        Tool(name="fact_invalidate", description="Expire facts that are no longer current. Sets expired_at on matching facts.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "fact_substring": {"type": "string", "description": "Match facts containing this text"}, "ended": {"type": "string", "description": "ISO date when fact stopped being true"}, "reason": {"type": "string", "description": "Why the fact was expired"}}, "required": ["entity", "ended"]}),
+        Tool(name="fact_invalidate", description="Expire facts that are no longer current by setting expired_at. Needs a scope, `fact_substring` or `category`: an unscoped call is refused rather than expiring every fact the entity has.", inputSchema={
+            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "fact_substring": {"type": "string", "description": "Match facts containing this text"}, "ended": {"type": "string", "description": "ISO date when the fact stopped being true (default: today)"}, "reason": {"type": "string", "description": "Why the fact was expired"}}, "required": ["entity"]}),
         Tool(name="fact_relate", description="Add a typed relationship edge between two entities in the knowledge graph. Edges are expired rather than deleted, so a wrong edge is recoverable.", inputSchema={
             "type": "object", "properties": {"source": {"type": "string", "description": "Entity the edge points from (alias-resolved)"}, "target": {"type": "string", "description": "Entity the edge points to (alias-resolved)"}, "type": {"type": "string", "description": "Relationship type (e.g. built_on, uses, part_of, related_to)"}, "confidence": {"type": "number", "description": "0.0-1.0 belief in the edge (default 0.9)"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the edge was derived (default: STATED)"}, "source_doc": {"type": "string", "description": "Vault path this edge came from, for provenance"}}, "required": ["source", "target", "type"]}),
         Tool(name="fact_relationships", description="Get all relationships for an entity (inbound + outbound edges).", inputSchema={
@@ -1020,8 +1016,8 @@ async def list_tools():
 
 async def call_tool(name: str, arguments: dict):
     handlers = {
-        "fact_get": _fact_get, "fact_add": _fact_add, "fact_profile": _fact_profile,
-        "fact_check": _fact_check, "fact_resolve": _fact_resolve,
+        "fact_get": _fact_get, "fact_add": _fact_add,
+        "fact_resolve": _fact_resolve,
         "fact_resolve_apply": _fact_resolve_apply,
         "fact_invalidate": _fact_invalidate,
         "fact_relate": _fact_relate, "fact_relationships": _fact_relationships,

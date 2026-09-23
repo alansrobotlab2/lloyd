@@ -69,7 +69,6 @@ NON_OWNER_DISALLOWED = [
     "browser_navigate",
     "browser_snapshot",
     "browser_click",
-    "browser_type",
     "browser_scroll",
     "browser_press",
     "browser_tabs",

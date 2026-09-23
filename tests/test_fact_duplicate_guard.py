@@ -23,7 +23,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from agent_mcp import _shared, facts, memory_ops, retrieval  # noqa: E402
+from agent_mcp import _shared, facts, retrieval  # noqa: E402
 from app import kg_store  # noqa: E402
 
 
@@ -142,22 +142,16 @@ def test_post_capture_cannot_bypass_the_guard(tree):
     assert rows[0]["category"] == "session-extracted"
 
 
-def test_remember_reports_a_skip_it_did_not_make_itself(tree):
-    """`remember` must not overwrite fact_add's verdict with `skipped: False`
-    just because its own same-category verbatim check did not fire."""
+def test_a_cross_category_duplicate_is_reported_as_a_skip(tree):
+    """The same text under another category is still a skip, reported as one:
+    `skipped` must be true whenever nothing was written. (Pinned on `remember`
+    until it was retired into `fact_add` on 2026-09-23.)"""
     assert _add(category="state").get("skipped") is not True
 
-    r = memory_ops.remember({"entity": "Zedlink", "category": "event",
-                             "fact": "runs on the tailnet"})
+    r = facts._fact_add({"entity": "Zedlink", "category": "event",
+                         "fact": "runs on the tailnet"})
     assert r.get("success") is True, r
-    assert r.get("skipped") is True, f"remember reported a duplicate as written: {r}"
-    assert len(_rows("Zedlink")) == 1
-
-
-def test_remember_still_writes_a_genuinely_new_fact(tree):
-    r = memory_ops.remember({"entity": "Zedlink", "category": "state",
-                             "fact": "first seen in September"})
-    assert r.get("success") is True and r.get("skipped") is False, r
+    assert r.get("skipped") is True, f"fact_add reported a duplicate as written: {r}"
     assert len(_rows("Zedlink")) == 1
 
 

@@ -1539,51 +1539,6 @@ def test_a_memory_only_candidate_is_never_ratcheted_on_the_soul_series(isolated_
     assert f"{gate:.1%}" in shape_refusals[0], shape_refusals
 
 
-def test_the_manual_promote_route_refuses_the_same_ratchet(isolated_prompts, tmp_path, monkeypatch):
-    """Clause 2 across the second process boundary: the manual MCP promote.
-
-    `agent_mcp.autoresearch._handle_promote` is a promotion entry point that bypasses
-    `run_round` entirely — the rescue path a person or a worker calls with a variant id,
-    running in the MCP server with its own `_load_cfg` and its own import of the module.
-    The ratchet lives inside `promote()`, so this route is covered by construction *only*
-    for as long as the handler keeps handing `promote()` a config with a real
-    `paths.ledger_path`; a handler that built its own config, or passed a variant summary
-    through a wrapper that dropped the contract check, would open a ratchet-blind door to
-    the same write every round is refused. The candidate is therefore placed where that
-    handler looks for it (`paths.variants_dir/<variant_id>` plus `variant.json`), the
-    handler is called with no reference to `run_round`, and the assertion reads the
-    refusal out of the JSON string the MCP tool returns rather than the dict the
-    in-process tests read.
-    """
-    import prompt_surface
-
-    from agent_mcp import autoresearch as mcp
-
-    cfg = make_cfg(tmp_path)
-    gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
-    assert prompt_surface.check_contract(RATCHET_SOUL) == []  # no ceiling is being crossed
-    _seed_shape_history(cfg, [gate - 0.02, gate - 0.01])
-
-    overlay = cfg.paths.variants_dir / "V_manual"
-    overlay.mkdir(parents=True)
-    (overlay / "SOUL.md").write_text(RATCHET_SOUL, encoding="utf-8")
-    (overlay / "variant.json").write_text(
-        json.dumps({"variant_id": "V_manual", "description": "d", "hypothesis": "h"}),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(mcp, "_load_cfg", lambda: cfg)
-
-    payload = json.loads(mcp._handle_promote({"variant_id": "V_manual", "dry_run": True}))
-    refusals = _shape_refusals(payload)
-    assert len(refusals) == 1, payload
-    assert "gate stack" in refusals[0], refusals[0]
-    for value in (gate - 0.02, gate - 0.01, gate):
-        assert f"{value:.1%}" in refusals[0], refusals[0]
-    # Nothing reached the identity files through this route.
-    assert isolated_prompts["SOUL.md"].read_text(
-        encoding="utf-8") == "canonical SOUL.md\n"
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # `--bench-limit` against the live gate, over the REAL bench.
 #

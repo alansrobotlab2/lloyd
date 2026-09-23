@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from agent_mcp import fact_improvement as fi          # noqa: E402
-from agent_mcp import memory_ops                       # noqa: E402
+from agent_mcp import facts                            # noqa: E402
 from app import kg_store                               # noqa: E402
 from app import paths as app_paths                     # noqa: E402
 
@@ -340,15 +340,16 @@ def test_cli_summary_reports_scanned_over_total(world, capsys, monkeypatch):
     assert "entities scanned=2 of 5 drift candidates" in out, out
 
 
-def test_improve_tool_reports_the_denominator_over_the_mcp_seam(world):
-    """The record crosses a process boundary here: `improve` serializes it over
-    MCP. Nothing whitelists its keys, so pin that the new field survives the
-    `call_tool` dispatch instead of assuming serialization is transparent."""
+def test_improvement_reports_the_denominator_in_its_record(world):
+    """The record is the pass's only report: the nightly script prints it and
+    writes it to `_pipeline/improvement/`. Pin that the denominator is in it.
+    (It was pinned across the `improve` MCP tool's serialisation until that
+    tool was retired on 2026-09-23; nothing calls the pass over MCP now.)"""
     facts_root, st, _ = world
     _five_drifted(facts_root, st)
 
-    result = asyncio.run(memory_ops.call_tool("improve", {"sources": ["drift"], "limit": 2}))
-    payload = json.loads(result.content[0].text)
+    payload = fi.run_improvement(sources=("drift",), limit=2)
+    payload = json.loads(json.dumps(payload))
     assert payload["drift_candidates_total"] == 5, sorted(payload)
     assert payload["signals"] == 2, payload["signals"]
     # #1383: the store verdict is read by whoever receives this payload, not
@@ -1091,92 +1092,69 @@ def test_the_attribution_guard_reads_a_row_that_omits_the_keys_entirely(world):
     assert plan["actions"] == [], plan["actions"]
 
 
-# ── 3. unified surface: remember / recall / forget ───────────────────────────
+# ── 3. the unified verbs were retired into the tools they wrapped ─────────────
+#
+# `remember`/`recall`/`forget`/`improve` (#376) were routers layered on top of
+# `fact_add`/`vault_recall`/`fact_invalidate`/`run_improvement`, each adding one
+# guard. On 2026-09-23 the guards moved into the tools and the verbs went:
+# `fact_add` already had the duplicate refusal (#499), `fact_invalidate` took the
+# scope refusal and the default date, `recall` was `vault_recall` with a
+# default, and the improvement pass is the nightly script's. These pin that the
+# guards survived the move.
 
-def _tool_names(mod):
-    return [t.name for t in asyncio.run(mod.list_tools())]
-
-
-def test_unified_verbs_are_registered_tools():
-    """The acceptance grep: `def remember|def recall|def forget` must hit."""
-    import inspect
-    src = inspect.getsource(memory_ops)
-    for verb in ("def remember", "def recall", "def forget"):
-        assert verb in src, verb
-    assert set(_tool_names(memory_ops)) == {"remember", "recall", "forget", "improve"}
+_RETIRED_VERBS = ("remember", "recall", "forget", "improve")
 
 
-def test_improve_is_registered_on_the_fact_side():
-    assert "improve" in _tool_names(memory_ops)
-
-
-def test_unified_verbs_are_dispatchable_and_unique():
+def test_the_retired_verbs_are_gone_from_the_catalog_and_every_table():
     from agent_mcp import main as M
-    names = [t.name for t in asyncio.run(M.list_tools())]
-    assert len(names) == len(set(names)), "duplicate tool registration"
-    for verb in ("remember", "recall", "forget", "improve"):
-        assert verb in names, verb
-    assert set(M._dispatch) >= {"remember", "recall", "forget", "improve"}
+    from agent_mcp import annotations as A
+    names = {t.name for t in asyncio.run(M.list_tools())}
+    tables = (A.READ_ONLY | A.DESTRUCTIVE | A.IDEMPOTENT | A.REPEAT_EXPECTED
+              | A.PLAN_MODE_ALWAYS_ALLOWED)
+    for verb in _RETIRED_VERBS:
+        assert verb not in names, verb
+        assert verb not in M._dispatch, verb
+        assert verb not in tables, verb
 
 
-def test_remember_adds_a_fact_once(world):
+def test_fact_add_adds_a_fact_once(world):
     facts_root, st, _ = world
-    res = memory_ops.remember({"entity": "Bernie", "category": "state",
-                               "fact": "Bernie uses a mecanum drive."})
+    res = facts._fact_add({"entity": "Bernie", "category": "state",
+                           "fact": "Bernie uses a mecanum drive."})
     assert res.get("success") is True, res
     assert _active(st, "Bernie") == 1
-    again = memory_ops.remember({"entity": "Bernie", "category": "state",
-                                 "fact": "Bernie uses a mecanum drive."})
+    again = facts._fact_add({"entity": "Bernie", "category": "state",
+                             "fact": "Bernie uses a mecanum drive."})
     assert again.get("skipped") is True
-    assert _active(st, "Bernie") == 1, "remember must not duplicate a fact"
+    assert _active(st, "Bernie") == 1, "fact_add must not duplicate a fact"
 
 
-def test_remember_requires_an_entity_and_a_fact(world):
-    res = memory_ops.remember({"entity": "Bernie", "category": "state"})
-    assert res.get("error"), res
-
-
-def test_recall_returns_documents_and_facts(world):
-    facts_root, st, _ = world
-    _write_facts(facts_root, "Bernie", "state",
-                 [{"fact": "Bernie uses a mecanum drive.", "created_at": _days_ago(3)}])
-    _reindex(st, facts_root)
-    res = memory_ops.recall({"query": "Bernie drive", "limit": 5, "grep_code": False})
-    assert "documents" in res and "facts" in res
-    assert any("mecanum" in f.get("fact", "") for f in res["facts"]), res["facts"]
-
-
-def test_recall_refuses_an_empty_query(world):
-    res = memory_ops.recall({"query": "   "})
-    assert res.get("error")
-
-
-def test_forget_expires_only_facts_that_match(world):
+def test_fact_invalidate_expires_only_facts_that_match(world):
     facts_root, st, _ = world
     _write_facts(facts_root, "Bernie", "state", [
         {"fact": "Bernie uses a mecanum drive.", "created_at": _days_ago(20)},
         {"fact": "Bernie has a 5-lb Olympic plate mount.", "created_at": _days_ago(20)},
     ])
     _reindex(st, facts_root)
-    res = memory_ops.forget({"entity": "Bernie", "match": "mecanum"})
+    res = facts._fact_invalidate({"entity": "Bernie", "fact_substring": "mecanum"})
     assert res.get("expired_count") == 1, res
     assert _active(st, "Bernie") == 1
 
 
-def test_forget_refuses_to_blank_an_entity(world):
-    """A bare `forget(entity=…)` is a blanket delete over every fact the entity
-    has. Refuse it — the same reason `fact_resolve` stopped defaulting to
-    auto_resolve."""
+def test_fact_invalidate_refuses_to_blank_an_entity(world):
+    """A bare `fact_invalidate(entity=…)` is a blanket expire over every fact
+    the entity has. Refused — the guard `forget` carried, now on the tool."""
     facts_root, st, _ = world
     _write_facts(facts_root, "Bernie", "state",
                  [{"fact": "Bernie uses a mecanum drive.", "created_at": _days_ago(20)}])
     _reindex(st, facts_root)
-    res = memory_ops.forget({"entity": "Bernie"})
+    res = facts._fact_invalidate({"entity": "Bernie", "ended": "2026-09-23"})
     assert res.get("error"), res
+    assert res.get("expired_count") == 0
     assert _active(st, "Bernie") == 1
 
 
-def test_improve_tool_defaults_to_dry_run(world):
+def test_improvement_defaults_to_dry_run(world):
     facts_root, st, _ = world
     _write_facts(facts_root, "TTS", "state", [
         {"fact": "TTS built-in voices are working and returning 200 OK.",
@@ -1185,17 +1163,15 @@ def test_improve_tool_defaults_to_dry_run(world):
          "created_at": _days_ago(2)},
     ])
     _reindex(st, facts_root)
-    res = memory_ops.improve({"sources": ["drift"], "days": 3})
+    res = fi.run_improvement(sources=("drift",), days=3)
     assert res["apply"] is False and res["actions_taken"] == 0
     assert _active(st) == 2
 
 
-def test_the_improve_tool_verb_records_what_it_acted_on(world):
-    """The seam the 09-09 records came through: an agent calls `improve` over
-    MCP with `apply=true`, and the file that lands in `_pipeline/improvement/`
-    is written by `run_improvement` two frames away. Self-description has to
-    survive that hop, or the one entry point that can delete facts is the one
-    whose record cannot say which store it deleted from."""
+def test_an_applied_improvement_records_what_it_acted_on(world):
+    """The file that lands in `_pipeline/improvement/` has to say which store
+    it deleted from, or the one entry point that can delete facts is the one
+    whose record cannot."""
     facts_root, st, _ = world
     _write_facts(facts_root, "TTS", "state", [
         {"fact": "TTS built-in voices are working and returning 200 OK.",
@@ -1204,7 +1180,7 @@ def test_the_improve_tool_verb_records_what_it_acted_on(world):
          "created_at": _days_ago(2)},
     ])
     _reindex(st, facts_root)
-    res = memory_ops.improve({"sources": ["drift"], "days": 3, "apply": True})
+    res = fi.run_improvement(sources=("drift",), days=3, apply=True)
     assert res["actions_taken"] == 1 and _active(st) == 1
     on_disk = _persisted_record(res)
     assert on_disk["apply"] is True
@@ -1212,30 +1188,6 @@ def test_the_improve_tool_verb_records_what_it_acted_on(world):
     assert on_disk["kg_db"] == str(st.path)
     assert re.fullmatch(r"[0-9a-f]{40}", on_disk["git_head"]), on_disk["git_head"]
     assert on_disk["isolated"] is True
-
-
-def test_annotation_tables_classify_the_new_verbs():
-    """An unclassified actuator is a plan-mode hole; a mislabelled one is a
-    badge lie. Both are pinned by the existing suite, so name them here."""
-    from agent_mcp import annotations as A
-    assert "recall" in A.READ_ONLY
-    for verb in ("remember", "forget", "improve"):
-        assert verb not in A.READ_ONLY, verb
-    assert {"forget", "improve"} <= A.DESTRUCTIVE
-    assert A.DESTRUCTIVE & A.READ_ONLY == frozenset()
-
-
-def test_new_tools_carry_descriptions_and_documented_parameters():
-    """Same hygiene bar the whole surface is held to (test_mcp_layer)."""
-    thin, undocumented = [], []
-    for tool in asyncio.run(memory_ops.list_tools()):
-        if len(tool.description or "") < 60:
-            thin.append(tool.name)
-        for pname, spec in ((tool.input_schema or {}).get("properties") or {}).items():
-            if not (spec.get("description") or "").strip():
-                undocumented.append(f"{tool.name}.{pname}")
-    assert thin == []
-    assert undocumented == []
 
 
 # ── 4. the schedule half: a consumer nobody dispatches is dead text ───────────

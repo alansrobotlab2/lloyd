@@ -92,7 +92,7 @@ DISALLOWED: tuple[str, ...] = (
     *WORKER_AUTOMOD_BAN,
     "Bash", "Edit", "Task",
     "http_request",
-    "browser_evaluate", "browser_fill", "browser_type", "browser_click",
+    "browser_evaluate", "browser_fill", "browser_click",
     "browser_press", "browser_cookies", "browser_drag", "browser_select",
     "autonomy_write_task", "autonomy_delete_task", "autonomy_run_task",
     "autonomy_config", "autonomy_config_set",

@@ -1141,7 +1141,7 @@ def test_the_toolbox_denies_the_memory_and_fact_writers(tree):
                  "fact_add", "fact_relate", "fact_invalidate", "fact_resolve",
                  "fact_resolve_apply"):
         assert name in A.DISALLOWED, f"{name} can write outside the one doc"
-    for name in ("memory_read", "fact_get", "fact_profile", "vault_read",
+    for name in ("memory_read", "fact_get", "vault_read",
                  "vault_search", "session_recall"):
         assert name not in A.DISALLOWED, f"{name} is a reader; a review legitimately reads"
 

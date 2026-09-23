@@ -1,7 +1,7 @@
 """agent_mcp.retrieval + the fact tools' ranking behaviour.
 
 There were no tests here at all, which is how `_graph_rerank`'s god-node
-penalty stayed a no-op for four months and `fact_profile` kept returning
+penalty stayed a no-op for four months and `fact_profile` (now `fact_get`) kept returning
 5,489 facts for one entity.
 """
 import asyncio
@@ -601,13 +601,10 @@ async def test_a_client_cannot_move_the_seed_set_through_the_tool_boundary(
         world, monkeypatch):
     """The seam the first #843 round was refused for. `_vault_recall` is
     registered as the `vault_recall` handler and `call_tool` hands it the
-    client's raw argument dict; `memory_ops.recall` forwards its params the same
-    way (memory_ops.py:105). Reading the width out of `params` would therefore
+    client's raw argument dict. Reading the width out of `params` would therefore
     have made an undocumented key able to change retrieval — a client that sent
     `seed_top_k: 2` would have gotten 2 seeds where the schema offers no such
-    parameter. The width is keyword-only now, so neither boundary may move it."""
-    from agent_mcp import memory_ops
-
+    parameter. The width is keyword-only now, so the boundary may not move it."""
     query = _twelve_entity_query(world)
     width = vault.RECALL_SEED_TOP_K
 
@@ -617,12 +614,6 @@ async def test_a_client_cannot_move_the_seed_set_through_the_tool_boundary(
     assert len(_seeds_of(handed)) == width, (
         "a stray `seed_top_k` in the MCP arguments moved the seeding width, "
         "which no tool schema declares and no eval asked for")
-
-    handed = _seed_spy(vault, monkeypatch)
-    memory_ops.recall({"query": query, "expand_graph": True, "seed_top_k": 2})
-    assert len(_seeds_of(handed)) == width, (
-        "memory_ops.recall forwards its params untouched, so the width must not "
-        "be readable from them")
 
 
 def test_the_width_is_keyword_only_and_stays_out_of_the_schema():
@@ -1027,31 +1018,40 @@ def test_get_facts_sync_temporal_filters(world):
     assert retrieval.get_facts_sync("Nobody")["facts"] == []
 
 
-# ── fact_profile ─────────────────────────────────────────────────────────────
+# ── fact_get caps and ranks (absorbed fact_profile, 2026-09-23) ──────────────
 
-def test_fact_profile_caps_a_god_node(world):
+def test_fact_get_caps_a_god_node(world):
     """Uncapped, this returned every fact an entity had — 5,489 for `Lloyd`
-    — straight into the model's context."""
+    — straight into the model's context. `fact_profile` existed to cap it;
+    `fact_get` carries the cap now."""
     root, _ = world
     _write_facts(root, "Lloyd", "state",
                  [{"id": f"stat-{i:03d}", "fact": f"fact number {i}", "category": "state"}
                   for i in range(1, 61)])
-    out = facts_mod._fact_profile({"entity": "Lloyd"})
+    out = facts_mod._fact_get({"entity": "Lloyd"})
     assert out["fact_count"] == 60
-    assert len(out["categories"]["state"]) == retrieval.FACT_RANK_CAP_SEED
+    assert len(out["facts"]) == retrieval.FACT_RANK_CAP_SEED
     assert out["truncated_categories"] == {"state": 60}
-    assert "hint" in out and "showing" in out["summary"]
+    assert "hint" in out
+    everything = facts_mod._fact_get({"entity": "Lloyd", "limit_per_category": 0})
+    assert len(everything["facts"]) == 60
+    assert "truncated_categories" not in everything
 
 
-def test_fact_profile_ranks_by_query_when_given(world):
+def test_fact_get_ranks_by_query_when_given(world):
     root, _ = world
     _write_facts(root, "Lloyd", "state",
                  [{"id": f"stat-{i:03d}", "fact": f"filler {i}", "category": "state"}
                   for i in range(1, 40)]
                  + [{"id": "stat-099", "category": "state",
                      "fact": "Lloyd serves models through vLLM"}])
-    out = facts_mod._fact_profile({"entity": "Lloyd", "query": "vLLM serving"})
-    assert out["categories"]["state"][0]["id"] == "stat-099"
+    out = facts_mod._fact_get({"entity": "Lloyd", "query": "vLLM serving"})
+    assert out["facts"][0]["id"] == "stat-099"
+
+
+def test_fact_get_rejects_a_non_integer_cap(world):
+    out = facts_mod._fact_get({"entity": "Lloyd", "limit_per_category": "lots"})
+    assert out.get("error")
 
 
 # ── fact_resolve ─────────────────────────────────────────────────────────────
@@ -1163,7 +1163,7 @@ def test_kind_recognises_tasks_docs_and_skills():
 
 def test_fact_invalidate_updates_the_index(world):
     """The markdown is the fact layer, but facts_idx is what the router and
-    fact_profile read. fact_invalidate wrote expired_at to the file and left
+    fact_get read. fact_invalidate wrote expired_at to the file and left
     the index alone, so the Memory page went on showing the fact as current."""
     root, st = world
     _write_facts(root, "Lloyd", "state", [

@@ -206,52 +206,14 @@ async def _exit_plan_mode(args: dict[str, Any]) -> str:
     )
 
 
-_ENTER_DESC = """Enter plan mode — research-only mode for drafting a structured plan before execution.
+_ENTER_DESC = """Use when a request is genuinely multi-stage and worth planning before acting (a change across several files, backend plus frontend, an investigation with branching questions, or intent unclear enough to ask about first); for a single step, or a list the user already broke down, use TodoWrite instead.
 
-## When to use
-Call this when the user's request is genuinely multi-stage and would benefit from explicit planning before action: refactors that touch multiple files, features that span backend + frontend, investigations that branch across multiple sub-questions, or any task where the user's intent is unclear enough that you'd want to ask clarifying questions first.
-
-## What it does
-- Flips the session into plan mode: write tools (Write, Edit, Bash) are blocked until you commit.
-- You retain read tools (Read, Grep, Glob, skills_search/skills_read), TodoWrite, and ToolSearch.
-- Prepends a system reminder explaining the constraints.
-
-## Workflow once in plan mode
-1. Read relevant files, skills, and any prior session context.
-2. If the goal is ambiguous, ask the user clarifying questions (the user can answer in their next turn — you'll see the answer when you're called next).
-3. Draft a structured plan: a short markdown document describing goal, approach, stages, and acceptance criteria.
-4. Decompose into todos: one or more per stage, in execution order.
-5. Call ExitPlanMode with `plan_md` (the markdown), `stages` (the stage structure), and `todos` (the decomposed list).
-
-## When not to use
-- Single-step requests ("what time is it?", "show me file X", "run this query").
-- Tasks where the skill protocol already prescribes the workflow.
-- Tasks the user has already broken down — just call TodoWrite directly.
-
-If during research you realize the task wasn't actually plan-worthy, call ExitPlanMode(cancel=true) and proceed with normal execution."""
+In plan mode the write tools (Write, Edit, Bash) are blocked; reads, skills, TodoWrite and ToolSearch still work. Research, ask the user anything ambiguous (the answer arrives on your next turn), draft the plan and its todos, then call ExitPlanMode. If the task turns out not to need a plan, call ExitPlanMode(cancel=true) and carry on."""
 
 
-_EXIT_DESC = """Exit plan mode — either commit a structured plan + todos, or cancel without committing.
+_EXIT_DESC = """Use to leave plan mode: commit the plan and its todos, or pass cancel=true to back out without committing; to enter plan mode use EnterPlanMode.
 
-## Commit path (default)
-Required args: `plan_md` (the markdown plan body) and `todos` (the decomposed list, same shape as TodoWrite). Optional: `stages` (a list of `{n, title, summary}` for stage grouping).
-
-What happens on commit:
-- Plan markdown is written to `~/obsidian/plans/<session_id>.md`.
-- `session.plan` is populated with `plan_md_path`, `stages`, `committed_at`.
-- `session.todos` is REPLACED with the decomposed list — Plan A's TodoWrite stewardship governs execution from here on.
-- Plan mode flag flips off; write tools are unblocked.
-
-## Cancel path
-Pass `cancel=true` (other args ignored). Used when:
-- Research showed the request was simpler than it looked (a one-line change).
-- The user changed direction during the research turn.
-- You're stuck and want to abandon the plan ritual.
-
-Cancel does NOT modify the prior committed plan (if one exists) — it only backs out of the current drafting session.
-
-## Todo shape (same as TodoWrite)
-Each todo: `{content: str, status: "pending"|"in_progress"|"completed", activeForm: str}`. Optional `stage: int` to associate with a stage from `stages`. Default first-stage todo to `in_progress` if you want to start work immediately on the next turn."""
+On commit the plan is written to ~/obsidian/plans/<session_id>.md, the session's todo list is REPLACED with `todos`, and the write tools are unblocked. Cancel leaves any previously committed plan untouched. A todo may carry `stage` to group it under one of `stages`; set the first todo in_progress to start work on the next turn."""
 
 
 async def list_tools():

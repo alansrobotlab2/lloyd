@@ -47,14 +47,14 @@ Two loops, both inside the **backend** process (`server.py`):
 
 `workers.db` lives in the data root (`~/lloyd-data/workers.db`, outside the
 code tree, [[data-home]]) and is opened in WAL mode, because the **MCP aggregator is a
-second process** that writes to it: `autoresearch_round` enqueues a round from
-there, the effect ledger writes `tool_effects` rows from inside a tool call,
-and the authority gate reads its grants. A process outside the backend never
-runs `start_worker_pool`, so the singleton is never initialised there and a
-bare `get_queue()` raises — which is how the round tool answered "work queue
-not available" for its entire life, with not one row in `workers.db` carrying
-the `targets` payload it sends. Callers outside the backend ask
-`configured_db_path()` instead of inventing a path.
+second process** that writes to it: the effect ledger writes `tool_effects`
+rows from inside a tool call, `autoresearch_status` reads the queue, and the
+authority gate reads its grants. A process outside the backend never runs
+`start_worker_pool`, so the singleton is never initialised there and a bare
+`get_queue()` raises — which is how the `autoresearch_round` tool (retired
+2026-09-23) answered "work queue not available" for most of its life, with not
+one row in `workers.db` carrying the `targets` payload it sent. Callers outside
+the backend ask `configured_db_path()` instead of inventing a path.
 
 ---
 

@@ -6,7 +6,7 @@ status: implemented
 date: 2026-09-11
 ---
 
-# Memory: the `improve` loop and the four-verb surface
+# Memory: the `improve` loop and the memory tool surface
 
 Backlog #376. Written while implementing it, so the numbers below are measured,
 not proposed. Where the item's assumption did not survive contact with the
@@ -19,24 +19,28 @@ Before: 19 memory-family tools at three abstraction levels — 10 `fact_*`
 (`agent_mcp/session.py`). Two prior consolidation efforts (#174 "17→7", #340
 the module split) moved the count **up**.
 
-Now: four verbs in `agent_mcp/memory_ops.py`, and the 19 unchanged underneath.
+Then (2026-09-09 to 2026-09-23): four verbs in `agent_mcp/memory_ops.py`,
+layered over the 19 as routers, each adding one guard its target lacked.
 
-| verb | delegates to | the one thing it adds |
-|---|---|---|
-| `remember` | `fact_add` | refuses to re-add a fact the entity already carries verbatim |
-| `recall` | `vault_recall` | documents + facts + graph in one call; `grep_code` off by default |
-| `forget` | `fact_invalidate` | refuses an unscoped "forget everything about X" |
-| `improve` | `fact_improvement.run_improvement` | the feedback loop, dry-run by default |
+| verb | delegated to | the one thing it added | where that guard lives now |
+|---|---|---|---|
+| `remember` | `fact_add` | refused a fact the entity already carried verbatim | `fact_add`'s own write-time duplicate refusal (#499), across every category |
+| `recall` | `vault_recall` | `grep_code` off by default | nothing: it was `vault_recall` with one default |
+| `forget` | `fact_invalidate` | refused an unscoped "forget everything about X" | `fact_invalidate`, which also defaults `ended` to today |
+| `improve` | `fact_improvement.run_improvement` | the feedback loop as a tool | `scripts/memory/fact-improvement.py`, which the nightly task #84 runs |
 
-**Routers, not replacements.** This deliberately does not shrink the tool count.
-A caller that wants `fact_neighbors(min_confidence=0.7)` still calls it; hiding
-parameters behind a facade would trade the actual complaint (no obvious entry
-point) for a worse one (the escape hatch is gone). Each verb exists because it
-adds a guard its underlying tool lacks, not because it renames it.
+Now: the verbs are retired (2026-09-23). They made the catalog bigger by four
+while their three guards were already in, or could move into, the tools they
+wrapped, and no transcript or vault file had ever called them. A router is
+worth its schema only while it guards something its target does not. The
+same pass retired `fact_check` (the same read as `fact_resolve`) and
+`fact_profile`, whose per-category cap and `query` ranking moved into
+`fact_get`: uncapped, `fact_get` on a hub entity (`Lloyd`, 5,489 facts) had
+put every fact into the context.
 
-`forget`'s refusal is the interesting one: naming an entity is not a decision
-about its entire history, and the same reasoning made `fact_resolve`
-stop defaulting to `auto_resolve=true`.
+Naming an entity is still not a decision about its entire history.
+`fact_invalidate` refuses without `fact_substring` or `category`, the reasoning
+that also made `fact_resolve` stop defaulting to `auto_resolve=true`.
 
 ## 2. `improve`: the detector is evidence, never a verdict
 
@@ -113,9 +117,9 @@ Signal sources, both real, neither invented:
   date, and directory mtimes don't move when a file is edited in place.
 
 Writers are the existing tools called as functions. Three writers of
-`expired_at` would be the drift bug `fact_profile` and the router already had
+`expired_at` would be the drift bug `fact_get` and the router already had
 — `_reindex_files` (`agent_mcp/facts.py:80-92`), whose docstring is the rule:
-the markdown is the fact layer, `facts_idx` is what the router, `fact_profile`
+the markdown is the fact layer, `facts_idx` is what the router, `fact_get`
 and the health report actually read, and a write that skips the reindex leaves
 the two disagreeing. Every run writes a JSON record under
 `_pipeline/improvement/` with before/after active-fact counts and one reason
@@ -240,7 +244,6 @@ a day before its code half).
 | path | role |
 |---|---|
 | `agent_mcp/fact_improvement.py` | the loop: signals → plan → apply → record |
-| `agent_mcp/memory_ops.py` | `remember` / `recall` / `forget` / `improve` |
 | `scripts/memory/fact-improvement.py` | CLI; exits 2 on failure, 3 on blast-radius overrun |
 | `tests/test_memory_improvement.py` | 47 tests, incl. the one-fact-per-action and near-duplicate guards, the per-category rescan's scope rules (#1251), and the schedule wiring (task armed + script named by the skill exists) |
 | `skills/fact-improvement/SKILL.md` + `autonomy/84-fact-improvement.md` | the scheduled consumer — armed `up_next`, daily, window 14:00 local, plan mode only |

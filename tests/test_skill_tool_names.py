@@ -63,8 +63,8 @@ if str(ROOT) not in sys.path:
 
 SKILLS_DIRS = [Path.home() / "obsidian" / "skills", ROOT / "skills"]
 
-# Tool names that were never real in Lloyd. Every one of these was found in an
-# active skill on 2026-09-04.
+# Tool names that were never real in Lloyd, or no longer are. The first group
+# was found in active skills on 2026-09-04.
 PHANTOM_TOOLS = {
     "web_search", "web_fetch", "web_extract",
     "WebSearch", "WebFetch", "HTTPFetch",
@@ -76,6 +76,12 @@ PHANTOM_TOOLS = {
     "skill_view",
     "file_glob", "file_grep", "tag_search", "tag_explore",
     "pipeline_dispatch", "chat_send", "sessions_send",
+    # Retired on 2026-09-23 as duplicates or subsumed. The four #376 verbs
+    # (remember, recall, forget, improve) went too but are English words, so a
+    # word-boundary match on them would flag ordinary prose.
+    "fact_profile", "fact_check", "browser_type",
+    "autoresearch_round", "autoresearch_promote", "autoresearch_bench_add",
+    "autoresearch_bench_list", "autoresearch_ledger_query",
 }
 
 # `terminal` was the OpenClaw name for Bash. It is also an ordinary English

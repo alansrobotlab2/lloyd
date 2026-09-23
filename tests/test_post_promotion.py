@@ -770,31 +770,9 @@ def test_a_later_round_reads_the_report_the_round_actually_wrote(world, monkeypa
     assert "BASELINE DECLINE PAST NOISE FLOOR" in text and "V_new" in text
 
 
-def test_the_mcp_ledger_query_handler_returns_the_new_row(world, monkeypatch):
-    """The other side of the process boundary: `autoresearch_ledger_query` is how
-    a human or a worker actually reads this row, and it runs in the MCP server,
-    not the round's process. It filters `event` generically, so the row's shape
-    has to survive the trip — asserted against the handler itself, not a copy."""
-    from agent_mcp import autoresearch as mcp
-
-    post_promotion.record_round_summary(
-        world, "R_20260909_060000", 0.4364, landed(), {"mean_composite": 0.6145}
-    )
-    monkeypatch.setattr(mcp, "_load_cfg", lambda: world)
-    payload = json.loads(mcp._handle_ledger_query({"event": post_promotion.ROUND_SUMMARY_EVENT}))
-    assert payload["count"] == 1
-    row = payload["rows"][0]
-    assert (row["baseline_mean"], row["promoted_variant_id"], row["promoted_variant_mean"]) == (
-        0.4364, PROMOTED, 0.6145,
-    )
-    # And the pre-existing queries keep their old inputs: a decision-event query
-    # finds none of these rows.
-    assert json.loads(mcp._handle_ledger_query({"event": "decision"}))["count"] == 0
-
-
 def test_the_new_ledger_event_is_invisible_to_the_existing_readers(world):
     """`round_summary` rows carry no `composite_score` and no `task_id`, so the
-    hypothesis generator's loser scan, the FP sweep and the MCP ledger query all
+    hypothesis generator's loser scan and the FP sweep both
     keep their old inputs. A new row shape that leaked into either would
     silently change #428's published denominator."""
     from scripts.autoresearch import promotion_fp_rate as fp
@@ -1137,32 +1115,3 @@ def test_the_report_run_writes_carries_the_shape_block_capped_at_five(world, mon
         assert f"- {row['round_id']}: contract" not in report, row["round_id"]
     assert len(printed) == 5, printed
     assert "- ceilings: gate stack 50%, prohibitions 25%" in report
-
-
-def test_the_shape_fields_survive_the_mcp_ledger_query(world, monkeypatch, live_contract):
-    """The widened row read by the process that does not write it.
-
-    `autoresearch_ledger_query` is how a person or a worker sees a round's row, and it
-    runs in the MCP server with its own `_load_cfg` and its own import of the ledger —
-    the round's process never sees it. The six #789 fields exist only so that reader
-    can reconstruct the series, so the assertion goes through the production writer
-    (`post_promotion_check`, which is what puts them in the file) and out through the
-    handler, and compares the numbers that came back with the numbers the writer
-    recorded. A handler that whitelisted fields instead of returning the row would
-    return a row with the shape missing and every writer-side test still green.
-    """
-    from agent_mcp import autoresearch as mcp
-
-    _lines, row = shape_check(world, "R_SHAPE_MCP", None)
-    monkeypatch.setattr(mcp, "_load_cfg", lambda: world)
-    payload = json.loads(mcp._handle_ledger_query({"round_id": "R_SHAPE_MCP"}))
-    assert payload["count"] == 1, payload
-    got = payload["rows"][0]
-    assert got["event"] == post_promotion.ROUND_SUMMARY_EVENT
-    for field in post_promotion.SHAPE_FIELDS:
-        assert field in got, f"{field} did not survive the query"
-        assert got[field] == row[field], (field, got[field], row[field])
-    # The two ratios a human reads the drift off, non-null and in range: a null here
-    # would make the report and the query agree that nothing was measured.
-    assert 0.0 < got["contract_gate_share"] <= 1.0, got
-    assert 0.0 <= got["contract_prohibition_ratio"] <= 1.0, got

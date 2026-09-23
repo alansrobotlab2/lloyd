@@ -144,7 +144,7 @@ def test_the_shadow_hook_is_not_inside_the_graph_rerank_branch():
 
 
 def test_the_shadow_hook_runs_on_the_production_path(monkeypatch):
-    """Both `vault_recall` and `memory_ops.recall` pass through the slice,
+    """`vault_recall` passes through the slice,
     and `RECALL_GRAPH_RERANK` is False, so this is the ordering production
     actually returns."""
     import inspect

@@ -130,18 +130,14 @@ async def list_tools():
             "required": ["task_id"],
         }),
         Tool(name="backlog_write_task", description=(
-            "Create or update a task. Provide task_id to update, omit to create new. "
-            "For new tasks, name/description/board are required. On update, any omitted "
-            "field is left unchanged. By default, a new description passed on update is "
-            "APPENDED to the existing body — pass description_mode='replace' to overwrite "
-            "or 'prepend' to push the new text above the existing body. "
-            "New tasks are checked against the board before they are written: every "
-            "create returns `similar` (existing items that look like this one, best "
-            "first). A create tagged `spawned-by-*` whose finding an open item already "
-            "covers is MERGED into that item instead — the description is appended "
-            "under a 'Merged finding' heading, the activity log names the session — "
-            "and the result carries `merged_into` with that item's id; cite that id "
-            "as what you filed. Pass `force: true` to create regardless."
+            "Use to file a new backlog item or change one; to read an item use "
+            "backlog_get_task. Omit task_id to create (name, description and board "
+            "required); pass it to update, where omitted fields stay unchanged and a "
+            "description is APPENDED unless description_mode says replace or prepend. "
+            "Every create returns `similar`, the existing items that look like it. A "
+            "create tagged `spawned-by-*` that an open item already covers is merged "
+            "into that item instead, and the result's `merged_into` is the id to cite "
+            "as filed. force=true creates regardless."
         ), inputSchema={
             "type": "object",
             "properties": {

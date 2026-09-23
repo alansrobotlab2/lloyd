@@ -867,3 +867,54 @@ def test_run_task_refuses_to_dispatch_a_task_whose_grants_block_is_malformed(
     assert "hooks" not in captured, (
         "the turn was dispatched anyway: the refusal is decoration and the task "
         "runs with whatever the accidental scope resolves to")
+
+
+# ── Catalog size (2026-09-23) ────────────────────────────────────────────────
+#
+# `harness.tool_search` is off by decision (#456), so every chat and
+# session-backed worker turn is handed every schema, and nothing measured what
+# that cost: #639 found the only token test guarded the disabled gist path.
+# At 156 tools the advertised JSON was ~35.2k real tokens a request. These pin
+# the tree's own part of it (the Thunderbird bridge is gitignored, so its ~40
+# tools are measured separately in test_thunderbird_discovery_cache).
+
+# The twelve tools retired as duplicates or subsumed on 2026-09-23. A name
+# coming back is a decision, not drift, so it has to be taken out of here.
+RETIRED_TOOLS = frozenset({
+    "fact_check", "fact_profile",
+    "remember", "recall", "forget", "improve",
+    "browser_type",
+    "autoresearch_round", "autoresearch_promote", "autoresearch_bench_add",
+    "autoresearch_bench_list", "autoresearch_ledger_query",
+})
+
+# chars/4 via `app.compaction.estimate_tokens`, over the OpenAI-shaped JSON the
+# harness actually sends. Measured 20,524 at the 2026-09-23 trim (104 tools);
+# the primary's own tokenizer read 20,582, so the estimate is within 1% on this
+# JSON. The ceiling is ~10% over,
+# so growth past it is a conscious raise with a reason, not a slow creep.
+INTERNAL_CATALOG_TOKEN_CEILING = 22_500
+
+
+def test_retired_tools_stay_retired(names):
+    back = sorted(RETIRED_TOOLS & names)
+    assert back == [], f"retired tools are advertised again: {back}"
+    tables = (A.READ_ONLY | A.DESTRUCTIVE | A.IDEMPOTENT | A.REPEAT_EXPECTED
+              | A.PLAN_MODE_ALWAYS_ALLOWED)
+    assert sorted(RETIRED_TOOLS & tables) == []
+
+
+def test_advertised_catalog_stays_under_its_token_ceiling(tools):
+    import json
+
+    from app.compaction import estimate_tokens
+    from app.harness.tool_schema import mcp_tool_to_openai
+
+    advertised = [t for t in _internal(tools) if not t.name.startswith("_")]
+    payload = json.dumps([mcp_tool_to_openai(t.model_dump(by_alias=True))
+                          for t in advertised])
+    tokens = estimate_tokens(payload)
+    assert tokens < INTERNAL_CATALOG_TOKEN_CEILING, (
+        f"the advertised catalog is {tokens} estimated tokens over "
+        f"{len(advertised)} tools, past the {INTERNAL_CATALOG_TOKEN_CEILING} "
+        "ceiling; trim a description or raise the ceiling with a reason")

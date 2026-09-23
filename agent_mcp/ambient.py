@@ -58,21 +58,15 @@ async def list_tools():
         Tool(
             name="session_inject_context",
             description=(
-                "Inject background-producer context into the user's active chat session. "
-                "Use for email summaries, calendar nudges, background research results, "
-                "autonomy-task findings, or any signal the user should eventually see. "
-                "\n\nPriority picks the mechanism:\n"
-                "  - 'ambient' (DEFAULT — 99% of uses): cheap, zero SDK cost. Queued and "
-                "    folded into the <context> block on the user's next turn. No "
-                "    interruption. The agent references it naturally if relevant.\n"
-                "  - 'notable': fires a real agent turn that the agent can choose to stay "
-                "    silent on via ambient_decide(surface=false). Use when a signal might "
-                "    need surfacing within the current session but isn't time-critical.\n"
-                "  - 'urgent': fires a real agent turn framed for immediate surface. Use "
-                "    sparingly — every urgent costs a full SDK call.\n"
-                "\nIf session_id is empty, routes to the user's most recent chat session "
-                "(excluding autonomy's own sessions). If there is no active user session, "
-                "returns a graceful no-op; producers do not need to handle this case."
+                "Use from a background job to hand the user something they should "
+                "see (an email summary, a calendar nudge, a research or autonomy "
+                "finding); to answer the user in a chat turn, just reply.\n\n"
+                "priority: 'ambient' (the default, and nearly always right) queues "
+                "it into the <context> block of the user's next turn at no cost; "
+                "'notable' runs an agent turn that may stay silent via "
+                "ambient_decide(surface=false); 'urgent' runs a turn framed to "
+                "surface it now, so use it sparingly. An empty session_id means "
+                "the user's most recent chat; with no active chat it is a no-op."
             ),
             inputSchema={
                 "type": "object",

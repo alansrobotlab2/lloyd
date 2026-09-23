@@ -189,8 +189,8 @@ STATEFUL_TOOLS: frozenset[str] = frozenset({
     "calendar_create", "calendar_update_event", "calendar_delete_event",
     "tasks_create", "tasks_update",
     "contacts_create", "contacts_update", "contacts_delete",
-    # the research loop must not edit its own bench or promote itself
-    "autoresearch_bench_add", "autoresearch_promote", "autoresearch_rollback",
+    # the research loop must not restore its own prompts
+    "autoresearch_rollback",
     # ambient injection and self-modification
     "session_inject_context", "automod_start", "automod_gate", "automod_land",
     "automod_rollback", "automod_abort", "automod_vault_land",

@@ -141,7 +141,7 @@ DISALLOWED: tuple[str, ...] = (
     "fact_add", "fact_relate", "fact_invalidate", "fact_resolve",
     "fact_resolve_apply",
     "http_request",
-    "browser_evaluate", "browser_fill", "browser_type", "browser_click",
+    "browser_evaluate", "browser_fill", "browser_click",
     "browser_press", "browser_cookies", "browser_drag", "browser_select",
     "autonomy_write_task", "autonomy_delete_task", "autonomy_run_task",
     "autonomy_config", "autonomy_config_set",

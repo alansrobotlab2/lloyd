@@ -200,22 +200,22 @@ except Exception as e:
     report("browser_snapshot(google)", False, str(e))
 
 # =====================================================================
-# 7. browser_type -- type into search box (uses "ref" param)
+# 7. browser_fill keystrokes=true -- type key by key (what browser_type did)
 # =====================================================================
-print("\n-- Test 7: browser_type --", flush=True)
+print("\n-- Test 7: browser_fill(keystrokes) --", flush=True)
 try:
     target = search_ref or (refs2[0] if refs2 else None)
     if target:
-        r = call_tool("browser_type", {"ref": target, "text": "playwright test"})
+        r = call_tool("browser_fill", {"ref": target, "value": "playwright test", "keystrokes": True})
         txt = text_of(r)
         ok = not is_error(r)
-        report("browser_type", ok, f"typed_into ref={target}")
+        report("browser_fill(keystrokes)", ok, f"typed_into ref={target}")
         if not ok:
             print(f"    Response: {txt[:400]}", flush=True)
     else:
-        report("browser_type", False, "No search ref found")
+        report("browser_fill(keystrokes)", False, "No search ref found")
 except Exception as e:
-    report("browser_type", False, str(e))
+    report("browser_fill(keystrokes)", False, str(e))
 
 # =====================================================================
 # 8. browser_fill -- fill search box (uses "ref" param, clears+replaces)

@@ -303,7 +303,7 @@ def test_no_other_write_lane_consults_the_deny_set():
     """`vault_write` and `automod_vault_land` are sanctioned writers with their
     own root checks and their own validation, and the 06:00 nightly job runs on
     them; the deny-set stops at the fs lane so it cannot fail that run."""
-    for rel in ("agent_mcp/vault.py", "agent_mcp/automod.py", "agent_mcp/memory_ops.py",
+    for rel in ("agent_mcp/vault.py", "agent_mcp/automod.py", "agent_mcp/facts.py",
                 "app/harness/safety.py", "app/harness/mcp_pool.py", "agent_mcp/main.py"):
         path = REPO / rel
         assert path.exists(), rel

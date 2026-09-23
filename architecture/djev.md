@@ -543,9 +543,10 @@ The hook sits between the daily-log demote sort and the `[:limit]` slice,
 **unconditionally**. At that point `documents` holds qmd's reranked pool in the
 order production returns it. It records the head of the pool
 (`RANK_DEFAULT_N`, 12), with `actual` = production's path order and
-`meta` = the query and qmd's scores. `_vault_recall` has two production callers,
-the `vault_recall` tool and `memory_ops.recall` (`agent_mcp/memory_ops.py:105`),
-and both pass through it. `eval/run_eval.py` is a third, muted one. An earlier estimate of "315-378 prefetch turns a
+`meta` = the query and qmd's scores. `_vault_recall` has one production caller,
+the `vault_recall` tool, which passes through it (`memory_ops.recall` was a
+second until it was retired on 2026-09-23). `eval/run_eval.py` is another, muted
+one. An earlier estimate of "315-378 prefetch turns a
 day" had no verified caller behind it, and there is no prefetch caller. The
 real daily volume will be read from the rows, not guessed.
 
@@ -859,7 +860,7 @@ answer (`architecture/automod.md` §8.1b). Production never sets the variable.
 ### 9.1 From a turn
 
 - **`djev_rank` is a final stage over a shortlist**, never the retrieval
-  itself. Shortlist with `vault_search`, `recall` or a grep, then rank the best
+  itself. Shortlist with `vault_search`, `vault_recall` or a grep, then rank the best
   12. Use the *order*. Do not read meaning into a score's absolute value, or
   compare scores from two different calls.
 - **`djev_decide` is for classifying and ordering one piece of text** when the

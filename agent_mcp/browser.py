@@ -3,9 +3,11 @@
 Lloyd MCP Server: Browser — full browser control via Playwright.
 
 Tools (Phase 1): browser_navigate, browser_snapshot, browser_click,
-                 browser_type, browser_scroll, browser_press, browser_tabs
+                 browser_scroll, browser_press, browser_tabs
 Tools (Phase 2): browser_screenshot, browser_evaluate, browser_fill, browser_wait
 Tools (Phase 3): browser_select, browser_drag, browser_cookies
+
+`browser_type` was merged into `browser_fill(keystrokes=true)` on 2026-09-23.
 """
 
 import asyncio
@@ -654,20 +656,6 @@ async def _browser_click(ref: str, button: str = "left") -> str:
     except Exception as exc:
         return json.dumps({"error": f"Click failed: {exc}"})
 
-async def _browser_type(ref: str, text: str, clear: bool = False) -> str:
-    page = await _get_page()
-    try:
-        loc = await _locate(page, ref)
-        if clear:
-            await loc.clear(timeout=5000)
-        await loc.press_sequentially(text, delay=30)
-        return json.dumps({"ok": True, "ref": ref})
-    except ValueError as exc:
-        return json.dumps({"error": str(exc)})
-    except Exception as exc:
-        return json.dumps({"error": f"Type failed: {exc}"})
-
-
 async def _browser_scroll(direction: str = "down", amount: int = 300) -> str:
     page = await _get_page()
     dx, dy = 0, 0
@@ -888,11 +876,22 @@ async def _browser_evaluate(script: str) -> str:
         return json.dumps({"error": f"Evaluate failed: {exc}"})
 
 
-async def _browser_fill(ref: str, value: str) -> str:
+async def _browser_fill(ref: str, value: str, keystrokes: bool = False) -> str:
+    """Set a field's value, in one write or key by key.
+
+    `keystrokes` absorbed `browser_type` (2026-09-23). A one-shot `fill()` fires
+    input/change but no per-key events, and a search-as-you-type box or an
+    autocomplete widget listens for keys, so it clears the field and presses
+    each character instead. Either way the field ends up holding `value` alone.
+    """
     page = await _get_page()
     try:
         loc = await _locate(page, ref)
-        await loc.fill(value, timeout=10000)
+        if keystrokes:
+            await loc.clear(timeout=5000)
+            await loc.press_sequentially(value, delay=30)
+        else:
+            await loc.fill(value, timeout=10000)
         return json.dumps({"ok": True, "ref": ref})
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
@@ -1007,7 +1006,7 @@ async def list_tools():
             "status on the first line, because its tree otherwise looks like the "
             "target's. "
             "Interactive elements (links, buttons, form fields) are assigned ref IDs like e1, e2, e3. "
-            "Use these refs with browser_click, browser_type, etc. "
+            "Use these refs with browser_click, browser_fill, etc. "
             "Refs are invalidated after each new snapshot or navigation."
         ), inputSchema={
             "type": "object",
@@ -1032,19 +1031,6 @@ async def list_tools():
                 },
             },
             "required": ["ref"],
-        }),
-        Tool(name="browser_type", description=(
-            "Type text into a form field by ref ID. "
-            "Use clear=true to clear the field first. "
-            "For filling large amounts of text, prefer browser_fill which triggers change events properly."
-        ), inputSchema={
-            "type": "object",
-            "properties": {
-                "ref": {"type": "string", "description": "Element ref ID from browser_snapshot"},
-                "text": {"type": "string", "description": "Text to type"},
-                "clear": {"type": "boolean", "description": "Clear the field first. Default: false"},
-            },
-            "required": ["ref", "text"],
         }),
         Tool(name="browser_scroll", description="Scroll the current page by a pixel amount in one direction. Use browser_snapshot afterwards to see what came into view.", inputSchema={
             "type": "object",
@@ -1105,14 +1091,16 @@ async def list_tools():
             "required": ["script"],
         }),
         Tool(name="browser_fill", description=(
-            "Fill a form field with a value using Playwright's fill() API, which properly "
-            "triggers input/change events. Use for text inputs, textareas, and contenteditable elements. "
-            "Replaces the entire field value."
+            "Use to put text into a form field by ref; to press a single key use browser_press. "
+            "Replaces the field's whole value in one write that fires input/change events. "
+            "Pass keystrokes=true for a field that reacts to typing, such as search-as-you-type "
+            "or autocomplete: it clears the field and types the value key by key."
         ), inputSchema={
             "type": "object",
             "properties": {
                 "ref": {"type": "string", "description": "Element ref ID from browser_snapshot"},
-                "value": {"type": "string", "description": "Value to fill"},
+                "value": {"type": "string", "description": "Value the field should hold"},
+                "keystrokes": {"type": "boolean", "description": "Type key by key instead of one write. Default: false"},
             },
             "required": ["ref", "value"],
         }),
@@ -1204,11 +1192,6 @@ async def call_tool(name: str, arguments: dict):
             arguments.get("ref", ""),
             arguments.get("button", "left"),
         ),
-        "browser_type": lambda: _browser_type(
-            arguments.get("ref", ""),
-            arguments.get("text", ""),
-            arguments.get("clear", False),
-        ),
         "browser_scroll": lambda: _browser_scroll(
             arguments.get("direction", "down"),
             arguments.get("amount", 300),
@@ -1228,6 +1211,7 @@ async def call_tool(name: str, arguments: dict):
         "browser_fill": lambda: _browser_fill(
             arguments.get("ref", ""),
             arguments.get("value", ""),
+            bool(arguments.get("keystrokes", False)),
         ),
         "browser_wait": lambda: _browser_wait(
             arguments.get("condition", "timeout"),

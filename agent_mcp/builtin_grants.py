@@ -142,22 +142,9 @@ async def _grant_revoke(args: dict[str, Any]) -> str:
                        "effective": "next dispatch, including mid-run"})
 
 
-_CREATE_DESC = """Mint an expiring, quota-bound authority grant (#534).
+_CREATE_DESC = """Use when the user wants to let an unattended worker or autonomy task use a tool its gate refuses; to see existing grants use grant_list, to withdraw one use grant_revoke.
 
-Interactive scope only: a worker or autonomy turn cannot call this, and the
-grant store refuses a row whose issuer names a non-interactive identity. A
-grant is what lets a tight gate still let real work through — the human
-issues it in advance, it names one bounded scope, and it dies on its date.
-
-## Args
-- `scope` (required): whose authority this covers — `worker:<source>` or `autonomy-task:<id>`.
-- `tool` (required): the bare tool name, e.g. `email_send`.
-- `predicate` (optional): `len(field)<=N` or `field<=N`. The only grammar accepted; it is parsed, never evaluated.
-- `quota` (optional): max executions. Unbounded if omitted — prefer setting it.
-- `expires_at` (required): ISO date or datetime. Mandatory; there is no default and no infinity.
-- `issued_by` (required): who authorized it. Names a human.
-
-A denial that says "no grant for X from scope Y" renders this exact call shape."""
+Mints an expiring, quota-bound authority grant (#534) for one scope and one tool. Interactive turns only: a worker or autonomy turn cannot call it, and a grant never outlives `expires_at`. A refusal reading "no grant for X from scope Y" shows the exact call to make."""
 
 _LIST_DESC = """List live (unexpired, unrevoked) authority grants, optionally for one scope.
 

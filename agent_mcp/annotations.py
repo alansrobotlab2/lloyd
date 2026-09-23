@@ -39,14 +39,11 @@ READ_ONLY: frozenset[str] = frozenset({
     # Knowledge graph
     # `fact_resolve` is a report since #1326: `auto_resolve` is gone and the
     # marking lives in `fact_resolve_apply`, deliberately in no table.
-    "fact_get", "fact_profile", "fact_check", "fact_resolve",
+    "fact_get", "fact_resolve",
     "fact_relationships", "fact_path", "fact_neighbors",
     # Vault + memory + sessions
     "vault_read", "vault_overview", "vault_search", "vault_recall",
     "memory_read", "session_recall", "chat_list_sessions", "chat_get_session",
-    # Unified memory verbs (#376) — the read half. `remember`/`forget`/`improve`
-    # are actuators and are not listed here.
-    "recall",
     # Skills
     "skills_search", "skills_read",
     # Autonomy / backlog / research — inspection halves
@@ -55,7 +52,7 @@ READ_ONLY: frozenset[str] = frozenset({
     # is the write.
     "autonomy_tasks", "autonomy_get_task", "autonomy_config", "autonomy_health",
     "backlog_boards", "backlog_tasks", "backlog_get_task",
-    "autoresearch_status", "autoresearch_bench_list", "autoresearch_ledger_query",
+    "autoresearch_status",
     # research_next is read-only by construction: it peeks, the worker claims.
     "research_list", "research_stats", "research_next",
     # Mission control
@@ -98,8 +95,6 @@ DESTRUCTIVE: frozenset[str] = frozenset({
     "Bash",                       # arbitrary command execution
     "fact_invalidate",
     "memory_remove",
-    # #376: `forget` expires facts; `improve` expires/invalidates them in bulk.
-    "forget", "improve",
     "autonomy_delete_task",
     "autoresearch_rollback",
     "email_delete", "email_delete_filter", "email_delete_folder",
@@ -123,8 +118,6 @@ IDEMPOTENT: frozenset[str] = frozenset({
     "contacts_delete", "contacts_update",
     "tasks_update", "fact_invalidate",
     "research_complete",
-    # `remember` dedupes, so repeating it adds nothing further (#376).
-    "remember",
     "ide_open_file", "ide_open_folder", "ide_close_tab",
     "mc_navigate", "mc_close_modal",
     # Rebuilding an up-to-date graph writes the same graph again.
@@ -173,7 +166,7 @@ REPEAT_EXPECTED: frozenset[str] = frozenset({
     "EnterPlanMode", "ExitPlanMode", "SetGoal", "ClearGoal", "TodoWrite",
     "mc_navigate", "mc_close_modal",
     "ide_open_file", "ide_open_folder", "ide_close_tab",
-    "browser_navigate", "browser_click", "browser_type", "browser_fill",
+    "browser_navigate", "browser_click", "browser_fill",
     "browser_press", "browser_scroll", "browser_select", "browser_drag",
     "browser_tabs", "browser_cookies", "browser_wait", "browser_evaluate",
     # A second identical click is a second click; the lease and the verdict are

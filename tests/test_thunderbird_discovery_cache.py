@@ -129,3 +129,72 @@ def test_shutdown_forgets_the_cache(clock, monkeypatch):
 
     asyncio.run(run())
     assert calls[0] == 2
+
+
+# ── Prose shaping (2026-09-23) ───────────────────────────────────────────────
+#
+# All 40 mail tools stay advertised; only their words were trimmed. These pin
+# that the trim rewrites prose and never structure, and that no advertised
+# text still names a bridge function the model cannot call.
+
+class _ProsePool:
+    def __init__(self) -> None:
+        self.discovered = [("thunderbird", [
+            {"name": "searchMessages",
+             "description": "Search headers; use with getMessage to read",
+             "inputSchema": {"type": "object", "required": ["query"], "properties": {
+                 "query": {"type": "string", "description": "x" * 400},
+                 "folderPath": {"type": "string",
+                                "description": "Optional folder URI (from listFolders)"},
+                 "offset": {"type": "number", "description": "y" * 190},
+                 "maxResults": {"type": "number", "description": "Max results (optional)"},
+             }}},
+            {"name": "sendMail", "description": "z" * 170,
+             "inputSchema": {"type": "object", "required": ["to"], "properties": {
+                 "to": {"type": "string", "description": "Recipient"},
+                 "skipReview": {"type": "boolean", "description": "w" * 152},
+             }}},
+        ])]
+
+
+def _listed(monkeypatch):
+    async def fake_get_pool():
+        return _ProsePool()
+    monkeypatch.setattr(tb, "_get_pool", fake_get_pool)
+    return {t.name: t for t in asyncio.run(tb.list_tools())}
+
+
+def _schema(tool):
+    return getattr(tool, "inputSchema", None) or tool.input_schema
+
+
+def test_prose_is_rewritten_and_structure_is_not(clock, monkeypatch):
+    tools = _listed(monkeypatch)
+    search = _schema(tools["email_search"])
+    assert search["required"] == ["query"]
+    assert search["properties"]["offset"]["type"] == "number"
+    assert search["properties"]["query"]["description"] == \
+        tb.TOOL_PARAM_OVERRIDES[("email_search", "query")]
+    assert search["properties"]["offset"]["description"] == \
+        tb.PARAM_DESCRIPTION_OVERRIDES["offset"]
+    assert search["properties"]["maxResults"]["description"] == "Max results"
+    send = _schema(tools["email_send"])
+    assert send["properties"]["skipReview"]["description"] == \
+        tb.PARAM_DESCRIPTION_OVERRIDES["skipReview"]
+    assert tools["email_send"].description == tb.DESCRIPTION_OVERRIDES["email_send"]
+
+
+def test_no_advertised_text_names_a_bridge_function(clock, monkeypatch):
+    tools = _listed(monkeypatch)
+    folder = _schema(tools["email_search"])["properties"]["folderPath"]["description"]
+    assert "email_folders" in folder and "listFolders" not in folder
+    for tool in tools.values():
+        text = tool.description + " " + str(_schema(tool))
+        leaked = [b for b in tb.TOOL_NAME_MAP if b in text]
+        assert leaked == [], (tool.name, leaked)
+
+
+def test_every_override_names_a_mapped_tool():
+    lloyd_names = set(tb.TOOL_NAME_MAP.values())
+    assert set(tb.DESCRIPTION_OVERRIDES) <= lloyd_names
+    assert {t for t, _p in tb.TOOL_PARAM_OVERRIDES} <= lloyd_names

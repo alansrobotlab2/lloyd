@@ -386,8 +386,7 @@ RECALL_EXPAND_GRAPH = False
 # `grep_code` and `graph_lookup`, which the schema also omits but this module
 # still reads out of `params` — deliberately NOT readable from `params` either.
 # `_vault_recall` is registered as the `vault_recall` handler (vault.py:1430) and
-# `call_tool` hands it the client's argument dict raw, and `memory_ops.recall`
-# forwards its params untouched (memory_ops.py:105), so a width taken from
+# `call_tool` hands it the client's argument dict raw, so a width taken from
 # `params` would be an agent-settable retrieval knob under a name no schema
 # declares — the "stray key changes retrieval" surface the review of #843
 # refused. It is a keyword-only argument instead, so only an in-process caller
@@ -1522,8 +1521,8 @@ def _djev_shadow_rerank(documents: list[dict], query: str) -> None:
     """Record what djev would have ordered, beside what production returns.
 
     Unconditional and off-thread: one `put_nowait` on a bounded queue that
-    drops rather than waits. The lead seam of the three, because
-    `memory_ops.recall` delegates here too, so both callers pass through it.
+    drops rather than waits. The lead seam of the three, because every
+    `vault_recall` passes through it.
 
     The state and question set are built by a lambda the shadow WORKER runs —
     the recall path holds the texts already and must not spend even a string
@@ -1556,8 +1555,7 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
     """Combined recall over documents, entity facts and graph neighbours.
 
     `params` is what the `vault_recall` tool receives — `call_tool` hands this
-    handler the client's argument dict raw, and `memory_ops.recall` forwards its
-    params untouched — so every retrieval knob read out of it is agent-settable.
+    handler the client's argument dict raw — so every retrieval knob read out of it is agent-settable.
     `seed_top_k` is keyword-only precisely so it is NOT one of them: it is absent
     from the tool schema, a stray `{"seed_top_k": 3}` arriving over the wire
     changes nothing, and the only caller that sets it is `eval/run_eval.py`, in

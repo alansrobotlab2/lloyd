@@ -212,10 +212,9 @@ entity-resolution-sweep.py  (#48, daily, DRY RUN ONLY)
 Three other writers:
 
 - **`fact_relate` / `fact_add`** (MCP tools) — a fact or edge stated in a chat
-  turn. `provenance: STATED`, `origin: fact_relate`. Since 2026-09-09 the
-  `remember` and `forget` verbs land here too: they are routers onto `fact_add`
-  and `fact_invalidate`, not new write paths, so nothing in this chain changed
-  shape. See `architecture/memory.md`.
+  turn. `provenance: STATED`, `origin: fact_relate`. The `remember` and
+  `forget` verbs that routed onto `fact_add` and `fact_invalidate` from
+  2026-09-09 were retired on 2026-09-23; see `architecture/memory.md`.
 - **`conversation_relations.py`** (#51) — co-access pairs from session
   trajectories become `co_accessed` edges, `provenance: INFERRED`, with the
   trajectory as `source_doc`. It has produced **143 active edges, 0 expired**,
@@ -307,7 +306,7 @@ because a gate you have to remember to enable is a gate that gets forgotten.
 ### The index is not optional
 
 The markdown is what a person reads; `facts_idx` is what the router,
-`fact_profile`, the Memory page and the health report actually read. Every
+`fact_get`, the Memory page and the health report actually read. Every
 writer of a fact file updates it in the same breath —
 `fact_add` through `facts_idx.update_file`, `fact_resolve` and
 `fact_invalidate` through `facts.py:_reindex_files()`, in the same call, as
@@ -367,10 +366,10 @@ not have detected a regression in the real one.
 
 **God-node handling.** An entity above `FACT_GODNODE_THRESHOLD` (50) facts
 needs a query-token match before any of its facts are returned; graph expansion
-divides each neighbour's weight by `log(degree + e)`; `fact_profile` caps each
-category at 10. `Lloyd` had 5,489 facts when this was written and has 6,642 on
+divides each neighbour's weight by `log(degree + e)`; `fact_get` caps each
+category at 10 (it took the cap from `fact_profile`, retired 2026-09-23). `Lloyd` had 5,489 facts when this was written and has 6,642 on
 2026-09-11 — without these it answers every question. The same threshold
-refuses the pairwise contradiction scan behind `fact_check` and `fact_resolve`;
+refuses the pairwise contradiction scan behind `fact_resolve` and `fact_resolve_apply`;
 see *Tools*.
 
 ---
@@ -588,18 +587,16 @@ holds, and the count is a stock, not a leak.
 
 ## Tools
 
-`fact_get`, `fact_add`, `fact_profile`, `fact_check`, `fact_resolve`,
+`fact_get`, `fact_add`, `fact_resolve`, `fact_resolve_apply`,
 `fact_invalidate`, `fact_relate`, `fact_relationships`, `fact_path`,
 `fact_neighbors` (`agent_mcp/facts.py`), and `vault_recall`
 (`agent_mcp/vault.py`).
 
-Since 2026-09-09 four verbs sit over them — `remember`, `recall`, `forget`,
-`improve` (`agent_mcp/memory_ops.py`). They are routers, not replacements:
-each adds the one guard its underlying tool lacks, all ten tools above stay
-callable with their own parameters, and nothing about the store or the write
-chain changed. `architecture/memory.md` is that surface's doc, including the
-`improve` loop (#84, nightly, plan mode) and why its detector is evidence
-rather than a verdict.
+#376's four verbs (`remember`, `recall`, `forget`, `improve`) sat over these
+from 2026-09-09 and were retired on 2026-09-23, with `fact_check` (a second
+name for `fact_resolve`) and `fact_profile` (whose cap and `query` ranking
+`fact_get` took). `architecture/memory.md` has why, and the `improve` loop
+(#84, nightly, plan mode), which runs from its script.
 
 Three of those address a fact by `<file, id>` -- `fact_resolve`,
 `fact_invalidate` and every revert report -- so the ID has to name exactly one
@@ -612,7 +609,7 @@ call that reads like a query silently expired facts — and its contradiction
 detector fires on token overlap above 0.6, which is two facts phrased
 similarly, not two facts that disagree.
 
-`fact_check` and `fact_resolve` share that detector, and it is pairwise —
+`fact_resolve` and `fact_resolve_apply` share that detector, and it is pairwise —
 O(n²) in the entity's fact count. It is refused above `FACT_GODNODE_THRESHOLD`
 inside `_detect_contradictions_sync`, so both tools inherit the refusal; the
 guard used to sit on `auto_resolve` alone, which left the reporting path

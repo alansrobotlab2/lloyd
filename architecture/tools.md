@@ -17,7 +17,7 @@ relations:
   - autonomy/38-nightly-reflection-signals.md
   - architecture/autonomy-jobs.md
 tags: [architecture, tools, mcp]
-summary: The lloyd-mcp aggregator — 157 tools across 27 modules behind one
+summary: The lloyd-mcp aggregator — 145 tools across 26 modules behind one
   Server("lloyd") on :8500/mcp, the dispatch path every call takes, and every
   tool with its properties.
 type: reference
@@ -28,16 +28,25 @@ date: 2026-09-21
 # MCP tools
 
 Every tool Lloyd can call lives in the **lloyd-mcp aggregator**: one
-`Server("lloyd")` in its own process that mounts 27 Python modules and
+`Server("lloyd")` in its own process that mounts 26 Python modules and
 advertises their tools as one flat namespace. There is no per-plugin server
 and no gateway. The in-process harness (`app/harness/`) is the client that
 dispatches tools. The Tools page's discovery (`app/mcp_discovery.py`) opens its
 own session to list them, and the backend reads the side routes in §2.
 
-**155 tools, 27 modules**, verified against `GET :8500/health` and an offline
-`list_tools()` on 2026-09-20. The model is shown fewer: `_BackgroundTaskDrain`
-is never advertised, and the four `discord_*` tools sit in `disabled_tools`,
-so an ordinary chat turn sees 150. `ToolSearch` is not in the count. The
+**145 tools, 26 modules**, from an offline `list_tools()` on 2026-09-23 (105
+in the tree plus the Thunderbird bridge's 40). The model is shown fewer:
+`_BackgroundTaskDrain` is never advertised, and the four `discord_*` tools sit
+in `disabled_tools`, so an ordinary chat turn sees 140. Twelve were retired on
+2026-09-23 as duplicates of, or subsumed by, a tool that stays: `fact_check`
+(`fact_resolve`), `fact_profile` (`fact_get`, which took its cap and `query`
+ranking), `browser_type` (`browser_fill(keystrokes=true)`), #376's
+`remember`/`recall`/`forget`/`improve` (`fact_add`, `vault_recall`,
+`fact_invalidate`, which took `forget`'s scope refusal, and the nightly
+`fact-improvement` script), and five operator verbs of `autoresearch`.
+`tests/test_mcp_layer.py::RETIRED_TOOLS` keeps them out, and
+`test_advertised_catalog_stays_under_its_token_ceiling` pins the tree's
+catalog size. `ToolSearch` is not in the count. The
 harness answers it itself (see §7).
 
 > **Regenerate this inventory; do not edit it by hand.** §11 has the command.
@@ -427,14 +436,13 @@ self-evidently a file with a fresh timestamp.
 | `builtin_todo` | 1 | the session todo list |
 | `ambient` | 2 | background producers pushing into the active chat, and the ambient turn's routing verdict |
 | `autonomy` | 8 | the scheduled-task fleet ([[autonomy]]) |
-| `autoresearch` | 7 | prompt-variant rounds against the bench |
+| `autoresearch` | 2 | prompt-variant rounds: their status, and restoring prompts from a snapshot. A round is scheduled by the worker source or run with `scripts.autoresearch.run_round` |
 | `backlog` | 4 | the kanban backlog. `backlog_write_task` runs write-time dedupe ([[backlog]]) |
-| `browser` | 14 | Playwright Chromium, with the SSRF guard on resolved addresses |
+| `browser` | 13 | Playwright Chromium, with the SSRF guard on resolved addresses |
 | `code_graph` | 6 | structural navigation over graphify's AST extraction (§9) |
 | `discord_bot` | 4 | Discord. All four are disabled in config today |
 | `djev` | 3 | typed decisions on GPU 2's DiffusionGemma, ~40 ms each. Ranking only: the scores are not calibrated ([[djev]]) |
-| `facts` | 11 | the knowledge-graph fact layer and store ([[knowledge-graph]]) |
-| `memory_ops` | 4 | #376's four verbs. Routers over `fact_*`/`vault_*`, each adding the one guard its target lacks |
+| `facts` | 9 | the knowledge-graph fact layer and store ([[knowledge-graph]]) |
 | `vault` | 5 | the Obsidian vault: read, write, search, recall |
 | `session` | 5 | `MEMORY.md`/`USER.md`, and transcript search |
 | `mission_control` | 2 | chat session listing |
@@ -444,7 +452,7 @@ self-evidently a file with a fresh timestamp.
 | `automod` | 10 | a thin surface over `scripts/automod/`. There is no `automod_write_code`: a round is a worktree path plus ordinary Edit/Write/Bash. While `automod.enabled` is false every tool refuses except `automod_status` and `automod_abort` ([[automod]]) |
 | `skills` | 2 | the skill library ([[skills]]) |
 | `http_tools` | 3 | web search, fetch and raw requests (§9) |
-| `thunderbird` | 40 | mail (26), calendar (6), to-dos (3), contacts (5), through a Node bridge over stdio. Zero tools, and still `ok`, when Thunderbird is not running |
+| `thunderbird` | 40 | mail (26), calendar (6), to-dos (3), contacts (5), through a Node bridge over stdio. Zero tools, and still `ok`, when Thunderbird is not running. The proxy rewrites the bridge's prose, never its schema structure: bridge function names become Lloyd's, and repeated or long parameter text is replaced (`PARAM_DESCRIPTION_OVERRIDES`) |
 
 ### Every tool
 
@@ -523,16 +531,11 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `autonomy_run_task` | FX | `id` | Run a task now, inside the aggregator. The call blocks until the run ends (its own description says "background", which is wrong) |
 | `autonomy_health` | RO | — | Fleet health over N days: failures, timeouts, empty runs, GPU-hours |
 
-#### `autoresearch` (7)
+#### `autoresearch` (2)
 
 | Tool | Properties | Required | Does |
 |---|---|---|---|
-| `autoresearch_round` | FX | — | Start a prompt-variant round against the bench; promotes a winner that beats baseline |
 | `autoresearch_status` | RO | — | Recent rounds, or one round's variants and scores |
-| `autoresearch_bench_list` | RO | — | The bench's task ids, categories and safety flags |
-| `autoresearch_bench_add` | FX | `id`, `frontmatter` | Add a bench task |
-| `autoresearch_ledger_query` | RO | — | Query the autoresearch ledger |
-| `autoresearch_promote` | FX | `variant_id` | Promote an evaluated variant (dry-run by default) |
 | `autoresearch_rollback` | DX FX | `snapshot_ts` | Restore prompt files from a snapshot, through the vault landing route |
 
 #### `backlog` (4)
@@ -544,20 +547,19 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `backlog_get_task` | RO | `task_id` | One item in full: front matter and body |
 | `backlog_write_task` | FX | — | Create or update an item. A create runs write-time dedupe and may merge into an existing item |
 
-#### `browser` (14)
+#### `browser` (13)
 
 | Tool | Properties | Required | Does |
 |---|---|---|---|
 | `browser_navigate` | OW RX | `url` | Load a URL (private hosts refused, loopback allowed) |
 | `browser_snapshot` | RO OW | — | Accessibility tree of the page, with `eN` refs for the action tools |
 | `browser_click` | OW RX | `ref` | Click an element by ref |
-| `browser_type` | OW RX | `ref`, `text` | Type into a field by ref |
 | `browser_scroll` | OW RX | — | Scroll the page |
 | `browser_press` | OW RX | `key` | Press a key or chord |
 | `browser_tabs` | OW RX | `action` | List, switch, open or close tabs |
 | `browser_screenshot` | RO OW | — | PNG of the page, also saved under `logs/screenshots/` |
 | `browser_evaluate` | OW RX | `script` | Run JavaScript in the page and return the result |
-| `browser_fill` | OW RX | `ref`, `value` | Fill a field through Playwright's `fill()` (fires input/change events) |
+| `browser_fill` | OW RX | `ref`, `value` | Set a field's value in one write that fires input/change, or key by key with `keystrokes=true` for search-as-you-type fields. Absorbed `browser_type` |
 | `browser_wait` | OW RX | `condition` | Wait for a selector, text, navigation or network idle |
 | `browser_select` | OW RX | `ref` | Pick an option in a `<select>` by value or label |
 | `browser_drag` | OW RX | `source_ref`, `target_ref` | Drag one element onto another |
@@ -591,30 +593,19 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `djev_decide` | RO | `state`, `questions` | Typed questions (yes/no, one-of-N, ordered scale) about one text, in ~40 ms |
 | `djev_status` | RO | — | Enabled, reachable, per-seam latency, shadow queue, per-schema floors and gate status |
 
-#### `facts` (10)
+#### `facts` (9)
 
 | Tool | Properties | Required | Does |
 |---|---|---|---|
-| `fact_get` | RO | `entity` | An entity's facts, optionally as of a date or including expired |
+| `fact_get` | RO | `entity` | An entity's facts, capped per category (10; 0 = none), most recent or ranked by `query`; optionally as of a date or including expired. Absorbed `fact_profile` |
 | `fact_add` | FX | `entity`, `category`, `fact` | Add one fact to an entity's markdown fact file and index it |
-| `fact_profile` | RO | `entity` | An entity's facts grouped by category, capped at 10 each |
-| `fact_check` | RO | `entity` | Pairwise contradiction scan (refused above 50 facts) |
 | `fact_resolve` | RO | `entity` | Report contradictions. It marks nothing (#1326) |
 | `fact_resolve_apply` | FX | `entity` | Mark the lower-confidence side of each pair `invalid_at` (never expired). Was `fact_resolve`'s `auto_resolve` |
-| `fact_invalidate` | DX ID | `entity`, `ended` | Expire facts that stopped being true |
+| `fact_invalidate` | DX ID | `entity` | Expire facts that stopped being true. Refuses an unscoped call; `ended` defaults to today. Absorbed `forget` |
 | `fact_relate` | FX | `source`, `target`, `type` | Add a typed edge between two entities |
 | `fact_relationships` | RO | `entity` | An entity's inbound and outbound edges |
 | `fact_path` | RO | `source`, `target` | Shortest relationship path between two entities |
 | `fact_neighbors` | RO | `entity` | N-hop subgraph around an entity (truncates at 1000 nodes / 2000 edges) |
-
-#### `memory_ops` (4)
-
-| Tool | Properties | Required | Does |
-|---|---|---|---|
-| `remember` | ID | `entity`, `category`, `fact` | Record one fact through one entry point; skips a verbatim duplicate |
-| `recall` | RO | `query` | Vault documents, entity facts and graph-neighbour facts in one call |
-| `forget` | DX FX | `entity` | Expire a fact; refuses without a match or category scope |
-| `improve` | DX FX | — | One feedback pass over fact quality (dry run unless `apply`) |
 
 #### `vault` (5)
 
@@ -749,8 +740,11 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 ## 7. Progressive disclosure (`ToolSearch`)
 
 Advertising the whole catalog on every request is billed as input tokens on
-every turn (~25.8k measured when the catalog was 124 tools; re-measure it
-against today's 155 before quoting it), and tool-call accuracy degrades past roughly
+every turn: ~30.3k tokens on a chat turn after the 2026-09-23 trim, measured
+with the primary's `/tokenize` over the OpenAI-shaped JSON (34.8k before it;
+25.8k when the catalog was 124 tools). The Thunderbird bridge is 10.1k of that,
+about half of it schema structure no prose trim can reach. And
+tool-call accuracy degrades past roughly
 30–50 tools loaded at once. `harness.tool_search` advertises a small baseline
 plus a `ToolSearch` meta-tool and loads the rest on demand
 (`app/harness/tool_search.py`, `tool_search_cache.py`). The model gets a

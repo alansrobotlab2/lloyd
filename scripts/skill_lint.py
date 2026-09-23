@@ -230,6 +230,12 @@ PHANTOM_TOOLS = frozenset({
     "skill_view",
     "file_glob", "file_grep", "tag_search", "tag_explore",
     "pipeline_dispatch", "chat_send", "sessions_send",
+    # Retired on 2026-09-23 as duplicates or subsumed. The four #376 verbs
+    # (remember, recall, forget, improve) went too but are English words, so a
+    # word-boundary match on them would flag ordinary prose.
+    "fact_profile", "fact_check", "browser_type",
+    "autoresearch_round", "autoresearch_promote", "autoresearch_bench_add",
+    "autoresearch_bench_list", "autoresearch_ledger_query",
 })
 
 # Skills whose job is to say these names are not real.

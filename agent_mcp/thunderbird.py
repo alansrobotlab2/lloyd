@@ -40,6 +40,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -122,8 +123,8 @@ DESCRIPTION_OVERRIDES = {
     ),
     "email_folders": (
         "List the mail folders for an account, with each folder's URI and "
-        "message count. The URI is what email_search and email_messages "
-        "take to scope a query."
+        "message count. Pass the URI as folderPath to email_search or "
+        "email_recent to scope a query."
     ),
     "email_read": (
         "Read one email message in full by id: headers, body and "
@@ -168,7 +169,137 @@ DESCRIPTION_OVERRIDES = {
         "Delete a contact from its address book by UID. Permanent — the "
         "contact is not recoverable from Thunderbird afterwards."
     ),
+    # The compose-style tools each restated the skipReview policy in their
+    # description AND in the parameter; the parameter now says it once.
+    "email_send": (
+        "Compose a new email and open it in a review window for the user to "
+        "send. Use email_reply to answer an existing message."
+    ),
+    "email_reply": (
+        "Reply to a message, quoting the original, in a review window for the "
+        "user to send. Find the message with email_search or email_recent."
+    ),
+    "email_forward": (
+        "Forward a message with its original content, in a review window for "
+        "the user to send."
+    ),
+    "email_save_draft": (
+        "Save a composed message to the identity's Drafts folder without "
+        "sending it or opening a window."
+    ),
+    "calendar_create": (
+        "Create a calendar event through a review dialog the user confirms. "
+        "Use calendar_list for a calendar id."
+    ),
+    "tasks_create": (
+        "Create a task (to-do) through a review dialog the user confirms."
+    ),
+    "email_search": (
+        "Search message headers (subject, author, recipients, preview) and "
+        "return ids and folder paths; read a hit with email_read. For the "
+        "newest mail with no query, use email_recent."
+    ),
+    "email_update": (
+        "Mark messages read/unread or flagged, add or remove tags, or move "
+        "them to a folder or Trash. messageId for one message, messageIds "
+        "for several. On IMAP, tagging and moving in one call can drop the "
+        "tags on the moved copy."
+    ),
 }
+
+# Parameter prose, by parameter name, applied to every mail tool that has
+# that parameter. The bridge's own wording is kept wherever it is short; these
+# replace the long outliers and the paragraphs the bridge repeats on several
+# tools (skipReview on five, offset on two). Types, enums and `required` are
+# never touched — only the words. Keyed by name because the same parameter
+# means the same thing on every tool that carries it; a tool-specific
+# exception goes in TOOL_PARAM_OVERRIDES.
+PARAM_DESCRIPTION_OVERRIDES = {
+    "skipReview": (
+        "Skip the review window. Honoured only if the user has switched "
+        "the default-on safety block off (default false)."
+    ),
+    "offset": (
+        "Results to skip, for paging (default 0). When set, the result is "
+        "{messages, totalMatches, offset, limit, hasMore}."
+    ),
+    "includeInlineImages": (
+        "Also return inline images as image blocks (default false; 1 MiB "
+        "each, 4 MiB total). Ignored with rawSource."
+    ),
+    "rawSource": (
+        "Return the raw RFC 2822 source instead of the parsed body, e.g. "
+        "for calendar invites (default false). Needs an offline copy on IMAP."
+    ),
+    "onlineMeeting": (
+        "Add (true) or remove (false) a Teams meeting link. Office 365 "
+        "accounts only."
+    ),
+    "showAs": (
+        "'busy' (opaque) or 'free' (transparent); default busy. An explicit "
+        "status wins. On update, null clears it."
+    ),
+    "dedupByMessageId": (
+        "Collapse copies of one message in several folders into one row, "
+        "listing the rest in dupLocations (default true)."
+    ),
+    "searchBody": (
+        "Search full bodies too, not just the ~200-char preview (slower; "
+        "needs query; IMAP needs offline sync)."
+    ),
+    "addTags": (
+        "Tag keywords to add. Built-in: $label1 Important, $label2 Work, "
+        "$label3 Personal, $label4 To Do, $label5 Later."
+    ),
+    "categories": (
+        "Category names, case-sensitive; get them from calendar_categories. "
+        "On update, [] clears them."
+    ),
+    "from": "Sender identity: an address or identity id from email_accounts.",
+    "isHtml": "True if body is HTML (default false).",
+    "attachments": "File paths, or inline {name, contentType, base64} objects.",
+}
+
+TOOL_PARAM_OVERRIDES = {
+    ("email_search", "query"): (
+        "Words that must all appear across subject, author, recipients and "
+        "preview. Prefix from:, subject:, to: or cc: to search one field. "
+        "Empty matches everything."
+    ),
+}
+
+# The bridge's descriptions name its own camelCase tools ("use with
+# getMessage", "from listFolders"), which do not exist under those names here.
+_BRIDGE_NAME_RE = re.compile(
+    r"\b(" + "|".join(sorted(TOOL_NAME_MAP, key=len, reverse=True)) + r")\b")
+_OPTIONAL_RE = re.compile(r"\s*\((?:optional)\)")
+
+
+def _lloyd_prose(text: str) -> str:
+    """Bridge prose with its tool names translated and "(optional)" dropped.
+
+    "(optional)" restates what `required` already says, on dozens of params.
+    """
+    text = _BRIDGE_NAME_RE.sub(lambda m: TOOL_NAME_MAP[m.group(1)], text or "")
+    return _OPTIONAL_RE.sub("", text).strip()
+
+
+def _shape_params(name: str, schema: dict) -> dict:
+    """The bridge schema with Lloyd's parameter prose; structure untouched."""
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return schema
+    shaped = {}
+    for pname, spec in props.items():
+        if not isinstance(spec, dict):
+            shaped[pname] = spec
+            continue
+        desc = (TOOL_PARAM_OVERRIDES.get((name, pname))
+                or PARAM_DESCRIPTION_OVERRIDES.get(pname)
+                or _lloyd_prose(spec.get("description") or ""))
+        shaped[pname] = {**spec, "description": desc} if desc else {
+            k: v for k, v in spec.items() if k != "description"}
+    return {**schema, "properties": shaped}
 
 # Discovery cache. The bridge was previously re-queried on every
 # tools/list — a blocking round trip on each new MCP client connection.
@@ -298,15 +429,15 @@ async def _discover() -> list[Tool]:
             name = _lloyd_name(bridge_name)
             if name.startswith("tb_"):
                 unmapped.append(bridge_name)
-            description = DESCRIPTION_OVERRIDES.get(name) or (
+            description = DESCRIPTION_OVERRIDES.get(name) or _lloyd_prose(
                 t.get("description") or f"Thunderbird: {bridge_name}"
             )
             tools.append(Tool(
                 name=name,
                 description=description,
-                inputSchema=_document_params(
-                    t.get("inputSchema") or {"type": "object", "properties": {}}
-                ),
+                inputSchema=_document_params(_shape_params(
+                    name, t.get("inputSchema") or {"type": "object", "properties": {}}
+                )),
             ))
     if unmapped:
         logger.warning(
