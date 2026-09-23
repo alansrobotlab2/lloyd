@@ -493,11 +493,15 @@ def test_no_shipped_skill_names_an_absent_repo_script():
 def test_the_absent_script_ledger_only_carries_drift_still_cited():
     """A named allowlist inside an enforced rule needs a retirement route.
 
-    `KNOWN_ABSENT_SCRIPTS` is four entries today. Every one must still be cited
+    `KNOWN_ABSENT_SCRIPTS` is three entries as of 2026-09-23 — the exact set is
+    pinned by `test_the_absent_script_ledger_holds_exactly_the_cited_debts`
+    below, not by this sentence. Every one must still be cited
     by a shipped skill, or the entry is a stale allowance: the day a skill drops
     its bad path, the line proving it stays behind and the rule quietly permits a
     *new* citation of that path forever. The failure message names the move —
-    delete the entry.
+    delete the entry. That is the route #1417 took for
+    `tests/test_system_health_check_frontend_endpoint.py`, whose only citation
+    lost its `~/lloyd/` anchor in the 2026-09-23 `system-health-check` edit.
     """
     skill_lint = _load_skill_lint()
     skills_dir = Path.home() / "obsidian" / "skills"
@@ -516,6 +520,35 @@ def test_the_absent_script_ledger_only_carries_drift_still_cited():
     assert not stale, (
         f"KNOWN_ABSENT_SCRIPTS entries no longer cited by any skill: {stale} — "
         "retire them, or the ledger is allowing paths nobody asked it to allow")
+
+
+def test_the_absent_script_ledger_holds_exactly_the_cited_debts():
+    """The allowlist is a named set, so its membership is a claim under test (#1417).
+
+    `test_the_absent_script_ledger_only_carries_drift_still_cited` proves no
+    entry has gone stale, and it is satisfied by ANY subset — a path could be
+    added to `KNOWN_ABSENT_SCRIPTS`, silence the rule for that path forever, and
+    that node would stay green. So the corpus node and the stale-entry node
+    between them pin the two edges of the ledger but not its contents, which is
+    how a debt allowlist quietly becomes the reason a guard never fires. Pinning
+    the exact mapping — every key AND the note naming the drift it excuses —
+    means an entry can only arrive with a visible edit here, and #1417's
+    retirement of `tests/test_system_health_check_frontend_endpoint.py` (the
+    skill's lone citation lost its `~/lloyd/` anchor, so the entry was allowing
+    a path nobody cited) is the route out, pinned by the same node.
+    """
+    skill_lint = _load_skill_lint()
+    assert skill_lint.KNOWN_ABSENT_SCRIPTS == {
+        "scripts/memory/extract-session-log.py":
+            "historical-knowledge-refresh; superseded by extract-transcript.py",
+        "scripts/memory/next-gen-memory/context_bundle.py":
+            "memory-path-scoping; directory removed with the next-gen-memory scripts",
+        "tests/test_health_skill_docs_live_fleet.py":
+            "system-health-check; test never landed",
+    }, ("the absent-path allowlist changed shape; every entry must name a drift "
+        f"the rule actually found, and #1417 retired "
+        f"'tests/test_system_health_check_frontend_endpoint.py' precisely because "
+        f"its citation was gone: {skill_lint.KNOWN_ABSENT_SCRIPTS}")
 
 
 # ── clause 10: a before/after number its own mechanism can move ──────────────

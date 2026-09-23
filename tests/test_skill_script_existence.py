@@ -16,13 +16,19 @@ tree this commit lands in, not inferred, because the naive version of the claim
 ("lint has no file-existence rule") is false and would not survive a reader:
 
   * `scripts/skill_lint.py` *does* have a script-path rule: `check_script_paths`
-    (:353), reported under `missing_script` at :458. Its regex (:330-333) is
+    (:367), reported under `missing_script` at :472. Its regex (:336-339) is
     anchored at `~/lloyd/` or `$HOME/lloyd/` and only over repo code roots
-    (`_REPO_CODE_ROOTS`, :328), so a path under `~/obsidian/skills/` is not a
+    (`_REPO_CODE_ROOTS`, :334), so a path under `~/obsidian/skills/` is not a
     shape it can match. Calling it directly returns `[]` for all three offenders
     and two repo paths for `system-health-check`, both already in its
-    `KNOWN_ABSENT_SCRIPTS` ledger (:341) — the positive control that shows the
-    rule is live and simply cannot see this directory.
+    `KNOWN_ABSENT_SCRIPTS` ledger (:357) — the positive control that shows the
+    rule is live and simply cannot see this directory. "Two" is the tree this
+    file joined: the second of them,
+    `tests/test_system_health_check_frontend_endpoint.py`, stopped being
+    reported on 2026-09-23 when that skill's lone citation of it lost its
+    `~/lloyd/` anchor, and #1417 retired the ledger entry the orphan left
+    behind. `test_the_retired_repo_ledger_entry_is_not_an_allowlist_any_more`
+    below is what keeps that retirement from becoming a blind spot.
   * the vault gate runs the real loaders, but `loader_errors` asks
     `skill_load_defect` about a touched skill (:180, :185) — that skill's own
     front matter and `SKILL.md`. It never opens a path the prose mentions, and
@@ -243,3 +249,53 @@ def test_the_check_cannot_be_silently_widened_into_a_no_op():
     assert len(bodies) > 100, (
         f"only {len(bodies)} active skills enumerated — the path check is "
         "vacuous, not green")
+
+
+# ── the repo-side ledger's retirement route (#1417) ──────────────────────────
+
+def _load_skill_lint():
+    """Load `scripts/skill_lint.py` the way its callers do: by path.
+
+    It is not an importable module (no package beside it on the path for the
+    nightly invocation `python …/scripts/skill_lint.py`), which is why
+    `tests/test_skills_single_walk.py` and
+    `tests/test_fact_identity_one_action_one_fact.py` each `importlib` it rather
+    than importing it. The code graph cannot see any of these reads — a
+    spec-from-file location is a string, not an edge — so a change to the
+    ledger's contents looks local to the graph and is not.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "skill_lint_under_existence_test", ROOT / "scripts" / "skill_lint.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_retired_repo_ledger_entry_is_not_an_allowlist_any_more(tmp_path):
+    """A skill citing the #1417-retired path is now reported, with no excuse.
+
+    `check_script_paths` answers with `known_stale`: the ledger's note when a
+    path is allowed, `""` otherwise, and `test_no_shipped_skill_names_an_absent_repo_script`
+    charges only the empty-note hits. So an entry that outlives its citation is
+    not merely untidy — it is a permanently open permit for that exact absent
+    path, granted by a line nobody can point to in the corpus any more. Retiring
+    `tests/test_system_health_check_frontend_endpoint.py` therefore has to be
+    *observable*: before this commit the synthetic citation below came back with
+    the note `"system-health-check; test never landed"` and was excused; after
+    it, the same citation is an offender. That flip is the clause, and it is
+    asserted as a whole-record comparison rather than `any(...)` so a hit with a
+    note still present fails rather than passing a membership test.
+    """
+    skill_lint = _load_skill_lint()
+    retired = "tests/test_system_health_check_frontend_endpoint.py"
+    assert retired not in skill_lint.KNOWN_ABSENT_SCRIPTS, (
+        "the entry is back, so the path is silently allowed again")
+
+    hits = skill_lint.check_script_paths(
+        f"Run `~/lloyd/{retired}` for the frontend certificate.\n",
+        skill_dir=tmp_path, repo_root=ROOT)
+    assert hits == [{"path": retired, "known_stale": ""}], (
+        f"a skill citing the retired path must be reported as an unexcused "
+        f"absent script: {hits}")

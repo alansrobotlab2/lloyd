@@ -344,14 +344,22 @@ _TEMPLATE_PATHS = re.compile(r"[<>{}*]|\.\.\.|path/to|exact/path|example|placeho
 # day it was written. Listed so the rule can be enforced from the day it lands
 # without the whole suite turning red over findings that predate it — and an
 # entry here is a debt with a name, not a blind spot: a NEW absent path fails.
+# It is also an entry with a route OUT: #1417 retired
+# `tests/test_system_health_check_frontend_endpoint.py` once the
+# `system-health-check` skill's only citation of it lost its `~/lloyd/` anchor
+# (the 2026-09-23 skill edit), which left an allowance for a path no skill
+# cites — the state
+# `test_the_absent_script_ledger_only_carries_drift_still_cited` exists to
+# catch. The exact set is pinned by
+# `test_the_absent_script_ledger_holds_exactly_the_cited_debts`; the
+# never-landed test that entry recorded is still owed debt and is named on
+# backlog #1417, not here.
 KNOWN_ABSENT_SCRIPTS: dict[str, str] = {
     "scripts/memory/extract-session-log.py":
         "historical-knowledge-refresh; superseded by extract-transcript.py",
     "scripts/memory/next-gen-memory/context_bundle.py":
         "memory-path-scoping; directory removed with the next-gen-memory scripts",
     "tests/test_health_skill_docs_live_fleet.py":
-        "system-health-check; test never landed",
-    "tests/test_system_health_check_frontend_endpoint.py":
         "system-health-check; test never landed",
 }
 
