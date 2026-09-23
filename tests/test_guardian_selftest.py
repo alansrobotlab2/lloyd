@@ -456,3 +456,68 @@ def test_the_two_profiles_partition_the_checks():
     assert set(STACK_INDEPENDENT).isdisjoint(STACK_DEPENDENT)
     assert len(STACK_INDEPENDENT) == 5 and len(STACK_DEPENDENT) == 3
     assert ST.PROFILES == (ST.PROFILE_DAILY, ST.PROFILE_STAGING)
+
+
+# ── the running guardian's first daily run is a boot race too ───────────
+#
+# #1302 moved the stage gate off the stack; the guardian's own first tick still
+# ran the daily profile ~2 s after a cold boot, so every boot from 2026-09-15 to
+# 09-23 paged "Guardian self-test failed" and published `selftest: false` for a
+# day over a healthy stack.
+
+
+def _record_alerts(g) -> list[str]:
+    seen: list[str] = []
+    g.alert = lambda level, title, body, **kw: seen.append(title)
+    return seen
+
+
+def _stack_answers(g, monkeypatch):
+    import probes
+    _supervisor_answers(g)
+    monkeypatch.setattr(probes, "probe", lambda url, timeout: {
+        "ok": True, "status": 200, "body": {}, "error": None,
+        "latency_ms": 1, "kind": "ok"})
+
+
+def test_a_failure_inside_the_boot_grace_is_recorded_but_not_paged(cold_stack):
+    seen = _record_alerts(cold_stack)
+    cold_stack.maybe_selftest()
+    assert cold_stack.selftest_ok is False, "the heartbeat must still read a dead stack honestly"
+    assert seen == [], "a boot race paged a human"
+
+
+def test_a_failure_after_the_boot_grace_pages_once_per_episode(cold_stack, monkeypatch):
+    import policy
+    seen = _record_alerts(cold_stack)
+    cold_stack.started_ts -= policy.SELFTEST_BOOT_GRACE_SECONDS + 1
+    cold_stack.maybe_selftest()
+    assert seen == ["Guardian self-test failed"]
+    cold_stack.last_selftest -= policy.SELFTEST_RETRY_SECONDS + 1
+    cold_stack.maybe_selftest()
+    assert seen == ["Guardian self-test failed"], "the retry clock must not re-page every 2 minutes"
+
+
+def test_a_failed_selftest_is_asked_again_on_the_retry_clock_not_in_a_day(cold_stack, monkeypatch):
+    import policy
+    _record_alerts(cold_stack)
+    cold_stack.maybe_selftest()
+    assert cold_stack.selftest_ok is False
+    _stack_answers(cold_stack, monkeypatch)
+    cold_stack.maybe_selftest()
+    assert cold_stack.selftest_ok is False, "re-asked before the retry interval elapsed"
+    cold_stack.last_selftest -= policy.SELFTEST_RETRY_SECONDS + 1
+    cold_stack.maybe_selftest()
+    assert cold_stack.selftest_ok is True, "a boot-race verdict outlived the stack coming up"
+
+
+def test_a_passing_selftest_keeps_the_daily_cadence(cold_stack, monkeypatch):
+    import policy
+    _stack_answers(cold_stack, monkeypatch)
+    cold_stack.maybe_selftest()
+    assert cold_stack.selftest_ok is True
+    calls = []
+    monkeypatch.setattr(ST, "run", lambda *a, **k: calls.append(1) or True)
+    cold_stack.last_selftest -= policy.SELFTEST_RETRY_SECONDS + 1
+    cold_stack.maybe_selftest()
+    assert calls == [], "a healthy guardian re-ran its selftest on the retry clock"

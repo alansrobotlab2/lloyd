@@ -194,4 +194,17 @@ ALERT_REPEAT_SECONDS = 900.0
 VOICE_REPEAT_SECONDS = 3600.0
 
 SELFTEST_INTERVAL_SECONDS = 24 * 3600.0
+# A failed daily selftest is asked again this soon, not in a day. Its first run
+# is the guardian's first tick, which on a cold boot is ~2 s after systemd
+# starts it — before supervisord's socket exists or either service answers — so
+# the three stack-dependent checks fail by construction. Every cold boot from
+# 2026-09-15 to 09-23 paged "Guardian self-test failed" (needs_human, every
+# channel) that way, and the heartbeat then published `selftest: false` for the
+# next 24 h over a stack that had been healthy since minute one.
+SELFTEST_RETRY_SECONDS = 120.0
+# Inside this window after the guardian starts, a failed selftest is logged and
+# retried, never alerted. Ten minutes covers a cold boot of the stack it probes
+# (backend + aggregator, ~1 min) with room; a watchdog that truly cannot act is
+# still reported ten minutes after boot rather than within seconds of it.
+SELFTEST_BOOT_GRACE_SECONDS = 600.0
 HEARTBEAT_NAME = "heartbeat.json"

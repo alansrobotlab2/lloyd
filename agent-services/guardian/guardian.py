@@ -125,8 +125,10 @@ class Guardian:
         self.start_history: dict[str, list[float]] = {p: [] for p in self.programs}
         self.sup_down_streak = 0
         self.quiet_until = 0.0
+        self.started_ts = time.time()
         self.last_selftest = 0.0
         self.selftest_ok: bool | None = None
+        self._selftest_alerted = 0.0
         self.chronic: set[str] = set()
         self._chronic_built_ts = 0.0
         self.last_alert = ""
@@ -835,20 +837,41 @@ class Guardian:
 
     # ── selftest ───────────────────────────────────────────────────────
     def maybe_selftest(self) -> None:
-        if time.time() - self.last_selftest < policy.SELFTEST_INTERVAL_SECONDS:
+        # A failing selftest is re-asked on the short clock: the heartbeat
+        # publishes `selftest_ok`, and a verdict from a boot race must not stand
+        # for a day (see policy.SELFTEST_RETRY_SECONDS).
+        now = time.time()
+        interval = (policy.SELFTEST_RETRY_SECONDS if self.selftest_ok is False
+                    else policy.SELFTEST_INTERVAL_SECONDS)
+        if now - self.last_selftest < interval:
             return
-        self.last_selftest = time.time()
+        self.last_selftest = now
+        was = self.selftest_ok
         try:
             import selftest
             self.selftest_ok = selftest.run(self, verbose=False)
         except Exception as exc:
             self.selftest_ok = False
             log(f"selftest raised: {exc}")
-        if not self.selftest_ok:
-            self.alert("error", "Guardian self-test failed",
-                       "The watchdog can no longer perform one of its own preconditions. "
-                       "It is still running but may not be able to act.",
-                       needs_human=True)
+        if self.selftest_ok:
+            if was is False:
+                log("selftest: passing again")
+            self._selftest_alerted = 0.0
+            return
+        if now - self.started_ts < policy.SELFTEST_BOOT_GRACE_SECONDS:
+            log(f"selftest failed {now - self.started_ts:.0f}s after start "
+                f"(boot grace {policy.SELFTEST_BOOT_GRACE_SECONDS:.0f}s); "
+                f"retrying in {policy.SELFTEST_RETRY_SECONDS:.0f}s")
+            return
+        # One page per failure episode, repeated daily while it lasts — the
+        # cadence the old 24 h check gave, now that the check runs every retry.
+        if now - self._selftest_alerted < policy.SELFTEST_INTERVAL_SECONDS:
+            return
+        self._selftest_alerted = now
+        self.alert("error", "Guardian self-test failed",
+                   "The watchdog can no longer perform one of its own preconditions. "
+                   "It is still running but may not be able to act.",
+                   needs_human=True)
 
     # ── main loop ──────────────────────────────────────────────────────
     def tick(self) -> str:
