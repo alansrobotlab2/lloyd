@@ -844,11 +844,12 @@ def test_expand_graph_default_is_named_by_one_production_constant():
     assert 'params.get("expand_graph", RECALL_EXPAND_GRAPH)' in src, (
         "_vault_recall defaults the knob from a literal again, so the constant "
         "can drift from what production actually serves")
+    # Since 2026-09-23 the knob is an eval knob, out of the tool schema, so no
+    # client is told a default at all; what production serves is the constant.
     tool = next(t for t in asyncio.run(vault.list_tools())
                 if t.name == "vault_recall")
-    desc = tool.input_schema["properties"]["expand_graph"]["description"]
-    assert f"(default {vault.RECALL_EXPAND_GRAPH})" in desc, (
-        f"the schema advertises a default not derived from the constant: {desc!r}")
+    assert "expand_graph" not in tool.input_schema["properties"]
+    assert "expand_graph" in vault.RECALL_EVAL_KNOBS
     assert ev.RECALL_EXPAND_GRAPH is vault.RECALL_EXPAND_GRAPH, (
         "the eval compares against its own copy of the number, which is how "
         "#1000 became invisible in the first place")

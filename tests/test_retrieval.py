@@ -607,13 +607,35 @@ async def test_a_client_cannot_move_the_seed_set_through_the_tool_boundary(
     parameter. The width is keyword-only now, so the boundary may not move it."""
     query = _twelve_entity_query(world)
     width = vault.RECALL_SEED_TOP_K
+    # The seeds are only read when the graph is expanded, and `expand_graph` is
+    # an eval knob a tool call cannot set, so production's default is flipped
+    # for the test instead.
+    monkeypatch.setattr(vault, "RECALL_EXPAND_GRAPH", True)
 
     handed = _seed_spy(vault, monkeypatch)
-    await vault.call_tool("vault_recall",
-                          {"query": query, "expand_graph": True, "seed_top_k": 2})
+    await vault.call_tool("vault_recall", {"query": query, "seed_top_k": 2})
     assert len(_seeds_of(handed)) == width, (
         "a stray `seed_top_k` in the MCP arguments moved the seeding width, "
         "which no tool schema declares and no eval asked for")
+
+
+async def test_the_eval_knobs_are_out_of_the_schema_and_off_the_wire(monkeypatch):
+    """2026-09-23: the seven eval knobs left the `vault_recall` schema, and a
+    client that still sends one is ignored rather than obeyed — the #843 rule
+    that a knob is either declared or unreachable, applied to all seven."""
+    tool = next(t for t in await vault.list_tools() if t.name == "vault_recall")
+    assert set(tool.input_schema["properties"]) & vault.RECALL_EVAL_KNOBS == set()
+
+    seen = {}
+
+    def spy(params, **kw):
+        seen.update(params)
+        return {"documents": [], "facts": []}
+
+    monkeypatch.setattr(vault, "_vault_recall", spy)
+    sent = {"query": "q", "limit": 3, **{k: True for k in vault.RECALL_EVAL_KNOBS}}
+    await vault.call_tool("vault_recall", sent)
+    assert seen == {"query": "q", "limit": 3}, seen
 
 
 def test_the_width_is_keyword_only_and_stays_out_of_the_schema():

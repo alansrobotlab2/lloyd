@@ -360,6 +360,20 @@ RECALL_RERANK_ALPHA = 0.3      # only consulted when rerank is explicitly on
 # (#1336).
 RECALL_DJEV_RERANK = False
 RECALL_DJEV_RERANK_TOP = 12
+
+# Evaluation knobs: read out of `params` by `_vault_recall` for its in-process
+# callers (`eval/run_eval.py`, the retrieval tests), and deliberately NOT
+# settable by a tool call. Until 2026-09-23 the `vault_recall` schema declared
+# all seven, which cost every turn their descriptions for knobs that 0 of 98
+# recorded calls ever passed and that production holds at measured values.
+# Dropping them from the schema alone would have left them readable from the
+# wire under names no schema declares, the surface the #843 review refused for
+# `seed_top_k`, so `call_tool` strips them before the handler sees the
+# arguments. tests/test_retrieval.py pins both halves.
+RECALL_EVAL_KNOBS = frozenset({
+    "expand_graph", "graph_rerank", "rerank_alpha", "graph_top_k", "graph_hops",
+    "djev_rerank", "djev_rerank_top",
+})
 RECALL_DEMOTE_DAILY_LOGS = True
 RECALL_GRAPH_TOP_K = 5
 RECALL_GRAPH_HOPS = 1
@@ -1948,19 +1962,12 @@ async def list_tools():
             "type": "object", "properties": {"detail": {"type": "string", "enum": ["summary", "hubs"], "description": "summary (default) counts files per segment; hubs lists the most-linked notes"}}}),
         Tool(name="vault_search", description="Use to find vault notes by topic when you do not know the path; then vault_read the winner.\n\nSearch the obsidian vault, combining BM25 keyword matching with vector similarity. Returns ranked excerpts with their vault paths; use vault_read to pull a full file.", inputSchema={
             "type": "object", "properties": {"query": {"type": "string", "description": "Natural-language or keyword query"}, "max_results": {"type": "integer", "description": "Maximum excerpts to return (default 10)"}, "min_score": {"type": "number", "description": "Drop results scoring below this threshold"}, "scope": {"type": "string", "description": "Restrict to a vault segment, e.g. 'knowledge' or 'memory/learnings'"}, "consolidate": {"type": "boolean", "description": "Summarize the hits into one synthesized answer instead of returning raw excerpts"}}, "required": ["query"]}),
-        Tool(name="vault_recall", description="Use when a question spans documents and entity facts; for prose alone use vault_search instead.\n\nCombined recall: vault search + entity fact retrieval in parallel. Use expand_graph=true to include facts from related entities.", inputSchema={
+        Tool(name="vault_recall", description="Use when a question spans documents and entity facts; for prose alone use vault_search instead.\n\nCombined recall: vault search and the facts of the entities the query names, in parallel.", inputSchema={
             "type": "object", "properties": {
                 "query": {"type": "string", "description": "Natural-language query; entities mentioned in it are resolved and their facts returned alongside documents"},
                 "limit": {"type": "integer", "description": "Documents returned (default 20)"},
                 "include_facts": {"type": "boolean", "description": "Include entity facts (default true)"},
-                "expand_graph": {"type": "boolean", "description": f"Also return facts from graph neighbours (default {RECALL_EXPAND_GRAPH})"},
-                "graph_rerank": {"type": "boolean", "description": f"Re-rank documents by graph votes (default {RECALL_GRAPH_RERANK})"},
-                "rerank_alpha": {"type": "number", "description": f"1.0 = pure search score, 0.0 = pure graph (default {RECALL_RERANK_ALPHA})"},
-                "graph_top_k": {"type": "integer", "description": f"Graph expansion breadth (default {RECALL_GRAPH_TOP_K})"},
-                "graph_hops": {"type": "integer", "description": f"Graph expansion depth (default {RECALL_GRAPH_HOPS})"},
                 "demote_daily_logs": {"type": "boolean", "description": f"Down-weight daily notes (default {RECALL_DEMOTE_DAILY_LOGS})"},
-                "djev_rerank": {"type": "boolean", "description": f"Re-rank the head of the pool through the djev decision engine (default {RECALL_DJEV_RERANK}; an evaluation arm, not production)"},
-                "djev_rerank_top": {"type": "integer", "description": f"How many of the top documents djev re-orders when djev_rerank is on (default {RECALL_DJEV_RERANK_TOP}, ceiling 16)"},
             }, "required": ["query"]}),
     ]
 
@@ -1971,6 +1978,10 @@ async def call_tool(name: str, arguments: dict):
         "vault_search": _vault_search, "vault_recall": _vault_recall,
     }
     handler = handlers.get(name)
+    if name == "vault_recall":
+        # The eval knobs are not the client's to set; see RECALL_EVAL_KNOBS.
+        arguments = {k: v for k, v in (arguments or {}).items()
+                     if k not in RECALL_EVAL_KNOBS}
     if handler:
         # Handlers are sync and do subprocess/urllib I/O (QMD search, rg,
         # consolidation LLM call) with multi-second timeouts — run them in a
