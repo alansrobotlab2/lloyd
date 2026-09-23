@@ -38,6 +38,17 @@ spill directory by the newest mtime inside it, because a spill dir is created
 on the session's first oversized tool result and then only ever has files
 added to it — its own mtime is the age of the OLDEST spill in it.
 
+Which root: every store above sits under `DATA_ROOT`, resolved by the one copy
+of `app.paths`' three rules (`app/data_root.py`, stdlib-only so this file can
+import it with no venv): `$LLOYD_DATA`, else `<passwd home>/lloyd-data` for the
+production checkout — and only while that root carries `.lloyd-data-root`, since
+without the marker the sweep refuses and exits 2 rather than fall back — else
+`<tree>/.lloyd-data` for any other checkout. So a sandbox's or a round's
+`--apply` reaches only that tree's own data (#1415). The run prints the root it
+resolved, in dry run and in `--apply` alike, above the numbers it describes. One
+rung writes outside the data root: truncating the activity logs in the vault's
+`autonomy/*.md`, which `LLOYD_VAULT_ROOT` points at a copy.
+
 Usage:
     retention-sweep.py            # dry run — report only
     retention-sweep.py --apply    # actually delete/gzip
@@ -46,7 +57,6 @@ Usage:
 import argparse
 import gzip
 import json
-import os
 import re
 from datetime import datetime, timezone
 import shutil
@@ -54,13 +64,56 @@ import sys
 import time
 from pathlib import Path
 
-# The runtime data root (`app.paths.DATA_ROOT`), resolved without importing `app`
-# because this script is stdlib-only and runs from cron with no venv.
-DATA_ROOT = Path(os.environ.get("LLOYD_DATA") or Path.home() / "lloyd-data")
+# Import `app.data_root` — the stdlib-only half of the resolver — not `app.paths`,
+# which drags in the package and needs the project venv this script does not have
+# when cron, the weekly autonomy task #79, or an `sh -c` child runs it.
+_TREE = Path(__file__).resolve().parents[2]
+for _p in (_TREE, _TREE / "app"):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+try:
+    from app.data_root import (DataRootMissing, resolve_data_root_for_tree,
+                               vault_root)
+except ModuleNotFoundError:
+    # `app` is a name a stray `app.py` on the path can shadow, and nothing else in
+    # this file imports `app.*`. The second spelling is the same file, and
+    # tests/test_retention_sweep.py pins both against the one resolver.
+    from data_root import (DataRootMissing, resolve_data_root_for_tree,
+                           vault_root)
+
+# The runtime data root — `app.paths.DATA_ROOT`'s three rules, read from the one
+# copy of them (#1415). It used to be restated here as
+# `${LLOYD_DATA:-~/lloyd-data}`, which is rule 2 with neither the marker check
+# nor rule 3, so an unset `LLOYD_DATA` — the normal state of every shell, and of
+# a sandbox or a round's checkout — pointed this script's deletes, gzips and
+# rewrites at the LIVE root while its own report said it had swept nothing of the
+# tree it was run from. A misdirected sweep was also uncatchable: the Bash delete
+# guard parses command strings and never sees a Python `unlink`, and the tripwire
+# needs 10 % and 200 files gone inside 15 minutes, ~5,600 of the live root's
+# ~56,000.
+try:
+    DATA_ROOT = resolve_data_root_for_tree(_TREE)
+except DataRootMissing as exc:
+    # Refuse, loudly, before a single file is opened. Falling back to
+    # `<tree>/.lloyd-data` here would start the second copy of everything the
+    # data move exists to prevent, and falling back to the tree would put this
+    # sweep's destructive reach inside a code checkout.
+    print(f"[retention-sweep] REFUSING to run: {exc}", file=sys.stderr)
+    sys.exit(2)
+
 TASKS_DIR = DATA_ROOT / "_pipeline" / "tasks"
 SESSIONS_DIR = DATA_ROOT / "sessions"
 AUTONOMY_RUNS_DIR = DATA_ROOT / "autonomy-runs"
-AUTONOMY_TASKS_DIR = Path.home() / "obsidian" / "autonomy"
+# The one store this sweep touches outside the data root: it truncates the
+# `## Activity Log` section of the autonomy task files in the vault. Derived the
+# way `app.paths.VAULT_ROOT` is (`Path.home() / "obsidian"`), which under a
+# gate's HOME is the round's link into the LIVE vault —
+# `scripts/automod/worktree.py::HOME_LINK_SKIP` skips `lloyd` and `lloyd-data`
+# and links everything else, and `worktree.py:86` is explicit that the symlink
+# stops `rmtree`, not `write_text`. So this rung gets the override
+# `vaultwatch.py:46` and `scripts/backup/backup-vault.sh:28` already read: a
+# round can point it at a copy of the task files instead of the live ones.
+AUTONOMY_TASKS_DIR = vault_root() / "autonomy"
 CANDIDATES_DIR = DATA_ROOT / "_pipeline" / "skills" / "candidates"
 # The one transcript scratch home. Both youtube skills name it as TRANSCRIPT_DIR, so this
 # constant and that literal are the same directory — tests/test_youtube_artifact_phase.py
@@ -483,6 +536,15 @@ def main() -> int:
     now = time.time()
     mode = "APPLY" if args.apply else "DRY RUN"
 
+    # The header goes out before anything is counted or deleted, and in both
+    # modes. An operator approves `--apply` from the dry run's seven numbers, and
+    # all seven describe whichever root this run resolved — a value that depends
+    # on the caller's tree, its environment and its `$HOME`, and appears nowhere
+    # in the report today (#1415). Naming the root above the numbers is what makes
+    # them approvable, and is the only line that says which tree they describe.
+    print(f"[retention-sweep] {mode}")
+    print(f"  data root: {DATA_ROOT}")
+
     logs_n, logs_b = sweep_task_logs(args.apply, now)
     sess_n, sess_b = sweep_sessions(args.apply, now)
     runs_n, runs_b = sweep_autonomy_runs(args.apply, now)
@@ -491,7 +553,6 @@ def main() -> int:
     scr_n, scr_b = sweep_transcript_scratch(args.apply, now)
     spill_n, spill_b = sweep_session_spills(args.apply, now)
 
-    print(f"[retention-sweep] {mode}")
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
     print(f"  sessions >{SESSION_ARCHIVE_AGE_DAYS}d inactive "

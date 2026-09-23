@@ -85,11 +85,27 @@ The first rule that matches wins:
    kept a canary off the live `workers.db` before this change. It stays the
    default so that the unsafe direction never happens by omission.
 
-Rule 3 reaches whatever imports `app.paths`. It does not reach the stdlib-only
-half, which resolves `${LLOYD_DATA:-~/lloyd-data}` itself and so gets rule 2 with
-neither the marker check nor rule 3: `agent-services/guardian/{policy,datawatch}.py`,
-`idle-worker.py`, `livekit_worker.py`, `snapshot-data.sh`, `restore-data.sh` — and
-`scripts/groundskeeper/retention-sweep.py:59`, which deletes (#1415).
+Rule 3 reaches whatever imports `app.paths` — and `app.paths` needs the project
+venv, so the jobs that run without it used to re-implement the resolution as
+`${LLOYD_DATA:-~/lloyd-data}`, which is rule 2 with neither the marker check nor
+rule 3. The one that mattered was the sweep, because it deletes: `--apply` from a
+sandbox or a round worktree reached the live root, invisible to the delete guard
+(a Python `unlink` is not an `rm`) and to the tripwire (#1415).
+
+The rules therefore live in `app/data_root.py`: stdlib-only, importing nothing
+from `app` and touching nothing but `pwd` and one `is_file()`. `app.paths`
+imports and re-exports it, so `app.paths.DATA_ROOT` and every derived constant
+are unchanged; a script with no venv calls
+`app.data_root.resolve_data_root_for_tree()` and gets the same three rules, or
+`DataRootMissing`. `scripts/groundskeeper/retention-sweep.py` is converted, and
+its run prints the root it resolved in both dry-run and `--apply`, because every
+number it reports is a count of that root.
+
+The stdlib readers still to convert — `agent-services/guardian/{policy,datawatch}.py`,
+`idle-worker.py`, `livekit_worker.py`, `snapshot-data.sh`, `restore-data.sh` —
+each read `${LLOYD_DATA:-~/lloyd-data}` directly. They resolve the live root from
+any tree, which is wrong but harmless for readers; the sweep was the one with
+`unlink` behind it. Import the same accessor when one of them next changes.
 
 **Nothing exports `LLOYD_DATA` in production, and nothing should.** The backend
 and the aggregator find the root by rule 2. Their Bash children inherit their
@@ -187,7 +203,15 @@ stop of `agent-supervisord.service` with the guardian stopped, not a series of
 
 ## Review log
 
-- 2026-09-23 — `current`. Checked against `a9f5fef`: the three resolution rules
+- 2026-09-23 — `current` (round `SM_20260923_204702`, #1415). The three rules moved
+  into `app/data_root.py` and `app.paths` re-imports them, which converts the one
+  stdlib job that deletes: `retention-sweep.py` now resolves by rule 3 in a
+  sandbox or a worktree, refuses on an unmarked production root, and prints the
+  root in both modes (`tests/test_retention_sweep.py`, five clauses). Supersedes
+  the entry below on one point: "rule 3 does not reach the stdlib-only scripts" is
+  no longer true of the sweep — it still names the five stdlib readers above,
+  which reach the live root from any tree and are read-only.
+- 2026-09-23 — Checked against `a9f5fef`: the three resolution rules
   and the marker, the nine `${LLOYD_DATA}` keys in `config.yaml`, the
   gate/canary/pytest isolation rows, the delete guard's refusals (probed live: the
   root, a top-level folder, a glob over one, `find` with `-delete`, `rsync

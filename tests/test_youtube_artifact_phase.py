@@ -47,6 +47,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import app.data_root as dr  # noqa: E402  (needs ROOT on the path first)
+
 # Vault skills first, then the repo checkout — same precedence as
 # tests/test_skill_tool_names.py and prompt_builder._load_skills_index.
 SKILLS_DIRS = [Path.home() / "obsidian" / "skills", ROOT / "skills"]
@@ -405,17 +407,31 @@ _SWEEP_SCRIPT = ROOT / "scripts" / "groundskeeper" / "retention-sweep.py"
 
 def _load_sweep_module():
     """Load the groundskeeper script by path — a hyphenated filename with no package, so
-    plain ``import`` cannot reach it. Same loader tests/test_retention_sweep.py uses."""
+    plain ``import`` cannot reach it. Same loader tests/test_retention_sweep.py uses.
+
+    Loaded the way PRODUCTION runs it, because production is the pair the skill text
+    names: ``TRANSCRIPT_DIR="$HOME/lloyd-data/_pipeline/tmp"`` is the marked live root,
+    which the sweep reaches there by rule 2. #1415 changed what loading this file does:
+    it resolved ``${LLOYD_DATA:-$HOME/lloyd-data}`` and so reported that path from every
+    tree — including a worktree, whose sweep must never reach the live root — while it
+    now follows ``app.paths``' three rules, so from this checkout its own answer is
+    ``<tree>/.lloyd-data/_pipeline/tmp``. That answer is right for a sweep run here and
+    wrong to compare against a production literal, so the two inputs rule 2 reads are
+    pinned rather than inherited: the tree is the live checkout, and it is not a linked
+    worktree. ``LLOYD_DATA`` stays popped — cron has no such variable, and the suite
+    points it at scratch.
+    """
     import importlib.util
+    from unittest import mock
 
     spec = importlib.util.spec_from_file_location(
         "retention_sweep_under_artifact_test", _SWEEP_SCRIPT)
     mod = importlib.util.module_from_spec(spec)
-    # The seam is production's: the sweep resolves its data root from `LLOYD_DATA`,
-    # which the suite points at scratch, so load it the way cron does — without one.
     saved = os.environ.pop("LLOYD_DATA", None)
     try:
-        spec.loader.exec_module(mod)
+        with mock.patch.object(dr, "live_checkout", lambda: ROOT), \
+                mock.patch.object(dr, "tree_is_worktree", lambda tree: False):
+            spec.loader.exec_module(mod)
     finally:
         if saved is not None:
             os.environ["LLOYD_DATA"] = saved
@@ -426,7 +442,11 @@ def test_the_sweep_constant_still_satisfies_the_pinned_requirement():
     """What the sweep actually bounds must be the directory the skill rule pins, checked
     from the repo side alone so it RUNS under the gate."""
     mod = _load_sweep_module()
-    literal = str(mod.TRANSCRIPT_SCRATCH_DIR).replace(str(Path.home()), "$HOME")
+    # The account home from passwd, not `Path.home()`: the sweep's root is
+    # passwd-anchored for the reason #1415 is about, and under a gate's
+    # `HOME=<round>/home` the two differ — where `$HOME` says the round, passwd says
+    # the machine this skill text describes.
+    literal = str(mod.TRANSCRIPT_SCRATCH_DIR).replace(str(dr.ACCOUNT_HOME), "$HOME")
     named = ARTIFACT_PHASE_REQUIREMENTS["the one named transcript scratch dir"]
     assert named.search(f'TRANSCRIPT_DIR="{literal}"'), (
         f"retention-sweep.py bounds {mod.TRANSCRIPT_SCRATCH_DIR} but the skill requirement "
@@ -454,7 +474,7 @@ def test_the_skill_and_the_sweep_name_the_same_scratch_dir(skill: str):
     m = re.search(r'TRANSCRIPT_DIR\s*=\s*"?\$HOME/(?P<rel>[^"\n]+)', _require_skill_text(skill))
     assert m, f"skills/{skill}/SKILL.md no longer declares TRANSCRIPT_DIR"
     mod = _load_sweep_module()
-    assert mod.TRANSCRIPT_SCRATCH_DIR == Path.home() / m.group("rel"), (
+    assert mod.TRANSCRIPT_SCRATCH_DIR == dr.ACCOUNT_HOME / m.group("rel"), (
         f"skills/{skill}/SKILL.md saves to ~/{m.group('rel')} but "
         f"retention-sweep.py bounds {mod.TRANSCRIPT_SCRATCH_DIR}")
 
@@ -467,7 +487,9 @@ def test_the_retention_skill_table_states_the_sweep_age():
     implement. Every row naming the store is graded, not the first one: a second row with a
     different age is the drift, and reading only rows[0] would let it sit there unread."""
     mod = _load_sweep_module()
-    needle = "~/" + str(mod.TRANSCRIPT_SCRATCH_DIR.relative_to(Path.home()))
+    # passwd's home again (`_load_sweep_module`'s note): the table row is written for
+    # the machine, and under a gate's HOME the two homes are different directories.
+    needle = "~/" + str(mod.TRANSCRIPT_SCRATCH_DIR.relative_to(dr.ACCOUNT_HOME))
     rows = [ln for ln in _require_skill_text("retention-sweep").splitlines() if needle in ln]
     assert rows, f"no retention-sweep table row names {needle}"
     for row in rows:

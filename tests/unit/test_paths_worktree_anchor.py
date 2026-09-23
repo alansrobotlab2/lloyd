@@ -22,7 +22,9 @@ session has already imported the real module — an in-process re-import could
 show neither, and a `caplog` assertion would capture nothing. The subprocess is
 the seam; the probe wires its handler to the root logger before the import.
 
-The trees are synthesised under `tmp_path` from the real `app/paths.py` source,
+The trees are synthesised under `tmp_path` from the real `app/paths.py` source
+(and the `app/data_root.py` it imports since #1415 — `paths.py` cannot import
+without it, so a tree holding one and not the other proves nothing about either),
 because the discriminator is on disk and nothing else: a linked git worktree
 keeps `.git` as a FILE (`gitdir: …`), the main checkout keeps it as a DIRECTORY.
 No case imports the live `~/lloyd` checkout — inside a round that would import
@@ -46,6 +48,11 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 PATHS_PY = REPO / "app" / "paths.py"
+# Since #1415 `paths.py` is not the whole of what a synthetic tree needs: it imports
+# `app.data_root`, where the three data-root rules now live, so a tree copied without
+# that file raises ModuleNotFoundError and every case in this file errors out for a
+# reason that has nothing to do with what is on trial here.
+DATA_ROOT_PY = REPO / "app" / "data_root.py"
 PKG_INIT = REPO / "app" / "__init__.py"
 LIVE_CHECKOUT = Path.home() / "lloyd"
 
@@ -136,6 +143,7 @@ def _make_tree(root: Path, *, gitfile: bool) -> Path:
     (tree / "app").mkdir(parents=True)
     shutil.copyfile(PKG_INIT, tree / "app" / "__init__.py")
     shutil.copyfile(PATHS_PY, tree / "app" / "paths.py")
+    shutil.copyfile(DATA_ROOT_PY, tree / "app" / "data_root.py")
     if gitfile:
         (tree / ".git").write_text("gitdir: /nonexistent/.git/worktrees/lloyd9\n")
     else:

@@ -66,6 +66,10 @@ def _make_repo(tmp_path: Path) -> Path:
     (repo / "app").mkdir()
     (repo / "app" / "__init__.py").write_text("")
     shutil.copy2(GRADER.parents[1] / "app" / "paths.py", repo / "app" / "paths.py")
+    # `paths.py` imports `app.data_root` at module scope since #1415 — the data-root
+    # rules live there so a script with no venv can read them — so a synthetic
+    # checkout holding one file and not the other cannot import `app.paths` at all.
+    shutil.copy2(GRADER.parents[1] / "app" / "data_root.py", repo / "app" / "data_root.py")
     (repo / ".lloyd-data").mkdir()
     return repo
 

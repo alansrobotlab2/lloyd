@@ -3,15 +3,24 @@
 Pins the retention contract: old task logs are deleted, stale sessions are
 gzipped (round-trip-validated, original removed), and anything younger than
 the thresholds is untouched in both dry-run and apply modes.
+
+Pins the root those stores live under, too — which root a `--apply` reaches is a
+retention contract like any other, because the wrong answer here is a real sweep
+of the wrong tree (`#1415`); see the section at the bottom of this file.
 """
 import gzip
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
 import pytest
+
+import app.data_root as dr
+import app.paths as paths
 
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "groundskeeper" / "retention-sweep.py"
 
@@ -43,6 +52,14 @@ def rs(tmp_path, monkeypatch):
             assert tmp_path in value.parents or value == tmp_path, (
                 f"{name} is not redirected into tmp_path (points at {value}) — "
                 f"add it to the fixture before writing tests that touch it")
+    # The patching above says only that each dir is patchable. Before the patch,
+    # the module resolved a root for itself; every destructive test in this file
+    # runs against the module that resolved it, so pin what it resolved: the
+    # scratch root this process exported, identical to `app.paths`' answer for the
+    # same tree, and not the machine's live root (#1415).
+    assert mod.DATA_ROOT == paths.DATA_ROOT, (
+        f"the sweep resolved {mod.DATA_ROOT}, app.paths resolved {paths.DATA_ROOT}")
+    assert mod.DATA_ROOT != paths.PRODUCTION_DATA_ROOT
     return mod
 
 
@@ -256,7 +273,6 @@ def test_transcript_scratch_missing_dir_is_zero(rs):
     """The scratch dir is created by an extraction session, not installed — first boot and
     every box that never extracted a video has no directory at all. That reports 0, it does
     not crash the sweep the rest of the stores depend on."""
-    import shutil
     shutil.rmtree(rs.TRANSCRIPT_SCRATCH_DIR)
     assert rs.sweep_transcript_scratch(apply=True, now=time.time()) == (0, 0)
 
@@ -519,3 +535,294 @@ def test_spill_store_is_reported_and_apply_removes_what_dry_run_counted(
     monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
     assert rs.main() == 0
     assert "0 deleted" in spill_line(), "a drained store must report 0, and mean it"
+
+
+# --------------------------------------------------------------------------------------
+# Which root the sweep resolves (backlog #1415)
+#
+# Every test above reaches the stores through the `rs` fixture, which patches the
+# directories into `tmp_path`. That is the right shape for testing what gets
+# deleted and the wrong shape for testing WHERE: the fixture supplies the paths, so
+# it cannot observe the resolution that produced them — and the resolution is the
+# thing that was wrong.
+#
+# The script used to resolve the root itself as `${LLOYD_DATA:-~/lloyd-data}`: rule
+# 2 of `app.paths`' three rules with neither the marker check nor rule 3.
+# `LLOYD_DATA` is exported by the gate, the canary and the test suite, and by
+# nothing in production (nothing should export it, and nothing does), so an unset
+# variable is the normal condition of every shell — including a sandbox's and a
+# round worktree's — and the answer from ANY tree was `<account home>/lloyd-data`:
+# the marked live root, 56,272 files on 2026-09-23, which is precisely what
+# `sweep_sessions` and `sweep_session_spills` unlink. Nothing downstream would have
+# caught it either: the harness's delete guard parses Bash command strings and
+# never sees a Python `unlink`, and `vaultwatch`'s tripwire needs 10 % AND 200 files
+# gone inside 900 s — roughly 5,600 removals from a root that size.
+#
+# The fix is that the script imports the rules instead of restating them, so these
+# cases load the module fresh with the resolution's inputs under control: the
+# environment variable, the tree the script lives in, and whether the account's
+# production root carries its marker.
+# --------------------------------------------------------------------------------------
+
+#: The checkout the script resolves itself in — `parents[2]` of
+#: `scripts/groundskeeper/retention-sweep.py`, the same arithmetic the script uses.
+_SWEEP_TREE = _SCRIPT.resolve().parents[2]
+
+
+def _load(monkeypatch, *, lloyd_data=None, production_root=None, marker=False):
+    """Import the script fresh, with the inputs the resolution reads controlled.
+
+    `lloyd_data` is the value for `LLOYD_DATA`; leaving it None takes the variable
+    away, which is the state of every production shell and the state the three
+    rules turn on. `production_root` makes the tree the script lives in be the
+    production checkout for the duration of the load, with its
+    `<account home>/lloyd-data` standing at that path — nothing else on this machine
+    can be the production checkout, and what is on trial is the rule, not this box.
+    Two inputs say "production" and both are pinned, because both are inputs on
+    purpose: the tree matching the live checkout, AND that tree not being a linked
+    worktree — which is what keeps a worktree cut off the live path on its own data.
+    This suite runs inside exactly such a worktree, so leaving the second one real
+    would answer rule 3 no matter what the first said. `marker` says whether that
+    root carries `.lloyd-data-root`.
+    """
+    if lloyd_data is None:
+        monkeypatch.delenv("LLOYD_DATA", raising=False)
+    else:
+        monkeypatch.setenv("LLOYD_DATA", str(lloyd_data))
+    if production_root is not None:
+        prod = Path(production_root)
+        if marker:
+            (prod / dr.DATA_ROOT_MARKER).write_text("{}")
+        monkeypatch.setattr(dr, "live_checkout", lambda: _SWEEP_TREE)
+        monkeypatch.setattr(dr, "tree_is_worktree", lambda tree: False)
+        monkeypatch.setattr(dr, "production_data_root", lambda: prod)
+    spec = importlib.util.spec_from_file_location("retention_sweep_fresh", _SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_env_unset_in_a_non_production_tree_resolves_inside_that_tree(monkeypatch):
+    """Clause 1: with the variable absent and a tree that is not the production
+    checkout, the root is `<tree>/.lloyd-data` — the sandbox or the round sweeps its
+    own data — and never `<account home>/lloyd-data`.
+
+    The tree here is a real checkout on disk, because the script is loaded from its
+    own path rather than from a fixture: which tree a script lives in is a fact about
+    it, and a test that passes a fake tree would pin the resolver, not the script.
+    """
+    assert (_SWEEP_TREE != dr.live_checkout().resolve()
+            or dr.tree_is_worktree(_SWEEP_TREE)), (
+        "this suite is running from the production checkout, where rule 2 is the"
+        " right answer and clause 1 has nothing to falsify here")
+    root_in_tree = _SWEEP_TREE / ".lloyd-data"
+    existed_before = root_in_tree.exists()
+
+    mod = _load(monkeypatch)
+
+    assert mod.DATA_ROOT == root_in_tree
+    assert mod.DATA_ROOT.is_relative_to(_SWEEP_TREE)
+    assert not mod.DATA_ROOT.is_relative_to(dr.PRODUCTION_DATA_ROOT)
+    # The store this script unlinks, checked on its own: a root that is right while
+    # the dirs are derived from somewhere else is the bug all over again.
+    assert mod.SESSIONS_DIR == root_in_tree / "sessions"
+    # Importing must leave the filesystem as it found it. `app.paths` does create
+    # `SESSIONS_DIR` at import; this module must not, or a mere import outside the
+    # venv starts a second data tree.
+    assert root_in_tree.exists() is existed_before, (
+        "importing the sweep created the root it resolved")
+
+
+def test_the_production_checkout_still_resolves_to_the_account_root(tmp_path, monkeypatch):
+    """Clause 2: with the variable absent and the production tree whose root carries
+    its marker, the same resolution returns `<account home>/lloyd-data`.
+
+    This is the weekly run's exact state: autonomy task #79's skill is
+    `~/lloyd/.venvs/lloyd/bin/python ~/lloyd/scripts/groundskeeper/retention-sweep.py
+    --apply` — the production checkout, nothing exported, so rule 2. A red here
+    would not mean the sweep had been made safe; it would mean the sweep had become
+    a no-op reporting `0 deleted` against an empty `.lloyd-data/` while the live
+    stores keep growing.
+    """
+    prod = tmp_path / "home" / "lloyd-data"
+    prod.mkdir(parents=True)
+    # What the stand-in stands in for: the second rule's answer is the passwd
+    # home's `lloyd-data`, which is what `production_data_root()` is.
+    assert dr.PRODUCTION_DATA_ROOT == dr.ACCOUNT_HOME / "lloyd-data"
+
+    mod = _load(monkeypatch, production_root=prod, marker=True)
+
+    assert mod.DATA_ROOT == prod
+    assert mod.SESSIONS_DIR == prod / "sessions"
+    assert mod.TASKS_DIR == prod / "_pipeline" / "tasks"
+    assert mod.AUTONOMY_RUNS_DIR == prod / "autonomy-runs"
+    assert mod.TRANSCRIPT_SCRATCH_DIR == prod / "_pipeline" / "tmp"
+
+
+def test_production_root_without_the_marker_refuses_before_any_delete(tmp_path, monkeypatch,
+                                                                     capsys):
+    """Clause 3: a production checkout whose root has lost `.lloyd-data-root` is
+    refused, with a non-zero exit, before a single store is opened.
+
+    Two wrong answers are on either side of this one. Falling back to the tree
+    starts the second copy of everything inside the code checkout that the whole
+    data move exists to prevent; falling back to an empty `.lloyd-data` and reporting
+    `0 deleted` is worse than refusing, because it looks like a clean sweep. The
+    refusal has to be the resolution's own — if a later change caught
+    `DataRootMissing` and carried on, `pytest.raises` here is what fails.
+    """
+    prod = tmp_path / "home" / "lloyd-data"
+    (prod / "sessions").mkdir(parents=True)
+    stale = prod / "sessions" / "20260101_000000_oldsession.json"
+    stale.write_text(json.dumps({"session_id": "oldsession",
+                                 "last_active": "2026-01-01T00:00:00"}))
+    _backdate(stale, 400)          # far past the 90 d archive window
+
+    with pytest.raises(SystemExit) as excinfo:
+        _load(monkeypatch, production_root=prod)      # marker absent
+    assert excinfo.value.code == 2, "refusal must be a non-zero exit, not a traceback"
+
+    err = capsys.readouterr().err
+    assert "REFUSING" in err, f"the sweep must say it refused: {err!r}"
+    assert dr.DATA_ROOT_MARKER in err, f"and name what is missing: {err!r}"
+    assert stale.exists(), "the refusal precedes any store being opened"
+
+
+def test_the_resolved_root_is_printed_in_both_modes(rs, capsys, monkeypatch):
+    """Clause 4: the dry run and `--apply` both print the root their numbers
+    describe.
+
+    The operator approves `--apply` from the dry run's seven counts, and every one
+    of them is a count of whatever root this run resolved — a value that depends on
+    the caller's tree, its environment and its `$HOME`, and appeared nowhere in the
+    report until #1415. Through `main()`, like the two reporting tests above: the
+    line has to come out of the path an operator runs, not a re-implementation of it.
+    """
+    def root_line() -> str:
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if "data root" in ln]
+        assert len(lines) == 1, f"expected exactly one data-root line, got {lines}"
+        return lines[0]
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    dry = root_line()
+    assert str(rs.DATA_ROOT) in dry, f"a dry run must name the root it counted: {dry!r}"
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    applied = root_line()
+    assert str(rs.DATA_ROOT) in applied, f"--apply must name the root it deleted from: {applied!r}"
+    assert applied == dry, "both modes must label their numbers with the same root"
+
+
+def test_a_bare_interpreter_reports_the_root_it_resolved(tmp_path):
+    """The same claim across the boundary that matters: cron and autonomy task #79
+    run this file as a program, so the printed root and the exit status are the ones
+    a shell sees — and with `python3`, not the project venv, which is the whole
+    reason `app/data_root.py` has to be stdlib-only.
+
+    Run from this checkout, which is not the production one, with `LLOYD_DATA`
+    removed from the child's environment: the answer must be `<tree>/.lloyd-data`.
+    A dry run writes nothing, and `LLOYD_VAULT_ROOT` keeps the one vault-touching
+    rung pointed at a directory that does not exist.
+    """
+    python = shutil.which("python3")
+    assert python, "the stdlib-only claim is a claim about a bare interpreter"
+    env = {k: v for k, v in os.environ.items() if k != "LLOYD_DATA"}
+    env["LLOYD_VAULT_ROOT"] = str(tmp_path / "no-vault-here")
+
+    proc = subprocess.run([python, str(_SCRIPT)], env=env, cwd=str(_SWEEP_TREE),
+                          capture_output=True, text=True, timeout=180)
+
+    assert proc.returncode == 0, f"bare python3 could not run the sweep: {proc.stderr}"
+    assert "DRY RUN" in proc.stdout, proc.stdout
+    assert f"data root: {_SWEEP_TREE / '.lloyd-data'}" in proc.stdout, \
+        f"the invocation resolved a different root than rule 3 gives it:\n{proc.stdout}"
+    assert str(dr.PRODUCTION_DATA_ROOT) not in proc.stdout, \
+        "a non-production invocation named the live root as its target"
+
+
+def test_the_one_resolution_owns_every_directory_the_sweep_touches(tmp_path, monkeypatch):
+    """Clause 5: `LLOYD_DATA` at a scratch root puts `DATA_ROOT` and every
+    module-level `*_DIR` beneath it.
+
+    The `rs` fixture patches each dir and then fails on an unpatched one, which
+    catches a new root escaping the fixture but cannot catch the six drifting apart,
+    because the fixture is what places them. This loads the module with nothing
+    patched and reads where its own arithmetic put them — the only way a
+    `SOMETHING_DIR = Path.home() / ...` added beside the others becomes a test
+    failure rather than a live-data incident. `AUTONOMY_TASKS_DIR` is in the set on
+    purpose: it is the one store outside the data root (the vault's task files), and
+    it lands under the scratch root here only because the test sends
+    `LLOYD_VAULT_ROOT` there, which is the knob that keeps a round's `--apply` out of
+    the live activity logs.
+    """
+    root = tmp_path / "scratch-root"
+    monkeypatch.setenv("LLOYD_VAULT_ROOT", str(root / "vault"))
+
+    mod = _load(monkeypatch, lloyd_data=root)
+
+    assert mod.DATA_ROOT == root
+    swept = {name: value for name, value in vars(mod).items()
+             if name.endswith("_DIR") and isinstance(value, Path)}
+    assert set(swept) == {"AUTONOMY_RUNS_DIR", "AUTONOMY_TASKS_DIR", "CANDIDATES_DIR",
+                          "SESSIONS_DIR", "TASKS_DIR", "TRANSCRIPT_SCRATCH_DIR"}, \
+        f"the sweep gained or lost a store dir; update this set deliberately: {sorted(swept)}"
+    for name, value in sorted(swept.items()):
+        assert value.is_relative_to(root), f"{name} = {value} is outside the root {root}"
+    assert swept["AUTONOMY_TASKS_DIR"] == root / "vault" / "autonomy"
+
+
+def test_the_vault_rung_reads_the_override_the_guardian_already_reads(tmp_path, monkeypatch):
+    """The sweep's one write outside the data root used to be
+    `Path.home() / "obsidian" / "autonomy"` with no knob at all. Under a gate's HOME
+    that is the round's `~/obsidian`, which `scripts/automod/worktree.py`
+    `ensure_round_home` links into the live vault — `HOME_LINK_SKIP` covers `lloyd`
+    and `lloyd-data`, not `obsidian` — and the same file says the symlink exists to
+    survive `rmtree`, which does nothing about `write_text`. So `--apply` in a round
+    pruned the LIVE activity logs. The override is not a new invention: it is
+    `LLOYD_VAULT_ROOT`, the name `vaultwatch.py:46` and `scripts/backup/
+    backup-vault.sh:28` already read. With it unset the default must still equal
+    `app.paths.VAULT_ROOT`, or the sweep would bound a different vault than the
+    system writes to.
+    """
+    monkeypatch.delenv("LLOYD_VAULT_ROOT", raising=False)
+    assert dr.vault_root() == paths.VAULT_ROOT
+    mod = _load(monkeypatch, lloyd_data=tmp_path / "root")
+    assert mod.AUTONOMY_TASKS_DIR == paths.VAULT_ROOT / "autonomy"
+
+    copy = tmp_path / "vault-copy"
+    monkeypatch.setenv("LLOYD_VAULT_ROOT", str(copy))
+    assert dr.vault_root() == copy
+    redirected = _load(monkeypatch, lloyd_data=tmp_path / "root")
+    assert redirected.AUTONOMY_TASKS_DIR == copy / "autonomy"
+
+
+def test_the_sweep_imports_the_resolver_instead_of_restating_it(monkeypatch):
+    """The shape of #1415 was never a wrong constant; it was a second
+    implementation of the rules, one copy per stdlib job. Pinning the outcome
+    without pinning the sharing would let the next change fix this script and leave
+    `agent-services/guardian/{policy,datawatch}.py`, `idle-worker.py`,
+    `livekit_worker.py` and the two backup scripts holding their own copies — the
+    list `architecture/data-home.md` still names as unresolved.
+
+    The three names the script imports must be the same objects `app.data_root`
+    exports, `app.paths` must export them too, and the old formula must not come
+    back as a string in the file.
+    """
+    mod = _load(monkeypatch, lloyd_data=Path("/tmp/whatever-root"))
+
+    assert mod.resolve_data_root_for_tree is dr.resolve_data_root_for_tree
+    assert mod.DataRootMissing is dr.DataRootMissing
+    assert mod.vault_root is dr.vault_root
+    # One implementation behind both spellings is the half that makes a fix here a
+    # fix for the system, rather than for one script.
+    assert paths.resolve_data_root is dr.resolve_data_root
+    assert paths.data_root_for_tree is dr.data_root_for_tree
+    assert paths.production_data_root is dr.production_data_root
+    assert paths.DataRootMissing is dr.DataRootMissing
+    assert paths.DATA_ROOT_MARKER == dr.DATA_ROOT_MARKER
+
+    src = _SCRIPT.read_text(encoding="utf-8")
+    assert 'Path.home() / "lloyd-data"' not in src, (
+        "the second implementation of rule 2 is back in the script that deletes")

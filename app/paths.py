@@ -12,13 +12,38 @@ IS_WORKTREE = (LLOYD_HOME / ".git").is_file()
 # `HOME=<round>/home`, a symlink farm whose `lloyd` IS the worktree
 # (`scripts/automod/worktree.py::ensure_round_home`). So `Path.home() / "lloyd"`
 # names the worktree there, and a reader that falls back to "the live checkout"
-# through it falls back to the tree it just found empty. A READ of live data
-# (sessions, logs, baselines) goes through this; nothing that writes should.
-try:
-    import pwd as _pwd
-    ACCOUNT_HOME = Path(_pwd.getpwuid(os.getuid()).pw_dir)
-except (ImportError, KeyError):
-    ACCOUNT_HOME = Path.home()
+# through it falls back to the tree it just found empty. So the rule is that a
+# job which wants live data — to read a session, a log, a baseline — reaches it
+# through here and not through `$HOME`. Writers use `DATA_ROOT`, which is why the
+# sweep's root, not this, is what `--apply` deletes (#1415). "Nothing that writes
+# should" was never true of this seam: four jobs write through it deliberately —
+# the review grader's session file, the nightly extraction's lock/log/backups, the
+# content hasher's index, the tool-override sync — and `architecture/data-home.md`
+# names them. What is still missing, and #1415 does not close, is anything that
+# ENUMERATES them: no constant or test separates a deliberate live writer from the
+# next person who reached for the nearest live-path function.
+#
+# The resolution lives in `app.data_root`, the stdlib-only half of this module,
+# because the jobs that cannot import THIS one — no venv, cron, a unit's `sh -c`
+# child — were each re-implementing it and getting rule 2 below with neither the
+# marker check nor rule 3. One of them is the script that deletes (#1415). The
+# names are re-exported here unchanged, so every existing caller still resolves
+# `app.paths.DATA_ROOT_MARKER`, `data_root_for_tree`, `production_data_root`,
+# `resolve_data_root` and `DataRootMissing` at the place it always did.
+from app.data_root import (
+    ACCOUNT_HOME, DATA_ROOT_MARKER, DataRootMissing, PRODUCTION_DATA_ROOT,
+    data_root_for_tree, production_data_root, resolve_data_root)
+
+#: The names re-exported through `app.paths`, listed so the import above reads as
+#: the API it is rather than as four unused imports a later tidy-up can delete —
+#: the stdlib-only jobs import `app.data_root` directly, and a reader who removes
+#: one of these lines breaks `app.paths`, not `app.data_root`. This is the
+#: re-export list, not this module's whole surface: the constants below are its
+#: other half.
+__all__ = ["ACCOUNT_HOME", "DATA_ROOT_MARKER", "DataRootMissing",
+           "PRODUCTION_DATA_ROOT", "data_root_for_tree", "production_data_root",
+           "resolve_data_root"]
+
 LIVE_CHECKOUT = ACCOUNT_HOME / "lloyd"
 
 # ------------------------------------------------------------------ data root --
@@ -48,47 +73,10 @@ LIVE_CHECKOUT = ACCOUNT_HOME / "lloyd"
 #      keeps its data inside itself, under `.lloyd-data/` (gitignored). That is
 #      the isolation the canary was built on ("state follows the code"), kept as
 #      the default so the unsafe direction is never what happens by omission.
-DATA_ROOT_MARKER = ".lloyd-data-root"
-PRODUCTION_DATA_ROOT = ACCOUNT_HOME / "lloyd-data"
-
-
-def data_root_for_tree(tree: Path) -> Path:
-    """Where a non-production checkout keeps its own runtime data."""
-    return Path(tree) / ".lloyd-data"
-
-
-def production_data_root() -> Path:
-    """The live data root, for READERS that mean production on purpose.
-
-    Writers use `DATA_ROOT`. This exists for the few readers whose whole job is
-    live data wherever they run from — the review grader reading a round's
-    sessions, the regression check reading the live store — and it is the same
-    path whatever `$HOME` or `LLOYD_DATA` say.
-    """
-    return PRODUCTION_DATA_ROOT
-
-
-class DataRootMissing(RuntimeError):
-    """The production checkout found no marked data root."""
-
-
-def resolve_data_root(*, env: str | None, lloyd_home: Path, is_worktree: bool,
-                      live_checkout: Path, production_root: Path) -> Path:
-    """The three rules above, as a pure function of what they read."""
-    if env:
-        return Path(env).expanduser()
-    if lloyd_home == live_checkout.resolve() and not is_worktree:
-        if not (production_root / DATA_ROOT_MARKER).is_file():
-            raise DataRootMissing(
-                f"{production_root} has no {DATA_ROOT_MARKER}: the production"
-                " checkout keeps its runtime data there and refuses to fall back to"
-                " the code tree. Restore it from ~/.lloyd-data-snapshots"
-                " (scripts/backup/restore-data.sh), or set LLOYD_DATA explicitly."
-            )
-        return production_root
-    return data_root_for_tree(lloyd_home)
-
-
+# `DATA_ROOT_MARKER`, `PRODUCTION_DATA_ROOT`, `data_root_for_tree`,
+# `production_data_root`, `DataRootMissing` and `resolve_data_root` are this
+# module's names too — imported from `app.data_root` above, where the rules are
+# written once so the stdlib-only jobs read them as well (#1415).
 DATA_ROOT = resolve_data_root(env=os.environ.get("LLOYD_DATA"), lloyd_home=LLOYD_HOME,
                               is_worktree=IS_WORKTREE, live_checkout=LIVE_CHECKOUT,
                               production_root=PRODUCTION_DATA_ROOT)
